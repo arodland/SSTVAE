@@ -1,0 +1,12 @@
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+
+# data & training artifacts
+data/
+runs/
+
+# audio/image scratch
+*.wav
