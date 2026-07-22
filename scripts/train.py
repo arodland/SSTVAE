@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""Stage-1 training: autoencoder through the latent channel model.
+
+Local smoke test (any torch device, incl. ROCm):
+    python scripts/train.py --smoke --out runs/smoke
+
+Real run (image folder, GPU):
+    python scripts/train.py --data /path/to/images --epochs 60 --out runs/s1
+"""
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from sstvae.data import FolderDataset, HFHubDataset, SyntheticDataset
+from sstvae.latent_channel import ChannelConfig, apply_latent_channel
+from sstvae.models import SSTVAE
+
+
+@torch.no_grad()
+def evaluate(model, loader, device, max_batches=16):
+    """Val PSNR at fixed channel settings: clean, and 8 dB + 20% erasures."""
+    model.eval()
+    cfgs = {
+        "clean": None,
+        "8dB_e20": ChannelConfig(
+            snr_db_range=(8.0, 8.0), erasure_rate_max=0.2, p_truncate=0.0
+        ),
+    }
+    mse = {k: 0.0 for k in cfgs}
+    n = 0
+    for bi, img in enumerate(loader):
+        if bi >= max_batches:
+            break
+        img = img.to(device)
+        z = model.encoder(img)
+        for k, cfg in cfgs.items():
+            if cfg is None:
+                noisy, w = z, torch.ones_like(z)
+            else:
+                g = torch.Generator(device=device).manual_seed(bi)
+                noisy, w = apply_latent_channel(z, cfg, generator=g)
+            recon = model.decoder(noisy, w)
+            mse[k] += F.mse_loss(recon, img).item() * img.shape[0]
+        n += img.shape[0]
+    model.train()
+    return {k: -10 * torch.tensor(v / n).log10().item() for k, v in mse.items()}
+
+
+def push_checkpoint(repo: str, out: Path, epoch: int) -> None:
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    api.create_repo(repo, exist_ok=True, private=True)
+    for name in ["checkpoint.pt", "metrics.jsonl", f"samples_{epoch:03d}.png"]:
+        p = out / name
+        if p.exists():
+            api.upload_file(
+                path_or_fileobj=str(p), path_in_repo=name, repo_id=repo
+            )
+
+
+@torch.no_grad()
+def dump_samples(model, imgs, out_path, device):
+    """Save [original | clean recon | noisy recon] grid for fixed images."""
+    from torchvision.utils import save_image
+
+    model.eval()
+    imgs = imgs.to(device)
+    z = model.encoder(imgs)
+    clean = model.decoder(z, torch.ones_like(z))
+    g = torch.Generator(device=device).manual_seed(0)
+    cfg = ChannelConfig(snr_db_range=(8.0, 8.0), erasure_rate_max=0.2, p_truncate=0.0)
+    noisy, w = apply_latent_channel(z, cfg, generator=g)
+    rough = model.decoder(noisy, w)
+    rows = torch.cat([imgs, clean, rough], dim=0)
+    save_image(rows, out_path, nrow=imgs.shape[0])
+    model.train()
+
+
+def pick_device() -> torch.device:
+    # torch.cuda covers ROCm builds as well
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def make_lpips(device):
+    try:
+        import lpips
+
+        return lpips.LPIPS(net="vgg").to(device).eval()
+    except Exception:
+        return None
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--data", type=str, default=None, help="image folder")
+    ap.add_argument(
+        "--hf-dataset",
+        type=str,
+        default=None,
+        help="Hub dataset repo (train/validation splits), e.g. arodland/coco320-sstvae",
+    )
+    ap.add_argument(
+        "--push-to-hub",
+        type=str,
+        default=None,
+        help="Hub model repo to upload checkpoint/metrics after each epoch",
+    )
+    ap.add_argument("--out", type=str, required=True)
+    ap.add_argument("--epochs", type=int, default=40)
+    ap.add_argument(
+        "--epoch-size",
+        type=int,
+        default=None,
+        help="random images per epoch (default: full dataset); "
+        "gives frequent checkpoints/samples on big datasets",
+    )
+    ap.add_argument("--batch", type=int, default=16)
+    ap.add_argument("--lr", type=float, default=2e-4)
+    ap.add_argument("--width", type=int, default=128)
+    ap.add_argument("--lpips-weight", type=float, default=0.5)
+    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--smoke", action="store_true", help="tiny run on synthetic data")
+    ap.add_argument(
+        "--amp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="bfloat16 autocast (halves activation VRAM)",
+    )
+    ap.add_argument("--resume", type=str, default=None)
+    args = ap.parse_args()
+
+    val_dataset = None
+    if args.smoke:
+        args.width = min(args.width, 32)
+        args.epochs = 2
+        args.batch = min(args.batch, 8)
+        dataset = SyntheticDataset(n=128)
+    elif args.hf_dataset:
+        dataset = HFHubDataset(args.hf_dataset, split="train")
+        val_dataset = HFHubDataset(args.hf_dataset, split="validation")
+    elif args.data:
+        dataset = FolderDataset(args.data)
+    else:
+        ap.error("--data or --hf-dataset is required unless --smoke")
+
+    device = pick_device()
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    print(f"device={device}, images={len(dataset)}, width={args.width}")
+
+    model = SSTVAE(width=args.width).to(device)
+    if args.resume:
+        path = args.resume
+        if path.startswith("hf://"):  # e.g. hf://arodland/sstvae-s1
+            from huggingface_hub import hf_hub_download
+
+            path = hf_hub_download(repo_id=path[5:], filename="checkpoint.pt")
+        model.load_state_dict(torch.load(path, map_location=device)["model"])
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
+    sampler = None
+    if args.epoch_size and args.epoch_size < len(dataset):
+        # Fresh random subset every epoch (RandomSampler reshuffles).
+        sampler = torch.utils.data.RandomSampler(
+            dataset, replacement=False, num_samples=args.epoch_size
+        )
+    loader = DataLoader(
+        dataset,
+        batch_size=args.batch,
+        shuffle=sampler is None,
+        sampler=sampler,
+        num_workers=0 if args.smoke else args.workers,
+        drop_last=True,
+    )
+    val_loader = None
+    if val_dataset is not None:
+        val_loader = DataLoader(
+            val_dataset, batch_size=args.batch, shuffle=False, num_workers=2
+        )
+    lpips_fn = None if args.smoke else make_lpips(device)
+    if lpips_fn is None and not args.smoke:
+        print("lpips unavailable; training with MSE only")
+    ch_cfg = ChannelConfig()
+
+    step = 0
+    for epoch in range(args.epochs):
+        model.train()
+        t0, ep_loss, n_batches = time.time(), 0.0, 0
+        for img in loader:
+            img = img.to(device, non_blocking=True)
+            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.amp):
+                z = model.encoder(img)
+                noisy, w = apply_latent_channel(z, ch_cfg)
+                recon = model.decoder(noisy, w)
+                loss = F.mse_loss(recon.float(), img)
+                if lpips_fn is not None:
+                    loss = loss + args.lpips_weight * lpips_fn(
+                        recon * 2 - 1, img * 2 - 1
+                    ).mean()
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+            ep_loss += loss.item()
+            n_batches += 1
+            step += 1
+        sched.step()
+        avg = ep_loss / max(n_batches, 1)
+        record = {"epoch": epoch, "train_loss": avg, "seconds": time.time() - t0}
+        if val_loader is not None:
+            record.update({f"val_psnr_{k}": v for k, v in
+                           evaluate(model, val_loader, device).items()})
+        print(
+            f"epoch {epoch}: loss={avg:.5f}"
+            + "".join(f" {k}={v:.2f}" for k, v in record.items()
+                      if k.startswith("val_psnr"))
+            + f" [{record['seconds']:.1f}s]"
+        )
+        with (out / "metrics.jsonl").open("a") as fh:
+            fh.write(json.dumps(record) + "\n")
+        torch.save(
+            {"model": model.state_dict(), "width": args.width, "epoch": epoch},
+            out / "checkpoint.pt",
+        )
+        if epoch % 2 == 0 or epoch == args.epochs - 1:
+            sample_src = val_dataset if val_dataset is not None else dataset
+            sample_imgs = torch.stack([sample_src[i] for i in range(4)])
+            dump_samples(model, sample_imgs, out / f"samples_{epoch:03d}.png", device)
+        if args.push_to_hub:
+            try:
+                push_checkpoint(args.push_to_hub, out, epoch)
+            except Exception as e:
+                print(f"hub push failed (will retry next epoch): {e}")
+
+    (out / "train_config.json").write_text(json.dumps(vars(args), indent=2))
+    print(f"done; checkpoint at {out/'checkpoint.pt'}")
+
+
+if __name__ == "__main__":
+    main()

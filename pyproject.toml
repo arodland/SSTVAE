@@ -1,0 +1,44 @@
+[project]
+name = "sstvae"
+version = "0.1.0"
+description = "Hybrid-digital SSTV: image transmission over HF via radio-autoencoder latents on OFDM"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+train = [
+    "torch>=2.2",
+    "lpips>=0.1.4",
+    "datasets>=2.18",
+    "trackio",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+# ROCm torch wheels (RX 9070 XT / gfx1201), local dev only — explicit so
+# cloud/CUDA machines resolve torch from PyPI instead. Local install:
+#   uv pip install --reinstall --index-url https://download.pytorch.org/whl/rocm7.2 torch torchvision
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
+explicit = true
+
+[[tool.uv.index]]
+name = "rocm-nightlies"
+url = "https://rocm.nightlies.amd.com/v2/gfx120X-all/"
+explicit = true
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["sstvae*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
