@@ -69,7 +69,7 @@ def main() -> None:
             cutoff = r.mode.n_frames * k / args.snapshots
             w_k = r.weights * (frame_of_latent < cutoff)
             img = reconstruct(model, latents, pad_to_full(w_k))
-            path = out.with_stem(f"{out.stem}_{k}")
+            path = out.with_stem(f"{out.stem}_{k:03d}")
             img.save(path)
             print(f"wrote {path} (first {cutoff:.0f} frames)")
 
