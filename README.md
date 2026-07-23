@@ -20,8 +20,10 @@ instead of failing hard.
 | freq offset tolerance | > ±50 Hz |
 | envelope PAPR | ~6.7 dB (clip-and-filter; NN-shaped in stage 2) |
 
-Modes: **A** ≈ 32 s (1 latent group, coarse), **B** ≈ 64 s (2 groups),
-**C** ≈ 95 s (3 groups, best fidelity). Faster modes are literal
+Images are transmitted at **640×480** (any input ≥320×240 is accepted
+and upscaled; decode with `--size 320x240` for a classic-SSTV-sized
+output). Modes: **A** ≈ 32 s (1 latent group, coarse), **B** ≈ 64 s
+(2 groups), **C** ≈ 95 s (3 groups, best fidelity). Faster modes are literal
 prefixes of mode C's stream, so a mode C reception can be decoded
 progressively as it arrives, and truncated or faded receptions decode
 at reduced fidelity.

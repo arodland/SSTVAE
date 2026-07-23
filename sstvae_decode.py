@@ -53,7 +53,15 @@ def main() -> None:
         "--search-end", type=float, default=None,
         help="limit preamble search to before this time (s)",
     )
+    ap.add_argument(
+        "--size", type=str, default=None,
+        help="resize output image, e.g. 320x240 (classic SSTV size)",
+    )
     args = ap.parse_args()
+    out_size = None
+    if args.size:
+        w, h = args.size.lower().split("x")
+        out_size = (int(w), int(h))
 
     x = wavio.read_wav(args.input)
     search = None
@@ -68,7 +76,13 @@ def main() -> None:
 
     latents = pad_to_full(r.latents)
     weights = pad_to_full(r.weights)
-    reconstruct(model, latents, weights).save(args.output)
+
+    def save(img, path):
+        if out_size is not None:
+            img = img.resize(out_size, Image.LANCZOS)
+        img.save(path)
+
+    save(reconstruct(model, latents, weights), args.output)
     print(f"wrote {args.output}")
 
     if args.snapshots > 0:
@@ -82,7 +96,7 @@ def main() -> None:
             w_k = r.weights * (frame_of_latent < cutoff)
             img = reconstruct(model, latents, pad_to_full(w_k))
             path = out.with_stem(f"{out.stem}_{k:03d}")
-            img.save(path)
+            save(img, path)
             print(f"wrote {path} (first {cutoff:.0f} frames)")
 
 

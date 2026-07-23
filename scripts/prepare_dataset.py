@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Prepare training images: extract from a zip (or walk a folder),
-resize-and-center-crop to 320x240, write JPEGs.
+resize-and-center-crop to the target resolution (sstvae.data.IMG_W/H).
 
-    python scripts/prepare_dataset.py data/val2017.zip data/coco320
-    python scripts/prepare_dataset.py data/train2017.zip data/coco320
+    python scripts/prepare_dataset.py data/val2017.zip data/coco640
+    python scripts/prepare_dataset.py data/train2017.zip data/coco640
 
-Images smaller than the target in either dimension are skipped.
+Images smaller than MIN_W x MIN_H (classic SSTV size) are skipped;
+anything between MIN and target size is upscaled by the cover-resize.
 Processing is multiprocess; re-runs skip already-written files.
 """
 
@@ -19,7 +20,7 @@ from pathlib import Path
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from sstvae.data import IMG_H, IMG_W
+from sstvae.data import IMG_H, IMG_W, MIN_H, MIN_W
 
 _zip_path: str | None = None
 _zf: zipfile.ZipFile | None = None
@@ -37,7 +38,9 @@ def _process(job: tuple[str, str]) -> bool:
         else:
             img = Image.open(name)
         img = img.convert("RGB")
-        if img.width < IMG_W or img.height < IMG_H:
+        # Accept anything classic-SSTV sized or larger; smaller-than-target
+        # images get upscaled by the cover-resize below.
+        if img.width < MIN_W or img.height < MIN_H:
             return False
         scale = max(IMG_W / img.width, IMG_H / img.height)
         img = img.resize(

@@ -42,7 +42,7 @@ class ResBlock(nn.Module):
 
 
 class Encoder(nn.Module):
-    """(B, 3, 240, 320) image in [0,1] -> unit-RMS latents."""
+    """(B, 3, 480, 640) image in [0,1] -> unit-RMS latents (x16 down)."""
 
     def __init__(self, width: int = 128):
         super().__init__()
@@ -55,6 +55,9 @@ class Encoder(nn.Module):
             nn.SiLU(),
             nn.Conv2d(w, w * 2, 4, stride=2, padding=1),
             ResBlock(w * 2),
+            nn.SiLU(),
+            nn.Conv2d(w * 2, w * 2, 4, stride=2, padding=1),
+            ResBlock(w * 2),
             ResBlock(w * 2),
             nn.GroupNorm(8, w * 2),
             nn.SiLU(),
@@ -63,6 +66,10 @@ class Encoder(nn.Module):
 
     def forward(self, img: torch.Tensor) -> torch.Tensor:
         z = torch.tanh(self.net(img * 2 - 1))
+        assert z.shape[-2:] == (LATENT_H, LATENT_W), (
+            f"latent grid {tuple(z.shape[-2:])} != ({LATENT_H}, {LATENT_W}); "
+            "input must be 640x480"
+        )
         # Unit RMS over each image's whole latent tensor: the modem
         # transmits latents at unit power, so train with the same scale.
         rms = z.flatten(1).pow(2).mean(dim=1, keepdim=True).sqrt().clamp_min(1e-6)
@@ -70,7 +77,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    """Noisy latents + per-latent weights -> (B, 3, 240, 320) in [0,1].
+    """Noisy latents + per-latent weights -> (B, 3, 480, 640) in [0,1].
 
     Erased latents must be zeroed and their weights 0; the weight planes
     let the network discount unreliable coefficients.
@@ -89,6 +96,9 @@ class Decoder(nn.Module):
             ResBlock(w),
             nn.SiLU(),
             nn.ConvTranspose2d(w, w // 2, 4, stride=2, padding=1),
+            ResBlock(w // 2),
+            nn.SiLU(),
+            nn.ConvTranspose2d(w // 2, w // 2, 4, stride=2, padding=1),
             ResBlock(w // 2),
             nn.SiLU(),
             nn.ConvTranspose2d(w // 2, w // 4, 4, stride=2, padding=1),

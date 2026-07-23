@@ -7,7 +7,12 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-IMG_W, IMG_H = 320, 240
+# Target resolution. The latent grid (40x30) is fixed by the modem's
+# capacity; at x16 downsampling that means 640x480 images. Images as
+# small as MIN_W x MIN_H are accepted (and upscaled) to keep parity
+# with classic 320x240 SSTV sources.
+IMG_W, IMG_H = 640, 480
+MIN_W, MIN_H = 320, 240
 
 
 def load_image(path: str | Path) -> torch.Tensor:
