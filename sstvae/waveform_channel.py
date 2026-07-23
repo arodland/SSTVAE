@@ -232,8 +232,16 @@ class WaveformChannel(torch.nn.Module):
 
     def forward(
         self, latents: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """(B, N_LATENTS) unit-RMS -> (noisy latents, weights, papr_db)."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(B, N_LATENTS) unit-RMS -> (noisy latents, weights, papr_db, confidence).
+
+        `confidence` (B,) reflects only actual channel quality (SNR,
+        fading depth, burst erasure) — NOT group truncation, so a clean
+        mode-A reception trains as confidently as a clean mode-C one.
+        See sstvae.latent_channel.apply_latent_channel for why this
+        matters (loss terms like chroma should relax under real
+        noise/fading but not under truncation alone).
+        """
         b, dev = latents.shape[0], latents.device
         cfg = self.cfg
 
@@ -254,7 +262,18 @@ class WaveformChannel(torch.nn.Module):
 
         eq, w = self._equalize(y)
 
+        # Confidence, captured before truncation is folded into w/keep:
+        # SNR (absolute, see latent_channel.SNR_CONF_*, not normalized to
+        # cfg's sampling range which may be a degenerate single point),
+        # fading depth (mean pilot-based gain), and burst-erasure
+        # coverage. Deliberately excludes truncation itself.
+        from .latent_channel import SNR_CONF_MIDPOINT, SNR_CONF_SCALE
+
+        snr_conf = torch.sigmoid((snr.view(b) - SNR_CONF_MIDPOINT) / SNR_CONF_SCALE)
+        fade_conf = w.mean(dim=(1, 2, 3))
+
         keep = self._burst_erasures(b, dev)
+        erasure_conf = keep.mean(dim=1)
         n_groups = torch.full((b,), LATENT_GROUPS, device=dev, dtype=torch.long)
         trunc = torch.rand(b, device=dev) < cfg.p_truncate
         n_groups[trunc] = torch.randint(
@@ -266,6 +285,8 @@ class WaveformChannel(torch.nn.Module):
         keep = keep * (frame_group < n_groups[:, None])
         w = w * keep[:, :, None, None]
 
+        confidence = snr_conf * fade_conf * erasure_conf
+
         eqw = eq * (w > 0)
         sl_pairs = torch.stack(
             [eqw.real * np.sqrt(2), eqw.imag * np.sqrt(2)], dim=-1
@@ -275,4 +296,4 @@ class WaveformChannel(torch.nn.Module):
             torch.stack([w, w], dim=-1).reshape(b, -1)[:, self.inv_perm]
         )
         sl = sl.clamp(-10, 10)
-        return sl, wl, papr_db
+        return sl, wl, papr_db, confidence

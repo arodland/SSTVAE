@@ -27,7 +27,7 @@ def _unit(b, seed=0):
 def test_clean_loopback_hits_clip_floor():
     ch = WaveformChannel(_clean_cfg())
     z = _unit(2)
-    out, w, papr = ch(z)
+    out, w, papr, conf = ch(z)
     err = (out - z).pow(2).mean()
     snr = 10 * torch.log10(z.pow(2).mean() / err)
     assert snr > 17, f"latent SNR {snr:.1f} dB"
@@ -42,7 +42,7 @@ def test_matches_numpy_modem():
 
     ch = WaveformChannel(_clean_cfg())
     z = _unit(1, seed=3)
-    out_t, _, _ = ch(z)
+    out_t, _, _, _ = ch(z)
     r = Modem().demodulate(Modem().modulate(z[0].numpy().astype(np.float64), "C"))
     # Both go through clip-and-filter + EQ; residuals differ (sync path,
     # real acquisition) but recovered latents should correlate ~1 with
@@ -56,10 +56,35 @@ def test_gradients_flow():
     ch = WaveformChannel(_clean_cfg())
     z = _unit(1)
     z.requires_grad_(True)
-    out, w, papr = ch(z)
+    out, w, papr, conf = ch(z)
     (out.pow(2).mean() + papr.mean() * 0.01).backward()
     g = z.grad
     assert g is not None and torch.isfinite(g).all() and g.abs().sum() > 0
+
+
+def test_confidence_independent_of_truncation():
+    """A clean channel with heavy truncation should report the same
+    confidence as a clean channel with no truncation — truncation is
+    not channel degradation."""
+    torch.manual_seed(0)
+    ch_notrunc = WaveformChannel(_clean_cfg(p_truncate=0.0))
+    ch_trunc = WaveformChannel(_clean_cfg(p_truncate=1.0))
+    z = _unit(8, seed=5)
+    _, w1, _, conf1 = ch_notrunc(z)
+    _, w2, _, conf2 = ch_trunc(z)
+    assert (w1 == 0).float().mean() < 0.05
+    assert (w2 == 0).float().mean() > 0.3  # truncation actually happened
+    assert conf1.mean() > 0.9 and conf2.mean() > 0.9
+    assert (conf1 - conf2).abs().max() < 0.05
+
+
+def test_confidence_tracks_snr():
+    ch_hi = WaveformChannel(_clean_cfg(snr_db_range=(30.0, 30.0)))
+    ch_lo = WaveformChannel(_clean_cfg(snr_db_range=(-5.0, -5.0)))
+    z = _unit(4, seed=6)
+    _, _, _, conf_hi = ch_hi(z)
+    _, _, _, conf_lo = ch_lo(z)
+    assert conf_hi.mean() > conf_lo.mean()
 
 
 def test_fading_and_erasures_shape_weights():
@@ -73,7 +98,7 @@ def test_fading_and_erasures_shape_weights():
     )
     torch.manual_seed(0)
     z = _unit(4, seed=4)
-    out, w, papr = ch(z)
+    out, w, papr, conf = ch(z)
     assert ((w == 0).float().mean() > 0.05)  # truncation/erasures present
     good = w > 0.7
     if good.any():

@@ -57,7 +57,7 @@ def evaluate(model, loader, device, max_batches=16):
                 noisy, w = z, torch.ones_like(z)
             else:
                 g = torch.Generator(device=device).manual_seed(bi)
-                noisy, w = apply_latent_channel(z, cfg, generator=g)
+                noisy, w, _conf = apply_latent_channel(z, cfg, generator=g)
             recon = model.decoder(noisy, w)
             mse[k] += F.mse_loss(recon, img).item() * img.shape[0]
         n += img.shape[0]
@@ -89,7 +89,7 @@ def dump_samples(model, imgs, out_path, device):
     clean = model.decoder(z, torch.ones_like(z))
     g = torch.Generator(device=device).manual_seed(0)
     cfg = ChannelConfig(snr_db_range=(8.0, 8.0), erasure_rate_max=0.2, p_truncate=0.0)
-    noisy, w = apply_latent_channel(z, cfg, generator=g)
+    noisy, w, _conf = apply_latent_channel(z, cfg, generator=g)
     rough = model.decoder(noisy, w)
     rows = torch.cat([imgs, clean, rough], dim=0)
     save_image(rows, out_path, nrow=imgs.shape[0])
@@ -241,22 +241,31 @@ def main() -> None:
                 # Waveform chain runs in fp32 (complex ops + autocast
                 # don't mix); the networks stay under autocast.
                 flat = model.latents_to_flat(z.float())
-                noisy_flat, w_flat, papr_db = wave_ch(flat)
+                noisy_flat, w_flat, papr_db, conf = wave_ch(flat)
                 noisy = model.flat_to_latents(noisy_flat)
                 w = model.flat_to_latents(w_flat)
                 papr_loss = args.papr_weight * F.relu(
                     papr_db - args.papr_target
                 ).mean()
             else:
-                noisy, w = apply_latent_channel(z, ch_cfg)
+                noisy, w, conf = apply_latent_channel(z, ch_cfg)
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.amp):
                 recon = model.decoder(noisy.to(z.dtype), w.to(z.dtype))
                 recon = recon.float()
                 loss = F.mse_loss(recon, img) + papr_loss
                 if args.chroma_weight:
-                    loss = loss + args.chroma_weight * F.mse_loss(
-                        chroma(recon), chroma(img)
-                    )
+                    # Scaled by per-sample channel confidence (SNR/erasure/
+                    # fading — NOT truncation): a clean mode-A-only sample
+                    # gets the full penalty (excellent should mean
+                    # saturated, regardless of how much was truncated),
+                    # while a genuinely noisy sample is allowed to hedge
+                    # toward gray instead of hallucinating color speckle.
+                    chroma_mse = F.mse_loss(
+                        chroma(recon), chroma(img), reduction="none"
+                    ).mean(dim=(1, 2, 3))
+                    loss = loss + args.chroma_weight * (
+                        conf.to(chroma_mse.dtype) * chroma_mse
+                    ).mean()
                 if lpips_fn is not None:
                     # LPIPS is calibrated on small patches (~64-256 px);
                     # a random 256x256 crop keeps it at its trained scale

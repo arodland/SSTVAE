@@ -25,10 +25,30 @@ class ChannelConfig:
     p_truncate: float = 0.5  # probability of dropping trailing groups
 
 
+# Confidence is an ABSOLUTE measure of channel quality, not normalized to
+# whatever snr_db_range a given config samples from (that range can be a
+# single fixed point, e.g. in eval/dump_samples configs, which would
+# divide by zero). The sigmoid midpoint/scale are anchored to the
+# measured modem SNR sweep (sstvae docs/session notes, mode B, AWGN):
+# sync unreliable below ~0 dB, PSNR still rising until ~8-12 dB.
+SNR_CONF_MIDPOINT = 6.0  # dB
+SNR_CONF_SCALE = 3.0  # dB
+
+
 def apply_latent_channel(
     z: torch.Tensor, cfg: ChannelConfig, generator: torch.Generator | None = None
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """z: (B, C, H, W) unit-RMS latents -> (noisy latents, weights)."""
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """z: (B, C, H, W) unit-RMS latents -> (noisy latents, weights, confidence).
+
+    `confidence` (B,) reflects only actual channel quality (SNR, erasure
+    rate) — NOT group truncation. Truncating to fewer groups isn't
+    channel degradation, it's just less data; a clean mode-A reception
+    should train as confidently as a clean mode-C one. Callers use this
+    to scale loss terms (like the chroma term) that should relax under
+    real noise/erasure but must NOT relax just because fewer groups
+    were transmitted — otherwise the network learns to hedge on group 0
+    even when it's actually clean.
+    """
     b, c, h, w = z.shape
     dev = z.device
 
@@ -56,4 +76,9 @@ def apply_latent_channel(
     sigma = (10 ** (-snr_db / 20)).to(z.dtype)
     noise = torch.randn(z.shape, device=dev, generator=generator) * sigma
     noisy = (z + noise) * weights
-    return noisy, weights.to(z.dtype)
+
+    snr_conf = torch.sigmoid((snr_db.view(b) - SNR_CONF_MIDPOINT) / SNR_CONF_SCALE)
+    erasure_conf = 1.0 - rate.view(b)
+    confidence = snr_conf * erasure_conf
+
+    return noisy, weights.to(z.dtype), confidence.to(z.dtype)
