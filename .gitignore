@@ -10,3 +10,4 @@ runs/
 
 # audio/image scratch
 *.wav
+out*.png
