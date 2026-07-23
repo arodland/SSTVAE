@@ -140,6 +140,15 @@ def main() -> None:
         default=True,
         help="bfloat16 autocast (halves activation VRAM)",
     )
+    ap.add_argument(
+        "--stage2",
+        action="store_true",
+        help="train through the differentiable OFDM waveform channel "
+        "(clip/PAPR, fading, pilot-EQ residuals) instead of the "
+        "latent-AWGN model; start from a stage-1 checkpoint",
+    )
+    ap.add_argument("--papr-weight", type=float, default=0.05)
+    ap.add_argument("--papr-target", type=float, default=5.0)
     ap.add_argument("--resume", type=str, default=None)
     args = ap.parse_args()
 
@@ -195,32 +204,63 @@ def main() -> None:
     if lpips_fn is None and not args.smoke:
         print("lpips unavailable; training with MSE only")
     ch_cfg = ChannelConfig()
+    wave_ch = None
+    if args.stage2:
+        from sstvae.waveform_channel import WaveformChannel
+
+        wave_ch = WaveformChannel().to(device)
 
     step = 0
     for epoch in range(args.epochs):
         model.train()
-        t0, ep_loss, n_batches = time.time(), 0.0, 0
+        t0, ep_loss, n_batches, ep_papr = time.time(), 0.0, 0, 0.0
         for img in loader:
             img = img.to(device, non_blocking=True)
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.amp):
                 z = model.encoder(img)
+            papr_loss = 0.0
+            if wave_ch is not None:
+                # Waveform chain runs in fp32 (complex ops + autocast
+                # don't mix); the networks stay under autocast.
+                flat = model.latents_to_flat(z.float())
+                noisy_flat, w_flat, papr_db = wave_ch(flat)
+                noisy = model.flat_to_latents(noisy_flat)
+                w = model.flat_to_latents(w_flat)
+                papr_loss = args.papr_weight * F.relu(
+                    papr_db - args.papr_target
+                ).mean()
+            else:
                 noisy, w = apply_latent_channel(z, ch_cfg)
-                recon = model.decoder(noisy, w)
-                loss = F.mse_loss(recon.float(), img)
+            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.amp):
+                recon = model.decoder(noisy.to(z.dtype), w.to(z.dtype))
+                loss = F.mse_loss(recon.float(), img) + papr_loss
                 if lpips_fn is not None:
+                    # LPIPS is calibrated on small patches (~64-256 px);
+                    # a random 256x256 crop keeps it at its trained scale
+                    # and saves ~5x compute vs the full 640x480 frame.
+                    ch = min(256, img.shape[-2])
+                    cw = min(256, img.shape[-1])
+                    top = int(torch.randint(0, img.shape[-2] - ch + 1, (1,)))
+                    left = int(torch.randint(0, img.shape[-1] - cw + 1, (1,)))
+                    rc = recon[..., top : top + ch, left : left + cw]
+                    ic = img[..., top : top + ch, left : left + cw]
                     loss = loss + args.lpips_weight * lpips_fn(
-                        recon * 2 - 1, img * 2 - 1
+                        rc * 2 - 1, ic * 2 - 1
                     ).mean()
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             ep_loss += loss.item()
+            if wave_ch is not None:
+                ep_papr += papr_db.mean().item()
             n_batches += 1
             step += 1
         sched.step()
         avg = ep_loss / max(n_batches, 1)
         record = {"epoch": epoch, "train_loss": avg, "seconds": time.time() - t0}
+        if wave_ch is not None:
+            record["papr_db"] = ep_papr / max(n_batches, 1)
         if val_loader is not None:
             record.update({f"val_psnr_{k}": v for k, v in
                            evaluate(model, val_loader, device).items()})

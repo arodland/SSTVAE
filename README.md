@@ -70,8 +70,16 @@ scripts/launch_job.sh l4x1 --epochs 60 --batch 48   # HF Jobs
 HF_TOKEN=... uv run scripts/train_job.py            # any GPU box
 ```
 
-Stage 2 (fine-tuning through the full OFDM waveform + fading channel,
-with a PAPR loss term) is not yet implemented.
+Stage 2 fine-tunes through a differentiable replica of the real modem
+chain (`sstvae/waveform_channel.py`): OFDM synthesis, envelope
+clip-and-filter, Watterson fading, noisy-pilot equalization, burst
+erasures — with an envelope-PAPR penalty in the loss:
+
+```sh
+python scripts/train.py --hf-dataset arodland/coco320-sstvae \
+    --stage2 --resume runs/s1/checkpoint.pt --lr 1e-4 \
+    --papr-weight 0.05 --papr-target 5 --out runs/s2
+```
 
 ## Development
 

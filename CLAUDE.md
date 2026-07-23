@@ -52,9 +52,18 @@ rationale lives in the plan history.
 - Local GPU is ROCm (`torch.cuda.is_available()` is true); never add
   CUDA-only dependencies.
 
+- `sstvae/waveform_channel.py` — stage-2 differentiable modem replica
+  (torch): OFDM synth, envelope clip/PAPR, symbol-domain fading,
+  noisy-pilot Catmull-Rom EQ, burst erasures. Tested to correlate
+  >0.98 with the NumPy modem on clean channels. Runs in fp32 outside
+  autocast (complex ops); `train.py --stage2` handles that split.
+
 ## Status / next steps
 
-Phase 1 (modem) and Phase 2 stage-1 training scaffold are complete.
-Remaining: real-dataset training run (HF Jobs), stage-2 fine-tune
-through a differentiable OFDM+fading channel with PAPR loss,
-evaluation sweeps (PSNR/LPIPS vs SNR per mode), on-air calibration.
+Phase 1 (modem) complete; stage-1 training pipeline complete with Hub
+dataset (`arodland/coco320-sstvae`) + cloud packaging
+(`scripts/launch_job.sh`); stage-2 channel implemented and tested.
+Remaining: run stage-2 fine-tune (start from a good stage-1
+checkpoint, `--lr 1e-4`), evaluation sweeps (PSNR/LPIPS vs SNR per
+mode), mid-stream re-sync markers, callsign header field (deferred),
+on-air calibration.
