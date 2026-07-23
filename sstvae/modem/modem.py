@@ -99,9 +99,16 @@ class Modem:
 
     # --- receive -----------------------------------------------------------
 
-    def demodulate(self, x: np.ndarray) -> DemodResult:
+    def demodulate(
+        self, x: np.ndarray, search_s: tuple[float, float] | None = None
+    ) -> DemodResult:
+        """`search_s` restricts preamble acquisition to a time window
+        (seconds); frames are still demodulated past its end."""
         z = to_baseband(np.asarray(x, dtype=np.float64))
-        acq = acquire(z)
+        search = None
+        if search_s is not None:
+            search = (int(search_s[0] * FS), int(search_s[1] * FS))
+        acq = acquire(z, search=search)
         z = freq_correct(z, acq.freq_offset)
 
         u0 = acq.preamble_start + PREAMBLE_CP

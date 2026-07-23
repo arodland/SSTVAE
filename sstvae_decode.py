@@ -16,7 +16,7 @@ import torch
 from PIL import Image
 
 from sstvae import wavio
-from sstvae.config import LATENT_CHANNELS, LATENTS_PER_FRAME, MODES
+from sstvae.config import FS, LATENT_CHANNELS, LATENTS_PER_FRAME, MODES
 from sstvae.models import SSTVAE
 from sstvae.modem import Modem, framing
 from sstvae_encode import load_model
@@ -45,10 +45,22 @@ def main() -> None:
     ap.add_argument("output", help="output image (png/jpg)")
     ap.add_argument("--model", required=True, help="checkpoint.pt")
     ap.add_argument("--snapshots", type=int, default=0)
+    ap.add_argument(
+        "--search-start", type=float, default=None,
+        help="limit preamble search to after this time (s)",
+    )
+    ap.add_argument(
+        "--search-end", type=float, default=None,
+        help="limit preamble search to before this time (s)",
+    )
     args = ap.parse_args()
 
+    x = wavio.read_wav(args.input)
+    search = None
+    if args.search_start is not None or args.search_end is not None:
+        search = (args.search_start or 0.0, args.search_end or len(x) / FS)
     model = load_model(args.model)
-    r = Modem().demodulate(wavio.read_wav(args.input))
+    r = Modem().demodulate(x, search_s=search)
     print(
         f"mode {r.mode.name}, {r.frames_received}/{r.mode.n_frames} frames, "
         f"freq offset {r.freq_offset:+.1f} Hz, sync metric {r.sync_metric:.2f}"

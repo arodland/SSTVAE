@@ -43,13 +43,30 @@ def _autocorr_metric(z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return np.abs(a) / energy, a
 
 
-def acquire(z: np.ndarray, threshold: float = 0.5, max_bins: int = 2) -> Acquisition:
-    """Find the preamble in baseband signal z."""
+def acquire(
+    z: np.ndarray,
+    threshold: float = 0.5,
+    max_bins: int = 2,
+    search: tuple[int, int] | None = None,
+) -> Acquisition:
+    """Find the preamble in baseband signal z.
+
+    `search` optionally restricts the preamble hunt to a [start, end)
+    sample range (the rest of the signal is still used for frames).
+    """
     if len(z) < PREAMBLE_SAMPLES + 2 * M:
         raise SyncError("signal too short")
 
     z = sync_lowpass(z)
     metric, a = _autocorr_metric(z)
+    if search is not None:
+        s0 = max(0, int(search[0]))
+        s1 = min(len(metric), int(search[1]))
+        if s1 - s0 < 1:
+            raise SyncError(f"empty search window {search}")
+        masked = np.full_like(metric, -1.0)
+        masked[s0:s1] = metric[s0:s1]
+        metric = masked
     n_star = int(np.argmax(metric))
     if metric[n_star] < threshold:
         raise SyncError(f"no preamble found (peak metric {metric[n_star]:.2f})")
