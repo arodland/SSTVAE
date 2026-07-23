@@ -73,12 +73,13 @@ HF_TOKEN=... uv run scripts/train_job.py            # any GPU box
 Stage 2 fine-tunes through a differentiable replica of the real modem
 chain (`sstvae/waveform_channel.py`): OFDM synthesis, envelope
 clip-and-filter, Watterson fading, noisy-pilot equalization, burst
-erasures — with an envelope-PAPR penalty in the loss:
+erasures — with a RADE-style continuous linear-ratio PAPR penalty in
+the loss (see scripts/train.py's --papr-weight help for the rationale):
 
 ```sh
 python scripts/train.py --hf-dataset arodland/coco320-sstvae \
     --stage2 --resume runs/s1/checkpoint.pt --lr 1e-4 \
-    --papr-weight 0.05 --papr-target 5 --out runs/s2
+    --papr-weight 0.002 --out runs/s2
 ```
 
 ## Development

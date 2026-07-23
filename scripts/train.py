@@ -157,8 +157,17 @@ def main() -> None:
         "(clip/PAPR, fading, pilot-EQ residuals) instead of the "
         "latent-AWGN model; start from a stage-1 checkpoint",
     )
-    ap.add_argument("--papr-weight", type=float, default=0.05)
-    ap.add_argument("--papr-target", type=float, default=5.0)
+    ap.add_argument(
+        "--papr-weight",
+        type=float,
+        default=0.002,
+        help="weight on the continuous linear-ratio PAPR penalty "
+        "(RADE-style: no hinge/target, just peak/mean power kept "
+        "small and always-active so it can't dominate reconstruction "
+        "loss — see radae/radae_base.py's distortion_loss). Default "
+        "chosen so pre+post-clip ratios (~13 early in training) "
+        "contribute roughly 2% of total loss, not 300%.",
+    )
     ap.add_argument(
         "--chroma-weight",
         type=float,
@@ -277,20 +286,24 @@ def main() -> None:
                 noisy_flat, w_flat, papr_pre_db, papr_post_db, conf = wave_ch(flat)
                 noisy = model.flat_to_latents(noisy_flat)
                 w = model.flat_to_latents(w_flat)
-                # Both pre- and post-clip PAPR contribute, same weight
-                # and target, hinged at args.papr_target. Once clipping
-                # is engaged, crest factor is scale-invariant so a
-                # post-clip loss alone has ~zero gradient (see
-                # WaveformChannel._clip_filter) — the pre-clip term
-                # supplies real signal there. Its hinge goes to exactly
-                # 0 once pre-clip PAPR is under target, right as the
-                # post-clip term's gradient wakes up (clipping stops
-                # dominating) to take over fine-grained pressure toward
-                # the actual transmitted number — always some live
-                # gradient, never losing sight of the physical goal.
+                # RADE-style PAPR penalty: continuous linear peak/mean
+                # power ratio, no hinge/target, small fixed weight (see
+                # radae/radae_base.py's distortion_loss: `loss +=
+                # (0.125/18) * PAPR` with PAPR = peak_power/av_power,
+                # unhinged). A dB-scale hinge loss was tried first and
+                # got stuck: log-compression flattens gradient for the
+                # worst peaks (the opposite of what you want), and a
+                # hinge either contributes 0 or grows unbounded past its
+                # target, which let it balloon to ~3x the reconstruction
+                # loss and still not move. Both pre- and post-clip still
+                # contribute (post-clip is what RADE penalizes; pre-clip
+                # is our own addition — see WaveformChannel._clip_filter
+                # for why post-clip alone gives weak gradient once
+                # clipping is active).
+                papr_pre_ratio = 10 ** (papr_pre_db / 10)
+                papr_post_ratio = 10 ** (papr_post_db / 10)
                 papr_loss = args.papr_weight * (
-                    F.relu(papr_pre_db - args.papr_target).mean()
-                    + F.relu(papr_post_db - args.papr_target).mean()
+                    papr_pre_ratio.mean() + papr_post_ratio.mean()
                 )
             else:
                 noisy, w, conf = apply_latent_channel(z, ch_cfg)
