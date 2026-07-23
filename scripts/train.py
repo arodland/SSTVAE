@@ -190,14 +190,37 @@ def main() -> None:
     print(f"device={device}, images={len(dataset)}, width={args.width}")
 
     model = SSTVAE(width=args.width).to(device)
+    start_epoch = 0
     if args.resume:
         path = args.resume
         if path.startswith("hf://"):  # e.g. hf://arodland/sstvae-s1
             from huggingface_hub import hf_hub_download
 
             path = hf_hub_download(repo_id=path[5:], filename="checkpoint.pt")
-        model.load_state_dict(torch.load(path, map_location=device)["model"])
+        ckpt = torch.load(path, map_location=device)
+        model.load_state_dict(ckpt["model"])
+        start_epoch = ckpt.get("epoch", -1) + 1
+        print(f"resumed from {args.resume} at epoch {start_epoch}")
+
+    # Keep metrics.jsonl continuous across resumes: if this invocation's
+    # push target already has history and we don't have it locally
+    # (e.g. resuming in a fresh directory), pull it down first so we
+    # append instead of silently truncating the pushed record.
+    metrics_path = out / "metrics.jsonl"
+    if args.push_to_hub and not metrics_path.exists():
+        from huggingface_hub import hf_hub_download
+
+        try:
+            prior = hf_hub_download(repo_id=args.push_to_hub, filename="metrics.jsonl")
+            metrics_path.write_bytes(Path(prior).read_bytes())
+            print(f"seeded {metrics_path} from existing {args.push_to_hub}")
+        except Exception:
+            pass  # no prior history on the hub target — fine, start fresh
+
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    # T_max is this invocation's epoch count, not a global target, so the
+    # cosine schedule restarts fresh on every resume rather than
+    # continuing the decay from before.
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     sampler = None
     if args.epoch_size and args.epoch_size < len(dataset):
@@ -229,7 +252,7 @@ def main() -> None:
         wave_ch = WaveformChannel().to(device)
 
     step = 0
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, start_epoch + args.epochs):
         model.train()
         t0, ep_loss, n_batches, ep_papr = time.time(), 0.0, 0, 0.0
         for img in loader:
@@ -302,13 +325,13 @@ def main() -> None:
                       if k.startswith("val_psnr"))
             + f" [{record['seconds']:.1f}s]"
         )
-        with (out / "metrics.jsonl").open("a") as fh:
+        with metrics_path.open("a") as fh:
             fh.write(json.dumps(record) + "\n")
         torch.save(
             {"model": model.state_dict(), "width": args.width, "epoch": epoch},
             out / "checkpoint.pt",
         )
-        if epoch % 2 == 0 or epoch == args.epochs - 1:
+        if epoch % 2 == 0 or epoch == start_epoch + args.epochs - 1:
             sample_src = val_dataset if val_dataset is not None else dataset
             sample_imgs = torch.stack([sample_src[i] for i in range(4)])
             dump_samples(model, sample_imgs, out / f"samples_{epoch:03d}.png", device)
