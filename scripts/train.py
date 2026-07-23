@@ -168,7 +168,16 @@ def main() -> None:
         "more resistant to washing out saturated colors)",
     )
     ap.add_argument("--resume", type=str, default=None)
+    ap.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="global RNG seed — sampler order and channel-noise draws "
+        "become comparable across runs (not bit-exact GPU determinism, "
+        "just enough for a fair A/B comparison)",
+    )
     args = ap.parse_args()
+    torch.manual_seed(args.seed)
 
     val_dataset = None
     if args.smoke:
@@ -254,7 +263,8 @@ def main() -> None:
     step = 0
     for epoch in range(start_epoch, start_epoch + args.epochs):
         model.train()
-        t0, ep_loss, n_batches, ep_papr = time.time(), 0.0, 0, 0.0
+        t0, ep_loss, n_batches = time.time(), 0.0, 0
+        ep_papr_post, ep_papr_pre = 0.0, 0.0
         for img in loader:
             img = img.to(device, non_blocking=True)
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.amp):
@@ -264,12 +274,24 @@ def main() -> None:
                 # Waveform chain runs in fp32 (complex ops + autocast
                 # don't mix); the networks stay under autocast.
                 flat = model.latents_to_flat(z.float())
-                noisy_flat, w_flat, papr_db, conf = wave_ch(flat)
+                noisy_flat, w_flat, papr_pre_db, papr_post_db, conf = wave_ch(flat)
                 noisy = model.flat_to_latents(noisy_flat)
                 w = model.flat_to_latents(w_flat)
-                papr_loss = args.papr_weight * F.relu(
-                    papr_db - args.papr_target
-                ).mean()
+                # Both pre- and post-clip PAPR contribute, same weight
+                # and target, hinged at args.papr_target. Once clipping
+                # is engaged, crest factor is scale-invariant so a
+                # post-clip loss alone has ~zero gradient (see
+                # WaveformChannel._clip_filter) — the pre-clip term
+                # supplies real signal there. Its hinge goes to exactly
+                # 0 once pre-clip PAPR is under target, right as the
+                # post-clip term's gradient wakes up (clipping stops
+                # dominating) to take over fine-grained pressure toward
+                # the actual transmitted number — always some live
+                # gradient, never losing sight of the physical goal.
+                papr_loss = args.papr_weight * (
+                    F.relu(papr_pre_db - args.papr_target).mean()
+                    + F.relu(papr_post_db - args.papr_target).mean()
+                )
             else:
                 noisy, w, conf = apply_latent_channel(z, ch_cfg)
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.amp):
@@ -308,21 +330,23 @@ def main() -> None:
             opt.step()
             ep_loss += loss.item()
             if wave_ch is not None:
-                ep_papr += papr_db.mean().item()
+                ep_papr_post += papr_post_db.mean().item()
+                ep_papr_pre += papr_pre_db.mean().item()
             n_batches += 1
             step += 1
         sched.step()
         avg = ep_loss / max(n_batches, 1)
         record = {"epoch": epoch, "train_loss": avg, "seconds": time.time() - t0}
         if wave_ch is not None:
-            record["papr_db"] = ep_papr / max(n_batches, 1)
+            record["papr_db"] = ep_papr_post / max(n_batches, 1)
+            record["papr_pre_db"] = ep_papr_pre / max(n_batches, 1)
         if val_loader is not None:
             record.update({f"val_psnr_{k}": v for k, v in
                            evaluate(model, val_loader, device).items()})
         print(
             f"epoch {epoch}: loss={avg:.5f}"
             + "".join(f" {k}={v:.2f}" for k, v in record.items()
-                      if k.startswith("val_psnr"))
+                      if k.startswith("val_psnr") or k.startswith("papr"))
             + f" [{record['seconds']:.1f}s]"
         )
         with metrics_path.open("a") as fh:

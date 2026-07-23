@@ -104,8 +104,28 @@ class WaveformChannel(torch.nn.Module):
         x = torch.einsum("bsc,nc->bsn", syms, self.mod_mat).real
         return x.reshape(x.shape[0], -1)
 
-    def _clip_filter(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Envelope clip + bandpass (2 iterations); returns (x, papr_db)."""
+    def _papr_db(self, x: torch.Tensor) -> torch.Tensor:
+        env2 = self._analytic(x).abs().pow(2)
+        return 10 * torch.log10(
+            torch.quantile(env2, 0.9999, dim=1) / env2.mean(dim=1).clamp_min(1e-12)
+        )
+
+    def _clip_filter(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Envelope clip + bandpass (2 iterations).
+
+        Returns (x, papr_pre_db, papr_post_db). papr_post_db is the real
+        transmitted PAPR (what matters physically, comparable to RADE's
+        numbers). papr_pre_db is measured BEFORE clipping — clipping
+        pins the peak envelope to ~thresh regardless of how far over a
+        given sample was, since thresh scales with each sample's own
+        RMS (crest factor is scale-invariant), so a loss on papr_post_db
+        has almost no gradient once any significant clipping is
+        happening: reducing pre-clip peaks doesn't change the pinned
+        post-clip value until pre-clip PAPR drops below the headroom
+        threshold entirely. papr_pre_db gives the encoder a real,
+        informative gradient toward that goal.
+        """
+        papr_pre_db = self._papr_db(x)
         thresh = (
             torch.sqrt(2 * x.pow(2).mean(dim=1, keepdim=True))
             * 10 ** (self.cfg.clip_headroom_db / 20)
@@ -117,11 +137,8 @@ class WaveformChannel(torch.nn.Module):
             x = torch.nn.functional.conv1d(x[:, None, :], self.bp_taps, padding=100)[
                 :, 0, :
             ]
-        env2 = self._analytic(x).abs().pow(2)
-        papr_db = 10 * torch.log10(
-            torch.quantile(env2, 0.9999, dim=1) / env2.mean(dim=1).clamp_min(1e-12)
-        )
-        return x, papr_db
+        papr_post_db = self._papr_db(x)
+        return x, papr_pre_db, papr_post_db
 
     @staticmethod
     def _analytic(x: torch.Tensor) -> torch.Tensor:
@@ -232,8 +249,15 @@ class WaveformChannel(torch.nn.Module):
 
     def forward(
         self, latents: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """(B, N_LATENTS) unit-RMS -> (noisy latents, weights, papr_db, confidence).
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(B, N_LATENTS) unit-RMS -> (noisy latents, weights, papr_pre_db,
+        papr_post_db, confidence).
+
+        papr_post_db is the real transmitted PAPR (compare against
+        target hardware numbers); papr_pre_db is measured before
+        clipping and is what a PAPR loss should actually be computed
+        against — see _clip_filter's docstring for why papr_post_db
+        gives near-zero gradient once clipping is active.
 
         `confidence` (B,) reflects only actual channel quality (SNR,
         fading depth, burst erasure) — NOT group truncation, so a clean
@@ -247,7 +271,7 @@ class WaveformChannel(torch.nn.Module):
 
         syms = self._to_symbols(latents)
         x = self._synthesize(syms)
-        x, papr_db = self._clip_filter(x)
+        x, papr_pre_db, papr_post_db = self._clip_filter(x)
         y = self._demodulate(x)
 
         h = self._fading(b, dev)
@@ -296,4 +320,4 @@ class WaveformChannel(torch.nn.Module):
             torch.stack([w, w], dim=-1).reshape(b, -1)[:, self.inv_perm]
         )
         sl = sl.clamp(-10, 10)
-        return sl, wl, papr_db, confidence
+        return sl, wl, papr_pre_db, papr_post_db, confidence
