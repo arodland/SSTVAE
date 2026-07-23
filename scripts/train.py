@@ -24,6 +24,16 @@ from sstvae.data import FolderDataset, HFHubDataset, SyntheticDataset
 from sstvae.latent_channel import ChannelConfig, apply_latent_channel
 from sstvae.models import SSTVAE
 
+_LUMA_WEIGHTS = torch.tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1)
+
+
+def chroma(img: torch.Tensor) -> torch.Tensor:
+    """Per-pixel color offset from gray (img minus its luma), broadcast
+    back to 3 channels. Penalizing its MSE directly targets desaturation
+    (regression toward gray) without HSV's singularities near black/white."""
+    luma = (img * _LUMA_WEIGHTS.to(img.device, img.dtype)).sum(dim=1, keepdim=True)
+    return img - luma
+
 
 @torch.no_grad()
 def evaluate(model, loader, device, max_batches=16):
@@ -149,6 +159,14 @@ def main() -> None:
     )
     ap.add_argument("--papr-weight", type=float, default=0.05)
     ap.add_argument("--papr-target", type=float, default=5.0)
+    ap.add_argument(
+        "--chroma-weight",
+        type=float,
+        default=2.0,
+        help="weight on MSE of the color-offset-from-gray vector; "
+        "counters RGB-MSE's blind spot for desaturation (higher = "
+        "more resistant to washing out saturated colors)",
+    )
     ap.add_argument("--resume", type=str, default=None)
     args = ap.parse_args()
 
@@ -233,7 +251,12 @@ def main() -> None:
                 noisy, w = apply_latent_channel(z, ch_cfg)
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.amp):
                 recon = model.decoder(noisy.to(z.dtype), w.to(z.dtype))
-                loss = F.mse_loss(recon.float(), img) + papr_loss
+                recon = recon.float()
+                loss = F.mse_loss(recon, img) + papr_loss
+                if args.chroma_weight:
+                    loss = loss + args.chroma_weight * F.mse_loss(
+                        chroma(recon), chroma(img)
+                    )
                 if lpips_fn is not None:
                     # LPIPS is calibrated on small patches (~64-256 px);
                     # a random 256x256 crop keeps it at its trained scale

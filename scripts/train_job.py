@@ -18,8 +18,8 @@ scripts/launch_job.sh), then runs scripts/train.py with Hub dataset
 in and Hub checkpoints out. All configuration via environment:
 
     SSTVAE_CODE_REPO   code snapshot repo   (default arodland/sstvae-code)
-    SSTVAE_DATASET     dataset repo         (default arodland/coco320-sstvae)
-    SSTVAE_OUT_REPO    checkpoint repo      (default arodland/sstvae-s1)
+    SSTVAE_DATASET     dataset repo         (default arodland/coco640-sstvae)
+    SSTVAE_OUT_REPO    checkpoint repo      (default arodland/sstvae-s1-640)
     SSTVAE_ARGS        extra train.py args  (e.g. "--epochs 60 --batch 64")
     SSTVAE_RESUME      set to resume from SSTVAE_OUT_REPO's checkpoint
 
@@ -38,8 +38,8 @@ import sys
 from huggingface_hub import snapshot_download
 
 code_repo = os.environ.get("SSTVAE_CODE_REPO", "arodland/sstvae-code")
-dataset = os.environ.get("SSTVAE_DATASET", "arodland/coco320-sstvae")
-out_repo = os.environ.get("SSTVAE_OUT_REPO", "arodland/sstvae-s1")
+dataset = os.environ.get("SSTVAE_DATASET", "arodland/coco640-sstvae")
+out_repo = os.environ.get("SSTVAE_OUT_REPO", "arodland/sstvae-s1-640")
 extra = os.environ.get("SSTVAE_ARGS", "--epochs 60 --batch 48").split()
 
 code_dir = snapshot_download(code_repo)
