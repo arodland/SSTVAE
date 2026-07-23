@@ -15,8 +15,9 @@ instead of failing hard.
 | carriers | 24 × 50 Hz spacing, 950–2100 Hz |
 | occupied bandwidth | ~1200 Hz (99% power) |
 | symbol | 20 ms + 4 ms cyclic prefix |
-| frame | 1 pilot + 5 data symbols (144 ms), 240 latents |
+| frame | 1 pilot + 5 data symbols (144 ms), 230 latents + 5 beacon chips |
 | sync | periodic preamble + Golay(24,12) BPSK header |
+| resync/callsign | 1 reserved carrier, continuous beacon (see below) |
 | freq offset tolerance | > ±50 Hz |
 | envelope PAPR | ~6.7 dB (clip-and-filter; NN-shaped in stage 2) |
 
@@ -28,16 +29,28 @@ prefixes of mode C's stream, so a mode C reception can be decoded
 progressively as it arrives, and truncated or faded receptions decode
 at reduced fidelity.
 
+One of the 24 carriers is permanently reserved for a beacon
+side-channel (`sstvae/modem/beacon.py`): a continuously repeating,
+Golay-coded packet carrying an absolute frame counter and an optional
+8-character callsign. Because the counter is absolute, a receiver that
+never caught the transmission-start preamble can still recover exact
+frame position from any ~10 s window (`Modem.demodulate_blind`, backed
+by `sync.acquire_blind`'s pilot-periodicity lock) — including frames
+recorded *before* the receiver locked on. This costs ~4.2% of latent
+capacity per group (dropped as a permanent erasure, same as truncation)
+but doesn't change any mode's transmission time.
+
 ## Usage
 
 ```sh
-# encode an image to transmit audio
-python sstvae_encode.py photo.jpg tx.wav --mode B --model runs/s1/checkpoint.pt
+# encode an image to transmit audio (--callsign is optional)
+python sstvae_encode.py photo.jpg tx.wav --mode B --model runs/s1/checkpoint.pt --callsign N0CALL
 
 # simulate an HF channel (AWGN / Watterson fading / offsets)
 python sstvae_simulate.py tx.wav rx.wav --snr 3 --fading mpp --freq-offset 43
 
-# decode received audio (with progressive snapshots)
+# decode received audio (with progressive snapshots); prints the
+# recovered beacon frame position + callsign alongside the image
 python sstvae_decode.py rx.wav out.png --model runs/s1/checkpoint.pt --snapshots 4
 ```
 
@@ -51,13 +64,13 @@ python scripts/train.py --smoke --out runs/smoke
 python scripts/train.py --data /path/to/images --epochs 60 --out runs/s1
 
 # stage 1, dataset from the Hub (with validation split + PSNR eval):
-python scripts/train.py --hf-dataset arodland/coco320-sstvae \
+python scripts/train.py --hf-dataset arodland/coco640-sstvae \
     --push-to-hub arodland/sstvae-s1 --epochs 60 --out runs/s1
 ```
 
-The training dataset (COCO 2017 at 320x240, proper train/val splits) is
-`arodland/coco320-sstvae` on the Hub; rebuild it with
-`scripts/build_hf_dataset.py`.
+The training dataset (COCO 2017 at 640x480, proper train/val splits,
+minimum 320x240 input upscaled) is `arodland/coco640-sstvae` on the
+Hub; rebuild it with `scripts/build_hf_dataset.py`.
 
 ### Cloud / remote training
 
@@ -77,7 +90,7 @@ erasures — with a RADE-style continuous linear-ratio PAPR penalty in
 the loss (see scripts/train.py's --papr-weight help for the rationale):
 
 ```sh
-python scripts/train.py --hf-dataset arodland/coco320-sstvae \
+python scripts/train.py --hf-dataset arodland/coco640-sstvae \
     --stage2 --resume runs/s1/checkpoint.pt --lr 1e-4 \
     --papr-weight 0.002 --out runs/s2
 ```

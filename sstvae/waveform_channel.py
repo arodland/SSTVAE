@@ -20,6 +20,8 @@ import torch
 from .config import (
     FS,
     NC,
+    NC_LATENT,
+    BEACON_CARRIER,
     M,
     NCP,
     NSYM,
@@ -27,6 +29,7 @@ from .config import (
     DATA_SYMS_PER_FRAME,
     LATENTS_PER_FRAME,
     GROUP_LATENTS,
+    TRANSMIT_LATENTS_PER_GROUP,
     FRAMES_PER_GROUP,
     LATENT_GROUPS,
     CLIP_HEADROOM_DB,
@@ -52,17 +55,25 @@ class Stage2Config:
 class WaveformChannel(torch.nn.Module):
     N_FRAMES = LATENT_GROUPS * FRAMES_PER_GROUP  # 660
     N_SYMS = N_FRAMES * SYMS_PER_FRAME
-    N_LATENTS = MODES["C"].n_latents
+    N_LATENTS = MODES["C"].n_latents  # full canonical count (model-facing)
+    N_TX_LATENTS = MODES["C"].n_tx_latents  # on-air budget (< N_LATENTS)
 
     def __init__(self, cfg: Stage2Config | None = None):
         super().__init__()
         self.cfg = cfg or Stage2Config()
 
-        perm = np.concatenate(
-            [framing._PERMS[g] + g * GROUP_LATENTS for g in range(LATENT_GROUPS)]
+        # Only the first TRANSMIT_LATENTS_PER_GROUP permuted indices per
+        # group ever reach an on-air slot (one carrier is reserved for the
+        # beacon side-channel on every frame — see config.py); the rest
+        # never get transmitted and come back as a permanent erasure,
+        # exactly like the real modem (framing.py's _TX_PERMS).
+        tx_perm = np.concatenate(
+            [
+                framing._TX_PERMS[g] + g * GROUP_LATENTS
+                for g in range(LATENT_GROUPS)
+            ]
         )
-        self.register_buffer("perm", torch.from_numpy(perm).long())
-        self.register_buffer("inv_perm", torch.from_numpy(np.argsort(perm)).long())
+        self.register_buffer("tx_perm", torch.from_numpy(tx_perm).long())
 
         self.register_buffer(
             "mod_mat", torch.from_numpy(ofdm.MOD_MATRIX).to(torch.complex64)
@@ -87,17 +98,24 @@ class WaveformChannel(torch.nn.Module):
     # --- TX ------------------------------------------------------------
 
     def _to_symbols(self, latents: torch.Tensor) -> torch.Tensor:
-        b = latents.shape[0]
-        slots = latents[:, self.perm]
-        s = slots.view(b, self.N_FRAMES, DATA_SYMS_PER_FRAME, NC, 2)
+        b, dev = latents.shape[0], latents.device
+        slots = latents[:, self.tx_perm]
+        s = slots.view(b, self.N_FRAMES, DATA_SYMS_PER_FRAME, NC_LATENT, 2)
         data = torch.complex(s[..., 0], s[..., 1]).to(torch.complex64) / np.sqrt(2)
         syms = torch.empty(
             (b, self.N_FRAMES, SYMS_PER_FRAME, NC),
             dtype=torch.complex64,
-            device=latents.device,
+            device=dev,
         )
         syms[:, :, 0, :] = self.pilot
-        syms[:, :, 1:, :] = data
+        syms[:, :, 1:, :NC_LATENT] = data
+        # Beacon carrier: not trained (decoder never reads it), but it
+        # needs realistic +-1 BPSK power/PAPR statistics to match what
+        # the real modem actually puts on air.
+        beacon_chips = (
+            torch.randint(0, 2, (b, self.N_FRAMES, DATA_SYMS_PER_FRAME), device=dev) * 2 - 1
+        ).to(torch.complex64)
+        syms[:, :, 1:, BEACON_CARRIER] = beacon_chips
         return syms.view(b, self.N_SYMS, NC)
 
     def _synthesize(self, syms: torch.Tensor) -> torch.Tensor:
@@ -294,7 +312,7 @@ class WaveformChannel(torch.nn.Module):
         from .latent_channel import SNR_CONF_MIDPOINT, SNR_CONF_SCALE
 
         snr_conf = torch.sigmoid((snr.view(b) - SNR_CONF_MIDPOINT) / SNR_CONF_SCALE)
-        fade_conf = w.mean(dim=(1, 2, 3))
+        fade_conf = w[..., :NC_LATENT].mean(dim=(1, 2, 3))
 
         keep = self._burst_erasures(b, dev)
         erasure_conf = keep.mean(dim=1)
@@ -311,13 +329,24 @@ class WaveformChannel(torch.nn.Module):
 
         confidence = snr_conf * fade_conf * erasure_conf
 
-        eqw = eq * (w > 0)
+        # Only the 23 latent carriers feed latents back out; the beacon
+        # carrier's equalized value is discarded here (unlike the real
+        # modem, this replica has no use for it during training).
+        eq_lat, w_lat = eq[..., :NC_LATENT], w[..., :NC_LATENT]
+        eqw = eq_lat * (w_lat > 0)
         sl_pairs = torch.stack(
             [eqw.real * np.sqrt(2), eqw.imag * np.sqrt(2)], dim=-1
         )
-        sl = sl_pairs.reshape(b, -1)[:, self.inv_perm]
-        wl = (
-            torch.stack([w, w], dim=-1).reshape(b, -1)[:, self.inv_perm]
-        )
+        sl_tx = sl_pairs.reshape(b, -1)
+        wl_tx = torch.stack([w_lat, w_lat], dim=-1).reshape(b, -1)
+
+        # Scatter the transmitted slots back to canonical order; the
+        # DROPPED_LATENTS_PER_GROUP positions per group that never got a
+        # slot stay at their zero init (weight 0), same erasure contract
+        # as the real modem's framing.deinterleave.
+        sl = torch.zeros(b, self.N_LATENTS, device=dev)
+        wl = torch.zeros(b, self.N_LATENTS, device=dev)
+        sl[:, self.tx_perm] = sl_tx
+        wl[:, self.tx_perm] = wl_tx
         sl = sl.clamp(-10, 10)
         return sl, wl, papr_pre_db, papr_post_db, confidence

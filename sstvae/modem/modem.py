@@ -1,7 +1,8 @@
 """Top-level modem: latent vector <-> passband audio samples.
 
 TX layout:  silence | preamble | 2x header symbol | N frames | silence
-Frame:      1 pilot symbol + 11 data symbols (528 real latents).
+Frame:      1 pilot symbol + 5 data symbols (230 real latents + 5 beacon
+chips on the one carrier reserved for resync/callsign, see beacon.py).
 
 RX equalizes each data symbol against per-carrier gains interpolated
 between the surrounding frame pilots, tracks sample-clock drift from the
@@ -18,11 +19,16 @@ from ..config import (
     FS,
     RS,
     NC,
+    NC_LATENT,
+    BEACON_CARRIER,
+    CHIPS_PER_FRAME,
     M,
     NCP,
     NSYM,
     SYMS_PER_FRAME,
+    DATA_SYMS_PER_FRAME,
     FRAME_SAMPLES,
+    FRAMES_PER_GROUP,
     LATENTS_PER_FRAME,
     PREAMBLE_CP,
     PREAMBLE_SAMPLES,
@@ -31,14 +37,15 @@ from ..config import (
     LEADOUT_SAMPLES,
     CLIP_HEADROOM_DB,
     DEMOD_BACKOFF,
+    LATENT_GROUPS,
     MODES,
     ModeSpec,
 )
-from . import framing, ofdm
+from . import beacon, framing, ofdm
 from .dsp import to_baseband, freq_correct, tx_condition
-from .sync import acquire, SyncError
+from .sync import acquire, acquire_blind, SyncError
 
-__all__ = ["Modem", "DemodResult", "SyncError"]
+__all__ = ["Modem", "DemodResult", "BlindDemodResult", "SyncError"]
 
 
 @dataclass
@@ -49,6 +56,25 @@ class DemodResult:
     freq_offset: float
     sync_metric: float
     frames_received: int
+    beacon: beacon.BeaconResult | None = None  # decoded resync/callsign packet
+    callsign: str = ""
+
+
+@dataclass
+class BlindDemodResult:
+    """Result of demodulate_blind: no preamble/header was needed, so
+    unlike DemodResult there's no known `mode` — latents/weights are
+    always sized for mode C's full canonical range (every mode is a
+    prefix of it) and only populated where a demodulated frame actually
+    landed, via the beacon's recovered absolute frame index."""
+
+    latents: np.ndarray
+    weights: np.ndarray
+    freq_offset: float
+    beacon: beacon.BeaconResult | None
+    callsign: str
+    frame_offset: int | None  # absolute index of this buffer's first frame
+    n_frames: int  # local frames demodulated (may exceed what beacon covers)
 
 
 class Modem:
@@ -58,11 +84,18 @@ class Modem:
     # --- transmit ----------------------------------------------------------
 
     def modulate(
-        self, latents: np.ndarray, mode: str | ModeSpec, normalize: bool = True
+        self,
+        latents: np.ndarray,
+        mode: str | ModeSpec,
+        normalize: bool = True,
+        callsign: str = "",
     ) -> np.ndarray:
         """Latent vector -> unit-RMS float waveform at FS.
 
         The on-air contract is unit-RMS latents; `normalize` enforces it.
+        `callsign` (up to 8 chars) rides the reserved beacon carrier along
+        with a resync frame counter on every frame; leave blank to send
+        just the resync counter.
         """
         spec = MODES[mode] if isinstance(mode, str) else mode
         latents = np.asarray(latents, dtype=np.float64)
@@ -77,13 +110,17 @@ class Modem:
 
         slots = framing.interleave(latents, spec)
         n_f = spec.n_frames
+        beacon_chips = beacon.chip_stream(0, n_f, callsign)
         symbols = np.empty((n_f * SYMS_PER_FRAME, NC), dtype=np.complex128)
         for f in range(n_f):
             sl = slots[f * LATENTS_PER_FRAME : (f + 1) * LATENTS_PER_FRAME]
             symbols[f * SYMS_PER_FRAME] = self.pilot
-            symbols[f * SYMS_PER_FRAME + 1 : (f + 1) * SYMS_PER_FRAME] = (
-                framing.slots_to_symbols(sl)
-            )
+            data_syms = np.empty((DATA_SYMS_PER_FRAME, NC), dtype=np.complex128)
+            data_syms[:, :NC_LATENT] = framing.slots_to_symbols(sl)
+            data_syms[:, BEACON_CARRIER] = beacon_chips[
+                f * CHIPS_PER_FRAME : (f + 1) * CHIPS_PER_FRAME
+            ]
+            symbols[f * SYMS_PER_FRAME + 1 : (f + 1) * SYMS_PER_FRAME] = data_syms
 
         hdr = framing.header_symbol(spec)
         x = np.concatenate(
@@ -168,8 +205,8 @@ class Modem:
                     tau_ema -= step
 
         # Equalize data symbols with pilots interpolated across the frame.
-        latents = np.zeros(spec.n_latents)
-        weights = np.zeros(spec.n_latents)
+        latents = np.zeros(spec.n_tx_latents)
+        weights = np.zeros(spec.n_tx_latents)
         med_h = np.median(np.abs(h_pilot[received])) if received.any() else 1.0
         floor = max(0.05 * med_h, 1e-9)
         def pilot_at(i: int, fallback: int) -> np.ndarray:
@@ -177,6 +214,7 @@ class Modem:
                 return h_pilot[i]
             return h_pilot[fallback]
 
+        beacon_soft = np.zeros(n_f * CHIPS_PER_FRAME)
         for f in range(n_f):
             if not received[f]:
                 continue
@@ -199,22 +237,120 @@ class Modem:
                 mag = np.maximum(np.abs(h), floor)
                 y = raw[f, s] * np.conj(h) / mag**2
                 w = np.minimum(np.abs(h) / med_h, 1.0)
-                i0 = (s - 1) * NC * 2
-                sl = framing.symbols_to_slots(y[None, :])
-                frame_slots[i0 : i0 + NC * 2] = sl
-                frame_w[i0 : i0 + NC * 2] = np.repeat(w, 2)
+                i0 = (s - 1) * NC_LATENT * 2
+                sl = framing.symbols_to_slots(y[:NC_LATENT][None, :])
+                frame_slots[i0 : i0 + NC_LATENT * 2] = sl
+                frame_w[i0 : i0 + NC_LATENT * 2] = np.repeat(w[:NC_LATENT], 2)
+                beacon_soft[f * CHIPS_PER_FRAME + (s - 1)] = np.real(y[BEACON_CARRIER])
             lo = f * LATENTS_PER_FRAME
             latents[lo : lo + LATENTS_PER_FRAME] = frame_slots
             weights[lo : lo + LATENTS_PER_FRAME] = frame_w
 
         latents = np.clip(latents, -10, 10)
+        latents_full, _ = framing.deinterleave(latents, spec)
+        weights_full, _ = framing.deinterleave(weights, spec)
+        beacon_result = beacon.decode(beacon_soft)
         return DemodResult(
-            latents=framing.deinterleave(latents, spec),
-            weights=framing.deinterleave(weights, spec),
+            latents=latents_full,
+            weights=weights_full,
             mode=spec,
             freq_offset=acq.freq_offset,
             sync_metric=acq.metric,
             frames_received=int(received.sum()),
+            beacon=beacon_result,
+            callsign=beacon_result.callsign if beacon_result else "",
+        )
+
+    def demodulate_blind(
+        self, x: np.ndarray, search_s: tuple[float, float] | None = None
+    ) -> BlindDemodResult:
+        """Recover frame timing purely from the pilot's own periodicity
+        (sync.acquire_blind) — no preamble or header needed, so this
+        works on a recording that starts mid-transmission. Once the
+        beacon carrier's superframe decodes, every demodulated frame's
+        absolute index is known, which places its latents in the right
+        canonical (group-aware) slot without ever having seen the
+        header, and reconstructs where the transmission's frame 0 fell
+        in sample time — the "retrospective decode" case.
+
+        No sample-clock drift tracking (that needs a preamble-phase
+        reference); fine for the bounded windows this is meant for.
+        """
+        z = to_baseband(np.asarray(x, dtype=np.float64))
+        search = None
+        if search_s is not None:
+            search = (int(search_s[0] * FS), int(search_s[1] * FS))
+        ba = acquire_blind(z, search=search)
+        z = freq_correct(z, ba.freq_offset)
+
+        p0 = ba.frame_start - NCP  # CP-start of local frame 0
+        L_lo = int(np.ceil(-p0 / FRAME_SAMPLES))
+        L_hi = int(np.floor((len(z) - FRAME_SAMPLES - p0) / FRAME_SAMPLES))
+        if L_lo > L_hi:
+            raise SyncError("blind lock too close to buffer edge to demod any full frame")
+        n_f = L_hi - L_lo + 1
+        p_start = p0 + L_lo * FRAME_SAMPLES
+
+        raw = np.zeros((n_f, SYMS_PER_FRAME, NC), dtype=np.complex128)
+        h_pilot = np.zeros((n_f, NC), dtype=np.complex128)
+        p = p_start
+        for f in range(n_f):
+            for s in range(SYMS_PER_FRAME):
+                raw[f, s] = ofdm.demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF)
+            h_pilot[f] = raw[f, 0] / self.pilot
+            p += FRAME_SAMPLES
+
+        med_h = np.median(np.abs(h_pilot))
+        floor = max(0.05 * med_h, 1e-9)
+
+        def pilot_at(i: int) -> np.ndarray:
+            return h_pilot[int(np.clip(i, 0, n_f - 1))]
+
+        beacon_soft = np.zeros(n_f * CHIPS_PER_FRAME)
+        slot_values = np.zeros((n_f, LATENTS_PER_FRAME))
+        slot_weights = np.zeros((n_f, LATENTS_PER_FRAME))
+        for f in range(n_f):
+            p0_, p1_, p2_, p3_ = pilot_at(f - 1), h_pilot[f], pilot_at(f + 1), pilot_at(f + 2)
+            for s in range(1, SYMS_PER_FRAME):
+                u = s / SYMS_PER_FRAME
+                h = 0.5 * (
+                    2 * p1_
+                    + (p2_ - p0_) * u
+                    + (2 * p0_ - 5 * p1_ + 4 * p2_ - p3_) * u**2
+                    + (3 * p1_ - p0_ - 3 * p2_ + p3_) * u**3
+                )
+                mag = np.maximum(np.abs(h), floor)
+                y = raw[f, s] * np.conj(h) / mag**2
+                w = np.minimum(np.abs(h) / med_h, 1.0)
+                i0 = (s - 1) * NC_LATENT * 2
+                sl = framing.symbols_to_slots(y[:NC_LATENT][None, :])
+                slot_values[f, i0 : i0 + NC_LATENT * 2] = sl
+                slot_weights[f, i0 : i0 + NC_LATENT * 2] = np.repeat(w[:NC_LATENT], 2)
+                beacon_soft[f * CHIPS_PER_FRAME + (s - 1)] = np.real(y[BEACON_CARRIER])
+
+        beacon_result = beacon.decode(beacon_soft)
+        latents_full = np.zeros(MODES["C"].n_latents)
+        weights_full = np.zeros(MODES["C"].n_latents)
+        frame_offset = None
+        if beacon_result is not None:
+            frame_offset = (
+                beacon_result.frame_index - beacon_result.chip_offset // CHIPS_PER_FRAME
+            )
+            for f in range(n_f):
+                abs_frame = frame_offset + f
+                if 0 <= abs_frame < LATENT_GROUPS * FRAMES_PER_GROUP:
+                    _, idx = framing.slot_range_for_frame(abs_frame)
+                    latents_full[idx] = np.clip(slot_values[f], -10, 10)
+                    weights_full[idx] = slot_weights[f]
+
+        return BlindDemodResult(
+            latents=latents_full,
+            weights=weights_full,
+            freq_offset=ba.freq_offset,
+            beacon=beacon_result,
+            callsign=beacon_result.callsign if beacon_result else "",
+            frame_offset=frame_offset,
+            n_frames=n_f,
         )
 
     @staticmethod

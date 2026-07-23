@@ -23,12 +23,20 @@ def test_symbol_loopback_via_baseband():
 
 
 def test_interleaver_roundtrip():
+    """Every latent that gets an on-air slot round-trips exactly; the
+    small per-group remainder that the beacon carrier's reserved capacity
+    doesn't fit (see config.DROPPED_LATENTS_PER_GROUP) comes back as a
+    permanent erasure (0, weight 0), not the original value."""
     for mode in MODES.values():
         rng = np.random.default_rng(mode.index)
         lat = rng.normal(size=mode.n_latents)
-        assert np.array_equal(
-            framing.deinterleave(framing.interleave(lat, mode), mode), lat
-        )
+        out, weight = framing.deinterleave(framing.interleave(lat, mode), mode)
+        assert np.array_equal(out[weight == 1], lat[weight == 1])
+        assert np.all(out[weight == 0] == 0)
+        # dropped fraction matches the documented per-group accounting
+        from sstvae.config import DROPPED_LATENTS_PER_GROUP, GROUP_LATENTS
+
+        assert np.sum(weight == 0) == mode.groups * DROPPED_LATENTS_PER_GROUP
 
 
 def test_slots_symbols_roundtrip():

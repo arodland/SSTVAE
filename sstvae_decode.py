@@ -73,6 +73,11 @@ def main() -> None:
         f"mode {r.mode.name}, {r.frames_received}/{r.mode.n_frames} frames, "
         f"freq offset {r.freq_offset:+.1f} Hz, sync metric {r.sync_metric:.2f}"
     )
+    if r.beacon is not None:
+        cs = f"'{r.callsign}'" if r.callsign else "(none sent)"
+        print(f"beacon: frame {r.beacon.frame_index}, callsign {cs}")
+    else:
+        print("beacon: no superframe decoded (short/noisy reception)")
 
     latents = pad_to_full(r.latents)
     weights = pad_to_full(r.weights)
@@ -87,9 +92,12 @@ def main() -> None:
 
     if args.snapshots > 0:
         # Frame index of each canonical latent: which point in the
-        # transmission it arrived at.
-        slot_frame = np.arange(r.mode.n_latents) // LATENTS_PER_FRAME
-        frame_of_latent = framing.deinterleave(slot_frame.astype(float), r.mode)
+        # transmission it arrived at. Latents that never got an on-air
+        # slot (see config.DROPPED_LATENTS_PER_GROUP) come back as 0
+        # here, but they're always weight-0 anyway so the bogus frame
+        # index never actually gates anything in.
+        slot_frame = np.arange(r.mode.n_tx_latents) // LATENTS_PER_FRAME
+        frame_of_latent, _ = framing.deinterleave(slot_frame.astype(float), r.mode)
         out = Path(args.output)
         for k in range(1, args.snapshots + 1):
             cutoff = r.mode.n_frames * k / args.snapshots

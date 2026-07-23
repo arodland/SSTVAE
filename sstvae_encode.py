@@ -30,6 +30,11 @@ def main() -> None:
     ap.add_argument("output", help="WAV file for transmission")
     ap.add_argument("--mode", choices=sorted(MODES), default="B")
     ap.add_argument("--model", required=True, help="checkpoint.pt")
+    ap.add_argument(
+        "--callsign", default="",
+        help="up to 8 chars, sent continuously on the beacon carrier "
+        "alongside the resync frame counter (see sstvae/modem/beacon.py)",
+    )
     args = ap.parse_args()
 
     spec = MODES[args.mode]
@@ -39,7 +44,7 @@ def main() -> None:
         z = model.encoder(img)
     flat = SSTVAE.latents_to_flat(z)[0].numpy().astype(np.float64)
 
-    x = Modem().modulate(flat[: spec.n_latents], spec)
+    x = Modem().modulate(flat[: spec.n_latents], spec, callsign=args.callsign)
     wavio.write_wav(args.output, x)
     print(
         f"wrote {args.output}: mode {spec.name}, {spec.n_latents} latents, "

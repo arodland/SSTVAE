@@ -69,3 +69,14 @@ def preamble_template() -> np.ndarray:
     n = np.arange(PREAMBLE_SAMPLES) - PREAMBLE_CP
     e = np.exp(2j * np.pi * np.outer(n, BASEBAND_FREQS) / FS)
     return 0.5 * (e @ p)
+
+
+def pilot_template() -> np.ndarray:
+    """Complex baseband replica of one bare frame-pilot symbol's useful
+    window (no CP) — used by sync.acquire_blind() to find frame timing
+    purely from the pilot's own per-frame periodicity, without needing
+    the (non-repeating) transmission-start preamble."""
+    p = pilot_sequence()
+    n = np.arange(M)
+    e = np.exp(2j * np.pi * np.outer(n, BASEBAND_FREQS) / FS)
+    return 0.5 * (e @ p)
