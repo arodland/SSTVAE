@@ -59,6 +59,7 @@ class DemodResult:
     frames_received: int
     beacon: BeaconResult | None = None  # decoded resync/callsign packet
     callsign: str = ""
+    preamble_start: int = 0  # sample index (into the demodulated buffer) of the preamble
 
 
 @dataclass
@@ -76,6 +77,11 @@ class BlindDemodResult:
     callsign: str
     frame_offset: int | None  # absolute index of this buffer's first frame
     n_frames: int  # local frames demodulated (may exceed what beacon covers)
+    frame0_start: int | None = None  # sample index (into the demodulated
+    # buffer) the transmitter's own absolute frame 0 would fall at --
+    # only known once the beacon gives frame_offset; a stable identifier
+    # for "which transmission is this" across repeated blind decodes of
+    # a buffer that hasn't advanced past it yet.
 
 
 class Modem:
@@ -260,6 +266,7 @@ class Modem:
             frames_received=int(received.sum()),
             beacon=beacon_result,
             callsign=beacon_result.callsign if beacon_result else "",
+            preamble_start=acq.preamble_start,
         )
 
     def demodulate_blind(
@@ -352,6 +359,7 @@ class Modem:
             callsign=beacon_result.callsign if beacon_result else "",
             frame_offset=frame_offset,
             n_frames=n_f,
+            frame0_start=p0 - frame_offset * FRAME_SAMPLES if frame_offset is not None else None,
         )
 
     @staticmethod

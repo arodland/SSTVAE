@@ -19,6 +19,10 @@ train = [
 dev = [
     "pytest>=8.0",
 ]
+listen = [
+    "sounddevice>=0.4.6",
+    "matplotlib>=3.7",
+]
 
 # ROCm torch wheels (RX 9070 XT / gfx1201), local dev only — explicit so
 # cloud/CUDA machines resolve torch from PyPI instead. Local install:
