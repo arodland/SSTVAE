@@ -557,6 +557,15 @@ def main() -> None:
     )
     ap.add_argument("--poll-interval", type=float, default=5.0, help="seconds between decode attempts")
     ap.add_argument(
+        "--blind-search-seconds", type=float, default=25.0,
+        help="how much of the buffer's most recent audio the blind CFO/timing "
+        "search scans, rather than the whole --buffer-seconds window. Must "
+        "exceed MIN_FRAMES_FOR_SYNC's ~10.5s with margin; the retrospective "
+        "decode itself still covers the full buffer once locked, this only "
+        "bounds where acquisition looks (the dominant CPU cost of the blind "
+        "path).",
+    )
+    ap.add_argument(
         "--end-grace", type=float, default=8.0,
         help="seconds of no further progress (blind-sync case only, true length unknown) "
         "before a reception is considered finished",
