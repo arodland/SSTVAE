@@ -166,7 +166,7 @@ def main() -> None:
         "small and always-active so it can't dominate reconstruction "
         "loss — see radae/radae_base.py's distortion_loss). Default "
         "chosen so pre+post-clip ratios (~13 early in training) "
-        "contribute roughly 2% of total loss, not 300%.",
+        "contribute roughly 2%% of total loss, not 300%%.",
     )
     ap.add_argument(
         "--chroma-weight",
