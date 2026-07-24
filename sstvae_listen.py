@@ -25,6 +25,14 @@ unknown) when decoded progress stops advancing for --end-grace
 seconds. The image is saved and the listener goes back to waiting for
 the next transmission.
 
+--low-cpu drops the blind fallback (and with it, retrospective
+mid-stream decoding) in exchange for much lower idle CPU use: it only
+ever looks for the preamble, restricts that search to the audio that's
+newly arrived since the last poll (instead of rescanning the whole
+buffer), and once the header locks it just sleeps until the whole
+transmission has been captured and decodes it once, rather than
+repeatedly re-decoding for progress updates.
+
 Requires sounddevice (PortAudio): pip install -e .[listen]
 """
 
@@ -40,7 +48,7 @@ from pathlib import Path
 
 import numpy as np
 
-from sstvae.config import FS, LATENTS_PER_FRAME, MODES
+from sstvae.config import FS, FRAME_SAMPLES, HEADER_SAMPLES, LATENTS_PER_FRAME, MODES, PREAMBLE_SAMPLES
 from sstvae.modem import Modem, SyncError
 from sstvae.modem.dsp import to_baseband
 from sstvae.modem.sync import acquire as sync_acquire
@@ -318,6 +326,118 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
                 state.callsign = ""
 
 
+def decode_loop_low_cpu(
+    ring: RingBuffer, model, state: SharedState, args, stop_event: threading.Event
+):
+    """Header-only variant: no blind fallback, no retrospective decode.
+    While idle, only searches the newly-arrived slice of audio each poll
+    (not the whole buffer) for the preamble. Once it locks, it does no
+    further signal processing at all until enough audio has been
+    captured for the whole transmission, then decodes and saves once."""
+    modem = Modem()
+    search_overlap_s = 2.0  # margin so a preamble can't be missed by
+    # straddling the boundary between one poll's search window and the next
+    last_search_pos = 0  # abs sample position (ring.total_written coord)
+
+    while not stop_event.is_set():
+        stop_event.wait(args.poll_interval)
+        if stop_event.is_set():
+            break
+
+        samples, total = ring.snapshot()
+        seconds_captured = total / FS
+        if len(samples) < MIN_SECONDS_BEFORE_ATTEMPT * FS:
+            continue
+        buf_start = total - len(samples)
+
+        search_from_abs = max(buf_start, last_search_pos - int(search_overlap_s * FS))
+        search = (search_from_abs - buf_start, len(samples))
+        last_search_pos = total
+
+        with state.lock:
+            state.seconds_captured = seconds_captured
+            if state.status != "receiving":
+                state.status = "listening"
+
+        try:
+            acq = sync_acquire(to_baseband(samples), search=search)
+        except SyncError:
+            continue
+
+        try:
+            r = modem.demodulate(samples)
+        except SyncError:
+            continue  # spurious preamble-shaped hit; keep listening
+
+        reception_start = buf_start + acq.preamble_start
+        frames_end_abs = (
+            reception_start + PREAMBLE_SAMPLES + HEADER_SAMPLES + r.mode.n_frames * FRAME_SAMPLES
+        )
+
+        with state.lock:
+            state.status = "receiving"
+            state.mode_name = r.mode.name
+            state.frames_received = r.frames_received
+            state.n_frames_expected = r.mode.n_frames
+            state.progress_frac = min(r.frames_received / r.mode.n_frames, 1.0)
+            state.callsign = r.callsign
+
+        # No further DSP until the whole transmission should have
+        # arrived -- just wait, updating the status text cheaply.
+        while not stop_event.is_set():
+            _, total_now = ring.snapshot()
+            if total_now >= frames_end_abs:
+                break
+            with state.lock:
+                state.seconds_captured = total_now / FS
+            stop_event.wait(min(1.0, args.poll_interval))
+        if stop_event.is_set():
+            break
+
+        samples, total = ring.snapshot()
+        try:
+            r = modem.demodulate(samples)
+        except SyncError:
+            # transmission was cut short / corrupted after all; go back
+            # to listening rather than crash the loop
+            with state.lock:
+                state.status = "listening"
+            continue
+
+        img = reconstruct(model, pad_to_full(r.latents), pad_to_full(r.weights))
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = Path(args.out_dir) / f"rx_{ts}.png"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        saved = img
+        if args.size:
+            w, h = args.size.lower().split("x")
+            saved = saved.resize((int(w), int(h)))
+        saved.save(out_path)
+        print(
+            f"saved {out_path} (mode={r.mode.name}, frames={r.frames_received}/"
+            f"{r.mode.n_frames}, callsign={r.callsign or '(none)'})"
+        )
+        with state.lock:
+            state.status = "done"
+            state.image = img
+            state.frames_received = r.frames_received
+            state.progress_frac = min(r.frames_received / r.mode.n_frames, 1.0)
+            state.saved_path = str(out_path)
+
+        if args.once:
+            stop_event.set()
+            break
+
+        time.sleep(2.0)
+        with state.lock:
+            state.status = "listening"
+            state.mode_name = None
+            state.frames_received = None
+            state.n_frames_expected = None
+            state.progress_frac = 0.0
+            state.callsign = ""
+
+
 def run_gui(state: SharedState, stop_event: threading.Event):
     import matplotlib.pyplot as plt
     from matplotlib.animation import FuncAnimation
@@ -426,6 +546,13 @@ def main() -> None:
     ap.add_argument("--no-gui", action="store_true", help="print status instead of a matplotlib window")
     ap.add_argument("--once", action="store_true", help="exit after the first successful reception")
     ap.add_argument("--list-devices", action="store_true", help="list audio devices and exit")
+    ap.add_argument(
+        "--low-cpu", action="store_true",
+        help="header-sync only: no blind fallback, no retrospective mid-stream "
+        "decode. Searches only newly-arrived audio each poll instead of the "
+        "whole buffer, and decodes once at the end of a locked reception "
+        "instead of repeatedly for progress updates.",
+    )
     args = ap.parse_args()
 
     if args.list_devices:
@@ -445,9 +572,8 @@ def main() -> None:
     stream, actual_rate = open_input_stream(args.device, args.samplerate, ring)
     print(f"listening at {actual_rate} Hz, buffer {args.buffer_seconds:.0f}s -- Ctrl+C to stop")
 
-    worker = threading.Thread(
-        target=decode_loop, args=(ring, model, state, args, stop_event), daemon=True
-    )
+    target = decode_loop_low_cpu if args.low_cpu else decode_loop
+    worker = threading.Thread(target=target, args=(ring, model, state, args, stop_event), daemon=True)
     worker.start()
 
     try:
