@@ -109,6 +109,7 @@ class SharedState:
     n_frames_expected: int | None = None
     progress_frac: float = 0.0
     callsign: str = ""
+    snr_db: float = float("nan")
     image: object = None
     saved_path: str | None = None
     seconds_captured: float = 0.0
@@ -200,6 +201,7 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
         latents_full = weights_full = None
         mode_name = n_frames_expected = frames_received = None
         callsign = ""
+        snr_db = float("nan")
         progress_frac = 0.0
         progress_metric = 0
         reception_start = None
@@ -234,6 +236,7 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
             n_frames_expected = r.mode.n_frames
             frames_received = r.frames_received
             callsign = r.callsign
+            snr_db = r.snr_db
             progress_frac = frames_received / n_frames_expected
             progress_metric = frames_received
         else:
@@ -248,6 +251,7 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
                 latents_full = rb.latents
                 weights_full = rb.weights
                 callsign = rb.callsign
+                snr_db = rb.snr_db
                 progress_metric = int(np.count_nonzero(weights_full))
                 progress_frac = progress_metric / total_c_latents
             else:
@@ -277,6 +281,7 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
             state.n_frames_expected = n_frames_expected
             state.progress_frac = min(progress_frac, 1.0)
             state.callsign = callsign
+            state.snr_db = snr_db
             state.image = img
 
         if n_frames_expected is not None:
@@ -303,7 +308,7 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
                 finished_starts.append(current_reception_start)
             print(
                 f"saved {out_path} (mode={mode_name or 'unknown, blind sync'}, "
-                f"callsign={callsign or '(none)'})"
+                f"callsign={callsign or '(none)'}{_fmt_snr(snr_db)})"
             )
             with state.lock:
                 state.status = "done"
@@ -324,6 +329,7 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
                 state.n_frames_expected = None
                 state.progress_frac = 0.0
                 state.callsign = ""
+                state.snr_db = float("nan")
 
 
 def decode_loop_low_cpu(
@@ -381,6 +387,7 @@ def decode_loop_low_cpu(
             state.n_frames_expected = r.mode.n_frames
             state.progress_frac = min(r.frames_received / r.mode.n_frames, 1.0)
             state.callsign = r.callsign
+            state.snr_db = r.snr_db
 
         # No further DSP until the whole transmission should have
         # arrived -- just wait, updating the status text cheaply.
@@ -415,13 +422,14 @@ def decode_loop_low_cpu(
         saved.save(out_path)
         print(
             f"saved {out_path} (mode={r.mode.name}, frames={r.frames_received}/"
-            f"{r.mode.n_frames}, callsign={r.callsign or '(none)'})"
+            f"{r.mode.n_frames}, callsign={r.callsign or '(none)'}{_fmt_snr(r.snr_db)})"
         )
         with state.lock:
             state.status = "done"
             state.image = img
             state.frames_received = r.frames_received
             state.progress_frac = min(r.frames_received / r.mode.n_frames, 1.0)
+            state.snr_db = r.snr_db
             state.saved_path = str(out_path)
 
         if args.once:
@@ -436,6 +444,13 @@ def decode_loop_low_cpu(
             state.n_frames_expected = None
             state.progress_frac = 0.0
             state.callsign = ""
+            state.snr_db = float("nan")
+
+
+def _fmt_snr(snr_db: float) -> str:
+    if snr_db != snr_db:  # NaN
+        return ""
+    return f"  SNR {snr_db:.1f}dB"
 
 
 def run_gui(state: SharedState, stop_event: threading.Event):
@@ -458,6 +473,7 @@ def run_gui(state: SharedState, stop_event: threading.Event):
             n_frames_expected = state.n_frames_expected
             progress_frac = state.progress_frac
             callsign = state.callsign
+            snr_db = state.snr_db
             saved_path = state.saved_path
             seconds_captured = state.seconds_captured
 
@@ -476,10 +492,11 @@ def run_gui(state: SharedState, stop_event: threading.Event):
                 )
             else:
                 txt = f"receiving (blind sync): {100 * progress_frac:.0f}% of latents"
+            txt += _fmt_snr(snr_db)
             if callsign:
                 txt += f"  de {callsign}"
         else:
-            txt = f"done -- saved {saved_path}"
+            txt = f"done -- saved {saved_path}" + _fmt_snr(snr_db)
         title.set_text(txt)
 
         if stop_event.is_set():
@@ -501,6 +518,7 @@ def run_console(state: SharedState, stop_event: threading.Event):
             n_frames_expected = state.n_frames_expected
             progress_frac = state.progress_frac
             callsign = state.callsign
+            snr_db = state.snr_db
             seconds_captured = state.seconds_captured
             saved_path = state.saved_path
 
@@ -514,10 +532,11 @@ def run_console(state: SharedState, stop_event: threading.Event):
                 )
             else:
                 line = f"receiving (blind sync): {100 * progress_frac:.0f}% of latents"
+            line += _fmt_snr(snr_db)
             if callsign:
                 line += f"  de {callsign}"
         else:
-            line = f"done -- saved {saved_path}"
+            line = f"done -- saved {saved_path}" + _fmt_snr(snr_db)
 
         if line != last_status:
             print(line)
