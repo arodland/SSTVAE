@@ -28,10 +28,13 @@ def test_clean_loopback_hits_clip_floor():
     ch = WaveformChannel(_clean_cfg())
     z = _unit(2)
     out, w, papr_pre, papr_post, conf = ch(z)
-    err = (out - z).pow(2).mean()
-    snr = 10 * torch.log10(z.pow(2).mean() / err)
+    # Exclude the small per-group fraction permanently dropped for the
+    # beacon carrier (weight 0 by design, not a channel error).
+    mask = w > 0
+    err = (out[mask] - z[mask]).pow(2).mean()
+    snr = 10 * torch.log10(z[mask].pow(2).mean() / err)
     assert snr > 17, f"latent SNR {snr:.1f} dB"
-    assert w.min() > 0.5
+    assert w[mask].min() > 0.5
     assert 5.0 < papr_post.min() and papr_post.max() < 9.0, f"PAPR {papr_post}"
     # Random unshaped latents are peaky pre-clip; clipping should reduce
     # (or at worst leave roughly equal) the measured PAPR.

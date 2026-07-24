@@ -12,9 +12,9 @@ from dataclasses import dataclass
 import numpy as np
 from scipy import signal
 
-from ..config import FS, M, PREAMBLE_CP, PREAMBLE_SAMPLES
+from ..config import FS, M, FRAME_SAMPLES, PREAMBLE_CP, PREAMBLE_SAMPLES
 from .dsp import freq_correct, sync_lowpass
-from .ofdm import preamble_template
+from .ofdm import preamble_template, pilot_template
 
 
 class SyncError(Exception):
@@ -108,3 +108,69 @@ def acquire(
             f_hat += np.angle(d) / (2 * np.pi * M / FS)
 
     return Acquisition(preamble_start=p0, freq_offset=f_hat, metric=float(metric[n_star]))
+
+
+@dataclass
+class BlindAcquisition:
+    frame_start: int  # sample index of some pilot symbol's useful-window start
+    freq_offset: float  # Hz
+    metric: float  # relative confidence, not directly comparable to Acquisition.metric
+
+
+def acquire_blind(
+    z: np.ndarray,
+    max_offset_hz: float = 55.0,
+    bin_step_hz: float = 1.7,
+    min_periods: int = 8,
+    threshold: float = 4.0,
+    search: tuple[int, int] | None = None,
+) -> BlindAcquisition:
+    """Recover frame-boundary timing and carrier frequency purely from the
+    frame pilot's own periodicity (repeats every FRAME_SAMPLES), with NO
+    dependence on the transmission-start preamble — the preamble is sent
+    once and doesn't recur, so it's useless for a recording that starts
+    mid-transmission. This is the mechanism that lets a receiver recover
+    position (and, combined with beacon.decode, the absolute frame index
+    and callsign) from any long-enough stretch of audio, including audio
+    recorded before the receiver "noticed" the signal.
+
+    For each candidate CFO bin, this matched-filters the whole window
+    against one bare pilot symbol and folds the matched-filter energy
+    into FRAME_SAMPLES-periodic phase bins, integrating across every
+    period available — the periodic-pilot analogue of the preamble's
+    single-shot correlation, needed because unlike the preamble the
+    pilot symbol is only ~1/6 of each frame, not the whole thing.
+    `score` is the winning phase's prominence over the other 1151 phase
+    bins (peak / median), not an absolute SNR-like quantity — scale
+    invariant, so `threshold` doesn't need retuning per signal level.
+    """
+    template = pilot_template()
+
+    seg = z if search is None else z[search[0] : search[1]]
+    if len(seg) < FRAME_SAMPLES * min_periods:
+        raise SyncError("window too short for blind acquisition")
+
+    n_bins = int(np.ceil(max_offset_hz / bin_step_hz))
+    best = None
+    for k in range(-n_bins, n_bins + 1):
+        f_cand = k * bin_step_hz
+        seg_c = freq_correct(seg, f_cand)
+        mf = signal.fftconvolve(seg_c, np.conj(template[::-1]), mode="valid")
+        p2 = np.abs(mf) ** 2
+        n_periods = len(p2) // FRAME_SAMPLES
+        if n_periods < min_periods:
+            continue
+        folded = p2[: n_periods * FRAME_SAMPLES].reshape(n_periods, FRAME_SAMPLES).sum(axis=0)
+        phase = int(np.argmax(folded))
+        score = folded[phase] / (np.median(folded) + 1e-12)
+        if best is None or score > best[0]:
+            best = (score, phase, f_cand)
+
+    if best is None:
+        raise SyncError("signal too short for blind acquisition at any CFO bin")
+    score, phase, f_hat = best
+    if score < threshold:
+        raise SyncError(f"no periodic pilot found (peak prominence {score:.3g})")
+
+    off = (search[0] if search is not None else 0) + phase
+    return BlindAcquisition(frame_start=off, freq_offset=f_hat, metric=float(score))

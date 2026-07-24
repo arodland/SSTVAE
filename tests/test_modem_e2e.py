@@ -31,8 +31,10 @@ def test_clean_loopback(modem):
     assert r.frames_received == FRAMES_PER_GROUP
     assert abs(r.freq_offset) < 1.0
     # Ceiling set by TX clip-and-filter distortion, which the decoder
-    # network is trained through.
-    assert _latent_snr_db(lat, r.latents) > 18
+    # network is trained through. Weighted mask excludes the small
+    # permanently-dropped-for-the-beacon-carrier fraction (weight 0 by
+    # design, not a channel error) alongside any real erasures.
+    assert _latent_snr_db(lat, r.latents, r.weights) > 18
 
 
 @pytest.mark.parametrize("df", [-50.0, 47.5, 50.0])
@@ -42,7 +44,7 @@ def test_freq_offset(modem, df):
     y = hfchannel.apply_channel(x, freq_offset_hz=df)
     r = modem.demodulate(y)
     assert abs(r.freq_offset - df) < 1.0
-    assert _latent_snr_db(lat, r.latents) > 17
+    assert _latent_snr_db(lat, r.latents, r.weights) > 17
 
 
 def test_awgn_latent_snr(modem):
@@ -88,7 +90,7 @@ def test_sample_clock_offset(modem, ppm):
     y = hfchannel.apply_channel(x, ppm=ppm)
     r = modem.demodulate(y)
     assert r.frames_received >= FRAMES_PER_GROUP - 1
-    assert _latent_snr_db(lat, r.latents) > 15
+    assert _latent_snr_db(lat, r.latents, r.weights) > 15
 
 
 def test_fading_smoke(modem):
