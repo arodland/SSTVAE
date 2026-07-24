@@ -71,7 +71,8 @@ def main() -> None:
     r = Modem().demodulate(x, search_s=search)
     print(
         f"mode {r.mode.name}, {r.frames_received}/{r.mode.n_frames} frames, "
-        f"freq offset {r.freq_offset:+.1f} Hz, sync metric {r.sync_metric:.2f}"
+        f"freq offset {r.freq_offset:+.1f} Hz, sync metric {r.sync_metric:.2f}, "
+        f"SNR {r.snr_db:.1f} dB"
     )
     if r.beacon is not None:
         cs = f"'{r.callsign}'" if r.callsign else "(none sent)"

@@ -59,6 +59,8 @@ class DemodResult:
     frames_received: int
     beacon: BeaconResult | None = None  # decoded resync/callsign packet
     callsign: str = ""
+    preamble_start: int = 0  # sample index (into the demodulated buffer) of the preamble
+    snr_db: float = float("nan")  # pilot-based radio SNR estimate, see _estimate_snr_db
 
 
 @dataclass
@@ -76,6 +78,51 @@ class BlindDemodResult:
     callsign: str
     frame_offset: int | None  # absolute index of this buffer's first frame
     n_frames: int  # local frames demodulated (may exceed what beacon covers)
+    frame0_start: int | None = None  # sample index (into the demodulated
+    # buffer) the transmitter's own absolute frame 0 would fall at --
+    # only known once the beacon gives frame_offset; a stable identifier
+    # for "which transmission is this" across repeated blind decodes of
+    # a buffer that hasn't advanced past it yet.
+    snr_db: float = float("nan")  # pilot-based radio SNR estimate, see _estimate_snr_db
+
+
+def _estimate_snr_db(h_pilot: np.ndarray, received: np.ndarray | None = None) -> float:
+    """Pilot-based radio SNR estimate, in the same "dB SNR in a 3000 Hz
+    noise bandwidth" convention used elsewhere (hfchannel.awgn, the
+    training confidence sigmoid) -- so it's directly comparable to
+    those numbers, not an ad-hoc scale.
+
+    Treats the frame-to-frame difference of each carrier's pilot-derived
+    channel gain as a noise proxy (real fading is assumed to move much
+    more slowly than one frame; a fast fade will therefore read as
+    extra "noise" and understate SNR a bit -- fine for a status
+    display, not a calibration instrument). That gives a per-carrier
+    SNR in a ~RS-wide (50 Hz) noise bandwidth (the DFT correlator's
+    matched-filter bandwidth), which is then scaled up to the 3000 Hz
+    reference bandwidth assuming roughly even power across the NC
+    carriers (measured spread is well under 1 dB in practice -- see
+    scripts/diagnose_carrier_power.py).
+    """
+    if received is not None:
+        idx = np.flatnonzero(received)
+    else:
+        idx = np.arange(len(h_pilot))
+    if len(idx) < 2:
+        return float("nan")
+    h = h_pilot[idx]
+    adjacent = np.diff(idx) == 1
+    if not adjacent.any():
+        return float("nan")
+    diffs = np.diff(h, axis=0)[adjacent]
+    noise_var = 0.5 * float(np.mean(np.abs(diffs) ** 2))
+    signal_var = float(np.mean(np.abs(h) ** 2))
+    if noise_var <= 0:
+        return float("inf")
+    if signal_var <= 0:
+        return float("-inf")
+    snr_50hz_linear = signal_var / noise_var
+    snr_3khz_linear = snr_50hz_linear * (NC * RS / 3000.0)
+    return 10 * np.log10(snr_3khz_linear)
 
 
 class Modem:
@@ -260,6 +307,8 @@ class Modem:
             frames_received=int(received.sum()),
             beacon=beacon_result,
             callsign=beacon_result.callsign if beacon_result else "",
+            preamble_start=acq.preamble_start,
+            snr_db=_estimate_snr_db(h_pilot, received),
         )
 
     def demodulate_blind(
@@ -352,6 +401,8 @@ class Modem:
             callsign=beacon_result.callsign if beacon_result else "",
             frame_offset=frame_offset,
             n_frames=n_f,
+            frame0_start=p0 - frame_offset * FRAME_SAMPLES if frame_offset is not None else None,
+            snr_db=_estimate_snr_db(h_pilot),
         )
 
     @staticmethod
