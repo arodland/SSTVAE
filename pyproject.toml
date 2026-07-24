@@ -11,7 +11,7 @@ dependencies = [
 
 [project.optional-dependencies]
 train = [
-    "torch>=2.2",
+    "torch>=2.13.0",
     "lpips>=0.1.4",
     "datasets>=2.18",
     "trackio",
@@ -27,6 +27,8 @@ listen = [
 # ROCm torch wheels (RX 9070 XT / gfx1201), local dev only — explicit so
 # cloud/CUDA machines resolve torch from PyPI instead. Local install:
 #   uv pip install --reinstall --index-url https://download.pytorch.org/whl/rocm7.2 torch torchvision
+# NOTE: `uv sync`/`uv add` will replace the ROCm build with plain PyPI
+# torch (uv.lock pins it); re-run the install command above afterwards.
 [[tool.uv.index]]
 name = "pytorch-rocm"
 url = "https://download.pytorch.org/whl/rocm7.2"
