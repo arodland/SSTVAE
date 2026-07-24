@@ -31,6 +31,7 @@ hf jobs uv run scripts/train_job.py \
     --secrets HF_TOKEN \
     --env SSTVAE_CODE_REPO="$CODE_REPO" \
     --env SSTVAE_ARGS="$ARGS" \
+    ${SSTVAE_OUT_REPO:+--env SSTVAE_OUT_REPO="$SSTVAE_OUT_REPO"} \
     ${SSTVAE_RESUME:+--env SSTVAE_RESUME=1}
 
 echo "== follow logs with: hf jobs logs --follow <job id>"
