@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy import signal
+from scipy.fft import next_fast_len, fft, ifft
 
 from ..config import FS, M, FRAME_SAMPLES, PREAMBLE_CP, PREAMBLE_SAMPLES
 from .dsp import freq_correct, sync_lowpass
@@ -143,19 +144,40 @@ def acquire_blind(
     `score` is the winning phase's prominence over the other 1151 phase
     bins (peak / median), not an absolute SNR-like quantity — scale
     invariant, so `threshold` doesn't need retuning per signal level.
+
+    Searching many CFO candidates against the same segment is a
+    Doppler-search matched filter, so instead of re-modulating the
+    (long) segment and re-running a fresh FFT convolution for every
+    candidate bin (each one recomputing the *template's* FFT too, even
+    though it's fixed), this takes a single FFT of the unmodulated
+    segment and, per candidate, applies a circular shift to its
+    spectrum instead — time-domain modulation by f is exactly a shift
+    of the DFT by f/bin_hz bins, so this produces the same matched-
+    filter magnitude (up to <0.1 Hz quantization to the nearest FFT
+    bin, negligible next to bin_step_hz) for a small fraction of the
+    FFT work.
     """
     template = pilot_template()
+    kernel = np.conj(template[::-1])
 
     seg = z if search is None else z[search[0] : search[1]]
     if len(seg) < FRAME_SAMPLES * min_periods:
         raise SyncError("window too short for blind acquisition")
 
     n_bins = int(np.ceil(max_offset_hz / bin_step_hz))
+    n_fft = next_fast_len(len(seg) + len(kernel) - 1)
+    bin_hz = FS / n_fft
+    lo = len(kernel) - 1
+    valid_len = len(seg) - len(kernel) + 1
+
+    Sf = fft(seg, n_fft)
+    Tf = fft(kernel, n_fft)
+
     best = None
     for k in range(-n_bins, n_bins + 1):
-        f_cand = k * bin_step_hz
-        seg_c = freq_correct(seg, f_cand)
-        mf = signal.fftconvolve(seg_c, np.conj(template[::-1]), mode="valid")
+        shift_bins = int(round(k * bin_step_hz / bin_hz))
+        f_cand = shift_bins * bin_hz
+        mf = ifft(np.roll(Sf, -shift_bins) * Tf)[lo : lo + valid_len]
         p2 = np.abs(mf) ** 2
         n_periods = len(p2) // FRAME_SAMPLES
         if n_periods < min_periods:
