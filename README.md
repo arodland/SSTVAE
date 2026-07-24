@@ -27,7 +27,17 @@ output). Modes: **A** ≈ 32 s (1 latent group, coarse), **B** ≈ 64 s
 (2 groups), **C** ≈ 95 s (3 groups, best fidelity). Faster modes are literal
 prefixes of mode C's stream, so a mode C reception can be decoded
 progressively as it arrives, and truncated or faded receptions decode
-at reduced fidelity.
+at reduced fidelity. The slower modes aren't just higher fidelity —
+they're also more forgiving of a missed header: with more total frames
+in the transmission, there are more chances for the beacon's ~10 s
+resync window (see below) to land somewhere clean enough to lock, even
+if the dedicated preamble/header was lost to noise or fading.
+
+Because latents are spread across the whole image by a fixed per-group
+interleaver, picking up a transmission mid-stream (or losing chunks of
+it to fading) degrades quality roughly uniformly across the frame,
+unlike analog SSTV's top-to-bottom scan, where missing the start just
+cuts the top of the image off outright.
 
 One of the 24 carriers is permanently reserved for a beacon
 side-channel (`sstvae/modem/beacon.py`): a continuously repeating,
