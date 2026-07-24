@@ -42,6 +42,7 @@ from ..config import (
     ModeSpec,
 )
 from . import beacon, framing, ofdm
+from .beacon import BeaconResult
 from .dsp import to_baseband, freq_correct, tx_condition
 from .sync import acquire, acquire_blind, SyncError
 
@@ -56,7 +57,7 @@ class DemodResult:
     freq_offset: float
     sync_metric: float
     frames_received: int
-    beacon: beacon.BeaconResult | None = None  # decoded resync/callsign packet
+    beacon: BeaconResult | None = None  # decoded resync/callsign packet
     callsign: str = ""
 
 
@@ -71,7 +72,7 @@ class BlindDemodResult:
     latents: np.ndarray
     weights: np.ndarray
     freq_offset: float
-    beacon: beacon.BeaconResult | None
+    beacon: BeaconResult | None
     callsign: str
     frame_offset: int | None  # absolute index of this buffer's first frame
     n_frames: int  # local frames demodulated (may exceed what beacon covers)
