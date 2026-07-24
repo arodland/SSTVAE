@@ -10,7 +10,15 @@ from dataclasses import dataclass
 import numpy as np
 from scipy import signal
 
-from .config import FS
+from .config import (
+    FS,
+    FRAME_SAMPLES,
+    LEADIN_SAMPLES,
+    PREAMBLE_SAMPLES,
+    HEADER_SAMPLES,
+    MODES,
+    ModeSpec,
+)
 
 
 @dataclass(frozen=True)
@@ -90,6 +98,90 @@ def zero_spans(x: np.ndarray, spans_s: list[tuple[float, float]]) -> np.ndarray:
     y = x.copy()
     for a, b in spans_s:
         y[int(a * FS) : int(b * FS)] = 0.0
+    return y
+
+
+def detect_mode_by_length(x: np.ndarray, tol_samples: int = 4) -> ModeSpec:
+    """Identify which mode produced this waveform purely from its sample
+    count — exact for audio straight out of sstvae_encode.py, which is
+    the only case data_sample_mask()/apply_channel_data_only() support
+    (they rely on TX's fixed, known layout, not on re-acquiring sync)."""
+    n = len(x)
+    for spec in MODES.values():
+        if abs(n - round(spec.duration_s * FS)) <= tol_samples:
+            return spec
+    raise ValueError(
+        f"{n} samples doesn't match any mode's expected length "
+        f"(A={round(MODES['A'].duration_s*FS)}, "
+        f"B={round(MODES['B'].duration_s*FS)}, "
+        f"C={round(MODES['C'].duration_s*FS)}); pass mode explicitly "
+        "if this wasn't produced by sstvae_encode.py as-is"
+    )
+
+
+def data_sample_mask(mode: ModeSpec, n_samples: int) -> np.ndarray:
+    """Boolean mask over a TX waveform from sstvae_encode.py: True over
+    every frame (pilot symbols AND data together), False over lead-in/
+    out, the preamble, and the header.
+
+    Only the preamble and header are protected — what acquisition and
+    header decode actually need to always succeed. Per-frame pilots are
+    corrupted right along with their frame's data on purpose: the
+    demodulator estimates each frame's channel from its pilot and uses
+    that to equalize the neighboring data, so a clean pilot next to
+    corrupted data would make it confidently apply the *wrong*
+    correction (implying the channel is clean when it wasn't) — a
+    self-inflicted decode failure, not a realistic one. Letting fading/
+    noise affect pilots and data together keeps equalization physically
+    consistent; it can still legitimately struggle under extreme
+    fading, but that's real degradation, not an artifact of this mask.
+    """
+    mask = np.zeros(n_samples, dtype=bool)
+    start = LEADIN_SAMPLES + PREAMBLE_SAMPLES + HEADER_SAMPLES
+    end = start + mode.n_frames * FRAME_SAMPLES
+    mask[start:end] = True
+    return mask[:n_samples]
+
+
+def apply_channel_data_only(
+    x: np.ndarray,
+    mode: ModeSpec | None = None,
+    snr_db: float | None = None,
+    freq_offset_hz: float = 0.0,
+    fading_preset: str | None = None,
+    spans: list[tuple[float, float]] | None = None,
+    seed: int = 0,
+) -> np.ndarray:
+    """Like apply_channel, but the preamble and header are spliced back
+    in clean afterward, so acquisition and header decode always succeed
+    no matter how extreme snr_db/fading_preset are. Per-frame pilots are
+    NOT protected — they're corrupted along with their frame's data on
+    purpose, since the demodulator equalizes data using its frame's own
+    pilot; protecting pilots but not data would make the equalizer
+    confidently apply a wrong correction (see data_sample_mask's
+    docstring). This is for visualizing worst-case data corruption
+    while guaranteeing a lock, with equalization still behaving
+    physically consistently — not a fully realistic channel (a real one
+    can't protect the preamble/header this way either), but not
+    self-defeating like protecting pilots would be.
+
+    freq_offset_hz is applied globally to the whole composite signal
+    afterward (a stable LO offset realistically affects everything and
+    is what the pilots/header are there to estimate and correct, so it
+    isn't isolated like the noise/fading terms).
+
+    No ppm support: sample-clock resampling shifts alignment, which
+    breaks the fixed-layout assumption this function depends on.
+    """
+    if mode is None:
+        mode = detect_mode_by_length(x)
+    dirty = apply_channel(
+        x, snr_db=snr_db, fading_preset=fading_preset, spans=spans, seed=seed
+    )
+    mask = data_sample_mask(mode, len(x))
+    y = np.where(mask, dirty, x)
+    if freq_offset_hz:
+        y = freq_shift(y, freq_offset_hz)
     return y
 
 
