@@ -185,6 +185,14 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
     last_progress_metric = -1
     stable_since = None
     current_reception_start = None
+    # Absolute (ring-buffer-coordinate) sample position before which the
+    # preamble search never looks. Advanced past each finished reception's
+    # preamble once it's done (see below) so sync_acquire's single global
+    # argmax can't keep re-locking onto an old, already-decoded preamble
+    # that's merely still sitting in the buffer -- without this, a
+    # stronger stale peak can permanently starve out any later, genuinely
+    # new transmission until it ages out of the buffer entirely.
+    search_floor_abs = 0
 
     while not stop_event.is_set():
         stop_event.wait(args.poll_interval)
@@ -193,6 +201,8 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
 
         samples, total = ring.snapshot()
         seconds_captured = total / FS
+        with state.lock:
+            state.seconds_captured = seconds_captured
         if len(samples) < MIN_SECONDS_BEFORE_ATTEMPT * FS:
             continue
         buf_start = total - len(samples)
@@ -208,9 +218,13 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
 
         # Cheap preamble-only check first: if it's a hit and its start
         # position matches an already-finished reception, skip the full
-        # decode (and the expensive blind fallback) entirely.
+        # decode (and the expensive blind fallback) entirely. The search
+        # is floored past every already-finished reception's preamble so
+        # a stale peak still sitting in the buffer can never outrank (and
+        # so permanently hide) a genuinely new one -- see search_floor_abs.
+        search = (max(0, search_floor_abs - buf_start), len(samples))
         try:
-            acq = sync_acquire(to_baseband(samples))
+            acq = sync_acquire(to_baseband(samples), search=search)
         except SyncError:
             acq = None
 
@@ -260,7 +274,6 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
         decode_s = time.time() - t0
 
         with state.lock:
-            state.seconds_captured = seconds_captured
             state.last_decode_s = decode_s
 
         if latents_full is None:
@@ -306,6 +319,9 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
             saved.save(out_path)
             if current_reception_start is not None:
                 finished_starts.append(current_reception_start)
+                search_floor_abs = max(
+                    search_floor_abs, current_reception_start + PREAMBLE_SAMPLES
+                )
             print(
                 f"saved {out_path} (mode={mode_name or 'unknown, blind sync'}, "
                 f"callsign={callsign or '(none)'}{_fmt_snr(snr_db)})"
