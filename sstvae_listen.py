@@ -172,6 +172,80 @@ def _already_finished(pos: float, finished_starts, epsilon_samples: float) -> bo
     return any(abs(pos - k) <= epsilon_samples for k in finished_starts)
 
 
+def _free_spans(n: int, buf_start: int, finished_starts, epsilon_samples: int):
+    """Local [lo, hi) spans of the buffer with already-saved receptions'
+    preambles carved out.
+
+    Only the preamble region of a finished reception is excluded, not its
+    whole duration: two transmissions can overlap in time, and blanking a
+    finished one's full extent would hide an overlapping neighbour's
+    preamble along with it.
+    """
+    blocked = []
+    for p in finished_starts:
+        lo = int(p - buf_start - epsilon_samples)
+        hi = int(p - buf_start + PREAMBLE_SAMPLES + epsilon_samples)
+        if hi > 0 and lo < n:
+            blocked.append((max(0, lo), min(n, hi)))
+    blocked.sort()
+    spans, cur = [], 0
+    for lo, hi in blocked:
+        if lo > cur:
+            spans.append((cur, lo))
+        cur = max(cur, hi)
+    if cur < n:
+        spans.append((cur, n))
+    return spans
+
+
+def _find_new_reception(modem, samples, z, buf_start, finished_starts,
+                        epsilon_samples, max_tries=4):
+    """Decode the strongest preamble that is neither already saved nor a
+    spurious peak. Returns (DemodResult, reception_start) or (None, None).
+
+    sync_acquire returns a single global argmax inside its window, so an
+    already-decoded transmission still sitting in the buffer can outrank
+    and hide a second one. Searching only *forward* of finished hits
+    doesn't fix that either -- the strongest peak is often the later
+    transmission, and stepping past it buries every earlier one. So
+    search each still-unclaimed span, and within a span step past any
+    peak whose header won't decode (a correlation artefact inside a
+    transmission's own frames rather than a real preamble).
+
+    demodulate gets the same window the hit came from. It runs its own
+    acquisition, and left to scan the whole buffer it can lock a
+    different preamble than the one just vetted -- which is how an
+    already-saved reception ends up decoded and written out a second
+    time while the bookkeeping records some other position.
+    """
+    n = len(samples)
+    tries = 0
+    for span_lo, span_hi in _free_spans(n, buf_start, finished_starts,
+                                        epsilon_samples):
+        lo = span_lo
+        while lo < span_hi and tries < max_tries:
+            try:
+                acq = sync_acquire(z, search=(lo, span_hi))
+            except SyncError:
+                break
+            tries += 1
+            try:
+                r = modem.demodulate(samples, search_s=(lo / FS, span_hi / FS))
+                return r, buf_start + r.preamble_start
+            except SyncError:
+                lo = acq.preamble_start + PREAMBLE_SAMPLES
+    return None, None
+
+
+def _timestamped_path(out_dir: str) -> Path:
+    """Unique output path. Millisecond resolution because two short-mode
+    receptions can be finished within the same second (both already sat
+    complete in the buffer), and a second-resolution name would have the
+    later one silently overwrite the earlier."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    return Path(out_dir) / f"rx_{ts}.png"
+
+
 def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: threading.Event):
     modem = Modem()
     total_c_latents = MODES["C"].n_latents
@@ -185,14 +259,11 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
     last_progress_metric = -1
     stable_since = None
     current_reception_start = None
-    # Absolute (ring-buffer-coordinate) sample position before which the
-    # preamble search never looks. Advanced past each finished reception's
-    # preamble once it's done (see below) so sync_acquire's single global
-    # argmax can't keep re-locking onto an old, already-decoded preamble
-    # that's merely still sitting in the buffer -- without this, a
-    # stronger stale peak can permanently starve out any later, genuinely
-    # new transmission until it ages out of the buffer entirely.
-    search_floor_abs = 0
+    # Which reception the progress counters above describe. Progress is
+    # per-reception: carrying a previous transmission's metric across to
+    # the next one can make a brand-new reception look like it has
+    # already stalled and end it early.
+    tracked_reception_start = None
 
     while not stop_event.is_set():
         stop_event.wait(args.poll_interval)
@@ -216,32 +287,15 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
         progress_metric = 0
         reception_start = None
 
-        # Cheap preamble-only check first: if it's a hit and its start
-        # position matches an already-finished reception, skip the full
-        # decode (and the expensive blind fallback) entirely. The search
-        # is floored past every already-finished reception's preamble so
-        # a stale peak still sitting in the buffer can never outrank (and
-        # so permanently hide) a genuinely new one -- see search_floor_abs.
-        search = (max(0, search_floor_abs - buf_start), len(samples))
-        try:
-            acq = sync_acquire(to_baseband(samples), search=search)
-        except SyncError:
-            acq = None
-
-        full_ok = False
-        if acq is not None:
-            reception_start = buf_start + acq.preamble_start
-            if _already_finished(reception_start, finished_starts, epsilon_samples):
-                continue
-            try:
-                r = modem.demodulate(samples)
-                full_ok = True
-            except SyncError:
-                # acquire() found a preamble-shaped hit but header decode
-                # failed (corrupted header, or a spurious correlation
-                # peak) -- fall through to the blind path below rather
-                # than treating this as fatal.
-                pass
+        # Preamble path first: find and decode the strongest reception
+        # that hasn't already been saved. Falls through to the blind path
+        # below if nothing there decodes (corrupted header, or the only
+        # hits are spurious correlation peaks).
+        r, reception_start = _find_new_reception(
+            modem, samples, to_baseband(samples), buf_start,
+            finished_starts, epsilon_samples,
+        )
+        full_ok = r is not None
 
         if full_ok:
             latents_full = pad_to_full(r.latents)
@@ -254,8 +308,18 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
             progress_frac = frames_received / n_frames_expected
             progress_metric = frames_received
         else:
+            # Bound where blind acquisition searches (the dominant CPU
+            # cost of this path) to the most recent slice of the buffer;
+            # the retrospective decode still covers everything once
+            # locked. Whole buffer if it's shorter than the window.
+            blind_span = int(args.blind_search_seconds * FS)
+            blind_search = (
+                None
+                if len(samples) <= blind_span
+                else ((len(samples) - blind_span) / FS, len(samples) / FS)
+            )
             try:
-                rb = modem.demodulate_blind(samples)
+                rb = modem.demodulate_blind(samples, search_s=blind_search)
             except SyncError:
                 rb = None
             if rb is not None and rb.beacon is not None and rb.frame0_start is not None:
@@ -285,6 +349,18 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
             current_reception_start = None
             continue
 
+        # A different reception than the one the progress counters
+        # describe: start its progress history fresh, or its very first
+        # poll can be mistaken for a stalled (and so finished) one.
+        if (
+            tracked_reception_start is None
+            or reception_start is None
+            or abs(reception_start - tracked_reception_start) > epsilon_samples
+        ):
+            tracked_reception_start = reception_start
+            last_progress_metric = -1
+            stable_since = None
+
         current_reception_start = reception_start
         img = reconstruct(model, latents_full, weights_full)
         with state.lock:
@@ -309,8 +385,7 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
         last_progress_metric = progress_metric
 
         if done and progress_metric > 0:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_path = Path(args.out_dir) / f"rx_{ts}.png"
+            out_path = _timestamped_path(args.out_dir)
             out_path.parent.mkdir(parents=True, exist_ok=True)
             saved = img
             if args.size:
@@ -319,9 +394,6 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
             saved.save(out_path)
             if current_reception_start is not None:
                 finished_starts.append(current_reception_start)
-                search_floor_abs = max(
-                    search_floor_abs, current_reception_start + PREAMBLE_SAMPLES
-                )
             print(
                 f"saved {out_path} (mode={mode_name or 'unknown, blind sync'}, "
                 f"callsign={callsign or '(none)'}{_fmt_snr(snr_db)})"
@@ -337,7 +409,8 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
             last_progress_metric = -1
             stable_since = None
             current_reception_start = None
-            time.sleep(2.0)
+            tracked_reception_start = None
+            stop_event.wait(2.0)
             with state.lock:
                 state.status = "listening"
                 state.mode_name = None
@@ -374,7 +447,6 @@ def decode_loop_low_cpu(
 
         search_from_abs = max(buf_start, last_search_pos - int(search_overlap_s * FS))
         search = (search_from_abs - buf_start, len(samples))
-        last_search_pos = total
 
         with state.lock:
             state.seconds_captured = seconds_captured
@@ -384,11 +456,18 @@ def decode_loop_low_cpu(
         try:
             acq = sync_acquire(to_baseband(samples), search=search)
         except SyncError:
+            last_search_pos = total
             continue
 
         try:
-            r = modem.demodulate(samples)
+            # Same window the hit came from, so demodulate can't lock a
+            # different (older, already-saved) preamble than the one just
+            # found -- see _acquire_unfinished's docstring.
+            r = modem.demodulate(
+                samples, search_s=(search[0] / FS, search[1] / FS)
+            )
         except SyncError:
+            last_search_pos = total
             continue  # spurious preamble-shaped hit; keep listening
 
         reception_start = buf_start + acq.preamble_start
@@ -418,8 +497,16 @@ def decode_loop_low_cpu(
             break
 
         samples, total = ring.snapshot()
+        # Never look for this reception's preamble again: without this the
+        # next poll resumes from where the search stood *before* waiting
+        # out the transmission, re-finds the preamble that is still in the
+        # buffer, and decodes and saves the same image a second time.
+        last_search_pos = frames_end_abs
+        # Re-anchor the window on this reception in the grown buffer's
+        # coordinates, so the final decode can't lock a different preamble.
+        lo = max(0, reception_start - (total - len(samples)))
         try:
-            r = modem.demodulate(samples)
+            r = modem.demodulate(samples, search_s=(lo / FS, len(samples) / FS))
         except SyncError:
             # transmission was cut short / corrupted after all; go back
             # to listening rather than crash the loop
@@ -428,8 +515,7 @@ def decode_loop_low_cpu(
             continue
 
         img = reconstruct(model, pad_to_full(r.latents), pad_to_full(r.weights))
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = Path(args.out_dir) / f"rx_{ts}.png"
+        out_path = _timestamped_path(args.out_dir)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         saved = img
         if args.size:

@@ -48,3 +48,9 @@ include = ["sstvae*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The listener state-machine tests synthesize whole transmissions and run
+# the real decode loop over them, so they take minutes rather than the
+# ~2 s the rest of the suite does. Excluded by default to keep `pytest`
+# the fast check it is documented as; run them with `pytest -m slow`.
+markers = ["slow: multi-minute end-to-end tests (run with -m slow)"]
+addopts = "-m 'not slow'"
