@@ -84,8 +84,8 @@ DROPPED_LATENTS_PER_GROUP = GROUP_LATENTS - TRANSMIT_LATENTS_PER_GROUP  # 2200 (
 assert 0 <= DROPPED_LATENTS_PER_GROUP < GROUP_LATENTS
 
 # --- TX conditioning -------------------------------------------------------
-CLIP_HEADROOM_DB = 5.0  # envelope clip threshold above mean envelope power;
-#                         gives ~6.7 dB envelope PAPR at ~20 dB latent-SNR floor
+CLIP_HEADROOM_DB = 0.5  # envelope clip threshold above mean envelope power;
+#                         gives ~4.2 dB envelope PAPR
 TX_BANDPASS = (850.0, 2200.0)  # Hz, post-clip filter
 DEMOD_BACKOFF = 6  # samples: demod window starts this early inside the CP
 
