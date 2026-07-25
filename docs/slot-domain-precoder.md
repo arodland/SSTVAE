@@ -1,4 +1,10 @@
-# Design: slot-domain precoder (not implemented)
+# Design: slot-domain precoder
+
+> **RESULT 2026-07-25: fixed unitary spreading does not work here, and
+> the reason generalizes to the learned variant. Measured with
+> `scripts/precoder_probe.py` — see "Measured" below before building
+> any of this.** The design is kept because the plumbing description is
+> still accurate and the tone-reservation alternative reuses it.
 
 Written 2026-07-25 alongside [latent-mixer-results.md](latent-mixer-results.md),
 which established that no mixer on the latent grid's axes can affect
@@ -73,6 +79,55 @@ pseudo-inverse at RX, breaks the power contract, and conditioning
 becomes a training failure mode. No reason to accept those costs before
 variant 2 is shown to be insufficient.
 
+## Measured (2026-07-25)
+
+`scripts/precoder_probe.py` builds the real TX waveform with each
+symbol's 23 latent carriers spread by a unitary matrix, and reports
+envelope PAPR plus **clip SNR** — waveform NMSE through `tx_condition`,
+which maps to latent SNR because OFDM demod is linear and orthogonal.
+
+Clip SNR, not post-clip PAPR, is the figure of merit: the clipper pins
+post-clip PAPR at any headroom by construction, so what a precoder can
+actually buy is *less clipping distortion at the same headroom*.
+
+| input | precoder | PAPR pre-clip | clip SNR |
+|---|---|---|---|
+| QPSK (control) | none | 11.06 | 12.68 |
+| QPSK (control) | **dft** | **8.72 (−2.34)** | **14.98 (+2.30)** |
+| QPSK (control) | hadamard | 9.20 (−1.86) | 13.12 (+0.44) |
+| real latents | none | 10.82 | 12.47 |
+| real latents | **dft** | 10.55 (−0.26) | **12.11 (−0.36)** |
+| real latents | hadamard | 11.71 (+0.89) | 12.15 (−0.32) |
+
+The QPSK row is the control and it reproduces SC-FDMA's textbook win, so
+the probe is sound. On real latents DFT spreading makes clipping
+distortion slightly *worse*, unchanged at 0.0 dB headroom (−0.35 dB).
+
+**Why, and why it generalizes.** A unitary transform of an i.i.d.
+Gaussian vector is another i.i.d. Gaussian vector — the distribution is
+invariant. Our latents measure kurtosis 3.47, near-Gaussian, so *any*
+unitary precoder is close to a no-op on the peak statistics. This is not
+a property of the DFT; it kills the whole class.
+
+That also undercuts the learned-unitary variant (2) much more than
+expected when it was written. Joint training could only win by making
+the encoder's within-symbol joint distribution non-Gaussian — and
+Gaussian is the max-entropy choice at fixed power, i.e. exactly what a
+rate-distortion-optimal encoder wants to emit. The learned precoder
+would be asking the encoder to pay in reconstruction quality for peak
+structure. That may still be a trade worth making, but it is a
+*different and worse* proposition than "the precoder finds free
+structure", which is how variant 2 was originally justified.
+
+**What does work on Gaussian signals** is PAPR reduction that adds
+redundancy rather than rotating: tone reservation (reserve a few
+carriers to carry a peak-cancelling signal), or SLM/PTS (transmit the
+best of several scramblings, plus side information). These are
+distribution-independent. Tone reservation is the natural fit here — it
+costs capacity, which is the currency the mode table already trades in,
+and it reuses this document's plumbing. It does not need the
+autoencoder at all.
+
 ## Consequences that must be designed for
 
 **Erasure and confidence accounting changes, and this is the big one.**
@@ -119,9 +174,18 @@ speculative. Cheap to test in stage-2 simulation before committing.
 
 ## Suggested order of work
 
-1. Fixed DFT spreading end-to-end (framing + waveform_channel + a
-   round-trip test), measure PAPR and PSNR-vs-SNR on AWGN and mpp. This
-   is where the caveat above gets settled empirically and cheaply.
-2. Only if the plumbing holds up: learned unitary, trained jointly.
-3. MMSE per-latent confidence derivation, needed for either to perform
-   on fading channels.
+~~1. Fixed DFT spreading end-to-end~~ — **done cheaply via
+`scripts/precoder_probe.py` instead of a full implementation; result
+above. Steps 2 and 3 are not worth starting on this evidence.**
+
+If the PAPR/PSNR tradeoff is still the goal, the live options are, in
+order of expected value per unit of work:
+
+1. **`--clip-headroom-db`.** The existing genie sweep already found it
+   costs less PSNR per dB of PAPR than anything else tried, and this
+   experiment did not turn up a competitor.
+2. **Tone reservation.** Distribution-independent, so unlike a precoder
+   it is not blocked by Gaussian latents. Costs carrier capacity; needs
+   a waveform version bit.
+3. **Learned unitary precoder**, accepting that it now has to buy peak
+   structure with reconstruction quality rather than finding it free.

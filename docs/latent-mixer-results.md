@@ -107,5 +107,7 @@ Code is kept, defaulted off (`--mixer-depth 0`). Checkpoints record
 checkpoint back as `pre_tanh` so the first experiment's checkpoints keep
 their trained semantics.
 
-For a mechanism that *can* reach PAPR, see
-[slot-domain-precoder.md](slot-domain-precoder.md).
+The follow-up — a slot-domain precoder, the one mechanism that *can*
+reach within-symbol structure — was then measured and also came up
+empty, for a related reason (unitary transforms preserve Gaussianity).
+See [slot-domain-precoder.md](slot-domain-precoder.md).
