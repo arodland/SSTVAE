@@ -140,6 +140,13 @@ def main() -> None:
         "gives frequent checkpoints/samples on big datasets",
     )
     ap.add_argument("--batch", type=int, default=16)
+    ap.add_argument(
+        "--augment",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="train-only random zoom/pan crop + hflip + color jitter "
+        "(see sstvae/data.py); never applied to the validation split",
+    )
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--width", type=int, default=128)
     ap.add_argument("--lpips-weight", type=float, default=0.5)
@@ -207,10 +214,10 @@ def main() -> None:
         args.batch = min(args.batch, 8)
         dataset = SyntheticDataset(n=128)
     elif args.hf_dataset:
-        dataset = HFHubDataset(args.hf_dataset, split="train")
+        dataset = HFHubDataset(args.hf_dataset, split="train", augment=args.augment)
         val_dataset = HFHubDataset(args.hf_dataset, split="validation")
     elif args.data:
-        dataset = FolderDataset(args.data)
+        dataset = FolderDataset(args.data, augment=args.augment)
     else:
         ap.error("--data or --hf-dataset is required unless --smoke")
 
