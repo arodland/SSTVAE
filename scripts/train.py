@@ -20,6 +20,7 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from sstvae.config import CLIP_HEADROOM_DB
 from sstvae.data import FolderDataset, HFHubDataset, SyntheticDataset
 from sstvae.latent_channel import ChannelConfig, apply_latent_channel
 from sstvae.models import SSTVAE
@@ -169,6 +170,17 @@ def main() -> None:
         "contribute roughly 2%% of total loss, not 300%%.",
     )
     ap.add_argument(
+        "--clip-headroom-db",
+        type=float,
+        default=CLIP_HEADROOM_DB,
+        help="envelope clip threshold above mean envelope power, fed to "
+        "WaveformChannel's Stage2Config (default matches the on-air "
+        "modem's sstvae.config.CLIP_HEADROOM_DB). Genie-sweep testing "
+        "(scripts/genie_papr_sweep.py) found this knob costs far less "
+        "PSNR per dB of PAPR than pushing pre-clip crest factor down "
+        "via --papr-weight, so prefer lowering this directly.",
+    )
+    ap.add_argument(
         "--chroma-weight",
         type=float,
         default=2.0,
@@ -265,9 +277,11 @@ def main() -> None:
     ch_cfg = ChannelConfig()
     wave_ch = None
     if args.stage2:
-        from sstvae.waveform_channel import WaveformChannel
+        from sstvae.waveform_channel import Stage2Config, WaveformChannel
 
-        wave_ch = WaveformChannel().to(device)
+        wave_ch = WaveformChannel(
+            Stage2Config(clip_headroom_db=args.clip_headroom_db)
+        ).to(device)
 
     step = 0
     for epoch in range(start_epoch, start_epoch + args.epochs):
