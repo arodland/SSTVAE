@@ -89,6 +89,15 @@ rationale lives in the plan history.
   >0.98 with the NumPy modem on clean channels. Runs in fp32 outside
   autocast (complex ops); `train.py --stage2` handles that split.
 
+## Docs
+
+- `docs/latent-mixer-results.md` — the latent MLP-mixer experiment and
+  why no mixer on the latent grid's axes can move PAPR (the interleaver
+  scatters the 46 latents that share an OFDM symbol).
+- `docs/slot-domain-precoder.md` — design for the mechanism that *can*
+  reach PAPR (DFT spreading / learned unitary precoder in slot domain).
+  Not implemented.
+
 ## Status / next steps
 
 Phase 1 (modem) complete; stage-1 training pipeline complete with Hub
