@@ -82,7 +82,11 @@ class BlindDemodResult:
     # buffer) the transmitter's own absolute frame 0 would fall at --
     # only known once the beacon gives frame_offset; a stable identifier
     # for "which transmission is this" across repeated blind decodes of
-    # a buffer that hasn't advanced past it yet.
+    # a buffer that hasn't advanced past it yet. May be negative if the
+    # buffer starts mid-transmission (frame 0 is then a virtual position
+    # before the buffer). Note this is the start of *frame 0*, one
+    # preamble+header later than a preamble-path DemodResult.preamble_start
+    # for the same transmission -- convert before comparing the two.
     snr_db: float = float("nan")  # pilot-based radio SNR estimate, see _estimate_snr_db
 
 
@@ -401,7 +405,15 @@ class Modem:
             callsign=beacon_result.callsign if beacon_result else "",
             frame_offset=frame_offset,
             n_frames=n_f,
-            frame0_start=p0 - frame_offset * FRAME_SAMPLES if frame_offset is not None else None,
+            # Anchor on p_start, not p0: the demod loop (and so the beacon
+            # chip stream frame_offset indexes) starts at p_start, which is
+            # L_lo frames away from p0 whenever the blind lock isn't already
+            # at the buffer start. Using p0 here put absolute frame 0 off by
+            # L_lo frames -- tens of seconds for a mid-stream lock.
+            frame0_start=(
+                p_start - frame_offset * FRAME_SAMPLES
+                if frame_offset is not None else None
+            ),
             snr_db=_estimate_snr_db(h_pilot),
         )
 

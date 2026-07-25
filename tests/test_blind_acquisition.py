@@ -104,6 +104,33 @@ def test_retrospective_decode_using_a_late_lock_window(clip_floor_db):
     assert snr > snr_floor_db(clip_floor_db, margin_db=BLIND_MARGIN_DB)
 
 
+def test_frame0_start_locates_absolute_frame_zero_after_a_late_lock():
+    """frame0_start must point at absolute frame 0 no matter where in the
+    buffer the blind lock landed.
+
+    It was anchored on p0 (the CP-start of the frame the lock found)
+    rather than p_start (where the demod loop, and so the beacon chip
+    stream that frame_offset indexes, actually begins). The two differ by
+    L_lo frames, so a lock late in a long recording reported absolute
+    frame 0 tens of seconds away from the truth. The latents still landed
+    in the right slots -- only the reported position was wrong -- so
+    nothing downstream of the image caught it, but a caller using
+    frame0_start to identify *which* transmission this is (sstvae_listen's
+    dedup) saw one transmission as two.
+    """
+    modem, _, x, frames_start = _tx(seed=5, callsign="N0CALL")
+    # Whole transmission in the buffer, but only the tail is searched --
+    # forces a large negative L_lo.
+    search_s = ((len(x) - 60 * FRAME_SAMPLES) / FS, len(x) / FS)
+    r = modem.demodulate_blind(x, search_s=search_s)
+    assert r.beacon is not None and r.frame0_start is not None
+    err = abs(r.frame0_start - frames_start)
+    assert err < FRAME_SAMPLES // 2, (
+        f"frame0_start off by {err} samples ({err / FRAME_SAMPLES:.2f} frames); "
+        f"got {r.frame0_start}, true frame 0 at {frames_start}"
+    )
+
+
 def test_window_shorter_than_min_frames_for_sync_may_fail_gracefully():
     """Below beacon.MIN_FRAMES_FOR_SYNC there's no guarantee of a full
     superframe fitting; demodulate_blind must not report a wrong

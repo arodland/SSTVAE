@@ -323,7 +323,15 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, args, stop_event: t
             except SyncError:
                 rb = None
             if rb is not None and rb.beacon is not None and rb.frame0_start is not None:
-                reception_start = buf_start + rb.frame0_start
+                # Record every reception in the same coordinate -- the
+                # preamble start -- so finished_starts is homogeneous.
+                # The blind path locates absolute frame 0, which sits one
+                # preamble+header later; without this the two paths label
+                # one transmission with two positions 768 samples apart,
+                # and _free_spans blocks the wrong region.
+                reception_start = (
+                    buf_start + rb.frame0_start - PREAMBLE_SAMPLES - HEADER_SAMPLES
+                )
                 if _already_finished(reception_start, finished_starts, epsilon_samples):
                     continue
                 latents_full = rb.latents
