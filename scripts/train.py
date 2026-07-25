@@ -21,7 +21,12 @@ from torch.utils.data import DataLoader
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sstvae.config import CLIP_HEADROOM_DB
-from sstvae.data import FolderDataset, HFHubDataset, SyntheticDataset
+from sstvae.data import (
+    FolderDataset,
+    HFHubDataset,
+    SyntheticDataset,
+    overlay_text_batch,
+)
 from sstvae.latent_channel import ChannelConfig, apply_latent_channel
 from sstvae.models import SSTVAE
 
@@ -38,7 +43,14 @@ def chroma(img: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def evaluate(model, loader, device, max_batches=16):
-    """Val PSNR at fixed channel settings: clean, and 8 dB + 20% erasures."""
+    """Val PSNR at fixed channel settings: clean, 8 dB + 20% erasures, and
+    clean-channel with burned-in text.
+
+    The `text` variant deliberately uses the *unmodified* validation
+    images plus a seeded overlay, so it tracks how well burned-in text
+    survives without perturbing `clean` — whose value carries a long
+    run-to-run history worth keeping comparable.
+    """
     model.eval()
     cfgs = {
         "clean": None,
@@ -47,6 +59,7 @@ def evaluate(model, loader, device, max_batches=16):
         ),
     }
     mse = {k: 0.0 for k in cfgs}
+    mse["text"] = 0.0
     n = 0
     for bi, img in enumerate(loader):
         if bi >= max_batches:
@@ -61,6 +74,10 @@ def evaluate(model, loader, device, max_batches=16):
                 noisy, w, _conf = apply_latent_channel(z, cfg, generator=g)
             recon = model.decoder(noisy, w)
             mse[k] += F.mse_loss(recon, img).item() * img.shape[0]
+        timg = overlay_text_batch(img, seed=bi)
+        tz = model.encoder(timg)
+        trecon = model.decoder(tz, torch.ones_like(tz))
+        mse["text"] += F.mse_loss(trecon, timg).item() * img.shape[0]
         n += img.shape[0]
     model.train()
     return {k: -10 * torch.tensor(v / n).log10().item() for k, v in mse.items()}
