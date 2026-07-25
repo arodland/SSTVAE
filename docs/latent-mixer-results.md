@@ -131,11 +131,18 @@ weight planes carry real information rather than constant ones.
 
 ## Status
 
-Code is kept, defaulted off (`--mixer-depth 0`). Checkpoints record
-`mixer_depth`/`mixer_hidden_mult`/`mixer_place`;
-`SSTVAE.mixer_kwargs_from_checkpoint` reads a placement-less mixer
-checkpoint back as `pre_tanh` so the first experiment's checkpoints keep
-their trained semantics.
+**The mixer code is not on master** — only this write-up and
+`scripts/precoder_probe.py` were kept. The implementation
+(`--mixer-depth` / `--mixer-hidden-mult` / `--mixer-place`, checkpoint
+architecture round-tripping via `SSTVAE.mixer_kwargs_from_checkpoint`)
+lives on the local branch `worktree-mlp-mixer`, off master at the
+"image augmentation pipeline" commit. Revive it from there if a later
+idea needs a latent-domain mixer; don't re-derive it.
+
+Checkpoints from the two mixer runs (`arodland/sstvae-s2-640-mixer`,
+`...-mixer-post`) therefore need that branch to load. The control run's
+checkpoint (`...-mixer0`) is plain `--mixer-depth 0` and loads with
+master's code unchanged.
 
 The follow-up — a slot-domain precoder, the one mechanism that *can*
 reach within-symbol structure — was then measured and also came up
