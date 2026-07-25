@@ -4,11 +4,12 @@
 the encoder and the start of the decoder lets the model adapt to the
 channel and improves the PSNR/PAPR tradeoff.
 
-**Result.** No PAPR effect at either tanh placement. A small PSNR gain
-appeared but is confounded with an LR-schedule restart and traces to
-the decoder, not to channel adaptation. The negative result has a
-structural explanation (below) that rules out this *class* of mixer for
-PAPR, not just this instance.
+**Result.** Negative, and closed. No PAPR effect at either tanh
+placement; the encoder mixer is inert (deleting it costs 0.009 dB); the
+apparent +0.29 dB PSNR gain was reproduced exactly by a `--mixer-depth 0`
+control, so it belongs to the resumed run, not the architecture. The
+negative result has a structural explanation (below) that rules out this
+*class* of mixer for PAPR, not just this instance.
 
 ## What was built
 
@@ -89,15 +90,44 @@ This also undercuts the original rationale for choosing channel-mixing
 over token-mixing (that erasure bursts hit a run of positions within one
 channel) — the interleaver scatters those too.
 
-## Open / not established
+## Control run: the +0.29 dB was not the mixer
 
-- The +0.29 dB from the pre_tanh run is **not** attributed. `train.py`
-  sets cosine `T_max` to the invocation's epoch count, so that run got
-  50 epochs at a re-raised LR the baseline never saw. The control is a
-  `--mixer-depth 0` resume from the same epoch-170 checkpoint at the
-  same `--lr`/`--epochs`; it was not run.
-- Whether the decoder-side mixer helps under erasures (where the weight
-  planes carry real information) is untested in isolation.
+A `--mixer-depth 0` resume from the same epoch-170 checkpoint, same
+`--lr`/`--epochs`/seed (`arodland/sstvae-s2-640-mixer0`), reproduces the
+climb:
+
+| window | mixer | control |
+|---|---|---|
+| 171-180 | 25.711 | 25.706 |
+| 181-190 | 25.748 | 25.749 |
+| 191-200 | 25.816 | 25.809 |
+| 201-210 | 25.950 | 25.871 |
+
+So the gain belongs to the resumed run, not the architecture. Two
+candidate causes, not separated and not worth separating: the cosine
+`T_max` restart at the resume boundary, and image augmentation having
+been enabled shortly before epoch 170 with its generalization benefit
+still being realized. Both runs get both, which is why they agree.
+
+Other ablations on the epoch-227 mixer checkpoint, forcing each half
+back to exact identity:
+
+| | clean | e20 | text |
+|---|---|---|---|
+| as trained | 25.573 | 24.709 | 25.071 |
+| encoder mixer -> identity | 25.564 | 24.711 | 25.064 |
+| decoder mixer -> identity | 22.145 | 22.029 | 21.795 |
+
+Deleting the encoder mixer costs **0.009 dB** — it is inert, so the
+transmitted latents are effectively unchanged and channel adaptation
+cannot be the mechanism for anything observed. (The decoder row is
+co-adaptation damage from removing a block the decoder trained against
+for 50 epochs, not a measure of its value.) Consistently, a matched-epoch
+A/B of `pre_tanh` vs `post_tanh` over epochs 171-176 differs by 0.003 dB
+on clean — placement is irrelevant when the block is inert.
+
+Untested: whether the decoder-side mixer helps under erasures, where the
+weight planes carry real information rather than constant ones.
 
 ## Status
 
