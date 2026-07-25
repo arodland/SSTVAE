@@ -5,6 +5,11 @@ from sstvae import hfchannel
 from sstvae.config import MODES
 from sstvae.modem import Modem
 
+from conftest import snr_floor_db
+
+# SNR this scenario reaches with clipping disabled (see conftest).
+MPG_FADING_15DB_ONLY_DB = 15.4
+
 
 @pytest.fixture(scope="module")
 def modem():
@@ -76,7 +81,7 @@ def test_protect_sync_survives_extreme_fading(modem):
     assert r.frames_received == r.mode.n_frames
 
 
-def test_protect_sync_fading_equalization_is_not_self_defeating(modem):
+def test_protect_sync_fading_equalization_is_not_self_defeating(modem, clip_floor_db):
     """The bug this mask design fixes: protecting pilots but not data
     under fading made the equalizer trust a clean channel estimate
     while the data went through a totally different faded channel,
@@ -94,7 +99,10 @@ def test_protect_sync_fading_equalization_is_not_self_defeating(modem):
     assert good.sum() > 0.3 * lat.size
     err = np.mean((lat[good] - r.latents[good]) ** 2)
     snr_db_out = 10 * np.log10(np.mean(lat[good] ** 2) / err)
-    assert snr_db_out > 10, f"expected decent quality, got {snr_db_out:.1f} dB"
+    floor = snr_floor_db(clip_floor_db, MPG_FADING_15DB_ONLY_DB)
+    assert snr_db_out > floor, (
+        f"expected ~{floor:.1f} dB or better, got {snr_db_out:.1f} dB"
+    )
 
 
 def test_protect_sync_clean_data_is_bit_exact(modem):

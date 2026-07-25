@@ -13,6 +13,16 @@ from sstvae.config import (
 from sstvae.modem import Modem, beacon
 from sstvae.modem.sync import acquire_blind, SyncError
 
+from conftest import snr_floor_db
+
+# Blind decode has no preamble phase reference and so no clock-drift
+# tracking; it normally lands within ~0.15 dB of the clean-loopback
+# clip floor, but accumulated timing error over a long buffer
+# interacts with clip distortion and it dipped 2.5 dB at one
+# headroom setting (3.0 dB) out of ten sampled from 8.0 down to
+# -5.0. Margin covers that rather than tracking the floor tightly.
+BLIND_MARGIN_DB = 3.5
+
 
 def _tx(seed=0, callsign="N0CALL"):
     modem = Modem()
@@ -51,7 +61,7 @@ def test_acquire_blind_rejects_pure_noise():
         acquire_blind(junk.astype(np.float64) * 0 + rng.normal(size=junk.shape))
 
 
-def test_demodulate_blind_recovers_position_and_callsign():
+def test_demodulate_blind_recovers_position_and_callsign(clip_floor_db):
     modem, lat, x, frames_start = _tx(seed=1, callsign="K6ABC/P")
     win = _frames_slice(x, frames_start, 300, 90)
     r = modem.demodulate_blind(win)
@@ -61,7 +71,7 @@ def test_demodulate_blind_recovers_position_and_callsign():
     assert good.sum() > 0.5 * lat.size * (90 / MODES["C"].n_frames)
     err = np.mean((lat[good] - r.latents[good]) ** 2)
     snr = 10 * np.log10(np.mean(lat[good] ** 2) / err)
-    assert snr > 18
+    assert snr > snr_floor_db(clip_floor_db, margin_db=BLIND_MARGIN_DB)
 
 
 def test_demodulate_blind_survives_awgn_and_cfo():
@@ -74,7 +84,7 @@ def test_demodulate_blind_survives_awgn_and_cfo():
     assert abs(r.freq_offset - 15.0) < 2.0
 
 
-def test_retrospective_decode_using_a_late_lock_window():
+def test_retrospective_decode_using_a_late_lock_window(clip_floor_db):
     """The core scenario: the receiver only searches/locks using the
     tail of a recorded buffer (simulating 'noticed the signal late'),
     but the whole buffer — including frames recorded before the lock
@@ -91,7 +101,7 @@ def test_retrospective_decode_using_a_late_lock_window():
     assert good.sum() > 0
     err = np.mean((lat[good] - r.latents[good]) ** 2)
     snr = 10 * np.log10(np.mean(lat[good] ** 2) / err)
-    assert snr > 18
+    assert snr > snr_floor_db(clip_floor_db, margin_db=BLIND_MARGIN_DB)
 
 
 def test_window_shorter_than_min_frames_for_sync_may_fail_gracefully():

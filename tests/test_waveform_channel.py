@@ -6,6 +6,11 @@ torch = pytest.importorskip("torch")
 from sstvae.config import MODES
 from sstvae.waveform_channel import Stage2Config, WaveformChannel
 
+from conftest import snr_floor_db
+
+# SNR this scenario reaches with clipping disabled (see conftest).
+FADED_ERASED_ONLY_DB = 8.7
+
 
 def _clean_cfg(**kw):
     base = dict(
@@ -24,8 +29,9 @@ def _unit(b, seed=0):
     return z / z.pow(2).mean(dim=1, keepdim=True).sqrt()
 
 
-def test_clean_loopback_hits_clip_floor():
-    ch = WaveformChannel(_clean_cfg())
+def test_clean_loopback_hits_clip_floor(clip_floor_db):
+    cfg = _clean_cfg()
+    ch = WaveformChannel(cfg)
     z = _unit(2)
     out, w, papr_pre, papr_post, conf = ch(z)
     # Exclude the small per-group fraction permanently dropped for the
@@ -33,9 +39,19 @@ def test_clean_loopback_hits_clip_floor():
     mask = w > 0
     err = (out[mask] - z[mask]).pow(2).mean()
     snr = 10 * torch.log10(z[mask].pow(2).mean() / err)
-    assert snr > 17, f"latent SNR {snr:.1f} dB"
+    # The torch replica should land on the same clip floor as the real
+    # NumPy modem, whatever headroom is configured.
+    assert snr > snr_floor_db(clip_floor_db), f"latent SNR {snr:.1f} dB"
     assert w[mask].min() > 0.5
-    assert 5.0 < papr_post.min() and papr_post.max() < 9.0, f"PAPR {papr_post}"
+    # The clipper only engages when the threshold sits below the
+    # waveform's own PAPR. When it does, it pins the envelope near the
+    # threshold and bandpass regrowth adds some back, so the transmitted
+    # PAPR lands above the threshold; when it doesn't, the waveform
+    # passes through untouched.
+    engaged = cfg.clip_headroom_db < papr_pre
+    assert torch.where(
+        engaged, papr_post > cfg.clip_headroom_db, papr_post >= papr_pre - 0.5
+    ).all(), f"PAPR pre {papr_pre} post {papr_post} headroom {cfg.clip_headroom_db}"
     # Random unshaped latents are peaky pre-clip; clipping should reduce
     # (or at worst leave roughly equal) the measured PAPR.
     assert (papr_post <= papr_pre + 0.5).all()
@@ -116,7 +132,7 @@ def test_confidence_tracks_snr():
     assert conf_hi.mean() > conf_lo.mean()
 
 
-def test_fading_and_erasures_shape_weights():
+def test_fading_and_erasures_shape_weights(clip_floor_db):
     ch = WaveformChannel(
         Stage2Config(
             snr_db_range=(12.0, 12.0),
@@ -133,4 +149,9 @@ def test_fading_and_erasures_shape_weights():
     if good.any():
         err = (out[good] - z[good]).pow(2).mean()
         snr = 10 * torch.log10(z[good].pow(2).mean() / err)
-        assert snr > 5, f"faded latent SNR {snr:.1f} dB"
+        # Looser margin than elsewhere: the w > 0.7 mask keeps a
+        # different subset of latents as clipping worsens, so the
+        # independent-noise model under-predicts the damage here by up
+        # to ~2 dB (checked over headroom 5.0 down to -3.0).
+        floor = snr_floor_db(clip_floor_db, FADED_ERASED_ONLY_DB, margin_db=3.0)
+        assert snr > floor, f"faded latent SNR {snr:.1f} dB, floor {floor:.1f} dB"
