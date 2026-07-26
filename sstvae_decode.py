@@ -12,31 +12,17 @@ import argparse
 from pathlib import Path
 
 import numpy as np
-import torch
 from PIL import Image
 
 from sstvae import wavio
-from sstvae.config import FS, LATENT_CHANNELS, LATENTS_PER_FRAME, MODES
-from sstvae.models import SSTVAE
+from sstvae.codec import (  # noqa: F401  (re-exported)
+    MODEL_HELP,
+    load_model,
+    pad_to_full,
+    reconstruct,
+)
+from sstvae.config import FS, LATENTS_PER_FRAME
 from sstvae.modem import Modem, framing
-from sstvae_encode import MODEL_HELP, load_model
-
-
-def reconstruct(model: SSTVAE, latents: np.ndarray, weights: np.ndarray) -> Image.Image:
-    """Full-length (mode C sized) latent/weight vectors -> PIL image."""
-    z = SSTVAE.flat_to_latents(torch.from_numpy(latents).float()[None])
-    w = SSTVAE.flat_to_latents(torch.from_numpy(weights).float()[None])
-    with torch.no_grad():
-        img = model.decoder(z * (w > 0), w)[0]
-    arr = (img.permute(1, 2, 0).numpy() * 255).round().astype(np.uint8)
-    return Image.fromarray(arr)
-
-
-def pad_to_full(vec: np.ndarray, fill: float = 0.0) -> np.ndarray:
-    full = MODES["C"].n_latents
-    out = np.full(full, fill)
-    out[: len(vec)] = vec
-    return out
 
 
 def main() -> None:

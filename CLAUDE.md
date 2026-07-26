@@ -7,7 +7,10 @@ rationale lives in the plan history.
 
 ## Commands
 
-- Run tests: `pytest` (fast, ~2 s; includes full modem end-to-end tests)
+- Run tests: `pytest` (fast, ~10 s; includes full modem end-to-end tests)
+- Slow gate: `pytest -m slow` (~2 min) — the listener state machine and
+  the app's transmit→receive loopback. Run it after touching `sstvae/rx/`.
+- Run the app: `uv run sstvae-gui` (needs `uv sync --extra gui`)
 - Smoke-train: `python scripts/train.py --smoke --out /tmp/smoke`
 - Full pipeline check: `sstvae_encode.py` → `sstvae_simulate.py` → `sstvae_decode.py`
 
@@ -65,6 +68,58 @@ rationale lives in the plan history.
   weights + weight planes; handles erasures/truncation).
 - `sstvae/latent_channel.py` — stage-1 differentiable channel
   (AWGN, group truncation, erasures) used by `scripts/train.py`.
+- `sstvae/codec.py` — `load_model` / `reconstruct` / `pad_to_full`.
+  These used to live in the top-level `sstvae_encode.py` /
+  `sstvae_decode.py` scripts; they are here so package code doesn't
+  import a *script*. The scripts re-export them, so existing imports and
+  command lines are unchanged. Always loads on CPU.
+
+## The application
+
+`sstvae/gui/` (PySide6) on top of headless, Qt-free engines. Nothing
+below `sstvae/gui/` may import Qt; nothing in `sstvae/overlay/` may
+either, so overlays stay renderable from the command line.
+
+- `sstvae/rx/` — the live reception state machine, extracted from
+  `sstvae_listen.py` (which is now just its CLI front end). `engine.py`
+  holds `decode_loop` / `decode_loop_low_cpu` **unchanged** from the
+  version the slow tests were written against — treat that logic as
+  load-bearing and run `pytest -m slow` after touching it. Two seams
+  were added: an `RxConfig` in place of the argparse namespace, and a
+  `sink` that receives finished receptions. **Saving is the sink's job,
+  not the loop's**, because the GUI's autosave checkbox may hold a
+  picture for the Save button instead of writing it. `ringbuffer.py`
+  adds `tail()` (cheap slice for the ~20 fps waterfall; `snapshot()`
+  copies all 130 s) and `clear()`.
+- `sstvae/tx/engine.py` — encode → modulate → PTT → play → unkey.
+  **The invariant is that PTT always comes back down**: try/finally
+  around the keyed region *plus* an independent `_PttWatchdog` thread
+  for the case where the transmit path is wedged and its finally will
+  never run. `condition_for_output` is a plain peak scale on purpose —
+  `Modem.modulate` already did the envelope clipping that sets PAPR,
+  and a second clip here would splatter.
+- `sstvae/audio.py` — device enumeration and stream opening, both
+  directions, with the 8 kHz-rejected → native-rate + `resample_poly`
+  fallback. Imports `sounddevice` lazily so the module works with no
+  PortAudio installed (the settings dialog needs to *report* that).
+- `sstvae/rig/rigctld.py` — TCP client for Hamlib's `rigctld`. Chosen
+  over the SWIG `Hamlib` bindings because those are installed in the
+  system site-packages and a virtualenv cannot see them. A Hamlib error
+  code raises but keeps the connection; a dead socket redials once.
+- `sstvae/overlay/` — `model.py` is the document, `render.py` draws it
+  with PIL. Designed so *templates* are a later UI-only change:
+  coordinates are normalized 0..1 (resolution-independent) and
+  `ImageItem.source` is a late-bound reference (`"last_rx"` or a path)
+  rather than a pasted bitmap, so a saved template keeps meaning "the
+  most recent received picture". `item_bbox` is shared with the editor
+  so selection handles can't drift from what is drawn.
+- `sstvae/gui/settings.py` — JSON config (atomic write; unknown keys
+  ignored, never fatal). Importable without Qt.
+- The editor's preview **is** `overlay.render()`'s output, not a
+  Qt-drawn imitation, so composition is WYSIWYG by construction.
+- Half duplex: `transmitStarted` suspends receive, and resuming
+  allocates a fresh ring buffer so the tail of our own transmission
+  isn't decoded back as a reception.
 
 ## Gotchas learned the hard way
 
@@ -82,6 +137,15 @@ rationale lives in the plan history.
   encoder, modem, and training. Don't renormalize anywhere else.
 - Local GPU is ROCm (`torch.cuda.is_available()` is true); never add
   CUDA-only dependencies.
+- Capture and playback need **inverse** resample ratios, and sharing one
+  "ratio to the device" helper between them is a silent, hardware-only
+  bug: playback decimated 48k→8k instead of interpolating 8k→48k, so a
+  32 s transmission went out as 0.9 s of noise. Only devices that
+  *reject* 8 kHz take that path (an Elecraft K4's USB codec does;
+  PulseAudio's `default` does not), so testing against the default
+  device proves nothing. Use `audio.resample_ratio(src, dst)`, which
+  names both rates, and see `tests/test_audio.py` for the fake-PortAudio
+  harness that catches it without hardware.
 
 - `sstvae/waveform_channel.py` — stage-2 differentiable modem replica
   (torch): OFDM synth, envelope clip/PAPR, symbol-domain fading,
@@ -122,7 +186,14 @@ with the real modem, but does not simulate/train through beacon content
 itself (synthesizes random BPSK there just for realistic PAPR
 statistics).
 
+Desktop app (`sstvae-gui`) implemented: live TX/RX on a soundcard,
+rigctld PTT + frequency readback, waterfall, overlay composition,
+persistent config. Overlay *templates* are deliberately not implemented
+but the document format is built for them (see `sstvae/overlay/`).
+
 Remaining: run stage-2 fine-tune (start from a good stage-1
 checkpoint, `--lr 1e-4`) — note pre-beacon checkpoints remain
 architecture-compatible (model channel count unchanged), evaluation
-sweeps (PSNR/LPIPS vs SNR per mode), on-air calibration.
+sweeps (PSNR/LPIPS vs SNR per mode), on-air calibration. On the app
+side: overlay templates, and a real on-air (not loopback) shakedown of
+the PTT timing against a physical radio.

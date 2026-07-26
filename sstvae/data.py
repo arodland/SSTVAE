@@ -148,6 +148,33 @@ def _augment_image(img: Image.Image, rng: random.Random | None = None) -> Image.
     return img
 
 
+def fit_image(img: Image.Image) -> Image.Image:
+    """Any image -> exactly IMG_W x IMG_H RGB, by scaling to cover the
+    target and centre-cropping (deterministic, aspect-preserving).
+
+    Split out of `load_image` so callers that already hold an image in
+    memory -- the GUI, which composes text and insets onto the picture
+    before transmitting -- go through the same framing as a file loaded
+    from disk, instead of a subtly different resize.
+    """
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    if img.size == (IMG_W, IMG_H):
+        return img
+    scale = max(IMG_W / img.width, IMG_H / img.height)
+    img = img.resize(
+        (round(img.width * scale), round(img.height * scale)), Image.LANCZOS
+    )
+    left = (img.width - IMG_W) // 2
+    top = (img.height - IMG_H) // 2
+    return img.crop((left, top, left + IMG_W, top + IMG_H))
+
+
+def image_to_tensor(img: Image.Image) -> torch.Tensor:
+    """IMG_W x IMG_H RGB image -> (3, IMG_H, IMG_W) float in [0,1]."""
+    return torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
+
+
 def load_image(path: str | Path, augment: bool = False) -> torch.Tensor:
     """Open any PIL-readable image -> (3, IMG_H, IMG_W) float in [0,1].
 
@@ -157,17 +184,8 @@ def load_image(path: str | Path, augment: bool = False) -> torch.Tensor:
     burned-in random text with probability TEXT_OVERLAY_P (training only).
     """
     img = Image.open(path).convert("RGB")
-    if augment:
-        img = _augment_image(img)
-    else:
-        scale = max(IMG_W / img.width, IMG_H / img.height)
-        img = img.resize(
-            (round(img.width * scale), round(img.height * scale)), Image.LANCZOS
-        )
-        left = (img.width - IMG_W) // 2
-        top = (img.height - IMG_H) // 2
-        img = img.crop((left, top, left + IMG_W, top + IMG_H))
-    return torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
+    img = _augment_image(img) if augment else fit_image(img)
+    return image_to_tensor(img)
 
 
 class FolderDataset(Dataset):
