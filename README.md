@@ -59,6 +59,18 @@ fall off. And a fixed interleaver scatters every frame's latents across
 the whole picture, so losing part of a transmission dims detail
 *everywhere* slightly rather than removing a region.
 
+![SSTVAE mode B and analog Scottie 2 received over the same path](docs/images/ota-vs-analog.png)
+
+The same picture between the same two stations, on the same frequency,
+100 W both, a few minutes apart — and comparable airtime, 64 s against
+71 s. The analog copy shows what the channel did to it: impulse noise as
+coloured streaks, speckle through the sky, softened detail. The SSTVAE
+copy absorbed the same channel into a slightly softer picture.
+
+One comparison on one path at one moment isn't a controlled study —
+propagation shifts minute to minute. And Scottie 2 is 320×256 *by
+design*; it isn't failing, it's doing its job at its own resolution.
+
 | | Analog SSTV | HamDRM | SSDV | SSTVAE |
 |---|---|---|---|---|
 | Payload | Scanlines as tones | Compressed file + FEC | JPEG in FEC'd packets | Autoencoder latents |
