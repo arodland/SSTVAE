@@ -13,9 +13,22 @@ breaking it.
 It is directly inspired by [FreeDV RADE](https://freedv.org/radio-autoencoder/)
 (the "radio autoencoder"), which does the same trick for speech.
 
+![Sent and received images over a 3150 km path to Utah](docs/images/ota-20m-irises.png)
+
+![Sent and received images over a 1700 km path to Minnesota](docs/images/ota-20m-airplane.png)
+
+**Actually over the air.** Mode B (64 s) on 20 m, transmitted from New
+Jersey. Top row received at the
+[Northern Utah WebSDR](http://www.sdrutah.org/) in Corinne, Utah —
+**3150 km**. Bottom row received in Minnesota — **1700 km**. In both,
+the middle panel is 100 W and the right panel is **10 W**, sent back to
+back over the same path. One tenth the power costs about 1 dB of
+picture: it gets slightly softer rather than breaking up, which is the
+whole idea.
+
 > ### ⚠️ Status: working beta
 >
-> This works, and it has been **successfully decoded over the air**. But:
+> It works on real HF, as above. But:
 >
 > - **The on-air format is not frozen.** Expect incompatible changes.
 >   Two stations must run the same commit *and* the same model
@@ -102,6 +115,19 @@ PSNR in dB; higher is better.
 Every point above acquired sync and received **100% of frames**. Mode C
 gives up only 1.9 dB of PSNR across a 20 dB drop in channel SNR — that
 gentle slope is the entire point of the design.
+
+The on-air results at the top of this page land where the table says
+they should. For the irises, the 100 W pass scored 25.5 dB — between the
+mode B simulation's 6 and 10 dB SNR rows — and the 10 W pass 24.6 dB,
+near its 3 dB row. Dropping 10 dB of power moved the picture by 0.9 dB
+on that path, and by 1.0 dB on the shorter one.
+
+Compare like with like, though: absolute PSNR depends heavily on the
+picture. The airplane shot scores 28.2 / 27.2 dB, above every number in
+the table, because a smooth sky and distant fields are simply easier to
+code than iris petals — not because that path was better than the
+simulation. Only the *differences* between passes of the same image are
+meaningful across rows.
 
 **Where it actually breaks:** the limit is acquisition, not image
 quality. Below roughly −2 dB (AWGN) the preamble stops being detectable
