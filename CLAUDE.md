@@ -97,6 +97,13 @@ rationale lives in the plan history.
 - `docs/slot-domain-precoder.md` — design for the mechanism that *can*
   reach PAPR (DFT spreading / learned unitary precoder in slot domain).
   Not implemented.
+- `docs/todo.md` — open work items with the reasoning behind them.
+  Currently: (1) a wider acquisition search so a mis-tuned counterpart
+  still decodes — measured, the demod path is entirely independent of
+  absolute centre frequency (8.73 dB latent SNR from 900 to 2100 Hz), so
+  this is acquisition-side only; (2) acquisition reliability at large
+  frequency offsets, which costs ~1 dB of threshold near the edge of the
+  ±50 Hz tolerance.
 
 ## Status / next steps
 
