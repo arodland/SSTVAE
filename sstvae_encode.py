@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Encode an image into SSTVAE transmit audio.
 
-    python sstvae_encode.py photo.jpg tx.wav --mode B --model runs/s1/checkpoint.pt
+    python sstvae_encode.py photo.jpg tx.wav --mode B
 """
 
 import argparse
@@ -9,15 +9,21 @@ import argparse
 import numpy as np
 import torch
 
-from sstvae import wavio
+from sstvae import checkpoint, wavio
 from sstvae.config import MODES
 from sstvae.data import load_image
 from sstvae.models import SSTVAE
 from sstvae.modem import Modem
 
+MODEL_HELP = (
+    "checkpoint.pt; defaults to the published checkpoint, downloaded and "
+    "cached on first use"
+)
 
-def load_model(path: str) -> SSTVAE:
-    ckpt = torch.load(path, map_location="cpu")
+
+def load_model(path: str | None = None) -> SSTVAE:
+    """`path` may be None, in which case the published checkpoint is used."""
+    ckpt = torch.load(checkpoint.resolve(path), map_location="cpu")
     model = SSTVAE(width=ckpt.get("width", 128))
     model.load_state_dict(ckpt["model"])
     model.eval()
@@ -29,7 +35,7 @@ def main() -> None:
     ap.add_argument("image")
     ap.add_argument("output", help="WAV file for transmission")
     ap.add_argument("--mode", choices=sorted(MODES), default="B")
-    ap.add_argument("--model", required=True, help="checkpoint.pt")
+    ap.add_argument("--model", default=None, help=MODEL_HELP)
     ap.add_argument(
         "--callsign", default="",
         help="up to 8 chars, sent continuously on the beacon carrier "

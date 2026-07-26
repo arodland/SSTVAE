@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Decode received SSTVAE audio into an image.
 
-    python sstvae_decode.py rx.wav out.png --model runs/s1/checkpoint.pt
+    python sstvae_decode.py rx.wav out.png
     python sstvae_decode.py rx.wav out.png --model ... --snapshots 4
 
 --snapshots N additionally writes out_1.png..out_N.png reconstructed
@@ -19,7 +19,7 @@ from sstvae import wavio
 from sstvae.config import FS, LATENT_CHANNELS, LATENTS_PER_FRAME, MODES
 from sstvae.models import SSTVAE
 from sstvae.modem import Modem, framing
-from sstvae_encode import load_model
+from sstvae_encode import MODEL_HELP, load_model
 
 
 def reconstruct(model: SSTVAE, latents: np.ndarray, weights: np.ndarray) -> Image.Image:
@@ -43,7 +43,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("input", help="received WAV")
     ap.add_argument("output", help="output image (png/jpg)")
-    ap.add_argument("--model", required=True, help="checkpoint.pt")
+    ap.add_argument("--model", default=None, help=MODEL_HELP)
     ap.add_argument("--snapshots", type=int, default=0)
     ap.add_argument(
         "--search-start", type=float, default=None,

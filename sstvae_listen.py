@@ -3,9 +3,9 @@
 transmission and decode it, including the case where listening starts
 mid-transmission.
 
-    python sstvae_listen.py --model runs/s1/checkpoint.pt --out-dir received
+    python sstvae_listen.py --out-dir received
     python sstvae_listen.py --list-devices
-    python sstvae_listen.py --model ... --device pulse --no-gui
+    python sstvae_listen.py --device pulse --no-gui
 
 Keeps a rolling buffer of the last --buffer-seconds of audio (long
 enough to cover a full mode-C transmission). Every --poll-interval
@@ -53,7 +53,7 @@ from sstvae.modem import Modem, SyncError
 from sstvae.modem.dsp import to_baseband
 from sstvae.modem.sync import acquire as sync_acquire
 from sstvae_decode import pad_to_full, reconstruct
-from sstvae_encode import load_model
+from sstvae_encode import MODEL_HELP, load_model
 
 MIN_SECONDS_BEFORE_ATTEMPT = 3.0
 # How close two acquisitions' transmission-start sample position must be
@@ -656,7 +656,7 @@ def run_console(state: SharedState, stop_event: threading.Event):
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--model", help="checkpoint.pt")
+    ap.add_argument("--model", default=None, help=MODEL_HELP)
     ap.add_argument("--out-dir", default="received", help="directory for saved images")
     ap.add_argument("--device", default=None, help="input device name/index (see --list-devices)")
     ap.add_argument("--samplerate", type=int, default=FS, help="capture sample rate to request")
@@ -698,9 +698,6 @@ def main() -> None:
 
         print(sd.query_devices())
         return
-
-    if not args.model:
-        ap.error("--model is required (unless --list-devices)")
 
     model = load_model(args.model)
     ring = RingBuffer(args.buffer_seconds)

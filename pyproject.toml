@@ -10,6 +10,21 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Encode/decode/simulate from the command line. torch is needed because
+# the encoder and decoder *are* the image codec -- only sstvae_simulate.py
+# runs on the base deps alone.
+cli = [
+    "torch>=2.0",
+    "huggingface_hub>=0.20",
+]
+# Live receive off a soundcard: everything in `cli`, plus PortAudio
+# bindings and the waterfall/preview window.
+listen = [
+    "torch>=2.0",
+    "huggingface_hub>=0.20",
+    "sounddevice>=0.4.6",
+    "matplotlib>=3.7",
+]
 train = [
     "torch>=2.13.0",
     "lpips>=0.1.4",
@@ -18,10 +33,6 @@ train = [
 ]
 dev = [
     "pytest>=8.0",
-]
-listen = [
-    "sounddevice>=0.4.6",
-    "matplotlib>=3.7",
 ]
 
 # ROCm torch wheels (RX 9070 XT / gfx1201), local dev only — explicit so
