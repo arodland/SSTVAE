@@ -188,7 +188,9 @@ simply decodes at lower fidelity.
 Slower modes are also more robust in a way that isn't obvious: with more
 total frames on air, there are more chances for the beacon's ~10 s
 resync window to land somewhere clean enough to lock, even if the
-dedicated preamble was lost.
+dedicated preamble was lost. Mode C actually has a minimal quality
+increase over mode B, but it gives a better chance of a picture getting
+through at all on a poor channel.
 
 ### Waveform
 
