@@ -34,7 +34,11 @@ gui = [
     "torch>=2.0",
     "huggingface_hub>=0.20",
     "sounddevice>=0.4.6",
-    "pyside6>=6.5",
+    # Essentials, not the `pyside6` metapackage: we import only QtCore,
+    # QtGui and QtWidgets, while the addons half carries a 107 MB copy of
+    # Chromium (QtWebEngine) plus ffmpeg, Quick/Qml and Designer -- about
+    # 200 MB installed that nothing here ever loads.
+    "pyside6-essentials>=6.5",
     "platformdirs>=3.0",
 ]
 train = [
