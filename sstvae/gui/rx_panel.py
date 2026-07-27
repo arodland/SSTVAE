@@ -10,6 +10,7 @@ should not stall on a slow or full disk mid-reception.
 """
 
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal
@@ -88,6 +89,20 @@ class _GuiSink:
         return str(path)
 
 
+@dataclass
+class _Displayed:
+    """The picture currently in the preview, and what to name it.
+
+    Not necessarily a *finished* reception: the decode loop reconstructs
+    on every poll, so there is usually a picture on screen long before
+    the transmission ends.
+    """
+
+    image: object
+    callsign: str = ""
+    mode_name: str | None = None
+
+
 def _unique(path: Path) -> Path:
     """Never overwrite: two receptions can finish in the same second
     with the same callsign and frequency."""
@@ -113,7 +128,8 @@ class ReceivePanel(QWidget):
         self._thread = None
         self._stop = threading.Event()
         self._state = SharedState()
-        self._last_reception = None
+        self._displayed: _Displayed | None = None
+        self._shown_image = None  # identity check, to avoid redundant repaints
         self._last_saved_path = None
         self._suspended_for_tx = False
 
@@ -322,9 +338,9 @@ class ReceivePanel(QWidget):
 
         self.status.setText(text)
         self.progress.setValue(int(100 * frac))
-        if image is not None and image is not getattr(self, "_shown_image", None):
+        if image is not None and image is not self._shown_image:
             self._shown_image = image
-            self._show_image(image)
+            self._set_displayed(image, callsign, mode)
 
     def _on_status(self, text: str) -> None:
         self.status.setText(text)
@@ -336,11 +352,25 @@ class ReceivePanel(QWidget):
         )
         self._preview_pixmap = pix
 
-    def _on_reception(self, rec, saved_path) -> None:
-        self._last_reception = rec
-        self._last_saved_path = saved_path
+    def _set_displayed(self, image, callsign: str = "", mode_name=None) -> None:
+        """Put a picture in the preview and make it saveable.
+
+        Called for partial decodes as well as finished ones. A
+        half-received picture is still a picture, and on a marginal
+        signal the operator may well want the version on screen now
+        rather than whatever the reception eventually settles on -- or
+        may never reach a 'complete' state at all.
+        """
+        self._displayed = _Displayed(image, callsign or "", mode_name)
+        self._show_image(image)
         self.save_btn.setEnabled(True)
-        self._show_image(rec.image)
+
+    def _on_reception(self, rec, saved_path) -> None:
+        self._last_saved_path = saved_path
+        self._shown_image = rec.image
+        self._set_displayed(rec.image, rec.callsign, rec.mode_name)
+        # Only finished receptions become the transmit panel's "last
+        # received image" inset; a partial one would be a poor keepsake.
         self.imageReceived.emit(rec.image)
         if saved_path:
             self.receptionSaved.emit(saved_path)
@@ -353,14 +383,15 @@ class ReceivePanel(QWidget):
         self._app.save_config()
 
     def save_current(self) -> None:
-        if self._last_reception is None:
+        """Write whatever is in the preview, complete or not."""
+        if self._displayed is None:
             return
         cfg = self._app.config
         stem = format_filename(
             cfg.receive.filename_template,
-            callsign=self._last_reception.callsign,
+            callsign=self._displayed.callsign,
             freq_hz=self._app.current_frequency_hz,
-            mode=self._last_reception.mode_name,
+            mode=self._displayed.mode_name,
         )
         suggested = str(Path(cfg.folders.receive_dir) / f"{stem}.png")
         Path(cfg.folders.receive_dir).mkdir(parents=True, exist_ok=True)
@@ -370,7 +401,7 @@ class ReceivePanel(QWidget):
         if not path:
             return
         try:
-            self._last_reception.image.save(path)
+            self._displayed.image.save(path)
         except (OSError, ValueError) as e:
             QMessageBox.critical(self, "Could not save", str(e))
             return
