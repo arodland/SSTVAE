@@ -106,57 +106,64 @@ matters.
 ## Performance
 
 Measured end-to-end (encode → modem → simulated channel → modem →
-decode) on 6 validation images never seen in training, at 640×480.
+decode) on 25 validation images never seen in training, at 640×480.
 PSNR in dB; higher is better.
 
-**AWGN** (SNR in a 3 kHz noise bandwidth):
+**AWGN** (SNR in a 2.5 kHz noise bandwidth):
 
 | Mode | Time | clean | 20 dB | 10 dB | 6 dB | 3 dB | 0 dB | −2 dB |
 |---|---|---|---|---|---|---|---|---|
-| A | 32 s | 24.7 | 24.7 | 24.4 | 24.0 | 23.4 | 22.3 | 21.4 |
-| B | 64 s | 25.7 | 25.6 | 25.4 | 25.0 | 24.4 | 23.5 | — |
-| C | 95 s | 26.0 | 26.0 | 25.8 | 25.5 | 25.0 | 24.1 | 22.8 |
+| A | 32 s | 25.9 | 25.9 | 25.5 | 24.9 | 24.1 | 22.6 (22/25) | 21.5 (14/25) |
+| B | 64 s | 27.0 | 26.9 | 26.6 | 26.1 | 25.4 | 24.1 (21/25) | 23.0 (11/25) |
+| C | 95 s | 27.4 | 27.4 | 27.1 | 26.7 | 26.0 | 24.9 (20/25) | 23.8 (11/25) |
 
 **Watterson "poor" multipath** (`mpp`: 2 ms second-path delay, 1 Hz Doppler spread):
 
 | Mode | 20 dB | 10 dB | 6 dB |
 |---|---|---|---|
-| A | 23.7 | 23.3 | 22.8 |
-| B | 25.2 | 24.7 | 24.2 |
-| C | 25.6 | 25.3 | 24.8 |
+| A | 25.1 (24/25) | 24.6 (24/25) | 24.0 (19/25) |
+| B | 26.2 | 25.7 | 24.8 (24/25) |
+| C | 26.8 | 26.2 (24/25) | 25.5 (22/25) |
 
-Every point above acquired sync and received **100% of frames**. Mode C
-gives up only 1.9 dB of PSNR across a 20 dB drop in channel SNR — that
+Reproduce with `python scripts/snr_sweep.py`.
+
+A bracketed fraction is how many of the 25 transmissions acquired sync at
+all; the PSNR beside it averages only those, so read the pair as "how
+often you get a picture, and how good it is when you do". Where no
+fraction is shown, all 25 decoded with **100% of frames**. Across the
+whole range where acquisition is reliable — 20 dB down to 3 dB — mode C
+gives up just 1.4 dB of PSNR for a 17 dB drop in channel SNR, and that
 gentle slope is the entire point of the design.
 
-The on-air results at the top of this page land where the table says
-they should. For the irises, the 100 W pass scored 25.5 dB — between the
-mode B simulation's 6 and 10 dB SNR rows — and the 10 W pass 24.6 dB,
-near its 3 dB row. Dropping 10 dB of power moved the picture by 0.9 dB
-on that path, and by 1.0 dB on the shorter one.
+Don't read the on-air results at the top of this page straight off these
+rows: absolute PSNR depends far more on the picture than on the channel.
+The irises scored 25.5 dB at 100 W and 24.6 dB at 10 W, below most of
+the mode B row; the airplane shot scored 28.2 / 27.2 dB, above all of
+it. That gap is iris petals versus a smooth sky, not one path being
+better than the other, and the table's own images span a comparable
+range.
 
-Compare like with like, though: absolute PSNR depends heavily on the
-picture. The airplane shot scores 28.2 / 27.2 dB, above every number in
-the table, because a smooth sky and distant fields are simply easier to
-code than iris petals — not because that path was better than the
-simulation. Only the *differences* between passes of the same image are
-meaningful across rows.
+What *is* comparable is the difference between two passes of the same
+image over the same path. Dropping 10 dB of power moved the picture by
+0.9 dB on the Utah path and 1.0 dB on the Minnesota one — the same
+shallow slope the table shows, arrived at over real ionosphere.
 
 **Where it actually breaks:** the limit is acquisition, not image
-quality. Below roughly −2 dB (AWGN) the preamble stops being detectable
-and you get no image at all rather than a poor one. Fading pulls that
-threshold up: mode C under `mpp` failed to acquire at −2 dB. So the
-cliff hasn't been abolished — it has been moved off the picture and onto
-the sync problem, which is a much better place for it.
+quality. Down to 3 dB every transmission is detected; by 0 dB about a
+fifth are missed, and at −2 dB more than half — and a missed preamble
+means no image at all rather than a poor one. So the cliff hasn't been
+abolished, it has been moved off the picture and onto the sync problem,
+which is a much better place for it: the pictures that do arrive at
+−2 dB are still worth looking at.
 
-Acquisition is also probabilistic once fading is involved, because it
-depends on the preamble not landing in a deep fade. At 6 dB SNR with a
-43 Hz frequency offset, preamble sync succeeded on 6–8 of 8 random
-channel realizations across all three fading presets — an individual
-over can miss even when conditions are nominally fine. The beacon's
-mid-stream resync is the safety net here: it gets a second chance every
-~10 s for the whole length of the transmission, rather than one chance
-at the start.
+Acquisition is probabilistic once fading is involved, because it depends
+on the preamble not landing in a deep fade. At 6 dB with a 43 Hz
+frequency offset, mode C sync succeeded on 20–22 of 25 random channel
+realizations across the three fading presets — an individual over can
+miss even when conditions are nominally fine. The beacon's mid-stream
+resync is the safety net here: it gets a second chance every ~10 s for
+the whole length of the transmission, rather than one chance at the
+start.
 
 Other measured properties:
 

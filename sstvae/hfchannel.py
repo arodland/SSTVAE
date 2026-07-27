@@ -1,8 +1,8 @@
 """NumPy HF channel simulator: AWGN, Watterson-style fading, frequency
 offset, sample-clock error. Operates on real passband audio at FS.
 
-SNR follows the FreeDV convention: signal power relative to the noise
-power falling in a 3000 Hz bandwidth.
+SNR is signal power relative to the noise power falling in
+`config.SNR_REF_BW_HZ`.
 """
 
 from dataclasses import dataclass
@@ -17,6 +17,7 @@ from .config import (
     PREAMBLE_SAMPLES,
     HEADER_SAMPLES,
     MODES,
+    SNR_REF_BW_HZ,
     ModeSpec,
 )
 
@@ -78,7 +79,7 @@ def fading(x: np.ndarray, preset: str | FadingPreset, seed: int = 0) -> np.ndarr
 
 
 def awgn(x: np.ndarray, snr_db: float, seed: int = 0) -> np.ndarray:
-    """Add white noise for the given SNR in a 3000 Hz noise bandwidth.
+    """Add white noise for the given SNR in a `SNR_REF_BW_HZ` bandwidth.
 
     Signal power is measured over the active portion (envelope above 10%
     of the overall RMS) so lead-in/out silence doesn't skew it.
@@ -88,8 +89,8 @@ def awgn(x: np.ndarray, snr_db: float, seed: int = 0) -> np.ndarray:
     active = env > 0.1 * np.sqrt(np.mean(x**2))
     s_power = np.mean(x[active] ** 2) if active.any() else np.mean(x**2)
     # White noise over FS/2 Hz with total power sigma^2 puts
-    # sigma^2 * 3000 / (FS/2) into 3000 Hz.
-    sigma2 = s_power * (FS / 2) / 3000.0 / 10 ** (snr_db / 10)
+    # sigma^2 * SNR_REF_BW_HZ / (FS/2) into the reference bandwidth.
+    sigma2 = s_power * (FS / 2) / SNR_REF_BW_HZ / 10 ** (snr_db / 10)
     return x + rng.normal(scale=np.sqrt(sigma2), size=len(x))
 
 

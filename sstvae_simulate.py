@@ -30,7 +30,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("input", help="input WAV (transmit audio)")
     ap.add_argument("output", help="output WAV (received audio)")
-    ap.add_argument("--snr", type=float, default=None, help="SNR dB in 3000 Hz")
+    ap.add_argument("--snr", type=float, default=None, help="SNR dB in 2500 Hz")
     ap.add_argument("--freq-offset", type=float, default=0.0, help="Hz")
     ap.add_argument("--ppm", type=float, default=0.0, help="sample clock error")
     ap.add_argument(

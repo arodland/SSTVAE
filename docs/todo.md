@@ -63,30 +63,45 @@ typical 300–2700 Hz SSB filter, which limits the centre to roughly
 900–2100 Hz — exactly the range measured above. Beyond that the
 transmitter's own filtering, not the modem, is the limit.
 
-## Improve acquisition at large frequency offsets
+## ~~Improve acquisition at large frequency offsets~~ — did not reproduce
 
-**Confirmed:** offsets approaching the advertised ±50 Hz limit cost
-real acquisition sensitivity — but only near the SNR threshold, which
-is why it's easy to miss.
+**Withdrawn 2026-07-26. There is no offset effect; the original result
+was small-sample noise.** Kept rather than deleted because the mechanism
+analysis below is still worth having, and because someone will
+otherwise re-derive the same false positive from the same impression.
 
-Mode C, AWGN (no fading, so deep-fade luck can't mask the effect),
-6 random noise seeds per point, counting successful preamble sync:
+Re-measured with 25 seeds per point instead of 6 (mode C, AWGN, SNR in
+2500 Hz — see CLAUDE.md on the convention change):
 
 | SNR | 0 Hz | 25 Hz | 45 Hz | 50 Hz | 55 Hz |
 |---|---|---|---|---|---|
-| 0 dB | 5/6 | 6/6 | 4/6 | 5/6 | 5/6 |
-| −1 dB | 4/6 | **6/6** | **1/6** | **1/6** | 3/6 |
+| 0 dB | 23/25 | 19/25 | 18/25 | 22/25 | 19/25 |
+| −1 dB | 13/25 | 8/25 | 10/25 | 11/25 | 14/25 |
 
-At −1 dB, offsets ≥45 Hz acquire 2/12 versus 10/12 for offsets ≤25 Hz.
-One dB higher and the effect nearly vanishes; at 6 dB with `mpp` fading
-it is invisible (7–8/8 flat across 0–50 Hz, 8 seeds per point). So the
-cost is roughly *a decibel of acquisition threshold* at large offset,
-not an outright failure — which matches the impression that "most
-failures happen near the edges" without contradicting the modes working
-fine off-frequency in good conditions.
+Pooled at −1 dB: offsets ≤25 Hz acquire **21/50 (42%)**, offsets ≥45 Hz
+**35/75 (47%)**. The large offsets do marginally *better*, and at 0 dB
+the two groups are 84% and 79% — a gap well inside the binomial noise of
+these sample sizes. Under `mpp` fading at 6 dB the row is flat as well
+(19–21/25 across 0–55 Hz), which is what the original notes said too.
 
-**Mechanism: not yet identified.** The obvious theory is wrong, so
-don't start there. `sync.acquire()` estimates CFO in two stages
+The original claim rested on a single SNR row with 6 seeds per point,
+pooled as "2/12 versus 10/12" — and that pooling quietly dropped the
+55 Hz column, which at 3/6 already contradicted the trend. Six trials
+cannot separate 40% from 80%. The non-monotonicity the notes flagged as
+puzzling (45 and 50 Hz worst, 55 Hz recovering) was the tell: it was
+never a mechanism, it was variance.
+
+**Do not re-open this without ≥25 seeds per point.** Acquisition near
+threshold is a coin flip with a per-point success rate around 40–80%,
+so any sweep with single-digit trials per cell will manufacture a
+pattern.
+
+The rest of this section is the mechanism analysis done while the effect
+was believed real. It is retained only because it records what has been
+*ruled out* about `acquire()`, which stays useful if a genuine
+acquisition problem turns up later.
+
+`sync.acquire()` estimates CFO in two stages
 (`sstvae/modem/sync.py`):
 
 1. A lag-`M` autocorrelation over the periodic preamble gives a
@@ -95,16 +110,15 @@ don't start there. `sync.acquire()` estimates CFO in two stages
    resolved by scoring candidate bins (`f_cand = f_frac + m_bin*FS/M`)
    against the known preamble template and taking the best.
 
-That structure predicts the *worst* performance at the half-bin
-boundary, i.e. 25 Hz, where noise most easily pushes the fractional
-estimate into the neighbouring bin's basin. **25 Hz measured best
-(6/6 at both SNRs)** — the cleanest point in the sweep. So plain
-wrong-bin ambiguity is not the story.
+That structure predicts the worst performance at the half-bin boundary,
+i.e. 25 Hz, where noise most easily pushes the fractional estimate into
+the neighbouring bin's basin. The 25 seed-per-point sweep shows no such
+dip either (19/25 and 8/25 at 25 Hz, indistinguishable from its
+neighbours) — so the two-stage CFO estimator is not leaking a wrong-bin
+penalty anywhere across ±55 Hz. That is a genuine, if negative, result:
+the estimator behaves.
 
-The response is also non-monotonic (45 and 50 Hz worst, 55 Hz partly
-recovering), which argues against a simple rolloff explanation.
-
-**Already ruled out: the sync lowpass.** `sync_lowpass()` is
+**Also ruled out: the sync lowpass.** `sync_lowpass()` is
 `firwin(129, 850, fs=FS)` on the complex baseband, and the carriers sit
 at −550..+600 Hz around `FCENTER` before any offset, so it looked like a
 large offset might push them into the skirt. Measured attenuation at the
@@ -112,23 +126,22 @@ shifted carrier positions is **flat to within 0.02 dB out to 55 Hz** at
 both band edges — the filter is not costing anything here. Don't
 re-check this.
 
-Candidates to investigate, cheapest first:
+If a real acquisition problem does turn up later, these were the
+untested candidates — they are ideas, not outstanding work, since there
+is currently nothing to explain:
 
-- Instrument `acquire()` on the failing cases: log `f_frac`, the chosen
+- Instrument `acquire()` on failing cases: log `f_frac`, the chosen
   `m_bin`, the per-candidate scores, and the final `f_hat` versus truth.
-  This distinguishes "picked the wrong bin" from "detected nothing" in
-  one run, and the sweep above gives ready-made failing seeds. Start
-  here — with the filter excluded and half-bin ambiguity contradicted,
-  there is no strong prior left to test against.
-- Check whether residual CFO after bin selection degrades the *template
-  correlation* used for fine timing: a phase ramp across the correlation
-  window costs coherent gain, and the residual grows with total offset
-  even when the bin is chosen correctly.
+  This distinguishes "picked the wrong bin" from "detected nothing".
 - Score bin candidates over more than the preamble — fold in the first
   few frames' pilots before committing. The information is already
   demodulated; only the decision is premature.
 - Keep the top-2 candidates and let the Golay header arbitrate, turning
   a hard argmax into a cheap 2-way retry.
+
+What the 25-seed sweep *does* establish is the plain AWGN acquisition
+curve for mode C, independent of offset: ~80% at 0 dB, ~45% at −1 dB.
+That is the threshold region, and it is steep.
 
 **Scope check: this is an acquisition problem, essentially entirely.**
 Once a signal is acquired and its centre frequency known, decode quality
@@ -140,8 +153,8 @@ latent SNR vs offset:
 |---|---|---|---|---|---|---|---|---|---|
 | latent SNR (dB) | 8.73 | 8.69 | 8.68 | 8.70 | 8.73 | 8.67 | 8.66 | 8.70 | 8.73 |
 
-Total spread **0.07 dB** — negligible beside the ~1 dB of acquisition
-threshold above. The small structure that is there is real and
+Total spread **0.07 dB** — i.e. nothing. The small structure that is
+there is real and
 explainable: `to_baseband()` is deliberately unfiltered and relies on
 the heterodyne image landing exactly on the 50 Hz bin grid, where the
 160-sample demod correlation nulls it. After acquisition corrects by δ,
@@ -151,32 +164,33 @@ is 25 Hz (δ = 12.5, 37.5 → 8.66–8.68 dB) and vanishes where it is 0
 and the CFO estimate error is constant (−0.021 Hz) across the sweep, so
 it isn't residual CFO doing this.
 
-Conclusion: don't go looking for offset sensitivity in the demod/EQ
-path. Fix acquisition.
+Conclusion: there is no offset sensitivity in the demod/EQ path, and
+(per the 25-seed sweep above) none in acquisition either. Frequency
+offset within ±55 Hz simply does not cost anything.
 
-**Safety net.** Less catastrophic than it looks: the beacon gives a
-fresh sync opportunity roughly every 10 s for the whole transmission
-(`sync.acquire_blind` / `Modem.demodulate_blind`), and
-`sstvae_listen.py` falls back to it automatically. A missed preamble
-costs latency and the header's mode information, not the image. But the
-preamble path sets the floor for `sstvae_decode.py` on a recording, and
-`acquire_blind` searches CFO bins directly at `bin_step_hz` resolution
-without a preamble — so it may already be more offset-robust, which
-would itself be a useful comparison.
+**Safety net.** Whatever does cause a missed preamble, it is less
+catastrophic than it looks: the beacon gives a fresh sync opportunity
+roughly every 10 s for the whole transmission (`sync.acquire_blind` /
+`Modem.demodulate_blind`), and `sstvae_listen.py` falls back to it
+automatically. A missed preamble costs latency and the header's mode
+information, not the image. The preamble path still sets the floor for
+`sstvae_decode.py` on a recording.
 
 **Reproducing.** Sync success vs offset, everything else fixed:
 
 ```sh
 uv run sstvae_encode.py photo.jpg tx.wav --mode C --model checkpoint.pt
 for off in 0 25 45 50 55; do
-  for seed in 0 1 2 3 4 5; do
+  for seed in $(seq 0 24); do
     uv run sstvae_simulate.py tx.wav rx.wav --snr -1 --freq-offset $off --seed $seed
     uv run sstvae_decode.py rx.wav out.png --model checkpoint.pt
   done
 done
 ```
 
-Count `SyncError: header decode failed` against successes. Two traps:
+Count `SyncError: header decode failed` against successes. Three traps:
 use AWGN rather than fading (with fading, whether the preamble lands in
-a deep fade swamps the effect), and stay within about a dB of the
-threshold — at 6 dB there is nothing to see.
+a deep fade dominates everything else); stay within about a dB of
+threshold, since at 6 dB everything succeeds and there is nothing to
+measure; and **use at least 25 seeds per point** — six is what produced
+the phantom effect this section used to describe.
