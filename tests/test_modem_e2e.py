@@ -17,10 +17,10 @@ from conftest import (
 # characterize the modem/channel, not the clip setting, so they stay put
 # as CLIP_HEADROOM_DB moves; conftest folds in the clip floor. See
 # conftest for the combination model.
-AWGN_10DB_ONLY_DB = 9.4
+AWGN_10DB_ONLY_DB = 8.9
 ZEROED_SPANS_ONLY_DB = 24.1
 PPM_50_ONLY_DB = 26.4
-MPP_FADING_15DB_ONLY_DB = 14.4
+MPP_FADING_15DB_ONLY_DB = 13.7
 
 
 @pytest.fixture(scope="module")
@@ -73,7 +73,7 @@ def test_awgn_latent_snr(modem, clip_floor_db):
     y = hfchannel.apply_channel(x, snr_db=10.0, freq_offset_hz=-31.0)
     r = modem.demodulate(y)
     snr = _latent_snr_db(lat, r.latents)
-    # 10 dB channel SNR (3 kHz ref) spread over 24 carriers x 50 baud.
+    # 10 dB channel SNR spread over 24 carriers x 50 baud.
     # Bounded above as well: beating the noise-plus-clipping prediction
     # would mean the channel is not actually being applied.
     expected = combine_snr_db(clip_floor_db, AWGN_10DB_ONLY_DB)

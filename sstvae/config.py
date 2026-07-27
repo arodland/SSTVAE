@@ -89,6 +89,15 @@ CLIP_HEADROOM_DB = 0.5  # envelope clip threshold above mean envelope power;
 TX_BANDPASS = (850.0, 2200.0)  # Hz, post-clip filter
 DEMOD_BACKOFF = 6  # samples: demod window starts this early inside the CP
 
+# --- SNR reporting convention ---------------------------------------------
+# Every SNR the project quotes -- the channel simulator's --snr, the
+# receiver's pilot-based estimate, the figures in README and docs -- is
+# signal power over the noise power falling in this bandwidth. Shared so
+# the simulator and the estimator cannot drift apart, since a mismatch
+# between them is invisible (both keep working, they just disagree about
+# what a number means).
+SNR_REF_BW_HZ = 2500.0
+
 INTERLEAVER_SEED = 1000  # + group index
 PILOT_SEED = 42
 PROTOCOL_VERSION = 1

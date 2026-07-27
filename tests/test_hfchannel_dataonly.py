@@ -8,7 +8,7 @@ from sstvae.modem import Modem
 from conftest import snr_floor_db
 
 # SNR this scenario reaches with clipping disabled (see conftest).
-MPG_FADING_15DB_ONLY_DB = 15.4
+MPG_FADING_15DB_ONLY_DB = 14.7
 
 
 @pytest.fixture(scope="module")

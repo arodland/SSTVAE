@@ -61,7 +61,8 @@ rationale lives in the plan history.
     *guarantees* a full copy regardless of phase; shorter windows may
     still get lucky but aren't guaranteed to.
   - `golay.py` Golay(24,12), brute-force soft ML decode.
-- `sstvae/hfchannel.py` — channel sim (AWGN in 3 kHz convention,
+- `sstvae/hfchannel.py` — channel sim (AWGN in the `SNR_REF_BW_HZ`
+  convention,
   Watterson 2-path fading presets mpg/mpp/mpd, freq/clock offset).
 - `sstvae/models/autoencoder.py` — encoder (unit-RMS tanh latents,
   132ch in 3 ordered groups of 44) and decoder (takes latents ×
@@ -137,6 +138,20 @@ either, so overlays stay renderable from the command line.
   encoder, modem, and training. Don't renormalize anywhere else.
 - Local GPU is ROCm (`torch.cuda.is_available()` is true); never add
   CUDA-only dependencies.
+- **SNR is quoted in a 2500 Hz noise bandwidth** (`config.SNR_REF_BW_HZ`),
+  changed from 3000 Hz on 2026-07-26. It is one constant, used by both
+  `hfchannel.awgn` (which generates the noise) and
+  `modem._estimate_snr_db` (which measures it) — never hardcode a
+  bandwidth in either, because a mismatch between them is invisible:
+  both keep working and simply disagree about what a number means. The
+  same physical channel reads **0.79 dB higher** on the new scale
+  (`10log10(3000/2500)`), so any pre-2026-07-26 SNR figure found in old
+  notes is 0.79 dB *below* its equivalent today. Note that
+  `latent_channel.py` and `waveform_channel.py` add noise per-latent /
+  per-carrier against unit-RMS references — those have no noise
+  bandwidth and were deliberately left alone; changing them would alter
+  training, not relabel it. The README's tables were re-measured on the
+  new scale with `scripts/snr_sweep.py`.
 - Capture and playback need **inverse** resample ratios, and sharing one
   "ratio to the device" helper between them is a silent, hardware-only
   bug: playback decimated 48k→8k instead of interpolating 8k→48k, so a

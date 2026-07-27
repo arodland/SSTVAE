@@ -32,6 +32,7 @@ from ..config import (
     LATENTS_PER_FRAME,
     PREAMBLE_CP,
     PREAMBLE_SAMPLES,
+    SNR_REF_BW_HZ,
     HEADER_SAMPLES,
     LEADIN_SAMPLES,
     LEADOUT_SAMPLES,
@@ -91,10 +92,10 @@ class BlindDemodResult:
 
 
 def _estimate_snr_db(h_pilot: np.ndarray, received: np.ndarray | None = None) -> float:
-    """Pilot-based radio SNR estimate, in the same "dB SNR in a 3000 Hz
-    noise bandwidth" convention used elsewhere (hfchannel.awgn, the
-    training confidence sigmoid) -- so it's directly comparable to
-    those numbers, not an ad-hoc scale.
+    """Pilot-based radio SNR estimate, in the same "dB SNR in a
+    `SNR_REF_BW_HZ` noise bandwidth" convention used elsewhere
+    (hfchannel.awgn) -- so it's directly comparable to those numbers,
+    not an ad-hoc scale.
 
     Treats the frame-to-frame difference of each carrier's pilot-derived
     channel gain as a noise proxy (real fading is assumed to move much
@@ -102,8 +103,8 @@ def _estimate_snr_db(h_pilot: np.ndarray, received: np.ndarray | None = None) ->
     extra "noise" and understate SNR a bit -- fine for a status
     display, not a calibration instrument). That gives a per-carrier
     SNR in a ~RS-wide (50 Hz) noise bandwidth (the DFT correlator's
-    matched-filter bandwidth), which is then scaled up to the 3000 Hz
-    reference bandwidth assuming roughly even power across the NC
+    matched-filter bandwidth), which is then scaled to the reference
+    bandwidth assuming roughly even power across the NC
     carriers (measured spread is well under 1 dB in practice -- see
     scripts/diagnose_carrier_power.py).
     """
@@ -125,8 +126,8 @@ def _estimate_snr_db(h_pilot: np.ndarray, received: np.ndarray | None = None) ->
     if signal_var <= 0:
         return float("-inf")
     snr_50hz_linear = signal_var / noise_var
-    snr_3khz_linear = snr_50hz_linear * (NC * RS / 3000.0)
-    return 10 * np.log10(snr_3khz_linear)
+    snr_ref_linear = snr_50hz_linear * (NC * RS / SNR_REF_BW_HZ)
+    return 10 * np.log10(snr_ref_linear)
 
 
 class Modem:
