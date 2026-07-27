@@ -11,9 +11,9 @@ buffer.
 """
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from ..config import CARRIER0, FS, NC, RS
 
@@ -21,7 +21,11 @@ NFFT = 1024
 BIN_HZ = FS / NFFT
 DISPLAY_HZ = 3000.0  # an SSB receiver's passband; the signal lives inside it
 N_BINS = int(DISPLAY_HZ / BIN_HZ)
-HISTORY = 300  # rows of waterfall kept
+# Rows of history kept. Sized for the tall, narrow column the widget now
+# lives in down the right-hand side of the receive panel: at ~20 fps this
+# is around half a minute of history, and enough rows that a full-height
+# pane isn't drawn from a handful of stretched ones.
+HISTORY = 640
 
 # The occupied band, marked so the operator can see whether the signal is
 # sitting where the modem expects it.
@@ -62,12 +66,20 @@ class WaterfallWidget(QWidget):
         self._rows = np.zeros((HISTORY, N_BINS, 3), dtype=np.uint8)
         self._peak = 0.0
         self._clipping = False
+        # Narrow minimum: the frequency axis is scaled to whatever width
+        # the splitter gives it, and demanding all N_BINS pixels would
+        # stop the operator from shrinking the column in favour of the
+        # picture.
+        self.setMinimumWidth(160)
         self.setMinimumHeight(140)
-        self.setMinimumWidth(N_BINS)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(max(1, int(1000 / fps)))
+
+    def sizeHint(self):
+        return QSize(280, 600)
 
     # --- data ----------------------------------------------------------
     def set_ring(self, ring) -> None:
@@ -119,17 +131,29 @@ class WaterfallWidget(QWidget):
             x = int(hz * scale)
             painter.drawLine(x, 0, x, self.height())
 
-        painter.setPen(QColor(255, 255, 255, 160))
-        painter.drawText(
-            int(BAND_LO_HZ * scale) + 4, 14,
-            f"SSTVAE {BAND_LO_HZ:.0f}-{BAND_HI_HZ:.0f} Hz",
-        )
+        # The column is user-resizable now, so the caption has to earn its
+        # place: drop it rather than let it run off the edge or overprint
+        # the spectrum.
+        label = f"SSTVAE {BAND_LO_HZ:.0f}-{BAND_HI_HZ:.0f} Hz"
+        x_label = int(BAND_LO_HZ * scale) + 4
+        if x_label + painter.fontMetrics().horizontalAdvance(label) < w - 12:
+            painter.setPen(QColor(0, 0, 0, 160))
+            painter.drawText(x_label + 1, 15, label)  # shadow, for contrast
+            painter.setPen(QColor(255, 255, 255, 220))
+            painter.drawText(x_label, 14, label)
         # A 1 kHz grid, so the operator can read where a signal sits.
-        painter.setPen(QColor(255, 255, 255, 60))
+        # Drawn with a shadow: the ticks sit over whatever the spectrum
+        # happens to be doing at the bottom of the pane, which is often
+        # bright.
+        h = self.height()
         for hz in range(1000, int(DISPLAY_HZ), 1000):
             x = int(hz * scale)
-            painter.drawLine(x, self.height() - 8, x, self.height())
-            painter.drawText(x + 3, self.height() - 3, f"{hz // 1000}k")
+            painter.setPen(QColor(0, 0, 0, 150))
+            painter.drawLine(x + 1, h - 8, x + 1, h)
+            painter.drawText(x + 4, h - 3, f"{hz // 1000}k")
+            painter.setPen(QColor(255, 255, 255, 190))
+            painter.drawLine(x, h - 8, x, h)
+            painter.drawText(x + 3, h - 4, f"{hz // 1000}k")
 
     def _draw_level_meter(self, painter: QPainter) -> None:
         """A thin bar down the right edge: enough to set soundcard gain,

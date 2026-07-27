@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -127,27 +128,41 @@ class ReceivePanel(QWidget):
 
     # --- ui -------------------------------------------------------------
     def _build_ui(self) -> None:
+        # Picture on the left, waterfall down the right — the same shape
+        # as the transmit panel. The pictures are 4:3, so on the wide
+        # monitor most people have, stacking the waterfall on top would
+        # leave the sides empty and squeeze the thing you actually want
+        # to look at.
         layout = QVBoxLayout(self)
+        splitter = QSplitter(Qt.Horizontal, self)
 
-        self.waterfall = WaterfallWidget(None, self)
-        layout.addWidget(self.waterfall)
+        left = QWidget(splitter)
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
 
-        preview_box = QGroupBox("Picture", self)
+        preview_box = QGroupBox("Picture", left)
         pv = QVBoxLayout(preview_box)
-        self.preview = QLabel("Nothing received yet", self)
+        self.preview = QLabel("Nothing received yet", left)
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setMinimumHeight(240)
         self.preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.preview.setStyleSheet("background:#202024; color:#888;")
         pv.addWidget(self.preview)
-        layout.addWidget(preview_box, 1)
+        left_layout.addWidget(preview_box, 1)
 
-        self.status = QLabel("Stopped", self)
-        layout.addWidget(self.status)
+        self.status = QLabel("Stopped", left)
+        left_layout.addWidget(self.status)
 
-        self.progress = QProgressBar(self)
+        self.progress = QProgressBar(left)
         self.progress.setRange(0, 100)
-        layout.addWidget(self.progress)
+        left_layout.addWidget(self.progress)
+
+        self.waterfall = WaterfallWidget(None, splitter)
+        splitter.addWidget(left)
+        splitter.addWidget(self.waterfall)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter, 1)
 
         controls = QHBoxLayout()
         self.start_btn = QPushButton("Start receiving", self)
