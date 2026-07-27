@@ -12,6 +12,7 @@ import sys
 import threading
 
 from PySide6.QtCore import QObject, Signal
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QLabel,
@@ -135,11 +136,29 @@ class MainWindow(QMainWindow):
         self._update_station_label()
 
     def _build_menu(self) -> None:
+        """Build the File menu.
+
+        The explicit `NoRole` calls are load-bearing on macOS. Qt's Cocoa
+        plugin pattern-matches action text and moves anything looking
+        like Preferences or Quit into the application menu. Both of this
+        menu's actions match, so Qt emptied the File menu -- and macOS
+        hides an empty menu, leaving no way to reach Settings at all.
+        Pinning the roles keeps them where they were put.
+
+        The shortcuts are the belt to that braces: `Preferences` and
+        `Quit` are the platform-correct sequences (Cmd+, and Cmd+Q on
+        macOS, Ctrl+Q on everything else), so Settings stays reachable
+        even if a platform menu bar misbehaves again.
+        """
         menu = self.menuBar().addMenu("&File")
         settings_action = menu.addAction("&Settings...")
+        settings_action.setMenuRole(QAction.MenuRole.NoRole)
+        settings_action.setShortcut(QKeySequence.StandardKey.Preferences)
         settings_action.triggered.connect(self.open_settings)
         menu.addSeparator()
         quit_action = menu.addAction("&Quit")
+        quit_action.setMenuRole(QAction.MenuRole.NoRole)
+        quit_action.setShortcut(QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
 
     def _build_status_bar(self) -> None:
