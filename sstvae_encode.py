@@ -9,25 +9,12 @@ import argparse
 import numpy as np
 import torch
 
-from sstvae import checkpoint, wavio
+from sstvae import wavio
+from sstvae.codec import MODEL_HELP, load_model  # noqa: F401  (re-exported)
 from sstvae.config import MODES
 from sstvae.data import load_image
 from sstvae.models import SSTVAE
 from sstvae.modem import Modem
-
-MODEL_HELP = (
-    "checkpoint.pt; defaults to the published checkpoint, downloaded and "
-    "cached on first use"
-)
-
-
-def load_model(path: str | None = None) -> SSTVAE:
-    """`path` may be None, in which case the published checkpoint is used."""
-    ckpt = torch.load(checkpoint.resolve(path), map_location="cpu")
-    model = SSTVAE(width=ckpt.get("width", 128))
-    model.load_state_dict(ckpt["model"])
-    model.eval()
-    return model
 
 
 def main() -> None:

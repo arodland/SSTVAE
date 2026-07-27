@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import sstvae_listen  # noqa: E402
 from sstvae.config import FS, MODES  # noqa: E402
 from sstvae.modem import Modem  # noqa: E402
+from sstvae.rx import engine as rx_engine  # noqa: E402
 
 
 def _transmission(mode: str, seed: int) -> np.ndarray:
@@ -66,8 +67,10 @@ def _run_decode_loop(loop_fn, audio, tmp_path, timeout_s=180.0, expect_saves=2):
         img.putdata([(h[0], h[1], h[2])] * 64)
         return img
 
-    real_reconstruct = sstvae_listen.reconstruct
-    sstvae_listen.reconstruct = fake_reconstruct
+    # Patched where the decode loop looks it up, which is the engine
+    # module -- sstvae_listen only re-exports it for the CLI.
+    real_reconstruct = rx_engine.reconstruct
+    rx_engine.reconstruct = fake_reconstruct
 
     state = sstvae_listen.SharedState()
     stop = threading.Event()
@@ -89,7 +92,7 @@ def _run_decode_loop(loop_fn, audio, tmp_path, timeout_s=180.0, expect_saves=2):
     finally:
         stop.set()
         th.join(timeout=10.0)
-        sstvae_listen.reconstruct = real_reconstruct
+        rx_engine.reconstruct = real_reconstruct
 
     for p in sorted(Path(tmp_path).glob("*.png")):
         saves.append(p)

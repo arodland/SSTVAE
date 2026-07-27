@@ -33,8 +33,9 @@ whole idea.
 > - **The on-air format is not frozen.** Expect incompatible changes.
 >   Two stations must run the same commit *and* the same model
 >   checkpoint to talk to each other.
-> - **It is not yet user-friendly.** Command-line tools, no rig control,
->   no packaged installer, no integration with existing SSTV software.
+> - **It is not yet packaged.** There is a desktop app now (`sstvae-gui`,
+>   with rig control), but you still install it from source, and there is
+>   no integration with existing SSTV software.
 > - Not registered with, or coordinated with, any band-plan authority.
 >   Use it thoughtfully and identify per your licence.
 >
@@ -277,6 +278,53 @@ PipeWire monitor sources, or just a microphone near the speaker.
 
 ## Usage
 
+### The desktop application
+
+```sh
+uv sync --extra gui
+uv run sstvae-gui
+```
+
+One window that transmits and receives on a soundcard, keys the rig, and
+remembers how it is set up — the alternative to stringing the
+command-line tools below together by hand.
+
+- **Receive** — waterfall with the SSTVAE band marked and an input level
+  meter, the picture building up as it arrives, autosave or a Save
+  button. Filenames follow a template, e.g.
+  `2026-07-26_011542Z_14.340MHz_N0CALL.png`; the frequency comes from
+  the rig and is simply left out when there is no rig control.
+- **Transmit** — pick a picture, then drag station text and an inset of
+  the last received image onto it. The preview *is* the render, so what
+  you arrange is exactly what goes on the air. Mode A/B/C with their
+  durations, a progress bar, and Cancel.
+- **Rig control** — PTT and frequency readback through Hamlib's
+  `rigctld`. Point it at a daemon you are already running (shared with
+  WSJT-X or fldigi), or let the app start its own. Receive pauses while
+  you transmit, so your own signal is never decoded back as a reception.
+
+Rig control is optional — leave it off and use VOX or manual PTT.
+
+<details>
+<summary>Rig control setup</summary>
+
+The app talks to `rigctld` over TCP rather than linking Hamlib
+directly, so it works with a daemon shared between programs and needs
+no Python bindings. Find your rig's model number with `rigctl -l`, then
+either start the daemon yourself:
+
+```sh
+rigctld -m 3073 -r /dev/ttyUSB0 -s 38400
+```
+
+or tick **Start a local rigctld myself** in Settings → Rig control and
+fill in the same values. Two programs cannot both hold the serial port,
+so if something else already has the rig, share its daemon instead.
+`rigctld -m 1` starts Hamlib's dummy rig, which is handy for testing the
+buttons with no radio attached.
+
+</details>
+
 ### Transmit
 
 ```sh
@@ -311,6 +359,8 @@ Received images land in `received/` (`--out-dir`). The listener keeps a
 rolling buffer and decodes continuously, so it picks up transmissions
 already in progress and reconstructs them in full. `--low-cpu` trades
 that mid-stream capability for much lower idle CPU — useful on a Pi.
+(This is the same reception engine the desktop app uses, without the
+window.)
 
 ### Test it without a radio
 
