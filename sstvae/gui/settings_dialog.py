@@ -7,8 +7,10 @@ device is plugged or unplugged, so a saved index silently comes back
 pointing at a different soundcard.
 """
 
+import re
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -29,7 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..audio import AudioUnavailable, list_devices
-from ..rig import RigError, RigctldClient
+from ..rig import RigError, RigctldClient, list_models
 
 
 class _FolderRow(QWidget):
@@ -141,6 +143,65 @@ class SettingsDialog(QDialog):
             combo.setCurrentIndex(idx if idx >= 0 else 0)
         return combo
 
+    def _model_combo(self, current: str, parent: QWidget) -> QComboBox:
+        """Picker over `rigctld -l`.
+
+        Editable on purpose: the list can fail to load (no Hamlib), and a
+        configuration written by an older/newer Hamlib may name a model
+        this one doesn't list. In both cases the number must still be
+        typeable, and the saved value must survive a round trip through
+        the dialog rather than being silently reset.
+        """
+        combo = QComboBox(parent)
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.NoInsert)
+        self._model_error = None
+        try:
+            models = list_models()
+        except RigError as e:
+            self._model_error = str(e).splitlines()[0]
+            models = []
+        for m in models:
+            combo.addItem(m.label(), m.number)
+        # 300-odd entries, labelled "<mfg> <model>". Qt's default
+        # completer anchors at the start of the label, so a user typing
+        # the only part they know ("FT-847", "IC-7300") would match
+        # nothing; match anywhere in the label instead.
+        completer = combo.completer()
+        if completer is not None:
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchContains)
+
+        try:
+            number = int(current)
+        except (TypeError, ValueError):
+            number = None
+        idx = combo.findData(number) if number is not None else -1
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        else:
+            combo.setEditText(current or "1")
+        return combo
+
+    def _rig_model_number(self) -> str:
+        """The model number behind the picker's current state.
+
+        A chosen item carries its number as item data. Free text is
+        either a bare number or a label that was typed/completed to match
+        an item, so fall back to matching the text, then to the leading
+        digits of a label like "Yaesu FT-847 (1001)".
+        """
+        text = self.rig_model.currentText().strip()
+        idx = self.rig_model.findText(text)
+        if idx >= 0:
+            data = self.rig_model.itemData(idx)
+            if data is not None:
+                return str(data)
+        if text.isdigit():
+            return text
+        m = re.search(r"\((\d+)\)\s*(?:\[[^]]*\])?$", text)
+        return m.group(1) if m else "1"
+
     def _rig_tab(self) -> QWidget:
         w = QWidget(self)
         form = QFormLayout(w)
@@ -166,12 +227,25 @@ class SettingsDialog(QDialog):
             "serial port."
         ))
 
-        self.rig_model = QLineEdit(rig.model, w)
+        self.rig_model = self._model_combo(rig.model, w)
+        self.rig_model_note = QLabel("", w)
         self.rig_device = QLineEdit(rig.device, w)
         self.rig_baud = QSpinBox(w)
         self.rig_baud.setRange(300, 921600)
         self.rig_baud.setValue(rig.baud)
-        form.addRow("Rig model (rigctl -l)", self.rig_model)
+        form.addRow("Rig model", self.rig_model)
+        if self._model_error:
+            self.rig_model_note.setText(
+                f"{self._model_error}\nEnter a model number by hand, or install "
+                "Hamlib and reopen this dialog."
+            )
+            self.rig_model_note.setStyleSheet("color: palette(link-visited);")
+            # Disabled, but deliberately not unchecked: Hamlib may just be
+            # missing on the machine editing the config, and clearing a
+            # setting the user did not touch is worse than a spawn that
+            # fails loudly later (rig_controller already reports that).
+            self.rig_spawn.setEnabled(False)
+            form.addRow("", self.rig_model_note)
         form.addRow("Serial device", self.rig_device)
         form.addRow("Baud", self.rig_baud)
 
@@ -308,7 +382,7 @@ class SettingsDialog(QDialog):
         config.rig.host = self.rig_host.text().strip() or "127.0.0.1"
         config.rig.port = self.rig_port.value()
         config.rig.spawn_local = self.rig_spawn.isChecked()
-        config.rig.model = self.rig_model.text().strip() or "1"
+        config.rig.model = self._rig_model_number()
         config.rig.device = self.rig_device.text().strip()
         config.rig.baud = self.rig_baud.value()
         config.rig.ptt_lead_s = self.ptt_lead.value()

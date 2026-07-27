@@ -371,15 +371,18 @@ Rig control is optional — leave it off and use VOX or manual PTT.
 
 The app talks to `rigctld` over TCP rather than linking Hamlib
 directly, so it works with a daemon shared between programs and needs
-no Python bindings. Find your rig's model number with `rigctl -l`, then
-either start the daemon yourself:
+no Python bindings. Either start the daemon yourself:
 
 ```sh
 rigctld -m 3073 -r /dev/ttyUSB0 -s 38400
 ```
 
 or tick **Start a local rigctld myself** in Settings → Rig control and
-fill in the same values. Two programs cannot both hold the serial port,
+fill in the same values. The **Rig model** box lists every backend your
+Hamlib supports — start typing any part of the name (`FT-847`,
+`IC-7300`) to find it — so you don't need to look the number up with
+`rigctl -l` yourself. If Hamlib isn't installed the box says so, and
+you can still enter a model number by hand. Two programs cannot both hold the serial port,
 so if something else already has the rig, share its daemon instead.
 `rigctld -m 1` starts Hamlib's dummy rig, which is handy for testing the
 buttons with no radio attached.

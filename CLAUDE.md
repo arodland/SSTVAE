@@ -108,6 +108,15 @@ either, so overlays stay renderable from the command line.
   system site-packages and a virtualenv cannot see them. A Hamlib error
   code raises but keeps the connection; a dead socket redials once.
   Every method is **blocking socket I/O** — see `gui/rig_controller.py`.
+  `list_models()` parses `rigctld -l` (~3 ms, 321 rows) to populate the
+  settings picker, and is the one place that surfaces "Hamlib isn't
+  installed" at configuration time rather than at the first keying.
+  It **slices fixed-width columns using offsets taken from the header
+  line** — splitting on whitespace runs looks fine and silently drops
+  rows, because fields contain single spaces ("N2ADR James Ahlstrom")
+  and at least one Model fills its column exactly, leaving a single
+  space before Version. Asks `rigctld`, not `rigctl`, so the list comes
+  from the same binary `spawn_rigctld` runs.
 - `sstvae/gui/rig_controller.py` — all rigctld I/O, on its own thread.
   **Nothing on the GUI thread may call the rig.** A rigctld that is up
   but not answering costs the socket timeout on the recv *and* again on

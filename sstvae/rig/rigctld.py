@@ -22,6 +22,7 @@ import shutil
 import socket
 import subprocess
 import threading
+from typing import NamedTuple
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 4532
@@ -178,6 +179,110 @@ class RigctldClient:
         return f"rig: {f / 1e6:.4f} MHz"
 
 
+def _rigctld_exe() -> str:
+    exe = shutil.which("rigctld")
+    if exe is None:
+        raise RigError(
+            "rigctld not found on PATH. Install Hamlib "
+            "(Debian/Ubuntu: apt install libhamlib-utils; Arch: hamlib; "
+            "macOS: brew install hamlib)."
+        )
+    return exe
+
+
+class RigModel(NamedTuple):
+    """One row of `rigctld -l`."""
+
+    number: int
+    mfg: str
+    model: str
+    version: str
+    status: str
+    macro: str
+
+    def label(self) -> str:
+        """Display text for a picker. The status suffix is there so a
+        user doesn't unknowingly choose an Alpha or Untested backend;
+        Stable is the majority and stays unmarked."""
+        base = f"{self.mfg} {self.model} ({self.number})"
+        return base if self.status == "Stable" else f"{base} [{self.status}]"
+
+
+# The models people reach for when they are sharing a rig with other
+# software rather than driving the serial port themselves. Alphabetical
+# order buries them; the picker floats these to the top.
+SHARED_RIG_MODELS = (2, 4)
+
+_LIST_COLUMNS = ("Rig #", "Mfg", "Model", "Version", "Status", "Macro")
+
+
+def _parse_model_list(text: str) -> list[RigModel]:
+    """Parse `rigctld -l` output.
+
+    Deliberately column-sliced rather than split on whitespace runs:
+    fields contain single spaces ("N2ADR James Ahlstrom", "NET rigctl"),
+    and at least one row ("Digital World Traveller") fills its column
+    exactly, leaving a *single* space before the next field. Taking the
+    offsets from the header line instead handles both, and survives a
+    Hamlib build that changes the column widths.
+    """
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    for i, line in enumerate(lines):
+        if all(c in line for c in _LIST_COLUMNS):
+            header, rows = line, lines[i + 1:]
+            break
+    else:
+        raise RigError("could not parse `rigctld -l`: no header row found")
+
+    # "Rig #" is right-aligned in its column, so its field starts at the
+    # line start, not at the header text.
+    starts = [0] + [header.index(c) for c in _LIST_COLUMNS[1:]]
+    ends = starts[1:] + [None]
+
+    models = []
+    for line in rows:
+        fields = [line[s:e].strip() for s, e in zip(starts, ends)]
+        if not fields[0].isdigit() or not fields[5].startswith("RIG_MODEL_"):
+            continue  # trailing notes, or a format we don't recognise
+        models.append(RigModel(int(fields[0]), *fields[1:]))
+    if not models:
+        raise RigError("`rigctld -l` listed no usable models")
+    return models
+
+
+def list_models(timeout: float = 10.0) -> list[RigModel]:
+    """Every rig backend this machine's Hamlib supports, sorted by
+    manufacturer then model, with `SHARED_RIG_MODELS` floated to the
+    front.
+
+    Asks `rigctld` rather than `rigctl` so the list is guaranteed to come
+    from the same binary `spawn_rigctld` will run. Raises `RigError` with
+    the install hint if Hamlib isn't there — which is the moment worth
+    telling the user about, rather than at the first attempt to key up.
+    """
+    exe = _rigctld_exe()
+    try:
+        proc = subprocess.run(
+            [exe, "-l"], capture_output=True, text=True, timeout=timeout
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RigError(f"could not run `rigctld -l`: {e}") from e
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip().splitlines()
+        raise RigError(
+            "`rigctld -l` failed"
+            + (f": {detail[0]}" if detail else f" (exit {proc.returncode})")
+        )
+
+    models = _parse_model_list(proc.stdout)
+    pinned = {n: i for i, n in enumerate(SHARED_RIG_MODELS)}
+    return sorted(
+        models,
+        key=lambda m: (pinned.get(m.number, len(pinned)),
+                       m.mfg.lower(), m.model.lower()),
+    )
+
+
 def spawn_rigctld(model: str, device: str, baud: int | None = None,
                   port: int = DEFAULT_PORT) -> subprocess.Popen:
     """Start a private rigctld. Only for users who aren't already running
@@ -186,14 +291,7 @@ def spawn_rigctld(model: str, device: str, baud: int | None = None,
 
     The caller owns the returned process and must terminate it.
     """
-    exe = shutil.which("rigctld")
-    if exe is None:
-        raise RigError(
-            "rigctld not found on PATH. Install Hamlib "
-            "(Debian/Ubuntu: apt install libhamlib-utils; Arch: hamlib; "
-            "macOS: brew install hamlib)."
-        )
-    argv = [exe, "-m", str(model), "-r", device, "-t", str(port)]
+    argv = [_rigctld_exe(), "-m", str(model), "-r", device, "-t", str(port)]
     if baud:
         argv += ["-s", str(baud)]
     try:
