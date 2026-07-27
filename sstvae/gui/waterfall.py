@@ -21,11 +21,30 @@ NFFT = 1024
 BIN_HZ = FS / NFFT
 DISPLAY_HZ = 3000.0  # an SSB receiver's passband; the signal lives inside it
 N_BINS = int(DISPLAY_HZ / BIN_HZ)
-# Rows of history kept. Sized for the tall, narrow column the widget now
-# lives in down the right-hand side of the receive panel: at ~20 fps this
-# is around half a minute of history, and enough rows that a full-height
-# pane isn't drawn from a handful of stretched ones.
-HISTORY = 640
+
+# The backing image is kept exactly the widget's size, so the painter
+# never rescales it.
+#
+# Scrolling is clean when the destination is an integer multiple of the
+# source: at a k-times upscale, source row i lands at exactly i*k and a
+# one-row shift moves the picture by exactly k pixels. The bad direction
+# is downscaling, which is where this widget was -- 640 rows into a pane
+# a few hundred pixels tall. There, source row i lands at
+# floor(i * height / rows), a one-row shift moves the picture by a
+# fraction of a pixel, and every frame re-quantises differently, so the
+# rows crawl and shimmer.
+#
+# k = 1 is the simplest member of that family and the best one here: the
+# scroll advances a single pixel per tick (k > 1 would jump k pixels and
+# hold k times less history for the same pane).
+#
+# The frequency axis has the same problem in the same direction -- 384
+# bins squeezed into a ~280 px column -- so rows are reduced to the
+# widget's width when they are computed rather than by the painter; see
+# `reduce_to_width`.
+#
+# History depth therefore follows the widget height: at ~20 fps a
+# 700-pixel pane holds a bit over half a minute.
 
 # The occupied band, marked so the operator can see whether the signal is
 # sitting where the modem expects it.
@@ -57,13 +76,35 @@ _LUT = _colormap()
 _WINDOW = np.hanning(NFFT)
 
 
+def reduce_to_width(values: np.ndarray, width: int) -> np.ndarray:
+    """Map a spectrum onto exactly `width` columns.
+
+    Peak-hold rather than point-sampling when shrinking: the carriers are
+    one or two bins wide and about six bins apart, so taking every k'th
+    bin drops some of them outright and leaves a ragged comb where the
+    signal should be a solid block. Taking the maximum over each output
+    column's bins keeps every carrier visible.
+    """
+    n = len(values)
+    if width <= 0:
+        return values[:0]
+    if width == n:
+        return values
+    if width > n:  # upscaling: interpolate rather than repeat, to avoid
+        # a blocky frequency axis on a wide pane
+        return np.interp(np.linspace(0, n - 1, width), np.arange(n), values)
+    # Group boundaries are strictly increasing because n >= width.
+    return np.maximum.reduceat(values, (np.arange(width) * n) // width)
+
+
 class WaterfallWidget(QWidget):
     """Spectrum history, newest row at the top."""
 
     def __init__(self, ring, parent=None, fps: int = 20):
         super().__init__(parent)
         self._ring = ring
-        self._rows = np.zeros((HISTORY, N_BINS, 3), dtype=np.uint8)
+        # Allocated on first use / resize, always exactly widget-sized.
+        self._rgb: np.ndarray | None = None
         self._peak = 0.0
         self._clipping = False
         # Narrow minimum: the frequency axis is scaled to whatever width
@@ -86,9 +127,38 @@ class WaterfallWidget(QWidget):
         self._ring = ring
 
     def clear(self) -> None:
-        self._rows[:] = 0
+        if self._rgb is not None:
+            self._rgb[:] = 0
         self._peak = 0.0
         self.update()
+
+    def _ensure_buffer(self) -> np.ndarray:
+        """The backing image, resized to the widget if it has changed.
+
+        Existing history is carried across so a resize doesn't blank the
+        display: rows are kept as-is (they are already one pixel each)
+        and columns are point-resampled, which is good enough for pixels
+        that are only scrolling off anyway.
+        """
+        h, w = max(1, self.height()), max(1, self.width())
+        old = self._rgb
+        if old is not None and old.shape[:2] == (h, w):
+            return old
+
+        new = np.zeros((h, w, 3), dtype=np.uint8)
+        if old is not None:
+            rows = min(h, old.shape[0])
+            if old.shape[1] == w:
+                new[:rows] = old[:rows]
+            else:
+                cols = ((np.arange(w) * old.shape[1]) // w).clip(0, old.shape[1] - 1)
+                new[:rows] = old[:rows][:, cols]
+        self._rgb = new
+        return new
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._ensure_buffer()
 
     def _tick(self) -> None:
         if self._ring is None:
@@ -102,21 +172,26 @@ class WaterfallWidget(QWidget):
         # already been clipped somewhere upstream in the capture chain.
         self._clipping = self._peak >= 0.99
 
+        buf = self._ensure_buffer()
         spec = np.abs(np.fft.rfft(block * _WINDOW))[:N_BINS]
         db = 20.0 * np.log10(spec / NFFT + 1e-12)
+        # Reduced to the display width here, not by the painter: see
+        # reduce_to_width.
+        db = reduce_to_width(db, buf.shape[1])
         norm = np.clip((db - DB_FLOOR) / (DB_CEIL - DB_FLOOR), 0.0, 1.0)
-        row = _LUT[(norm * 255).astype(np.uint8)]
 
-        self._rows[1:] = self._rows[:-1]
-        self._rows[0] = row
+        buf[1:] = buf[:-1]  # one row = one pixel, so this is a 1 px scroll
+        buf[0] = _LUT[(norm * 255).astype(np.uint8)]
         self.update()
 
     # --- painting -------------------------------------------------------
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
-        buf = np.ascontiguousarray(self._rows)
-        img = QImage(buf.data, N_BINS, HISTORY, 3 * N_BINS, QImage.Format_RGB888)
-        painter.drawImage(self.rect(), img)
+        buf = np.ascontiguousarray(self._ensure_buffer())
+        h, w = buf.shape[:2]
+        img = QImage(buf.data, w, h, 3 * w, QImage.Format_RGB888)
+        # 1:1 by construction, so this is a blit and not a rescale.
+        painter.drawImage(0, 0, img)
 
         self._draw_band_markers(painter)
         self._draw_level_meter(painter)
