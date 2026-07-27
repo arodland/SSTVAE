@@ -279,20 +279,34 @@ uv sync --extra cli                      # with uv
 pip install -e '.[cli]'                  # or plain pip, ideally in a venv
 ```
 
+**Nothing outside training uses a GPU**, so don't let pip talk you into
+a CUDA one. With `uv` this is handled for you: the `cli`, `listen` and
+`gui` extras pull CPU-only torch (~40 packages) while `train` gets a GPU
+build. On Linux, plain `pip` will instead drag in ~2.5 GB of CUDA
+runtime that never gets used, so tell it not to:
+
+```sh
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -e '.[cli]'
+```
+
+This is a Linux-only wrinkle: the macOS and Windows wheels pull no
+separate GPU runtime, so there is nothing to avoid there.
+
 With `uv`, prefix commands with `uv run`; with pip, activate your venv
 and call `python` directly. Examples below use `uv run`.
 
 <details>
 <summary>Platform notes</summary>
 
-- **Linux** — nothing extra. `pip install -e '.[cli]'` pulls a CPU or
-  CUDA build of torch depending on your platform; either works.
-- **macOS** (Intel or Apple Silicon) — nothing extra. Torch uses the CPU
-  or MPS automatically.
+- **Linux** — see the CPU-torch note above; otherwise nothing extra.
+- **macOS** (Intel or Apple Silicon) — nothing extra, and nothing to
+  choose: there is one wheel, it covers CPU and MPS, and it brings no
+  separate GPU runtime with it.
 - **Windows** — works in PowerShell or WSL. In PowerShell, quote the
   extras differently: `pip install -e ".[cli]"`.
-- **AMD GPU / ROCm** — the default wheels are CPU/CUDA. You do not need
-  a GPU for encode/decode; only training benefits.
+- **AMD GPU / ROCm** — nothing to do. You do not need a GPU for
+  encode/decode; only training benefits.
 
 </details>
 

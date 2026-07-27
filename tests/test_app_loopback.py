@@ -78,7 +78,7 @@ def ring_player(ring):
 
 def composed_picture() -> Image.Image:
     """A picture put together the way the transmit panel does it."""
-    from sstvae.data import fit_image
+    from sstvae.images import fit_image
 
     base = fit_image(Image.effect_mandelbrot((640, 480), (-2, -1.2, 0.8, 1.2), 40)
                      .convert("RGB"))

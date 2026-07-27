@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import MODES
-from ..data import fit_image
+from ..images import fit_image
 from ..overlay import ImageItem, TextItem
 from ..tx import TxConfig, TxEngine, TxPhase
 from .overlay_editor import OverlayEditor

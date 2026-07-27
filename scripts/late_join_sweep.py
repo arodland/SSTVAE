@@ -30,7 +30,7 @@ from sstvae.config import (  # noqa: E402
     LATENTS_PER_FRAME,
     MODES,
 )
-from sstvae.data import image_to_tensor  # noqa: E402
+from sstvae.images import image_to_tensor  # noqa: E402
 from sstvae.models import SSTVAE  # noqa: E402
 from sstvae.modem import Modem, framing  # noqa: E402
 

@@ -16,14 +16,12 @@ dependencies = [
 # runs on the base deps alone.
 cli = [
     "torch>=2.0",
-    "torchvision>=0.15",
     "huggingface_hub>=0.20",
 ]
 # Live receive off a soundcard: everything in `cli`, plus PortAudio
 # bindings and the waterfall/preview window.
 listen = [
     "torch>=2.0",
-    "torchvision>=0.15",
     "huggingface_hub>=0.20",
     "sounddevice>=0.4.6",
     "matplotlib>=3.7",
@@ -34,7 +32,6 @@ listen = [
 # GUI draws its own spectrum.
 gui = [
     "torch>=2.0",
-    "torchvision>=0.15",
     "huggingface_hub>=0.20",
     "sounddevice>=0.4.6",
     "pyside6>=6.5",
@@ -54,11 +51,42 @@ dev = [
 [project.scripts]
 sstvae-gui = "sstvae.gui:main"
 
+# Nothing outside `train` ever touches a GPU: the encoder and decoder run
+# on the CPU by design (see sstvae/codec.py), and one 640x480 forward pass
+# is ~30-50 ms against ~270 ms of NumPy DSP in the same operation — on a
+# transmission lasting 32-95 s. So a receiving station has no use for the
+# ~2.5 GB of CUDA runtime that plain `torch` drags in on Linux. The app
+# extras take torch from the CPU index instead; only `train` gets a GPU
+# build.
+#
+# The `conflicts` block is load-bearing: uv resolves a single torch for
+# the whole lock, so without declaring the app extras and `train` mutually
+# exclusive the CPU pin silently wins for training too.
+[tool.uv]
+conflicts = [
+    [{ extra = "cli" }, { extra = "train" }],
+    [{ extra = "listen" }, { extra = "train" }],
+    [{ extra = "gui" }, { extra = "train" }],
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cli" },
+    { index = "pytorch-cpu", extra = "listen" },
+    { index = "pytorch-cpu", extra = "gui" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 # ROCm torch wheels (RX 9070 XT / gfx1201), local dev only — explicit so
 # cloud/CUDA machines resolve torch from PyPI instead. Local install:
 #   uv pip install --reinstall --index-url https://download.pytorch.org/whl/rocm7.2 torch torchvision
-# NOTE: `uv sync`/`uv add` will replace the ROCm build with plain PyPI
-# torch (uv.lock pins it); re-run the install command above afterwards.
+# NOTE: `uv sync`/`uv add` will replace the ROCm build (with CPU torch if
+# an app extra is selected, PyPI CUDA torch for `train`); re-run the
+# install command above afterwards.
 [[tool.uv.index]]
 name = "pytorch-rocm"
 url = "https://download.pytorch.org/whl/rocm7.2"

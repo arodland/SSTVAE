@@ -27,6 +27,7 @@ from PIL import Image
 
 from ..codec import load_model
 from ..config import FS, MODES, ModeSpec
+from ..images import fit_image, image_to_tensor
 from ..models import SSTVAE
 from ..modem import Modem
 
@@ -293,8 +294,4 @@ class _PttWatchdog:
 
 
 def _image_to_tensor(image: Image.Image) -> torch.Tensor:
-    # Imported lazily: sstvae.data pulls in torchvision and the training
-    # dataset machinery, which a transmit-only install has no use for.
-    from ..data import fit_image, image_to_tensor
-
     return image_to_tensor(fit_image(image))

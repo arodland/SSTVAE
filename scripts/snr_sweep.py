@@ -34,7 +34,7 @@ from PIL import Image  # noqa: E402
 from sstvae import hfchannel  # noqa: E402
 from sstvae.codec import MODEL_HELP, load_model, pad_to_full, reconstruct  # noqa: E402
 from sstvae.config import MODES, SNR_REF_BW_HZ  # noqa: E402
-from sstvae.data import fit_image, image_to_tensor  # noqa: E402
+from sstvae.images import fit_image, image_to_tensor  # noqa: E402
 from sstvae.models import SSTVAE  # noqa: E402
 from sstvae.modem import Modem, SyncError  # noqa: E402
 

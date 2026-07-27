@@ -19,17 +19,17 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .model import ImageItem, OverlayDoc, SOURCE_LAST_RX, TextItem
 
-# Reuses the font search `sstvae.data` already does for training
-# overlays, so the GUI's default face matches what the model was trained
-# on rather than being an arbitrary second choice.
-from ..data import _AVAILABLE_FONTS
+# Same font search the training overlays use, so the GUI's default face
+# matches what the model was trained on rather than being an arbitrary
+# second choice.
+from ..images import AVAILABLE_FONTS
 
 
 @lru_cache(maxsize=64)
 def _load_font(path: str | None, size: int):
     size = max(1, int(size))
     candidates = [path] if path else []
-    candidates += list(_AVAILABLE_FONTS)
+    candidates += list(AVAILABLE_FONTS)
     for p in candidates:
         if p and os.path.exists(p):
             try:
@@ -194,7 +194,7 @@ def render(base: Image.Image, doc: OverlayDoc,
     """Draw `doc` over `base` and return a new RGB image.
 
     `base` is used as-is; the caller is responsible for having framed it
-    to the transmit size (`sstvae.data.fit_image`), because the
+    to the transmit size (`sstvae.images.fit_image`), because the
     document's normalized coordinates are relative to whatever it is
     given. `last_rx` supplies the pixels for any item whose source is
     `"last_rx"`.

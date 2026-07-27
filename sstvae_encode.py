@@ -12,7 +12,7 @@ import torch
 from sstvae import wavio
 from sstvae.codec import MODEL_HELP, load_model  # noqa: F401  (re-exported)
 from sstvae.config import MODES
-from sstvae.data import load_image
+from sstvae.images import load_image
 from sstvae.models import SSTVAE
 from sstvae.modem import Modem
 

@@ -23,7 +23,7 @@ its rendering stay testable and reusable from the command line.
 import json
 from dataclasses import asdict, dataclass, field
 
-from ..data import IMG_H, IMG_W
+from ..images import IMG_H, IMG_W
 
 # The overlay's coordinate space is the transmitted frame itself, so
 # what the editor shows is what goes on the air.

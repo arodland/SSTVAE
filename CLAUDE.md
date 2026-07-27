@@ -138,6 +138,22 @@ either, so overlays stay renderable from the command line.
   encoder, modem, and training. Don't renormalize anywhere else.
 - Local GPU is ROCm (`torch.cuda.is_available()` is true); never add
   CUDA-only dependencies.
+- **Nothing outside `train` touches a GPU, on purpose.** `codec.load_model`
+  is `map_location="cpu"` with no `.to(device)` anywhere. Measured: the
+  encoder is 31 ms and the decoder 50 ms per 640x480 image, against
+  ~270 ms of NumPy DSP in the same operation, on a transmission lasting
+  32–95 s — so GPU offload would save ~70 ms while costing seconds of
+  context init. Don't add a GPU path to the app, and don't advertise one.
+  The `cli`/`listen`/`gui` extras therefore take torch from the CPU index
+  (`[tool.uv.sources]` in pyproject); the `conflicts` block next to it is
+  load-bearing, because uv resolves one torch per lock and without it the
+  CPU pin silently wins for `train` too. pip can't do index selection, so
+  the README tells Linux pip users to install CPU torch first.
+- `sstvae/images.py` holds the geometry (`IMG_W/IMG_H`), `fit_image`,
+  `image_to_tensor` and the font search; `sstvae/data.py` is training
+  only and re-exports them. Import from `images`, not `data`, anywhere in
+  the send/receive path — `data` pulls in torchvision and
+  `torch.utils.data`, which is why torchvision is a `train`-only dep.
 - **SNR is quoted in a 2500 Hz noise bandwidth** (`config.SNR_REF_BW_HZ`),
   changed from 3000 Hz on 2026-07-26. It is one constant, used by both
   `hfchannel.awgn` (which generates the noise) and

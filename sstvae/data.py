@@ -1,22 +1,28 @@
 """Training data: a folder of images, or a synthetic set for smoke tests."""
 
-import os
 import random
-from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from torch.utils.data import Dataset
 from torchvision import transforms as T
 
-# Target resolution. The latent grid (40x30) is fixed by the modem's
-# capacity; at x16 downsampling that means 640x480 images. Images as
-# small as MIN_W x MIN_H are accepted (and upscaled) to keep parity
-# with classic 320x240 SSTV sources.
-IMG_W, IMG_H = 640, 480
-MIN_W, MIN_H = 320, 240
+# The geometry and the font search live in `images.py`, which the
+# receive/transmit paths import without dragging torchvision and the
+# dataset machinery in with them. Re-exported here so training code and
+# existing imports are unchanged.
+from .images import (  # noqa: F401
+    AVAILABLE_FONTS as _AVAILABLE_FONTS,
+    IMG_H,
+    IMG_W,
+    MIN_H,
+    MIN_W,
+    fit_image,
+    font as _font,
+    image_to_tensor,
+)
 
 # Train-only augmentation: mild zoom/pan (scale relative to the source
 # image's own area, so small MIN_W x MIN_H sources aren't cropped much
@@ -47,19 +53,6 @@ _AUGMENT = T.Compose([_RANDOM_CROP, T.RandomHorizontalFlip(p=0.5), _COLOR_JITTER
 # and after the jitter so it stays the crisp overlay a station burns in.
 TEXT_OVERLAY_P = 0.5
 
-_FONT_CANDIDATES = (
-    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    "/usr/share/fonts/TTF/DejaVuSerif.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
-    "/usr/share/fonts/liberation/LiberationSerif-Regular.ttf",
-    "/usr/share/fonts/liberation/LiberationMono-Bold.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-)
-_AVAILABLE_FONTS = tuple(p for p in _FONT_CANDIDATES if os.path.exists(p))
-
 _TEXT_CHARS = (
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     "abcdefghijklmnopqrstuvwxyz"
@@ -67,18 +60,6 @@ _TEXT_CHARS = (
     "0123456789"  # digits weighted up: overlays are numeral-heavy
     "/-.:# "
 )
-
-
-@lru_cache(maxsize=128)
-def _font(size: int, idx: int):
-    """A scalable font at `size`. Falls back to Pillow's built-in scalable
-    default, so this works in a bare container with no font packages."""
-    if _AVAILABLE_FONTS:
-        return ImageFont.truetype(_AVAILABLE_FONTS[idx % len(_AVAILABLE_FONTS)], size)
-    try:
-        return ImageFont.load_default(size=size)
-    except TypeError:  # Pillow < 10.1 has a bitmap-only default
-        return ImageFont.load_default()
 
 
 def draw_random_text(img: Image.Image, rng: random.Random | None = None) -> Image.Image:
@@ -146,33 +127,6 @@ def _augment_image(img: Image.Image, rng: random.Random | None = None) -> Image.
     if rng.random() < TEXT_OVERLAY_P:
         img = draw_random_text(img, rng)
     return img
-
-
-def fit_image(img: Image.Image) -> Image.Image:
-    """Any image -> exactly IMG_W x IMG_H RGB, by scaling to cover the
-    target and centre-cropping (deterministic, aspect-preserving).
-
-    Split out of `load_image` so callers that already hold an image in
-    memory -- the GUI, which composes text and insets onto the picture
-    before transmitting -- go through the same framing as a file loaded
-    from disk, instead of a subtly different resize.
-    """
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    if img.size == (IMG_W, IMG_H):
-        return img
-    scale = max(IMG_W / img.width, IMG_H / img.height)
-    img = img.resize(
-        (round(img.width * scale), round(img.height * scale)), Image.LANCZOS
-    )
-    left = (img.width - IMG_W) // 2
-    top = (img.height - IMG_H) // 2
-    return img.crop((left, top, left + IMG_W, top + IMG_H))
-
-
-def image_to_tensor(img: Image.Image) -> torch.Tensor:
-    """IMG_W x IMG_H RGB image -> (3, IMG_H, IMG_W) float in [0,1]."""
-    return torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
 
 
 def load_image(path: str | Path, augment: bool = False) -> torch.Tensor:
