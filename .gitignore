@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.egg-info/
 .venv/
+uv.lock
 
 # data & training artifacts
 data/
@@ -10,4 +11,12 @@ runs/
 
 # audio/image scratch
 *.wav
-out*.png
+
+# Checkpoints, pictures and sweep output land in the repo root while
+# working. Anything of these types that actually belongs in the repo
+# lives in a subdirectory (docs/images/, data/), so these are anchored
+# to the root only.
+/*.pt
+/*.png
+/*.jpg
+/*.csv
