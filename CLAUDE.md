@@ -177,12 +177,15 @@ either, so overlays stay renderable from the command line.
   reach PAPR (DFT spreading / learned unitary precoder in slot domain).
   Not implemented.
 - `docs/todo.md` — open work items with the reasoning behind them.
-  Currently: (1) a wider acquisition search so a mis-tuned counterpart
+  Currently one: a wider acquisition search so a mis-tuned counterpart
   still decodes — measured, the demod path is entirely independent of
   absolute centre frequency (8.73 dB latent SNR from 900 to 2100 Hz), so
-  this is acquisition-side only; (2) acquisition reliability at large
-  frequency offsets, which costs ~1 dB of threshold near the edge of the
-  ±50 Hz tolerance.
+  this is acquisition-side only. The second item, "acquisition costs
+  ~1 dB of threshold at large frequency offset", was **withdrawn
+  2026-07-26**: it did not reproduce at 25 seeds per point and was an
+  artifact of 6-seed sampling. Acquisition near threshold succeeds
+  40–80% of the time, so any sweep with single-digit trials per cell
+  will invent a pattern — see the warning kept in that section.
 
 ## Status / next steps
 
