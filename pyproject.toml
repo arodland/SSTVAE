@@ -16,12 +16,14 @@ dependencies = [
 # runs on the base deps alone.
 cli = [
     "torch>=2.0",
+    "torchvision>=0.15",
     "huggingface_hub>=0.20",
 ]
 # Live receive off a soundcard: everything in `cli`, plus PortAudio
 # bindings and the waterfall/preview window.
 listen = [
     "torch>=2.0",
+    "torchvision>=0.15",
     "huggingface_hub>=0.20",
     "sounddevice>=0.4.6",
     "matplotlib>=3.7",
@@ -32,6 +34,7 @@ listen = [
 # GUI draws its own spectrum.
 gui = [
     "torch>=2.0",
+    "torchvision>=0.15",
     "huggingface_hub>=0.20",
     "sounddevice>=0.4.6",
     "pyside6>=6.5",
@@ -39,6 +42,7 @@ gui = [
 ]
 train = [
     "torch>=2.13.0",
+    "torchvision>=0.28.0",
     "lpips>=0.1.4",
     "datasets>=2.18",
     "trackio",
