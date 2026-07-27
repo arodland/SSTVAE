@@ -76,7 +76,7 @@ design*; it isn't failing, it's doing its job at its own resolution.
 |---|---|---|---|---|
 | Payload | Scanlines as tones | Compressed file + FEC | JPEG in FEC'd packets | Autoencoder latents |
 | Degradation | Gradual, but localized damage | Digital cliff | Lost packets = missing blocks | Gradual, spread over whole image |
-| Missed the start? | Top of image lost | Usually unrecoverable | Depends on transport | **Full image**, via beacon resync |
+| Missed the start? | Top of image lost | Usually unrecoverable | Depends on transport | **Whole image**, softer — never a missing region |
 | Bandwidth | ~1200 Hz, most modes | 2200 or 2500 Hz | Depends on transport | ~1200 Hz |
 | Time on air | 36–120 s, common modes | ~30–180 s, varies with size and FEC | Depends on transport and size | 32 / 64 / 95 s |
 | Needs a trained model | No | No | No | **Yes — both ends** |
@@ -172,9 +172,16 @@ Other measured properties:
   is a dB of average power you don't get to transmit. The network is
   explicitly trained to keep its latents' crest factor low.
 - **Frequency offset tolerance > ±50 Hz** — no need to zero-beat.
-- **Mid-stream join.** Start listening 60 seconds into a transmission
-  and you still get the *whole* picture, including the part that was
-  sent before you tuned in (see below).
+- **Late lock costs nothing.** If you were already recording but the
+  preamble was buried in noise or a fade, the beacon lets the decoder
+  work out where it is partway through and then decode everything it
+  captured — including the frames from before it locked on. Full
+  quality; the transmission is all there.
+- **Tuning in late costs fidelity, not area.** If you genuinely joined
+  partway, the earlier frames were never received. You still get a
+  complete picture rather than a truncated one — no lost scanlines, no
+  missing blocks — but a softer one, and the later you join the softer
+  it gets (see below).
 
 ## How it works
 
@@ -187,11 +194,44 @@ stream from any ~10 s window — and then decode frames it recorded
 *before* it locked on. This costs about 4.2% of latent capacity but no
 airtime.
 
+That last part is worth separating from a superficially similar case:
+
+- **The preamble was lost, but you were recording.** The beacon recovers
+  your position and the buffered frames decode normally. Nothing is
+  missing, so the picture is as good as the noise allows. This is what
+  the beacon was built for, and it is the common failure it rescues.
+- **You tuned in partway.** The earlier frames never reached you and
+  decode as erasures. The beacon still tells the receiver where it is,
+  so the picture is complete rather than truncated — but it is a
+  lower-fidelity picture, and how much lower depends on *what* you
+  missed.
+
 The three modes are **nested**: the latents are ordered into 3 groups,
 and modes A/B/C send 1/2/3 of them. Mode A's transmission is literally a
 prefix of mode C's. A mode C reception can therefore be decoded
 progressively as it arrives, and a truncated or partly-faded reception
 simply decodes at lower fidelity.
+
+That ordering is what decides the price of tuning in late, because the
+groups go out in order and group 0 — the base layer that B and C only
+refine — goes out first. Mode C on a clean channel, 12 validation
+images, by how late you started listening:
+
+| joined at | 0 s | 16 s | 32 s | 48 s | 64 s | 80 s |
+|---|---|---|---|---|---|---|
+| PSNR (dB) | 26.2 | 25.6 | 19.3 | 18.4 | 16.3 | 10.5 |
+
+Group 0 ends at 32 s and group 1 at 63 s. Losing *part* of group 0 is
+almost free (26.2 → 25.6 dB); losing *all* of it costs about 6 dB at a
+stroke, and everything after that is refinement without a base to refine.
+Join in the last third and you get a recognisable but poor picture.
+
+Note what does *not* happen at any of those points: a missing region.
+The interleaver scatters each frame's latents across the whole picture,
+so frames you never received cost detail everywhere rather than a band
+across the top. That is the useful part of the guarantee — "complete"
+and "good" are separate claims, and only the first one is unconditional.
+Reproduce with `python scripts/late_join_sweep.py`.
 
 Slower modes are also more robust in a way that isn't obvious: with more
 total frames on air, there are more chances for the beacon's ~10 s
@@ -363,9 +403,13 @@ uv run sstvae_listen.py --low-cpu        # small machines
 ```
 
 Received images land in `received/` (`--out-dir`). The listener keeps a
-rolling buffer and decodes continuously, so it picks up transmissions
-already in progress and reconstructs them in full. `--low-cpu` trades
-that mid-stream capability for much lower idle CPU — useful on a Pi.
+rolling buffer and decodes continuously, so it can lock onto a
+transmission already in progress and still reconstruct every frame that
+reached the buffer — including those recorded before it locked. Leave it
+running and a transmission whose preamble you missed still decodes in
+full; start it midway through one and you get the rest, at the reduced
+fidelity described above. `--low-cpu` trades that retrospective
+capability for much lower idle CPU — useful on a Pi.
 (This is the same reception engine the desktop app uses, without the
 window.)
 
