@@ -206,6 +206,11 @@ either, so overlays stay renderable from the command line.
 - `docs/slot-domain-precoder.md` — design for the mechanism that *can*
   reach PAPR (DFT spreading / learned unitary precoder in slot domain).
   Not implemented.
+- `docs/onnx.md` — measured (not implemented) ONNX runtime path:
+  onnxruntime is 27 MB against torch's 336 MB, fp32 ONNX is the same
+  codec to ~1e-6, fp16 is free and int8 costs ~0.15 dB PSNR. Read it
+  before assuming quantisation is dangerous here — latents are analog,
+  so it is additive noise well under the channel's, not a format break.
 - `docs/todo.md` — open work items with the reasoning behind them.
   Currently one: a wider acquisition search so a mis-tuned counterpart
   still decodes — measured, the demod path is entirely independent of
