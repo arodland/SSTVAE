@@ -73,6 +73,23 @@ class RigctldClient:
         with self._lock:
             self._close_locked()
 
+    def interrupt(self) -> None:
+        """Abort whatever request is in flight, from another thread.
+
+        Deliberately does *not* take the lock: the point is to break a
+        thread that is blocked in `recv` and holding it. Shutting the
+        socket down makes that call return at once instead of waiting out
+        the timeout, which is what lets a caller tear this client down
+        without inheriting its remaining wait.
+        """
+        sock = self._sock
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass  # already closed, or never connected
+
     def _close_locked(self) -> None:
         if self._sock is not None:
             try:

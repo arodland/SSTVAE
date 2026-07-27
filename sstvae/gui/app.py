@@ -11,7 +11,7 @@ takes thirty seconds to appear looks broken.
 import sys
 import threading
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QLabel,
@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..codec import load_model
-from ..rig import RigError, RigctldClient, spawn_rigctld
+from .rig_controller import RigController
 from .rx_panel import ReceivePanel
 from .settings import Config
 from .settings_dialog import SettingsDialog
@@ -41,10 +41,9 @@ class AppState(QObject):
         super().__init__()
         self.config = Config.load()
         self.model = None
-        self.current_frequency_hz: float | None = None
-        self._rig: RigctldClient | None = None
-        self._rigctld_proc = None
         self._model_error: str | None = None
+        self._rig = RigController(self)
+        self._rig.statusChanged.connect(self.rigStatus)
 
     # --- model ----------------------------------------------------------
     def load_model_async(self) -> None:
@@ -62,55 +61,31 @@ class AppState(QObject):
         return self._model_error
 
     # --- rig ------------------------------------------------------------
+    # All rigctld I/O lives on the RigController's own thread. Nothing
+    # here may call into the rig: every operation is a blocking socket
+    # request, and a rigctld that is down costs seconds per attempt.
+    @property
+    def current_frequency_hz(self) -> float | None:
+        """Last polled dial frequency — a cached value, not a request."""
+        return self._rig.current_frequency_hz
+
     def ptt(self):
         """The object the transmit engine keys, or None if rig control is
         off. Returning None (rather than a no-op stub) is what tells the
         engine there is nothing to key -- VOX or manual PTT."""
-        return self._rig if self.config.rig.enabled else None
+        return self._rig.ptt() if self.config.rig.enabled else None
 
     def connect_rig(self) -> None:
-        self.disconnect_rig()
-        if not self.config.rig.enabled:
-            self.rigStatus.emit("Rig control off")
-            return
-        cfg = self.config.rig
-        if cfg.spawn_local:
-            try:
-                self._rigctld_proc = spawn_rigctld(
-                    cfg.model, cfg.device, cfg.baud, cfg.port
-                )
-            except RigError as e:
-                self.rigStatus.emit(str(e))
-                return
-        self._rig = RigctldClient(cfg.host, cfg.port)
-        try:
-            self._rig.connect()
-            self.current_frequency_hz = self._rig.get_frequency_hz()
-            self.rigStatus.emit(f"Rig: {self.current_frequency_hz / 1e6:.4f} MHz")
-        except RigError as e:
-            self.rigStatus.emit(str(e).splitlines()[0])
+        self._rig.apply_config(self.config.rig)
 
     def disconnect_rig(self) -> None:
-        if self._rig is not None:
-            self._rig.close()
-            self._rig = None
-        if self._rigctld_proc is not None:
-            self._rigctld_proc.terminate()
-            self._rigctld_proc = None
-        self.current_frequency_hz = None
+        self._rig.stop()
 
-    def poll_frequency(self) -> None:
-        """Cache the dial frequency for status and filenames. Quiet on
-        failure: a rig that has gone away should degrade the frequency
-        field, not nag during a reception."""
-        if self._rig is None or not self.config.rig.enabled:
-            return
-        try:
-            self.current_frequency_hz = self._rig.get_frequency_hz()
-            self.rigStatus.emit(f"Rig: {self.current_frequency_hz / 1e6:.4f} MHz")
-        except RigError as e:
-            self.current_frequency_hz = None
-            self.rigStatus.emit(str(e).splitlines()[0])
+    def pause_rig_polling(self) -> None:
+        self._rig.pause()
+
+    def resume_rig_polling(self) -> None:
+        self._rig.resume()
 
     def save_config(self) -> None:
         try:
@@ -142,6 +117,10 @@ class MainWindow(QMainWindow):
         # a received picture.
         self.tx_panel.transmitStarted.connect(self.rx_panel.suspend_for_transmit)
         self.tx_panel.transmitFinished.connect(self.rx_panel.resume_after_transmit)
+        # Frequency polling pauses too: the answer is not interesting
+        # mid-over, and it keeps CAT chatter off the wire while keyed.
+        self.tx_panel.transmitStarted.connect(self.state.pause_rig_polling)
+        self.tx_panel.transmitFinished.connect(self.state.resume_rig_polling)
         # The most recent picture becomes available as a transmit inset.
         self.rx_panel.imageReceived.connect(self.tx_panel.set_last_rx_image)
         self.rx_panel.receptionSaved.connect(
@@ -152,10 +131,6 @@ class MainWindow(QMainWindow):
         self.state.rigStatus.connect(self._rig_label.setText)
         self.state.load_model_async()
         self.state.connect_rig()
-
-        self._rig_timer = QTimer(self)
-        self._rig_timer.timeout.connect(self.state.poll_frequency)
-        self._rig_timer.start(int(self.state.config.rig.poll_interval_s * 1000))
 
         self._update_station_label()
 
@@ -201,7 +176,6 @@ class MainWindow(QMainWindow):
         self.state.save_config()
         self._update_station_label()
         self.state.connect_rig()
-        self._rig_timer.setInterval(int(self.state.config.rig.poll_interval_s * 1000))
         self.rx_panel.autosave.setChecked(self.state.config.receive.autosave)
         if self.state.config.model_path != previous_model:
             self._model_label.setText("Loading model...")

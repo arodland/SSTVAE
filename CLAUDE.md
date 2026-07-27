@@ -107,6 +107,20 @@ either, so overlays stay renderable from the command line.
   over the SWIG `Hamlib` bindings because those are installed in the
   system site-packages and a virtualenv cannot see them. A Hamlib error
   code raises but keeps the connection; a dead socket redials once.
+  Every method is **blocking socket I/O** — see `gui/rig_controller.py`.
+- `sstvae/gui/rig_controller.py` — all rigctld I/O, on its own thread.
+  **Nothing on the GUI thread may call the rig.** A rigctld that is up
+  but not answering costs the socket timeout on the recv *and* again on
+  the retry, so polling from a `QTimer` froze the window for seconds
+  every interval. Three things keep it that way, all regression-tested
+  in `tests/test_rig_controller.py` against a server that accepts and
+  never replies: the poll loop is a worker thread with exponential
+  backoff; `stop()` never joins or closes inline (it calls
+  `RigctldClient.interrupt()`, which shuts the socket down *without* the
+  lock the stuck worker is holding, then reaps on a throwaway thread);
+  and PTT gets a **separate client**, so keying never queues behind a
+  poll that is mid-timeout. The worker takes its stop event and client
+  as arguments so a superseded one cannot publish stale state.
 - `sstvae/overlay/` — `model.py` is the document, `render.py` draws it
   with PIL. Designed so *templates* are a later UI-only change:
   coordinates are normalized 0..1 (resolution-independent) and
