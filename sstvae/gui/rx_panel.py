@@ -30,7 +30,8 @@ from PySide6.QtWidgets import (
 )
 
 from .. import wavio
-from ..audio import AudioUnavailable, open_input_stream
+from ..audio import AudioUnavailable
+from .audio_backend import open_input_stream
 from ..rx import RingBuffer, RxConfig, SharedState, decode_loop, decode_loop_low_cpu, fmt_snr
 from ..rx.engine import parse_size
 from .overlay_editor import pil_to_pixmap
@@ -198,8 +199,7 @@ class ReceivePanel(QWidget):
         self.progress.setRange(0, 100)
         left_layout.addWidget(self.progress)
 
-        self.waterfall = WaterfallWidget(
-            None, splitter, fps=self._app.config.receive.waterfall_fps)
+        self.waterfall = WaterfallWidget(None, splitter)
         splitter.addWidget(left)
         splitter.addWidget(self.waterfall)
         splitter.setStretchFactor(0, 3)
@@ -254,10 +254,7 @@ class ReceivePanel(QWidget):
         self.waterfall.set_ring(self._ring)
         try:
             self._stream, rate = open_input_stream(
-                cfg.audio.input_device or None, self._ring, cfg.audio.samplerate,
-                on_error=self._signals.error.emit,
-                device_rate=cfg.audio.input_device_rate,
-            )
+                cfg, self._ring, on_error=self._signals.error.emit)
         except AudioUnavailable as e:
             QMessageBox.critical(self, "Audio unavailable", str(e))
             return False

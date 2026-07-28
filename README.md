@@ -281,10 +281,18 @@ pip install -e '.[cli]'                  # or plain pip, ideally in a venv
 
 **Sending and receiving pictures does not install PyTorch at all.** The
 encoder and decoder are two convolutional passes, and onnxruntime runs
-them in 53 MB where torch needs 345 MB — so the `cli`, `listen` and
-`gui` extras come to about 263 MB installed instead of ~555 MB, and the
-old "make sure pip doesn't give you the CUDA build" dance is gone. Only
-the `train` extra uses torch. See [docs/onnx.md](docs/onnx.md).
+them in 53 MB where torch needs 345 MB — so `cli` and `listen` come to
+about 263 MB installed instead of ~555 MB, and the old "make sure pip
+doesn't give you the CUDA build" dance is gone. Only the `train` extra
+uses torch. See [docs/onnx.md](docs/onnx.md).
+
+The `gui` extra is larger, and deliberately so: it pulls
+`pyside6-addons` for QtMultimedia, which is what keeps our code off the
+realtime audio thread. Without it the app drops captured audio whenever
+it is busy drawing — silently, producing a noisy or mangled picture
+while sync still succeeds. Addons brings a copy of Chromium the app
+never loads, which is most of its ~400 MB; that is a poor trade on paper
+and the right one in practice.
 
 With `uv`, prefix commands with `uv run`; with pip, activate your venv
 and call `python` directly. Examples below use `uv run`.

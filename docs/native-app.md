@@ -132,7 +132,25 @@ the project's Artistic 2.0 distribution.
 
 ### Audio: use QtMultimedia
 
-**Decided 2026-07-28, on evidence rather than aesthetics.** The Python
+**Decided 2026-07-28 on evidence, and already implemented in the Python
+app** — `sstvae/gui/qtaudio.py`, with `gui/audio_backend.py` dispatching
+on `audio.backend`. Qt is the default for capture *and* playback;
+PortAudio is retained only because Qt does not enumerate
+PulseAudio/PipeWire monitor sources. Validated on real hardware: capture
+clean through 800 ms of deliberate GIL starvation, and a full
+transmit→receive loopback through Qt on both sides decoding at +27.4 dB
+with the callsign recovered. So the C++ port inherits a *working, tested*
+design here rather than a plan.
+
+Two costs worth knowing before the C++ work starts. In **Python**,
+QtMultimedia means `pyside6-addons`: 232 MB → 648 MB installed, 195 MB of
+it Chromium that nothing loads. **In C++ that cost vanishes** — Qt
+Multimedia is a small shared library and WebEngine is simply not linked,
+so this is a PySide6 packaging artifact, not a Qt one. And PySide6 cannot
+marshal `QAudio::State` into a Python slot, which forced polling
+`error()` instead of connecting `stateChanged`; C++ has no such problem.
+
+The original argument follows, since the reasoning is what matters. The Python
 app's worst bug to date was that its PortAudio capture callback is
 *Python*, so it runs on the host's realtime audio thread and must take
 the GIL. When the Qt thread held the GIL — converting a 640×480 preview

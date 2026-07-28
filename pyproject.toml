@@ -34,11 +34,23 @@ gui = [
     "onnxruntime>=1.17",
     "huggingface_hub>=0.20",
     "sounddevice>=0.4.6",
-    # Essentials, not the `pyside6` metapackage: we import only QtCore,
-    # QtGui and QtWidgets, while the addons half carries a 107 MB copy of
-    # Chromium (QtWebEngine) plus ffmpeg, Quick/Qml and Designer -- about
-    # 200 MB installed that nothing here ever loads.
     "pyside6-essentials>=6.5",
+    # QtMultimedia lives in `addons`, and we need it: our PortAudio
+    # capture callback is Python, so it sits on the host's realtime audio
+    # thread and must take the GIL. Losing that race to the Qt thread
+    # drops audio silently -- on JACK, which has no buffer behind its
+    # period, that cost 5 dB of SNR and a mangled picture with sync
+    # intact. `QAudioSource` is pull-based over a buffered QIODevice, so
+    # the realtime side stays in Qt's C++ backend. See CLAUDE.md and
+    # docs/native-app.md.
+    #
+    # This reverses an earlier, deliberate choice to avoid `addons`, and
+    # it is expensive: measured 232 MB -> 648 MB installed, of which
+    # 195 MB is a copy of Chromium (QtWebEngine) that nothing here ever
+    # loads. Accepted on 2026-07-28 -- a silently mangled picture is
+    # worse than a large download. Revisit if PySide6 ever ships
+    # QtMultimedia without WebEngine.
+    "pyside6-addons>=6.5",
     "platformdirs>=3.0",
 ]
 train = [

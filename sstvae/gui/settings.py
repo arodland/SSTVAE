@@ -41,18 +41,33 @@ def config_path() -> Path:
     return config_dir() / "config.json"
 
 
+AUDIO_BACKENDS = ("qt", "portaudio")
+
+
 @dataclass
 class AudioConfig:
-    input_device: str | None = None  # PortAudio name; None = system default
+    # Which library talks to the soundcard. "qt" (QtMultimedia) is the
+    # default because its realtime side is C++ inside Qt, so our Python
+    # never sits on the audio thread. A PortAudio *callback* does, and
+    # losing the GIL race to Qt's painting drops audio silently on hosts
+    # with no buffer behind them (JACK) -- measured at 5 dB of SNR and a
+    # mangled picture. See sstvae/gui/qtaudio.py.
+    #
+    # "portaudio" is kept because the two enumerate different devices:
+    # Qt does not list PulseAudio/PipeWire *monitor* sources, so a
+    # loopback needs `module-remap-source` to be visible to it, while
+    # PortAudio sees monitors directly. Useful for testing.
+    backend: str = "qt"
+    # Device *description* under the active backend; None = system
+    # default. Stored as a name rather than an opaque id so the config
+    # stays hand-editable and survives a backend change -- the two
+    # backends spell some devices differently, and a name that no longer
+    # resolves is kept and flagged rather than silently reset.
+    input_device: str | None = None
     output_device: str | None = None
     # What lands in the ring buffer. Fixed by the modem -- this is not a
     # device setting, and changing it produces silent garbage.
     samplerate: int = FS
-    # Open the input device at this rate instead of its advertised
-    # default, resampling to `samplerate` here. For hosts that cannot
-    # honour the rate they claim: PortAudio's JACK backend only ever runs
-    # at the JACK server's rate. None = use the device's own default.
-    input_device_rate: int | None = None
 
 
 @dataclass
@@ -93,10 +108,6 @@ class ReceiveConfig:
     # picture bad because the audio was bad?" without needing the
     # hardware again -- the dump decodes offline with sstvae_decode.py.
     save_audio: bool = False
-    # Waterfall refresh rate. 0 disables it entirely -- a diagnostic for
-    # whether the display's ~20 Hz reads of the ring are interfering
-    # with audio capture. See sstvae/gui/waterfall.py.
-    waterfall_fps: int = 20
     # Fields available: date, time, freq, callsign, mode. Missing ones
     # (no rig, no callsign decoded) drop out of the name rather than
     # leaving an empty gap.

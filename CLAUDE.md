@@ -14,6 +14,35 @@ rationale lives in the plan history.
 - Smoke-train: `python scripts/train.py --smoke --out /tmp/smoke`
 - Full pipeline check: `sstvae_encode.py` → `sstvae_simulate.py` → `sstvae_decode.py`
 
+## Testing the live paths without hardware
+
+Both of these exercise the *real* code paths, which is the point — the
+audio and rig bugs found so far were all invisible to unit tests.
+
+- **Rig control:** run a dummy `rigctld` on an ephemeral port
+  (`rigctld -m 1 -t <port>`) and point the app's rig settings at it. Model
+  1 is Hamlib's dummy rig, so PTT, frequency readback and the whole
+  `gui/rig_controller.py` threading model can be driven for real without
+  a radio attached.
+- **Audio loopback:** a null sink plus a *remapped* monitor, because Qt
+  does not enumerate monitor sources:
+
+  ```sh
+  pactl load-module module-null-sink sink_name=null-sink
+  pactl load-module module-remap-source source_name=sstvae_loop \
+      master=null-sink.monitor channels=1 \
+      source_properties=device.description=SSTVAE-Loopback
+  ```
+
+  Then play into `null-sink` and capture `SSTVAE-Loopback`. Unload the
+  modules by index (`pactl unload-module N`) afterwards. **Pre-resample
+  the file to the sink's rate** — `pw-play` converting 44.1k→48k on the
+  fly cost ~4 dB of apparent SNR and sent me chasing a phantom.
+- **Anything Qt with an event loop: run it under `timeout`.** A headless
+  `QApplication` with `app.quit()` called from a worker thread has hung
+  this project's runs; `timeout 120 uv run python ...` makes that
+  self-limiting. Do not put event-loop tests in the pytest suites.
+
 ## Architecture
 
 - `sstvae/config.py` — every constant shared between modem, channel sim,
@@ -234,15 +263,25 @@ either, so overlays stay renderable from the command line.
   against a 0.43 ms snapshot; the new one, 0.01 ms.
   `tests/test_rx_ringbuffer.py` guards this on the p95 of write latency,
   self-calibrated against the copy cost.
-- **Our capture callback is Python, so it is on the host's realtime
-  thread and needs the GIL.** This is the root cause of the worst bug
-  found so far, and it is not fixed — only worked around by avoiding
-  JACK. When the Qt thread holds the GIL (converting a 640x480 preview to
-  a QPixmap and painting it, right after every decode poll), the callback
-  cannot run. PulseAudio and PipeWire's own device have a big software
-  buffer and absorb it invisibly. **JACK has none**: a couple of
-  milliseconds per period with nothing queued, so audio is skipped
-  silently, with no status flag.
+- **Audio defaults to QtMultimedia (`gui/qtaudio.py`), not PortAudio**,
+  and the reason is a measured bug rather than taste. `gui/audio_backend.py`
+  dispatches on `audio.backend` (`"qt"` | `"portaudio"`) for capture,
+  playback and device enumeration; PortAudio is kept because **Qt does
+  not list PulseAudio/PipeWire *monitor* sources**, so a loopback needs
+  `module-remap-source` to be visible to Qt while PortAudio sees monitors
+  directly.
+- **A PortAudio callback written in Python sits on the host's realtime
+  thread and needs the GIL** — that was the root cause of the worst bug
+  found so far. When the Qt thread holds the GIL (converting a 640x480
+  preview to a QPixmap and painting it, right after every decode poll),
+  the callback cannot run. PulseAudio and PipeWire's own device have a
+  big software buffer and absorb it invisibly. **JACK has none**: a
+  couple of milliseconds per period with nothing queued, so audio is
+  skipped silently, with no status flag. `QAudioSource` is pull-based —
+  Qt's C++ backend fills a buffer and we drain it from the event loop —
+  so Python leaves the realtime path entirely. Measured on K4 RX A with a
+  thread deliberately holding the GIL: **clean through 800 ms of
+  blocking** (+211 ppm), where PortAudio on JACK lost 3500 ppm at ~30 ms.
   - Measured on a PipeWire-JACK device: ~200–350 samples lost per decode
     poll, **tracking `poll_interval` exactly** — change it from 5 s to
     11 s and the losses follow — for 5 dB of SNR and a mangled picture,
@@ -254,32 +293,34 @@ either, so overlays stay renderable from the command line.
     GUI's `receive.save_audio`). Windows that correlate at 1.000 but at a
     drifting lag prove sample loss rather than added noise, and the
     interval between lag steps names the culprit.
-  - **PortAudio's blocking API is not the fix**, though it would put C on
-    the realtime path: `stream.read()` **corrupts the heap** on the JACK
-    backend (`malloc(): invalid size`) at every blocksize and latency
-    tried. Verified, not assumed. `audio.warn_if_fragile_host` therefore
-    warns rather than fixing, and the real fix is a capture layer whose
-    realtime side is not Python — see `docs/native-app.md`.
+  - **PortAudio's blocking API is not an alternative fix**, though it
+    would also put C on the realtime path: `stream.read()` **corrupts the
+    heap** on the JACK backend (`malloc(): invalid size`) at every
+    blocksize and latency tried. Verified, not assumed. That is what
+    forced the move to QtMultimedia rather than a PortAudio rework.
+    `audio.warn_if_fragile_host` still warns if the PortAudio backend is
+    used with a JACK device.
+- **`pyside6-addons` is now a dependency, for QtMultimedia only.** This
+  reverses the earlier deliberate choice of `essentials`: measured
+  232 MB → 648 MB installed, of which **195 MB is a copy of Chromium**
+  (QtWebEngine) that nothing here loads. Accepted 2026-07-28 — a silently
+  mangled picture is worse than a large download. Revisit if PySide6 ever
+  ships QtMultimedia without WebEngine.
+- **PySide6 cannot marshal `QAudio::State`** into any Python slot in this
+  build, not even a `*args` lambda, so `QAudioSource.stateChanged` is
+  deliberately not connected; `qtaudio` polls `error()` from the read path
+  instead. `QAudioSource` also has no `errorOccurred` signal in PySide6.
 - **Capture opens at the device's *own* rate and resamples in our code,
   never by asking the device for 8 kHz.** Almost nothing is natively
   8 kHz, so requesting it doesn't avoid a resampler — it delegates to
   whichever one the audio stack has, and JACK cannot resample at all
   (a JACK stream only ever runs at the server's rate, whatever you
-  asked for). `open_input_stream`'s `device_rate=` forces the open rate
-  for a host whose advertised default is a fiction; `--device-rate` and
-  `audio.input_device_rate` expose it.
+  asked for).
 - **`samplerate` in the audio API is the *ring buffer's* rate, not a
   device setting.** It is fixed at `FS` by the modem, and passing
   anything else fills the ring with wrong-rate audio that decodes to
   nothing. `sstvae_listen.py` used to expose it as `--samplerate`, which
-  read like "ask the device for this"; that flag is gone, replaced by
-  `--device-rate`, which is the one people actually want.
-- A stream silently running at a rate other than the one requested is
-  now **detected**: `open_input_stream` measures delivered samples
-  against wall clock for the first few seconds and reports a mismatch
-  (`RATE_CHECK_SECONDS` / `RATE_CHECK_TOLERANCE`). Cheap, and it turns
-  the worst failure mode here — plausible-looking garbage — into a
-  message.
+  read like "ask the device for this"; that flag is gone.
 - **Capture resampling is stateful — `audio.StreamResampler`, never a
   bare `resample_poly` per callback chunk.** `resample_poly` is an FIR
   polyphase filter, so an isolated chunk is zero-padded at both ends and

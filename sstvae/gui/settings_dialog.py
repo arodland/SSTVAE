@@ -30,8 +30,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..audio import AudioUnavailable, list_devices
+from ..audio import AudioUnavailable
 from ..checkpoint import PRECISIONS
+from .audio_backend import list_input_labels, list_output_labels
 from ..rig import RigError, RigctldClient, list_models
 
 
@@ -130,10 +131,25 @@ class SettingsDialog(QDialog):
     def _audio_tab(self) -> QWidget:
         w = QWidget(self)
         form = QFormLayout(w)
+
+        self.backend = QComboBox(w)
+        self.backend.addItem("QtMultimedia (recommended)", "qt")
+        self.backend.addItem("PortAudio", "portaudio")
+        idx = self.backend.findData(getattr(self._config.audio, "backend", "qt"))
+        self.backend.setCurrentIndex(idx if idx >= 0 else 0)
+        form.addRow("Audio backend", self.backend)
+        form.addRow(QLabel(
+            "QtMultimedia keeps our code off the realtime audio thread, which\n"
+            "is what stops audio being dropped while the app is busy drawing.\n"
+            "PortAudio is kept because it lists PulseAudio/PipeWire monitor\n"
+            "sources, which Qt does not — useful for loopback testing."
+        ))
+
         self.input_device = self._device_combo("input", self._config.audio.input_device)
         self.output_device = self._device_combo("output", self._config.audio.output_device)
         form.addRow("Input (from radio)", self.input_device)
         form.addRow("Output (to radio)", self.output_device)
+        self.backend.currentIndexChanged.connect(self._on_backend_changed)
 
         self.tx_level = QDoubleSpinBox(w)
         self.tx_level.setRange(0.05, 1.0)
@@ -149,18 +165,57 @@ class SettingsDialog(QDialog):
         return w
 
     def _device_combo(self, kind: str, current: str | None) -> QComboBox:
+        """Devices for one direction, from whichever backend is selected.
+
+        Repopulated when the backend changes, because the two do not agree
+        on names -- notably Qt does not list PulseAudio/PipeWire *monitor*
+        sources at all, so a loopback has to be published as a real source
+        (`module-remap-source`) before it appears under Qt.
+        """
         combo = QComboBox(self)
+        self._fill_device_combo(combo, kind, current)
+        return combo
+
+    def _fill_device_combo(self, combo: QComboBox, kind: str,
+                           current: str | None) -> None:
+        combo.clear()
+        combo.setEnabled(True)
         combo.addItem("System default", None)
+        lister = (list_input_labels if kind == "input" else list_output_labels)
         try:
-            for d in list_devices(kind):
-                combo.addItem(d.label(), d.name)
-        except AudioUnavailable as e:
+            for label in lister(self._pending_audio_config()):
+                combo.addItem(label, label)
+        except (AudioUnavailable, Exception) as e:
             combo.addItem(f"(audio unavailable: {e})", None)
             combo.setEnabled(False)
         if current:
             idx = combo.findData(current)
-            combo.setCurrentIndex(idx if idx >= 0 else 0)
-        return combo
+            if idx < 0:
+                # A name from the other backend, or a device that has gone
+                # away. Keep it rather than silently switching the user to
+                # the default -- they may just have it unplugged.
+                combo.addItem(f"{current} (not found)", current)
+                idx = combo.count() - 1
+            combo.setCurrentIndex(idx)
+
+    def _pending_audio_config(self):
+        """The config as the dialog currently stands, for enumeration.
+
+        The device lists have to reflect the backend the user just picked,
+        not the one that was saved.
+        """
+        import copy
+
+        cfg = copy.deepcopy(self._config)
+        if getattr(self, "backend", None) is not None:
+            cfg.audio.backend = self.backend.currentData()
+        return cfg
+
+    def _on_backend_changed(self) -> None:
+        self._fill_device_combo(self.input_device, "input",
+                                self.input_device.currentData())
+        self._fill_device_combo(self.output_device, "output",
+                                self.output_device.currentData())
 
     def _model_combo(self, current: str, parent: QWidget) -> QComboBox:
         """Picker over `rigctld -l`.
@@ -434,6 +489,7 @@ class SettingsDialog(QDialog):
         config.model_path = self.model_path.text().strip() or None
         config.precision = self.precision.currentData()
 
+        config.audio.backend = self.backend.currentData()
         config.audio.input_device = self.input_device.currentData()
         config.audio.output_device = self.output_device.currentData()
         config.transmit.level = self.tx_level.value()

@@ -26,6 +26,7 @@ from ..config import MODES
 from ..images import fit_image
 from ..overlay import ImageItem, TextItem
 from ..tx import TxConfig, TxEngine, TxPhase
+from .audio_backend import player_for
 from .overlay_editor import OverlayEditor
 from .settings import codec_precision
 
@@ -305,6 +306,7 @@ class TransmitPanel(QWidget):
         )
         self._engine = TxEngine(
             ptt=self._app.ptt(),
+            player=player_for(cfg),
             model=self._app.model,
             on_state=self._signals.state.emit,
             on_error=self._signals.error.emit,
