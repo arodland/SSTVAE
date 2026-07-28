@@ -1,0 +1,153 @@
+# CI for the Python reference and the native (C++) port.
+#
+# This is the project's first workflow. CLAUDE.md notes in two places
+# that tests which `importorskip` "would quietly stop running instead of
+# failing, and there is no CI to notice" -- so the Python job below runs
+# with the dev extra installed and treats a skipped reference test as a
+# problem to look at, not a pass.
+#
+# Qt is deliberately absent: Phase 0 of docs/native-app.md has no Qt
+# code, and `install-qt-action` on three platforms would dominate the
+# run time for nothing. It gets added with the GUI in Phase 3.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The generated artifacts are committed, so the only thing keeping
+  # them honest is regenerating them and diffing. Runs first and alone:
+  # if config.hpp is stale, every other job is testing the wrong thing.
+  generated:
+    name: Generated artifacts are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy scipy pillow
+      - name: config.hpp matches sstvae/config.py
+        run: python tools/gen_config_header.py --check
+      - name: Golden vectors match the Python reference
+        run: python tools/gen_golden_vectors.py --check
+      - name: Layering rules
+        run: python tools/check_layering.py
+      - name: Show the diff if anything is stale
+        if: failure()
+        run: |
+          python tools/gen_config_header.py || true
+          python tools/gen_golden_vectors.py || true
+          git diff --stat
+          git diff -- native/core/config.hpp native/tests/golden/manifest.json
+
+  python:
+    name: Python reference (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The dev extra pins CPU torch, which several tests use as the
+      # *reference* implementation for the numpy/ONNX paths.
+      - run: uv pip install --system -e ".[dev,cli]"
+      - name: Fast suite
+        run: pytest -q
+      - name: Slow suite
+        if: matrix.os == 'ubuntu-latest'
+        run: pytest -q -m slow
+
+  native:
+    name: Native core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # No Intel macOS runner. docs/native-app.md listed "GHA retires
+        # the Intel macOS runner mid-project" as a risk; it turns out to
+        # have happened already -- `macos-13` no longer schedules and a
+        # job requesting it queues forever rather than failing, which is
+        # worse than an error.
+        #
+        # Decision 2 still stands: Intel Macs are supported, because
+        # hams are conservative about hardware. So the x86_64 slice has
+        # to be *cross-compiled* on an Apple-silicon runner, which the
+        # doc anticipated as a fallback and which is now the only path.
+        # Until the packaging work in Phase 4 exists to do that, this
+        # matrix tests arm64 macOS only -- an honest gap, not a decision
+        # to drop Intel.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The package must be *installed*, not merely present: the
+      # `pytest` console script does not put the working directory on
+      # sys.path, so `import sstvae` fails without this. Running
+      # `python -m pytest` locally hides that, which is exactly how it
+      # reached CI.
+      - run: pip install -e ".[cli]" pytest pybind11
+      - uses: lukka/get-cmake@latest
+      # Put MSVC on PATH before CMake looks for a compiler. Without
+      # this, the Ninja generator finds the runner's MinGW GCC first and
+      # builds a perfectly good .pyd that CPython then cannot load --
+      # a MinGW extension is ABI-incompatible with an MSVC-built
+      # interpreter, and the only symptom is "DLL load failed".
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S native -B native/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DPython3_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')" \
+            -Dpybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')"
+      - name: Build
+        run: cmake --build native/build
+      # The C++ side checked against the committed corpus.
+      - name: C++ tests
+        run: ctest --test-dir native/build --output-on-failure
+      # Phase 0's actual exit criterion: the *Python* suite, running
+      # against the C++ implementations rather than the reference ones.
+      - name: Python suite against the C++ core
+        run: pytest -q --native
+      - name: Slow suite against the C++ core
+        if: matrix.os == 'ubuntu-latest'
+        run: pytest -q -m slow --native
+
+  sanitizers:
+    name: ASan + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No Python packages: with the pybind11 module off, this job
+      # builds C++ and runs ctest against the committed corpus, which
+      # needs nothing from the Python side.
+      - uses: lukka/get-cmake@latest
+      - name: Configure with sanitizers
+        run: |
+          cmake -S native -B native/build-asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug -DSSTVAE_SANITIZE=ON \
+            -DSSTVAE_BUILD_PYMODULE=OFF
+      - run: cmake --build native/build-asan
+      # C++ tests only. The pybind11 module is off because running it
+      # under ASan means preloading the runtime into the interpreter
+      # (LD_PRELOAD) and then chasing leaks in CPython itself, which
+      # says nothing about this code. "No memory safety net" is an
+      # accepted cost in docs/native-app.md; this is the net.
+      - run: ctest --test-dir native/build-asan --output-on-failure
