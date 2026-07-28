@@ -104,6 +104,33 @@ class FakePortAudio:
 
         return Stream()
 
+    def InputStream(self, samplerate=None, callback=None, **kw):
+        """Capture counterpart. Rejects rates the device doesn't do, which
+        is what pushes `open_input_stream` onto its resampling path."""
+        if samplerate not in self.accepts and samplerate != self.native:
+            raise RuntimeError(f"Invalid sample rate {samplerate}")
+        self.stream_rate = samplerate
+        self.capture_callback = callback
+        fake = self
+
+        class Stream:
+            def start(self_inner):
+                fake.started = True
+
+            def stop(self_inner):
+                pass
+
+            def close(self_inner):
+                pass
+
+        return Stream()
+
+    def feed(self, signal, blocksize=1024):
+        """Hand `signal` to the capture callback in blocks, as a device would."""
+        for i in range(0, len(signal), blocksize):
+            block = np.asarray(signal[i:i + blocksize], dtype=np.float32)
+            self.capture_callback(block.reshape(-1, 1), len(block), None, None)
+
     def total_samples_played(self) -> int:
         return sum(b.shape[0] for b in self.played)
 
@@ -159,3 +186,85 @@ def test_progress_reaches_one(fake_pa):
     seen = []
     audio.play(None, np.zeros(2 * FS), samplerate=FS, on_progress=seen.append)
     assert seen and seen[-1] == pytest.approx(1.0)
+
+
+# --- capture-side resampling ---------------------------------------------
+#
+# The regression these guard against decoded rather than failed: a
+# recording that `sstvae_decode.py` handled cleanly came out of the live
+# receiver as a mangled picture, still reporting every frame received.
+# `resample_poly` was being called on each callback chunk independently,
+# so every chunk boundary carried a polyphase transient (8821 taps against
+# ~186 output samples at 44.1 kHz) and each chunk's length was rounded up
+# on its own. Cost: 4.7 dB of SNR and 684 spurious samples over 66 s.
+
+RATE_PAIRS = [(44100, FS), (48000, FS), (22050, FS), (16000, FS)]
+
+
+@pytest.mark.parametrize("native,target", RATE_PAIRS)
+@pytest.mark.parametrize("blocksize", [735, 1024, 4096])
+def test_streaming_resampler_matches_one_shot_exactly(native, target, blocksize):
+    """Chunking must not change a single sample.
+
+    Exact equality is the right bar: this is the same filter over the
+    same data, so any difference at all is a boundary artifact.
+    """
+    from scipy.signal import resample_poly
+
+    rng = np.random.default_rng(0)
+    t = np.arange(int(native * 1.5)) / native
+    x = (np.sin(2 * np.pi * 1500 * t) + 0.3 * rng.standard_normal(len(t)))
+
+    up, down = audio.resample_ratio(native, target)
+    want = resample_poly(x, up, down)
+
+    rs = audio.StreamResampler(up, down)
+    got = np.concatenate([rs(x[i:i + blocksize])
+                          for i in range(0, len(x), blocksize)])
+
+    assert len(got) <= len(want)
+    # Only the unflushed tail may be missing, never more.
+    assert len(want) - len(got) < 2 * rs.pad * up // down + down
+    assert np.array_equal(got, want[:len(got)])
+
+
+@pytest.mark.parametrize("native,target", RATE_PAIRS)
+def test_streaming_resampler_does_not_drift(native, target):
+    """Output length must track input length, not accumulate rounding."""
+    up, down = audio.resample_ratio(native, target)
+    rs = audio.StreamResampler(up, down)
+    n = 0
+    for _ in range(200):
+        n += len(rs(np.zeros(1024)))
+    expected = 200 * 1024 * up / down
+    assert abs(n - expected) < 2 * rs.pad * up / down + down, (
+        "per-chunk rounding is accumulating a clock error"
+    )
+
+
+def test_capture_from_a_44k_only_device_reproduces_one_shot(fake_pa):
+    """End to end through `open_input_stream`, via the fake device."""
+    from scipy.signal import resample_poly
+
+    from sstvae.rx import RingBuffer
+
+    fake_pa.native = 44100
+    fake_pa.accepts = {44100}
+
+    t = np.arange(44100) / 44100
+    x = np.sin(2 * np.pi * 1200 * t)
+
+    ring = RingBuffer(10.0)
+    stream, rate = audio.open_input_stream(None, ring, FS, on_error=lambda m: None)
+    assert rate == 44100, "should have fallen back to the device rate"
+
+    fake_pa.feed(x, blocksize=1024)
+    got, total = ring.snapshot()
+
+    up, down = audio.resample_ratio(44100, FS)
+    want = resample_poly(x, up, down)
+    assert total > 0
+    assert np.allclose(got[:total], want[:total], atol=1e-6), (
+        "captured audio differs from one-shot resampling -- chunk-boundary "
+        "artifacts are back"
+    )

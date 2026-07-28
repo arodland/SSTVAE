@@ -218,6 +218,24 @@ either, so overlays stay renderable from the command line.
   bandwidth and were deliberately left alone; changing them would alter
   training, not relabel it. The README's tables were re-measured on the
   new scale with `scripts/snr_sweep.py`.
+- **Capture resampling is stateful — `audio.StreamResampler`, never a
+  bare `resample_poly` per callback chunk.** `resample_poly` is an FIR
+  polyphase filter, so an isolated chunk is zero-padded at both ends and
+  every chunk boundary gets a transient; at 44.1 kHz→8 kHz the filter is
+  8821 taps against ~186 output samples per chunk. Per-chunk `ceil`
+  rounding also gains samples (684 over 66 s, a 0.13% clock error the
+  timing tracker then fights). Measured on a real on-air recording:
+  **4.7 dB of SNR** (+2.4 → −2.3 dB) and a badly mangled picture — while
+  still syncing and reporting 440/440 frames, which is why it looked
+  like a decoder bug. `play()` avoids this by resampling the whole
+  waveform up front; capture cannot, hence the class. Only devices that
+  *reject* 8 kHz take this path, so the default PulseAudio device never
+  shows it — `tests/test_audio.py` now fakes an input device to catch it
+  without hardware.
+- `wavio.read_wav` must scale integer samples **before** the stereo
+  mixdown. `mean` returns float, so a dtype check afterwards skipped
+  normalization for every stereo integer file and returned ±32767
+  samples. The modem is scale-invariant enough that it decoded anyway.
 - Capture and playback need **inverse** resample ratios, and sharing one
   "ratio to the device" helper between them is a silent, hardware-only
   bug: playback decimated 48k→8k instead of interpolating 8k→48k, so a

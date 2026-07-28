@@ -11,11 +11,16 @@ def read_wav(path: str) -> np.ndarray:
     """Read a WAV file as float64 mono at FS, resampling if needed."""
     rate, data = wavfile.read(path)
     data = np.asarray(data)
-    if data.ndim > 1:
-        data = data.mean(axis=1)
+    # Scale *before* mixing down: `mean` returns float, so testing the
+    # dtype afterwards silently skipped normalization for every stereo
+    # integer file and handed back samples in the +-32767 range. The
+    # modem is scale-invariant enough that this decoded anyway, which is
+    # why it went unnoticed.
     if np.issubdtype(data.dtype, np.integer):
         data = data / float(np.iinfo(data.dtype).max)
-    data = data.astype(np.float64)
+    data = np.asarray(data, dtype=np.float64)
+    if data.ndim > 1:
+        data = data.mean(axis=1)
     if rate != FS:
         from math import gcd
 

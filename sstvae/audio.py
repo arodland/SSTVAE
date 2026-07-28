@@ -106,6 +106,59 @@ def resample_ratio(src_rate: int, dst_rate: int) -> tuple[int, int]:
     return dst_rate // g, src_rate // g
 
 
+class StreamResampler:
+    """`resample_poly` for a stream that arrives in chunks.
+
+    **Calling `resample_poly` on each callback chunk independently is
+    wrong**, and wrong in a way that decodes rather than fails. It is an
+    FIR polyphase filter, so an isolated chunk is zero-padded at both
+    ends and every chunk boundary gets a filter transient; at 44.1 kHz
+    into 8 kHz the filter is 8821 taps against ~186 output samples per
+    chunk. On a real 66 s recording that cost **4.7 dB of SNR** (+2.4 dB
+    one-shot, -2.3 dB per-chunk) and mangled the picture, while still
+    syncing and reporting every frame received. `play()` sidesteps this
+    by resampling the whole waveform up front; capture cannot.
+
+    Per-chunk rounding is the second half of the bug: each chunk's output
+    length is rounded up independently, so the stream gains samples --
+    684 of them over that same recording, a 0.13% clock error the timing
+    tracker then has to fight.
+
+    This keeps `pad` input samples of context on *each* side of every
+    block it emits, and only emits whole multiples of `down` input
+    samples, so the output is sample-for-sample what one-shot resampling
+    of the whole stream would have produced. Costs `2 * pad` input
+    samples of latency, ~20 ms at 44.1 kHz.
+    """
+
+    def __init__(self, up: int, down: int):
+        self.up = up
+        self.down = down
+        # scipy's default filter is 20*max(up, down)+1 taps in the
+        # upsampled domain; this is its span measured in *input* samples.
+        span = -(-(20 * max(up, down) + 1) // up)
+        # Round up to a whole number of `down`, so the samples skipped at
+        # the head are an exact integer and no phase error accumulates.
+        self.pad = -(-span // down) * down
+        self._buf = np.zeros(self.pad, dtype=np.float64)
+
+    def __call__(self, chunk: np.ndarray) -> np.ndarray:
+        from scipy.signal import resample_poly
+
+        self._buf = np.concatenate(
+            [self._buf, np.asarray(chunk, dtype=np.float64).reshape(-1)])
+        usable = len(self._buf) - 2 * self.pad
+        n = (usable // self.down) * self.down if usable > 0 else 0
+        if n <= 0:
+            return np.empty(0)
+        block = self._buf[: 2 * self.pad + n]
+        y = resample_poly(block, self.up, self.down)
+        skip = self.pad * self.up // self.down
+        take = n * self.up // self.down
+        self._buf = self._buf[n:]
+        return y[skip:skip + take]
+
+
 def open_input_stream(device, ring, samplerate: int = FS, on_error=None):
     """Open an InputStream feeding `ring` (a `sstvae.rx.RingBuffer`).
 
@@ -133,8 +186,6 @@ def open_input_stream(device, ring, samplerate: int = FS, on_error=None):
         stream.start()
         return stream, samplerate
     except Exception as e:
-        from scipy.signal import resample_poly
-
         native = _rate_fallback(device, "input")
         # Capture direction: the device hands us `native`, we want `samplerate`.
         up, down = resample_ratio(native, samplerate)
@@ -142,9 +193,11 @@ def open_input_stream(device, ring, samplerate: int = FS, on_error=None):
             f"[audio in] {samplerate} Hz rejected ({e}); falling back to "
             f"device default {native} Hz with resampling"
         )
+        # Stateful across callbacks -- see StreamResampler. A bare
+        # `resample_poly` per chunk decodes to a mangled picture.
         stream = sd.InputStream(
             samplerate=native, channels=1, dtype="float32", device=device,
-            callback=make_callback(lambda x: resample_poly(x, up, down)),
+            callback=make_callback(StreamResampler(up, down)),
         )
         stream.start()
         return stream, native
