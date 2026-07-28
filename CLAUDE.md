@@ -200,11 +200,27 @@ either, so overlays stay renderable from the command line.
 ## The native port
 
 `native/` is the C++20 rewrite of the application (`docs/native-app.md`).
-**Phase 0 only**: `golay` and `ofdm` are ported, along with the parity
-harness that everything after them depends on. **Python remains the
-normative definition of the on-air format** — when the two disagree,
-Python is right until proven otherwise, because that is the only thing
-that keeps "compatible implementation" a checkable claim.
+**Phases 0–1: the whole modem is ported** — `golay`, `ofdm`, `dsp`,
+`framing`, `beacon`, `sync`, `modem` — and the Python suite passes
+against it, including `-m slow`. Both interop directions work. Phase 2
+(the headless app core: codec, audio, rig, rx/tx engines) has not
+started. **Python remains the normative definition of the on-air
+format** — when the two disagree, Python is right until proven
+otherwise, because that is the only thing that keeps "compatible
+implementation" a checkable claim.
+
+**Format constants are frozen data, not computations.** The pilot
+quadrants (`config.PILOT_QUADRANTS`) and the interleaver permutations
+(`sstvae/modem/interleaver_perms.npy`) were originally drawn from
+seeded numpy, but nothing re-derives them: doing so would make numpy's
+PCG64 part of the waveform, so a future numpy that changed its stream
+would silently change what the radio transmits. If numpy ever does
+change, the right response is to keep sending the frozen values.
+`tools/freeze_format_constants.py --verify` reports whether numpy still
+agrees and **exits 0 either way** — it is deliberately not a CI gate,
+because a red build whose obvious fix is "regenerate" would invert the
+direction of authority. `tests/test_frozen_format.py` walks the AST of
+every module in `sstvae/modem/` and fails on any `default_rng` call.
 
 Three artifacts are **generated and committed**, and CI fails if any is
 stale. Committed so a plain `cmake` build needs no Python; generated so
