@@ -219,6 +219,65 @@ std::vector<cdouble> hilbert(std::span<const double> x) {
     return fft(spectrum, /*forward=*/false);
 }
 
+std::size_t next_fast_len(std::size_t n, bool real) {
+    return real ? pocketfft::detail::util::good_size_real(n)
+                : pocketfft::detail::util::good_size_cmplx(n);
+}
+
+std::vector<cdouble> fftconvolve_valid(std::span<const cdouble> a,
+                                       std::span<const cdouble> v) {
+    if (a.size() < v.size())
+        throw std::invalid_argument("fftconvolve_valid: len(a) must be >= len(v)");
+    const std::size_t full = a.size() + v.size() - 1;
+    const std::size_t n = next_fast_len(full, /*real=*/false);
+
+    std::vector<cdouble> pa(n, cdouble{}), pv(n, cdouble{});
+    std::copy(a.begin(), a.end(), pa.begin());
+    std::copy(v.begin(), v.end(), pv.begin());
+    std::vector<cdouble> fa = fft(pa, true);
+    const std::vector<cdouble> fv = fft(pv, true);
+    for (std::size_t i = 0; i < n; ++i) fa[i] *= fv[i];
+    const std::vector<cdouble> conv = fft(fa, false);
+
+    const std::size_t valid = a.size() - v.size() + 1;
+    return std::vector<cdouble>(conv.begin() + static_cast<std::ptrdiff_t>(v.size() - 1),
+                                conv.begin() + static_cast<std::ptrdiff_t>(v.size() - 1 + valid));
+}
+
+std::vector<double> fftconvolve_valid(std::span<const double> a,
+                                      std::span<const double> v) {
+    if (a.size() < v.size())
+        throw std::invalid_argument("fftconvolve_valid: len(a) must be >= len(v)");
+    const std::size_t full = a.size() + v.size() - 1;
+    const std::size_t n = next_fast_len(full, /*real=*/true);
+
+    // r2c/c2r, as scipy does for real inputs. Going through a complex
+    // transform instead would be algebraically identical and would round
+    // differently.
+    const std::size_t nc = n / 2 + 1;
+    std::vector<double> pa(n, 0.0), pv(n, 0.0);
+    std::copy(a.begin(), a.end(), pa.begin());
+    std::copy(v.begin(), v.end(), pv.begin());
+
+    std::vector<cdouble> fa(nc), fv(nc);
+    const pocketfft::shape_t shape{n};
+    const pocketfft::stride_t stride_r{static_cast<std::ptrdiff_t>(sizeof(double))};
+    const pocketfft::stride_t stride_c{static_cast<std::ptrdiff_t>(sizeof(cdouble))};
+    pocketfft::r2c(shape, stride_r, stride_c, pocketfft::shape_t{0}, true,
+                   pa.data(), fa.data(), 1.0);
+    pocketfft::r2c(shape, stride_r, stride_c, pocketfft::shape_t{0}, true,
+                   pv.data(), fv.data(), 1.0);
+    for (std::size_t i = 0; i < nc; ++i) fa[i] *= fv[i];
+
+    std::vector<double> conv(n);
+    pocketfft::c2r(shape, stride_c, stride_r, pocketfft::shape_t{0}, false,
+                   fa.data(), conv.data(), 1.0 / static_cast<double>(n));
+
+    const std::size_t valid = a.size() - v.size() + 1;
+    return std::vector<double>(conv.begin() + static_cast<std::ptrdiff_t>(v.size() - 1),
+                               conv.begin() + static_cast<std::ptrdiff_t>(v.size() - 1 + valid));
+}
+
 std::vector<double> tx_condition(std::span<const double> x,
                                  double clip_headroom_db, int iterations) {
     double power = 0.0;

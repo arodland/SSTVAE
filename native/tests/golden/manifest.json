@@ -635,6 +635,183 @@
         384
       ],
       "tol": 1e-11
+    },
+    "sync/acquire_clean": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "8.0000000000e+02",
+        "mean_abs": "2.6701180461e+02",
+        "rms": "4.6188057659e+02"
+      },
+      "note": "(preamble_start, freq_offset, metric); start -1 means SyncError",
+      "shape": [
+        3
+      ],
+      "tol": 1e-11
+    },
+    "sync/acquire_noise": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "1.0000000000e+00",
+        "mean_abs": "3.3333333333e-01",
+        "rms": "5.7735026919e-01"
+      },
+      "note": "pure noise: the reference refuses to lock",
+      "shape": [
+        3
+      ],
+      "tol": 1e-11
+    },
+    "sync/acquire_offset": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "8.0000000000e+02",
+        "mean_abs": "2.7932034315e+02",
+        "rms": "4.6237484626e+02"
+      },
+      "note": "(preamble_start, freq_offset, metric); start -1 means SyncError",
+      "shape": [
+        3
+      ],
+      "tol": 1e-11
+    },
+    "sync/acquire_snr0": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "8.0000000000e+02",
+        "mean_abs": "2.6731135588e+02",
+        "rms": "4.6188098366e+02"
+      },
+      "note": "(preamble_start, freq_offset, metric); start -1 means SyncError",
+      "shape": [
+        3
+      ],
+      "tol": 1e-11
+    },
+    "sync/acquire_snr6": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "8.0000000000e+02",
+        "mean_abs": "2.6696546290e+02",
+        "rms": "4.6188046897e+02"
+      },
+      "note": "(preamble_start, freq_offset, metric); start -1 means SyncError",
+      "shape": [
+        3
+      ],
+      "tol": 1e-11
+    },
+    "sync/blind_clean": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "4.4800000000e+02",
+        "mean_abs": "1.5713840237e+02",
+        "rms": "2.5900596642e+02"
+      },
+      "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
+      "shape": [
+        3
+      ],
+      "tol": 1e-11
+    },
+    "sync/blind_offset": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "4.4800000000e+02",
+        "mean_abs": "1.6933906125e+02",
+        "rms": "2.5988478547e+02"
+      },
+      "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
+      "shape": [
+        3
+      ],
+      "tol": 1e-11
+    },
+    "sync/blind_snr0": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "4.4800000000e+02",
+        "mean_abs": "1.5556857604e+02",
+        "rms": "2.5884537401e+02"
+      },
+      "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
+      "shape": [
+        3
+      ],
+      "tol": 1e-11
+    },
+    "sync/blind_snr6": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "4.4800000000e+02",
+        "mean_abs": "1.5657328178e+02",
+        "rms": "2.5891805851e+02"
+      },
+      "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
+      "shape": [
+        3
+      ],
+      "tol": 1e-11
+    },
+    "sync/wave_clean": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "2.2887142511e+00",
+        "mean_abs": "7.9785094717e-01",
+        "rms": "9.8032793381e-01"
+      },
+      "shape": [
+        16000
+      ],
+      "tol": 1e-11
+    },
+    "sync/wave_noise": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "3.8875753298e+00",
+        "mean_abs": "7.9686546309e-01",
+        "rms": "9.9969972637e-01"
+      },
+      "shape": [
+        16000
+      ],
+      "tol": 1e-11
+    },
+    "sync/wave_offset": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "3.3581839466e+00",
+        "mean_abs": "8.6592657050e-01",
+        "rms": "1.0616006425e+00"
+      },
+      "shape": [
+        16000
+      ],
+      "tol": 1e-11
+    },
+    "sync/wave_snr0": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "6.4637911971e+00",
+        "mean_abs": "1.2846406159e+00",
+        "rms": "1.6031147124e+00"
+      },
+      "shape": [
+        16000
+      ],
+      "tol": 1e-11
+    },
+    "sync/wave_snr6": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "3.8694442521e+00",
+        "mean_abs": "9.4940770456e-01",
+        "rms": "1.1679829254e+00"
+      },
+      "shape": [
+        16000
+      ],
+      "tol": 1e-11
     }
   }
 }

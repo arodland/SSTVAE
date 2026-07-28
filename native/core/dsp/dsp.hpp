@@ -56,6 +56,30 @@ std::vector<cdouble> sync_lowpass(std::span<const cdouble> z);
 // scipy.signal.hilbert: the analytic signal, via FFT.
 std::vector<cdouble> hilbert(std::span<const double> x);
 
+// scipy.signal.fftconvolve(a, v, mode="valid"), for len(a) >= len(v).
+//
+// FFT-based rather than a direct sum, matching the reference's choice.
+// That is not just convention: a direct moving sum and an FFT
+// convolution differ in the last bits, and `sync` feeds these straight
+// into argmax over a metric, so keeping the two implementations in the
+// same numerical family keeps the disagreement at FFT-vs-FFT level
+// instead of algorithm-vs-algorithm.
+//
+// Real and complex overloads mirror scipy's own split: it uses a real
+// FFT (and `next_fast_len(..., real=True)`) for real inputs, and the
+// transform length affects the rounding, so the choice is copied rather
+// than unified.
+std::vector<cdouble> fftconvolve_valid(std::span<const cdouble> a,
+                                       std::span<const cdouble> v);
+std::vector<double> fftconvolve_valid(std::span<const double> a,
+                                      std::span<const double> v);
+
+// scipy.fft.next_fast_len. pocketfft's good_size_* is the same function
+// scipy exposes -- verified equal over a range of sizes, which matters
+// because blind acquisition derives its CFO bin spacing from the
+// transform length.
+std::size_t next_fast_len(std::size_t n, bool real = false);
+
 // Envelope clip-and-filter for PAPR (PEP) control.
 //
 // SSB transmitters are limited by envelope peak power, so clipping acts

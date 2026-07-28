@@ -53,6 +53,7 @@ add_library(sstvae_core STATIC
   core/framing/framing.cpp
   core/framing/interleaver_table.cpp
   core/ofdm/ofdm.cpp
+  core/sync/sync.cpp
 )
 target_include_directories(sstvae_core PUBLIC core third_party/pocketfft)
 # Position-independent so the static core can be linked into the

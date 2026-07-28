@@ -19,6 +19,7 @@
 #include "framing/framing.hpp"
 #include "golay/golay.hpp"
 #include "ofdm/ofdm.hpp"
+#include "sync/sync.hpp"
 #include "testing/npy.hpp"
 
 using namespace sstvae;
@@ -509,6 +510,81 @@ void test_beacon() {
                    "beacon/decode recovers the callsign");
 }
 
+void test_sync() {
+    // Acquisition is the riskiest code in the port: a wrong timing index
+    // is not a small error but a completely different picture, and a
+    // wrong CFO bin is a decode that fails with no indication why.
+    //
+    // The timing index is therefore compared *exactly*. Only the
+    // frequency and the metric get a tolerance, and it is the FFT
+    // tolerance -- both sides reach these through convolutions of
+    // several thousand points.
+    constexpr double SYNC_TOL = 1e-9;
+
+    const std::vector<std::string> names = {"clean", "snr6", "snr0", "offset"};
+    for (const std::string& name : names) {
+        const std::vector<double> wave = load_f8(g("sync/wave_" + name));
+        const std::vector<cdouble> z = dsp::to_baseband(wave);
+
+        const std::vector<double> want_acq = load_f8(g("sync/acquire_" + name));
+        std::int64_t got_start = -1;
+        double got_f = 0.0, got_metric = 0.0;
+        try {
+            const auto a = sync::acquire(z);
+            got_start = a.preamble_start;
+            got_f = a.freq_offset;
+            got_metric = a.metric;
+        } catch (const sync::SyncError&) {
+            // -1 is how the corpus records a refusal.
+        }
+        check::equal(got_start, static_cast<std::int64_t>(want_acq[0]),
+                     "sync/acquire " + name + ": preamble_start (exact)");
+        if (want_acq[0] >= 0) {
+            check::close(std::vector<double>{got_f}, std::vector<double>{want_acq[1]},
+                         SYNC_TOL, "sync/acquire " + name + ": freq_offset");
+            check::close(std::vector<double>{got_metric},
+                         std::vector<double>{want_acq[2]}, SYNC_TOL,
+                         "sync/acquire " + name + ": metric");
+        }
+
+        const std::vector<double> want_blind = load_f8(g("sync/blind_" + name));
+        std::int64_t blind_start = -1;
+        double blind_f = 0.0, blind_metric = 0.0;
+        try {
+            const auto b = sync::acquire_blind(z);
+            blind_start = b.frame_start;
+            blind_f = b.freq_offset;
+            blind_metric = b.metric;
+        } catch (const sync::SyncError&) {
+        }
+        check::equal(blind_start, static_cast<std::int64_t>(want_blind[0]),
+                     "sync/acquire_blind " + name + ": frame_start (exact)");
+        if (want_blind[0] >= 0) {
+            check::close(std::vector<double>{blind_f},
+                         std::vector<double>{want_blind[1]}, SYNC_TOL,
+                         "sync/acquire_blind " + name + ": freq_offset");
+            check::close(std::vector<double>{blind_metric},
+                         std::vector<double>{want_blind[2]}, SYNC_TOL,
+                         "sync/acquire_blind " + name + ": metric");
+        }
+    }
+
+    // Pure noise. Refusing to lock is as much a part of the contract as
+    // locking: a receiver that found a preamble here would decode noise
+    // into a picture and report success.
+    const std::vector<double> noise = load_f8(g("sync/wave_noise"));
+    const std::vector<double> want_noise = load_f8(g("sync/acquire_noise"));
+    bool refused = false;
+    try {
+        sync::acquire(dsp::to_baseband(noise));
+    } catch (const sync::SyncError&) {
+        refused = true;
+    }
+    check::is_true(want_noise[0] < 0,
+                   "sync/the noise case is one the reference refuses");
+    check::is_true(refused, "sync/acquire refuses to lock onto pure noise");
+}
+
 void test_config_header() {
     // config.hpp is generated, so this is not checking arithmetic -- it
     // is checking that the committed header was generated from the
@@ -543,6 +619,7 @@ int main(int argc, char** argv) {
         test_dsp();
         test_framing();
         test_beacon();
+        test_sync();
         test_golay();
         test_ofdm_tables();
         test_ofdm_transforms();

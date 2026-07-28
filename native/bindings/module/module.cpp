@@ -27,6 +27,7 @@
 #include "framing/framing.hpp"
 #include "golay/golay.hpp"
 #include "ofdm/ofdm.hpp"
+#include "sync/sync.hpp"
 
 namespace py = pybind11;
 using sstvae::ofdm::cdouble;
@@ -278,6 +279,49 @@ PYBIND11_MODULE(sstvae_native, m) {
                                          r->callsign);
                },
                py::arg("chips"), py::arg("threshold") = 0.6);
+
+    py::module_ sync = m.def_submodule("sync");
+    // SyncError is raised through to Python as the reference's own
+    // exception type, registered by the conftest adapter -- a bare
+    // RuntimeError would make `pytest.raises(SyncError)` in the existing
+    // suite fail for the wrong reason.
+    static py::exception<sstvae::sync::SyncError> sync_error(sync, "SyncError");
+    py::register_exception_translator([](std::exception_ptr p) {
+        try {
+            if (p) std::rethrow_exception(p);
+        } catch (const sstvae::sync::SyncError& e) {
+            py::set_error(sync_error, e.what());
+        }
+    });
+    sync.def("acquire",
+             [](CArray z, double threshold, int max_bins,
+                std::optional<std::pair<std::int64_t, std::int64_t>> search) {
+                 std::span<const cdouble> in(
+                     z.data(), static_cast<std::size_t>(z.size()));
+                 std::optional<sstvae::sync::SearchWindow> win;
+                 if (search) win = sstvae::sync::SearchWindow{search->first,
+                                                             search->second};
+                 const auto a = sstvae::sync::acquire(in, threshold, max_bins, win);
+                 return py::make_tuple(a.preamble_start, a.freq_offset, a.metric);
+             },
+             py::arg("z"), py::arg("threshold") = 0.5, py::arg("max_bins") = 2,
+             py::arg("search") = py::none());
+    sync.def("acquire_blind",
+             [](CArray z, double max_offset_hz, double bin_step_hz,
+                int min_periods, double threshold,
+                std::optional<std::pair<std::int64_t, std::int64_t>> search) {
+                 std::span<const cdouble> in(
+                     z.data(), static_cast<std::size_t>(z.size()));
+                 std::optional<sstvae::sync::SearchWindow> win;
+                 if (search) win = sstvae::sync::SearchWindow{search->first,
+                                                             search->second};
+                 const auto a = sstvae::sync::acquire_blind(
+                     in, max_offset_hz, bin_step_hz, min_periods, threshold, win);
+                 return py::make_tuple(a.frame_start, a.freq_offset, a.metric);
+             },
+             py::arg("z"), py::arg("max_offset_hz") = 55.0,
+             py::arg("bin_step_hz") = 1.7, py::arg("min_periods") = 8,
+             py::arg("threshold") = 4.0, py::arg("search") = py::none());
 
     py::module_ dsp = m.def_submodule("dsp");
     dsp.def("to_baseband",

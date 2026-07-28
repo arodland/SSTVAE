@@ -126,6 +126,34 @@ def _native_adapters(native):
         index = fr.decode_header(soft)
         return None if index is None else MODES_BY_INDEX.get(index)
 
+    # sync raises on failure, and the existing suite catches the
+    # reference's own SyncError. The binding raises its own type, so it
+    # is translated here rather than in C++ -- keeping the core free of
+    # any knowledge of the Python exception it will be seen as.
+    def _sync_call(fn, ctor, *args, **kwargs):
+        from sstvae.modem.sync import SyncError
+
+        try:
+            return ctor(*fn(*args, **kwargs))
+        except Exception as e:
+            if type(e).__name__ == "SyncError":
+                raise SyncError(str(e)) from None
+            raise
+
+    def acquire(z, threshold=0.5, max_bins=2, search=None):
+        from sstvae.modem.sync import Acquisition
+
+        return _sync_call(native.sync.acquire, Acquisition, z, threshold,
+                          max_bins, search)
+
+    def acquire_blind(z, max_offset_hz=55.0, bin_step_hz=1.7, min_periods=8,
+                      threshold=4.0, search=None):
+        from sstvae.modem.sync import BlindAcquisition
+
+        return _sync_call(native.sync.acquire_blind, BlindAcquisition, z,
+                          max_offset_hz, bin_step_hz, min_periods, threshold,
+                          search)
+
     def beacon_decode(chips, threshold=0.6):
         r = bc.decode(chips, threshold)
         if r is None:
@@ -135,6 +163,11 @@ def _native_adapters(native):
                             callsign=callsign)
 
     return {
+        ("sstvae.modem.sync", "acquire"): acquire,
+        ("sstvae.modem.sync", "acquire_blind"): acquire_blind,
+        # modem.py from-imports both, so its copies need replacing too.
+        ("sstvae.modem.modem", "acquire"): acquire,
+        ("sstvae.modem.modem", "acquire_blind"): acquire_blind,
         ("sstvae.modem.beacon", "callsign_to_codes"): bc.callsign_to_codes,
         ("sstvae.modem.beacon", "codes_to_callsign"): bc.codes_to_callsign,
         ("sstvae.modem.beacon", "_crc16"): bc.crc16,

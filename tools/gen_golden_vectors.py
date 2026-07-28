@@ -560,8 +560,67 @@ def build_beacon(c: Corpus) -> None:
           "best-correlation first")
 
 
+def build_sync(c: Corpus) -> None:
+    from sstvae import hfchannel
+    from sstvae.config import MODES
+    from sstvae.modem import Modem, sync
+    from sstvae.modem.dsp import to_baseband
+
+    # A real transmission, truncated to keep the corpus small. Stored as
+    # the *passband* waveform rather than the baseband signal: half the
+    # size, and it makes the C++ run its own to_baseband, which is how
+    # the receiver actually reaches these functions.
+    rng = np.random.default_rng(20260728)
+    latents = rng.normal(size=MODES["A"].n_latents)
+    latents /= np.sqrt(np.mean(latents ** 2))
+    wave = Modem().modulate(latents, "A")[:16000]
+
+    cases = {
+        "clean": wave,
+        "snr6": hfchannel.awgn(wave, 6.0, seed=3),
+        "snr0": hfchannel.awgn(wave, 0.0, seed=4),
+        "offset": hfchannel.awgn(hfchannel.freq_shift(wave, 37.5), 10.0, seed=5),
+    }
+    for name, x in cases.items():
+        c.add(f"sync/wave_{name}", x, tol=PLATFORM_TOL)
+        z = to_baseband(x)
+        # acquire and acquire_blind return a timing index (exact), a
+        # frequency (a float) and a metric. Stored together; the index
+        # is the part that must match exactly, since it decides where
+        # every subsequent frame is read from.
+        try:
+            a = sync.acquire(z)
+            acq = [a.preamble_start, a.freq_offset, a.metric]
+        except sync.SyncError:
+            acq = [-1, 0.0, 0.0]
+        try:
+            b = sync.acquire_blind(z)
+            blind = [b.frame_start, b.freq_offset, b.metric]
+        except sync.SyncError:
+            blind = [-1, 0.0, 0.0]
+        c.add(f"sync/acquire_{name}", np.array(acq, dtype=np.float64),
+              "(preamble_start, freq_offset, metric); start -1 means SyncError",
+              tol=PLATFORM_TOL)
+        c.add(f"sync/blind_{name}", np.array(blind, dtype=np.float64),
+              "(frame_start, freq_offset, metric); start -1 means SyncError",
+              tol=PLATFORM_TOL)
+
+    # A signal with no preamble at all: acquire must refuse it rather
+    # than lock onto noise. The threshold behaviour is as much a part of
+    # the contract as the successful case.
+    noise = rng.normal(size=16000)
+    c.add("sync/wave_noise", noise, tol=PLATFORM_TOL)
+    try:
+        a = sync.acquire(to_baseband(noise))
+        noise_acq = [a.preamble_start, a.freq_offset, a.metric]
+    except sync.SyncError:
+        noise_acq = [-1, 0.0, 0.0]
+    c.add("sync/acquire_noise", np.array(noise_acq, dtype=np.float64),
+          "pure noise: the reference refuses to lock", tol=PLATFORM_TOL)
+
+
 BUILDERS = {"beacon": build_beacon, "dsp": build_dsp, "framing": build_framing,
-            "golay": build_golay, "ofdm": build_ofdm}
+            "golay": build_golay, "ofdm": build_ofdm, "sync": build_sync}
 
 
 def build() -> Corpus:
