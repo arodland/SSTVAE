@@ -1,8 +1,10 @@
 # Native desktop application (C++ / Qt 6)
 
-**Status: Phase 0 implemented (2026-07-28). Phases 1–5 are design.**
-The scaffolding and the parity harness exist in `native/` and `tools/`;
-everything from the modem core onwards is still plan. The rest of this
+**Status: Phases 0 and 1 implemented (2026-07-28). Phases 2–5 are
+design.** The scaffolding, the parity harness and the **whole modem**
+exist in `native/` — `golay`, `ofdm`, `dsp`, `framing`, `beacon`,
+`sync`, `modem` — and the Python suite passes against them. Everything
+from the headless app core onwards is still plan. The rest of this
 document records that plan, the decisions behind it, and the questions
 still open, so none of it has to be re-derived.
 
@@ -519,7 +521,7 @@ A port that is right where the reference is wrong has diverged, and only
 this kind of case catches it — likewise the tie-breaking test, where
 `np.argmax` returning the first maximum is arbitrary but observable.
 
-### Phase 1 — Modem core
+### Phase 1 — Modem core — **DONE 2026-07-28**
 
 `dsp`, `framing`, `beacon`, `sync`, `modem`. The risk is concentrated
 here: `sync.py` + `modem.py` are 622 lines containing the CFO bin
@@ -530,6 +532,73 @@ whole schedule.
 **Exit:** the full Python suite including `-m slow` passes against the
 C++ modem. Golden vectors match bit-for-bit where pocketfft permits, and
 every documented tolerance is justified in a comment.
+
+**Met.** 276 fast and all 19 `-m slow` tests pass under `pytest
+--native`, plus 50 A/B parity tests and three C++ binaries (108 checks).
+Both interop directions work: a C++ transmission decodes in Python and
+vice versa.
+
+The feared part turned out not to be the hard part. **`sync` matched on
+the first build** — identical timing index, 1.9e-16 on frequency — and a
+72-case sweep (SNR 30 to −2 dB, three frequency offsets, with and
+without MPP fading) found **zero differing decisions**, worst frequency
+delta 7.1e-15 Hz. Two decisions made that possible rather than lucky:
+
+- `fftconvolve` is FFT-based in C++ too, mirroring scipy's real/complex
+  split. A direct moving sum would have been *more* accurate and would
+  have diverged *more*, because these feed straight into `argmax`.
+- pocketfft's `good_size_cmplx` equals scipy's `next_fast_len`, verified
+  across sizes. In `acquire_blind` the transform length sets `bin_hz`
+  and therefore the entire CFO search grid, so this is structural rather
+  than an optimization detail.
+
+What actually cost time was two reference behaviours that were not
+deterministic, both found by the port and both fixed in Python:
+
+- **`beacon.find_sync` sorted with `np.argsort(score)[::-1]`.** A clean
+  stream ties *by construction* — every superframe correlates perfectly
+  — and numpy's default sort is unstable, so which of several equally
+  valid superframes `decode()` returned depended on sort internals. Now
+  `kind="stable"`, ties by lowest offset.
+- **The frozen-format problem**, described under Phase 0's lessons.
+
+And one thing the *reference test suite* caught that no parity check
+would have: `conftest.clip_headroom()` disables clipping by patching a
+module constant, to measure the modem's ceiling independent of how the
+clipper is tuned. A compiled-in constant is unreachable from there, so
+the C++ silently reported the clipped floor (10.1 dB) for an assertion
+expecting >30. `Modem::modulate` now takes `clip_headroom_db` as a
+parameter. **Substituting into the real suite is what found this** — a
+harness of purpose-written parity tests would have agreed with itself.
+
+#### On writing the C++-side round-trip test
+
+`native/tests/test_modem_roundtrip.cpp` is corpus-free: it runs the
+whole chain and asserts properties, so `ctest` covers the modem where
+the Python reference is unavailable. Worth recording how weak the
+obvious version of that test was.
+
+Perturbing the code deliberately showed a latent-SNR threshold catches
+almost nothing on a *clean* loopback:
+
+| Perturbation | Caught by SNR floor? |
+|---|---|
+| Beacon carrier off by one | yes (callsign lost) |
+| Catmull-Rom phase `u` shifted 0.05 | **no** |
+| Drift-tracker EMA 0.02 → 0.9 | **no** |
+| Equalizer scale √2 → 1.0 | **no** |
+
+The first two are honest: on a clean channel the pilots are nearly
+identical, so interpolation barely matters and there is no drift to
+track. Those paths are exercised by the *parity* tests under fading, not
+here. The last one was a genuine hole — a 0.707× amplitude error still
+measures 10.7 dB, above any threshold the clip-limited ~10 dB loopback
+leaves room for. Fixed by checking the best-fit **gain** separately from
+the SNR, which is the quantity that is actually wrong.
+
+The general point: **an SNR floor is not a correctness check.** It
+cannot see a scale error, and on a clean channel it cannot see the
+equalizer at all.
 
 - **Volume** — 1,034 lines displaced (`dsp` 64, `framing` 134, `beacon`
   214, `sync` 198, `modem` 424). Gated on `test_modem_e2e.py`,

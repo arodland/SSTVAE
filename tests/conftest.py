@@ -134,11 +134,14 @@ def _native_adapters(native):
         from sstvae.modem.sync import SyncError
 
         try:
-            return ctor(*fn(*args, **kwargs))
+            result = fn(*args, **kwargs)
         except Exception as e:
             if type(e).__name__ == "SyncError":
                 raise SyncError(str(e)) from None
             raise
+        # `dict` as ctor means "return it as-is"; the modem shims build
+        # their own dataclasses from the dict's fields.
+        return result if ctor is dict else ctor(*result)
 
     def acquire(z, threshold=0.5, max_bins=2, search=None):
         from sstvae.modem.sync import Acquisition
@@ -154,6 +157,58 @@ def _native_adapters(native):
                           max_offset_hz, bin_step_hz, min_periods, threshold,
                           search)
 
+    # Modem's methods, rebuilt into the reference's dataclasses. The
+    # binding returns plain dicts so the C++ core carries no knowledge of
+    # Python object layout -- it is the same core the application links.
+    def _beacon_from_tuple(t):
+        return None if t is None else BeaconResult(chip_offset=t[0],
+                                                   frame_index=t[1], callsign=t[2])
+
+    def modem_modulate(self, latents, mode, normalize=True, callsign=""):
+        import sstvae.modem.modem as modem_mod
+        from sstvae.config import MODES
+
+        spec = MODES[mode] if isinstance(mode, str) else mode
+        latents = np.asarray(latents, dtype=np.float64)
+        if latents.shape != (spec.n_latents,):
+            raise ValueError(
+                f"mode {spec.name} needs {spec.n_latents} latents, got {latents.shape}"
+            )
+        # Read the module constant rather than letting C++ use its
+        # compiled-in default: conftest.clip_headroom() patches it to
+        # measure the modem's own ceiling with clipping disabled, and a
+        # compiled-in value is unreachable from there. Passing it through
+        # is what makes that test mean the same thing on both sides --
+        # it caught this by reporting the clipped floor (10.1 dB) for an
+        # assertion that expects >30.
+        return native.modem.modulate(latents, spec.index, normalize, callsign,
+                                     modem_mod.CLIP_HEADROOM_DB)
+
+    def modem_demodulate(self, x, search_s=None):
+        from sstvae.config import MODES_BY_INDEX
+        from sstvae.modem.modem import DemodResult
+
+        d = _sync_call(native.modem.demodulate, dict, np.asarray(x, dtype=np.float64),
+                       search_s)
+        return DemodResult(
+            latents=d["latents"], weights=d["weights"],
+            mode=MODES_BY_INDEX[d["mode_index"]], freq_offset=d["freq_offset"],
+            sync_metric=d["sync_metric"], frames_received=d["frames_received"],
+            beacon=_beacon_from_tuple(d["beacon"]), callsign=d["callsign"],
+            preamble_start=d["preamble_start"], snr_db=d["snr_db"])
+
+    def modem_demodulate_blind(self, x, search_s=None):
+        from sstvae.modem.modem import BlindDemodResult
+
+        d = _sync_call(native.modem.demodulate_blind, dict,
+                       np.asarray(x, dtype=np.float64), search_s)
+        return BlindDemodResult(
+            latents=d["latents"], weights=d["weights"],
+            freq_offset=d["freq_offset"], beacon=_beacon_from_tuple(d["beacon"]),
+            callsign=d["callsign"], frame_offset=d["frame_offset"],
+            n_frames=d["n_frames"], frame0_start=d["frame0_start"],
+            snr_db=d["snr_db"])
+
     def beacon_decode(chips, threshold=0.6):
         r = bc.decode(chips, threshold)
         if r is None:
@@ -163,6 +218,10 @@ def _native_adapters(native):
                             callsign=callsign)
 
     return {
+        # Methods, so these take `self`; patched onto the class.
+        ("sstvae.modem.modem.Modem", "modulate"): modem_modulate,
+        ("sstvae.modem.modem.Modem", "demodulate"): modem_demodulate,
+        ("sstvae.modem.modem.Modem", "demodulate_blind"): modem_demodulate_blind,
         ("sstvae.modem.sync", "acquire"): acquire,
         ("sstvae.modem.sync", "acquire_blind"): acquire_blind,
         # modem.py from-imports both, so its copies need replacing too.
@@ -264,14 +323,20 @@ def pytest_configure(config):
             )
         setattr(module, attr, getattr(getattr(native, sub_name), sub_attr))
 
-    for (mod_name, attr), replacement in _native_adapters(native).items():
-        module = importlib.import_module(mod_name)
-        if not hasattr(module, attr):
+    for (target, attr), replacement in _native_adapters(native).items():
+        # A target may name a module or a class inside one ("...Modem"),
+        # since Modem's methods are what the reference exposes.
+        try:
+            owner = importlib.import_module(target)
+        except ImportError:
+            mod_name, _, cls_name = target.rpartition(".")
+            owner = getattr(importlib.import_module(mod_name), cls_name)
+        if not hasattr(owner, attr):
             raise pytest.UsageError(
-                f"{mod_name}.{attr} does not exist; the adapter table in "
+                f"{target}.{attr} does not exist; the adapter table in "
                 "tests/conftest.py is out of date with the reference"
             )
-        setattr(module, attr, replacement)
+        setattr(owner, attr, replacement)
 
     config._sstvae_native = native
 

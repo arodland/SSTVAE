@@ -26,6 +26,7 @@
 #include "dsp/dsp.hpp"
 #include "framing/framing.hpp"
 #include "golay/golay.hpp"
+#include "modem/modem.hpp"
 #include "ofdm/ofdm.hpp"
 #include "sync/sync.hpp"
 
@@ -279,6 +280,76 @@ PYBIND11_MODULE(sstvae_native, m) {
                                          r->callsign);
                },
                py::arg("chips"), py::arg("threshold") = 0.6);
+
+    py::module_ modem = m.def_submodule("modem");
+    modem.def("modulate",
+              [mode_by_index](DArray latents, int mode_index, bool normalize,
+                              const std::string& callsign,
+                              double clip_headroom_db) {
+                  std::span<const double> in(
+                      latents.data(), static_cast<std::size_t>(latents.size()));
+                  const sstvae::modem::Modem md;
+                  return to_numpy(md.modulate(in, mode_by_index(mode_index),
+                                              normalize, callsign,
+                                              clip_headroom_db));
+              },
+              py::arg("latents"), py::arg("mode_index"),
+              py::arg("normalize") = true, py::arg("callsign") = "",
+              py::arg("clip_headroom_db") = sstvae::config::CLIP_HEADROOM_DB);
+    // Results come back as dicts rather than bound structs: the conftest
+    // adapter rebuilds the reference's dataclasses from them, so the
+    // core stays free of any knowledge of Python object layout.
+    modem.def("demodulate",
+              [](DArray x, std::optional<std::pair<double, double>> search_s) {
+                  std::span<const double> in(
+                      x.data(), static_cast<std::size_t>(x.size()));
+                  const sstvae::modem::Modem md;
+                  const auto r = md.demodulate(in, search_s);
+                  py::dict out;
+                  out["latents"] = to_numpy(r.latents);
+                  out["weights"] = to_numpy(r.weights);
+                  out["mode_index"] = r.mode.index;
+                  out["freq_offset"] = r.freq_offset;
+                  out["sync_metric"] = r.sync_metric;
+                  out["frames_received"] = r.frames_received;
+                  out["callsign"] = r.callsign;
+                  out["preamble_start"] = r.preamble_start;
+                  out["snr_db"] = r.snr_db;
+                  if (r.beacon)
+                      out["beacon"] = py::make_tuple(r.beacon->chip_offset,
+                                                     r.beacon->frame_index,
+                                                     r.beacon->callsign);
+                  else
+                      out["beacon"] = py::none();
+                  return out;
+              },
+              py::arg("x"), py::arg("search_s") = py::none());
+    modem.def("demodulate_blind",
+              [](DArray x, std::optional<std::pair<double, double>> search_s) {
+                  std::span<const double> in(
+                      x.data(), static_cast<std::size_t>(x.size()));
+                  const sstvae::modem::Modem md;
+                  const auto r = md.demodulate_blind(in, search_s);
+                  py::dict out;
+                  out["latents"] = to_numpy(r.latents);
+                  out["weights"] = to_numpy(r.weights);
+                  out["freq_offset"] = r.freq_offset;
+                  out["callsign"] = r.callsign;
+                  out["n_frames"] = r.n_frames;
+                  out["snr_db"] = r.snr_db;
+                  out["frame_offset"] =
+                      r.frame_offset ? py::cast(*r.frame_offset) : py::none();
+                  out["frame0_start"] =
+                      r.frame0_start ? py::cast(*r.frame0_start) : py::none();
+                  if (r.beacon)
+                      out["beacon"] = py::make_tuple(r.beacon->chip_offset,
+                                                     r.beacon->frame_index,
+                                                     r.beacon->callsign);
+                  else
+                      out["beacon"] = py::none();
+                  return out;
+              },
+              py::arg("x"), py::arg("search_s") = py::none());
 
     py::module_ sync = m.def_submodule("sync");
     // SyncError is raised through to Python as the reference's own

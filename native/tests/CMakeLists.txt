@@ -13,3 +13,10 @@ add_executable(test_npy test_npy.cpp)
 target_link_libraries(test_npy PRIVATE sstvae_core)
 target_include_directories(test_npy PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME npy COMMAND test_npy ${CMAKE_CURRENT_SOURCE_DIR}/golden)
+
+# Corpus-free: the C++ modem against itself, so `ctest` covers the whole
+# transmit/receive chain even where the Python reference is unavailable.
+add_executable(test_modem_roundtrip test_modem_roundtrip.cpp)
+target_link_libraries(test_modem_roundtrip PRIVATE sstvae_core)
+target_include_directories(test_modem_roundtrip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME modem_roundtrip COMMAND test_modem_roundtrip)

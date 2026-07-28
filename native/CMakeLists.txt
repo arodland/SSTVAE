@@ -52,6 +52,7 @@ add_library(sstvae_core STATIC
   core/dsp/dsp.cpp
   core/framing/framing.cpp
   core/framing/interleaver_table.cpp
+  core/modem/modem.cpp
   core/ofdm/ofdm.cpp
   core/sync/sync.cpp
 )
