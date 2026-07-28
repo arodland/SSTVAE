@@ -11,17 +11,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Encode/decode/simulate from the command line. torch is needed because
-# the encoder and decoder *are* the image codec -- only sstvae_simulate.py
-# runs on the base deps alone.
+# Encode/decode/simulate from the command line. onnxruntime is needed
+# because the encoder and decoder *are* the image codec -- only
+# sstvae_simulate.py runs on the base deps alone.
 cli = [
-    "torch>=2.0",
+    "onnxruntime>=1.17",
     "huggingface_hub>=0.20",
 ]
 # Live receive off a soundcard: everything in `cli`, plus PortAudio
 # bindings and the waterfall/preview window.
 listen = [
-    "torch>=2.0",
+    "onnxruntime>=1.17",
     "huggingface_hub>=0.20",
     "sounddevice>=0.4.6",
     "matplotlib>=3.7",
@@ -31,7 +31,7 @@ listen = [
 # matplotlib -- the plotting window belongs to the `listen` CLI, and the
 # GUI draws its own spectrum.
 gui = [
-    "torch>=2.0",
+    "onnxruntime>=1.17",
     "huggingface_hub>=0.20",
     "sounddevice>=0.4.6",
     # Essentials, not the `pyside6` metapackage: we import only QtCore,
@@ -47,37 +47,57 @@ train = [
     "lpips>=0.1.4",
     "datasets>=2.18",
     "trackio",
+    # Publish-time, for scripts/export_onnx.py. `onnx` and `onnxscript`
+    # are export-only (the dynamo exporter needs onnxscript, and without
+    # it the export fails with ModuleNotFoundError); `onnxruntime`
+    # provides quantize_dynamic and verifies each artifact before it is
+    # written. A receiving station needs onnxruntime alone.
+    "onnx>=1.16",
+    "onnxscript>=0.1",
+    "onnxconverter-common>=1.14",
+    "onnxruntime>=1.17",
 ]
 dev = [
     "pytest>=8.0",
+    # The *reference* implementation, not a runtime dependency: a few
+    # tests check the ONNX/numpy path against torch. See [tool.uv] below
+    # for why it is pinned to the CPU index.
+    "torch>=2.0",
 ]
 
 [project.scripts]
 sstvae-gui = "sstvae.gui:main"
 
-# Nothing outside `train` ever touches a GPU: the encoder and decoder run
-# on the CPU by design (see sstvae/codec.py), and one 640x480 forward pass
-# is ~30-50 ms against ~270 ms of NumPy DSP in the same operation — on a
-# transmission lasting 32-95 s. So a receiving station has no use for the
-# ~2.5 GB of CUDA runtime that plain `torch` drags in on Linux. The app
-# extras take torch from the CPU index instead; only `train` gets a GPU
-# build.
+# Nothing outside `train` needs torch at all any more. The codec runs on
+# onnxruntime (see sstvae/codec.py and docs/onnx.md) — 27 MB against
+# torch's 336 MB, for a model that is two convolutional passes. That
+# deleted the CPU-index pins the app extras used to need, and with them
+# most of the trouble this block existed to manage.
+#
+# Nothing outside `train` touches a GPU either, which is the older and
+# still-true half of the rule: one 640x480 pass is ~30-50 ms against
+# ~270 ms of NumPy DSP in the same operation, on a transmission lasting
+# 32-95 s, so a receiving station has no use for the ~2.5 GB of CUDA
+# runtime that plain `torch` drags in on Linux.
+#
+# `dev` is the one non-training extra that still takes torch, because
+# several tests use it as the *reference* implementation — above all
+# tests/test_latents.py, which asserts the numpy latent mapping equals
+# the torch one. Those tests `importorskip`, so without torch here they
+# would quietly stop running instead of failing, and there is no CI to
+# notice.
 #
 # The `conflicts` block is load-bearing: uv resolves a single torch for
-# the whole lock, so without declaring the app extras and `train` mutually
+# the whole lock, so without declaring `dev` and `train` mutually
 # exclusive the CPU pin silently wins for training too.
 [tool.uv]
 conflicts = [
-    [{ extra = "cli" }, { extra = "train" }],
-    [{ extra = "listen" }, { extra = "train" }],
-    [{ extra = "gui" }, { extra = "train" }],
+    [{ extra = "dev" }, { extra = "train" }],
 ]
 
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cpu", extra = "cli" },
-    { index = "pytorch-cpu", extra = "listen" },
-    { index = "pytorch-cpu", extra = "gui" },
+    { index = "pytorch-cpu", extra = "dev" },
 ]
 
 [[tool.uv.index]]

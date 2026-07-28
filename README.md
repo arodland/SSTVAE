@@ -271,27 +271,20 @@ there's nothing else to download.
 
 ### Command-line tools (encode / decode / simulate)
 
-This is the smaller install: PyTorch runs the codec, but CPU-only is
-fine — decoding a picture takes a second or two.
+This is the smaller install: the codec runs on
+[ONNX Runtime](https://onnxruntime.ai/), not PyTorch.
 
 ```sh
 uv sync --extra cli                      # with uv
 pip install -e '.[cli]'                  # or plain pip, ideally in a venv
 ```
 
-**Nothing outside training uses a GPU**, so don't let pip talk you into
-a CUDA one. With `uv` this is handled for you: the `cli`, `listen` and
-`gui` extras pull CPU-only torch (~40 packages) while `train` gets a GPU
-build. On Linux, plain `pip` will instead drag in ~2.5 GB of CUDA
-runtime that never gets used, so tell it not to:
-
-```sh
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -e '.[cli]'
-```
-
-This is a Linux-only wrinkle: the macOS and Windows wheels pull no
-separate GPU runtime, so there is nothing to avoid there.
+**Sending and receiving pictures does not install PyTorch at all.** The
+encoder and decoder are two convolutional passes, and onnxruntime runs
+them in 53 MB where torch needs 345 MB — so the `cli`, `listen` and
+`gui` extras come to about 263 MB installed instead of ~555 MB, and the
+old "make sure pip doesn't give you the CUDA build" dance is gone. Only
+the `train` extra uses torch. See [docs/onnx.md](docs/onnx.md).
 
 With `uv`, prefix commands with `uv run`; with pip, activate your venv
 and call `python` directly. Examples below use `uv run`.
@@ -299,10 +292,9 @@ and call `python` directly. Examples below use `uv run`.
 <details>
 <summary>Platform notes</summary>
 
-- **Linux** — see the CPU-torch note above; otherwise nothing extra.
-- **macOS** (Intel or Apple Silicon) — nothing extra, and nothing to
-  choose: there is one wheel, it covers CPU and MPS, and it brings no
-  separate GPU runtime with it.
+- **Linux** — nothing extra. (Before the ONNX switch this needed a
+  CPU-torch pin to avoid ~2.5 GB of unused CUDA runtime; no longer.)
+- **macOS** (Intel or Apple Silicon) — nothing extra.
 - **Windows** — works in PowerShell or WSL. In PowerShell, quote the
   extras differently: `pip install -e ".[cli]"`.
 - **AMD GPU / ROCm** — nothing to do. You do not need a GPU for

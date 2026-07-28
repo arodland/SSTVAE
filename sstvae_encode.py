@@ -6,14 +6,15 @@
 
 import argparse
 
-import numpy as np
-import torch
-
 from sstvae import wavio
-from sstvae.codec import MODEL_HELP, load_model  # noqa: F401  (re-exported)
+from sstvae.checkpoint import PRECISIONS
+from sstvae.codec import (  # noqa: F401  (MODEL_HELP re-exported)
+    MODEL_HELP,
+    PRECISION_HELP,
+    load_codec,
+)
 from sstvae.config import MODES
 from sstvae.images import load_image
-from sstvae.models import SSTVAE
 from sstvae.modem import Modem
 
 
@@ -23,6 +24,8 @@ def main() -> None:
     ap.add_argument("output", help="WAV file for transmission")
     ap.add_argument("--mode", choices=sorted(MODES), default="B")
     ap.add_argument("--model", default=None, help=MODEL_HELP)
+    ap.add_argument("--precision", choices=PRECISIONS, default=None,
+                    help=PRECISION_HELP)
     ap.add_argument(
         "--callsign", default="",
         help="up to 8 chars, sent continuously on the beacon carrier "
@@ -31,11 +34,8 @@ def main() -> None:
     args = ap.parse_args()
 
     spec = MODES[args.mode]
-    model = load_model(args.model)
-    img = load_image(args.image)[None]
-    with torch.no_grad():
-        z = model.encoder(img)
-    flat = SSTVAE.latents_to_flat(z)[0].numpy().astype(np.float64)
+    codec = load_codec(args.model, precision=args.precision)
+    flat = codec.encode(load_image(args.image))
 
     x = Modem().modulate(flat[: spec.n_latents], spec, callsign=args.callsign)
     wavio.write_wav(args.output, x)

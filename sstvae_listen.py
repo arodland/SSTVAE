@@ -32,7 +32,14 @@ import threading
 import numpy as np
 
 from sstvae.audio import list_devices, open_input_stream
-from sstvae.codec import MODEL_HELP, load_model, pad_to_full, reconstruct  # noqa: F401
+from sstvae.checkpoint import PRECISIONS
+from sstvae.codec import (  # noqa: F401  (re-exported)
+    MODEL_HELP,
+    PRECISION_HELP,
+    load_codec,
+    pad_to_full,
+    reconstruct,
+)
 from sstvae.config import FS
 from sstvae.rx import (  # noqa: F401
     Reception,
@@ -116,6 +123,8 @@ def run_console(state: SharedState, stop_event: threading.Event):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", default=None, help=MODEL_HELP)
+    ap.add_argument("--precision", choices=PRECISIONS, default=None,
+                    help=PRECISION_HELP)
     ap.add_argument("--out-dir", default="received", help="directory for saved images")
     ap.add_argument("--device", default=None, help="input device name/index (see --list-devices)")
     ap.add_argument("--samplerate", type=int, default=FS, help="capture sample rate to request")
@@ -166,7 +175,7 @@ def main() -> None:
         blind_search_seconds=args.blind_search_seconds,
     )
 
-    model = load_model(args.model)
+    model = load_codec(args.model, precision=args.precision)
     ring = RingBuffer(args.buffer_seconds)
     state = SharedState()
     stop_event = threading.Event()

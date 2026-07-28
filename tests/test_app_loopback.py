@@ -47,9 +47,9 @@ def model():
     path = find_checkpoint()
     if path is None:
         pytest.skip("no local checkpoint; set SSTVAE_TEST_CHECKPOINT")
-    from sstvae.codec import load_model
+    from sstvae.codec import load_codec
 
-    return load_model(path)
+    return load_codec(path)
 
 
 class FakePtt:

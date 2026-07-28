@@ -194,3 +194,90 @@ a deep fade dominates everything else); stay within about a dB of
 threshold, since at 6 dB everything succeeds and there is nothing to
 measure; and **use at least 25 seeds per point** — six is what produced
 the phantom effect this section used to describe.
+
+## Quantisation tolerance as a training soft constraint
+
+**Nothing to act on, and the deficit that prompted this is gone.**
+Recorded so the reasoning is on the table next time the training recipe
+is revised.
+
+The int8 problem was solved at export, not in training: keeping each
+part's single most quantisation-sensitive conv layer at fp32 took the
+encoder from 5.8 dB to **14.0 dB** under the channel noise, and the
+whole pipeline from −0.19 dB to −0.002 dB on photographs and −1.57 dB to
+−0.112 dB off-distribution. `docs/onnx.md` has the mechanism
+(`ConvInteger` carries one scale per weight *tensor*, so one
+outlier-heavy tensor dominates) and the options if more margin is ever
+wanted. Static calibrated quantisation was tried and is **worse** — do
+not retry it without new information.
+
+**The finding that outlived the quantisation work is about training
+data.** The model is trained on COCO photographs; operators send test
+cards, charts, callsign graphics, screenshots and text. Quantisation
+tuning only removed the *extra* penalty those pictures were paying — a
+large one, 1.5 dB, which is why it surfaced here at all. They are still
+reconstructed by a model that has never seen anything like them, at
+every precision including fp32. Non-photographic content in the training
+mix would improve them across the board, and would also make the
+model less sensitive to the next perturbation nobody thought to test.
+
+## Non-photographic content: evaluate, then train on it
+
+**Andrew, 2026-07-28.** Two related pieces of work, promoted out of the
+quantisation section above because they outlived it.
+
+### Why this surfaced
+
+The quantisation work measured the model on smooth synthetic probes for
+the first time and found the fully-quantised decoder costing **1.54 dB**
+there against 0.10 dB on COCO. Fixing that at export removed the *extra*
+penalty, but the underlying fact remains: **the model has never seen
+anything that is not a photograph**, and operators routinely send test
+cards, charts, callsign graphics, screenshots and text. Nobody has
+measured what those cost at fp32.
+
+### 1. Evaluate on non-photographic images
+
+Should join the existing evaluation sweeps (PSNR/LPIPS vs SNR per mode),
+as a second content class rather than a replacement. The interesting
+number is the *gap* between the two classes at each mode and SNR — that
+is what tells you whether this is a training-data problem worth
+spending on, and how much.
+
+Expect specific failure modes rather than uniform blur: hard edges,
+large flat areas, saturated primaries and small text are all things a
+photograph-trained convolutional autoencoder handles differently from
+foliage and faces. The README already warns that small text "can come
+back subtly wrong rather than merely blurry"; this would quantify it.
+
+### 2. Find or make training data for v2
+
+Deferred once already, for limited availability and licensing — the
+dataset is republished as `arodland/coco640-sstvae`, so anything added
+has to be redistributable. Worth looking harder, and there is one angle
+that dissolves both objections:
+
+**Generate it.** Test cards, colour bars, grids, gradients, line art,
+callsign ID cards, rendered text blocks and plotted charts are all
+procedurally generatable, carry no licence at all, and are *exactly* the
+content class in question. The project already has the pieces —
+`sstvae/images.py` has the font search, `sstvae/overlay/render.py` draws
+text and insets with PIL, and matplotlib is already a dependency for
+plots. A generator gives unlimited quantity, exact control of the
+mixture, and no attribution burden.
+
+Real-world sources worth checking for the part a generator cannot cover
+(screenshots, scanned documents, real test-card photographs):
+
+- Wikimedia Commons public-domain test patterns (PM5544, SMPTE bars,
+  EBU) — many are PD or simple enough to be uncopyrightable.
+- CC0/CC-BY document and figure sets (DocLayNet is CC-BY).
+- Openclipart (CC0) for line art.
+
+Check licences individually; "found on the internet" is not a licence,
+and this dataset gets redistributed.
+
+**Mixture ratio matters and should be swept, not guessed.** Too much
+synthetic content and photographs regress; the point is to widen
+coverage, not to move the distribution. Measure both classes at every
+candidate ratio, and keep the photograph numbers as a floor.

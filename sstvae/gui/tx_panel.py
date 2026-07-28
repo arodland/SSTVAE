@@ -27,6 +27,7 @@ from ..images import fit_image
 from ..overlay import ImageItem, TextItem
 from ..tx import TxConfig, TxEngine, TxPhase
 from .overlay_editor import OverlayEditor
+from .settings import codec_precision
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif);;All files (*)"
 
@@ -300,6 +301,7 @@ class TransmitPanel(QWidget):
             ptt_lead_s=cfg.rig.ptt_lead_s,
             ptt_tail_s=cfg.rig.ptt_tail_s,
             model_path=cfg.model_path,
+            precision=codec_precision(cfg),
         )
         self._engine = TxEngine(
             ptt=self._app.ptt(),

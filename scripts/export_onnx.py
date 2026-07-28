@@ -46,7 +46,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sstvae import checkpoint  # noqa: E402
-from sstvae.codec import load_model  # noqa: E402
+from sstvae.codec import load_torch_model  # noqa: E402
 from sstvae.config import LATENT_CHANNELS, LATENT_H, LATENT_W  # noqa: E402
 from sstvae.images import IMG_H, IMG_W  # noqa: E402
 
@@ -72,13 +72,13 @@ CHANNEL_NOISE_RMS = 0.367
 # natural scale: int8 scores ~24 dB on it while costing ~0.15 dB of
 # actual picture quality, so gating on it would reject a good artifact.
 #
-# The int8 gates are loose because int8 really is coarse here. Measured
-# 2026-07-27 over 10 COCO val images: latent RMS 1.88e-01, costing
-# 0.28 dB of picture. `quantize_dynamic` turns every Conv into
-# `ConvInteger`, which supports only a **per-tensor** weight scale --
-# `per_channel=True` is silently a no-op on this graph, verified. Static
-# (calibrated) quantisation is the lever if int8 accuracy ever matters;
-# it is not implemented here.
+# The int8 gates stay loose enough to survive an untuned export failing
+# gracefully, but the tuned one is far inside them: latent RMS 7.31e-02,
+# costing 0.002 dB on photographs and 0.112 dB off-distribution.
+# `quantize_dynamic` turns every Conv into `ConvInteger`, which supports
+# only a **per-tensor** weight scale -- `per_channel=True` is silently a
+# no-op on this graph, verified -- which is why the fix is per-layer
+# exclusion rather than a quantiser setting.
 TOLERANCES = {
     "fp32": {"latent_rms": 1e-4, "quality_db": 0.02},
     "fp16": {"latent_rms": 5e-3, "quality_db": 0.05},
@@ -159,10 +159,101 @@ def convert_fp16(src: Path, dst: Path) -> None:
     onnx.save(float16.convert_float_to_float16(model, keep_io_types=True), str(dst))
 
 
-def convert_int8(src: Path, dst: Path) -> None:
+# int8 tuning: greedily keep the most quantisation-sensitive conv layers
+# at fp32, because `ConvInteger` carries one scale per weight *tensor*
+# and a single outlier-heavy tensor therefore sets a coarse scale for
+# everything in it.
+#
+# **Tune on off-distribution content too, or this measures nothing.**
+# Quantisation sensitivity barely shows on the photographs the model was
+# trained on and shows enormously on everything else. Measured on v1's
+# decoder: fully quantised costs 0.10 dB on COCO but **1.54 dB** on
+# smooth synthetic probes, and excluding one layer takes the latter to
+# -0.14 dB. Tuned against COCO alone the search sees 0.10 dB, concludes
+# there is nothing to fix, and ships the 1.54 dB. That is not an
+# academic case: operators send test cards, charts and screenshots.
+INT8_TUNE_SYNTHETIC_PROBES = 2
+
+# Stop once the error is under target -- **absolute, not a
+# relative-improvement rule**. At the tail a large *fractional* error
+# reduction is worth 0.00 dB of picture, which is how an earlier
+# relative-only rule talked itself into three decoder exclusions that
+# together bought 0.005 dB. `INT8_MIN_GAIN` remains only as a guard
+# against grinding away at a target that cannot be reached.
+#
+# The encoder is measured in latent RMS against the channel noise, since
+# that is the quantity that goes on the air. The decoder is measured in
+# dB of picture, since its error reaches nobody else.
+INT8_TARGET_DB_UNDER_CHANNEL = 13.0
+# A tenth of a dB of your own picture. Tighter than this (0.05 was tried)
+# buys a second decoder exclusion worth 0.02 dB for +1.8 MB, which is the
+# wrong trade for the precision that exists for constrained devices.
+INT8_TARGET_DECODER_DB = 0.10
+INT8_MIN_GAIN = 0.15
+INT8_MAX_EXCLUDED = 3
+
+
+def convert_int8(src: Path, dst: Path, exclude: list[str] | None = None) -> None:
     from onnxruntime.quantization import QuantType, quantize_dynamic
 
-    quantize_dynamic(str(src), str(dst), weight_type=QuantType.QInt8)
+    quantize_dynamic(str(src), str(dst), weight_type=QuantType.QInt8,
+                     nodes_to_exclude=list(exclude or []))
+
+
+def _conv_nodes(path: Path) -> list[str]:
+    import onnx
+
+    return [n.name for n in onnx.load(str(path)).graph.node
+            if n.op_type in ("Conv", "ConvTranspose")]
+
+
+def tune_int8_exclusions(src: Path, measure, target: float, *,
+                         log=print) -> list[str]:
+    """Find which conv layers to leave at fp32, by measuring.
+
+    Quantisation error is not spread evenly across layers -- it is
+    dominated by a few whose weight distribution has outliers, because
+    `quantize_dynamic` emits `ConvInteger`, which carries **one scale
+    per tensor**. A single bad tensor therefore sets a coarse scale for
+    all of its weights. (This is also why `per_channel=True` does
+    nothing here: ConvInteger has nowhere to put per-channel scales.)
+
+    Measured on v1: excluding one 0.59 MB layer took the encoder from
+    1.88e-01 to 7.31e-02 RMS -- 5.8 dB to 14.0 dB under the channel
+    noise -- for 8% more file. That is worth finding automatically
+    rather than hardcoding, because the sensitive layer is a property of
+    the trained weights and will move between revisions.
+
+    `measure(path) -> float` returns an error, lower being better, and
+    `target` is the value below which the error stops mattering.
+    """
+    candidates = _conv_nodes(src)
+    excluded: list[str] = []
+    with tempfile.TemporaryDirectory() as td:
+        def err(excl: list[str]) -> float:
+            p = Path(td) / f"probe{len(excl)}.onnx"
+            convert_int8(src, p, excl)
+            return measure(p)
+
+        current = err([])
+        log(f"    all quantised: {current:.4e} (target {target:.4e})")
+        while current > target and len(excluded) < INT8_MAX_EXCLUDED:
+            scored = [(err(excluded + [c]), c)
+                      for c in candidates if c not in excluded]
+            if not scored:
+                break
+            best_err, best = min(scored)
+            gain = (current - best_err) / current if current else 0.0
+            if gain < INT8_MIN_GAIN:
+                log(f"    stop: best remaining gain {gain:.1%} < "
+                    f"{INT8_MIN_GAIN:.0%}")
+                break
+            excluded.append(best)
+            current = best_err
+            log(f"    keep {best} at fp32 -> {current:.4e} ({gain:.0%} better)")
+        if current <= target:
+            log(f"    at target ({current:.4e} <= {target:.4e})")
+    return excluded
 
 
 def stamp_metadata(path: Path, props: dict) -> None:
@@ -278,6 +369,9 @@ def main() -> int:
                          "low-frequency probes are used if omitted")
     ap.add_argument("--n-probe", type=int, default=4,
                     help="number of verification images (default 4)")
+    ap.add_argument("--no-int8-tuning", action="store_true",
+                    help="skip the per-layer int8 sensitivity search (faster, "
+                         "but a worse int8 encoder -- see docs/onnx.md)")
     ap.add_argument("--push", action="store_true",
                     help="upload the artifacts to the Hub after verifying")
     ap.add_argument("--repo", default=checkpoint.DEFAULT_REPO,
@@ -294,7 +388,7 @@ def main() -> int:
     ckpt_sha = sha256(ckpt_path)
     print(f"checkpoint  {ckpt_path.name}  sha256:{ckpt_sha[:16]}...")
 
-    model = load_model(args.model)
+    model = load_torch_model(args.model)
     model.eval()
 
     if args.images:
@@ -328,6 +422,52 @@ def main() -> int:
         export_fp32(model.decoder, (z0, torch.ones_like(z0)), base["decoder"],
                     ["latents", "weights"], ["image"])
 
+        exclusions = {"encoder": [], "decoder": []}
+        if "int8" in precisions and not args.no_int8_tuning:
+            # A subset is plenty to *rank* layers -- the full set still
+            # verifies the result afterwards -- but it must include
+            # off-distribution probes. See INT8_TUNE_SYNTHETIC_PROBES.
+            tune_imgs = torch.cat([
+                images[:min(3, images.shape[0])],
+                probe_images(INT8_TUNE_SYNTHETIC_PROBES, seed=1234),
+            ])
+            tune_n = tune_imgs.shape[0]
+            src = tune_imgs.numpy()
+            with torch.no_grad():
+                ref_z = torch.cat([model.encoder(tune_imgs[i:i + 1])
+                                   for i in range(tune_n)])
+                ref_pic = torch.cat([
+                    model.decoder(ref_z[i:i + 1], torch.ones_like(ref_z[i:i + 1]))
+                    for i in range(tune_n)]).numpy()
+            ref_z = ref_z.numpy()
+            torch_q = float(np.mean([psnr(ref_pic[i], src[i]) for i in range(tune_n)]))
+
+            def enc_err(path: Path) -> float:
+                got = np.concatenate([
+                    run_onnx(path, {"primary": src[i:i + 1]})
+                    for i in range(tune_n)])
+                return float(np.sqrt(np.mean((got - ref_z) ** 2)))
+
+            def dec_err(path: Path) -> float:
+                """dB of picture lost, decoding the *torch* latents."""
+                got = np.concatenate([
+                    run_onnx(path, {"primary": ref_z[i:i + 1],
+                                    "secondary": np.ones_like(ref_z[i:i + 1])})
+                    for i in range(tune_n)])
+                q = float(np.mean([psnr(got[i], src[i]) for i in range(tune_n)]))
+                return max(torch_q - q, 0.0)
+
+            plan = {
+                "encoder": (enc_err, CHANNEL_NOISE_RMS
+                            / 10 ** (INT8_TARGET_DB_UNDER_CHANNEL / 20)),
+                "decoder": (dec_err, INT8_TARGET_DECODER_DB),
+            }
+            for part, (measure, target) in plan.items():
+                print(f"  tuning int8 {part} "
+                      f"({tune_n} probes, {INT8_TUNE_SYNTHETIC_PROBES} synthetic)...")
+                exclusions[part] = tune_int8_exclusions(
+                    base[part], measure, target, log=print)
+
         for precision in precisions:
             paths = {}
             for part in ("encoder", "decoder"):
@@ -337,15 +477,18 @@ def main() -> int:
                 elif precision == "fp16":
                     convert_fp16(base[part], dst)
                 else:
-                    convert_int8(base[part], dst)
-                stamp_metadata(dst, {
+                    convert_int8(base[part], dst, exclusions[part])
+                props = {
                     "sstvae.source_checkpoint": ckpt_path.name,
                     "sstvae.source_sha256": ckpt_sha,
                     "sstvae.part": part,
                     "sstvae.precision": precision,
                     "sstvae.opset": OPSET,
                     "sstvae.torch_version": torch.__version__,
-                })
+                }
+                if precision == "int8" and exclusions[part]:
+                    props["sstvae.int8_fp32_layers"] = ",".join(exclusions[part])
+                stamp_metadata(dst, props)
                 paths[part] = dst
 
             r = verify(model, images, paths, precision)
@@ -367,6 +510,7 @@ def main() -> int:
         "opset": OPSET,
         "torch_version": torch.__version__,
         "channel_noise_rms": CHANNEL_NOISE_RMS,
+        "int8_fp32_layers": exclusions,
         "artifacts": {
             p.name: {"sha256": sha256(p), "bytes": p.stat().st_size} for p in written
         },

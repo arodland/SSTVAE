@@ -96,7 +96,14 @@ class TransmitConfig:
 @dataclass
 class Config:
     callsign: str = ""
-    model_path: str | None = None  # None = the published checkpoint
+    # None = the published ONNX artifacts, fetched and cached on first use.
+    # May also be a .pt checkpoint, a .onnx artifact, or a directory of
+    # exported .onnx files -- see sstvae.checkpoint.resolve_onnx.
+    model_path: str | None = None
+    # ONNX precision. Purely local: every precision decodes every other
+    # precision's transmissions, so this never has to match the far end.
+    # Ignored when model_path names a .pt (that is the torch backend).
+    precision: str = "fp16"
     audio: AudioConfig = field(default_factory=AudioConfig)
     rig: RigConfig = field(default_factory=RigConfig)
     folders: FolderConfig = field(default_factory=FolderConfig)
@@ -138,6 +145,19 @@ class Config:
             os.fsync(fh.fileno())
         os.replace(tmp, path)  # atomic on POSIX and Windows
         return path
+
+
+def codec_precision(config) -> str | None:
+    """The `precision=` to hand `codec.load_codec` for this config.
+
+    `None` for a `.pt`, because that selects the torch backend, which has
+    no precision and rejects the argument rather than ignoring it. The
+    settings dialog greys the control out in the same case, so the user
+    sees the same rule the code applies.
+    """
+    if config.model_path and Path(config.model_path).suffix == ".pt":
+        return None
+    return config.precision
 
 
 def _build(cls, data: dict):

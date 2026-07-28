@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from PIL import Image  # noqa: E402
 
 from sstvae import hfchannel  # noqa: E402
-from sstvae.codec import MODEL_HELP, load_model, pad_to_full, reconstruct  # noqa: E402
+from sstvae.codec import MODEL_HELP, load_torch_model, pad_to_full, reconstruct  # noqa: E402
 from sstvae.config import MODES, SNR_REF_BW_HZ  # noqa: E402
 from sstvae.images import fit_image, image_to_tensor  # noqa: E402
 from sstvae.models import SSTVAE  # noqa: E402
@@ -133,7 +133,7 @@ def main() -> None:
     print(f"{len(images)} images, SNR referenced to {SNR_REF_BW_HZ:.0f} Hz\n",
           file=sys.stderr)
 
-    model = load_model(args.model)
+    model = load_torch_model(args.model)
     modem = Modem()
     latents = encode_all(model, images)
     modes = [MODES[m] for m in args.modes]

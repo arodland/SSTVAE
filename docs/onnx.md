@@ -1,9 +1,9 @@
 # ONNX export and quantisation
 
-**Status: exported and published; the runtime path is not implemented.**
-`scripts/export_onnx.py` exists and the six `v1` artifacts are on the
-Hub, but no code *loads* them yet — `codec.py` is still torch. See "What
-implementing it would involve" for what remains.
+**Status: implemented.** `sstvae/codec.py` runs on onnxruntime, the six
+`v1` artifacts are published, and the `cli`/`listen`/`gui` extras no
+longer depend on torch at all. Torch is training-only (plus `dev`, where
+it is the reference implementation the tests check against).
 
 Numbers were measured on 2026-07-26 against the published `v1.pt`
 checkpoint, on an x86-64 Linux box (24 cores, onnxruntime 1.28 CPU
@@ -19,18 +19,27 @@ installs, and it exists solely to run two convolutional passes:
 
 | | torch path | ONNX path |
 |---|---|---|
-| runtime installed | 336 MB | **27 MB** |
-| model artifacts | `v1.pt`, ~40 MB | 41.3 MB fp32 / 20.7 fp16 / 12.7 int8 |
+| runtime installed | 345 MB | **53 MB** |
+| model artifacts | `v1.pt`, ~40 MB | 41.5 MB fp32 / 20.9 fp16 / 12.8 int8 |
 | `import` cost | 0.48 s | 0.04 s |
 
 `onnx` (50 MB), `onnxscript` (108 KB) and `onnxconverter-common` are
 **export-time only** — `onnxruntime` alone loads and runs `.onnx` files.
 
-That takes a `pip install sstvae[gui]` from roughly 400 MB to about
-90 MB before any bundling, and puts a single-file distribution in the
-100–120 MB class instead of 300+. Note that the model artifacts row is
-not part of a download at all under the first-run-fetch decision below —
-it is a cache cost, paid once.
+Measured after implementation, `uv pip install '.[cli]'` into a clean
+venv: **263 MB, down from ~555 MB.** The model artifacts row is not part
+of that at all — they are fetched on first run (see below), so they are
+a cache cost paid once, not a download.
+
+> **Two figures in the first draft of this table were wrong**, both
+> flattering. onnxruntime is 53 MB *installed*; 27 MB was its wheel
+> size. And the claim that this took an install "from roughly 400 MB to
+> about 90 MB" ignored the base dependencies, which dominate now that
+> torch is gone: scipy is 110 MB, numpy 57 MB, pillow 20 MB. The real
+> saving is 2.1×, not 4.4×. It is still the single biggest thing that
+> can be removed from a receiving station — but scipy, not torch, is now
+> the largest dependency, and `sstvae/modem/` uses only `firwin`,
+> `hilbert`, `fftconvolve` and `resample_poly` from it.
 
 ## Exporting
 
@@ -92,21 +101,31 @@ document originally recorded** — see the correction below.
 |---|---|---|---|
 | fp32 | 41.5 MB | 1.95e-06 RMS | 105 dB below |
 | fp16 | 20.9 MB | 4.58e-04 RMS | 58 dB below |
-| int8 | 12.8 MB | **1.88e-01 RMS** | **5.8 dB below** |
+| int8 | 15.1 MB | 7.31e-02 RMS | 14.0 dB below |
 
-| | local decode, whole pipeline at this precision |
-|---|---|
-| torch | 26.71 dB |
-| fp32 | 26.71 dB (−0.000) |
-| fp16 | 26.71 dB (−0.000) |
-| int8 | 26.43 dB (−0.282) |
+Whole pipeline at each precision, against the torch reference — and
+measured on **two kinds of picture**, because the difference between
+them turned out to be the whole story:
+
+| | COCO photographs | off-distribution |
+|---|---|---|
+| fp32 | −0.000 dB | −0.000 dB |
+| fp16 | −0.000 dB | −0.000 dB |
+| int8 | −0.002 dB | −0.112 dB |
+| *int8, untuned export* | *−0.187 dB* | *−1.573 dB* |
 
 **fp16 is free.** Half the size, no measurable cost anywhere. This
-survived re-measurement unchanged and is the basis for shipping fp16.
+survived every re-measurement and is the basis for shipping fp16.
 
-**int8 costs about 0.28 dB PSNR** for a 3.2× smaller model — roughly
-twice what was first recorded here (0.13 dB), because the encoder latent
-error is 1.88e-01 RMS rather than 8.0e-02.
+**int8 is now very nearly free too**, at 2.7× smaller than fp32 — but
+only because the export leaves one layer per part at fp32 (see
+"Sensitive layers stay at fp32"). Untuned it costs 0.19 dB on
+photographs and **1.57 dB** on everything else. As an *on-air* cost the
+tuned int8 encoder is 0.17 dB of effective SNR, against ~1 dB untuned.
+
+> The off-distribution column uses smooth synthetic probes at a seed the
+> tuner never saw, so these are held-out numbers, not the search
+> scoring itself.
 
 > **Correction, 2026-07-27.** The original 8.0e-02 figure does not
 > reproduce with the current toolchain (torch 2.13, onnxruntime 1.28)
@@ -115,20 +134,89 @@ error is 1.88e-01 RMS rather than 8.0e-02.
 > supports only a **per-tensor** weight scale, so `per_channel=True` is
 > silently a no-op — verified, byte-identical output and identical
 > error. The earlier number was probably taken from a differently
-> optimized graph. The lever, if int8 accuracy ever matters, is **static
-> (calibrated) quantisation**, which yields `QLinearConv` and is both
-> more accurate and faster; it is not implemented.
+> optimized graph.
+>
+> **Superseded 2026-07-28**, before anyone could have these artifacts
+> cached. Per-tensor scaling turned out to be the whole story, and the
+> fix is in "Sensitive layers stay at fp32" below: int8 now measures
+> 5.83e-02 RMS, **16.0 dB** under the channel noise. The numbers in the
+> table above are the tuned ones; the untuned 1.88e-01 is what you get
+> with `--no-int8-tuning`.
 
-The arithmetic still explains the pictures, but it now lands somewhere
-less comfortable. Quantisation noise at 0.188 RMS adding in power to
-channel noise at 0.367 gives 0.412 — a **1.0 dB effective SNR penalty**,
-not the 0.2 dB originally derived here.
+The arithmetic explains the pictures. Quantisation noise at 0.0731 RMS
+adding in power to channel noise at 0.367 gives 0.374 — a **0.17 dB
+effective SNR penalty**. Untuned, at 0.188 RMS, it was 1.0 dB.
+
+### Sensitive layers stay at fp32
+
+`ConvInteger` — what `quantize_dynamic` emits — carries **one scale per
+weight tensor**. So quantisation error is not spread evenly across a
+network: one tensor with outlier weights forces a coarse scale on
+everything in it, and dominates the total. On `v1`'s encoder a single
+0.59 MB layer accounted for nearly all of it. Leaving just that one at
+fp32 moved the encoder from 1.88e-01 to 7.31e-02 RMS — **5.8 dB to
+14.0 dB under the channel noise** — for 8% more file.
+
+`scripts/export_onnx.py` therefore *measures* which layers to leave
+alone rather than hardcoding them, since the sensitive tensor is a
+property of the trained weights and will move between revisions. It
+greedily excludes the worst until the error is under target.
+
+Three decisions worth keeping, each of which was got wrong first:
+
+- **Tune against off-distribution pictures, or the search measures
+  nothing.** This is the big one. Sensitivity barely shows on the
+  photographs the model was trained on: the fully-quantised decoder
+  costs 0.10 dB on COCO and **1.54 dB** on smooth synthetic probes.
+  Scored on COCO alone the search sees 0.10 dB, concludes there is
+  nothing worth fixing, and ships the 1.54 dB. The tuning set therefore
+  always mixes in synthetic probes
+  (`INT8_TUNE_SYNTHETIC_PROBES`). This is not a corner case — operators
+  send test cards, charts, callsign graphics and screenshots.
+- **The stopping rule is an absolute target, not a relative
+  improvement.** 13 dB under the channel noise for the encoder,
+  0.10 dB of picture for the decoder. A relative rule ("keep going while
+  the next exclusion cuts error by 15%") looks reasonable and is not: at
+  the tail a 25% error reduction is worth 0.00 dB, and that rule talked
+  itself into three decoder exclusions that together bought 0.005 dB.
+- **Both parts get tuned, but to different targets, and the asymmetry
+  sets them.** Encoder error goes on the air and every receiver pays it,
+  so it is held to the channel-noise yardstick. Decoder error only
+  changes its own operator's picture, so a tenth of a dB is plenty —
+  a tighter 0.05 dB target buys a second decoder exclusion worth 0.02 dB
+  for +1.8 MB, which is the wrong trade for the precision that exists
+  for constrained devices.
+
+Measured decoder options, kept so the choice does not get re-litigated.
+Note how different the two columns are, and that the COCO column alone
+would justify shipping nothing at all:
+
+| decoder int8 | size | fp32 compute | COCO | off-distribution |
+|---|---|---|---|---|
+| 0 excluded | 6.78 MB | 0% | −0.100 dB | **−1.537 dB** |
+| **1 excluded (shipped)** | **8.60 MB** | **2%** | **−0.011 dB** | **+0.139 dB** |
+| 2 excluded | 9.04 MB | 4% | −0.017 dB | — |
+| 3 excluded | 9.15 MB | 6% | −0.010 dB | — |
+
+The excluded layer is the decoder's input convolution, which is large in
+weights (2.4 MB) but runs at 30×40, so it is only 2% of the decoder's
+compute — a good layer to spend on. Past the first exclusion the second
+measures *worse* than the first on COCO, which is noise, and is the tell
+that there is no signal left to chase.
+
+**Mixed int8/fp16 does not work**, and would have been the obvious way
+to make an excluded layer cheaper. `convert_float_to_float16` on an
+already-quantised graph produces a model onnxruntime refuses to load
+(`Type (tensor(float16)) ... does not match expected type
+(tensor(float))` at the int8 boundary) and takes pathologically long
+doing it, even with the quantisation ops in `op_block_list`. It would
+have saved ~1.7 MB across the pair. Not worth graph surgery.
 
 > **Not re-measured:** the on-air column (quantised TX → fp32 RX)
 > originally read 24.79 / 24.79 / 24.63 dB. Only the local pipeline was
-> re-run. Given the revised arithmetic, assume the int8 on-air cost is
-> nearer 1 dB than the 0.15 dB recorded before, and re-measure it before
-> relying on the number.
+> re-run. The arithmetic now puts the tuned int8 encoder at 0.17 dB of
+> effective SNR, so those figures are plausible again — but they were
+> recorded against a different export and have not been checked.
 
 > A first single-image run had int8 *beating* fp32 by 0.17 dB — the
 > effect is the same size as the per-image spread, so anything quoted
@@ -143,20 +231,102 @@ Decoder and encoder quantisation are not the same decision:
 - **Decoder** quantisation only changes the picture *you* see. It cannot
   affect anyone else and needs no coordination. Quantise freely.
 - **Encoder** quantisation changes what goes on the air, so its cost is
-  paid by every receiver. The re-measurement above sharpens this from a
-  caution into a recommendation: at 1.88e-01 RMS the int8 encoder sits
-  only 5.8 dB under the channel noise and costs ~1 dB of effective SNR.
-  **Use fp16 for the encoder.** It is free, and the picture you are
-  spending is someone else's.
+  paid by every receiver. **fp16 remains the default** — it is free by
+  every measure, so there is no reason to spend anything here. But the
+  int8 encoder is now defensible where size really binds: 14.0 dB under
+  the channel noise, 0.17 dB of effective SNR. Before the export was
+  taught to leave its worst layer at fp32 it was 5.8 dB and ~1 dB, which
+  was not defensible.
+
+  This asymmetry is also what decides how the export tunes int8: the
+  encoder gets the sensitivity search, the decoder does not.
+
+#### int8 degrades faster off-distribution
+
+This is fixed in the shipped artifacts, but the mechanism is worth
+keeping because it nearly went unnoticed and it generalises.
+
+The untuned int8 export cost **1.57 dB** on smooth synthetic probes
+against **0.19 dB** on COCO photographs — eight times worse on pictures
+the model is only mildly unfamiliar with.
+
+The cause is not where the intuition points. Two wrong guesses,
+both measured:
+
+- **Not the encoder.** Its *latent* error was actually smaller on the
+  off-distribution probes. And halving that error by tuning the encoder
+  changed the off-distribution picture by −0.05 dB — nothing. Encoder
+  quantisation was not what those pictures were paying for.
+- **Not diffuse.** It was one layer. Excluding the decoder's input
+  convolution took off-distribution from −1.54 dB to +0.14 dB, while
+  moving COCO by only 0.09 dB.
+
+So the sensitivity is concentrated in the **decoder**, and it is nearly
+invisible on the training distribution. Two consequences:
+
+1. **Tune against off-distribution content.** A search scored on
+   photographs alone rates that layer as worth 0.09 dB and leaves it
+   quantised, shipping a 1.5 dB regression to anyone sending a test
+   card. This is now built into the export.
+2. **Evaluate on both.** An earlier draft of this document concluded the
+   opposite — "quantisation must be evaluated on real photographs" —
+   from the same data. Photographs alone tell you what quantisation
+   costs a *typical* picture and nothing about what it costs a *hard*
+   one, and for this codec the second number was 8× the first.
+
+### Making future revisions more quantisation-tolerant
+
+**Nothing to do now** — a soft constraint to weigh when the training
+recipe is next touched, not a reason to retrain. The export-side fix
+below was tried first and largely solved the problem, so what remains
+here is genuinely optional.
+
+1. ~~**Static (calibrated) quantisation**, for the per-channel weight
+   scales `QLinearConv` supports and `ConvInteger` does not.~~
+   **Measured 2026-07-28, and it is worse:** 3.53e-01 latent RMS against
+   dynamic's 1.88e-01, i.e. only 0.3 dB under the channel noise. Static
+   quantisation also quantises *activations*, and this encoder ends in
+   `tanh` followed by unit-RMS normalisation, which does not survive
+   uint8 activations gracefully. Several configurations would not build
+   at all (`Quantization parameter shared mode is not supported for
+   weight yet`). The per-channel weights are real but they do not pay
+   for the activations. **Do not retry this without a reason to think
+   the activation problem has changed.**
+2. **Inject weight noise during training.** Add small uniform noise to
+   conv weights in the forward pass, sized like int8 quantisation error.
+   This is the same trick the project already runs on: channel noise in
+   the loop *is* the regulariser (`latent_channel.py`), and this is that
+   idea one level down, on the weights. Cheap, no graph or export
+   changes, and it does not commit anyone to a quantised deployment.
+3. **Regularise the per-tensor dynamic range.** Penalise max-to-RMS (or
+   kurtosis) of each conv weight tensor. This attacks the outlier
+   mechanism from (1) directly, so it is the right partner for
+   *dynamic* quantisation specifically.
+4. **Broaden the training data.** Probably the most valuable item here,
+   and it is not really about quantisation at all: the model is trained
+   on COCO photographs, while operators send test cards, charts,
+   screenshots and text. The quantisation work above only removed the
+   *extra* penalty those pictures were paying; they are still
+   reconstructed by a model that has never seen anything like them, at
+   every precision including fp32. Non-photographic content in the
+   training mix would improve them across the board.
+5. **Full QAT** — fake-quant nodes, QDQ export. The heavyweight option.
+   Probably not worth it for a codec whose quantisation noise is already
+   supposed to sit under a channel that carries far more.
+
+The measuring stick stays the one this document uses throughout: not
+fp32, but `CHANNEL_NOISE_RMS`. The export fix already put int8's encoder
+error at 14.0 dB under channel noise, so **there is no deficit left to
+close** — anything here would be buying margin, not repairing a
+regression.
 
 ### Do not chase precision below int8
 
-Not measured, and not worth measuring for on-air use. Note that the
-revised numbers put **int8 itself** close to this line rather than
-safely inside it: 5.8 dB under the channel noise is no longer
-"comfortably under", which is the whole premise of the
-graceful-degradation argument. int8 remains reasonable for the decoder
-and for small devices; below it there is nothing to recommend.
+Not measured, and not worth measuring for on-air use. With the tuned
+export int8 is back to a comfortable 14.0 dB under the channel noise,
+which is where the graceful-degradation argument holds; below int8 the
+quantisation noise stops being comfortably under the channel noise and
+that argument stops applying.
 
 ## Speed
 
@@ -191,8 +361,11 @@ this table would talk you out of int8 for the wrong reason.
   75 MB of Hub storage between them and they save every other
   implementer from rolling their own export — which is the case that
   actually risks divergence, since a third party choosing different
-  quantisation settings could land well outside the 0.28 dB measured
-  here — as this document's own superseded 0.13 dB figure demonstrates.
+  quantisation settings could land well outside the 0.002 dB measured
+  here. That is not hypothetical: a plain `quantize_dynamic` of this
+  same model — the obvious thing for a third party to do — costs 1.57 dB
+  on non-photographic pictures, and this document reached three
+  different wrong int8 figures before measuring properly.
   Canonical artifacts make "compatible app" a checkable claim rather than
   a hope.
 - **Use fp16 in the packaged distributions.** Free by every measure
@@ -217,25 +390,54 @@ risky. A station that fetches fp16 and a station that was shipped fp32
 interoperate exactly, so delivery and precision are independent choices
 and either can be revisited without touching the other.
 
-## What implementing it would involve
+## How it was implemented
 
-1. ~~`scripts/export_onnx.py`, run at publish time from the `.pt` so the
-   artifacts cannot drift from the checkpoint.~~ **Done 2026-07-27.** It
-   verifies every artifact against the torch model before writing, and
-   refuses to push if a tolerance is breached; provenance (source
-   checkpoint name and sha256) is stamped into each `.onnx`'s
-   `metadata_props` and into a published manifest. It is in
-   `launch_job.sh`'s code snapshot, so training jobs carry it.
-2. An ONNX path in `sstvae/codec.py`; torch stays for training only.
-3. Port `SSTVAE.latents_to_flat` / `flat_to_latents` to numpy — they are
-   pure reshape and concatenate, about ten lines. Without this the
-   runtime still imports torch and the whole exercise is pointless.
-4. `checkpoint.py` publishes and pins the `.onnx` artifacts; its
-   immutability model already fits.
-5. A test asserting each exported artifact matches the `.pt`. Exact
-   comparison (~1e-5) works for fp32; quantised variants need a
-   PSNR-based bound instead, since exact match is only meaningful
-   without quantisation.
+All done 2026-07-27. Recorded because the *shape* of the change is worth
+keeping, not just the fact of it.
+
+1. **`scripts/export_onnx.py`**, run at publish time from the `.pt` so
+   the artifacts cannot drift from the checkpoint. Verifies every
+   artifact against the torch model before writing and refuses to push
+   if a tolerance is breached; stamps provenance (source checkpoint name
+   and sha256) into each `.onnx`'s `metadata_props` and into a published
+   manifest. Carried in `launch_job.sh`'s code snapshot.
+2. **`sstvae/codec.py`** grew `OnnxCodec` (shipping) and `TorchCodec`
+   (reference), behind `load_codec(path, precision=, backend="auto")`.
+   `backend="auto"` sends a `.pt` to torch and everything else to ONNX,
+   so `--model something.pt` keeps working untouched.
+   - `reconstruct(codec, latents, weights)` **kept its exact signature**
+     so `sstvae/rx/engine.py` — load-bearing, per CLAUDE.md — needed no
+     edit at all. `pytest -m slow` passes unchanged.
+   - **Parts load lazily and independently.** Encoding touches only the
+     encoder; decoding and listening only the decoder. A receive-only
+     station therefore fetches 9 MB, not the 21 MB pair, and never pays
+     memory for a graph it will not run.
+3. **`sstvae/latents.py`** — the numpy `latents_to_flat` /
+   `flat_to_latents`. `tests/test_latents.py` asserts they equal the
+   torch statics *exactly*; both are pure reshape and concatenate, so
+   any tolerance would be hiding something. `sstvae/images.py` needed
+   the same treatment — it returned torch tensors, which would have
+   dragged torch back in through the send path regardless of the codec.
+4. **`checkpoint.py`** gained `onnx_filename` / `default_onnx` /
+   `resolve_onnx`, sharing one cache-first `_fetch` with the `.pt` path
+   because the immutability argument is identical. `DEFAULT_REVISION` is
+   derived from `DEFAULT_FILE`, so the artifact names cannot be bumped
+   independently of the checkpoint.
+   - `--model` had to grow up: the `.pt` is one file and the ONNX codec
+     is two. It now accepts a `.pt`, a directory of exported artifacts,
+     or a single `.onnx` (deriving the sibling part by name, and only
+     when that part is actually needed).
+5. **`tests/test_onnx_artifacts.py`** checks each artifact two ways:
+   provenance (the stamped sha256 against the real `v1.pt` — exact, and
+   catches a stale artifact even when the numbers look fine) and
+   numerics (tight for fp32, channel-referenced for the quantised
+   variants). Marked slow, and skips rather than downloading, so the
+   fast suite stays ~20 s and network-free.
+6. **`pyproject.toml`** — `cli`/`listen`/`gui` take onnxruntime instead
+   of torch, which deleted three CPU-index pins and three `conflicts`
+   entries. `dev` keeps CPU torch, because several tests `importorskip`
+   it as the reference implementation and there is no CI to notice them
+   silently vanishing.
 
 ## Reproducing
 

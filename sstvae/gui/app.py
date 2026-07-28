@@ -22,10 +22,10 @@ from PySide6.QtWidgets import (
     QTabWidget,
 )
 
-from ..codec import load_model
+from ..codec import load_codec
 from .rig_controller import RigController
 from .rx_panel import ReceivePanel
-from .settings import Config
+from .settings import Config, codec_precision
 from .settings_dialog import SettingsDialog
 from .tx_panel import TransmitPanel
 
@@ -50,7 +50,8 @@ class AppState(QObject):
     def load_model_async(self) -> None:
         def run():
             try:
-                self.model = load_model(self.config.model_path)
+                self.model = load_codec(self.config.model_path,
+                                        precision=codec_precision(self.config))
             except (SystemExit, Exception) as e:
                 self._model_error = str(e)
             self.modelLoaded.emit()

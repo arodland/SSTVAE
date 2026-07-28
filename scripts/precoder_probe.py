@@ -104,7 +104,7 @@ def latents_from_model(model_path: str, image: str | None, spec) -> np.ndarray:
     from PIL import Image
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from sstvae_encode import load_model
+    from sstvae.codec import load_torch_model as load_model
     from sstvae.models import SSTVAE
 
     model = load_model(model_path)

@@ -69,11 +69,32 @@ rationale lives in the plan history.
   weights + weight planes; handles erasures/truncation).
 - `sstvae/latent_channel.py` — stage-1 differentiable channel
   (AWGN, group truncation, erasures) used by `scripts/train.py`.
-- `sstvae/codec.py` — `load_model` / `reconstruct` / `pad_to_full`.
+- `sstvae/codec.py` — `load_codec` / `reconstruct` / `pad_to_full`.
   These used to live in the top-level `sstvae_encode.py` /
   `sstvae_decode.py` scripts; they are here so package code doesn't
-  import a *script*. The scripts re-export them, so existing imports and
-  command lines are unchanged. Always loads on CPU.
+  import a *script*. The scripts re-export them. Always loads on CPU.
+  **The runtime backend is ONNX; torch is training-only** (see
+  `docs/onnx.md`). `load_codec(path, precision=, backend="auto")` sends
+  a `.pt` to `TorchCodec` (the reference implementation) and everything
+  else to `OnnxCodec`, so `--model foo.pt` still works. Two things are
+  deliberate: `reconstruct(codec, latents, weights)` **keeps its exact
+  signature** so `rx/engine.py` needed no edit, and encoder/decoder
+  **load lazily and independently** — no CLI needs both, so a
+  receive-only station fetches 9 MB rather than the 21 MB pair. That
+  laziness is also what lets `--model` accept a single `.onnx`.
+  `--model` takes a directory, a single `.onnx`, or a `.pt` — the last
+  still works but **needs torch, which the app extras no longer
+  install**, so it raises a pointed `SystemExit` rather than a bare
+  ImportError. `OnnxCodec` cross-checks the two parts' stamped
+  `source_sha256`: an encoder and decoder from different checkpoints
+  would run and produce a *silently wrong* picture, which is the worst
+  failure available here. Precisions may differ freely; only the
+  checkpoint must match.
+- `sstvae/latents.py` — `latents_to_flat` / `flat_to_latents` in numpy.
+  Same mapping as the torch statics on `SSTVAE`, which stay for
+  training; `tests/test_latents.py` asserts they agree **exactly** (both
+  are pure reshape, so any tolerance would be hiding something). The
+  send/receive path must import this one, never `models`.
 
 ## The application
 
@@ -161,21 +182,27 @@ either, so overlays stay renderable from the command line.
   encoder, modem, and training. Don't renormalize anywhere else.
 - Local GPU is ROCm (`torch.cuda.is_available()` is true); never add
   CUDA-only dependencies.
-- **Nothing outside `train` touches a GPU, on purpose.** `codec.load_model`
-  is `map_location="cpu"` with no `.to(device)` anywhere. Measured: the
-  encoder is 31 ms and the decoder 50 ms per 640x480 image, against
+- **Nothing outside `train` touches torch at all**, let alone a GPU. The
+  codec runs on onnxruntime — 53 MB installed against torch's 345 MB —
+  so `cli`/`listen`/`gui` are ~263 MB installed, down from ~555 MB. This
+  deleted the CPU-index pins and shrank `conflicts` to one pair. The
+  remaining `[tool.uv.sources]` entry pins **`dev`** to CPU torch,
+  because several tests `importorskip` it as the reference
+  implementation and there is no CI to notice them silently vanishing;
+  the `conflicts` block is still load-bearing for the same old reason
+  (uv resolves one torch per lock, so without it the CPU pin wins for
+  `train` too). The GPU half of the rule stands on its own measurement:
+  the encoder is 31 ms and the decoder 50 ms per 640x480 image against
   ~270 ms of NumPy DSP in the same operation, on a transmission lasting
-  32–95 s — so GPU offload would save ~70 ms while costing seconds of
-  context init. Don't add a GPU path to the app, and don't advertise one.
-  The `cli`/`listen`/`gui` extras therefore take torch from the CPU index
-  (`[tool.uv.sources]` in pyproject); the `conflicts` block next to it is
-  load-bearing, because uv resolves one torch per lock and without it the
-  CPU pin silently wins for `train` too. pip can't do index selection, so
-  the README tells Linux pip users to install CPU torch first.
+  32–95 s. Don't add a GPU path to the app, and don't advertise one.
 - `sstvae/images.py` holds the geometry (`IMG_W/IMG_H`), `fit_image`,
-  `image_to_tensor` and the font search; `sstvae/data.py` is training
-  only and re-exports them. Import from `images`, not `data`, anywhere in
-  the send/receive path — `data` pulls in torchvision and
+  `image_to_array` and the font search; `sstvae/data.py` is training
+  only and re-exports them. **`images.py` must import without torch** —
+  `image_to_tensor` survives for training and imports torch lazily, but
+  `load_image` and `image_to_array` return ndarrays. An unconditional
+  `import torch` here would pull 345 MB back into every sending station
+  no matter what the codec does. Import from `images`, not `data`,
+  anywhere in the send/receive path — `data` pulls in torchvision and
   `torch.utils.data`, which is why torchvision is a `train`-only dep.
 - **SNR is quoted in a 2500 Hz noise bandwidth** (`config.SNR_REF_BW_HZ`),
   changed from 3000 Hz on 2026-07-26. It is one constant, used by both
@@ -219,16 +246,21 @@ either, so overlays stay renderable from the command line.
 - `docs/slot-domain-precoder.md` — design for the mechanism that *can*
   reach PAPR (DFT spreading / learned unitary precoder in slot domain).
   Not implemented.
-- `docs/onnx.md` — measured (not implemented) ONNX runtime path:
-  onnxruntime is 27 MB against torch's 336 MB, fp32 ONNX is the same
-  codec to ~1e-6, fp16 is free and int8 costs ~0.28 dB PSNR (corrected
-  upward from 0.15 on 2026-07-27 when the published export was measured;
-  `per_channel` is a no-op because `ConvInteger` is per-tensor only).
-  Read it before assuming quantisation is dangerous here — latents are
-  analog, so it is additive noise under the channel's, not a format
-  break — but use **fp16 for the encoder**, whose error is paid by every
-  receiver. Artifacts are exported by `scripts/export_onnx.py` and
-  published as `v1-{encoder,decoder}-{fp32,fp16,int8}.onnx`.
+- `docs/onnx.md` — the ONNX runtime path, **implemented 2026-07-27**:
+  onnxruntime is 53 MB installed against torch's 345 MB, fp32 ONNX is
+  the same codec to ~2e-06, and both fp16 and int8 are now essentially
+  free (int8 −0.002 dB on photographs, −0.112 dB off-distribution, at
+  2.7× smaller than fp32). **fp16 remains the default.** Read it before
+  assuming quantisation is dangerous here — latents are analog, so it is
+  additive noise under the channel's, not a format break. Two traps it
+  records, both of which cost real time: `per_channel` is a silent no-op
+  because `ConvInteger` is per-tensor only, so int8 accuracy comes from
+  leaving the worst layer per part at fp32; and **quantisation must be
+  scored on off-distribution pictures**, since the fully-quantised
+  decoder measured 0.10 dB on COCO and 1.54 dB on synthetic probes —
+  tuning on photographs alone ships the 1.54 dB. Artifacts are exported
+  by `scripts/export_onnx.py` and published as
+  `v1-{encoder,decoder}-{fp32,fp16,int8}.onnx`.
 - `docs/native-app.md` — design (not implemented) for a native C++/Qt 6
   desktop app replacing `sstvae/gui/`, which gets **deleted** when the
   native one reaches parity. Depends on `docs/onnx.md` landing first —
@@ -275,9 +307,16 @@ rigctld PTT + frequency readback, waterfall, overlay composition,
 persistent config. Overlay *templates* are deliberately not implemented
 but the document format is built for them (see `sstvae/overlay/`).
 
+ONNX runtime path complete: the codec is onnxruntime, torch is
+training-only, and `cli`/`listen`/`gui` install ~263 MB instead of
+~555 MB. Six `v1` artifacts are published; the app fetches what it needs
+on first run, per part.
+
 Remaining: run stage-2 fine-tune (start from a good stage-1
 checkpoint, `--lr 1e-4`) — note pre-beacon checkpoints remain
 architecture-compatible (model channel count unchanged), evaluation
 sweeps (PSNR/LPIPS vs SNR per mode), on-air calibration. On the app
 side: overlay templates, and a real on-air (not loopback) shakedown of
-the PTT timing against a physical radio.
+the PTT timing against a physical radio. See `docs/native-app.md` for
+the C++/Qt rewrite design (not started) and `docs/todo.md` for
+quantisation tolerance as a future training constraint.

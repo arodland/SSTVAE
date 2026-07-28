@@ -22,13 +22,11 @@ from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
-import torch
 from PIL import Image
 
-from ..codec import load_model
+from ..codec import load_codec
 from ..config import FS, MODES, ModeSpec
-from ..images import fit_image, image_to_tensor
-from ..models import SSTVAE
+from ..images import fit_image, image_to_array
 from ..modem import Modem
 
 # How long after the audio should have finished before the watchdog
@@ -71,6 +69,10 @@ class TxConfig:
     ptt_lead_s: float = 0.3  # PTT up -> audio start (relay + ALC settling)
     ptt_tail_s: float = 0.3  # audio end -> PTT down
     model_path: str | None = None
+    # ONNX precision, or None for the torch backend / to take the
+    # default. Only used when the caller did not already hand us a
+    # loaded codec, which the GUI does.
+    precision: str | None = None
 
 
 def condition_for_output(x: np.ndarray, level: float) -> np.ndarray:
@@ -138,11 +140,9 @@ class TxEngine:
 
         self._set(TxPhase.ENCODING, 0.0, "encoding image")
         if self._model is None:
-            self._model = load_model(config.model_path)
-        x = _image_to_tensor(image)[None]
-        with torch.no_grad():
-            z = self._model.encoder(x)
-        flat = SSTVAE.latents_to_flat(z)[0].numpy().astype(np.float64)
+            self._model = load_codec(config.model_path,
+                                     precision=config.precision)
+        flat = self._model.encode(image_to_array(fit_image(image)))
 
         if self._cancel.is_set():
             raise _Cancelled()
@@ -293,5 +293,3 @@ class _PttWatchdog:
         self._done.set()
 
 
-def _image_to_tensor(image: Image.Image) -> torch.Tensor:
-    return image_to_tensor(fit_image(image))

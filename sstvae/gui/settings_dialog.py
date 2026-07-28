@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..audio import AudioUnavailable, list_devices
+from ..checkpoint import PRECISIONS
 from ..rig import RigError, RigctldClient, list_models
 
 
@@ -93,19 +94,37 @@ class SettingsDialog(QDialog):
         ))
 
         self.model_path = QLineEdit(self._config.model_path or "", w)
-        self.model_path.setPlaceholderText("(published checkpoint)")
-        browse = QPushButton("Browse...", w)
-        browse.clicked.connect(self._browse_model)
+        self.model_path.setPlaceholderText("(published model)")
+        self.model_path.textChanged.connect(self._sync_precision_enabled)
+        browse_dir = QPushButton("Folder...", w)
+        browse_dir.clicked.connect(self._browse_model_folder)
+        browse_file = QPushButton("File...", w)
+        browse_file.clicked.connect(self._browse_model_file)
         row = QHBoxLayout()
         row.addWidget(self.model_path, 1)
-        row.addWidget(browse)
+        row.addWidget(browse_dir)
+        row.addWidget(browse_file)
         holder = QWidget(w)
         holder.setLayout(row)
-        form.addRow("Model checkpoint", holder)
+        form.addRow("Model", holder)
         form.addRow(QLabel(
-            "Leave blank to use the published checkpoint. Both stations must\n"
-            "run the same checkpoint to exchange pictures."
+            "Leave blank for the published model, downloaded once and cached.\n"
+            "Otherwise a folder of exported .onnx files, a single .onnx, or a\n"
+            ".pt checkpoint. Both stations must run the same model to exchange\n"
+            "pictures — but not the same precision, which is a local choice."
         ))
+
+        self.precision = QComboBox(w)
+        for p in PRECISIONS:
+            self.precision.addItem(p, p)
+        idx = self.precision.findData(self._config.precision)
+        self.precision.setCurrentIndex(idx if idx >= 0 else 0)
+        form.addRow("Precision", self.precision)
+        self.precision_note = QLabel("", w)
+        self.precision_note.setWordWrap(True)
+        self.precision_note.setStyleSheet("color: palette(link-visited);")
+        form.addRow("", self.precision_note)
+        self._sync_precision_enabled()
         return w
 
     def _audio_tab(self) -> QWidget:
@@ -332,12 +351,42 @@ class SettingsDialog(QDialog):
         return w
 
     # --- actions ------------------------------------------------------------
-    def _browse_model(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Model checkpoint", str(Path.home()), "Checkpoints (*.pt *.ckpt)"
+    def _browse_model_folder(self) -> None:
+        path = QFileDialog.getExistingDirectory(
+            self, "Folder of exported .onnx files", str(Path.home())
         )
         if path:
             self.model_path.setText(path)
+
+    def _browse_model_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Model file", str(Path.home()),
+            "Model files (*.onnx *.pt *.ckpt);;ONNX (*.onnx);;"
+            "Checkpoints (*.pt *.ckpt)",
+        )
+        if path:
+            self.model_path.setText(path)
+
+    def _sync_precision_enabled(self) -> None:
+        """Precision only means something for a folder or the published model.
+
+        A `.onnx` filename already names its precision -- picking
+        `v1-encoder-int8.onnx` selects int8 no matter what this combo
+        says, and the decoder is resolved beside it at the same
+        precision. A `.pt` is the torch backend, which has no precision
+        at all. Greying the control out in those cases shows the user the
+        same rule `settings.codec_precision` applies.
+        """
+        suffix = Path(self.model_path.text().strip()).suffix.lower()
+        if suffix == ".onnx":
+            note = "Set by the file name — that artifact is already one precision."
+        elif suffix in (".pt", ".ckpt"):
+            note = "Not applicable to a .pt checkpoint (that runs on torch)."
+        else:
+            note = ("fp16 is the default and measures identical to fp32. "
+                    "Purely local: it never has to match the far end.")
+        self.precision.setEnabled(suffix not in (".onnx", ".pt", ".ckpt"))
+        self.precision_note.setText(note)
 
     def _client(self) -> RigctldClient:
         return RigctldClient(self.rig_host.text(), self.rig_port.value(), timeout=2.0)
@@ -373,6 +422,7 @@ class SettingsDialog(QDialog):
         """Copy the dialog's values into `config`."""
         config.callsign = self.callsign.text().strip().upper()
         config.model_path = self.model_path.text().strip() or None
+        config.precision = self.precision.currentData()
 
         config.audio.input_device = self.input_device.currentData()
         config.audio.output_device = self.output_device.currentData()

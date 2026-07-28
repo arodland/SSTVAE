@@ -89,6 +89,30 @@ def test_cached_checkpoint_survives_an_unreachable_hub(fake_hub):
     assert hub.network_calls == []
 
 
+def test_a_file_cached_under_another_revision_is_still_found(fake_hub, tmp_path, monkeypatch):
+    """The offline case that a new upstream commit used to break.
+
+    `local_files_only` resolves `refs/main` and looks in that snapshot
+    only, so an unrelated commit strands files cached earlier. Published
+    filenames are immutable, so any revision's copy will do -- and the
+    codec fetching encoder and decoder separately makes this reachable
+    rather than theoretical.
+    """
+    hub = fake_hub(cached=None, remote=None)  # miss under refs/main, offline
+
+    snapshots = tmp_path / f"models--{checkpoint.DEFAULT_REPO.replace('/', '--')}" / "snapshots"
+    (snapshots / "oldcommit").mkdir(parents=True)
+    stranded = snapshots / "oldcommit" / checkpoint.DEFAULT_FILE
+    stranded.write_bytes(b"weights")
+
+    fake_constants = types.SimpleNamespace(HF_HUB_CACHE=str(tmp_path))
+    monkeypatch.setattr(sys.modules["huggingface_hub"], "constants",
+                        fake_constants, raising=False)
+
+    assert checkpoint.default_checkpoint() == str(stranded)
+    assert hub.network_calls == [], "should not need the network for this"
+
+
 def test_an_explicit_path_short_circuits_everything(fake_hub):
     hub = fake_hub(cached="/cache/v1.pt", remote="/downloaded/v1.pt")
     assert checkpoint.resolve("/my/own.pt") == "/my/own.pt"

@@ -15,9 +15,11 @@ import numpy as np
 from PIL import Image
 
 from sstvae import wavio
+from sstvae.checkpoint import PRECISIONS
 from sstvae.codec import (  # noqa: F401  (re-exported)
     MODEL_HELP,
-    load_model,
+    PRECISION_HELP,
+    load_codec,
     pad_to_full,
     reconstruct,
 )
@@ -30,6 +32,8 @@ def main() -> None:
     ap.add_argument("input", help="received WAV")
     ap.add_argument("output", help="output image (png/jpg)")
     ap.add_argument("--model", default=None, help=MODEL_HELP)
+    ap.add_argument("--precision", choices=PRECISIONS, default=None,
+                    help=PRECISION_HELP)
     ap.add_argument("--snapshots", type=int, default=0)
     ap.add_argument(
         "--search-start", type=float, default=None,
@@ -53,7 +57,7 @@ def main() -> None:
     search = None
     if args.search_start is not None or args.search_end is not None:
         search = (args.search_start or 0.0, args.search_end or len(x) / FS)
-    model = load_model(args.model)
+    model = load_codec(args.model, precision=args.precision)
     r = Modem().demodulate(x, search_s=search)
     print(
         f"mode {r.mode.name}, {r.frames_received}/{r.mode.n_frames} frames, "

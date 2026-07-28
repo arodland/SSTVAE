@@ -22,7 +22,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sstvae.codec import MODEL_HELP, load_model, pad_to_full, reconstruct  # noqa: E402
+from sstvae.codec import MODEL_HELP, load_torch_model, pad_to_full, reconstruct  # noqa: E402
 from sstvae.config import (  # noqa: E402
     FRAME_SAMPLES,
     FRAMES_PER_GROUP,
@@ -62,7 +62,7 @@ def main() -> None:
     args = ap.parse_args()
 
     images = load_images(args.images, args.n_images)
-    model = load_model(args.model)
+    model = load_torch_model(args.model)
     modem = Modem()
     spec = MODES[args.mode]
     frame_of_latent = frame_of_each_latent(spec)
