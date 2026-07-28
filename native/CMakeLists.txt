@@ -57,11 +57,15 @@ add_library(sstvae_core STATIC
   core/dsp/dsp.cpp
   core/framing/framing.cpp
   core/framing/interleaver_table.cpp
+  core/images/images.cpp
   core/modem/modem.cpp
   core/ofdm/ofdm.cpp
   core/sync/sync.cpp
 )
 target_include_directories(sstvae_core PUBLIC core third_party/pocketfft)
+# stb is SYSTEM: 20k lines of vendored single-header C that is not
+# warning-clean under -Wall -Wextra, and its warnings are not signal.
+target_include_directories(sstvae_core SYSTEM PUBLIC third_party/stb)
 # Position-independent so the static core can be linked into the
 # pybind11 shared module.
 set_target_properties(sstvae_core PROPERTIES POSITION_INDEPENDENT_CODE ON)

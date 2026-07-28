@@ -29,6 +29,7 @@
 #include "dsp/dsp.hpp"
 #include "framing/framing.hpp"
 #include "golay/golay.hpp"
+#include "images/images.hpp"
 #include "modem/modem.hpp"
 #include "ofdm/ofdm.hpp"
 #include "sync/sync.hpp"
@@ -516,6 +517,43 @@ PYBIND11_MODULE(sstvae_native, m) {
         sstvae::ofdm::mod_matrix(), sstvae::config::NSYM, sstvae::config::NC);
     ofdm.attr("DEMOD_MATRIX") = matrix_to_numpy(
         sstvae::ofdm::demod_matrix(), sstvae::config::NC, sstvae::config::M);
+
+    // --- images --------------------------------------------------------
+    //
+    // Pictures cross as (H, W, 3) uint8, which is what `np.asarray` of a
+    // PIL image gives, so a test can hand one straight over.
+    py::module_ images = m.def_submodule("images");
+    images.def("to_array",
+               [](py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast>
+                      pic) {
+                   if (pic.ndim() != 3 || pic.shape(2) != 3) {
+                       throw std::runtime_error("to_array wants an (H, W, 3) array");
+                   }
+                   sstvae::images::Picture p(static_cast<int>(pic.shape(1)),
+                                             static_cast<int>(pic.shape(0)));
+                   std::copy(pic.data(), pic.data() + pic.size(), p.rgb.begin());
+                   const sstvae::images::ImageArray a = sstvae::images::to_array(p);
+                   py::array_t<float> out({py::ssize_t{3},
+                                           static_cast<py::ssize_t>(a.height),
+                                           static_cast<py::ssize_t>(a.width)});
+                   std::copy(a.chw.begin(), a.chw.end(), out.mutable_data());
+                   return out;
+               },
+               py::arg("img"));
+    images.def("load",
+               [](const std::string& path) {
+                   const sstvae::images::Picture p = sstvae::images::load(path);
+                   py::array_t<std::uint8_t> out({static_cast<py::ssize_t>(p.height),
+                                                  static_cast<py::ssize_t>(p.width),
+                                                  py::ssize_t{3}});
+                   std::copy(p.rgb.begin(), p.rgb.end(), out.mutable_data());
+                   return out;
+               },
+               py::arg("path"));
+    images.attr("IMG_W") = sstvae::images::IMG_W;
+    images.attr("IMG_H") = sstvae::images::IMG_H;
+    images.attr("MIN_W") = sstvae::images::MIN_W;
+    images.attr("MIN_H") = sstvae::images::MIN_H;
 
 #ifdef SSTVAE_HAVE_CODEC
     // --- codec ---------------------------------------------------------

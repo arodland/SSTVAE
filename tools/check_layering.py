@@ -67,6 +67,12 @@ def sources() -> list[Path]:
         rel = path.relative_to(NATIVE)
         if rel.parts[0] == "build" or rel.parts[0].startswith("build-"):
             continue
+        # Vendored code is not ours to lay out. Scanning it inflates the
+        # reported count into implying coverage we do not have, and a
+        # third-party file that merely *mentions* QtGui would fail a rule
+        # written about this project's structure.
+        if rel.parts[0] == "third_party":
+            continue
         out.append(path)
     return out
 

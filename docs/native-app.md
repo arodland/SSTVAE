@@ -646,6 +646,28 @@ chosen**, and the only reason it was caught is that the test demanded
 byte equality. When a check *can* be exact, making it exact is what
 turns a near-miss into a finding.
 
+**`images` is done, with one deliberate inexactness.** `to_array` and
+PNG loading are checked byte-for-byte; **`fit_image`'s rescaling is
+not**. Pillow's LANCZOS turned out to be exactly reproducible — a port
+of `precompute_coeffs` plus the two fixed-point passes matched it on
+every subpixel across four source geometries — so an exact version was
+available and was *declined*, on the grounds that framing is
+transmit-side and cosmetic: it chooses which pixels of an oversized
+source get sent, a receiver never runs it, and two stations cropping a
+photo one pixel differently is not an interop question. `stb` does the
+resize instead, and parity tests feed already-640x480 pictures so the
+resampler is off the compared path.
+
+That is the counterpart to the decision above, and the pair is the
+useful thing: exactness was bought where it lands in the delivered
+picture and skipped where it does not. Deciding that per module beats
+either blanket policy.
+
+Vendoring `stb` rather than reaching for `QImage` also keeps `core/`
+Qt-free for the whole phase, so the headless CLI links no GUI toolkit
+and CI still installs Qt only in Phase 3 — which is what the workflow's
+comments already promise.
+
 Because artifacts are fetched rather than bundled (decision 5), this
 phase owns the **first-run experience**: a progress indication, a
 checksum check, and — importantly for a field laptop with no

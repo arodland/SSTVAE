@@ -990,3 +990,57 @@ def test_codec_rejects_mismatched_checkpoints(native, tmp_path):
     codec.encode(_test_picture().astype(np.float64))
     with pytest.raises(RuntimeError, match="different checkpoints"):
         codec.decode(np.zeros(158400), np.ones(158400))
+
+
+# --- images -----------------------------------------------------------------
+#
+# `to_array` is exact and is checked as such. `fit_image` is *not*
+# compared: it resamples with Pillow's LANCZOS and the C++ side uses stb,
+# which does not reproduce it. That is a deliberate decision recorded in
+# native/third_party/stb/README.md -- framing decides which pixels of an
+# oversized source get sent, not what the waveform means, and a receiver
+# never runs it. So these tests feed pictures that are already 640x480,
+# where fitting is a no-op and the resampler is off the path.
+
+def test_images_geometry_agrees(native):
+    from sstvae import images as ref
+
+    assert native.images.IMG_W == ref.IMG_W
+    assert native.images.IMG_H == ref.IMG_H
+    assert native.images.MIN_W == ref.MIN_W
+    assert native.images.MIN_H == ref.MIN_H
+
+
+def test_images_to_array_is_exact(native):
+    """A transpose and a divide by 255 -- no tolerance is defensible.
+
+    Every one of the 256 possible byte values appears, so a lookup table
+    or a scale factor that was wrong anywhere would show up here rather
+    than depending on which pixels a random picture happened to contain.
+    """
+    from PIL import Image
+
+    from sstvae.images import IMG_H, IMG_W, image_to_array
+
+    rng = np.random.default_rng(19)
+    pic = rng.integers(0, 256, size=(IMG_H, IMG_W, 3), dtype=np.uint8)
+    pic.reshape(-1)[:256] = np.arange(256, dtype=np.uint8)
+
+    want = image_to_array(Image.fromarray(pic))
+    got = native.images.to_array(pic)
+    assert got.dtype == want.dtype == np.float32
+    assert np.array_equal(got, want)
+
+
+def test_images_load_reads_the_same_pixels(native, tmp_path):
+    """PNG is lossless, so the decoders must agree byte for byte."""
+    from PIL import Image
+
+    from sstvae.images import IMG_H, IMG_W
+
+    rng = np.random.default_rng(23)
+    pic = rng.integers(0, 256, size=(IMG_H, IMG_W, 3), dtype=np.uint8)
+    path = tmp_path / "probe.png"
+    Image.fromarray(pic).save(path)
+
+    assert np.array_equal(native.images.load(str(path)), pic)
