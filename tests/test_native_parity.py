@@ -1044,3 +1044,51 @@ def test_images_load_reads_the_same_pixels(native, tmp_path):
     Image.fromarray(pic).save(path)
 
     assert np.array_equal(native.images.load(str(path)), pic)
+
+
+# --- resampling -------------------------------------------------------------
+#
+# Not used by the modem, but required by anything that reads a WAV at a
+# rate other than FS and by the live capture path. CLAUDE.md records
+# that getting capture resampling wrong cost 4.7 dB of SNR on a real
+# recording while still reporting every frame received, so this is a
+# place where "close enough" has already proved expensive once.
+
+def test_bessel_i0_matches_numpy(native):
+    x = np.linspace(0, 5, 500)
+    got = np.array([native.dsp.bessel_i0(v) for v in x])
+    assert np.allclose(got, np.i0(x), rtol=1e-14, atol=0)
+
+
+def test_kaiser_window_matches_scipy(native):
+    sp = pytest.importorskip("scipy.signal.windows")
+    for m, beta in ((21, 5.0), (201, 5.0), (481, 5.0), (100, 8.6)):
+        assert max_abs_diff(native.dsp.kaiser(m, beta), sp.kaiser(m, beta)) < 1e-14
+
+
+@pytest.mark.parametrize("up,down", [
+    (1, 1),      # the identity shortcut
+    (1, 6),      # 48k -> 8k, the common capture case
+    (6, 1),      # 8k -> 48k, playback
+    (2, 3),
+    (3, 2),
+    (160, 441),  # 44.1k -> 8k: the ratio that cost 4.7 dB when done per-chunk
+    (441, 160),
+])
+def test_resample_poly_matches_scipy(native, up, down):
+    """Length *and* value.
+
+    The length is checked because it is the part that silently drifts:
+    per-chunk `ceil` rounding gained 684 samples over 66 s in the bug
+    CLAUDE.md describes -- a 0.13% clock error the timing tracker then
+    fought, with the audio itself looking perfectly reasonable.
+    """
+    from scipy.signal import resample_poly
+
+    rng = np.random.default_rng(5)
+    for n_in in (1000, 4001):
+        x = rng.normal(size=n_in)
+        want = resample_poly(x, up, down)
+        got = native.dsp.resample_poly(x, up, down)
+        assert len(got) == len(want), f"{len(got)} samples vs scipy's {len(want)}"
+        assert max_abs_diff(got, want) < 1e-13

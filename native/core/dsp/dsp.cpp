@@ -89,9 +89,11 @@ std::vector<double> hamming(int m) {
     return w;
 }
 
-// The shared body of scipy's firwin for a single passband, with the
-// Hamming window and scale=True.
-std::vector<double> firwin_band(int numtaps, double left, double right) {
+// The shared body of scipy's firwin for a single passband, with
+// scale=True and a caller-supplied window (Hamming for the modem's own
+// filters, Kaiser for resampling).
+std::vector<double> firwin_band(int numtaps, double left, double right,
+                                const std::vector<double>& win) {
     const double alpha = 0.5 * (numtaps - 1);
     std::vector<double> h(static_cast<std::size_t>(numtaps));
     std::vector<double> m(static_cast<std::size_t>(numtaps));
@@ -101,7 +103,6 @@ std::vector<double> firwin_band(int numtaps, double left, double right) {
         h[static_cast<std::size_t>(i)] = right * sinc(right * mi) - left * sinc(left * mi);
     }
 
-    const std::vector<double> win = hamming(numtaps);
     for (std::size_t i = 0; i < h.size(); ++i) h[i] *= win[i];
 
     // scale=True: normalize the response at the passband centre (or at
@@ -176,12 +177,121 @@ std::vector<cdouble> freq_correct(std::span<const cdouble> z, double f_hz) {
 
 std::vector<double> firwin_lowpass(int numtaps, double cutoff_hz) {
     const double nyq = 0.5 * static_cast<double>(FS);
-    return firwin_band(numtaps, 0.0, cutoff_hz / nyq);
+    return firwin_band(numtaps, 0.0, cutoff_hz / nyq, hamming(numtaps));
 }
 
 std::vector<double> firwin_bandpass(int numtaps, double lo_hz, double hi_hz) {
     const double nyq = 0.5 * static_cast<double>(FS);
-    return firwin_band(numtaps, lo_hz / nyq, hi_hz / nyq);
+    return firwin_band(numtaps, lo_hz / nyq, hi_hz / nyq, hamming(numtaps));
+}
+
+double bessel_i0(double x) {
+    // I0(x) = sum_k (x^2/4)^k / (k!)^2.
+    //
+    // Every term is positive, so there is no cancellation and the error
+    // is just accumulated rounding -- accurate to the last couple of
+    // ulp over the range this is used for. `resample_poly` fixes
+    // beta = 5, so the argument never exceeds 5; the series is still
+    // fine well past that, but it is not the right algorithm for large
+    // x, where the asymptotic form is needed. Hence the guard.
+    const double ax = std::abs(x);
+    if (ax > 30.0) {
+        throw std::invalid_argument(
+            "bessel_i0: the power series is not appropriate above ~30; "
+            "an asymptotic branch would be needed");
+    }
+    const double y = 0.25 * ax * ax;
+    double term = 1.0;
+    double sum = 1.0;
+    for (int k = 1; k < 64; ++k) {
+        term *= y / (static_cast<double>(k) * static_cast<double>(k));
+        sum += term;
+        if (term < 1e-18 * sum) break;
+    }
+    return sum;
+}
+
+std::vector<double> kaiser(int m, double beta) {
+    std::vector<double> w(static_cast<std::size_t>(m));
+    if (m == 1) {
+        w[0] = 1.0;
+        return w;
+    }
+    const double alpha = 0.5 * (m - 1);
+    const double denom = bessel_i0(beta);
+    for (int n = 0; n < m; ++n) {
+        const double t = (static_cast<double>(n) - alpha) / alpha;
+        w[static_cast<std::size_t>(n)] =
+            bessel_i0(beta * std::sqrt(std::max(0.0, 1.0 - t * t))) / denom;
+    }
+    return w;
+}
+
+// scipy's _output_len: the length upfirdn returns.
+std::size_t upfirdn_out_len(std::size_t len_h, std::size_t len_x, int up, int down) {
+    const std::size_t in_len = (len_x - 1) * static_cast<std::size_t>(up) + len_h;
+    return (in_len - 1) / static_cast<std::size_t>(down) + 1;
+}
+
+std::vector<double> resample_poly(std::span<const double> x, int up, int down) {
+    if (up <= 0 || down <= 0) throw std::invalid_argument("resample_poly: up/down must be positive");
+    const int g = static_cast<int>(std::gcd(up, down));
+    up /= g;
+    down /= g;
+    if (up == 1 && down == 1) return std::vector<double>(x.begin(), x.end());
+    if (x.empty()) return {};
+
+    const std::size_t n_in = x.size();
+    std::size_t n_out = n_in * static_cast<std::size_t>(up);
+    n_out = n_out / static_cast<std::size_t>(down) +
+            ((n_out % static_cast<std::size_t>(down)) ? 1 : 0);
+
+    // Filter design, exactly scipy's: cutoff 1/max(up,down) relative to
+    // Nyquist, 10*max(up,down) taps either side, Kaiser(5.0).
+    const int max_rate = std::max(up, down);
+    const double f_c = 1.0 / max_rate;
+    const int half_len = 10 * max_rate;
+    const int numtaps = 2 * half_len + 1;
+    std::vector<double> h = firwin_band(numtaps, 0.0, f_c, kaiser(numtaps, 5.0));
+    for (double& v : h) v *= up;
+
+    // Zero-pad the filter so the output samples land at the centre.
+    const std::size_t n_pre_pad =
+        static_cast<std::size_t>(down - half_len % down);
+    std::size_t n_post_pad = 0;
+    const std::size_t n_pre_remove =
+        (static_cast<std::size_t>(half_len) + n_pre_pad) / static_cast<std::size_t>(down);
+    while (upfirdn_out_len(h.size() + n_pre_pad + n_post_pad, n_in, up, down) <
+           n_out + n_pre_remove) {
+        ++n_post_pad;
+    }
+    std::vector<double> hp(n_pre_pad, 0.0);
+    hp.insert(hp.end(), h.begin(), h.end());
+    hp.insert(hp.end(), n_post_pad, 0.0);
+
+    // upfirdn with mode='constant', cval=0: insert up-1 zeros between
+    // input samples, convolve, keep every `down`th. Written as a direct
+    // polyphase sum -- for each output we touch only the taps that align
+    // with a real input sample, so the inserted zeros are never visited.
+    const std::size_t n_full = upfirdn_out_len(hp.size(), n_in, up, down);
+    std::vector<double> y(n_full, 0.0);
+    const std::ptrdiff_t up_s = up;
+    for (std::size_t i = 0; i < n_full; ++i) {
+        const std::ptrdiff_t t = static_cast<std::ptrdiff_t>(i) * down;
+        // Taps k with (t - k) a multiple of `up` and inside the signal.
+        std::ptrdiff_t k = t % up_s;
+        double acc = 0.0;
+        for (; k <= t && k < static_cast<std::ptrdiff_t>(hp.size()); k += up_s) {
+            const std::ptrdiff_t j = (t - k) / up_s;
+            if (j < static_cast<std::ptrdiff_t>(n_in)) {
+                acc += hp[static_cast<std::size_t>(k)] * x[static_cast<std::size_t>(j)];
+            }
+        }
+        y[i] = acc;
+    }
+
+    return std::vector<double>(y.begin() + static_cast<std::ptrdiff_t>(n_pre_remove),
+                               y.begin() + static_cast<std::ptrdiff_t>(n_pre_remove + n_out));
 }
 
 std::vector<double> convolve_same(std::span<const double> a,

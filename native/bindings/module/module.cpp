@@ -464,6 +464,14 @@ PYBIND11_MODULE(sstvae_native, m) {
         return to_numpy(sstvae::dsp::firwin_bandpass(numtaps, lo_hz, hi_hz));
     });
     dsp.def("wrap_cycles", &sstvae::dsp::wrap_cycles, py::arg("cycles"));
+    dsp.def("bessel_i0", &sstvae::dsp::bessel_i0, py::arg("x"));
+    dsp.def("kaiser", [](int m, double beta) {
+        return to_numpy(sstvae::dsp::kaiser(m, beta));
+    }, py::arg("m"), py::arg("beta"));
+    dsp.def("resample_poly", [](DArray x, int up, int down) {
+        std::vector<double> v(x.data(), x.data() + x.size());
+        return to_numpy(sstvae::dsp::resample_poly(v, up, down));
+    }, py::arg("x"), py::arg("up"), py::arg("down"));
 
     py::module_ ofdm = m.def_submodule("ofdm");
     ofdm.def("modulate_symbols",

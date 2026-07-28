@@ -41,6 +41,23 @@ std::vector<cdouble> freq_correct(std::span<const cdouble> z, double f_hz);
 std::vector<double> firwin_lowpass(int numtaps, double cutoff_hz);
 std::vector<double> firwin_bandpass(int numtaps, double lo_hz, double hi_hz);
 
+// The modified Bessel function of the first kind, order 0 -- `np.i0`,
+// which is what scipy's Kaiser window is defined in terms of.
+double bessel_i0(double x);
+
+// scipy.signal.windows.kaiser(M, beta, sym=True).
+std::vector<double> kaiser(int m, double beta);
+
+// scipy.signal.resample_poly(x, up, down) with its default
+// window=('kaiser', 5.0) and padtype='constant'.
+//
+// **Rate conversion is stateful in the live capture path** -- see
+// `audio::StreamResampler`, and the note in CLAUDE.md about the 4.7 dB
+// that per-chunk resampling cost. This function is the whole-signal
+// form, correct for a file or a complete waveform and wrong for a
+// stream of blocks.
+std::vector<double> resample_poly(std::span<const double> x, int up, int down);
+
 // numpy.convolve(a, v, mode="same"): the centre len(a) samples of the
 // full convolution, for len(a) >= len(v).
 std::vector<double> convolve_same(std::span<const double> a,
