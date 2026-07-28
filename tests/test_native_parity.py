@@ -205,12 +205,24 @@ FFT_TOL = 1e-11
 
 
 def _test_signal(n=4096, seed=5):
+    """Two tones plus noise, with the tone arguments range-reduced.
+
+    The same construction the golden generator uses, and reduced for the
+    same reason: unreduced, `2*pi*1200*t` reaches 3860 rad where one ulp
+    is 4.5e-13, and the signal itself then differs between x86-64 and
+    Apple silicon by 6.6e-13. That does not break this test — one array
+    is built here and handed to both sides — but a test signal whose
+    value depends on the machine is a bad habit to keep around.
+    """
     from sstvae.config import FS
 
     rng = np.random.default_rng(seed)
-    t = np.arange(n) / FS
-    return (np.sin(2 * np.pi * 1200 * t) + 0.5 * np.sin(2 * np.pi * 1900 * t)
-            + 0.2 * rng.normal(size=n))
+    k = np.arange(n)
+
+    def tone(freq_hz):
+        return np.sin(2 * np.pi * ((freq_hz * k) % FS) / FS)
+
+    return tone(1200) + 0.5 * tone(1900) + 0.2 * rng.normal(size=n)
 
 
 def test_dsp_firwin_matches_scipy(native):
@@ -304,6 +316,114 @@ def test_dsp_to_int16_rounds_half_to_even(native):
 
     plain = _test_signal()
     assert np.array_equal(dsp_ref.to_int16(plain), native.dsp.to_int16(plain))
+
+
+# --- framing ---------------------------------------------------------------
+
+def test_framing_embedded_table_is_the_frozen_one(native):
+    """The C++ compiles the interleaver in; Python loads it from a file.
+
+    They must be the same bytes, or the two implementations interleave
+    differently and every picture crossing between them is noise. This
+    is the check that makes the property-based tests below sufficient.
+    """
+    from sstvae.modem import framing as fr
+
+    for g in range(3):
+        _, idx = native.framing.slot_range_for_frame(g * 220)
+        _, ref_idx = fr.slot_range_for_frame(g * 220)
+        assert np.array_equal(idx, ref_idx), f"group {g} frame 0 differs"
+
+
+def test_framing_interleave_roundtrip_matches(native):
+    """Full-size, over every mode, against the reference's own output."""
+    from sstvae.config import MODES
+    from sstvae.modem import framing as fr
+
+    for mode in MODES.values():
+        rng = np.random.default_rng(mode.index)
+        latents = rng.normal(size=mode.n_latents)
+        assert np.array_equal(fr.interleave(latents, mode),
+                              native.framing.interleave(latents, mode.index)), mode.name
+
+        slots = fr.interleave(latents, mode)
+        ref_out, ref_w = fr.deinterleave(slots, mode)
+        out, w = native.framing.deinterleave(slots, mode.index)
+        assert np.array_equal(ref_out, out), mode.name
+        assert np.array_equal(ref_w, w), mode.name
+
+
+def test_framing_group_offsets_reach_past_16_bits(native):
+    """The table is uint16; the group offsets are not.
+
+    Mode C's third group starts at 2*GROUP_LATENTS = 105,600, which does
+    not fit in uint16. Both sides widen before adding — Python by
+    `.astype(np.intp)` on load, C++ by computing the offset in int64 —
+    and this asserts the result actually lands up there rather than
+    wrapping to something plausible-looking.
+    """
+    from sstvae.config import GROUP_LATENTS
+
+    group, idx = native.framing.slot_range_for_frame(659)  # last frame of mode C
+    assert group == 2
+    assert idx.min() >= 2 * GROUP_LATENTS
+    assert idx.max() < 3 * GROUP_LATENTS
+
+
+def test_framing_slot_range_across_group_boundaries(native):
+    from sstvae.modem import framing as fr
+
+    for frame in (0, 1, 219, 220, 221, 439, 440, 441, 658, 659):
+        ref_g, ref_idx = fr.slot_range_for_frame(frame)
+        g, idx = native.framing.slot_range_for_frame(frame)
+        assert g == ref_g, frame
+        assert np.array_equal(ref_idx, idx), frame
+
+
+def test_framing_slots_and_symbols(native):
+    from sstvae.config import LATENTS_PER_FRAME
+    from sstvae.modem import framing as fr
+
+    rng = np.random.default_rng(19)
+    slots = rng.normal(size=LATENTS_PER_FRAME)
+    sym = native.framing.slots_to_symbols(slots)
+    assert sym.shape == fr.slots_to_symbols(slots).shape
+    assert max_abs_diff(fr.slots_to_symbols(slots), sym) < 1e-15
+    assert max_abs_diff(fr.symbols_to_slots(sym),
+                        native.framing.symbols_to_slots(sym)) < 1e-15
+
+
+def test_framing_header_roundtrip(native):
+    from sstvae.config import MODES
+    from sstvae.modem import framing as fr
+
+    for mode in MODES.values():
+        assert np.array_equal(fr.header_bits(mode),
+                              native.framing.header_bits(mode.index))
+        assert max_abs_diff(fr.header_symbol(mode),
+                            native.framing.header_symbol(mode.index)) == 0.0
+        soft = np.real(fr.header_symbol(mode)).astype(float)
+        assert native.framing.decode_header(soft) == mode.index
+
+
+def test_framing_header_rejects_the_same_garbage(native):
+    """Agreeing on what to *reject* matters as much as what to accept.
+
+    A port that accepted a corrupt header would report a plausible mode
+    and then decode noise — worse than reporting no lock, because the
+    operator has no reason to doubt it.
+    """
+    from sstvae.modem import framing as fr
+
+    rng = np.random.default_rng(23)
+    rejected = 0
+    for _ in range(300):
+        soft = rng.normal(size=24)
+        ref = fr.decode_header(soft)
+        got = native.framing.decode_header(soft)
+        assert (ref.index if ref is not None else None) == got
+        rejected += ref is None
+    assert rejected > 0, "no garbage was rejected; the test proves nothing"
 
 
 # --- the golden corpus binds both suites to the same bytes -----------------

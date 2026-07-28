@@ -342,11 +342,27 @@ def build_dsp(c: Corpus) -> None:
     # A signal with real structure rather than noise alone, so the
     # filters and the analytic transform are exercised on something with
     # the spectrum they were designed for.
+    #
+    # The tone arguments are range-reduced in exact integer arithmetic,
+    # the same treatment the modem gives its own phasors: 1200 Hz at
+    # FS=8000 is periodic in 20 samples and 1900 Hz in 80. Unreduced,
+    # the argument reaches 3860 rad where one ulp is 4.5e-13, so the
+    # *test signal itself* differed between x86-64 and Apple silicon by
+    # 6.6e-13 -- which is how this was found: CI regenerated different
+    # input bytes on macOS and Windows.
+    #
+    # Note this vector is still tolerance-class, not bitwise. Reduction
+    # shrinks the platform spread from ~6e-13 to ~1e-16 but cannot
+    # remove it: no standard requires sin() to be correctly rounded, and
+    # that applies to a golden *input* exactly as it does to an output.
+    def tone(freq_hz: int, n_samples: int) -> np.ndarray:
+        k = np.arange(n_samples)
+        return np.sin(2 * np.pi * ((freq_hz * k) % FS) / FS)
+
     n = 4096
-    t = np.arange(n) / FS
-    x = (np.sin(2 * np.pi * 1200 * t) + 0.5 * np.sin(2 * np.pi * 1900 * t)
-         + 0.2 * rng.normal(size=n))
-    c.add("dsp/signal_input", x, "test signal: two tones plus noise")
+    x = tone(1200, n) + 0.5 * tone(1900, n) + 0.2 * rng.normal(size=n)
+    c.add("dsp/signal_input", x, "test signal: two tones plus noise",
+          tol=PLATFORM_TOL)
 
     c.add("dsp/to_baseband", dsp.to_baseband(x),
           "heterodyne by FCENTER; exactly periodic in 16 samples",
@@ -372,12 +388,89 @@ def build_dsp(c: Corpus) -> None:
     # An odd length too: hilbert's frequency mask differs for odd n, and
     # a recording is not going to be a nice round number of samples.
     x_odd = x[:1001]
-    c.add("dsp/signal_input_odd", x_odd)
+    c.add("dsp/signal_input_odd", x_odd, tol=PLATFORM_TOL)
     c.add("dsp/hilbert_odd", signal.hilbert(x_odd),
           "odd length takes the other branch of the mask", tol=PLATFORM_TOL)
 
 
-BUILDERS = {"dsp": build_dsp, "golay": build_golay, "ofdm": build_ofdm}
+def build_framing(c: Corpus) -> None:
+    from sstvae.config import (
+        DROPPED_LATENTS_PER_GROUP,
+        LATENTS_PER_FRAME,
+        MODES,
+        MODES_BY_INDEX,
+    )
+    from sstvae.modem import framing
+
+    # The permutation itself is NOT copied here. It already exists as
+    # sstvae/modem/interleaver_perms.npy -- the canonical frozen format
+    # data -- and the C++ test reads that file directly to check its
+    # embedded table against it. A copy in the corpus would be 1.2 MB of
+    # duplication that could drift from the original, which is precisely
+    # the failure the freezing was meant to rule out.
+    #
+    # Nor are the full interleave/deinterleave vectors stored. They would
+    # be ~8 MB across the three modes, and they are redundant: given a
+    # verified permutation table, interleave and deinterleave are pure
+    # index arithmetic, fully pinned by the round-trip and group-offset
+    # properties the C++ test asserts directly. `pytest --native` also
+    # runs the reference's own interleaver round-trip over real
+    # full-size data through the C++ implementation.
+    rng = np.random.default_rng(20260728)
+
+    # slot_range_for_frame across every group boundary and both ends of
+    # the range: this is what blind decode uses to place a frame without
+    # knowing the mode, so an off-by-one is a silently wrong picture.
+    frames = [0, 1, 219, 220, 221, 439, 440, 441, 658, 659]
+    c.add("framing/slot_range_frames", np.array(frames, dtype=np.int64))
+    groups, indices = [], []
+    for f in frames:
+        g, idx = framing.slot_range_for_frame(f)
+        groups.append(g)
+        indices.append(idx)
+    c.add("framing/slot_range_groups", np.array(groups, dtype=np.int64))
+    c.add("framing/slot_range_indices", np.array(indices, dtype=np.int64),
+          "one row per frame; canonical latent indices in slot order")
+
+    # slots <-> symbols. The 1/sqrt(2) scaling is the only arithmetic.
+    frame_slots = rng.normal(size=LATENTS_PER_FRAME)
+    c.add("framing/frame_slots", frame_slots)
+    sym = framing.slots_to_symbols(frame_slots)
+    c.add("framing/frame_symbols", sym, tol=PLATFORM_TOL)
+    c.add("framing/frame_slots_roundtrip", framing.symbols_to_slots(sym),
+          tol=PLATFORM_TOL)
+
+    # Header: Golay-coded, so integer arithmetic throughout.
+    for mode in sorted(MODES.values(), key=lambda m: m.index):
+        c.add(f"framing/header_bits_{mode.name}",
+              framing.header_bits(mode).astype(np.int64))
+        c.add(f"framing/header_symbol_{mode.name}",
+              framing.header_symbol(mode).astype(np.complex128))
+
+    # decode_header, including inputs it must *reject*. A port that
+    # accepted a corrupt header would show a plausible mode and then
+    # decode noise, which is worse than reporting no lock.
+    cases, expected = [], []
+    for mode in sorted(MODES.values(), key=lambda m: m.index):
+        soft = np.real(framing.header_symbol(mode)).astype(float)
+        cases.append(soft)
+        expected.append(mode.index)
+        # Mild noise: still decodable.
+        cases.append(soft + rng.normal(scale=0.3, size=len(soft)))
+        expected.append(mode.index)
+    for _ in range(20):
+        # Garbage. -1 marks "must be rejected".
+        soft = rng.normal(size=24)
+        got = framing.decode_header(soft)
+        cases.append(soft)
+        expected.append(got.index if got is not None else -1)
+    c.add("framing/header_soft_inputs", np.array(cases, dtype=np.float64))
+    c.add("framing/header_soft_expected", np.array(expected, dtype=np.int64),
+          "mode index, or -1 where the header must be rejected")
+
+
+BUILDERS = {"dsp": build_dsp, "framing": build_framing, "golay": build_golay,
+            "ofdm": build_ofdm}
 
 
 def build() -> Corpus:

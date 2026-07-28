@@ -100,18 +100,28 @@
     },
     "dsp/signal_input": {
       "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "1.9080812339e+00",
+        "mean_abs": "6.9269133036e-01",
+        "rms": "8.1669085733e-01"
+      },
       "note": "test signal: two tones plus noise",
-      "sha256": "a4b93dd5e9b1db17507bd327a1eaf2170d6d0fafc4ae0494b1c02aa95371843e",
       "shape": [
         4096
-      ]
+      ],
+      "tol": 1e-11
     },
     "dsp/signal_input_odd": {
       "dtype": "<f8",
-      "sha256": "7baa3057d691e1d94f5e9e5d15dda0baf8ffc552b804e9fc929b2f317c3f88ef",
+      "fingerprint": {
+        "max_abs": "1.8599371491e+00",
+        "mean_abs": "6.9670137390e-01",
+        "rms": "8.2014307920e-01"
+      },
       "shape": [
         1001
-      ]
+      ],
+      "tol": 1e-11
     },
     "dsp/sync_lowpass": {
       "dtype": "<c16",

@@ -105,6 +105,44 @@ NATIVE_SUBSTITUTIONS = [
 ]
 
 
+# Some C++ signatures cannot be identical to the reference's, and where
+# that is true the difference is deliberate rather than sloppy: the
+# framing functions take a `ModeSpec`, a Python dataclass, and binding
+# that type would put Python object layout into the shared core that the
+# *application* also links. They take a mode index instead, and these
+# adapters restore the reference's signature at the test boundary.
+#
+# Keep this list short. Every entry is a place where the substitution is
+# no longer literally the same call, so a bug in an adapter looks like a
+# bug in the port.
+def _native_adapters(native):
+    from sstvae.config import MODES_BY_INDEX
+
+    fr = native.framing
+
+    def decode_header(soft):
+        index = fr.decode_header(soft)
+        return None if index is None else MODES_BY_INDEX.get(index)
+
+    return {
+        ("sstvae.modem.framing", "interleave"):
+            lambda latents, mode: fr.interleave(latents, mode.index),
+        ("sstvae.modem.framing", "deinterleave"):
+            lambda slots, mode: fr.deinterleave(slots, mode.index),
+        ("sstvae.modem.framing", "header_bits"):
+            lambda mode: fr.header_bits(mode.index),
+        ("sstvae.modem.framing", "header_symbol"):
+            lambda mode: fr.header_symbol(mode.index),
+        ("sstvae.modem.framing", "decode_header"): decode_header,
+        # These take no mode, so they pass straight through; listed here
+        # rather than in the table above only to keep all of framing's
+        # substitutions in one place.
+        ("sstvae.modem.framing", "slots_to_symbols"): fr.slots_to_symbols,
+        ("sstvae.modem.framing", "symbols_to_slots"): fr.symbols_to_slots,
+        ("sstvae.modem.framing", "slot_range_for_frame"): fr.slot_range_for_frame,
+    }
+
+
 def pytest_addoption(parser):
     parser.addoption(
         "--native", action="store_true", default=False,
@@ -175,6 +213,15 @@ def pytest_configure(config):
                 "tests/conftest.py is out of date with the reference"
             )
         setattr(module, attr, getattr(getattr(native, sub_name), sub_attr))
+
+    for (mod_name, attr), replacement in _native_adapters(native).items():
+        module = importlib.import_module(mod_name)
+        if not hasattr(module, attr):
+            raise pytest.UsageError(
+                f"{mod_name}.{attr} does not exist; the adapter table in "
+                "tests/conftest.py is out of date with the reference"
+            )
+        setattr(module, attr, replacement)
 
     config._sstvae_native = native
 
