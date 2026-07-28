@@ -224,6 +224,19 @@ either, so overlays stay renderable from the command line.
   codec to ~1e-6, fp16 is free and int8 costs ~0.15 dB PSNR. Read it
   before assuming quantisation is dangerous here — latents are analog,
   so it is additive noise well under the channel's, not a format break.
+- `docs/native-app.md` — design (not implemented) for a native C++/Qt 6
+  desktop app replacing `sstvae/gui/`, which gets **deleted** when the
+  native one reaches parity. Depends on `docs/onnx.md` landing first —
+  the app cannot embed torch. Read it before assuming the motivation is
+  download size: after ONNX, frozen Python is already in the same size
+  class, and the real wins are startup, install robustness, and native
+  platform integration. Two load-bearing points: the golden-vector and
+  pybind11 parity harness must exist *before* `sync.cpp` is written
+  (Python is the oracle, so the riskiest code is also the most
+  checkable), and the phases are deliberately sized in lines-displaced
+  and what-verifies-them rather than in weeks — the bulk of the code is
+  the part that goes quickly, and the hardware/signing/on-air tail is
+  the project.
 - `docs/todo.md` — open work items with the reasoning behind them.
   Currently one: a wider acquisition search so a mis-tuned counterpart
   still decodes — measured, the demod path is entirely independent of

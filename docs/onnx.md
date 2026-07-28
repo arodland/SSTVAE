@@ -22,7 +22,9 @@ installs, and it exists solely to run two convolutional passes:
 
 That takes a `pip install sstvae[gui]` from roughly 400 MB to about
 90 MB before any bundling, and puts a single-file distribution in the
-100–120 MB class instead of 300+.
+100–120 MB class instead of 300+. Note that the model artifacts row is
+not part of a download at all under the first-run-fetch decision below —
+it is a cache cost, paid once.
 
 ## Exporting
 
@@ -156,14 +158,27 @@ this table would talk you out of int8 for the wrong reason.
   quantisation settings could land well outside the 0.15 dB measured
   here. Canonical artifacts make "compatible app" a checkable claim
   rather than a hope.
-- **Ship fp16 in the packaged distributions.** Free by every measure
-  above, and halves the largest single file in the bundle.
+- **Use fp16 in the packaged distributions.** Free by every measure
+  above, and halves the largest single artifact.
+- **Fetch it on first run rather than baking it into the installer**
+  (revised 2026-07-27; the original wording here said "ship fp16 *in*
+  the packaged distributions", which read as bundling). Keeps
+  `checkpoint.py`'s cache-first, immutable-filename model — one
+  mechanism for CLI and app alike — and keeps ~20 MB out of every
+  download. The cost is a network dependency at first launch, so an
+  offline machine needs a clear message and a manual import path.
+  See `docs/native-app.md` decision 5.
 
-Both follow from the fp32 equivalence result: because every precision
-decodes on every other precision's receiver, the choice is a local
-packaging matter and not a format decision. That is worth stating
+All three follow from the fp32 equivalence result: because every
+precision decodes on every other precision's receiver, the choice is a
+local packaging matter and not a format decision. That is worth stating
 explicitly for anyone building against these artifacts — **there is one
 on-air format, and the precisions are not variants of it.**
+
+The same equivalence is what makes first-run fetch safe rather than
+risky. A station that fetches fp16 and a station that was shipped fp32
+interoperate exactly, so delivery and precision are independent choices
+and either can be revisited without touching the other.
 
 ## What implementing it would involve
 
