@@ -209,6 +209,10 @@ either, so overlays stay renderable from the command line.
 
 ## Docs
 
+- `docs/cyclic-prefix.md` — explainer: what the CP is, why carriers must
+  sit on multiples of RS for it to be truly cyclic, why `demod_window`
+  throws it away and backs 6 samples into it, and how it divides labor
+  with the pilots (CP handles delay spread, pilots handle Doppler).
 - `docs/latent-mixer-results.md` — the latent MLP-mixer experiment and
   why no mixer on the latent grid's axes can move PAPR (the interleaver
   scatters the 46 latents that share an OFDM symbol).
