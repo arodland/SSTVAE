@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 
 from sstvae.config import M, NC, NCP
+from sstvae.modem import dsp as dsp_ref
 from sstvae.modem import golay, ofdm
 from sstvae.modem.dsp import to_baseband
 
@@ -190,6 +191,119 @@ def test_native_rejects_a_window_before_the_signal(native):
     z = np.zeros(500, dtype=complex)
     with pytest.raises(ValueError):
         native.ofdm.demod_window(z, 2, 6)
+
+
+# --- dsp -------------------------------------------------------------------
+#
+# The FFT is the one place the two implementations run genuinely
+# different code: SciPy is on ducc0, the C++ on pocketfft. Same lineage
+# (same author, ducc0 is pocketfft's successor), no guarantee of
+# identical bits -- and an FFT could not be bitwise across platforms
+# anyway, since it sums thousands of terms in an implementation-defined
+# order. Hence the looser bound wherever hilbert() is involved.
+FFT_TOL = 1e-11
+
+
+def _test_signal(n=4096, seed=5):
+    from sstvae.config import FS
+
+    rng = np.random.default_rng(seed)
+    t = np.arange(n) / FS
+    return (np.sin(2 * np.pi * 1200 * t) + 0.5 * np.sin(2 * np.pi * 1900 * t)
+            + 0.2 * rng.normal(size=n))
+
+
+def test_dsp_firwin_matches_scipy(native):
+    """The filters are part of the waveform, not an implementation
+    detail: the transmit bandpass shapes what goes on air and the sync
+    lowpass sets what the preamble detector sees. "A reasonable windowed
+    sinc" would be a different radio."""
+    from scipy import signal
+
+    from sstvae.config import FS, TX_BANDPASS
+
+    assert max_abs_diff(signal.firwin(129, 850.0, fs=FS),
+                        native.dsp.firwin_lowpass(129, 850.0)) < 1e-14
+    assert max_abs_diff(signal.firwin(201, TX_BANDPASS, fs=FS, pass_zero=False),
+                        native.dsp.firwin_bandpass(201, *TX_BANDPASS)) < 1e-14
+
+
+def test_dsp_to_baseband(native):
+    x = _test_signal()
+    assert max_abs_diff(dsp_ref.to_baseband(x), native.dsp.to_baseband(x)) < 1e-14
+
+
+def test_dsp_to_baseband_stays_exact_over_a_long_recording(native):
+    """The heterodyne is periodic in 16 samples, so neither side should
+    accumulate anything over length. Before both were range-reduced this
+    drifted to 1.5e-10 over a mode C transmission; the point of the fix
+    was that the result is a property of the signal, not of how long you
+    have been running."""
+    x = np.ones(400_000)
+    got = native.dsp.to_baseband(x)
+    assert max_abs_diff(dsp_ref.to_baseband(x), got) < 1e-14
+    assert np.max(np.abs(np.abs(got) - 1.0)) < 1e-15
+
+
+def test_dsp_hilbert(native):
+    from scipy import signal
+
+    x = _test_signal()
+    assert max_abs_diff(signal.hilbert(x), native.dsp.hilbert(x)) < FFT_TOL
+
+
+def test_dsp_hilbert_odd_length(native):
+    """The frequency-domain mask takes a different branch for odd n, and
+    a recording is not going to be a round number of samples."""
+    from scipy import signal
+
+    x = _test_signal()[:1001]
+    assert max_abs_diff(signal.hilbert(x), native.dsp.hilbert(x)) < FFT_TOL
+
+
+def test_dsp_sync_lowpass(native):
+    z = dsp_ref.to_baseband(_test_signal())
+    assert max_abs_diff(dsp_ref.sync_lowpass(z), native.dsp.sync_lowpass(z)) < 1e-13
+
+
+def test_dsp_freq_correct(native):
+    z = dsp_ref.to_baseband(_test_signal())
+    for f in (0.0, 1.0, -1.0, 12.5, 37.5, -55.0, 7.3125):
+        assert max_abs_diff(dsp_ref.freq_correct(z, f),
+                            native.dsp.freq_correct(z, f)) < 1e-13, f"offset {f}"
+
+
+def test_dsp_tx_condition(native):
+    """What actually goes on air. Two clip-and-filter iterations over a
+    hilbert each, so the FFT difference compounds -- checked directly
+    rather than trusted to its parts."""
+    from sstvae.config import CLIP_HEADROOM_DB
+
+    x = _test_signal()
+    got = native.dsp.tx_condition(x, CLIP_HEADROOM_DB)
+    assert max_abs_diff(dsp_ref.tx_condition(x, CLIP_HEADROOM_DB), got) < 1e-10
+    # The contract is unit RMS; assert it rather than inferring it.
+    assert abs(np.sqrt(np.mean(got ** 2)) - 1.0) < 1e-12
+
+
+def test_dsp_papr_db(native):
+    x = _test_signal()
+    assert abs(dsp_ref.papr_db(x) - native.dsp.papr_db(x)) < 1e-11
+
+
+def test_dsp_to_int16_rounds_half_to_even(native):
+    """np.round is half-to-even; std::round is half-away-from-zero.
+
+    Constructed so values land exactly on .5 after scaling, which is
+    where the two disagree -- random input would almost never hit it.
+    """
+    x = np.array([0.0, 1.0, -1.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5])
+    x = x / 32767.0 / 0.95 * np.max(np.abs(x))  # so scaling returns the .5s
+    got = native.dsp.to_int16(x)
+    assert np.array_equal(dsp_ref.to_int16(x), got)
+
+    plain = _test_signal()
+    assert np.array_equal(dsp_ref.to_int16(plain), native.dsp.to_int16(plain))
 
 
 # --- the golden corpus binds both suites to the same bytes -----------------

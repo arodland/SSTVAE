@@ -13,6 +13,152 @@
     "changed: a deliberate format change, or a bug. Not noise."
   ],
   "vectors": {
+    "dsp/firwin_sync": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "2.1264803900e-01",
+        "mean_abs": "1.4967569931e-02",
+        "rms": "4.0029967488e-02"
+      },
+      "note": "firwin(129, 850, fs=FS) -- the sync lowpass",
+      "shape": [
+        129
+      ],
+      "tol": 1e-11
+    },
+    "dsp/firwin_tx": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "3.3716828003e-01",
+        "mean_abs": "1.2769551979e-02",
+        "rms": "4.0461992881e-02"
+      },
+      "note": "firwin(201, TX_BANDPASS, pass_zero=False) -- the transmit bandpass",
+      "shape": [
+        201
+      ],
+      "tol": 1e-11
+    },
+    "dsp/freq_correct": {
+      "dtype": "<c16",
+      "fingerprint": {
+        "max_abs": "1.9080812339e+00",
+        "mean_abs": "6.9269133036e-01",
+        "rms": "8.1669085733e-01"
+      },
+      "note": "one row per offset",
+      "shape": [
+        7,
+        4096
+      ],
+      "tol": 1e-11
+    },
+    "dsp/freq_correct_offsets": {
+      "dtype": "<f8",
+      "sha256": "5e993c5890be2b918b2862b4d119f0b06c1ee6181f3d219020aed147c05dd2f7",
+      "shape": [
+        7
+      ]
+    },
+    "dsp/hilbert": {
+      "dtype": "<c16",
+      "fingerprint": {
+        "max_abs": "2.1856737202e+00",
+        "mean_abs": "1.0865114542e+00",
+        "rms": "1.1549587875e+00"
+      },
+      "note": "analytic signal",
+      "shape": [
+        4096
+      ],
+      "tol": 1e-11
+    },
+    "dsp/hilbert_odd": {
+      "dtype": "<c16",
+      "fingerprint": {
+        "max_abs": "1.9734695251e+00",
+        "mean_abs": "1.0899595079e+00",
+        "rms": "1.1598563404e+00"
+      },
+      "note": "odd length takes the other branch of the mask",
+      "shape": [
+        1001
+      ],
+      "tol": 1e-11
+    },
+    "dsp/papr_db": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "5.5403768595e+00",
+        "mean_abs": "5.5403768595e+00",
+        "rms": "5.5403768595e+00"
+      },
+      "shape": [
+        1
+      ],
+      "tol": 1e-11
+    },
+    "dsp/signal_input": {
+      "dtype": "<f8",
+      "note": "test signal: two tones plus noise",
+      "sha256": "a4b93dd5e9b1db17507bd327a1eaf2170d6d0fafc4ae0494b1c02aa95371843e",
+      "shape": [
+        4096
+      ]
+    },
+    "dsp/signal_input_odd": {
+      "dtype": "<f8",
+      "sha256": "7baa3057d691e1d94f5e9e5d15dda0baf8ffc552b804e9fc929b2f317c3f88ef",
+      "shape": [
+        1001
+      ]
+    },
+    "dsp/sync_lowpass": {
+      "dtype": "<c16",
+      "fingerprint": {
+        "max_abs": "9.3742272350e-01",
+        "mean_abs": "5.3817284700e-01",
+        "rms": "5.6802848932e-01"
+      },
+      "shape": [
+        4096
+      ],
+      "tol": 1e-11
+    },
+    "dsp/to_baseband": {
+      "dtype": "<c16",
+      "fingerprint": {
+        "max_abs": "1.9080812339e+00",
+        "mean_abs": "6.9269133036e-01",
+        "rms": "8.1669085733e-01"
+      },
+      "note": "heterodyne by FCENTER; exactly periodic in 16 samples",
+      "shape": [
+        4096
+      ],
+      "tol": 1e-11
+    },
+    "dsp/to_int16": {
+      "dtype": "<i8",
+      "note": "np.round is half-to-even; std::round would differ",
+      "sha256": "9480e8ccdaf24bf7fee8bacbc69041b3ed5cd2af6ace54e82f0e9a8875c3626d",
+      "shape": [
+        4096
+      ]
+    },
+    "dsp/tx_condition": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "1.9230574438e+00",
+        "mean_abs": "8.6311838774e-01",
+        "rms": "1.0000000000e+00"
+      },
+      "note": "clip-and-filter at the configured headroom",
+      "shape": [
+        4096
+      ],
+      "tol": 1e-11
+    },
     "golay/all_codewords": {
       "dtype": "<i8",
       "note": "encode(m) for every 12-bit message",

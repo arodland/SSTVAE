@@ -22,11 +22,14 @@
 #include <vector>
 
 #include "config.hpp"
+#include "dsp/dsp.hpp"
 #include "golay/golay.hpp"
 #include "ofdm/ofdm.hpp"
 
 namespace py = pybind11;
 using sstvae::ofdm::cdouble;
+
+// to_numpy overloads are shared with the dsp bindings below.
 
 namespace {
 
@@ -110,6 +113,73 @@ PYBIND11_MODULE(sstvae_native, m) {
         "ML-decode 24 soft values (positive => bit 0) to the 12 info bits.");
     golay.def("min_distance", &sstvae::golay::min_distance,
               "Minimum distance of the code (8).");
+
+    py::module_ dsp = m.def_submodule("dsp");
+    dsp.def("to_baseband",
+            [](DArray x) {
+                std::span<const double> in(x.data(),
+                                           static_cast<std::size_t>(x.size()));
+                return to_numpy(sstvae::dsp::to_baseband(in));
+            },
+            py::arg("x"), "Real passband -> complex baseband.");
+    dsp.def("freq_correct",
+            [](CArray z, double f_hz) {
+                std::span<const cdouble> in(z.data(),
+                                            static_cast<std::size_t>(z.size()));
+                return to_numpy(sstvae::dsp::freq_correct(in, f_hz));
+            },
+            py::arg("z"), py::arg("f_hz"));
+    dsp.def("sync_lowpass",
+            [](CArray z) {
+                std::span<const cdouble> in(z.data(),
+                                            static_cast<std::size_t>(z.size()));
+                return to_numpy(sstvae::dsp::sync_lowpass(in));
+            },
+            py::arg("z"));
+    dsp.def("tx_condition",
+            [](DArray x, double clip_headroom_db, int iterations) {
+                std::span<const double> in(x.data(),
+                                           static_cast<std::size_t>(x.size()));
+                return to_numpy(
+                    sstvae::dsp::tx_condition(in, clip_headroom_db, iterations));
+            },
+            py::arg("x"), py::arg("clip_headroom_db"), py::arg("iterations") = 2);
+    dsp.def("papr_db",
+            [](DArray x) {
+                std::span<const double> in(x.data(),
+                                           static_cast<std::size_t>(x.size()));
+                return sstvae::dsp::papr_db(in);
+            },
+            py::arg("x"));
+    dsp.def("to_int16",
+            [](DArray x, double peak) {
+                std::span<const double> in(x.data(),
+                                           static_cast<std::size_t>(x.size()));
+                const auto v = sstvae::dsp::to_int16(in, peak);
+                py::array_t<std::int16_t> out(static_cast<py::ssize_t>(v.size()));
+                std::copy(v.begin(), v.end(), out.mutable_data());
+                return out;
+            },
+            py::arg("x"), py::arg("peak") = 0.95);
+    // Not substituted into the reference (Python uses scipy for these),
+    // but exposed so the parity tests can check them directly -- they
+    // are what sync_lowpass and tx_condition are built from, and a bug
+    // in one of them would otherwise only surface as a vague
+    // whole-filter mismatch.
+    dsp.def("hilbert",
+            [](DArray x) {
+                std::span<const double> in(x.data(),
+                                           static_cast<std::size_t>(x.size()));
+                return to_numpy(sstvae::dsp::hilbert(in));
+            },
+            py::arg("x"));
+    dsp.def("firwin_lowpass", [](int numtaps, double cutoff_hz) {
+        return to_numpy(sstvae::dsp::firwin_lowpass(numtaps, cutoff_hz));
+    });
+    dsp.def("firwin_bandpass", [](int numtaps, double lo_hz, double hi_hz) {
+        return to_numpy(sstvae::dsp::firwin_bandpass(numtaps, lo_hz, hi_hz));
+    });
+    dsp.def("wrap_cycles", &sstvae::dsp::wrap_cycles, py::arg("cycles"));
 
     py::module_ ofdm = m.def_submodule("ofdm");
     ofdm.def("modulate_symbols",

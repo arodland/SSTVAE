@@ -14,11 +14,13 @@
 
 #include "check.hpp"
 #include "config.hpp"
+#include "dsp/dsp.hpp"
 #include "golay/golay.hpp"
 #include "ofdm/ofdm.hpp"
 #include "testing/npy.hpp"
 
 using namespace sstvae;
+using sstvae::dsp::cdouble;
 using sstvae::testing::load_c16;
 using sstvae::testing::load_f8;
 using sstvae::testing::load_i8;
@@ -161,6 +163,71 @@ void test_ofdm_transforms() {
                  "ofdm/demod_window past the end of the signal");
 }
 
+void test_dsp() {
+    // FIR designs. Tolerance because sinc and the Hamming window are
+    // transcendental and the scale normalization sums 129/201 terms;
+    // 1e-14 is the same one-ulp-of-exp() reasoning as PHASOR_TOL.
+    check::close(dsp::firwin_lowpass(129, 850.0), load_f8(g("dsp/firwin_sync")),
+                 1e-14, "dsp/firwin lowpass matches scipy");
+    check::close(dsp::firwin_bandpass(201, config::TX_BANDPASS_LO,
+                                      config::TX_BANDPASS_HI),
+                 load_f8(g("dsp/firwin_tx")), 1e-14,
+                 "dsp/firwin bandpass matches scipy");
+
+    const std::vector<double> x = load_f8(g("dsp/signal_input"));
+
+    // Both sides reduce the heterodyne exactly, and it is periodic in 16
+    // samples, so this should be as close as two exp() calls can be.
+    check::close(dsp::to_baseband(x), load_c16(g("dsp/to_baseband")), 1e-14,
+                 "dsp/to_baseband");
+
+    // The FFT is the one place where the two implementations run
+    // genuinely different code: SciPy is on ducc0, this is pocketfft.
+    // Same lineage, no guarantee of identical bits, and an FFT sums
+    // 4096 terms -- hence the looser bound. Still ~1e10 tighter than
+    // anything that could affect a decode.
+    check::close(dsp::hilbert(x), load_c16(g("dsp/hilbert")), 1e-11,
+                 "dsp/hilbert");
+    const std::vector<double> x_odd = load_f8(g("dsp/signal_input_odd"));
+    check::close(dsp::hilbert(x_odd), load_c16(g("dsp/hilbert_odd")), 1e-11,
+                 "dsp/hilbert at odd length (the other mask branch)");
+
+    check::close(dsp::sync_lowpass(dsp::to_baseband(x)),
+                 load_c16(g("dsp/sync_lowpass")), 1e-13, "dsp/sync_lowpass");
+
+    const std::vector<double> papr = load_f8(g("dsp/papr_db"));
+    check::close(std::vector<double>{dsp::papr_db(x)}, papr, 1e-11, "dsp/papr_db");
+
+    // tx_condition runs two clip-and-filter iterations over a hilbert
+    // each, so the FFT difference compounds; it is also the function
+    // whose output goes on air, so it gets its own check rather than
+    // being trusted to its parts.
+    check::close(dsp::tx_condition(x, config::CLIP_HEADROOM_DB),
+                 load_f8(g("dsp/tx_condition")), 1e-10, "dsp/tx_condition");
+
+    // Integer output: exact, and specifically checking that half-to-even
+    // rounding was used. std::round would differ here.
+    const std::vector<std::int64_t> want_i16 = load_i8(g("dsp/to_int16"));
+    const std::vector<std::int16_t> got_i16 = dsp::to_int16(x);
+    bool i16_ok = got_i16.size() == want_i16.size();
+    if (i16_ok)
+        for (std::size_t i = 0; i < got_i16.size(); ++i)
+            if (static_cast<std::int64_t>(got_i16[i]) != want_i16[i]) i16_ok = false;
+    check::is_true(i16_ok, "dsp/to_int16 matches np.round exactly");
+
+    const std::vector<double> offsets = load_f8(g("dsp/freq_correct_offsets"));
+    const std::vector<cdouble> fc_expected = load_c16(g("dsp/freq_correct"));
+    const std::vector<cdouble> z = dsp::to_baseband(x);
+    std::vector<cdouble> fc_got;
+    fc_got.reserve(offsets.size() * z.size());
+    for (double f : offsets) {
+        const auto row = dsp::freq_correct(z, f);
+        fc_got.insert(fc_got.end(), row.begin(), row.end());
+    }
+    check::close(fc_got, fc_expected, 1e-13,
+                 "dsp/freq_correct across the acquisition range");
+}
+
 void test_config_header() {
     // config.hpp is generated, so this is not checking arithmetic -- it
     // is checking that the committed header was generated from the
@@ -185,6 +252,7 @@ int main(int argc, char** argv) {
 
     try {
         test_config_header();
+        test_dsp();
         test_golay();
         test_ofdm_tables();
         test_ofdm_transforms();

@@ -317,7 +317,67 @@ def build_ofdm(c: Corpus) -> None:
           tol=PLATFORM_TOL)
 
 
-BUILDERS = {"golay": build_golay, "ofdm": build_ofdm}
+def build_dsp(c: Corpus) -> None:
+    from scipy import signal
+
+    from sstvae.config import FS, TX_BANDPASS
+    from sstvae.modem import dsp
+
+    # FIR designs. These are part of the waveform (the transmit bandpass
+    # shapes what goes on air) and of acquisition (the sync lowpass sets
+    # what the preamble detector sees), so the port has to reproduce
+    # scipy's firwin rather than design "a reasonable" filter.
+    #
+    # Tolerance rather than bitwise: sinc and the Hamming window are
+    # transcendental, and the scale normalization sums 129 or 201 terms.
+    c.add("dsp/firwin_sync", signal.firwin(129, 850.0, fs=FS),
+          "firwin(129, 850, fs=FS) -- the sync lowpass", tol=PLATFORM_TOL)
+    c.add("dsp/firwin_tx",
+          signal.firwin(201, TX_BANDPASS, fs=FS, pass_zero=False),
+          "firwin(201, TX_BANDPASS, pass_zero=False) -- the transmit bandpass",
+          tol=PLATFORM_TOL)
+
+    rng = np.random.default_rng(20260728)
+
+    # A signal with real structure rather than noise alone, so the
+    # filters and the analytic transform are exercised on something with
+    # the spectrum they were designed for.
+    n = 4096
+    t = np.arange(n) / FS
+    x = (np.sin(2 * np.pi * 1200 * t) + 0.5 * np.sin(2 * np.pi * 1900 * t)
+         + 0.2 * rng.normal(size=n))
+    c.add("dsp/signal_input", x, "test signal: two tones plus noise")
+
+    c.add("dsp/to_baseband", dsp.to_baseband(x),
+          "heterodyne by FCENTER; exactly periodic in 16 samples",
+          tol=PLATFORM_TOL)
+    c.add("dsp/hilbert", signal.hilbert(x), "analytic signal", tol=PLATFORM_TOL)
+    c.add("dsp/sync_lowpass", dsp.sync_lowpass(dsp.to_baseband(x)),
+          tol=PLATFORM_TOL)
+    c.add("dsp/papr_db", np.array([dsp.papr_db(x)]), tol=PLATFORM_TOL)
+    c.add("dsp/tx_condition", dsp.tx_condition(x, 0.5),
+          "clip-and-filter at the configured headroom", tol=PLATFORM_TOL)
+    c.add("dsp/to_int16", dsp.to_int16(x).astype(np.int64),
+          "np.round is half-to-even; std::round would differ")
+
+    # freq_correct at offsets spanning the acquisition range, including
+    # a negative one and a deliberately awkward fractional value.
+    z = dsp.to_baseband(x)
+    offsets = np.array([0.0, 1.0, -1.0, 12.5, 37.5, -55.0, 7.3125], dtype=np.float64)
+    c.add("dsp/freq_correct_offsets", offsets)
+    c.add("dsp/freq_correct",
+          np.array([dsp.freq_correct(z, f) for f in offsets]),
+          "one row per offset", tol=PLATFORM_TOL)
+
+    # An odd length too: hilbert's frequency mask differs for odd n, and
+    # a recording is not going to be a nice round number of samples.
+    x_odd = x[:1001]
+    c.add("dsp/signal_input_odd", x_odd)
+    c.add("dsp/hilbert_odd", signal.hilbert(x_odd),
+          "odd length takes the other branch of the mask", tol=PLATFORM_TOL)
+
+
+BUILDERS = {"dsp": build_dsp, "golay": build_golay, "ofdm": build_ofdm}
 
 
 def build() -> Corpus:

@@ -85,10 +85,23 @@ NATIVE_SUBSTITUTIONS = [
     ("sstvae.modem.ofdm", "BASEBAND_FREQS", "ofdm", "BASEBAND_FREQS"),
     ("sstvae.modem.ofdm", "MOD_MATRIX", "ofdm", "MOD_MATRIX"),
     ("sstvae.modem.ofdm", "DEMOD_MATRIX", "ofdm", "DEMOD_MATRIX"),
-    # `sync` took these by from-import, so it needs its own copies
-    # replaced or it would keep calling Python's.
+    ("sstvae.modem.dsp", "to_baseband", "dsp", "to_baseband"),
+    ("sstvae.modem.dsp", "freq_correct", "dsp", "freq_correct"),
+    ("sstvae.modem.dsp", "sync_lowpass", "dsp", "sync_lowpass"),
+    ("sstvae.modem.dsp", "tx_condition", "dsp", "tx_condition"),
+    ("sstvae.modem.dsp", "papr_db", "dsp", "papr_db"),
+    ("sstvae.modem.dsp", "to_int16", "dsp", "to_int16"),
+    # From-import sites. These bound the function object at import time,
+    # so patching the defining module does not reach them -- and a
+    # missed one means a test that silently keeps exercising Python
+    # while reporting itself as a native run.
     ("sstvae.modem.sync", "preamble_template", "ofdm", "preamble_template"),
     ("sstvae.modem.sync", "pilot_template", "ofdm", "pilot_template"),
+    ("sstvae.modem.sync", "freq_correct", "dsp", "freq_correct"),
+    ("sstvae.modem.sync", "sync_lowpass", "dsp", "sync_lowpass"),
+    ("sstvae.modem.modem", "to_baseband", "dsp", "to_baseband"),
+    ("sstvae.modem.modem", "freq_correct", "dsp", "freq_correct"),
+    ("sstvae.modem.modem", "tx_condition", "dsp", "tx_condition"),
 ]
 
 

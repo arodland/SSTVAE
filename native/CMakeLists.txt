@@ -48,9 +48,10 @@ endif()
 # No QtWidgets anywhere below here; enforced by tools/check_layering.py.
 add_library(sstvae_core STATIC
   core/golay/golay.cpp
+  core/dsp/dsp.cpp
   core/ofdm/ofdm.cpp
 )
-target_include_directories(sstvae_core PUBLIC core)
+target_include_directories(sstvae_core PUBLIC core third_party/pocketfft)
 # Position-independent so the static core can be linked into the
 # pybind11 shared module.
 set_target_properties(sstvae_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
