@@ -195,6 +195,70 @@ threshold, since at 6 dB everything succeeds and there is nothing to
 measure; and **use at least 25 seeds per point** — six is what produced
 the phantom effect this section used to describe.
 
+## Range-reduce the phasor arguments in `ofdm.py`
+
+**Found 2026-07-28 while porting `ofdm.py` to C++. Not urgent, and
+deliberately deferred until the native port settles**, because changing
+it now would invalidate the committed golden-vector corpus in the middle
+of the work that depends on it.
+
+`ofdm.py` builds `MOD_MATRIX` and `DEMOD_MATRIX` as
+
+```python
+np.exp(2j * np.pi * np.outer(_n_sym, CARRIER_FREQS) / FS)
+```
+
+on the **unreduced** argument. With `n` up to 160 and carriers up to
+2100 Hz, |θ| reaches **262 rad**, where one ulp is 5.7e-14. The phasors
+therefore carry up to ~|θ|·eps ≈ 5.8e-14 of error, and which entries
+round which way is an accident of numpy's complex-array arithmetic
+rather than anything about the waveform.
+
+**The fix is exact and cheap.** Every frequency is an integer number of
+Hz and every sample index is an integer, so the phasor depends only on
+`(n*f) mod FS`:
+
+```python
+q = np.outer(_n_sym, CARRIER_FREQS) % FS      # exact, integer
+MOD_MATRIX = np.exp(2j * np.pi * q / FS)      # |theta| < 2*pi
+```
+
+`native/core/ofdm/ofdm.cpp` already does this. Measured against a
+70-digit series expansion: current Python **2.8e-14**, the two-line
+replacement above **9.0e-16**, the C++ **1.6e-16**. The replacement has
+been run and checked — it is not a suggestion, only an unlanded one.
+Note the `%` must be a true Euclidean remainder; `_n_sym` is negative
+across the cyclic prefix, and numpy's `%` does give the non-negative
+result there (verified), but a rewrite in another form must not quietly
+switch to C-style truncation.
+
+**Why bother, given -280 dB is nowhere near mattering on air?** Two
+reasons, neither of which is the accuracy itself:
+
+- **Cross-platform determinism.** `sin`/`cos` of 262 rad disagree
+  between glibc, musl and MSVC by far more than they do near zero,
+  because implementations differ in how far they carry argument
+  reduction. Under 2π they agree to well under an ulp. Every parity
+  tolerance between Python and C++ has to hold on three platforms, and
+  reduction is what makes that a bound rather than a hope.
+- **It removes a tolerance from the parity harness.** `PHASOR_TOL` in
+  `native/tests/test_golden.cpp` is currently sized by *Python's* error,
+  not by the port's. Fix this and the two implementations agree to
+  ~1e-15, which is a much stronger statement about the port.
+
+**Sequencing.** Do it *after* the C++ modem port is complete and its
+golden vectors have stopped churning, then regenerate the corpus
+(`tools/gen_golden_vectors.py`) and tighten `PHASOR_TOL` in the same
+commit. Doing it earlier means regenerating the corpus twice and losing
+the ability to tell a port bug from a reference change.
+
+**Check for the same pattern elsewhere while you are there.**
+`preamble_waveform`, `preamble_template` and `pilot_template` build
+their own phasors the same way; `dsp.to_baseband`'s heterodyne is the
+other obvious candidate and it runs over whole recordings, so its
+arguments grow without bound — that one may matter more than these,
+and has not been measured.
+
 ## Quantisation tolerance as a training soft constraint
 
 **Nothing to act on, and the deficit that prompted this is gone.**

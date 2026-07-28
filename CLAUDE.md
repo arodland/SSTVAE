@@ -10,6 +10,8 @@ rationale lives in the plan history.
 - Run tests: `pytest` (fast, ~10 s; includes full modem end-to-end tests)
 - Slow gate: `pytest -m slow` (~2 min) — the listener state machine and
   the app's transmit→receive loopback. Run it after touching `sstvae/rx/`.
+- Native port: `tools/build_native.sh --test` (builds `native/`, runs
+  `ctest` and `pytest --native`). See "The native port" below.
 - Run the app: `uv run sstvae-gui` (needs `uv sync --extra gui`)
 - Smoke-train: `python scripts/train.py --smoke --out /tmp/smoke`
 - Full pipeline check: `sstvae_encode.py` → `sstvae_simulate.py` → `sstvae_decode.py`
@@ -194,6 +196,56 @@ either, so overlays stay renderable from the command line.
 - Half duplex: `transmitStarted` suspends receive, and resuming
   allocates a fresh ring buffer so the tail of our own transmission
   isn't decoded back as a reception.
+
+## The native port
+
+`native/` is the C++20 rewrite of the application (`docs/native-app.md`).
+**Phase 0 only**: `golay` and `ofdm` are ported, along with the parity
+harness that everything after them depends on. **Python remains the
+normative definition of the on-air format** — when the two disagree,
+Python is right until proven otherwise, because that is the only thing
+that keeps "compatible implementation" a checkable claim.
+
+Three artifacts are **generated and committed**, and CI fails if any is
+stale. Committed so a plain `cmake` build needs no Python; generated so
+there is only ever one source of truth:
+
+- `native/core/config.hpp` ← `tools/gen_config_header.py` from
+  `sstvae/config.py`. Never hand-edit it. Two hand-maintained copies of
+  the waveform constants would be the single most likely cause of a
+  silent on-air incompatibility.
+- `native/tests/golden/` ← `tools/gen_golden_vectors.py`. 22 `.npy`
+  files plus a `manifest.json` carrying shape/dtype/sha256 — the
+  manifest is the *reviewable* part, so a deliberate regeneration
+  produces a diff naming exactly which vectors moved.
+- The layering rules are checked by `tools/check_layering.py`, not by
+  good intentions: nothing under `core/` includes QtWidgets, only
+  `core/overlay/` may include QtGui, and only `bindings/embed/` may link
+  libpython.
+
+**`pytest --native` is the point of the whole exercise.** It substitutes
+the C++ implementations into the reference modules, so the existing
+suite becomes the port's acceptance suite (currently 243 fast + 19 slow
+against C++). `tests/test_native_parity.py` is the complement: it holds
+both implementations in one process and diffs them, which is what you
+need when `--native` fails and you want to know *where*.
+
+- Substitution is by **attribute assignment**, so every binding keeps
+  its Python counterpart's exact signature — a shim that "improved" an
+  interface would break the mechanism. `from x import y` sites bind at
+  import time and are invisible to it, so they are listed explicitly in
+  `NATIVE_SUBSTITUTIONS`; a missed one silently keeps testing Python.
+- Without the extension module built, the parity tests **skip** and
+  `--native` **errors**. Both are deliberate: a parity suite that
+  quietly passes because it tested nothing is worse than no suite.
+- **Tolerances are sized by the reference's error, not the port's.**
+  `ofdm.py` builds phasors on an unreduced argument up to 262 rad and
+  carries ~3e-14; the C++ reduces `(n*f) mod FS` in integers and is
+  accurate to 1.6e-16. Reduce phase arguments exactly in any new DSP —
+  `sin`/`cos` of a large argument disagree across glibc/musl/MSVC by far
+  more than near zero, and the tolerances must hold on all three. The
+  Python-side fix is in `docs/todo.md`, deliberately deferred so the
+  golden corpus does not churn during the port.
 
 ## Gotchas learned the hard way
 
