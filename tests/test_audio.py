@@ -66,13 +66,16 @@ class FakePortAudio:
         self.accepts = set(accepts)
         self.played = []  # every block handed to the device
         self.stream_rate = None
+        self.closed = False
+        self.hostapi_name = "ALSA"
 
     def check_output_settings(self, device=None, samplerate=None, **kw):
         if samplerate not in self.accepts:
             raise RuntimeError(f"Invalid sample rate {samplerate}")
 
     def query_devices(self, device=None, kind=None):
-        return {"default_samplerate": float(self.native), "name": "Fake TX"}
+        return {"default_samplerate": float(self.native), "name": "Fake TX",
+                "hostapi": 0}
 
     def OutputStream(self, samplerate=None, callback=None,
                      finished_callback=None, **kw):
@@ -104,6 +107,9 @@ class FakePortAudio:
 
         return Stream()
 
+    def query_hostapis(self, index=None):
+        return {"name": self.hostapi_name}
+
     def InputStream(self, samplerate=None, callback=None, **kw):
         """Capture counterpart. Rejects rates the device doesn't do, which
         is what pushes `open_input_stream` onto its resampling path."""
@@ -118,10 +124,10 @@ class FakePortAudio:
                 fake.started = True
 
             def stop(self_inner):
-                pass
+                fake.closed = True
 
             def close(self_inner):
-                pass
+                fake.closed = True
 
         return Stream()
 
@@ -259,12 +265,76 @@ def test_capture_from_a_44k_only_device_reproduces_one_shot(fake_pa):
     assert rate == 44100, "should have fallen back to the device rate"
 
     fake_pa.feed(x, blocksize=1024)
-    got, total = ring.snapshot()
-
     up, down = audio.resample_ratio(44100, FS)
     want = resample_poly(x, up, down)
+    got, total = ring.snapshot()
     assert total > 0
     assert np.allclose(got[:total], want[:total], atol=1e-6), (
         "captured audio differs from one-shot resampling -- chunk-boundary "
         "artifacts are back"
     )
+
+
+def test_capture_prefers_the_device_rate_even_when_8k_is_offered(fake_pa):
+    """The PipeWire/ALSA regression.
+
+    Asking a device for 8 kHz does not avoid a resampler -- it delegates
+    to whatever the audio stack provides, and ALSA's default is linear
+    interpolation. The same loopback decoded cleanly via PulseAudio and
+    produced a mangled picture via PipeWire/ALSA. So we open at the
+    device's own rate and convert here, where the quality is ours.
+    """
+    from sstvae.rx import RingBuffer
+
+    fake_pa.native = 48000
+    fake_pa.accepts = {FS, 48000}  # device would happily give us 8 kHz
+
+    ring = RingBuffer(10.0)
+    _, rate = audio.open_input_stream(None, ring, FS, on_error=lambda m: None)
+
+    assert rate == 48000, (
+        "should open at the device's native rate and resample in "
+        "StreamResampler, not let the audio stack convert to 8 kHz"
+    )
+    assert fake_pa.stream_rate == 48000
+
+
+def test_capture_opens_directly_when_the_device_is_natively_8k(fake_pa):
+    """No pointless conversion when the device really is 8 kHz."""
+    from sstvae.rx import RingBuffer
+
+    fake_pa.native = FS
+    fake_pa.accepts = {FS}
+
+    ring = RingBuffer(10.0)
+    stream, rate = audio.open_input_stream(None, ring, FS, on_error=lambda m: None)
+    assert rate == FS
+
+    x = np.sin(2 * np.pi * 1200 * np.arange(FS) / FS)
+    fake_pa.feed(x, blocksize=1024)
+    got, total = ring.snapshot()
+    assert np.allclose(got[:total], x[:total], atol=1e-6), "must pass through untouched"
+
+
+def test_a_jack_device_is_flagged(fake_pa):
+    """JACK has no buffering behind its realtime period, and our capture
+    callback is Python. Losing the GIL race there drops audio silently --
+    a mangled picture with sync intact, which nobody would blame on their
+    device choice. Warn; don't refuse."""
+    from sstvae.rx import RingBuffer
+
+    fake_pa.hostapi_name = "JACK Audio Connection Kit"
+    fake_pa.accepts = {48000}
+    msgs = []
+    audio.open_input_stream(None, RingBuffer(10.0), FS, on_error=msgs.append)
+    assert any("host API" in m for m in msgs), msgs
+    assert any("pipewire" in m for m in msgs), "should name the alternatives"
+
+
+def test_an_ordinary_device_is_not_flagged(fake_pa):
+    from sstvae.rx import RingBuffer
+
+    fake_pa.accepts = {48000}
+    msgs = []
+    audio.open_input_stream(None, RingBuffer(10.0), FS, on_error=msgs.append)
+    assert not any("host API" in m for m in msgs), msgs

@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import wavio
 from ..audio import AudioUnavailable, open_input_stream
 from ..rx import RingBuffer, RxConfig, SharedState, decode_loop, decode_loop_low_cpu, fmt_snr
 from ..rx.engine import parse_size
@@ -56,9 +57,11 @@ class _GuiSink:
     without restarting the loop.
     """
 
-    def __init__(self, signals: _Signals, settings_fn):
+    def __init__(self, signals: _Signals, settings_fn, ring_fn=None):
         self._signals = signals
         self._settings = settings_fn
+        # Returns the live RingBuffer, for the save_audio diagnostic.
+        self._ring_fn = ring_fn or (lambda: None)
 
     def on_reception(self, rec):
         cfg, freq_hz = self._settings()
@@ -86,7 +89,29 @@ class _GuiSink:
         if size:
             img = img.resize(size)
         img.save(path)
+        if cfg.receive.save_audio:
+            self._save_audio(path)
         return str(path)
+
+    def _save_audio(self, image_path: Path) -> None:
+        """Dump the capture buffer beside the picture. Never fatal.
+
+        Deliberately the *whole* ring rather than a trimmed reception:
+        the point is to be able to re-run the real decoder over exactly
+        what the sound card delivered, and a trim would beg the question
+        by assuming we know where the transmission was.
+        """
+        ring = self._ring_fn()
+        if ring is None:
+            return
+        try:
+            samples, total = ring.snapshot()
+            if total <= 0:
+                return
+            wavio.write_wav_float(str(Path(image_path).with_suffix(".wav")),
+                                  samples[:total])
+        except Exception as e:  # a diagnostic must never break receiving
+            self._signals.error.emit(f"could not save captured audio: {e}")
 
 
 @dataclass
@@ -173,7 +198,8 @@ class ReceivePanel(QWidget):
         self.progress.setRange(0, 100)
         left_layout.addWidget(self.progress)
 
-        self.waterfall = WaterfallWidget(None, splitter)
+        self.waterfall = WaterfallWidget(
+            None, splitter, fps=self._app.config.receive.waterfall_fps)
         splitter.addWidget(left)
         splitter.addWidget(self.waterfall)
         splitter.setStretchFactor(0, 3)
@@ -230,6 +256,7 @@ class ReceivePanel(QWidget):
             self._stream, rate = open_input_stream(
                 cfg.audio.input_device or None, self._ring, cfg.audio.samplerate,
                 on_error=self._signals.error.emit,
+                device_rate=cfg.audio.input_device_rate,
             )
         except AudioUnavailable as e:
             QMessageBox.critical(self, "Audio unavailable", str(e))
@@ -249,7 +276,11 @@ class ReceivePanel(QWidget):
             once=False,
             blind_search_seconds=cfg.receive.blind_search_seconds,
         )
-        sink = _GuiSink(self._signals, lambda: (self._app.config, self._app.current_frequency_hz))
+        sink = _GuiSink(
+            self._signals,
+            lambda: (self._app.config, self._app.current_frequency_hz),
+            ring_fn=lambda: self._ring,
+        )
         target = decode_loop_low_cpu if cfg.receive.low_cpu else decode_loop
         self._stop = threading.Event()
         self._thread = threading.Thread(

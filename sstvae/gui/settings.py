@@ -45,7 +45,14 @@ def config_path() -> Path:
 class AudioConfig:
     input_device: str | None = None  # PortAudio name; None = system default
     output_device: str | None = None
+    # What lands in the ring buffer. Fixed by the modem -- this is not a
+    # device setting, and changing it produces silent garbage.
     samplerate: int = FS
+    # Open the input device at this rate instead of its advertised
+    # default, resampling to `samplerate` here. For hosts that cannot
+    # honour the rate they claim: PortAudio's JACK backend only ever runs
+    # at the JACK server's rate. None = use the device's own default.
+    input_device_rate: int | None = None
 
 
 @dataclass
@@ -81,6 +88,15 @@ class ReceiveConfig:
     blind_search_seconds: float = 25.0
     end_grace: float = 8.0
     save_size: str | None = None  # e.g. "320x240"; None keeps 640x480
+    # Diagnostic: also write the captured audio beside each received
+    # image, as float32 at FS with nothing rescaled. Answers "is the
+    # picture bad because the audio was bad?" without needing the
+    # hardware again -- the dump decodes offline with sstvae_decode.py.
+    save_audio: bool = False
+    # Waterfall refresh rate. 0 disables it entirely -- a diagnostic for
+    # whether the display's ~20 Hz reads of the ring are interfering
+    # with audio capture. See sstvae/gui/waterfall.py.
+    waterfall_fps: int = 20
     # Fields available: date, time, freq, callsign, mode. Missing ones
     # (no rig, no callsign decoded) drop out of the name rather than
     # leaving an empty gap.

@@ -77,15 +77,12 @@ outcome of reading this document.
 Two properties decided this over the alternatives, and both are specific
 to *this* codebase rather than general C++ advocacy:
 
-**PortAudio continuity.** `sounddevice` *is* PortAudio. Staying on it
-means `audio.py`'s hard-won behaviour — device enumeration, the
-8 kHz-rejected → native-rate + resample fallback, and `resample_ratio`'s
-deliberately two-named-rates signature — ports nearly literally. The
-gotcha list in `CLAUDE.md` records that this cost a 32-second
-transmission going out as 0.9 s of noise, discoverable only on real
-hardware (an Elecraft K4's USB codec takes that path; PulseAudio's
-`default` does not). Any other audio abstraction re-derives that class
-of bug from scratch.
+**~~PortAudio continuity.~~ Superseded 2026-07-28 — see "Audio: use
+QtMultimedia" below.** The original argument was that `sounddevice` *is*
+PortAudio, so `audio.py`'s hard-won behaviour ports literally. The
+behaviour is still worth porting, but PortAudio itself is no longer worth
+keeping, and the conclusion now points the same way as the toolkit
+choice rather than merely rhyming with it.
 
 **Qt replaces PIL, not just PySide6.** `QImage`/`QPainter`/
 `QFontDatabase` cover everything `overlay/render.py` does. That removes
@@ -123,7 +120,7 @@ and removes the font-discovery-per-OS problem in `images.py`.
 | `firwin`, `hilbert`, `fftconvolve` | Hand-written, ~150 lines total | Windowed sinc; FFT-based analytic signal; overlap-save. |
 | `resample_poly` | Hand-written polyphase, ~80 lines | **The delicate one.** scipy's kernel defaults (Kaiser window, `gcd` handling) must be replicated exactly or capture and playback drift apart. |
 | ONNX | onnxruntime C++ API | First-class native API, not a binding layer. |
-| Audio | **PortAudio** | See above. |
+| Audio | **QtMultimedia** (`QAudioSource`/`QAudioSink`) | See below. Was PortAudio; changed 2026-07-28 for a measured reason, not for tidiness. |
 | Rig | **`libhamlib`, linked** | User installs nothing. One `RIG*` on a dedicated thread; model 2 covers sharing a radio via someone else's `rigctld`. Deletes the socket client and the `rigctld -l` parser. See "Bundling Hamlib". |
 | Hub fetch | `QNetworkAccessManager` | Ports `checkpoint.py`'s cache-first, immutable-filename model — a cache hit is trusted outright, no revalidating HEAD. |
 | Images, text, fonts | Qt (`QImage`, `QPainter`, `QFontDatabase`) | Replaces Pillow entirely. |
@@ -132,6 +129,52 @@ and removes the font-discovery-per-OS problem in `images.py`.
 
 **Do not use FFTW.** GPL-2+ unless licensed commercially, which fights
 the project's Artistic 2.0 distribution.
+
+### Audio: use QtMultimedia
+
+**Decided 2026-07-28, on evidence rather than aesthetics.** The Python
+app's worst bug to date was that its PortAudio capture callback is
+*Python*, so it runs on the host's realtime audio thread and must take
+the GIL. When the Qt thread held the GIL — converting a 640×480 preview
+to a QPixmap and painting it, immediately after every decode poll — the
+callback could not run, and on a JACK device, which has no buffer behind
+its couple-of-millisecond period, the audio was silently skipped:
+200–350 samples per poll, 5 dB of SNR, a mangled picture, with sync
+succeeding and every frame reported. It took several rounds to find
+because the identical code was clean headless and clean on
+`pulse`/`pipewire`.
+
+The obvious fix is to keep Python off the realtime thread by using
+PortAudio's blocking API. **That does not work**: `stream.read()`
+corrupts the heap on PortAudio's JACK backend at every blocksize and
+latency tried. So the Python app is left with a warning
+(`audio.warn_if_fragile_host`) and "don't use JACK".
+
+A C++ app does not have this problem *at all* — there is no GIL, so a
+callback is simply a callback. That alone settles PortAudio-vs-Qt on
+merit rather than convenience. Given that, prefer QtMultimedia:
+
+- `QAudioSource` is pull-based over a buffered `QIODevice`, so the
+  realtime side stays inside Qt's C++ backend and the app drains a
+  buffer. The structural hazard disappears rather than being tuned
+  around.
+- One fewer native dependency, and `QMediaDevices` gives device
+  hot-plug and default-change notifications PortAudio does not.
+- It is the same class in Python and C++, so a QtMultimedia port of the
+  *Python* app is not throwaway work — it is Phase 2 done early, on the
+  real hardware, with the Python test suite still available to check it.
+
+**Carry these forward regardless of library**, since they are properties
+of the problem and not of PortAudio:
+
+- Open at the device's own rate and resample in our own code
+  (`StreamResampler`). `QAudioSource` will equally happily accept an
+  8 kHz `QAudioFormat` and let its backend convert.
+- Capture resampling must be *stateful across blocks*; per-block
+  `resample_poly` cost 4.7 dB on a real recording.
+- Nothing may hold the ring buffer's lock across a bulk copy.
+- Keep the resampling and ring logic out of the Qt layer, so the
+  fake-device tests that caught three of these bugs still apply.
 
 ### Prior art worth mining
 

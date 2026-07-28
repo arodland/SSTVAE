@@ -22,6 +22,31 @@ import numpy as np
 
 from .config import FS
 
+# Host APIs where a Python capture callback is not safe to rely on.
+#
+# Our PortAudio callback is Python, so it runs on the host's realtime
+# audio thread and must take the GIL to do anything at all. Any other
+# thread holding the GIL -- the Qt thread converting a 640x480 preview to
+# a QPixmap and painting it, right after every decode poll -- stops it
+# from running. Hosts with a large software buffer (PulseAudio, PipeWire's
+# own device) absorb that invisibly. **JACK does not**: its period is a
+# couple of milliseconds with nothing queued behind it, so the audio is
+# skipped, silently, with no status flag to report.
+#
+# Measured on a PipeWire-JACK device: ~200-350 samples lost on every
+# decode poll, tracking `poll_interval` exactly (change the interval and
+# the losses follow it), costing 5 dB of SNR and a mangled picture, while
+# still syncing and reporting every frame received. The identical code was
+# clean headless, which is what made it look like a GUI decode bug.
+#
+# The proper fix is to keep Python off the realtime thread. PortAudio's
+# *blocking* API would do that -- its own C callback fills an internal
+# ring -- but `stream.read()` **corrupts the heap on the JACK backend**
+# (`malloc(): invalid size`) at every blocksize and latency tried, so it
+# is not available. The real fix is a capture layer whose realtime side
+# is not Python at all; see docs/native-app.md on QtMultimedia.
+FRAGILE_HOST_APIS = ("jack",)
+
 
 class AudioUnavailable(RuntimeError):
     """PortAudio/sounddevice could not be loaded or found no devices."""
@@ -90,6 +115,37 @@ def _rate_fallback(device, kind: str) -> int:
     sd = _sd()
     info = sd.query_devices(device, kind)
     return int(round(info["default_samplerate"]))
+
+
+def host_api_name(device) -> str | None:
+    """The PortAudio host API a device belongs to, lowercased."""
+    sd = _sd()
+    try:
+        info = sd.query_devices(device, "input")
+        return sd.query_hostapis(info["hostapi"])["name"].lower()
+    except Exception:
+        return None
+
+
+def warn_if_fragile_host(device, report) -> str | None:
+    """Say so if this device's host API cannot be captured reliably.
+
+    Worth a warning rather than a refusal: it *mostly* works, and a
+    user who has deliberately chosen JACK may know what they are doing.
+    But the failure mode is a quietly mangled picture, which nobody
+    would attribute to their device choice unaided. See
+    `FRAGILE_HOST_APIS`.
+    """
+    api = host_api_name(device)
+    if api and any(bad in api for bad in FRAGILE_HOST_APIS):
+        report(
+            f"[audio in] this device is on the '{api}' host API, which has no "
+            "buffering behind its realtime period. Pictures may decode noisy "
+            "or mangled even though sync succeeds. Prefer the 'pulse' or "
+            "'pipewire' entry for the same device."
+        )
+        return api
+    return None
 
 
 def resample_ratio(src_rate: int, dst_rate: int) -> tuple[int, int]:
@@ -162,9 +218,26 @@ class StreamResampler:
 def open_input_stream(device, ring, samplerate: int = FS, on_error=None):
     """Open an InputStream feeding `ring` (a `sstvae.rx.RingBuffer`).
 
-    Returns (stream, actual_rate). Tries the requested rate directly
-    first; falls back to the device's default rate with per-chunk
-    polyphase resampling if that is rejected.
+    Returns (stream, actual_rate).
+
+    **Opens at the device's own rate and resamples here, rather than
+    asking the device for 8 kHz.** Almost no capture hardware is natively
+    8 kHz, so requesting it does not avoid a resampler -- it just hands
+    the job to whichever one happens to be in the audio stack, and their
+    quality varies enormously. JACK cannot resample at all: a JACK stream
+    only ever runs at the server's rate, whatever was asked for. Doing
+    the conversion in `StreamResampler` makes capture quality a property
+    of this code rather than of the user's audio configuration.
+
+    `samplerate` is what lands in `ring`, and the modem fixes it at `FS`
+    -- it is not a device setting and changing it produces silent
+    garbage.
+
+    This uses PortAudio's **callback** API. The blocking API would keep
+    Python off the host's realtime thread, which would be better -- see
+    the note on `warn_if_fragile_host` -- but `stream.read()` corrupts
+    the heap on PortAudio's JACK backend at every blocksize and latency
+    tried, so it is not an option.
     """
     sd = _sd()
     report = on_error or (lambda msg: print(msg, file=sys.stderr))
@@ -178,29 +251,42 @@ def open_input_stream(device, ring, samplerate: int = FS, on_error=None):
 
         return callback
 
+    def open_at(rate: int):
+        resampler = None
+        if rate != samplerate:
+            resampler = StreamResampler(*resample_ratio(rate, samplerate))
+        stream = sd.InputStream(
+            samplerate=rate, channels=1, dtype="float32", device=device,
+            callback=make_callback(resampler),
+        )
+        stream.start()
+        return stream, rate
+
+    warn_if_fragile_host(device, report)
+
+    native = None
     try:
-        stream = sd.InputStream(
-            samplerate=samplerate, channels=1, dtype="float32",
-            device=device, callback=make_callback(),
-        )
-        stream.start()
-        return stream, samplerate
-    except Exception as e:
         native = _rate_fallback(device, "input")
-        # Capture direction: the device hands us `native`, we want `samplerate`.
-        up, down = resample_ratio(native, samplerate)
-        report(
-            f"[audio in] {samplerate} Hz rejected ({e}); falling back to "
-            f"device default {native} Hz with resampling"
-        )
-        # Stateful across callbacks -- see StreamResampler. A bare
-        # `resample_poly` per chunk decodes to a mangled picture.
-        stream = sd.InputStream(
-            samplerate=native, channels=1, dtype="float32", device=device,
-            callback=make_callback(StreamResampler(up, down)),
-        )
-        stream.start()
-        return stream, native
+    except Exception as e:  # device gone, or no rate advertised
+        report(f"[audio in] could not query the device's rate ({e})")
+
+    if native and native != samplerate:
+        try:
+            return open_at(native)
+        except Exception as e:
+            report(
+                f"[audio in] {native} Hz (the device's own rate) failed ({e}); "
+                f"asking for {samplerate} Hz instead \u2014 note this leaves the "
+                "rate conversion to the audio stack"
+            )
+
+    try:
+        return open_at(samplerate)
+    except Exception as e:
+        if native is None or native == samplerate:
+            raise
+        report(f"[audio in] {samplerate} Hz rejected ({e}); using {native} Hz")
+        return open_at(native)
 
 
 def play(device, samples: np.ndarray, samplerate: int = FS, on_progress=None,

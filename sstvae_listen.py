@@ -127,7 +127,6 @@ def main() -> None:
                     help=PRECISION_HELP)
     ap.add_argument("--out-dir", default="received", help="directory for saved images")
     ap.add_argument("--device", default=None, help="input device name/index (see --list-devices)")
-    ap.add_argument("--samplerate", type=int, default=FS, help="capture sample rate to request")
     ap.add_argument(
         "--buffer-seconds", type=float, default=130.0,
         help="rolling audio buffer length; must exceed the longest mode duration "
@@ -180,7 +179,7 @@ def main() -> None:
     state = SharedState()
     stop_event = threading.Event()
 
-    stream, actual_rate = open_input_stream(args.device, ring, args.samplerate)
+    stream, actual_rate = open_input_stream(args.device, ring, FS)
     print(f"listening at {actual_rate} Hz, buffer {args.buffer_seconds:.0f}s -- Ctrl+C to stop")
 
     target = decode_loop_low_cpu if args.low_cpu else decode_loop

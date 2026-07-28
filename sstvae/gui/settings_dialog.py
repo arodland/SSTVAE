@@ -316,6 +316,16 @@ class SettingsDialog(QDialog):
         self.autosave.setChecked(r.autosave)
         form.addRow(self.autosave)
 
+        self.save_audio = QCheckBox(
+            "Also save the captured audio (diagnostic)", w)
+        self.save_audio.setChecked(r.save_audio)
+        form.addRow(self.save_audio)
+        form.addRow(QLabel(
+            "Writes a .wav beside each received picture, exactly as captured.\n"
+            "Use it when a picture decodes badly: run sstvae_decode.py on the\n"
+            "dump to see whether the audio or the decoder was at fault."
+        ))
+
         self.low_cpu = QCheckBox("Low-CPU mode", w)
         self.low_cpu.setChecked(r.low_cpu)
         form.addRow(self.low_cpu)
@@ -443,6 +453,7 @@ class SettingsDialog(QDialog):
         config.folders.template_dir = self.template_dir.value()
 
         config.receive.autosave = self.autosave.isChecked()
+        config.receive.save_audio = self.save_audio.isChecked()
         config.receive.low_cpu = self.low_cpu.isChecked()
         config.receive.filename_template = self.filename_template.text()
         config.receive.save_size = self.save_size.text().strip() or None

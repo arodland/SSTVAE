@@ -130,11 +130,14 @@ def _artifact(part: str, precision: str) -> str:
 @pytest.mark.parametrize("precision", checkpoint.PRECISIONS)
 @pytest.mark.parametrize("part", ["encoder", "decoder"])
 def test_artifact_records_the_checkpoint_it_came_from(part, precision, pt_sha):
-    """Provenance, exactly -- the check that catches a stale artifact."""
-    import onnx
+    """Provenance, exactly -- the check that catches a stale artifact.
 
-    model = onnx.load(_artifact(part, precision), load_external_data=False)
-    props = {p.key: p.value for p in model.metadata_props}
+    Read through onnxruntime rather than the `onnx` package: onnxruntime
+    is a real dependency of the app, `onnx` is export-time only, and
+    this is the same accessor `OnnxCodec` uses to cross-check the pair.
+    """
+    props = (_session(_artifact(part, precision))
+             .get_modelmeta().custom_metadata_map or {})
 
     assert props.get("sstvae.source_checkpoint") == checkpoint.DEFAULT_FILE
     assert props.get("sstvae.source_sha256") == pt_sha, (

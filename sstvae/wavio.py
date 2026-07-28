@@ -29,6 +29,17 @@ def read_wav(path: str) -> np.ndarray:
     return data
 
 
+def write_wav_float(path: str, x: np.ndarray) -> None:
+    """Write float32 at FS with **no normalization and no quantization**.
+
+    For diagnostics, where the question is "what exactly did we
+    capture?" -- `write_wav` rescales to a fixed peak and rounds to
+    int16, both of which destroy the evidence. `read_wav` returns these
+    unchanged, so a dump round-trips exactly.
+    """
+    wavfile.write(path, FS, np.asarray(x, dtype=np.float32))
+
+
 def write_wav(path: str, x: np.ndarray, peak: float = 0.95) -> None:
     m = np.max(np.abs(x))
     if m > 0:

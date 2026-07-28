@@ -28,7 +28,7 @@ def make_reception(callsign="N0CALL", mode="B"):
     )
 
 
-def make_sink(cfg, freq_hz=14340000.0):
+def make_sink(cfg, freq_hz=14340000.0, ring=None):
     from sstvae.gui.rx_panel import _Signals
 
     signals = _Signals()
@@ -36,7 +36,8 @@ def make_sink(cfg, freq_hz=14340000.0):
     signals.reception.connect(lambda rec, path: seen.append((rec, path)))
     errors = []
     signals.error.connect(errors.append)
-    return _GuiSink(signals, lambda: (cfg, freq_hz)), seen, errors
+    sink = _GuiSink(signals, lambda: (cfg, freq_hz), ring_fn=lambda: ring)
+    return sink, seen, errors
 
 
 def test_autosave_writes_a_file_named_from_the_template(tmp_path):
@@ -124,3 +125,77 @@ def test_unique_leaves_a_free_name_alone(tmp_path):
     assert _unique(path) == path
     path.touch()
     assert _unique(path) == tmp_path / "rx_2.png"
+
+
+# --- the captured-audio diagnostic ---------------------------------------
+
+def _ring_with(samples):
+    from sstvae.rx import RingBuffer
+
+    ring = RingBuffer(len(samples) / 8000.0 + 1.0)
+    ring.write(samples)
+    return ring
+
+
+def test_save_audio_writes_the_capture_beside_the_picture(tmp_path):
+    """The dump has to be usable as evidence, so: exact samples.
+
+    `write_wav` would rescale to a fixed peak and round to int16, which
+    destroys the two things you look at first -- absolute level and
+    whether anything clipped.
+    """
+    import numpy as np
+
+    from sstvae import wavio
+
+    cfg = Config()
+    cfg.folders.receive_dir = str(tmp_path)
+    cfg.receive.autosave = True
+    cfg.receive.save_audio = True
+
+    samples = (np.sin(2 * np.pi * 1200 * np.arange(8000) / 8000) * 0.1)
+    sink, _, errors = make_sink(cfg, ring=_ring_with(samples))
+    saved = sink.on_reception(make_reception())
+
+    wav = Path(saved).with_suffix(".wav")
+    assert wav.exists(), f"no audio dump beside {saved}"
+    assert not errors
+
+    back = wavio.read_wav(str(wav))
+    assert len(back) == len(samples)
+    assert np.allclose(back, samples, atol=1e-6), (
+        "the dump must round-trip unscaled -- otherwise it is not evidence"
+    )
+
+
+def test_save_audio_off_writes_no_wav(tmp_path):
+    import numpy as np
+
+    cfg = Config()
+    cfg.folders.receive_dir = str(tmp_path)
+    cfg.receive.autosave = True
+    cfg.receive.save_audio = False
+
+    sink, _, _ = make_sink(cfg, ring=_ring_with(np.zeros(8000)))
+    saved = sink.on_reception(make_reception())
+    assert not Path(saved).with_suffix(".wav").exists()
+    assert list(tmp_path.glob("*.wav")) == []
+
+
+def test_a_broken_audio_dump_does_not_lose_the_picture(tmp_path):
+    """A diagnostic must never cost you the reception it was diagnosing."""
+    class Exploding:
+        def snapshot(self):
+            raise OSError("disk full")
+
+    cfg = Config()
+    cfg.folders.receive_dir = str(tmp_path)
+    cfg.receive.autosave = True
+    cfg.receive.save_audio = True
+
+    sink, seen, errors = make_sink(cfg, ring=Exploding())
+    saved = sink.on_reception(make_reception())
+
+    assert saved and Path(saved).exists(), "the picture must still be saved"
+    assert any("captured audio" in e for e in errors)
+    assert seen, "the reception must still reach the GUI"

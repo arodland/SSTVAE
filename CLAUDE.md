@@ -218,6 +218,68 @@ either, so overlays stay renderable from the command line.
   bandwidth and were deliberately left alone; changing them would alter
   training, not relabel it. The README's tables were re-measured on the
   new scale with `scripts/snr_sweep.py`.
+- **Nothing may hold the `RingBuffer` lock across a bulk copy.** The
+  audio callback calls `write()`, and a blocked audio callback means
+  PortAudio *discards input*. `snapshot()` used to copy the whole buffer
+  (8 MB at 130 s) under the lock, so the decode loop tore a hole in its
+  own audio every `poll_interval`, and the holes **grew** as the buffer
+  filled and the copy slowed. Measured against a simultaneous clean
+  capture of the same playback: losses of 85 samples rising to 235, one
+  every 5.00 s, 1718 samples over 50 s — 0.35% of timing error, which is
+  ~4 samples/frame against a drift tracker built for <0.1. Result was
+  5 dB of SNR, a failed beacon and a mangled picture, while still
+  syncing and reporting every frame received. `write()` now holds the
+  lock only to publish two integers, and `snapshot()` copies outside it.
+  A microbenchmark of the old code showed writes blocked for **786 ms**
+  against a 0.43 ms snapshot; the new one, 0.01 ms.
+  `tests/test_rx_ringbuffer.py` guards this on the p95 of write latency,
+  self-calibrated against the copy cost.
+- **Our capture callback is Python, so it is on the host's realtime
+  thread and needs the GIL.** This is the root cause of the worst bug
+  found so far, and it is not fixed — only worked around by avoiding
+  JACK. When the Qt thread holds the GIL (converting a 640x480 preview to
+  a QPixmap and painting it, right after every decode poll), the callback
+  cannot run. PulseAudio and PipeWire's own device have a big software
+  buffer and absorb it invisibly. **JACK has none**: a couple of
+  milliseconds per period with nothing queued, so audio is skipped
+  silently, with no status flag.
+  - Measured on a PipeWire-JACK device: ~200–350 samples lost per decode
+    poll, **tracking `poll_interval` exactly** — change it from 5 s to
+    11 s and the losses follow — for 5 dB of SNR and a mangled picture,
+    while sync succeeded and every frame was reported. The same code was
+    clean headless and clean on `pulse`/`pipewire`, which is why it
+    looked like a GUI decode bug for several rounds.
+  - **Diagnosing this class of bug:** compare two *simultaneous* captures
+    of one playback (`scripts/diagnose_capture.py --out` alongside the
+    GUI's `receive.save_audio`). Windows that correlate at 1.000 but at a
+    drifting lag prove sample loss rather than added noise, and the
+    interval between lag steps names the culprit.
+  - **PortAudio's blocking API is not the fix**, though it would put C on
+    the realtime path: `stream.read()` **corrupts the heap** on the JACK
+    backend (`malloc(): invalid size`) at every blocksize and latency
+    tried. Verified, not assumed. `audio.warn_if_fragile_host` therefore
+    warns rather than fixing, and the real fix is a capture layer whose
+    realtime side is not Python — see `docs/native-app.md`.
+- **Capture opens at the device's *own* rate and resamples in our code,
+  never by asking the device for 8 kHz.** Almost nothing is natively
+  8 kHz, so requesting it doesn't avoid a resampler — it delegates to
+  whichever one the audio stack has, and JACK cannot resample at all
+  (a JACK stream only ever runs at the server's rate, whatever you
+  asked for). `open_input_stream`'s `device_rate=` forces the open rate
+  for a host whose advertised default is a fiction; `--device-rate` and
+  `audio.input_device_rate` expose it.
+- **`samplerate` in the audio API is the *ring buffer's* rate, not a
+  device setting.** It is fixed at `FS` by the modem, and passing
+  anything else fills the ring with wrong-rate audio that decodes to
+  nothing. `sstvae_listen.py` used to expose it as `--samplerate`, which
+  read like "ask the device for this"; that flag is gone, replaced by
+  `--device-rate`, which is the one people actually want.
+- A stream silently running at a rate other than the one requested is
+  now **detected**: `open_input_stream` measures delivered samples
+  against wall clock for the first few seconds and reports a mismatch
+  (`RATE_CHECK_SECONDS` / `RATE_CHECK_TOLERANCE`). Cheap, and it turns
+  the worst failure mode here — plausible-looking garbage — into a
+  message.
 - **Capture resampling is stateful — `audio.StreamResampler`, never a
   bare `resample_poly` per callback chunk.** `resample_poly` is an FIR
   polyphase filter, so an isolated chunk is zero-padded at both ends and
