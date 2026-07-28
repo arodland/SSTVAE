@@ -18,7 +18,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-torch = pytest.importorskip("torch")
+# No torch guard here: `reconstruct` is stubbed out below, so this file
+# never loads a model. It used to import torch and skip without it,
+# which meant the whole slow suite silently vanished on any machine
+# without torch installed -- including CI, where it reported 13 skips
+# and a green tick. Removed 2026-07-28.
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
