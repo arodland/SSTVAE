@@ -79,7 +79,12 @@ class WaveformChannel(torch.nn.Module):
             "mod_mat", torch.from_numpy(ofdm.MOD_MATRIX).to(torch.complex64)
         )
         n = np.arange(M)
-        demod = np.exp(-2j * np.pi * np.outer(ofdm.CARRIER_FREQS, n) / FS)
+        # Range-reduced like ofdm.py's own matrices -- this replica has
+        # to stay faithful to the modem it mirrors, and the whole point
+        # of the file is that it is the same arithmetic. The change is
+        # ~1e-14 on a buffer that is then cast to complex64 (eps 1e-7),
+        # so it cannot affect training; it just stops the two drifting.
+        demod = ofdm._phasor(np.outer(ofdm.CARRIER_FREQS, n), -1)
         self.register_buffer("demod_mat", torch.from_numpy(demod).to(torch.complex64))
         self.register_buffer(
             "pilot", torch.from_numpy(ofdm.pilot_sequence()).to(torch.complex64)

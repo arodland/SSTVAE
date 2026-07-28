@@ -495,9 +495,16 @@ That has a direct consequence for Phase 1: **reduce phase arguments
 exactly wherever they appear**, because `sin`/`cos` of a large argument
 disagree between glibc, musl and MSVC by far more than they do near
 zero, and every tolerance has to hold on three platforms.
-`dsp.to_baseband`'s heterodyne runs over whole recordings, so its
-arguments grow without bound — that is the next place to look, and it
-has not been measured.
+
+**Resolved on the Python side before Phase 1 continued** (2026-07-28),
+deliberately, so the corpus and its tolerances moved once rather than
+twice. `dsp.to_baseband` turned out to be far the worst case — its
+argument grows over a whole recording, reaching 895,000 rad and 1.5e-10
+of phase error, ~5000x the matrices — and also the easiest, since
+`FCENTER/FS = 3/16` gives only 16 distinct phasors. Both sides now
+reduce, `PHASOR_TOL` tightened from 2e-13 to **1e-14**, and the residual
+is one ulp of `exp()` rather than anyone's accumulated error. Details
+and measurements in `docs/todo.md`.
 
 **Substitution is by attribute assignment, so from-imports need listing
 explicitly.** `sync.py` does `from .ofdm import preamble_template`,

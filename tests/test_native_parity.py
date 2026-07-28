@@ -12,10 +12,10 @@ normal `pytest` run is unaffected. Build it with tools/build_native.sh.
 
 The tolerances here are the same ones justified in
 native/tests/test_golden.cpp; see that file for why they are not zero.
-The short version: the reference builds its phasors on an argument up to
-262 rad, where one ulp is 5.7e-14, so it carries ~3e-14 of error that
-the C++ (which reduces the argument exactly, in integers) does not.
-docs/todo.md has the fix for the Python side.
+The short version: both sides now reduce the phasor argument exactly in
+integer arithmetic before calling exp(), so the only residual is that no
+standard requires a transcendental to be correctly rounded -- about one
+ulp. Measured 9.6e-16 on the OFDM matrices, 0 on the pilot sequence.
 """
 
 import numpy as np
@@ -25,8 +25,8 @@ from sstvae.config import M, NC, NCP
 from sstvae.modem import golay, ofdm
 from sstvae.modem.dsp import to_baseband
 
-PHASOR_TOL = 2e-13
-PHASOR_SUM_TOL = 1e-12
+PHASOR_TOL = 1e-14
+PHASOR_SUM_TOL = 1e-13
 
 
 def max_abs_diff(a, b) -> float:
@@ -115,25 +115,30 @@ def test_ofdm_matrices(native):
     assert max_abs_diff(ofdm.DEMOD_MATRIX, native.ofdm.demod_matrix()) < PHASOR_TOL
 
 
-def test_native_phasors_are_the_more_accurate_side(native):
-    """Not parity -- a check that the C++ is right where they differ.
+def test_both_sides_range_reduce_their_phasors(native):
+    """Not parity -- a check that neither side has regressed to building
+    phasors on an unreduced argument.
 
-    The reference computes exp(2j*pi*n*f/FS) without reducing the
-    argument, so |theta| reaches 262 rad and it loses ~3e-14. The C++
-    reduces (n*f) mod FS in integer arithmetic first. Both are on the
-    unit circle in exact arithmetic, so |z| - 1 measures each one's own
-    error without needing a high-precision reference in the test.
+    Every entry is a unit phasor in exact arithmetic, so `|z| - 1`
+    measures each implementation's own error without needing a
+    high-precision reference here. An unreduced argument reaching 262 rad
+    costs ~3e-14; a reduced one costs ~1e-16. A few ulp is the pass mark,
+    and the gap between the two regimes is two orders of magnitude, so
+    this cannot fail marginally.
 
-    If this ever fails while test_ofdm_matrices passes, the Python fix
-    in docs/todo.md has probably landed -- tighten PHASOR_TOL and delete
-    this test.
+    This replaced an earlier test asserting the C++ was the *more*
+    accurate side, which was true only while sstvae/modem/ofdm.py still
+    computed the unreduced form. Both sides reduce now (docs/todo.md,
+    closed 2026-07-28), so the property worth guarding is that they
+    continue to.
     """
-    cpp_err = np.max(np.abs(np.abs(native.ofdm.mod_matrix()) - 1.0))
-    py_err = np.max(np.abs(np.abs(ofdm.MOD_MATRIX) - 1.0))
-    assert cpp_err <= py_err, (
-        f"C++ phasors ({cpp_err:.2e} off the unit circle) are no longer more "
-        f"accurate than Python's ({py_err:.2e})"
-    )
+    for name, values in (("C++", native.ofdm.mod_matrix()),
+                         ("Python", ofdm.MOD_MATRIX)):
+        err = float(np.max(np.abs(np.abs(values) - 1.0)))
+        assert err < 1e-15, (
+            f"{name} phasors sit {err:.2e} off the unit circle -- that is the "
+            "signature of an unreduced exp() argument, not of rounding"
+        )
 
 
 def test_ofdm_pilot_and_templates(native):

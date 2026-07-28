@@ -31,28 +31,29 @@ std::string g(const std::string& name) { return golden_dir + "/" + name + ".npy"
 
 // Tolerance for a single phasor, and the reason it is not zero.
 //
-// The reference computes exp(2j*pi*n*f/FS) on the *unreduced* argument,
-// which reaches 262 rad where one ulp is 5.7e-14; its phasors are
-// therefore up to ~|theta|*eps = 5.8e-14 away from the true value, and
-// which entries land on which side of the rounding is an accident of
-// numpy's complex-array arithmetic. The C++ reduces (n*f) mod FS in
-// integer arithmetic first, so it is accurate to ~1.6e-16 -- measured
-// against a 70-digit series expansion, alongside numpy's 3.6e-14 at the
-// same entries.
+// **Both** implementations now reduce (n*f) mod FS in exact integer
+// arithmetic before calling exp(), so the argument is under one turn on
+// each side and identical between them. What is left is only that no
+// standard requires exp/sin/cos to be correctly rounded, so two libms
+// may differ in the last ulp -- about 2.2e-16 on a unit phasor.
 //
-// So this tolerance is not slack for the port. It is the size of the
-// *reference's* error, and the C++ sits inside it because it is the
-// more accurate of the two. 2e-13 leaves ~3x margin over the analytic
-// bound for platforms whose sin/cos round differently near zero.
-constexpr double PHASOR_TOL = 2e-13;
+// Measured C++ against Python: 9.6e-16 on MOD_MATRIX, 9.4e-16 on
+// DEMOD_MATRIX, and exactly 0 on the pilot sequence. 1e-14 is ~10x that,
+// which is margin for platforms whose libm rounds differently, not slack
+// for the port.
+//
+// This was 2e-13 while sstvae/modem/ofdm.py still built its phasors on
+// an unreduced argument reaching 262 rad: the tolerance then had to
+// cover the *reference's* ~3e-14 error, which is a much weaker statement
+// about the port. See docs/todo.md, item closed 2026-07-28.
+constexpr double PHASOR_TOL = 1e-14;
 
-// Sums of NC or M of those phasors, so the per-term error above can
-// accumulate across 24 or 160 terms; numpy additionally reaches its
-// sums through BLAS, which blocks and vectorizes and therefore
-// associates differently. Still ~1e12 times tighter than any error that
-// could affect a decode -- for scale, an error of 1e-12 on a unit
-// phasor is -240 dB.
-constexpr double PHASOR_SUM_TOL = 1e-12;
+// Sums of NC or M of those phasors, so the per-term error can
+// accumulate across 24 or 160 terms; numpy additionally reaches its sums
+// through BLAS, which blocks and vectorizes and therefore associates
+// differently. Measured worst case 4.9e-15 (modulate_symbols); 1e-13
+// gives ~20x. For scale, 1e-13 on a unit phasor is -260 dB.
+constexpr double PHASOR_SUM_TOL = 1e-13;
 
 void test_golay() {
     check::equal(golay::min_distance(), 8, "golay/min_distance");

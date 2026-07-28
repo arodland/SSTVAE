@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy import signal
 
+from .modem import dsp
 from .config import (
     FS,
     FRAME_SAMPLES,
@@ -41,8 +42,12 @@ def _analytic(x: np.ndarray) -> np.ndarray:
 
 
 def freq_shift(x: np.ndarray, df_hz: float) -> np.ndarray:
+    # Phase reduced to one turn before exp(), for the reason in
+    # dsp.wrap_cycles: over a whole transmission the unreduced argument
+    # reaches tens of thousands of radians, where the result depends on
+    # the platform's argument reduction rather than on the signal.
     n = np.arange(len(x))
-    return np.real(_analytic(x) * np.exp(2j * np.pi * df_hz * n / FS))
+    return np.real(_analytic(x) * np.exp(2j * np.pi * dsp.wrap_cycles(df_hz * n / FS)))
 
 
 def sample_clock_offset(x: np.ndarray, ppm: float) -> np.ndarray:

@@ -195,69 +195,61 @@ threshold, since at 6 dB everything succeeds and there is nothing to
 measure; and **use at least 25 seeds per point** — six is what produced
 the phantom effect this section used to describe.
 
-## Range-reduce the phasor arguments in `ofdm.py`
+## ~~Range-reduce the phasor arguments~~ — done 2026-07-28
 
-**Found 2026-07-28 while porting `ofdm.py` to C++. Not urgent, and
-deliberately deferred until the native port settles**, because changing
-it now would invalidate the committed golden-vector corpus in the middle
-of the work that depends on it.
+**Closed.** Fixed in `sstvae/modem/ofdm.py`, `sstvae/modem/dsp.py`,
+`sstvae/hfchannel.py` and `sstvae/waveform_channel.py` before the C++
+port went further, so the golden corpus and its tolerances only had to
+move once.
 
-`ofdm.py` builds `MOD_MATRIX` and `DEMOD_MATRIX` as
+Every phasor argument is now reduced before it reaches `exp()`. Where
+the frequency is an integer number of Hz — which is all of the OFDM
+carriers — the reduction is exact integer arithmetic (`(n*f) % FS`), so
+the argument is under one turn and carries no rounding of its own. For
+arbitrary frequencies (`freq_correct`, `hfchannel.freq_shift`) the phase
+is wrapped to `[0, 1)` cycles, which cannot make the *product* exact but
+does remove the large-argument error entirely.
 
-```python
-np.exp(2j * np.pi * np.outer(_n_sym, CARRIER_FREQS) / FS)
-```
+`to_baseband` got the biggest win and the simplest treatment:
+`FCENTER/FS = 1500/8000 = 3/16`, so there are only **16 distinct
+phasors** and a table lookup replaces 760,000 calls to `exp()`. Derived
+from `gcd(FCENTER, FS)` rather than hardcoded, so a config change stays
+correct.
 
-on the **unreduced** argument. With `n` up to 160 and carriers up to
-2100 Hz, |θ| reaches **262 rad**, where one ulp is 5.7e-14. The phasors
-therefore carry up to ~|θ|·eps ≈ 5.8e-14 of error, and which entries
-round which way is an accident of numpy's complex-array arithmetic
-rather than anything about the waveform.
+Measured against a 70-digit series expansion:
 
-**The fix is exact and cheap.** Every frequency is an integer number of
-Hz and every sample index is an integer, so the phasor depends only on
-`(n*f) mod FS`:
+| | before | after |
+|---|---|---|
+| `MOD_MATRIX` | 2.83e-14 | **8.97e-16** |
+| `to_baseband` over a mode C transmission | 7.03e-11 | **1.23e-16** |
 
-```python
-q = np.outer(_n_sym, CARRIER_FREQS) % FS      # exact, integer
-MOD_MATRIX = np.exp(2j * np.pi * q / FS)      # |theta| < 2*pi
-```
+The payoff was never the accuracy — 1e-10 rad is 6e-9 degrees, and
+nothing on air could notice. It was:
 
-`native/core/ofdm/ofdm.cpp` already does this. Measured against a
-70-digit series expansion: current Python **2.8e-14**, the two-line
-replacement above **9.0e-16**, the C++ **1.6e-16**. The replacement has
-been run and checked — it is not a suggestion, only an unlanded one.
-Note the `%` must be a true Euclidean remainder; `_n_sym` is negative
-across the cyclic prefix, and numpy's `%` does give the non-negative
-result there (verified), but a rewrite in another form must not quietly
-switch to C-style truncation.
+- **Cross-platform determinism.** `sin`/`cos` of a large argument
+  disagree between glibc, musl and MSVC, and between x86-64 and Apple
+  silicon, because implementations differ in how far they carry argument
+  reduction. This had already broken CI: `MOD_MATRIX` and `DEMOD_MATRIX`
+  failed byte-comparison on macOS and Windows while passing on Linux.
+- **A stronger parity claim.** `PHASOR_TOL` in
+  `native/tests/test_golden.cpp` went from 2e-13 to **1e-14**, and the
+  sum tolerance from 1e-12 to 1e-13, because they are now sized by one
+  ulp of `exp()` rather than by the reference's own error. Measured C++
+  against Python: 9.6e-16 on the matrices, exactly 0 on the pilot
+  sequence.
 
-**Why bother, given -280 dB is nowhere near mattering on air?** Two
-reasons, neither of which is the accuracy itself:
+Two notes for anyone touching this again. `waveform_channel.py` was
+included deliberately even though it is training-only: it is a replica
+of the modem, and letting the replica and the original compute the same
+matrix differently is exactly the drift the file exists to prevent. The
+change is ~1e-14 on a buffer immediately cast to complex64 (eps 1e-7),
+so it cannot affect training. And `scripts/precoder_probe.py` still has
+the unreduced form; it is a scratch probe, not part of the product.
 
-- **Cross-platform determinism.** `sin`/`cos` of 262 rad disagree
-  between glibc, musl and MSVC by far more than they do near zero,
-  because implementations differ in how far they carry argument
-  reduction. Under 2π they agree to well under an ulp. Every parity
-  tolerance between Python and C++ has to hold on three platforms, and
-  reduction is what makes that a bound rather than a hope.
-- **It removes a tolerance from the parity harness.** `PHASOR_TOL` in
-  `native/tests/test_golden.cpp` is currently sized by *Python's* error,
-  not by the port's. Fix this and the two implementations agree to
-  ~1e-15, which is a much stronger statement about the port.
-
-**Sequencing.** Do it *after* the C++ modem port is complete and its
-golden vectors have stopped churning, then regenerate the corpus
-(`tools/gen_golden_vectors.py`) and tighten `PHASOR_TOL` in the same
-commit. Doing it earlier means regenerating the corpus twice and losing
-the ability to tell a port bug from a reference change.
-
-**Check for the same pattern elsewhere while you are there.**
-`preamble_waveform`, `preamble_template` and `pilot_template` build
-their own phasors the same way; `dsp.to_baseband`'s heterodyne is the
-other obvious candidate and it runs over whole recordings, so its
-arguments grow without bound — that one may matter more than these,
-and has not been measured.
+**The general rule, worth applying to new DSP:** reduce the argument
+before a transcendental whenever you can do it exactly. It is free, it
+is more accurate, and it is the difference between a result that is a
+property of the signal and one that is a property of the machine.
 
 ## Quantisation tolerance as a training soft constraint
 

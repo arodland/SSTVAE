@@ -238,14 +238,20 @@ need when `--native` fails and you want to know *where*.
 - Without the extension module built, the parity tests **skip** and
   `--native` **errors**. Both are deliberate: a parity suite that
   quietly passes because it tested nothing is worse than no suite.
-- **Tolerances are sized by the reference's error, not the port's.**
-  `ofdm.py` builds phasors on an unreduced argument up to 262 rad and
-  carries ~3e-14; the C++ reduces `(n*f) mod FS` in integers and is
-  accurate to 1.6e-16. Reduce phase arguments exactly in any new DSP —
-  `sin`/`cos` of a large argument disagree across glibc/musl/MSVC by far
-  more than near zero, and the tolerances must hold on all three. The
-  Python-side fix is in `docs/todo.md`, deliberately deferred so the
-  golden corpus does not churn during the port.
+- **Reduce phase arguments exactly before any transcendental.** Both
+  implementations do this now (`ofdm._phasor`, `dsp._HET_TABLE`,
+  `dsp.wrap_cycles`, and the C++ `carrier_phasor`), so parity tolerances
+  are sized by one ulp of `exp()` rather than by anyone's accumulated
+  error: `PHASOR_TOL` is 1e-14 against a measured 9.6e-16.
+  **Do the same in new DSP.** Where the frequency is an integer number
+  of Hz the reduction `(n*f) % FS` is exact and free; `to_baseband`
+  needs only 16 distinct phasors because `FCENTER/FS = 3/16`. This is
+  not about accuracy — 1e-10 rad is 6e-9 degrees — it is that `sin`/`cos`
+  of a large argument disagree across glibc/musl/MSVC and across
+  x86-64/Apple silicon by far more than near zero, so an unreduced
+  argument makes a result a property of the machine rather than of the
+  signal. It had already broken CI. See `docs/todo.md` (closed
+  2026-07-28) for the measurements.
 
 ## Gotchas learned the hard way
 
