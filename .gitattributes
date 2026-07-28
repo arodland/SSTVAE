@@ -1,0 +1,21 @@
+# The golden-vector corpus is compared byte for byte, so git must hand
+# it back exactly as committed.
+#
+# Git for Windows checks out text files with CRLF by default, which
+# rewrites manifest.json on checkout and makes
+# `tools/gen_golden_vectors.py --check` fail on Windows and nowhere
+# else. The .npy files escaped because git detects them as binary and
+# leaves them alone -- so the symptom was the manifest alone differing,
+# which reads like a content problem rather than a checkout one.
+#
+# -text disables end-of-line conversion in both directions.
+native/tests/golden/** -text
+
+# Belt and braces: never let any .npy be treated as text. Git's binary
+# detection is a heuristic, and a corpus file it guessed wrong about
+# would be corrupted rather than merely reformatted.
+*.npy binary
+
+# Generated, and compared against a fresh generation in CI for an exact
+# match. Same reasoning as the manifest.
+native/core/config.hpp -text
