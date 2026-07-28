@@ -23,7 +23,9 @@ across AWGN, fading, sample-clock offset and frame-erasure impairments.
 """
 
 import os
+import sys
 from contextlib import contextmanager
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -44,6 +46,145 @@ SNR_MARGIN_DB = 1.5
 # A clip threshold this far above mean envelope power never engages, so
 # the waveform passes through clip-and-filter untouched.
 NO_CLIP_HEADROOM_DB = 30.0
+
+
+# --- running the suite against the C++ core --------------------------------
+#
+# `pytest --native` substitutes the C++ implementations from
+# native/bindings/module into the reference modules, so this suite
+# becomes the native port's acceptance suite. See docs/native-app.md;
+# this is the mechanism the whole parity plan rests on, and it costs the
+# table below plus about thirty lines.
+#
+# Substitution is by attribute assignment on the reference module, which
+# is why every binding keeps its Python counterpart's exact signature.
+# Two consequences worth knowing:
+#
+# * A module that did `from .ofdm import pilot_template` bound the
+#   function at import time, so patching `ofdm.pilot_template` would not
+#   reach it. Those sites are listed explicitly rather than discovered,
+#   because a missed one means a test that silently keeps exercising
+#   Python while reporting itself as a native run.
+# * Module-level arrays (MOD_MATRIX and friends) are substituted too, so
+#   the C++ tables are genuinely in the path rather than merely built.
+NATIVE_MODULE_DIR = Path(__file__).resolve().parent.parent / "native" / "build" / "python"
+
+# (reference module, attribute, native module, native attribute)
+NATIVE_SUBSTITUTIONS = [
+    ("sstvae.modem.golay", "encode", "golay", "encode"),
+    ("sstvae.modem.golay", "codeword_bits", "golay", "codeword_bits"),
+    ("sstvae.modem.golay", "decode_soft", "golay", "decode_soft"),
+    ("sstvae.modem.golay", "min_distance", "golay", "min_distance"),
+    ("sstvae.modem.ofdm", "modulate_symbols", "ofdm", "modulate_symbols"),
+    ("sstvae.modem.ofdm", "demod_window", "ofdm", "demod_window"),
+    ("sstvae.modem.ofdm", "pilot_sequence", "ofdm", "pilot_sequence"),
+    ("sstvae.modem.ofdm", "preamble_waveform", "ofdm", "preamble_waveform"),
+    ("sstvae.modem.ofdm", "preamble_template", "ofdm", "preamble_template"),
+    ("sstvae.modem.ofdm", "pilot_template", "ofdm", "pilot_template"),
+    ("sstvae.modem.ofdm", "CARRIER_FREQS", "ofdm", "CARRIER_FREQS"),
+    ("sstvae.modem.ofdm", "BASEBAND_FREQS", "ofdm", "BASEBAND_FREQS"),
+    ("sstvae.modem.ofdm", "MOD_MATRIX", "ofdm", "MOD_MATRIX"),
+    ("sstvae.modem.ofdm", "DEMOD_MATRIX", "ofdm", "DEMOD_MATRIX"),
+    # `sync` took these by from-import, so it needs its own copies
+    # replaced or it would keep calling Python's.
+    ("sstvae.modem.sync", "preamble_template", "ofdm", "preamble_template"),
+    ("sstvae.modem.sync", "pilot_template", "ofdm", "pilot_template"),
+]
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--native", action="store_true", default=False,
+        help="run the suite against the C++ core (native/bindings/module) "
+             "instead of the Python reference",
+    )
+
+
+_native_import_error: str | None = None
+
+
+def import_native():
+    """The C++ extension module, or None if it cannot be imported.
+
+    The failure *reason* is kept, because "not built" and "built but
+    unloadable" need completely different fixes and look identical from
+    here. A Windows build against MinGW rather than MSVC, for instance,
+    produces a .pyd that exists but raises "DLL load failed" -- reported
+    as a bare "no extension module", that cost a CI round to work out.
+    """
+    global _native_import_error
+    if str(NATIVE_MODULE_DIR) not in sys.path:
+        sys.path.insert(0, str(NATIVE_MODULE_DIR))
+    try:
+        import sstvae_native
+    except ImportError as e:
+        built = sorted(p.name for p in NATIVE_MODULE_DIR.glob("sstvae_native*")) \
+            if NATIVE_MODULE_DIR.is_dir() else []
+        _native_import_error = (
+            f"{type(e).__name__}: {e}\n"
+            + (f"    (the module file IS present: {', '.join(built)} -- so this "
+               "is a load failure, not a missing build)"
+               if built else
+               f"    (no sstvae_native* in {NATIVE_MODULE_DIR})")
+        )
+        return None
+    return sstvae_native
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "native: only meaningful under --native")
+    if not config.getoption("--native"):
+        return
+
+    native = import_native()
+    if native is None:
+        raise pytest.UsageError(
+            f"--native given but the extension module could not be imported.\n"
+            f"    {_native_import_error}\n"
+            "Build it with:  tools/build_native.sh"
+        )
+    # A stale module built against an older core would substitute
+    # functions with different semantics and report success. Refuse
+    # rather than guess.
+    if getattr(native, "__sstvae_abi__", None) != 1:
+        raise pytest.UsageError(
+            f"{native.__file__} has ABI "
+            f"{getattr(native, '__sstvae_abi__', 'unknown')}, expected 1; rebuild it"
+        )
+
+    import importlib
+
+    for mod_name, attr, sub_name, sub_attr in NATIVE_SUBSTITUTIONS:
+        module = importlib.import_module(mod_name)
+        if not hasattr(module, attr):
+            raise pytest.UsageError(
+                f"{mod_name}.{attr} does not exist; the substitution table in "
+                "tests/conftest.py is out of date with the reference"
+            )
+        setattr(module, attr, getattr(getattr(native, sub_name), sub_attr))
+
+    config._sstvae_native = native
+
+
+def pytest_report_header(config):
+    if config.getoption("--native"):
+        return (f"sstvae: running against the C++ core "
+                f"({len(NATIVE_SUBSTITUTIONS)} substitutions)")
+    return "sstvae: running against the Python reference"
+
+
+@pytest.fixture(scope="session")
+def native():
+    """The C++ extension module; skips the test if it is not built.
+
+    Available whether or not --native was given, so a parity test can
+    compare the two implementations side by side in one run.
+    """
+    module = import_native()
+    if module is None:
+        pytest.skip(f"C++ extension module unavailable -- "
+                    f"{_native_import_error}; build it with tools/build_native.sh")
+    return module
 
 
 @contextmanager
