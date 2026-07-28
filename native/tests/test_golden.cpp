@@ -15,6 +15,7 @@
 #include "check.hpp"
 #include "config.hpp"
 #include "dsp/dsp.hpp"
+#include "framing/framing.hpp"
 #include "golay/golay.hpp"
 #include "ofdm/ofdm.hpp"
 #include "testing/npy.hpp"
@@ -28,6 +29,10 @@ using sstvae::testing::load_i8;
 namespace {
 
 std::string golden_dir;
+// Path to sstvae/modem/interleaver_perms.npy. Passed in rather than
+// derived from golden_dir, which would bake in the layout of the repo
+// above the corpus and break the moment either moved.
+std::string frozen_perms_path;
 
 std::string g(const std::string& name) { return golden_dir + "/" + name + ".npy"; }
 
@@ -228,6 +233,162 @@ void test_dsp() {
                  "dsp/freq_correct across the acquisition range");
 }
 
+void test_framing() {
+    using framing::ModeSpec;
+
+    // --- the embedded permutation is the frozen one -------------------
+    //
+    // Read from sstvae/modem/interleaver_perms.npy directly rather than
+    // from a copy in the corpus: that file *is* the on-air format, and a
+    // second copy could drift from it. This is the check that makes the
+    // property-based tests below sufficient -- with the table verified,
+    // interleave and deinterleave are pure index arithmetic.
+    const std::string& frozen = frozen_perms_path;
+    const testing::NpyFile perms_file = testing::read_npy(frozen);
+    const std::vector<std::uint16_t> frozen_perms = testing::load_u2(frozen);
+    check::equal(perms_file.rows(), static_cast<std::size_t>(framing::N_GROUPS),
+                 "framing/frozen perms group count");
+    check::equal(perms_file.cols(), static_cast<std::size_t>(framing::TX_PERM_LEN),
+                 "framing/frozen perms length");
+    bool table_exact = frozen_perms.size() ==
+                       static_cast<std::size_t>(framing::N_GROUPS) * framing::TX_PERM_LEN;
+    if (table_exact)
+        for (std::size_t i = 0; i < frozen_perms.size(); ++i)
+            if (framing::TX_PERMS_DATA[i] != frozen_perms[i]) table_exact = false;
+    check::is_true(table_exact,
+                   "framing/embedded table equals sstvae/modem/interleaver_perms.npy");
+
+    // Each group's permutation is a valid prefix: distinct indices, all
+    // inside the group. True whatever the values are.
+    for (int gi = 0; gi < framing::N_GROUPS; ++gi) {
+        const auto perm = framing::tx_perm(gi);
+        std::vector<bool> seen(config::GROUP_LATENTS, false);
+        bool ok = true;
+        for (std::uint16_t v : perm) {
+            if (v >= config::GROUP_LATENTS || seen[v]) ok = false;
+            else seen[v] = true;
+        }
+        check::is_true(ok, "framing/group " + std::to_string(gi) +
+                               " permutation is distinct and in range");
+    }
+
+    // --- interleave / deinterleave ------------------------------------
+    //
+    // Property-based, over mode C so all three groups and the largest
+    // group offsets are exercised. The offsets are the subtle part: the
+    // table is uint16 and the offsets reach 105,600, which is exactly
+    // where a too-narrow type would silently wrap.
+    const ModeSpec& mode_c = config::MODES[2];
+    std::vector<double> latents(static_cast<std::size_t>(mode_c.n_latents));
+    for (std::size_t i = 0; i < latents.size(); ++i)
+        latents[i] = static_cast<double>(i);  // exact in double; identity-like
+    const std::vector<double> slots = framing::interleave(latents, mode_c);
+    check::equal(slots.size(), static_cast<std::size_t>(mode_c.n_tx_latents),
+                 "framing/interleave output length");
+
+    const framing::Deinterleaved back = framing::deinterleave(slots, mode_c);
+    std::size_t kept = 0, wrong = 0, dropped = 0;
+    for (std::size_t i = 0; i < latents.size(); ++i) {
+        if (back.weight[i] == 1.0) {
+            ++kept;
+            if (back.latents[i] != latents[i]) ++wrong;
+        } else {
+            ++dropped;
+            if (back.latents[i] != 0.0) ++wrong;
+        }
+    }
+    check::equal(wrong, std::size_t{0},
+                 "framing/round-trip is exact where weight is 1, zero elsewhere");
+    check::equal(dropped,
+                 static_cast<std::size_t>(mode_c.groups *
+                                          config::DROPPED_LATENTS_PER_GROUP),
+                 "framing/dropped count matches the documented accounting");
+    check::equal(kept, static_cast<std::size_t>(mode_c.n_tx_latents),
+                 "framing/kept count matches the transmit budget");
+
+    // Every slot must come from its own group -- the check that would
+    // catch a group offset applied wrongly.
+    bool groups_ok = true;
+    for (int gi = 0; gi < mode_c.groups; ++gi) {
+        const std::size_t lo = static_cast<std::size_t>(gi) * config::GROUP_LATENTS;
+        for (int i = 0; i < config::TRANSMIT_LATENTS_PER_GROUP; ++i) {
+            const double v = slots[static_cast<std::size_t>(gi) *
+                                       config::TRANSMIT_LATENTS_PER_GROUP +
+                                   static_cast<std::size_t>(i)];
+            if (v < static_cast<double>(lo) ||
+                v >= static_cast<double>(lo + config::GROUP_LATENTS))
+                groups_ok = false;
+        }
+    }
+    check::is_true(groups_ok, "framing/each group's slots stay within that group");
+
+    // --- slot_range_for_frame -----------------------------------------
+    const std::vector<std::int64_t> frames = load_i8(g("framing/slot_range_frames"));
+    const std::vector<std::int64_t> want_groups =
+        load_i8(g("framing/slot_range_groups"));
+    const std::vector<std::int64_t> want_idx =
+        load_i8(g("framing/slot_range_indices"));
+    bool slot_range_ok = true;
+    for (std::size_t i = 0; i < frames.size(); ++i) {
+        const auto got = framing::slot_range_for_frame(static_cast<int>(frames[i]));
+        if (got.group != static_cast<int>(want_groups[i])) slot_range_ok = false;
+        for (int j = 0; j < config::LATENTS_PER_FRAME; ++j)
+            if (got.indices[static_cast<std::size_t>(j)] !=
+                want_idx[i * config::LATENTS_PER_FRAME + static_cast<std::size_t>(j)])
+                slot_range_ok = false;
+    }
+    check::is_true(slot_range_ok,
+                   "framing/slot_range_for_frame across every group boundary");
+
+    // --- slots <-> symbols --------------------------------------------
+    const std::vector<double> frame_slots = load_f8(g("framing/frame_slots"));
+    const std::vector<cdouble> sym = framing::slots_to_symbols(frame_slots);
+    check::close(sym, load_c16(g("framing/frame_symbols")), 1e-15,
+                 "framing/slots_to_symbols");
+    check::close(framing::symbols_to_slots(sym),
+                 load_f8(g("framing/frame_slots_roundtrip")), 1e-15,
+                 "framing/symbols_to_slots");
+
+    // --- header --------------------------------------------------------
+    for (const ModeSpec& mode : config::MODES) {
+        const std::string suffix(mode.name);
+        const std::vector<std::int64_t> want_bits =
+            load_i8(g("framing/header_bits_" + suffix));
+        const std::vector<int> got_bits = framing::header_bits(mode);
+        bool bits_ok = got_bits.size() == want_bits.size();
+        if (bits_ok)
+            for (std::size_t i = 0; i < got_bits.size(); ++i)
+                if (got_bits[i] != want_bits[i]) bits_ok = false;
+        check::is_true(bits_ok, "framing/header_bits mode " + suffix);
+
+        check::close(framing::header_symbol(mode),
+                     load_c16(g("framing/header_symbol_" + suffix)), 0.0,
+                     "framing/header_symbol mode " + suffix + " (exact: +/-1)");
+    }
+
+    // decode_header, including the inputs it must reject. A port that
+    // accepted a corrupt header would report a plausible mode and then
+    // decode noise, which is worse than reporting no lock at all.
+    const testing::NpyFile hdr_file = testing::read_npy(g("framing/header_soft_inputs"));
+    const std::vector<double> hdr_soft = load_f8(g("framing/header_soft_inputs"));
+    const std::vector<std::int64_t> hdr_want =
+        load_i8(g("framing/header_soft_expected"));
+    std::size_t hdr_wrong = 0, rejected = 0;
+    for (std::size_t i = 0; i < hdr_file.rows(); ++i) {
+        const std::span<const double> row(hdr_soft.data() + i * config::NC,
+                                          config::NC);
+        const auto got = framing::decode_header(row);
+        const std::int64_t got_idx = got ? got->index : -1;
+        if (got_idx != hdr_want[i]) ++hdr_wrong;
+        if (hdr_want[i] == -1) ++rejected;
+    }
+    check::equal(hdr_wrong, std::size_t{0},
+                 "framing/decode_header agrees on all " +
+                     std::to_string(hdr_file.rows()) + " cases");
+    check::is_true(rejected > 0,
+                   "framing/the header cases include some that must be rejected");
+}
+
 void test_config_header() {
     // config.hpp is generated, so this is not checking arithmetic -- it
     // is checking that the committed header was generated from the
@@ -243,16 +404,24 @@ void test_config_header() {
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::fprintf(stderr,
-                     "usage: %s <golden-dir>\n\nThe golden corpus is generated by "
-                     "tools/gen_golden_vectors.py.\n",
+                     "usage: %s <golden-dir> [frozen-perms.npy]\n\n"
+                     "The golden corpus is generated by "
+                     "tools/gen_golden_vectors.py. The second argument is\n"
+                     "sstvae/modem/interleaver_perms.npy, the frozen on-air\n"
+                     "interleave, which is checked against the table compiled\n"
+                     "into the library rather than copied into the corpus.\n",
                      argv[0]);
         return 2;
     }
     golden_dir = argv[1];
+    frozen_perms_path = (argc > 2)
+                            ? argv[2]
+                            : golden_dir + "/../../../sstvae/modem/interleaver_perms.npy";
 
     try {
         test_config_header();
         test_dsp();
+        test_framing();
         test_golay();
         test_ofdm_tables();
         test_ofdm_transforms();

@@ -6,7 +6,8 @@ target_include_directories(test_golden PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # can be pointed at a regenerated corpus without a rebuild while a
 # format change is being reviewed.
 add_test(NAME golden
-         COMMAND test_golden ${CMAKE_CURRENT_SOURCE_DIR}/golden)
+         COMMAND test_golden ${CMAKE_CURRENT_SOURCE_DIR}/golden
+                 ${CMAKE_CURRENT_SOURCE_DIR}/../../sstvae/modem/interleaver_perms.npy)
 
 add_executable(test_npy test_npy.cpp)
 target_link_libraries(test_npy PRIVATE sstvae_core)

@@ -23,6 +23,7 @@
 
 #include "config.hpp"
 #include "dsp/dsp.hpp"
+#include "framing/framing.hpp"
 #include "golay/golay.hpp"
 #include "ofdm/ofdm.hpp"
 
@@ -113,6 +114,95 @@ PYBIND11_MODULE(sstvae_native, m) {
         "ML-decode 24 soft values (positive => bit 0) to the 12 info bits.");
     golay.def("min_distance", &sstvae::golay::min_distance,
               "Minimum distance of the code (8).");
+
+    // framing's interleave/deinterleave take a ModeSpec, which on the
+    // Python side is a frozen dataclass. Rather than bind that type, the
+    // shims accept the mode *index* and look it up -- the reference's
+    // signature is preserved by the conftest wrapper, which unpacks
+    // `mode.index` before calling in. Keeping the C++ boundary free of
+    // Python object layout is what lets the same functions serve the app.
+    auto mode_by_index = [](int index) -> const sstvae::config::ModeSpec& {
+        for (const auto& mode : sstvae::config::MODES)
+            if (mode.index == index) return mode;
+        throw std::invalid_argument("no such mode index");
+    };
+
+    py::module_ framing = m.def_submodule("framing");
+    framing.def("interleave",
+                [mode_by_index](DArray latents, int mode_index) {
+                    std::span<const double> in(
+                        latents.data(), static_cast<std::size_t>(latents.size()));
+                    return to_numpy(
+                        sstvae::framing::interleave(in, mode_by_index(mode_index)));
+                },
+                py::arg("latents"), py::arg("mode_index"));
+    framing.def("deinterleave",
+                [mode_by_index](DArray slots, int mode_index) {
+                    std::span<const double> in(
+                        slots.data(), static_cast<std::size_t>(slots.size()));
+                    const auto r =
+                        sstvae::framing::deinterleave(in, mode_by_index(mode_index));
+                    return py::make_tuple(to_numpy(r.latents), to_numpy(r.weight));
+                },
+                py::arg("slots"), py::arg("mode_index"));
+    framing.def("slot_range_for_frame",
+                [](int abs_frame) {
+                    const auto r = sstvae::framing::slot_range_for_frame(abs_frame);
+                    py::array_t<std::int64_t> idx(
+                        static_cast<py::ssize_t>(r.indices.size()));
+                    std::copy(r.indices.begin(), r.indices.end(), idx.mutable_data());
+                    return py::make_tuple(r.group, idx);
+                },
+                py::arg("abs_frame"));
+    framing.def("slots_to_symbols",
+                [](DArray frame_slots) {
+                    std::span<const double> in(
+                        frame_slots.data(),
+                        static_cast<std::size_t>(frame_slots.size()));
+                    const auto v = sstvae::framing::slots_to_symbols(in);
+                    // (DATA_SYMS_PER_FRAME, NC_LATENT), matching the
+                    // reference's reshape -- callers index it 2-D.
+                    py::array_t<cdouble> out({
+                        static_cast<py::ssize_t>(sstvae::config::DATA_SYMS_PER_FRAME),
+                        static_cast<py::ssize_t>(sstvae::config::NC_LATENT)});
+                    std::copy(v.begin(), v.end(), out.mutable_data());
+                    return out;
+                },
+                py::arg("frame_slots"));
+    framing.def("symbols_to_slots",
+                [](CArray symbols) {
+                    std::span<const cdouble> in(
+                        symbols.data(), static_cast<std::size_t>(symbols.size()));
+                    return to_numpy(sstvae::framing::symbols_to_slots(in));
+                },
+                py::arg("symbols"));
+    framing.def("header_bits",
+                [mode_by_index](int mode_index) {
+                    const auto bits =
+                        sstvae::framing::header_bits(mode_by_index(mode_index));
+                    py::array_t<std::int64_t> out(
+                        static_cast<py::ssize_t>(bits.size()));
+                    std::copy(bits.begin(), bits.end(), out.mutable_data());
+                    return out;
+                },
+                py::arg("mode_index"));
+    framing.def("header_symbol",
+                [mode_by_index](int mode_index) {
+                    return to_numpy(
+                        sstvae::framing::header_symbol(mode_by_index(mode_index)));
+                },
+                py::arg("mode_index"));
+    framing.def("decode_header",
+                [](DArray soft) -> py::object {
+                    std::span<const double> in(
+                        soft.data(), static_cast<std::size_t>(soft.size()));
+                    const auto mode = sstvae::framing::decode_header(in);
+                    // None for a rejected header, matching the reference;
+                    // the caller maps the index back to its ModeSpec.
+                    if (!mode) return py::none();
+                    return py::int_(mode->index);
+                },
+                py::arg("soft"));
 
     py::module_ dsp = m.def_submodule("dsp");
     dsp.def("to_baseband",

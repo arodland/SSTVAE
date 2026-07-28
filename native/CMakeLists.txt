@@ -49,6 +49,8 @@ endif()
 add_library(sstvae_core STATIC
   core/golay/golay.cpp
   core/dsp/dsp.cpp
+  core/framing/framing.cpp
+  core/framing/interleaver_table.cpp
   core/ofdm/ofdm.cpp
 )
 target_include_directories(sstvae_core PUBLIC core third_party/pocketfft)

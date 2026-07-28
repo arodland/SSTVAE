@@ -75,8 +75,12 @@ inline std::string header_value(const std::string& header, const std::string& ke
 inline std::size_t itemsize(const std::string& dtype) {
     if (dtype == "<f8" || dtype == "<i8") return 8;
     if (dtype == "<c16") return 16;
+    // uint16 is not emitted by the golden generator, but it is the dtype
+    // of sstvae/modem/interleaver_perms.npy -- the frozen interleaver,
+    // which the framing test reads directly rather than through a copy.
+    if (dtype == "<u2") return 2;
     throw std::runtime_error("unsupported npy dtype '" + dtype +
-                             "'; the golden generator emits only <f8, <c16, <i8");
+                             "'; supported: <f8, <c16, <i8, <u2");
 }
 
 }  // namespace detail
@@ -152,6 +156,14 @@ inline std::vector<std::int64_t> load_i8(const std::string& path) {
     NpyFile f = read_npy(path);
     if (f.dtype != "<i8") throw std::runtime_error(path + ": expected <i8, got " + f.dtype);
     std::vector<std::int64_t> out(f.size());
+    std::memcpy(out.data(), f.raw.data(), f.raw.size());
+    return out;
+}
+
+inline std::vector<std::uint16_t> load_u2(const std::string& path) {
+    NpyFile f = read_npy(path);
+    if (f.dtype != "<u2") throw std::runtime_error(path + ": expected <u2, got " + f.dtype);
+    std::vector<std::uint16_t> out(f.size());
     std::memcpy(out.data(), f.raw.data(), f.raw.size());
     return out;
 }

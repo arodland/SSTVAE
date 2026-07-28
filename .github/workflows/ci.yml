@@ -39,6 +39,13 @@ jobs:
         run: python tools/gen_config_header.py --check
       - name: Golden vectors match the Python reference
         run: python tools/gen_golden_vectors.py --check
+      # Encoding check only: it compares the generated C++ against
+      # sstvae/modem/interleaver_perms.npy, which is the frozen on-air
+      # format. It does NOT re-derive from numpy -- see
+      # tools/freeze_format_constants.py for why that distinction is
+      # the whole point.
+      - name: Interleaver table matches the frozen data
+        run: python tools/gen_interleaver_table.py --check
       - name: Layering rules
         run: python tools/check_layering.py
       - name: Show the diff if anything is stale

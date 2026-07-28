@@ -169,6 +169,119 @@
       ],
       "tol": 1e-11
     },
+    "framing/frame_slots": {
+      "dtype": "<f8",
+      "sha256": "b4f32d42b3281f94297a7389bfa304c38a1677891f23d27043087078b9640c4e",
+      "shape": [
+        230
+      ]
+    },
+    "framing/frame_slots_roundtrip": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "2.8808137317e+00",
+        "mean_abs": "7.6347261637e-01",
+        "rms": "9.6021396822e-01"
+      },
+      "shape": [
+        230
+      ],
+      "tol": 1e-11
+    },
+    "framing/frame_symbols": {
+      "dtype": "<c16",
+      "fingerprint": {
+        "max_abs": "2.1161566414e+00",
+        "mean_abs": "8.5195371805e-01",
+        "rms": "9.6021396822e-01"
+      },
+      "shape": [
+        5,
+        23
+      ],
+      "tol": 1e-11
+    },
+    "framing/header_bits_A": {
+      "dtype": "<i8",
+      "sha256": "145d4d1ac348a3fd38b21e3414970242f84f55fc9c3b1a0e52f493f6339513af",
+      "shape": [
+        24
+      ]
+    },
+    "framing/header_bits_B": {
+      "dtype": "<i8",
+      "sha256": "de24f4c5ac671aaadef25155269c59fe5e563ae77856a4422d00f3c37f3da7a6",
+      "shape": [
+        24
+      ]
+    },
+    "framing/header_bits_C": {
+      "dtype": "<i8",
+      "sha256": "bc0b1314ce1f7dada55012152f9042a7e084189139311b23134e02bd2675d164",
+      "shape": [
+        24
+      ]
+    },
+    "framing/header_soft_expected": {
+      "dtype": "<i8",
+      "note": "mode index, or -1 where the header must be rejected",
+      "sha256": "ec6b8af80fa44936711bf3437cd2eed1459e079498196421adc1936568ec72d2",
+      "shape": [
+        26
+      ]
+    },
+    "framing/header_soft_inputs": {
+      "dtype": "<f8",
+      "sha256": "53e6ed1c4a3395021f2698c8a9cbb63c278b7a36c8c636f10f719a208baa518b",
+      "shape": [
+        26,
+        24
+      ]
+    },
+    "framing/header_symbol_A": {
+      "dtype": "<c16",
+      "sha256": "5540a2c455a97c757a4b880e9d4322307f4c8e5580f4f286b9123adf36e56263",
+      "shape": [
+        24
+      ]
+    },
+    "framing/header_symbol_B": {
+      "dtype": "<c16",
+      "sha256": "d3e84ccd55c2ceb53b3e7c9e28c59b42d466571b7622c16252fd15f7e00f68a7",
+      "shape": [
+        24
+      ]
+    },
+    "framing/header_symbol_C": {
+      "dtype": "<c16",
+      "sha256": "7bd6f9e3b32effd6706d2977ad2c600d6d9d50170b517d2fd12087db338f5f27",
+      "shape": [
+        24
+      ]
+    },
+    "framing/slot_range_frames": {
+      "dtype": "<i8",
+      "sha256": "56f78179eaa5e95f6f045e5caf0303a06a130972a33d07bb3701286d0782ad57",
+      "shape": [
+        10
+      ]
+    },
+    "framing/slot_range_groups": {
+      "dtype": "<i8",
+      "sha256": "d4b6d833e613f45a480c16c90fab2dfbf24937bf1100abb99d297a1fe7a0ad27",
+      "shape": [
+        10
+      ]
+    },
+    "framing/slot_range_indices": {
+      "dtype": "<i8",
+      "note": "one row per frame; canonical latent indices in slot order",
+      "sha256": "f13cf976248851e39e8ed121fbc2f2ec223cda93283b21b7ddf7290b0bbd2234",
+      "shape": [
+        10,
+        230
+      ]
+    },
     "golay/all_codewords": {
       "dtype": "<i8",
       "note": "encode(m) for every 12-bit message",
