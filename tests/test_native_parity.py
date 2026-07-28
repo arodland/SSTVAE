@@ -18,6 +18,8 @@ standard requires a transcendental to be correctly rounded -- about one
 ulp. Measured 9.6e-16 on the OFDM matrices, 0 on the pilot sequence.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -817,3 +819,174 @@ def test_generated_config_header_matches_config_py():
     result = subprocess.run([sys.executable, str(script), "--check"],
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+# --- codec ------------------------------------------------------------------
+#
+# Parity here is a different and much stronger claim than anywhere else
+# in this file. Everywhere above, two *implementations* of an algorithm
+# are compared and agree to a tolerance. Here both sides call the same
+# onnxruntime version on the same artifact file, so the only things that
+# can differ are what we hand it and what we do with what comes back --
+# and those we can require to be exact.
+#
+# It only holds while the two runtimes are the same version, which is
+# why native/cmake/onnxruntime.cmake pins it to the Python one and says
+# not to bump it independently.
+
+def _codec_skip(reason):
+    """Skip, unless the environment says these tests must run.
+
+    Every other skip in this file is safe: it means the extension was
+    not built, and `--native` errors rather than passing in that case.
+    The codec's skips are not safe in the same way, because they depend
+    on a *downloaded artifact* being present -- so on a runner without
+    one, the strongest checks in the suite would silently become no
+    tests at all. CI sets SSTVAE_REQUIRE_CODEC=1 after prefetching, and
+    then a skip is a failure.
+    """
+    import os
+
+    if os.environ.get("SSTVAE_REQUIRE_CODEC"):
+        pytest.fail(f"SSTVAE_REQUIRE_CODEC is set but codec tests cannot run: {reason}")
+    pytest.skip(reason)
+
+
+def _codec_artifacts():
+    """Paths to the published parts, or None if they aren't cached.
+
+    Deliberately does *not* trigger a download: a test that fetches
+    ~20 MB mid-run would be a flaky network test wearing a parity
+    test's clothes. Fetching is CI's job, done once as its own step.
+    """
+    try:
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        return None
+    from sstvae import checkpoint
+
+    try:
+        return {p: checkpoint.resolve_onnx(p, None, "fp16")
+                for p in ("encoder", "decoder")}
+    except (Exception, SystemExit):
+        # SystemExit, not Exception: checkpoint.resolve_onnx deliberately
+        # raises SystemExit so a CLI user gets its offline instructions
+        # rather than a traceback. It is a BaseException, so a bare
+        # `except Exception` here lets it through and the missing-artifact
+        # case reports as an unhandled error instead of the intended
+        # skip-or-fail.
+        return None
+
+
+@pytest.fixture(scope="module")
+def codecs(native):
+    if not hasattr(native, "codec"):
+        _codec_skip("built without SSTVAE_BUILD_CODEC")
+    paths = _codec_artifacts()
+    if paths is None:
+        _codec_skip("published ONNX artifacts are not cached")
+    from sstvae.codec import OnnxCodec
+
+    return OnnxCodec(precision="fp16"), native.codec.OnnxCodec(lambda part: paths[part])
+
+
+def _test_picture():
+    """Deterministic and deliberately off-distribution.
+
+    docs/onnx.md records that quantisation must be scored on pictures
+    the model has not seen -- the fully-quantised decoder measured
+    0.10 dB on COCO and 1.54 dB on synthetic probes. The same logic
+    applies to a parity check: a photograph is the easy case.
+    """
+    yy, xx = np.mgrid[0:480, 0:640].astype(np.float32)
+    return np.stack([
+        0.5 + 0.5 * np.sin(xx / 37.0),
+        0.5 + 0.5 * np.cos(yy / 29.0),
+        ((xx.astype(int) ^ yy.astype(int)) % 256) / 255.0,
+    ]).astype(np.float32)
+
+
+@pytest.mark.codec
+def test_codec_encodes_bit_identically(codecs):
+    """Not "to a tolerance" -- identically. Same graph, same kernels."""
+    py, cpp = codecs
+    img = _test_picture()
+    assert np.array_equal(py.encode(img), cpp.encode(img.astype(np.float64)))
+
+
+@pytest.mark.codec
+def test_codec_decodes_byte_identically(codecs):
+    """Every subpixel, not a PSNR.
+
+    A near-miss here is worth chasing rather than tolerating: the one
+    that showed up in development was the final `* 255` being done in
+    float64 where numpy does it in float32 (NEP 50), which moved 3 of
+    921600 subpixels across a round-half-to-even boundary. That is a
+    real difference in the delivered picture, and it is invisible to any
+    threshold anyone would have picked.
+    """
+    py, cpp = codecs
+    rng = np.random.default_rng(7)
+    lat = py.encode(_test_picture())
+    wts = rng.uniform(0.3, 1.0, size=lat.shape)
+    wts[rng.random(lat.shape) < 0.08] = 0.0  # erasures, as a real reception has
+
+    want = np.asarray(py.decode(lat, wts))
+    got = cpp.decode(lat, wts)
+    assert got.shape == want.shape
+    assert np.array_equal(got, want), (
+        f"{int(np.sum(got != want))} of {want.size} subpixels differ, "
+        f"max delta {int(np.max(np.abs(got.astype(int) - want.astype(int))))}"
+    )
+
+
+@pytest.mark.codec
+def test_codec_pad_to_full_matches(native):
+    if not hasattr(native, "codec"):
+        _codec_skip("built without SSTVAE_BUILD_CODEC")
+    from sstvae.codec import pad_to_full
+
+    vec = np.arange(1000, dtype=np.float64)
+    assert np.array_equal(pad_to_full(vec), native.codec.pad_to_full(vec))
+    assert np.array_equal(pad_to_full(vec, 0.5), native.codec.pad_to_full(vec, 0.5))
+
+
+@pytest.mark.codec
+def test_codec_rejects_mismatched_checkpoints(native, tmp_path):
+    """The silent-garbage failure the sha256 stamp exists to prevent.
+
+    An encoder and decoder from different training runs load, run, and
+    produce a picture made of nothing. This is the check that stops it,
+    so it must not be the check that quietly skipped.
+
+    The forged artifact is made by *byte patching* rather than with the
+    `onnx` package, which is a publish-time dependency a receiving
+    station does not install -- and this test guarding the app's worst
+    failure mode should not be the one that vanishes on a normal
+    machine. The stamp is a 64-character hex string appearing exactly
+    once, so an equal-length substitution leaves every protobuf length
+    prefix untouched.
+    """
+    if not hasattr(native, "codec"):
+        _codec_skip("built without SSTVAE_BUILD_CODEC")
+    paths = _codec_artifacts()
+    if paths is None:
+        _codec_skip("published ONNX artifacts are not cached")
+
+    raw = Path(paths["decoder"]).read_bytes()
+    import onnxruntime as ort
+
+    meta = ort.InferenceSession(
+        paths["decoder"], providers=["CPUExecutionProvider"]
+    ).get_modelmeta().custom_metadata_map
+    stamp = meta["sstvae.source_sha256"].encode()
+    assert raw.count(stamp) == 1, "stamp is no longer a unique literal; patch differently"
+
+    forged = tmp_path / "decoder-other.onnx"
+    forged.write_bytes(raw.replace(stamp, b"0" * len(stamp)))
+
+    codec = native.codec.OnnxCodec(
+        lambda part: paths["encoder"] if part == "encoder" else str(forged))
+    codec.encode(_test_picture().astype(np.float64))
+    with pytest.raises(RuntimeError, match="different checkpoints"):
+        codec.decode(np.zeros(158400), np.ones(158400))

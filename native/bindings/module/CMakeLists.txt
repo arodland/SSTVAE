@@ -22,6 +22,28 @@ find_package(pybind11 CONFIG REQUIRED)
 pybind11_add_module(sstvae_native MODULE module.cpp)
 target_link_libraries(sstvae_native PRIVATE sstvae_core)
 
+if(SSTVAE_BUILD_CODEC)
+  target_link_libraries(sstvae_native PRIVATE sstvae_codec)
+  target_compile_definitions(sstvae_native PRIVATE SSTVAE_HAVE_CODEC)
+  # The extension has to find libonnxruntime at import time. An RPATH
+  # beats setting LD_LIBRARY_PATH in every test invocation, and beats
+  # copying the library somewhere it could go stale.
+  if(APPLE)
+    set_property(TARGET sstvae_native APPEND PROPERTY
+      BUILD_RPATH "${SSTVAE_ONNXRUNTIME_LIBDIR}")
+  elseif(NOT WIN32)
+    set_property(TARGET sstvae_native APPEND PROPERTY
+      BUILD_RPATH "${SSTVAE_ONNXRUNTIME_LIBDIR}")
+  else()
+    # Windows has no RPATH: put the DLL beside the .pyd instead.
+    add_custom_command(TARGET sstvae_native POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${SSTVAE_ONNXRUNTIME_LIBDIR}/onnxruntime.dll"
+              "$<TARGET_FILE_DIR:sstvae_native>"
+      VERBATIM)
+  endif()
+endif()
+
 # Dropped in one predictable place that tests/conftest.py adds to
 # sys.path, rather than installed into site-packages: the module is a
 # test fixture, and installing it would let a stale copy shadow a fresh

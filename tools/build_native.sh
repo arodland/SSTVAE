@@ -3,8 +3,13 @@
 # against this project's virtualenv.
 #
 #   tools/build_native.sh              # build everything
-#   tools/build_native.sh --sanitize   # ASan + UBSan
+#   tools/build_native.sh --sanitize   # ASan + UBSan (implies --no-codec)
+#   tools/build_native.sh --no-codec   # skip the codec and its onnxruntime download
 #   tools/build_native.sh --test       # build, then run ctest and pytest --native
+#
+# The codec is the only part that downloads anything (a pinned
+# onnxruntime binary, 9-80 MB depending on platform). --no-codec gives
+# an offline build of everything else, which is the entire modem.
 #
 # The interpreter matters: the extension module must be built for the
 # same Python that runs pytest, or the import silently fails and the
@@ -39,7 +44,10 @@ fi
 run_tests=0
 for arg in "$@"; do
     case "$arg" in
-        --sanitize) cmake_args+=(-DSSTVAE_SANITIZE=ON) ;;
+        # onnxruntime is a prebuilt binary nobody here instrumented, so
+        # under ASan it would report its allocations rather than ours.
+        --sanitize) cmake_args+=(-DSSTVAE_SANITIZE=ON -DSSTVAE_BUILD_CODEC=OFF) ;;
+        --no-codec) cmake_args+=(-DSSTVAE_BUILD_CODEC=OFF) ;;
         --test)     run_tests=1 ;;
         *)          cmake_args+=("$arg") ;;
     esac

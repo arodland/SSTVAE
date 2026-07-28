@@ -23,6 +23,9 @@
 
 #include "config.hpp"
 #include "beacon/beacon.hpp"
+#ifdef SSTVAE_HAVE_CODEC
+#include "codec/codec.hpp"
+#endif
 #include "dsp/dsp.hpp"
 #include "framing/framing.hpp"
 #include "golay/golay.hpp"
@@ -513,6 +516,70 @@ PYBIND11_MODULE(sstvae_native, m) {
         sstvae::ofdm::mod_matrix(), sstvae::config::NSYM, sstvae::config::NC);
     ofdm.attr("DEMOD_MATRIX") = matrix_to_numpy(
         sstvae::ofdm::demod_matrix(), sstvae::config::NC, sstvae::config::M);
+
+#ifdef SSTVAE_HAVE_CODEC
+    // --- codec ---------------------------------------------------------
+    //
+    // Unlike every other binding here, this one does *not* mirror its
+    // Python counterpart's return type: `codec.OnnxCodec.decode` hands
+    // back a PIL image, and a C++ class cannot. It returns the (H, W, 3)
+    // uint8 array PIL would have been built from, and conftest wraps it.
+    // The wrapper is two lines and it is honest about the seam; a
+    // binding that linked Pillow to avoid it would not be.
+    py::module_ codec = m.def_submodule("codec");
+    py::class_<sstvae::codec::OnnxCodec>(codec, "OnnxCodec")
+        .def(py::init([](py::object resolver) {
+                 return std::make_unique<sstvae::codec::OnnxCodec>(
+                     [resolver](const std::string& part) {
+                         py::gil_scoped_acquire gil;
+                         return resolver(part).cast<std::string>();
+                     });
+             }),
+             py::arg("resolver"))
+        .def("encode",
+             [](sstvae::codec::OnnxCodec& self, DArray image) {
+                 // (3, H, W) in [0, 1], as images.image_to_array gives.
+                 if (image.ndim() != 3 || image.shape(0) != 3) {
+                     throw std::runtime_error("encode wants a (3, H, W) array");
+                 }
+                 sstvae::codec::ImageArray arr;
+                 arr.height = static_cast<int>(image.shape(1));
+                 arr.width = static_cast<int>(image.shape(2));
+                 arr.chw.assign(image.data(), image.data() + image.size());
+                 std::vector<double> out;
+                 {
+                     py::gil_scoped_release unlock;
+                     out = self.encode(arr);
+                 }
+                 return to_numpy(out);
+             },
+             py::arg("image"))
+        .def("decode",
+             [](sstvae::codec::OnnxCodec& self, DArray latents, DArray weights) {
+                 std::vector<double> z(latents.data(), latents.data() + latents.size());
+                 std::vector<double> w(weights.data(), weights.data() + weights.size());
+                 sstvae::codec::Picture p;
+                 {
+                     py::gil_scoped_release unlock;
+                     p = self.decode(z, w);
+                 }
+                 py::array_t<std::uint8_t> out(
+                     {static_cast<py::ssize_t>(p.height),
+                      static_cast<py::ssize_t>(p.width), py::ssize_t{3}});
+                 std::copy(p.rgb.begin(), p.rgb.end(), out.mutable_data());
+                 return out;
+             },
+             py::arg("latents"), py::arg("weights"));
+    codec.def("pad_to_full",
+              [](DArray vec, double fill) {
+                  std::vector<double> v(vec.data(), vec.data() + vec.size());
+                  return to_numpy(sstvae::codec::pad_to_full(v, fill));
+              },
+              py::arg("vec"), py::arg("fill") = 0.0);
+    codec.attr("IMG_W") = sstvae::codec::IMG_W;
+    codec.attr("IMG_H") = sstvae::codec::IMG_H;
+    codec.attr("N_LATENTS") = sstvae::codec::N_LATENTS;
+#endif
 
     // The generated constants, so a test can prove the C++ build and the
     // Python package were built from the same config.py rather than

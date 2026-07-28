@@ -203,11 +203,48 @@ either, so overlays stay renderable from the command line.
 **Phases 0–1: the whole modem is ported** — `golay`, `ofdm`, `dsp`,
 `framing`, `beacon`, `sync`, `modem` — and the Python suite passes
 against it, including `-m slow`. Both interop directions work. Phase 2
-(the headless app core: codec, audio, rig, rx/tx engines) has not
-started. **Python remains the normative definition of the on-air
-format** — when the two disagree, Python is right until proven
+(the headless app core) is **in progress**: the codec is done, audio,
+rig and the rx/tx engines are not. **Python remains the normative
+definition of the on-air format** — when the two disagree, Python is
+right until proven
 otherwise, because that is the only thing that keeps "compatible
 implementation" a checkable claim.
+
+**The codec's parity claim is different in kind, and stronger.**
+Everywhere else in the port, two implementations of an algorithm agree
+to a tolerance. `native/core/codec/` calls the *same* onnxruntime on the
+*same* artifact, so the only variables are what we hand it and what we
+do with what it returns — and those are required to be **exact**:
+the encoder is bit-identical to Python's and the decoder byte-identical
+on every subpixel (`tests/test_native_parity.py -m codec`). Two things
+buy that, neither of them free:
+
+- **The onnxruntime version is pinned to the Python one** in
+  `native/cmake/onnxruntime.cmake`, with a sha256 per platform archive.
+  "Identical" is a claim about two builds of one version; two versions
+  could differ by a kernel rewrite, both be correct, and deliver a
+  picture that is subtly not the one that was sent. Bump it in step with
+  `pyproject.toml`, never ahead.
+- **The final `* 255` is done in float32**, because numpy's is: NEP 50
+  keeps `float32_array * python_int` at float32. Doing it in double
+  moved 3 subpixels of 921600 across a round-half-to-even boundary.
+  Round with `nearbyint` (half to even, like numpy), never `std::round`
+  (half away from zero).
+
+The codec is the only part of `native/` that downloads anything, so it
+is a separate library behind `-DSSTVAE_BUILD_CODEC` (`--no-codec` in
+`tools/build_native.sh`): the entire modem still builds and tests
+offline. Its tests carry a `codec` marker — `-m 'not codec'` for an
+isolated run, `SSTVAE_REQUIRE_CODEC=1` to turn their skips into
+failures, which is what CI sets after prefetching the artifacts. That
+env var exists because these are the suite's strongest checks *and* the
+only ones with a downloaded prerequisite, which is exactly the
+combination that rots into silently testing nothing.
+
+A trap in the ORT C++ API, since it crashes rather than warns:
+`GetInputTypeInfo()` returns a `TypeInfo` **by value** and
+`GetTensorTypeAndShapeInfo()` is an unowned view into it. Binding only
+the view leaves it dangling.
 
 **Format constants are frozen data, not computations.** The pilot
 quadrants (`config.PILOT_QUADRANTS`) and the interleaver permutations

@@ -612,11 +612,39 @@ equalizer at all.
   scipy legitimately differ, and on anything that turns out to be an
   accident of the Python implementation rather than part of the format.
 
-### Phase 2 — Headless app core
+### Phase 2 — Headless app core — IN PROGRESS
 
 `codec` (onnxruntime), `checkpoint` (Hub fetch), `images`,
 `overlay/render`, `audio` (PortAudio), `rig` (linked `libhamlib`),
 `settings`, and the `rx`/`tx` engines.
+
+**`codec` is done.** It was taken first deliberately: it is the only
+module in the phase with a heavyweight new external dependency, and
+finding out late that onnxruntime could not be made to work cleanly on
+three platforms would have meant arranging the rest of the phase around
+a hole.
+
+What the spike settled, before any structure was committed to:
+
+- Official prebuilt CPU archives exist per platform at 9–80 MB, ship a
+  usable CMake package, and are pinned by sha256. Building ORT from
+  source — hours, and its own dependency tree — is not necessary.
+- **There is no `osx-x64` archive.** The macOS build is Apple silicon
+  only. That compounds the `macos-13` retirement noted in the matrix
+  below: Intel Mac support now needs cross-compilation *and* a
+  cross-built ORT, which is a Phase 4 packaging problem rather than a
+  Phase 2 one, but it is worth knowing now.
+- Parity is **exact**, not tolerance-bounded, because both sides call
+  one runtime on one file. That is a stronger guarantee than the modem
+  gets, and it holds only while the versions match — hence the pin.
+
+The one real defect the spike found was a 1-LSB difference in 3 of
+921600 subpixels, from doing the output quantisation in float64 where
+numpy does it in float32. Worth recording not for the fix but for the
+shape of it: **it was well inside any tolerance anyone would have
+chosen**, and the only reason it was caught is that the test demanded
+byte equality. When a check *can* be exact, making it exact is what
+turns a near-miss into a finding.
 
 Because artifacts are fetched rather than bundled (decision 5), this
 phase owns the **first-run experience**: a progress indication, a

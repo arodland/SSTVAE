@@ -110,6 +110,25 @@ jobs:
       # reached CI.
       - run: pip install -e ".[cli]" pytest pybind11
       - uses: lukka/get-cmake@latest
+      # onnxruntime is a ~9-80 MB pinned download per platform. Cached
+      # on the URL's hash so a version bump busts it automatically.
+      - name: Cache onnxruntime
+        uses: actions/cache@v4
+        with:
+          path: native/build/_deps/onnxruntime_prebuilt-subbuild
+          key: ort-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/cmake/onnxruntime.cmake') }}
+      # The codec's parity tests compare two runtimes on the *same*
+      # model file, so they need that file. Fetching it here rather than
+      # inside a test keeps a network failure reported as a network
+      # failure. SSTVAE_REQUIRE_CODEC below then makes a skip -- for any
+      # reason, including this step silently half-working -- a failure.
+      - name: Cache model artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ hashFiles('sstvae/checkpoint.py') }}
+      - name: Fetch the published ONNX artifacts
+        run: python -c "from sstvae import checkpoint; [checkpoint.resolve_onnx(p, None, 'fp16') for p in ('encoder','decoder')]"
       # Put MSVC on PATH before CMake looks for a compiler. Without
       # this, the Ninja generator finds the runner's MinGW GCC first and
       # builds a perfectly good .pyd that CPython then cannot load --
@@ -133,6 +152,14 @@ jobs:
       # against the C++ implementations rather than the reference ones.
       - name: Python suite against the C++ core
         run: pytest -q --native
+        env:
+          # The codec parity tests are the strongest checks in the
+          # suite -- same runtime, same file, so they can demand
+          # *identical* output rather than a tolerance. That also makes
+          # them the ones with a downloaded prerequisite, and therefore
+          # the ones that could quietly become no tests at all. Here
+          # they are mandatory.
+          SSTVAE_REQUIRE_CODEC: "1"
       - name: Slow suite against the C++ core
         if: matrix.os == 'ubuntu-latest'
         run: pytest -q -m slow --native
@@ -150,11 +177,15 @@ jobs:
         run: |
           cmake -S native -B native/build-asan -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug -DSSTVAE_SANITIZE=ON \
-            -DSSTVAE_BUILD_PYMODULE=OFF
+            -DSSTVAE_BUILD_PYMODULE=OFF -DSSTVAE_BUILD_CODEC=OFF
       - run: cmake --build native/build-asan
       # C++ tests only. The pybind11 module is off because running it
       # under ASan means preloading the runtime into the interpreter
       # (LD_PRELOAD) and then chasing leaks in CPython itself, which
       # says nothing about this code. "No memory safety net" is an
       # accepted cost in docs/native-app.md; this is the net.
+      #
+      # The codec is off for the same reason: it is a prebuilt shared
+      # library nobody here compiled with instrumentation, so ASan would
+      # report onnxruntime's allocations rather than ours.
       - run: ctest --test-dir native/build-asan --output-on-failure

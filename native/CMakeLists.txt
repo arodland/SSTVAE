@@ -25,6 +25,11 @@ endif()
 
 option(SSTVAE_BUILD_PYMODULE "Build the pybind11 module for pytest parity runs" ON)
 option(SSTVAE_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
+# The codec is a separate library and a separate switch because it is
+# the only part of the core with a heavyweight external dependency.
+# Everything through Phase 1 -- the entire modem -- builds and tests
+# without downloading anything, and that stays true.
+option(SSTVAE_BUILD_CODEC "Build the ONNX codec (downloads onnxruntime)" ON)
 
 # The numeric core is compared against Python to ~1e-12. Fast-math would
 # licence the compiler to reassociate exactly the sums those tolerances
@@ -60,6 +65,20 @@ target_include_directories(sstvae_core PUBLIC core third_party/pocketfft)
 # Position-independent so the static core can be linked into the
 # pybind11 shared module.
 set_target_properties(sstvae_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# --- codec ------------------------------------------------------------------
+if(SSTVAE_BUILD_CODEC)
+  list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+  include(onnxruntime)
+  add_library(sstvae_codec STATIC core/codec/codec.cpp)
+  set_target_properties(sstvae_codec PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(sstvae_codec PUBLIC core)
+  target_link_libraries(sstvae_codec PUBLIC sstvae_core PRIVATE onnxruntime)
+  # onnxruntime's headers are not ours and are not warning-clean under
+  # -Wall -Wextra; treat them as system so our own warnings stay signal.
+  target_include_directories(sstvae_codec SYSTEM PRIVATE
+    ${SSTVAE_ONNXRUNTIME_ROOT}/include)
+endif()
 
 # config.hpp is generated from sstvae/config.py and must never be
 # hand-edited. It is committed, so a plain cmake build needs no Python;
