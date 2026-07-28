@@ -151,17 +151,10 @@ class SettingsDialog(QDialog):
         form.addRow("Output (to radio)", self.output_device)
         self.backend.currentIndexChanged.connect(self._on_backend_changed)
 
-        self.tx_level = QDoubleSpinBox(w)
-        self.tx_level.setRange(0.05, 1.0)
-        self.tx_level.setSingleStep(0.05)
-        self.tx_level.setDecimals(2)
-        self.tx_level.setValue(self._config.transmit.level)
-        form.addRow("Transmit level", self.tx_level)
-        form.addRow(QLabel(
-            "Set the level so the radio's ALC barely moves. The waveform is\n"
-            "already conditioned for a ~4 dB envelope peak; driving it into\n"
-            "ALC compression will spread it across the band."
-        ))
+        # Transmit level lives on the transmit panel, not here: setting it
+        # means watching the radio's ALC while sending, so it has to be
+        # reachable without a modal dialog in the way. It is still stored
+        # in `transmit.level` and persists across runs.
         return w
 
     def _device_combo(self, kind: str, current: str | None) -> QComboBox:
@@ -492,7 +485,6 @@ class SettingsDialog(QDialog):
         config.audio.backend = self.backend.currentData()
         config.audio.input_device = self.input_device.currentData()
         config.audio.output_device = self.output_device.currentData()
-        config.transmit.level = self.tx_level.value()
 
         config.rig.enabled = self.rig_enabled.isChecked()
         config.rig.host = self.rig_host.text().strip() or "127.0.0.1"

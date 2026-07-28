@@ -1,9 +1,10 @@
 """Transmit panel: pick a picture, compose an overlay, send it."""
 
+import math
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QColorDialog,
     QComboBox,
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSlider,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -31,6 +33,27 @@ from .overlay_editor import OverlayEditor
 from .settings import codec_precision
 
 IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif);;All files (*)"
+
+# The output level is stored as a peak amplitude (`transmit.level`, 0..1)
+# because that is what `tx.condition_for_output` scales to, but it is
+# *shown* in dB relative to full scale, which is the unit the operator is
+# already working in at the radio. 0 dB is 1.0.
+LEVEL_MIN_DB = -30.0
+LEVEL_STEP_DB = 0.5
+# Writing the config on every tick of a drag would be dozens of atomic
+# saves, each with an fsync; the in-memory value updates immediately and
+# the file follows once the operator settles.
+LEVEL_SAVE_DELAY_MS = 500
+
+
+def level_to_db(level: float) -> float:
+    if level <= 0:
+        return LEVEL_MIN_DB
+    return max(LEVEL_MIN_DB, 20.0 * math.log10(level))
+
+
+def db_to_level(db: float) -> float:
+    return 10.0 ** (db / 20.0)
 
 
 class _Signals(QObject):
@@ -165,11 +188,60 @@ class TransmitPanel(QWidget):
 
         bar.addWidget(QLabel("Mode:", self))
         bar.addWidget(self.mode_combo)
+        bar.addWidget(QLabel("Level:", self))
+        bar.addWidget(self._build_level_slider())
+        bar.addWidget(self.level_label)
         bar.addWidget(self.send_btn)
         bar.addWidget(self.cancel_btn)
         bar.addWidget(self.tx_progress, 1)
         bar.addWidget(self.tx_status)
         return bar
+
+    def _build_level_slider(self) -> QSlider:
+        """Output level, in dB, where the operator can reach it.
+
+        It belongs beside Send rather than in the settings dialog because
+        setting it means watching the radio's ALC while transmitting, and
+        a modal dialog covering the window makes that awkward.
+        """
+        self.level_slider = QSlider(Qt.Horizontal, self)
+        self.level_slider.setRange(round(LEVEL_MIN_DB / LEVEL_STEP_DB), 0)
+        self.level_slider.setSingleStep(1)
+        self.level_slider.setPageStep(2)  # one whole dB
+        self.level_slider.setFixedWidth(140)
+        self.level_slider.setToolTip(
+            "Output level, dB relative to full scale.\n\n"
+            "Set it so the radio's ALC barely moves. The waveform is already\n"
+            "conditioned for a ~4 dB envelope peak; driving it into ALC\n"
+            "compression will spread it across the band."
+        )
+        # Set before connecting, so restoring the saved value is not itself
+        # treated as an edit worth writing back.
+        self.level_slider.setValue(
+            round(level_to_db(self._app.config.transmit.level) / LEVEL_STEP_DB)
+        )
+        self.level_slider.valueChanged.connect(self._on_level_changed)
+
+        self.level_label = QLabel(self)
+        self.level_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.level_label.setMinimumWidth(
+            self.level_label.fontMetrics().horizontalAdvance("-30.0 dB")
+        )
+        self._save_level_timer = QTimer(self)
+        self._save_level_timer.setSingleShot(True)
+        self._save_level_timer.setInterval(LEVEL_SAVE_DELAY_MS)
+        self._save_level_timer.timeout.connect(self._app.save_config)
+        self._update_level_label()
+        return self.level_slider
+
+    def _on_level_changed(self, steps: int) -> None:
+        self._app.config.transmit.level = db_to_level(steps * LEVEL_STEP_DB)
+        self._update_level_label()
+        self._save_level_timer.start()
+
+    def _update_level_label(self) -> None:
+        db = self.level_slider.value() * LEVEL_STEP_DB
+        self.level_label.setText(f"{db:.1f} dB")
 
     # --- content -----------------------------------------------------------
     def choose_image(self) -> None:
@@ -314,6 +386,9 @@ class TransmitPanel(QWidget):
 
         self.send_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
+        # The level is captured in `tx_config` above, so moving the slider
+        # now would change the reading without changing the transmission.
+        self.level_slider.setEnabled(False)
         self.transmitStarted.emit()
 
         def run():
@@ -344,6 +419,7 @@ class TransmitPanel(QWidget):
     def _on_finished(self, ok: bool) -> None:
         self.send_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
+        self.level_slider.setEnabled(True)
         self.tx_progress.setRange(0, 100)
         self.tx_progress.setValue(100 if ok else 0)
         self.tx_status.setText("Sent" if ok else self.tx_status.text())
