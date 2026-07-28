@@ -221,9 +221,14 @@ either, so overlays stay renderable from the command line.
   Not implemented.
 - `docs/onnx.md` — measured (not implemented) ONNX runtime path:
   onnxruntime is 27 MB against torch's 336 MB, fp32 ONNX is the same
-  codec to ~1e-6, fp16 is free and int8 costs ~0.15 dB PSNR. Read it
-  before assuming quantisation is dangerous here — latents are analog,
-  so it is additive noise well under the channel's, not a format break.
+  codec to ~1e-6, fp16 is free and int8 costs ~0.28 dB PSNR (corrected
+  upward from 0.15 on 2026-07-27 when the published export was measured;
+  `per_channel` is a no-op because `ConvInteger` is per-tensor only).
+  Read it before assuming quantisation is dangerous here — latents are
+  analog, so it is additive noise under the channel's, not a format
+  break — but use **fp16 for the encoder**, whose error is paid by every
+  receiver. Artifacts are exported by `scripts/export_onnx.py` and
+  published as `v1-{encoder,decoder}-{fp32,fp16,int8}.onnx`.
 - `docs/native-app.md` — design (not implemented) for a native C++/Qt 6
   desktop app replacing `sstvae/gui/`, which gets **deleted** when the
   native one reaches parity. Depends on `docs/onnx.md` landing first —

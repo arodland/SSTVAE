@@ -1,10 +1,16 @@
 # ONNX export and quantisation
 
-**Status: measured, not implemented.** Nothing in the codebase uses ONNX
-yet. This records what an ONNX runtime path would cost and buy, so the
-decision doesn't have to be re-derived. All numbers below were measured
-on 2026-07-26 against the published `v1.pt` checkpoint, on an x86-64
-Linux box (24 cores, onnxruntime 1.28 CPU provider, 4 intra-op threads).
+**Status: exported and published; the runtime path is not implemented.**
+`scripts/export_onnx.py` exists and the six `v1` artifacts are on the
+Hub, but no code *loads* them yet — `codec.py` is still torch. See "What
+implementing it would involve" for what remains.
+
+Numbers were measured on 2026-07-26 against the published `v1.pt`
+checkpoint, on an x86-64 Linux box (24 cores, onnxruntime 1.28 CPU
+provider, 4 intra-op threads), and the accuracy figures were **re-measured
+2026-07-27** through the real publish script — which corrected the int8
+row upward. Where the two disagree, the later measurement is the one
+taken from the artifacts actually being distributed.
 
 ## Why bother
 
@@ -78,26 +84,51 @@ So the yardstick is not fp32, it is the channel. At the modem's
 operating point the channel puts **0.367 RMS of noise on unit-RMS
 latents**:
 
+Re-measured 2026-07-27 by `scripts/export_onnx.py` (the real publish
+path) over 10 COCO validation images. **The int8 row is worse than this
+document originally recorded** — see the correction below.
+
 | | model size | encoder latent error | vs channel noise |
 |---|---|---|---|
-| fp32 | 41.3 MB | — | — |
-| fp16 | 20.7 MB | 3.7e-04 RMS | 60 dB below |
-| int8 | 12.7 MB | 8.0e-02 RMS | 13.3 dB below |
+| fp32 | 41.5 MB | 1.95e-06 RMS | 105 dB below |
+| fp16 | 20.9 MB | 4.58e-04 RMS | 58 dB below |
+| int8 | 12.8 MB | **1.88e-01 RMS** | **5.8 dB below** |
 
-Measured over 10 COCO val2017 images, mode A:
+| | local decode, whole pipeline at this precision |
+|---|---|
+| torch | 26.71 dB |
+| fp32 | 26.71 dB (−0.000) |
+| fp16 | 26.71 dB (−0.000) |
+| int8 | 26.43 dB (−0.282) |
 
-| | local decode (fp32 latents) | on air, quantised TX → fp32 RX |
-|---|---|---|
-| fp32 | 26.44 dB | 24.79 dB |
-| fp16 | 26.44 dB (−0.00) | 24.79 dB (+0.00) |
-| int8 | 26.31 dB (−0.13) | 24.63 dB (−0.15) |
+**fp16 is free.** Half the size, no measurable cost anywhere. This
+survived re-measurement unchanged and is the basis for shipping fp16.
 
-**fp16 is free.** Half the size, no measurable cost anywhere.
+**int8 costs about 0.28 dB PSNR** for a 3.2× smaller model — roughly
+twice what was first recorded here (0.13 dB), because the encoder latent
+error is 1.88e-01 RMS rather than 8.0e-02.
 
-**int8 costs about 0.15 dB PSNR** for a 3.2× smaller model, and even
-that is arithmetic rather than surprise: quantisation noise at 0.08 RMS
-adding in power to channel noise at 0.367 gives 0.376, a 0.2 dB
-effective SNR penalty, which is what the pictures show.
+> **Correction, 2026-07-27.** The original 8.0e-02 figure does not
+> reproduce with the current toolchain (torch 2.13, onnxruntime 1.28)
+> and the export path we actually publish from. Investigated:
+> `quantize_dynamic` turns all 13 Convs into `ConvInteger`, which
+> supports only a **per-tensor** weight scale, so `per_channel=True` is
+> silently a no-op — verified, byte-identical output and identical
+> error. The earlier number was probably taken from a differently
+> optimized graph. The lever, if int8 accuracy ever matters, is **static
+> (calibrated) quantisation**, which yields `QLinearConv` and is both
+> more accurate and faster; it is not implemented.
+
+The arithmetic still explains the pictures, but it now lands somewhere
+less comfortable. Quantisation noise at 0.188 RMS adding in power to
+channel noise at 0.367 gives 0.412 — a **1.0 dB effective SNR penalty**,
+not the 0.2 dB originally derived here.
+
+> **Not re-measured:** the on-air column (quantised TX → fp32 RX)
+> originally read 24.79 / 24.79 / 24.63 dB. Only the local pipeline was
+> re-run. Given the revised arithmetic, assume the int8 on-air cost is
+> nearer 1 dB than the 0.15 dB recorded before, and re-measure it before
+> relying on the number.
 
 > A first single-image run had int8 *beating* fp32 by 0.17 dB — the
 > effect is the same size as the per-image spread, so anything quoted
@@ -112,15 +143,20 @@ Decoder and encoder quantisation are not the same decision:
 - **Decoder** quantisation only changes the picture *you* see. It cannot
   affect anyone else and needs no coordination. Quantise freely.
 - **Encoder** quantisation changes what goes on the air, so its cost is
-  paid by every receiver. Still small (0.15 dB for int8), but it is
-  someone else's picture, so be more conservative here than you would be
-  locally.
+  paid by every receiver. The re-measurement above sharpens this from a
+  caution into a recommendation: at 1.88e-01 RMS the int8 encoder sits
+  only 5.8 dB under the channel noise and costs ~1 dB of effective SNR.
+  **Use fp16 for the encoder.** It is free, and the picture you are
+  spending is someone else's.
 
 ### Do not chase precision below int8
 
-Not measured, and not worth measuring for on-air use: below int8 the
-quantisation noise stops being comfortably under the channel noise, and
-the graceful-degradation argument above stops applying.
+Not measured, and not worth measuring for on-air use. Note that the
+revised numbers put **int8 itself** close to this line rather than
+safely inside it: 5.8 dB under the channel noise is no longer
+"comfortably under", which is the whole premise of the
+graceful-degradation argument. int8 remains reasonable for the decoder
+and for small devices; below it there is nothing to recommend.
 
 ## Speed
 
@@ -155,9 +191,10 @@ this table would talk you out of int8 for the wrong reason.
   75 MB of Hub storage between them and they save every other
   implementer from rolling their own export — which is the case that
   actually risks divergence, since a third party choosing different
-  quantisation settings could land well outside the 0.15 dB measured
-  here. Canonical artifacts make "compatible app" a checkable claim
-  rather than a hope.
+  quantisation settings could land well outside the 0.28 dB measured
+  here — as this document's own superseded 0.13 dB figure demonstrates.
+  Canonical artifacts make "compatible app" a checkable claim rather than
+  a hope.
 - **Use fp16 in the packaged distributions.** Free by every measure
   above, and halves the largest single artifact.
 - **Fetch it on first run rather than baking it into the installer**
@@ -182,8 +219,13 @@ and either can be revisited without touching the other.
 
 ## What implementing it would involve
 
-1. `scripts/export_onnx.py`, run at publish time from the `.pt` so the
-   artifacts cannot drift from the checkpoint.
+1. ~~`scripts/export_onnx.py`, run at publish time from the `.pt` so the
+   artifacts cannot drift from the checkpoint.~~ **Done 2026-07-27.** It
+   verifies every artifact against the torch model before writing, and
+   refuses to push if a tolerance is breached; provenance (source
+   checkpoint name and sha256) is stamped into each `.onnx`'s
+   `metadata_props` and into a published manifest. It is in
+   `launch_job.sh`'s code snapshot, so training jobs carry it.
 2. An ONNX path in `sstvae/codec.py`; torch stays for training only.
 3. Port `SSTVAE.latents_to_flat` / `flat_to_latents` to numpy — they are
    pure reshape and concatenate, about ten lines. Without this the
@@ -197,17 +239,22 @@ and either can be revisited without touching the other.
 
 ## Reproducing
 
-The probes are not committed — they were one-off measurements. The
-shape of them:
+The accuracy figures are reproduced by the publish script itself, which
+prints the whole table on every run:
 
-```python
-torch.onnx.export(model.encoder, (image,), "encoder.onnx",
-                  input_names=["image"], output_names=["latents"],
-                  opset_version=17)          # dynamo=True is the default
+```
+scripts/export_onnx.py --images path/to/coco-val --n-probe 10
 ```
 
-then `onnxruntime.quantization.quantize_dynamic(..., weight_type=QInt8)`
-for int8 and `onnxconverter_common.float16.convert_float_to_float16(...,
-keep_io_types=True)` for fp16, comparing against torch on the same
-inputs and through `Modem.modulate` / `demodulate` for the on-air
-figures.
+Nothing is uploaded without `--push`, so this is safe to run for
+measurement alone. Two things it does that a hand-rolled probe will get
+wrong: `external_data=False` (**not** the default — otherwise the
+weights land in a `.onnx.data` sidecar and each artifact becomes two
+files that must travel together), and verification against real
+photographs. Synthetic low-frequency probes make int8 look ~3× worse
+than it is, because the model is far off its training distribution and
+reconstructs them at 21.5 dB rather than 26.7 dB.
+
+The **speed** table above and the **on-air** figures are not reproduced
+by the script — they were one-off measurements, the latter run through
+`Modem.modulate` / `demodulate`.

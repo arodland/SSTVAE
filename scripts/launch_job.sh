@@ -19,7 +19,8 @@ echo "== uploading code snapshot to $CODE_REPO"
 hf repos create "$CODE_REPO" --private --exist-ok >/dev/null
 hf upload "$CODE_REPO" . . \
     --include "sstvae/**" --include "scripts/train.py" \
-    --include "scripts/train_job.py" --include "pyproject.toml" \
+    --include "scripts/train_job.py" --include "scripts/export_onnx.py" \
+    --include "pyproject.toml" \
     --exclude "**/__pycache__/**" \
     --commit-message "code snapshot for training job" --quiet
 
