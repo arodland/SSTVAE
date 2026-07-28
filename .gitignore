@@ -14,6 +14,10 @@ uv.lock
 native/build/
 native/build-*/
 native/cmake-build-*/
+# FetchContent's downloads (onnxruntime), kept out of the build tree so
+# CI can cache them across runs without caching build output. Cache it
+# whole or not at all -- see the note in .github/workflows/ci.yml.
+native/.deps/
 # clangd's index and the compile database it reads
 compile_commands.json
 .cache/

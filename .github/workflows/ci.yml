@@ -112,10 +112,19 @@ jobs:
       - uses: lukka/get-cmake@latest
       # onnxruntime is a ~9-80 MB pinned download per platform. Cached
       # on the URL's hash so a version bump busts it automatically.
+      #
+      # **Cache the whole FetchContent tree, never a part of it.** The
+      # first version of this cached only `*-subbuild`, which holds the
+      # downloaded archive *and the stamp files saying it was already
+      # extracted* -- while the extracted content lives in `*-src`,
+      # which was not cached. The run that populated the cache passed;
+      # the next one restored "already extracted" beside an empty source
+      # directory and failed on all three platforms in 40 ms. A
+      # FetchContent tree is only meaningful as a unit.
       - name: Cache onnxruntime
         uses: actions/cache@v4
         with:
-          path: native/build/_deps/onnxruntime_prebuilt-subbuild
+          path: native/.deps
           key: ort-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/cmake/onnxruntime.cmake') }}
       # The codec's parity tests compare two runtimes on the *same*
       # model file, so they need that file. Fetching it here rather than
@@ -141,6 +150,7 @@ jobs:
         run: |
           cmake -S native -B native/build -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps" \
             -DPython3_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')" \
             -Dpybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')"
       - name: Build

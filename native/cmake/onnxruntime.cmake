@@ -100,9 +100,24 @@ else()
 endif()
 
 if(NOT EXISTS "${_ort_root}/include/onnxruntime_cxx_api.h")
+  if(SSTVAE_ONNXRUNTIME_DIR)
+    message(FATAL_ERROR
+      "onnxruntime at ${_ort_root} has no include/onnxruntime_cxx_api.h; "
+      "SSTVAE_ONNXRUNTIME_DIR should be the directory containing include/ and lib/.")
+  endif()
+  # The download reported success but left nothing behind. In practice
+  # this means a *partially restored* FetchContent tree: the `-subbuild`
+  # directory carries stamp files saying the archive was already
+  # extracted, so nothing re-extracts, while the extracted `-src` is
+  # missing. A CI cache that saved one without the other did exactly
+  # this and failed on three platforms at once.
   message(FATAL_ERROR
-    "onnxruntime at ${_ort_root} has no include/onnxruntime_cxx_api.h; "
-    "SSTVAE_ONNXRUNTIME_DIR should be the directory containing include/ and lib/.")
+    "onnxruntime was not extracted to ${_ort_root}.\n"
+    "If this is a cached build, the FetchContent tree is inconsistent: "
+    "its stamp files say the archive is already extracted but the "
+    "extracted content is gone. Delete the whole _deps (or "
+    "FETCHCONTENT_BASE_DIR) tree and configure again -- it is only "
+    "meaningful as a unit, so anything caching it must cache all of it.")
 endif()
 
 # The archives ship a CMake config package, but it names an imported
