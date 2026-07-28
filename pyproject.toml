@@ -137,6 +137,13 @@ explicit = true
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.package-data]
+# The interleaver permutations are part of the on-air format and are
+# shipped as data rather than recomputed at import -- see the note in
+# sstvae/modem/framing.py. Without this the wheel imports and then fails
+# at the first transmission.
+"sstvae.modem" = ["*.npy"]
+
 [tool.setuptools.packages.find]
 include = ["sstvae*"]
 

@@ -72,19 +72,19 @@ inline constexpr int BEACON_SYNC_LEN = 13;
 inline constexpr std::array<int, BEACON_SYNC_LEN> BEACON_SYNC = {1, 1, 1, 1, 1, -1, -1, 1, 1, -1, 1, -1, 1};
 
 // --- pilot sequence --------------------------------------------------
-// GENERATED VALUES, not a generated algorithm. Python draws these from
-// np.random.default_rng(PILOT_SEED), but they are a *format constant*:
-// 24 fixed QPSK symbols both ends must agree on. Reimplementing PCG64
-// and numpy's bounded-integer draw in C++ to rederive them would make
-// numpy's RNG internals part of the on-air format, which they are not.
+// Copied from config.PILOT_QUADRANTS, which is a frozen literal -- not
+// re-derived here, and not re-derived by Python either.
 //
-// Emitted as the quadrant indices rather than as phases or as complex
-// values, so C++ evaluates the *same expression* Python does:
-//     phase = pi/4 + pi/2 * k
-// Emitting phases would mean emitting np.angle()'s principal value,
-// which wraps 7pi/4 to -pi/4 -- mathematically identical, but a
-// different argument to exp() and so a different last ulp for no
-// reason. Residual divergence is then libm's alone.
+// These 24 QPSK symbols are part of the on-air format. They were
+// originally drawn from np.random.default_rng(PILOT_SEED), but nothing
+// draws them any more: doing so would make numpy's PCG64 and its
+// bounded-integer draw part of the format, so a future numpy that
+// changed either would change what this program transmits. If that
+// ever happens the right answer is to keep sending these, which is
+// only possible because they are written down.
+//
+// Quadrant indices rather than phases or complex values, so C++
+// evaluates the *same expression* Python does: pi/4 + pi/2 * k.
 inline constexpr std::array<int, NC> PILOT_QUADRANTS = {
     0, 3, 2, 1, 1, 3, 0, 2, 0, 0, 2, 3,
     2, 3, 2, 3, 2, 0, 3, 1, 2, 1, 0, 3,

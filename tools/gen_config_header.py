@@ -132,32 +132,33 @@ def render() -> str:
     w("\n")
 
     w("// --- pilot sequence --------------------------------------------------\n")
-    w("// GENERATED VALUES, not a generated algorithm. Python draws these from\n")
-    w("// np.random.default_rng(PILOT_SEED), but they are a *format constant*:\n")
-    w("// 24 fixed QPSK symbols both ends must agree on. Reimplementing PCG64\n")
-    w("// and numpy's bounded-integer draw in C++ to rederive them would make\n")
-    w("// numpy's RNG internals part of the on-air format, which they are not.\n")
+    w("// Copied from config.PILOT_QUADRANTS, which is a frozen literal -- not\n")
+    w("// re-derived here, and not re-derived by Python either.\n")
     w("//\n")
-    w("// Emitted as the quadrant indices rather than as phases or as complex\n")
-    w("// values, so C++ evaluates the *same expression* Python does:\n")
-    w("//     phase = pi/4 + pi/2 * k\n")
-    w("// Emitting phases would mean emitting np.angle()'s principal value,\n")
-    w("// which wraps 7pi/4 to -pi/4 -- mathematically identical, but a\n")
-    w("// different argument to exp() and so a different last ulp for no\n")
-    w("// reason. Residual divergence is then libm's alone.\n")
-    quadrants = np.rint(
-        (np.angle(ofdm.pilot_sequence()) - np.pi / 4) / (np.pi / 2)
-    ).astype(int) % 4
-    # Verify the emitted indices actually reproduce the sequence, so a
-    # future change to pilot_sequence() cannot silently ship a header
-    # describing a waveform nobody transmits.
-    rebuilt = np.exp(1j * (np.pi / 4 + np.pi / 2 * quadrants))
-    err = np.max(np.abs(rebuilt - ofdm.pilot_sequence()))
-    if err > 1e-12:
+    w("// These 24 QPSK symbols are part of the on-air format. They were\n")
+    w("// originally drawn from np.random.default_rng(PILOT_SEED), but nothing\n")
+    w("// draws them any more: doing so would make numpy's PCG64 and its\n")
+    w("// bounded-integer draw part of the format, so a future numpy that\n")
+    w("// changed either would change what this program transmits. If that\n")
+    w("// ever happens the right answer is to keep sending these, which is\n")
+    w("// only possible because they are written down.\n")
+    w("//\n")
+    w("// Quadrant indices rather than phases or complex values, so C++\n")
+    w("// evaluates the *same expression* Python does: pi/4 + pi/2 * k.\n")
+    quadrants = list(cfg.PILOT_QUADRANTS)
+    if len(quadrants) != cfg.NC or any(k not in (0, 1, 2, 3) for k in quadrants):
         raise SystemExit(
-            f"pilot quadrant recovery failed (max error {err:.3g}); "
-            "ofdm.pilot_sequence() is no longer a plain QPSK draw and this "
-            "generator needs updating"
+            f"config.PILOT_QUADRANTS must be {cfg.NC} values in 0..3, "
+            f"got {len(quadrants)}"
+        )
+    # Cross-check that the frozen literal is what ofdm actually builds, so
+    # the header cannot describe a waveform the Python side does not send.
+    rebuilt = np.exp(1j * (np.pi / 4 + np.pi / 2 * np.asarray(quadrants)))
+    err = np.max(np.abs(rebuilt - ofdm.pilot_sequence()))
+    if err != 0.0:
+        raise SystemExit(
+            f"config.PILOT_QUADRANTS does not reproduce ofdm.pilot_sequence() "
+            f"(max error {err:.3g}); they must not disagree"
         )
     w(f"inline constexpr std::array<int, NC> PILOT_QUADRANTS = {{\n")
     for i in range(0, len(quadrants), 12):

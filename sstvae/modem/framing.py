@@ -13,6 +13,8 @@ TRANSMIT_LATENTS_PER_GROUP entries of each group's permutation get a
 slot; the rest are permanently erased (weight 0), never transmitted.
 """
 
+from pathlib import Path
+
 import numpy as np
 
 from ..config import (
@@ -23,21 +25,53 @@ from ..config import (
     GROUP_LATENTS,
     TRANSMIT_LATENTS_PER_GROUP,
     FRAMES_PER_GROUP,
-    INTERLEAVER_SEED,
     PROTOCOL_VERSION,
     MODES_BY_INDEX,
     ModeSpec,
 )
 from . import golay
 
-_PERMS = [
-    np.random.default_rng(INTERLEAVER_SEED + g).permutation(GROUP_LATENTS)
-    for g in range(3)
-]
-# Only the first TRANSMIT_LATENTS_PER_GROUP permuted indices ever reach a
-# slot; the remainder (_PERMS[g][TRANSMIT_LATENTS_PER_GROUP:]) are the
-# canonical latents this group always drops.
-_TX_PERMS = [p[:TRANSMIT_LATENTS_PER_GROUP] for p in _PERMS]
+# The interleaver permutations are **frozen data, not a computation**.
+#
+# They were originally drawn with
+# `np.random.default_rng(INTERLEAVER_SEED + g).permutation(GROUP_LATENTS)`,
+# and re-deriving them at import would make numpy's PCG64, its
+# bounded-integer draw and its shuffle loop part of the on-air format.
+# numpy commits to stream stability, but if it ever did change, the
+# correct behaviour is to keep interleaving exactly as before -- two
+# stations that disagree here produce noise, with no error to say why.
+# That is only possible if the permutation is written down, so it is.
+#
+# Only the transmittable prefix is stored. The remainder of each
+# permutation is the set of latents that group permanently drops
+# (weight 0); it is defined by its absence, so storing it would be
+# storing something nothing reads.
+#
+# `tools/freeze_format_constants.py --verify` re-derives these from the
+# seed and reports whether the current numpy still agrees. That is
+# information, not a gate: see the note in config.py.
+_PERMS_PATH = Path(__file__).with_name("interleaver_perms.npy")
+try:
+    # Stored as uint16 (indices are < GROUP_LATENTS = 52,800) to keep the
+    # committed file small, but widened on load: callers add a group
+    # offset of up to 2*GROUP_LATENTS = 105,600, and under NEP 50 a
+    # Python int added to a uint16 array stays uint16. numpy 2 raises on
+    # that, but an older numpy would wrap silently -- which would
+    # scramble the interleave for groups 1 and 2 and produce a picture
+    # that decoded to noise with nothing to indicate why.
+    _TX_PERMS = np.load(_PERMS_PATH).astype(np.intp)
+except FileNotFoundError as e:  # pragma: no cover - packaging error
+    raise RuntimeError(
+        f"{_PERMS_PATH.name} is missing. It carries the interleaver "
+        "permutations, which are part of the on-air format and are shipped "
+        "as package data rather than recomputed. Reinstall the package, or "
+        "regenerate with tools/freeze_format_constants.py."
+    ) from e
+
+assert _TX_PERMS.shape == (3, TRANSMIT_LATENTS_PER_GROUP), (
+    f"interleaver_perms.npy has shape {_TX_PERMS.shape}, expected "
+    f"(3, {TRANSMIT_LATENTS_PER_GROUP}); it does not match this config.py"
+)
 
 
 def slot_range_for_frame(abs_frame: int) -> tuple[int, np.ndarray]:

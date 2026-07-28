@@ -7,7 +7,9 @@ dsp.to_baseband, where carrier k sits at bin (k - 11) * RS Hz.
 
 import numpy as np
 
-from ..config import FS, RS, NC, M, NCP, NSYM, CARRIER0, FCENTER, PILOT_SEED
+from ..config import (
+    FS, RS, NC, M, NCP, NSYM, CARRIER0, FCENTER, PILOT_QUADRANTS,
+)
 
 CARRIER_FREQS = CARRIER0 + RS * np.arange(NC)  # passband, Hz
 BASEBAND_FREQS = CARRIER_FREQS - FCENTER  # multiples of RS
@@ -66,9 +68,15 @@ def demod_window(z: np.ndarray, start: int, backoff: int = 0) -> np.ndarray:
 
 
 def pilot_sequence() -> np.ndarray:
-    """Fixed unit-magnitude QPSK sequence used for preamble and frame pilots."""
-    rng = np.random.default_rng(PILOT_SEED)
-    phases = np.pi / 4 + np.pi / 2 * rng.integers(0, 4, NC)
+    """Fixed unit-magnitude QPSK sequence used for preamble and frame pilots.
+
+    Built from the frozen `config.PILOT_QUADRANTS` rather than re-drawn
+    from `np.random.default_rng(PILOT_SEED)`. This sequence is part of
+    the on-air format: if a future numpy changed its generator stream,
+    the right behaviour is to keep transmitting the same pilots, not to
+    follow numpy. See the note in config.py.
+    """
+    phases = np.pi / 4 + np.pi / 2 * np.asarray(PILOT_QUADRANTS)
     return np.exp(1j * phases)
 
 
