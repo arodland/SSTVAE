@@ -668,6 +668,39 @@ Qt-free for the whole phase, so the headless CLI links no GUI toolkit
 and CI still installs Qt only in Phase 3 — which is what the workflow's
 comments already promise.
 
+**The exit criterion is met for the receive path.**
+`native/apps/sstvae_decode.cpp` produces a picture **byte-identical** to
+`sstvae_decode.py`'s on the same WAV, over a 12 dB AWGN channel — so
+sync, CFO, pilot EQ, drift tracking, the beacon and the codec all agreed
+exactly, not merely closely. Also byte-identical on three variants that
+each exercise something the plain case does not: a 44.1 kHz recording
+(the 160/441 resample), a stereo int16 file (the scale-before-mixdown
+rule), and a mid-transmission slice decoded blind (position from the
+beacon's absolute counter alone). `tests/test_native_cli.py`.
+
+Two things this required that were not in the plan:
+
+- **`dsp::resample_poly`**, matching scipy's design exactly (Kaiser(5.0)
+  firwin, `h *= up`, scipy's pre/post padding and slice). Verified
+  against scipy to ~1e-14 with exactly matching output lengths. It was
+  needed for `wavio` and will be needed again for capture — where
+  CLAUDE.md records that getting it wrong cost 4.7 dB while still
+  reporting every frame received.
+- **`dr_wav`** rather than a hand-rolled RIFF parser, because the files
+  this reads were written by whatever the operator had.
+
+The trap worth recording: the slow suite runs under `--native`, which
+substitutes the C++ modem *in-process*. The blind test's "Python
+reference" was an in-process `Modem().demodulate_blind`, which under CI
+would have been the C++ implementation — the test would have compared
+C++ against C++ and passed while checking nothing. Every reference-side
+decode in `test_native_cli.py` now runs in a **subprocess**, where no
+substitution is applied. Any future test that wants a reference
+alongside `--native` has the same problem.
+
+Still open in this phase: `checkpoint` (so `--model` can be optional),
+`settings`, `overlay`, the rx/tx engines, `audio` and `rig`.
+
 Because artifacts are fetched rather than bundled (decision 5), this
 phase owns the **first-run experience**: a progress indication, a
 checksum check, and — importantly for a field laptop with no

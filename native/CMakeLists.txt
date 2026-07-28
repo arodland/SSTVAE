@@ -106,3 +106,22 @@ add_subdirectory(tests)
 if(SSTVAE_BUILD_PYMODULE)
   add_subdirectory(bindings/module)
 endif()
+
+# --- apps -------------------------------------------------------------------
+# Headless command-line tools. Phase 2's exit criterion is that
+# sstvae-decode turns a WAV into a picture that matches the Python CLI's
+# on the same input; these link no GUI toolkit, and must not start to.
+if(SSTVAE_BUILD_CODEC)
+  add_executable(sstvae-decode apps/sstvae_decode.cpp)
+  target_link_libraries(sstvae-decode PRIVATE sstvae_core sstvae_codec)
+  if(NOT WIN32)
+    set_property(TARGET sstvae-decode APPEND PROPERTY
+      BUILD_RPATH "${SSTVAE_ONNXRUNTIME_LIBDIR}")
+  else()
+    add_custom_command(TARGET sstvae-decode POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${SSTVAE_ONNXRUNTIME_LIBDIR}/onnxruntime.dll"
+              "$<TARGET_FILE_DIR:sstvae-decode>"
+      VERBATIM)
+  endif()
+endif()

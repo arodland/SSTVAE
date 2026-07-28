@@ -160,9 +160,14 @@ jobs:
           # the ones that could quietly become no tests at all. Here
           # they are mandatory.
           SSTVAE_REQUIRE_CODEC: "1"
+      # Also covers tests/test_native_cli.py, which runs the built
+      # `sstvae-decode` against sstvae_decode.py on one WAV and requires
+      # the same picture byte for byte -- Phase 2's exit criterion.
       - name: Slow suite against the C++ core
         if: matrix.os == 'ubuntu-latest'
         run: pytest -q -m slow --native
+        env:
+          SSTVAE_REQUIRE_CODEC: "1"
 
   sanitizers:
     name: ASan + UBSan
