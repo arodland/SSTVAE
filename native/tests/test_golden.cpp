@@ -14,6 +14,7 @@
 
 #include "check.hpp"
 #include "config.hpp"
+#include "beacon/beacon.hpp"
 #include "dsp/dsp.hpp"
 #include "framing/framing.hpp"
 #include "golay/golay.hpp"
@@ -389,6 +390,125 @@ void test_framing() {
                    "framing/the header cases include some that must be rejected");
 }
 
+void test_beacon() {
+    check::equal(beacon::SUPERFRAME_LEN, 181, "beacon/superframe length");
+    check::equal(beacon::MIN_FRAMES_FOR_SYNC, 73, "beacon/min frames for sync");
+
+    // The 64-symbol alphabet, one code point at a time. The C++ keeps
+    // its own copy of the string, so this is what stops the two drifting.
+    const std::vector<std::int64_t> alpha_chars =
+        load_i8(g("beacon/alphabet_chars"));
+    bool alphabet_ok = alpha_chars.size() == beacon::ALPHABET.size();
+    if (alphabet_ok)
+        for (std::size_t i = 0; i < alpha_chars.size(); ++i)
+            if (static_cast<std::int64_t>(
+                    static_cast<unsigned char>(beacon::ALPHABET[i])) != alpha_chars[i])
+                alphabet_ok = false;
+    check::is_true(alphabet_ok, "beacon/alphabet matches the reference exactly");
+
+    // Callsigns, including truncation, padding and characters outside
+    // the alphabet (which must become spaces rather than anything else).
+    const std::vector<std::int64_t> lengths = load_i8(g("beacon/callsign_lengths"));
+    const std::vector<std::int64_t> chars = load_i8(g("beacon/callsign_chars"));
+    const std::vector<std::int64_t> codes = load_i8(g("beacon/callsign_codes"));
+    std::size_t cpos = 0;
+    bool callsigns_ok = true;
+    for (std::size_t i = 0; i < lengths.size(); ++i) {
+        std::string s;
+        for (std::int64_t j = 0; j < lengths[i]; ++j)
+            s.push_back(static_cast<char>(chars[cpos++]));
+        const std::vector<int> got = beacon::callsign_to_codes(s);
+        for (int k = 0; k < config::BEACON_CALLSIGN_CHARS; ++k)
+            if (got[static_cast<std::size_t>(k)] !=
+                codes[i * config::BEACON_CALLSIGN_CHARS + static_cast<std::size_t>(k)])
+                callsigns_ok = false;
+    }
+    check::is_true(callsigns_ok, "beacon/callsign_to_codes over every case");
+
+    // CRC-16. Integer arithmetic, so exact; the all-zero and all-one
+    // inputs are the ones that catch a mis-transcribed shift.
+    const std::vector<std::int64_t> crc_lengths =
+        load_i8(g("beacon/crc_input_lengths"));
+    const std::vector<std::int64_t> crc_inputs = load_i8(g("beacon/crc_inputs"));
+    const std::vector<std::int64_t> crc_expected = load_i8(g("beacon/crc_expected"));
+    std::size_t bpos = 0;
+    bool crc_ok = true;
+    for (std::size_t i = 0; i < crc_lengths.size(); ++i) {
+        std::vector<int> bits;
+        for (std::int64_t j = 0; j < crc_lengths[i]; ++j)
+            bits.push_back(static_cast<int>(crc_inputs[bpos++]));
+        const std::vector<int> got = beacon::crc16(bits);
+        for (int k = 0; k < config::BEACON_CRC_BITS; ++k)
+            if (got[static_cast<std::size_t>(k)] !=
+                crc_expected[i * config::BEACON_CRC_BITS + static_cast<std::size_t>(k)])
+                crc_ok = false;
+    }
+    check::is_true(crc_ok, "beacon/crc16 over every case");
+
+    // Superframes, at the counter's edges as well as ordinary values.
+    // Chips are +/-1 exactly, so no tolerance is defensible.
+    const std::vector<std::int64_t> frames = load_i8(g("beacon/encode_frames"));
+    const std::vector<double> want_chips = load_f8(g("beacon/encode_chips"));
+    std::vector<double> got_chips;
+    for (std::int64_t f : frames) {
+        const auto sf = beacon::encode_chips(static_cast<int>(f), "KC2G");
+        got_chips.insert(got_chips.end(), sf.begin(), sf.end());
+    }
+    check::close(got_chips, want_chips, 0.0,
+                 "beacon/encode_chips is exact (+/-1 chips)");
+
+    const std::vector<double> stream = load_f8(g("beacon/chip_stream"));
+    check::close(beacon::chip_stream(0, 120, "N6MTS"), stream, 0.0,
+                 "beacon/chip_stream is exact");
+
+    // find_sync's ranking, which depends on the normalization as much as
+    // on the correlation.
+    const std::vector<std::int64_t> want_sync = load_i8(g("beacon/find_sync_offsets"));
+    const std::vector<double> head(stream.begin(), stream.begin() + 600);
+    const std::vector<std::int64_t> got_sync = beacon::find_sync(head);
+    bool sync_ok = got_sync.size() == want_sync.size();
+    if (sync_ok)
+        for (std::size_t i = 0; i < got_sync.size(); ++i)
+            if (got_sync[i] != want_sync[i]) sync_ok = false;
+    check::is_true(sync_ok, "beacon/find_sync ranks the same offsets in order");
+
+    // decode(), clean and noisy. The expected values include cases the
+    // reference *fails* -- a port that succeeded there would be a
+    // different receiver, not a better one.
+    const std::vector<std::int64_t> offsets = load_i8(g("beacon/decode_offsets"));
+    auto run_decode = [&offsets](const std::vector<double>& src,
+                                 const std::vector<std::int64_t>& want,
+                                 const std::string& what) {
+        std::size_t wrong = 0, failures = 0;
+        for (std::size_t i = 0; i < offsets.size(); ++i) {
+            const std::size_t off = static_cast<std::size_t>(offsets[i]);
+            const std::size_t len =
+                std::min<std::size_t>(2 * beacon::SUPERFRAME_LEN,
+                                      src.size() > off ? src.size() - off : 0);
+            const std::span<const double> window(src.data() + off, len);
+            const auto r = beacon::decode(window);
+            const std::int64_t got_off = r ? r->chip_offset : -1;
+            const std::int64_t got_idx = r ? r->frame_index : -1;
+            if (got_off != want[2 * i] || got_idx != want[2 * i + 1]) ++wrong;
+            if (want[2 * i] == -1) ++failures;
+            if (r && want[2 * i] != -1 && r->callsign.empty()) ++wrong;
+        }
+        check::equal(wrong, std::size_t{0}, what);
+        check::is_true(failures > 0,
+                       what + ": the cases include some that must fail");
+    };
+    run_decode(stream, load_i8(g("beacon/decode_expected")),
+               "beacon/decode over a clean stream");
+    run_decode(load_f8(g("beacon/noisy_stream")),
+               load_i8(g("beacon/noisy_decode_expected")),
+               "beacon/decode over a noisy stream");
+
+    // The callsign has to survive, not just the counter.
+    const auto clean = beacon::decode(stream);
+    check::is_true(clean.has_value() && clean->callsign == "N6MTS",
+                   "beacon/decode recovers the callsign");
+}
+
 void test_config_header() {
     // config.hpp is generated, so this is not checking arithmetic -- it
     // is checking that the committed header was generated from the
@@ -422,6 +542,7 @@ int main(int argc, char** argv) {
         test_config_header();
         test_dsp();
         test_framing();
+        test_beacon();
         test_golay();
         test_ofdm_tables();
         test_ofdm_transforms();

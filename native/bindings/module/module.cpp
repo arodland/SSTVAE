@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "config.hpp"
+#include "beacon/beacon.hpp"
 #include "dsp/dsp.hpp"
 #include "framing/framing.hpp"
 #include "golay/golay.hpp"
@@ -203,6 +204,80 @@ PYBIND11_MODULE(sstvae_native, m) {
                     return py::int_(mode->index);
                 },
                 py::arg("soft"));
+
+    py::module_ beacon = m.def_submodule("beacon");
+    beacon.def("callsign_to_codes",
+               [](const std::string& callsign) {
+                   const auto codes = sstvae::beacon::callsign_to_codes(callsign);
+                   py::array_t<std::int64_t> out(
+                       static_cast<py::ssize_t>(codes.size()));
+                   std::copy(codes.begin(), codes.end(), out.mutable_data());
+                   return out;
+               },
+               py::arg("callsign"));
+    beacon.def("codes_to_callsign",
+               [](py::array_t<std::int64_t, py::array::c_style |
+                                                py::array::forcecast> codes) {
+                   std::vector<int> v(static_cast<std::size_t>(codes.size()));
+                   for (py::ssize_t i = 0; i < codes.size(); ++i)
+                       v[static_cast<std::size_t>(i)] =
+                           static_cast<int>(codes.data()[i]);
+                   return sstvae::beacon::codes_to_callsign(v);
+               },
+               py::arg("codes"));
+    beacon.def("crc16",
+               [](py::array_t<std::int64_t, py::array::c_style |
+                                                py::array::forcecast> bits) {
+                   std::vector<int> v(static_cast<std::size_t>(bits.size()));
+                   for (py::ssize_t i = 0; i < bits.size(); ++i)
+                       v[static_cast<std::size_t>(i)] =
+                           static_cast<int>(bits.data()[i]);
+                   const auto crc = sstvae::beacon::crc16(v);
+                   py::array_t<std::int64_t> out(
+                       static_cast<py::ssize_t>(crc.size()));
+                   std::copy(crc.begin(), crc.end(), out.mutable_data());
+                   return out;
+               },
+               py::arg("bits"));
+    beacon.def("encode_chips",
+               [](int frame_index, const std::string& callsign) {
+                   return to_numpy(
+                       sstvae::beacon::encode_chips(frame_index, callsign));
+               },
+               py::arg("frame_index"), py::arg("callsign"));
+    beacon.def("chip_stream",
+               [](int start_frame, int n_frames, const std::string& callsign) {
+                   return to_numpy(sstvae::beacon::chip_stream(
+                       start_frame, n_frames, callsign));
+               },
+               py::arg("start_frame"), py::arg("n_frames"), py::arg("callsign"));
+    beacon.def("find_sync",
+               [](DArray chips, double threshold, int max_candidates) {
+                   std::span<const double> in(
+                       chips.data(), static_cast<std::size_t>(chips.size()));
+                   const auto offs =
+                       sstvae::beacon::find_sync(in, threshold, max_candidates);
+                   // A plain list, matching the reference's list[int].
+                   py::list out;
+                   for (std::int64_t v : offs) out.append(py::int_(v));
+                   return out;
+               },
+               py::arg("chips"), py::arg("threshold") = 0.6,
+               py::arg("max_candidates") = 8);
+    beacon.def("decode",
+               [](DArray chips, double threshold) -> py::object {
+                   std::span<const double> in(
+                       chips.data(), static_cast<std::size_t>(chips.size()));
+                   const auto r = sstvae::beacon::decode(in, threshold);
+                   // A tuple, unpacked by the conftest adapter into the
+                   // reference's BeaconResult dataclass -- binding that
+                   // dataclass would put Python object layout into the
+                   // core the application links.
+                   if (!r) return py::none();
+                   return py::make_tuple(r->chip_offset, r->frame_index,
+                                         r->callsign);
+               },
+               py::arg("chips"), py::arg("threshold") = 0.6);
 
     py::module_ dsp = m.def_submodule("dsp");
     dsp.def("to_baseband",

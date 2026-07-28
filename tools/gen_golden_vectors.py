@@ -469,8 +469,99 @@ def build_framing(c: Corpus) -> None:
           "mode index, or -1 where the header must be rejected")
 
 
-BUILDERS = {"dsp": build_dsp, "framing": build_framing, "golay": build_golay,
-            "ofdm": build_ofdm}
+def build_beacon(c: Corpus) -> None:
+    from sstvae.modem import beacon
+
+    c.add_scalar("beacon/superframe_len", beacon.SUPERFRAME_LEN)
+    c.add_scalar("beacon/min_frames_for_sync", beacon.MIN_FRAMES_FOR_SYNC)
+
+    # Every code point of the 6-bit alphabet, so the C++ copy of the
+    # string cannot drift from the reference's without being caught.
+    c.add("beacon/alphabet_codes",
+          np.arange(64, dtype=np.int64), "input to codes_to_callsign")
+    c.add("beacon/alphabet_chars",
+          np.array([ord(ch) for ch in beacon._ALPHABET], dtype=np.int64),
+          "the 64-symbol callsign alphabet, as code points")
+
+    # Callsign round-trips: real ones, one needing truncation, one with
+    # characters outside the alphabet (which must map to space), and the
+    # empty string.
+    callsigns = ["KC2G", "N6MTS", "W1AW/4", "VE3ABC", "LONGCALLSIGN", "", "ab3xyz!"]
+    c.add("beacon/callsign_lengths",
+          np.array([len(s) for s in callsigns], dtype=np.int64))
+    c.add("beacon/callsign_chars",
+          np.array([ord(ch) for s in callsigns for ch in s], dtype=np.int64),
+          "concatenated; split with callsign_lengths")
+    c.add("beacon/callsign_codes",
+          np.array([beacon.callsign_to_codes(s) for s in callsigns],
+                   dtype=np.int64),
+          "one row per callsign, BEACON_CALLSIGN_CHARS codes each")
+
+    # CRC-16 over inputs that exercise the shift-and-xor edges: all
+    # zeros, all ones, a single set bit at each end, and real payloads.
+    crc_cases = [
+        np.zeros(32, dtype=np.int64),
+        np.ones(32, dtype=np.int64),
+        np.array([1] + [0] * 31, dtype=np.int64),
+        np.array([0] * 31 + [1], dtype=np.int64),
+    ]
+    rng = np.random.default_rng(20260728)
+    for _ in range(8):
+        crc_cases.append(rng.integers(0, 2, 58).astype(np.int64))
+    c.add("beacon/crc_input_lengths",
+          np.array([len(b) for b in crc_cases], dtype=np.int64))
+    c.add("beacon/crc_inputs",
+          np.concatenate(crc_cases).astype(np.int64), "concatenated")
+    c.add("beacon/crc_expected",
+          np.array([beacon._crc16(b) for b in crc_cases], dtype=np.int64),
+          "one 16-bit row per input")
+
+    # Superframes at the counter's edges as well as ordinary values.
+    frames = [0, 1, 219, 220, 439, 440, 659, beacon.MAX_FRAME_COUNTER]
+    c.add("beacon/encode_frames", np.array(frames, dtype=np.int64))
+    c.add("beacon/encode_chips",
+          np.array([beacon.encode_chips(f, "KC2G") for f in frames]),
+          "one superframe per frame index, callsign KC2G")
+
+    # A continuous stream, which is what the modem actually transmits:
+    # superframes back to back, truncated at the end.
+    stream = beacon.chip_stream(0, 120, "N6MTS")
+    c.add("beacon/chip_stream", stream, "frames 0..119, callsign N6MTS")
+
+    # decode() over the stream at several offsets, including windows too
+    # short to guarantee a hit. The expected values record what the
+    # reference actually returns, including its failures.
+    offsets = [0, 1, 7, 100, 181, 362, 500]
+    c.add("beacon/decode_offsets", np.array(offsets, dtype=np.int64))
+    rows = []
+    for off in offsets:
+        window = stream[off:off + 2 * beacon.SUPERFRAME_LEN]
+        r = beacon.decode(window)
+        rows.append([-1, -1] if r is None else [r.chip_offset, r.frame_index])
+    c.add("beacon/decode_expected", np.array(rows, dtype=np.int64),
+          "(chip_offset, frame_index) per offset; (-1,-1) where decode fails")
+
+    # And with noise, where some decodes must fail. A port that
+    # succeeded where the reference gives up would be a different
+    # receiver, not a better one.
+    noisy = stream + rng.normal(scale=0.8, size=len(stream))
+    c.add("beacon/noisy_stream", noisy, tol=PLATFORM_TOL)
+    noisy_rows = []
+    for off in offsets:
+        window = noisy[off:off + 2 * beacon.SUPERFRAME_LEN]
+        r = beacon.decode(window)
+        noisy_rows.append([-1, -1] if r is None else [r.chip_offset, r.frame_index])
+    c.add("beacon/noisy_decode_expected", np.array(noisy_rows, dtype=np.int64))
+
+    # find_sync scoring on a clean stream: the offsets it ranks, in
+    # order. Sensitive to the normalization as well as the correlation.
+    c.add("beacon/find_sync_offsets",
+          np.array(beacon.find_sync(stream[:600]), dtype=np.int64),
+          "best-correlation first")
+
+
+BUILDERS = {"beacon": build_beacon, "dsp": build_dsp, "framing": build_framing,
+            "golay": build_golay, "ofdm": build_ofdm}
 
 
 def build() -> Corpus:

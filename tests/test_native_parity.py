@@ -426,6 +426,96 @@ def test_framing_header_rejects_the_same_garbage(native):
     assert rejected > 0, "no garbage was rejected; the test proves nothing"
 
 
+# --- beacon ----------------------------------------------------------------
+
+def test_beacon_alphabet_and_callsigns(native):
+    """The C++ keeps its own copy of the 64-symbol alphabet."""
+    from sstvae.modem import beacon as bc
+
+    for code in range(64):
+        assert bc.codes_to_callsign(np.array([code])) == \
+            native.beacon.codes_to_callsign(np.array([code])) or code == \
+            bc._CHAR_TO_CODE[" "], code
+
+    for call in ("KC2G", "N6MTS", "W1AW/4", "LONGCALLSIGN", "", "ab3xyz!"):
+        assert np.array_equal(bc.callsign_to_codes(call),
+                              native.beacon.callsign_to_codes(call)), call
+
+
+def test_beacon_crc16(native):
+    """Including the all-zero and all-one inputs, which are where a
+    mis-transcribed shift-and-xor shows up."""
+    from sstvae.modem import beacon as bc
+
+    rng = np.random.default_rng(31)
+    cases = [np.zeros(32, dtype=np.int64), np.ones(32, dtype=np.int64),
+             np.array([1] + [0] * 31), np.array([0] * 31 + [1])]
+    cases += [rng.integers(0, 2, n) for n in (1, 7, 58, 74, 128)]
+    for bits in cases:
+        assert np.array_equal(bc._crc16(bits), native.beacon.crc16(bits))
+
+
+def test_beacon_encode_and_stream(native):
+    from sstvae.modem import beacon as bc
+
+    for frame in (0, 1, 219, 220, 659, bc.MAX_FRAME_COUNTER):
+        assert np.array_equal(bc.encode_chips(frame, "KC2G"),
+                              native.beacon.encode_chips(frame, "KC2G")), frame
+    assert np.array_equal(bc.chip_stream(0, 120, "N6MTS"),
+                          native.beacon.chip_stream(0, 120, "N6MTS"))
+
+
+def test_beacon_find_sync_ordering_is_deterministic(native):
+    """A clean stream ties: every superframe correlates perfectly.
+
+    That made the reference's candidate order depend on numpy's unstable
+    argsort, so `decode` returned an arbitrary one of several equally
+    valid superframes. Both sides now sort stably, ties by lowest
+    offset, and this asserts they agree on the whole ranking rather than
+    just the winner.
+    """
+    from sstvae.modem import beacon as bc
+
+    stream = bc.chip_stream(0, 120, "N6MTS")[:600]
+    assert bc.find_sync(stream) == native.beacon.find_sync(stream)
+
+    # The ties are real, not hypothetical -- if this stops being true the
+    # test above has stopped testing what it claims to.
+    corr = np.correlate(stream, bc.SYNC, mode="valid")
+    energy = np.sqrt(np.convolve(stream ** 2, np.ones(bc.SYNC_LEN), mode="valid")
+                     * np.sum(bc.SYNC ** 2)) + 1e-12
+    score = corr / energy
+    assert np.sum(score == score.max()) > 1, "expected exact ties in a clean stream"
+
+
+def test_beacon_decode_clean_and_noisy(native):
+    """Agreement on failures matters as much as on successes: the beacon
+    is what gives a mid-stream receiver its absolute frame position, and
+    a false positive would place the picture at the wrong offset."""
+    from sstvae.modem import beacon as bc
+
+    rng = np.random.default_rng(37)
+    stream = bc.chip_stream(0, 200, "W1AW/4")
+    failures = 0
+    for scale in (0.0, 0.4, 0.8, 1.5):
+        noisy = stream + (rng.normal(scale=scale, size=len(stream)) if scale else 0)
+        for off in (0, 1, 7, 100, 181, 362, 500):
+            window = noisy[off:off + 2 * bc.SUPERFRAME_LEN]
+            ref = bc.decode(window)
+            got = native.beacon.decode(window)
+            # The raw binding returns a plain tuple; only the conftest
+            # adapter rebuilds it into a BeaconResult, and that adapter
+            # is installed under --native rather than here.
+            if ref is None:
+                assert got is None, (scale, off)
+                failures += 1
+            else:
+                assert got is not None, (scale, off)
+                assert (ref.chip_offset, ref.frame_index, ref.callsign) == got, \
+                    (scale, off)
+    assert failures > 0, "no decode failed; the agreement-on-failure check is vacuous"
+
+
 # --- the golden corpus binds both suites to the same bytes -----------------
 
 def test_golden_corpus_matches_the_reference():

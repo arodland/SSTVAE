@@ -48,6 +48,7 @@ endif()
 # No QtWidgets anywhere below here; enforced by tools/check_layering.py.
 add_library(sstvae_core STATIC
   core/golay/golay.cpp
+  core/beacon/beacon.cpp
   core/dsp/dsp.cpp
   core/framing/framing.cpp
   core/framing/interleaver_table.cpp

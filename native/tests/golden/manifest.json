@@ -13,6 +13,144 @@
     "changed: a deliberate format change, or a bug. Not noise."
   ],
   "vectors": {
+    "beacon/alphabet_chars": {
+      "dtype": "<i8",
+      "note": "the 64-symbol callsign alphabet, as code points",
+      "sha256": "d7689cd72feb143a283b66d5116cc6b5f60a2737c38ac513543c67bda8c3a876",
+      "shape": [
+        64
+      ]
+    },
+    "beacon/alphabet_codes": {
+      "dtype": "<i8",
+      "note": "input to codes_to_callsign",
+      "sha256": "e59dc1dc4abcdbb6428e92a71180ae5aeb2747a990654bf1608a8a94ee96b5bd",
+      "shape": [
+        64
+      ]
+    },
+    "beacon/callsign_chars": {
+      "dtype": "<i8",
+      "note": "concatenated; split with callsign_lengths",
+      "sha256": "502f81c21faf510bf1c125af1666b9818b574535aea0e3b7c2742a221425fba1",
+      "shape": [
+        40
+      ]
+    },
+    "beacon/callsign_codes": {
+      "dtype": "<i8",
+      "note": "one row per callsign, BEACON_CALLSIGN_CHARS codes each",
+      "sha256": "52d5384fe4e1afdb79d65fa5705ffefb79d35ff88863af4d3ab4a5394337af19",
+      "shape": [
+        7,
+        8
+      ]
+    },
+    "beacon/callsign_lengths": {
+      "dtype": "<i8",
+      "sha256": "c64adb081bbcd04760c4e348f61e639c29dfa4651d5f58091adb3b0141976115",
+      "shape": [
+        7
+      ]
+    },
+    "beacon/chip_stream": {
+      "dtype": "<f8",
+      "note": "frames 0..119, callsign N6MTS",
+      "sha256": "e3ad31e4a18a750a98f4d89102e891d6ce669da37dab4a6c3b73da9f003439b2",
+      "shape": [
+        600
+      ]
+    },
+    "beacon/crc_expected": {
+      "dtype": "<i8",
+      "note": "one 16-bit row per input",
+      "sha256": "b57b443b946eed5737b4f635840268a95b02a848419e2dd01b9d697fd0a47ab6",
+      "shape": [
+        12,
+        16
+      ]
+    },
+    "beacon/crc_input_lengths": {
+      "dtype": "<i8",
+      "sha256": "677cd0e07de58f13aa1484d007349ab0995df535ebbef690e571748e535a577a",
+      "shape": [
+        12
+      ]
+    },
+    "beacon/crc_inputs": {
+      "dtype": "<i8",
+      "note": "concatenated",
+      "sha256": "c0954903673c0ed3e80b8abaac13e5b305e12514a785622f8b70996d8738d1db",
+      "shape": [
+        592
+      ]
+    },
+    "beacon/decode_expected": {
+      "dtype": "<i8",
+      "note": "(chip_offset, frame_index) per offset; (-1,-1) where decode fails",
+      "sha256": "a40be36733dd790dcf7f52c6afaf4a5378c6b6f686e08ba43b7b668d2c6c60c7",
+      "shape": [
+        7,
+        2
+      ]
+    },
+    "beacon/decode_offsets": {
+      "dtype": "<i8",
+      "sha256": "db0e45363ab466c0be89d16275f4a50eb5a7e402f69dd3107c90567e4dee6bf5",
+      "shape": [
+        7
+      ]
+    },
+    "beacon/encode_chips": {
+      "dtype": "<f8",
+      "note": "one superframe per frame index, callsign KC2G",
+      "sha256": "a78a3e99724a766c2a05b310fbbb5cdcd32df0cba0d586ae3f17dfa14b12d855",
+      "shape": [
+        8,
+        181
+      ]
+    },
+    "beacon/encode_frames": {
+      "dtype": "<i8",
+      "sha256": "e03a54c2e3ddec16cde1bfda1b7da0b1eadcf5ae55568a7556f7566692d71789",
+      "shape": [
+        8
+      ]
+    },
+    "beacon/find_sync_offsets": {
+      "dtype": "<i8",
+      "note": "best-correlation first",
+      "sha256": "0619b96bbfd483f1e4ee53b5cfc73d6d35245a9d40150b1ab00b90e7b7639638",
+      "shape": [
+        8
+      ]
+    },
+    "beacon/min_frames_for_sync": {
+      "scalar": 73
+    },
+    "beacon/noisy_decode_expected": {
+      "dtype": "<i8",
+      "sha256": "515c67e3dad43765eef9df83dbf15e17e8474a83da5c60c2cada250a2f683e01",
+      "shape": [
+        7,
+        2
+      ]
+    },
+    "beacon/noisy_stream": {
+      "dtype": "<f8",
+      "fingerprint": {
+        "max_abs": "3.6137089878e+00",
+        "mean_abs": "1.1026492321e+00",
+        "rms": "1.3008831152e+00"
+      },
+      "shape": [
+        600
+      ],
+      "tol": 1e-11
+    },
+    "beacon/superframe_len": {
+      "scalar": 181
+    },
     "dsp/firwin_sync": {
       "dtype": "<f8",
       "fingerprint": {

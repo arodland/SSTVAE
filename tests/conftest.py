@@ -117,14 +117,31 @@ NATIVE_SUBSTITUTIONS = [
 # bug in the port.
 def _native_adapters(native):
     from sstvae.config import MODES_BY_INDEX
+    from sstvae.modem.beacon import BeaconResult
 
     fr = native.framing
+    bc = native.beacon
 
     def decode_header(soft):
         index = fr.decode_header(soft)
         return None if index is None else MODES_BY_INDEX.get(index)
 
+    def beacon_decode(chips, threshold=0.6):
+        r = bc.decode(chips, threshold)
+        if r is None:
+            return None
+        chip_offset, frame_index, callsign = r
+        return BeaconResult(chip_offset=chip_offset, frame_index=frame_index,
+                            callsign=callsign)
+
     return {
+        ("sstvae.modem.beacon", "callsign_to_codes"): bc.callsign_to_codes,
+        ("sstvae.modem.beacon", "codes_to_callsign"): bc.codes_to_callsign,
+        ("sstvae.modem.beacon", "_crc16"): bc.crc16,
+        ("sstvae.modem.beacon", "encode_chips"): bc.encode_chips,
+        ("sstvae.modem.beacon", "chip_stream"): bc.chip_stream,
+        ("sstvae.modem.beacon", "find_sync"): bc.find_sync,
+        ("sstvae.modem.beacon", "decode"): beacon_decode,
         ("sstvae.modem.framing", "interleave"):
             lambda latents, mode: fr.interleave(latents, mode.index),
         ("sstvae.modem.framing", "deinterleave"):
