@@ -111,7 +111,12 @@ endif()
 if(SSTVAE_BUILD_QTAUDIO STREQUAL "OFF")
   set(_want_qtaudio OFF)
 else()
-  find_package(Qt6 6.5 COMPONENTS Core Multimedia QUIET)
+  # 6.2 (the first LTS) rather than something newer: QAudioSource,
+  # QAudioSink, QAudioDevice and QMediaDevices have all been there
+  # since 6.0, so a higher floor buys nothing and costs
+  # distributions -- ubuntu-latest ships 6.4.2, which a 6.5 floor
+  # rejected outright.
+  find_package(Qt6 6.2 COMPONENTS Core Multimedia QUIET)
   if(Qt6_FOUND)
     set(_want_qtaudio ON)
   elseif(SSTVAE_BUILD_QTAUDIO STREQUAL "ON")
