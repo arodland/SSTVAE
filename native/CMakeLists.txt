@@ -60,6 +60,7 @@ add_library(sstvae_core STATIC
   core/framing/interleaver_table.cpp
   core/images/images.cpp
   core/modem/modem.cpp
+  core/rx/ringbuffer.cpp
   core/settings/settings.cpp
   core/ofdm/ofdm.cpp
   core/overlay/model.cpp
