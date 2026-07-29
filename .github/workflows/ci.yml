@@ -242,3 +242,31 @@ jobs:
             -DSSTVAE_BUILD_PYMODULE=OFF -DSSTVAE_BUILD_CODEC=OFF
       - run: cmake --build native/build-tsan --target test_rx_engine test_tx_engine test_ringbuffer
       - run: ctest --test-dir native/build-tsan --output-on-failure -R 'rx_engine|tx_engine|ringbuffer'
+
+  qtaudio:
+    name: Qt audio builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      # SSTVAE_BUILD_QTAUDIO defaults to AUTO, which *skips* the audio
+      # layer when Qt is absent -- so without this job every other build
+      # here would be silently not compiling core/audio/qt/ at all. ON
+      # rather than AUTO for the same reason: a job whose purpose is to
+      # compile that file must fail if it did not.
+      - name: Install Qt Multimedia
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-multimedia-dev qt6-base-dev
+      - name: Configure
+        run: |
+          cmake -S native -B native/build-qt -G Ninja \
+            -DSSTVAE_BUILD_QTAUDIO=ON -DSSTVAE_BUILD_CODEC=OFF \
+            -DSSTVAE_BUILD_PYMODULE=OFF
+      - run: cmake --build native/build-qt
+      # Runs headless with no audio server, so it lists nothing and
+      # exits 0. That is still worth doing: it proves the library links
+      # and that QMediaDevices can be reached without a display.
+      # Anything past enumeration needs a device -- see the loopback
+      # recipe in apps/sstvae_audio_check.cpp, which is a manual test.
+      - run: ./native/build-qt/sstvae-audio-check
