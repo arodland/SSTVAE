@@ -25,6 +25,13 @@ namespace sstvae::images {
 inline constexpr int MIN_W = 320;
 inline constexpr int MIN_H = 240;
 
+// Scale to an arbitrary size, ignoring aspect ratio -- the operation
+// `Image.resize((w, h))` performs. Used for the receiver's optional
+// "save at 320x240" and as the first half of `fit`.
+//
+// Already-correct input is returned untouched.
+Picture resize(const Picture& img, int width, int height);
+
 // Any picture -> exactly IMG_W x IMG_H RGB, by scaling to cover the
 // target and centre-cropping. Deterministic and aspect-preserving.
 //

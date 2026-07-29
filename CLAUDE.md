@@ -203,8 +203,10 @@ either, so overlays stay renderable from the command line.
 **Phases 0–1: the whole modem is ported** — `golay`, `ofdm`, `dsp`,
 `framing`, `beacon`, `sync`, `modem` — and the Python suite passes
 against it, including `-m slow`. Both interop directions work. Phase 2
-(the headless app core) is **in progress**: the codec is done, audio,
-rig and the rx/tx engines are not. **Python remains the normative
+(the headless app core) is **in progress**: the codec, images, WAV I/O,
+settings, the overlay document, the ring buffer and the **rx decode
+loop** are done; audio devices, rig control and the tx engine are not.
+**Python remains the normative
 definition of the on-air format** — when the two disagree, Python is
 right until proven
 otherwise, because that is the only thing that keeps "compatible

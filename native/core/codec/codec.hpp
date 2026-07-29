@@ -25,6 +25,7 @@
 
 #include "config.hpp"
 #include "images/types.hpp"
+#include "latents/latents.hpp"
 
 namespace sstvae::codec {
 
@@ -33,8 +34,11 @@ using images::IMG_H;
 using images::IMG_W;
 using images::Picture;
 
-inline constexpr int N_LATENTS =
-    config::LATENT_CHANNELS * config::LATENT_H * config::LATENT_W;
+// Both live in core/latents/ so the rx engine can pad a short mode's
+// latents without linking onnxruntime; re-exported here because
+// `codec::pad_to_full` is how every caller spells it.
+using latents::N_LATENTS;
+using latents::pad_to_full;
 
 // Which artifact to load for a part ("encoder" / "decoder").
 //
@@ -74,11 +78,6 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
-
-// Extend a mode A/B latent (or weight) vector to mode C's length.
-// The modes are nested, so a shorter one is a full-length vector whose
-// tail never arrived -- which is exactly what weight 0 means.
-std::vector<double> pad_to_full(const std::vector<double>& vec, double fill = 0.0);
 
 }  // namespace sstvae::codec
 

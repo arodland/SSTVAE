@@ -16,6 +16,22 @@
 
 namespace sstvae::images {
 
+Picture resize(const Picture& img, int width, int height) {
+    if (img.width == width && img.height == height) return img;
+    if (img.width <= 0 || img.height <= 0) {
+        throw std::runtime_error("cannot resize an empty picture");
+    }
+    if (width <= 0 || height <= 0) {
+        throw std::runtime_error("resize target must be positive");
+    }
+    Picture out(width, height);
+    if (stbir_resize_uint8_srgb(img.rgb.data(), img.width, img.height, 0, out.rgb.data(),
+                                width, height, 0, STBIR_RGB) == nullptr) {
+        throw std::runtime_error("image resize failed");
+    }
+    return out;
+}
+
 Picture fit(const Picture& img) {
     if (img.width == IMG_W && img.height == IMG_H) return img;
     if (img.width <= 0 || img.height <= 0) {
@@ -29,18 +45,14 @@ Picture fit(const Picture& img) {
     const int sw = std::max(IMG_W, static_cast<int>(std::lround(img.width * scale)));
     const int sh = std::max(IMG_H, static_cast<int>(std::lround(img.height * scale)));
 
-    std::vector<std::uint8_t> scaled(static_cast<std::size_t>(sw) * sh * 3);
-    if (stbir_resize_uint8_srgb(img.rgb.data(), img.width, img.height, 0, scaled.data(),
-                                sw, sh, 0, STBIR_RGB) == nullptr) {
-        throw std::runtime_error("image resize failed");
-    }
+    const Picture scaled = resize(img, sw, sh);
 
     Picture out(IMG_W, IMG_H);
     const int left = (sw - IMG_W) / 2;
     const int top = (sh - IMG_H) / 2;
     for (int y = 0; y < IMG_H; ++y) {
         const std::uint8_t* src =
-            scaled.data() + (static_cast<std::size_t>(y + top) * sw + left) * 3;
+            scaled.rgb.data() + (static_cast<std::size_t>(y + top) * sw + left) * 3;
         std::copy(src, src + static_cast<std::size_t>(IMG_W) * 3,
                   out.rgb.begin() + static_cast<std::size_t>(y) * IMG_W * 3);
     }

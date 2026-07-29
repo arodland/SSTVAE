@@ -190,10 +190,4 @@ Picture OnnxCodec::decode(const std::vector<double>& latents,
     return p;
 }
 
-std::vector<double> pad_to_full(const std::vector<double>& vec, double fill) {
-    std::vector<double> out(static_cast<std::size_t>(N_LATENTS), fill);
-    std::copy(vec.begin(), vec.begin() + std::min(vec.size(), out.size()), out.begin());
-    return out;
-}
-
 }  // namespace sstvae::codec

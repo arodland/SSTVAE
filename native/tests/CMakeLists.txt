@@ -25,3 +25,11 @@ add_executable(test_ringbuffer test_ringbuffer.cpp)
 target_link_libraries(test_ringbuffer PRIVATE sstvae_core)
 target_include_directories(test_ringbuffer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME ringbuffer COMMAND test_ringbuffer)
+
+# The decode loop's decisions, with a stub decoder in place of the
+# codec -- so the state machine is covered in every build, including
+# --no-codec.
+add_executable(test_rx_engine test_rx_engine.cpp)
+target_link_libraries(test_rx_engine PRIVATE sstvae_core)
+target_include_directories(test_rx_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME rx_engine COMMAND test_rx_engine)
