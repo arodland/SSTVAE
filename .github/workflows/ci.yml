@@ -113,8 +113,13 @@ jobs:
         #
         # macos-15, not macos-latest. macos-latest is now macOS 26
         # (Tahoe), whose SDK removed the AGL framework -- and Qt 6.8's
-        # link interface still references it, so every Qt executable
-        # fails with "ld: framework 'AGL' not found" (QTBUG-137687).
+        # link interface still referenced it, so every Qt executable
+        # failed with "ld: framework 'AGL' not found" (QTBUG-137687).
+        # The Qt pin has since moved to 6.11.1, which may have dropped
+        # that reference; the pin stays regardless, because building a
+        # distributed app against an older SDK is what we want and
+        # because unpinning it is a change to make on purpose rather
+        # than a side effect of a version bump.
         # Qt does not use AGL; the flag is vestigial. Pinning the image
         # is the deterministic fix and costs nothing else: building a
         # distributed app against an older SDK is what you want anyway,
@@ -150,15 +155,24 @@ jobs:
       # Qt, pinned like every other external dependency here
       # (onnxruntime, Hamlib). One version across all three platforms,
       # so "which Qt" never becomes a per-platform property the way
-      # Ubuntu's Hamlib 4.5.5 did. 6.8 is an LTS and supports the floor
-      # decision 2 sets: Windows 10, and macOS universal binaries.
+      # Ubuntu's Hamlib 4.5.5 did.
+      #
+      # 6.11.1, moved up from 6.8.1 on 2026-07-29. 6.8 is the LTS and
+      # was the conservative choice, but the packaged app's waterfall
+      # repainted slowly and looked wrong on a desktop where the *same
+      # code* built against that distribution's 6.11.1 was fine -- and
+      # once the missing-plugin and device-pixel-ratio faults were ruled
+      # out, the Qt version was the only difference left. Matching the
+      # version that demonstrably works is worth more than the LTS
+      # label. Windows 10 is still supported (6.12 LTS is announced as
+      # the last release that will be), so decision 2 is unaffected.
       #
       # qtmultimedia is the only extra module: Widgets, Gui and Network
       # are in the base package.
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: "6.8.1"
+          version: "6.11.1"
           modules: qtmultimedia
           cache: true
       # aqt's Qt is not a distro package and brings no system
