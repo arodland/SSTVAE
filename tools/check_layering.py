@@ -67,6 +67,12 @@ def sources() -> list[Path]:
         rel = path.relative_to(NATIVE)
         if rel.parts[0] == "build" or rel.parts[0].startswith("build-"):
             continue
+        # Dot-directories are tooling, not source: `.deps` is where
+        # FetchContent unpacks onnxruntime, and scanning its headers
+        # inflated this tool's reported count from 32 files to 51 while
+        # checking nothing anyone here wrote.
+        if rel.parts[0].startswith("."):
+            continue
         # Vendored code is not ours to lay out. Scanning it inflates the
         # reported count into implying coverage we do not have, and a
         # third-party file that merely *mentions* QtGui would fail a rule

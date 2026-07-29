@@ -30,6 +30,7 @@
 #include "framing/framing.hpp"
 #include "golay/golay.hpp"
 #include "images/images.hpp"
+#include "settings/settings.hpp"
 #include "modem/modem.hpp"
 #include "ofdm/ofdm.hpp"
 #include "sync/sync.hpp"
@@ -525,6 +526,50 @@ PYBIND11_MODULE(sstvae_native, m) {
         sstvae::ofdm::mod_matrix(), sstvae::config::NSYM, sstvae::config::NC);
     ofdm.attr("DEMOD_MATRIX") = matrix_to_numpy(
         sstvae::ofdm::demod_matrix(), sstvae::config::NC, sstvae::config::M);
+
+    // --- settings ------------------------------------------------------
+    //
+    // Exposed as JSON text in and out rather than as a bound struct.
+    // What matters for the tests is that a config file written by
+    // either implementation is understood by the other, and that is a
+    // statement about *the file*, not about field accessors -- binding
+    // 30 fields would be more code testing less.
+    py::module_ settings = m.def_submodule("settings");
+    settings.def("round_trip",
+                 [](const std::string& text) {
+                     std::vector<sstvae::settings::Note> notes;
+                     const auto cfg = sstvae::settings::from_json(text, &notes);
+                     py::list out;
+                     for (const auto& n : notes) out.append(py::make_tuple(n.key, n.problem));
+                     return py::make_tuple(sstvae::settings::to_json(cfg), out);
+                 },
+                 py::arg("text"),
+                 "Parse config JSON and re-serialize it; returns (json, notes).");
+    settings.def("defaults_json",
+                 [] { return sstvae::settings::to_json(sstvae::settings::Config{}); });
+    settings.def("format_filename",
+                 [](const std::string& tmpl, const std::string& callsign,
+                    std::optional<double> freq_hz, const std::string& mode,
+                    std::optional<std::int64_t> when) {
+                     sstvae::settings::FilenameFields f;
+                     f.callsign = callsign;
+                     f.freq_hz = freq_hz;
+                     f.mode = mode;
+                     f.when = when;
+                     return sstvae::settings::format_filename(tmpl, f);
+                 },
+                 py::arg("template"), py::arg("callsign") = std::string(),
+                 py::arg("freq_hz") = std::nullopt, py::arg("mode") = std::string(),
+                 py::arg("when") = std::nullopt);
+    settings.def("config_path", [] { return sstvae::settings::config_path().string(); });
+    settings.def("save_and_load",
+                 [](const std::string& text, const std::string& path) {
+                     std::vector<sstvae::settings::Note> notes;
+                     const auto cfg = sstvae::settings::from_json(text, &notes);
+                     sstvae::settings::save(cfg, path);
+                     return sstvae::settings::load(path).config.callsign;
+                 },
+                 py::arg("text"), py::arg("path"));
 
     // --- images --------------------------------------------------------
     //

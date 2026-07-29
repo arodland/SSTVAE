@@ -108,7 +108,13 @@ jobs:
       # sys.path, so `import sstvae` fails without this. Running
       # `python -m pytest` locally hides that, which is exactly how it
       # reached CI.
-      - run: pip install -e ".[cli]" pytest pybind11
+      # platformdirs is a `gui`-extra dependency, but it is the
+      # *reference* for where the config lives, and the native settings
+      # test compares against it. Without it that test skips -- which it
+      # did on macOS but not Windows, so the check silently covered two
+      # platforms out of three. Installed explicitly rather than pulling
+      # in the whole gui extra, which would mean 648 MB of PySide6.
+      - run: pip install -e ".[cli]" pytest pybind11 platformdirs
       - uses: lukka/get-cmake@latest
       # onnxruntime is a ~9-80 MB pinned download per platform. Cached
       # on the URL's hash so a version bump busts it automatically.
