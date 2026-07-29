@@ -183,6 +183,14 @@ if(SSTVAE_BUILD_RIG)
   set_target_properties(sstvae_rig PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_include_directories(sstvae_rig PUBLIC core)
   target_link_libraries(sstvae_rig PUBLIC sstvae_core PRIVATE sstvae::hamlib)
+  if(MSVC)
+    # hamlib/rig.h includes <pthread.h> unconditionally and MSVC has
+    # none. See the header for why a shim is safe here and what keeps it
+    # so. SYSTEM, so it never shadows a real pthread.h on any other
+    # toolchain and produces no warnings of its own.
+    target_include_directories(sstvae_rig SYSTEM PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/third_party/msvc-pthread)
+  endif()
 endif()
 
 # --- tests ------------------------------------------------------------------

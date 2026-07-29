@@ -107,8 +107,27 @@ public:
     }
 
     std::string description() const override {
-        if (rig_ != nullptr && rig_->caps != nullptr) {
-            return std::string(rig_->caps->mfg_name) + " " + rig_->caps->model_name;
+        // Via rig_get_caps_cptr rather than rig_->caps->..., and that is
+        // deliberate: **nothing here may dereference a RIG\***.
+        //
+        // `struct rig_state`, which `struct RIG` embeds, contains
+        // pthread_mutex_t members. MSVC has no pthread.h, so Windows
+        // builds compile against a shim
+        // (native/third_party/msvc-pthread/) whose type sizes cannot be
+        // guaranteed to match the winpthreads the bundled MinGW-built
+        // DLL was compiled with. Reading through a RIG* would then find
+        // every field after the first mutex at the wrong offset --
+        // silently. Taking the model number instead means no struct
+        // layout is relied on at all. `struct rig_caps`, the one thing
+        // list_models() does read through, has no pthread members.
+        const char* mfg =
+            rig_get_caps_cptr(static_cast<rig_model_t>(config_.model),
+                              RIG_CAPS_MFG_NAME_CPTR);
+        const char* model =
+            rig_get_caps_cptr(static_cast<rig_model_t>(config_.model),
+                              RIG_CAPS_MODEL_NAME_CPTR);
+        if (mfg != nullptr && model != nullptr) {
+            return std::string(mfg) + " " + model;
         }
         return "model " + std::to_string(config_.model);
     }
@@ -172,6 +191,17 @@ std::unique_ptr<RigBackend> make_hamlib_backend(const HamlibConfig& config) {
     return std::make_unique<HamlibBackend>(config);
 }
 
-std::string hamlib_version() { return hamlib_version2 != nullptr ? hamlib_version2 : ""; }
+std::string hamlib_version() {
+    // rig_version(), not the `hamlib_version2` variable, and that is a
+    // Windows requirement rather than taste. Hamlib exports the version
+    // string as *data*, and MSVC cannot import a data symbol from a DLL
+    // without __declspec(dllimport) -- which Hamlib's headers only emit
+    // when the consumer defines `DLL_EXPORT`, a name far too generic to
+    // want in a translation unit. Function symbols have no such problem:
+    // the import library thunks them. This linked on Linux and macOS and
+    // failed only on Windows, with exactly one unresolved symbol.
+    const char* v = rig_version();
+    return v != nullptr ? v : "";
+}
 
 }  // namespace sstvae::rig

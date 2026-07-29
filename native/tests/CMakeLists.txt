@@ -74,8 +74,14 @@ if(TARGET sstvae_rig)
   # search path, so the test has to be able to find it at run time.
   if(SSTVAE_HAMLIB_RUNTIME_DIR)
     if(WIN32)
-      set_tests_properties(rig_hamlib PROPERTIES
-        ENVIRONMENT "PATH=${SSTVAE_HAMLIB_RUNTIME_DIR};$ENV{PATH}")
+      # ENVIRONMENT_MODIFICATION, not ENVIRONMENT: a Windows PATH is
+      # semicolon-separated and CMake treats a semicolon inside a
+      # property value as a *list* separator, so "PATH=<dir>;<rest>"
+      # silently becomes two entries and the inherited PATH is lost.
+      # path_list_prepend knows the platform's separator and does the
+      # right thing without any quoting games.
+      set_tests_properties(rig_hamlib PROPERTIES ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${SSTVAE_HAMLIB_RUNTIME_DIR}")
     else()
       set_property(TARGET test_rig_hamlib APPEND PROPERTY
         BUILD_RPATH "${SSTVAE_HAMLIB_RUNTIME_DIR}")

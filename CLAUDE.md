@@ -417,7 +417,30 @@ the MinGW DLL). **Dynamically linked** because Hamlib is LGPL-2.1+, the
 same reasoning as Qt. `-DSSTVAE_HAMLIB_SYSTEM=ON` for distro packagers,
 who then own the >= 4.6 requirement.
 
-Two traps in that build, both of which cost time: the tarball's files
+**On Windows, nothing may dereference a `RIG*`.** `hamlib/rig.h`
+includes `<pthread.h>` unconditionally — upstream's own comment says
+"For MSVC install the NuGet pthread package" — and MSVC has none, so
+`native/third_party/msvc-pthread/` supplies the two types
+(`pthread_t`, `pthread_mutex_t`) that `struct rig_state` needs. Those
+sizes are deliberately **not** load-bearing: if they disagreed with the
+winpthreads the bundled MinGW-built DLL carries, every field after the
+first mutex would sit at the wrong offset, silently. So
+`description()` goes through `rig_get_caps_cptr(model, ...)`, which
+takes a model number rather than a pointer, and the only struct read
+through is `struct rig_caps` — which has no pthread members. The result
+is that no struct layout is relied on at all, which is what makes the
+shim safe rather than a gamble.
+
+**And never link a Hamlib *data* symbol on Windows.** `hamlib_version2`
+is an exported variable, and MSVC cannot import data from a DLL without
+`__declspec(dllimport)`, which Hamlib's headers emit only when the
+consumer defines `DLL_EXPORT` — a name far too generic to want in a
+translation unit. Functions have no such problem, because the import
+library thunks them; that is why exactly one symbol failed to link on
+Windows while Linux and macOS were clean. `rig_version()` is the
+function form and is what `hamlib_version()` calls.
+
+Two traps in the source build, both of which cost time: the tarball's files
 share one mtime, so `make` re-runs `aclocal` and fails without the exact
 automake the release was rolled with (Hamlib has no
 `AM_MAINTAINER_MODE`) — the generated files are re-stamped in dependency

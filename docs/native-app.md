@@ -1041,8 +1041,17 @@ link would be easier to ship.
 nothing, for distro packagers. That configuration is not what CI checks,
 so it is on the packager to confirm their Hamlib is >= 4.6.
 
-Two things the build has to work around, both recorded because they cost
-time: the release tarball's files all carry the same mtime, so `make`
+Windows adds one more constraint, and it shapes the code rather than the
+build: `hamlib/rig.h` includes `<pthread.h>` unconditionally (upstream
+suggests the NuGet pthread package), MSVC has none, and the types it
+wants sit inside `struct rig_state`. A shim supplies them, but its sizes
+cannot be guaranteed to match the winpthreads inside the MinGW-built
+DLL — so `core/rig/hamlib.cpp` never dereferences a `RIG*`, taking the
+manufacturer and model from `rig_get_caps_cptr()` instead. With no
+struct layout relied upon, a mismatch cannot corrupt anything.
+
+Two things the source build has to work around, both recorded because
+they cost time: the release tarball's files all carry the same mtime, so `make`
 cannot tell `configure` is already newer than `configure.ac` and tries
 to re-run `aclocal` — which fails without the exact automake the release
 was rolled with. Hamlib has no `AM_MAINTAINER_MODE`, so the generated
