@@ -40,6 +40,7 @@ void usage() {
                  "  --out DIR    where to write the PNGs (default: .)\n"
                  "  --size WxH   window size (default: the window's own)\n"
                  "  --tab N      only this settings tab; default is all\n"
+                 "  --transmit   also shoot the transmit panel\n"
                  "\n"
                  "Writes settings-<n>-<name>.png, one per tab.\n");
 }
@@ -66,6 +67,7 @@ int main(int argc, char** argv) {
     int width = 0;
     int height = 0;
     int only_tab = -1;
+    bool transmit = false;
 
     const QStringList args = QCoreApplication::arguments();
     for (int i = 1; i < args.size(); ++i) {
@@ -82,6 +84,8 @@ int main(int argc, char** argv) {
             height = parts[1].toInt();
         } else if (arg == QLatin1String("--tab") && i + 1 < args.size()) {
             only_tab = args[++i].toInt();
+        } else if (arg == QLatin1String("--transmit")) {
+            transmit = true;
         } else {
             usage();
             return 2;
@@ -99,9 +103,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // The transmit panel, which needs an AppState but touches neither
-    // the network nor the radio until Send is pressed.
-    {
+    // Opt-in, because unlike the settings dialog this one needs an
+    // AppState -- which begins resolving the checkpoint as soon as it is
+    // constructed, and on a cold cache that means an HTTP download. A
+    // smoke test that proves Qt links should not also depend on the
+    // network being up.
+    if (transmit) {
         sstvae::gui::AppState state;
         sstvae::gui::TransmitPanel panel(&state);
         panel.resize(width > 0 ? width : 1000, height > 0 ? height : 700);

@@ -792,8 +792,11 @@ nearly-finished one is not.
 
 - **Windows:** `windeployqt` → WiX or NSIS → **Azure Trusted Signing**.
   The EV-token era is over for CI purposes; SignPath is the alternative.
-- **macOS:** universal2 via `lipo` from `macos-14` + `macos-13` builds,
-  Developer ID cert from a base64 secret, hardened runtime. **Sign
+- **macOS:** two slices — arm64 native and x86_64 cross-compiled on the
+  same Apple-silicon runner, both working since 2026-07-29 (see
+  "Platform floor"). Developer ID cert from a base64 secret, hardened
+  runtime. Each slice is signed and notarized separately, since they are
+  separate downloads rather than one universal binary. **Sign
   inside-out manually** — `codesign --deep` is deprecated and will bite
   you with Qt frameworks — then `notarytool submit --wait` and
   `stapler`. Prefer a statically linked onnxruntime to avoid signing an
@@ -893,7 +896,7 @@ already needs the CI matrix stood up.
 | **Audio device quirks** | PortAudio continuity retires most of it. Port `tests/test_audio.py`'s fake-PortAudio harness early — it caught the resample-direction bug without hardware and will catch its C++ twin. |
 | **macOS notarization archaeology** | Static-link onnxruntime; sign inside-out; do a throwaway notarization spike in Phase 0 rather than discovering the problems in Phase 4. |
 | **Two GUIs to maintain forever** | Bounded by decision 1 as amended: the Python GUI is frozen at parity (bug fixes only) and deleted at packaging. Freezing is what caps the cost — the window between parity and packaging is real, but during it only one GUI is being *developed*. The residual risk moves to a Phase 4 that stalls, so the deletion is part of the packaging change rather than a follow-up to it. |
-| ~~**GHA retires the Intel macOS runner mid-project**~~ — **happened, 2026-07-28** | Already gone by the time CI was first stood up: `macos-13` no longer schedules, and a job requesting it **queues indefinitely rather than failing**, which is worse than an error because nothing tells you why. Removed from the matrix. Cross-compiling the `x86_64` slice on an Apple-silicon runner is therefore mandatory, not a fallback — see "Platform floor". Decision 2 is unchanged: Intel Macs are still supported, and the gap is in CI coverage, not in intent. |
+| ~~**GHA retires the Intel macOS runner mid-project**~~ — **happened, 2026-07-28** | Already gone by the time CI was first stood up: `macos-13` no longer schedules, and a job requesting it **queues indefinitely rather than failing**, which is worse than an error because nothing tells you why. Removed from the matrix. Cross-compiling the `x86_64` slice on an Apple-silicon runner is therefore mandatory, not a fallback — **done and passing since 2026-07-29**, and tested on the artifact through Rosetta rather than shipped blind. Decision 2 is met rather than merely intended; the residual gap is that `pytest --native` cannot run against a cross-built extension module, so the x86_64 slice is not parity-checked against Python. |
 | **First run fails offline** | Decision 5 trades installer size for a network dependency at first launch. Phase 2 owes a clear message and a manual model-import path; a field laptop with no connectivity is an ordinary case, not an edge one. |
 | **Bundled Hamlib goes stale** | CI bump, as agreed. Note that bundling means a Hamlib CVE or a new-radio backend becomes our release, not the distro's. Pinned in `native/cmake/hamlib.cmake` (4.7.2), sha256 per artifact, built from the release tarball on Linux/macOS and taken from upstream's prebuilt zip on Windows. |
 | **A Hamlib backend segfaults and takes the app with it** | Accepted cost of in-process linking. Mitigated by Hamlib's exposure across the ham software ecosystem, and by model 2 as an out for users who want isolation back. |
@@ -953,20 +956,38 @@ already needs the CI matrix stood up.
   **verify the exact floor for the chosen Qt against Windows 10 in
   Phase 0**, before the CI matrix is fixed. Qt 6.8 LTS is the
   conservative pick if the newer releases have moved on.
-- **macOS ships universal2**, built by `lipo`-ing an `x86_64` and an
-  `arm64` slice. The deployment target is set by the oldest Intel Mac
-  worth supporting, and it also constrains the Qt version — pick both
-  together in Phase 0.
-- **The Intel-macOS runner is gone (confirmed 2026-07-28).** This was
-  written as a thing to watch for; it had already happened. `macos-13`
-  no longer schedules — and note the failure mode, because it costs an
-  afternoon if you meet it cold: the job **sits in the queue forever
-  instead of erroring**, so the run neither passes nor fails.
-  Consequently there is no way to build or test the `x86_64` slice
-  natively. Cross-compiling it on an Apple-silicon runner is now the
-  only route, which needs a universal Qt install and a tested `lipo`
-  step. **Prove that step early**, since Decision 2 commits to Intel
-  Macs and nothing in CI currently exercises them at all.
+- **macOS ships two separate slices, not a universal2 binary** —
+  changed 2026-07-29, and the reason is a dependency rather than a
+  preference. Autotools cannot produce a fat library, so Hamlib has to
+  be built one architecture at a time; `hamlib.cmake` refuses a
+  multi-architecture `CMAKE_OSX_ARCHITECTURES` outright rather than
+  silently emitting a thin library inside something that looks
+  universal. `lipo`-ing the results afterwards remains possible and is
+  the obvious next step if one download is worth more than two.
+- **The Intel-macOS runner is gone (confirmed 2026-07-28), and the
+  x86_64 slice is cross-compiled — working since 2026-07-29.** Note the
+  failure mode of the retirement, because it costs an afternoon cold:
+  `macos-13` **sits in the queue forever instead of erroring**, so the
+  run neither passes nor fails.
+
+  What makes the cross build honest rather than hopeful is that it is
+  *tested*: x86_64 binaries run on Apple silicon through Rosetta, so
+  ctest and the packaged-app check both execute on the artifact that
+  ships. Rosetta is installed by the job; it is not on the image.
+  `pytest --native` is the one thing skipped, because the pybind11
+  module would be built for the target while the runner's Python is
+  native — so the x86_64 slice's *parity against Python* is genuinely
+  uncovered, which is the residual gap to state rather than paper over.
+
+  Three details each cost a round or would have:
+  **onnxruntime has no macOS x86_64 build after 1.22** — see
+  `SSTVAE_ONNXRUNTIME_VERSION_OSX_X86_64`, the one accepted departure
+  from "the same runtime version as Python". **The version is per
+  platform, so anything that reconstructs the library filename must use
+  the resolved version**, not the pin. And **`CMAKE_OSX_ARCHITECTURES`
+  means nothing to autotools**: without `--host` and `-arch` in
+  `CFLAGS`, Hamlib builds for the runner and the link fails with an
+  architecture mismatch a long way from its cause.
 - **Linux builds on the oldest supported GHA Ubuntu image** for the
   glibc floor, for the same conservative-user reason.
 - No Windows-on-ARM target.

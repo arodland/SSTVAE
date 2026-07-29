@@ -95,15 +95,31 @@ void Waterfall::clear() {
 }
 
 void Waterfall::ensure_image() {
-    const int w = std::max(1, width());
-    const int h = std::max(1, height());
-    if (image_.width() == w && image_.height() == h) return;
+    // Device pixels, not logical ones.
+    //
+    // The rule this widget is built on is that the backing image is
+    // exactly the size it is drawn at, so the painter never rescales
+    // it -- and on a HiDPI screen "the size it is drawn at" is the
+    // widget's size times the device pixel ratio. Sized in logical
+    // pixels instead, the image is half resolution and Qt scales it up
+    // on every repaint: blurry, slower, and the one-row scroll lands on
+    // a half-pixel boundary so the rows shimmer as they move. That is
+    // the same class of fault as the downscaling this widget was
+    // written to avoid, arriving by a different route.
+    const qreal dpr = devicePixelRatioF();
+    const int w = std::max(1, static_cast<int>(std::lround(width() * dpr)));
+    const int h = std::max(1, static_cast<int>(std::lround(height() * dpr)));
+    if (image_.width() == w && image_.height() == h &&
+        qFuzzyCompare(image_.devicePixelRatio(), dpr)) {
+        return;
+    }
 
     // Carry the history across a resize rather than blanking it. Rows
     // are already one pixel each, so they are kept as-is; columns are
     // point-resampled, which is good enough for pixels that are only
     // scrolling off anyway.
     QImage grown(w, h, QImage::Format_RGB888);
+    grown.setDevicePixelRatio(dpr);
     grown.fill(Qt::black);
     if (!image_.isNull()) {
         const int rows = std::min(h, image_.height());
@@ -166,8 +182,10 @@ void Waterfall::paintEvent(QPaintEvent* event) {
     Q_UNUSED(event);
     ensure_image();
     QPainter painter(this);
-    // 1:1 by construction, so this is a blit and not a rescale.
-    painter.drawImage(0, 0, image_);
+    // 1:1 by construction, so this is a blit and not a rescale: the
+    // image carries the same device pixel ratio as the painter, so
+    // drawing it at the origin puts one image pixel on one device pixel.
+    painter.drawImage(QPointF(0, 0), image_);
     draw_band_markers(painter);
     draw_level_meter(painter);
 }

@@ -3,7 +3,6 @@ __pycache__/
 *.pyc
 *.egg-info/
 .venv/
-uv.lock
 
 # native app (C++/Qt) build products
 #
@@ -40,3 +39,4 @@ runs/
 /*.png
 /*.jpg
 /*.csv
+dist/
