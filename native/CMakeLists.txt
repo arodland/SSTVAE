@@ -62,6 +62,7 @@ add_library(sstvae_core STATIC
   core/modem/modem.cpp
   core/settings/settings.cpp
   core/ofdm/ofdm.cpp
+  core/overlay/model.cpp
   core/sync/sync.cpp
 )
 target_include_directories(sstvae_core PUBLIC core third_party/pocketfft)

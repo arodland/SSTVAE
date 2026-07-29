@@ -30,6 +30,7 @@
 #include "framing/framing.hpp"
 #include "golay/golay.hpp"
 #include "images/images.hpp"
+#include "overlay/model.hpp"
 #include "settings/settings.hpp"
 #include "modem/modem.hpp"
 #include "ofdm/ofdm.hpp"
@@ -570,6 +571,25 @@ PYBIND11_MODULE(sstvae_native, m) {
                      return sstvae::settings::load(path).config.callsign;
                  },
                  py::arg("text"), py::arg("path"));
+
+    // --- overlay -------------------------------------------------------
+    //
+    // The document only; rendering lands in Phase 3 with the editor, so
+    // that `item_bbox` has one implementation shared between the drawn
+    // picture and the editor's selection handles rather than two.
+    py::module_ overlay = m.def_submodule("overlay");
+    overlay.def("round_trip",
+                [](const std::string& text) {
+                    std::vector<sstvae::overlay::Note> notes;
+                    const auto doc = sstvae::overlay::from_json(text, &notes);
+                    py::list out;
+                    for (const auto& n : notes) out.append(py::make_tuple(n.where, n.problem));
+                    return py::make_tuple(sstvae::overlay::to_json(doc), out);
+                },
+                py::arg("text"));
+    overlay.attr("CANVAS_W") = sstvae::overlay::CANVAS_W;
+    overlay.attr("CANVAS_H") = sstvae::overlay::CANVAS_H;
+    overlay.attr("DOC_VERSION") = sstvae::overlay::DOC_VERSION;
 
     // --- images --------------------------------------------------------
     //
