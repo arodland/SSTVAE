@@ -248,6 +248,34 @@ A trap in the ORT C++ API, since it crashes rather than warns:
 `GetTensorTypeAndShapeInfo()` is an unowned view into it. Binding only
 the view leaves it dangling.
 
+**Above the modem, identical behaviour is not required** (decided
+2026-07-27). The on-air format is normative and stays exact; the app
+around it may use native idioms and improve on the reference. Two
+places do: `native/core/rx/engine.cpp` takes its decoder as a
+`std::function` seam where Python imports `codec.reconstruct` directly,
+and `SharedState` exposes only `get`/`update` rather than Python's
+"here is a mutex, remember to take it".
+
+That seam is load-bearing, not cosmetic. It keeps the decode loop in
+`sstvae_core` rather than the codec library, so **the whole receive
+state machine builds and is tested with `--no-codec`** — no
+onnxruntime, no download — and `native/tests/test_rx_engine.cpp` drives
+it with a stub decoder. `pad_to_full` moved to `core/latents/` for the
+same reason (it is a memcpy, not an inference); `codec.hpp` re-exports
+it, so `codec::pad_to_full` still resolves. The loop's decisions are
+where the duplicate-picture and ended-early bugs live and they have no
+oracle in the golden vectors, so this is the one part of the port whose
+tests had to be written rather than inherited.
+
+**Do not assert that noise decodes to nothing.** A preamble-shaped peak
+clears the detection threshold every few seed-minutes and the
+Golay-coded header behind it occasionally decodes to a plausible mode —
+measured at 0 spurious locks in 4 vetted peaks over 12 seeds for
+*each* implementation, but the first seed picked for the C++ test
+happened to be one that locked. The invariant that does hold, and what
+`test_rx_engine.cpp` checks instead, is that noise never *finishes* a
+reception: a spurious lock reports a few frames and stops advancing.
+
 **Format constants are frozen data, not computations.** The pilot
 quadrants (`config.PILOT_QUADRANTS`) and the interleaver permutations
 (`sstvae/modem/interleaver_perms.npy`) were originally drawn from
