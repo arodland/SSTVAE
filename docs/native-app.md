@@ -883,7 +883,7 @@ already needs the CI matrix stood up.
 | **Two GUIs to maintain forever** | Resolved by decision 1: `sstvae/gui/` is deleted at parity, in the same change. The residual risk is a Phase 3 that stalls just short of parity and leaves both alive indefinitely. |
 | ~~**GHA retires the Intel macOS runner mid-project**~~ — **happened, 2026-07-28** | Already gone by the time CI was first stood up: `macos-13` no longer schedules, and a job requesting it **queues indefinitely rather than failing**, which is worse than an error because nothing tells you why. Removed from the matrix. Cross-compiling the `x86_64` slice on an Apple-silicon runner is therefore mandatory, not a fallback — see "Platform floor". Decision 2 is unchanged: Intel Macs are still supported, and the gap is in CI coverage, not in intent. |
 | **First run fails offline** | Decision 5 trades installer size for a network dependency at first launch. Phase 2 owes a clear message and a manual model-import path; a field laptop with no connectivity is an ordinary case, not an edge one. |
-| **Bundled Hamlib goes stale** | CI bump, as agreed. Note that bundling means a Hamlib CVE or a new-radio backend becomes our release, not the distro's. |
+| **Bundled Hamlib goes stale** | CI bump, as agreed. Note that bundling means a Hamlib CVE or a new-radio backend becomes our release, not the distro's. Pinned in `native/cmake/hamlib.cmake` (4.7.2), sha256 per artifact, built from the release tarball on Linux/macOS and taken from upstream's prebuilt zip on Windows. |
 | **A Hamlib backend segfaults and takes the app with it** | Accepted cost of in-process linking. Mitigated by Hamlib's exposure across the ham software ecosystem, and by model 2 as an out for users who want isolation back. |
 | **`config.py` drift** | Generated header, CI-enforced. |
 
@@ -1013,6 +1013,44 @@ contain single spaces and at least one Model fills its column exactly"* —
 along with the entire class of bug it warns about. Model metadata comes
 from a struct instead of from text, and model 2 appears in the list for
 free.
+
+#### Pinned, not taken from the system
+
+Implemented 2026-07-29, and the pin is load-bearing rather than tidy.
+Hamlib's public API moves between minor releases: Ubuntu 24.04 ships
+4.5.5, where a configuration token is a `token_t`, and 4.6 renamed it
+`hamlib_token_t`. `core/rig/hamlib.cpp` therefore compiled against a
+developer's 4.7 and failed on the CI runner. Papering over that with
+version `#if`s would mean the app's rig support silently differs by
+platform — and for CAT control, "which radios work" differing by
+platform is the whole ballgame.
+
+So one version is pinned with a sha256 per artifact, exactly as
+onnxruntime is: built from the release tarball on Linux and macOS
+(upstream publishes no binaries for them), and taken from upstream's
+prebuilt zip on Windows, which ships an MSVC import library beside the
+MinGW-built DLL so linking from MSVC is supported rather than a trick.
+
+**Dynamically linked**, following decision 6's reasoning for Qt: Hamlib
+is LGPL-2.1+, so a shared library the user can replace avoids the
+relinking obligation a static link would carry. That is why the source
+build passes `--enable-shared --disable-static` even though a static
+link would be easier to ship.
+
+`-DSSTVAE_HAMLIB_SYSTEM=ON` uses pkg-config instead and downloads
+nothing, for distro packagers. That configuration is not what CI checks,
+so it is on the packager to confirm their Hamlib is >= 4.6.
+
+Two things the build has to work around, both recorded because they cost
+time: the release tarball's files all carry the same mtime, so `make`
+cannot tell `configure` is already newer than `configure.ac` and tries
+to re-run `aclocal` — which fails without the exact automake the release
+was rolled with. Hamlib has no `AM_MAINTAINER_MODE`, so the generated
+files are re-stamped in dependency order first. And the install tree
+goes under `FETCHCONTENT_BASE_DIR`, not the build directory, so that
+whatever caches the former caches the *built* Hamlib: cold 26 s on a
+24-core machine, warm 0.26 s, and CI throws its build tree away every
+run.
 
 #### What is genuinely given up
 

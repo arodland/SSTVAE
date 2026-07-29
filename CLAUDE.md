@@ -405,6 +405,27 @@ handle. Joining would inherit exactly the timeout being escaped.
 a backend that accepts and never answers, so the part that can be wrong
 is covered on a machine with no Hamlib.
 
+**Hamlib is pinned and bundled, not taken from the system**
+(`native/cmake/hamlib.cmake`, 4.7.2, sha256 per artifact — same shape as
+the onnxruntime pin). Its public API moves between minor releases:
+Ubuntu 24.04 ships 4.5.5 where a config token is `token_t`, renamed
+`hamlib_token_t` in 4.6, so the backend built locally and failed on CI.
+Version `#if`s would have made "which radios work" a per-platform
+property. Built from the release tarball on Linux/macOS, taken from
+upstream's prebuilt zip on Windows (it ships an MSVC import lib beside
+the MinGW DLL). **Dynamically linked** because Hamlib is LGPL-2.1+, the
+same reasoning as Qt. `-DSSTVAE_HAMLIB_SYSTEM=ON` for distro packagers,
+who then own the >= 4.6 requirement.
+
+Two traps in that build, both of which cost time: the tarball's files
+share one mtime, so `make` re-runs `aclocal` and fails without the exact
+automake the release was rolled with (Hamlib has no
+`AM_MAINTAINER_MODE`) — the generated files are re-stamped in dependency
+order first. And the install tree lives under `FETCHCONTENT_BASE_DIR`
+rather than the build directory, so whatever caches that caches the
+*built* library: 26 s cold, 0.26 s warm, against a CI that discards its
+build tree every run.
+
 **A CMake `if()` on an unset variable is silently false.** `_want_rig`
 was defined *after* `add_subdirectory(tests)`, so the Hamlib test was
 not built and `ctest` passed 9/9 while running 8 — green, and testing

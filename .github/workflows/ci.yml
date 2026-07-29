@@ -132,11 +132,14 @@ jobs:
       # the next one restored "already extracted" beside an empty source
       # directory and failed on all three platforms in 40 ms. A
       # FetchContent tree is only meaningful as a unit.
-      - name: Cache onnxruntime
+      # Holds onnxruntime *and* the built Hamlib, which is why the key
+      # covers both files: Hamlib is compiled from source on Linux and
+      # macOS, so an uncached job pays for that every time.
+      - name: Cache native dependencies
         uses: actions/cache@v4
         with:
           path: native/.deps
-          key: ort-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/cmake/onnxruntime.cmake') }}
+          key: deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/cmake/onnxruntime.cmake', 'native/cmake/hamlib.cmake') }}
       # The codec's parity tests compare two runtimes on the *same*
       # model file, so they need that file. Fetching it here rather than
       # inside a test keeps a network failure reported as a network
@@ -210,7 +213,8 @@ jobs:
         run: |
           cmake -S native -B native/build-asan -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSSTVAE_SANITIZE=ON \
-            -DSSTVAE_BUILD_PYMODULE=OFF -DSSTVAE_BUILD_CODEC=OFF
+            -DSSTVAE_BUILD_PYMODULE=OFF -DSSTVAE_BUILD_CODEC=OFF \
+            -DSSTVAE_BUILD_RIG=OFF
       - run: cmake --build native/build-asan
       # C++ tests only. The pybind11 module is off because running it
       # under ASan means preloading the runtime into the interpreter
@@ -246,7 +250,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_CXX_FLAGS="-fsanitize=thread -g" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
-            -DSSTVAE_BUILD_PYMODULE=OFF -DSSTVAE_BUILD_CODEC=OFF
+            -DSSTVAE_BUILD_PYMODULE=OFF -DSSTVAE_BUILD_CODEC=OFF \
+            -DSSTVAE_BUILD_RIG=OFF
       - run: cmake --build native/build-tsan --target test_rx_engine test_tx_engine test_ringbuffer
       - run: ctest --test-dir native/build-tsan --output-on-failure -R 'rx_engine|tx_engine|ringbuffer'
 
@@ -261,15 +266,25 @@ jobs:
       # here would be silently not compiling core/audio/qt/ at all. ON
       # rather than AUTO for the same reason: a job whose purpose is to
       # compile that file must fail if it did not.
-      - name: Install Qt Multimedia and libhamlib
+      # Hamlib is *not* installed from apt: it is pinned and built by
+      # native/cmake/hamlib.cmake. Ubuntu ships 4.5.5, which predates
+      # the hamlib_token_t rename and does not compile here -- which is
+      # exactly the drift the pin exists to remove.
+      - name: Install Qt Multimedia
         run: |
           sudo apt-get update
-          sudo apt-get install -y qt6-multimedia-dev qt6-base-dev libhamlib-dev
+          sudo apt-get install -y qt6-multimedia-dev qt6-base-dev
+      - name: Cache native dependencies
+        uses: actions/cache@v4
+        with:
+          path: native/.deps
+          key: deps-optional-${{ runner.os }}-${{ hashFiles('native/cmake/hamlib.cmake') }}
       - name: Configure
         run: |
           cmake -S native -B native/build-qt -G Ninja \
             -DSSTVAE_BUILD_QTAUDIO=ON -DSSTVAE_BUILD_RIG=ON \
-            -DSSTVAE_BUILD_CODEC=OFF -DSSTVAE_BUILD_PYMODULE=OFF
+            -DSSTVAE_BUILD_CODEC=OFF -DSSTVAE_BUILD_PYMODULE=OFF \
+            -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps"
       - run: cmake --build native/build-qt
       # Runs headless with no audio server, so it lists nothing and
       # exits 0. That is still worth doing: it proves the library links

@@ -70,6 +70,17 @@ if(TARGET sstvae_rig)
   target_link_libraries(test_rig_hamlib PRIVATE sstvae_core sstvae_rig)
   target_include_directories(test_rig_hamlib PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME rig_hamlib COMMAND test_rig_hamlib)
+  # The bundled Hamlib is a shared library that is not on the default
+  # search path, so the test has to be able to find it at run time.
+  if(SSTVAE_HAMLIB_RUNTIME_DIR)
+    if(WIN32)
+      set_tests_properties(rig_hamlib PROPERTIES
+        ENVIRONMENT "PATH=${SSTVAE_HAMLIB_RUNTIME_DIR};$ENV{PATH}")
+    else()
+      set_property(TARGET test_rig_hamlib APPEND PROPERTY
+        BUILD_RPATH "${SSTVAE_HAMLIB_RUNTIME_DIR}")
+    endif()
+  endif()
 endif()
 
 # Hard upper bounds, so a wedged test is reported as a Timeout rather
