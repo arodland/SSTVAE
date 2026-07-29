@@ -23,7 +23,9 @@ across AWGN, fading, sample-clock offset and frame-erasure impairments.
 """
 
 import os
+import sys
 from contextlib import contextmanager
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -44,6 +46,320 @@ SNR_MARGIN_DB = 1.5
 # A clip threshold this far above mean envelope power never engages, so
 # the waveform passes through clip-and-filter untouched.
 NO_CLIP_HEADROOM_DB = 30.0
+
+
+# --- running the suite against the C++ core --------------------------------
+#
+# `pytest --native` substitutes the C++ implementations from
+# native/bindings/module into the reference modules, so this suite
+# becomes the native port's acceptance suite. See docs/native-app.md;
+# this is the mechanism the whole parity plan rests on, and it costs the
+# table below plus about thirty lines.
+#
+# Substitution is by attribute assignment on the reference module, which
+# is why every binding keeps its Python counterpart's exact signature.
+# Two consequences worth knowing:
+#
+# * A module that did `from .ofdm import pilot_template` bound the
+#   function at import time, so patching `ofdm.pilot_template` would not
+#   reach it. Those sites are listed explicitly rather than discovered,
+#   because a missed one means a test that silently keeps exercising
+#   Python while reporting itself as a native run.
+# * Module-level arrays (MOD_MATRIX and friends) are substituted too, so
+#   the C++ tables are genuinely in the path rather than merely built.
+NATIVE_MODULE_DIR = Path(__file__).resolve().parent.parent / "native" / "build" / "python"
+
+# (reference module, attribute, native module, native attribute)
+NATIVE_SUBSTITUTIONS = [
+    ("sstvae.modem.golay", "encode", "golay", "encode"),
+    ("sstvae.modem.golay", "codeword_bits", "golay", "codeword_bits"),
+    ("sstvae.modem.golay", "decode_soft", "golay", "decode_soft"),
+    ("sstvae.modem.golay", "min_distance", "golay", "min_distance"),
+    ("sstvae.modem.ofdm", "modulate_symbols", "ofdm", "modulate_symbols"),
+    ("sstvae.modem.ofdm", "demod_window", "ofdm", "demod_window"),
+    ("sstvae.modem.ofdm", "pilot_sequence", "ofdm", "pilot_sequence"),
+    ("sstvae.modem.ofdm", "preamble_waveform", "ofdm", "preamble_waveform"),
+    ("sstvae.modem.ofdm", "preamble_template", "ofdm", "preamble_template"),
+    ("sstvae.modem.ofdm", "pilot_template", "ofdm", "pilot_template"),
+    ("sstvae.modem.ofdm", "CARRIER_FREQS", "ofdm", "CARRIER_FREQS"),
+    ("sstvae.modem.ofdm", "BASEBAND_FREQS", "ofdm", "BASEBAND_FREQS"),
+    ("sstvae.modem.ofdm", "MOD_MATRIX", "ofdm", "MOD_MATRIX"),
+    ("sstvae.modem.ofdm", "DEMOD_MATRIX", "ofdm", "DEMOD_MATRIX"),
+    ("sstvae.modem.dsp", "to_baseband", "dsp", "to_baseband"),
+    ("sstvae.modem.dsp", "freq_correct", "dsp", "freq_correct"),
+    ("sstvae.modem.dsp", "sync_lowpass", "dsp", "sync_lowpass"),
+    ("sstvae.modem.dsp", "tx_condition", "dsp", "tx_condition"),
+    ("sstvae.modem.dsp", "papr_db", "dsp", "papr_db"),
+    ("sstvae.modem.dsp", "to_int16", "dsp", "to_int16"),
+    # From-import sites. These bound the function object at import time,
+    # so patching the defining module does not reach them -- and a
+    # missed one means a test that silently keeps exercising Python
+    # while reporting itself as a native run.
+    ("sstvae.modem.sync", "preamble_template", "ofdm", "preamble_template"),
+    ("sstvae.modem.sync", "pilot_template", "ofdm", "pilot_template"),
+    ("sstvae.modem.sync", "freq_correct", "dsp", "freq_correct"),
+    ("sstvae.modem.sync", "sync_lowpass", "dsp", "sync_lowpass"),
+    ("sstvae.modem.modem", "to_baseband", "dsp", "to_baseband"),
+    ("sstvae.modem.modem", "freq_correct", "dsp", "freq_correct"),
+    ("sstvae.modem.modem", "tx_condition", "dsp", "tx_condition"),
+]
+
+
+# Some C++ signatures cannot be identical to the reference's, and where
+# that is true the difference is deliberate rather than sloppy: the
+# framing functions take a `ModeSpec`, a Python dataclass, and binding
+# that type would put Python object layout into the shared core that the
+# *application* also links. They take a mode index instead, and these
+# adapters restore the reference's signature at the test boundary.
+#
+# Keep this list short. Every entry is a place where the substitution is
+# no longer literally the same call, so a bug in an adapter looks like a
+# bug in the port.
+def _native_adapters(native):
+    from sstvae.config import MODES_BY_INDEX
+    from sstvae.modem.beacon import BeaconResult
+
+    fr = native.framing
+    bc = native.beacon
+
+    def decode_header(soft):
+        index = fr.decode_header(soft)
+        return None if index is None else MODES_BY_INDEX.get(index)
+
+    # sync raises on failure, and the existing suite catches the
+    # reference's own SyncError. The binding raises its own type, so it
+    # is translated here rather than in C++ -- keeping the core free of
+    # any knowledge of the Python exception it will be seen as.
+    def _sync_call(fn, ctor, *args, **kwargs):
+        from sstvae.modem.sync import SyncError
+
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as e:
+            if type(e).__name__ == "SyncError":
+                raise SyncError(str(e)) from None
+            raise
+        # `dict` as ctor means "return it as-is"; the modem shims build
+        # their own dataclasses from the dict's fields.
+        return result if ctor is dict else ctor(*result)
+
+    def acquire(z, threshold=0.5, max_bins=2, search=None):
+        from sstvae.modem.sync import Acquisition
+
+        return _sync_call(native.sync.acquire, Acquisition, z, threshold,
+                          max_bins, search)
+
+    def acquire_blind(z, max_offset_hz=55.0, bin_step_hz=1.7, min_periods=8,
+                      threshold=4.0, search=None):
+        from sstvae.modem.sync import BlindAcquisition
+
+        return _sync_call(native.sync.acquire_blind, BlindAcquisition, z,
+                          max_offset_hz, bin_step_hz, min_periods, threshold,
+                          search)
+
+    # Modem's methods, rebuilt into the reference's dataclasses. The
+    # binding returns plain dicts so the C++ core carries no knowledge of
+    # Python object layout -- it is the same core the application links.
+    def _beacon_from_tuple(t):
+        return None if t is None else BeaconResult(chip_offset=t[0],
+                                                   frame_index=t[1], callsign=t[2])
+
+    def modem_modulate(self, latents, mode, normalize=True, callsign=""):
+        import sstvae.modem.modem as modem_mod
+        from sstvae.config import MODES
+
+        spec = MODES[mode] if isinstance(mode, str) else mode
+        latents = np.asarray(latents, dtype=np.float64)
+        if latents.shape != (spec.n_latents,):
+            raise ValueError(
+                f"mode {spec.name} needs {spec.n_latents} latents, got {latents.shape}"
+            )
+        # Read the module constant rather than letting C++ use its
+        # compiled-in default: conftest.clip_headroom() patches it to
+        # measure the modem's own ceiling with clipping disabled, and a
+        # compiled-in value is unreachable from there. Passing it through
+        # is what makes that test mean the same thing on both sides --
+        # it caught this by reporting the clipped floor (10.1 dB) for an
+        # assertion that expects >30.
+        return native.modem.modulate(latents, spec.index, normalize, callsign,
+                                     modem_mod.CLIP_HEADROOM_DB)
+
+    def modem_demodulate(self, x, search_s=None):
+        from sstvae.config import MODES_BY_INDEX
+        from sstvae.modem.modem import DemodResult
+
+        d = _sync_call(native.modem.demodulate, dict, np.asarray(x, dtype=np.float64),
+                       search_s)
+        return DemodResult(
+            latents=d["latents"], weights=d["weights"],
+            mode=MODES_BY_INDEX[d["mode_index"]], freq_offset=d["freq_offset"],
+            sync_metric=d["sync_metric"], frames_received=d["frames_received"],
+            beacon=_beacon_from_tuple(d["beacon"]), callsign=d["callsign"],
+            preamble_start=d["preamble_start"], snr_db=d["snr_db"])
+
+    def modem_demodulate_blind(self, x, search_s=None):
+        from sstvae.modem.modem import BlindDemodResult
+
+        d = _sync_call(native.modem.demodulate_blind, dict,
+                       np.asarray(x, dtype=np.float64), search_s)
+        return BlindDemodResult(
+            latents=d["latents"], weights=d["weights"],
+            freq_offset=d["freq_offset"], beacon=_beacon_from_tuple(d["beacon"]),
+            callsign=d["callsign"], frame_offset=d["frame_offset"],
+            n_frames=d["n_frames"], frame0_start=d["frame0_start"],
+            snr_db=d["snr_db"])
+
+    def beacon_decode(chips, threshold=0.6):
+        r = bc.decode(chips, threshold)
+        if r is None:
+            return None
+        chip_offset, frame_index, callsign = r
+        return BeaconResult(chip_offset=chip_offset, frame_index=frame_index,
+                            callsign=callsign)
+
+    return {
+        # Methods, so these take `self`; patched onto the class.
+        ("sstvae.modem.modem.Modem", "modulate"): modem_modulate,
+        ("sstvae.modem.modem.Modem", "demodulate"): modem_demodulate,
+        ("sstvae.modem.modem.Modem", "demodulate_blind"): modem_demodulate_blind,
+        ("sstvae.modem.sync", "acquire"): acquire,
+        ("sstvae.modem.sync", "acquire_blind"): acquire_blind,
+        # modem.py from-imports both, so its copies need replacing too.
+        ("sstvae.modem.modem", "acquire"): acquire,
+        ("sstvae.modem.modem", "acquire_blind"): acquire_blind,
+        ("sstvae.modem.beacon", "callsign_to_codes"): bc.callsign_to_codes,
+        ("sstvae.modem.beacon", "codes_to_callsign"): bc.codes_to_callsign,
+        ("sstvae.modem.beacon", "_crc16"): bc.crc16,
+        ("sstvae.modem.beacon", "encode_chips"): bc.encode_chips,
+        ("sstvae.modem.beacon", "chip_stream"): bc.chip_stream,
+        ("sstvae.modem.beacon", "find_sync"): bc.find_sync,
+        ("sstvae.modem.beacon", "decode"): beacon_decode,
+        ("sstvae.modem.framing", "interleave"):
+            lambda latents, mode: fr.interleave(latents, mode.index),
+        ("sstvae.modem.framing", "deinterleave"):
+            lambda slots, mode: fr.deinterleave(slots, mode.index),
+        ("sstvae.modem.framing", "header_bits"):
+            lambda mode: fr.header_bits(mode.index),
+        ("sstvae.modem.framing", "header_symbol"):
+            lambda mode: fr.header_symbol(mode.index),
+        ("sstvae.modem.framing", "decode_header"): decode_header,
+        # These take no mode, so they pass straight through; listed here
+        # rather than in the table above only to keep all of framing's
+        # substitutions in one place.
+        ("sstvae.modem.framing", "slots_to_symbols"): fr.slots_to_symbols,
+        ("sstvae.modem.framing", "symbols_to_slots"): fr.symbols_to_slots,
+        ("sstvae.modem.framing", "slot_range_for_frame"): fr.slot_range_for_frame,
+    }
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--native", action="store_true", default=False,
+        help="run the suite against the C++ core (native/bindings/module) "
+             "instead of the Python reference",
+    )
+
+
+_native_import_error: str | None = None
+
+
+def import_native():
+    """The C++ extension module, or None if it cannot be imported.
+
+    The failure *reason* is kept, because "not built" and "built but
+    unloadable" need completely different fixes and look identical from
+    here. A Windows build against MinGW rather than MSVC, for instance,
+    produces a .pyd that exists but raises "DLL load failed" -- reported
+    as a bare "no extension module", that cost a CI round to work out.
+    """
+    global _native_import_error
+    if str(NATIVE_MODULE_DIR) not in sys.path:
+        sys.path.insert(0, str(NATIVE_MODULE_DIR))
+    try:
+        import sstvae_native
+    except ImportError as e:
+        built = sorted(p.name for p in NATIVE_MODULE_DIR.glob("sstvae_native*")) \
+            if NATIVE_MODULE_DIR.is_dir() else []
+        _native_import_error = (
+            f"{type(e).__name__}: {e}\n"
+            + (f"    (the module file IS present: {', '.join(built)} -- so this "
+               "is a load failure, not a missing build)"
+               if built else
+               f"    (no sstvae_native* in {NATIVE_MODULE_DIR})")
+        )
+        return None
+    return sstvae_native
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "native: only meaningful under --native")
+    if not config.getoption("--native"):
+        return
+
+    native = import_native()
+    if native is None:
+        raise pytest.UsageError(
+            f"--native given but the extension module could not be imported.\n"
+            f"    {_native_import_error}\n"
+            "Build it with:  tools/build_native.sh"
+        )
+    # A stale module built against an older core would substitute
+    # functions with different semantics and report success. Refuse
+    # rather than guess.
+    if getattr(native, "__sstvae_abi__", None) != 1:
+        raise pytest.UsageError(
+            f"{native.__file__} has ABI "
+            f"{getattr(native, '__sstvae_abi__', 'unknown')}, expected 1; rebuild it"
+        )
+
+    import importlib
+
+    for mod_name, attr, sub_name, sub_attr in NATIVE_SUBSTITUTIONS:
+        module = importlib.import_module(mod_name)
+        if not hasattr(module, attr):
+            raise pytest.UsageError(
+                f"{mod_name}.{attr} does not exist; the substitution table in "
+                "tests/conftest.py is out of date with the reference"
+            )
+        setattr(module, attr, getattr(getattr(native, sub_name), sub_attr))
+
+    for (target, attr), replacement in _native_adapters(native).items():
+        # A target may name a module or a class inside one ("...Modem"),
+        # since Modem's methods are what the reference exposes.
+        try:
+            owner = importlib.import_module(target)
+        except ImportError:
+            mod_name, _, cls_name = target.rpartition(".")
+            owner = getattr(importlib.import_module(mod_name), cls_name)
+        if not hasattr(owner, attr):
+            raise pytest.UsageError(
+                f"{target}.{attr} does not exist; the adapter table in "
+                "tests/conftest.py is out of date with the reference"
+            )
+        setattr(owner, attr, replacement)
+
+    config._sstvae_native = native
+
+
+def pytest_report_header(config):
+    if config.getoption("--native"):
+        return (f"sstvae: running against the C++ core "
+                f"({len(NATIVE_SUBSTITUTIONS)} substitutions)")
+    return "sstvae: running against the Python reference"
+
+
+@pytest.fixture(scope="session")
+def native():
+    """The C++ extension module; skips the test if it is not built.
+
+    Available whether or not --native was given, so a parity test can
+    compare the two implementations side by side in one run.
+    """
+    module = import_native()
+    if module is None:
+        pytest.skip(f"C++ extension module unavailable -- "
+                    f"{_native_import_error}; build it with tools/build_native.sh")
+    return module
 
 
 @contextmanager

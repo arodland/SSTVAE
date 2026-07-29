@@ -195,6 +195,62 @@ threshold, since at 6 dB everything succeeds and there is nothing to
 measure; and **use at least 25 seeds per point** — six is what produced
 the phantom effect this section used to describe.
 
+## ~~Range-reduce the phasor arguments~~ — done 2026-07-28
+
+**Closed.** Fixed in `sstvae/modem/ofdm.py`, `sstvae/modem/dsp.py`,
+`sstvae/hfchannel.py` and `sstvae/waveform_channel.py` before the C++
+port went further, so the golden corpus and its tolerances only had to
+move once.
+
+Every phasor argument is now reduced before it reaches `exp()`. Where
+the frequency is an integer number of Hz — which is all of the OFDM
+carriers — the reduction is exact integer arithmetic (`(n*f) % FS`), so
+the argument is under one turn and carries no rounding of its own. For
+arbitrary frequencies (`freq_correct`, `hfchannel.freq_shift`) the phase
+is wrapped to `[0, 1)` cycles, which cannot make the *product* exact but
+does remove the large-argument error entirely.
+
+`to_baseband` got the biggest win and the simplest treatment:
+`FCENTER/FS = 1500/8000 = 3/16`, so there are only **16 distinct
+phasors** and a table lookup replaces 760,000 calls to `exp()`. Derived
+from `gcd(FCENTER, FS)` rather than hardcoded, so a config change stays
+correct.
+
+Measured against a 70-digit series expansion:
+
+| | before | after |
+|---|---|---|
+| `MOD_MATRIX` | 2.83e-14 | **8.97e-16** |
+| `to_baseband` over a mode C transmission | 7.03e-11 | **1.23e-16** |
+
+The payoff was never the accuracy — 1e-10 rad is 6e-9 degrees, and
+nothing on air could notice. It was:
+
+- **Cross-platform determinism.** `sin`/`cos` of a large argument
+  disagree between glibc, musl and MSVC, and between x86-64 and Apple
+  silicon, because implementations differ in how far they carry argument
+  reduction. This had already broken CI: `MOD_MATRIX` and `DEMOD_MATRIX`
+  failed byte-comparison on macOS and Windows while passing on Linux.
+- **A stronger parity claim.** `PHASOR_TOL` in
+  `native/tests/test_golden.cpp` went from 2e-13 to **1e-14**, and the
+  sum tolerance from 1e-12 to 1e-13, because they are now sized by one
+  ulp of `exp()` rather than by the reference's own error. Measured C++
+  against Python: 9.6e-16 on the matrices, exactly 0 on the pilot
+  sequence.
+
+Two notes for anyone touching this again. `waveform_channel.py` was
+included deliberately even though it is training-only: it is a replica
+of the modem, and letting the replica and the original compute the same
+matrix differently is exactly the drift the file exists to prevent. The
+change is ~1e-14 on a buffer immediately cast to complex64 (eps 1e-7),
+so it cannot affect training. And `scripts/precoder_probe.py` still has
+the unreduced form; it is a scratch probe, not part of the product.
+
+**The general rule, worth applying to new DSP:** reduce the argument
+before a transcendental whenever you can do it exactly. It is free, it
+is more accurate, and it is the difference between a result that is a
+property of the signal and one that is a property of the machine.
+
 ## Quantisation tolerance as a training soft constraint
 
 **Nothing to act on, and the deficit that prompted this is gone.**

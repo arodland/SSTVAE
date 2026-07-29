@@ -189,7 +189,22 @@ def find_sync(chips: np.ndarray, threshold: float = 0.6, max_candidates: int = 8
         np.convolve(chips**2, np.ones(SYNC_LEN), mode="valid") * np.sum(SYNC**2)
     ) + 1e-12
     score = corr / energy
-    order = np.argsort(score)[::-1]
+    # Best first, ties by lowest offset.
+    #
+    # `np.argsort(score)[::-1]` was not deterministic here: a clean
+    # stream has one perfectly-correlating position per superframe, so
+    # exact ties are the normal case rather than a freak one, and
+    # argsort's default is an *unstable* sort. Which of the tied
+    # candidates decode() returned therefore depended on numpy's sort
+    # internals — it picked [0, 543, 362, 181] out of four equal scores.
+    # Every one of them is a valid superframe, so the answer was never
+    # wrong, but it was arbitrary, and it made the result unreproducible
+    # across implementations for no benefit.
+    #
+    # kind="stable" on the negated score gives descending score with
+    # ties in ascending offset order, which is both deterministic and
+    # the sensible choice: prefer the earliest complete superframe.
+    order = np.argsort(-score, kind="stable")
     out = []
     for i in order[: max_candidates * 4]:
         if score[i] >= threshold:

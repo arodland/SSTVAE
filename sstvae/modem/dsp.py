@@ -1,9 +1,34 @@
 """Small DSP helpers shared by the modem."""
 
+from math import gcd
+
 import numpy as np
 from scipy import signal
 
 from ..config import FS, FCENTER, TX_BANDPASS
+
+# The heterodyne is exactly periodic: FCENTER/FS reduces to 3/16, so
+# there are only 16 distinct phasors, and `n` never has to reach exp()
+# at all.
+#
+# This is the same range-reduction argument as in ofdm.py but it matters
+# far more here, because `n` runs over a whole recording rather than one
+# symbol. Measured over a mode C transmission (760k samples), the old
+# form reached |theta| = 895,000 rad -- where one ulp is 1.16e-10 --
+# and accumulated 1.47e-10 rad of phase error, ~5000x the error in the
+# OFDM matrices. Still nothing on air (1e-10 rad is 6e-9 degrees), but
+# it was the largest numerical defect in the receiver and the one most
+# exposed to differences between platforms' sin/cos.
+#
+# Derived from the config rather than hardcoded as 3/16, so a change to
+# FCENTER or FS stays correct instead of silently producing a table for
+# the wrong frequency.
+_HET_G = gcd(FCENTER, FS)
+_HET_PERIOD = FS // _HET_G  # 16
+_HET_STEP = FCENTER // _HET_G  # 3
+# k/period is exact for a power-of-two period, so these 16 values are as
+# accurate as exp() can be.
+_HET_TABLE = np.exp(-2j * np.pi * np.arange(_HET_PERIOD) / _HET_PERIOD)
 
 
 def to_baseband(x: np.ndarray) -> np.ndarray:
@@ -16,7 +41,7 @@ def to_baseband(x: np.ndarray) -> np.ndarray:
     provides per-carrier noise selectivity. Sync filters its own copy.
     """
     n = np.arange(len(x))
-    return x.astype(np.float64) * np.exp(-2j * np.pi * FCENTER * n / FS)
+    return x.astype(np.float64) * _HET_TABLE[(_HET_STEP * n) % _HET_PERIOD]
 
 
 def sync_lowpass(z: np.ndarray) -> np.ndarray:
@@ -27,9 +52,20 @@ def sync_lowpass(z: np.ndarray) -> np.ndarray:
     return np.convolve(z, taps, mode="same")
 
 
+def wrap_cycles(cycles: np.ndarray) -> np.ndarray:
+    """Fractional part of a phase expressed in cycles, in [0, 1).
+
+    For arbitrary (non-integer) frequencies the product cannot be made
+    exact the way the integer cases above can, but reducing it before it
+    reaches exp() still removes the large-argument error entirely and
+    leaves only the rounding already present in the product itself.
+    """
+    return cycles - np.floor(cycles)
+
+
 def freq_correct(z: np.ndarray, f_hz: float) -> np.ndarray:
     n = np.arange(len(z))
-    return z * np.exp(-2j * np.pi * f_hz * n / FS)
+    return z * np.exp(-2j * np.pi * wrap_cycles(f_hz * n / FS))
 
 
 def tx_condition(x: np.ndarray, clip_headroom_db: float, iterations: int = 2) -> np.ndarray:

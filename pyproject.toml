@@ -137,6 +137,13 @@ explicit = true
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.package-data]
+# The interleaver permutations are part of the on-air format and are
+# shipped as data rather than recomputed at import -- see the note in
+# sstvae/modem/framing.py. Without this the wheel imports and then fails
+# at the first transmission.
+"sstvae.modem" = ["*.npy"]
+
 [tool.setuptools.packages.find]
 include = ["sstvae*"]
 
@@ -146,5 +153,12 @@ testpaths = ["tests"]
 # the real decode loop over them, so they take minutes rather than the
 # ~2 s the rest of the suite does. Excluded by default to keep `pytest`
 # the fast check it is documented as; run them with `pytest -m slow`.
-markers = ["slow: multi-minute end-to-end tests (run with -m slow)"]
+markers = [
+    "slow: multi-minute end-to-end tests (run with -m slow)",
+    # Needs a downloaded model artifact, so it is the one part of the
+    # suite that cannot run from a clean checkout alone. `-m 'not codec'`
+    # deselects it for an isolated or offline run; SSTVAE_REQUIRE_CODEC=1
+    # does the opposite and turns its skips into failures.
+    "codec: needs the published ONNX artifacts (deselect with -m 'not codec')",
+]
 addopts = "-m 'not slow'"

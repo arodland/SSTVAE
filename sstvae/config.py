@@ -98,8 +98,37 @@ DEMOD_BACKOFF = 6  # samples: demod window starts this early inside the CP
 # what a number means).
 SNR_REF_BW_HZ = 2500.0
 
-INTERLEAVER_SEED = 1000  # + group index
-PILOT_SEED = 42
+# --- frozen format constants ----------------------------------------------
+# The seeds below are *provenance*, not a runtime input: they record how
+# these constants were originally produced, and nothing reads them to
+# rebuild anything.
+#
+# The distinction is load-bearing. These values are part of the on-air
+# format. Deriving them at import time from
+# `np.random.default_rng(seed)` would make numpy's PCG64, its bounded
+# integer draw and its shuffle loop part of that format -- so a future
+# numpy that changed any of them would change what this program
+# transmits, silently, and two stations on different numpy versions
+# would fail to talk to each other. The correct response to numpy
+# changing is to keep transmitting the old sequence, which is only
+# possible if the old sequence is written down.
+#
+# So they are frozen: the quadrants below as a literal, and the far
+# larger interleaver permutations as a committed array next to
+# `framing.py`. `tools/freeze_format_constants.py --verify` re-derives
+# both from the seeds and reports whether numpy still agrees, which is
+# information rather than a gate -- see that script.
+INTERLEAVER_SEED = 1000  # + group index; provenance only
+PILOT_SEED = 42  # provenance only
+
+# The pilot symbol's QPSK quadrants, one per carrier: phase =
+# pi/4 + pi/2 * k. Originally np.random.default_rng(PILOT_SEED)
+# .integers(0, 4, NC).
+PILOT_QUADRANTS = (
+    0, 3, 2, 1, 1, 3, 0, 2, 0, 0, 2, 3,
+    2, 3, 2, 3, 2, 0, 3, 1, 2, 1, 0, 3,
+)
+
 PROTOCOL_VERSION = 1
 
 

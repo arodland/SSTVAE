@@ -7,20 +7,44 @@ dsp.to_baseband, where carrier k sits at bin (k - 11) * RS Hz.
 
 import numpy as np
 
-from ..config import FS, RS, NC, M, NCP, NSYM, CARRIER0, FCENTER, PILOT_SEED
+from ..config import (
+    FS, RS, NC, M, NCP, NSYM, CARRIER0, FCENTER, PILOT_QUADRANTS,
+)
 
 CARRIER_FREQS = CARRIER0 + RS * np.arange(NC)  # passband, Hz
 BASEBAND_FREQS = CARRIER_FREQS - FCENTER  # multiples of RS
+
+# Every frequency here is an integer number of Hz and every sample index
+# is an integer, so `n*f/FS` has an exact integer remainder and the
+# phasor depends only on `(n*f) mod FS`. Reducing first, in integer
+# arithmetic, is exact and keeps the argument to exp() under one turn.
+#
+# Without it |theta| reaches 262 rad, where one ulp is 5.7e-14, so the
+# phasors carried ~3e-14 of error and *which* entries rounded which way
+# was an accident of numpy's complex-array arithmetic. Two reasons that
+# was worth fixing, neither of them the accuracy itself:
+#
+#   * sin/cos of a large argument disagree between libms -- and between
+#     x86-64 and Apple silicon -- by far more than they do near zero,
+#     because implementations differ in how far they carry argument
+#     reduction. This made the tables non-reproducible across platforms.
+#   * The C++ port checks itself against these values, and a tolerance
+#     sized by the reference's error rather than the port's is a much
+#     weaker statement. See docs/native-app.md.
+def _phasor(cycles_num: np.ndarray, sign: int = 1) -> np.ndarray:
+    """exp(sign * 2j*pi * cycles_num / FS) for integer `cycles_num`."""
+    return np.exp(sign * 2j * np.pi * (np.asarray(cycles_num) % FS) / FS)
+
 
 # Passband modulation matrix: symbol samples n=0..NSYM-1, phase reference
 # at the start of the useful part (n=NCP). Carriers are multiples of RS,
 # so the first NCP samples are a true cyclic prefix.
 _n_sym = np.arange(NSYM) - NCP
-MOD_MATRIX = np.exp(2j * np.pi * np.outer(_n_sym, CARRIER_FREQS) / FS)  # (NSYM, NC)
+MOD_MATRIX = _phasor(np.outer(_n_sym, CARRIER_FREQS))  # (NSYM, NC)
 
 # Baseband demod matrix over one useful window (M samples).
 _n_use = np.arange(M)
-DEMOD_MATRIX = np.exp(-2j * np.pi * np.outer(BASEBAND_FREQS, _n_use) / FS)  # (NC, M)
+DEMOD_MATRIX = _phasor(np.outer(BASEBAND_FREQS, _n_use), -1)  # (NC, M)
 
 
 def modulate_symbols(symbols: np.ndarray) -> np.ndarray:
@@ -44,9 +68,15 @@ def demod_window(z: np.ndarray, start: int, backoff: int = 0) -> np.ndarray:
 
 
 def pilot_sequence() -> np.ndarray:
-    """Fixed unit-magnitude QPSK sequence used for preamble and frame pilots."""
-    rng = np.random.default_rng(PILOT_SEED)
-    phases = np.pi / 4 + np.pi / 2 * rng.integers(0, 4, NC)
+    """Fixed unit-magnitude QPSK sequence used for preamble and frame pilots.
+
+    Built from the frozen `config.PILOT_QUADRANTS` rather than re-drawn
+    from `np.random.default_rng(PILOT_SEED)`. This sequence is part of
+    the on-air format: if a future numpy changed its generator stream,
+    the right behaviour is to keep transmitting the same pilots, not to
+    follow numpy. See the note in config.py.
+    """
+    phases = np.pi / 4 + np.pi / 2 * np.asarray(PILOT_QUADRANTS)
     return np.exp(1j * phases)
 
 
@@ -57,7 +87,7 @@ def preamble_waveform() -> np.ndarray:
 
     p = pilot_sequence()
     n = np.arange(PREAMBLE_SAMPLES) - PREAMBLE_CP
-    e = np.exp(2j * np.pi * np.outer(n, CARRIER_FREQS) / FS)
+    e = _phasor(np.outer(n, CARRIER_FREQS))
     return np.real(e @ p)
 
 
@@ -67,7 +97,7 @@ def preamble_template() -> np.ndarray:
 
     p = pilot_sequence()
     n = np.arange(PREAMBLE_SAMPLES) - PREAMBLE_CP
-    e = np.exp(2j * np.pi * np.outer(n, BASEBAND_FREQS) / FS)
+    e = _phasor(np.outer(n, BASEBAND_FREQS))
     return 0.5 * (e @ p)
 
 
@@ -78,5 +108,5 @@ def pilot_template() -> np.ndarray:
     the (non-repeating) transmission-start preamble."""
     p = pilot_sequence()
     n = np.arange(M)
-    e = np.exp(2j * np.pi * np.outer(n, BASEBAND_FREQS) / FS)
+    e = _phasor(np.outer(n, BASEBAND_FREQS))
     return 0.5 * (e @ p)

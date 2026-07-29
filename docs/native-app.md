@@ -1,9 +1,12 @@
 # Native desktop application (C++ / Qt 6)
 
-**Status: design, not implemented.** Nothing in this document exists in
-the tree yet. It records the plan, the decisions behind it, and the
-questions still open, so none of that has to be re-derived when work
-starts.
+**Status: Phases 0 and 1 implemented (2026-07-28). Phases 2–5 are
+design.** The scaffolding, the parity harness and the **whole modem**
+exist in `native/` — `golay`, `ofdm`, `dsp`, `framing`, `beacon`,
+`sync`, `modem` — and the Python suite passes against them. Everything
+from the headless app core onwards is still plan. The rest of this
+document records that plan, the decisions behind it, and the questions
+still open, so none of it has to be re-derived.
 
 **Prerequisite: the ONNX path in `docs/onnx.md` must land first.** The
 native app cannot embed torch, so `codec.py`'s ONNX rewrite and the
@@ -20,8 +23,10 @@ The **application** is rewritten. Everything else stays Python:
 | `hfchannel.py` (simulation) | `sstvae/modem/`, `codec.py`, `images.py` |
 | The whole `sstvae` package as the **reference implementation** | `audio.py`, `rig/`, `overlay/`, `gui/settings.py`, `checkpoint.py` |
 
-`sstvae/gui/` is **deleted** when the native app reaches parity
-(decision 1), taking the `gui` extra and `pyside6-essentials` with it.
+`sstvae/gui/` is **deleted** when the native app is packaged (decision
+1), taking the `gui` extra and `pyside6-essentials` with it; it is
+frozen — bug fixes only — from the moment the native app reaches
+parity.
 `checkpoint.py` is ported rather than left behind because the native app
 fetches its own artifacts (decision 5); the Python copy stays for the
 CLIs.
@@ -283,8 +288,11 @@ native/
     dsp/  ofdm/  golay/  framing/  beacon/  sync/  modem/
     codec/              # onnxruntime
     overlay/            # QtGui only, no QtWidgets
-    audio/              # PortAudio
-    rig/                # QTcpSocket
+    audio/              # rate/format conversion, no Qt
+      qt/               # QtMultimedia (see "Audio: use QtMultimedia")
+    rig/                # the threading design, no external deps
+      hamlib.cpp        # libhamlib (see "Bundling Hamlib")
+    latents/  util/
     rx/  tx/
   gui/                  # QtWidgets
   bindings/
@@ -295,6 +303,12 @@ tools/
   gen_config_header.py
   gen_golden_vectors.py
 ```
+
+This sketch predates two decisions recorded further down and has been
+corrected to match them: audio is QtMultimedia rather than PortAudio,
+and rig control links `libhamlib` rather than speaking to `rigctld`
+over a `QTcpSocket`. Both are split so that the part with the logic in
+it has no external dependency and stays testable without one.
 
 ### Layering rules
 
@@ -339,7 +353,7 @@ Each phase is instead described by three things that can be checked:
   against a radio iterates at the speed of a person with a radio.
 - **Needs you for** — the parts that cannot be delegated.
 
-### Phase 0 — Scaffolding and parity harness
+### Phase 0 — Scaffolding and parity harness — **DONE 2026-07-28**
 
 CMake + vcpkg manifest, GHA matrix, `install-qt-action`, ccache,
 ASan/UBSan job. `gen_config_header.py` and its CI check. Golden-vector
@@ -349,6 +363,110 @@ end to end before anything hard is attempted.
 
 **Exit:** `pytest` passes with C++ `golay` and `ofdm` substituted via the
 pybind11 module, on all three platforms in CI.
+
+**Met.** Locally: 243 fast tests and all 19 `-m slow` tests pass under
+`pytest --native`, plus 16 direct A/B parity tests and two C++ binaries
+against the corpus. On CI (the repo's first workflows), the first run
+failed six of eight jobs for two causes, both since fixed and both worth
+recording because they are the kind of thing that recurs:
+
+- **`pytest` as a console script does not put the working directory on
+  `sys.path`**, so `import sstvae` failed in every native job. Invisible
+  locally, where `python -m pytest` does. The native jobs now install
+  the package.
+- **The golden corpus is not byte-reproducible**, and demanding that it
+  be was a design error — one that took *two* rounds to get right,
+  which is the interesting part. The first fix classified vectors by
+  whether they reached a `@` (BLAS) or an FFT, on the evidence that
+  three such vectors differed while the `exp` tables matched. That
+  evidence was one green Linux run: the next round failed `MOD_MATRIX`
+  and `DEMOD_MATRIX` on macOS and Windows, because **no standard
+  requires a transcendental to be correctly rounded** and x86-64 and
+  Apple silicon genuinely disagree. The rule now follows from IEEE 754
+  rather than from a sample: bitwise means integer arithmetic,
+  `+ - * /`, and seeded numpy RNG draws; everything touching `exp`,
+  BLAS or an FFT is compared by value against a tolerance and carries a
+  platform-stable fingerprint instead of a churning SHA-256. 11 vectors
+  bitwise, 10 by tolerance.
+- **Windows CMake picked MinGW GCC over MSVC**, because it is first on
+  the runner's `PATH` and nothing said otherwise. It built a perfectly
+  good `.pyd` that CPython then could not load, since a MinGW extension
+  is ABI-incompatible with an MSVC-built interpreter. Fixed with
+  `ilammy/msvc-dev-cmd` before the configure step. The diagnosis cost a
+  round only because `conftest.py` caught `ImportError` and reported
+  "no extension module" — it now distinguishes *not built* from *built
+  but unloadable* and prints the real error.
+- **Git rewrote the corpus on checkout.** With everything above fixed,
+  Windows still failed — on `manifest.json` alone, with every `.npy`
+  passing. Git for Windows converts LF to CRLF on checkout by default,
+  and the `.npy` files escaped only because git's binary heuristic left
+  them alone. So the corpus being compared was not the corpus that was
+  committed. Fixed by a `.gitattributes` marking the golden tree and
+  the generated `config.hpp` as `-text`; `--check` additionally
+  recognises a line-endings-only difference and says so, because the
+  symptom otherwise reads as a content problem rather than a checkout
+  one. **Any committed generated artifact needs this**, and the failure
+  is invisible on Linux and macOS.
+- **The slow suite was vacuous**: `pytest -m slow --native` reported
+  "16 skipped" and a green tick in 0.41 s. `test_listen_state_machine.py`
+  opened with `pytest.importorskip("torch")` and then never used torch —
+  a leftover from before the ONNX migration, which stubs `reconstruct`
+  and needs no model at all. This is precisely the hazard `CLAUDE.md`
+  names ("those tests `importorskip`, so without torch here they would
+  quietly stop running instead of failing, and there is no CI to
+  notice"), caught the first time there was a CI to notice. Guard
+  removed; those tests now run everywhere.
+
+Three lessons for Phase 1, all cheap to act on and expensive to
+retrofit:
+
+- **Decide what is genuinely reproducible before making reproducibility
+  a gate**, and derive the rule from the standard rather than from
+  whichever platforms happened to agree today. `sync` and `modem` are
+  far more FFT- and transcendental-heavy than `ofdm`, so most of their
+  vectors will land on the tolerance side.
+- **Pin the toolchain explicitly on every platform.** CMake's idea of
+  "the compiler" is whatever it finds first, and on a GitHub runner that
+  is not what you meant.
+- **A byte-exact check is a promise about the whole path to the bytes**,
+  not just about the generator: the toolchain that produced them, the
+  library that computed them, and git's handling of them on checkout are
+  all part of it. Three of the four failures above were somewhere on
+  that path rather than in the code being tested.
+- **A skip is not a pass.** Audit `importorskip` guards as modules are
+  ported — a stale one silently deletes coverage, and the whole parity
+  strategy is built on tests that are actually executing.
+
+Deviations from the plan above, all deliberate:
+
+- **No vcpkg manifest.** Phase 0's dependencies are pybind11 (build-time
+  only, from pip) and the standard library. A manifest would be an empty
+  ceremony until pocketfft, Eigen, onnxruntime and Hamlib arrive in
+  Phases 1–2.
+- **No `install-qt-action` or ccache.** No Qt code exists yet, and the
+  whole native build is under 10 seconds. Both belong with Phase 3.
+- **The notarization spike did not happen.** It is still the right
+  advice — see "Where the cost actually sits" — but it needs credentials
+  and an Apple Developer account, so it is yours to trigger. It remains
+  the cheapest way to move the least compressible work earlier.
+- **The Qt-version-against-Windows-10 check is still open.** Decision 2's
+  one blocking unknown; no Qt dependency has been pinned, so nothing is
+  foreclosed.
+
+What exists:
+
+| Path | What it is |
+|---|---|
+| `tools/gen_config_header.py` | `sstvae/config.py` → `native/core/config.hpp`, `--check` for CI |
+| `tools/gen_golden_vectors.py` | the corpus, `--check` for CI |
+| `tools/check_layering.py` | the layering rules, as promised, enforced |
+| `tools/build_native.sh` | configure + build against the project venv |
+| `native/core/{golay,ofdm}/` | the two ported modules |
+| `native/core/testing/npy.hpp` | `.npy` reader, ~90 lines, no zip dependency |
+| `native/tests/` | two C++ binaries, `check.hpp`, `golden/` (22 files, 431 KB) |
+| `native/bindings/module/` | the pybind11 module |
+| `tests/test_native_parity.py` | side-by-side A/B, skips if unbuilt |
+| `.github/workflows/ci.yml` | four jobs; the project's first CI |
 
 - **Volume** — 135 lines displaced (`golay.py` 53, `ofdm.py` 82), plus
   the codegen, vector generator, and binding shim, which are new code
@@ -364,7 +482,57 @@ pybind11 module, on all three platforms in CI.
 > without one, it fails a whole-transmission decode much later with
 > 1,000 lines of untested code beneath it and nothing to bisect.
 
-### Phase 1 — Modem core
+#### What Phase 0 taught, that Phase 1 should inherit
+
+**Generate format constants; do not port the algorithms that produce
+them.** `ofdm.pilot_sequence()` draws from `np.random.default_rng(42)`.
+Reimplementing PCG64 and numpy's bounded-integer draw in C++ would make
+numpy's RNG internals part of the on-air format, permanently. The
+sequence is 24 fixed QPSK symbols, so `config.hpp` carries the quadrant
+indices and C++ evaluates the same `pi/4 + pi/2*k` expression. **The
+interleaver permutations in `framing.py` are the same problem at much
+larger scale** (`INTERLEAVER_SEED + group`) and should get their own
+generated artifact rather than a ported RNG.
+
+**Bit-exactness is the wrong target; knowing *why* it fails is the right
+one.** The first parity failure was 2.85e-14 on `MOD_MATRIX`. Chasing it
+found a real defect — in the *reference*. `ofdm.py` builds phasors on an
+unreduced argument reaching 262 rad, where one ulp is 5.7e-14, so it
+carries ~3e-14 of error; the C++ reduces `(n*f) mod FS` in integer
+arithmetic and is accurate to 1.6e-16, verified against a 70-digit
+series expansion. The tolerance in the harness is therefore sized by
+**Python's** error, and says so. `docs/todo.md` has the two-line Python
+fix, deferred so the corpus does not churn mid-port.
+
+That has a direct consequence for Phase 1: **reduce phase arguments
+exactly wherever they appear**, because `sin`/`cos` of a large argument
+disagree between glibc, musl and MSVC by far more than they do near
+zero, and every tolerance has to hold on three platforms.
+
+**Resolved on the Python side before Phase 1 continued** (2026-07-28),
+deliberately, so the corpus and its tolerances moved once rather than
+twice. `dsp.to_baseband` turned out to be far the worst case — its
+argument grows over a whole recording, reaching 895,000 rad and 1.5e-10
+of phase error, ~5000x the matrices — and also the easiest, since
+`FCENTER/FS = 3/16` gives only 16 distinct phasors. Both sides now
+reduce, `PHASOR_TOL` tightened from 2e-13 to **1e-14**, and the residual
+is one ulp of `exp()` rather than anyone's accumulated error. Details
+and measurements in `docs/todo.md`.
+
+**Substitution is by attribute assignment, so from-imports need listing
+explicitly.** `sync.py` does `from .ofdm import preamble_template`,
+which binds at import time and is invisible to patching `ofdm`. The
+table in `tests/conftest.py` names those sites; a missed one means a
+test that silently keeps exercising Python while reporting itself as a
+native run. Check for new from-import sites as each module is ported.
+
+**Keep golden vectors of the reference's mistakes.** The corpus includes
+soft-decode cases noisy enough that the reference decoder is *wrong*.
+A port that is right where the reference is wrong has diverged, and only
+this kind of case catches it — likewise the tie-breaking test, where
+`np.argmax` returning the first maximum is arbitrary but observable.
+
+### Phase 1 — Modem core — **DONE 2026-07-28**
 
 `dsp`, `framing`, `beacon`, `sync`, `modem`. The risk is concentrated
 here: `sync.py` + `modem.py` are 622 lines containing the CFO bin
@@ -375,6 +543,73 @@ whole schedule.
 **Exit:** the full Python suite including `-m slow` passes against the
 C++ modem. Golden vectors match bit-for-bit where pocketfft permits, and
 every documented tolerance is justified in a comment.
+
+**Met.** 276 fast and all 19 `-m slow` tests pass under `pytest
+--native`, plus 50 A/B parity tests and three C++ binaries (108 checks).
+Both interop directions work: a C++ transmission decodes in Python and
+vice versa.
+
+The feared part turned out not to be the hard part. **`sync` matched on
+the first build** — identical timing index, 1.9e-16 on frequency — and a
+72-case sweep (SNR 30 to −2 dB, three frequency offsets, with and
+without MPP fading) found **zero differing decisions**, worst frequency
+delta 7.1e-15 Hz. Two decisions made that possible rather than lucky:
+
+- `fftconvolve` is FFT-based in C++ too, mirroring scipy's real/complex
+  split. A direct moving sum would have been *more* accurate and would
+  have diverged *more*, because these feed straight into `argmax`.
+- pocketfft's `good_size_cmplx` equals scipy's `next_fast_len`, verified
+  across sizes. In `acquire_blind` the transform length sets `bin_hz`
+  and therefore the entire CFO search grid, so this is structural rather
+  than an optimization detail.
+
+What actually cost time was two reference behaviours that were not
+deterministic, both found by the port and both fixed in Python:
+
+- **`beacon.find_sync` sorted with `np.argsort(score)[::-1]`.** A clean
+  stream ties *by construction* — every superframe correlates perfectly
+  — and numpy's default sort is unstable, so which of several equally
+  valid superframes `decode()` returned depended on sort internals. Now
+  `kind="stable"`, ties by lowest offset.
+- **The frozen-format problem**, described under Phase 0's lessons.
+
+And one thing the *reference test suite* caught that no parity check
+would have: `conftest.clip_headroom()` disables clipping by patching a
+module constant, to measure the modem's ceiling independent of how the
+clipper is tuned. A compiled-in constant is unreachable from there, so
+the C++ silently reported the clipped floor (10.1 dB) for an assertion
+expecting >30. `Modem::modulate` now takes `clip_headroom_db` as a
+parameter. **Substituting into the real suite is what found this** — a
+harness of purpose-written parity tests would have agreed with itself.
+
+#### On writing the C++-side round-trip test
+
+`native/tests/test_modem_roundtrip.cpp` is corpus-free: it runs the
+whole chain and asserts properties, so `ctest` covers the modem where
+the Python reference is unavailable. Worth recording how weak the
+obvious version of that test was.
+
+Perturbing the code deliberately showed a latent-SNR threshold catches
+almost nothing on a *clean* loopback:
+
+| Perturbation | Caught by SNR floor? |
+|---|---|
+| Beacon carrier off by one | yes (callsign lost) |
+| Catmull-Rom phase `u` shifted 0.05 | **no** |
+| Drift-tracker EMA 0.02 → 0.9 | **no** |
+| Equalizer scale √2 → 1.0 | **no** |
+
+The first two are honest: on a clean channel the pilots are nearly
+identical, so interpolation barely matters and there is no drift to
+track. Those paths are exercised by the *parity* tests under fading, not
+here. The last one was a genuine hole — a 0.707× amplitude error still
+measures 10.7 dB, above any threshold the clip-limited ~10 dB loopback
+leaves room for. Fixed by checking the best-fit **gain** separately from
+the SNR, which is the quantity that is actually wrong.
+
+The general point: **an SNR floor is not a correctness check.** It
+cannot see a scale error, and on a clean channel it cannot see the
+equalizer at all.
 
 - **Volume** — 1,034 lines displaced (`dsp` 64, `framing` 134, `beacon`
   214, `sync` 198, `modem` 424). Gated on `test_modem_e2e.py`,
@@ -388,11 +623,94 @@ every documented tolerance is justified in a comment.
   scipy legitimately differ, and on anything that turns out to be an
   accident of the Python implementation rather than part of the format.
 
-### Phase 2 — Headless app core
+### Phase 2 — Headless app core — IN PROGRESS
 
 `codec` (onnxruntime), `checkpoint` (Hub fetch), `images`,
 `overlay/render`, `audio` (PortAudio), `rig` (linked `libhamlib`),
 `settings`, and the `rx`/`tx` engines.
+
+**`codec` is done.** It was taken first deliberately: it is the only
+module in the phase with a heavyweight new external dependency, and
+finding out late that onnxruntime could not be made to work cleanly on
+three platforms would have meant arranging the rest of the phase around
+a hole.
+
+What the spike settled, before any structure was committed to:
+
+- Official prebuilt CPU archives exist per platform at 9–80 MB, ship a
+  usable CMake package, and are pinned by sha256. Building ORT from
+  source — hours, and its own dependency tree — is not necessary.
+- **There is no `osx-x64` archive.** The macOS build is Apple silicon
+  only. That compounds the `macos-13` retirement noted in the matrix
+  below: Intel Mac support now needs cross-compilation *and* a
+  cross-built ORT, which is a Phase 4 packaging problem rather than a
+  Phase 2 one, but it is worth knowing now.
+- Parity is **exact**, not tolerance-bounded, because both sides call
+  one runtime on one file. That is a stronger guarantee than the modem
+  gets, and it holds only while the versions match — hence the pin.
+
+The one real defect the spike found was a 1-LSB difference in 3 of
+921600 subpixels, from doing the output quantisation in float64 where
+numpy does it in float32. Worth recording not for the fix but for the
+shape of it: **it was well inside any tolerance anyone would have
+chosen**, and the only reason it was caught is that the test demanded
+byte equality. When a check *can* be exact, making it exact is what
+turns a near-miss into a finding.
+
+**`images` is done, with one deliberate inexactness.** `to_array` and
+PNG loading are checked byte-for-byte; **`fit_image`'s rescaling is
+not**. Pillow's LANCZOS turned out to be exactly reproducible — a port
+of `precompute_coeffs` plus the two fixed-point passes matched it on
+every subpixel across four source geometries — so an exact version was
+available and was *declined*, on the grounds that framing is
+transmit-side and cosmetic: it chooses which pixels of an oversized
+source get sent, a receiver never runs it, and two stations cropping a
+photo one pixel differently is not an interop question. `stb` does the
+resize instead, and parity tests feed already-640x480 pictures so the
+resampler is off the compared path.
+
+That is the counterpart to the decision above, and the pair is the
+useful thing: exactness was bought where it lands in the delivered
+picture and skipped where it does not. Deciding that per module beats
+either blanket policy.
+
+Vendoring `stb` rather than reaching for `QImage` also keeps `core/`
+Qt-free for the whole phase, so the headless CLI links no GUI toolkit
+and CI still installs Qt only in Phase 3 — which is what the workflow's
+comments already promise.
+
+**The exit criterion is met for the receive path.**
+`native/apps/sstvae_decode.cpp` produces a picture **byte-identical** to
+`sstvae_decode.py`'s on the same WAV, over a 12 dB AWGN channel — so
+sync, CFO, pilot EQ, drift tracking, the beacon and the codec all agreed
+exactly, not merely closely. Also byte-identical on three variants that
+each exercise something the plain case does not: a 44.1 kHz recording
+(the 160/441 resample), a stereo int16 file (the scale-before-mixdown
+rule), and a mid-transmission slice decoded blind (position from the
+beacon's absolute counter alone). `tests/test_native_cli.py`.
+
+Two things this required that were not in the plan:
+
+- **`dsp::resample_poly`**, matching scipy's design exactly (Kaiser(5.0)
+  firwin, `h *= up`, scipy's pre/post padding and slice). Verified
+  against scipy to ~1e-14 with exactly matching output lengths. It was
+  needed for `wavio` and will be needed again for capture — where
+  CLAUDE.md records that getting it wrong cost 4.7 dB while still
+  reporting every frame received.
+- **`dr_wav`** rather than a hand-rolled RIFF parser, because the files
+  this reads were written by whatever the operator had.
+
+The trap worth recording: the slow suite runs under `--native`, which
+substitutes the C++ modem *in-process*. The blind test's "Python
+reference" was an in-process `Modem().demodulate_blind`, which under CI
+would have been the C++ implementation — the test would have compared
+C++ against C++ and passed while checking nothing. Every reference-side
+decode in `test_native_cli.py` now runs in a **subprocess**, where no
+substitution is applied. Any future test that wants a reference
+alongside `--native` has the same problem.
+
+Still open in this phase: `checkpoint` (so `--model` can be optional),
+`settings`, `overlay`, the rx/tx engines, `audio` and `rig`.
 
 Because artifacts are fetched rather than bundled (decision 5), this
 phase owns the **first-run experience**: a progress indication, a
@@ -445,11 +763,15 @@ The GUI work is independent of the modem, and running it early is how
 you get something demo-able before `sync.cpp` works.
 
 **Exit:** feature parity with `sstvae-gui`, and the loopback equivalent
-of `test_app_loopback.py` passes. **Parity here is what triggers
-decision 1** — `sstvae/gui/`, the `gui` extra, and `pyside6-essentials`
-are removed in a single change, and `CLAUDE.md`'s "The application"
-section is rewritten to describe the C++ app. Until that change lands,
-both GUIs are maintained, so do not let this phase idle at 95%.
+of `test_app_loopback.py` passes. **Met 2026-07-29**: a picture sent and
+received native->native, native->Python and Python->native over a
+soundcard loopback. The two mixed directions are the ones with content —
+they check the on-air format against the normative implementation end to
+end, through the audio path, which no golden vector can do. Parity **freezes** the Python GUI —
+bug fixes only from here, every new feature goes to the native app — but
+does *not* delete it; that is Phase 4's, under the amended decision 1.
+Do not let this phase idle at 95%: a frozen GUI is a bounded cost, a
+nearly-finished one is not.
 
 - **Volume** — 2,162 lines displaced (`rx_panel` 417, `settings_dialog`
   400, `tx_panel` 347, `overlay_editor` 309, `waterfall` 252, `app` 229,
@@ -488,6 +810,12 @@ both GUIs are maintained, so do not let this phase idle at 95%.
 
 **Exit:** a tagged GHA run produces three signed artifacts, each
 installed and launched on a clean VM with no developer tooling present.
+**That is what triggers decision 1** — in the same change, `sstvae/gui/`
+is deleted along with the `gui` extra and `pyside6-essentials`, and
+`CLAUDE.md`'s "The application" section is rewritten to describe the C++
+app. In the same change and not as a follow-up, for the reason the
+original decision gave: a deletion deferred is a deletion that does not
+happen.
 
 - **Volume** — almost no Python displaced; this is nearly all new
   configuration. Small in lines, and that is exactly why it will not
@@ -564,20 +892,35 @@ already needs the CI matrix stood up.
 | **`resample_poly` mismatch** | Explicitly called out as delicate; test against scipy over a matrix of rate pairs, not just 8k↔48k. |
 | **Audio device quirks** | PortAudio continuity retires most of it. Port `tests/test_audio.py`'s fake-PortAudio harness early — it caught the resample-direction bug without hardware and will catch its C++ twin. |
 | **macOS notarization archaeology** | Static-link onnxruntime; sign inside-out; do a throwaway notarization spike in Phase 0 rather than discovering the problems in Phase 4. |
-| **Two GUIs to maintain forever** | Resolved by decision 1: `sstvae/gui/` is deleted at parity, in the same change. The residual risk is a Phase 3 that stalls just short of parity and leaves both alive indefinitely. |
-| **GHA retires the Intel macOS runner mid-project** | Build universal2 from Phase 0, so the `lipo` step is already proven when the fallback (cross-compiling `x86_64` on Apple silicon) becomes necessary rather than optional. |
+| **Two GUIs to maintain forever** | Bounded by decision 1 as amended: the Python GUI is frozen at parity (bug fixes only) and deleted at packaging. Freezing is what caps the cost — the window between parity and packaging is real, but during it only one GUI is being *developed*. The residual risk moves to a Phase 4 that stalls, so the deletion is part of the packaging change rather than a follow-up to it. |
+| ~~**GHA retires the Intel macOS runner mid-project**~~ — **happened, 2026-07-28** | Already gone by the time CI was first stood up: `macos-13` no longer schedules, and a job requesting it **queues indefinitely rather than failing**, which is worse than an error because nothing tells you why. Removed from the matrix. Cross-compiling the `x86_64` slice on an Apple-silicon runner is therefore mandatory, not a fallback — see "Platform floor". Decision 2 is unchanged: Intel Macs are still supported, and the gap is in CI coverage, not in intent. |
 | **First run fails offline** | Decision 5 trades installer size for a network dependency at first launch. Phase 2 owes a clear message and a manual model-import path; a field laptop with no connectivity is an ordinary case, not an edge one. |
-| **Bundled Hamlib goes stale** | CI bump, as agreed. Note that bundling means a Hamlib CVE or a new-radio backend becomes our release, not the distro's. |
+| **Bundled Hamlib goes stale** | CI bump, as agreed. Note that bundling means a Hamlib CVE or a new-radio backend becomes our release, not the distro's. Pinned in `native/cmake/hamlib.cmake` (4.7.2), sha256 per artifact, built from the release tarball on Linux/macOS and taken from upstream's prebuilt zip on Windows. |
 | **A Hamlib backend segfaults and takes the app with it** | Accepted cost of in-process linking. Mitigated by Hamlib's exposure across the ham software ecosystem, and by model 2 as an out for users who want isolation back. |
 | **`config.py` drift** | Generated header, CI-enforced. |
 
 ## Decisions (Andrew, 2026-07-27)
 
-1. **The Python GUI is retired** once the native app reaches parity.
-   `sstvae/gui/` is deleted, the `gui` extra and `pyside6-essentials`
-   go with it, and Python keeps the CLIs, the reference modem, and
-   training. The `listen` extra stays. This is part of the plan, not a
-   follow-up — see Phase 3's exit criteria.
+1. **The Python GUI is retired** once the native app is **packaged** —
+   amended 2026-07-29, from "once it reaches parity". `sstvae/gui/` is
+   deleted, the `gui` extra and `pyside6-essentials` go with it, and
+   Python keeps the CLIs, the reference modem, and training. The
+   `listen` extra stays. This is part of the plan, not a follow-up — see
+   Phase 4's exit criteria.
+
+   The amendment is about what a user can actually run. Parity means the
+   native app *works*; packaging means someone who is not us can install
+   it. Between those two points the only way to have a working desktop
+   app is to build C++, Qt and Hamlib from source — so deleting the
+   Python GUI at parity would leave every operator without one, to
+   remove code that costs nothing to keep for another phase. The trigger
+   is therefore a signed, installable build on all three platforms.
+
+   To stop that becoming an indefinite reprieve, the Python GUI is
+   **frozen at parity**: bug fixes only, no new features. Anything new
+   goes to the native app alone. That bounds the duplicated-maintenance
+   cost the original decision was written to avoid, without paying it
+   with a period where nothing is installable.
 2. **Windows 10 and Intel Macs are supported.** Hams are conservative
    about hardware, so the floor is set by users, not by tooling
    convenience. Consequences in "Platform floor" below.
@@ -614,13 +957,16 @@ already needs the CI matrix stood up.
   `arm64` slice. The deployment target is set by the oldest Intel Mac
   worth supporting, and it also constrains the Qt version — pick both
   together in Phase 0.
-- **Watch the GitHub Actions Intel-macOS runner.** GHA has been retiring
-  older runner images, and Intel macOS is on that path. If the `macos-13`
-  class disappears, the fallback is cross-compiling the `x86_64` slice
-  on an Apple-silicon runner, which Qt supports but which needs a
-  universal Qt install and a tested `lipo` step. **Build the universal
-  binary from day one in Phase 0** rather than discovering this at
-  Phase 4, when it becomes urgent.
+- **The Intel-macOS runner is gone (confirmed 2026-07-28).** This was
+  written as a thing to watch for; it had already happened. `macos-13`
+  no longer schedules — and note the failure mode, because it costs an
+  afternoon if you meet it cold: the job **sits in the queue forever
+  instead of erroring**, so the run neither passes nor fails.
+  Consequently there is no way to build or test the `x86_64` slice
+  natively. Cross-compiling it on an Apple-silicon runner is now the
+  only route, which needs a universal Qt install and a tested `lipo`
+  step. **Prove that step early**, since Decision 2 commits to Intel
+  Macs and nothing in CI currently exercises them at all.
 - **Linux builds on the oldest supported GHA Ubuntu image** for the
   glibc floor, for the same conservative-user reason.
 - No Windows-on-ARM target.
@@ -694,6 +1040,53 @@ contain single spaces and at least one Model fills its column exactly"* —
 along with the entire class of bug it warns about. Model metadata comes
 from a struct instead of from text, and model 2 appears in the list for
 free.
+
+#### Pinned, not taken from the system
+
+Implemented 2026-07-29, and the pin is load-bearing rather than tidy.
+Hamlib's public API moves between minor releases: Ubuntu 24.04 ships
+4.5.5, where a configuration token is a `token_t`, and 4.6 renamed it
+`hamlib_token_t`. `core/rig/hamlib.cpp` therefore compiled against a
+developer's 4.7 and failed on the CI runner. Papering over that with
+version `#if`s would mean the app's rig support silently differs by
+platform — and for CAT control, "which radios work" differing by
+platform is the whole ballgame.
+
+So one version is pinned with a sha256 per artifact, exactly as
+onnxruntime is: built from the release tarball on Linux and macOS
+(upstream publishes no binaries for them), and taken from upstream's
+prebuilt zip on Windows, which ships an MSVC import library beside the
+MinGW-built DLL so linking from MSVC is supported rather than a trick.
+
+**Dynamically linked**, following decision 6's reasoning for Qt: Hamlib
+is LGPL-2.1+, so a shared library the user can replace avoids the
+relinking obligation a static link would carry. That is why the source
+build passes `--enable-shared --disable-static` even though a static
+link would be easier to ship.
+
+`-DSSTVAE_HAMLIB_SYSTEM=ON` uses pkg-config instead and downloads
+nothing, for distro packagers. That configuration is not what CI checks,
+so it is on the packager to confirm their Hamlib is >= 4.6.
+
+Windows adds one more constraint, and it shapes the code rather than the
+build: `hamlib/rig.h` includes `<pthread.h>` unconditionally (upstream
+suggests the NuGet pthread package), MSVC has none, and the types it
+wants sit inside `struct rig_state`. A shim supplies them, but its sizes
+cannot be guaranteed to match the winpthreads inside the MinGW-built
+DLL — so `core/rig/hamlib.cpp` never dereferences a `RIG*`, taking the
+manufacturer and model from `rig_get_caps_cptr()` instead. With no
+struct layout relied upon, a mismatch cannot corrupt anything.
+
+Two things the source build has to work around, both recorded because
+they cost time: the release tarball's files all carry the same mtime, so `make`
+cannot tell `configure` is already newer than `configure.ac` and tries
+to re-run `aclocal` — which fails without the exact automake the release
+was rolled with. Hamlib has no `AM_MAINTAINER_MODE`, so the generated
+files are re-stamped in dependency order first. And the install tree
+goes under `FETCHCONTENT_BASE_DIR`, not the build directory, so that
+whatever caches the former caches the *built* Hamlib: cold 26 s on a
+24-core machine, warm 0.26 s, and CI throws its build tree away every
+run.
 
 #### What is genuinely given up
 

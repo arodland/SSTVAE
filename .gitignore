@@ -5,6 +5,26 @@ __pycache__/
 .venv/
 uv.lock
 
+# native app (C++/Qt) build products
+#
+# Deliberately narrow: native/tests/golden/ holds the committed golden
+# vector corpus (.npy plus a reviewable manifest.json) and native/core/
+# holds the *generated but committed* config.hpp, so neither may be
+# swept up by a broad pattern here. Only build directories are ignored.
+native/build/
+native/build-*/
+native/cmake-build-*/
+# FetchContent's downloads (onnxruntime), kept out of the build tree so
+# CI can cache them across runs without caching build output. Cache it
+# whole or not at all -- see the note in .github/workflows/ci.yml.
+native/.deps/
+# clangd's index and the compile database it reads
+compile_commands.json
+.cache/
+
+# setuptools' build tree, from `pip install .` / bdist runs
+/build/
+
 # data & training artifacts
 data/
 runs/

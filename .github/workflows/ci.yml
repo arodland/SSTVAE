@@ -1,0 +1,340 @@
+# CI for the Python reference and the native (C++) port.
+#
+# This is the project's first workflow. CLAUDE.md notes in two places
+# that tests which `importorskip` "would quietly stop running instead of
+# failing, and there is no CI to notice" -- so the Python job below runs
+# with the dev extra installed and treats a skipped reference test as a
+# problem to look at, not a pass.
+#
+# Qt is deliberately absent: Phase 0 of docs/native-app.md has no Qt
+# code, and `install-qt-action` on three platforms would dominate the
+# run time for nothing. It gets added with the GUI in Phase 3.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The generated artifacts are committed, so the only thing keeping
+  # them honest is regenerating them and diffing. Runs first and alone:
+  # if config.hpp is stale, every other job is testing the wrong thing.
+  generated:
+    name: Generated artifacts are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy scipy pillow
+      - name: config.hpp matches sstvae/config.py
+        run: python tools/gen_config_header.py --check
+      - name: Golden vectors match the Python reference
+        run: python tools/gen_golden_vectors.py --check
+      # Encoding check only: it compares the generated C++ against
+      # sstvae/modem/interleaver_perms.npy, which is the frozen on-air
+      # format. It does NOT re-derive from numpy -- see
+      # tools/freeze_format_constants.py for why that distinction is
+      # the whole point.
+      - name: Interleaver table matches the frozen data
+        run: python tools/gen_interleaver_table.py --check
+      - name: Layering rules
+        run: python tools/check_layering.py
+      # Catches on Linux what would otherwise only fail on MSVC: a
+      # std:: name used without its header, which libstdc++ and libc++
+      # forgive and MSVC does not.
+      - name: Standard-library includes
+        run: python tools/check_includes.py
+      - name: Show the diff if anything is stale
+        if: failure()
+        run: |
+          python tools/gen_config_header.py || true
+          python tools/gen_golden_vectors.py || true
+          git diff --stat
+          git diff -- native/core/config.hpp native/tests/golden/manifest.json
+
+  python:
+    name: Python reference (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The dev extra pins CPU torch, which several tests use as the
+      # *reference* implementation for the numpy/ONNX paths.
+      - run: uv pip install --system -e ".[dev,cli]"
+      - name: Fast suite
+        run: pytest -q
+      - name: Slow suite
+        if: matrix.os == 'ubuntu-latest'
+        run: pytest -q -m slow
+
+  native:
+    name: Native core (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # No Intel macOS runner. docs/native-app.md listed "GHA retires
+        # the Intel macOS runner mid-project" as a risk; it turns out to
+        # have happened already -- `macos-13` no longer schedules and a
+        # job requesting it queues forever rather than failing, which is
+        # worse than an error.
+        #
+        # Decision 2 still stands: Intel Macs are supported, because
+        # hams are conservative about hardware. So the x86_64 slice has
+        # to be *cross-compiled* on an Apple-silicon runner, which the
+        # doc anticipated as a fallback and which is now the only path.
+        # Until the packaging work in Phase 4 exists to do that, this
+        # matrix tests arm64 macOS only -- an honest gap, not a decision
+        # to drop Intel.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The package must be *installed*, not merely present: the
+      # `pytest` console script does not put the working directory on
+      # sys.path, so `import sstvae` fails without this. Running
+      # `python -m pytest` locally hides that, which is exactly how it
+      # reached CI.
+      # platformdirs is a `gui`-extra dependency, but it is the
+      # *reference* for where the config lives, and the native settings
+      # test compares against it. Without it that test skips -- which it
+      # did on macOS but not Windows, so the check silently covered two
+      # platforms out of three. Installed explicitly rather than pulling
+      # in the whole gui extra, which would mean 648 MB of PySide6.
+      - run: pip install -e ".[cli]" pytest pybind11 platformdirs
+      - uses: lukka/get-cmake@latest
+      # onnxruntime is a ~9-80 MB pinned download per platform. Cached
+      # on the URL's hash so a version bump busts it automatically.
+      #
+      # **Cache the whole FetchContent tree, never a part of it.** The
+      # first version of this cached only `*-subbuild`, which holds the
+      # downloaded archive *and the stamp files saying it was already
+      # extracted* -- while the extracted content lives in `*-src`,
+      # which was not cached. The run that populated the cache passed;
+      # the next one restored "already extracted" beside an empty source
+      # directory and failed on all three platforms in 40 ms. A
+      # FetchContent tree is only meaningful as a unit.
+      # Holds onnxruntime *and* the built Hamlib, which is why the key
+      # covers both files: Hamlib is compiled from source on Linux and
+      # macOS, so an uncached job pays for that every time.
+      - name: Cache native dependencies
+        uses: actions/cache@v4
+        with:
+          path: native/.deps
+          key: deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/cmake/onnxruntime.cmake', 'native/cmake/hamlib.cmake') }}
+      # The codec's parity tests compare two runtimes on the *same*
+      # model file, so they need that file. Fetching it here rather than
+      # inside a test keeps a network failure reported as a network
+      # failure. SSTVAE_REQUIRE_CODEC below then makes a skip -- for any
+      # reason, including this step silently half-working -- a failure.
+      - name: Cache model artifacts
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ hashFiles('sstvae/checkpoint.py') }}
+      - name: Fetch the published ONNX artifacts
+        run: python -c "from sstvae import checkpoint; [checkpoint.resolve_onnx(p, None, 'fp16') for p in ('encoder','decoder')]"
+      # Put MSVC on PATH before CMake looks for a compiler. Without
+      # this, the Ninja generator finds the runner's MinGW GCC first and
+      # builds a perfectly good .pyd that CPython then cannot load --
+      # a MinGW extension is ABI-incompatible with an MSVC-built
+      # interpreter, and the only symptom is "DLL load failed".
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S native -B native/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps" \
+            -DPython3_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')" \
+            -Dpybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')"
+      - name: Build
+        run: cmake --build native/build
+      # Windows only, and it runs before ctest because the loader has no
+      # other voice.
+      #
+      # A bad import library links cleanly and produces an executable
+      # that cannot start: `rig_hamlib` timed out under ctest having
+      # written *nothing*, its in-process watchdog never fired, and the
+      # cause was two layers below anything a test can report -- the exe
+      # died at load with STATUS_DLL_NOT_FOUND before reaching main, so
+      # there was no output on any stream and nothing to tell it apart
+      # from a deadlock. That cost several CI rounds.
+      #
+      # ctest cannot distinguish those, so this does it first: run the
+      # binary directly and require it to *start* and exit 0. The
+      # dumpbin dump is what makes a failure immediately readable -- a
+      # dependency listed as `(null)`, or libhamlib-4.dll missing from
+      # the list entirely, is the malformed-import-directory signature.
+      - name: Rig test starts outside ctest
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = "native/build/tests/test_rig_hamlib.exe"
+          Write-Host "== beside the executable =="
+          Get-ChildItem (Split-Path $exe) -Filter *.dll | Format-Table Name, Length
+          Write-Host "== imports =="
+          dumpbin /dependents $exe
+          Write-Host "== running it directly, 90 s limit =="
+          $p = Start-Process -FilePath $exe -PassThru -NoNewWindow `
+                 -RedirectStandardOutput out.txt -RedirectStandardError err.txt
+          $exited = $p.WaitForExit(90000)
+          if (-not $exited) { $p.Kill() }
+          Write-Host "== stdout =="; Get-Content out.txt -ErrorAction SilentlyContinue
+          Write-Host "== stderr =="; Get-Content err.txt -ErrorAction SilentlyContinue
+          if (-not $exited) {
+            throw "test_rig_hamlib did not finish in 90 s"
+          }
+          if ($p.ExitCode -ne 0) {
+            $hex = "0x{0:X8}" -f $p.ExitCode
+            throw "test_rig_hamlib exited with $($p.ExitCode) ($hex). " +
+                  "0xC0000135 is STATUS_DLL_NOT_FOUND: the process could not " +
+                  "start, so nothing above the loader ran."
+          }
+      # The C++ side checked against the committed corpus.
+      - name: C++ tests
+        run: ctest --test-dir native/build --output-on-failure
+      # Phase 0's actual exit criterion: the *Python* suite, running
+      # against the C++ implementations rather than the reference ones.
+      - name: Python suite against the C++ core
+        run: pytest -q --native
+        env:
+          # The codec parity tests are the strongest checks in the
+          # suite -- same runtime, same file, so they can demand
+          # *identical* output rather than a tolerance. That also makes
+          # them the ones with a downloaded prerequisite, and therefore
+          # the ones that could quietly become no tests at all. Here
+          # they are mandatory.
+          SSTVAE_REQUIRE_CODEC: "1"
+      # Also covers tests/test_native_cli.py, which runs the built
+      # `sstvae-decode` against sstvae_decode.py on one WAV and requires
+      # the same picture byte for byte -- Phase 2's exit criterion.
+      - name: Slow suite against the C++ core
+        if: matrix.os == 'ubuntu-latest'
+        run: pytest -q -m slow --native
+        env:
+          SSTVAE_REQUIRE_CODEC: "1"
+
+  sanitizers:
+    name: ASan + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No Python packages: with the pybind11 module off, this job
+      # builds C++ and runs ctest against the committed corpus, which
+      # needs nothing from the Python side.
+      - uses: lukka/get-cmake@latest
+      # RelWithDebInfo, not Debug. The sanitizers are not what makes an
+      # instrumented build slow -- -O0 is. Measured on this suite:
+      # 670 s at -O0 against 136 s at -O2, same 7 tests, and ASan still
+      # reports a planted heap-buffer-overflow with a symbolized stack
+      # (upstream recommends -O1/-O2 with -fno-omit-frame-pointer, which
+      # SSTVAE_SANITIZE sets). At -O0 the rx engine's tests did not merely
+      # run slowly, they timed out.
+      - name: Configure with sanitizers
+        run: |
+          cmake -S native -B native/build-asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSSTVAE_SANITIZE=ON \
+            -DSSTVAE_BUILD_PYMODULE=OFF -DSSTVAE_BUILD_CODEC=OFF \
+            -DSSTVAE_BUILD_RIG=OFF
+      - run: cmake --build native/build-asan
+      # C++ tests only. The pybind11 module is off because running it
+      # under ASan means preloading the runtime into the interpreter
+      # (LD_PRELOAD) and then chasing leaks in CPython itself, which
+      # says nothing about this code. "No memory safety net" is an
+      # accepted cost in docs/native-app.md; this is the net.
+      #
+      # The codec is off for the same reason: it is a prebuilt shared
+      # library nobody here compiled with instrumentation, so ASan would
+      # report onnxruntime's allocations rather than ours.
+      - run: ctest --test-dir native/build-asan --output-on-failure
+
+  tsan:
+    name: ThreadSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      # A separate job from ASan because the two sanitizers cannot be
+      # combined, and separate from the ordinary build because the whole
+      # tree does not need instrumenting to check the part that has
+      # threads in it.
+      #
+      # That part is small and recent: the receiver's lock-free ring
+      # buffer, the decode loop, and the transmitter's PTT watchdog. All
+      # three make claims about what may run concurrently -- "the audio
+      # callback never blocks", "the message string is only written
+      # outside the playing window" -- and those claims are exactly the
+      # kind that stay true until someone adds a field.
+      - name: Configure with ThreadSanitizer
+        run: |
+          cmake -S native -B native/build-tsan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+            -DSSTVAE_BUILD_PYMODULE=OFF -DSSTVAE_BUILD_CODEC=OFF \
+            -DSSTVAE_BUILD_RIG=OFF
+      - run: cmake --build native/build-tsan --target test_rx_engine test_tx_engine test_ringbuffer
+      - run: ctest --test-dir native/build-tsan --output-on-failure -R 'rx_engine|tx_engine|ringbuffer'
+
+  optional-deps:
+    name: Qt audio + rig control build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      # SSTVAE_BUILD_QTAUDIO defaults to AUTO, which *skips* the audio
+      # layer when Qt is absent -- so without this job every other build
+      # here would be silently not compiling core/audio/qt/ at all. ON
+      # rather than AUTO for the same reason: a job whose purpose is to
+      # compile that file must fail if it did not.
+      # Hamlib is *not* installed from apt: it is pinned and built by
+      # native/cmake/hamlib.cmake. Ubuntu ships 4.5.5, which predates
+      # the hamlib_token_t rename and does not compile here -- which is
+      # exactly the drift the pin exists to remove.
+      - name: Install Qt Multimedia
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qt6-multimedia-dev qt6-base-dev
+      - name: Cache native dependencies
+        uses: actions/cache@v4
+        with:
+          path: native/.deps
+          key: deps-optional-${{ runner.os }}-${{ hashFiles('native/cmake/hamlib.cmake') }}
+      - name: Configure
+        run: |
+          cmake -S native -B native/build-qt -G Ninja \
+            -DSSTVAE_BUILD_QTAUDIO=ON -DSSTVAE_BUILD_RIG=ON \
+            -DSSTVAE_BUILD_CODEC=OFF -DSSTVAE_BUILD_PYMODULE=OFF \
+            -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps"
+      - run: cmake --build native/build-qt
+      # Runs headless with no audio server, so it lists nothing and
+      # exits 0. That is still worth doing: it proves the library links
+      # and that QMediaDevices can be reached without a display.
+      # Anything past enumeration needs a device -- see the loopback
+      # recipe in apps/sstvae_audio_check.cpp, which is a manual test.
+      - run: ./native/build-qt/sstvae-audio-check
+      # The libhamlib backend against Hamlib's own dummy rig (model 1),
+      # which opens, keys and reports a frequency with no hardware --
+      # the same trick the Python side uses with `rigctld -m 1`.
+      - run: ctest --test-dir native/build-qt --output-on-failure -R 'rig'
+
