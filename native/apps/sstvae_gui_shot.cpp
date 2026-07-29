@@ -26,8 +26,10 @@
 #include <cstdio>
 #include <string>
 
+#include "app_state.hpp"
 #include "settings/settings.hpp"
 #include "settings_dialog.hpp"
+#include "tx_panel.hpp"
 
 namespace {
 
@@ -95,6 +97,19 @@ int main(int argc, char** argv) {
     if (tabs == nullptr) {
         std::fprintf(stderr, "sstvae-gui-shot: no tab widget found\n");
         return 1;
+    }
+
+    // The transmit panel, which needs an AppState but touches neither
+    // the network nor the radio until Send is pressed.
+    {
+        sstvae::gui::AppState state;
+        sstvae::gui::TransmitPanel panel(&state);
+        panel.resize(width > 0 ? width : 1000, height > 0 ? height : 700);
+        panel.show();
+        app.processEvents();
+        const QString path = QStringLiteral("%1/transmit.png").arg(out);
+        panel.grab().save(path);
+        std::printf("%s\n", path.toLocal8Bit().constData());
     }
 
     for (int i = 0; i < tabs->count(); ++i) {

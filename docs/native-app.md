@@ -23,8 +23,10 @@ The **application** is rewritten. Everything else stays Python:
 | `hfchannel.py` (simulation) | `sstvae/modem/`, `codec.py`, `images.py` |
 | The whole `sstvae` package as the **reference implementation** | `audio.py`, `rig/`, `overlay/`, `gui/settings.py`, `checkpoint.py` |
 
-`sstvae/gui/` is **deleted** when the native app reaches parity
-(decision 1), taking the `gui` extra and `pyside6-essentials` with it.
+`sstvae/gui/` is **deleted** when the native app is packaged (decision
+1), taking the `gui` extra and `pyside6-essentials` with it; it is
+frozen — bug fixes only — from the moment the native app reaches
+parity.
 `checkpoint.py` is ported rather than left behind because the native app
 fetches its own artifacts (decision 5); the Python copy stays for the
 CLIs.
@@ -761,11 +763,11 @@ The GUI work is independent of the modem, and running it early is how
 you get something demo-able before `sync.cpp` works.
 
 **Exit:** feature parity with `sstvae-gui`, and the loopback equivalent
-of `test_app_loopback.py` passes. **Parity here is what triggers
-decision 1** — `sstvae/gui/`, the `gui` extra, and `pyside6-essentials`
-are removed in a single change, and `CLAUDE.md`'s "The application"
-section is rewritten to describe the C++ app. Until that change lands,
-both GUIs are maintained, so do not let this phase idle at 95%.
+of `test_app_loopback.py` passes. Parity **freezes** the Python GUI —
+bug fixes only from here, every new feature goes to the native app — but
+does *not* delete it; that is Phase 4's, under the amended decision 1.
+Do not let this phase idle at 95%: a frozen GUI is a bounded cost, a
+nearly-finished one is not.
 
 - **Volume** — 2,162 lines displaced (`rx_panel` 417, `settings_dialog`
   400, `tx_panel` 347, `overlay_editor` 309, `waterfall` 252, `app` 229,
@@ -804,6 +806,12 @@ both GUIs are maintained, so do not let this phase idle at 95%.
 
 **Exit:** a tagged GHA run produces three signed artifacts, each
 installed and launched on a clean VM with no developer tooling present.
+**That is what triggers decision 1** — in the same change, `sstvae/gui/`
+is deleted along with the `gui` extra and `pyside6-essentials`, and
+`CLAUDE.md`'s "The application" section is rewritten to describe the C++
+app. In the same change and not as a follow-up, for the reason the
+original decision gave: a deletion deferred is a deletion that does not
+happen.
 
 - **Volume** — almost no Python displaced; this is nearly all new
   configuration. Small in lines, and that is exactly why it will not
@@ -880,7 +888,7 @@ already needs the CI matrix stood up.
 | **`resample_poly` mismatch** | Explicitly called out as delicate; test against scipy over a matrix of rate pairs, not just 8k↔48k. |
 | **Audio device quirks** | PortAudio continuity retires most of it. Port `tests/test_audio.py`'s fake-PortAudio harness early — it caught the resample-direction bug without hardware and will catch its C++ twin. |
 | **macOS notarization archaeology** | Static-link onnxruntime; sign inside-out; do a throwaway notarization spike in Phase 0 rather than discovering the problems in Phase 4. |
-| **Two GUIs to maintain forever** | Resolved by decision 1: `sstvae/gui/` is deleted at parity, in the same change. The residual risk is a Phase 3 that stalls just short of parity and leaves both alive indefinitely. |
+| **Two GUIs to maintain forever** | Bounded by decision 1 as amended: the Python GUI is frozen at parity (bug fixes only) and deleted at packaging. Freezing is what caps the cost — the window between parity and packaging is real, but during it only one GUI is being *developed*. The residual risk moves to a Phase 4 that stalls, so the deletion is part of the packaging change rather than a follow-up to it. |
 | ~~**GHA retires the Intel macOS runner mid-project**~~ — **happened, 2026-07-28** | Already gone by the time CI was first stood up: `macos-13` no longer schedules, and a job requesting it **queues indefinitely rather than failing**, which is worse than an error because nothing tells you why. Removed from the matrix. Cross-compiling the `x86_64` slice on an Apple-silicon runner is therefore mandatory, not a fallback — see "Platform floor". Decision 2 is unchanged: Intel Macs are still supported, and the gap is in CI coverage, not in intent. |
 | **First run fails offline** | Decision 5 trades installer size for a network dependency at first launch. Phase 2 owes a clear message and a manual model-import path; a field laptop with no connectivity is an ordinary case, not an edge one. |
 | **Bundled Hamlib goes stale** | CI bump, as agreed. Note that bundling means a Hamlib CVE or a new-radio backend becomes our release, not the distro's. Pinned in `native/cmake/hamlib.cmake` (4.7.2), sha256 per artifact, built from the release tarball on Linux/macOS and taken from upstream's prebuilt zip on Windows. |
@@ -889,11 +897,26 @@ already needs the CI matrix stood up.
 
 ## Decisions (Andrew, 2026-07-27)
 
-1. **The Python GUI is retired** once the native app reaches parity.
-   `sstvae/gui/` is deleted, the `gui` extra and `pyside6-essentials`
-   go with it, and Python keeps the CLIs, the reference modem, and
-   training. The `listen` extra stays. This is part of the plan, not a
-   follow-up — see Phase 3's exit criteria.
+1. **The Python GUI is retired** once the native app is **packaged** —
+   amended 2026-07-29, from "once it reaches parity". `sstvae/gui/` is
+   deleted, the `gui` extra and `pyside6-essentials` go with it, and
+   Python keeps the CLIs, the reference modem, and training. The
+   `listen` extra stays. This is part of the plan, not a follow-up — see
+   Phase 4's exit criteria.
+
+   The amendment is about what a user can actually run. Parity means the
+   native app *works*; packaging means someone who is not us can install
+   it. Between those two points the only way to have a working desktop
+   app is to build C++, Qt and Hamlib from source — so deleting the
+   Python GUI at parity would leave every operator without one, to
+   remove code that costs nothing to keep for another phase. The trigger
+   is therefore a signed, installable build on all three platforms.
+
+   To stop that becoming an indefinite reprieve, the Python GUI is
+   **frozen at parity**: bug fixes only, no new features. Anything new
+   goes to the native app alone. That bounds the duplicated-maintenance
+   cost the original decision was written to avoid, without paying it
+   with a period where nothing is installable.
 2. **Windows 10 and Intel Macs are supported.** Hams are conservative
    about hardware, so the floor is set by users, not by tooling
    convenience. Consequences in "Platform floor" below.

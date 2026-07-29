@@ -9,11 +9,11 @@
 #include <QMessageBox>
 #include <QStatusBar>
 #include <QTabWidget>
-#include <QVBoxLayout>
 #include <QWidget>
 
 #include "app_state.hpp"
 #include "rx_panel.hpp"
+#include "tx_panel.hpp"
 #include "settings_dialog.hpp"
 
 namespace sstvae::gui {
@@ -21,20 +21,6 @@ namespace sstvae::gui {
 namespace {
 
 constexpr auto APP_NAME = "SSTVAE";
-
-// Stands in for a panel until its own port lands. Named rather than an
-// anonymous QWidget so the window's structure -- and the wiring between
-// the two panels -- is visible and testable now, instead of arriving in
-// one lump with the panels.
-QWidget* placeholder(const QString& text, QWidget* parent) {
-    auto* page = new QWidget(parent);
-    auto* layout = new QVBoxLayout(page);
-    auto* label = new QLabel(text, page);
-    label->setAlignment(Qt::AlignCenter);
-    label->setEnabled(false);
-    layout->addWidget(label);
-    return page;
-}
 
 }  // namespace
 
@@ -46,7 +32,24 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     tabs_ = new QTabWidget(this);
     rx_panel_ = new ReceivePanel(state_, tabs_);
     tabs_->addTab(rx_panel_, tr("Receive"));
-    tabs_->addTab(placeholder(tr("Transmit panel"), tabs_), tr("Transmit"));
+    tx_panel_ = new TransmitPanel(state_, tabs_);
+    tabs_->addTab(tx_panel_, tr("Transmit"));
+
+    // Half duplex: our own transmission must not be decoded back into a
+    // received picture. Frequency polling pauses too -- the answer is
+    // not interesting mid-over, and it keeps CAT chatter off the wire
+    // while keyed.
+    connect(tx_panel_, &TransmitPanel::transmitStarted, rx_panel_,
+            &ReceivePanel::suspend_for_transmit);
+    connect(tx_panel_, &TransmitPanel::transmitFinished, rx_panel_,
+            &ReceivePanel::resume_after_transmit);
+    connect(tx_panel_, &TransmitPanel::transmitStarted, state_,
+            &AppState::pause_rig_polling);
+    connect(tx_panel_, &TransmitPanel::transmitFinished, state_,
+            &AppState::resume_rig_polling);
+    // The most recent picture becomes available as a transmit inset.
+    connect(rx_panel_, &ReceivePanel::imageReceived, tx_panel_,
+            &TransmitPanel::set_last_rx_image);
     setCentralWidget(tabs_);
 
     build_menu();
@@ -149,6 +152,16 @@ void MainWindow::open_settings() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+    if (tx_panel_->transmitting()) {
+        const auto answer = QMessageBox::question(
+            this, tr("Transmitting"),
+            tr("A transmission is in progress. Stop it and quit?"));
+        if (answer != QMessageBox::Yes) {
+            event->ignore();
+            return;
+        }
+        tx_panel_->cancel();
+    }
     rx_panel_->stop();
     state_->disconnect_rig();
     state_->save_config();

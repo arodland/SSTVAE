@@ -265,6 +265,21 @@ a resize must keep the history rather than blank it, and a tone must
 paint at the x its frequency says. `tick()` is a slot so a test can
 render one frame instead of waiting on the timer — no stopwatch.
 
+**The overlay editor is a painted `QWidget`, not a `QGraphicsView`.**
+The design doc assumed the reference's scene graph would port directly,
+but the reference's own rule — *the preview is `overlay::render()`'s
+output, not a Qt-drawn imitation* — makes a scene pointless here: there
+is nothing to put in it but the rendered composite. A plain widget has
+no second representation that can drift. Selection handles come from
+`overlay::item_bbox`, the same geometry the renderer places items with,
+so a handle cannot sit somewhere other than the thing it selects; and a
+drag writes *normalized* coordinates, never pixels, which is what keeps
+a saved template meaningful at another size.
+`tests/test_overlay_editor.cpp` drives synthesized mouse events and
+checks the arithmetic — an inverted axis or a dropped letterbox offset
+still looks like a working editor until an item will not go where you
+put it.
+
 **`sstvae-gui-shot` renders the app's windows to PNG, headless**, so a
 layout can be looked at at several sizes without a display or a human.
 A tool rather than a ctest, like `sstvae-audio-check`: "is this laid out
@@ -934,8 +949,14 @@ need when `--native` fails and you want to know *where*.
   by `scripts/export_onnx.py` and published as
   `v1-{encoder,decoder}-{fp32,fp16,int8}.onnx`.
 - `docs/native-app.md` — design (not implemented) for a native C++/Qt 6
-  desktop app replacing `sstvae/gui/`, which gets **deleted** when the
-  native one reaches parity. Depends on `docs/onnx.md` landing first —
+  desktop app replacing `sstvae/gui/`, which is **frozen** (bug fixes
+  only) when the native one reaches parity and **deleted** when it is
+  packaged — amended 2026-07-29 from "deleted at parity". Between those
+  points the only way to run the native app is to build C++, Qt and
+  Hamlib from source, so deleting the Python GUI at parity would leave
+  operators with no app at all in order to remove code that costs
+  nothing to keep. Freezing is what keeps the duplicated-maintenance
+  cost bounded meanwhile. Depends on `docs/onnx.md` landing first —
   the app cannot embed torch. Read it before assuming the motivation is
   download size: after ONNX, frozen Python is already in the same size
   class, and the real wins are startup, install robustness, and native

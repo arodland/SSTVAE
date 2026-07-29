@@ -296,6 +296,8 @@ if(_want_gui)
     gui/rx_panel.cpp
     gui/rig_config.cpp
     gui/settings_dialog.cpp
+    gui/overlay_editor.cpp
+    gui/tx_panel.cpp
     gui/app_state.cpp)
   set_target_properties(sstvae_gui PROPERTIES AUTOMOC ON)
   target_include_directories(sstvae_gui PUBLIC core gui)

@@ -149,6 +149,12 @@ if(TARGET sstvae_gui)
   add_test(NAME settings_dialog COMMAND test_settings_dialog)
   set_tests_properties(settings_dialog PROPERTIES TIMEOUT 300)
 
+  add_executable(test_overlay_editor test_overlay_editor.cpp)
+  target_link_libraries(test_overlay_editor PRIVATE sstvae_gui)
+  target_include_directories(test_overlay_editor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME overlay_editor COMMAND test_overlay_editor)
+  set_tests_properties(overlay_editor PROPERTIES TIMEOUT 300)
+
   add_executable(test_waterfall test_waterfall.cpp)
   target_link_libraries(test_waterfall PRIVATE sstvae_gui)
   target_include_directories(test_waterfall PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
