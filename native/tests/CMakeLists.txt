@@ -48,6 +48,23 @@ target_link_libraries(test_audio PRIVATE sstvae_core)
 target_include_directories(test_audio PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME audio COMMAND test_audio)
 
+# Rig control's threading properties, against a fake radio -- so the
+# part that can actually be wrong is covered with no libhamlib present.
+add_executable(test_rig test_rig.cpp)
+target_link_libraries(test_rig PRIVATE sstvae_core)
+target_include_directories(test_rig PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME rig COMMAND test_rig)
+
+# The libhamlib backend itself, exercised against Hamlib's own dummy
+# rig (model 1) -- the same trick CLAUDE.md uses for the Python side,
+# and the only way to run open/PTT/frequency with no radio attached.
+if(TARGET sstvae_rig)
+  add_executable(test_rig_hamlib test_rig_hamlib.cpp)
+  target_link_libraries(test_rig_hamlib PRIVATE sstvae_core sstvae_rig)
+  target_include_directories(test_rig_hamlib PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME rig_hamlib COMMAND test_rig_hamlib)
+endif()
+
 # Hard upper bounds, so a wedged test is reported as a Timeout rather
 # than running until GitHub kills the whole job -- at which point there
 # is no ctest output at all to say which test it was.
@@ -60,5 +77,8 @@ add_test(NAME audio COMMAND test_audio)
 # outlast the run.
 set_tests_properties(rx_engine PROPERTIES TIMEOUT 360)
 set_tests_properties(tx_engine PROPERTIES TIMEOUT 180)
-set_tests_properties(golden npy modem_roundtrip ringbuffer audio
+set_tests_properties(golden npy modem_roundtrip ringbuffer audio rig
                      PROPERTIES TIMEOUT 300)
+if(TARGET sstvae_rig)
+  set_tests_properties(rig_hamlib PROPERTIES TIMEOUT 300)
+endif()

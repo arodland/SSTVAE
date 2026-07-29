@@ -203,10 +203,9 @@ either, so overlays stay renderable from the command line.
 **Phases 0–1: the whole modem is ported** — `golay`, `ofdm`, `dsp`,
 `framing`, `beacon`, `sync`, `modem` — and the Python suite passes
 against it, including `-m slow`. Both interop directions work. Phase 2
-(the headless app core) is **in progress**: the codec, images, WAV I/O,
-settings, the overlay document, the ring buffer, the **rx and tx
-engines** and **soundcard audio** are done; rig control is not.
-**Python remains the normative
+(the headless app core) is **complete**: the codec, images, WAV I/O,
+settings, the overlay document, the ring buffer, the rx and tx engines,
+soundcard audio and rig control. **Python remains the normative
 definition of the on-air format** — when the two disagree, Python is
 right until proven
 otherwise, because that is the only thing that keeps "compatible
@@ -342,6 +341,43 @@ include-what-you-use: no extra dependency, and it only reports the
 direction that breaks a build. It is a CI gate, unlike
 `freeze_format_constants.py --verify`, because here regenerating *is*
 the right fix.
+
+**Rig control is a re-derivation, not a port, and the design doc says
+why.** `sstvae/rig/rigctld.py` talks to a `rigctld` child over a socket
+because the SWIG Hamlib bindings live in the system site-packages where
+a virtualenv cannot see them — a *Python packaging* constraint with no
+C++ equivalent. So `native/core/rig/` links `libhamlib` in-process and
+the socket client, the redial logic, the `rigctld` spawner and the
+`rigctld -l` column parser are deleted rather than translated
+(`rig_list_foreach` gives a struct, which cannot have the
+silently-dropped-row bug that parser is flagged for below). Sharing a
+radio with WSJT-X still works: Hamlib **model 2** speaks the rigctld
+protocol as a *client*, so it is one more entry in the same picker.
+What is given up is crash isolation — a backend segfault now takes the
+app down — and that was accepted in `docs/native-app.md`.
+
+**The property that survives is the one that matters**: nothing on the
+GUI thread ever blocks on the rig, and keying is never stuck behind a
+stale poll. One backend on one worker thread; PTT is priority work, so
+worst-case keying latency is *one in-flight operation* rather than a
+queue drain (which retires the reference's separate-PTT-socket trick —
+that existed to dodge contention the socket layer itself introduced);
+polling suspends while transmitting; and **`stop()` detaches rather than
+joining**, expressed by the worker co-owning its session through a
+`shared_ptr` so the departing thread runs the destructor that closes the
+handle. Joining would inherit exactly the timeout being escaped.
+`RigController` has no external dependency at all and is tested against
+a backend that accepts and never answers, so the part that can be wrong
+is covered on a machine with no Hamlib.
+
+**A CMake `if()` on an unset variable is silently false.** `_want_rig`
+was defined *after* `add_subdirectory(tests)`, so the Hamlib test was
+not built and `ctest` passed 9/9 while running 8 — green, and testing
+nothing, which is the failure mode the `SSTVAE_REQUIRE_CODEC` env var
+exists to prevent elsewhere. The optional-dependency blocks now all
+precede the tests directory, and `tests/CMakeLists.txt` keys off
+`if(TARGET sstvae_rig)` rather than a variable, because a target cannot
+exist without having been created.
 
 **Do not assert that noise decodes to nothing.** A preamble-shaped peak
 clears the detection threshold every few seed-minutes and the

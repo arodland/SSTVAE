@@ -286,8 +286,11 @@ native/
     dsp/  ofdm/  golay/  framing/  beacon/  sync/  modem/
     codec/              # onnxruntime
     overlay/            # QtGui only, no QtWidgets
-    audio/              # PortAudio
-    rig/                # QTcpSocket
+    audio/              # rate/format conversion, no Qt
+      qt/               # QtMultimedia (see "Audio: use QtMultimedia")
+    rig/                # the threading design, no external deps
+      hamlib.cpp        # libhamlib (see "Bundling Hamlib")
+    latents/  util/
     rx/  tx/
   gui/                  # QtWidgets
   bindings/
@@ -298,6 +301,12 @@ tools/
   gen_config_header.py
   gen_golden_vectors.py
 ```
+
+This sketch predates two decisions recorded further down and has been
+corrected to match them: audio is QtMultimedia rather than PortAudio,
+and rig control links `libhamlib` rather than speaking to `rigctld`
+over a `QTcpSocket`. Both are split so that the part with the logic in
+it has no external dependency and stays testable without one.
 
 ### Layering rules
 

@@ -38,6 +38,13 @@ option(SSTVAE_BUILD_CODEC "Build the ONNX codec (downloads onnxruntime)" ON)
 # silently ship without audio.
 set(SSTVAE_BUILD_QTAUDIO "AUTO" CACHE STRING "Build Qt Multimedia audio (ON/OFF/AUTO)")
 set_property(CACHE SSTVAE_BUILD_QTAUDIO PROPERTY STRINGS ON OFF AUTO)
+# Rig control needs libhamlib. Same AUTO/ON/OFF contract as the audio
+# layer, and for the same reason: the threading design that makes rig
+# control safe lives in core/rig/controller.cpp, which has no external
+# dependency at all and is tested against a fake backend -- so a machine
+# with no Hamlib still builds and checks the part that can be wrong.
+set(SSTVAE_BUILD_RIG "AUTO" CACHE STRING "Build libhamlib rig control (ON/OFF/AUTO)")
+set_property(CACHE SSTVAE_BUILD_RIG PROPERTY STRINGS ON OFF AUTO)
 
 # The numeric core is compared against Python to ~1e-12. Fast-math would
 # licence the compiler to reassociate exactly the sums those tolerances
@@ -72,6 +79,7 @@ add_library(sstvae_core STATIC
   core/latents/latents.cpp
   core/util/event.cpp
   core/rx/ringbuffer.cpp
+  core/rig/controller.cpp
   core/rx/engine.cpp
   core/tx/engine.cpp
   core/settings/settings.cpp
@@ -149,6 +157,36 @@ if(Python3_Interpreter_FOUND)
             ${CMAKE_CURRENT_SOURCE_DIR}/../tools/gen_config_header.py
     COMMENT "Regenerating native/core/config.hpp from sstvae/config.py"
     VERBATIM)
+endif()
+
+# --- rig --------------------------------------------------------------------
+# Only the libhamlib backend lives here; the controller is in the core.
+if(SSTVAE_BUILD_RIG STREQUAL "OFF")
+  set(_want_rig OFF)
+else()
+  find_package(PkgConfig QUIET)
+  if(PkgConfig_FOUND)
+    pkg_check_modules(HAMLIB QUIET IMPORTED_TARGET hamlib)
+  endif()
+  if(HAMLIB_FOUND)
+    set(_want_rig ON)
+  elseif(SSTVAE_BUILD_RIG STREQUAL "ON")
+    message(FATAL_ERROR
+      "SSTVAE_BUILD_RIG=ON but libhamlib was not found. Install it (the "
+      "-dev/-devel package), or pass -DSSTVAE_BUILD_RIG=OFF to build "
+      "without rig control.")
+  else()
+    set(_want_rig OFF)
+    message(STATUS "libhamlib not found; building without rig control")
+  endif()
+endif()
+
+if(_want_rig)
+  add_library(sstvae_rig STATIC core/rig/hamlib.cpp)
+  set_target_properties(sstvae_rig PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(sstvae_rig PUBLIC core)
+  target_link_libraries(sstvae_rig PUBLIC sstvae_core PRIVATE PkgConfig::HAMLIB)
+  message(STATUS "libhamlib rig control: ${HAMLIB_VERSION}")
 endif()
 
 # --- tests ------------------------------------------------------------------
