@@ -210,3 +210,30 @@ jobs:
       # library nobody here compiled with instrumentation, so ASan would
       # report onnxruntime's allocations rather than ours.
       - run: ctest --test-dir native/build-asan --output-on-failure
+
+  tsan:
+    name: ThreadSanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+      # A separate job from ASan because the two sanitizers cannot be
+      # combined, and separate from the ordinary build because the whole
+      # tree does not need instrumenting to check the part that has
+      # threads in it.
+      #
+      # That part is small and recent: the receiver's lock-free ring
+      # buffer, the decode loop, and the transmitter's PTT watchdog. All
+      # three make claims about what may run concurrently -- "the audio
+      # callback never blocks", "the message string is only written
+      # outside the playing window" -- and those claims are exactly the
+      # kind that stay true until someone adds a field.
+      - name: Configure with ThreadSanitizer
+        run: |
+          cmake -S native -B native/build-tsan -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+            -DSSTVAE_BUILD_PYMODULE=OFF -DSSTVAE_BUILD_CODEC=OFF
+      - run: cmake --build native/build-tsan --target test_rx_engine test_tx_engine test_ringbuffer
+      - run: ctest --test-dir native/build-tsan --output-on-failure -R 'rx_engine|tx_engine|ringbuffer'
