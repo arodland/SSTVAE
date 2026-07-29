@@ -56,6 +56,11 @@ public:
 
     bool listening() const;
 
+    // Re-read the settings the panel mirrors in its own controls. The
+    // autosave checkbox exists in both places, so a change made in the
+    // dialog has to show up here or the two disagree about what is on.
+    void sync_from_config();
+
 public slots:
     bool start();
     void stop();

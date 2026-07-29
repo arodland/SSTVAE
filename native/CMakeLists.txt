@@ -294,6 +294,8 @@ if(_want_gui)
     gui/main_window.cpp
     gui/waterfall.cpp
     gui/rx_panel.cpp
+    gui/rig_config.cpp
+    gui/settings_dialog.cpp
     gui/app_state.cpp)
   set_target_properties(sstvae_gui PROPERTIES AUTOMOC ON)
   target_include_directories(sstvae_gui PUBLIC core gui)
@@ -350,4 +352,13 @@ if(_want_qtaudio)
   add_executable(sstvae-audio-check apps/sstvae_audio_check.cpp)
   target_link_libraries(sstvae-audio-check PRIVATE sstvae_core sstvae_audio_qt
                         Qt6::Core)
+endif()
+
+# Renders the app's windows to PNG, headless -- so a layout can be
+# looked at without a display. Not a ctest: "is this laid out well" has
+# no oracle, and a stored-PNG comparison fails on every font and theme
+# it was not recorded with. See the file's comment for what it caught.
+if(TARGET sstvae_gui)
+  add_executable(sstvae-gui-shot apps/sstvae_gui_shot.cpp)
+  target_link_libraries(sstvae-gui-shot PRIVATE sstvae_gui)
 endif()

@@ -14,6 +14,7 @@
 
 #include "app_state.hpp"
 #include "rx_panel.hpp"
+#include "settings_dialog.hpp"
 
 namespace sstvae::gui {
 
@@ -124,12 +125,27 @@ void MainWindow::on_model_loaded() {
 }
 
 void MainWindow::open_settings() {
-    // The dialog itself is a later step; the surrounding sequence is
-    // here because it is the window's, not the dialog's: save, relabel,
-    // reconnect the rig, and reload the model only if the checkpoint
-    // actually changed.
-    QMessageBox::information(this, tr("Settings"),
-                             tr("The settings dialog is not built yet."));
+    SettingsDialog dialog(state_->config(), this);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    // The sequence is the window's, not the dialog's: apply, save,
+    // relabel, reconnect the rig, and reload the model *only* if the
+    // checkpoint actually changed -- reloading unconditionally would
+    // re-download or re-open it every time the operator adjusted an
+    // unrelated setting.
+    const std::string previous_model = state_->config().model_path;
+    const std::string previous_precision = state_->config().precision;
+    dialog.apply_to(state_->config());
+    state_->save_config();
+    update_station_label();
+    rx_panel_->sync_from_config();
+    state_->connect_rig();
+
+    if (state_->config().model_path != previous_model ||
+        state_->config().precision != previous_precision) {
+        model_label_->setText(tr("Loading model..."));
+        state_->load_model_async();
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {

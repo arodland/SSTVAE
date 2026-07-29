@@ -1,6 +1,7 @@
 #include "rx_panel.hpp"
 
 #include <QCheckBox>
+#include <QSignalBlocker>
 #include <QFileDialog>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -94,7 +95,15 @@ void ReceivePanel::build_ui() {
     preview_->setAlignment(Qt::AlignCenter);
     preview_->setMinimumHeight(240);
     preview_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    preview_->setStyleSheet(QStringLiteral("background:#202024; color:#888;"));
+    // Palette, not a stylesheet: a stylesheet anywhere makes Qt wrap the
+    // application style in QStyleSheetStyle, which resets padding to
+    // zero across every combo and spin box in the app -- including the
+    // settings dialog, which has nothing to do with this widget.
+    preview_->setAutoFillBackground(true);
+    QPalette dark = preview_->palette();
+    dark.setColor(QPalette::Window, QColor(0x20, 0x20, 0x24));
+    dark.setColor(QPalette::WindowText, QColor(0x88, 0x88, 0x88));
+    preview_->setPalette(dark);
     preview_layout->addWidget(preview_);
     left_layout->addWidget(preview_box, 1);
 
@@ -135,6 +144,14 @@ void ReceivePanel::build_ui() {
 }
 
 bool ReceivePanel::listening() const { return running_.load(); }
+
+void ReceivePanel::sync_from_config() {
+    // Without blocking signals this would write the value straight back
+    // to the config it just came from -- harmless today, but it makes
+    // the checkbox the authority over the file it is meant to reflect.
+    const QSignalBlocker blocker(autosave_);
+    autosave_->setChecked(app_->config().receive.autosave);
+}
 
 bool ReceivePanel::start() {
     if (listening()) return true;

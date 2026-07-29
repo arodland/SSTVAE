@@ -265,6 +265,49 @@ a resize must keep the history rather than blank it, and a tone must
 paint at the x its frequency says. `tick()` is a slot so a test can
 render one frame instead of waiting on the timer — no stopwatch.
 
+**`sstvae-gui-shot` renders the app's windows to PNG, headless**, so a
+layout can be looked at at several sizes without a display or a human.
+A tool rather than a ctest, like `sstvae-audio-check`: "is this laid out
+well" has no oracle, and a stored-PNG comparison fails on every font and
+theme it was not recorded with. It earned its place immediately —
+it is how the clipped help text and the zero-padding bug below were both
+*seen* rather than guessed at. `MainWindow` is deliberately not one of
+its targets: it starts a model load and opens the rig.
+
+**A `QFormLayout` with too little height truncates rather than
+compresses**, and what goes first is the wrapped help text at the bottom
+of a section. There is no default size that is right on a laptop panel
+and on a large monitor, so each settings tab lives in a `QScrollArea`
+(horizontal scrolling off — the width is the dialog's, so a horizontal
+bar would only ever mean a label refusing to wrap). Clipping is worse
+than scrolling in a way that matters: the reader cannot tell whether the
+text is cut off or simply ends.
+
+**Never set a Qt stylesheet for styling in this app; use `QPalette`.**
+A stylesheet on *any* widget makes Qt wrap the application style in
+`QStyleSheetStyle`, whose defaults are not the platform's — most
+visibly, padding drops to zero, so every combo, spin box and line edit
+gets its text jammed against the left border. One `color:` rule on a
+label in the settings dialog did that to the whole window, and the
+receive panel's preview background did it from another file entirely.
+The symptom appears nowhere near the cause.
+
+**A settings dialog's real bug is a field it displays but forgets to
+write back**, so `test_settings_dialog.cpp` round-trips a config in
+which *no field holds its default* and requires the output to be
+identical. A dropped field comes back as its default, and no default
+appears in the fixture, so it cannot survive. Verified by deleting one
+`apply_to` line and watching it fail — a round-trip test that passes
+trivially is worse than none.
+
+**One rig mapping, in `gui/rig_config.cpp`**, shared by `AppState` and
+the dialog's Test CAT / Test PTT. Two copies would let the test button
+pass while the app failed, which is worse than having no test button:
+it sends the operator to look at their radio instead of at the setting
+that differs. The test runs on a worker thread for the same reason
+polling does — "nothing on the GUI thread blocks on the rig" has no
+exception for a button.
+
 **Probing a rendered widget means knowing what else is painted on it.**
 Three of the waterfall's first test failures were the test's fault, not
 the widget's: the level meter is the brightest column on the pane, the

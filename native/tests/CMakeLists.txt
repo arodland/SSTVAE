@@ -143,9 +143,17 @@ set_tests_properties(spectrum PROPERTIES TIMEOUT 300)
 
 # The widgets, where they are checkable without eyes.
 if(TARGET sstvae_gui)
+  add_executable(test_settings_dialog test_settings_dialog.cpp)
+  target_link_libraries(test_settings_dialog PRIVATE sstvae_gui)
+  target_include_directories(test_settings_dialog PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME settings_dialog COMMAND test_settings_dialog)
+  set_tests_properties(settings_dialog PROPERTIES TIMEOUT 300)
+
   add_executable(test_waterfall test_waterfall.cpp)
   target_link_libraries(test_waterfall PRIVATE sstvae_gui)
   target_include_directories(test_waterfall PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   add_test(NAME waterfall COMMAND test_waterfall)
   set_tests_properties(waterfall PROPERTIES TIMEOUT 300)
 endif()
+
+
