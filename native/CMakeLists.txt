@@ -30,6 +30,14 @@ option(SSTVAE_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
 # Everything through Phase 1 -- the entire modem -- builds and tests
 # without downloading anything, and that stays true.
 option(SSTVAE_BUILD_CODEC "Build the ONNX codec (downloads onnxruntime)" ON)
+# Soundcard I/O needs Qt Multimedia. AUTO builds it when Qt6 is present
+# and quietly skips it otherwise, which is what keeps a machine with no
+# Qt able to build and test the entire modem, codec and both engines --
+# the engines take their player as a seam for exactly this reason.
+# ON makes a missing Qt an error, for a packaging build that must not
+# silently ship without audio.
+set(SSTVAE_BUILD_QTAUDIO "AUTO" CACHE STRING "Build Qt Multimedia audio (ON/OFF/AUTO)")
+set_property(CACHE SSTVAE_BUILD_QTAUDIO PROPERTY STRINGS ON OFF AUTO)
 
 # The numeric core is compared against Python to ~1e-12. Fast-math would
 # licence the compiler to reassociate exactly the sums those tolerances
@@ -56,6 +64,7 @@ add_library(sstvae_core STATIC
   core/beacon/beacon.cpp
   core/dsp/dsp.cpp
   core/framing/framing.cpp
+  core/audio/audio.cpp
   core/audio/wavio.cpp
   core/framing/interleaver_table.cpp
   core/images/images.cpp
@@ -92,6 +101,37 @@ if(SSTVAE_BUILD_CODEC)
   # -Wall -Wextra; treat them as system so our own warnings stay signal.
   target_include_directories(sstvae_codec SYSTEM PRIVATE
     ${SSTVAE_ONNXRUNTIME_ROOT}/include)
+endif()
+
+# --- Qt audio ---------------------------------------------------------------
+# Deliberately a separate library from sstvae_core, not a source file in
+# it: linking Qt into the core would make the modem, the golden-vector
+# tests and the pybind11 parity module all depend on a GUI toolkit for
+# no reason. Nothing above this line knows Qt exists.
+if(SSTVAE_BUILD_QTAUDIO STREQUAL "OFF")
+  set(_want_qtaudio OFF)
+else()
+  find_package(Qt6 6.5 COMPONENTS Core Multimedia QUIET)
+  if(Qt6_FOUND)
+    set(_want_qtaudio ON)
+  elseif(SSTVAE_BUILD_QTAUDIO STREQUAL "ON")
+    message(FATAL_ERROR
+      "SSTVAE_BUILD_QTAUDIO=ON but Qt6 Multimedia was not found. "
+      "Install it, or pass -DSSTVAE_BUILD_QTAUDIO=OFF to build without "
+      "soundcard support.")
+  else()
+    set(_want_qtaudio OFF)
+    message(STATUS "Qt6 Multimedia not found; building without soundcard audio")
+  endif()
+endif()
+
+if(_want_qtaudio)
+  add_library(sstvae_audio_qt STATIC core/audio/qt/qtaudio.cpp)
+  set_target_properties(sstvae_audio_qt PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(sstvae_audio_qt PUBLIC core)
+  target_link_libraries(sstvae_audio_qt PUBLIC sstvae_core
+                        PRIVATE Qt6::Core Qt6::Multimedia)
+  message(STATUS "Qt Multimedia audio: ${Qt6_VERSION}")
 endif()
 
 # config.hpp is generated from sstvae/config.py and must never be
@@ -132,4 +172,13 @@ if(SSTVAE_BUILD_CODEC)
               "$<TARGET_FILE_DIR:sstvae-decode>"
       VERBATIM)
   endif()
+endif()
+
+# The soundcard path's only real test. `core/audio/qt/` is device
+# enumeration and moving bytes; the only way to check it is to move
+# bytes through a device, so this is a tool rather than a ctest.
+if(_want_qtaudio)
+  add_executable(sstvae-audio-check apps/sstvae_audio_check.cpp)
+  target_link_libraries(sstvae-audio-check PRIVATE sstvae_core sstvae_audio_qt
+                        Qt6::Core)
 endif()

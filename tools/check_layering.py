@@ -14,6 +14,12 @@ The rules mirror the Python package's, for the same reasons:
   rendering has to work under QGuiApplication with an offscreen
   platform, so an overlay stays renderable from the command line. This
   is the C++ restatement of "nothing in sstvae/overlay/ may import Qt".
+* **Only `core/audio/qt/` may include Qt Multimedia.** Soundcard I/O is
+  the one place in `core/` that needs a Qt module, and it is a separate
+  library (`SSTVAE_BUILD_QTAUDIO`) so the modem, the codec and both
+  engines still build and test on a machine with no Qt at all. The
+  engines take their player and their decoder as seams to keep that
+  true; a Qt include anywhere else in `core/` would quietly undo it.
 * **Nothing outside `bindings/embed/` may link libpython.** The
   dev-only build that embeds the Python modem is the single exception,
   and it is never shipped.
@@ -45,6 +51,11 @@ RULES = [
         "core/ outside overlay/ must not depend on QtGui either",
         lambda p: p.parts[0] == "core" and (len(p.parts) < 2 or p.parts[1] != "overlay"),
         re.compile(r'^\s*#\s*include\s*[<"]QtGui', re.M),
+    ),
+    (
+        "only core/audio/qt/ may depend on Qt Multimedia",
+        lambda p: p.parts[0] == "core" and p.parts[:3] != ("core", "audio", "qt"),
+        re.compile(r'^\s*#\s*include\s*[<"](QtMultimedia|QAudio|QMediaDevices)', re.M),
     ),
     (
         "only bindings/embed/ may link libpython",
