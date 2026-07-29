@@ -55,6 +55,7 @@
 #include "config.hpp"
 #include "images/types.hpp"
 #include "rx/ringbuffer.hpp"
+#include "util/event.hpp"
 
 namespace sstvae::rx {
 
@@ -75,22 +76,10 @@ struct RxConfig {
     double blind_search_seconds = 25.0;
 };
 
-// The `threading.Event` the reference stops on. A condition variable
-// rather than a polled flag, so `stop()` interrupts a `wait` in progress
-// -- shutting the receiver down must not take a poll interval.
-class StopFlag {
-public:
-    void set();
-    bool is_set() const;
-    // Sleep up to `seconds`. Returns true if it was stopped (either
-    // already, or during the wait).
-    bool wait(double seconds);
-
-private:
-    mutable std::mutex m_;
-    std::condition_variable cv_;
-    bool set_ = false;
-};
+// The `threading.Event` the reference stops on. Shared with the
+// transmitter, which needs the same primitive for its cancel flag and
+// its watchdog; the name stays because "stop flag" is what it is here.
+using StopFlag = util::Event;
 
 enum class Status { Listening, Receiving, Done };
 

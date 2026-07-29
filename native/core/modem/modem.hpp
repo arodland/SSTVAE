@@ -111,6 +111,12 @@ class Modem {
     std::vector<cdouble> pilot_;
 };
 
+// Look a mode up by its on-air name ("A", "B", "C"). Throws
+// std::out_of_range for anything else, naming what was asked for -- an
+// unknown mode from a config file or a command line is a typo to report,
+// never a default to silently substitute.
+const ModeSpec& mode_by_name(std::string_view name);
+
 // Pilot-based radio SNR estimate, in the same "dB SNR in a
 // SNR_REF_BW_HZ noise bandwidth" convention used by the channel
 // simulator -- so it is directly comparable to those numbers.

@@ -33,3 +33,10 @@ add_executable(test_rx_engine test_rx_engine.cpp)
 target_link_libraries(test_rx_engine PRIVATE sstvae_core)
 target_include_directories(test_rx_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME rx_engine COMMAND test_rx_engine)
+
+# The transmit sequence, with stub encoder/player/PTT -- so the "PTT
+# always comes back down" guarantee is checked without a radio.
+add_executable(test_tx_engine test_tx_engine.cpp)
+target_link_libraries(test_tx_engine PRIVATE sstvae_core)
+target_include_directories(test_tx_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME tx_engine COMMAND test_tx_engine)

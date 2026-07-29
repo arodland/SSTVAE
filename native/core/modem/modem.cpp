@@ -105,6 +105,13 @@ EqualizedSymbol equalize(std::span<const cdouble> raw_sym,
 
 }  // namespace
 
+const ModeSpec& mode_by_name(std::string_view name) {
+    for (const ModeSpec& m : config::MODES) {
+        if (m.name == name) return m;
+    }
+    throw std::out_of_range("unknown mode \"" + std::string(name) + "\"");
+}
+
 double estimate_snr_db(std::span<const cdouble> h_pilot, int n_frames,
                        std::span<const char> received) {
     std::vector<int> idx;
