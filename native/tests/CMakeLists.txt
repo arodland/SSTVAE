@@ -122,3 +122,15 @@ if(TARGET sstvae_rig)
   # spending the job on it.
   set_tests_properties(rig_hamlib PROPERTIES TIMEOUT 120)
 endif()
+
+# Overlay rendering needs QtGui; the library is optional, so the test
+# follows it. TARGET rather than a variable, for the reason the Hamlib
+# block above records: an if() on an unset variable is silently false.
+if(TARGET sstvae_overlay_render)
+  add_executable(test_overlay_render test_overlay_render.cpp)
+  target_link_libraries(test_overlay_render PRIVATE sstvae_core
+                        sstvae_overlay_render Qt6::Core Qt6::Gui)
+  target_include_directories(test_overlay_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME overlay_render COMMAND test_overlay_render)
+  set_tests_properties(overlay_render PROPERTIES TIMEOUT 300)
+endif()

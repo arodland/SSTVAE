@@ -38,6 +38,8 @@ option(SSTVAE_BUILD_CODEC "Build the ONNX codec (downloads onnxruntime)" ON)
 # silently ship without audio.
 set(SSTVAE_BUILD_QTAUDIO "AUTO" CACHE STRING "Build Qt Multimedia audio (ON/OFF/AUTO)")
 set_property(CACHE SSTVAE_BUILD_QTAUDIO PROPERTY STRINGS ON OFF AUTO)
+set(SSTVAE_BUILD_OVERLAY "AUTO" CACHE STRING "Build Qt overlay rendering (ON/OFF/AUTO)")
+set_property(CACHE SSTVAE_BUILD_OVERLAY PROPERTY STRINGS ON OFF AUTO)
 # Rig control. Plain ON/OFF rather than the audio layer's AUTO, because
 # Hamlib is pinned and bundled (native/cmake/hamlib.cmake) -- there is
 # no system library to detect, so "auto" would have nothing to decide.
@@ -145,6 +147,39 @@ if(_want_qtaudio)
   target_link_libraries(sstvae_audio_qt PUBLIC sstvae_core
                         PRIVATE Qt6::Core Qt6::Multimedia)
   message(STATUS "Qt Multimedia audio: ${Qt6_VERSION}")
+endif()
+
+# --- Overlay rendering ------------------------------------------------------
+# Separate from sstvae_core for the same reason Qt audio is: the modem,
+# the golden vectors and the parity module have no business needing a
+# GUI toolkit. QtGui only -- check_layering.py allows it here and
+# nowhere else under core/ -- so an overlay renders from the command
+# line under QT_QPA_PLATFORM=offscreen, which is what keeps composition
+# available to the headless tools and not just the editor.
+if(SSTVAE_BUILD_OVERLAY STREQUAL "OFF")
+  set(_want_overlay OFF)
+else()
+  find_package(Qt6 6.2 COMPONENTS Core Gui QUIET)
+  if(Qt6_FOUND)
+    set(_want_overlay ON)
+  elseif(SSTVAE_BUILD_OVERLAY STREQUAL "ON")
+    message(FATAL_ERROR
+      "SSTVAE_BUILD_OVERLAY=ON but Qt6 Gui was not found. Install it, or "
+      "pass -DSSTVAE_BUILD_OVERLAY=OFF to build without overlay rendering.")
+  else()
+    set(_want_overlay OFF)
+    message(STATUS "Qt6 Gui not found; building without overlay rendering")
+  endif()
+endif()
+
+if(_want_overlay)
+  add_library(sstvae_overlay_render STATIC core/overlay/render.cpp)
+  set_target_properties(sstvae_overlay_render PROPERTIES
+                        POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(sstvae_overlay_render PUBLIC core)
+  target_link_libraries(sstvae_overlay_render PUBLIC sstvae_core
+                        PRIVATE Qt6::Core Qt6::Gui)
+  message(STATUS "Overlay rendering: Qt ${Qt6_VERSION}")
 endif()
 
 # config.hpp is generated from sstvae/config.py and must never be
