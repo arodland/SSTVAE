@@ -129,7 +129,14 @@ jobs:
         # matrix already carries a comment about macos-13 disappearing.
         # The real fix is a Qt with the AGL reference removed; revisit
         # when the pin below moves.
-        os: [ubuntu-24.04, macos-15, windows-latest]
+        # ubuntu-24.04 rather than -latest: the build machine's glibc is
+        # the floor for every machine the package runs on, so the oldest
+        # runner that still works is the right one. 22.04 does not.
+        #
+        # ubuntu-24.04-arm builds the aarch64 package. Worth having for a
+        # ham application specifically -- a Raspberry Pi or similar SBC
+        # at the radio is a normal station, not an exotic one.
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -175,6 +182,13 @@ jobs:
           version: "6.11.1"
           modules: qtmultimedia
           cache: true
+          # The action works out `host` from the runner (it knows about
+          # linux_arm64), but it only fills in `arch` for Android and
+          # Windows -- every Linux host falls through to aqt's default,
+          # which is the x86_64 package. So an ARM build has to name
+          # Qt's arm64 desktop package itself. Empty elsewhere, which
+          # leaves the existing platforms on that same default.
+          arch: ${{ (runner.os == 'Linux' && runner.arch == 'ARM64') && 'linux_gcc_arm64' || '' }}
           # aqtinstall from git, pinned to the commit that supports Qt
           # 6.11 on Windows (PR #1000, issue #1007).
           #
