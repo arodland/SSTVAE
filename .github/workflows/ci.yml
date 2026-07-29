@@ -345,13 +345,30 @@ jobs:
           else
             wait "$pid"; echo "the packaged app exited on its own" >&2; exit 1
           fi
+      # Name packages after what they *run on*, not the image they were
+      # built on. `ubuntu-24.04` in a download name reads as a
+      # requirement rather than a build detail -- the binary runs on that
+      # and anything newer, because the runner is chosen for the oldest
+      # glibc that still works. And a name containing `latest` changes
+      # meaning underneath a published release the moment GitHub moves
+      # the label.
+      - name: Name the package
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux)   tag="linux-$(uname -m)" ;;
+            macOS)   tag="macos-$(uname -m)" ;;
+            Windows) tag="windows-x64" ;;
+            *)       tag="$RUNNER_OS" ;;
+          esac
+          echo "pkg=sstvae-$tag" >> "$GITHUB_ENV"
       # tar on Unix, because an artifact zip does not preserve the
       # executable bit -- which would ship a macOS .app that cannot be
       # launched and a Linux binary that cannot be run.
       - name: Archive (Unix)
         if: runner.os != 'Windows'
         shell: bash
-        run: tar czf "sstvae-${{ matrix.os }}.tar.gz" -C dist .
+        run: tar czf "${{ env.pkg }}.tar.gz" -C dist .
       # archive: false uploads the tarball as itself instead of putting
       # it inside a zip. Two rules come with it: the path must resolve to
       # exactly one file, and `name` is ignored -- the artifact is named
@@ -360,7 +377,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: runner.os != 'Windows'
         with:
-          path: sstvae-${{ matrix.os }}.tar.gz
+          path: ${{ env.pkg }}.tar.gz
           archive: false
           if-no-files-found: error
       # Windows keeps the zip: it is a directory rather than one file, a
@@ -369,7 +386,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: runner.os == 'Windows'
         with:
-          name: sstvae-${{ matrix.os }}
+          name: ${{ env.pkg }}
           path: dist
           if-no-files-found: error
       # Also worth keeping: they are how a layout regression gets seen.
