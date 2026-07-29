@@ -314,6 +314,21 @@ transmitter's `message_` is only written outside the playing window —
 and those are the claims that stay true right up until someone adds a
 field.
 
+**Build sanitizer jobs at `-O2`, not `-O0`.** The sanitizers are not
+what makes an instrumented build slow; the missing optimizer is.
+Measured on this suite: **670 s at `-O0` against 90 s at `-O2`**, the
+same seven tests, with ASan still reporting a planted
+heap-buffer-overflow with a full symbolized stack (upstream recommends
+`-O1`/`-O2` with `-fno-omit-frame-pointer`, which `SSTVAE_SANITIZE`
+sets). At `-O0` the rx engine's tests did not merely run slowly, they
+**timed out** — and the thing that expired was a deadline inside the
+test, i.e. a latency assertion that had smuggled itself in as a
+watchdog. Two rules came out of that: a watchdog belongs at several
+times the measured worst case, never at "about enough"; and the hard
+bound on a wedged test is a ctest `TIMEOUT` property, because when the
+CI runner kills a job there is no ctest output left to say which test
+it was.
+
 **`tools/check_includes.py` catches on Linux what would otherwise only
 fail on MSVC**: a `std::` name used without its header. libstdc++ and
 libc++ pull in far more than they promise (`<vector>` happens to give

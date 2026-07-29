@@ -199,10 +199,17 @@ jobs:
       # builds C++ and runs ctest against the committed corpus, which
       # needs nothing from the Python side.
       - uses: lukka/get-cmake@latest
+      # RelWithDebInfo, not Debug. The sanitizers are not what makes an
+      # instrumented build slow -- -O0 is. Measured on this suite:
+      # 670 s at -O0 against 136 s at -O2, same 7 tests, and ASan still
+      # reports a planted heap-buffer-overflow with a symbolized stack
+      # (upstream recommends -O1/-O2 with -fno-omit-frame-pointer, which
+      # SSTVAE_SANITIZE sets). At -O0 the rx engine's tests did not merely
+      # run slowly, they timed out.
       - name: Configure with sanitizers
         run: |
           cmake -S native -B native/build-asan -G Ninja \
-            -DCMAKE_BUILD_TYPE=Debug -DSSTVAE_SANITIZE=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSSTVAE_SANITIZE=ON \
             -DSSTVAE_BUILD_PYMODULE=OFF -DSSTVAE_BUILD_CODEC=OFF
       - run: cmake --build native/build-asan
       # C++ tests only. The pybind11 module is off because running it

@@ -130,12 +130,24 @@ struct Harness {
         };
     }
 
-    // Wait for a condition on the shared state. The deadline is a
-    // watchdog: it exists so a broken loop fails with a message instead
-    // of hanging the suite, never to assert that something was fast.
+    // Wait for a condition on the shared state.
+    //
+    // The deadline is a watchdog, not an assertion: it exists so a
+    // broken loop names *which* wait it died on instead of going quiet.
+    // The hard bound on the job is the TIMEOUT property in
+    // tests/CMakeLists.txt -- several waits each expiring here would
+    // otherwise outlast the CI run.
+    //
+    // 120 s is about 3x the slowest single step measured on CI under
+    // ASan (the whole test is ~150 s there, ~67 s here). It was 180 s
+    // and still expired, because that job built at -O0: the fix was to
+    // stop doing that rather than to keep raising this, since a
+    // deadline that is only *just* long enough is a latency assertion
+    // wearing a disguise. If this fires, find out why -- do not raise
+    // it again without a measurement.
     bool until(const std::function<bool()>& pred, const std::string& what) {
         std::unique_lock<std::mutex> lock(m);
-        const bool ok = cv.wait_for(lock, std::chrono::seconds(180), pred);
+        const bool ok = cv.wait_for(lock, std::chrono::seconds(120), pred);
         if (!ok) check::fail(what, "timed out waiting for the loop to get there");
         return ok;
     }
@@ -206,8 +218,14 @@ void test_a_finished_reception_is_not_rediscovered() {
 
     h.until([&] { return h.received.size() >= 1; }, "rx/dup: the first reception");
     const std::uint64_t after = h.polls();
-    // Several more polls over the same, unchanged buffer.
-    h.until([&] { return h.polls() >= after + 5; }, "rx/dup: five more polls");
+    // Two further polls, not five. The buffer is static, so every poll
+    // after the reception is handled takes an identical path through the
+    // loop -- the first one that declines to report it again is the
+    // evidence, and the second only confirms the first was not a fluke
+    // of the reset window. Five was five full demodulations of the whole
+    // buffer for no extra information, which is most of what made this
+    // test expensive under a sanitizer.
+    h.until([&] { return h.polls() >= after + 2; }, "rx/dup: two more polls");
     h.stop.set();
     loop.join();
     watcher.join();
@@ -235,7 +253,8 @@ void test_two_transmissions_are_both_received() {
 
     h.until([&] { return h.received.size() >= 2; }, "rx/two: both receptions");
     const std::uint64_t after = h.polls();
-    h.until([&] { return h.polls() >= after + 5; }, "rx/two: five more polls");
+    // Two, for the reason given in the duplicate-reception test above.
+    h.until([&] { return h.polls() >= after + 2; }, "rx/two: two more polls");
     h.stop.set();
     loop.join();
     watcher.join();

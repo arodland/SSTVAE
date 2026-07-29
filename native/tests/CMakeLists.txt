@@ -47,3 +47,18 @@ add_executable(test_audio test_audio.cpp)
 target_link_libraries(test_audio PRIVATE sstvae_core)
 target_include_directories(test_audio PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME audio COMMAND test_audio)
+
+# Hard upper bounds, so a wedged test is reported as a Timeout rather
+# than running until GitHub kills the whole job -- at which point there
+# is no ctest output at all to say which test it was.
+#
+# Sized against the sanitizer build, which is the slowest thing that
+# runs these: rx_engine measures ~150 s there and tx_engine ~26 s, so
+# these are roughly 2.5x headroom. They bound the job where the
+# per-wait watchdog inside test_rx_engine.cpp cannot -- that one gives
+# the better message, but several waits expiring in turn would still
+# outlast the run.
+set_tests_properties(rx_engine PROPERTIES TIMEOUT 360)
+set_tests_properties(tx_engine PROPERTIES TIMEOUT 180)
+set_tests_properties(golden npy modem_roundtrip ringbuffer audio
+                     PROPERTIES TIMEOUT 300)
