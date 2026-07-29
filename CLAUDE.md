@@ -204,8 +204,8 @@ either, so overlays stay renderable from the command line.
 `framing`, `beacon`, `sync`, `modem` — and the Python suite passes
 against it, including `-m slow`. Both interop directions work. Phase 2
 (the headless app core) is **in progress**: the codec, images, WAV I/O,
-settings, the overlay document, the ring buffer and the **rx decode
-loop** are done; audio devices, rig control and the tx engine are not.
+settings, the overlay document, the ring buffer and the **rx and tx
+engines** are done; audio devices and rig control are not.
 **Python remains the normative
 definition of the on-air format** — when the two disagree, Python is
 right until proven
@@ -266,6 +266,40 @@ it, so `codec::pad_to_full` still resolves. The loop's decisions are
 where the duplicate-picture and ended-early bugs live and they have no
 oracle in the golden vectors, so this is the one part of the port whose
 tests had to be written rather than inherited.
+
+**The transmitter's guarantee is doubled on purpose.** `core/tx/` keeps
+the reference's rule that PTT always comes back down, by a scope guard
+*and* an independent `PttWatchdog` thread. The watchdog is not belt and
+braces: the scope guard only runs if control returns, and the failure it
+exists for is the one where control does not. It is in the **header**
+rather than hidden in the .cpp so it can be tested directly — reaching
+it through a `transmit()` that returns normally would be testing the
+wrong thing, and its real timeout is lead + duration + tail + 15 s.
+`TxConfig::watchdog_margin_s` is a field for the same reason
+`Modem::modulate` takes `clip_headroom_db`: the reference's tests patch
+a module constant, which a compiled-in one cannot offer.
+
+**The engines are the port's only concurrent code**, so CI runs a
+**ThreadSanitizer** job over `rx_engine`, `tx_engine` and `ringbuffer`
+(a separate job: TSan and ASan cannot be combined). They make claims
+about what may run concurrently — the audio callback never blocks, the
+transmitter's `message_` is only written outside the playing window —
+and those are the claims that stay true right up until someone adds a
+field.
+
+**`tools/check_includes.py` catches on Linux what would otherwise only
+fail on MSVC**: a `std::` name used without its header. libstdc++ and
+libc++ pull in far more than they promise (`<vector>` happens to give
+you `std::count_if`), so a missing `#include <algorithm>` builds
+cleanly on two of three platforms. That cost two CI rounds before the
+check existed, and finding it needs the platform least likely to be in
+front of you. It follows project headers, so a .cpp that gets
+`<vector>` from its own .hpp is fine — that is a real guarantee, unlike
+one standard header happening to include another. Deliberately not
+include-what-you-use: no extra dependency, and it only reports the
+direction that breaks a build. It is a CI gate, unlike
+`freeze_format_constants.py --verify`, because here regenerating *is*
+the right fix.
 
 **Do not assert that noise decodes to nothing.** A preamble-shaped peak
 clears the detection threshold every few seed-minutes and the
