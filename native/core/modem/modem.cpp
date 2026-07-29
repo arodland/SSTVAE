@@ -4,6 +4,7 @@
 #include <cmath>
 #include <numbers>
 #include <stdexcept>
+#include <utility>
 
 #include "dsp/dsp.hpp"
 #include "framing/framing.hpp"

@@ -1,6 +1,7 @@
 #include "golay/golay.hpp"
 
 #include <bit>
+#include <cstddef>
 #include <stdexcept>
 #include <vector>
 

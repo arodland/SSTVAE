@@ -13,9 +13,16 @@
 // test demodulates it to prove that "sent" means a decodable
 // transmission rather than an empty buffer.
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <functional>
+#include <mutex>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <thread>

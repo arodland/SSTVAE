@@ -22,6 +22,7 @@
 #ifndef SSTVAE_SETTINGS_SETTINGS_HPP
 #define SSTVAE_SETTINGS_SETTINGS_HPP
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>

@@ -4,10 +4,15 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <deque>
 #include <filesystem>
 #include <limits>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 
 #include "dsp/dsp.hpp"
 #include "images/images.hpp"

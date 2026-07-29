@@ -1,11 +1,12 @@
 #include "codec/codec.hpp"
 
-#include <onnxruntime_cxx_api.h>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
+
+#include <onnxruntime_cxx_api.h>
 
 namespace sstvae::codec {
 

@@ -8,6 +8,7 @@
 // The rule: anything that is pure integer or pure sign arithmetic must
 // match *exactly*, and only sums of transcendentals get a tolerance.
 
+#include <algorithm>
 #include <cstdlib>
 #include <string>
 #include <vector>

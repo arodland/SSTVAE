@@ -33,9 +33,10 @@
 #include <atomic>
 #include <functional>
 #include <span>
-#include <thread>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include "config.hpp"

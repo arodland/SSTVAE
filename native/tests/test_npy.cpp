@@ -6,6 +6,7 @@
 // tautology -- so the loader is checked against facts stated
 // independently in the manifest rather than against itself.
 
+#include <cstddef>
 #include <string>
 
 #include "check.hpp"

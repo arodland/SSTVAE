@@ -4,6 +4,8 @@
 #include <cmath>
 #include <numbers>
 #include <numeric>
+#include <string>
+#include <utility>
 
 #include "dsp/dsp.hpp"
 #include "dsp/fft.hpp"

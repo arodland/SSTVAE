@@ -48,6 +48,11 @@ jobs:
         run: python tools/gen_interleaver_table.py --check
       - name: Layering rules
         run: python tools/check_layering.py
+      # Catches on Linux what would otherwise only fail on MSVC: a
+      # std:: name used without its header, which libstdc++ and libc++
+      # forgive and MSVC does not.
+      - name: Standard-library includes
+        run: python tools/check_includes.py
       - name: Show the diff if anything is stale
         if: failure()
         run: |

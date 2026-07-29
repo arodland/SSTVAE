@@ -17,12 +17,17 @@
 // appears is the harness watchdog, whose only job is to turn a hang
 // into a message rather than a stalled CI job.
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
