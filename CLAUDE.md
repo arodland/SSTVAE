@@ -204,8 +204,8 @@ either, so overlays stay renderable from the command line.
 `framing`, `beacon`, `sync`, `modem` — and the Python suite passes
 against it, including `-m slow`. Both interop directions work. Phase 2
 (the headless app core) is **in progress**: the codec, images, WAV I/O,
-settings, the overlay document, the ring buffer and the **rx and tx
-engines** are done; audio devices and rig control are not.
+settings, the overlay document, the ring buffer, the **rx and tx
+engines** and **soundcard audio** are done; rig control is not.
 **Python remains the normative
 definition of the on-air format** — when the two disagree, Python is
 right until proven
@@ -278,6 +278,33 @@ wrong thing, and its real timeout is lead + duration + tail + 15 s.
 `TxConfig::watchdog_margin_s` is a field for the same reason
 `Modem::modulate` takes `clip_headroom_db`: the reference's tests patch
 a module constant, which a compiled-in one cannot offer.
+
+**Audio is split at the device boundary, and the split is the design.**
+`core/audio/audio.hpp` is Qt-free and holds everything with logic in it
+— `resample_ratio`, `StreamResampler`, the sample-format conversions,
+`match_device` — because *every* audio bug this project has had lived
+there rather than in the code talking to the driver, and all of them
+were found against a fake device. `core/audio/qt/` is then only
+enumeration and moving bytes. It is a **separate library**
+(`SSTVAE_BUILD_QTAUDIO`, AUTO/ON/OFF) so the modem, codec and both
+engines still build and test on a machine with no Qt at all;
+`check_layering.py` enforces that nothing else under `core/` includes Qt
+Multimedia. Two departures from the reference: capture runs on **its own
+thread with its own event loop** (Python drains from the GUI thread,
+which is the same shape as the hazard that cost 5 dB), and the C++ mixes
+multichannel float down in double where numpy's `.mean` stays in float32
+— a ~3e-8 difference, which is why that one parity test is the only
+audio one not held to 1e-12.
+
+**`sstvae-audio-check --loopback` is the soundcard path's only real
+test**, and it is a tool rather than a ctest because it needs a device.
+The recipe (null sink + *remapped* monitor, since Qt does not enumerate
+monitor sources) is in `native/apps/sstvae_audio_check.cpp`. Measured
+through it: mode A, 220/220 frames, callsign recovered, 27–29 dB, with
+the device at 48 kHz so the capture resampler was in the path. CI has no
+audio device, so its `qtaudio` job compiles the layer and runs
+enumeration only — with `SSTVAE_BUILD_QTAUDIO=ON`, not AUTO, because a
+job whose purpose is to compile that file must fail if it did not.
 
 **The engines are the port's only concurrent code**, so CI runs a
 **ThreadSanitizer** job over `rx_engine`, `tx_engine` and `ringbuffer`
