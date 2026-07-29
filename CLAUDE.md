@@ -579,6 +579,42 @@ direction that breaks a build. It is a CI gate, unlike
 `freeze_format_constants.py --verify`, because here regenerating *is*
 the right fix.
 
+**Five packages, and macOS x86_64 is the awkward one.** CI builds
+linux-x86_64, linux-aarch64, macos-arm64, macos-x86_64 and windows-x64.
+The Intel slice is **cross-compiled on an Apple-silicon runner** (there
+is no Intel runner any more) and **tested through Rosetta**, so ctest
+and the packaged-app check run on the artifact that ships. Three things
+it needs that nothing else does:
+
+- **onnxruntime has no macOS x86_64 build after 1.22**, so that one
+  platform pins 1.22.0 while everything else is on the Python-matched
+  version. This is the single accepted departure from "the same runtime
+  version, two builds" that the codec parity claim rests on — taken
+  deliberately (2026-07-29) because what must match between stations is
+  the *model*, which is published and identical, and a runtime
+  difference lands as noise under the channel's. arm64 macOS is
+  untouched and stays exact. Label that artifact as the lower
+  compatibility tier, the way the int8 ones are.
+- **The onnxruntime version is per platform now, so anything
+  reconstructing the library's filename must use the *resolved* version**,
+  not `SSTVAE_ONNXRUNTIME_VERSION`. Getting that wrong downloads the
+  right archive and then looks for a file that was never in it. There is
+  a glob fallback, which also makes an unpacked `SSTVAE_ONNXRUNTIME_DIR`
+  work at any version rather than only the pinned one.
+- **`CMAKE_OSX_ARCHITECTURES` means nothing to autotools.** Hamlib needs
+  `--host` and `-arch` in CFLAGS or it builds for the runner and the link
+  fails with an architecture mismatch far from its cause. It also cannot
+  build fat, so `hamlib.cmake` refuses a multi-architecture request
+  rather than emitting a thin library inside something that looks
+  universal — which is why macOS ships two downloads and not a
+  universal2 binary.
+
+**`pytest --native` cannot run on a cross build**: the extension module
+would be built for the target while the runner's Python is native. So
+the x86_64 slice is not parity-checked against Python — the one real gap
+in that platform's coverage, and worth saying out loud rather than
+assuming the green tick covers it.
+
 **Model artifacts: plain HTTPS to the Hub, and our own cache.** The
 design doc said `QNetworkAccessManager`, and that part stands, but the
 native app deliberately does **not** share `huggingface_hub`'s cache.
