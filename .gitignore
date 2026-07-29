@@ -40,3 +40,4 @@ runs/
 /*.png
 /*.jpg
 /*.csv
+dist/

@@ -274,6 +274,72 @@ jobs:
       # The C++ side checked against the committed corpus.
       - name: C++ tests
         run: ctest --test-dir native/build --output-on-failure
+      # --- packaging ------------------------------------------------------
+      # Staged with Qt and our pinned libraries, so what comes out of CI
+      # is something a tester can unpack and run rather than a binary
+      # that needs a Qt install to start. Not an installer: no icons, no
+      # associations, no signing. Those are the next steps.
+      - name: Stage a runnable app
+        run: tools/package_app.sh native/build dist
+        shell: bash
+      # Proves the *staged* tree starts, not just the build tree. The
+      # two differ in exactly the way that matters -- the build tree
+      # finds Qt through the compiler's rpath and the developer's
+      # environment, and the staged one has to carry everything itself.
+      # A missing platform plugin only shows up here.
+      - name: The packaged app runs
+        shell: bash
+        run: |
+          case "$(uname -s)" in
+            Darwin) exe=dist/sstvae-gui.app/Contents/MacOS/sstvae-gui ;;
+            MINGW*|MSYS*) exe=dist/sstvae/sstvae-gui.exe ;;
+            *) exe=dist/sstvae/sstvae-gui ;;
+          esac
+          # No `timeout` on macOS, so run it in the background and check
+          # it is still alive -- which is the assertion anyway: an app
+          # that exits on its own has failed to start.
+          QT_QPA_PLATFORM=offscreen "$exe" & pid=$!
+          sleep 8
+          if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid" 2>/dev/null || true
+            echo "started and stayed up"
+          else
+            wait "$pid"; echo "the packaged app exited on its own" >&2; exit 1
+          fi
+      # tar on Unix, because an artifact zip does not preserve the
+      # executable bit -- which would ship a macOS .app that cannot be
+      # launched and a Linux binary that cannot be run.
+      - name: Archive (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: tar czf "sstvae-${{ matrix.os }}.tar.gz" -C dist .
+      # archive: false uploads the tarball as itself instead of putting
+      # it inside a zip. Two rules come with it: the path must resolve to
+      # exactly one file, and `name` is ignored -- the artifact is named
+      # after the file, which is why the tarball above is given the name
+      # we want to see on the downloads page.
+      - uses: actions/upload-artifact@v7
+        if: runner.os != 'Windows'
+        with:
+          path: sstvae-${{ matrix.os }}.tar.gz
+          archive: false
+          if-no-files-found: error
+      # Windows keeps the zip: it is a directory rather than one file, a
+      # zip is the native shape there anyway, and there are no
+      # permissions to lose.
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Windows'
+        with:
+          name: sstvae-${{ matrix.os }}
+          path: dist
+          if-no-files-found: error
+      # Also worth keeping: they are how a layout regression gets seen.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gui-shots-${{ matrix.os }}
+          path: gui-shots
+          if-no-files-found: error
+
       # Phase 0's actual exit criterion: the *Python* suite, running
       # against the C++ implementations rather than the reference ones.
       - name: Python suite against the C++ core

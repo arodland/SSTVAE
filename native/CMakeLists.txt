@@ -116,6 +116,32 @@ if(SSTVAE_BUILD_CODEC)
     ${SSTVAE_ONNXRUNTIME_ROOT}/include)
 endif()
 
+# Put the onnxruntime runtime where `target` can find it.
+#
+# A function rather than the one POST_BUILD it started as: sstvae-decode
+# had the copy and sstvae-gui did not, and the GUI still ran in CI only
+# because the two share a build directory. That is not a dependency, it
+# is a coincidence -- and it evaporates the moment anything is copied
+# somewhere else, which is exactly what packaging does.
+function(sstvae_onnxruntime_copy_runtime target)
+  if(NOT TARGET sstvae_codec)
+    return()
+  endif()
+  if(NOT WIN32)
+    # Elsewhere CMake already adds a linked shared library's directory
+    # to the build rpath; this is explicit so it survives a target that
+    # links the codec only transitively.
+    set_property(TARGET ${target} APPEND PROPERTY
+      BUILD_RPATH "${SSTVAE_ONNXRUNTIME_LIBDIR}")
+    return()
+  endif()
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${SSTVAE_ONNXRUNTIME_LIBDIR}/onnxruntime.dll"
+            "$<TARGET_FILE_DIR:${target}>"
+    VERBATIM)
+endfunction()
+
 # --- Qt audio ---------------------------------------------------------------
 # Deliberately a separate library from sstvae_core, not a source file in
 # it: linking Qt into the core would make the modem, the golden-vector
@@ -310,6 +336,7 @@ if(_want_gui)
   set_target_properties(sstvae-gui PROPERTIES AUTOMOC ON)
   target_link_libraries(sstvae-gui PRIVATE sstvae_gui)
   sstvae_hamlib_copy_runtime(sstvae-gui)
+  sstvae_onnxruntime_copy_runtime(sstvae-gui)
   message(STATUS "Desktop application: Qt ${Qt6_VERSION}")
 endif()
 
@@ -335,16 +362,7 @@ if(SSTVAE_BUILD_CODEC)
     target_link_libraries(sstvae-decode PRIVATE sstvae_fetch Qt6::Core)
     target_compile_definitions(sstvae-decode PRIVATE SSTVAE_HAVE_FETCH)
   endif()
-  if(NOT WIN32)
-    set_property(TARGET sstvae-decode APPEND PROPERTY
-      BUILD_RPATH "${SSTVAE_ONNXRUNTIME_LIBDIR}")
-  else()
-    add_custom_command(TARGET sstvae-decode POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different
-              "${SSTVAE_ONNXRUNTIME_LIBDIR}/onnxruntime.dll"
-              "$<TARGET_FILE_DIR:sstvae-decode>"
-      VERBATIM)
-  endif()
+  sstvae_onnxruntime_copy_runtime(sstvae-decode)
 endif()
 
 # The soundcard path's only real test. `core/audio/qt/` is device
@@ -367,4 +385,5 @@ if(TARGET sstvae_gui)
   # Hamlib DLL. On Windows an unresolved import stops the process before
   # main with no output at all -- see the note in hamlib.cmake.
   sstvae_hamlib_copy_runtime(sstvae-gui-shot)
+  sstvae_onnxruntime_copy_runtime(sstvae-gui-shot)
 endif()
