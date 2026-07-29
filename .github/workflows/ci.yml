@@ -169,6 +169,47 @@ jobs:
             -Dpybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')"
       - name: Build
         run: cmake --build native/build
+      # Windows only, and it runs before ctest because the loader has no
+      # other voice.
+      #
+      # A bad import library links cleanly and produces an executable
+      # that cannot start: `rig_hamlib` timed out under ctest having
+      # written *nothing*, its in-process watchdog never fired, and the
+      # cause was two layers below anything a test can report -- the exe
+      # died at load with STATUS_DLL_NOT_FOUND before reaching main, so
+      # there was no output on any stream and nothing to tell it apart
+      # from a deadlock. That cost several CI rounds.
+      #
+      # ctest cannot distinguish those, so this does it first: run the
+      # binary directly and require it to *start* and exit 0. The
+      # dumpbin dump is what makes a failure immediately readable -- a
+      # dependency listed as `(null)`, or libhamlib-4.dll missing from
+      # the list entirely, is the malformed-import-directory signature.
+      - name: Rig test starts outside ctest
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = "native/build/tests/test_rig_hamlib.exe"
+          Write-Host "== beside the executable =="
+          Get-ChildItem (Split-Path $exe) -Filter *.dll | Format-Table Name, Length
+          Write-Host "== imports =="
+          dumpbin /dependents $exe
+          Write-Host "== running it directly, 90 s limit =="
+          $p = Start-Process -FilePath $exe -PassThru -NoNewWindow `
+                 -RedirectStandardOutput out.txt -RedirectStandardError err.txt
+          $exited = $p.WaitForExit(90000)
+          if (-not $exited) { $p.Kill() }
+          Write-Host "== stdout =="; Get-Content out.txt -ErrorAction SilentlyContinue
+          Write-Host "== stderr =="; Get-Content err.txt -ErrorAction SilentlyContinue
+          if (-not $exited) {
+            throw "test_rig_hamlib did not finish in 90 s"
+          }
+          if ($p.ExitCode -ne 0) {
+            $hex = "0x{0:X8}" -f $p.ExitCode
+            throw "test_rig_hamlib exited with $($p.ExitCode) ($hex). " +
+                  "0xC0000135 is STATUS_DLL_NOT_FOUND: the process could not " +
+                  "start, so nothing above the loader ran."
+          }
       # The C++ side checked against the committed corpus.
       - name: C++ tests
         run: ctest --test-dir native/build --output-on-failure

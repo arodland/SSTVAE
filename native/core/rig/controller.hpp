@@ -107,6 +107,22 @@ public:
     // device" anyway.
     bool running() const;
 
+    // Wait until an abandoned worker has finished shutting the rig down.
+    // Returns true if it has; false if `seconds` elapsed first.
+    //
+    // Deliberately separate from `stop()`, which must never wait --
+    // that is the guarantee this whole class exists for. This is for
+    // the one caller that genuinely can afford to wait and must:
+    // whatever is about to end the process.
+    //
+    // **Ending the process with a worker still inside libhamlib is a
+    // real hazard on Windows**, where teardown takes the loader lock
+    // and a thread cannot exit while it is held -- so the `pthread_join`
+    // inside `rig_close` can block forever. Linux and macOS have no
+    // equivalent, which is exactly the kind of asymmetry that shows up
+    // as one platform's CI hanging.
+    bool wait_for_shutdown(double seconds = 5.0);
+
     // The last frequency the worker published, or nothing. A cached
     // value, never a request -- reading it cannot block.
     std::optional<double> frequency_hz() const;
@@ -135,6 +151,9 @@ public:
 
 private:
     std::shared_ptr<RigSession> session_;
+    // Kept after stop() purely to observe the worker's teardown; a weak
+    // reference, so holding it cannot keep the session alive.
+    std::weak_ptr<RigSession> departing_;
     OnFrequency on_frequency_;
     OnStatus on_status_;
     mutable std::mutex mutex_;

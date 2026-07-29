@@ -2,6 +2,7 @@
 
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <hamlib/rig.h>
 #include <hamlib/riglist.h>
@@ -24,7 +25,18 @@ void load_backends_once() {
         // Quiet by default: Hamlib logs to stderr, and a CAT timeout is
         // reported through our own status text rather than as a wall of
         // library chatter behind whatever the operator is reading.
-        rig_set_debug(RIG_DEBUG_NONE);
+        //
+        // SSTVAE_HAMLIB_DEBUG turns that back on, because "quiet" and
+        // "unfalsifiable" are close together when the library owns the
+        // serial port: the questions an operator's bug report actually
+        // raises -- which CAT command did the rig refuse, how far did
+        // open get -- are answerable only from Hamlib's own trace. The
+        // rig tests set it so a failure arrives with that trace already
+        // attached rather than needing the run repeated.
+        const char* debug = std::getenv("SSTVAE_HAMLIB_DEBUG");
+        const bool verbose = debug != nullptr && *debug != '\0' &&
+                             std::strcmp(debug, "0") != 0;
+        rig_set_debug(verbose ? RIG_DEBUG_TRACE : RIG_DEBUG_NONE);
         rig_load_all_backends();
     });
 }
@@ -68,6 +80,19 @@ public:
         // and `RigController::stop()` leans on these being short.
         set_conf("timeout", std::to_string(config_.timeout_ms));
         set_conf("retry", std::to_string(config_.retries));
+
+        // Hamlib's own polling thread, off.
+        //
+        // `rig_open` otherwise starts one (poll_interval defaults to
+        // 1000 ms) that issues its own CAT commands for transceive
+        // emulation. That is a direct conflict with what RigController
+        // is for: it exists to keep exactly one command in flight and
+        // to guarantee keying never waits behind a status read, and it
+        // cannot do either if the library is talking to the same serial
+        // port behind its back. We poll at our own interval, on our own
+        // thread, and want the port quiet in between -- which also means
+        // one fewer thread to shut down when a wedged rig is abandoned.
+        set_conf("poll_interval", "0");
 
         const int rc = rig_open(rig_);
         if (rc != RIG_OK) {

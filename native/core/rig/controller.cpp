@@ -225,6 +225,7 @@ void RigController::stop() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         s.swap(session_);
+        departing_ = s;
     }
     if (!s) return;
     {
@@ -237,6 +238,22 @@ void RigController::stop() {
     // And that is all. `s` goes out of scope here; if the worker is
     // mid-call it holds the last reference and cleans up when it
     // unwinds. Waiting for it is precisely what this must not do.
+}
+
+bool RigController::wait_for_shutdown(double seconds) {
+    std::weak_ptr<RigSession> departing;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        departing = departing_;
+    }
+    const Clock::time_point deadline =
+        Clock::now() + std::chrono::duration_cast<Clock::duration>(
+                           std::chrono::duration<double>(seconds));
+    while (!departing.expired()) {
+        if (Clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return true;
 }
 
 bool RigController::running() const {

@@ -180,21 +180,62 @@ void test_the_controller_drives_a_real_backend() {
 
     controller.stop();
     check::is_true(!controller.running(), "hamlib/controller: stops cleanly");
+    // Do not return from main with a detached worker still inside
+    // libhamlib: see wait_for_shutdown's comment on why that is a hang
+    // on Windows rather than merely untidy.
+    check::is_true(controller.wait_for_shutdown(),
+                   "hamlib/controller: the worker finishes closing the rig");
 }
 
 }  // namespace
 
+// Announce each step on stderr, unbuffered, and publish it for the
+// watchdog.
+//
+// This test drives a real library that opens ports and starts threads,
+// so its plausible failure mode is not "wrong answer" but "never
+// returns" -- and a hang with no output tells you nothing at all except
+// on which platform it happened. Printing alone was not enough: ctest
+// holds a test's output until it finishes, so a live log shows nothing
+// either way. The watchdog is what turns the hang into a message,
+// because it reports from inside the process and then ends it.
+#define STEP(f)                                     \
+    do {                                            \
+        check::current_step = #f;                   \
+        std::fprintf(stderr, "-- %s\n", #f);        \
+        std::fflush(stderr);                        \
+        f();                                        \
+    } while (0)
+
 int main() {
+    check::report_crashes_instead_of_prompting();
+
+    // ~90x the measured runtime (0.65 s on Linux). Sized so that
+    // expiring can only mean wedged, and so it fires well inside the
+    // ctest TIMEOUT -- the two are not redundant, they answer different
+    // questions. If the watchdog fires, a step is stuck and it says
+    // which. If ctest times out instead, with this test's "ok:" line in
+    // the captured output, then everything finished and the wedge is in
+    // process teardown -- which is a different bug in a different place.
+    const check::Watchdog watchdog(60.0, "hamlib backend");
+
     try {
-        test_list_models();
-        test_version_is_reported();
-        test_dummy_rig_opens_keys_and_reports();
-        test_an_unknown_model_is_refused_readably();
-        test_using_a_closed_rig_reports_rather_than_crashes();
-        test_the_controller_drives_a_real_backend();
+        STEP(test_list_models);
+        STEP(test_version_is_reported);
+        STEP(test_dummy_rig_opens_keys_and_reports);
+        STEP(test_an_unknown_model_is_refused_readably);
+        STEP(test_using_a_closed_rig_reports_rather_than_crashes);
+        STEP(test_the_controller_drives_a_real_backend);
+        check::current_step = "reporting";
+        std::fprintf(stderr, "-- done\n");
+        std::fflush(stderr);
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "FATAL: %s\n", e.what());
+        std::fprintf(stderr, "FATAL in %s: %s\n", check::current_step.load(),
+                     e.what());
         return 1;
     }
-    return check::report("hamlib backend");
+    const int rc = check::report("hamlib backend");
+    std::fflush(stdout);
+    check::current_step = "process teardown";
+    return rc;
 }

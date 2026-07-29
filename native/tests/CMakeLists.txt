@@ -69,7 +69,17 @@ if(TARGET sstvae_rig)
   add_executable(test_rig_hamlib test_rig_hamlib.cpp)
   target_link_libraries(test_rig_hamlib PRIVATE sstvae_core sstvae_rig)
   target_include_directories(test_rig_hamlib PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  # Beside the executable on Windows; see the function's comment for why
+  # that rather than PATH. Kept in addition to the PATH setting below,
+  # which is what the other platforms' rpath equivalent uses.
+  sstvae_hamlib_copy_runtime(test_rig_hamlib)
   add_test(NAME rig_hamlib COMMAND test_rig_hamlib)
+  # Hamlib's own trace, on. ctest keeps a passing test's output, so the
+  # cost is nothing until something fails -- and when it does, the log
+  # already contains how far `rig_open` got and which CAT command the
+  # rig refused, instead of that needing another run to find out.
+  set_property(TEST rig_hamlib APPEND PROPERTY ENVIRONMENT_MODIFICATION
+    "SSTVAE_HAMLIB_DEBUG=set:1")
   # The bundled Hamlib is a shared library that is not on the default
   # search path, so the test has to be able to find it at run time.
   if(SSTVAE_HAMLIB_RUNTIME_DIR)
@@ -80,7 +90,7 @@ if(TARGET sstvae_rig)
       # silently becomes two entries and the inherited PATH is lost.
       # path_list_prepend knows the platform's separator and does the
       # right thing without any quoting games.
-      set_tests_properties(rig_hamlib PROPERTIES ENVIRONMENT_MODIFICATION
+      set_property(TEST rig_hamlib APPEND PROPERTY ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${SSTVAE_HAMLIB_RUNTIME_DIR}")
     else()
       set_property(TARGET test_rig_hamlib APPEND PROPERTY
@@ -105,5 +115,10 @@ set_tests_properties(golden npy modem_roundtrip ringbuffer audio rig
                      checkpoint
                      PROPERTIES TIMEOUT 300)
 if(TARGET sstvae_rig)
-  set_tests_properties(rig_hamlib PROPERTIES TIMEOUT 300)
+  # Shorter than the rest on purpose: this one carries its own 60 s
+  # watchdog, so reaching the ctest bound at all already means the
+  # watchdog never got to run -- the process was wedged before main or
+  # after it returned. 120 s is enough to establish that without
+  # spending the job on it.
+  set_tests_properties(rig_hamlib PROPERTIES TIMEOUT 120)
 endif()

@@ -197,9 +197,56 @@ set_target_properties(sstvae_hamlib PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES "${_hl_root}/include")
 
 if(WIN32)
+  # MSVC needs an import library it generates itself, from the .def.
+  #
+  # `lib/gcc/libhamlib-4.lib` has a .lib extension but is a GNU ar
+  # archive of dlltool stubs -- MinGW's format, in a directory named
+  # gcc, which is the giveaway that was missed. MSVC's linker reads it
+  # far enough to resolve every symbol, so the build *succeeds*; what it
+  # cannot do is build a valid import directory from GNU-convention
+  # import members, and it says nothing when it fails to. The result
+  # links, then dies at load with STATUS_DLL_NOT_FOUND (0xC0000135) --
+  # before main, so with no output on any stream, which is
+  # indistinguishable from a deadlock and was diagnosed as one for
+  # several rounds. `dumpbin /dependents` is where it is visible: the
+  # exe lists a dependency named `(null)` and does not mention
+  # libhamlib-4.dll at all.
+  #
+  # `lib/msvc/` ships a .def for exactly this, and lib.exe turns it into
+  # a real short-import library (the difference is an .idata$2 import
+  # descriptor member, which the gcc one has none of). /NAME matters:
+  # the .def carries no LIBRARY statement, so without it the import
+  # would name the wrong file again.
+  set(_hl_implib "${_hl_root}/lib/gcc/libhamlib-4.lib")
+  if(MSVC)
+    set(_hl_def "${_hl_root}/lib/msvc/libhamlib-4.def")
+    if(NOT EXISTS "${_hl_def}")
+      message(FATAL_ERROR
+        "Hamlib ${_hl_v} did not ship ${_hl_def}. The gcc import library "
+        "beside it links but produces an executable that cannot start; do "
+        "not fall back to it.")
+    endif()
+    set(_hl_implib "${CMAKE_CURRENT_BINARY_DIR}/hamlib/libhamlib-4.lib")
+    if(NOT EXISTS "${_hl_implib}")
+      file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/hamlib")
+      # CMAKE_AR is lib.exe under MSVC. The prebuilt zip is x64-only, so
+      # there is no architecture to choose.
+      execute_process(
+        COMMAND "${CMAKE_AR}" "/def:${_hl_def}" /machine:x64
+                /name:libhamlib-4.dll "/out:${_hl_implib}"
+        RESULT_VARIABLE _hl_lib_rc OUTPUT_VARIABLE _hl_lib_out
+        ERROR_VARIABLE _hl_lib_out)
+      if(NOT _hl_lib_rc EQUAL 0 OR NOT EXISTS "${_hl_implib}")
+        message(FATAL_ERROR
+          "Could not build a Hamlib import library from ${_hl_def}:\n"
+          "${_hl_lib_out}")
+      endif()
+      message(STATUS "Hamlib: generated ${_hl_implib} from the .def")
+    endif()
+  endif()
   set_target_properties(sstvae_hamlib PROPERTIES
     IMPORTED_LOCATION "${_hl_root}/bin/libhamlib-4.dll"
-    IMPORTED_IMPLIB "${_hl_root}/lib/gcc/libhamlib-4.lib")
+    IMPORTED_IMPLIB "${_hl_implib}")
   set(SSTVAE_HAMLIB_RUNTIME_DIR "${_hl_root}/bin" CACHE INTERNAL "")
 elseif(APPLE)
   # libtool's current:revision:age for Hamlib gives libhamlib.4.dylib,
@@ -237,3 +284,33 @@ endif()
 message(STATUS "Hamlib: ${_hl_loc}")
 
 set(SSTVAE_HAMLIB_ROOT "${_hl_root}" CACHE INTERNAL "")
+
+# Put the Windows DLLs beside the executable that needs them.
+#
+# This is not a test fixture, it is the shipping layout: Windows always
+# searches the directory the .exe lives in, first, with no environment
+# involved, and the installer will have to put them there anyway. The
+# PATH route works but makes running a binary conditional on being
+# launched the right way -- and when it does not work, the loader fails
+# *before* main, so there is no output, no exit code anyone sees, and
+# nothing to distinguish it from a deadlock. That is worth spending a
+# file copy to never diagnose twice.
+#
+# All four DLLs, not just libhamlib: upstream's build links libusb and
+# carries its own libgcc/libwinpthread, and a missing transitive
+# dependency fails exactly as invisibly as a missing direct one.
+function(sstvae_hamlib_copy_runtime target)
+  if(NOT WIN32 OR NOT SSTVAE_HAMLIB_RUNTIME_DIR)
+    return()
+  endif()
+  file(GLOB _hl_dlls "${SSTVAE_HAMLIB_RUNTIME_DIR}/*.dll")
+  if(NOT _hl_dlls)
+    message(FATAL_ERROR
+      "No DLLs found in ${SSTVAE_HAMLIB_RUNTIME_DIR}; ${target} would fail to "
+      "start with no diagnostic at all.")
+  endif()
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_hl_dlls}
+            "$<TARGET_FILE_DIR:${target}>"
+    COMMENT "Copying the Hamlib runtime beside ${target}")
+endfunction()

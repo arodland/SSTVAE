@@ -328,6 +328,97 @@ bound on a wedged test is a ctest `TIMEOUT` property, because when the
 CI runner kills a job there is no ctest output left to say which test
 it was.
 
+**A `printf` is not a diagnostic for a hang — ctest holds a test's
+output until the test finishes.** Instrumenting `test_rig_hamlib` with
+per-step prints produced exactly as much information as no
+instrumentation at all, because a wedged test never reaches the point
+where ctest flushes what it captured. What works is a watchdog *inside*
+the process (`check::Watchdog` + `check::current_step`): it names the
+step and then calls `std::_Exit`, deliberately skipping static
+destructors, because unwinding is itself somewhere a wedged library can
+hang and a watchdog that can hang is not one. Sized at ~90x the measured
+runtime, so expiring can only mean wedged — not "slower than I guessed",
+which is the failure the `-O0` episode above records. It and the ctest
+`TIMEOUT` answer different questions and both are kept: watchdog fires ⇒
+a named step is stuck; ctest timeout *with* the suite's `ok:` line in
+the captured output ⇒ everything finished and the wedge is in process
+teardown; ctest timeout with nothing at all ⇒ it never reached `main`.
+
+**Never include `<windows.h>` from a widely-included header.** It
+defines `min` and `max` as macros, so every later `std::max(a, b)`
+becomes a syntax error (C2589) — pulling it into `check.hpp` for one
+call to `SetErrorMode` broke two unrelated test files on MSVC and
+nothing anywhere else. `NOMINMAX`/`WIN32_LEAN_AND_MEAN` only work until
+something includes a Windows header first, which is a constraint on
+include order that nothing checks; declaring the one function by hand
+has no such requirement. The `SEM_` constants are spelled as literals
+for the same reason — redefining those names would break any TU that
+*does* include the real header.
+
+**A mingw-w64 cross compiler checks this class locally**, unlike
+`check_includes.py`, which only finds missing headers:
+`x86_64-w64-mingw32-g++ -std=c++20 -I native/tests -c` over a probe that
+includes `<windows.h>` *first*, plus an `#ifdef max` `#error`, proves
+both include orders and that no macro leaked. Seconds, against a
+Windows CI job's several minutes. **Wine runs the Windows binaries
+too** — `wine rigctl.exe -l` and `wine rigctl.exe -m 1 f` exercise the
+bundled DLL's load path and the dummy rig from this machine, and
+`x86_64-w64-mingw32-gcc` + wine settled the pthread-shim sizes
+(`pthread_t` and `pthread_mutex_t` are both 8, matching the shim) by
+measurement rather than by reading a header. Wine reimplements the
+loader, so a *pass* there is suggestive and not proof; a failure would
+have been conclusive.
+
+**A `.lib` in a directory called `gcc` is a MinGW import library, and
+MSVC must not be given one.** Hamlib's Windows zip ships
+`lib/gcc/libhamlib-4.lib` (a GNU `ar` archive of dlltool stubs) and
+`lib/msvc/libhamlib-4.def`. Linking the first from MSVC **succeeds** —
+every symbol resolves — but the linker cannot build a valid import
+directory out of GNU-convention import members and does not say so, and
+the executable then dies at load with `STATUS_DLL_NOT_FOUND`
+(0xC0000135). Generate the import library from the `.def` with
+`lib.exe /def: /machine:x64 /name:libhamlib-4.dll` instead; `/NAME` is
+required because the `.def` has no `LIBRARY` statement. The structural
+difference is one `.idata$2` import-descriptor member, which the gcc
+archive has none of — checkable from Linux with `llvm-lib` and
+`llvm-nm`.
+
+**That failure mode is why the Windows job now runs the rig test once
+outside ctest.** Load-time failure happens *before* `main`, so there is
+no output on any stream, no test framework has run, and an in-process
+watchdog cannot fire — it is byte-for-byte identical in a CI log to a
+deadlock, and was diagnosed as one for several rounds. `dumpbin
+/dependents` is the tool that shows it: a dependency listed as `(null)`
+with `libhamlib-4.dll` absent from the list entirely. Assert the exit
+code, and print the dump next to it so the answer arrives with the
+failure rather than a round later.
+
+**Windows DLLs go beside the executable, not on `PATH`**
+(`sstvae_hamlib_copy_runtime`). Windows always searches the .exe's own
+directory first with no environment involved, it is the layout the
+installer needs anyway, and the failure mode it retires is the worst
+available: an unresolved import stops the process *before* `main`, so
+there is no output on any stream, no exit code anyone sees, and nothing
+to tell it apart from a deadlock. Copy all of them — upstream's build
+carries libusb, libgcc and libwinpthread, and a missing transitive
+dependency fails exactly as invisibly as a direct one.
+
+**On Windows a crash and a deadlock look identical in a CI log**, and
+that is worth defusing rather than diagnosing twice. An unhandled
+exception raises Windows Error Reporting and a CRT assert opens a
+message box; on a headless runner both block forever with an empty
+stderr, so a crash gets investigated as a hang. `check.hpp`'s
+`report_crashes_instead_of_prompting()` routes them to stderr and lets
+the process die. No-op on the other two platforms.
+
+**Hamlib's own trace is on for the rig tests** (`SSTVAE_HAMLIB_DEBUG`,
+which also exists for operators' bug reports). ctest discards a passing
+test's output, so it costs nothing until something fails — and then the
+log already says how far `rig_open` got and which CAT command the rig
+refused, rather than that needing another CI round to find out. When the
+library owns the serial port, "quiet" and "unfalsifiable" are close
+together.
+
 **`tools/check_includes.py` catches on Linux what would otherwise only
 fail on MSVC**: a `std::` name used without its header. libstdc++ and
 libc++ pull in far more than they promise (`<vector>` happens to give
@@ -430,6 +521,23 @@ takes a model number rather than a pointer, and the only struct read
 through is `struct rig_caps` — which has no pthread members. The result
 is that no struct layout is relied on at all, which is what makes the
 shim safe rather than a gamble.
+
+**Hamlib's own poll thread is turned off** (`poll_interval` = 0).
+`rig_open` otherwise starts one, defaulting to 1000 ms, that issues CAT
+commands for transceive emulation — which directly contradicts what
+`RigController` is for. It exists to keep one command in flight and to
+guarantee keying never waits behind a status read, and it can do
+neither if the library is talking to the same serial port behind its
+back.
+
+**Do not end the process with a rig worker still inside libhamlib.**
+`stop()` detaches by design, so at exit a worker may be mid-`rig_close`
+— which joins Hamlib's internal threads. On Windows, teardown holds the
+loader lock and a thread cannot exit while it is held, so that join can
+block forever; Linux and macOS have no equivalent, which is why it
+showed up as one platform's test running for minutes. `wait_for_shutdown()`
+is for exactly one caller — whatever is about to end the process — and
+`stop()` still never waits.
 
 **And never link a Hamlib *data* symbol on Windows.** `hamlib_version2`
 is an exported variable, and MSVC cannot import data from a DLL without
