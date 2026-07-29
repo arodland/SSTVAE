@@ -142,7 +142,11 @@ jobs:
       # platforms out of three. Installed explicitly rather than pulling
       # in the whole gui extra, which would mean 648 MB of PySide6.
       - run: pip install -e ".[cli]" pytest pybind11 platformdirs
-      - uses: lukka/get-cmake@latest
+      # Pinned to an exact tag, like onnxruntime, Hamlib and Qt. It was
+      # @latest, which meant a CMake release could break a build with no
+      # change on our side -- and there is no moving `v4` alias tag on
+      # this action to pin to instead.
+      - uses: lukka/get-cmake@v4.4.0
       # Qt, pinned like every other external dependency here
       # (onnxruntime, Hamlib). One version across all three platforms,
       # so "which Qt" never becomes a per-platform property the way
@@ -373,7 +377,7 @@ jobs:
       # No Python packages: with the pybind11 module off, this job
       # builds C++ and runs ctest against the committed corpus, which
       # needs nothing from the Python side.
-      - uses: lukka/get-cmake@latest
+      - uses: lukka/get-cmake@v4.4.0
       # RelWithDebInfo, not Debug. The sanitizers are not what makes an
       # instrumented build slow -- -O0 is. Measured on this suite:
       # 670 s at -O0 against 136 s at -O2, same 7 tests, and ASan still
@@ -404,7 +408,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: lukka/get-cmake@latest
+      - uses: lukka/get-cmake@v4.4.0
       # A separate job from ASan because the two sanitizers cannot be
       # combined, and separate from the ordinary build because the whole
       # tree does not need instrumenting to check the part that has
@@ -432,7 +436,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: lukka/get-cmake@latest
+      - uses: lukka/get-cmake@v4.4.0
       # SSTVAE_BUILD_QTAUDIO defaults to AUTO, which *skips* the audio
       # layer when Qt is absent -- so without this job every other build
       # here would be silently not compiling core/audio/qt/ at all. ON
