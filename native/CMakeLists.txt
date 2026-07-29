@@ -363,4 +363,8 @@ endif()
 if(TARGET sstvae_gui)
   add_executable(sstvae-gui-shot apps/sstvae_gui_shot.cpp)
   target_link_libraries(sstvae-gui-shot PRIVATE sstvae_gui)
+  # Anything linking sstvae_gui pulls in sstvae_rig and therefore the
+  # Hamlib DLL. On Windows an unresolved import stops the process before
+  # main with no output at all -- see the note in hamlib.cmake.
+  sstvae_hamlib_copy_runtime(sstvae-gui-shot)
 endif()

@@ -6,9 +6,13 @@
 # with the dev extra installed and treats a skipped reference test as a
 # problem to look at, not a pass.
 #
-# Qt is deliberately absent: Phase 0 of docs/native-app.md has no Qt
-# code, and `install-qt-action` on three platforms would dominate the
-# run time for nothing. It gets added with the GUI in Phase 3.
+# Qt was absent through Phases 0-2, when there was no Qt code to
+# compile. It is installed on all three platforms now, and the app is
+# built with SSTVAE_BUILD_GUI=ON rather than AUTO -- because AUTO is
+# what let the entire GUI go uncompiled on macOS and Windows without a
+# single job going red. A switch that silently builds nothing is the
+# failure mode SSTVAE_REQUIRE_CODEC and the sstvae_rig target check
+# already exist to prevent; the same rule applies here.
 
 name: CI
 
@@ -102,7 +106,21 @@ jobs:
         # Until the packaging work in Phase 4 exists to do that, this
         # matrix tests arm64 macOS only -- an honest gap, not a decision
         # to drop Intel.
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        #
+        # macos-15, not macos-latest. macos-latest is now macOS 26
+        # (Tahoe), whose SDK removed the AGL framework -- and Qt 6.8's
+        # link interface still references it, so every Qt executable
+        # fails with "ld: framework 'AGL' not found" (QTBUG-137687).
+        # Qt does not use AGL; the flag is vestigial. Pinning the image
+        # is the deterministic fix and costs nothing else: building a
+        # distributed app against an older SDK is what you want anyway,
+        # given decision 2's conservative hardware floor.
+        #
+        # This has a known expiry -- GHA retires runner images, and this
+        # matrix already carries a comment about macos-13 disappearing.
+        # The real fix is a Qt with the AGL reference removed; revisit
+        # when the pin below moves.
+        os: [ubuntu-latest, macos-15, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -121,6 +139,32 @@ jobs:
       # in the whole gui extra, which would mean 648 MB of PySide6.
       - run: pip install -e ".[cli]" pytest pybind11 platformdirs
       - uses: lukka/get-cmake@latest
+      # Qt, pinned like every other external dependency here
+      # (onnxruntime, Hamlib). One version across all three platforms,
+      # so "which Qt" never becomes a per-platform property the way
+      # Ubuntu's Hamlib 4.5.5 did. 6.8 is an LTS and supports the floor
+      # decision 2 sets: Windows 10, and macOS universal binaries.
+      #
+      # qtmultimedia is the only extra module: Widgets, Gui and Network
+      # are in the base package.
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.1"
+          modules: qtmultimedia
+          cache: true
+      # aqt's Qt is not a distro package and brings no system
+      # dependencies with it; these are what its plugins dlopen at
+      # startup. Without them the build succeeds and the app dies on
+      # launch, which is a worse place to find out.
+      - name: Qt runtime dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-dev libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+            libpulse0
       # onnxruntime is a ~9-80 MB pinned download per platform. Cached
       # on the URL's hash so a version bump busts it automatically.
       #
@@ -164,6 +208,8 @@ jobs:
         run: |
           cmake -S native -B native/build -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DSSTVAE_BUILD_GUI=ON -DSSTVAE_BUILD_QTAUDIO=ON \
+            -DSSTVAE_BUILD_OVERLAY=ON \
             -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps" \
             -DPython3_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')" \
             -Dpybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')"
@@ -210,6 +256,21 @@ jobs:
                   "0xC0000135 is STATUS_DLL_NOT_FOUND: the process could not " +
                   "start, so nothing above the loader ran."
           }
+      # Proves the GUI links and *starts* on this platform, which
+      # building alone does not: Qt resolves its platform plugin at run
+      # time, so a missing xcb or cocoa plugin is a launch failure with a
+      # clean build behind it. Offscreen, and settings-only -- the
+      # transmit panel's AppState would begin a checkpoint download, and
+      # a link check should not depend on the network.
+      - name: The GUI starts
+        # A relative directory, not runner.temp: on Windows that is
+        # `D:\a\_temp`, and bash eats the backslashes as escapes, so the
+        # tool was handed `D:a_temp` and correctly refused to write
+        # there. The shots are also worth keeping -- step 2 uploads them.
+        run: |
+          mkdir -p gui-shots
+          ./native/build/sstvae-gui-shot --out gui-shots
+        shell: bash
       # The C++ side checked against the committed corpus.
       - name: C++ tests
         run: ctest --test-dir native/build --output-on-failure
