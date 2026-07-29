@@ -32,7 +32,11 @@
 
 namespace sstvae::settings {
 
-inline constexpr int CONFIG_VERSION = 1;
+// 2 since 2026-07-29: the rig section was reshaped around libhamlib
+// rather than a rigctld socket (see RigConfig). Everything else in the
+// file is unchanged, and unknown keys are still ignored rather than
+// fatal, so the bump is a record of the change rather than a gate.
+inline constexpr int CONFIG_VERSION = 2;
 
 // Where the config lives, per platform. Matches what platformdirs'
 // user_config_dir("sstvae", appauthor=False) picks, so the C++ and
@@ -60,17 +64,67 @@ struct AudioConfig {
     int samplerate = config::FS;
 };
 
+// What Hamlib needs to talk to a radio.
+//
+// This section deliberately **breaks compatibility** with the config
+// the Python app writes (decided 2026-07-29), and the version bump is
+// how a reader finds out. The old shape -- host, port, spawn_local --
+// described a *rigctld socket*, which is the one part of rig control
+// the native app does not have: it links libhamlib in-process, so there
+// is no daemon to address or to start. Hamlib model 2 ("NET rigctl") is
+// the rigctld client, so talking to a remote daemon is now a model
+// number in the same picker rather than a parallel set of fields.
+//
+// The rest is modelled on WSJT-X's Radio tab, because that is the set a
+// real radio actually needs and the one operators already know. Every
+// field maps to a `rig_set_conf` token (see `rig/hamlib.cpp`); the
+// enumerated ones use our own lowercase spellings rather than Hamlib's,
+// so the config file does not become a place where Hamlib's combo-box
+// strings leak into a user's editor.
+//
+// "default" everywhere means *do not set the token at all* and let the
+// backend's own default stand -- which for most rigs is the right
+// answer and is why WSJT-X offers it as a distinct choice rather than
+// making the user guess 8-N-1.
 struct RigConfig {
     bool enabled = false;
-    std::string host = "127.0.0.1";
-    int port = 4532;
-    bool spawn_local = false;  // start our own rigctld rather than reuse one
-    std::string model = "1";   // Hamlib rig model number; 1 is the dummy rig
-    std::string device = "/dev/ttyUSB0";
-    int baud = 19200;
+    int model = 1;  // Hamlib model number; 1 is the dummy rig, 2 is NET rigctl
+    double poll_interval_s = 5.0;
     double ptt_lead_s = 0.3;
     double ptt_tail_s = 0.3;
-    double poll_interval_s = 5.0;
+
+    // --- CAT ---------------------------------------------------------
+    // Serial device, or "host:port" when the model is NET rigctl.
+    //
+    // Keeps v1's key name, and not by accident: v1 also had a `port`,
+    // an integer holding a rigctld TCP port. Reusing *that* name for a
+    // device string would make every migrated config report a type
+    // error on a key the operator never touched. `device` meant this
+    // already.
+    std::string device;
+    int baud = 0;                       // 0 = the backend's default
+    std::string data_bits = "default";  // default | seven | eight
+    std::string stop_bits = "default";  // default | one | two
+    std::string parity = "default";     // default | none | odd | even
+    std::string handshake = "default";  // default | none | xonxoff | hardware
+    // Held high or low for the life of the session, which is how an
+    // interface that steals its power from the control lines stays fed.
+    std::string dtr = "default";  // default | high | low
+    std::string rts = "default";  // default | high | low
+
+    // --- PTT ---------------------------------------------------------
+    // "vox" means do not key at all: the operator's radio is keyed by
+    // the audio itself, so the transmit engine must be given nothing to
+    // key rather than something that fails.
+    std::string ptt_method = "cat";  // vox | cat | dtr | rts
+    // Often a *different* port from the CAT one -- a serial adapter
+    // whose control lines key the rig while CAT runs elsewhere, or a
+    // rig with no CAT keying at all. Empty means "the CAT device".
+    std::string ptt_device;
+
+    // Set on the rig when the session opens; "none" leaves whatever the
+    // operator has dialled in alone.
+    std::string mode = "none";  // none | usb | pkt_usb
 };
 
 struct FolderConfig {

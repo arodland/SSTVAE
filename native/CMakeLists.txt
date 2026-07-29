@@ -40,6 +40,8 @@ set(SSTVAE_BUILD_QTAUDIO "AUTO" CACHE STRING "Build Qt Multimedia audio (ON/OFF/
 set_property(CACHE SSTVAE_BUILD_QTAUDIO PROPERTY STRINGS ON OFF AUTO)
 set(SSTVAE_BUILD_OVERLAY "AUTO" CACHE STRING "Build Qt overlay rendering (ON/OFF/AUTO)")
 set_property(CACHE SSTVAE_BUILD_OVERLAY PROPERTY STRINGS ON OFF AUTO)
+set(SSTVAE_BUILD_GUI "AUTO" CACHE STRING "Build the desktop application (ON/OFF/AUTO)")
+set_property(CACHE SSTVAE_BUILD_GUI PROPERTY STRINGS ON OFF AUTO)
 # Rig control. Plain ON/OFF rather than the audio layer's AUTO, because
 # Hamlib is pinned and bundled (native/cmake/hamlib.cmake) -- there is
 # no system library to detect, so "auto" would have nothing to decide.
@@ -226,6 +228,70 @@ if(SSTVAE_BUILD_RIG)
     target_include_directories(sstvae_rig SYSTEM PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/third_party/msvc-pthread)
   endif()
+endif()
+
+# --- the desktop application ------------------------------------------------
+# The only place QtWidgets is allowed, enforced by check_layering.py.
+#
+# Unlike every other optional piece here, this one is not optional
+# *because of an external dependency we would rather avoid* -- Qt is the
+# app's toolkit by design. It is a switch so that the modem, the CLI and
+# the parity module still build on a machine with no GUI stack at all,
+# which is every CI job but one and every headless station.
+#
+# It needs more than Qt: the codec to make a picture, the audio layer to
+# hear one, the rig to key a radio, and the overlay renderer to compose
+# one. Each of those is separately optional, so AUTO means "when
+# everything is present" and ON has to say which piece is missing --
+# "Qt6 not found" would be a lie when the real problem is -DSSTVAE_BUILD_CODEC=OFF.
+# Placed before add_subdirectory(tests) with the rest: an if() on a
+# variable defined later is silently false, which once left a test
+# built-and-not-run and ctest reporting green over it.
+if(SSTVAE_BUILD_GUI STREQUAL "OFF")
+  set(_want_gui OFF)
+else()
+  set(_gui_missing "")
+  find_package(Qt6 6.2 COMPONENTS Core Gui Widgets QUIET)
+  if(NOT Qt6_FOUND)
+    list(APPEND _gui_missing "Qt6 Widgets")
+  endif()
+  foreach(_dep sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render)
+    if(NOT TARGET ${_dep})
+      list(APPEND _gui_missing ${_dep})
+    endif()
+  endforeach()
+
+  if(_gui_missing)
+    if(SSTVAE_BUILD_GUI STREQUAL "ON")
+      string(REPLACE ";" ", " _gui_missing_text "${_gui_missing}")
+      message(FATAL_ERROR
+        "SSTVAE_BUILD_GUI=ON but the application needs: ${_gui_missing_text}. "
+        "Install what is missing, or pass -DSSTVAE_BUILD_GUI=OFF.")
+    endif()
+    set(_want_gui OFF)
+    string(REPLACE ";" ", " _gui_missing_text "${_gui_missing}")
+    message(STATUS "Not building the app; missing: ${_gui_missing_text}")
+  else()
+    set(_want_gui ON)
+  endif()
+endif()
+
+if(_want_gui)
+  # AUTOMOC only here: everything under core/ is deliberately free of
+  # QObject, so running moc over it would be scanning for something the
+  # layering rules forbid.
+  add_executable(sstvae-gui WIN32 MACOSX_BUNDLE
+    gui/main.cpp
+    gui/main_window.cpp
+    gui/app_state.cpp)
+  set_target_properties(sstvae-gui PROPERTIES AUTOMOC ON)
+  target_include_directories(sstvae-gui PRIVATE core gui)
+  target_link_libraries(sstvae-gui PRIVATE
+    sstvae_core sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render
+    sstvae_fetch
+    Qt6::Core Qt6::Gui Qt6::Widgets)
+  sstvae_hamlib_copy_runtime(sstvae-gui)
+  message(STATUS "Desktop application: Qt ${Qt6_VERSION}")
 endif()
 
 # --- tests ------------------------------------------------------------------

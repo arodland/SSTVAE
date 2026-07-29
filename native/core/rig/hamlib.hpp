@@ -67,11 +67,47 @@ struct RigModel {
 // model 2 appears in the list for free.
 std::vector<RigModel> list_models();
 
+// How PTT is asserted. `Vox` is not "key by VOX" -- it is *do not key
+// at all*, because the operator's audio is doing it; the caller must
+// then hand the transmit engine nothing to key rather than something
+// that fails.
+enum class PttMethod { Vox, Cat, Dtr, Rts };
+
+// Serial line settings. `Default` means do not set the token, leaving
+// the backend's own value -- which is right for almost every rig, and
+// is why it is a distinct choice rather than a guess at 8-N-1.
+enum class DataBits { Default, Seven, Eight };
+enum class StopBits { Default, One, Two };
+enum class Parity { Default, None, Odd, Even };
+enum class Handshake { Default, None, XonXoff, Hardware };
+// Held for the life of the session: an interface that steals its power
+// from the control lines needs them parked, not toggled.
+enum class LineState { Default, High, Low };
+
+// What to put the rig in when the session opens. `None` leaves whatever
+// the operator has dialled in alone -- the safe default, since changing
+// a stranger's rig mode on connect is a surprise.
+enum class RigMode { None, Usb, PktUsb };
+
 struct HamlibConfig {
     int model = MODEL_DUMMY;
     // Serial device, or "host:port" for MODEL_NET_RIGCTL.
     std::string device;
     int baud = 0;  // 0 = the backend's default
+
+    DataBits data_bits = DataBits::Default;
+    StopBits stop_bits = StopBits::Default;
+    Parity parity = Parity::Default;
+    Handshake handshake = Handshake::Default;
+    LineState dtr = LineState::Default;
+    LineState rts = LineState::Default;
+
+    PttMethod ptt_method = PttMethod::Cat;
+    // Empty means the CAT device. Often different: a serial adapter
+    // whose control lines key the rig while CAT runs elsewhere.
+    std::string ptt_device;
+
+    RigMode mode = RigMode::None;
 
     // Set on the rig via `rig_set_conf` before opening.
     //

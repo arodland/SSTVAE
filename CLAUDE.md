@@ -242,6 +242,50 @@ env var exists because these are the suite's strongest checks *and* the
 only ones with a downloaded prerequisite, which is exactly the
 combination that rots into silently testing nothing.
 
+**Phase 3 (the GUI) is under way.** `native/gui/` is the only place
+QtWidgets is allowed; `SSTVAE_BUILD_GUI` is AUTO/ON/OFF like the audio
+and overlay switches, but for a different reason — Qt is the app's
+toolkit by design, and the switch exists so the modem, the CLI and the
+parity module still build on a machine with no GUI stack, which is
+every CI job but one and every headless station. It needs the codec,
+Qt audio, rig control *and* the overlay renderer, each separately
+optional, so ON has to name which piece is missing: "Qt6 not found"
+would be a lie when the real problem is `-DSSTVAE_BUILD_CODEC=OFF`.
+Panels land one at a time behind placeholders, so the window's
+structure and the wiring *between* the panels — half duplex, polling
+paused while keyed, last-received picture offered as a transmit inset —
+are visible and reviewable before the panels themselves exist.
+
+**The rig settings broke compatibility with the Python config, on
+purpose (2026-07-29), and `CONFIG_VERSION` is 2.** The v1 shape —
+`host`, `port`, `spawn_local` — described a *rigctld socket*, the one
+part of rig control the native app does not have, since it links
+libhamlib in-process. Hamlib model 2 ("NET rigctl") is the rigctld
+client, so a remote daemon is now a model number in the same picker
+rather than a parallel set of fields. The replacement is modelled on
+WSJT-X's Radio tab, because that is the set a real radio needs and the
+one operators already know: data bits, stop bits, parity, handshake,
+forced DTR/RTS, PTT method (VOX/CAT/DTR/RTS) with **its own port**, and
+an optional USB/PKT-USB mode on connect. `"default"` everywhere means
+*do not set the token*, leaving the backend's own value — which is why
+an unrecognized setting falls back to Default rather than erroring: it
+declines to force a wrong value onto a radio. Two migration details
+earn their code: v1's dead keys are listed as *known* so an old config
+does not read as four typos, and `model` accepts the v1 string as well
+as a number — the operator did not do anything wrong, so migrating must
+be quiet. The `device` key is reused rather than a new `port`, because
+v1's `port` was an integer and reusing that name would make every
+migrated file report a type error.
+
+**Hamlib's `rig_set_conf` token names are not guessable and must not be
+guessed.** `rig_token_lookup` returns `RIG_CONF_END` for a name it does
+not know and `set_conf` then does nothing — a misspelling is silent, so
+the radio simply ignores the setting. The authoritative list is
+`src/serial_cfg_params.h` and `src/conf.c` in the pinned tarball;
+values are case-sensitive combo strings (`"XONXOFF"`, `"Hardware"`,
+`"ON"`/`"OFF"`, `ptt_type` of `"RIG"`/`"DTR"`/`"RTS"`/`"None"`). Read
+them there, not from memory.
+
 A trap in the ORT C++ API, since it crashes rather than warns:
 `GetInputTypeInfo()` returns a `TypeInfo` **by value** and
 `GetTensorTypeAndShapeInfo()` is an unowned view into it. Binding only

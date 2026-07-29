@@ -74,6 +74,8 @@ public:
         // reads the same setting, so there is no branch here.
         if (!config_.device.empty()) set_conf("rig_pathname", config_.device);
         if (config_.baud > 0) set_conf("serial_speed", std::to_string(config_.baud));
+        apply_serial_settings();
+        apply_ptt_settings();
 
         // One timeout and one retry, both ours. See HamlibConfig: the
         // reference has two layers of each and controls only the outer,
@@ -102,6 +104,7 @@ public:
             throw RigError(msg);
         }
         open_ = true;
+        apply_mode();
     }
 
     void close() noexcept override {
@@ -160,6 +163,88 @@ public:
 private:
     void require_open() const {
         if (rig_ == nullptr || !open_) throw RigError("the rig is not open");
+    }
+
+    // The token names and their allowed values are Hamlib's, taken from
+    // `src/serial_cfg_params.h` and `src/conf.c` in the pinned release
+    // rather than from memory -- a misspelled token is not an error,
+    // `rig_token_lookup` simply returns RIG_CONF_END and the setting is
+    // silently ignored, which is the failure mode this whole file is
+    // written to avoid.
+    void apply_serial_settings() {
+        switch (config_.data_bits) {
+            case DataBits::Seven: set_conf("data_bits", "7"); break;
+            case DataBits::Eight: set_conf("data_bits", "8"); break;
+            case DataBits::Default: break;
+        }
+        switch (config_.stop_bits) {
+            case StopBits::One: set_conf("stop_bits", "1"); break;
+            case StopBits::Two: set_conf("stop_bits", "2"); break;
+            case StopBits::Default: break;
+        }
+        switch (config_.parity) {
+            case Parity::None: set_conf("serial_parity", "None"); break;
+            case Parity::Odd: set_conf("serial_parity", "Odd"); break;
+            case Parity::Even: set_conf("serial_parity", "Even"); break;
+            case Parity::Default: break;
+        }
+        switch (config_.handshake) {
+            case Handshake::None: set_conf("serial_handshake", "None"); break;
+            case Handshake::XonXoff:
+                set_conf("serial_handshake", "XONXOFF");
+                break;
+            case Handshake::Hardware:
+                set_conf("serial_handshake", "Hardware");
+                break;
+            case Handshake::Default: break;
+        }
+        // "Unset" is Hamlib's own name for "leave it alone", so
+        // Default could equally be spelled by setting it; not setting
+        // the token at all is the same thing and one fewer assumption.
+        switch (config_.dtr) {
+            case LineState::High: set_conf("dtr_state", "ON"); break;
+            case LineState::Low: set_conf("dtr_state", "OFF"); break;
+            case LineState::Default: break;
+        }
+        switch (config_.rts) {
+            case LineState::High: set_conf("rts_state", "ON"); break;
+            case LineState::Low: set_conf("rts_state", "OFF"); break;
+            case LineState::Default: break;
+        }
+    }
+
+    void apply_ptt_settings() {
+        switch (config_.ptt_method) {
+            // Vox means the rig is keyed by its own audio detector, so
+            // Hamlib must not key it: "None" is the token value that
+            // says exactly that. Callers are additionally expected not
+            // to hand this backend to the transmit engine as a PTT.
+            case PttMethod::Vox: set_conf("ptt_type", "None"); break;
+            case PttMethod::Cat: set_conf("ptt_type", "RIG"); break;
+            case PttMethod::Dtr: set_conf("ptt_type", "DTR"); break;
+            case PttMethod::Rts: set_conf("ptt_type", "RTS"); break;
+        }
+        // Only meaningful for the line-keyed methods, and only worth
+        // setting when it differs -- an empty value means "the CAT
+        // device", which Hamlib already assumes.
+        if (!config_.ptt_device.empty() &&
+            (config_.ptt_method == PttMethod::Dtr ||
+             config_.ptt_method == PttMethod::Rts)) {
+            set_conf("ptt_pathname", config_.ptt_device);
+        }
+    }
+
+    // After open, not before: it is a rig command rather than a port
+    // setting. A failure is reported and not fatal, because a rig that
+    // will not change mode is still a rig we can key and read.
+    void apply_mode() {
+        rmode_t mode = RIG_MODE_NONE;
+        switch (config_.mode) {
+            case RigMode::Usb: mode = RIG_MODE_USB; break;
+            case RigMode::PktUsb: mode = RIG_MODE_PKTUSB; break;
+            case RigMode::None: return;
+        }
+        rig_set_mode(rig_, RIG_VFO_CURR, mode, RIG_PASSBAND_NOCHANGE);
     }
 
     void set_conf(const char* name, const std::string& value) {

@@ -6,6 +6,20 @@ machine: a `config.json` written by either must be understood by the
 other, with every setting surviving the trip. Anything else is a
 silently reverted preference.
 
+**Except the rig section, which diverged deliberately on 2026-07-29**
+and is excluded from the shared-config tests by `_shared`. The old
+shape described a rigctld socket -- host, port, spawn_local -- which is
+the one part of rig control the native app does not have, since it links
+libhamlib in-process; and it could not express what a real radio needs
+(handshake, forced control lines, PTT on a separate port). The Python
+GUI is being deleted at parity, so growing that schema in a module
+already scheduled for removal would be churn.
+
+What is still tested about the rig, because it is what an operator
+actually experiences: a v1 rig section must *migrate quietly*. It is
+not the user's fault that the file changed shape, so an old config must
+produce no complaints -- see `test_a_v1_rig_section_migrates_quietly`.
+
 The C++ side adds something the reference does not have: it reports
 what it ignored. Python drops unknown or ill-typed keys silently, which
 is the right effect (an old build must not wipe a new build's settings)
@@ -33,6 +47,23 @@ def _cpp(native):
     return native.settings
 
 
+def _shared(config: dict) -> dict:
+    """The parts of a config the two apps still agree on.
+
+    Two exclusions, both deliberate. `rig` is compared by the dedicated
+    tests below; see the module docstring for why it diverged. `version`
+    differs *because* it did -- the whole point of the bump is that the
+    two files are no longer the same schema, so comparing it would be
+    asserting the divergence never happened.
+
+    Written as a subtraction from the whole rather than a list of
+    sections to keep, so a *new* section is covered by these tests
+    automatically instead of being silently omitted.
+    """
+    return {key: value for key, value in config.items()
+            if key not in ("rig", "version")}
+
+
 def test_python_defaults_load_into_cpp_unchanged(native):
     """The whole default config, field by field.
 
@@ -46,7 +77,7 @@ def test_python_defaults_load_into_cpp_unchanged(native):
     got = json.loads(got_text)
 
     assert not notes, f"C++ objected to the reference defaults: {notes}"
-    assert got == want
+    assert _shared(got) == _shared(want)
 
 
 def test_cpp_defaults_load_into_python_unchanged(native):
@@ -54,7 +85,79 @@ def test_cpp_defaults_load_into_python_unchanged(native):
     cpp = _cpp(native)
     defaults = json.loads(cpp.defaults_json())
     rebuilt = Config.from_dict(defaults).to_dict()
-    assert rebuilt == defaults
+    assert _shared(rebuilt) == _shared(defaults)
+
+
+def test_a_v1_rig_section_migrates_quietly(native):
+    """A config the Python app wrote must not read as a pile of typos.
+
+    The rig section changed shape; the operator did not do anything
+    wrong, so the dead keys are recognized-and-ignored rather than
+    reported. The one thing that does carry over is the model number,
+    which v1 stored as a string.
+    """
+    cpp = _cpp(native)
+    data = Config().to_dict()
+    data["rig"] = {
+        "enabled": True,
+        "host": "10.0.0.5",
+        "port": 4533,
+        "spawn_local": True,
+        "model": "2043",
+        "device": "/dev/ttyACM1",
+        "baud": 38400,
+        "ptt_lead_s": 0.45,
+        "ptt_tail_s": 0.25,
+        "poll_interval_s": 2.5,
+    }
+
+    got_text, notes = cpp.round_trip(json.dumps(data))
+    rig = json.loads(got_text)["rig"]
+
+    assert not [n for n in notes if n[0].startswith("rig.")], (
+        f"migrating a v1 rig section should be quiet: {notes}")
+    # A string model number is read as the number it is.
+    assert rig["model"] == 2043
+    # And the fields that mean the same thing in both schemas survive.
+    assert rig["enabled"] is True
+    assert rig["device"] == "/dev/ttyACM1"
+    assert rig["baud"] == 38400
+    assert rig["ptt_lead_s"] == 0.45
+    assert rig["poll_interval_s"] == 2.5
+
+
+def test_the_new_rig_settings_round_trip(native):
+    """The fields that only exist on the native side.
+
+    No Python counterpart to compare against, so this is a C++ round
+    trip: what a settings dialog writes must be what it reads back, or a
+    handshake setting silently reverts and the radio stops answering
+    with no explanation.
+    """
+    cpp = _cpp(native)
+    data = Config().to_dict()
+    data["rig"] = {
+        "enabled": True,
+        "model": 3073,
+        "poll_interval_s": 1.0,
+        "ptt_lead_s": 0.2,
+        "ptt_tail_s": 0.1,
+        "device": "COM5",
+        "baud": 115200,
+        "data_bits": "eight",
+        "stop_bits": "two",
+        "parity": "even",
+        "handshake": "hardware",
+        "dtr": "high",
+        "rts": "low",
+        "ptt_method": "rts",
+        "ptt_device": "COM7",
+        "mode": "pkt_usb",
+    }
+
+    got_text, notes = cpp.round_trip(json.dumps(data))
+    assert not [n for n in notes if n[0].startswith("rig.")], notes
+    assert json.loads(got_text)["rig"] == data["rig"]
 
 
 def test_a_realistic_hand_edited_config_survives(native):
@@ -72,16 +175,6 @@ def test_a_realistic_hand_edited_config_survives(native):
     cfg.audio.backend = "portaudio"
     cfg.audio.input_device = "USB Audio CODEC"
     cfg.audio.output_device = "SSTVAE-Loopback"
-    cfg.rig.enabled = True
-    cfg.rig.host = "10.0.0.5"
-    cfg.rig.port = 4533
-    cfg.rig.spawn_local = True
-    cfg.rig.model = "2043"
-    cfg.rig.device = "/dev/ttyACM1"
-    cfg.rig.baud = 38400
-    cfg.rig.ptt_lead_s = 0.45
-    cfg.rig.ptt_tail_s = 0.25
-    cfg.rig.poll_interval_s = 2.5
     cfg.folders.receive_dir = "/srv/sstv/in"
     cfg.folders.transmit_dir = "/srv/sstv/out"
     cfg.folders.template_dir = "/srv/sstv/tpl"
@@ -97,10 +190,11 @@ def test_a_realistic_hand_edited_config_survives(native):
     cfg.transmit.mode = "C"
     cfg.transmit.level = 0.72
 
+    # The rig section is covered by its own tests; see _shared.
     want = cfg.to_dict()
     got_text, notes = cpp.round_trip(json.dumps(want))
     assert not notes, notes
-    assert json.loads(got_text) == want
+    assert _shared(json.loads(got_text)) == _shared(want)
 
 
 def test_unknown_keys_are_kept_harmless_but_reported(native):
@@ -119,14 +213,14 @@ def test_unknown_keys_are_kept_harmless_but_reported(native):
     assert "some_future_option" in reported
     assert "receive.future_nested" in reported
     # The known settings still came through.
-    assert json.loads(got_text) == Config().to_dict()
+    assert _shared(json.loads(got_text)) == _shared(Config().to_dict())
 
 
 def test_wrong_types_fall_back_to_defaults_and_are_reported(native):
     cpp = _cpp(native)
     data = Config().to_dict()
     data["callsign"] = 12345          # should be a string
-    data["rig"]["port"] = "4532"      # should be an integer
+    data["rig"]["baud"] = "115200"    # should be an integer
     data["receive"]["autosave"] = "yes"  # should be a boolean
     data["transmit"] = "B"            # should be an object
 
@@ -135,10 +229,11 @@ def test_wrong_types_fall_back_to_defaults_and_are_reported(native):
     reported = {key: problem for key, problem in notes}
 
     assert "callsign" in reported and "string" in reported["callsign"]
-    assert "rig.port" in reported and "integer" in reported["rig.port"]
+    assert "rig.baud" in reported and "integer" in reported["rig.baud"]
     assert "receive.autosave" in reported
     assert "transmit" in reported
-    assert got == Config().to_dict(), "a bad value should leave the default in place"
+    assert _shared(got) == _shared(Config().to_dict()), \
+        "a bad value should leave the default in place"
 
 
 def test_a_corrupt_file_still_yields_a_usable_config(native):
@@ -146,7 +241,7 @@ def test_a_corrupt_file_still_yields_a_usable_config(native):
     cpp = _cpp(native)
     for broken in ("", "{", "null", "[1,2,3]", "not json at all"):
         got_text, notes = cpp.round_trip(broken)
-        assert json.loads(got_text) == Config().to_dict()
+        assert _shared(json.loads(got_text)) == _shared(Config().to_dict())
         assert notes, f"{broken!r} parsed silently"
 
 

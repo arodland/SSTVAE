@@ -180,17 +180,56 @@ void read_audio(const Reader& r, AudioConfig& c) {
 
 void read_rig(const Reader& r, RigConfig& c) {
     r.get("enabled", c.enabled);
-    r.get("host", c.host);
-    r.get("port", c.port);
-    r.get("spawn_local", c.spawn_local);
-    r.get("model", c.model);
-    r.get("device", c.device);
-    r.get("baud", c.baud);
+    // v1 wrote the model as a string ("1"), because it was passed
+    // straight to a rigctld command line; it is a number and is stored
+    // as one now. Accept both, so migrating does not report a type
+    // error against a key the operator never edited -- the same
+    // courtesy the dead v1 keys get below.
+    const json* model_value;
+    if (r.present("model", &model_value)) {
+        if (model_value->is_number_integer()) {
+            c.model = model_value->get<int>();
+        } else if (model_value->is_string()) {
+            try {
+                c.model = std::stoi(model_value->get<std::string>());
+            } catch (const std::exception&) {
+                r.notes.add(r.path("model"),
+                            "expected a Hamlib model number, found \"" +
+                                model_value->get<std::string>() + "\"");
+            }
+        } else {
+            r.notes.add(r.path("model"),
+                        "expected an integer, found " + type_name(*model_value));
+        }
+    }
+    r.get("poll_interval_s", c.poll_interval_s);
     r.get("ptt_lead_s", c.ptt_lead_s);
     r.get("ptt_tail_s", c.ptt_tail_s);
-    r.get("poll_interval_s", c.poll_interval_s);
-    r.report_unknown({"enabled", "host", "port", "spawn_local", "model", "device",
-                      "baud", "ptt_lead_s", "ptt_tail_s", "poll_interval_s"});
+    r.get("device", c.device);
+    r.get("baud", c.baud);
+    r.get("data_bits", c.data_bits);
+    r.get("stop_bits", c.stop_bits);
+    r.get("parity", c.parity);
+    r.get("handshake", c.handshake);
+    r.get("dtr", c.dtr);
+    r.get("rts", c.rts);
+    r.get("ptt_method", c.ptt_method);
+    r.get("ptt_device", c.ptt_device);
+    r.get("mode", c.mode);
+    // The v1 keys are listed as known so that a config written by the
+    // Python app is *quietly* migrated rather than reported as four
+    // typos. They carry no information the new schema can use -- a
+    // rigctld host and port describe a daemon this app does not have --
+    // so the rig simply comes up on its defaults and the operator sets
+    // it once. Naming them here is the difference between "your config
+    // changed shape" and a wall of complaints about a file they did not
+    // write.
+    r.report_unknown({"enabled", "model", "poll_interval_s", "ptt_lead_s",
+                      "ptt_tail_s", "device", "baud", "data_bits", "stop_bits",
+                      "parity", "handshake", "dtr", "rts", "ptt_method",
+                      "ptt_device", "mode",
+                      // v1, ignored:
+                      "host", "port", "spawn_local"});
 }
 
 void read_folders(const Reader& r, FolderConfig& c) {
@@ -338,15 +377,21 @@ std::string to_json(const Config& c) {
           {"samplerate", c.audio.samplerate}}},
         {"rig",
          {{"enabled", c.rig.enabled},
-          {"host", c.rig.host},
-          {"port", c.rig.port},
-          {"spawn_local", c.rig.spawn_local},
           {"model", c.rig.model},
-          {"device", c.rig.device},
-          {"baud", c.rig.baud},
+          {"poll_interval_s", c.rig.poll_interval_s},
           {"ptt_lead_s", c.rig.ptt_lead_s},
           {"ptt_tail_s", c.rig.ptt_tail_s},
-          {"poll_interval_s", c.rig.poll_interval_s}}},
+          {"device", c.rig.device},
+          {"baud", c.rig.baud},
+          {"data_bits", c.rig.data_bits},
+          {"stop_bits", c.rig.stop_bits},
+          {"parity", c.rig.parity},
+          {"handshake", c.rig.handshake},
+          {"dtr", c.rig.dtr},
+          {"rts", c.rig.rts},
+          {"ptt_method", c.rig.ptt_method},
+          {"ptt_device", c.rig.ptt_device},
+          {"mode", c.rig.mode}}},
         {"folders",
          {{"receive_dir", c.folders.receive_dir},
           {"transmit_dir", c.folders.transmit_dir},
