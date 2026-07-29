@@ -31,6 +31,7 @@
 #include "dsp/dsp.hpp"
 #include "framing/framing.hpp"
 #include "golay/golay.hpp"
+#include "audio/audio.hpp"
 #include "images/images.hpp"
 #include "overlay/model.hpp"
 #include "settings/settings.hpp"
@@ -693,6 +694,60 @@ PYBIND11_MODULE(sstvae_native, m) {
     codec.attr("IMG_H") = sstvae::codec::IMG_H;
     codec.attr("N_LATENTS") = sstvae::codec::N_LATENTS;
 #endif
+
+    // --- audio ---------------------------------------------------------
+    //
+    // The device-independent half only. The Qt layer is a separate
+    // library that this module deliberately does not link -- binding it
+    // would make `pytest --native` need a soundcard.
+    py::module_ audio = m.def_submodule("audio");
+    audio.def("resample_ratio",
+              [](int src, int dst) {
+                  const auto r = sstvae::audio::resample_ratio(src, dst);
+                  return py::make_tuple(r.up, r.down);
+              },
+              py::arg("src_rate"), py::arg("dst_rate"));
+    // Exposed as a factory returning a callable, so the parity test can
+    // drive it with exactly the same code it drives the reference with.
+    py::class_<sstvae::audio::StreamResampler>(audio, "StreamResampler")
+        .def(py::init<int, int>(), py::arg("up"), py::arg("down"))
+        .def("__call__",
+             [](sstvae::audio::StreamResampler& self, DArray chunk) {
+                 const auto* p = chunk.data();
+                 return to_numpy(self(std::span<const double>(
+                     p, static_cast<std::size_t>(chunk.size()))));
+             })
+        .def_property_readonly("pad", &sstvae::audio::StreamResampler::pad);
+    audio.def("bytes_to_mono",
+              [](py::bytes raw, const std::string& fmt, int channels) {
+                  const auto sf = sstvae::audio::sample_format_from_name(fmt);
+                  if (!sf) throw std::runtime_error("unsupported sample format " + fmt);
+                  const std::string_view view = raw;
+                  return to_numpy(sstvae::audio::bytes_to_mono(
+                      std::span<const std::byte>(
+                          reinterpret_cast<const std::byte*>(view.data()), view.size()),
+                      *sf, channels));
+              },
+              py::arg("raw"), py::arg("fmt"), py::arg("channels"));
+    audio.def("mono_to_bytes",
+              [](DArray x, const std::string& fmt, int channels) {
+                  const auto sf = sstvae::audio::sample_format_from_name(fmt);
+                  if (!sf) throw std::runtime_error("unsupported sample format " + fmt);
+                  const auto out = sstvae::audio::mono_to_bytes(
+                      std::span<const double>(x.data(),
+                                              static_cast<std::size_t>(x.size())),
+                      *sf, channels);
+                  return py::bytes(reinterpret_cast<const char*>(out.data()), out.size());
+              },
+              py::arg("x"), py::arg("fmt"), py::arg("channels"));
+    audio.def("match_device",
+              [](const std::vector<std::string>& descriptions,
+                 const std::string& wanted) -> py::object {
+                  const auto hit = sstvae::audio::match_device(descriptions, wanted);
+                  if (!hit) return py::none();
+                  return py::int_(*hit);
+              },
+              py::arg("descriptions"), py::arg("wanted"));
 
     // The generated constants, so a test can prove the C++ build and the
     // Python package were built from the same config.py rather than

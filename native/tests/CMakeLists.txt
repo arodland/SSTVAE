@@ -40,3 +40,10 @@ add_executable(test_tx_engine test_tx_engine.cpp)
 target_link_libraries(test_tx_engine PRIVATE sstvae_core)
 target_include_directories(test_tx_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME tx_engine COMMAND test_tx_engine)
+
+# The device-independent half of the audio layer: rate conversion,
+# sample-format conversion, device matching. No soundcard, no Qt.
+add_executable(test_audio test_audio.cpp)
+target_link_libraries(test_audio PRIVATE sstvae_core)
+target_include_directories(test_audio PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME audio COMMAND test_audio)

@@ -1092,3 +1092,163 @@ def test_resample_poly_matches_scipy(native, up, down):
         got = native.dsp.resample_poly(x, up, down)
         assert len(got) == len(want), f"{len(got)} samples vs scipy's {len(want)}"
         assert max_abs_diff(got, want) < 1e-13
+
+
+# --- audio ----------------------------------------------------------------
+#
+# The device-independent half. The Qt layer is not bound into the parity
+# module on purpose -- checking it would need a soundcard, and there is
+# nothing in it but device enumeration and moving bytes. Everything with
+# logic in it is here.
+
+
+@pytest.mark.parametrize("src,dst", [
+    (44100, 8000), (48000, 8000), (12000, 8000), (8000, 8000),
+    (8000, 48000), (8000, 44100), (22050, 8000), (96000, 8000),
+])
+def test_resample_ratio_matches(native, src, dst):
+    """Both directions, because they are inverses and confusing them is a
+    real bug with a measured cost: sharing one "ratio to the device"
+    helper between capture and playback decimated a 32 s transmission
+    into 0.9 s of noise."""
+    from sstvae.audio import resample_ratio
+
+    assert native.audio.resample_ratio(src, dst) == resample_ratio(src, dst)
+
+
+@pytest.mark.parametrize("src,dst", [(44100, 8000), (48000, 8000), (12000, 8000)])
+def test_stream_resampler_matches(native, src, dst):
+    """Chunk for chunk, not just in total.
+
+    Comparing only the concatenated output would pass an implementation
+    that buffered everything and emitted it at the end, which is a
+    different component. The reference's contract is that a given input
+    chunk produces a specific amount of output at a specific time, and
+    the ring buffer downstream records absolute sample positions against
+    exactly that.
+    """
+    from sstvae.audio import StreamResampler, resample_ratio
+
+    up, down = resample_ratio(src, dst)
+    ref = StreamResampler(up, down)
+    got = native.audio.StreamResampler(up, down)
+    assert got.pad == ref.pad, "the filter's context window must be the same length"
+
+    rng = np.random.default_rng(11)
+    x = rng.standard_normal(src)
+    i = 0
+    while i < len(x):
+        n = int(rng.integers(50, 3000))
+        chunk = x[i:i + n]
+        a, b = ref(chunk), got(chunk)
+        # Emitting nothing is the common case early on, while the filter
+        # is still filling its context window -- and both sides must
+        # agree about *that* too, which is what the length check says.
+        assert len(a) == len(b), f"chunk at {i}: {len(b)} samples vs {len(a)}"
+        if len(a):
+            assert max_abs_diff(a, b) < 1e-13
+        i += n
+
+
+@pytest.mark.parametrize("fmt,dtype", [
+    ("Float", np.float32), ("Int16", np.int16),
+    ("Int32", np.int32), ("UInt8", np.uint8),
+])
+@pytest.mark.parametrize("channels", [1, 2])
+def test_bytes_to_mono_matches(native, fmt, dtype, channels):
+    """Against `gui/qtaudio.py`, which is where the reference keeps this.
+
+    Note what a skip here does and does not cost: `native/tests/
+    test_audio.cpp` covers the C++ side either way, so a missing PySide6
+    loses the *comparison*, not the coverage.
+    """
+    qtaudio = pytest.importorskip(
+        "sstvae.gui.qtaudio", reason="needs PySide6 (the gui extra)")
+
+    rng = np.random.default_rng(3)
+    if dtype is np.float32:
+        raw = rng.uniform(-1.2, 1.2, 40 * channels).astype(dtype)
+    else:
+        info = np.iinfo(dtype)
+        raw = rng.integers(info.min, info.max, 40 * channels, endpoint=True).astype(dtype)
+    blob = raw.tobytes()
+
+    want = qtaudio.bytes_to_mono(blob, fmt, channels)
+    got = native.audio.bytes_to_mono(blob, fmt, channels)
+    assert len(got) == len(want)
+
+    # Float multichannel is the one case where the two do not agree to
+    # double precision, and deliberately: numpy's `.mean(axis=1)` on a
+    # float32 array accumulates in float32, while the C++ mixes down in
+    # double. The difference is ~3e-8, which is 150 dB below full scale
+    # -- inaudible, unmeasurable against any device's noise floor, and
+    # the C++ side is the more accurate of the two. Matching numpy here
+    # would mean deliberately rounding to float32 mid-calculation.
+    tol = 1e-6 if (fmt == "Float" and channels > 1) else 1e-12
+    assert max_abs_diff(got, want) < tol
+
+
+def test_bytes_to_mono_drops_a_partial_frame_the_same_way(native):
+    """A short read from the device must not misalign everything after
+    it, and both sides must agree on where the boundary is."""
+    qtaudio = pytest.importorskip(
+        "sstvae.gui.qtaudio", reason="needs PySide6 (the gui extra)")
+
+    raw = np.arange(9, dtype=np.int16).tobytes()  # 4.5 stereo frames
+    want = qtaudio.bytes_to_mono(raw, "Int16", 2)
+    got = native.audio.bytes_to_mono(raw, "Int16", 2)
+    assert len(got) == len(want) == 4
+    assert max_abs_diff(got, want) < 1e-12
+
+
+@pytest.mark.parametrize("fmt,dtype", [
+    ("Float", np.float32), ("Int16", np.int16),
+    ("Int32", np.int32), ("UInt8", np.uint8),
+])
+def test_mono_to_bytes_matches_the_reference_player(native, fmt, dtype):
+    """The playback conversion, which the reference does inline in
+    `qtaudio.play` rather than in a named function -- so this restates it
+    from that code. Both rails are included: the scale-then-clip-in-the-
+    integer-domain detail exists so +1.0 cannot wrap to full-scale
+    negative, and a wrap there is a click on every transmission peak.
+    """
+    rng = np.random.default_rng(4)
+    x = np.concatenate([rng.uniform(-1, 1, 32), [1.0, -1.0, 1.5, -1.5, 0.0]])
+
+    if fmt == "Float":
+        want = np.clip(x, -1.0, 1.0).astype(np.float32)
+    else:
+        scale, offset = {"Int16": (32768.0, 0.0), "Int32": (2147483648.0, 0.0),
+                         "UInt8": (128.0, 128.0)}[fmt]
+        info = np.iinfo(dtype)
+        want = np.clip(np.round(x * (scale - 1) + offset),
+                       info.min, info.max).astype(dtype)
+
+    got = np.frombuffer(native.audio.mono_to_bytes(x, fmt, 1), dtype=dtype)
+    assert np.array_equal(got, want)
+
+
+def test_mono_to_bytes_duplicates_across_channels(native):
+    got = np.frombuffer(
+        native.audio.mono_to_bytes(np.array([0.25, -0.5]), "Int16", 2), dtype=np.int16)
+    assert got.tolist() == [got[0], got[0], got[2], got[2]]
+
+
+@pytest.mark.parametrize("wanted", [
+    "", "K4 RX A Digital Stereo (IEC958)", "K4 RX A", "k4 rx a",
+    "K4 RX", "Behringer", "Built-in",
+])
+def test_match_device_matches(native, wanted):
+    """Including the ambiguous and absent cases, which both have to come
+    back as "use the default" rather than as a guess -- capturing from
+    the wrong receiver looks like a dead band, not like a bug."""
+    qtaudio = pytest.importorskip(
+        "sstvae.gui.qtaudio", reason="needs PySide6 (the gui extra)")
+
+    devices = [
+        "Built-in Audio Analogue Stereo",
+        "K4 RX A Digital Stereo (IEC958)",
+        "K4 RX B Digital Stereo (IEC958)",
+    ]
+    assert native.audio.match_device(devices, wanted) == qtaudio.match_device(
+        devices, wanted or None)
