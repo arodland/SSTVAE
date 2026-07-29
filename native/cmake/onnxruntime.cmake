@@ -5,6 +5,9 @@
 # are 9-80 MB and contain exactly what a consumer needs (headers, one
 # shared library, a CMake config package). We use those.
 #
+# **One platform is deliberately an exception**: see
+# SSTVAE_ONNXRUNTIME_VERSION_OSX_X86_64 below.
+#
 # **The version is pinned to the same one the Python package resolves**,
 # and that is not incidental. `docs/onnx.md` measures fp16 as identical
 # to fp32 end to end, and the C++/Python spike measured the encoder
@@ -21,10 +24,34 @@
 
 set(SSTVAE_ONNXRUNTIME_VERSION "1.28.0" CACHE STRING
     "onnxruntime version; keep in step with the Python pin")
+
+# Intel macOS, and only Intel macOS, stays on an older runtime.
+#
+# onnxruntime stopped publishing a macOS x86_64 build between 1.22 and
+# 1.26 -- there is no tgz and no wheel for the current pin, so an Intel
+# Mac cannot be served by it at any price. 1.22.0 is the last release
+# that has one.
+#
+# This *does* break the "same version, two builds" basis of the codec
+# parity claim, and only for this artifact. Accepted deliberately
+# (Andrew, 2026-07-29): what has to match between two stations is the
+# *model*, which is published and identical; a runtime version
+# difference lands as noise underneath the channel's, in the same way
+# `docs/onnx.md` measures quantisation doing. The parity tests are
+# stronger than the on-air requirement, so a small drift confined to one
+# legacy artifact is a fair trade for a station that would otherwise
+# have no app at all -- and the build can be *labelled* as the lower
+# compatibility tier, the way the int8 artifacts are.
+#
+# The arm64 macOS build is untouched and its parity claim stays exact.
+# Raise this pin the moment onnxruntime publishes x86_64 again; delete
+# it, and Intel support, if Apple's own support ends first.
+set(SSTVAE_ONNXRUNTIME_VERSION_OSX_X86_64 "1.22.0" CACHE STRING
+    "onnxruntime version for Intel macOS, which the main pin has no build for")
 set(SSTVAE_ONNXRUNTIME_DIR "" CACHE PATH
     "Unpacked onnxruntime distribution; skips the download when set")
 
-function(_sstvae_onnxruntime_archive out_url out_hash out_ext)
+function(_sstvae_onnxruntime_archive out_url out_hash out_ext out_version)
   set(_v "${SSTVAE_ONNXRUNTIME_VERSION}")
   # Hashes are the GitHub release digests for this exact version. A new
   # version means new hashes -- there is deliberately no way to bump the
@@ -32,6 +59,7 @@ function(_sstvae_onnxruntime_archive out_url out_hash out_ext)
   # a binary that runs on every received picture is not something to
   # leave to the network.
   set(_known
+    "1.22.0|osx-x86_64|tgz|e4ec94a7696de74fb1b12846569aa94e499958af6ffa186022cfde16c9d617f0"
     "1.28.0|linux-x64|tgz|a3e1b79d7bb1bf09696ce675f49e4064e6c81f6202b8225624fff0e93f8d6407"
     "1.28.0|linux-aarch64|tgz|e15ff8b5d85afe6c144d97c6fd432254bf76a219daaf17658087d6ecb3e8f0bb"
     "1.28.0|osx-arm64|tgz|1268b359718099bde2cedb55787f182a130067bc4f31e8c88478c445b850d3d8"
@@ -39,8 +67,7 @@ function(_sstvae_onnxruntime_archive out_url out_hash out_ext)
     "1.28.0|win-arm64|zip|cbe4547463ece092b505c3581376ed5896d22b5429f39d5e645e425ecdd369ad"
   )
 
-  # Platform slug. Note there is no osx-x64 archive any more: the macOS
-  # build is Apple silicon only, which is also why CI dropped macos-13.
+  # Platform slug.
   if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
     set(_os "win")
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
@@ -65,6 +92,15 @@ function(_sstvae_onnxruntime_archive out_url out_hash out_ext)
   endif()
 
   set(_slug "${_os}-${_arch}")
+
+  # Intel macOS is spelled `osx-x86_64` by the release that has it, not
+  # `osx-x64` like every other x86 archive, and it carries its own
+  # version. Both exceptions are here rather than in the table so the
+  # table stays a plain list of pinned digests.
+  if(_os STREQUAL "osx" AND _arch STREQUAL "x64")
+    set(_slug "osx-x86_64")
+    set(_v "${SSTVAE_ONNXRUNTIME_VERSION_OSX_X86_64}")
+  endif()
   foreach(_row IN LISTS _known)
     string(REPLACE "|" ";" _f "${_row}")
     list(GET _f 0 _rv)
@@ -77,6 +113,11 @@ function(_sstvae_onnxruntime_archive out_url out_hash out_ext)
           PARENT_SCOPE)
       set(${out_hash} "SHA256=${_rh}" PARENT_SCOPE)
       set(${out_ext} "${_re}" PARENT_SCOPE)
+      # Reported back because it is not always
+      # SSTVAE_ONNXRUNTIME_VERSION: Intel macOS pins its own, and the
+      # library's filename carries the version, so a caller that assumes
+      # the default looks for a file that was never downloaded.
+      set(${out_version} "${_v}" PARENT_SCOPE)
       return()
     endif()
   endforeach()
@@ -87,11 +128,16 @@ function(_sstvae_onnxruntime_archive out_url out_hash out_ext)
     "or point -DSSTVAE_ONNXRUNTIME_DIR at an unpacked distribution.")
 endfunction()
 
+# The version actually in use. Only differs from the pin on the
+# platforms that have their own (Intel macOS), and is left at the pin for
+# an unpacked distribution, whose version we cannot know.
+set(_ort_version "${SSTVAE_ONNXRUNTIME_VERSION}")
+
 if(SSTVAE_ONNXRUNTIME_DIR)
   set(_ort_root "${SSTVAE_ONNXRUNTIME_DIR}")
   message(STATUS "onnxruntime: using ${_ort_root}")
 else()
-  _sstvae_onnxruntime_archive(_ort_url _ort_hash _ort_ext)
+  _sstvae_onnxruntime_archive(_ort_url _ort_hash _ort_ext _ort_version)
   message(STATUS "onnxruntime: fetching ${_ort_url}")
   include(FetchContent)
   FetchContent_Declare(onnxruntime_prebuilt URL "${_ort_url}" URL_HASH "${_ort_hash}")
@@ -131,13 +177,30 @@ if(WIN32)
   set_target_properties(onnxruntime PROPERTIES
     IMPORTED_LOCATION "${_ort_root}/lib/onnxruntime.dll"
     IMPORTED_IMPLIB "${_ort_root}/lib/onnxruntime.lib")
-elseif(APPLE)
-  set_target_properties(onnxruntime PROPERTIES
-    IMPORTED_LOCATION "${_ort_root}/lib/libonnxruntime.${SSTVAE_ONNXRUNTIME_VERSION}.dylib")
 else()
-  set_target_properties(onnxruntime PROPERTIES
-    IMPORTED_LOCATION "${_ort_root}/lib/libonnxruntime.so.${SSTVAE_ONNXRUNTIME_VERSION}"
-    IMPORTED_SONAME "libonnxruntime.so.1")
+  # The versioned filename, then whatever versioned library is actually
+  # there. The fallback is what makes an unpacked distribution
+  # (SSTVAE_ONNXRUNTIME_DIR) work at any version rather than only at the
+  # pinned one -- and it is the same mistake that made a platform with
+  # its own pin look for a file it had never downloaded.
+  if(APPLE)
+    set(_ort_lib "${_ort_root}/lib/libonnxruntime.${_ort_version}.dylib")
+    set(_ort_glob "${_ort_root}/lib/libonnxruntime.*.dylib")
+  else()
+    set(_ort_lib "${_ort_root}/lib/libonnxruntime.so.${_ort_version}")
+    set(_ort_glob "${_ort_root}/lib/libonnxruntime.so.[0-9]*")
+  endif()
+  if(NOT EXISTS "${_ort_lib}")
+    file(GLOB _ort_found "${_ort_glob}")
+    list(SORT _ort_found)
+    if(_ort_found)
+      list(GET _ort_found 0 _ort_lib)
+    endif()
+  endif()
+  set_target_properties(onnxruntime PROPERTIES IMPORTED_LOCATION "${_ort_lib}")
+  if(NOT APPLE)
+    set_target_properties(onnxruntime PROPERTIES IMPORTED_SONAME "libonnxruntime.so.1")
+  endif()
 endif()
 
 get_target_property(_ort_loc onnxruntime IMPORTED_LOCATION)

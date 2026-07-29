@@ -92,51 +92,36 @@ jobs:
         run: pytest -q -m slow
 
   native:
-    name: Native core (${{ matrix.os }})
+    name: Native core (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
+      # An include-only matrix, because two jobs share one runner image:
+      # there is no Intel macOS runner any more, so the x86_64 slice is
+      # cross-compiled on Apple silicon. `label` names the *target* and
+      # is what the package is named after -- deriving it from `uname -m`
+      # would say arm64 on the cross build, which is the one case where
+      # the answer matters.
+      #
+      # ubuntu-24.04 rather than -latest: the build machine's glibc is
+      # the floor for every machine the package runs on, so the oldest
+      # runner that still works is the right one. 22.04 does not.
+      #
+      # ubuntu-24.04-arm builds the aarch64 package. Worth having for a
+      # ham application specifically -- a Raspberry Pi or similar SBC at
+      # the radio is a normal station, not an exotic one.
+      #
+      # macos-15, not macos-latest: macOS 26's SDK removed the AGL
+      # framework that Qt's link interface still referenced
+      # (QTBUG-137687). Building a distributed app against an older SDK
+      # is what we want anyway.
       matrix:
-        # No Intel macOS runner. docs/native-app.md listed "GHA retires
-        # the Intel macOS runner mid-project" as a risk; it turns out to
-        # have happened already -- `macos-13` no longer schedules and a
-        # job requesting it queues forever rather than failing, which is
-        # worse than an error.
-        #
-        # Decision 2 still stands: Intel Macs are supported, because
-        # hams are conservative about hardware. So the x86_64 slice has
-        # to be *cross-compiled* on an Apple-silicon runner, which the
-        # doc anticipated as a fallback and which is now the only path.
-        # Until the packaging work in Phase 4 exists to do that, this
-        # matrix tests arm64 macOS only -- an honest gap, not a decision
-        # to drop Intel.
-        #
-        # macos-15, not macos-latest. macos-latest is now macOS 26
-        # (Tahoe), whose SDK removed the AGL framework -- and Qt 6.8's
-        # link interface still referenced it, so every Qt executable
-        # failed with "ld: framework 'AGL' not found" (QTBUG-137687).
-        # The Qt pin has since moved to 6.11.1, which may have dropped
-        # that reference; the pin stays regardless, because building a
-        # distributed app against an older SDK is what we want and
-        # because unpinning it is a change to make on purpose rather
-        # than a side effect of a version bump.
-        # Qt does not use AGL; the flag is vestigial. Pinning the image
-        # is the deterministic fix and costs nothing else: building a
-        # distributed app against an older SDK is what you want anyway,
-        # given decision 2's conservative hardware floor.
-        #
-        # This has a known expiry -- GHA retires runner images, and this
-        # matrix already carries a comment about macos-13 disappearing.
-        # The real fix is a Qt with the AGL reference removed; revisit
-        # when the pin below moves.
-        # ubuntu-24.04 rather than -latest: the build machine's glibc is
-        # the floor for every machine the package runs on, so the oldest
-        # runner that still works is the right one. 22.04 does not.
-        #
-        # ubuntu-24.04-arm builds the aarch64 package. Worth having for a
-        # ham application specifically -- a Raspberry Pi or similar SBC
-        # at the radio is a normal station, not an exotic one.
-        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-latest]
+        include:
+          - { os: ubuntu-24.04,     label: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, label: linux-aarch64 }
+          - { os: macos-15,         label: macos-arm64 }
+          - { os: macos-15,         label: macos-x86_64, osx_arch: x86_64 }
+          - { os: windows-latest,   label: windows-x64 }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -236,7 +221,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: native/.deps
-          key: deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('native/cmake/onnxruntime.cmake', 'native/cmake/hamlib.cmake') }}
+          key: deps-${{ matrix.label }}-${{ hashFiles('native/cmake/onnxruntime.cmake', 'native/cmake/hamlib.cmake') }}
       # The codec's parity tests compare two runtimes on the *same*
       # model file, so they need that file. Fetching it here rather than
       # inside a test keeps a network failure reported as a network
@@ -256,11 +241,24 @@ jobs:
       # interpreter, and the only symptom is "DLL load failed".
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
+      # x86_64 binaries run on Apple silicon through Rosetta, which is
+      # what lets the cross-built slice be *tested* rather than shipped
+      # blind. Not preinstalled on the runner images.
+      - name: Install Rosetta
+        if: matrix.osx_arch == 'x86_64'
+        run: softwareupdate --install-rosetta --agree-to-license
       - name: Configure
         shell: bash
+        # The pybind11 module is off for the cross build: it would be
+        # built for the target while the runner's Python is native, so it
+        # could not be imported and `pytest --native` is skipped below.
+        env:
+          OSX_ARCH: ${{ matrix.osx_arch }}
         run: |
           cmake -S native -B native/build -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            ${OSX_ARCH:+-DCMAKE_OSX_ARCHITECTURES=$OSX_ARCH} \
+            ${OSX_ARCH:+-DSSTVAE_BUILD_PYMODULE=OFF} \
             -DSSTVAE_BUILD_GUI=ON -DSSTVAE_BUILD_QTAUDIO=ON \
             -DSSTVAE_BUILD_OVERLAY=ON \
             -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps" \
@@ -368,14 +366,7 @@ jobs:
       # the label.
       - name: Name the package
         shell: bash
-        run: |
-          case "$RUNNER_OS" in
-            Linux)   tag="linux-$(uname -m)" ;;
-            macOS)   tag="macos-$(uname -m)" ;;
-            Windows) tag="windows-x64" ;;
-            *)       tag="$RUNNER_OS" ;;
-          esac
-          echo "pkg=sstvae-$tag" >> "$GITHUB_ENV"
+        run: echo "pkg=sstvae-${{ matrix.label }}" >> "$GITHUB_ENV"
       # tar on Unix, because an artifact zip does not preserve the
       # executable bit -- which would ship a macOS .app that cannot be
       # launched and a Linux binary that cannot be run.
@@ -406,13 +397,14 @@ jobs:
       # Also worth keeping: they are how a layout regression gets seen.
       - uses: actions/upload-artifact@v7
         with:
-          name: gui-shots-${{ matrix.os }}
+          name: gui-shots-${{ matrix.label }}
           path: gui-shots
           if-no-files-found: error
 
       # Phase 0's actual exit criterion: the *Python* suite, running
       # against the C++ implementations rather than the reference ones.
       - name: Python suite against the C++ core
+        if: matrix.osx_arch == ''
         run: pytest -q --native
         env:
           # The codec parity tests are the strongest checks in the

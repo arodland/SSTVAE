@@ -155,6 +155,53 @@ else()
         "--without-libusb"
         "--disable-silent-rules")
 
+    # Cross-compiling to the other macOS architecture.
+    #
+    # CMake's CMAKE_OSX_ARCHITECTURES means nothing to autotools, so
+    # without this the library is built for whatever the *runner* is and
+    # the link fails with an architecture mismatch -- which is a
+    # confusing error a long way from its cause. There is no Intel macOS
+    # runner any more, so the x86_64 slice is necessarily cross-built on
+    # Apple silicon.
+    #
+    # `--host` is what puts configure into cross mode, so it stops trying
+    # to run what it just built; the arch and deployment-target flags go
+    # in the compiler variables, which configure accepts as arguments.
+    if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+      list(LENGTH CMAKE_OSX_ARCHITECTURES _hl_narch)
+      if(_hl_narch GREATER 1)
+        # A fat build would need two configure/make runs and a lipo, and
+        # nothing here asks for one: the packaging builds one slice per
+        # job. Refusing beats silently producing a thin library.
+        message(FATAL_ERROR
+          "Hamlib is built one architecture at a time; "
+          "CMAKE_OSX_ARCHITECTURES is '${CMAKE_OSX_ARCHITECTURES}'. "
+          "Configure once per slice and combine them with lipo.")
+      endif()
+      set(_hl_arch "${CMAKE_OSX_ARCHITECTURES}")
+      if(_hl_arch STREQUAL "arm64")
+        set(_hl_triple "aarch64-apple-darwin")
+      else()
+        set(_hl_triple "${_hl_arch}-apple-darwin")
+      endif()
+      set(_hl_archflags "-arch ${_hl_arch}")
+      if(CMAKE_OSX_DEPLOYMENT_TARGET)
+        string(APPEND _hl_archflags
+               " -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+      endif()
+      # Only when it actually differs from the machine doing the build;
+      # passing --host unconditionally would put a native build into
+      # cross mode for no reason.
+      if(NOT _hl_arch STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR)
+        list(APPEND _hl_configure_args "--host=${_hl_triple}")
+      endif()
+      list(APPEND _hl_configure_args
+           "CFLAGS=${_hl_archflags}"
+           "CXXFLAGS=${_hl_archflags}"
+           "LDFLAGS=${_hl_archflags}")
+      message(STATUS "Hamlib: building for ${_hl_arch}")
+    endif()
+
     execute_process(
       COMMAND "${hamlib_src_SOURCE_DIR}/configure" ${_hl_configure_args}
       WORKING_DIRECTORY "${hamlib_src_BINARY_DIR}"
