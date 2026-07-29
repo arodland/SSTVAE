@@ -57,6 +57,7 @@ MINGW*|MSYS*|CYGWIN*)
     mkdir -p "$app"
     cp "$BUILD_DIR/sstvae-gui.exe" "$app/"
     cp "$BUILD_DIR/sstvae-decode.exe" "$app/" 2>/dev/null || true
+    cp "$BUILD_DIR/sstvae-audio-check.exe" "$app/" 2>/dev/null || true
     # Ours first, so windeployqt sees a complete executable and does not
     # report an import it cannot resolve.
     [ -n "$HAMLIB_RUNTIME_DIR" ] && cp "$HAMLIB_RUNTIME_DIR"/*.dll "$app/"
@@ -72,6 +73,12 @@ Darwin)
     # native/.deps, whose absolute paths mean nothing on another Mac.
     cp -R "$BUILD_DIR/sstvae-gui.app" "$STAGE_DIR/"
     app="$STAGE_DIR/sstvae-gui.app"
+    # Inside the bundle's MacOS directory, so they share the app's
+    # rpaths and the Frameworks macdeployqt is about to populate.
+    # Shipped because "the waterfall is black" has several causes and
+    # this is what tells them apart on a machine we cannot log in to.
+    cp "$BUILD_DIR/sstvae-audio-check" "$app/Contents/MacOS/" 2>/dev/null || true
+    cp "$BUILD_DIR/sstvae-decode" "$app/Contents/MacOS/" 2>/dev/null || true
     mkdir -p "$app/Contents/Frameworks"
     [ -n "$HAMLIB_RUNTIME_DIR" ] && cp "$HAMLIB_RUNTIME_DIR"/libhamlib*.dylib \
         "$app/Contents/Frameworks/" 2>/dev/null || true
@@ -93,25 +100,22 @@ Darwin)
     mkdir -p "$app/bin" "$app/lib" "$app/plugins"
     cp "$BUILD_DIR/sstvae-gui" "$app/bin/"
     cp "$BUILD_DIR/sstvae-decode" "$app/bin/" 2>/dev/null || true
+    cp "$BUILD_DIR/sstvae-audio-check" "$app/bin/" 2>/dev/null || true
     [ -n "$HAMLIB_RUNTIME_DIR" ] && cp -P "$HAMLIB_RUNTIME_DIR"/libhamlib.so* "$app/lib/"
     [ -n "$ORT_LIBDIR" ] && cp -P "$ORT_LIBDIR"/libonnxruntime.so* "$app/lib/"
 
-    # Qt: the libraries the binary actually links, plus the plugin
-    # directories Qt loads by name at run time. `ldd` gives the first
-    # set; the second cannot be discovered that way, because nothing
-    # links a plugin -- which is exactly how an app ships fine and then
-    # dies with "could not find the Qt platform plugin xcb".
+    # Qt: seeded from what the executable links, then completed by
+    # following the *plugins*. Nothing links a plugin, so an ldd of the
+    # binary cannot see a single one of a plugin's dependencies -- which
+    # is exactly how the xcb platform plugin shipped without
+    # libQt6XcbQpa and then reported itself "found" but unloadable.
     qt_lib_dir="$(ldd "$BUILD_DIR/sstvae-gui" | sed -n 's|.*=> \(.*/libQt6Core\.so[^ ]*\).*|\1|p' \
                   | head -1 | xargs -r dirname)"
     if [ -n "$qt_lib_dir" ]; then
         ldd "$BUILD_DIR/sstvae-gui" \
             | sed -n 's|.*=> \([^ ]*libQt6[^ ]*\) .*|\1|p' \
             | while read -r lib; do cp -P "$lib"* "$app/lib/" 2>/dev/null || true; done
-        # ICU and friends live beside Qt and are not distro packages on
-        # every target.
-        for extra in libicui18n libicuuc libicudata; do
-            cp -P "$qt_lib_dir/$extra.so"* "$app/lib/" 2>/dev/null || true
-        done
+
         # Ask Qt where its plugins are; do not infer it from the library
         # path. aqt puts them at <qt>/plugins and a distro at
         # <libdir>/qt6/plugins, so a relative guess is right on exactly
@@ -132,8 +136,9 @@ Darwin)
                 [ -d "$guess" ] && plugins="$guess" && break
             done
         fi
-        for kind in platforms xcbglintegrations imageformats \
-                    multimedia tls iconengines platformthemes; do
+        for kind in platforms xcbglintegrations imageformats styles \
+                    multimedia tls iconengines platformthemes wayland-shell-integration \
+                    wayland-decoration-client wayland-graphics-integration-client; do
             [ -d "$plugins/$kind" ] && cp -R "$plugins/$kind" "$app/plugins/"
         done
         # A bundle with no platform plugin cannot start, so refuse to
@@ -144,6 +149,117 @@ Darwin)
         fi
     fi
 
+    # Which libraries we take responsibility for.
+    #
+    # The rule is "whatever Qt itself shipped": if a dependency resolves
+    # inside Qt's own lib directory it is part of the Qt we built
+    # against, and the target has no reason to have that exact build.
+    # That is what picks up the media backend's FFmpeg -- libraries with
+    # no `Qt` in the name at all, which a name-based allowlist missed,
+    # leaving the plugin unloadable and QtMultimedia reporting "no
+    # backends found".
+    #
+    # Plus the libxcb-* leaf helpers, which Qt's xcb platform plugin
+    # needs and a minimal desktop very often lacks. xcb-cursor is the one
+    # Qt's own error names, and being newer it is missing most often.
+    #
+    # Deliberately *not* libxcb.so.1, libX11, libwayland-*, GTK, GStreamer
+    # or anything GL: those talk to the running display server, the
+    # graphics driver or the desktop, and a bundled copy that disagrees
+    # with the host is worse than not bundling at all.
+    #
+    # The Qt-tree rule only holds when Qt lives in its own prefix. A
+    # distro Qt has its libraries in /usr/lib beside libc and libGL, and
+    # "everything in Qt's lib dir" would then mean the entire system.
+    case "$qt_lib_dir" in
+        /usr/lib|/usr/lib64|/lib|/lib64|/usr/lib/*-linux-gnu) qt_own_prefix=0 ;;
+        "") qt_own_prefix=0 ;;
+        *) qt_own_prefix=1 ;;
+    esac
+
+    bundle_worthy() {
+        # $1 = basename, $2 = full path
+        case "$1" in
+            libxcb.so.*) return 1 ;;
+            libxcb-*)    return 0 ;;
+        esac
+        if [ "$qt_own_prefix" -eq 1 ]; then
+            case "$2" in "$qt_lib_dir"/*) return 0 ;; esac
+            return 1
+        fi
+        # Distro Qt: name-matched instead, including the media backend's
+        # codec libraries, which are the ones the tree rule exists for.
+        case "$1" in
+            libQt6*|libicu*|libav*|libsw*) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+
+    # A few rounds, because the answer is transitive: the xcb plugin
+    # needs libQt6XcbQpa, which needs more Qt than the executable does.
+    deps="$(mktemp)"
+    for _round in 1 2 3 4 5; do
+        find "$app/bin" "$app/lib" "$app/plugins" -type f \
+             \( -name '*.so*' -o -perm -u+x \) -print0 2>/dev/null \
+            | xargs -0 -r -n1 ldd 2>/dev/null \
+            | sed -n 's|.*=> \(/[^ ]*\) .*|\1|p' | sort -u > "$deps"
+        while IFS= read -r dep; do
+            base="$(basename "$dep")"
+            bundle_worthy "$base" "$dep" || continue
+            [ -e "$app/lib/$base" ] && continue
+            # The glob matters: `cp -P` on its own copies the *symlink*
+            # (libFoo.so.6) and not the file it names (libFoo.so.6.11.1),
+            # leaving a dangling link -- which `[ -e ]` then reports as
+            # absent, so it is copied again every round and is still
+            # broken at the end. Taking the whole family copies the link
+            # and its target together.
+            cp -P "$dep"* "$app/lib/" 2>/dev/null || true
+        done < "$deps"
+    done
+    rm -f "$deps"
+
+    # Report what is still unresolved; delete only a platform plugin's
+    # worth of trouble.
+    #
+    # **Do not drop a plugin merely because this machine cannot satisfy
+    # it.** Qt skips an unloadable optional plugin by itself, and the
+    # host is a different computer: `libqgtk3.so` needs GTK, which we
+    # deliberately do not bundle and which most desktops have -- an
+    # earlier version of this script deleted it because the CI runner
+    # did not, and the result was an app with none of the native file
+    # dialogs the user's own machine could have given it.
+    #
+    # A *platform* plugin is different, because the app cannot start
+    # without one, so an unresolved xcb or wayland plugin is fatal here
+    # rather than a surprise on someone else's desktop.
+    unresolved() {
+        LD_LIBRARY_PATH="$app/lib" ldd "$1" 2>/dev/null \
+            | sed -n 's|^[[:space:]]*\([^ ]*\) => not found.*|\1|p'
+    }
+
+    fatal=0
+    for obj in "$app"/plugins/*/*.so; do
+        [ -e "$obj" ] || continue
+        libs="$(unresolved "$obj" | tr '\n' ' ')"
+        [ -z "$libs" ] && continue
+        case "$obj" in
+            */platforms/*)
+                echo "package_app: platform plugin $(basename "$obj") needs $libs" >&2
+                fatal=1
+                ;;
+            *)
+                echo "package_app: note: $(basename "$obj") wants $libs" \
+                     "(kept; the target may have it)" >&2
+                ;;
+        esac
+    done
+    libs="$(unresolved "$app/bin/sstvae-gui" | tr '\n' ' ')"
+    if [ -n "$libs" ]; then
+        echo "package_app: sstvae-gui needs $libs" >&2
+        fatal=1
+    fi
+    [ "$fatal" -eq 0 ] || exit 1
+
     # A wrapper, because the alternative is asking the user to set two
     # environment variables correctly before the app will start.
     cat > "$app/sstvae-gui" <<'LAUNCH'
@@ -152,6 +268,25 @@ Darwin)
 here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 export LD_LIBRARY_PATH="$here/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export QT_PLUGIN_PATH="$here/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+
+# Ask for native dialogs through the desktop portal.
+#
+# Qt chooses a platform theme by detecting the desktop, and on KDE it
+# looks for that desktop's own plugin -- which belongs to the
+# distribution and cannot be bundled. Finding nothing it falls back to
+# the generic theme, and the operator gets Qt's plain file chooser
+# instead of the one the rest of their desktop uses. The portal theme
+# *is* bundled and works on GNOME and KDE alike, because it asks the
+# desktop over D-Bus rather than linking any of it -- but it is never
+# selected unless it is named.
+#
+# Only when the caller has not chosen, and only if the plugin is
+# actually here; with no portal running Qt falls back to exactly the
+# behaviour we already had.
+if [ -z "${QT_QPA_PLATFORMTHEME:-}" ] \
+   && [ -e "$here/plugins/platformthemes/libqxdgdesktopportal.so" ]; then
+    export QT_QPA_PLATFORMTHEME=xdgdesktopportal
+fi
 exec "$here/bin/sstvae-gui" "$@"
 LAUNCH
     chmod +x "$app/sstvae-gui"

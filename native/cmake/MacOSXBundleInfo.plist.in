@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The app bundle's identity.
+
+  CMake generates a default Info.plist for a MACOSX_BUNDLE target, and
+  it is enough to produce a directory macOS will launch -- but not
+  enough to make the app a first-class one. Two things depend on what is
+  here rather than on the code:
+
+  * NSMicrophoneUsageDescription. Without it, macOS will not grant
+    microphone access; the app opens a capture stream, the system shows
+    the microphone indicator, and the samples that arrive are silence.
+    That is exactly "receive starts, waterfall stays black" with nothing
+    in the log to explain it.
+
+  * CFBundleIdentifier. TCC records a permission decision *against the
+    bundle identifier*, so without a stable one the grant cannot be
+    remembered, and the identifier is also what a signing certificate
+    and a notarization ticket are bound to.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>@MACOSX_BUNDLE_EXECUTABLE_NAME@</string>
+    <key>CFBundleIdentifier</key>
+    <string>@MACOSX_BUNDLE_GUI_IDENTIFIER@</string>
+    <key>CFBundleName</key>
+    <string>@MACOSX_BUNDLE_BUNDLE_NAME@</string>
+    <key>CFBundleDisplayName</key>
+    <string>@MACOSX_BUNDLE_BUNDLE_NAME@</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@MACOSX_BUNDLE_SHORT_VERSION_STRING@</string>
+    <key>CFBundleVersion</key>
+    <string>@MACOSX_BUNDLE_BUNDLE_VERSION@</string>
+
+    <!-- Why the app wants the microphone, in the operator's words:
+         this string is shown verbatim in the permission prompt. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SSTVAE listens to your radio's receive audio to decode pictures.</string>
+
+    <!-- A foreground application with a Dock icon and a menu bar.
+         Stated rather than left to default, because it is what makes
+         the app able to take focus -- and a modal panel, such as the
+         file chooser, opens in front of the window rather than behind
+         an application that was never activated. -->
+    <key>LSBackgroundOnly</key>
+    <false/>
+    <key>LSUIElement</key>
+    <false/>
+
+    <!-- Retina. Without it the whole UI is drawn at 1x and scaled up,
+         which on a modern display looks like a rendering bug. -->
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>@CMAKE_OSX_DEPLOYMENT_TARGET@</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+</dict>
+</plist>

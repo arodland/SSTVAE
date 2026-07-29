@@ -13,11 +13,19 @@
 #   SSTVAE_SANITIZE        ASan + UBSan (there is no memory-safety net here)
 
 cmake_minimum_required(VERSION 3.24)
-project(sstvae_native LANGUAGES CXX)
+project(sstvae_native VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# The oldest macOS this is built to run on. Decision 2 in
+# docs/native-app.md sets a conservative hardware floor, and Qt 6.8
+# supports back to 12; stated explicitly so it is a choice rather than
+# whatever SDK the runner happens to have.
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "" FORCE)
+endif()
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
@@ -334,6 +342,19 @@ if(_want_gui)
 
   add_executable(sstvae-gui WIN32 MACOSX_BUNDLE gui/main.cpp)
   set_target_properties(sstvae-gui PROPERTIES AUTOMOC ON)
+  if(APPLE)
+    # CMake's default Info.plist produces a bundle macOS will launch but
+    # not one it will trust with a microphone, and a bundle with no
+    # stable identifier is one TCC cannot remember a decision about.
+    # See cmake/MacOSXBundleInfo.plist.in.
+    set_target_properties(sstvae-gui PROPERTIES
+      MACOSX_BUNDLE_INFO_PLIST
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/MacOSXBundleInfo.plist.in"
+      MACOSX_BUNDLE_BUNDLE_NAME "SSTVAE"
+      MACOSX_BUNDLE_GUI_IDENTIFIER "org.cleverdomain.sstvae"
+      MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+      MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}")
+  endif()
   target_link_libraries(sstvae-gui PRIVATE sstvae_gui)
   sstvae_hamlib_copy_runtime(sstvae-gui)
   sstvae_onnxruntime_copy_runtime(sstvae-gui)
