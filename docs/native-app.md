@@ -763,7 +763,11 @@ The GUI work is independent of the modem, and running it early is how
 you get something demo-able before `sync.cpp` works.
 
 **Exit:** feature parity with `sstvae-gui`, and the loopback equivalent
-of `test_app_loopback.py` passes. Parity **freezes** the Python GUI —
+of `test_app_loopback.py` passes. **Met 2026-07-29**: a picture sent and
+received native->native, native->Python and Python->native over a
+soundcard loopback. The two mixed directions are the ones with content —
+they check the on-air format against the normative implementation end to
+end, through the audio path, which no golden vector can do. Parity **freezes** the Python GUI —
 bug fixes only from here, every new feature goes to the native app — but
 does *not* delete it; that is Phase 4's, under the amended decision 1.
 Do not let this phase idle at 95%: a frozen GUI is a bounded cost, a

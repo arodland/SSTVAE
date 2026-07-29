@@ -129,6 +129,16 @@ audio and rig bugs found so far were all invisible to unit tests.
 
 ## The application
 
+**`sstvae/gui/` is frozen (2026-07-29): bug fixes only, no new
+features.** The native app has reached parity, so anything new goes
+there instead. It is not deleted yet — that happens in the same change
+that packages the native app (`docs/native-app.md` decision 1, amended),
+because until then the only way to run the native app is to build C++,
+Qt and Hamlib from source. Freezing rather than deleting is what keeps
+one GUI in development without leaving operators with nothing
+installable. Everything below still describes live code and is still
+the reference for the native port.
+
 `sstvae/gui/` (PySide6) on top of headless, Qt-free engines. Nothing
 below `sstvae/gui/` may import Qt; nothing in `sstvae/overlay/` may
 either, so overlays stay renderable from the command line.
@@ -242,7 +252,17 @@ env var exists because these are the suite's strongest checks *and* the
 only ones with a downloaded prerequisite, which is exactly the
 combination that rots into silently testing nothing.
 
-**Phase 3 (the GUI) is under way.** `native/gui/` is the only place
+**Phase 3 (the GUI) is complete**, and its exit criterion was met by
+loopback on 2026-07-29 (Andrew's measurement, not mine): a picture sent
+and received **native->native, native->Python, and Python->native**. The
+cross-implementation pair is the one that matters — it is what makes
+"compatible implementation" a checkable claim rather than an assertion,
+and it exercises the on-air format in both directions through a real
+soundcard rather than through a golden vector. Note what it is *not*:
+loopback, not RF. The PTT timing against a physical radio is still
+untested, and that is the remaining item.
+
+`native/gui/` is the only place
 QtWidgets is allowed; `SSTVAE_BUILD_GUI` is AUTO/ON/OFF like the audio
 and overlay switches, but for a different reason — Qt is the app's
 toolkit by design, and the switch exists so the modem, the CLI and the
@@ -948,7 +968,7 @@ need when `--native` fails and you want to know *where*.
   tuning on photographs alone ships the 1.54 dB. Artifacts are exported
   by `scripts/export_onnx.py` and published as
   `v1-{encoder,decoder}-{fp32,fp16,int8}.onnx`.
-- `docs/native-app.md` — design (not implemented) for a native C++/Qt 6
+- `docs/native-app.md` — design for the native C++/Qt 6
   desktop app replacing `sstvae/gui/`, which is **frozen** (bug fixes
   only) when the native one reaches parity and **deleted** when it is
   packaged — amended 2026-07-29 from "deleted at parity". Between those
@@ -995,10 +1015,13 @@ with the real modem, but does not simulate/train through beacon content
 itself (synthesizes random BPSK there just for realistic PAPR
 statistics).
 
-Desktop app (`sstvae-gui`) implemented: live TX/RX on a soundcard,
-rigctld PTT + frequency readback, waterfall, overlay composition,
-persistent config. Overlay *templates* are deliberately not implemented
-but the document format is built for them (see `sstvae/overlay/`).
+Desktop app implemented twice. The Python one (`sstvae-gui`) is
+**frozen** — see "The application". The native one (`native/`,
+Phases 0-3) has reached parity and passed the loopback shakedown in all
+three directions, including both cross-implementation ones. Overlay
+*templates* are deliberately not implemented in either, but the document
+format is built for them (see `sstvae/overlay/` and
+`native/core/overlay/`).
 
 ONNX runtime path complete: the codec is onnxruntime, torch is
 training-only, and `cli`/`listen`/`gui` install ~263 MB instead of
@@ -1010,6 +1033,8 @@ checkpoint, `--lr 1e-4`) — note pre-beacon checkpoints remain
 architecture-compatible (model channel count unchanged), evaluation
 sweeps (PSNR/LPIPS vs SNR per mode), on-air calibration. On the app
 side: overlay templates, and a real on-air (not loopback) shakedown of
-the PTT timing against a physical radio. See `docs/native-app.md` for
-the C++/Qt rewrite design (not started) and `docs/todo.md` for
-quantisation tolerance as a future training constraint.
+the PTT timing against a physical radio. For the native app: Phase 4,
+packaging and signing on three platforms, which is also what triggers
+deleting `sstvae/gui/`. See `docs/native-app.md` for the C++/Qt rewrite
+design (Phases 0-3 done) and `docs/todo.md` for quantisation tolerance
+as a future training constraint.
