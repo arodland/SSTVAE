@@ -13,6 +13,7 @@
 #include <QWidget>
 
 #include "app_state.hpp"
+#include "rx_panel.hpp"
 
 namespace sstvae::gui {
 
@@ -42,7 +43,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     resize(1100, 800);
 
     tabs_ = new QTabWidget(this);
-    tabs_->addTab(placeholder(tr("Receive panel"), tabs_), tr("Receive"));
+    rx_panel_ = new ReceivePanel(state_, tabs_);
+    tabs_->addTab(rx_panel_, tr("Receive"));
     tabs_->addTab(placeholder(tr("Transmit panel"), tabs_), tr("Transmit"));
     setCentralWidget(tabs_);
 
@@ -51,6 +53,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     connect(state_, &AppState::modelLoaded, this, &MainWindow::on_model_loaded);
     connect(state_, &AppState::rigStatus, rig_label_, &QLabel::setText);
+    connect(rx_panel_, &ReceivePanel::receptionSaved, this,
+            [this](const QString& path) {
+                statusBar()->showMessage(tr("Saved %1").arg(path), 5000);
+            });
 
     state_->load_model_async();
     state_->connect_rig();
@@ -127,6 +133,7 @@ void MainWindow::open_settings() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+    rx_panel_->stop();
     state_->disconnect_rig();
     state_->save_config();
     QMainWindow::closeEvent(event);

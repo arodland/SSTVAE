@@ -21,6 +21,7 @@ class QTabWidget;
 namespace sstvae::gui {
 
 class AppState;
+class ReceivePanel;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -43,6 +44,7 @@ private:
 
     AppState* state_ = nullptr;
     QTabWidget* tabs_ = nullptr;
+    ReceivePanel* rx_panel_ = nullptr;
     QLabel* station_label_ = nullptr;
     QLabel* rig_label_ = nullptr;
     QLabel* model_label_ = nullptr;

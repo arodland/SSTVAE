@@ -146,6 +146,18 @@ using Sink = std::function<std::optional<std::string>(const Reception&)>;
 using Decoder = std::function<images::Picture(std::span<const double> latents,
                                               std::span<const double> weights)>;
 
+// "  SNR 12.3dB", or nothing when no SNR has been measured yet.
+//
+// Public because the GUI's status line and the CLI's stdout have to
+// agree: two spellings of the same number read as two different
+// measurements to an operator comparing notes on the air.
+std::string fmt_snr(double snr_db);
+
+// Parse a "WxH" size, as `receive.save_size` stores it. Nothing for an
+// empty or unreadable string, which means "keep the full size" -- a
+// typo must not silently produce a 0x0 picture.
+std::optional<std::pair<int, int>> parse_size(const std::string& text);
+
 // Unique output path, millisecond resolution.
 //
 // Millisecond and not second because two short-mode receptions can

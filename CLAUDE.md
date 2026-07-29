@@ -256,6 +256,30 @@ structure and the wiring *between* the panels — half duplex, polling
 paused while keyed, last-received picture offered as a transmit inset —
 are visible and reviewable before the panels themselves exist.
 
+**The widgets live in `sstvae_gui`, a library, with `sstvae-gui` as
+just `main.cpp`** — so a test can drive a widget. Most of what makes a
+GUI good needs eyes, but the parts that do not have been wrong before:
+the waterfall's scroll must move history *down* (an in-place row copy
+is easy to reverse, and the result still looks like a moving display),
+a resize must keep the history rather than blank it, and a tone must
+paint at the x its frequency says. `tick()` is a slot so a test can
+render one frame instead of waiting on the timer — no stopwatch.
+
+**Probing a rendered widget means knowing what else is painted on it.**
+Three of the waterfall's first test failures were the test's fault, not
+the widget's: the level meter is the brightest column on the pane, the
+band markers are dashed lines down the full height so *no row is ever
+entirely black*, and a marker's whole-height column out-totals a tone
+that has painted one row. The fixes are in `test_waterfall.cpp` — probe
+a single pixel in a column no overlay touches, and use a width narrow
+enough that the caption is dropped.
+
+**`core/dsp/spectrum.cpp` is the waterfall's arithmetic, Qt-free.**
+`reduce_to_width` is peak-hold when shrinking, not point-sampling: the
+carriers are one or two bins wide and about six apart, so taking every
+k'th bin drops some outright and leaves a ragged comb — which reads as
+a *reception* problem and sends the next person to debug the modem.
+
 **The rig settings broke compatibility with the Python config, on
 purpose (2026-07-29), and `CONFIG_VERSION` is 2.** The v1 shape —
 `host`, `port`, `spawn_local` — described a *rigctld socket*, the one

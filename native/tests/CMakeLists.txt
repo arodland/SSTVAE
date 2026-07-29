@@ -134,3 +134,18 @@ if(TARGET sstvae_overlay_render)
   add_test(NAME overlay_render COMMAND test_overlay_render)
   set_tests_properties(overlay_render PROPERTIES TIMEOUT 300)
 endif()
+
+add_executable(test_spectrum test_spectrum.cpp)
+target_link_libraries(test_spectrum PRIVATE sstvae_core)
+target_include_directories(test_spectrum PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME spectrum COMMAND test_spectrum)
+set_tests_properties(spectrum PROPERTIES TIMEOUT 300)
+
+# The widgets, where they are checkable without eyes.
+if(TARGET sstvae_gui)
+  add_executable(test_waterfall test_waterfall.cpp)
+  target_link_libraries(test_waterfall PRIVATE sstvae_gui)
+  target_include_directories(test_waterfall PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME waterfall COMMAND test_waterfall)
+  set_tests_properties(waterfall PROPERTIES TIMEOUT 300)
+endif()

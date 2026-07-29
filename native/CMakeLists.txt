@@ -73,6 +73,7 @@ add_library(sstvae_core STATIC
   core/golay/golay.cpp
   core/beacon/beacon.cpp
   core/dsp/dsp.cpp
+  core/dsp/spectrum.cpp
   core/framing/framing.cpp
   core/audio/audio.cpp
   core/checkpoint/checkpoint.cpp
@@ -280,16 +281,30 @@ if(_want_gui)
   # AUTOMOC only here: everything under core/ is deliberately free of
   # QObject, so running moc over it would be scanning for something the
   # layering rules forbid.
-  add_executable(sstvae-gui WIN32 MACOSX_BUNDLE
-    gui/main.cpp
+  # Everything but main() goes in a library, so the widgets can be
+  # driven by a test as well as by the application. A QWidget's
+  # behaviour is mostly its painting, which needs eyes -- but the parts
+  # that are not (a scroll that must go the right way, a buffer that
+  # must survive a resize) have been wrong before and are checkable.
+  #
+  # AUTOMOC only here: everything under core/ is deliberately free of
+  # QObject, so running moc over it would be scanning for something the
+  # layering rules forbid.
+  add_library(sstvae_gui STATIC
     gui/main_window.cpp
+    gui/waterfall.cpp
+    gui/rx_panel.cpp
     gui/app_state.cpp)
-  set_target_properties(sstvae-gui PROPERTIES AUTOMOC ON)
-  target_include_directories(sstvae-gui PRIVATE core gui)
-  target_link_libraries(sstvae-gui PRIVATE
+  set_target_properties(sstvae_gui PROPERTIES AUTOMOC ON)
+  target_include_directories(sstvae_gui PUBLIC core gui)
+  target_link_libraries(sstvae_gui PUBLIC
     sstvae_core sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render
     sstvae_fetch
     Qt6::Core Qt6::Gui Qt6::Widgets)
+
+  add_executable(sstvae-gui WIN32 MACOSX_BUNDLE gui/main.cpp)
+  set_target_properties(sstvae-gui PROPERTIES AUTOMOC ON)
+  target_link_libraries(sstvae-gui PRIVATE sstvae_gui)
   sstvae_hamlib_copy_runtime(sstvae-gui)
   message(STATUS "Desktop application: Qt ${Qt6_VERSION}")
 endif()

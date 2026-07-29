@@ -157,6 +157,8 @@ void reset_to_listening(SharedState& state) {
     });
 }
 
+}  // namespace
+
 std::string fmt_snr(double snr_db) {
     if (std::isnan(snr_db)) return "";
     char buf[32];
@@ -164,7 +166,21 @@ std::string fmt_snr(double snr_db) {
     return buf;
 }
 
-}  // namespace
+std::optional<std::pair<int, int>> parse_size(const std::string& text) {
+    const std::size_t x = text.find('x');
+    if (x == std::string::npos) return std::nullopt;
+    try {
+        std::size_t used = 0;
+        const int w = std::stoi(text.substr(0, x), &used);
+        if (used != x) return std::nullopt;
+        const std::string tail = text.substr(x + 1);
+        const int h = std::stoi(tail, &used);
+        if (used != tail.size() || w <= 0 || h <= 0) return std::nullopt;
+        return std::pair<int, int>{w, h};
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
 
 // --- primitives -------------------------------------------------------------
 
