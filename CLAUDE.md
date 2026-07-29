@@ -342,6 +342,41 @@ direction that breaks a build. It is a CI gate, unlike
 `freeze_format_constants.py --verify`, because here regenerating *is*
 the right fix.
 
+**Model artifacts: plain HTTPS to the Hub, and our own cache.** The
+design doc said `QNetworkAccessManager`, and that part stands, but the
+native app deliberately does **not** share `huggingface_hub`'s cache.
+Reading it would be easy; *writing* it means reproducing an
+undocumented internal layout — `blobs/` keyed by etag,
+`snapshots/<commit>/` symlinked into them (copied on Windows),
+`refs/main`, and the locks around it — and a near-miss corrupts a cache
+another program owns. The price is that anyone running both the Python
+tools and the native app downloads ~9–21 MB twice; worth it to keep the
+failure mode "an extra download" rather than "a broken
+huggingface_hub". Cache lives at `SSTVAE_MODEL_CACHE`, else the
+platform cache dir + `sstvae/models`.
+
+**The Hub's 302 carries the checksum.** `x-linked-etag` on the redirect
+is the LFS object's sha256 — verified against the published decoder,
+byte for byte. So `qt_fetcher` follows redirects **by hand**, because
+Qt's automatic following would hide the response carrying it, and the
+artifact is checked against a hash the server stated *before* sending
+the bytes. Downloads land as `<name>.part` and are renamed only after
+that check: a truncated file left in the cache would be found by
+`find_cached` on the next run and handed to onnxruntime, failing a long
+way from its cause.
+
+**Only the download needs the network; nothing else does.**
+`checkpoint::resolve_onnx` and the cache lookup are path arithmetic in
+`sstvae_core`, and the downloader is a `Fetcher` seam in a separate
+library — so a build with no Qt still honours `--model` and still uses
+a warm cache, which is every case but a first run. Verified end to
+end: empty cache → fetches only the *decoder* (per-part laziness
+intact) → 220/220 frames; and with the network blocked, dropping the
+file into the cache directory by hand decodes identically. **The
+offline message is a deliverable, not a nicety** — a fetch failure that
+was rethrown unchanged silently dropped it, which is a caught
+regression with a test of its own.
+
 **Rig control is a re-derivation, not a port, and the design doc says
 why.** `sstvae/rig/rigctld.py` talks to a `rigctld` child over a socket
 because the SWIG Hamlib bindings live in the system site-packages where

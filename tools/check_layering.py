@@ -20,6 +20,10 @@ The rules mirror the Python package's, for the same reasons:
   engines still build and test on a machine with no Qt at all. The
   engines take their player and their decoder as seams to keep that
   true; a Qt include anywhere else in `core/` would quietly undo it.
+* **Only `core/checkpoint/` may include Qt Network.** The Hub download
+  is the one thing in `core/` that needs a network stack, and it is a
+  separate library so that resolution and the cache lookup -- which is
+  every case but a first run -- stay dependency-free.
 * **Nothing outside `bindings/embed/` may link libpython.** The
   dev-only build that embeds the Python modem is the single exception,
   and it is never shipped.
@@ -56,6 +60,11 @@ RULES = [
         "only core/audio/qt/ may depend on Qt Multimedia",
         lambda p: p.parts[0] == "core" and p.parts[:3] != ("core", "audio", "qt"),
         re.compile(r'^\s*#\s*include\s*[<"](QtMultimedia|QAudio|QMediaDevices)', re.M),
+    ),
+    (
+        "only core/checkpoint/ may depend on Qt Network",
+        lambda p: p.parts[0] == "core" and p.parts[:2] != ("core", "checkpoint"),
+        re.compile(r'^\s*#\s*include\s*[<"](QtNetwork|QNetwork)', re.M),
     ),
     (
         "only bindings/embed/ may link libpython",

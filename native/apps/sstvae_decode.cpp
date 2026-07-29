@@ -19,6 +19,13 @@
 #include <vector>
 
 #include "audio/wavio.hpp"
+#ifdef SSTVAE_HAVE_FETCH
+#include <QCoreApplication>
+
+#include "checkpoint/qt_fetcher.hpp"
+#endif
+
+#include "checkpoint/checkpoint.hpp"
 #include "codec/codec.hpp"
 #include "config.hpp"
 #include "images/images.hpp"
@@ -32,6 +39,7 @@ struct Options {
     std::string input;
     std::string output;
     std::string model;          // directory of .onnx parts, or a single file
+    std::string precision{checkpoint::DEFAULT_PRECISION};
     std::optional<double> search_start;
     std::optional<double> search_end;
     bool blind = false;
@@ -39,18 +47,20 @@ struct Options {
 
 [[noreturn]] void usage(int code) {
     std::fprintf(code ? stderr : stdout,
-        "usage: sstvae-decode <input.wav> <output.png> --model <path> [options]\n"
+        "usage: sstvae-decode <input.wav> <output.png> [options]\n"
         "\n"
         "  --model PATH        directory of exported .onnx files, or one .onnx\n"
-        "                      (its sibling part is found beside it)\n"
+        "                      (its sibling part is found beside it). Omit to\n"
+        "                      use the published artifacts.\n"
+        "  --precision P       fp32, fp16 (default) or int8\n"
         "  --search-start SEC  limit preamble search to after this time\n"
         "  --search-end SEC    limit preamble search to before this time\n"
         "  --blind             preamble-free decode; position comes from the\n"
         "                      beacon, for a recording that never contained\n"
         "                      the start of the transmission\n"
         "\n"
-        "--model is required for now: the Hub fetch that makes it optional in\n"
-        "the Python CLI is not ported yet.\n");
+        "--model is optional: with no --model the published artifacts are\n"
+        "used, from the local cache or downloaded once on first run.\n");
     std::exit(code);
 }
 
@@ -68,6 +78,7 @@ Options parse(int argc, char** argv) {
         };
         if (a == "-h" || a == "--help") usage(0);
         else if (a == "--model") o.model = value("--model");
+        else if (a == "--precision") o.precision = value("--precision");
         else if (a == "--search-start") o.search_start = std::stod(value("--search-start"));
         else if (a == "--search-end") o.search_end = std::stod(value("--search-end"));
         else if (a == "--blind") o.blind = true;
@@ -79,58 +90,37 @@ Options parse(int argc, char** argv) {
     if (positional.size() != 2) usage(2);
     o.input = positional[0];
     o.output = positional[1];
-    if (o.model.empty()) {
-        std::fprintf(stderr, "--model is required (see --help)\n");
-        std::exit(2);
-    }
     return o;
 }
 
-// Resolve "encoder"/"decoder" against a directory or a single .onnx.
-//
-// Mirrors `checkpoint.resolve_onnx`'s *shape* -- a single file names its
-// own part and its sibling is found beside it -- without the Hub fetch,
-// which is not ported yet. Deliberately narrow: it is better to be
-// obviously incomplete than to look like the full resolver.
-codec::Resolver file_resolver(const std::string& model) {
-    return [model](const std::string& part) -> std::string {
-        namespace fs = std::filesystem;
-        const fs::path p(model);
-        if (fs::is_directory(p)) {
-            for (const auto& entry : fs::directory_iterator(p)) {
-                const std::string name = entry.path().filename().string();
-                if (entry.path().extension() == ".onnx" &&
-                    name.find(part) != std::string::npos) {
-                    return entry.path().string();
-                }
-            }
-            throw std::runtime_error("no " + part + " .onnx in " + model);
-        }
-        // A single file: if it is the part asked for, use it; otherwise
-        // look for its sibling with the part name swapped.
-        const std::string name = p.filename().string();
-        if (name.find(part) != std::string::npos) return p.string();
-        const std::string other = (part == "encoder") ? "decoder" : "encoder";
-        const std::size_t at = name.find(other);
-        if (at == std::string::npos) {
-            throw std::runtime_error(
-                "cannot tell which part " + model + " is; name it *encoder*.onnx "
-                "or *decoder*.onnx, or pass a directory");
-        }
-        std::string sibling = name;
-        sibling.replace(at, other.size(), part);
-        const fs::path candidate = p.parent_path() / sibling;
-        if (!fs::exists(candidate)) {
-            throw std::runtime_error("expected the " + part + " beside it at " +
-                                     candidate.string());
-        }
-        return candidate.string();
+// Resolve "encoder"/"decoder" against whatever --model was given, or
+// against the published artifacts when it was omitted.
+codec::Resolver model_resolver(const std::string& model, const std::string& precision) {
+    return [model, precision](const std::string& part) -> std::string {
+        // Was a local approximation of checkpoint.py's rules; now the
+        // real thing, which also means an omitted --model resolves to
+        // the published artifact from the cache or the Hub.
+        return checkpoint::resolve_onnx(part, model, precision);
     };
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifdef SSTVAE_HAVE_FETCH
+    // Qt only for the first-run download. Everything else here -- an
+    // explicit --model, and any artifact already in the cache -- works
+    // in a build without it, which is why this is a compile-time option
+    // rather than a hard dependency of the CLI.
+    QCoreApplication app(argc, argv);
+    checkpoint::install_qt_fetcher([](std::int64_t got, std::int64_t total) {
+        if (total <= 0) return;
+        std::fprintf(stderr, "\rfetching model: %lld / %lld KB",
+                     static_cast<long long>(got / 1024),
+                     static_cast<long long>(total / 1024));
+        if (got >= total) std::fprintf(stderr, "\n");
+    });
+#endif
     const Options o = parse(argc, argv);
     try {
         const std::vector<double> x = audio::read_wav(o.input);
@@ -175,7 +165,7 @@ int main(int argc, char** argv) {
             std::printf("beacon: no superframe decoded (short/noisy reception)\n");
         }
 
-        codec::OnnxCodec cd(file_resolver(o.model));
+        codec::OnnxCodec cd(model_resolver(o.model, o.precision));
         const images::Picture pic = cd.decode(codec::pad_to_full(latents),
                                               codec::pad_to_full(weights));
         images::save_png(pic, o.output);

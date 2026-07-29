@@ -72,6 +72,7 @@ add_library(sstvae_core STATIC
   core/dsp/dsp.cpp
   core/framing/framing.cpp
   core/audio/audio.cpp
+  core/checkpoint/checkpoint.cpp
   core/audio/wavio.cpp
   core/framing/interleaver_table.cpp
   core/images/images.cpp
@@ -159,6 +160,21 @@ if(Python3_Interpreter_FOUND)
     VERBATIM)
 endif()
 
+# --- checkpoint fetch -------------------------------------------------------
+# Only the downloader; resolution and the cache live in the core with no
+# dependency, so a build without this still honours --model and still
+# finds an already-cached artifact.
+if(_want_qtaudio)
+  find_package(Qt6 6.2 COMPONENTS Network QUIET)
+endif()
+if(Qt6Network_FOUND)
+  add_library(sstvae_fetch STATIC core/checkpoint/qt_fetcher.cpp)
+  set_target_properties(sstvae_fetch PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(sstvae_fetch PUBLIC core)
+  target_link_libraries(sstvae_fetch PUBLIC sstvae_core
+                        PRIVATE Qt6::Core Qt6::Network)
+endif()
+
 # --- rig --------------------------------------------------------------------
 # Only the libhamlib backend lives here; the controller is in the core.
 if(SSTVAE_BUILD_RIG STREQUAL "OFF")
@@ -205,6 +221,12 @@ endif()
 if(SSTVAE_BUILD_CODEC)
   add_executable(sstvae-decode apps/sstvae_decode.cpp)
   target_link_libraries(sstvae-decode PRIVATE sstvae_core sstvae_codec)
+  # Optional: without it the CLI still honours --model and a warm cache,
+  # it just cannot perform the first-run download.
+  if(TARGET sstvae_fetch)
+    target_link_libraries(sstvae-decode PRIVATE sstvae_fetch Qt6::Core)
+    target_compile_definitions(sstvae-decode PRIVATE SSTVAE_HAVE_FETCH)
+  endif()
   if(NOT WIN32)
     set_property(TARGET sstvae-decode APPEND PROPERTY
       BUILD_RPATH "${SSTVAE_ONNXRUNTIME_LIBDIR}")

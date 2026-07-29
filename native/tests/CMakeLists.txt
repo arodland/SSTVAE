@@ -48,6 +48,13 @@ target_link_libraries(test_audio PRIVATE sstvae_core)
 target_include_directories(test_audio PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME audio COMMAND test_audio)
 
+# Finding the model artifacts: names, cache, and --model resolution.
+# No network -- the download is checked by running the CLI for real.
+add_executable(test_checkpoint test_checkpoint.cpp)
+target_link_libraries(test_checkpoint PRIVATE sstvae_core)
+target_include_directories(test_checkpoint PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME checkpoint COMMAND test_checkpoint)
+
 # Rig control's threading properties, against a fake radio -- so the
 # part that can actually be wrong is covered with no libhamlib present.
 add_executable(test_rig test_rig.cpp)
@@ -78,6 +85,7 @@ endif()
 set_tests_properties(rx_engine PROPERTIES TIMEOUT 360)
 set_tests_properties(tx_engine PROPERTIES TIMEOUT 180)
 set_tests_properties(golden npy modem_roundtrip ringbuffer audio rig
+                     checkpoint
                      PROPERTIES TIMEOUT 300)
 if(TARGET sstvae_rig)
   set_tests_properties(rig_hamlib PROPERTIES TIMEOUT 300)
