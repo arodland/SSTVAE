@@ -175,6 +175,23 @@ jobs:
           version: "6.11.1"
           modules: qtmultimedia
           cache: true
+          # aqtinstall from git, pinned to the commit that supports Qt
+          # 6.11 on Windows (PR #1000, issue #1007).
+          #
+          # Qt changed its Windows repository layout at 6.11: the
+          # per-architecture directories moved, and the released
+          # aqtinstall still looks for `Updates.xml` where it used to
+          # be, so it reports 6.11.1 as if it did not exist. The fix has
+          # been on master since 2026-03-24 and the newest release
+          # (v3.3.0) is from 2025-06 -- so the pin below is strictly
+          # newer than the released version in every respect, which is
+          # why it is used on all three platforms rather than only on
+          # the one that needs it. One installer everywhere; a
+          # per-platform tool is how "which Qt you get" quietly becomes
+          # a per-platform property.
+          #
+          # Remove this once an aqtinstall release contains the fix.
+          aqtsource: "git+https://github.com/miurahr/aqtinstall@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b"
       # aqt's Qt is not a distro package and brings no system
       # dependencies with it; these are what its plugins dlopen at
       # startup. Without them the build succeeds and the app dies on
