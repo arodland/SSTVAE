@@ -59,6 +59,9 @@ train = [
     "lpips>=0.1.4",
     "datasets>=2.18",
     "trackio",
+    # sstvae/nonphoto.py's chart class (training mixture + the fixed
+    # non-photo validation metric in scripts/train.py).
+    "matplotlib>=3.7",
     # Publish-time, for scripts/export_onnx.py. `onnx` and `onnxscript`
     # are export-only (the dynamo exporter needs onnxscript, and without
     # it the export fails with ModuleNotFoundError); `onnxruntime`

@@ -3459,6 +3459,8 @@ listen = [
 train = [
     { name = "datasets" },
     { name = "lpips" },
+    { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'extra-6-sstvae-train') or (extra == 'extra-6-sstvae-dev' and extra == 'extra-6-sstvae-train')" },
+    { name = "matplotlib", version = "3.11.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11' and extra == 'extra-6-sstvae-train') or (extra == 'extra-6-sstvae-dev' and extra == 'extra-6-sstvae-train')" },
     { name = "onnx" },
     { name = "onnxconverter-common" },
     { name = "onnxruntime", version = "1.24.3", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and extra == 'extra-6-sstvae-train') or (extra == 'extra-6-sstvae-dev' and extra == 'extra-6-sstvae-train')" },
@@ -3477,6 +3479,7 @@ requires-dist = [
     { name = "huggingface-hub", marker = "extra == 'listen'", specifier = ">=0.20" },
     { name = "lpips", marker = "extra == 'train'", specifier = ">=0.1.4" },
     { name = "matplotlib", marker = "extra == 'listen'", specifier = ">=3.7" },
+    { name = "matplotlib", marker = "extra == 'train'", specifier = ">=3.7" },
     { name = "numpy", specifier = ">=1.24" },
     { name = "onnx", marker = "extra == 'train'", specifier = ">=1.16" },
     { name = "onnxconverter-common", marker = "extra == 'train'", specifier = ">=1.14" },
