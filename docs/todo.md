@@ -306,6 +306,48 @@ photograph-trained convolutional autoencoder handles differently from
 foliage and faces. The README already warns that small text "can come
 back subtly wrong rather than merely blurry"; this would quantify it.
 
+**Measured 2026-07-30, codec-only at fp32** (`scripts/gen_nonphoto.py`
+→ `scripts/eval_nonphoto.py`; encode → per-mode truncation → decode, no
+modem, so the number isolates the model; the generated set is
+deterministic — salt "eval", 8 images per class — so these numbers are
+re-derivable exactly). PSNR against 25 COCO val images, gap vs COCO in
+parentheses:
+
+| class    | mode A         | mode B         | mode C         |
+|----------|----------------|----------------|----------------|
+| coco     | 26.83          | 27.72          | 27.93          |
+| chart    | 26.41 (−0.42)  | 27.65 (−0.08)  | 27.61 (−0.32)  |
+| text     | 23.65 (−3.19)  | 25.17 (−2.56)  | 25.73 (−2.21)  |
+| lineart  | 23.33 (−3.51)  | 24.05 (−3.68)  | 24.22 (−3.72)  |
+| gradient | 23.68 (−3.16)  | 22.12 (−5.60)  | 12.56 (−15.37) |
+| callsign | 21.61 (−5.23)  | 23.41 (−4.31)  | 23.61 (−4.33)  |
+| testcard | 19.73 (−7.10)  | 20.36 (−7.36)  | 20.62 (−7.32)  |
+
+Three findings, in decreasing order of importance:
+
+- **The operator content classes pay 2–7 dB at fp32**, an order of
+  magnitude more than the 0.1 dB the quantisation work was tuned to
+  remove. Training-data work is clearly worth spending on. (Charts are
+  the exception — mostly white with thin marks, low-energy residual,
+  fine as-is.) Qualitatively the reconstructions are still *usable* —
+  text stays legible — but flats pick up a grey tint and halos, thin
+  lines drop out, and saturated bars bleed at the edges.
+- **Smooth gradients are a pathology, not a gap: mode C is *worse*
+  than mode A on every gradient image** (systematic across all 8, not
+  an outlier — down to 11 dB). The third latent group, fed content with
+  no fine detail, emits latents the decoder renders as a full-field
+  high-frequency checkerboard. Modes A/B truncate that group away and
+  stay smooth. Worth knowing operationally (a longer mode can deliver a
+  *worse* picture on smooth content) and a specific thing v2 training
+  should fix — it is also a hint that group 2's latent distribution on
+  off-distribution input leaves the region the decoder was trained on.
+- Full-pipeline SNR sweeps on this set (the original plan above) are
+  still worth doing once training-data work starts, but the clean-codec
+  gap already answers the go/no-go question and runs in seconds.
+
+`gen_nonphoto.py` is deterministic per (class, index) and is deliberately
+the same generator that item 2 below would scale up for training data.
+
 ### 2. Find or make training data for v2
 
 Deferred once already, for limited availability and licensing — the
@@ -337,3 +379,73 @@ and this dataset gets redistributed.
 synthetic content and photographs regress; the point is to widen
 coverage, not to move the distribution. Measure both classes at every
 candidate ratio, and keep the photograph numbers as a floor.
+
+**The machinery for this landed 2026-07-30.** `sstvae/nonphoto.py` is
+the generator (deterministic per (class, index, salt); the salt keeps
+"train"/"val"/"eval" disjoint by construction, so no training image can
+leak into either measurement set). `data.NonPhotoDataset` generates on
+the fly — no dataset to build, host or license — and
+`train.py --nonphoto-frac X` mixes it into any base dataset.
+`val_psnr_np_clean` / `val_psnr_np_8dB_e20` are logged every epoch on a
+fixed salt="val" set *whether or not the mix is on*, so a photo-only
+baseline records the same metric the ratio sweep compares against.
+**The ratio sweep ran 2026-07-30** (HF Jobs, a10g-large, from-scratch
+stage-1, width 128, epoch-size 8192, batch 16, 100 epochs; repos
+`arodland/sstvae-s1-640-np{0,01,02,03}`). Means over epochs 90–99,
+where every run is a ±0.02 dB plateau:
+
+| frac | photo clean | non-photo clean |
+|------|-------------|-----------------|
+| 0    | 25.55       | 23.91           |
+| 0.1  | 25.42       | **28.85**       |
+| 0.2  | 25.19       | 27.61           |
+
+**0.1 buys +4.9 dB non-photo for −0.13 dB photo, and strictly
+dominates 0.2** (better on both axes) — more synthetic content past
+~10% starts moving the distribution rather than widening it, exactly
+the failure mode predicted above. The 0.3 run only reached epoch 16
+(quota-delayed start, 1 h limit) and trailed both metrics there;
+given 0.2 already loses to 0.1, it was not rerun. Caveats: one seed
+per point (runs are independent shuffles, so tenth-of-a-dB differences
+are noise — the 1.2 dB and 4.9 dB gaps are not), and short from-scratch
+runs, so the *ratio* is the finding, not the absolute PSNRs. **Use
+`--nonphoto-frac 0.1` for v2 training.**
+
+**Confirmed at full scale the same day**: `arodland/sstvae-s2-640-np01`
+resumed the published stage-2 checkpoint (epoch 217) for 100 epochs
+with `--stage2 --nonphoto-frac 0.1 --clip-headroom-db 0.5
+--papr-weight 0.001 --lr 1e-4`. The photo baseline recovered in ~40
+epochs and finished *above* the base run (val_psnr_clean 26.19 vs
+26.06), non-photo val rose from 23-ish to 29.20, and PAPR held at the
+base's 4.27 dB. Codec-only eval of the final checkpoint on the held-out
+"eval"-salt set, mode C, vs the published model: testcard 20.62→30.08,
+callsign 23.61→31.22, gradient 12.56→**35.24** (the mode-C checkerboard
+pathology on smooth gradients is gone — verified visually, all modes
+smooth), chart 27.61→31.39, text 25.73→27.98, lineart 24.22→26.37, and
+COCO itself 27.93→**28.32** — the mixture *helped* photographs, which
+matches the regularization guess above. Text and line art remain the
+only classes below COCO (≤2 dB): dense fine strokes, a capacity story
+more than a distribution one. So a converged model absorbs the mixture
+as a cheap fine-tune; nothing needs to be trained from scratch for it.
+
+What remains: real-world sources (screenshots, scanned documents) for
+what the generator cannot make; and before publishing this checkpoint
+as v2 artifacts, redo the int8 layer-exclusion sweep in
+`scripts/export_onnx.py` from scratch — its choices were tuned against
+the *old* model's off-distribution behaviour, which this training
+specifically changed.
+
+**Quantisation re-assessed on this checkpoint 2026-07-30** (export not
+published). The sweep found the same *shape* as v1 — one dominant layer
+per part — but had to be re-run to find *which*: encoder keeps
+`node_conv2d_2` at fp32 (int8 latent RMS 7.00e-02, 14.4 dB under the
+channel), decoder keeps `node_conv2d` (untuned cost 0.98 dB → 0.00 on
+the tuning probes). All gates pass; fp16 is ~free as before. Per-class
+int8 cost on the eval set: ≤0.17 dB everywhere except **text, +0.44 dB
+across all modes** — the tuning probe set (3 photos + 2 smooth
+synthetics) contains no rendered text, so the search never saw the one
+class that still pays. If that 0.44 dB ever matters, the fix is adding
+a text image to the tuning probes, not more exclusions. (Gradients
+show +1.2–1.7 dB in modes A/B but from a 40 dB base — quantisation
+noise on a near-perfect smooth field, invisible and irrelevant under
+any real channel.)

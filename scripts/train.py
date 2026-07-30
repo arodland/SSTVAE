@@ -24,6 +24,7 @@ from sstvae.config import CLIP_HEADROOM_DB
 from sstvae.data import (
     FolderDataset,
     HFHubDataset,
+    NonPhotoDataset,
     SyntheticDataset,
     overlay_text_batch,
 )
@@ -80,6 +81,30 @@ def evaluate(model, loader, device, max_batches=16):
         mse["text"] += F.mse_loss(trecon, timg).item() * img.shape[0]
         n += img.shape[0]
     model.train()
+    return {k: -10 * torch.tensor(v / n).log10().item() for k, v in mse.items()}
+
+
+@torch.no_grad()
+def evaluate_nonphoto(model, imgs, device, batch=8):
+    """Clean and 8 dB + 20%-erasure PSNR on the fixed non-photo val set
+    (salt="val", disjoint from both training and the measured eval set).
+
+    Logged whether or not --nonphoto-frac is on, so a photo-only
+    baseline records the same metric the mixture-ratio sweep compares.
+    """
+    model.eval()
+    cfg = ChannelConfig(snr_db_range=(8.0, 8.0), erasure_rate_max=0.2, p_truncate=0.0)
+    mse = {"np_clean": 0.0, "np_8dB_e20": 0.0}
+    for b0 in range(0, len(imgs), batch):
+        img = imgs[b0 : b0 + batch].to(device)
+        z = model.encoder(img)
+        recon = model.decoder(z, torch.ones_like(z))
+        mse["np_clean"] += F.mse_loss(recon, img).item() * img.shape[0]
+        g = torch.Generator(device=device).manual_seed(b0)
+        noisy, w, _conf = apply_latent_channel(z, cfg, generator=g)
+        mse["np_8dB_e20"] += F.mse_loss(model.decoder(noisy, w), img).item() * img.shape[0]
+    model.train()
+    n = len(imgs)
     return {k: -10 * torch.tensor(v / n).log10().item() for k, v in mse.items()}
 
 
@@ -164,6 +189,17 @@ def main() -> None:
         help="train-only random zoom/pan crop + hflip + color jitter "
         "(see sstvae/data.py); never applied to the validation split",
     )
+    ap.add_argument(
+        "--nonphoto-frac",
+        type=float,
+        default=0.0,
+        help="fraction of the training mix drawn from procedural "
+        "non-photographic content (sstvae/nonphoto.py: test cards, "
+        "callsign cards, text, line art, gradients, charts) — the "
+        "classes measured 3-7 dB behind COCO on a photo-only model "
+        "(docs/todo.md). 0 disables; sweep it, don't guess it, and "
+        "watch val_psnr_clean for photo regression",
+    )
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--width", type=int, default=128)
     ap.add_argument("--lpips-weight", type=float, default=0.5)
@@ -237,6 +273,18 @@ def main() -> None:
         dataset = FolderDataset(args.data, augment=args.augment)
     else:
         ap.error("--data or --hf-dataset is required unless --smoke")
+    if args.nonphoto_frac and not args.smoke:
+        if not 0.0 < args.nonphoto_frac < 1.0:
+            ap.error("--nonphoto-frac must be in (0, 1)")
+        # Sized so nonphoto is `frac` of the combined pool; a RandomSampler
+        # over the concatenation then keeps that fraction per epoch in
+        # expectation, whether or not --epoch-size subsamples.
+        n_extra = round(args.nonphoto_frac / (1 - args.nonphoto_frac) * len(dataset))
+        dataset = torch.utils.data.ConcatDataset(
+            [dataset, NonPhotoDataset(n_extra, salt="train")]
+        )
+        print(f"nonphoto mix: {n_extra} synthetic images "
+              f"({args.nonphoto_frac:.0%} of {len(dataset)})")
 
     device = pick_device()
     out = Path(args.out)
@@ -295,6 +343,10 @@ def main() -> None:
         val_loader = DataLoader(
             val_dataset, batch_size=args.batch, shuffle=False, num_workers=2
         )
+    nonphoto_val = None
+    if not args.smoke:
+        np_ds = NonPhotoDataset(48, salt="val")  # 8 per class, fixed
+        nonphoto_val = torch.stack([np_ds[i] for i in range(len(np_ds))])
     lpips_fn = None if args.smoke else make_lpips(device)
     if lpips_fn is None and not args.smoke:
         print("lpips unavailable; training with MSE only")
@@ -394,6 +446,9 @@ def main() -> None:
         if val_loader is not None:
             record.update({f"val_psnr_{k}": v for k, v in
                            evaluate(model, val_loader, device).items()})
+        if nonphoto_val is not None:
+            record.update({f"val_psnr_{k}": v for k, v in
+                           evaluate_nonphoto(model, nonphoto_val, device).items()})
         print(
             f"epoch {epoch}: loss={avg:.5f}"
             + "".join(f" {k}={v:.2f}" for k, v in record.items()

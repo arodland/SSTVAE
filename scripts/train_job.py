@@ -9,6 +9,7 @@
 #     "lpips",
 #     "datasets",
 #     "huggingface_hub",
+#     "matplotlib",
 # ]
 # ///
 """HF Jobs / remote-machine entry point for SSTVAE stage-1 training.

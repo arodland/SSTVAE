@@ -14,6 +14,7 @@ shift || true
 ARGS="${*:---epochs 60 --batch 48}"
 
 CODE_REPO="${SSTVAE_CODE_REPO:-arodland/sstvae-code}"
+TIMEOUT="${SSTVAE_TIMEOUT:-24h}"
 
 echo "== uploading code snapshot to $CODE_REPO"
 hf repos create "$CODE_REPO" --private --exist-ok >/dev/null
@@ -27,7 +28,7 @@ hf upload "$CODE_REPO" . . \
 echo "== launching job (flavor=$FLAVOR, args: $ARGS)"
 hf jobs uv run scripts/train_job.py \
     --flavor "$FLAVOR" \
-    --timeout 24h \
+    --timeout "$TIMEOUT" \
     --detach \
     --secrets HF_TOKEN \
     --env SSTVAE_CODE_REPO="$CODE_REPO" \

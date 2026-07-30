@@ -186,6 +186,36 @@ class HFHubDataset(Dataset):
         return torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
 
 
+class NonPhotoDataset(Dataset):
+    """Procedural operator-content images from `sstvae/nonphoto.py`:
+    test cards, callsign cards, text blocks, line art, gradients, charts.
+
+    Mixed into photographic training via `--nonphoto-frac` — the classes
+    measured 3–7 dB behind COCO at fp32 on a photo-only model
+    (docs/todo.md "Non-photographic content"). Generated on the fly, so
+    `n` is a knob, not a directory size; deterministic per (index, salt),
+    with the salt keeping train/val/eval splits disjoint by construction.
+
+    Deliberately unaugmented: no mirror (mirrored callsigns), no color
+    jitter (a test card's saturated primaries *are* the content), and
+    the generators already randomize geometry per index.
+    """
+
+    def __init__(self, n: int, salt: str = "train"):
+        from . import nonphoto
+
+        self._gen = nonphoto.generate_index
+        self.n = n
+        self.salt = salt
+
+    def __len__(self):
+        return self.n
+
+    def __getitem__(self, i):
+        img = self._gen(i, salt=self.salt)
+        return torch.from_numpy(np.array(img)).permute(2, 0, 1).float() / 255.0
+
+
 class SyntheticDataset(Dataset):
     """Procedural gradients/shapes/noise — pipeline smoke tests only."""
 
