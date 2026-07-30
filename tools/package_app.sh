@@ -60,6 +60,18 @@ ORT_LIBDIR="$(cache_value SSTVAE_ONNXRUNTIME_LIBDIR || true)"
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 
+ROOT="$(realpath "$(dirname "$0")/..")"
+
+# LICENSE and NOTICE travel with every package. NOTICE is the one that
+# matters here rather than a formality: it is where the app icon is
+# recorded as licensed artwork that the project's own license does not
+# cover, so a package that omits it is a package making a claim about the
+# icon that is not true.
+copy_legal() {
+    mkdir -p "$1"
+    cp "$ROOT/LICENSE" "$ROOT/NOTICE" "$1/"
+}
+
 case "$(uname -s)" in
 # ---------------------------------------------------------------- Windows
 MINGW*|MSYS*|CYGWIN*)
@@ -74,6 +86,7 @@ MINGW*|MSYS*|CYGWIN*)
     [ -n "$ORT_LIBDIR" ] && cp "$ORT_LIBDIR/onnxruntime.dll" "$app/"
     windeployqt --release --no-translations --no-system-d3d-compiler \
         --no-opengl-sw "$app/sstvae-gui.exe"
+    copy_legal "$app"
     ;;
 
 # ------------------------------------------------------------------ macOS
@@ -100,6 +113,7 @@ Darwin)
         "$app/Contents/Frameworks/" 2>/dev/null || true
     [ -n "$ORT_LIBDIR" ] && cp "$ORT_LIBDIR"/libonnxruntime*.dylib \
         "$app/Contents/Frameworks/" 2>/dev/null || true
+    copy_legal "$app/Contents/Resources"
     # -libpath so macdeployqt can resolve what it is about to rewrite;
     # it fixes the install names and rpaths for everything it finds.
     macdeployqt "$app" -verbose=1 \
@@ -124,6 +138,7 @@ Darwin)
     mkdir -p "$app/share/applications" "$app/share/metainfo"
     cp "$pkg/org.cleverdomain.sstvae.desktop" "$app/share/applications/"
     cp "$pkg/org.cleverdomain.sstvae.metainfo.xml" "$app/share/metainfo/"
+    copy_legal "$app/share/doc/sstvae"
     for png in "$pkg"/icons/sstvae-*.png; do
         size="${png##*-}"; size="${size%.png}"
         dir="$app/share/icons/hicolor/${size}x${size}/apps"

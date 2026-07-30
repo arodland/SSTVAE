@@ -1,0 +1,6 @@
+# The SSTVAE application icon is licensed artwork, NOT under the
+# project's Artistic License 2.0. Rendered from
+# native/packaging/sstvae.svg by tools/gen_icons.py; a derivative work,
+# so the same restriction applies. See NOTICE at the repository root.
+SPDX-FileCopyrightText: Licensed artwork, all rights reserved by its author
+SPDX-License-Identifier: LicenseRef-SSTVAE-Branding

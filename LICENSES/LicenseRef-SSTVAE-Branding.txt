@@ -1,0 +1,25 @@
+SSTVAE Branding License
+=======================
+
+This identifier covers the SSTVAE application icon and everything
+rendered from it. See NOTICE for the file list.
+
+The artwork is licensed to Andrew Rodland for use in the SSTVAE
+application. It is **not** open source, and no rights in it are granted
+to recipients of this source code:
+
+  * You may not use, copy, modify or distribute the artwork under the
+    terms of the Artistic License 2.0, or under any other open-source
+    license.
+  * Redistributing the application in any form other than a binary
+    published by this project requires replacing the artwork with your
+    own. See NOTICE.
+  * The presence of these files in a public repository is not a grant.
+
+The underlying license from the artist is a private agreement and is not
+reproduced here. Its terms govern; this file exists so that automated
+license tooling records the artwork as non-free rather than inheriting
+the repository's root LICENSE, which would be wrong.
+
+Direct questions about reuse of the artwork to andrew@cleverdomain.org
+rather than assuming an answer from this file.

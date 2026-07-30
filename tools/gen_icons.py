@@ -22,6 +22,13 @@ librsvg upgrade with no icon having changed. Re-run this by hand when
 the SVG changes, and look at the result -- which is the only check that
 means anything for an icon anyway.
 
+Everything this writes is a derivative of the SVG, which is **licensed
+artwork and not under the project's license** (see NOTICE). So each
+output gets an SPDX sidecar written beside it here, rather than by hand:
+adding a size later would otherwise put an unlabelled non-free file into
+a repository whose root LICENSE says Artistic-2.0, and nothing would
+notice.
+
 Requires `rsvg-convert` (librsvg) and Pillow. Rasterizing every size
 from the vector rather than downscaling one big PNG is the point: at 16
 and 32 pixels a Lanczos reduction of a 1024px render is a grey blur,
@@ -65,6 +72,19 @@ ICNS_TYPES = (
     (b"ic09", 512),
     (b"ic10", 1024),
 )
+
+
+# The REUSE sidecar written beside every generated file. Kept in step
+# with native/packaging/sstvae.svg.license, which is the hand-written one
+# for the source artwork; if that changes, change this.
+SIDECAR = """\
+# The SSTVAE application icon is licensed artwork, NOT under the
+# project's Artistic License 2.0. Rendered from
+# native/packaging/sstvae.svg by tools/gen_icons.py; a derivative work,
+# so the same restriction applies. See NOTICE at the repository root.
+SPDX-FileCopyrightText: Licensed artwork, all rights reserved by its author
+SPDX-License-Identifier: LicenseRef-SSTVAE-Branding
+"""
 
 
 def rasterize(size: int) -> Image.Image:
@@ -141,7 +161,9 @@ def main() -> int:
     written.append(icns)
 
     for path in written:
-        print(f"{path.relative_to(ROOT)} ({path.stat().st_size} bytes)")
+        sidecar = path.with_name(path.name + ".license")
+        sidecar.write_text(SIDECAR)
+        print(f"{path.relative_to(ROOT)} ({path.stat().st_size} bytes) + .license")
     return 0
 
 

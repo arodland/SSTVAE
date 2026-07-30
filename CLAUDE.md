@@ -672,6 +672,23 @@ window to its launcher instead of showing a second nameless taskbar entry.
 Rasterize each size from the vector rather than downscaling one large
 PNG: at 16 and 32 pixels a reduction of a 1024px render is a grey blur.
 
+**The icon is licensed artwork and the repository's LICENSE does not
+cover it.** Andrew holds a license to use it in this application; it is
+**not** sublicensed to anyone who receives the source, so a fork or a
+redistributed package must replace it. `NOTICE` at the root is the
+exhaustive file list — the SVG plus the seven files generated from it,
+which are derivative works and equally restricted — and every one of them
+carries a REUSE sidecar (`<file>.license`,
+`LicenseRef-SSTVAE-Branding`). `tools/gen_icons.py` **writes the sidecar
+beside each file it generates**, deliberately: adding a size later would
+otherwise drop an unlabelled non-free file into a tree whose root LICENSE
+says Artistic-2.0, and the first thing a packager or a compliance scanner
+does is read that. `package_app.sh` ships `LICENSE` and `NOTICE` in all
+three packages for the same reason — a package without the NOTICE makes a
+claim about the icon that is not true. A `SSTVAE_BRANDING` switch with a
+free placeholder, so a redistributor need not edit files at all, is
+specified in `docs/todo.md` and not implemented.
+
 **Model artifacts: plain HTTPS to the Hub, and our own cache.** The
 design doc said `QNetworkAccessManager`, and that part stands, but the
 native app deliberately does **not** share `huggingface_hub`'s cache.
