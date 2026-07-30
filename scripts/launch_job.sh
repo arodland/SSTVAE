@@ -20,6 +20,7 @@ echo "== uploading code snapshot to $CODE_REPO"
 hf repos create "$CODE_REPO" --private --exist-ok >/dev/null
 hf upload "$CODE_REPO" . . \
     --include "sstvae/**" --include "scripts/train.py" \
+    --include "scripts/train_refiner.py" \
     --include "scripts/train_job.py" --include "scripts/export_onnx.py" \
     --include "pyproject.toml" \
     --exclude "**/__pycache__/**" \
@@ -33,6 +34,7 @@ hf jobs uv run scripts/train_job.py \
     --secrets HF_TOKEN \
     --env SSTVAE_CODE_REPO="$CODE_REPO" \
     --env SSTVAE_ARGS="$ARGS" \
+    ${SSTVAE_SCRIPT:+--env SSTVAE_SCRIPT="$SSTVAE_SCRIPT"} \
     ${SSTVAE_OUT_REPO:+--env SSTVAE_OUT_REPO="$SSTVAE_OUT_REPO"} \
     ${SSTVAE_RESUME:+--env SSTVAE_RESUME=1}
 
