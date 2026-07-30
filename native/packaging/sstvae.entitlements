@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  What the hardened runtime is asked to give back.
+
+  Notarization requires the hardened runtime (codesign's `options
+  runtime` flag), and the hardened runtime revokes a set of capabilities
+  that an unsigned process has by default. Each entry below is one of
+  those, turned back on. The list is deliberately short: every
+  entitlement is a restriction lifted, and one added "just in case" is a
+  hole with no test that would ever notice it.
+
+  Note for anyone editing this file: an XML comment may not contain two
+  consecutive hyphens, so command-line flags are spelled in prose here.
+  Getting that wrong does not produce a comment with a typo in it, it
+  produces a file codesign refuses to parse.
+
+  Only one entitlement is needed, and it is the one whose absence is
+  invisible:
+
+  * com.apple.security.device.audio-input. Without it the capture stream
+    opens, the system draws the microphone indicator in the menu bar,
+    and every sample that arrives is zero. So receive runs, the
+    waterfall stays black, and nothing anywhere says why. This is the
+    same failure NSMicrophoneUsageDescription guards against in
+    Info.plist, and both are required: the usage string is what the
+    prompt says, this is what makes the process eligible to be asked.
+
+  Three that are conspicuously absent, because each was considered and
+  none is needed:
+
+  * disable-library-validation. Under the hardened runtime a process may
+    only load libraries signed by the same team (or by Apple). Every
+    dylib in the bundle, meaning Qt, libhamlib, onnxruntime and the Qt
+    plugins, is signed by tools/sign.sh with this project's identity, so
+    validation passes. Adding it would let the app load anyone's code
+    and would hide a genuine signing gap in the bundle.
+  * allow-unsigned-executable-memory and allow-jit. onnxruntime's CPU
+    execution provider interprets a graph; it does not generate code.
+  * files.user-selected.read-write. That is a *sandbox* entitlement and
+    means nothing outside the App Store sandbox, which this app is not
+    in. The hardened runtime does not restrict file access at all.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+</dict>
+</plist>

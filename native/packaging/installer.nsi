@@ -46,6 +46,14 @@ RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 
 VIProductVersion "${VERSION}.0"
+; The signing certificate's subject, verbatim. Nothing enforces this --
+; a signature over a version block naming someone else verifies fine --
+; but Windows shows the two in different places (the cert in the UAC
+; prompt and the file's Digital Signatures tab, this in Details and in
+; Apps & features), so a difference is only ever visible to a user
+; deciding whether to trust the download. Same string as sstvae.rc.in's
+; CompanyName and the Publisher value written below.
+VIAddVersionKey "CompanyName" "Halibut Electronics, Inc"
 VIAddVersionKey "ProductName" "SSTVAE"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "FileVersion" "${VERSION}.0"
@@ -97,7 +105,7 @@ Section "SSTVAE (required)" SecMain
   WriteRegStr HKLM "${UNINST_KEY}" "DisplayName" "SSTVAE"
   WriteRegStr HKLM "${UNINST_KEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr HKLM "${UNINST_KEY}" "DisplayIcon" "$INSTDIR\sstvae-gui.exe"
-  WriteRegStr HKLM "${UNINST_KEY}" "Publisher" "SSTVAE"
+  WriteRegStr HKLM "${UNINST_KEY}" "Publisher" "Halibut Electronics, Inc"
   WriteRegStr HKLM "${UNINST_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKLM "${UNINST_KEY}" "QuietUninstallString" \
     '"$INSTDIR\uninstall.exe" /S'
