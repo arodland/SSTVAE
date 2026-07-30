@@ -337,3 +337,57 @@ and this dataset gets redistributed.
 synthetic content and photographs regress; the point is to widen
 coverage, not to move the distribution. Measure both classes at every
 candidate ratio, and keep the photograph numbers as a floor.
+
+## `SSTVAE_BRANDING` switch, so a redistributor can build lawfully
+
+**Goal.** One build option that substitutes a freely-licensed placeholder
+icon for the licensed artwork, so anyone repackaging this project can
+produce a complete, lawful application without editing files.
+
+**Why it is not optional in the long run.** The app icon is licensed to
+Andrew for use in this application and that license does not transfer
+(NOTICE, and the SPDX sidecars beside each file). Today the *only* way to
+comply is to overwrite eight files in place — which works, because
+nothing reads them by any other path, but it is a step a packager has to
+discover from prose and then redo on every update. Documenting a
+restriction is not the same as providing a way to satisfy it.
+
+**Why it is cheap.** The indirection already exists. Every consumer names
+the icon by a path that CMake and one shell script control:
+
+- `native/packaging/icons.qrc` → compiled-in window icon
+- `native/packaging/sstvae.rc.in` → the Windows executable resource
+- `MACOSX_BUNDLE_ICON_FILE` plus the `.icns` as a bundle source
+- `tools/package_app.sh`'s freedesktop `hicolor` loop
+
+So the change is a variable holding a directory, plus a placeholder set
+generated the same way (`tools/gen_icons.py` already takes one SVG and
+emits every format). **Keep the file names identical** between the two
+sets — `sstvae.svg`, `sstvae.ico`, `sstvae.icns`, `icons/sstvae-<n>.png`
+— and no consumer above needs to change at all; only the directory does.
+
+**Open questions worth deciding rather than defaulting.**
+
+- **Which way it defaults.** `official` is friendlier for the person who
+  builds this most (Andrew, on his own machine, wanting his own icon);
+  `generic` is the safer default for anyone else, and is what Chromium
+  does. Chromium's reasoning applies here too: the branded build is the
+  special case, and a default that silently produces a non-redistributable
+  binary is a trap. Leaning `generic` **once the placeholder exists** —
+  before then it would just mean no icon.
+- **Whether the licensed art stays in the repository at all.** It is here
+  today. If the artist's license turns out to permit use in the
+  application but not distribution as a source file, the switch stops
+  being a convenience and becomes the mechanism: `generic` is committed,
+  the real artwork lives outside the tree, and the release build is
+  handed a path to it. That is a question about the private license text,
+  not about this code.
+- **A placeholder that is actually good.** A deliberately ugly one gets
+  shipped by accident and looks like a bug; an imitation of the licensed
+  artwork defeats the purpose. Something simple and clearly different.
+
+**Not urgent.** Nobody is repackaging this yet, and NOTICE plus the
+sidecars mean the position is stated correctly in the meantime. It should
+land before the first release that invites forks — a switch added after
+people have already built from source is one they have to be told about
+twice.
