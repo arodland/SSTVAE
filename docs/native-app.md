@@ -790,8 +790,67 @@ nearly-finished one is not.
 
 ### Phase 4 — Packaging, signing, CI
 
-- **Windows:** `windeployqt` → WiX or NSIS → **Azure Trusted Signing**.
+Sequenced in five steps at Andrew's direction (2026-07-29), and the order
+is the point: steps 1–3 make a *testable* download on every platform,
+which is worth having before engaging the third party who holds the
+signing credentials. **Steps 1–3 are done.** Every push builds five
+packages and, since this change, five installers:
+
+| | portable | installer |
+|---|---|---|
+| linux-x86_64, linux-aarch64 | `.tar.gz` | **AppImage** |
+| macos-arm64, macos-x86_64 | `.tar.gz` | **`.dmg`** |
+| windows-x64 | `.zip` | **NSIS setup `.exe`** |
+
+Both are published, deliberately: the portable copy needs no
+administrator and runs from a stick, which is the shape a shack PC often
+wants. The installer step runs on the same staged tree the "does it
+start" check just exercised, so a packaging failure cannot be mistaken
+for a build one, and it is **not gated on a tag** — an installer whose
+first exercise is the release is an installer with three
+platform-specific tools in it and no history of working.
+
+**Not CPack**, which this document assumed. CPack packages what
+`install()` rules install, so adopting it means teaching CMake to install
+Qt — capturing `windeployqt`/`macdeployqt` output in install rules on two
+platforms and reimplementing them on the third. That is a rewrite of the
+part that already works, to gain generator plumbing for containers that
+are three lines of `hdiutil`, `appimagetool` and `makensis`. Staging
+stays in `tools/package_app.sh` and wrapping in `tools/make_installer.sh`
+— split so that building and running needs none of the packaging tools.
+
+**One icon source, three attachment mechanisms.** `native/packaging/`
+holds the SVG; `tools/gen_icons.py` rasterizes the `.ico`, the `.icns`
+and the freedesktop PNGs, all committed so no build needs image tooling.
+The mechanisms differ because the platforms do: Windows reads a resource
+compiled into the `.exe`, macOS reads `CFBundleIconFile` in the bundle,
+and Linux reads the `.desktop` file and looks the name up in the icon
+theme. A runtime `QIcon` reaches none of those three — it is set as well,
+from a `.qrc`, for the X11 window icon and the Wayland fallback.
+
+- **Windows:** `windeployqt` → **NSIS** (done) → **Azure Trusted Signing**.
   The EV-token era is over for CI purposes; SignPath is the alternative.
+  NSIS rather than WiX because an MSI's component/GUID model wants every
+  file listed with a stable identity, and what is being installed is
+  "whatever `windeployqt` decided the app needs" — which changes with the
+  Qt version. The accurate description is a directory.
+
+  **NSIS is pinned by sha256 and fetched, not taken from the runner.** It
+  is not preinstalled on `windows-latest`, which cost one CI round;
+  `choco install nsis` would have fixed it and was declined, because it
+  makes the version of a packaging tool a property of a package feed's
+  current contents. Same treatment as appimagetool, onnxruntime and
+  Hamlib. A locally installed `makensis` still wins, so a developer with
+  one does not download a second copy.
+
+  **The installer is validated under Wine, locally.** `makensis.exe`
+  compiles `installer.nsi` and the result silently installs, registers,
+  and uninstalls in a throwaway `WINEPREFIX` — which checks `File /r`
+  recursion into `platforms/`, the Start Menu shortcuts, the Add/Remove
+  Programs registry block and that an uninstall leaves nothing. Seconds,
+  against a Windows CI job's several minutes, and it caught the `.nsi`
+  before it was ever pushed. The same caveat as the other Wine work
+  applies: a pass is suggestive rather than proof, a failure conclusive.
 - **macOS:** two slices — arm64 native and x86_64 cross-compiled on the
   same Apple-silicon runner, both working since 2026-07-29 (see
   "Platform floor"). Developer ID cert from a base64 secret, hardened
@@ -801,17 +860,33 @@ nearly-finished one is not.
   you with Qt frameworks — then `notarytool submit --wait` and
   `stapler`. Prefer a statically linked onnxruntime to avoid signing an
   extra nested dylib.
-- **Linux:** build on `ubuntu-22.04` for the glibc floor. AppImage via
-  `linuxdeploy`, plus a Flatpak on Flathub — which is realistically the
-  best Linux install UX available and worth the extra manifest.
-- `.desktop` and AppStream metainfo files.
+- **Linux:** built on `ubuntu-24.04` — 22.04 was the plan for its older
+  glibc and does not work (glibc errors from the Qt we ship against), so
+  24.04 is the oldest image that builds. **AppImage, done**, via
+  `appimagetool` pinned by sha256 per architecture, the same shape as the
+  onnxruntime and Hamlib pins: a packaging tool that changes underneath us
+  changes what we ship. Not `linuxdeploy` — `package_app.sh` already
+  assembles the tree it would assemble, so all that is left is the
+  container. A Flatpak on Flathub is still the best Linux install UX
+  available and still worth the extra manifest; it is not done.
+- `.desktop` and AppStream metainfo files, **done**, validated by
+  `desktop-file-validate` and `appstreamcli` during packaging *when those
+  are present* — we run them ourselves rather than through
+  `appimagetool --appstream`, which fails the build outright on an image
+  that lacks `appstreamcli`. A packaging run must not depend on which
+  validator a runner image happens to ship.
 - **No auto-update** (decision 4). Distribution channels are winget,
   Homebrew cask, Flathub, and direct download.
 - `libhamlib` ships as a linked library, so there is no nested
   executable to sign — one of the reasons for choosing it over bundling
   `rigctld`.
 
-**Exit:** a tagged GHA run produces three signed artifacts, each
+**Remaining:** step 4 (signing) and step 5 (a real release). Signing
+lands as a call *between* staging and packing on macOS and Windows —
+notarization in particular has to happen on the finished container — so
+the seam it needs already exists rather than having to be cut later.
+
+**Exit:** a tagged GHA run produces five signed artifacts, each
 installed and launched on a clean VM with no developer tooling present.
 **That is what triggers decision 1** — in the same change, `sstvae/gui/`
 is deleted along with the `gui` extra and `pyside6-essentials`, and

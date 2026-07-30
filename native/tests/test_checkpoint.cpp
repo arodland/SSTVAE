@@ -92,11 +92,11 @@ bool contains(const std::string& haystack, const std::string& needle) {
 
 void test_filenames() {
     check::equal(checkpoint::onnx_filename("encoder", "fp16"),
-                 std::string("v1-encoder-fp16.onnx"), "ckpt/name: encoder fp16");
+                 std::string("v2-encoder-fp16.onnx"), "ckpt/name: encoder fp16");
     check::equal(checkpoint::onnx_filename("decoder", "int8"),
-                 std::string("v1-decoder-int8.onnx"), "ckpt/name: decoder int8");
+                 std::string("v2-decoder-int8.onnx"), "ckpt/name: decoder int8");
     check::equal(checkpoint::onnx_filename("decoder"),
-                 std::string("v1-decoder-fp16.onnx"),
+                 std::string("v2-decoder-fp16.onnx"),
                  "ckpt/name: fp16 is the default precision");
 
     // The revision is the checkpoint stem, so the artifacts can never be
@@ -115,10 +115,10 @@ void test_filenames() {
 }
 
 void test_url_names_the_repo_and_file() {
-    const std::string url = checkpoint::artifact_url("v1-decoder-fp16.onnx");
+    const std::string url = checkpoint::artifact_url("v2-decoder-fp16.onnx");
     check::is_true(contains(url, std::string(checkpoint::DEFAULT_REPO)),
                    "ckpt/url: names the repo");
-    check::is_true(contains(url, "v1-decoder-fp16.onnx"), "ckpt/url: names the file");
+    check::is_true(contains(url, "v2-decoder-fp16.onnx"), "ckpt/url: names the file");
     check::is_true(url.rfind("https://", 0) == 0, "ckpt/url: https");
 }
 
@@ -134,10 +134,10 @@ void test_cache_dir_is_overridable() {
 void test_find_cached() {
     TempDir tmp;
     set_cache(tmp.str());
-    check::is_true(!checkpoint::find_cached("v1-decoder-fp16.onnx").has_value(),
+    check::is_true(!checkpoint::find_cached("v2-decoder-fp16.onnx").has_value(),
                    "ckpt/cache: nothing in an empty cache");
-    tmp.touch("v1-decoder-fp16.onnx");
-    check::is_true(checkpoint::find_cached("v1-decoder-fp16.onnx").has_value(),
+    tmp.touch("v2-decoder-fp16.onnx");
+    check::is_true(checkpoint::find_cached("v2-decoder-fp16.onnx").has_value(),
                    "ckpt/cache: found once present");
 }
 
@@ -147,7 +147,7 @@ void test_a_cache_hit_never_reaches_the_fetcher() {
     // network is not touched at all.
     TempDir tmp;
     set_cache(tmp.str());
-    tmp.touch("v1-decoder-fp16.onnx");
+    tmp.touch("v2-decoder-fp16.onnx");
 
     int calls = 0;
     const checkpoint::Fetcher counting = [&](std::string_view) -> std::string {
@@ -156,7 +156,7 @@ void test_a_cache_hit_never_reaches_the_fetcher() {
     };
     const std::string got = checkpoint::resolve_onnx("decoder", "", "fp16", counting);
     check::equal(calls, 0, "ckpt/cache: a hit does not call the fetcher");
-    check::equal(fs::path(got).filename().string(), std::string("v1-decoder-fp16.onnx"),
+    check::equal(fs::path(got).filename().string(), std::string("v2-decoder-fp16.onnx"),
                  "ckpt/cache: and returns the cached file");
 }
 
@@ -170,7 +170,7 @@ void test_a_miss_fetches_once() {
     };
     checkpoint::resolve_onnx("encoder", "", "fp16", fake);
     check::equal(asked.size(), std::size_t{1}, "ckpt/fetch: asked for exactly one file");
-    check::equal(asked.front(), std::string("v1-encoder-fp16.onnx"),
+    check::equal(asked.front(), std::string("v2-encoder-fp16.onnx"),
                  "ckpt/fetch: the part that was actually needed");
 }
 
@@ -180,7 +180,7 @@ void test_no_fetcher_explains_the_way_out() {
     set_cache(tmp.str());
     const std::string msg =
         error_text([] { checkpoint::resolve_onnx("decoder", "", "fp16", nullptr); });
-    check::is_true(contains(msg, "v1-decoder-fp16.onnx"),
+    check::is_true(contains(msg, "v2-decoder-fp16.onnx"),
                    "ckpt/offline: names the missing artifact");
     check::is_true(contains(msg, "https://huggingface.co/"),
                    "ckpt/offline: gives the URL to fetch by hand");
@@ -209,20 +209,20 @@ void test_a_failing_fetcher_still_explains_the_way_out() {
 
 void test_a_directory_is_searched() {
     TempDir tmp;
-    tmp.touch("v1-encoder-fp16.onnx");
-    tmp.touch("v1-decoder-fp16.onnx");
+    tmp.touch("v2-encoder-fp16.onnx");
+    tmp.touch("v2-decoder-fp16.onnx");
     check::equal(fs::path(checkpoint::resolve_onnx("decoder", tmp.str())).filename().string(),
-                 std::string("v1-decoder-fp16.onnx"), "ckpt/dir: picks the right part");
+                 std::string("v2-decoder-fp16.onnx"), "ckpt/dir: picks the right part");
     check::equal(fs::path(checkpoint::resolve_onnx("encoder", tmp.str())).filename().string(),
-                 std::string("v1-encoder-fp16.onnx"), "ckpt/dir: and the other one");
+                 std::string("v2-encoder-fp16.onnx"), "ckpt/dir: and the other one");
 }
 
 void test_a_directory_without_the_part_says_what_is_there() {
     TempDir tmp;
-    tmp.touch("v1-encoder-fp16.onnx");
+    tmp.touch("v2-encoder-fp16.onnx");
     const std::string msg =
         error_text([&] { checkpoint::resolve_onnx("decoder", tmp.str()); });
-    check::is_true(contains(msg, "v1-encoder-fp16.onnx"),
+    check::is_true(contains(msg, "v2-encoder-fp16.onnx"),
                    "ckpt/dir: lists what the directory does hold");
 
     TempDir empty;
@@ -249,37 +249,37 @@ void test_a_directory_with_two_candidates_is_ambiguous() {
 
 void test_precision_selects_within_a_directory() {
     TempDir tmp;
-    tmp.touch("v1-decoder-fp16.onnx");
-    tmp.touch("v1-decoder-int8.onnx");
+    tmp.touch("v2-decoder-fp16.onnx");
+    tmp.touch("v2-decoder-int8.onnx");
     check::equal(
         fs::path(checkpoint::resolve_onnx("decoder", tmp.str(), "int8")).filename().string(),
-        std::string("v1-decoder-int8.onnx"), "ckpt/dir: precision picks the file");
+        std::string("v2-decoder-int8.onnx"), "ckpt/dir: precision picks the file");
 }
 
 void test_a_single_file_is_used_directly() {
     TempDir tmp;
-    const fs::path dec = tmp.touch("v1-decoder-fp16.onnx");
+    const fs::path dec = tmp.touch("v2-decoder-fp16.onnx");
     check::equal(checkpoint::resolve_onnx("decoder", dec.string()), dec.string(),
                  "ckpt/file: the named part is used as given");
 }
 
 void test_the_sibling_part_is_derived() {
-    // `--model v1-encoder-fp16.onnx` must still work for an operation
+    // `--model v2-encoder-fp16.onnx` must still work for an operation
     // that turns out to need the decoder too.
     TempDir tmp;
-    const fs::path enc = tmp.touch("v1-encoder-fp16.onnx");
-    tmp.touch("v1-decoder-fp16.onnx");
+    const fs::path enc = tmp.touch("v2-encoder-fp16.onnx");
+    tmp.touch("v2-decoder-fp16.onnx");
     check::equal(fs::path(checkpoint::resolve_onnx("decoder", enc.string())).filename().string(),
-                 std::string("v1-decoder-fp16.onnx"),
+                 std::string("v2-decoder-fp16.onnx"),
                  "ckpt/file: the sibling is found beside it");
 }
 
 void test_a_missing_sibling_is_reported() {
     TempDir tmp;
-    const fs::path enc = tmp.touch("v1-encoder-fp16.onnx");
+    const fs::path enc = tmp.touch("v2-encoder-fp16.onnx");
     const std::string msg =
         error_text([&] { checkpoint::resolve_onnx("decoder", enc.string()); });
-    check::is_true(contains(msg, "v1-decoder-fp16.onnx"),
+    check::is_true(contains(msg, "v2-decoder-fp16.onnx"),
                    "ckpt/file: names the sibling it wanted");
     check::is_true(contains(msg, "not next to"), "ckpt/file: and where it looked");
 }
@@ -297,7 +297,7 @@ void test_an_unrecognisable_name_is_reported() {
 
 void test_something_that_is_neither_is_reported() {
     TempDir tmp;
-    const fs::path pt = tmp.touch("v1.pt");
+    const fs::path pt = tmp.touch("v2.pt");
     const std::string msg =
         error_text([&] { checkpoint::resolve_onnx("decoder", pt.string()); });
     check::is_true(contains(msg, "expected a .onnx"),

@@ -202,7 +202,14 @@ jobs:
           sudo apt-get install -y libgl1-mesa-dev libxkbcommon-x11-0 \
             libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
             libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
-            libpulse0
+            libpulse0 \
+            desktop-file-utils appstream
+      # `appstream` and `desktop-file-utils` above are for the AppImage's
+      # metadata, not for Qt: tools/make_installer.sh validates the
+      # .desktop and .metainfo.xml files when the validators are present
+      # and only warns when they are not. Installed here so the check
+      # actually runs rather than being skipped in the one place it would
+      # catch a typo before an operator does.
       # onnxruntime is a ~9-80 MB pinned download per platform. Cached
       # on the URL's hash so a version bump busts it automatically.
       #
@@ -326,10 +333,10 @@ jobs:
       - name: C++ tests
         run: ctest --test-dir native/build --output-on-failure
       # --- packaging ------------------------------------------------------
-      # Staged with Qt and our pinned libraries, so what comes out of CI
-      # is something a tester can unpack and run rather than a binary
-      # that needs a Qt install to start. Not an installer: no icons, no
-      # associations, no signing. Those are the next steps.
+      # Two stages, and both are published. Staging produces a tree with
+      # Qt and our pinned libraries in it, which is what a tester unpacks
+      # and runs; the installer step then wraps that same tree in the
+      # platform's own container. Nothing is signed yet.
       - name: Stage a runnable app
         run: tools/package_app.sh native/build dist
         shell: bash
@@ -342,7 +349,7 @@ jobs:
         shell: bash
         run: |
           case "$(uname -s)" in
-            Darwin) exe=dist/sstvae-gui.app/Contents/MacOS/sstvae-gui ;;
+            Darwin) exe=dist/SSTVAE.app/Contents/MacOS/sstvae-gui ;;
             MINGW*|MSYS*) exe=dist/sstvae/sstvae-gui.exe ;;
             *) exe=dist/sstvae/sstvae-gui ;;
           esac
@@ -387,12 +394,34 @@ jobs:
           if-no-files-found: error
       # Windows keeps the zip: it is a directory rather than one file, a
       # zip is the native shape there anyway, and there are no
-      # permissions to lose.
+      # permissions to lose. It is also the portable copy -- the
+      # installer below needs administrator rights and a stick does not.
       - uses: actions/upload-artifact@v7
         if: runner.os == 'Windows'
         with:
-          name: ${{ env.pkg }}
+          name: ${{ env.pkg }}-portable
           path: dist
+          if-no-files-found: error
+      # The platform's own container: a .dmg, an AppImage, a setup .exe.
+      # Built from the *same* staged tree that was just proven to start,
+      # so a packaging bug here cannot be confused with a build one.
+      #
+      # Not gated on a tag. An installer that is only ever built for a
+      # release is one whose first exercise is the release, and this is
+      # the step with three platform-specific tools in it.
+      - name: Build the installer
+        shell: bash
+        run: tools/make_installer.sh dist "${{ env.pkg }}"
+      # Each of the three is a single file, so archive: false applies
+      # everywhere here and the artifact takes the file's own name --
+      # which is what makes the downloads page read as a list of
+      # installers rather than of zips to open first. The name comes from
+      # the script, through GITHUB_ENV, so the suffix is known in exactly
+      # one place.
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.installer }}
+          archive: false
           if-no-files-found: error
       # Also worth keeping: they are how a layout regression gets seen.
       - uses: actions/upload-artifact@v7

@@ -519,4 +519,11 @@ The photographs used on this page are my own.
 
 ## License
 
-[Artistic License 2.0](LICENSE).
+Code: [Artistic License 2.0](LICENSE).
+
+**The application icon is not.** It is licensed artwork, usable in this
+application but not sublicensed to anyone who receives this source — so a
+fork or a redistributed package must replace it. [NOTICE](NOTICE) lists
+the files and says what to do; each of them also carries an SPDX sidecar.
+This is the same arrangement Firefox and Chrome have with their
+open-source builds.

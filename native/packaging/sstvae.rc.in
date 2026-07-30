@@ -1,0 +1,50 @@
+// Windows resources: the application icon and the version block.
+//
+// Configured by CMake so the version is the project's, in one place. Both
+// halves matter for different reasons:
+//
+//   The icon is what Explorer, the taskbar and the Alt-Tab switcher draw.
+//   Without it they draw the generic "unknown application" tile -- Qt's
+//   runtime QIcon does not reach any of them, because they read the
+//   executable's resources rather than asking the running process.
+//
+//   The version block is what SmartScreen, the "Apps & features" list and
+//   a support request's screenshot all quote. An unsigned executable with
+//   no publisher and no version is the shape SmartScreen is most hostile
+//   to, and filling this in costs nothing.
+
+#include <winver.h>
+
+// The first icon in the resource table is the one Windows uses for the
+// executable, so this must stay first.
+IDI_ICON1 ICON "@SSTVAE_PACKAGING_DIR@/sstvae.ico"
+
+VS_VERSION_INFO VERSIONINFO
+  FILEVERSION    @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+  PRODUCTVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+  FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+  FILEFLAGS      0x0L
+  FILEOS         VOS__WINDOWS32
+  FILETYPE       VFT_APP
+  FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    // 0409 = US English, 04b0 = Unicode.
+    BLOCK "040904b0"
+    BEGIN
+      VALUE "CompanyName",      "SSTVAE"
+      VALUE "FileDescription",  "SSTVAE -- pictures over HF radio"
+      VALUE "FileVersion",      "@PROJECT_VERSION@.0"
+      VALUE "InternalName",     "sstvae-gui"
+      VALUE "LegalCopyright",   "Artistic License 2.0"
+      VALUE "OriginalFilename", "sstvae-gui.exe"
+      VALUE "ProductName",      "SSTVAE"
+      VALUE "ProductVersion",   "@PROJECT_VERSION@"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 0x04b0
+  END
+END

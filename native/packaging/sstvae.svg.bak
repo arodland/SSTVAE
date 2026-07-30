@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The application icon, and the only hand-authored copy of it.
+
+  Everything shipped — the .ico, the .icns, the freedesktop PNGs — is
+  rasterized from this file by tools/gen_icons.py. One source, because an
+  icon edited in three formats drifts in three directions.
+
+  Designed to survive 16x16, which is the size that decides whether an
+  icon works: a taskbar, a title bar and a file manager's list view all
+  draw it that small. That budget is why there are exactly two ideas here
+  — a picture, and the carriers it is made of — and why the carriers
+  are six wide bars rather than the twenty-three the waveform actually
+  has. Twenty-three bars at 16 pixels is a grey smear.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d4e79"/>
+      <stop offset="1" stop-color="#0d1f33"/>
+    </linearGradient>
+    <linearGradient id="pane" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f2f6fb"/>
+      <stop offset="1" stop-color="#c9d8e8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- The tile. Rounded because every platform draws it on a different
+       background and a square reads as a missing icon on some of them. -->
+  <rect x="1" y="1" width="62" height="62" rx="13" fill="url(#sky)"/>
+  <rect x="1.5" y="1.5" width="61" height="61" rx="12.5" fill="none"
+        stroke="#3d7ab0" stroke-width="1" stroke-opacity="0.55"/>
+
+  <!-- The picture. Sun and hill rather than an abstract shape: at 16
+       pixels a viewer needs to recognize "a photograph" from two blobs,
+       and those are the two blobs that do it. -->
+  <clipPath id="frame">
+    <rect x="12" y="11" width="40" height="26" rx="3"/>
+  </clipPath>
+  <g clip-path="url(#frame)">
+    <rect x="12" y="11" width="40" height="26" fill="url(#pane)"/>
+    <circle cx="23" cy="20" r="4.6" fill="#f0a020"/>
+    <path d="M12 37 L23 26 L31 32 L41 23 L52 33 L52 37 Z" fill="#2f6f4f"/>
+  </g>
+
+  <!-- ...and, below it, the carriers that picture arrives on. A band of
+       its own rather than bars growing into the picture: overlapped, the
+       two ideas read as one bar chart, which is a different application
+       entirely. -->
+  <rect x="12" y="41" width="40" height="11" rx="2.5" fill="#081420"/>
+  <g>
+    <rect x="14.2" y="45.4" width="4.4" height="4.6" fill="#38bdf8"/>
+    <rect x="20.6" y="43.4" width="4.4" height="6.6" fill="#f0a020"/>
+    <rect x="27"   y="46.6" width="4.4" height="3.4" fill="#38bdf8"/>
+    <rect x="33.4" y="44.2" width="4.4" height="5.8" fill="#f0a020"/>
+    <rect x="39.8" y="47"   width="4.4" height="3.0" fill="#38bdf8"/>
+    <rect x="46.2" y="45"   width="4.4" height="5.0" fill="#f0a020"/>
+  </g>
+</svg>

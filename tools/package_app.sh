@@ -3,16 +3,26 @@
 #
 #   tools/package_app.sh [build-dir] [staging-dir]
 #
-# This is step 2 of the packaging work: an archive somebody can unpack
+# Staging is step 2 of the packaging work: an archive somebody can unpack
 # and *run*, which is what makes on-air testing possible before any
-# installer or signing exists. It is deliberately not an installer --
-# no icons, no file associations, no uninstall. Step 3 is where those
-# arrive, most likely as CMake install() rules plus CPack, at which
-# point this script probably goes away.
+# installer or signing exists. `tools/make_installer.sh` then turns this
+# tree into the platform's own container -- a .dmg, an AppImage, a setup
+# .exe -- so the two halves stay separable: a developer can stage and run
+# without any installer tooling present at all.
 #
 # One script rather than three CI blocks, because bash is present on all
 # three runners and because a packaging step that can only be exercised
 # by pushing is one that gets debugged six minutes at a time.
+#
+# **Not CPack**, which was the plan and is worth saying why it was not
+# done. CPack packages what `install()` rules install, so adopting it
+# means teaching CMake to install Qt -- which on two of three platforms
+# means capturing the output of windeployqt/macdeployqt in install rules
+# and on the third means reimplementing them. That is a rewrite of the
+# part that already works, to gain generator plumbing for containers that
+# are three lines of hdiutil, appimagetool and makensis respectively. The
+# one thing CPack would genuinely buy is component installs, which this
+# application does not have.
 #
 # What has to end up beside the executable, and why each is easy to
 # forget:
@@ -50,6 +60,18 @@ ORT_LIBDIR="$(cache_value SSTVAE_ONNXRUNTIME_LIBDIR || true)"
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 
+ROOT="$(realpath "$(dirname "$0")/..")"
+
+# LICENSE and NOTICE travel with every package. NOTICE is the one that
+# matters here rather than a formality: it is where the app icon is
+# recorded as licensed artwork that the project's own license does not
+# cover, so a package that omits it is a package making a claim about the
+# icon that is not true.
+copy_legal() {
+    mkdir -p "$1"
+    cp "$ROOT/LICENSE" "$ROOT/NOTICE" "$1/"
+}
+
 case "$(uname -s)" in
 # ---------------------------------------------------------------- Windows
 MINGW*|MSYS*|CYGWIN*)
@@ -64,6 +86,7 @@ MINGW*|MSYS*|CYGWIN*)
     [ -n "$ORT_LIBDIR" ] && cp "$ORT_LIBDIR/onnxruntime.dll" "$app/"
     windeployqt --release --no-translations --no-system-d3d-compiler \
         --no-opengl-sw "$app/sstvae-gui.exe"
+    copy_legal "$app"
     ;;
 
 # ------------------------------------------------------------------ macOS
@@ -71,8 +94,14 @@ Darwin)
     # CMake built it as a bundle already (MACOSX_BUNDLE), so the layout
     # exists; what it does not have is anything it links from
     # native/.deps, whose absolute paths mean nothing on another Mac.
-    cp -R "$BUILD_DIR/sstvae-gui.app" "$STAGE_DIR/"
-    app="$STAGE_DIR/sstvae-gui.app"
+    #
+    # Renamed on the way in. The bundle *directory*'s name is what Finder
+    # draws under the icon and what ends up in /Applications, and
+    # `sstvae-gui.app` reads like a build artifact; CFBundleExecutable
+    # still names the binary inside, which is unchanged, so the rename is
+    # only the user-visible half.
+    cp -R "$BUILD_DIR/sstvae-gui.app" "$STAGE_DIR/SSTVAE.app"
+    app="$STAGE_DIR/SSTVAE.app"
     # Inside the bundle's MacOS directory, so they share the app's
     # rpaths and the Frameworks macdeployqt is about to populate.
     # Shipped because "the waterfall is black" has several causes and
@@ -84,6 +113,7 @@ Darwin)
         "$app/Contents/Frameworks/" 2>/dev/null || true
     [ -n "$ORT_LIBDIR" ] && cp "$ORT_LIBDIR"/libonnxruntime*.dylib \
         "$app/Contents/Frameworks/" 2>/dev/null || true
+    copy_legal "$app/Contents/Resources"
     # -libpath so macdeployqt can resolve what it is about to rewrite;
     # it fixes the install names and rpaths for everything it finds.
     macdeployqt "$app" -verbose=1 \
@@ -98,6 +128,29 @@ Darwin)
     # and step 3's AppImage will bring its own anyway.
     app="$STAGE_DIR/sstvae"
     mkdir -p "$app/bin" "$app/lib" "$app/plugins"
+
+    # The freedesktop trio, in the layout an AppDir and a system prefix
+    # both use. Linux is the one platform where the icon is *not* attached
+    # to the binary -- the desktop reads the .desktop file and looks the
+    # icon up by name in the theme -- so shipping these is the only way
+    # the app has an icon at all here.
+    pkg="$(realpath "$(dirname "$0")/../native/packaging")"
+    mkdir -p "$app/share/applications" "$app/share/metainfo"
+    cp "$pkg/org.cleverdomain.sstvae.desktop" "$app/share/applications/"
+    cp "$pkg/org.cleverdomain.sstvae.metainfo.xml" "$app/share/metainfo/"
+    copy_legal "$app/share/doc/sstvae"
+    for png in "$pkg"/icons/sstvae-*.png; do
+        size="${png##*-}"; size="${size%.png}"
+        dir="$app/share/icons/hicolor/${size}x${size}/apps"
+        mkdir -p "$dir"
+        cp "$png" "$dir/org.cleverdomain.sstvae.png"
+    done
+    # The scalable one too: it is what a HiDPI panel prefers, and it is
+    # the source the rest were rasterized from.
+    mkdir -p "$app/share/icons/hicolor/scalable/apps"
+    cp "$pkg/sstvae.svg" \
+       "$app/share/icons/hicolor/scalable/apps/org.cleverdomain.sstvae.svg"
+
     cp "$BUILD_DIR/sstvae-gui" "$app/bin/"
     cp "$BUILD_DIR/sstvae-decode" "$app/bin/" 2>/dev/null || true
     cp "$BUILD_DIR/sstvae-audio-check" "$app/bin/" 2>/dev/null || true

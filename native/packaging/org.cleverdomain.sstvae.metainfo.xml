@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata: what a Linux software centre shows, and what an
+  AppImage's thumbnailer and desktop integration read.
+
+  Worth shipping even though this application is not in any repository:
+  the file is also what carries the release notes and the screenshots, so
+  a distribution that later packages it has them, and appimagetool warns
+  when it is absent.
+
+  The id must match the .desktop file's basename, or the two records are
+  not recognized as describing the same application.
+-->
+<component type="desktop-application">
+  <id>org.cleverdomain.sstvae</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>Artistic-2.0</project_license>
+
+  <name>SSTVAE</name>
+  <summary>Send and receive pictures over HF radio</summary>
+
+  <description>
+    <p>
+      SSTVAE transmits images over HF radio by sending the latent values of
+      a convolutional autoencoder as analog samples on OFDM carriers. It is
+      not slow-scan television: the picture is compressed by a neural codec
+      rather than scanned line by line, so it degrades gracefully as the
+      channel does instead of tearing.
+    </p>
+    <p>
+      The application transmits and receives through a soundcard, keys the
+      radio through Hamlib, shows a live waterfall while decoding, and can
+      compose a callsign or an inset of the last received picture over an
+      image before sending it.
+    </p>
+    <p>
+      An amateur radio licence is required to transmit. Receiving needs
+      only a receiver and a soundcard.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">org.cleverdomain.sstvae.desktop</launchable>
+
+  <!-- Kept in step with the .desktop file's Categories line, including
+       its single main category. -->
+  <categories>
+    <category>Network</category>
+    <category>HamRadio</category>
+  </categories>
+
+  <developer id="org.cleverdomain">
+    <name>Andrew Rodland</name>
+  </developer>
+
+  <keywords>
+    <keyword>SSTV</keyword>
+    <keyword>amateur radio</keyword>
+    <keyword>shortwave</keyword>
+    <keyword>HF</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/arodland/SSTVAE</url>
+  <url type="bugtracker">https://github.com/arodland/SSTVAE/issues</url>
+
+  <!-- A desktop application in the ordinary sense: it wants a pointer and
+       a window of some size. Stated as a recommendation rather than a
+       requirement, because "requires" is what stops an install, and the
+       app does run in a small window. -->
+  <recommends>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <display_length compare="ge">768</display_length>
+  </recommends>
+
+  <provides>
+    <binary>sstvae-gui</binary>
+  </provides>
+
+  <releases>
+    <release version="0.1.0" type="development" date="2026-07-29">
+      <description>
+        <p>First packaged build of the native application.</p>
+      </description>
+    </release>
+  </releases>
+
+  <content_rating type="oars-1.1"/>
+</component>
