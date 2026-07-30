@@ -342,16 +342,55 @@ if(_want_gui)
 
   add_executable(sstvae-gui WIN32 MACOSX_BUNDLE gui/main.cpp)
   set_target_properties(sstvae-gui PROPERTIES AUTOMOC ON)
+
+  # --- the icon, which has to be attached differently on each platform ---
+  #
+  # Note what this is *not*: a QIcon set at runtime. Two of the three
+  # places an icon appears are drawn by the operating system without
+  # asking the process -- Explorer and the taskbar read the executable's
+  # resource table, Finder and the Dock read the bundle -- so an icon that
+  # exists only in the running app's window is an icon most users never
+  # see. Linux is the exception, and it reads the .desktop file instead,
+  # which is why that platform's icon is handled by the packaging script.
+  #
+  # All three formats are generated from one SVG by tools/gen_icons.py and
+  # committed, so this needs no image tooling at build time.
+  set(SSTVAE_PACKAGING_DIR "${CMAKE_CURRENT_SOURCE_DIR}/packaging")
+  # Every platform: the window icon, compiled in. See packaging/icons.qrc
+  # for why this is separate from the two below rather than instead of them.
+  target_sources(sstvae-gui PRIVATE "${SSTVAE_PACKAGING_DIR}/icons.qrc")
+  set_target_properties(sstvae-gui PROPERTIES AUTORCC ON)
+  if(WIN32)
+    # Explicit: CMake enables RC for MSVC on its own, but not for a MinGW
+    # or clang-cl toolchain, where the .rc would then be treated as an
+    # unknown source type and silently ignored -- leaving a working
+    # executable with the generic icon, which looks like the resource
+    # file being wrong rather than unbuilt.
+    enable_language(RC)
+    configure_file("${SSTVAE_PACKAGING_DIR}/sstvae.rc.in"
+                   "${CMAKE_CURRENT_BINARY_DIR}/sstvae.rc" @ONLY)
+    target_sources(sstvae-gui PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/sstvae.rc")
+  endif()
   if(APPLE)
     # CMake's default Info.plist produces a bundle macOS will launch but
     # not one it will trust with a microphone, and a bundle with no
     # stable identifier is one TCC cannot remember a decision about.
     # See cmake/MacOSXBundleInfo.plist.in.
+    #
+    # The .icns is a *source* with a package location rather than an
+    # install() rule, so it is copied into Contents/Resources as part of
+    # building the target: the bundle in the build tree then has its icon
+    # too, and there is no way to run a build that packages without it.
+    set(_sstvae_icns "${SSTVAE_PACKAGING_DIR}/sstvae.icns")
+    target_sources(sstvae-gui PRIVATE "${_sstvae_icns}")
+    set_source_files_properties("${_sstvae_icns}" PROPERTIES
+      MACOSX_PACKAGE_LOCATION Resources)
     set_target_properties(sstvae-gui PROPERTIES
       MACOSX_BUNDLE_INFO_PLIST
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/MacOSXBundleInfo.plist.in"
       MACOSX_BUNDLE_BUNDLE_NAME "SSTVAE"
       MACOSX_BUNDLE_GUI_IDENTIFIER "org.cleverdomain.sstvae"
+      MACOSX_BUNDLE_ICON_FILE "sstvae.icns"
       MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
       MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}")
   endif()

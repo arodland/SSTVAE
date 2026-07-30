@@ -39,6 +39,12 @@
     <key>CFBundleVersion</key>
     <string>@MACOSX_BUNDLE_BUNDLE_VERSION@</string>
 
+    <!-- The icon, by file name within Contents/Resources. Finder, the
+         Dock and the Cmd-Tab switcher all read it from here; a QIcon set
+         at runtime reaches none of them. -->
+    <key>CFBundleIconFile</key>
+    <string>@MACOSX_BUNDLE_ICON_FILE@</string>
+
     <!-- Why the app wants the microphone, in the operator's words:
          this string is shown verbatim in the permission prompt. -->
     <key>NSMicrophoneUsageDescription</key>

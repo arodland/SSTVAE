@@ -1,0 +1,25 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=SSTVAE
+GenericName=HF Image Transmission
+Comment=Send and receive pictures over HF radio
+# Bare, with no path: an AppImage's own launcher is on PATH inside the
+# bundle, and a system install puts the wrapper in bindir. An absolute
+# path here would be wrong for whichever of the two it was not written
+# for -- and a .desktop file with a stale Exec fails by doing nothing at
+# all when the icon is clicked.
+Exec=sstvae-gui
+Icon=org.cleverdomain.sstvae
+Terminal=false
+# HamRadio is a registered *additional* category and needs a main one
+# beside it. Exactly one main category, even though AudioVideo is also
+# true here: desktop-file-validate warns that two put the application in
+# two menus, and one entry that is slightly misfiled beats two entries.
+Categories=Network;HamRadio;
+Keywords=SSTV;SSTVAE;ham;amateur;radio;shortwave;HF;image;
+# Matches the executable's WM class, which is what lets a taskbar
+# associate the running window with this entry rather than showing an
+# unnamed second item beside it.
+StartupWMClass=sstvae-gui
+StartupNotify=true

@@ -615,6 +615,63 @@ the x86_64 slice is not parity-checked against Python — the one real gap
 in that platform's coverage, and worth saying out loud rather than
 assuming the green tick covers it.
 
+**Pin the packaging tools too, and do not believe a runner ships one.**
+appimagetool and NSIS are both fetched and sha256-checked, like
+onnxruntime and Hamlib. `makensis` is **not** preinstalled on
+`windows-latest` — this script asserted it was, in a comment *and* in its
+error message, and one CI round said otherwise. `choco install nsis`
+would work and was declined: it makes the version of a packaging tool a
+property of a package feed's current contents, which is the thing pinning
+exists to prevent. Two extraction traps came with it, both platform
+folklore rather than anything a test would find: Git Bash has no `unzip`,
+**and its `tar` is msys2 GNU tar, not the bsdtar Windows itself ships**,
+so `tar -xf` on a zip fails with "this does not look like a tar archive"
+— use `powershell Expand-Archive`.
+
+**The Windows installer is testable from Linux, and was.** `wine
+makensis.exe` compiles `installer.nsi`, and the result silently installs,
+registers and uninstalls inside a throwaway `WINEPREFIX` — checking
+`File /r` recursion into subdirectories, the Start Menu shortcuts, the
+Add/Remove Programs block and that an uninstall leaves nothing behind.
+Seconds against a Windows CI job's minutes. Same caveat as the rest of
+the Wine work here: a pass is suggestive, a failure conclusive.
+
+**Packaging is two scripts, and the split is what makes it usable.**
+`tools/package_app.sh` stages a runnable tree (Qt, Hamlib, onnxruntime,
+the freedesktop files); `tools/make_installer.sh` wraps that same tree in
+an AppImage, a `.dmg` or an NSIS setup `.exe`. Building and *running*
+needs none of the second script's tooling, which is the whole reason they
+are separate — only whoever produces a download needs `hdiutil`,
+`appimagetool` or `makensis`. Both outputs are published per platform:
+the portable archive needs no administrator, the installer gives a Start
+Menu entry and an uninstaller. **The installer step is not gated on a
+tag**, because an installer whose first exercise is the release is three
+platform-specific tools with no history of working. Deliberately **not
+CPack**, which was the design doc's plan: CPack packages what `install()`
+rules install, so adopting it means teaching CMake to install Qt —
+capturing `windeployqt`/`macdeployqt` output on two platforms and
+reimplementing them on the third — to gain plumbing for containers that
+are three lines of shell each.
+
+**One icon source, three attachment mechanisms, and a runtime one that
+reaches none of them.** `native/packaging/sstvae.svg` is the only
+hand-authored copy; `tools/gen_icons.py` rasterizes the `.ico`, the
+`.icns` and the freedesktop PNGs, **generated and committed** so no build
+needs image tooling. It is deliberately *not* a CI staleness gate, unlike
+`config.hpp` and the golden vectors: the check would be a byte-comparison
+of rasterized output, and librsvg's antialiasing is not promised stable
+across versions, so the gate would fail on a librsvg upgrade with no icon
+having changed. The three mechanisms are not interchangeable — Windows
+reads a resource compiled into the `.exe`, macOS reads
+`CFBundleIconFile`, Linux reads the `.desktop` file and looks the name up
+in the icon theme — and all three are drawn by the OS *without asking the
+process*, so `QApplication::setWindowIcon` is a fourth thing, not a
+substitute. It is set as well, from a `.qrc`, for the X11 window icon and
+the Wayland fallback; `setDesktopFileName` is what lets Wayland match a
+window to its launcher instead of showing a second nameless taskbar entry.
+Rasterize each size from the vector rather than downscaling one large
+PNG: at 16 and 32 pixels a reduction of a 1024px render is a grey blur.
+
 **Model artifacts: plain HTTPS to the Hub, and our own cache.** The
 design doc said `QNetworkAccessManager`, and that part stands, but the
 native app deliberately does **not** share `huggingface_hub`'s cache.
@@ -1069,8 +1126,11 @@ checkpoint, `--lr 1e-4`) — note pre-beacon checkpoints remain
 architecture-compatible (model channel count unchanged), evaluation
 sweeps (PSNR/LPIPS vs SNR per mode), on-air calibration. On the app
 side: overlay templates, and a real on-air (not loopback) shakedown of
-the PTT timing against a physical radio. For the native app: Phase 4,
-packaging and signing on three platforms, which is also what triggers
-deleting `sstvae/gui/`. See `docs/native-app.md` for the C++/Qt rewrite
-design (Phases 0-3 done) and `docs/todo.md` for quantisation tolerance
+the PTT timing against a physical radio. For the native app: Phase 4 is
+sequenced in five steps and the first three are done — CI builds five
+packages and five installers (AppImage, `.dmg`, NSIS setup) on every
+push. Remaining there: **signing** on macOS and Windows, then publishing
+a real release, which is what triggers deleting `sstvae/gui/`. See
+`docs/native-app.md` for the C++/Qt rewrite design (Phases 0-3 done,
+Phase 4 steps 1-3 done) and `docs/todo.md` for quantisation tolerance
 as a future training constraint.

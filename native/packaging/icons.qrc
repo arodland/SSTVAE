@@ -1,0 +1,23 @@
+<!--
+  The icon, compiled into the binary.
+
+  The platform's own icon (the Windows resource, the macOS bundle) is what
+  Explorer, the Dock and the taskbar draw, and it covers the cases where
+  the operating system never asks the process. This one covers the cases
+  where it does: the X11 window icon, the Wayland fallback when no
+  .desktop file has been installed, and anywhere the app draws its own
+  identity.
+
+  Compiled in rather than loaded from a path, because a path that is
+  correct in the build tree, in an AppImage and inside a .app is three
+  different paths, and the failure is a silently missing icon.
+
+  Two sizes, not five: Qt scales between the ones it is given, and these
+  are the two ends of the range a window icon is asked for.
+-->
+<RCC>
+  <qresource prefix="/">
+    <file alias="sstvae-48.png">icons/sstvae-48.png</file>
+    <file alias="sstvae-256.png">icons/sstvae-256.png</file>
+  </qresource>
+</RCC>
