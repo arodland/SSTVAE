@@ -12,10 +12,12 @@
 
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 
 #include "images/types.hpp"
+#include "optimize/speculative.hpp"
 #include "overlay/model.hpp"
 #include "tx/engine.hpp"
 
@@ -59,6 +61,10 @@ public:
 
 public slots:
     void send();
+    // Re-arm speculative optimization for the current composition.
+    // Cheap and idempotent: the debounce inside `Speculative` is what
+    // keeps a drag from starting a run per mouse move.
+    void schedule_optimization();
     void cancel();
     void choose_image();
     void load_image(const QString& path);
@@ -69,12 +75,17 @@ signals:
     void transmitStarted();
     void transmitFinished();
 
+    // Emitted from the optimizer's worker thread; queued to the slot
+    // below, exactly like the transmit callbacks above.
+    void optimizerProgressed();
+
     // Emitted from the transmitting thread; queued to the slots below.
     void stateChanged(int phase, double progress, const QString& message);
     void errorOccurred(const QString& message);
     void sendFinished(bool ok);
 
 private slots:
+    void on_optimizer_progress();
     void on_state(int phase, double progress, const QString& message);
     void on_error(const QString& message);
     void on_finished(bool ok);
@@ -84,6 +95,12 @@ private slots:
 
 private:
     void build_ui();
+    // Everything from "the operator pressed Send" onwards, once any
+    // optimization has settled. Split out because Send may have to wait
+    // for the optimizer first, and that wait must not block the GUI.
+    void begin_transmit(const images::Picture& picture,
+                        std::vector<double> latents);
+    void rebuild_optimizer();
     QWidget* build_side_panel();
     QGroupBox* build_properties(QWidget* parent);
     QWidget* build_send_bar();
@@ -119,6 +136,21 @@ private:
     std::unique_ptr<tx::TxEngine> engine_;
     std::thread thread_;
     std::atomic<bool> running_{false};
+
+    // Null when the feature is off or the model has not loaded yet.
+    std::unique_ptr<optimize::Speculative> optimizer_;
+    // Set between pressing Send and the optimizer settling; polled by
+    // `wait_timer_`, which is the only thing that may start the
+    // transmission in that window.
+    QTimer* wait_timer_ = nullptr;
+    bool awaiting_optimizer_ = false;
+    // The composition as it was when Send was pressed. Send commits to
+    // that picture: editing during the wait (or during transmission)
+    // applies to the *next* send, not this one.
+    std::optional<images::Picture> send_picture_;
+    // An edit arrived while a send was in progress; re-arm once it is
+    // over rather than moving the ground under it.
+    bool restart_after_send_ = false;
 };
 
 }  // namespace sstvae::gui

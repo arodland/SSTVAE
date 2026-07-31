@@ -257,7 +257,8 @@ void read_receive(const Reader& r, ReceiveConfig& c) {
 void read_transmit(const Reader& r, TransmitConfig& c) {
     r.get("mode", c.mode);
     r.get("level", c.level);
-    r.report_unknown({"mode", "level"});
+    r.get("optimize", c.optimize);
+    r.report_unknown({"mode", "level", "optimize"});
 }
 
 // Empty string <-> JSON null, for the fields Python declares optional.
@@ -406,7 +407,10 @@ std::string to_json(const Config& c) {
           {"save_size", or_null(c.receive.save_size)},
           {"save_audio", c.receive.save_audio},
           {"filename_template", c.receive.filename_template}}},
-        {"transmit", {{"mode", c.transmit.mode}, {"level", c.transmit.level}}},
+        {"transmit",
+         {{"mode", c.transmit.mode},
+          {"level", c.transmit.level},
+          {"optimize", c.transmit.optimize}}},
         {"version", c.version},
     };
     return root.dump(2) + "\n";

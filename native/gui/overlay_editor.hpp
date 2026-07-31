@@ -72,6 +72,16 @@ signals:
     // Null when the selection was cleared.
     void selectionChanged(overlay::Item* item);
 
+    // The composition changed: a new base picture, an item added,
+    // moved, resized, edited or removed. Emitted per mouse move during
+    // a drag, so anything expensive downstream must debounce -- which
+    // is what `optimize::Speculative` is for.
+    //
+    // Deliberately *not* emitted by `select()`: selection handles are
+    // drawn over the widget, not into `composed_image()`, so choosing a
+    // different item changes nothing that would be transmitted.
+    void documentChanged();
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;

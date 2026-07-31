@@ -156,6 +156,16 @@ struct ReceiveConfig {
 struct TransmitConfig {
     std::string mode = "B";
     double level = 0.9;
+
+    // Spend the composing time improving the latents for this
+    // particular picture (docs/latent-optimization.md). Off by default:
+    // it fetches an extra 18 MB artifact on first use, and a station
+    // that does not want it should never pay for it.
+    //
+    // Deliberately one switch and no dials. The objective SNR is a
+    // measured constant rather than a setting, and the budgets only
+    // matter through a plateau test that usually ends the run first.
+    bool optimize = false;
 };
 
 struct Config {

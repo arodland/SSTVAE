@@ -26,7 +26,9 @@
 
 #include "app_state.hpp"
 #include "audio/qt/qtaudio.hpp"
+#include "checkpoint/checkpoint.hpp"
 #include "codec/codec.hpp"
+#include "codec/grad_session.hpp"
 #include "config.hpp"
 #include "images/images.hpp"
 #include "overlay_editor.hpp"
@@ -58,11 +60,136 @@ TransmitPanel::TransmitPanel(AppState* state, QWidget* parent)
             Qt::QueuedConnection);
     connect(this, &TransmitPanel::sendFinished, this, &TransmitPanel::on_finished,
             Qt::QueuedConnection);
+    connect(this, &TransmitPanel::optimizerProgressed, this,
+            &TransmitPanel::on_optimizer_progress, Qt::QueuedConnection);
+
+    // Polls the optimizer while Send waits for it. A timer rather than
+    // a blocking wait because nothing on the GUI thread may block --
+    // the same rule rig control follows.
+    wait_timer_ = new QTimer(this);
+    wait_timer_->setInterval(100);
+    connect(wait_timer_, &QTimer::timeout, this, [this] {
+        if (!awaiting_optimizer_ || optimizer_ == nullptr) return;
+        if (!optimizer_->ready()) return;
+        wait_timer_->stop();
+        awaiting_optimizer_ = false;
+        if (!send_picture_) return;
+        // The picture captured at the click, and latents for the
+        // generation that was current then -- edits since were
+        // deferred, so the two still describe the same composition.
+        const images::Picture picture = *send_picture_;
+        send_picture_.reset();
+        begin_transmit(picture, optimizer_->take_result());
+    });
+
+    rebuild_optimizer();
 }
 
 TransmitPanel::~TransmitPanel() {
+    // Before the engine, because the optimizer's worker holds an ORT
+    // session and its own thread; stopping it first keeps teardown in
+    // one obvious order.
+    if (optimizer_) optimizer_->stop();
     if (engine_) engine_->cancel();
     if (thread_.joinable()) thread_.join();
+}
+
+void TransmitPanel::rebuild_optimizer() {
+    optimizer_.reset();
+    if (!app_->config().transmit.optimize) return;
+    codec::OnnxCodec* model = app_->model();
+    if (model == nullptr) return;  // retried when a picture is next scheduled
+
+    optimize::SpeculativeConfig cfg;
+    const std::string model_path = app_->config().model_path;
+    optimizer_ = std::make_unique<optimize::Speculative>(
+        [model_path](const images::ImageArray& target) {
+            // Resolved per run rather than cached: the artifact is only
+            // fetched when the feature is actually used, and
+            // `resolve_onnx` pins it to fp32 whatever the codec's
+            // precision is.
+            const std::string path = checkpoint::resolve_onnx(
+                std::string(checkpoint::GRAD_PART), model_path);
+            auto session = std::make_shared<codec::GradSession>(path, target);
+            optimize::GradFn fn = session->fn();
+            // Keep the session alive for as long as the gradient
+            // function that borrows it.
+            return [session, fn](const std::vector<float>& z,
+                                 const std::vector<float>& w,
+                                 std::vector<float>& grad, double& mse) {
+                fn(z, w, grad, mse);
+            };
+        },
+        cfg, [this] { emit optimizerProgressed(); });
+    schedule_optimization();
+}
+
+void TransmitPanel::schedule_optimization() {
+    if (optimizer_ == nullptr) {
+        // The model may have finished loading since the last attempt.
+        if (app_->config().transmit.optimize && app_->model() != nullptr) {
+            rebuild_optimizer();
+        }
+        return;
+    }
+    // Send commits to the picture that was on screen when it was
+    // pressed, so an edit arriving now belongs to the *next* send.
+    // Deferring it also keeps the generation still, which is what lets
+    // the latents already in flight stay valid for the committed
+    // picture.
+    if (transmitting() || awaiting_optimizer_) {
+        restart_after_send_ = true;
+        return;
+    }
+    const std::optional<images::Picture> image = editor_->composed_image();
+    if (!image) {
+        optimizer_->clear();
+        return;
+    }
+    codec::OnnxCodec* model = app_->model();
+    if (model == nullptr) return;
+
+    images::ImageArray array = images::to_array(*image);
+    const std::string mode_name =
+        mode_combo_->currentData().toString().toStdString();
+    const config::ModeSpec* mode = &config::MODES[0];
+    for (const config::ModeSpec& m : config::MODES) {
+        if (mode_name == m.name) mode = &m;
+    }
+    // The encode runs on the optimizer's worker, after the debounce --
+    // so a drag that produces twenty of these pays for none of them.
+    optimizer_->picture_changed(
+        array, [model, array] { return model->encode(array); }, *mode);
+}
+
+void TransmitPanel::on_optimizer_progress() {
+    if (optimizer_ == nullptr || transmitting()) return;
+    const optimize::SpeculativeStatus st = optimizer_->status();
+
+    // An *estimate*, and labelled as one. It is the objective's own
+    // improvement, which overstates recovered picture quality by
+    // roughly 3x at a ratio that varies with the image -- so it must
+    // never be read as decibels the far end will see. Shown because a
+    // number that climbs is worth having while the operator waits, and
+    // kept afterwards because the finished figure is the interesting
+    // one (Andrew, 2026-07-31).
+    const QString gain =
+        QString::asprintf("%+.1f dB", st.progress.objective_gain_db);
+
+    if (st.running) {
+        status_->setText(tr("Refining picture... %1 est.").arg(gain));
+    } else if (st.finished && awaiting_optimizer_) {
+        status_->setText(tr("Refining picture... finishing"));
+    } else if (st.finished && st.progress.step > 0) {
+        // Whatever ended it -- plateau, either budget, or Send cutting
+        // it short -- the gain it did reach stays on screen.
+        status_->setText(tr("Picture refined: %1 est.").arg(gain));
+    } else if (st.finished) {
+        // Finished without a single measured step: the artifact was
+        // missing or the encode failed, and the encoder's own latents
+        // are what will be sent.
+        status_->setText(tr("Sending unrefined"));
+    }
 }
 
 void TransmitPanel::build_ui() {
@@ -72,6 +199,8 @@ void TransmitPanel::build_ui() {
     editor_ = new OverlayEditor(splitter);
     connect(editor_, &OverlayEditor::selectionChanged, this,
             &TransmitPanel::on_selection);
+    connect(editor_, &OverlayEditor::documentChanged, this,
+            &TransmitPanel::schedule_optimization);
     splitter->addWidget(editor_);
     splitter->addWidget(build_side_panel());
     splitter->setStretchFactor(0, 3);
@@ -292,6 +421,9 @@ void TransmitPanel::update_level_label() {
 }
 
 void TransmitPanel::on_mode_changed() {
+    // A different mode is a different latent budget, so any result in
+    // hand is for the wrong transmission.
+    schedule_optimization();
     app_->config().transmit.mode = mode_combo_->currentData().toString().toStdString();
     app_->save_config();
 }
@@ -383,6 +515,33 @@ void TransmitPanel::send() {
     }
     if (thread_.joinable()) thread_.join();
 
+    // Optimization, if it is on, must be entirely finished before the
+    // radio is keyed -- so Send shortens its deadline and then waits,
+    // on a timer rather than by blocking. `Speculative::ready()` is
+    // true immediately when there is nothing to wait for, so this costs
+    // nothing when the feature is off.
+    if (optimizer_ != nullptr && !awaiting_optimizer_) {
+        optimizer_->request_send();
+        if (!optimizer_->ready()) {
+            send_picture_ = *image;
+            awaiting_optimizer_ = true;
+            send_button_->setEnabled(false);
+            status_->setText(tr("Refining picture..."));
+            progress_->setRange(0, 0);
+            wait_timer_->start();
+            return;
+        }
+        begin_transmit(*image, optimizer_->take_result());
+        return;
+    }
+    begin_transmit(*image, {});
+}
+
+void TransmitPanel::begin_transmit(const images::Picture& picture,
+                                   std::vector<double> latents) {
+    codec::OnnxCodec* model = app_->model();
+    if (model == nullptr) return;
+
     const settings::Config& config = app_->config();
     tx::TxConfig tx_config;
     tx_config.mode = mode_combo_->currentData().toString().toStdString();
@@ -401,7 +560,13 @@ void TransmitPanel::send() {
             return audio::qt::play(device, wave, samplerate, on_progress,
                                    should_stop, on_error);
         },
-        [model](const images::ImageArray& array) { return model->encode(array); },
+        // The optimizer's output enters here, through the seam the
+        // engine already had. Empty means it was off, unfinished, or
+        // failed -- in which case this is the plain encoder and the
+        // picture is exactly what it would always have been.
+        [model, latents](const images::ImageArray& array) {
+            return latents.empty() ? model->encode(array) : latents;
+        },
         [this](const tx::TxState& state) {
             emit stateChanged(static_cast<int>(state.phase), state.progress,
                               QString::fromStdString(state.message));
@@ -418,7 +583,6 @@ void TransmitPanel::send() {
     running_.store(true);
     emit transmitStarted();
 
-    const images::Picture picture = *image;
     thread_ = std::thread([this, picture, tx_config] {
         bool ok = false;
         try {
@@ -458,6 +622,16 @@ void TransmitPanel::on_error(const QString& message) { status_->setText(message)
 
 void TransmitPanel::on_finished(bool ok) {
     if (thread_.joinable()) thread_.join();
+    // Only re-armed if an edit was deferred while the send was
+    // committed. Otherwise the composition is unchanged and still has
+    // its optimized latents -- `take_result` consumes nothing -- so a
+    // second send reuses them, and re-arming would spend CPU
+    // reproducing what is already in hand and overwrite "Sent" a
+    // second later.
+    if (restart_after_send_) {
+        restart_after_send_ = false;
+        schedule_optimization();
+    }
     send_button_->setEnabled(true);
     cancel_button_->setEnabled(false);
     level_slider_->setEnabled(true);

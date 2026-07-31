@@ -43,6 +43,7 @@ void OverlayEditor::set_base_image(const images::Picture& image) {
     base_ = image;
     composed_valid_ = false;
     update();
+    emit documentChanged();
 }
 
 void OverlayEditor::set_last_rx(const images::Picture& image) {
@@ -51,6 +52,7 @@ void OverlayEditor::set_last_rx(const images::Picture& image) {
     // changes what an existing item shows -- which is the point.
     composed_valid_ = false;
     update();
+    emit documentChanged();
 }
 
 void OverlayEditor::add_text(const std::string& text) {
@@ -58,6 +60,7 @@ void OverlayEditor::add_text(const std::string& text) {
     item.text = text;
     doc_.items.push_back(item);
     select(static_cast<int>(doc_.items.size()) - 1);
+    emit documentChanged();
 }
 
 void OverlayEditor::add_image_inset(const std::string& path) {
@@ -65,23 +68,27 @@ void OverlayEditor::add_image_inset(const std::string& path) {
     item.source = path;
     doc_.items.push_back(item);
     select(static_cast<int>(doc_.items.size()) - 1);
+    emit documentChanged();
 }
 
 void OverlayEditor::add_last_rx_inset() {
     overlay::ImageItem item;  // defaults to SOURCE_LAST_RX
     doc_.items.push_back(item);
     select(static_cast<int>(doc_.items.size()) - 1);
+    emit documentChanged();
 }
 
 void OverlayEditor::remove_selected() {
     if (selected_ < 0 || selected_ >= static_cast<int>(doc_.items.size())) return;
     doc_.items.erase(doc_.items.begin() + selected_);
     select(-1);
+    emit documentChanged();
 }
 
 void OverlayEditor::clear_overlay() {
     doc_.items.clear();
     select(-1);
+    emit documentChanged();
 }
 
 overlay::Item* OverlayEditor::selected_item() {
@@ -94,11 +101,13 @@ overlay::Item* OverlayEditor::selected_item() {
 void OverlayEditor::refresh_item() {
     composed_valid_ = false;
     update();
+    emit documentChanged();
 }
 
 void OverlayEditor::set_doc(overlay::Doc doc) {
     doc_ = std::move(doc);
     select(-1);
+    emit documentChanged();
 }
 
 void OverlayEditor::select(int index) {
@@ -284,6 +293,7 @@ void OverlayEditor::mouseMoveEvent(QMouseEvent* event) {
     composed_valid_ = false;
     update();
     emit selectionChanged(item);
+    emit documentChanged();
 }
 
 void OverlayEditor::mouseReleaseEvent(QMouseEvent* event) {

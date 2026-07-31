@@ -157,6 +157,7 @@ SettingsDialog::SettingsDialog(const settings::Config& config, QWidget* parent)
     tabs->addTab(scrolling(rig_tab()), tr("Rig control"));
     tabs->addTab(scrolling(folders_tab()), tr("Folders"));
     tabs->addTab(scrolling(receive_tab()), tr("Receive"));
+    tabs->addTab(scrolling(transmit_tab()), tr("Transmit"));
 
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
@@ -695,6 +696,28 @@ QWidget* SettingsDialog::receive_tab() {
     return page;
 }
 
+QWidget* SettingsDialog::transmit_tab() {
+    auto* page = new QWidget(this);
+    auto* form = new QFormLayout(page);
+
+    optimize_ = new QCheckBox(tr("Refine each picture before sending"), page);
+    optimize_->setChecked(config_.transmit.optimize);
+    form->addRow(optimize_);
+    form->addRow(note(tr("The encoder is trained to do well on average, not on "
+                         "the picture in front of it. Given the composing time "
+                         "before you press Send, a search for better latents is "
+                         "worth around 1.5 dB of recovered quality -- most "
+                         "visibly on text and line art.\n\n"
+                         "Costs no extra airtime, and needs nothing of the "
+                         "receiving station: every station decodes it as an "
+                         "ordinary transmission and simply gets a better "
+                         "picture. Downloads an extra 18 MB the first time. If "
+                         "Send arrives before it has settled, it finishes "
+                         "quickly and sends what it has."),
+                      page));
+    return page;
+}
+
 // --- result -----------------------------------------------------------------
 
 void SettingsDialog::apply_to(settings::Config& config) const {
@@ -713,6 +736,7 @@ void SettingsDialog::apply_to(settings::Config& config) const {
     config.folders.transmit_dir = transmit_dir_->text().toStdString();
     config.folders.template_dir = template_dir_->text().toStdString();
 
+    config.transmit.optimize = optimize_->isChecked();
     config.receive.autosave = autosave_->isChecked();
     config.receive.save_audio = save_audio_->isChecked();
     config.receive.low_cpu = low_cpu_->isChecked();

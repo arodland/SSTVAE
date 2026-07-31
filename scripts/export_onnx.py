@@ -47,7 +47,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sstvae import checkpoint  # noqa: E402
 from sstvae.codec import load_torch_model  # noqa: E402
-from sstvae.config import LATENT_CHANNELS, LATENT_H, LATENT_W  # noqa: E402
+from sstvae.config import (  # noqa: E402
+    CHANNELS_PER_GROUP,
+    LATENT_CHANNELS,
+    LATENT_H,
+    LATENT_W,
+)
 from sstvae.images import IMG_H, IMG_W  # noqa: E402
 
 OPSET = 17
@@ -84,6 +89,27 @@ TOLERANCES = {
     "fp16": {"latent_rms": 5e-3, "quality_db": 0.05},
     "int8": {"latent_rms": 0.25, "quality_db": 0.50},
 }
+
+# The gradient artifact for transmit-time latent optimization
+# (`docs/latent-optimization.md`). Held to fp32 only: differentiating
+# `ConvInteger` is not a well-defined operation, so an int8 gradient
+# graph would be a trap rather than a saving, and fp16 is exported only
+# if it verifies -- gradients carry a wider dynamic range than
+# activations, so the argument that made fp16 free for inference does
+# not transfer.
+# fp16 is attempted and, as of 2026-07-31, does not survive: with
+# `keep_io_types` the converter leaves `target` at fp32 while `recon`
+# becomes fp16 and feeds the same `Sub`, producing a graph onnxruntime
+# refuses to load. Converting the IO too would push fp16 buffers into
+# the C++ caller for a 9 MB saving on an opt-in feature, in the one
+# numerical regime -- gradients -- where half precision is least
+# obviously safe. Attempted rather than removed so a future converter
+# that handles it is picked up for free.
+GRAD_PRECISIONS = ("fp32", "fp16")
+# Direction matters more than scale (Adam normalizes away the latter),
+# but both are checked -- see `verify_grad`.
+GRAD_TOL_REL_RMS = 0.02
+GRAD_TOL_COSINE = 0.9995
 
 
 def sha256(path: Path) -> str:
@@ -272,18 +298,26 @@ def stamp_metadata(path: Path, props: dict) -> None:
     onnx.save(model, str(path))
 
 
-def run_onnx(path: Path, feeds: dict) -> np.ndarray:
+def run_onnx(path: Path, feeds: dict, outputs: tuple[str, ...] | None = None):
+    """Run a graph by input *position*, so the caller needs no names.
+
+    `outputs` names them on the way out and returns a dict; without it
+    the first output is returned bare, which is what the one- and
+    two-input encoder/decoder callers want.
+    """
     import onnxruntime as ort
 
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = 4  # measured best; 1 was ~5x worse
     opts.log_severity_level = 3
     sess = ort.InferenceSession(str(path), opts, providers=["CPUExecutionProvider"])
-    name = sess.get_inputs()[0].name
-    if len(sess.get_inputs()) == 1:
-        return sess.run(None, {name: feeds["primary"]})[0]
-    second = sess.get_inputs()[1].name
-    return sess.run(None, {name: feeds["primary"], second: feeds["secondary"]})[0]
+    names = [i.name for i in sess.get_inputs()]
+    keys = ("primary", "secondary", "tertiary")
+    feed = {n: feeds[k] for n, k in zip(names, keys)}
+    got = sess.run(None, feed)
+    if outputs is None:
+        return got[0]
+    return dict(zip(outputs, got))
 
 
 def psnr(a: np.ndarray, b: np.ndarray) -> float:
@@ -352,6 +386,67 @@ def verify(model, images: torch.Tensor, paths: dict, precision: str) -> dict:
     }
 
 
+def verify_grad(model, images: torch.Tensor, path: Path) -> dict:
+    """Check the exported gradient graph against `torch.autograd.grad`.
+
+    The oracle is autograd on the *real* decoder, so this checks the
+    hand-derived backward formulas and the export in one step.
+
+    Cosine similarity is reported alongside relative RMS because they
+    fail differently and the optimizer cares about both: a scale error
+    leaves the direction perfect and is absorbed by Adam's
+    normalization, while a direction error is not recoverable at any
+    step size. A graph that was subtly wrong in a way Adam papers over
+    would still be wrong, so neither is allowed to slide.
+
+    Half the probes run with a mode-A weight mask. `weights` is both a
+    forward mask and the chain-rule factor on `grad_z`; an
+    implementation that applied it in the forward pass and dropped it
+    from the backward passes an unmasked check.
+    """
+    from sstvae.models.decoder_vjp import DecoderVJP
+
+    vjp = DecoderVJP(model.decoder).eval()
+    rel_rms, cos_sim, mse_err = [], [], []
+    for i in range(images.shape[0]):
+        target = images[i : i + 1]
+        with torch.no_grad():
+            z = model.encoder(target)
+        weights = torch.ones_like(z)
+        if i % 2:  # exercise the mask on half of them
+            weights = torch.zeros_like(z)
+            weights[:, : CHANNELS_PER_GROUP] = 1.0
+            z = z * weights
+
+        z_ref = z.clone().requires_grad_(True)
+        ref_mse = torch.nn.functional.mse_loss(
+            model.decoder(z_ref * weights, weights), target)
+        (ref_grad,) = torch.autograd.grad(ref_mse, z_ref)
+        ref_grad = (ref_grad * weights).numpy().ravel()
+
+        got = run_onnx(path, {"primary": z.detach().numpy().astype(np.float32),
+                              "secondary": weights.numpy().astype(np.float32),
+                              "tertiary": target.numpy().astype(np.float32)},
+                       outputs=("recon", "grad_z", "mse"))
+        g = got["grad_z"].ravel()
+        denom = float(np.sqrt(np.mean(ref_grad ** 2))) or 1.0
+        rel_rms.append(float(np.sqrt(np.mean((g - ref_grad) ** 2))) / denom)
+        nrm = float(np.linalg.norm(g) * np.linalg.norm(ref_grad)) or 1.0
+        cos_sim.append(float(np.dot(g, ref_grad) / nrm))
+        mse_err.append(abs(float(got["mse"]) - ref_mse.item()))
+
+    worst_rel = float(np.max(rel_rms))
+    worst_cos = float(np.min(cos_sim))
+    return {
+        "artifact": path.name,
+        "grad_rel_rms": worst_rel,
+        "grad_cosine": worst_cos,
+        "mse_abs_err": float(np.max(mse_err)),
+        "mb": path.stat().st_size / 1e6,
+        "ok": worst_rel <= GRAD_TOL_REL_RMS and worst_cos >= GRAD_TOL_COSINE,
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -372,6 +467,9 @@ def main() -> int:
     ap.add_argument("--no-int8-tuning", action="store_true",
                     help="skip the per-layer int8 sensitivity search (faster, "
                          "but a worse int8 encoder -- see docs/onnx.md)")
+    ap.add_argument("--no-grad", action="store_true",
+                    help="skip the decoder-gradient artifact used by "
+                         "transmit-time latent optimization")
     ap.add_argument("--push", action="store_true",
                     help="upload the artifacts to the Hub after verifying")
     ap.add_argument("--repo", default=checkpoint.DEFAULT_REPO,
@@ -407,6 +505,7 @@ def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     results = []
+    grad_results: list[dict] = []
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -494,6 +593,7 @@ def main() -> int:
             r = verify(model, images, paths, precision)
             results.append(r)
             written.extend(paths.values())
+
             flag = "ok" if r["ok"] else "FAIL"
             print(
                 f"  {precision:>4}  {r['encoder_mb']:5.1f} + {r['decoder_mb']:4.1f} MB  "
@@ -502,6 +602,61 @@ def main() -> int:
                 f"picture {r['onnx_psnr_db']:6.2f} dB "
                 f"({r['quality_lost_db']:+.3f} vs torch)  [{flag}]"
             )
+
+        if not args.no_grad:
+            from sstvae.models.decoder_vjp import DecoderVJP
+
+            print("exporting gradient graph "
+                  "(transmit-time latent optimization)...")
+            grad_src = tmp / "decoder-grad-fp32.onnx"
+            z0 = torch.zeros(1, LATENT_CHANNELS, LATENT_H, LATENT_W)
+            export_fp32(
+                DecoderVJP(model.decoder).eval(),
+                (z0, torch.ones_like(z0), images[:1]), grad_src,
+                ["latents", "weights", "target"], ["recon", "grad_z", "mse"])
+
+            for precision in GRAD_PRECISIONS:
+                dst = args.out / f"{stem}-decoder-grad-{precision}.onnx"
+                # Anything below fp32 is optional here and must never
+                # take the run down with it: a converter that emits an
+                # invalid graph and one that emits an inaccurate graph
+                # are the same decision -- publish fp32 only.
+                try:
+                    if precision == "fp32":
+                        shutil.copyfile(grad_src, dst)
+                    else:
+                        convert_fp16(grad_src, dst)
+                    stamp_metadata(dst, {
+                        "sstvae.source_checkpoint": ckpt_path.name,
+                        "sstvae.source_sha256": ckpt_sha,
+                        "sstvae.part": "decoder-grad",
+                        "sstvae.precision": precision,
+                        "sstvae.opset": OPSET,
+                        "sstvae.torch_version": torch.__version__,
+                    })
+                    g = verify_grad(model, images, dst)
+                except Exception as e:
+                    if precision == "fp32":
+                        raise
+                    print(f"  {precision:>4}  not published: "
+                          f"{type(e).__name__}: {str(e)[:120]}")
+                    grad_results.append({"artifact": dst.name, "ok": False,
+                                         "error": f"{type(e).__name__}: {e}"})
+                    dst.unlink(missing_ok=True)
+                    continue
+
+                grad_results.append(g)
+                flag = "ok" if g["ok"] else "FAIL"
+                print(f"  {precision:>4}  {g['mb']:5.1f} MB  "
+                      f"grad rel-RMS {g['grad_rel_rms']:.2e}  "
+                      f"cos {g['grad_cosine']:.6f}  "
+                      f"mse err {g['mse_abs_err']:.2e}  [{flag}]")
+                if g["ok"]:
+                    written.append(dst)
+                else:
+                    print(f"       -> {precision} gradient graph misses "
+                          f"tolerance; not published")
+                    dst.unlink()
 
     manifest = args.out / f"{stem}-onnx-manifest.json"
     manifest.write_text(json.dumps({
@@ -515,10 +670,18 @@ def main() -> int:
             p.name: {"sha256": sha256(p), "bytes": p.stat().st_size} for p in written
         },
         "verification": results,
+        "gradient_verification": grad_results,
     }, indent=2) + "\n")
     print(f"wrote {len(written)} artifact(s) + manifest to {args.out}/")
 
+    # An fp32 gradient failure IS fatal -- unlike fp16, which is
+    # optional, fp32 failing means the hand-derived backward or the
+    # export is wrong, and every other artifact in this run came off the
+    # same checkpoint.
     failed = [r["precision"] for r in results if not r["ok"]]
+    failed += [f"decoder-grad-{g['artifact'].split('-')[-1][:-5]}"
+               for g in grad_results
+               if not g["ok"] and g["artifact"].endswith("fp32.onnx")]
     if failed:
         print(f"\nFAILED verification: {', '.join(failed)} -- nothing pushed",
               file=sys.stderr)

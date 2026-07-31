@@ -34,6 +34,24 @@ target_link_libraries(test_rx_engine PRIVATE sstvae_core)
 target_include_directories(test_rx_engine PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME rx_engine COMMAND test_rx_engine)
 
+# The latent optimizer's decisions, with a stub gradient in place of the
+# ONNX graph -- so the loop is covered in every build, including
+# --no-codec. The gradient itself has an oracle (torch.autograd, checked
+# at export time); the loop's choices do not.
+add_executable(test_optimize test_optimize.cpp)
+target_link_libraries(test_optimize PRIVATE sstvae_core)
+target_include_directories(test_optimize PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME optimize COMMAND test_optimize)
+
+# Speculative optimization's coordination: the generation counter, the
+# deadline policy, and the staleness rule that keeps a superseded
+# picture off the air. Latch-driven, so nothing here waits on a clock.
+add_executable(test_speculative test_speculative.cpp)
+target_link_libraries(test_speculative PRIVATE sstvae_core)
+target_include_directories(test_speculative PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME speculative COMMAND test_speculative)
+set_tests_properties(speculative PROPERTIES TIMEOUT 180)
+
 # The transmit sequence, with stub encoder/player/PTT -- so the "PTT
 # always comes back down" guarantee is checked without a radio.
 add_executable(test_tx_engine test_tx_engine.cpp)
