@@ -18,6 +18,7 @@
 #include <QMediaDevices>
 #include <QObject>
 #include <QThread>
+#include <QTimer>
 
 #include "dsp/dsp.hpp"
 
@@ -311,36 +312,131 @@ std::uint64_t InputStream::samples_captured() const { return impl_->worker->capt
 
 namespace {
 
-// Push `data` into `io`, pacing on `bytesFree`. True if it all went.
-bool write_all(QIODevice* io, QAudioSink& sink, const std::vector<std::byte>& data,
-               qsizetype frame_bytes, const std::function<void(double)>& on_progress,
-               const std::function<bool()>& should_stop, Clock::time_point deadline) {
-    const auto total = static_cast<qsizetype>(data.size());
-    qsizetype pos = 0;
-    while (pos < total) {
-        if (should_stop && should_stop()) return false;
-        if (Clock::now() > deadline) return false;
+// Lives on its own thread, like CaptureWorker: on Windows, QAudioSink's
+// WASAPI backend needs an event loop pumped on the thread that owns the
+// sink to actually move written bytes to the device -- push mode still
+// relies on timer-driven bookkeeping internally. Without one, write()
+// happily queues into the sink's buffer and nothing ever drains, which
+// reads as total silence (no meter deflection, nothing on the monitor)
+// until the stream is torn down, at which point the buffered tail
+// escapes in one burst. That is exactly what a plain std::thread with no
+// event loop -- which is what TxEngine calls this from -- produces.
+// PulseAudio/PipeWire/CoreAudio service the stream from their own native
+// thread and never showed it, which is why the loopback shakedown never
+// caught it.
+class PlaybackWorker : public QObject {
+public:
+    PlaybackWorker(QAudioDevice device, std::vector<std::byte> data, QAudioFormat fmt,
+                   qsizetype frame_bytes, std::function<void(double)> on_progress,
+                   std::function<bool()> should_stop, Report on_error)
+        : device_(std::move(device)),
+          data_(std::move(data)),
+          fmt_(fmt),
+          frame_bytes_(frame_bytes),
+          on_progress_(std::move(on_progress)),
+          should_stop_(std::move(should_stop)),
+          report_(std::move(on_error)),
+          timer_(this) {}
 
-        const qsizetype free = sink.bytesFree();
-        // Whole frames only; a partial frame would desync the stream.
-        const qsizetype chunk = free > 0 ? (std::min(free, total - pos) / frame_bytes) *
-                                               frame_bytes
-                                         : 0;
-        if (chunk <= 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            continue;
+    // Called on the playback thread once its event loop is running.
+    void start() {
+        sink_ = std::make_unique<QAudioSink>(device_, fmt_);
+        sink_->setBufferSize(static_cast<qsizetype>(BUFFER_SECONDS * fmt_.sampleRate() *
+                                                     fmt_.channelCount() *
+                                                     fmt_.bytesPerSample()));
+        io_ = sink_->start();
+        if (io_ == nullptr) {
+            if (report_) {
+                report_("could not start playback on \"" + to_std(device_.description()) +
+                        "\"");
+            }
+            finish(false);
+            return;
         }
-        const qsizetype written =
-            io->write(reinterpret_cast<const char*>(data.data() + pos), chunk);
-        if (written < 0) return false;
-        pos += written;
-        if (on_progress) {
-            on_progress(std::min(1.0, static_cast<double>(pos) / static_cast<double>(total)));
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        connect(&timer_, &QTimer::timeout, this, &PlaybackWorker::feed);
+        timer_.start(5);
     }
-    return true;
-}
+
+    void shutdown() {
+        timer_.stop();
+        io_ = nullptr;
+        if (sink_) {
+            sink_->stop();
+            sink_.reset();
+        }
+    }
+
+    bool finished() const { return finished_.load(std::memory_order_acquire); }
+    bool succeeded() const { return success_.load(std::memory_order_relaxed); }
+
+private:
+    void finish(bool ok) {
+        timer_.stop();
+        success_.store(ok, std::memory_order_relaxed);
+        finished_.store(true, std::memory_order_release);
+    }
+
+    void feed() {
+        if (should_stop_ && should_stop_()) {
+            finish(false);
+            return;
+        }
+
+        if (phase_ == Phase::Writing) {
+            const auto total = static_cast<qsizetype>(data_.size());
+            const qsizetype free = sink_->bytesFree();
+            // Whole frames only; a partial frame would desync the stream.
+            const qsizetype chunk =
+                free > 0 ? (std::min(free, total - pos_) / frame_bytes_) * frame_bytes_ : 0;
+            if (chunk > 0) {
+                const qsizetype written =
+                    io_->write(reinterpret_cast<const char*>(data_.data() + pos_), chunk);
+                if (written < 0) {
+                    finish(false);
+                    return;
+                }
+                pos_ += written;
+                if (on_progress_) {
+                    on_progress_(
+                        std::min(1.0, static_cast<double>(pos_) / static_cast<double>(total)));
+                }
+            }
+            if (pos_ >= total) {
+                // Let the device drain what is still buffered, or the
+                // tail of the transmission is cut off mid-picture.
+                phase_ = Phase::Draining;
+                drain_deadline_ = Clock::now() + std::chrono::duration_cast<Clock::duration>(
+                                                     std::chrono::duration<double>(
+                                                         BUFFER_SECONDS + 1.0));
+            }
+            return;
+        }
+
+        if (sink_->bytesFree() >= sink_->bufferSize() || Clock::now() >= drain_deadline_) {
+            finish(true);
+        }
+    }
+
+    QAudioDevice device_;
+    std::vector<std::byte> data_;
+    QAudioFormat fmt_;
+    qsizetype frame_bytes_;
+    std::function<void(double)> on_progress_;
+    std::function<bool()> should_stop_;
+    Report report_;
+
+    std::unique_ptr<QAudioSink> sink_;
+    QIODevice* io_ = nullptr;
+    QTimer timer_;
+    qsizetype pos_ = 0;
+
+    enum class Phase { Writing, Draining };
+    Phase phase_ = Phase::Writing;
+    Clock::time_point drain_deadline_;
+
+    std::atomic<bool> success_{false};
+    std::atomic<bool> finished_{false};
+};
 
 }  // namespace
 
@@ -368,45 +464,37 @@ bool play(const std::string& device_name, std::span<const double> samples, int s
     }
 
     const std::vector<std::byte> buf = mono_to_bytes(x, *sf, fmt.channelCount());
-
-    QAudioSink sink(device, fmt);
-    sink.setBufferSize(static_cast<qsizetype>(BUFFER_SECONDS * rate * fmt.channelCount() *
-                                              fmt.bytesPerSample()));
-    QIODevice* io = sink.start();
-    if (io == nullptr) {
-        throw std::runtime_error("could not start playback on \"" +
-                                 to_std(device.description()) + "\"");
-    }
     const auto frame_bytes =
         static_cast<qsizetype>(std::max(1, fmt.channelCount() * fmt.bytesPerSample()));
 
     // A generous ceiling so a wedged device cannot block transmit
     // forever. TxEngine's watchdog is the real backstop; this keeps the
     // ordinary case from depending on it.
+    const double budget_s =
+        static_cast<double>(x.size()) / std::max(rate, 1) + 30.0 + BUFFER_SECONDS;
+
+    QThread thread;
+    auto worker = std::make_unique<PlaybackWorker>(device, buf, fmt, frame_bytes, on_progress,
+                                                    should_stop, on_error);
+    worker->moveToThread(&thread);
+    QObject::connect(&thread, &QThread::started, worker.get(), &PlaybackWorker::start);
+    thread.start();
+
     const Clock::time_point deadline =
-        Clock::now() + std::chrono::duration_cast<Clock::duration>(
-                           std::chrono::duration<double>(
-                               static_cast<double>(x.size()) / std::max(rate, 1) + 30.0));
-
-    struct StopSink {
-        QAudioSink* sink;
-        ~StopSink() { sink->stop(); }
-    } stop_sink{&sink};
-
-    const bool done =
-        write_all(io, sink, buf, frame_bytes, on_progress, should_stop, deadline);
-    if (!done) return false;
-
-    // Let the device drain what is still buffered, or the tail of the
-    // transmission is cut off mid-picture.
-    const Clock::time_point drain_until =
-        Clock::now() + std::chrono::duration_cast<Clock::duration>(
-                           std::chrono::duration<double>(BUFFER_SECONDS + 1.0));
-    while (sink.bytesFree() < sink.bufferSize() && Clock::now() < drain_until) {
-        if (should_stop && should_stop()) return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        Clock::now() +
+        std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(budget_s));
+    while (!worker->finished() && Clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    return true;
+
+    // Shut the sink down *on its own thread*, same reasoning as
+    // InputStream::stop(): QAudioSink is not thread-affine by accident.
+    PlaybackWorker* w = worker.get();
+    QMetaObject::invokeMethod(w, [w] { w->shutdown(); }, Qt::BlockingQueuedConnection);
+    thread.quit();
+    thread.wait();
+
+    return worker->finished() && worker->succeeded();
 }
 
 }  // namespace sstvae::audio::qt

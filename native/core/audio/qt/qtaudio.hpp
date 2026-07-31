@@ -103,9 +103,16 @@ private:
 // Matches `tx::Player`, so it drops into `TxEngine`'s seam unchanged --
 // which means the PTT guarantee is unaffected by which player is in use.
 //
-// Push mode, with explicit writes paced on `bytesFree`: the transmit
-// engine calls this from a worker thread that has no event loop, so
-// nothing would deliver a pull-mode signal.
+// **Runs its own QThread with its own event loop**, like InputStream.
+// Push mode with explicit writes paced on `bytesFree`, same as before,
+// but on Windows the WASAPI backend still needs an event loop pumped on
+// the owning thread to actually move written bytes to the device --
+// without one, write() queues into the sink's buffer and nothing drains,
+// which reads as total silence until the stream is torn down and the
+// buffered tail escapes in one burst. TxEngine calls this from a plain
+// std::thread with no event loop, which is exactly the thread that hit
+// this; PulseAudio/PipeWire/CoreAudio service the stream from their own
+// native thread and never showed it.
 //
 // Resamples up front rather than per chunk. Unlike capture the whole
 // waveform is in hand, so one clean conversion avoids polyphase edge
