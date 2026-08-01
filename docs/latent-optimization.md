@@ -594,9 +594,11 @@ of which fail in ways that still produce a picture:
   `{stem}-{part}-{precision}` is right, substituting into the given
   name is not, because the gradient sibling of an fp16 encoder is fp32.
 
-`GRAD_REVISIONS` exists because the default is still v2, which predates
-the artifact: `--optimize` without `--model` explains that in a sentence
-instead of 404-ing on a filename the operator has never seen.
+`GRAD_REVISIONS` existed because the default was still v2, which
+predates the artifact. **The default is v3 as of 2026-07-31**, so
+`--optimize` needs no `--model` at all; the guard stays for the next
+revision that ships without a gradient graph, and keeps that case a
+sentence rather than a 404 on a filename the operator has never seen.
 
 ### 4. Port the loop to C++ — **DONE 2026-07-31**
 
@@ -725,6 +727,26 @@ three of which already existed:
   than blocking, because nothing on the GUI thread may block. When the
   feature is off, `ready()` is true immediately and the wait costs
   nothing.
+
+**The setting takes effect on OK, not at the next edit** (Andrew,
+2026-07-31). `TransmitPanel::sync_from_config` is called from
+`MainWindow::open_settings` beside the receive panel's equivalent:
+turning it on starts a run for what is already composed, and turning it
+off destroys the optimizer, which *is* the discard — there is nowhere
+else a refined latent is held, and `send` then falls through to the
+plain encoder exactly as it did before the feature existed. A stale
+"Picture refined: +2.4 dB" is cleared at the same time, because it
+would otherwise describe something that is no longer what would be
+sent.
+
+The same call is made from `on_model_loaded`, since refinement needs a
+codec to start from: a run that could not be armed at startup, or after
+a checkpoint change, is armed when the model arrives rather than
+waiting for the operator to touch something.
+
+Switching it off while a send is waiting on it stops the wait and
+returns the button rather than transmitting: the settings dialog is not
+somewhere anyone expects to trigger a transmission.
 
 **Send commits to the composition that was on screen when it was
 pressed** (Andrew, 2026-07-31), so an edit arriving during the

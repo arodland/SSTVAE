@@ -125,6 +125,10 @@ void MainWindow::on_model_loaded() {
         return;
     }
     model_label_->setText(tr("Model ready"));
+    // Refinement needs a codec to start from, so a run that could not
+    // be armed at startup (or after a checkpoint change) is armed here
+    // rather than waiting for the operator to edit something.
+    tx_panel_->sync_from_config();
 }
 
 void MainWindow::open_settings() {
@@ -142,6 +146,10 @@ void MainWindow::open_settings() {
     state_->save_config();
     update_station_label();
     rx_panel_->sync_from_config();
+    // Picture refinement can be switched on or off here, and either way
+    // it has to take effect now: on, and a run starts for what is
+    // already composed; off, and any refined latents are discarded.
+    tx_panel_->sync_from_config();
     state_->connect_rig();
 
     if (state_->config().model_path != previous_model ||

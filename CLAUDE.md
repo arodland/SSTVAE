@@ -1265,7 +1265,11 @@ move, which the debounce absorbs, and deliberately *not* by `select()`
 is exactly what the app always did. Send polls on a `QTimer` rather
 than blocking, and **commits to the composition as it was at the
 click**: an edit during the wait or the transmission is deferred to the
-next send. That is not just a UX preference — it keeps the generation
+next send. `sync_from_config` applies the setting **on OK rather than
+at the next edit**, and is also called from `on_model_loaded` because
+refinement needs a codec to start from; turning it off destroys the
+optimizer, which *is* how refined latents are discarded — nothing else
+holds any. That is not just a UX preference — it keeps the generation
 still while a send is committed, which is what makes the latents in
 flight still describe the picture going out. Note `transmit.optimize` was added to
 `sstvae/gui/settings.py` too although that GUI is frozen: the two must

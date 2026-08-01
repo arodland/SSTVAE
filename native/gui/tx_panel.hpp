@@ -61,6 +61,10 @@ public:
 
 public slots:
     void send();
+    // The settings dialog was accepted, or the model finished loading.
+    // Both can turn refinement on or off underneath us, and both must
+    // take effect at once rather than at the next edit.
+    void sync_from_config();
     // Re-arm speculative optimization for the current composition.
     // Cheap and idempotent: the debounce inside `Speculative` is what
     // keeps a drag from starting a run per mouse move.

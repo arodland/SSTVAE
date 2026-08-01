@@ -94,11 +94,42 @@ TransmitPanel::~TransmitPanel() {
     if (thread_.joinable()) thread_.join();
 }
 
+void TransmitPanel::sync_from_config() {
+    // Turning refinement off must take effect immediately, including
+    // dropping any refined latents already in hand: destroying the
+    // optimizer discards them, and `send` then falls through to the
+    // plain encoder exactly as it did before the feature existed.
+    // Turning it on starts a run for the current composition rather
+    // than waiting for the operator to touch something.
+    rebuild_optimizer();
+}
+
 void TransmitPanel::rebuild_optimizer() {
+    const bool was_running = optimizer_ != nullptr;
     optimizer_.reset();
-    if (!app_->config().transmit.optimize) return;
+
+    if (awaiting_optimizer_) {
+        // A send was waiting on a refinement that no longer exists (or
+        // is being restarted). Stop waiting and hand the operator the
+        // button back rather than silently sending something they did
+        // not ask for -- the settings dialog is not a place anyone
+        // expects to trigger a transmission.
+        wait_timer_->stop();
+        awaiting_optimizer_ = false;
+        send_picture_.reset();
+        send_button_->setEnabled(true);
+        progress_->setRange(0, 100);
+        progress_->setValue(0);
+    }
+
+    if (!app_->config().transmit.optimize) {
+        // Clear a stale "Picture refined: +2.4 dB" that no longer
+        // describes what would be sent.
+        if (was_running) status_->clear();
+        return;
+    }
     codec::OnnxCodec* model = app_->model();
-    if (model == nullptr) return;  // retried when a picture is next scheduled
+    if (model == nullptr) return;  // armed by modelLoaded, or by the next edit
 
     optimize::SpeculativeConfig cfg;
     const std::string model_path = app_->config().model_path;

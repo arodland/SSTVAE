@@ -53,6 +53,9 @@ sstvae::settings::Config demo_config() {
     config.rig.enabled = true;
     config.rig.device = "/dev/ttyUSB0";
     config.rig.baud = 38400;
+    // On, so the transmit shot exercises the refinement wiring as well
+    // as showing the control in its non-default state.
+    config.transmit.optimize = true;
     return config;
 }
 
