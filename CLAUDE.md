@@ -12,7 +12,8 @@ rationale lives in the plan history.
   the app's transmit→receive loopback. Run it after touching `sstvae/rx/`.
 - Native port: `tools/build_native.sh --test` (builds `native/`, runs
   `ctest` and `pytest --native`). See "The native port" below.
-- Run the app: `uv run sstvae-gui` (needs `uv sync --extra gui`)
+- Run the app: `tools/build_native.sh` then `native/build/sstvae-gui`
+  (the app is C++; there is no Python GUI any more)
 - Smoke-train: `python scripts/train.py --smoke --out /tmp/smoke`
 - Full pipeline check: `sstvae_encode.py` → `sstvae_simulate.py` → `sstvae_decode.py`
 
@@ -21,11 +22,11 @@ rationale lives in the plan history.
 Both of these exercise the *real* code paths, which is the point — the
 audio and rig bugs found so far were all invisible to unit tests.
 
-- **Rig control:** run a dummy `rigctld` on an ephemeral port
-  (`rigctld -m 1 -t <port>`) and point the app's rig settings at it. Model
-  1 is Hamlib's dummy rig, so PTT, frequency readback and the whole
-  `gui/rig_controller.py` threading model can be driven for real without
-  a radio attached.
+- **Rig control:** set the app's rig model to **1**, Hamlib's dummy rig,
+  and PTT, frequency readback and the whole `RigController` threading
+  model can be driven for real without a radio attached. Model **2**
+  (NET rigctl) against a `rigctld -m 1 -t <port>` exercises the shared-
+  radio path the same way.
 - **Audio loopback:** a null sink plus a *remapped* monitor, because Qt
   does not enumerate monitor sources:
 
@@ -127,21 +128,36 @@ audio and rig bugs found so far were all invisible to unit tests.
   are pure reshape, so any tolerance would be hiding something). The
   send/receive path must import this one, never `models`.
 
-## The application
+## The engines
 
-**`sstvae/gui/` is frozen (2026-07-29): bug fixes only, no new
-features.** The native app has reached parity, so anything new goes
-there instead. It is not deleted yet — that happens in the same change
-that packages the native app (`docs/native-app.md` decision 1, amended),
-because until then the only way to run the native app is to build C++,
-Qt and Hamlib from source. Freezing rather than deleting is what keeps
-one GUI in development without leaving operators with nothing
-installable. Everything below still describes live code and is still
-the reference for the native port.
+**`sstvae/gui/` was deleted on 2026-08-01, and `sstvae/rig/` with it.**
+The desktop application is `native/` — see "The native port". The
+PySide6 GUI was frozen at parity (2026-07-29) and removed once CI was
+publishing an installable build for all five platforms, one step ahead
+of the signed release `docs/native-app.md` decision 1 originally named:
+signing is an external round-trip of unknown length, and the condition
+the amendment actually cared about — that an operator can get a working
+app without building Qt and Hamlib from source — was already met by the
+CI artifacts. `sstvae/rig/` (the rigctld TCP client) went because the
+GUI was its only consumer; the native app links libhamlib in-process.
 
-`sstvae/gui/` (PySide6) on top of headless, Qt-free engines. Nothing
-below `sstvae/gui/` may import Qt; nothing in `sstvae/overlay/` may
-either, so overlays stay renderable from the command line.
+Gone with them: the `gui` extra, the `sstvae-gui` console script, and
+nine test modules that only drove widgets. Two test files were
+**rewritten rather than deleted**, because they used `sstvae/gui/` as
+the *oracle* for the C++ port rather than testing it:
+`tests/test_native_settings.py` now drives the C++ reader from a
+fixture in which no field holds its default — a dropped field comes
+back as its default, and no default appears in the fixture, so it
+cannot survive — plus a guard test that fails when a setting is added
+to the C++ and not to the fixture; and three audio parity tests in
+`tests/test_native_parity.py` restate `bytes_to_mono` and
+`match_device` in numpy, which is what the playback-direction test in
+that file always did.
+
+What remains is the Qt-free layer the GUI sat on, still live, still
+used by the CLIs, and still the reference the native port is checked
+against. Nothing in it may import Qt — the native side's equivalent
+rule is enforced by `tools/check_layering.py`.
 
 - `sstvae/rx/` — the live reception state machine, extracted from
   `sstvae_listen.py` (which is now just its CLI front end). `engine.py`
@@ -150,8 +166,8 @@ either, so overlays stay renderable from the command line.
   load-bearing and run `pytest -m slow` after touching it. Two seams
   were added: an `RxConfig` in place of the argparse namespace, and a
   `sink` that receives finished receptions. **Saving is the sink's job,
-  not the loop's**, because the GUI's autosave checkbox may hold a
-  picture for the Save button instead of writing it. `ringbuffer.py`
+  not the loop's**, because an autosave checkbox may hold a picture for
+  a Save button instead of writing it. `ringbuffer.py`
   adds `tail()` (cheap slice for the ~20 fps waterfall; `snapshot()`
   copies all 130 s) and `clear()`.
 - `sstvae/tx/engine.py` — encode → modulate → PTT → play → unkey.
@@ -164,34 +180,7 @@ either, so overlays stay renderable from the command line.
 - `sstvae/audio.py` — device enumeration and stream opening, both
   directions, with the 8 kHz-rejected → native-rate + `resample_poly`
   fallback. Imports `sounddevice` lazily so the module works with no
-  PortAudio installed (the settings dialog needs to *report* that).
-- `sstvae/rig/rigctld.py` — TCP client for Hamlib's `rigctld`. Chosen
-  over the SWIG `Hamlib` bindings because those are installed in the
-  system site-packages and a virtualenv cannot see them. A Hamlib error
-  code raises but keeps the connection; a dead socket redials once.
-  Every method is **blocking socket I/O** — see `gui/rig_controller.py`.
-  `list_models()` parses `rigctld -l` (~3 ms, 321 rows) to populate the
-  settings picker, and is the one place that surfaces "Hamlib isn't
-  installed" at configuration time rather than at the first keying.
-  It **slices fixed-width columns using offsets taken from the header
-  line** — splitting on whitespace runs looks fine and silently drops
-  rows, because fields contain single spaces ("N2ADR James Ahlstrom")
-  and at least one Model fills its column exactly, leaving a single
-  space before Version. Asks `rigctld`, not `rigctl`, so the list comes
-  from the same binary `spawn_rigctld` runs.
-- `sstvae/gui/rig_controller.py` — all rigctld I/O, on its own thread.
-  **Nothing on the GUI thread may call the rig.** A rigctld that is up
-  but not answering costs the socket timeout on the recv *and* again on
-  the retry, so polling from a `QTimer` froze the window for seconds
-  every interval. Three things keep it that way, all regression-tested
-  in `tests/test_rig_controller.py` against a server that accepts and
-  never replies: the poll loop is a worker thread with exponential
-  backoff; `stop()` never joins or closes inline (it calls
-  `RigctldClient.interrupt()`, which shuts the socket down *without* the
-  lock the stuck worker is holding, then reaps on a throwaway thread);
-  and PTT gets a **separate client**, so keying never queues behind a
-  poll that is mid-timeout. The worker takes its stop event and client
-  as arguments so a superseded one cannot publish stale state.
+  PortAudio installed (a settings UI needs to *report* that).
 - `sstvae/overlay/` — `model.py` is the document, `render.py` draws it
   with PIL. Designed so *templates* are a later UI-only change:
   coordinates are normalized 0..1 (resolution-independent) and
@@ -199,13 +188,14 @@ either, so overlays stay renderable from the command line.
   rather than a pasted bitmap, so a saved template keeps meaning "the
   most recent received picture". `item_bbox` is shared with the editor
   so selection handles can't drift from what is drawn.
-- `sstvae/gui/settings.py` — JSON config (atomic write; unknown keys
-  ignored, never fatal). Importable without Qt.
-- The editor's preview **is** `overlay.render()`'s output, not a
-  Qt-drawn imitation, so composition is WYSIWYG by construction.
-- Half duplex: `transmitStarted` suspends receive, and resuming
-  allocates a fresh ring buffer so the tail of our own transmission
-  isn't decoded back as a reception.
+
+Two rules the deleted GUI established, which the native app inherits
+and which are the reason its panels look the way they do: a composition
+preview **is** `overlay.render()`'s output rather than a toolkit-drawn
+imitation, so what you arrange is what goes on the air by
+construction; and half duplex means transmitting suspends receive, with
+a **fresh ring buffer** on resume so the tail of our own transmission
+isn't decoded back as a reception.
 
 ## The native port
 
@@ -725,14 +715,14 @@ was rethrown unchanged silently dropped it, which is a caught
 regression with a test of its own.
 
 **Rig control is a re-derivation, not a port, and the design doc says
-why.** `sstvae/rig/rigctld.py` talks to a `rigctld` child over a socket
-because the SWIG Hamlib bindings live in the system site-packages where
-a virtualenv cannot see them — a *Python packaging* constraint with no
-C++ equivalent. So `native/core/rig/` links `libhamlib` in-process and
-the socket client, the redial logic, the `rigctld` spawner and the
-`rigctld -l` column parser are deleted rather than translated
-(`rig_list_foreach` gives a struct, which cannot have the
-silently-dropped-row bug that parser is flagged for below). Sharing a
+why.** The deleted `sstvae/rig/rigctld.py` talked to a `rigctld` child
+over a socket because the SWIG Hamlib bindings live in the system
+site-packages where a virtualenv cannot see them — a *Python packaging*
+constraint with no C++ equivalent. So `native/core/rig/` links
+`libhamlib` in-process and the socket client, the redial logic, the
+`rigctld` spawner and the `rigctld -l` column parser were never
+translated (`rig_list_foreach` gives a struct, which cannot have the
+silently-dropped-row bug that parser had). Sharing a
 radio with WSJT-X still works: Hamlib **model 2** speaks the rigctld
 protocol as a *client*, so it is one more entry in the same picker.
 What is given up is crash isolation — a backend segfault now takes the
@@ -959,16 +949,18 @@ need when `--native` fails and you want to know *where*.
   against a 0.43 ms snapshot; the new one, 0.01 ms.
   `tests/test_rx_ringbuffer.py` guards this on the p95 of write latency,
   self-calibrated against the copy cost.
-- **Audio defaults to QtMultimedia (`gui/qtaudio.py`), not PortAudio**,
-  and the reason is a measured bug rather than taste. `gui/audio_backend.py`
-  dispatches on `audio.backend` (`"qt"` | `"portaudio"`) for capture,
-  playback and device enumeration; PortAudio is kept because **Qt does
-  not list PulseAudio/PipeWire *monitor* sources**, so a loopback needs
-  `module-remap-source` to be visible to Qt while PortAudio sees monitors
-  directly.
+- **The app defaults to QtMultimedia, not PortAudio**, and the reason is
+  a measured bug rather than taste. The dispatch lived in the deleted
+  `gui/audio_backend.py` and now lives in `native/core/audio/`;
+  `audio.backend` (`"qt"` | `"portaudio"`) is still the config key.
+  PortAudio is kept because **Qt does not list PulseAudio/PipeWire
+  *monitor* sources**, so a loopback needs `module-remap-source` to be
+  visible to Qt while PortAudio sees monitors directly. `sstvae/audio.py`
+  is the surviving PortAudio path and is what `sstvae_listen.py` uses,
+  so the bullet below still applies to it.
 - **A PortAudio callback written in Python sits on the host's realtime
   thread and needs the GIL** — that was the root cause of the worst bug
-  found so far. When the Qt thread holds the GIL (converting a 640x480
+  found so far. When another thread holds the GIL (converting a 640x480
   preview to a QPixmap and painting it, right after every decode poll),
   the callback cannot run. PulseAudio and PipeWire's own device have a
   big software buffer and absorb it invisibly. **JACK has none**: a
@@ -996,16 +988,6 @@ need when `--native` fails and you want to know *where*.
     forced the move to QtMultimedia rather than a PortAudio rework.
     `audio.warn_if_fragile_host` still warns if the PortAudio backend is
     used with a JACK device.
-- **`pyside6-addons` is now a dependency, for QtMultimedia only.** This
-  reverses the earlier deliberate choice of `essentials`: measured
-  232 MB → 648 MB installed, of which **195 MB is a copy of Chromium**
-  (QtWebEngine) that nothing here loads. Accepted 2026-07-28 — a silently
-  mangled picture is worse than a large download. Revisit if PySide6 ever
-  ships QtMultimedia without WebEngine.
-- **PySide6 cannot marshal `QAudio::State`** into any Python slot in this
-  build, not even a `*args` lambda, so `QAudioSource.stateChanged` is
-  deliberately not connected; `qtaudio` polls `error()` from the read path
-  instead. `QAudioSource` also has no `errorOccurred` signal in PySide6.
 - **Capture opens at the device's *own* rate and resamples in our code,
   never by asking the device for 8 kHz.** Almost nothing is natively
   8 kHz, so requesting it doesn't avoid a resampler — it delegates to
@@ -1079,13 +1061,14 @@ need when `--native` fails and you want to know *where*.
   by `scripts/export_onnx.py` and published as
   `v1-{encoder,decoder}-{fp32,fp16,int8}.onnx`.
 - `docs/native-app.md` — design for the native C++/Qt 6
-  desktop app replacing `sstvae/gui/`, which is **frozen** (bug fixes
-  only) when the native one reaches parity and **deleted** when it is
-  packaged — amended 2026-07-29 from "deleted at parity". Between those
-  points the only way to run the native app is to build C++, Qt and
-  Hamlib from source, so deleting the Python GUI at parity would leave
+  desktop app that **replaced** `sstvae/gui/`. That GUI was frozen at
+  parity (2026-07-29) and deleted 2026-08-01, one step ahead of the
+  signed release the amended decision named — see "The engines". The
+  amendment's reasoning is still the interesting part: between parity
+  and packaging the only way to run the native app was to build C++, Qt
+  and Hamlib from source, so deleting at parity would have left
   operators with no app at all in order to remove code that costs
-  nothing to keep. Freezing is what keeps the duplicated-maintenance
+  nothing to keep. Freezing is what kept the duplicated-maintenance
   cost bounded meanwhile. Depends on `docs/onnx.md` landing first —
   the app cannot embed torch. Read it before assuming the motivation is
   download size: after ONNX, frozen Python is already in the same size
@@ -1152,16 +1135,15 @@ with the real modem, but does not simulate/train through beacon content
 itself (synthesizes random BPSK there just for realistic PAPR
 statistics).
 
-Desktop app implemented twice. The Python one (`sstvae-gui`) is
-**frozen** — see "The application". The native one (`native/`,
-Phases 0-3) has reached parity and passed the loopback shakedown in all
-three directions, including both cross-implementation ones. Overlay
-*templates* are deliberately not implemented in either, but the document
-format is built for them (see `sstvae/overlay/` and
-`native/core/overlay/`).
+Desktop app: **one implementation**, `native/` (Phases 0-3), which
+reached parity, passed the loopback shakedown in all three directions
+including both cross-implementation ones, and replaced the PySide6 GUI
+on 2026-08-01 — see "The engines". Overlay *templates* are deliberately
+not implemented, but the document format is built for them (see
+`sstvae/overlay/` and `native/core/overlay/`).
 
 ONNX runtime path complete: the codec is onnxruntime, torch is
-training-only, and `cli`/`listen`/`gui` install ~263 MB instead of
+training-only, and `cli`/`listen` install ~263 MB instead of
 ~555 MB. The published codec is **v3** (cc12), and `DEFAULT_FILE` /
 `DEFAULT_REVISION` point at it in both implementations: six codec
 artifacts plus `v3-decoder-grad-fp32.onnx` for the optimizer. The app
@@ -1177,7 +1159,9 @@ the PTT timing against a physical radio. For the native app: Phase 4 is
 sequenced in five steps and the first three are done — CI builds five
 packages and five installers (AppImage, `.dmg`, NSIS setup) on every
 push. Remaining there: **signing** on macOS and Windows, then publishing
-a real release, which is what triggers deleting `sstvae/gui/`. See
+a real release. Until that lands the only downloads are CI artifacts,
+which need a GitHub login and warn about an unidentified developer;
+the README says so plainly rather than implying a release exists. See
 `docs/native-app.md` for the C++/Qt rewrite design (Phases 0-3 done,
 Phase 4 steps 1-3 done) and `docs/todo.md` for quantisation tolerance
 as a future training constraint.
@@ -1271,7 +1255,11 @@ refinement needs a codec to start from; turning it off destroys the
 optimizer, which *is* how refined latents are discarded — nothing else
 holds any. That is not just a UX preference — it keeps the generation
 still while a send is committed, which is what makes the latents in
-flight still describe the picture going out. Note `transmit.optimize` was added to
-`sstvae/gui/settings.py` too although that GUI is frozen: the two must
-agree about the config file or each reads the other's as a typo, which
-`tests/test_native_settings.py` checks.
+flight still describe the picture going out. `transmit.optimize` was
+mirrored into the Python GUI's settings module at the time — the two
+had to agree about the config file or each read the other's as a typo —
+which stopped mattering when that GUI was deleted. What replaced the
+check is `tests/test_native_settings.py`'s non-default fixture: a new
+setting that the reader knows and the fixture does not now fails
+`test_the_fixture_holds_no_default`, so the file's schema still cannot
+grow silently.

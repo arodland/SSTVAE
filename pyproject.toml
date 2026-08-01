@@ -26,33 +26,9 @@ listen = [
     "sounddevice>=0.4.6",
     "matplotlib>=3.7",
 ]
-# The desktop application: transmit and receive on a soundcard, rig
-# control, waterfall, overlay composition. Deliberately does not include
-# matplotlib -- the plotting window belongs to the `listen` CLI, and the
-# GUI draws its own spectrum.
-gui = [
-    "onnxruntime>=1.17",
-    "huggingface_hub>=0.20",
-    "sounddevice>=0.4.6",
-    "pyside6-essentials>=6.5",
-    # QtMultimedia lives in `addons`, and we need it: our PortAudio
-    # capture callback is Python, so it sits on the host's realtime audio
-    # thread and must take the GIL. Losing that race to the Qt thread
-    # drops audio silently -- on JACK, which has no buffer behind its
-    # period, that cost 5 dB of SNR and a mangled picture with sync
-    # intact. `QAudioSource` is pull-based over a buffered QIODevice, so
-    # the realtime side stays in Qt's C++ backend. See CLAUDE.md and
-    # docs/native-app.md.
-    #
-    # This reverses an earlier, deliberate choice to avoid `addons`, and
-    # it is expensive: measured 232 MB -> 648 MB installed, of which
-    # 195 MB is a copy of Chromium (QtWebEngine) that nothing here ever
-    # loads. Accepted on 2026-07-28 -- a silently mangled picture is
-    # worse than a large download. Revisit if PySide6 ever ships
-    # QtMultimedia without WebEngine.
-    "pyside6-addons>=6.5",
-    "platformdirs>=3.0",
-]
+# There is no `gui` extra any more. The desktop application is
+# `native/` -- a C++/Qt program, not a Python package -- and the PySide6
+# one it replaced was deleted on 2026-08-01. See docs/native-app.md.
 train = [
     "torch>=2.13.0",
     "torchvision>=0.28.0",
@@ -78,10 +54,13 @@ dev = [
     # tests check the ONNX/numpy path against torch. See [tool.uv] below
     # for why it is pinned to the CPU index.
     "torch>=2.0",
+    # The reference for the config-path convention the native app has to
+    # match (tests/test_native_settings.py). It used to arrive with the
+    # `gui` extra, which is gone; it `importorskip`s, so without it here
+    # the two tests that caught the AppData\Local/Roaming bug would
+    # quietly stop running.
+    "platformdirs>=3.0",
 ]
-
-[project.scripts]
-sstvae-gui = "sstvae.gui:main"
 
 # Nothing outside `train` needs torch at all any more. The codec runs on
 # onnxruntime (see sstvae/codec.py and docs/onnx.md) — 27 MB against

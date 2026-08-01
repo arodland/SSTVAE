@@ -71,8 +71,8 @@ def _sd():
     except Exception as e:  # ImportError, or PortAudio missing at load
         raise AudioUnavailable(
             f"sounddevice/PortAudio is not available: {e}\n"
-            "Install the GUI extra (pip install -e .[gui]) and your platform's "
-            "PortAudio library."
+            "Install the listen extra (pip install -e .[listen]) and your "
+            "platform's PortAudio library."
         ) from e
     return sd
 

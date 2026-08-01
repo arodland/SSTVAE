@@ -33,9 +33,15 @@ whole idea.
 > - **The on-air format is not frozen.** Expect incompatible changes.
 >   Two stations must run the same commit *and* the same model
 >   checkpoint to talk to each other.
-> - **It is not yet packaged.** There is a desktop app now (`sstvae-gui`,
->   with rig control), but you still install it from source, and there is
->   no integration with existing SSTV software.
+> - **There is no release download yet.** The desktop app is built and
+>   packaged for all five platforms on every push — installers and
+>   portable archives both — but the builds are not signed, so they are
+>   published as [CI
+>   artifacts](https://github.com/arodland/SSTVAE/actions/workflows/ci.yml)
+>   (which need a GitHub login to download) rather than on a releases
+>   page. Signing is the last thing between here and a real release. See
+>   [Install](#install).
+> - There is no integration with existing SSTV software.
 > - Not registered with, or coordinated with, any band-plan authority.
 >   Use it thoughtfully and identify per your licence.
 >
@@ -256,23 +262,72 @@ through at all on a poor channel.
 
 ## Install
 
-You need **Python 3.10+**. [uv](https://docs.astral.sh/uv/) is
-recommended but not required.
+**Most people want the desktop app.** It transmits, receives, keys the
+rig and remembers how it is set up, and it needs no Python at all. The
+command-line tools below are for scripting, batch work and experiments.
 
-Get the code and a model checkpoint:
+Either way, the published model is fetched on first use and cached, so
+there is nothing else to download.
+
+### The desktop application
+
+A native C++/Qt program — see [Usage](#the-desktop-application-1) for
+what it does. It is built for **Linux x86-64, Linux arm64, macOS
+(Apple Silicon and Intel) and Windows x64** on every push, as both a
+portable archive and a platform installer (AppImage, `.dmg`, NSIS
+setup).
+
+> **No releases page yet.** The builds are not code-signed, so until
+> that is sorted out the only downloads are CI artifacts, and GitHub
+> requires you to be logged in to fetch them. Open the latest green run
+> of [the CI
+> workflow](https://github.com/arodland/SSTVAE/actions/workflows/ci.yml),
+> scroll to **Artifacts**, and take the one matching your platform
+> (`sstvae-linux-x86_64`, `sstvae-macos-arm64`,
+> `sstvae-windows-x64-portable`, …) or its installer. macOS and Windows
+> will warn you that the app is from an unidentified developer, because
+> it is — that is the same missing signature.
+
+<details>
+<summary>Or build it from source</summary>
+
+You need CMake, Ninja, a C++20 compiler and **Qt 6**. Hamlib and ONNX
+Runtime are pinned and fetched by the build, so they are not
+prerequisites.
+
+```sh
+git clone https://github.com/arodland/SSTVAE
+cd SSTVAE
+cmake -S native -B native/build -G Ninja
+cmake --build native/build
+./native/build/sstvae-gui
+```
+
+On Linux, Qt's plugins `dlopen` a handful of system libraries that a
+build does not need — on Debian/Ubuntu, `libgl1-mesa-dev
+libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0
+libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0
+libxcb-xinerama0 libpulse0`. Without them the build succeeds and the
+app dies at startup.
+
+`tools/build_native.sh --test` builds the same tree and runs the test
+suites; `tools/package_app.sh` stages a runnable copy with Qt beside
+it, which is what the CI artifacts are.
+
+</details>
+
+### Command-line tools (encode / decode / simulate)
+
+These need **Python 3.10+**. [uv](https://docs.astral.sh/uv/) is
+recommended but not required.
 
 ```sh
 git clone https://github.com/arodland/SSTVAE     # or your fork/source
 cd SSTVAE
 ```
 
-The tools fetch the published model on first use and cache it, so
-there's nothing else to download.
 
-### Command-line tools (encode / decode / simulate)
-
-This is the smaller install: the codec runs on
-[ONNX Runtime](https://onnxruntime.ai/), not PyTorch.
+The codec runs on [ONNX Runtime](https://onnxruntime.ai/), not PyTorch.
 
 ```sh
 uv sync --extra cli                      # with uv
@@ -285,14 +340,6 @@ them in 53 MB where torch needs 345 MB — so `cli` and `listen` come to
 about 263 MB installed instead of ~555 MB, and the old "make sure pip
 doesn't give you the CUDA build" dance is gone. Only the `train` extra
 uses torch. See [docs/onnx.md](docs/onnx.md).
-
-The `gui` extra is larger, and deliberately so: it pulls
-`pyside6-addons` for QtMultimedia, which is what keeps our code off the
-realtime audio thread. Without it the app drops captured audio whenever
-it is busy drawing — silently, producing a noisy or mangled picture
-while sync still succeeds. Addons brings a copy of Chromium the app
-never loads, which is most of its ~400 MB; that is a poor trade on paper
-and the right one in practice.
 
 With `uv`, prefix commands with `uv run`; with pip, activate your venv
 and call `python` directly. Examples below use `uv run`.
@@ -341,14 +388,11 @@ PipeWire monitor sources, or just a microphone near the speaker.
 
 ### The desktop application
 
-```sh
-uv sync --extra gui
-uv run sstvae-gui
-```
-
-One window that transmits and receives on a soundcard, keys the rig, and
-remembers how it is set up — the alternative to stringing the
-command-line tools below together by hand.
+**Start here if you just want to send and receive pictures.** One window
+that transmits and receives on a soundcard, keys the rig, and remembers
+how it is set up — the alternative to stringing the command-line tools
+below together by hand. See [Install](#the-desktop-application) for how
+to get it.
 
 - **Receive** — waterfall with the SSTVAE band marked and an input level
   meter, the picture building up as it arrives, autosave or a Save
@@ -359,33 +403,54 @@ command-line tools below together by hand.
   the last received image onto it. The preview *is* the render, so what
   you arrange is exactly what goes on the air. Mode A/B/C with their
   durations, a progress bar, and Cancel.
-- **Rig control** — PTT and frequency readback through Hamlib's
-  `rigctld`. Point it at a daemon you are already running (shared with
-  WSJT-X or fldigi), or let the app start its own. Receive pauses while
-  you transmit, so your own signal is never decoded back as a reception.
+- **Rig control** — PTT and frequency readback through Hamlib, which is
+  bundled, so there is nothing to install. Receive pauses while you
+  transmit, so your own signal is never decoded back as a reception.
 
 Rig control is optional — leave it off and use VOX or manual PTT.
 
 <details>
 <summary>Rig control setup</summary>
 
-The app talks to `rigctld` over TCP rather than linking Hamlib
-directly, so it works with a daemon shared between programs and needs
-no Python bindings. Either start the daemon yourself:
+Settings → Rig control is modelled on WSJT-X's Radio tab, because that
+is the set of knobs a real radio needs and the one you already know:
+serial port and baud, data/stop bits, parity, handshake, forced DTR/RTS,
+PTT method (VOX/CAT/DTR/RTS) with its own port, and an optional
+USB/PKT-USB mode on connect. Everything defaults to **Default**, which
+means *leave the backend's own value alone* rather than forcing one.
 
-```sh
-rigctld -m 3073 -r /dev/ttyUSB0 -s 38400
-```
+The **Rig model** box lists every backend the bundled Hamlib supports —
+start typing any part of the name (`FT-847`, `IC-7300`) to find it — so
+you never look a number up by hand. **Test CAT** and **Test PTT** try
+the settings in front of you before you close the dialog.
 
-or tick **Start a local rigctld myself** in Settings → Rig control and
-fill in the same values. The **Rig model** box lists every backend your
-Hamlib supports — start typing any part of the name (`FT-847`,
-`IC-7300`) to find it — so you don't need to look the number up with
-`rigctl -l` yourself. If Hamlib isn't installed the box says so, and
-you can still enter a model number by hand. Two programs cannot both hold the serial port,
-so if something else already has the rig, share its daemon instead.
-`rigctld -m 1` starts Hamlib's dummy rig, which is handy for testing the
-buttons with no radio attached.
+Two programs cannot both hold the serial port, so sharing a radio means
+putting something in front of it that both can talk to — a `rigctld`
+from your own Hamlib install, or flrig. Point every program at that
+(WSJT-X calls it *Hamlib NET rigctl*; fldigi has flrig built in), and
+point this one at it too: model **2 (NET rigctl)** with the daemon's
+`host:port` as the device, or model **4 (FLRig)**. They are ordinary
+entries in the same picker, so no separate setting is involved. Model
+**1** is the dummy rig, handy for exercising the buttons with no radio
+attached.
+
+</details>
+
+<details>
+<summary>Transmit-time latent optimization</summary>
+
+Settings → Transmit has one switch, **Optimize latents before
+transmitting**. The encoder is amortized — trained to do well on
+everything — so for any *one* picture there are better inputs to the
+same decoder, and a short gradient descent finds them. Worth
+**1.4–1.8 dB** of recovered picture, and it is entirely sender-side:
+optimized latents are ordinary latents, so the receiving station needs
+no change and does not need to know.
+
+It runs speculatively, starting a moment after you stop editing, so the
+cost lands in time you were spending anyway; hitting Send early just
+takes the best result so far. See
+[docs/latent-optimization.md](docs/latent-optimization.md).
 
 </details>
 
@@ -427,8 +492,8 @@ running and a transmission whose preamble you missed still decodes in
 full; start it midway through one and you get the rest, at the reduced
 fidelity described above. `--low-cpu` trades that retrospective
 capability for much lower idle CPU — useful on a Pi.
-(This is the same reception engine the desktop app uses, without the
-window.)
+(The desktop app has its own implementation of the same state machine;
+this is the Python one, without a window.)
 
 ### Test it without a radio
 

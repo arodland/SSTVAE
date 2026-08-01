@@ -573,9 +573,9 @@ station must never pull 18 MB it has no use for.
 
 `sstvae/latent_optim.py`, torch-free: it runs the published gradient
 graph on the same onnxruntime the codec uses. `sstvae_encode.py
---optimize [SECONDS]` is the opt-in flag. `sstvae/gui/` is **frozen**,
-so this deliberately does not appear there — the native app is where it
-lands.
+--optimize [SECONDS]` is the opt-in flag. It deliberately never
+appeared in `sstvae/gui/`, which was frozen at the time and deleted on
+2026-08-01 — the native app is where it lands.
 
 Two things in `checkpoint.py` earned tests (`test_checkpoint.py`), both
 of which fail in ways that still produce a picture:

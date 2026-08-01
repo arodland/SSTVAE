@@ -275,12 +275,13 @@ FolderConfig::FolderConfig()
       template_dir((home() / "SSTVAE" / "templates").string()) {}
 
 // This mirrors `platformdirs.user_config_dir("sstvae", appauthor=False)`,
-// which is what the GUI app actually uses -- *not* the ImportError
-// fallback in `sstvae/gui/settings.py`. The two differ, and the
-// difference is easy to test against by accident: platformdirs lives in
-// the `gui` extra, so an environment installing only `[cli]` takes the
-// fallback and reports `~/.config` on every platform. Matching that
-// would put the native app's config somewhere the GUI never looks.
+// which is where the Python GUI's config actually lived -- *not* the
+// ImportError fallback that module carried. The two differ, and the
+// difference was easy to test against by accident, because platformdirs
+// was a `gui`-extra dependency: an environment installing only `[cli]`
+// took the fallback and reported `~/.config` on every platform. That is
+// why `tests/test_native_settings.py` compares against platformdirs
+// itself, which is still the reference now that the GUI is gone.
 //
 // XDG_CONFIG_HOME is honoured on macOS as well as Linux, because
 // platformdirs honours it on both. An all-whitespace value counts as
