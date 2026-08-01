@@ -195,7 +195,7 @@ def load_torch_model(path: str | None = None):
         import torch
     except ImportError as e:
         raise SystemExit(
-            "a .pt checkpoint needs torch, which the cli/listen/gui extras no "
+            "a .pt checkpoint needs torch, which the cli/listen extras no "
             "longer install — the codec runs on onnxruntime now "
             "(see docs/onnx.md).\n"
             "Either point --model at exported .onnx artifacts (or leave it "

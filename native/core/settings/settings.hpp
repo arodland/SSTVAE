@@ -1,8 +1,11 @@
 // Persistent application configuration.
 //
-// Plain structs over JSON, matching `sstvae/gui/settings.py`'s schema so
-// an existing config.json loads unchanged. Two robustness rules carry
-// over from there, both learned from config files that ate themselves:
+// Plain structs over JSON. The schema comes from the Python GUI's
+// `settings.py` (deleted 2026-08-01), so a config.json that app wrote
+// still loads -- see CONFIG_VERSION for the one section that changed
+// shape.
+// Two robustness rules carry over from there, both learned from config
+// files that ate themselves:
 //
 //  * **Writes are atomic** (temp file + rename), so losing power or
 //    filling the disk mid-save leaves the previous config intact rather

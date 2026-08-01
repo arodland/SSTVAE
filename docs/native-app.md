@@ -26,7 +26,10 @@ The **application** is rewritten. Everything else stays Python:
 `sstvae/gui/` is **deleted** when the native app is packaged (decision
 1), taking the `gui` extra and `pyside6-essentials` with it; it is
 frozen — bug fixes only — from the moment the native app reaches
-parity.
+parity. **Done 2026-08-01**, ahead of the signed release the decision
+originally named — see decision 1's second amendment. `sstvae/rig/`
+went with it: the rigctld client had no consumer left, since the native
+app links libhamlib in-process.
 `checkpoint.py` is ported rather than left behind because the native app
 fetches its own artifacts (decision 5); the Python copy stays for the
 CLIs.
@@ -895,6 +898,12 @@ app. In the same change and not as a follow-up, for the reason the
 original decision gave: a deletion deferred is a deletion that does not
 happen.
 
+**Done 2026-08-01, at step 3 rather than at this exit.** Steps 1–3
+already produce an installable build for every target; only the
+signature is missing, and waiting for it would have kept the duplicated
+GUI alive for a tail measured in external round-trips. See decision 1's
+second amendment for what was deleted and what was rewritten instead.
+
 - **Volume** — almost no Python displaced; this is nearly all new
   configuration. Small in lines, and that is exactly why it will not
   compress the way Phases 0–3 do.
@@ -999,6 +1008,33 @@ already needs the CI matrix stood up.
    goes to the native app alone. That bounds the duplicated-maintenance
    cost the original decision was written to avoid, without paying it
    with a period where nothing is installable.
+
+   **Executed 2026-08-01** (Andrew), on the amendment's own reasoning
+   rather than on its literal trigger. The trigger was a *signed*
+   installable build; signing is the only thing still outstanding, and
+   CI now publishes a portable archive and a platform installer for all
+   five targets on every push. Those are CI artifacts, so downloading
+   one needs a GitHub login and macOS and Windows will warn about an
+   unidentified developer — worse than a releases page, and far better
+   than "build Qt and Hamlib from source", which is the condition the
+   amendment was written to avoid. The README now points operators at
+   the native app and says exactly where the downloads are.
+
+   Deleted with it: `sstvae/rig/`, whose only consumer was the Python
+   GUI (the native app links libhamlib in-process, so the rigctld
+   client, its spawner and the `rigctld -l` column parser are all
+   dead), the `gui` extra, the `sstvae-gui` console script, and the
+   nine test modules that only exercised widgets. Two test files were
+   rewritten rather than deleted, because they used `sstvae/gui/`
+   modules as the *oracle* for the C++ port and the coverage was worth
+   keeping: `tests/test_native_settings.py` now drives the reader from
+   a fixture in which no field holds its default (a dropped field comes
+   back as a default, and no default appears in the fixture, so it
+   cannot survive) with a guard test that fails when a new setting is
+   added to the C++ and not to the fixture; and the three audio parity
+   tests in `tests/test_native_parity.py` restate `bytes_to_mono` and
+   `match_device` in numpy, the way the playback-direction test in the
+   same file already did.
 2. **Windows 10 and Intel Macs are supported.** Hams are conservative
    about hardware, so the floor is set by users, not by tooling
    convenience. Consequences in "Platform floor" below.

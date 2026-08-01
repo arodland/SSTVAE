@@ -13,7 +13,7 @@ decode it, falling back to the preamble-free blind path so a
 mid-transmission lock still recovers the frames that arrived before it.
 The reception state machine itself lives in `sstvae/rx/engine.py`; this
 is just its command-line front end. For a windowed version with rig
-control, a waterfall, and transmit, see `sstvae-gui`.
+control, a waterfall, and transmit, use the desktop app (`native/`).
 
 --low-cpu drops the blind fallback (and with it, retrospective
 mid-stream decoding) in exchange for much lower idle CPU use: it only

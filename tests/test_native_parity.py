@@ -1150,21 +1150,58 @@ def test_stream_resampler_matches(native, src, dst):
         i += n
 
 
+# The capture conversion, restated in numpy. This used to compare
+# against `sstvae/gui/qtaudio.py`; that module went with the Python GUI
+# (2026-08-01), so the reference is spelled out here the way
+# `test_mono_to_bytes_matches_the_reference_player` below already spelled
+# out the playback direction. Written as numpy on purpose -- the C++ is
+# hand-rolled pointer arithmetic per format, and numpy's dtype handling
+# is a genuinely independent statement of the same thing.
+_CAPTURE_FORMATS = {
+    "Float": (np.float32, 1.0, 0.0),
+    "Int16": (np.int16, 32768.0, 0.0),
+    "Int32": (np.int32, 2147483648.0, 0.0),
+    "UInt8": (np.uint8, 128.0, 128.0),
+}
+
+
+def _bytes_to_mono(raw, fmt: str, channels: int) -> np.ndarray:
+    """Raw interleaved device bytes -> mono float64 in [-1, 1]."""
+    dtype, scale, offset = _CAPTURE_FORMATS[fmt]
+    a = np.frombuffer(raw, dtype=dtype)
+    if channels > 1:
+        # Drop a trailing partial frame rather than misaligning every
+        # sample after it.
+        a = a[: len(a) // channels * channels].reshape(-1, channels)
+        a = a.mean(axis=1)
+    return (a.astype(np.float64) - offset) / scale
+
+
+def _match_device(descriptions: list[str], wanted: str | None) -> int | None:
+    """Index of the device to use, or None for "the system default".
+
+    Matching is by description rather than by an opaque device id,
+    because the id is not stable across backends and the config file has
+    to stay human-editable. Exact match wins; otherwise a *unique*
+    case-insensitive substring match, so a saved "K4 RX A" still finds
+    "K4 RX A" after the backend decorates the name.
+    """
+    if not wanted:
+        return None
+    for i, d in enumerate(descriptions):
+        if d == wanted:
+            return i
+    low = wanted.lower()
+    hits = [i for i, d in enumerate(descriptions) if low in d.lower()]
+    return hits[0] if len(hits) == 1 else None
+
+
 @pytest.mark.parametrize("fmt,dtype", [
     ("Float", np.float32), ("Int16", np.int16),
     ("Int32", np.int32), ("UInt8", np.uint8),
 ])
 @pytest.mark.parametrize("channels", [1, 2])
 def test_bytes_to_mono_matches(native, fmt, dtype, channels):
-    """Against `gui/qtaudio.py`, which is where the reference keeps this.
-
-    Note what a skip here does and does not cost: `native/tests/
-    test_audio.cpp` covers the C++ side either way, so a missing PySide6
-    loses the *comparison*, not the coverage.
-    """
-    qtaudio = pytest.importorskip(
-        "sstvae.gui.qtaudio", reason="needs PySide6 (the gui extra)")
-
     rng = np.random.default_rng(3)
     if dtype is np.float32:
         raw = rng.uniform(-1.2, 1.2, 40 * channels).astype(dtype)
@@ -1173,7 +1210,7 @@ def test_bytes_to_mono_matches(native, fmt, dtype, channels):
         raw = rng.integers(info.min, info.max, 40 * channels, endpoint=True).astype(dtype)
     blob = raw.tobytes()
 
-    want = qtaudio.bytes_to_mono(blob, fmt, channels)
+    want = _bytes_to_mono(blob, fmt, channels)
     got = native.audio.bytes_to_mono(blob, fmt, channels)
     assert len(got) == len(want)
 
@@ -1191,11 +1228,8 @@ def test_bytes_to_mono_matches(native, fmt, dtype, channels):
 def test_bytes_to_mono_drops_a_partial_frame_the_same_way(native):
     """A short read from the device must not misalign everything after
     it, and both sides must agree on where the boundary is."""
-    qtaudio = pytest.importorskip(
-        "sstvae.gui.qtaudio", reason="needs PySide6 (the gui extra)")
-
     raw = np.arange(9, dtype=np.int16).tobytes()  # 4.5 stereo frames
-    want = qtaudio.bytes_to_mono(raw, "Int16", 2)
+    want = _bytes_to_mono(raw, "Int16", 2)
     got = native.audio.bytes_to_mono(raw, "Int16", 2)
     assert len(got) == len(want) == 4
     assert max_abs_diff(got, want) < 1e-12
@@ -1242,13 +1276,10 @@ def test_match_device_matches(native, wanted):
     """Including the ambiguous and absent cases, which both have to come
     back as "use the default" rather than as a guess -- capturing from
     the wrong receiver looks like a dead band, not like a bug."""
-    qtaudio = pytest.importorskip(
-        "sstvae.gui.qtaudio", reason="needs PySide6 (the gui extra)")
-
     devices = [
         "Built-in Audio Analogue Stereo",
         "K4 RX A Digital Stereo (IEC958)",
         "K4 RX B Digital Stereo (IEC958)",
     ]
-    assert native.audio.match_device(devices, wanted) == qtaudio.match_device(
+    assert native.audio.match_device(devices, wanted) == _match_device(
         devices, wanted or None)

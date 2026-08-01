@@ -6,10 +6,12 @@ This is that grep, made specific enough to be worth running.
 
 The rules mirror the Python package's, for the same reasons:
 
-* **Nothing under `core/` may include QtWidgets.** The Python rule is
-  "nothing below sstvae/gui/ may import Qt"; the point is that the
-  engines stay drivable without a GUI, which is what makes headless
-  tests and CLI tools possible at all.
+* **Nothing under `core/` may include QtWidgets.** The Python package's
+  rule was "nothing below sstvae/gui/ may import Qt"; that GUI is gone,
+  but the point it protected is not -- the engines stay drivable without
+  a GUI, which is what makes headless tests and CLI tools possible at
+  all, and `sstvae/rx/`, `sstvae/tx/` and `sstvae/overlay/` are still
+  Qt-free for exactly that reason.
 * **`core/overlay/` may include QtGui, but not QtWidgets.** Overlay
   rendering has to work under QGuiApplication with an offscreen
   platform, so an overlay stays renderable from the command line. This

@@ -22,7 +22,6 @@ from 0.5 dB through 30 dB (i.e. from heavy clipping to none at all),
 across AWGN, fading, sample-clock offset and frame-erasure impairments.
 """
 
-import os
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -32,11 +31,6 @@ import pytest
 
 from sstvae.config import MODES
 from sstvae.modem import Modem
-
-# The GUI tests construct real Qt widgets. Forced before PySide6 is ever
-# imported so they run on a headless machine (and in CI) without trying
-# to open a display.
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 # Slack allowed below the predicted SNR before a test fails. The
 # prediction tracks measurements to ~0.25 dB, so this is loose enough to

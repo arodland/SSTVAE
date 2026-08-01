@@ -1,14 +1,14 @@
 // Rig control that can never block the thread drawing the window.
 //
-// The reference is `sstvae/gui/rig_controller.py`, but this is a
-// re-derivation rather than a port, and `docs/native-app.md` ("Bundling
-// Hamlib") says why: Python talks to a `rigctld` child over a socket
-// *because the SWIG Hamlib bindings live in the system site-packages
-// and a virtualenv cannot see them*. C++ has no such problem, so the
-// constraint that produced that architecture is gone. `libhamlib` is
-// linked in-process and the socket client, the redial logic, the
-// `rigctld` spawner and the `rigctld -l` column parser are all deleted
-// rather than translated.
+// The reference was `sstvae/gui/rig_controller.py` (deleted 2026-08-01
+// with the Python GUI), but this is a re-derivation rather than a port,
+// and `docs/native-app.md` ("Bundling Hamlib") says why: Python talked
+// to a `rigctld` child over a socket *because the SWIG Hamlib bindings
+// live in the system site-packages and a virtualenv cannot see them*.
+// C++ has no such problem, so the constraint that produced that
+// architecture is gone. `libhamlib` is linked in-process and the socket
+// client, the redial logic, the `rigctld` spawner and the `rigctld -l`
+// column parser were never translated.
 //
 // **The property that survives unchanged is the one that matters**:
 // nothing on the GUI thread ever blocks on the rig, and keying is never

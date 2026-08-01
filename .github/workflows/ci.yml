@@ -132,12 +132,12 @@ jobs:
       # sys.path, so `import sstvae` fails without this. Running
       # `python -m pytest` locally hides that, which is exactly how it
       # reached CI.
-      # platformdirs is a `gui`-extra dependency, but it is the
-      # *reference* for where the config lives, and the native settings
-      # test compares against it. Without it that test skips -- which it
-      # did on macOS but not Windows, so the check silently covered two
-      # platforms out of three. Installed explicitly rather than pulling
-      # in the whole gui extra, which would mean 648 MB of PySide6.
+      # platformdirs is the *reference* for where the config lives, and
+      # the native settings test compares against it. Without it that
+      # test skips -- which it did on macOS but not Windows, so the
+      # check silently covered two platforms out of three. Named here
+      # rather than taken from an extra because this job installs
+      # `[cli]`, not `[dev]`.
       - run: pip install -e ".[cli]" pytest pybind11 platformdirs
       # Pinned to an exact tag, like onnxruntime, Hamlib and Qt. It was
       # @latest, which meant a CMake release could break a build with no
