@@ -50,7 +50,7 @@ inline constexpr std::string_view DEFAULT_REPO = "arodland/sstvae";
 // The stem of the checkpoint the artifacts were exported from. Bumping
 // it is how a new published codec is adopted, and that must happen in
 // the same change as the code needing it.
-inline constexpr std::string_view DEFAULT_REVISION = "v2";
+inline constexpr std::string_view DEFAULT_REVISION = "v3";
 
 inline constexpr std::array<std::string_view, 3> PRECISIONS = {"fp32", "fp16",
                                                                "int8"};

@@ -1162,8 +1162,11 @@ format is built for them (see `sstvae/overlay/` and
 
 ONNX runtime path complete: the codec is onnxruntime, torch is
 training-only, and `cli`/`listen`/`gui` install ~263 MB instead of
-~555 MB. Six `v1` artifacts are published; the app fetches what it needs
-on first run, per part.
+~555 MB. The published codec is **v3** (cc12), and `DEFAULT_FILE` /
+`DEFAULT_REVISION` point at it in both implementations: six codec
+artifacts plus `v3-decoder-grad-fp32.onnx` for the optimizer. The app
+fetches what it needs on first run, per part — and a station that never
+optimizes never fetches the gradient graph.
 
 Remaining: run stage-2 fine-tune (start from a good stage-1
 checkpoint, `--lr 1e-4`) — note pre-beacon checkpoints remain

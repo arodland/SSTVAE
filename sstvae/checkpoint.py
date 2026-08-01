@@ -19,7 +19,7 @@ cache hit be trusted outright rather than revalidated — see
 from pathlib import Path
 
 DEFAULT_REPO = "arodland/sstvae"
-DEFAULT_FILE = "v2.pt"
+DEFAULT_FILE = "v3.pt"
 
 # The ONNX artifacts exported from DEFAULT_FILE by scripts/export_onnx.py.
 # `DEFAULT_REVISION` is the stem of the checkpoint they came from, so the
