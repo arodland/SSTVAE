@@ -90,13 +90,23 @@ bool contains(const std::string& haystack, const std::string& needle) {
 
 // --- names ------------------------------------------------------------------
 
+
+// Published artifact names are built from `DEFAULT_REVISION` rather
+// than spelled out, so bumping the default codec does not turn this
+// suite red for no reason. The cases that are *about* a specific
+// revision -- the gradient artifact's, below -- name it deliberately.
+std::string published(const std::string& part, const std::string& precision) {
+    return std::string(checkpoint::DEFAULT_REVISION) + "-" + part + "-" +
+           precision + ".onnx";
+}
+
 void test_filenames() {
     check::equal(checkpoint::onnx_filename("encoder", "fp16"),
-                 std::string("v2-encoder-fp16.onnx"), "ckpt/name: encoder fp16");
+                 published("encoder", "fp16"), "ckpt/name: encoder fp16");
     check::equal(checkpoint::onnx_filename("decoder", "int8"),
-                 std::string("v2-decoder-int8.onnx"), "ckpt/name: decoder int8");
+                 published("decoder", "int8"), "ckpt/name: decoder int8");
     check::equal(checkpoint::onnx_filename("decoder"),
-                 std::string("v2-decoder-fp16.onnx"),
+                 published("decoder", "fp16"),
                  "ckpt/name: fp16 is the default precision");
 
     // The revision is the checkpoint stem, so the artifacts can never be
@@ -115,10 +125,11 @@ void test_filenames() {
 }
 
 void test_url_names_the_repo_and_file() {
-    const std::string url = checkpoint::artifact_url("v2-decoder-fp16.onnx");
+    const std::string url = checkpoint::artifact_url(published("decoder", "fp16"));
     check::is_true(contains(url, std::string(checkpoint::DEFAULT_REPO)),
                    "ckpt/url: names the repo");
-    check::is_true(contains(url, "v2-decoder-fp16.onnx"), "ckpt/url: names the file");
+    check::is_true(contains(url, published("decoder", "fp16")),
+                   "ckpt/url: names the file");
     check::is_true(url.rfind("https://", 0) == 0, "ckpt/url: https");
 }
 
@@ -147,7 +158,7 @@ void test_a_cache_hit_never_reaches_the_fetcher() {
     // network is not touched at all.
     TempDir tmp;
     set_cache(tmp.str());
-    tmp.touch("v2-decoder-fp16.onnx");
+    tmp.touch(published("decoder", "fp16"));
 
     int calls = 0;
     const checkpoint::Fetcher counting = [&](std::string_view) -> std::string {
@@ -156,7 +167,7 @@ void test_a_cache_hit_never_reaches_the_fetcher() {
     };
     const std::string got = checkpoint::resolve_onnx("decoder", "", "fp16", counting);
     check::equal(calls, 0, "ckpt/cache: a hit does not call the fetcher");
-    check::equal(fs::path(got).filename().string(), std::string("v2-decoder-fp16.onnx"),
+    check::equal(fs::path(got).filename().string(), published("decoder", "fp16"),
                  "ckpt/cache: and returns the cached file");
 }
 
@@ -170,7 +181,7 @@ void test_a_miss_fetches_once() {
     };
     checkpoint::resolve_onnx("encoder", "", "fp16", fake);
     check::equal(asked.size(), std::size_t{1}, "ckpt/fetch: asked for exactly one file");
-    check::equal(asked.front(), std::string("v2-encoder-fp16.onnx"),
+    check::equal(asked.front(), published("encoder", "fp16"),
                  "ckpt/fetch: the part that was actually needed");
 }
 
@@ -180,7 +191,7 @@ void test_no_fetcher_explains_the_way_out() {
     set_cache(tmp.str());
     const std::string msg =
         error_text([] { checkpoint::resolve_onnx("decoder", "", "fp16", nullptr); });
-    check::is_true(contains(msg, "v2-decoder-fp16.onnx"),
+    check::is_true(contains(msg, published("decoder", "fp16")),
                    "ckpt/offline: names the missing artifact");
     check::is_true(contains(msg, "https://huggingface.co/"),
                    "ckpt/offline: gives the URL to fetch by hand");
