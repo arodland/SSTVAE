@@ -97,6 +97,8 @@ add_library(sstvae_core STATIC
   core/tx/engine.cpp
   core/settings/settings.cpp
   core/ofdm/ofdm.cpp
+  core/optimize/optimize.cpp
+  core/optimize/speculative.cpp
   core/overlay/model.cpp
   core/sync/sync.cpp
 )
@@ -114,7 +116,7 @@ set_target_properties(sstvae_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(SSTVAE_BUILD_CODEC)
   list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
   include(onnxruntime)
-  add_library(sstvae_codec STATIC core/codec/codec.cpp)
+  add_library(sstvae_codec STATIC core/codec/codec.cpp core/codec/grad_session.cpp)
   set_target_properties(sstvae_codec PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_include_directories(sstvae_codec PUBLIC core)
   target_link_libraries(sstvae_codec PUBLIC sstvae_core PRIVATE onnxruntime)

@@ -1097,6 +1097,33 @@ need when `--native` fails and you want to know *where*.
   and what-verifies-them rather than in weeks — the bulk of the code is
   the part that goes quickly, and the hardware/signing/on-air tail is
   the project.
+- `docs/latent-optimization.md` — transmit-time per-image latent
+  optimization, **implemented end to end 2026-07-31**. The encoder
+  is amortized, so for any one picture there are better inputs to the
+  same frozen decoder; gradient descent on the latents finds them, and
+  a transmission lasts 32–95 s against the encoder's 31 ms. Measured
+  +3.6 dB on a photograph and +6.9 dB on off-distribution text, all
+  sender-side: optimized latents are ordinary latents, so **no
+  receiver, artifact or on-air change is involved**. Read it before
+  assuming this needs torch in the app — it does not. The decoder's
+  weights are frozen, so only the gradient w.r.t. its *input* is
+  wanted, and that VJP exports as a plain opset-17 ONNX graph
+  (`scripts/decoder_vjp_prototype.py`, agreeing with autograd to
+  2.3e-9), leaving the runtime one ORT session and an Adam loop. Two
+  traps it records: the backward must be **hand-derived as forward
+  ops**, because exporting through `torch.autograd.grad` traces a
+  double-backward and hits unregistered symbolics; and optimizing
+  against the *clean* decoder is the wrong objective — it wins 1.25 dB
+  clean and loses 1.05 dB under the channel it will actually meet —
+  and the **end-to-end round trip (2026-07-31) settled that
+  decisively**: with the clean objective the feature is *harmful*,
+  losing on every fading cell, while channel-aware at 5 dB (Andrew's
+  figure) wins all 40 cells by 0.1–3.0 dB. Two rules came out of it.
+  **Latent-domain PSNR is an objective value, never a result** — it
+  flattered itself by ~2×. And PAPR, the risk that doc originally led
+  with, measured ±0.05 dB: the clipper absorbs it and stage-2 trained
+  through that same clipper, so the *objective* was the real risk all
+  along.
 - `docs/todo.md` — open work items with the reasoning behind them.
   Currently one: a wider acquisition search so a mis-tuned counterpart
   still decodes — measured, the demod path is entirely independent of
@@ -1151,3 +1178,93 @@ a real release, which is what triggers deleting `sstvae/gui/`. See
 `docs/native-app.md` for the C++/Qt rewrite design (Phases 0-3 done,
 Phase 4 steps 1-3 done) and `docs/todo.md` for quantisation tolerance
 as a future training constraint.
+
+Transmit-time latent optimization is **implemented end to end**
+(`docs/latent-optimization.md`, 2026-07-31): published artifact, both
+implementations, and wired into the native app behind
+`transmit.optimize`. Not yet shaken down on air.
+Go/no-go is a **go**, and the whole measurement set was **re-run
+against `sstvae-cc12-epoch438.pt`** and held: +1.4–1.8 dB of recovered
+picture across both test images, all four channel models, 0–12 dB and
+all three modes, sender-side only,
+with acquisition unaffected and PAPR unchanged — provided the objective
+optimizes *through* the differentiable channel, which is the condition
+the whole result hangs on. The objective SNR is **5 dB and ships as a
+constant**: swept, the optimum is flat from 2.5 to 7.5 dB on both
+images, so it never becomes an operator setting, and the asymmetry says
+err toward assuming a *worse* channel (too optimistic degrades toward
+the harmful clean objective). The **L2 regularizer was measured and
+removed** (default 0): with the channel in the objective it does
+nothing, and above 1e-3 it only costs. It is not a cheaper substitute
+for the channel term either — it rescues the clean objective to +0.79
+but the channel term reaches +1.69, because a norm penalty restricts
+every direction at once while the channel term constrains only the
+fragile ones. The gain **survives every decoder
+precision identically, int8 included** (Δ within 0.01 dB): quantisation
+costs the encoder's and the optimized latents the same, so it cancels
+in the difference — no compatibility tier, nothing to warn operators
+about. **The gain is anti-correlated with encoder quality**: `cc12` is
+0.56 dB better than `np1` on the certificate unaided and the optimizer
+earns 0.21 dB less there, so expect the headline to erode as
+checkpoints improve — re-measure on every codec revision rather than
+trusting "it used to be worth 2 dB". The native app can run it on the
+pinned inference onnxruntime via an exported gradient graph rather than
+torch. **Measurement, publishing and the Python side are done**
+(2026-07-31): `v3-decoder-grad-fp32.onnx` ships beside the v3/cc12
+codec, `sstvae/latent_optim.py` runs it torch-free, and
+`sstvae_encode.py --optimize [SECONDS]` is the flag. The gradient
+artifact is **fp32 whatever `--precision` says** — the only precision
+published, since the fp16 converter emits a graph ORT will not load and
+int8 is excluded on principle. Watch two name traps that both end in a
+picture rather than an error: `-decoder-` is a substring of
+`-decoder-grad-`, and a derived sibling must be rebuilt as
+`{stem}-{part}-{precision}` rather than substituted into, because the
+gradient sibling of an fp16 encoder is fp32. The default budget is 20 s
+and buys ~65% of the achievable gain (plateau ~90 s on a fast desktop),
+so the doc's tables are what the feature *can* do, not what the default
+does. **The C++ port is done too**: `core/optimize/` holds the loop in
+`sstvae_core` behind a `GradFn` seam — so it builds and is tested with
+`--no-codec` — and `core/codec/grad_session.cpp` is the ORT half. With
+a deterministic objective and an identical input the two agree exactly
+(+3.35 dB both); in normal use they differ ~0.1 dB because the channel
+noise comes from different RNGs, which is the intended contract.
+**Comparing the two numerically requires a 640x480 PNG**: at any other
+size `fit` resizes and stb's resampler is not PIL's LANCZOS, and even
+at the right size a JPEG decodes differently — both accepted
+above-the-modem differences that look exactly like a port bug. Three
+mutants survived `test_optimize.cpp`'s first draft and each is recorded
+in the doc; the sharpest is that Adam's `m/sqrt(v)` is scale-invariant,
+so summing the Monte Carlo draws instead of averaging them is
+undetectable. Remaining: app integration, whose shape is decided
+(Andrew, 2026-07-31) — **run it speculatively**, starting a short
+debounce after the operator stops editing and running to plateau or a
+generous budget, with a **second shorter budget starting from the Send
+click** if that arrives first. The expensive part then sits in time the
+operator was spending anyway. This needs **no change to
+`optimize::run`**: `ProgressFn` is consulted every step and returning
+false stops the loop, so the caller owns the deadline
+(`min(generous, click + short)`) while `time_budget_s` stays the outer
+backstop. What the implementation must get right is elsewhere — a
+generation counter so an edit invalidates a run in flight (transmitting
+the *previous* composition is worse than not optimizing), one-step
+granularity on the Send response, and nothing blocking the GUI thread.
+**`core/optimize/speculative.hpp` implements that**, Qt-free and
+ORT-free behind a `GradFactory`, so the whole policy is tested with a
+stub in a `--no-codec` build; `test_speculative.cpp` uses a latch
+rather than a clock. `Progress::objective_gain_db` rides along for the
+GUI to show — free, but it is an **objective** value that overstates
+recovered quality ~3x, so present it as progress, never as decibels
+earned. **The GUI is wired** behind `transmit.optimize` (one switch, no
+dials): `OverlayEditor::documentChanged` drives it — emitted per mouse
+move, which the debounce absorbs, and deliberately *not* by `select()`
+— and the optimized latents enter through **`TxEngine`'s existing
+`Encoder` seam**, so there is no second transmit path and "no result"
+is exactly what the app always did. Send polls on a `QTimer` rather
+than blocking, and **commits to the composition as it was at the
+click**: an edit during the wait or the transmission is deferred to the
+next send. That is not just a UX preference — it keeps the generation
+still while a send is committed, which is what makes the latents in
+flight still describe the picture going out. Note `transmit.optimize` was added to
+`sstvae/gui/settings.py` too although that GUI is frozen: the two must
+agree about the config file or each reads the other's as a typo, which
+`tests/test_native_settings.py` checks.

@@ -60,6 +60,25 @@ inline constexpr std::array<std::string_view, 3> PRECISIONS = {"fp32", "fp16",
 // effective SNR on the *encoder*, whose error every receiver pays for.
 inline constexpr std::string_view DEFAULT_PRECISION = "fp16";
 
+// The decoder's gradient graph, for transmit-time latent optimization
+// (docs/latent-optimization.md). Not a codec part: no receiver ever
+// loads it, and a station that does not optimize never fetches it.
+//
+// **fp32 whatever the codec's precision is**, because fp32 is the only
+// version published -- the fp16 converter emits a graph onnxruntime
+// will not load, and int8 is excluded on principle since
+// differentiating `ConvInteger` is not well defined. The override is
+// silent rather than an error because `--precision` is a statement
+// about the *codec*, and refusing to optimize because someone chose
+// int8 for their decoder would answer a question they did not ask.
+inline constexpr std::string_view GRAD_PART = "decoder-grad";
+inline constexpr std::string_view GRAD_PRECISION = "fp32";
+
+// Revisions that actually ship one. v1 and v2 predate the feature and
+// DEFAULT_REVISION is still v2, so this is the difference between a
+// clear message and a 404 on a filename the operator has never seen.
+inline constexpr std::array<std::string_view, 1> GRAD_REVISIONS = {"v3"};
+
 // Everything an operator has to fix: a bad `--model`, a missing
 // artifact, an unreachable Hub. The message is the deliverable here --
 // `docs/native-app.md` makes the offline story this phase's

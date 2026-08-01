@@ -117,3 +117,71 @@ def test_an_explicit_path_short_circuits_everything(fake_hub):
     hub = fake_hub(cached="/cache/v1.pt", remote="/downloaded/v1.pt")
     assert checkpoint.resolve("/my/own.pt") == "/my/own.pt"
     assert hub.calls == []
+
+
+# --- the decoder-gradient artifact ---------------------------------------
+#
+# Transmit-time latent optimization (docs/latent-optimization.md) adds a
+# third part with two properties nothing else has: it is published at
+# fp32 only, and its filename *contains* the decoder's. Both are easy to
+# get wrong in a way that still loads a graph and produces a picture.
+
+
+@pytest.mark.parametrize("asked", checkpoint.PRECISIONS)
+def test_gradient_artifact_is_fp32_whatever_precision_is_asked(asked):
+    """`--precision` is a statement about the codec, not about this.
+
+    fp16 is unpublished (the converter emits a graph onnxruntime will
+    not load) and int8 is excluded on principle, so honouring the
+    caller here would name a file that does not exist.
+    """
+    name = checkpoint.onnx_filename(checkpoint.GRAD_PART, asked)
+    assert name.endswith(f"-{checkpoint.GRAD_PART}-fp32.onnx")
+
+
+def test_gradient_artifact_is_not_mistaken_for_the_decoder(tmp_path):
+    """`-decoder-` is a substring of `-decoder-grad-`.
+
+    A plain containment test hands back the gradient graph when the
+    decoder was asked for. It loads, and its first output *is* a
+    reconstruction, so the mistake survives all the way to a wrong
+    picture.
+    """
+    for n in ("v3-decoder-fp16.onnx", "v3-decoder-grad-fp32.onnx",
+              "v3-encoder-fp16.onnx"):
+        (tmp_path / n).write_bytes(b"")
+    grad = str(tmp_path / "v3-decoder-grad-fp32.onnx")
+
+    assert checkpoint.resolve_onnx("decoder", grad, "fp16") == \
+        str(tmp_path / "v3-decoder-fp16.onnx")
+    assert checkpoint.resolve_onnx(checkpoint.GRAD_PART, grad) == grad
+    # ...and from a directory, where the globs must not collide either.
+    assert checkpoint.resolve_onnx("decoder", str(tmp_path), "fp16") == \
+        str(tmp_path / "v3-decoder-fp16.onnx")
+    assert checkpoint.resolve_onnx(checkpoint.GRAD_PART, str(tmp_path)) == grad
+
+
+def test_gradient_sibling_uses_its_own_precision_not_the_given_one(tmp_path):
+    """Deriving the sibling must rebuild the name, not substitute into it.
+
+    From `v3-encoder-fp16.onnx` the gradient sibling is *fp32*; a
+    substitution would look for an fp16 name that was never exported.
+    """
+    for n in ("v3-encoder-fp16.onnx", "v3-decoder-grad-fp32.onnx"):
+        (tmp_path / n).write_bytes(b"")
+    got = checkpoint.resolve_onnx(
+        checkpoint.GRAD_PART, str(tmp_path / "v3-encoder-fp16.onnx"), "fp16")
+    assert got == str(tmp_path / "v3-decoder-grad-fp32.onnx")
+
+
+def test_a_revision_without_a_gradient_artifact_says_so(monkeypatch):
+    """v1 and v2 predate the feature and the default is still v2.
+
+    The failure to avoid is a 404 on a filename the operator has never
+    seen, for a flag they used correctly.
+    """
+    monkeypatch.setattr(checkpoint, "DEFAULT_REVISION", "v2")
+    with pytest.raises(SystemExit) as e:
+        checkpoint.resolve_onnx(checkpoint.GRAD_PART, None)
+    msg = str(e.value)
+    assert "v2" in msg and "v3" in msg and checkpoint.GRAD_PART in msg

@@ -35,7 +35,20 @@ fs::path home() {
 }
 
 bool is_valid_part(std::string_view part) {
-    return part == "encoder" || part == "decoder";
+    return part == "encoder" || part == "decoder" || part == GRAD_PART;
+}
+
+std::string parts_text() { return "'encoder', 'decoder' or 'decoder-grad'"; }
+
+// The gradient graph exists at one precision only; see GRAD_PRECISION.
+std::string_view effective_precision(std::string_view part,
+                                     std::string_view precision) {
+    return part == GRAD_PART ? GRAD_PRECISION : precision;
+}
+
+bool revision_has_grad() {
+    return std::find(GRAD_REVISIONS.begin(), GRAD_REVISIONS.end(),
+                     DEFAULT_REVISION) != GRAD_REVISIONS.end();
 }
 
 bool is_valid_precision(std::string_view precision) {
@@ -74,7 +87,7 @@ std::string offline_advice(std::string_view filename) {
 
 std::string onnx_filename(std::string_view part, std::string_view precision) {
     if (!is_valid_part(part)) {
-        throw CheckpointError("part must be 'encoder' or 'decoder', not '" +
+        throw CheckpointError("part must be " + parts_text() + ", not '" +
                               std::string(part) + "'");
     }
     if (!is_valid_precision(precision)) {
@@ -82,7 +95,7 @@ std::string onnx_filename(std::string_view part, std::string_view precision) {
                               ", not '" + std::string(precision) + "'");
     }
     return std::string(DEFAULT_REVISION) + "-" + std::string(part) + "-" +
-           std::string(precision) + ".onnx";
+           std::string(effective_precision(part, precision)) + ".onnx";
 }
 
 std::string cache_dir() {
@@ -155,10 +168,22 @@ std::string fetch_published(std::string_view part, std::string_view precision,
 std::string resolve_onnx(std::string_view part, std::string_view path,
                          std::string_view precision, const Fetcher& fetcher) {
     if (!is_valid_part(part)) {
-        throw CheckpointError("part must be 'encoder' or 'decoder', not '" +
+        throw CheckpointError("part must be " + parts_text() + ", not '" +
                               std::string(part) + "'");
     }
-    if (path.empty()) return fetch_published(part, precision, fetcher);
+    precision = effective_precision(part, precision);
+    if (path.empty()) {
+        if (part == GRAD_PART && !revision_has_grad()) {
+            throw CheckpointError(
+                "latent optimization needs the " + std::string(GRAD_PART) +
+                " artifact, which was not published for " +
+                std::string(DEFAULT_REVISION) + " (it exists from " +
+                std::string(GRAD_REVISIONS.front()) +
+                " onward).\nPass --model with a revision that has it, or a "
+                "directory of exported .onnx files.");
+        }
+        return fetch_published(part, precision, fetcher);
+    }
 
     std::error_code ec;
     const fs::path p{std::string(path)};
@@ -206,12 +231,23 @@ std::string resolve_onnx(std::string_view part, std::string_view path,
     if (p.extension() == ".onnx") {
         const std::string name = p.filename().string();
         const std::string mine = "-" + std::string(part) + "-";
-        if (name.find(mine) != std::string::npos) return p.string();
+        const std::string grad_tag = "-" + std::string(GRAD_PART) + "-";
+        // `-decoder-` is a prefix of `-decoder-grad-`, so a bare
+        // substring test hands back the gradient graph when the decoder
+        // was asked for -- and it loads, and its first output *is* a
+        // reconstruction, so the mistake survives to a wrong picture
+        // rather than an error.
+        const bool is_grad = name.find(grad_tag) != std::string::npos;
+        if (name.find(mine) != std::string::npos && is_grad == (part == GRAD_PART)) {
+            return p.string();
+        }
 
-        // Named the other part: derive this one, so `--model
+        // Named a different part: derive this one, so `--model
         // v1-encoder-fp16.onnx` still works for an operation that turns
         // out to need the decoder too.
-        const std::string other_part = part == "encoder" ? "decoder" : "encoder";
+        const std::string other_part =
+            is_grad ? std::string(GRAD_PART)
+                    : (part == "encoder" ? "decoder" : "encoder");
         const std::string theirs = "-" + other_part + "-";
         const std::size_t at = name.find(theirs);
         if (at == std::string::npos) {
@@ -221,8 +257,13 @@ std::string resolve_onnx(std::string_view part, std::string_view path,
                                   std::string(part) + "-" + std::string(precision) +
                                   ".onnx, or pass the directory instead");
         }
-        std::string sibling_name = name;
-        sibling_name.replace(at, theirs.size(), mine);
+        // Rebuild from the stem rather than substituting into the given
+        // name: the sibling's *precision* need not match the one we
+        // were handed. `decoder-grad` is published at fp32 only, so the
+        // gradient sibling of an fp16 encoder is an fp32 name that a
+        // substitution would never produce.
+        const std::string sibling_name = name.substr(0, at) + mine +
+                                         std::string(precision) + ".onnx";
         const fs::path sibling = p.parent_path() / sibling_name;
         if (!fs::is_regular_file(sibling, ec)) {
             throw CheckpointError("need the " + std::string(part) + " as well as the " +

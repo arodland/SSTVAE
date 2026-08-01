@@ -310,6 +310,70 @@ void test_something_that_is_neither_is_reported() {
 
 }  // namespace
 
+
+// --- the decoder-gradient artifact --------------------------------------
+//
+// Transmit-time latent optimization (docs/latent-optimization.md) adds a
+// third part with two properties nothing else has: it is published at
+// fp32 only, and its filename *contains* the decoder's. Both are easy
+// to get wrong in a way that still loads a graph and makes a picture.
+// Mirrors tests/test_checkpoint.py, because the trap is in both.
+
+void test_the_gradient_artifact_is_always_fp32() {
+    // `--precision` is a statement about the codec. fp16 is unpublished
+    // (the converter emits a graph ORT will not load) and int8 is
+    // excluded on principle, so honouring the caller here would name a
+    // file that does not exist.
+    for (const std::string_view precision : checkpoint::PRECISIONS) {
+        const std::string name =
+            checkpoint::onnx_filename(checkpoint::GRAD_PART, precision);
+        check::is_true(contains(name, "-decoder-grad-fp32.onnx"),
+                       "ckpt/grad: fp32 whatever precision is asked for");
+    }
+}
+
+void test_the_gradient_artifact_is_not_mistaken_for_the_decoder() {
+    // `-decoder-` is a substring of `-decoder-grad-`. A bare
+    // containment test hands back the gradient graph when the decoder
+    // was asked for -- and it loads, and its first output *is* a
+    // reconstruction, so the mistake survives to a wrong picture.
+    TempDir tmp;
+    tmp.touch("v3-decoder-fp16.onnx");
+    const fs::path grad = tmp.touch("v3-decoder-grad-fp32.onnx");
+    tmp.touch("v3-encoder-fp16.onnx");
+
+    check::equal(fs::path(checkpoint::resolve_onnx("decoder", grad.string()))
+                     .filename().string(),
+                 std::string("v3-decoder-fp16.onnx"),
+                 "ckpt/grad: asking for the decoder gets the decoder");
+    check::equal(checkpoint::resolve_onnx(checkpoint::GRAD_PART, grad.string()),
+                 grad.string(), "ckpt/grad: asking for the gradient gets it");
+    // ...and the directory globs must not collide either.
+    check::equal(fs::path(checkpoint::resolve_onnx("decoder", tmp.path().string()))
+                     .filename().string(),
+                 std::string("v3-decoder-fp16.onnx"),
+                 "ckpt/grad: directory search skips the gradient graph");
+    check::equal(fs::path(checkpoint::resolve_onnx(checkpoint::GRAD_PART,
+                                                   tmp.path().string()))
+                     .filename().string(),
+                 std::string("v3-decoder-grad-fp32.onnx"),
+                 "ckpt/grad: directory search finds the gradient graph");
+}
+
+void test_the_gradient_sibling_uses_its_own_precision() {
+    // Deriving the sibling must rebuild the name, not substitute into
+    // it: from an fp16 encoder the gradient sibling is *fp32*, which a
+    // substitution would never produce.
+    TempDir tmp;
+    const fs::path enc = tmp.touch("v3-encoder-fp16.onnx");
+    tmp.touch("v3-decoder-grad-fp32.onnx");
+    check::equal(fs::path(checkpoint::resolve_onnx(checkpoint::GRAD_PART,
+                                                   enc.string()))
+                     .filename().string(),
+                 std::string("v3-decoder-grad-fp32.onnx"),
+                 "ckpt/grad: sibling is rebuilt at fp32, not substituted");
+}
+
 int main() {
     try {
         test_filenames();
@@ -329,6 +393,9 @@ int main() {
         test_a_missing_sibling_is_reported();
         test_an_unrecognisable_name_is_reported();
         test_something_that_is_neither_is_reported();
+        test_the_gradient_artifact_is_always_fp32();
+        test_the_gradient_artifact_is_not_mistaken_for_the_decoder();
+        test_the_gradient_sibling_uses_its_own_precision();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;

@@ -118,6 +118,12 @@ class ReceiveConfig:
 class TransmitConfig:
     mode: str = "B"
     level: float = 0.9
+    # Transmit-time latent optimization (docs/latent-optimization.md).
+    # The **native** app implements it; this GUI is frozen, so the key
+    # exists here only so the two agree about the config file -- a
+    # config written by one must not read as a typo to the other. That
+    # agreement is what `tests/test_native_settings.py` checks.
+    optimize: bool = False
 
 
 @dataclass

@@ -30,6 +30,27 @@ DEFAULT_FILE = "v2.pt"
 DEFAULT_REVISION = DEFAULT_FILE.rsplit(".", 1)[0]
 PRECISIONS = ("fp32", "fp16", "int8")
 
+# The decoder's gradient graph, for transmit-time latent optimization
+# (`docs/latent-optimization.md`). Not a codec part: no receiver ever
+# loads it, and a station that does not use the optimizer never fetches
+# it.
+#
+# **It is fp32 whatever the codec's precision is**, because fp32 is the
+# only version published -- the fp16 converter emits a graph
+# onnxruntime will not load, and int8 is excluded on principle since
+# differentiating `ConvInteger` is not well defined. The override is
+# silent rather than an error because `--precision` is a statement about
+# the *codec*, and refusing to optimize because someone picked int8 for
+# their decoder would be answering a question they did not ask.
+GRAD_PART = "decoder-grad"
+GRAD_PRECISION = "fp32"
+PARTS = ("encoder", "decoder", GRAD_PART)
+# Revisions that actually have one. v1 and v2 predate the feature, and
+# the default is still v2 -- so this is not hypothetical bookkeeping,
+# it is the difference between a clear message and a 404. Add to it
+# when a revision ships the artifact.
+GRAD_REVISIONS = frozenset({"v3"})
+
 # fp16 is the shipped default: measured identical to fp32 end to end
 # (docs/onnx.md) at half the size. int8 is available but costs ~1 dB of
 # effective SNR on the *encoder*, whose error every receiver pays for.
@@ -37,13 +58,19 @@ DEFAULT_PRECISION = "fp16"
 
 
 def onnx_filename(part: str, precision: str = DEFAULT_PRECISION) -> str:
-    """e.g. ("encoder", "fp16") -> "v1-encoder-fp16.onnx"."""
-    if part not in ("encoder", "decoder"):
-        raise ValueError(f"part must be 'encoder' or 'decoder', not {part!r}")
+    """e.g. ("encoder", "fp16") -> "v1-encoder-fp16.onnx".
+
+    `decoder-grad` ignores `precision` and is always fp32 -- see
+    `GRAD_PRECISION`.
+    """
+    if part not in PARTS:
+        raise ValueError(f"part must be one of {', '.join(PARTS)}, not {part!r}")
     if precision not in PRECISIONS:
         raise ValueError(
             f"precision must be one of {', '.join(PRECISIONS)}, not {precision!r}"
         )
+    if part == GRAD_PART:
+        precision = GRAD_PRECISION
     return f"{DEFAULT_REVISION}-{part}-{precision}.onnx"
 
 
@@ -76,8 +103,27 @@ def resolve_onnx(part: str, path: str | None = None,
 
     A `.pt` path never reaches here -- `codec.load_codec` sends those to
     the torch backend instead.
+
+    `decoder-grad` is forced to fp32 (see `GRAD_PRECISION`), including
+    when resolving out of a directory or off a sibling.
     """
+    if part == GRAD_PART:
+        precision = GRAD_PRECISION
     if path is None:
+        if part == GRAD_PART and DEFAULT_REVISION not in GRAD_REVISIONS:
+            # The gradient graph arrived with v3; earlier revisions were
+            # published without one. Say so, rather than letting the
+            # fetch fail with a 404 on a filename nobody recognises --
+            # the operator has done nothing wrong and the fix is a flag.
+            raise SystemExit(
+                f"latent optimization needs the {GRAD_PART} artifact, which "
+                f"was not published for {DEFAULT_REVISION} (it exists from "
+                f"{sorted(GRAD_REVISIONS)[0]} onward).\n"
+                f"Pass --model with a revision that has it, e.g.\n"
+                f"  --model {sorted(GRAD_REVISIONS)[0]}-encoder-"
+                f"{DEFAULT_PRECISION}.onnx\n"
+                "or a directory of exported .onnx files."
+            )
         return default_onnx(part, precision)
 
     p = Path(path)
@@ -98,18 +144,31 @@ def resolve_onnx(part: str, path: str | None = None,
         return str(matches[0])
 
     if p.suffix == ".onnx":
-        if f"-{part}-" in p.name:
+        # `-decoder-` is a prefix of `-decoder-grad-`, so a plain
+        # substring test would hand back the gradient graph when the
+        # decoder was asked for -- and it would load, and produce
+        # nonsense, because its first output is the reconstruction.
+        is_grad = f"-{GRAD_PART}-" in p.name
+        if (f"-{part}-" in p.name) and (is_grad == (part == GRAD_PART)):
             return str(p)
-        # Named the other part: derive this one from it, so `--model
+        # Named a different part: derive this one from it, so `--model
         # v1-encoder-fp16.onnx` still works for an operation that turns
         # out to need the decoder too.
-        other = "decoder" if part == "encoder" else "encoder"
+        other = GRAD_PART if is_grad else (
+            "decoder" if part == "encoder" else "encoder")
         if f"-{other}-" not in p.name:
             raise SystemExit(
                 f"cannot tell which part {p.name} is -- expected a name like "
                 f"v1-{part}-{precision}.onnx, or pass the directory instead"
             )
-        sibling = p.with_name(p.name.replace(f"-{other}-", f"-{part}-"))
+        # Rebuild from the stem rather than substituting the part into
+        # the given name: the sibling's *precision* need not match the
+        # one we were handed. `decoder-grad` is only published at fp32,
+        # so `--model v3-encoder-fp16.onnx` has to resolve to
+        # `v3-decoder-grad-fp32.onnx`, not to an fp16 name that was
+        # never exported.
+        stem = p.name.split(f"-{other}-")[0]
+        sibling = p.with_name(f"{stem}-{part}-{precision}.onnx")
         if not sibling.exists():
             raise SystemExit(
                 f"need the {part} as well as the {other}, but {sibling.name} "

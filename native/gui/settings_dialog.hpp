@@ -64,6 +64,7 @@ private:
     QWidget* rig_tab();
     QWidget* folders_tab();
     QWidget* receive_tab();
+    QWidget* transmit_tab();
 
     void fill_device_combo(QComboBox* combo, bool input,
                            const std::string& current);
@@ -113,6 +114,7 @@ private:
     QLineEdit* template_dir_ = nullptr;
 
     // Receive
+    QCheckBox* optimize_ = nullptr;
     QCheckBox* autosave_ = nullptr;
     QCheckBox* save_audio_ = nullptr;
     QCheckBox* low_cpu_ = nullptr;
