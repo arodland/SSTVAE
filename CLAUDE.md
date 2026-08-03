@@ -1158,9 +1158,18 @@ side: overlay templates, and a real on-air (not loopback) shakedown of
 the PTT timing against a physical radio. For the native app: Phase 4 is
 sequenced in five steps and the first three are done — CI builds five
 packages and five installers (AppImage, `.dmg`, NSIS setup) on every
-push. Remaining there: **signing** on macOS and Windows, then publishing
-a real release. Until that lands the only downloads are CI artifacts,
-which need a GitHub login and warn about an unidentified developer;
+push. **Step 4 (signing) is written but has never run** (2026-08-03):
+`tools/sign.sh <app|installer> <path>` does Developer ID + notarization
++ stapling on macOS and Azure Trusted Signing on Windows, wired into
+`ci.yml` around the installer step. It is a **loud no-op with exit 0
+when the credentials are absent**, so a fork's CI still produces
+unsigned installers, and `SSTVAE_REQUIRE_SIGNING=1` turns that skip into
+a failure — the same hazard and the same answer as
+`SSTVAE_REQUIRE_CODEC`. Until it has actually run, treat the README's
+"no release download yet, the builds are not signed" as still true.
+Remaining there: that first run, then publishing a real release. Until
+it lands the only downloads are CI artifacts, which need a GitHub login
+and warn about an unidentified developer;
 the README says so plainly rather than implying a release exists. See
 `docs/native-app.md` for the C++/Qt rewrite design (Phases 0-3 done,
 Phase 4 steps 1-3 done) and `docs/todo.md` for quantisation tolerance
