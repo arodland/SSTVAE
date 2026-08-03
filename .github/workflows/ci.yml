@@ -333,13 +333,53 @@ jobs:
       - name: C++ tests
         run: ctest --test-dir native/build --output-on-failure
       # --- packaging ------------------------------------------------------
-      # Two stages, and both are published. Staging produces a tree with
-      # Qt and our pinned libraries in it, which is what a tester unpacks
-      # and runs; the installer step then wraps that same tree in the
-      # platform's own container. Nothing is signed yet.
+      # Three stages, and the first two are both published. Staging
+      # produces a tree with Qt and our pinned libraries in it, which is
+      # what a tester unpacks and runs; the installer step wraps that
+      # same tree in the platform's own container; signing happens
+      # *between* them on macOS and again after, because notarization
+      # has to see the finished container.
       - name: Stage a runnable app
         run: tools/package_app.sh native/build dist
         shell: bash
+      # Before the "does it start" check below, not after. The hardened
+      # runtime is the reason: it is switched on by signing, and it can
+      # stop an app that ran perfectly unsigned -- library validation
+      # rejecting a dylib we forgot to sign looks exactly like a crash on
+      # launch. Signing first means the check exercises the app as an
+      # operator will get it, rather than a configuration nobody ships.
+      #
+      # A no-op on Linux, and a loud no-op anywhere the secrets are not
+      # visible (a fork's pull request), which keeps those runs producing
+      # the unsigned installers they produced before.
+      - name: Sign the app
+        run: tools/sign.sh app dist
+        shell: bash
+        env: &signing_env
+          # Windows -- Azure Trusted Signing. The tenant/client/secret
+          # trio is read by DefaultAzureCredential from the environment
+          # rather than passed as flags, which is why the script names
+          # only the other three.
+          AZURE_ENDPOINT: ${{ secrets.AZURE_ENDPOINT }}
+          AZURE_CODE_SIGNING_NAME: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
+          AZURE_CERT_PROFILE_NAME: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          # macOS -- Developer ID certificate and a notary app-specific
+          # password. No team ID: it is read out of the certificate's own
+          # subject, so it cannot drift from the key that signs.
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # Same hazard as SSTVAE_REQUIRE_CODEC, same answer: the step
+          # with an external prerequisite is the one that rots into
+          # testing nothing. Where the secrets are known to exist -- a
+          # push or a branch PR on this repository, never a fork -- an
+          # unsigned artifact is a failure rather than a warning.
+          SSTVAE_REQUIRE_SIGNING: ${{ github.repository == 'arodland/SSTVAE' && github.event.pull_request.head.repo.fork != true && '1' || '' }}
       # Proves the *staged* tree starts, not just the build tree. The
       # two differ in exactly the way that matters -- the build tree
       # finds Qt through the compiler's rpath and the developer's
@@ -412,6 +452,17 @@ jobs:
       - name: Build the installer
         shell: bash
         run: tools/make_installer.sh dist "${{ env.pkg }}"
+      # The second half of macOS signing, and the whole of Windows's for
+      # the setup .exe. It has to be here rather than folded into the
+      # step above: the notary service assesses the container a user
+      # downloads, and the stapled ticket is written back into that same
+      # file, so there is nothing to submit until hdiutil or makensis has
+      # run. Windows is the mirror image -- the payload was signed in the
+      # staged tree, and this signs the wrapper around it.
+      - name: Sign the installer
+        shell: bash
+        run: tools/sign.sh installer "${{ env.installer }}"
+        env: *signing_env
       # Each of the three is a single file, so archive: false applies
       # everywhere here and the artifact takes the file's own name --
       # which is what makes the downloads page read as a list of
