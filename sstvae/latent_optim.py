@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -54,7 +55,28 @@ OBJECTIVE_SNR_DB = 5.0
 # it as a numerical parameter rather than a performance knob.
 CHANNEL_SAMPLES = 4
 
-LEARNING_RATE = 0.02
+# Swept 2026-08-02 on a 10-image corpus x 3 modes, against the previous
+# 0.02, which was never swept -- it came from the prototype and
+# survived. 0.05 is worth **+0.33 dB of recovered picture at 5 steps and
+# +0.37 at 20** end to end (mode B, AWGN and mpp at 3/9 dB, 25 paired
+# seeds), and it wins at every budget rather than trading short against
+# long.
+#
+# Rates above this are *faster once moving and unstable starting*: Adam's
+# first step has magnitude lr exactly (the bias correction cancels), and
+# at 0.10 that first step overshoots badly enough that the run spends its
+# whole budget recovering -- measured at -1.11 dB after one step, and 8
+# of 30 cells still net negative after 10. A 2-step warmup into 0.10
+# fixes that and was the sweep's winner on the objective, but it wins end
+# to end by under 0.1 dB, which does not buy a schedule in two
+# implementations. 0.05 is the largest rate that was never negative
+# anywhere: worst cell over 30, +0.20 dB.
+#
+# Re-measure this on a new checkpoint rather than inheriting it, for the
+# same reason the headline gain has to be re-measured: both are
+# properties of the encoder's amortization gap, not of the optimizer.
+# `scripts/latent_optim_lr_sweep.py` is the harness.
+LEARNING_RATE = 0.05
 
 
 @dataclass
@@ -101,9 +123,10 @@ def optimize(
     min_rel_gain: float = 2e-3,
     objective_snr_db: float = OBJECTIVE_SNR_DB,
     channel_samples: int = CHANNEL_SAMPLES,
-    lr: float = LEARNING_RATE,
+    lr: float | Callable[[int], float] = LEARNING_RATE,
     seed: int = 0,
     progress=None,
+    on_iterate=None,
 ) -> OptimizeResult:
     """Better latents for *this* picture, from the encoder's as a start.
 
@@ -121,7 +144,19 @@ def optimize(
     only backstops a loss that never plateaus.
 
     `progress(step, mse, elapsed)` is called each step if given.
+
+    `on_iterate(step, z, weights)` is a measurement hook, called with
+    the *current* iterate before its update. It exists so a sweep can
+    score every step of one run instead of re-running to each horizon;
+    nothing in the transmit path passes it.
+
+    `lr` is a constant by default; it may also be a callable
+    `lr(step) -> float` (1-based) so a schedule can be swept without a
+    second copy of this loop. `scripts/latent_optim_lr_sweep.py` is the
+    only caller that passes one; until that sweep says otherwise the
+    shipping value is the constant, and the C++ port has no schedule.
     """
+    lr_at = lr if callable(lr) else (lambda _step: lr)
     spec = MODES[mode]
     active = spec.groups * CHANNELS_PER_GROUP
 
@@ -187,6 +222,8 @@ def optimize(
             best_mse, best_z = mse, z.copy()
         if progress is not None:
             progress(step, mse, time.perf_counter() - started)
+        if on_iterate is not None:
+            on_iterate(step, z, weights)
 
         if step - best_step >= patience:
             stop = "plateau"
@@ -197,7 +234,8 @@ def optimize(
 
         m = b1 * m + (1 - b1) * grad
         v = b2 * v + (1 - b2) * grad * grad
-        z = z - lr * (m / (1 - b1**step)) / (np.sqrt(v / (1 - b2**step)) + eps)
+        z = z - lr_at(step) * (m / (1 - b1**step)) / (
+            np.sqrt(v / (1 - b2**step)) + eps)
         z = _project(z * weights, active)
 
     # The best iterate, not the last: the loss reported at a step

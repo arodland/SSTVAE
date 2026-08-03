@@ -52,7 +52,17 @@ inline constexpr double OBJECTIVE_SNR_DB = 5.0;
 // a performance knob.
 inline constexpr int CHANNEL_SAMPLES = 4;
 
-inline constexpr double LEARNING_RATE = 0.02;
+// Swept 2026-08-02 against the previous 0.02, which was never swept.
+// Worth +0.33 dB of recovered picture at 5 steps and +0.37 at 20, end to
+// end. Rates above this are faster once moving and unstable starting --
+// Adam's first step has magnitude lr exactly, and 0.10 overshoots far
+// enough to spend its whole budget recovering. A 2-step warmup into 0.10
+// repairs that and won the objective sweep, but by under 0.1 dB end to
+// end, which is why this is still a constant in both implementations.
+// 0.05 is the largest rate that was never negative on any cell measured.
+// See `docs/latent-optimization.md`; keep in step with
+// `sstvae/latent_optim.py`, which is normative.
+inline constexpr double LEARNING_RATE = 0.05;
 
 // One evaluation of the decoder and its input-gradient.
 //

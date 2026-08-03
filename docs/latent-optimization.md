@@ -222,6 +222,68 @@ Per-cell optima do drift the way you would expect — the best channel
 dB in exchange for a setting that is wrong whenever the operator's
 estimate is.
 
+### The learning rate is 0.05, swept 2026-08-02
+
+It was 0.02 until then, and 0.02 was never measured — it came from the
+prototype and survived by not being questioned. Swept on a 10-image
+corpus (`data/optim_corpus`) across all three modes, one run per cell to
+50 steps with the objective recorded at **every** step, so any stopping
+point could be read off afterwards rather than chosen in advance:
+`scripts/latent_optim_lr_sweep.py`, summarized by
+`scripts/latent_optim_lr_summary.py`.
+
+End-to-end confirmation, Δ recovered PSNR against encoder latents, mean
+over AWGN and mpp at 3 and 9 dB, 25 paired seeds, mode B, both test
+images (`scripts/latent_optim_lr_roundtrip.py`):
+
+| rate | 5 steps | 20 steps | 50 steps |
+|---|---|---|---|
+| 0.02 (was) | +0.43 | +1.04 | +1.39 |
+| **0.05** | **+0.76** | **+1.32** | **+1.54** |
+| warm2→0.10 | +0.77 | +1.41 | +1.58 |
+
+**+0.33 dB at 5 steps and +0.37 at 20, free.** It wins at every budget
+rather than trading short against long, which matters because *the
+budget is not ours to choose*: the shipping loop stops on a plateau or a
+20 s clock, and how many steps that buys depends on hardware we do not
+have. The measurement box is faster than almost any station's, so the
+short-budget column is the one to weight.
+
+**Rates above 0.05 are faster once moving and unstable starting**, and
+that is the whole shape of the result. Adam's first step has magnitude
+`lr` exactly — the bias corrections cancel — so a large rate takes one
+enormous step before any curvature is known. At 0.10 the objective is
+**−1.11 dB after one step** and still oscillating at three; at 0.20,
+−3.94. They recover and end up level (everything from 0.05 to 0.20 lands
+within 0.13 dB at 50 steps, so the curve *flattens* rather than turning
+over) — but a station that only got 10 steps would have shipped a worse
+picture than the encoder's on 8 of 30 cells at 0.10, and 21 of 30 at
+0.15.
+
+So the choice was the largest rate that was **never negative on any cell
+measured**, worst case +0.20 dB, rather than the best mean. A two-step
+linear warmup into 0.10 removes the instability and won the objective
+sweep outright (26–29 of 30 paired cells), but it wins end to end by
+under 0.1 dB — inside what two images and one mode can resolve — and
+that does not buy a schedule in two implementations plus a parity case.
+The safety argument is Andrew's and is the deciding one: 0.05 has passed
+every test it has seen, and the corpus is ten pictures, so the worst
+first step *available* is not the worst one that exists.
+
+Three notes for whoever re-runs this:
+
+- **Re-measure it on a new checkpoint.** Like the headline gain, this is
+  a property of the encoder's amortization gap rather than of the
+  optimizer.
+- **Decay schedules were tested and all lost** — exponential, 1/t, at
+  several time constants — each to the constant it starts from, at both
+  budgets. Annealing is not what this needs; the problem is at step 1,
+  not at step 50.
+- **A schedule must be a function of the step alone.** The optimizer
+  never knows how many steps it will get, so a cosine annealed to a
+  known horizon would score as a policy that could not have been run.
+  That rules out anneals and admits warmups.
+
 ### All three modes, and it does not matter which
 
 Mean Δ at the 5 dB objective, same four cells, 25 seeds:
