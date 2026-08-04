@@ -22,6 +22,7 @@
 #ifndef SSTVAE_OPTIMIZE_OPTIMIZE_HPP
 #define SSTVAE_OPTIMIZE_OPTIMIZE_HPP
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -45,6 +46,82 @@ namespace sstvae::optimize {
 // little, too high degrades toward the clean objective. If this ever
 // has to move, move it down.
 inline constexpr double OBJECTIVE_SNR_DB = 5.0;
+
+// The objective's channel above assumes every latent arrives at full
+// confidence with one noise level. A real fade does not: the
+// demodulator reports a per-latent confidence weight and the error that
+// comes with it, and the interleaver's whole job is to scatter a burst
+// so that what reaches the decoder is i.i.d. *per-latent confidence*
+// rather than a contiguous outage.
+//
+// This is that joint distribution, measured off the real demodulator
+// (`scripts/derive_fading_profile.py`, which regenerates it) and
+// re-derived across 36 conditions -- 6 images x {mpp, mpd} x 3/6/12 dB
+// -- to check that 27 numbers from one transmission are safe to freeze
+// into two implementations. Preset barely matters (the top bin differs
+// by 0.03 between mpp and mpd); SNR cancels because `rel_sigma` is
+// normalized by the top bin.
+//
+// Two things a parametric fade got wrong and this does not. The
+// receiver almost never reports near-zero confidence -- under 3.5% of
+// latents below w = 0.2, across every condition -- so a Rayleigh gain
+// or a hard erasure models a population that barely exists. And where
+// it *does* report low confidence it is conservative rather than
+// overconfident, because the equalizer's pilot floor clamps the 1/|h|
+// amplification; the overconfidence is in the middle of the range, at
+// about 1.2x.
+//
+// **Keep in step with `sstvae/latent_optim.py`, which is normative.**
+// Exact agreement is neither expected nor possible -- the two draw from
+// different RNGs, which is already the contract for the flat channel --
+// but the *distribution* must match or the two implementations are
+// optimizing different objectives.
+inline constexpr int FADING_BINS = 9;
+
+struct FadingProfile {
+    std::array<double, FADING_BINS> prob;       // sums to 1
+    std::array<float, FADING_BINS> weight;      // confidence the rx reports
+    std::array<float, FADING_BINS> rel_sigma;   // error, relative to top bin
+};
+
+inline constexpr FadingProfile MEASURED_FADING_PROFILE = {
+    {0.009, 0.025, 0.039, 0.053, 0.065, 0.110, 0.115, 0.111, 0.473},
+    {0.05f, 0.15f, 0.25f, 0.35f, 0.45f, 0.575f, 0.725f, 0.875f, 0.975f},
+    {10.73f, 6.99f, 4.44f, 3.25f, 2.59f, 2.03f, 1.64f, 1.38f, 1.00f},
+};
+
+// The fading profile wants its own SNR, and it is **not** 5 dB. It
+// carries 5-7 dB more noise at the same nominal number, so the flat
+// channel's constant lands somewhere much deeper on this scale. Swept
+// over the full 10-image corpus: +0.200 dB at 5, **+0.237 at 7.5**,
+// +0.163 at 10, and +/-0.000 at 2.5.
+//
+// **The asymmetry is inverted from `OBJECTIVE_SNR_DB`'s, so do not
+// carry that rule across.** There, too low costs little. Here, too low
+// is where it dies -- 2.5 dB scores nothing and -0.314 dB on its worst
+// image. If this has to move, move it *up*.
+inline constexpr double FADING_OBJECTIVE_SNR_DB = 7.5;
+
+// Fraction of a *clean* decode gain that survives to the receiver.
+//
+// A clean PSNR gain predicts the delivered one at r = +0.988, so this
+// one number is the whole estimator -- but it is a genuine handwave and
+// the reason is structural: measured over 6 images x 7 channel cells,
+// retention decomposes almost exactly into an image term plus a channel
+// term (spreads 0.126 and 0.139, residual 0.022), and **the sender
+// cannot know the channel term**. It ranges 0.39 at mpp/3 dB to 0.77 at
+// AWGN/12 dB, with a full per-cell range of 0.22-0.90.
+//
+// 0.50 is mpp at 6 dB: a fading channel at moderate SNR, chosen so the
+// estimate under-promises on a good path rather than over-promising on
+// a bad one. Everything about it is monotone -- more clean gain, more
+// delivered gain; better channel, more retained -- so it ranks
+// correctly even where it is numerically off.
+//
+// **Show it as approximate.** It is a point estimate of a quantity with
+// a factor-of-two spread, and the operator's actual channel picks which
+// end. A bare "+2.1 dB" claims precision this does not have.
+inline constexpr double RETENTION = 0.50;
 
 // Monte Carlo draws of the channel per step. Lowering it makes each
 // step cheaper and noisier -- and weakening the channel term is exactly
@@ -81,14 +158,34 @@ struct Progress {
 
     // 10*log10(mse_start / best_mse): how far the *objective* has come.
     //
-    // **Not an on-air figure and must not be shown as one.** Measured,
-    // latent-domain MSE against a noiseless decode overstates recovered
-    // picture quality by roughly 3x, and by a ratio that varies with
-    // the image. It is here because it is free -- both terms are
-    // already in hand -- and because a number that visibly climbs is
+    // **Not an on-air figure and must not be shown as one.** It
+    // overstates recovered picture quality by roughly 3x, by a ratio
+    // that varies with the image, and it is not comparable across
+    // objectives at all -- on one picture the flat objective reported
+    // 5.58 dB for a delivered 1.84 while the fading one reported 3.97
+    // for a delivered 3.29, ranking the two backwards. It is here
+    // because it is free and because a number that visibly climbs is
     // worth having while the operator waits. Present it as progress,
-    // not as decibels earned.
+    // never as decibels earned; `clean_gain_db` is the honest one.
     double objective_gain_db = 0.0;
+
+    // 10*log10(clean_mse_start / clean_mse_now): the improvement in a
+    // **noise-free** decode of the current iterate, in dB of PSNR
+    // against the source picture.
+    //
+    // This is a real picture-quality number, not a proxy. It costs one
+    // extra `GradFn` call every `clean_probe_every` steps -- the graph's
+    // own `mse` output with the noise switched off is image-domain PSNR,
+    // agreeing with a full `codec::decode` to 0.0013 dB, so no decoder
+    // session is needed and a send-only station never fetches one.
+    //
+    // Zero when probing is off, and it stays at the value of the last
+    // probe between probes rather than interpolating.
+    double clean_gain_db = 0.0;
+
+    // `clean_gain_db * RETENTION`: what the *receiver* is expected to
+    // see. Read the warning on RETENTION before showing this to anyone.
+    double estimated_gain_db = 0.0;
 };
 
 // Called once per step. Returning false asks the loop to stop -- that
@@ -110,8 +207,21 @@ enum class StopReason { Plateau, TimeBudget, MaxSteps, Cancelled };
 std::string to_string(StopReason reason);
 
 struct Options {
-    double objective_snr_db = OBJECTIVE_SNR_DB;
+    // **These two move together.** `objective_snr_db` is on a different
+    // scale for each channel -- the profile carries 5-7 dB more noise
+    // at the same nominal number -- so pairing the fading profile with
+    // 5.0, or a null profile with 7.5, silently optimizes a channel
+    // nobody measured. Adopted 2026-08-04, worth +0.237 dB of recovered
+    // picture over the flat pair across the 10-image corpus at
+    // identical compute.
+    double objective_snr_db = FADING_OBJECTIVE_SNR_DB;
     int channel_samples = CHANNEL_SAMPLES;
+
+    // Null falls back to the flat channel -- the pre-2026-08-04
+    // objective, kept reachable because every measurement older than
+    // that was taken against it. Setting it to null means setting
+    // `objective_snr_db` to `OBJECTIVE_SNR_DB` as well.
+    const FadingProfile* fading_profile = &MEASURED_FADING_PROFILE;
     double learning_rate = LEARNING_RATE;
 
     // Whichever fires first. **Not a fixed step count**: per-step cost
@@ -120,6 +230,13 @@ struct Options {
     // board. The plateau test is the one that should normally fire; the
     // budget is what makes this safe inside a transmit workflow;
     // max_steps only backstops a loss that never plateaus.
+    // Steps between noise-free probes for `Progress::clean_gain_db`,
+    // which is what the GUI shows. 0 disables them. Probing only ever
+    // happens when a `ProgressFn` was supplied, so a caller with no UI
+    // pays nothing for this default; with one, it is ~5% of the step
+    // cost at the default 4 draws.
+    int clean_probe_every = 5;
+
     double time_budget_s = 20.0;
     int max_steps = 1000;
     int patience = 10;
