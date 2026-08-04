@@ -92,7 +92,32 @@ Result run(const GradFn& grad_fn, const std::vector<double>& latents,
     std::mt19937_64 rng(opts.seed);
     std::normal_distribution<float> gauss(0.0f, static_cast<float>(sigma));
 
+    // Fading draws use a unit normal scaled per latent instead. The flat
+    // path deliberately keeps its own `gauss` rather than sharing one
+    // unit distribution and multiplying: that would change the numbers
+    // the shipping objective produces for no reason at all.
+    const FadingProfile* fp = opts.fading_profile;
+    std::normal_distribution<float> unit(0.0f, 1.0f);
+    std::discrete_distribution<int> bins(
+        fp ? fp->prob.begin() : MEASURED_FADING_PROFILE.prob.begin(),
+        fp ? fp->prob.end() : MEASURED_FADING_PROFILE.prob.end());
+    // Only allocated when fading is on: the flat path must not pay a
+    // 634k-float copy per draw for a feature it is not using.
+    std::vector<float> faded_weights(fp ? n_full : 0);
+
     constexpr double b1 = 0.9, b2 = 0.999, eps = 1e-8;
+
+    // Noise-free baseline for `Progress::clean_gain_db`. Taken once,
+    // from the encoder's own latents, so every later probe is a gain
+    // over the picture the operator would have sent unaided.
+    double clean_mse_start = 0.0;
+    double clean_gain_db = 0.0;
+    const bool probe = opts.clean_probe_every > 0 && progress != nullptr;
+    if (probe) {
+        double m0 = 0.0;
+        grad_fn(z, weights, grad, m0);
+        clean_mse_start = m0;
+    }
 
     std::vector<float> best_z = z;
     double best_mse = std::numeric_limits<double>::infinity();
@@ -111,9 +136,28 @@ Result run(const GradFn& grad_fn, const std::vector<double>& latents,
             // z. That is why no channel model has to be ported
             // alongside this: noise in, `weights` back out as the
             // chain-rule factor.
-            for (std::size_t i = 0; i < n_full; ++i) noisy[i] = z[i] + gauss(rng);
+            //
+            // A per-latent gain keeps that property: scaling the noise
+            // is still an additive perturbation independent of `z`, so
+            // the chain rule is unchanged and no second graph run is
+            // needed. The drawn confidence goes in as `weights`, which
+            // *is* the chain-rule factor -- so a low-confidence latent
+            // is both noisier and discounted, exactly as the receiver
+            // reports it.
+            const std::vector<float>* w_in = &weights;
+            if (fp) {
+                for (std::size_t i = 0; i < n_full; ++i) {
+                    const int b = bins(rng);
+                    noisy[i] = z[i] +
+                               unit(rng) * static_cast<float>(sigma) * fp->rel_sigma[b];
+                    faded_weights[i] = weights[i] * fp->weight[b];
+                }
+                w_in = &faded_weights;
+            } else {
+                for (std::size_t i = 0; i < n_full; ++i) noisy[i] = z[i] + gauss(rng);
+            }
             double mse = 0.0;
-            grad_fn(noisy, weights, grad, mse);
+            grad_fn(noisy, *w_in, grad, mse);
             if (grad.size() != n_full) {
                 throw std::runtime_error("gradient function returned the wrong size");
             }
@@ -149,6 +193,19 @@ Result run(const GradFn& grad_fn, const std::vector<double>& latents,
             p.objective_gain_db = (best_mse > 0.0 && mse_start > 0.0)
                                       ? 10.0 * std::log10(mse_start / best_mse)
                                       : 0.0;
+            // Probe the *current* iterate with the noise switched off.
+            // Not `best_z`: the operator is watching this run, and a
+            // number that stalls while the loss wanders is harder to
+            // read than one that tracks where the search actually is.
+            if (probe && (step == 1 || step % opts.clean_probe_every == 0)) {
+                double mc = 0.0;
+                grad_fn(z, weights, grad, mc);
+                if (mc > 0.0 && clean_mse_start > 0.0) {
+                    clean_gain_db = 10.0 * std::log10(clean_mse_start / mc);
+                }
+            }
+            p.clean_gain_db = clean_gain_db;
+            p.estimated_gain_db = clean_gain_db * RETENTION;
             if (!progress(p)) {
                 stop = StopReason::Cancelled;
                 break;

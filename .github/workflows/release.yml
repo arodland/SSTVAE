@@ -1,0 +1,231 @@
+# Turn a draft release into a published one.
+#
+# The flow this automates, and it is the whole of it:
+#
+#   1. Bump the version in native/CMakeLists.txt and pyproject.toml,
+#      commit, push.
+#   2. Create a **draft** release on GitHub whose tag is that version,
+#      with `v` in front. Write whatever release notes you want.
+#   3. This workflow fires, checks the tag against the two declared
+#      versions, builds and signs all five platforms, attaches the
+#      downloads, appends a table of them below your notes, and takes
+#      the draft flag off.
+#
+# **The build is not defined here.** It is `native-build.yml`, the same
+# reusable workflow ci.yml runs on every push, called with two inputs it
+# otherwise leaves empty. That is deliberate and it is the same argument
+# the installer step already makes -- "an installer that is only ever
+# built for a release is one whose first exercise is the release" --
+# applied one level up. A release-specific build path would be exercised
+# for the first time at the release, and it is the path holding the
+# signing credentials.
+#
+# Two things about the `release: [created]` trigger that are not obvious
+# and both bite:
+#
+# * **It only works once this file is on the default branch.** Workflows
+#   triggered by a release event are read from the default branch, not
+#   from whatever the release points at. So this cannot be tested from a
+#   pull request; merge it first, then cut a throwaway draft.
+# * **A draft release's tag usually does not exist in git.** GitHub
+#   creates it at publish time. So the checkout ref for a release event
+#   can be a tag nothing can resolve, which is why the `resolve` job
+#   below works out a concrete SHA and every build job is pinned to it.
+
+name: Release
+
+on:
+  release:
+    types: [created]
+  # A re-run without touching the release: point it at the same tag and
+  # it redoes the build, replaces the assets and republishes the notes.
+  # Wanted more often than it sounds -- a runner can fail for reasons
+  # that have nothing to do with the code, and recreating a draft to get
+  # another attempt would mean losing hand-written notes.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)build and publish, e.g. v0.2.0"
+        required: true
+        type: string
+
+# Never two runs against one tag. Not `cancel-in-progress`: by the time
+# a second run starts the first may be most of the way through five
+# signed builds, and Azure signature quota is finite.
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------- resolve
+  # Work out what is being released, and refuse if the answer is
+  # inconsistent -- before spending twenty minutes of five runners and a
+  # notarization round trip on it.
+  resolve:
+    name: Resolve and check the version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+      sha: ${{ steps.v.outputs.sha }}
+    steps:
+      # **The default branch explicitly, not the event's ref.** For a
+      # release event GitHub points the ref at `refs/tags/<tag>`, and a
+      # draft's tag does not exist until the release is published -- so
+      # the obvious bare checkout can fail on the very job whose purpose
+      # is to explain what is wrong, and fail with a git error about a
+      # missing ref rather than anything about releases. The default
+      # branch always exists, is where this workflow file was read from
+      # anyway, and carries the tag once there is one.
+      #
+      # fetch-depth: 0 for the tags and the full history: the tag is how
+      # we tell "a draft for a tag that already exists" from "a draft
+      # that will create its tag on publish", and those resolve to
+      # different commits.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - name: Parse the tag and check it against the source
+        id: v
+        # Everything the script needs arrives as an environment
+        # variable, and no `${{ }}` appears inside the script body. That
+        # is not style: an expression nested in a bash `${VAR:-default}`
+        # expands correctly on the runner and is a syntax error to bash
+        # itself, so the script cannot be run outside Actions -- which
+        # for a version gate means its first exercise is a release.
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          TARGET: ${{ github.event.release.target_commitish }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "$TAG" ] || { echo "no tag to release" >&2; exit 1; }
+
+          # One optional `v`, then a plain three-part version. Anything
+          # else is refused rather than guessed at: the version ends up
+          # in filenames, in the Windows version block and in Add/Remove
+          # Programs, and a tag like `v0.2` or `release-0.2.0` would put
+          # something different in each.
+          case "$TAG" in
+            v[0-9]*) VERSION="${TAG#v}" ;;
+            [0-9]*)  VERSION="$TAG" ;;
+            *) echo "tag '$TAG' is not a version tag (expected v1.2.3)" >&2; exit 1 ;;
+          esac
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "version '$VERSION' from tag '$TAG' is not X.Y.Z" >&2
+            exit 1
+          fi
+
+          # Which commit to build. A tag that exists wins, because that
+          # is exactly what the release names; otherwise the draft's
+          # target branch, resolved to a SHA here so all five jobs build
+          # one commit even if master moves.
+          if git rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null; then
+            SHA="$(git rev-parse "refs/tags/$TAG^{commit}")"
+            echo "tag $TAG exists, building $SHA"
+          else
+            TARGET="${TARGET:-${DEFAULT_BRANCH:-master}}"
+            # `--verify -q`, not a bare rev-parse with stderr hidden.
+            # **A bare `git rev-parse` echoes an argument it cannot
+            # resolve to stdout** and then exits non-zero, so
+            # `rev-parse A || rev-parse B` concatenates the failed
+            # attempt's text with the successful one's answer. That is
+            # not hypothetical: `target_commitish` is a raw SHA whenever
+            # the release was made from one or its branch has since been
+            # deleted, and `origin/<sha>` never resolves -- so the common
+            # branch case worked and the SHA case produced a two-line
+            # "SHA" that failed at checkout, a long way from the cause.
+            # `--verify -q` prints on success and nothing otherwise.
+            SHA="$(git rev-parse --verify -q "origin/$TARGET^{commit}" \
+                   || git rev-parse --verify -q "$TARGET^{commit}")" || SHA=""
+            if [ -z "$SHA" ]; then
+              echo "cannot resolve '$TARGET' to a commit -- is the branch pushed?" >&2
+              exit 1
+            fi
+            echo "tag $TAG does not exist yet; building $TARGET at $SHA"
+          fi
+          git checkout -q "$SHA"
+
+          # **The tag is checked against the source, not written into
+          # it.** tools/make_installer.sh reads the version from
+          # native/CMakeLists.txt on the stated principle that a
+          # packaging script with its own copy ships the wrong number;
+          # overriding it from the tag would reintroduce exactly that,
+          # one level further out. So a mismatch means a download called
+          # 0.2.0 containing a binary that reports 0.1.0 in its About box
+          # and in Add/Remove Programs -- silent, and only visible to
+          # somebody who already installed it. Fail instead, early.
+          CMAKE_V="$(sed -n 's/^project(sstvae_native VERSION \([0-9.]*\).*/\1/p' \
+                     native/CMakeLists.txt | head -1)"
+          PY_V="$(sed -n 's/^version = "\([0-9.]*\)".*/\1/p' pyproject.toml | head -1)"
+          echo "tag=$VERSION  native/CMakeLists.txt=$CMAKE_V  pyproject.toml=$PY_V"
+          fail=0
+          [ "$CMAKE_V" = "$VERSION" ] || { echo "::error::native/CMakeLists.txt says $CMAKE_V, tag says $VERSION"; fail=1; }
+          [ "$PY_V" = "$VERSION" ]    || { echo "::error::pyproject.toml says $PY_V, tag says $VERSION"; fail=1; }
+          if [ "$fail" -ne 0 ]; then
+            echo "Bump the version in the source, push, and re-run." >&2
+            exit 1
+          fi
+
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "sha=$SHA"
+          } >> "$GITHUB_OUTPUT"
+
+  # ------------------------------------------------------------------ build
+  # The same workflow ci.yml runs, with the two release inputs filled in.
+  # Nothing here is release-specific; if this passes on a push it passes
+  # here, and if it fails here it would have failed on a push.
+  build:
+    name: Build
+    needs: resolve
+    uses: ./.github/workflows/native-build.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+      release-tag: ${{ needs.resolve.outputs.tag }}
+      ref: ${{ needs.resolve.outputs.sha }}
+    secrets: inherit
+
+  # ---------------------------------------------------------------- publish
+  publish:
+    name: Write the download table and publish
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      # For tools/release_notes.py. Pinned to the same commit that was
+      # built, so the notes are generated by the code being released.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+      - name: Append the downloads and drop the draft flag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The table is built from the assets **actually on the
+          # release**, never from a filename pattern reconstructed here.
+          # tools/make_installer.sh owns the suffix rule -- ".dmg on
+          # macOS, AppImage on Linux, -setup.exe on Windows" -- and it
+          # says so; a second copy in this file is a copy that goes stale
+          # the first time one of them changes, and the symptom would be
+          # a release page full of dead links.
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json body,assets > release.json
+          python3 tools/release_notes.py release.json "$TAG" \
+            "$GITHUB_REPOSITORY" > body.md
+
+          # --notes-file rather than --notes: release notes routinely
+          # contain backticks and dollar signs, and passing them through
+          # an argument is one shell expansion away from mangling
+          # somebody's carefully written changelog.
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --notes-file body.md --draft=false
+          echo "published $TAG"

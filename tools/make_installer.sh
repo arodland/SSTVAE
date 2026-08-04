@@ -26,9 +26,13 @@
 #             the installer needs administrator rights and a portable
 #             copy on a stick does not.
 #
-# Nothing here signs anything. That is step 4, and it lands as an extra
-# call between staging and packing on macOS and Windows -- notarization in
-# particular has to happen on the *finished* container.
+# Nothing here signs anything -- that is `tools/sign.sh`, deliberately
+# still a separate script and not a flag on this one. It runs twice on
+# macOS and Windows: once over the staged tree before this script packs
+# it, and once over what this script produced, because notarization has
+# to see the *finished* container and the ticket is stapled back into it.
+# Keeping the split means an unsigned installer is still one command,
+# which is what a developer wants and what a fork's CI run gets.
 
 set -euo pipefail
 

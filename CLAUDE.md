@@ -1158,10 +1158,32 @@ side: overlay templates, and a real on-air (not loopback) shakedown of
 the PTT timing against a physical radio. For the native app: Phase 4 is
 sequenced in five steps and the first three are done — CI builds five
 packages and five installers (AppImage, `.dmg`, NSIS setup) on every
-push. Remaining there: **signing** on macOS and Windows, then publishing
-a real release. Until that lands the only downloads are CI artifacts,
-which need a GitHub login and warn about an unidentified developer;
-the README says so plainly rather than implying a release exists. See
+push. **Step 4 (signing) is done and green (2026-08-04)**:
+`tools/sign.sh <app|installer> <path>` does Developer ID + notarization
++ stapling on macOS and Azure Trusted Signing on Windows, wired into
+`ci.yml` around the installer step — macOS reports `source=Notarized
+Developer ID` on both slices, Windows signs all three executables and
+the NSIS setup. It is a **loud no-op with exit 0 when the credentials
+are absent**, so a fork's CI still produces unsigned installers, and
+`SSTVAE_REQUIRE_SIGNING=1` turns that skip into a failure — the same
+hazard and the same answer as `SSTVAE_REQUIRE_CODEC`. Three traps it
+cost, all in `docs/native-app.md`: `security import` sniffs the format
+from the *file extension*, so the p12 needs a `.p12` name and
+`-f pkcs12` or it fails as "Unknown format" and reads like a bad
+password; the sign CLI spells all three options `trusted-signing-*`,
+certificate profile included; and **a notarization failure can be
+Apple's** — one was, and cleared with no change — so check Apple's
+system status before editing anything, and use the `notarytool log`
+fetch to tell a real rejection from an outage.
+
+Remaining: **step 5, a real release.** There is still no releases page,
+so the only downloads are CI artifacts needing a GitHub login — the
+README says so plainly rather than implying a release exists. What CI
+cannot prove is the part still outstanding: each of the five artifacts
+installed and launched on a clean machine. Expect **Windows SmartScreen
+to warn anyway at first** — reputation is per certificate and accrues
+over downloads and time — which is a thing to tell operators, not a
+signing bug to go and fix. See
 `docs/native-app.md` for the C++/Qt rewrite design (Phases 0-3 done,
 Phase 4 steps 1-3 done) and `docs/todo.md` for quantisation tolerance
 as a future training constraint.
