@@ -19,6 +19,14 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# clangd reads this to get the real include paths and defines for every
+# target (Qt, onnxruntime, pybind11/Python.h, the bundled Hamlib
+# headers); without it clangd falls back to guessed flags and reports
+# most of the tree as undefined. .clangd points at the directory this
+# lands in. Every generator CMake supports here (Ninja, Makefiles) can
+# emit it; the root .gitignore already excludes the resulting file.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # The oldest macOS this is built to run on. Decision 2 in
 # docs/native-app.md sets a conservative hardware floor, and Qt 6.8
 # supports back to 12; stated explicitly so it is a choice rather than

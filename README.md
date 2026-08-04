@@ -33,9 +33,9 @@ whole idea.
 > - **The on-air format is not frozen.** Expect incompatible changes.
 >   Two stations must run the same commit *and* the same model
 >   checkpoint to talk to each other.
-> - **There is no release download yet** — the builds aren't code-signed,
->   so they are published as CI artifacts rather than on a releases page.
->   See [Get the app](#get-the-app).
+> - **There is no release download yet.** The builds are signed and
+>   notarized now, but they are still published as CI artifacts rather
+>   than on a releases page. See [Get the app](#get-the-app).
 > - There is no integration with existing SSTV software.
 > - Not registered with, or coordinated with, any band-plan authority.
 >   Use it thoughtfully and identify per your licence.
@@ -110,16 +110,24 @@ a native C++/Qt program, built for **Linux x86-64, Linux arm64, macOS
 portable archive and a platform installer (AppImage, `.dmg`, NSIS
 setup).
 
-> **No releases page yet.** The builds are not code-signed, so until
-> that is sorted out the only downloads are CI artifacts, and GitHub
-> requires you to be logged in to fetch them. Open the latest green run
-> of [the CI
+> **No releases page yet.** The builds are code-signed — macOS with a
+> Developer ID and notarized by Apple, Windows with Azure Trusted
+> Signing — but there is still no tagged release, so the only downloads
+> are CI artifacts and GitHub requires you to be logged in to fetch
+> them. Open the latest green run of [the CI
 > workflow](https://github.com/arodland/SSTVAE/actions/workflows/ci.yml),
 > scroll to **Artifacts**, and take the one matching your platform
 > (`sstvae-linux-x86_64`, `sstvae-macos-arm64`,
-> `sstvae-windows-x64-portable`, …) or its installer. macOS and Windows
-> will warn you that the app is from an unidentified developer, because
-> it is — that is the same missing signature.
+> `sstvae-windows-x64-portable`, …) or its installer.
+>
+> macOS should no longer warn about an unidentified developer: the
+> notarization ticket is stapled into the `.dmg`, so Gatekeeper can
+> approve it without asking Apple, and without a network connection.
+> On Windows the publisher is now named rather than unknown, but
+> **SmartScreen may still interrupt the first install** — its
+> reputation is earned per certificate over downloads and time, and
+> this one is new. "More info" → "Run anyway" is the way past it, and
+> it should stop happening on its own.
 
 The published model is fetched on first use and cached, so there is
 nothing else to download. Building from source is an ordinary CMake +

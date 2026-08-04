@@ -212,24 +212,37 @@ void TransmitPanel::on_optimizer_progress() {
     if (optimizer_ == nullptr || transmitting()) return;
     const optimize::SpeculativeStatus st = optimizer_->status();
 
-    // An *estimate*, and labelled as one. It is the objective's own
-    // improvement, which overstates recovered picture quality by
-    // roughly 3x at a ratio that varies with the image -- so it must
-    // never be read as decibels the far end will see. Shown because a
-    // number that climbs is worth having while the operator waits, and
-    // kept afterwards because the finished figure is the interesting
-    // one (Andrew, 2026-07-31).
+    // An *estimate*, and labelled as one -- but a defensible one since
+    // 2026-08-04. It is the clean-decode PSNR gain (measured, not a
+    // proxy) times `optimize::RETENTION`, the fraction that survives to
+    // the receiver. It replaced `objective_gain_db`, which overstated by
+    // roughly 3x and could rank two objectives backwards -- on one
+    // picture it reported 5.58 dB for a delivered 1.84 and 3.97 for a
+    // delivered 3.29.
+    //
+    // Still approximate, and the tilde says so rather than the code
+    // pretending otherwise: retention splits almost additively into an
+    // image term the sender can see and a channel term it cannot, and
+    // the channel term alone runs 0.39 (mpp at 3 dB) to 0.77 (AWGN at
+    // 12 dB). RETENTION is anchored at mpp/6 dB so this under-promises
+    // on a good path rather than over-promising on a bad one. It is
+    // monotone in everything, so it is honest about *more* or *less*
+    // even where the number itself is off by a factor.
+    //
+    // Shown because a number that climbs is worth having while the
+    // operator waits, and kept afterwards because the finished figure
+    // is the interesting one (Andrew, 2026-07-31).
     const QString gain =
-        QString::asprintf("%+.1f dB", st.progress.objective_gain_db);
+        QString::asprintf("~%+.1f dB", st.progress.estimated_gain_db);
 
     if (st.running) {
-        status_->setText(tr("Refining picture... %1 est.").arg(gain));
+        status_->setText(tr("Refining picture... %1 on air").arg(gain));
     } else if (st.finished && awaiting_optimizer_) {
         status_->setText(tr("Refining picture... finishing"));
     } else if (st.finished && st.progress.step > 0) {
         // Whatever ended it -- plateau, either budget, or Send cutting
         // it short -- the gain it did reach stays on screen.
-        status_->setText(tr("Picture refined: %1 est.").arg(gain));
+        status_->setText(tr("Picture refined: %1 on air").arg(gain));
         if (!optimizer_result_logged_) {
             // The status label cannot say *why* it stopped, so plateau
             // and out-of-time looked identical -- and the figure
@@ -238,7 +251,7 @@ void TransmitPanel::on_optimizer_progress() {
             optimizer_result_logged_ = true;
             app_->log_event(
                 "opt", log::Severity::Info,
-                tr("refined %1 est. (%2, %3 steps, %4 s)")
+                tr("refined %1 on air (%2, %3 steps, %4 s)")
                     .arg(gain)
                     .arg(QString::fromStdString(optimize::to_string(st.stop)))
                     .arg(st.progress.step)
