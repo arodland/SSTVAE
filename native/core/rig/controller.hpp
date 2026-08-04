@@ -80,8 +80,15 @@ struct RigConfig {
 };
 
 // Called from the worker thread, never from the caller's.
+//
+// `error` is true when the text is a failure report (open failed, a
+// poll raised) rather than a healthy status. The GUI needs the
+// distinction to treat the two differently -- a frequency readout is
+// routine, a CAT failure is an event worth logging with a timestamp --
+// and the text alone cannot carry it: failure text is whatever the
+// backend's exception said, with no reliable shape.
 using OnFrequency = std::function<void(std::optional<double> hz)>;
-using OnStatus = std::function<void(const std::string& text)>;
+using OnStatus = std::function<void(const std::string& text, bool error)>;
 
 class RigController {
 public:

@@ -16,13 +16,17 @@
 #include <string>
 #include <thread>
 
+#include "images/images.hpp"
 #include "images/types.hpp"
 #include "optimize/speculative.hpp"
 #include "overlay/model.hpp"
 #include "tx/engine.hpp"
 
+class QColor;
 class QComboBox;
 class QDoubleSpinBox;
+class QDragEnterEvent;
+class QDropEvent;
 class QGroupBox;
 class QLabel;
 class QPlainTextEdit;
@@ -34,6 +38,7 @@ class QTimer;
 namespace sstvae::gui {
 
 class AppState;
+class ErrorBanner;
 class OverlayEditor;
 
 // The output level is stored as a peak amplitude (`transmit.level`,
@@ -58,6 +63,11 @@ public:
     ~TransmitPanel() override;
 
     bool transmitting() const;
+    // The 4:3 canvas. Read by tests and by the screenshot tool.
+    QWidget* picture_area() const;
+    // Everything below the canvas, as one widget, so the container can
+    // hold it to the same height as the receive pane's strip.
+    QWidget* control_strip() const;
 
 public slots:
     void send();
@@ -72,6 +82,10 @@ public slots:
     void cancel();
     void choose_image();
     void load_image(const QString& path);
+    // Re-open the framing dialog for the picture already loaded. The
+    // original is kept, so this starts from the source rather than
+    // cropping what the last framing produced.
+    void choose_framing();
     // The receive panel's newest complete picture, for a "last_rx" inset.
     void set_last_rx_image(const images::Picture& image);
 
@@ -88,6 +102,15 @@ signals:
     void errorOccurred(const QString& message);
     void sendFinished(bool ok);
 
+protected:
+    // A dropped picture file loads exactly as a chosen one does.
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
+
+protected:
+    // Only to keep the error banner sitting over the top of the picture.
+    void resizeEvent(QResizeEvent* event) override;
+
 private slots:
     void on_optimizer_progress();
     void on_state(int phase, double progress, const QString& message);
@@ -99,13 +122,23 @@ private slots:
 
 private:
     void build_ui();
+    // Keeps the floating error banner across the top of the picture.
+    void place_banner();
+    // Paint the current text colour onto the Colour button.
+    void set_color_swatch(const QColor& color);
+    // True while the picture is committed to a send in progress.
+    bool picture_locked() const;
+    void set_picture_controls_enabled(bool on);
+    // Push `framing_` through `images::fit` into the editor, and
+    // relabel the picture honestly.
+    void apply_framing();
     // Everything from "the operator pressed Send" onwards, once any
     // optimization has settled. Split out because Send may have to wait
     // for the optimizer first, and that wait must not block the GUI.
     void begin_transmit(const images::Picture& picture,
                         std::vector<double> latents);
     void rebuild_optimizer();
-    QWidget* build_side_panel();
+    QWidget* build_tool_row();
     QGroupBox* build_properties(QWidget* parent);
     QWidget* build_send_bar();
     void update_level_label();
@@ -113,17 +146,30 @@ private:
 
     AppState* app_ = nullptr;
     OverlayEditor* editor_ = nullptr;
+    ErrorBanner* banner_ = nullptr;
 
     QPushButton* choose_button_ = nullptr;
+    QPushButton* frame_button_ = nullptr;
     QLabel* image_label_ = nullptr;
     QPushButton* add_rx_button_ = nullptr;
 
+    // The picture as loaded, at its own size, plus how it is framed
+    // into the transmit canvas. Kept apart so re-framing starts from
+    // the source instead of compounding crops.
+    std::optional<images::Picture> source_;
+    QString source_path_;
+    images::Framing framing_;
+
+    QWidget* strip_ = nullptr;
     QGroupBox* properties_ = nullptr;
     QPlainTextEdit* text_edit_ = nullptr;
     QComboBox* align_combo_ = nullptr;
     QDoubleSpinBox* size_spin_ = nullptr;
     QDoubleSpinBox* rotation_spin_ = nullptr;
     QPushButton* color_button_ = nullptr;
+    // What the swatch currently shows, so a drag's per-mouse-move
+    // selectionChanged does not rebuild an identical icon.
+    QColor swatch_color_;
     // Set while the property widgets are being filled from an item, so
     // their change signals do not write straight back into it.
     bool loading_properties_ = false;
@@ -155,6 +201,14 @@ private:
     // An edit arrived while a send was in progress; re-arm once it is
     // over rather than moving the ground under it.
     bool restart_after_send_ = false;
+
+    // Edge detection for the log: `on_state` fires on every playback
+    // progress tick, so phase transitions are logged only when the
+    // phase actually changes.
+    int last_logged_phase_ = -1;
+    // The optimizer's finished result is logged once per run, not once
+    // per progress callback.
+    bool optimizer_result_logged_ = false;
 };
 
 }  // namespace sstvae::gui

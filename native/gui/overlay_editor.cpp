@@ -1,13 +1,16 @@
 #include "overlay_editor.hpp"
 
 #include <QImage>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPen>
+#include <QResizeEvent>
 
 #include <algorithm>
 #include <cmath>
 #include <utility>
+#include <variant>
 
 #include "images/images.hpp"
 #include "overlay/render.hpp"
@@ -19,6 +22,15 @@ namespace {
 // Side of the square resize grip, in widget pixels.
 constexpr int HANDLE = 10;
 
+// The empty canvas, matching `PictureBox`'s empty state exactly so the
+// two panes look like a pair before either holds a picture. Kept in
+// step with picture_box.cpp by hand -- two constants rather than a
+// shared header, because the receive side is a palette on a QLabel and
+// this side is a painter fill, and a shared symbol would imply they are
+// applied the same way.
+const QColor EMPTY_CANVAS(0x20, 0x20, 0x24);
+const QColor EMPTY_CANVAS_TEXT(0x88, 0x88, 0x88);
+
 QImage to_qimage(const images::Picture& picture) {
     const QImage view(picture.rgb.data(), picture.width, picture.height,
                       picture.width * 3, QImage::Format_RGB888);
@@ -29,8 +41,34 @@ QImage to_qimage(const images::Picture& picture) {
 
 OverlayEditor::OverlayEditor(QWidget* parent) : QWidget(parent) {
     setMinimumSize(320, 240);
+    // **No `setHeightForWidth`.** It is the third form of the same
+    // ratchet as `setFixedHeight` (see picture_box.hpp), and the most
+    // deceptive, because `minimumSizeHint()` never consults it -- a
+    // test asserting on the hint sees nothing wrong. What Qt actually
+    // applies at layout time is `minimumHeightForWidth(width)`, and
+    // with the flag set that is `width * 3/4`.
+    //
+    // It stayed harmless for as long as it did because a `QSplitter`
+    // does not propagate `hasHeightForWidth` and a `QTabWidget` does.
+    // So the tabbed layout exposed it to the window for the first time,
+    // and measured on the container: at 900 px wide it demanded 1107 px
+    // of height, at 1400 px 1375, at **2020 px 1840**. The window grew
+    // past the bottom of the screen, and switching back to side by side
+    // did not shrink it again -- Qt lowers a minimum without resizing.
+    //
+    // Nothing is lost. `resizeEvent` caps the height at 4:3 (a maximum,
+    // which constrains nothing upward) and `canvas_rect()` letterboxes
+    // in both directions, so the canvas is still exactly 4:3 at any
+    // shape this widget is given.
+    // Expanding both ways: this is what absorbs the pane's spare
+    // room. It imposes no cap of its own -- `canvas_rect()` centres
+    // a 4:3 canvas in whatever it is given.
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     setMouseTracking(false);
-    setFocusPolicy(Qt::ClickFocus);
+    // Strong, not ClickFocus: the arrow keys and Delete are useless to
+    // an operator who cannot get focus onto this widget, and ClickFocus
+    // keeps it out of the Tab chain entirely.
+    setFocusPolicy(Qt::StrongFocus);
 }
 
 OverlayEditor::~OverlayEditor() = default;
@@ -60,6 +98,10 @@ void OverlayEditor::add_text(const std::string& text) {
     item.text = text;
     doc_.items.push_back(item);
     select(static_cast<int>(doc_.items.size()) - 1);
+    // The button that ran this has the focus, so the keyboard would
+    // otherwise be dead on exactly the flow the nudge exists for --
+    // add a callsign, then line it up against another.
+    setFocus(Qt::OtherFocusReason);
     emit documentChanged();
 }
 
@@ -68,6 +110,10 @@ void OverlayEditor::add_image_inset(const std::string& path) {
     item.source = path;
     doc_.items.push_back(item);
     select(static_cast<int>(doc_.items.size()) - 1);
+    // The button that ran this has the focus, so the keyboard would
+    // otherwise be dead on exactly the flow the nudge exists for --
+    // add a callsign, then line it up against another.
+    setFocus(Qt::OtherFocusReason);
     emit documentChanged();
 }
 
@@ -75,6 +121,10 @@ void OverlayEditor::add_last_rx_inset() {
     overlay::ImageItem item;  // defaults to SOURCE_LAST_RX
     doc_.items.push_back(item);
     select(static_cast<int>(doc_.items.size()) - 1);
+    // The button that ran this has the focus, so the keyboard would
+    // otherwise be dead on exactly the flow the nudge exists for --
+    // add a callsign, then line it up against another.
+    setFocus(Qt::OtherFocusReason);
     emit documentChanged();
 }
 
@@ -185,14 +235,29 @@ void OverlayEditor::paintEvent(QPaintEvent*) {
 
     if (!composed_valid_) rerender();
     if (composed_.empty()) {
-        painter.fillRect(this->rect(), palette().window());
-        painter.setPen(palette().color(QPalette::Disabled, QPalette::WindowText));
-        painter.drawText(this->rect(), Qt::AlignCenter,
-                         tr("Choose a picture to send"));
+        // **Draw the empty canvas as a 4:3 box, not as nothing.** The
+        // two panes are locked to the same width so the pictures are
+        // the same size, but an empty composer that painted only its
+        // own background made one side a dark rectangle and the other
+        // a void -- so they measured equal and did not read equal. The
+        // same fill and the same disabled text as `PictureBox`, which
+        // is the receive side's empty state, so the pair is symmetric
+        // before either has a picture in it.
+        // Viewport, then the 4:3 frame inside it -- the composer has to
+        // show the shape it will send before anything is in it, for the
+        // same reason the receive box does.
+        painter.fillRect(this->rect(), EMPTY_CANVAS);
+        painter.fillRect(rect, QColor(0x31, 0x31, 0x3a));
+        painter.setPen(QColor(0x55, 0x55, 0x61));
+        painter.drawRect(rect.adjusted(0, 0, -1, -1));
+        painter.setPen(EMPTY_CANVAS_TEXT);
+        painter.drawText(rect, Qt::AlignCenter, tr("Choose a picture to send"));
         return;
     }
 
-    painter.fillRect(this->rect(), Qt::black);
+    // The same fill as the empty state, so the viewport around the
+    // canvas does not change colour the moment a picture arrives.
+    painter.fillRect(this->rect(), EMPTY_CANVAS);
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     painter.drawImage(rect, to_qimage(composed_));
 
@@ -299,6 +364,68 @@ void OverlayEditor::mouseMoveEvent(QMouseEvent* event) {
 void OverlayEditor::mouseReleaseEvent(QMouseEvent* event) {
     Q_UNUSED(event);
     drag_ = Drag::None;
+}
+
+void OverlayEditor::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    // **Nothing here, deliberately.** This widget used to cap its own
+    // height at 4:3 -- first with `setFixedHeight`, which is a hard
+    // *minimum* and made a wide pane raise a window floor that
+    // narrowing never lowered (measured 611 px at 545 wide, 925 at
+    // 1348, 1274 at 1900); then with a maximum, which was safe but was
+    // still one of two caps on one property, so whichever `resizeEvent`
+    // ran last decided the size.
+    //
+    // Now the canvas is drawn *inside* the widget rather than being the
+    // widget, so none of it is needed: `canvas_rect()` letterboxes in
+    // both directions, the composer is exactly 4:3 at any shape this is
+    // handed, and nothing is imposed upward on the window.
+}
+
+void OverlayEditor::keyPressEvent(QKeyEvent* event) {
+    overlay::Item* item = selected_item();
+    if (item == nullptr) {
+        QWidget::keyPressEvent(event);
+        return;
+    }
+
+    if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
+        remove_selected();
+        event->accept();
+        return;
+    }
+
+    // A fraction of the canvas, not a pixel: positions are normalized,
+    // so a fixed step means the same nudge whatever the window size.
+    // Shift is the coarse step, for getting somewhere; the fine one is
+    // roughly a canvas pixel at 640 wide.
+    constexpr double FINE = 1.0 / 640.0;
+    constexpr double COARSE = 1.0 / 64.0;
+    const double step =
+        (event->modifiers() & Qt::ShiftModifier) ? COARSE : FINE;
+
+    double dx = 0.0;
+    double dy = 0.0;
+    switch (event->key()) {
+        case Qt::Key_Left: dx = -step; break;
+        case Qt::Key_Right: dx = step; break;
+        case Qt::Key_Up: dy = -step; break;
+        case Qt::Key_Down: dy = step; break;
+        default:
+            QWidget::keyPressEvent(event);
+            return;
+    }
+
+    // The same clamp a drag uses, so an item cannot be nudged somewhere
+    // a drag could not have put it.
+    std::visit(
+        [dx, dy](auto& i) {
+            i.x = std::clamp(i.x + dx, -0.5, 1.5);
+            i.y = std::clamp(i.y + dy, -0.5, 1.5);
+        },
+        *item);
+    refresh_item();
+    event->accept();
 }
 
 }  // namespace sstvae::gui

@@ -79,8 +79,26 @@ class InputStream {
 public:
     // `device_name` empty means the system default. Throws if capture
     // cannot be started.
+    // **Two callbacks, because there are two kinds of message.**
+    //
+    // `on_opened` reports what was actually obtained: the device and the
+    // rate it opened at, and whether our resampler is in the path. That
+    // is information. Almost nothing is natively 8 kHz, so "resampled
+    // to 8000 Hz" is the normal case, and reporting it as a failure told
+    // operators their setup was broken when it was working.
+    //
+    // `on_error` is for capture actually going wrong once it is running
+    // -- a device disappearing, an underrun, a QAudio error code. Those
+    // deserve the sticky banner.
+    //
+    // They were one callback, and collapsing them cost twice: first the
+    // notice was raised as an error, and then, "fixing" that by
+    // reclassifying the whole channel as information, a genuine capture
+    // failure became a quiet log line with no banner at all. A channel
+    // that carries two severities cannot be given one.
     InputStream(const std::string& device_name, rx::RingBuffer& ring,
-                int samplerate = config::FS, Report on_error = {});
+                int samplerate = config::FS, Report on_opened = {},
+                Report on_error = {});
     ~InputStream();
 
     InputStream(const InputStream&) = delete;

@@ -98,6 +98,7 @@ add_library(sstvae_core STATIC
   core/images/images.cpp
   core/modem/modem.cpp
   core/latents/latents.cpp
+  core/log/log.cpp
   core/util/event.cpp
   core/rx/ringbuffer.cpp
   core/rig/controller.cpp
@@ -336,12 +337,18 @@ if(_want_gui)
   # layering rules forbid.
   add_library(sstvae_gui STATIC
     gui/main_window.cpp
+    gui/flow_layout.cpp
+    gui/pane_container.cpp
+    gui/picture_box.cpp
     gui/waterfall.cpp
     gui/rx_panel.cpp
     gui/rig_config.cpp
     gui/settings_dialog.cpp
     gui/overlay_editor.cpp
     gui/tx_panel.cpp
+    gui/banner.cpp
+    gui/crop_dialog.cpp
+    gui/log_pane.cpp
     gui/app_state.cpp)
   set_target_properties(sstvae_gui PROPERTIES AUTOMOC ON)
   target_include_directories(sstvae_gui PUBLIC core gui)

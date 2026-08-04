@@ -32,12 +32,40 @@ inline constexpr int MIN_H = 240;
 // Already-correct input is returned untouched.
 Picture resize(const Picture& img, int width, int height);
 
+// How a picture is framed into the target rectangle.
+//
+// The pictures the codec sends are 4:3, and anything else has to lose
+// something. The default here is what this function has always done
+// silently -- scale to cover, crop the centre -- expressed as data so
+// the operator can move it. There is no letterbox option: padding
+// would spend airtime on black, and the decision (2026-08-01) was that
+// an operator who wants the whole frame pads the file themselves.
+struct Framing {
+    // Multiplier on the *cover* scale -- the smallest scale that fills
+    // the target. 1.0 is the tightest framing that keeps the picture
+    // full-bleed; above 1.0 crops in further. Below 1.0 would expose
+    // edges with nothing behind them, so callers clamp there.
+    double zoom = 1.0;
+    // Centre of the crop window in normalized source coordinates.
+    // (0.5, 0.5) is the middle of the picture, which is what the
+    // parameterless overload has always used.
+    double center_x = 0.5;
+    double center_y = 0.5;
+};
+
 // Any picture -> exactly IMG_W x IMG_H RGB, by scaling to cover the
-// target and centre-cropping. Deterministic and aspect-preserving.
+// target and cropping. Deterministic and aspect-preserving.
 //
 // Already-correct input is returned untouched, which is the path the
 // parity tests use.
+//
+// **The default framing is byte-identical to what this produced before
+// framing existed** -- the crop offset uses `floor`, which is what the
+// old `(scaled - target) / 2` integer division was for a non-negative
+// numerator. `test_framing` holds it to that by reimplementing the old
+// formula rather than by calling this function twice.
 Picture fit(const Picture& img);
+Picture fit(const Picture& img, const Framing& framing);
 
 // IMG_W x IMG_H RGB -> (3, IMG_H, IMG_W) float32 in [0,1].
 // Exact: a transpose and a divide by 255.

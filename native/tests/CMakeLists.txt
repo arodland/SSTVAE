@@ -26,6 +26,18 @@ target_link_libraries(test_ringbuffer PRIVATE sstvae_core)
 target_include_directories(test_ringbuffer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME ringbuffer COMMAND test_ringbuffer)
 
+add_executable(test_framing test_framing.cpp)
+target_link_libraries(test_framing PRIVATE sstvae_core)
+target_include_directories(test_framing PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME framing COMMAND test_framing)
+set_tests_properties(framing PROPERTIES TIMEOUT 180)
+
+add_executable(test_log test_log.cpp)
+target_link_libraries(test_log PRIVATE sstvae_core)
+target_include_directories(test_log PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME log COMMAND test_log)
+set_tests_properties(log PROPERTIES TIMEOUT 120)
+
 # The decode loop's decisions, with a stub decoder in place of the
 # codec -- so the state machine is covered in every build, including
 # --no-codec.
@@ -176,6 +188,38 @@ if(TARGET sstvae_gui)
   sstvae_onnxruntime_copy_runtime(test_overlay_editor)
   add_test(NAME overlay_editor COMMAND test_overlay_editor)
   set_tests_properties(overlay_editor PROPERTIES TIMEOUT 300)
+
+  add_executable(test_crop_view test_crop_view.cpp)
+  target_link_libraries(test_crop_view PRIVATE sstvae_gui)
+  target_include_directories(test_crop_view PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  sstvae_hamlib_copy_runtime(test_crop_view)
+  sstvae_onnxruntime_copy_runtime(test_crop_view)
+  add_test(NAME crop_view COMMAND test_crop_view)
+  set_tests_properties(crop_view PROPERTIES TIMEOUT 300)
+
+  add_executable(test_log_pane test_log_pane.cpp)
+  target_link_libraries(test_log_pane PRIVATE sstvae_gui)
+  target_include_directories(test_log_pane PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  sstvae_hamlib_copy_runtime(test_log_pane)
+  sstvae_onnxruntime_copy_runtime(test_log_pane)
+  add_test(NAME log_pane COMMAND test_log_pane)
+  set_tests_properties(log_pane PROPERTIES TIMEOUT 300)
+
+  add_executable(test_picture_box test_picture_box.cpp)
+  target_link_libraries(test_picture_box PRIVATE sstvae_gui)
+  target_include_directories(test_picture_box PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  sstvae_hamlib_copy_runtime(test_picture_box)
+  sstvae_onnxruntime_copy_runtime(test_picture_box)
+  add_test(NAME picture_box COMMAND test_picture_box)
+  set_tests_properties(picture_box PROPERTIES TIMEOUT 300)
+
+  add_executable(test_pane_container test_pane_container.cpp)
+  target_link_libraries(test_pane_container PRIVATE sstvae_gui)
+  target_include_directories(test_pane_container PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  sstvae_hamlib_copy_runtime(test_pane_container)
+  sstvae_onnxruntime_copy_runtime(test_pane_container)
+  add_test(NAME pane_container COMMAND test_pane_container)
+  set_tests_properties(pane_container PROPERTIES TIMEOUT 300)
 
   add_executable(test_waterfall test_waterfall.cpp)
   target_link_libraries(test_waterfall PRIVATE sstvae_gui)

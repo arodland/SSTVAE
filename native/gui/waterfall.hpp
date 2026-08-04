@@ -16,13 +16,18 @@
 // single pixel per tick, and k > 1 would jump k pixels and hold k times
 // less history for the same pane.
 //
-// The frequency axis has the same problem in the same direction -- 384
-// bins squeezed into a ~280 px column -- so rows are reduced to the
-// widget's width when they are computed rather than by the painter; see
-// `dsp::reduce_to_width`.
+// The frequency axis has the same problem, and had it in the same
+// direction while this widget was a narrow column: 384 bins squeezed
+// into ~280 px. Rows are therefore reduced to the widget's width when
+// they are computed rather than by the painter (`dsp::reduce_to_width`,
+// peak-hold when shrinking so a one-bin carrier cannot be sampled
+// away). As a strip it is usually *wider* than 384 px and that function
+// interpolates instead -- the shrinking path still matters whenever the
+// pane is dragged narrow, which the splitter allows.
 //
-// History depth therefore follows the widget height: at ~20 fps a
-// 700-pixel pane holds a bit over half a minute.
+// History depth therefore follows the widget height: at ~20 fps the
+// default 160-pixel strip holds about eight seconds, and dragging the
+// splitter down buys more.
 //
 // Audio comes from the same RingBuffer the decoder reads, via `tail()`
 // -- a display-sized slice, never `snapshot()`. The decode loop already
@@ -58,9 +63,20 @@ public:
     void set_ring(std::shared_ptr<rx::RingBuffer> ring);
     void clear();
 
+    // The clip indicator latches: a peak at or over unity marks the
+    // display until the operator clicks the meter. The instantaneous
+    // red bar reverts as soon as the peak passes, which for a 20 fps
+    // meter means a clipped over could come and go entirely unseen.
+    // Latched state is what turns "was it clipping while I was away?"
+    // into a question with an answer -- which is also why replacing
+    // the ring does *not* clear it.
+    bool clip_latched() const { return clip_latched_; }
+    void clear_clip();
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
 
 private slots:
     // A slot rather than a plain member so a test can drive one frame
@@ -72,12 +88,14 @@ private:
     void ensure_image();
     void draw_band_markers(QPainter& painter);
     void draw_level_meter(QPainter& painter);
+    void draw_disabled_scrim(QPainter& painter);
 
     std::shared_ptr<rx::RingBuffer> ring_;
     // Exactly widget-sized; see the header comment.
     QImage image_;
     double peak_ = 0.0;
     bool clipping_ = false;
+    bool clip_latched_ = false;
 };
 
 }  // namespace sstvae::gui

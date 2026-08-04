@@ -1,6 +1,7 @@
 #include "rx_panel.hpp"
 
 #include <QCheckBox>
+#include <QDesktopServices>
 #include <QSignalBlocker>
 #include <QFileDialog>
 #include <QGroupBox>
@@ -13,9 +14,12 @@
 #include <QResizeEvent>
 #include <QSizePolicy>
 #include <QSplitter>
+#include <QTime>
 #include <QTimer>
+#include <QUrl>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <cmath>
 #include <exception>
 #include <filesystem>
@@ -24,8 +28,11 @@
 #include "app_state.hpp"
 #include "audio/qt/qtaudio.hpp"
 #include "audio/wavio.hpp"
+#include "banner.hpp"
 #include "codec/codec.hpp"
 #include "images/images.hpp"
+#include "flow_layout.hpp"
+#include "picture_box.hpp"
 #include "settings/settings.hpp"
 #include "waterfall.hpp"
 
@@ -57,6 +64,19 @@ fs::path unique_path(fs::path path) {
     return path;
 }
 
+// SNR for display, with a placeholder when there is none.
+//
+// `rx::fmt_snr` returns an empty string for NaN, which is right for it
+// -- it mirrors Python's and feeds the CLI. But on screen an absent
+// field is indistinguishable from a field that was never going to be
+// there: the operator cannot tell "no SNR estimate yet" from "this
+// build does not show SNR". The engine formats; the panel decides how
+// to show absence.
+QString snr_text(double snr_db) {
+    const QString formatted = QString::fromStdString(rx::fmt_snr(snr_db));
+    return formatted.isEmpty() ? QStringLiteral("  SNR --") : formatted;
+}
+
 }  // namespace
 
 ReceivePanel::ReceivePanel(AppState* state, QWidget* parent)
@@ -78,50 +98,69 @@ ReceivePanel::ReceivePanel(AppState* state, QWidget* parent)
 ReceivePanel::~ReceivePanel() { stop(); }
 
 void ReceivePanel::build_ui() {
-    // Picture on the left, waterfall down the right -- the same shape as
-    // the transmit panel. The pictures are 4:3, so on the wide monitor
-    // most people have, stacking the waterfall on top would leave the
-    // sides empty and squeeze the thing you actually want to look at.
+    // Picture, then a control strip -- and nothing else. The waterfall
+    // used to be at the top of this pane in its own vertical splitter;
+    // it now spans the whole window and belongs to `MainWindow`, which
+    // drives it through `attach_waterfall`.
+    //
+    // The strip is the unit whose height the container matches against
+    // the transmit pane's, so everything below the picture has to be
+    // inside it. The picture then takes the rest, which is the same
+    // number on both sides.
     auto* layout = new QVBoxLayout(this);
-    auto* splitter = new QSplitter(Qt::Horizontal, this);
 
-    auto* left = new QWidget(splitter);
-    auto* left_layout = new QVBoxLayout(left);
-    left_layout->setContentsMargins(0, 0, 0, 0);
+    // The error tier: sticky, dismissable, and never overwritten by the
+    // 500 ms status refresh below -- which is exactly what happened to
+    // every receive error before (visible for at most half a second).
+    // **Over the picture, not above it.** In the layout it displaced
+    // everything below it -- so an error in one pane pushed that pane's
+    // picture down and the two stopped lining up, which is precisely
+    // what the equal-size work exists to prevent. Floating it costs no
+    // layout at all: it appears, it is dismissed, and nothing moves.
+    banner_ = new ErrorBanner(this);
+    banner_->hide();
 
-    auto* preview_box = new QGroupBox(tr("Picture"), left);
-    auto* preview_layout = new QVBoxLayout(preview_box);
-    preview_ = new QLabel(tr("Nothing received yet"), preview_box);
-    preview_->setAlignment(Qt::AlignCenter);
-    preview_->setMinimumHeight(240);
-    preview_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    // Palette, not a stylesheet: a stylesheet anywhere makes Qt wrap the
-    // application style in QStyleSheetStyle, which resets padding to
-    // zero across every combo and spin box in the app -- including the
-    // settings dialog, which has nothing to do with this widget.
-    preview_->setAutoFillBackground(true);
-    QPalette dark = preview_->palette();
-    dark.setColor(QPalette::Window, QColor(0x20, 0x20, 0x24));
-    dark.setColor(QPalette::WindowText, QColor(0x88, 0x88, 0x88));
-    preview_->setPalette(dark);
-    preview_layout->addWidget(preview_);
-    left_layout->addWidget(preview_box, 1);
+    // No inner "Picture" box: the pane itself is titled, and a group
+    // box between the layout and the picture would swallow the room the
+    // picture is supposed to be taking.
+    preview_ = new PictureBox(tr("Nothing received yet"), this);
+    // Stretch 1 and no trailing spacer: the picture *is* what the spare
+    // room is for. Everything else lives in the strip below, whose
+    // height is fixed by agreement with the transmit pane.
+    layout->addWidget(preview_);
 
-    status_ = new QLabel(tr("Stopped"), left);
-    left_layout->addWidget(status_);
+    strip_ = new QWidget(this);
+    auto* lower_layout = new QVBoxLayout(strip_);
+    lower_layout->setContentsMargins(0, 0, 0, 0);
+    lower_layout->setSpacing(4);
+    QWidget* lower = strip_;
 
-    progress_ = new QProgressBar(left);
+    status_ = new QLabel(tr("Stopped"), lower);
+    // A progress-tier surface must not set a width floor. Its longest
+    // line ("Receiving mode C: frame 220/220 ... de KD8XYZ") is ~400 px,
+    // and both panes are locked to one width, so every such floor is
+    // paid twice. Errors go to the banner, so what clips here is
+    // progress text that is rebuilt twice a second anyway.
+    status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    lower_layout->addWidget(status_);
+
+    progress_ = new QProgressBar(lower);
     progress_->setRange(0, 100);
-    left_layout->addWidget(progress_);
+    lower_layout->addWidget(progress_);
 
-    waterfall_ = new Waterfall(splitter);
-    splitter->addWidget(left);
-    splitter->addWidget(waterfall_);
-    splitter->setStretchFactor(0, 3);
-    splitter->setStretchFactor(1, 1);
-    layout->addWidget(splitter, 1);
+    // The last completed reception's details, which nothing kept
+    // before: the engine wipes mode, callsign and SNR from its shared
+    // state two seconds after a reception finishes, so the "Complete
+    // SNR x" line erased itself while the operator was still looking at
+    // the picture it described.
+    last_card_ = new QLabel(lower);
+    last_card_->setTextFormat(Qt::PlainText);
+    last_card_->setWordWrap(true);
+    last_card_->setEnabled(false);  // reads as secondary until it has content
+    lower_layout->addWidget(last_card_);
 
-    auto* controls = new QHBoxLayout();
+    // Wraps rather than crushes -- see flow_layout.hpp.
+    auto* controls = new FlowLayout();
     start_button_ = new QPushButton(tr("Start receiving"), this);
     connect(start_button_, &QPushButton::clicked, this, &ReceivePanel::start);
     stop_button_ = new QPushButton(tr("Stop"), this);
@@ -130,6 +169,11 @@ void ReceivePanel::build_ui() {
     save_button_ = new QPushButton(tr("Save image"), this);
     connect(save_button_, &QPushButton::clicked, this, &ReceivePanel::save_current);
     save_button_->setEnabled(false);
+    folder_button_ = new QPushButton(tr("Show folder"), this);
+    folder_button_->setToolTip(tr("Open the folder holding the last saved picture"));
+    connect(folder_button_, &QPushButton::clicked, this,
+            &ReceivePanel::open_saved_folder);
+    folder_button_->setEnabled(false);
     autosave_ = new QCheckBox(tr("Autosave"), this);
     autosave_->setChecked(app_->config().receive.autosave);
     connect(autosave_, &QCheckBox::toggled, this,
@@ -138,9 +182,32 @@ void ReceivePanel::build_ui() {
     controls->addWidget(start_button_);
     controls->addWidget(stop_button_);
     controls->addWidget(save_button_);
+    controls->addWidget(folder_button_);
     controls->addWidget(autosave_);
-    controls->addStretch(1);
-    layout->addLayout(controls);
+    // Into the strip, not the panel: the strip is the unit whose height
+    // is matched against the transmit pane's, so anything left outside
+    // it would break the equality it exists to give.
+    lower_layout->addLayout(controls);
+
+    layout->addWidget(strip_);
+}
+
+void ReceivePanel::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    place_banner();
+}
+
+void ReceivePanel::place_banner() {
+    if (banner_ == nullptr || preview_ == nullptr) return;
+    const QRect over = preview_->geometry();
+    // `heightForWidth`, not `sizeHint`: the message wraps, and a hint
+    // taken at unconstrained width is one line -- so a long device name
+    // was clipped to a sliver of its own text. Measured at the width it
+    // will actually get.
+    const int wanted = banner_->heightForWidth(over.width());
+    banner_->setGeometry(over.x(), over.y(), over.width(),
+                         std::max(banner_->sizeHint().height(), wanted));
+    banner_->raise();
 }
 
 bool ReceivePanel::listening() const { return running_.load(); }
@@ -166,17 +233,31 @@ bool ReceivePanel::start() {
 
     const settings::Config& config = app_->config();
     ring_ = std::make_shared<rx::RingBuffer>(config.receive.buffer_seconds);
-    waterfall_->set_ring(ring_);
+    if (Waterfall* w = fall()) w->set_ring(ring_);
 
     try {
         stream_ = std::make_unique<audio::qt::InputStream>(
             config.audio.input_device, *ring_, config::FS,
+            // What opened, and at what rate: information. The resampler
+            // being in the path is the normal case -- very little
+            // hardware is natively 8 kHz -- and a sticky red banner
+            // saying so told operators their setup was broken when it
+            // was working.
+            [this](const std::string& message) {
+                app_->log_event("rx", log::Severity::Info,
+                                QString::fromStdString(message));
+            },
+            // Capture actually failing: banner and log, as before. This
+            // is the half that must not be quiet.
             [this](const std::string& message) {
                 emit errorOccurred(QString::fromStdString(message));
             });
     } catch (const std::exception& e) {
-        waterfall_->set_ring(nullptr);
+        if (Waterfall* w = fall()) w->set_ring(nullptr);
         ring_.reset();
+        app_->log_event("rx", log::Severity::Error,
+                        tr("could not open the input device: %1")
+                            .arg(QString::fromUtf8(e.what())));
         QMessageBox::critical(
             this, tr("Could not open the input device"),
             tr("%1\n\nCheck the input device in Settings.")
@@ -227,12 +308,23 @@ bool ReceivePanel::start() {
 
     start_button_->setEnabled(false);
     stop_button_->setEnabled(true);
-    status_->setText(tr("Listening at %1 Hz").arg(device_rate));
+    set_status(tr("Listening at %1 Hz").arg(device_rate));
+    // A clean restart of the activity clears its error banner; the log
+    // keeps the history.
+    banner_->clear();
+    was_receiving_ = false;
+    app_->log_event("rx", log::Severity::Info,
+                    tr("listening (device at %1 Hz)").arg(device_rate));
     emit listeningChanged(true);
     return true;
 }
 
 void ReceivePanel::stop() {
+    // Idempotence matters here: closeEvent stops the panel and the
+    // destructor stops it again, and only the transition from "was
+    // actually listening" deserves a log line.
+    const bool was_listening = thread_.joinable();
+
     stop_flag_.set();
     // The stream first: it is what feeds the loop, and stopping it means
     // the loop's next poll sees no new audio rather than racing us.
@@ -240,31 +332,52 @@ void ReceivePanel::stop() {
     if (thread_.joinable()) thread_.join();
     running_.store(false);
 
-    if (waterfall_ != nullptr) waterfall_->set_ring(nullptr);
+    if (Waterfall* w = fall()) w->set_ring(nullptr);
     ring_.reset();
 
     if (start_button_ != nullptr) {
         start_button_->setEnabled(true);
         stop_button_->setEnabled(false);
-        status_->setText(tr("Stopped"));
+        set_status(tr("Stopped"));
     }
-    emit listeningChanged(false);
+    if (was_listening) {
+        app_->log_event("rx", log::Severity::Info, tr("stopped"));
+        emit listeningChanged(false);
+    }
 }
 
 void ReceivePanel::suspend_for_transmit() {
     if (!listening()) return;
     suspended_for_tx_ = true;
     stop();
-    status_->setText(tr("Paused -- transmitting"));
+    // This pane is on screen throughout the over now, so a half-duplex
+    // pause has to look deliberate rather than like a receiver that
+    // died: the waterfall stops dead when the ring goes away, and
+    // without this it is the same picture as a wedged capture.
+    set_status(tr("Paused -- transmitting"));
+    preview_->setEnabled(false);
+    if (Waterfall* w = fall()) w->setEnabled(false);
+    // And the button that would undo half duplex. `stop()` re-enables
+    // it on its way through, and this pane is now in front of the
+    // operator for the whole over: clicking Start here would open
+    // capture while the rig is keyed, feed our own transmission to the
+    // decoder, and -- because `start()` returns early when already
+    // listening -- deny `resume_after_transmit` the fresh ring buffer
+    // that is what keeps the tail of our own signal out of a
+    // "reception".
+    start_button_->setEnabled(false);
 }
 
 void ReceivePanel::resume_after_transmit() {
     if (!suspended_for_tx_) return;
     suspended_for_tx_ = false;
+    preview_->setEnabled(true);
+    if (Waterfall* w = fall()) w->setEnabled(true);
+    start_button_->setEnabled(true);  // start() disables it again
     // start() allocates a fresh ring buffer, so the tail of our own
     // transmission is dropped rather than decoded back as a reception.
     start();
-    waterfall_->clear();
+    if (Waterfall* w = fall()) w->clear();
 }
 
 // --- the sink, on the decode thread -----------------------------------------
@@ -339,9 +452,37 @@ void ReceivePanel::save_audio_beside(const std::string& image_path) {
 
 // --- the GUI thread ---------------------------------------------------------
 
+QWidget* ReceivePanel::picture_area() const { return preview_; }
+
+QWidget* ReceivePanel::control_strip() const { return strip_; }
+
+void ReceivePanel::set_status(const QString& text) {
+    status_->setText(text);
+    emit statusChanged(text);
+}
+
 void ReceivePanel::refresh_status() {
     if (!listening()) return;
     const rx::Progress progress = shared_->get();
+
+    // The engine has no "sync acquired" event -- acquisition is just the
+    // first poll whose status reads "receiving" -- so the edge is
+    // detected and logged here (once per acquisition).
+    if (progress.status == rx::Status::Receiving && !was_receiving_) {
+        was_receiving_ = true;
+        QString acquired = tr("sync acquired");
+        if (progress.mode_name) {
+            acquired += tr(": mode %1").arg(QString::fromStdString(*progress.mode_name));
+        } else {
+            acquired += tr(" (blind)");
+        }
+        if (!progress.callsign.empty()) {
+            acquired += tr(" de %1").arg(QString::fromStdString(progress.callsign));
+        }
+        app_->log_event("rx", log::Severity::Info, acquired);
+    } else if (progress.status == rx::Status::Listening) {
+        was_receiving_ = false;
+    }
 
     QString text;
     if (progress.status == rx::Status::Listening) {
@@ -359,12 +500,12 @@ void ReceivePanel::refresh_status() {
             text = tr("Receiving (blind sync): %1% of latents")
                        .arg(100.0 * progress.progress_frac, 0, 'f', 0);
         }
-        text += QString::fromStdString(rx::fmt_snr(progress.snr_db));
+        text += snr_text(progress.snr_db);
         if (!progress.callsign.empty()) {
             text += tr("  de %1").arg(QString::fromStdString(progress.callsign));
         }
     } else {
-        text = tr("Complete%1").arg(QString::fromStdString(rx::fmt_snr(progress.snr_db)));
+        text = tr("Complete%1").arg(snr_text(progress.snr_db));
         if (last_saved_path_) {
             text += tr(" -- saved %1")
                         .arg(QString::fromStdString(
@@ -372,7 +513,7 @@ void ReceivePanel::refresh_status() {
         }
     }
 
-    status_->setText(text);
+    set_status(text);
     progress_->setValue(static_cast<int>(100.0 * progress.progress_frac));
 
     if (progress.image && progress.image.get() != shown_) {
@@ -394,11 +535,65 @@ void ReceivePanel::on_reception(const QString& saved_path) {
         saved_path.isEmpty() ? std::nullopt
                              : std::optional<std::string>(saved_path.toStdString());
     set_displayed(reception->image, reception->callsign, reception->mode_name);
+
+    // The one durable record of a completed reception: mode, callsign,
+    // SNR, frame count and the *full* saved path -- which was previously
+    // shown only in a 5-second status bar flash before this line existed.
+    QString line = tr("reception complete");
+    if (reception->mode_name) {
+        line += tr(": mode %1").arg(QString::fromStdString(*reception->mode_name));
+    }
+    if (!reception->callsign.empty()) {
+        line += tr(" de %1").arg(QString::fromStdString(reception->callsign));
+    }
+    if (reception->n_frames_expected) {
+        line += tr(", %1/%2 frames")
+                    .arg(reception->frames_received.value_or(0))
+                    .arg(*reception->n_frames_expected);
+    }
+    const QString snr = QString::fromStdString(rx::fmt_snr(reception->snr_db));
+    if (!snr.isEmpty()) line += tr(",%1").arg(snr);
+    if (!saved_path.isEmpty()) line += tr(" -- saved %1").arg(saved_path);
+    app_->log_event("rx", log::Severity::Info, line);
+
+    // And the same facts on screen, where they stay. The engine resets
+    // its shared state two seconds after a reception, so everything
+    // below this point was previously unrecoverable from the UI.
+    QString card = tr("Last: %1").arg(QTime::currentTime().toString(QStringLiteral("HH:mm")));
+    if (reception->mode_name) {
+        card += tr(" - mode %1").arg(QString::fromStdString(*reception->mode_name));
+    }
+    if (!reception->callsign.empty()) {
+        card += tr(" - de %1").arg(QString::fromStdString(reception->callsign));
+    }
+    const QString card_snr = QString::fromStdString(rx::fmt_snr(reception->snr_db));
+    if (!card_snr.isEmpty()) card += QStringLiteral(" -") + card_snr;
+    if (reception->n_frames_expected) {
+        card += tr(" - %1/%2 frames")
+                    .arg(reception->frames_received.value_or(0))
+                    .arg(*reception->n_frames_expected);
+    }
+    if (!saved_path.isEmpty()) {
+        card += tr(" - %1").arg(
+            QString::fromStdString(fs::path(saved_path.toStdString()).filename().string()));
+    }
+    last_card_->setText(card);
+    last_card_->setEnabled(true);
+    folder_button_->setEnabled(!saved_path.isEmpty());
+
     emit imageReceived(reception->image);
     if (!saved_path.isEmpty()) emit receptionSaved(saved_path);
 }
 
-void ReceivePanel::on_error(const QString& message) { status_->setText(message); }
+void ReceivePanel::on_error(const QString& message) {
+    // Sticky (the banner) plus durable (the log). Deliberately not the
+    // status label: that is the progress tier, the next 500 ms refresh
+    // would overwrite it anyway, and a single-line label given a long
+    // error inflates the panel's minimum width.
+    place_banner();
+    banner_->show_error(message);
+    app_->log_event("rx", log::Severity::Error, message);
+}
 
 void ReceivePanel::on_autosave_toggled(bool on) {
     app_->config().receive.autosave = on;
@@ -406,10 +601,11 @@ void ReceivePanel::on_autosave_toggled(bool on) {
 }
 
 void ReceivePanel::show_image(const images::Picture& image) {
-    preview_pixmap_ = to_pixmap(image);
-    if (preview_pixmap_.isNull()) return;
-    preview_->setPixmap(preview_pixmap_.scaled(preview_->size(), Qt::KeepAspectRatio,
-                                               Qt::SmoothTransformation));
+    const QPixmap pixmap = to_pixmap(image);
+    if (pixmap.isNull()) return;
+    // The box keeps the original and rescales itself on every resize;
+    // the panel no longer has to notice.
+    preview_->set_picture(pixmap);
 }
 
 void ReceivePanel::set_displayed(const images::Picture& image,
@@ -449,19 +645,69 @@ void ReceivePanel::save_current() {
     try {
         images::save_png(*displayed_, path.toStdString());
     } catch (const std::exception& e) {
+        app_->log_event("rx", log::Severity::Error,
+                        tr("could not save %1: %2")
+                            .arg(path, QString::fromUtf8(e.what())));
         QMessageBox::critical(this, tr("Could not save"),
                               QString::fromUtf8(e.what()));
         return;
     }
     last_saved_path_ = path.toStdString();
+    folder_button_->setEnabled(true);
+    // The card claims to name the file the last picture went to, so a
+    // manual save has to update it -- otherwise the button points at
+    // one file while the card names another (or names none at all,
+    // with autosave off).
+    const QString name = QString::fromStdString(
+        fs::path(path.toStdString()).filename().string());
+    if (last_card_->text().isEmpty()) {
+        last_card_->setText(tr("Saved %1").arg(name));
+        last_card_->setEnabled(true);
+    } else {
+        last_card_->setText(tr("%1 - saved %2").arg(last_card_->text(), name));
+    }
     emit receptionSaved(path);
 }
 
-void ReceivePanel::resizeEvent(QResizeEvent* event) {
-    QWidget::resizeEvent(event);
-    if (!preview_pixmap_.isNull()) {
-        preview_->setPixmap(preview_pixmap_.scaled(
-            preview_->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+void ReceivePanel::fill_for_screenshot() {
+    // The longest line `refresh_status` can build, the longest card
+    // `on_reception` can build, and the banner inside the layout.
+    set_status(
+        tr("Receiving mode C: frame 220/220 (100%)  SNR 8.3dB  de KD8XYZ"));
+    progress_->setValue(100);
+    last_card_->setText(
+        tr("Last: 14:32 - mode C - de KD8XYZ - SNR 8.3dB - 220/220 frames"
+           " - KD8XYZ-C-14230000.png"));
+    last_card_->setEnabled(true);
+    save_button_->setEnabled(true);
+    folder_button_->setEnabled(true);
+    place_banner();
+    banner_->show_error(
+        tr("could not save received image: read-only file system"));
+}
+
+void ReceivePanel::open_saved_folder() {
+    if (!last_saved_path_) return;
+    // The containing folder rather than the file: opening the picture
+    // itself would launch an image viewer, and what the operator wants
+    // here is the directory their captures are piling up in.
+    const QString dir =
+        QString::fromStdString(fs::path(*last_saved_path_).parent_path().string());
+    // Logged unconditionally, before the call. `openUrl` reports only
+    // whether a *handler could be launched*: on Unix it ends in a
+    // detached `xdg-open`, which returns true as soon as the process
+    // starts and says nothing about whether a file manager ever
+    // appeared. So a false return is worth reporting, but a true one is
+    // not evidence of success -- and the case this button exists to
+    // survive (a minimal desktop with nothing registered) is precisely
+    // the one that returns true and does nothing. The log line is what
+    // makes that debuggable instead of baffling.
+    app_->log_event("rx", log::Severity::Info, tr("opening %1").arg(dir));
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(dir))) {
+        app_->log_event("rx", log::Severity::Error,
+                        tr("could not open %1 -- no handler for local "
+                           "folders on this desktop")
+                            .arg(dir));
     }
 }
 

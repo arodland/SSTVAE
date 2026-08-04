@@ -715,6 +715,23 @@ QWidget* SettingsDialog::transmit_tab() {
                          "Send arrives before it has settled, it finishes "
                          "quickly and sends what it has."),
                       page));
+
+    // The transmit level itself stays on the send bar, where it is
+    // adjusted, and keeps a short tooltip there. What lives here is the
+    // *procedure*, because a tooltip only ever reaches an operator who
+    // already suspects they have it wrong -- and drive is the one
+    // adjustment that ruins a transmission silently. The two texts name
+    // the same target on purpose; if this one changes, change the
+    // tooltip in `tx_panel.cpp` with it.
+    form->addRow(note(tr("Transmit level is on the Transmit panel, beside the "
+                         "mode.\n\n"
+                         "Set it so the radio shows no ALC action at all. ALC "
+                         "is a compressor: it flattens the peaks this waveform "
+                         "carries information in, and the far end sees that as "
+                         "a lower SNR and a mangled picture -- while your own "
+                         "meters look healthy. Start low and raise it until "
+                         "power output stops rising, then back off."),
+                      page));
     return page;
 }
 

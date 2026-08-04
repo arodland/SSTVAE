@@ -54,7 +54,8 @@ struct Response {
 
 // Follows redirects by hand so the intermediate headers stay visible;
 // see the header on why that matters.
-Response get_following_redirects(QNetworkAccessManager& nam, const QUrl& start) {
+Response get_following_redirects(QNetworkAccessManager& nam, const QUrl& start,
+                                 const OnProgress& on_progress) {
     QUrl url = start;
     QByteArray sha;
     for (int hop = 0; hop <= kMaxRedirects; ++hop) {
@@ -64,6 +65,16 @@ Response get_following_redirects(QNetworkAccessManager& nam, const QUrl& start) 
         request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("sstvae"));
 
         std::unique_ptr<QNetworkReply> reply(nam.get(request));
+        // Live progress while the loop below runs. Redirect hops have no
+        // body to speak of, so in practice this reports the artifact
+        // itself; before this connection existed the callback fired
+        // exactly once, at 100%, which is no progress indication at all.
+        if (on_progress) {
+            QObject::connect(reply.get(), &QNetworkReply::downloadProgress,
+                             [&on_progress](qint64 received, qint64 total) {
+                                 on_progress(received, total < 0 ? 0 : total);
+                             });
+        }
         QEventLoop loop;
         QObject::connect(reply.get(), &QNetworkReply::finished, &loop, &QEventLoop::quit);
         loop.exec();
@@ -100,7 +111,7 @@ Fetcher qt_fetcher(OnProgress on_progress) {
 
         QNetworkAccessManager nam;
         const QUrl url(QString::fromStdString(artifact_url(filename)));
-        Response response = get_following_redirects(nam, url);
+        Response response = get_following_redirects(nam, url, on_progress);
         QNetworkReply& reply = *response.reply;
 
         if (reply.error() != QNetworkReply::NoError) {
