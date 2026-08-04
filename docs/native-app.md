@@ -892,9 +892,13 @@ from a `.qrc`, for the X11 window icon and the Wayland fallback.
   executable to sign — one of the reasons for choosing it over bundling
   `rigctld`.
 
-**Step 4 (signing) is implemented and not yet exercised** — the
-credentials arrived 2026-08-03 and the first CI run against them has not
-happened. `tools/sign.sh <app|installer> <path>` is the whole of it, and
+**Step 4 (signing) is done, and green on 2026-08-04** — credentials in
+2026-08-03, three CI rounds, and the five packages now ship signed.
+macOS is signed with a Developer ID, notarized (`status: Accepted`) and
+stapled, with `spctl` reporting `source=Notarized Developer ID` on both
+the arm64 and the cross-compiled x86_64 slice; Windows has all three
+executables and the NSIS setup signed through Azure Trusted Signing.
+`tools/sign.sh <app|installer> <path>` is the whole of it, and
 it is one script with two modes rather than two scripts because the
 credential handling *is* the job: both modes want the same keychain on
 macOS and the same service principal on Windows, and two copies of a
@@ -961,8 +965,88 @@ because the platforms disagree about when a signature can exist:
   onnxruntime and Hamlib, and for the stronger form of the same reason:
   this is the tool that decides what a signature says.
 
-**Remaining:** the first real run of step 4, and then step 5 (a real
-release).
+Three rounds to green (PR #5, 2026-08-03 to 08-04). The first two
+failures were one per platform and **neither was a credential** — both
+were a tool being told something in the wrong shape:
+
+- **`security import` sniffs the format from the file extension**, so
+  the certificate must be written to a path ending `.p12` *and* given
+  `-f pkcs12`. A `mktemp` file has no extension and the import fails with
+  `SecKeychainItemImport: Unknown format in import.` — which names
+  neither the file nor the guess, and so reads exactly like a corrupt
+  secret or a wrong `P12_PASSWORD`. The script now checks the decoded
+  bytes begin `0x3082` (DER SEQUENCE, long-form length) before importing,
+  which separates "this is not a PKCS#12" from "the password is wrong":
+  two different secrets to go and look at. Double-encoding shows up as
+  `0x4d49`, the ASCII `MI` that base64-of-DER starts with.
+- **All three Trusted Signing options are spelled `trusted-signing-*`**,
+  the certificate profile included: `--trusted-signing-certificate-profile`,
+  not `--certificate-profile`. The short one is what the Azure portal
+  calls the field and what every other tool's config names it, which is
+  what makes it the natural guess. The CLI's own error is good — it
+  rejects the unknown option and names the required one — and it still
+  cost a round, because nothing local can check a flag list.
+
+The third failure was **Apple's, not ours** — an App Store Connect
+problem, which cleared on its own with no change to the script. Worth
+recording precisely because it is the one cause that reads as a bug in
+your own signing setup: notarization is a call to a service that can be
+having a bad day, and the failure arrives as a rejection of *your*
+upload. Before changing anything in response to a notary failure, check
+Apple's [system status](https://developer.apple.com/system-status/) and
+try again — the `notarytool log` fetch above is what tells the two
+apart, because a real rejection names what it objected to and an
+outage does not.
+
+The `sign` CLI version pin was right first time and needed no bump.
+
+**Step 5's machinery is built** (`.github/workflows/release.yml`): bump
+the version in `native/CMakeLists.txt` and `pyproject.toml`, push, create
+a **draft** release tagged `vX.Y.Z`, and the workflow checks the tag,
+builds and signs all five platforms, attaches the downloads, appends a
+table of them below the hand-written notes, and drops the draft flag.
+Four things it does that are not obvious:
+
+- **The build is `native-build.yml`, the same reusable workflow CI runs
+  on every push** — not a release-only copy of it. Same argument as the
+  installer step: a release-only build path is one whose first exercise
+  is the release, and it is the path holding the signing credentials.
+  ci.yml's `native` job is now a four-line `uses:`.
+- **The tag is checked against the source, never written into it.**
+  `make_installer.sh` reads the version from `native/CMakeLists.txt` on
+  the stated principle that a packaging script with its own copy ships
+  the wrong number; letting the tag override it reintroduces exactly
+  that one level out. A mismatch would mean a download called 0.2.0
+  containing a binary that reports 0.1.0 in Add/Remove Programs — silent,
+  and visible only to someone who already installed it. So the workflow
+  fails early instead, naming both files and both numbers.
+- **A draft release's tag usually does not exist in git**; GitHub creates
+  it at publish. So the release event's ref can be a tag nothing can
+  resolve — which would fail the checkout of the very job meant to
+  explain what is wrong. `resolve` checks out the default branch
+  explicitly, works out a concrete SHA, and every matrix job is pinned to
+  it, which also stops five builds straddling a push that lands
+  mid-release.
+- **The download table is built from the assets actually on the
+  release**, by `tools/release_notes.py`, never from a filename pattern
+  rebuilt in YAML — `make_installer.sh` owns the suffix rule and says so,
+  and a second copy goes stale into a page of dead links. It is a script
+  with tests (`tests/test_release_notes.py`) because a release page is
+  seen by more people than anything else here and there is one chance per
+  release; regenerating is idempotent, so re-running a half-failed
+  release replaces the table rather than stacking a second one.
+
+**The trigger only works once the workflow is on the default branch** —
+release events read workflows from there, so this cannot be tested from a
+pull request.
+
+**Remaining:** cutting one. The signing machinery is done;
+what is left is a tag, a releases page, and the exit criterion this
+phase was always going to be judged on — **each of the five artifacts
+installed and launched on a clean machine with no developer tooling
+present.** CI proves the signature exists and that Apple accepted it;
+it cannot prove that Windows SmartScreen lets an operator through, and
+on a new certificate it initially will not.
 
 **Exit:** a tagged GHA run produces five signed artifacts, each
 installed and launched on a clean VM with no developer tooling present.
@@ -1094,6 +1178,11 @@ already needs the CI matrix stood up.
    than "build Qt and Hamlib from source", which is the condition the
    amendment was written to avoid. The README now points operators at
    the native app and says exactly where the downloads are.
+
+   (That paragraph describes 2026-08-01 and is left as written. **Signing
+   landed on 2026-08-04**, so the warning is gone on macOS and the
+   publisher is named on Windows; the GitHub login is still required,
+   because there is still no releases page. See step 4 above.)
 
    Deleted with it: `sstvae/rig/`, whose only consumer was the Python
    GUI (the native app links libhamlib in-process, so the rigctld
