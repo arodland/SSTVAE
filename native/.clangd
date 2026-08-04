@@ -1,0 +1,9 @@
+# Scoped to native/ (the only C++ tree) rather than the repo root,
+# since the Python side has no compilation database to offer.
+#
+# native/CMakeLists.txt sets CMAKE_EXPORT_COMPILE_COMMANDS, so any of
+# the build directories tools/build_native.sh creates will do; `build`
+# matches its default. Point elsewhere with a local override if you
+# configure to a different directory (e.g. native/build-sanitize).
+CompileFlags:
+  CompilationDatabase: build
