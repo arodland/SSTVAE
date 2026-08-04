@@ -156,7 +156,7 @@ void test_the_controller_drives_a_real_backend() {
             }
             cv.notify_all();
         },
-        [&](const std::string& text) {
+        [&](const std::string& text, bool /*error*/) {
             std::lock_guard<std::mutex> lock(m);
             statuses.push_back(text);
         });

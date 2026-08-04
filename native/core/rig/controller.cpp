@@ -76,7 +76,7 @@ struct RigSession {
         if (backend) backend->close();
     }
 
-    void publish_status(const std::string& text) {
+    void publish_status(const std::string& text, bool error) {
         // Locked because `stopping` and `last_status` are shared with
         // stop(); the callback itself runs unlocked so a slow UI cannot
         // stall the worker.
@@ -87,7 +87,7 @@ struct RigSession {
             last_status = text;
             fn = on_status;
         }
-        if (fn) fn(text);
+        if (fn) fn(text, error);
     }
 
     void publish_frequency(std::optional<double> hz) {
@@ -110,9 +110,9 @@ namespace {
 void run(std::shared_ptr<RigSession> s) {
     try {
         s->backend->open();
-        s->publish_status("Rig: " + s->backend->description());
+        s->publish_status("Rig: " + s->backend->description(), false);
     } catch (const std::exception& e) {
-        s->publish_status(first_line(e.what()));
+        s->publish_status(first_line(e.what()), true);
         return;
     }
 
@@ -185,7 +185,7 @@ void run(std::shared_ptr<RigSession> s) {
             if (s->stopping) return;
         }
         s->publish_frequency(value);
-        s->publish_status(status);
+        s->publish_status(status, !ok);
 
         interval = next_interval(interval, base, ok);
         next_poll = Clock::now() + secs(interval);
@@ -213,7 +213,7 @@ void RigController::start(std::unique_ptr<RigBackend> backend,
         std::lock_guard<std::mutex> lock(mutex_);
         session_ = s;
     }
-    if (on_status_) on_status_("Rig: connecting...");
+    if (on_status_) on_status_("Rig: connecting...", false);
     // Detached from birth. There is no point at which joining this
     // thread would be safe to do from a UI thread, so the ability is
     // not offered.

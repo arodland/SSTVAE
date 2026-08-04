@@ -246,13 +246,22 @@ struct InputStream::Impl {
 };
 
 InputStream::InputStream(const std::string& device_name, rx::RingBuffer& ring,
-                         int samplerate, Report on_error)
+                         int samplerate, Report on_opened, Report on_error)
     : impl_(std::make_unique<Impl>()) {
+    // Falling back to the default device is information: the configured
+    // one is simply not present today.
     const QAudioDevice device =
         pick(QMediaDevices::audioInputs(), device_name,
-             QMediaDevices::defaultAudioInput(), "in", on_error);
+             QMediaDevices::defaultAudioInput(), "in", on_opened);
     impl_->device_name = to_std(device.description());
 
+    // The worker's channel is the *error* one. `fail()` and
+    // `check_error()` are genuine capture failures -- a device going
+    // away, a QAudio error code -- and they were sharing the callback
+    // that carries the opened-at notice. Handing that one channel a
+    // single severity was wrong in both directions: as an error it
+    // shouted about a working resampler, and as information it would
+    // have swallowed a device disappearing mid-reception.
     impl_->worker = std::make_unique<CaptureWorker>(device, ring, samplerate, on_error);
     impl_->worker->moveToThread(&impl_->thread);
     QObject::connect(&impl_->thread, &QThread::started, impl_->worker.get(),
@@ -278,9 +287,9 @@ InputStream::InputStream(const std::string& device_name, rx::RingBuffer& ring,
         throw std::runtime_error(why);
     }
 
-    if (on_error) {
+    if (on_opened) {
         const int rate = impl_->worker->rate();
-        on_error("[audio in] " + impl_->device_name + " at " + std::to_string(rate) +
+        on_opened("[audio in] " + impl_->device_name + " at " + std::to_string(rate) +
                  " Hz" + (rate == samplerate
                               ? ""
                               : ", resampled to " + std::to_string(samplerate) + " Hz"));

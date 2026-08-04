@@ -2,6 +2,7 @@
 
 #include <QColor>
 #include <QFontMetrics>
+#include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPen>
@@ -67,12 +68,17 @@ const std::array<Rgb, 256>& colormap() {
 }  // namespace
 
 Waterfall::Waterfall(QWidget* parent, int fps) : QWidget(parent) {
-    // Narrow minimum: the frequency axis is scaled to whatever width the
-    // splitter gives it, and demanding all the bins as pixels would stop
-    // the operator shrinking this column in favour of the picture.
+    // Narrow minimum: the frequency axis is scaled to whatever width it
+    // is given, and demanding all 384 bins as pixels would make this
+    // strip the floor under the whole receive pane -- and, since the
+    // two panes share a splitter whose minimum is the *sum* of theirs,
+    // under the window.
     setMinimumWidth(160);
-    setMinimumHeight(140);
-    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    setMinimumHeight(90);
+    // A strip across the top of the receive pane rather than a column
+    // down its side, so it takes the width it is given and does not
+    // fight the picture below it for height.
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
     auto* timer = new QTimer(this);
     connect(timer, &QTimer::timeout, this, &Waterfall::tick);
@@ -81,7 +87,12 @@ Waterfall::Waterfall(QWidget* parent, int fps) : QWidget(parent) {
 
 Waterfall::~Waterfall() = default;
 
-QSize Waterfall::sizeHint() const { return QSize(280, 600); }
+// Wide and shallow: history depth follows the height, so a strip holds
+// less of it than the old full-height column did -- about eight
+// seconds at 20 fps, which is the span that matters for "is someone
+// transmitting right now" and for setting soundcard gain. The splitter
+// above it makes that the operator's call rather than this number's.
+QSize Waterfall::sizeHint() const { return QSize(520, 160); }
 
 void Waterfall::set_ring(std::shared_ptr<rx::RingBuffer> ring) {
     ring_ = std::move(ring);
@@ -147,6 +158,7 @@ void Waterfall::tick() {
     // already been clipped somewhere upstream in the capture chain, so
     // this reports the soundcard's problem rather than ours.
     clipping_ = peak_ >= 0.99;
+    if (clipping_) clip_latched_ = true;
 
     ensure_image();
     const std::vector<double> reduced = dsp::reduce_to_width(
@@ -188,6 +200,24 @@ void Waterfall::paintEvent(QPaintEvent* event) {
     painter.drawImage(QPointF(0, 0), image_);
     draw_band_markers(painter);
     draw_level_meter(painter);
+    draw_disabled_scrim(painter);
+}
+
+void Waterfall::draw_disabled_scrim(QPainter& painter) {
+    // `setEnabled(false)` alone does nothing to a custom-painted widget:
+    // Qt greys the *standard* controls it draws itself, and a QLabel
+    // dims its pixmap, but a paintEvent that blits an image and strokes
+    // hard-coded colours renders pixel-identically either way. This
+    // widget is disabled exactly once -- while transmitting -- and the
+    // whole point of showing it then is that a paused receiver must not
+    // look like a wedged one, which is the state a frozen spectrum with
+    // no scrim is indistinguishable from.
+    if (isEnabled()) return;
+    painter.fillRect(rect(), QColor(0, 0, 0, 150));
+    painter.setPen(QColor(220, 220, 220, 220));
+    const QString label = tr("paused - transmitting");
+    const QRect box = rect();
+    painter.drawText(box, Qt::AlignCenter, label);
 }
 
 void Waterfall::draw_band_markers(QPainter& painter) {
@@ -203,14 +233,21 @@ void Waterfall::draw_band_markers(QPainter& painter) {
         painter.drawLine(x, 0, x, h);
     }
 
-    // The column is user-resizable, so the caption has to earn its
+    // The strip is user-resizable, so the caption has to earn its
     // place: drop it rather than let it run off the edge or overprint
     // the spectrum.
     const QString label = tr("SSTVAE %1-%2 Hz")
                               .arg(BAND_LO_HZ, 0, 'f', 0)
                               .arg(BAND_HI_HZ, 0, 'f', 0);
     const int label_x = static_cast<int>(BAND_LO_HZ * scale) + 4;
-    if (label_x + painter.fontMetrics().horizontalAdvance(label) < w - 12) {
+    // The latched CLIP marker shares this baseline at the right edge;
+    // when it is up, the caption yields early rather than overprinting
+    // it -- at 195-240 px both fit the old guard and neither is legible.
+    const int reserved =
+        clip_latched_
+            ? painter.fontMetrics().horizontalAdvance(tr("CLIP")) + 20
+            : 12;
+    if (label_x + painter.fontMetrics().horizontalAdvance(label) < w - reserved) {
         painter.setPen(QColor(0, 0, 0, 160));
         painter.drawText(label_x + 1, 15, label);  // shadow, for contrast
         painter.setPen(QColor(255, 255, 255, 220));
@@ -255,6 +292,34 @@ void Waterfall::draw_level_meter(QPainter& painter) {
         color = QColor(255, 190, 60);
     }
     painter.fillRect(x0, h - 2 - filled, bar_w, filled, color);
+
+    if (clip_latched_) {
+        // Latched, not momentary: stays until the meter is clicked, so
+        // clipping that happened while nobody was looking still gets
+        // reported. Same shadowed-text idiom as the band caption.
+        const QString label = tr("CLIP");
+        const int text_x =
+            x0 - painter.fontMetrics().horizontalAdvance(label) - 4;
+        painter.setPen(QColor(0, 0, 0, 160));
+        painter.drawText(text_x + 1, 15, label);
+        painter.setPen(QColor(255, 60, 60, 230));
+        painter.drawText(text_x, 14, label);
+    }
+}
+
+void Waterfall::clear_clip() {
+    clip_latched_ = false;
+    update();
+}
+
+void Waterfall::mousePressEvent(QMouseEvent* event) {
+    // A click on (or near) the meter clears the latch. The whole right
+    // edge counts -- an 8 px bar is not a precision target.
+    if (clip_latched_ && event->position().x() >= width() - 30) {
+        clear_clip();
+        return;
+    }
+    QWidget::mousePressEvent(event);
 }
 
 }  // namespace sstvae::gui

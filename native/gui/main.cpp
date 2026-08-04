@@ -3,7 +3,6 @@
 #include <QApplication>
 #include <QIcon>
 
-#include "checkpoint/qt_fetcher.hpp"
 #include "main_window.hpp"
 
 int main(int argc, char** argv) {
@@ -24,12 +23,10 @@ int main(int argc, char** argv) {
     icon.addFile(QStringLiteral(":/sstvae-256.png"));
     QApplication::setWindowIcon(icon);
 
-    // Make the published checkpoint fetchable before anything asks for
-    // it. Only the *download* needs this; resolving an explicit --model
-    // and finding a warm cache are path arithmetic in sstvae_core, so a
-    // second run works with the network gone.
-    sstvae::checkpoint::install_qt_fetcher();
-
+    // The checkpoint fetcher is installed by AppState (inside the
+    // window), which supplies the download-progress hook -- the fetch
+    // itself cannot start before then, because only the model load
+    // triggers it and AppState is what starts that.
     sstvae::gui::MainWindow window;
     window.show();
     return app.exec();

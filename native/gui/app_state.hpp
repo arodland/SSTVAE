@@ -23,6 +23,7 @@
 #include <QObject>
 #include <QString>
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -31,6 +32,7 @@
 #include <thread>
 
 #include "codec/codec.hpp"
+#include "log/log.hpp"
 #include "rig/controller.hpp"
 #include "settings/settings.hpp"
 
@@ -70,15 +72,50 @@ public:
     void pause_rig_polling();
     void resume_rig_polling();
 
-    // A read-only config directory must not break the session.
+    // A read-only config directory must not break the session -- but it
+    // must not be silent either: a failure is logged.
     void save_config();
+
+    // --- status log ----------------------------------------------------
+    // Append an entry. Thread-safe; callable from any thread. Every
+    // entry also reaches the file writer and the `logEntry` signal.
+    void log_event(const char* source, log::Severity severity,
+                   const QString& text);
+
+    // For the log pane: backfill via snapshot(), then follow logEntry.
+    const log::StatusLog& status_log() const { return log_; }
+    // Empty while the file log is healthy; a description otherwise.
+    QString log_file_note() const;
+    // Where the file log is being written, or empty if there is none.
+    // Asked rather than re-derived: a second copy of this path would
+    // keep compiling after the writer's location moved, and it is the
+    // path an operator is told to attach to a bug report.
+    QString log_file_path() const;
 
 signals:
     void modelLoaded();
-    void rigStatus(const QString& text);
+    // `error` distinguishes a CAT failure from a routine status; the
+    // text alone cannot (failure text is the backend's exception).
+    void rigStatus(const QString& text, bool error);
+    // Every log entry, queued to the GUI thread for the pane.
+    void logEntry(qlonglong ms, const QString& source, int severity,
+                  const QString& text);
+    // The file log's first failure, whenever it happens. Emitted from
+    // inside a StatusLog sink -- i.e. under the log's lock -- so the
+    // consumer MUST connect with Qt::QueuedConnection; a direct slot
+    // that calls log_event would deadlock on the non-recursive mutex.
+    void fileLogFailed(const QString& description);
+    // Model artifact download, live. Emitted from the model thread.
+    void modelProgress(qlonglong received, qlonglong total);
 
 private:
     settings::Config config_;
+
+    log::StatusLog log_;
+    std::unique_ptr<log::FileWriter> file_log_;
+    // First-failure guard for fileLogFailed; the failure itself is
+    // permanent (FileWriter stops writing), so one report is the truth.
+    std::atomic<bool> file_log_reported_{false};
 
     mutable std::mutex model_mutex_;
     std::unique_ptr<codec::OnnxCodec> model_;

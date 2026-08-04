@@ -22,6 +22,7 @@
 #include <QRect>
 #include <QWidget>
 
+
 #include <optional>
 #include <string>
 
@@ -39,6 +40,24 @@ public:
     ~OverlayEditor() override;
 
     QSize sizeHint() const override;
+    // **No `heightForWidth`, deliberately.** It was here, with a
+    // comment saying a `QSplitter` ignores it -- true, and the reason it
+    // did no visible harm for as long as it did. A `QTabWidget`
+    // *propagates* it, so the tabbed layout handed the window a
+    // minimum height of `width * 3/4`: 1840 px at 2020 px wide,
+    // measured. The window grew off the bottom of the screen and did
+    // not come back when the layout was switched again, because Qt
+    // lowers a minimum without resizing.
+    //
+    // It is also the one form of the ratchet a test on
+    // `minimumSizeHint()` cannot see, since that never consults
+    // `heightForWidth` -- Qt applies `minimumHeightForWidth` at layout
+    // time instead. `test_overlay_editor.cpp` measures a *container's*
+    // `minimumHeightForWidth` for that reason.
+    //
+    // The 4:3 shape is kept by `resizeEvent` (a maximum, which
+    // constrains nothing upward) and by `canvas_rect()`, which
+    // letterboxes both ways.
 
     // The picture the overlay sits on, already framed to the transmit
     // size by the caller.
@@ -87,6 +106,14 @@ protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    // Delete removes the selection; the arrows nudge it. Nudging is
+    // what a mouse cannot do: items are placed in normalized
+    // coordinates, so the smallest useful drag is one widget pixel,
+    // which is a different distance on every window size. A key press
+    // is a fixed fraction of the canvas, so two callsigns can actually
+    // be lined up.
+    void keyPressEvent(QKeyEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
 private:
     enum class Drag { None, Move, Resize };

@@ -21,6 +21,7 @@
 #define SSTVAE_GUI_RX_PANEL_HPP
 
 #include <QPixmap>
+#include <QPointer>
 #include <QWidget>
 
 #include <atomic>
@@ -30,6 +31,10 @@
 #include <thread>
 
 #include "images/types.hpp"
+#include "picture_box.hpp"
+// Complete type, not a forward declaration: QPointer<T> instantiates
+// static_casts through QObject and needs to know T derives from it.
+#include "waterfall.hpp"
 #include "rx/engine.hpp"
 #include "rx/ringbuffer.hpp"
 
@@ -45,7 +50,7 @@ class InputStream;
 namespace sstvae::gui {
 
 class AppState;
-class Waterfall;
+class ErrorBanner;
 
 class ReceivePanel : public QWidget {
     Q_OBJECT
@@ -56,6 +61,29 @@ public:
 
     bool listening() const;
 
+    // The spectrum strip now spans the whole window rather than living
+    // in this pane -- it is the one widget whose job is resolving
+    // detail across a frequency axis, and a third of the window was
+    // never enough for it. The panel still drives it (it owns the ring
+    // buffer), so ownership moved to MainWindow while control did not.
+    // Null until attached, and every use is guarded.
+    void attach_waterfall(Waterfall* waterfall) { waterfall_ = waterfall; }
+    // Null-safe accessor. **Not defensive programming for its own
+    // sake**: moving the strip up to the window made it a *sibling* of
+    // this panel rather than a child, and it is added to the central
+    // widget's layout first -- so at teardown `~QWidget` deletes it
+    // before the panel whose `stop()` still calls `set_ring(nullptr)`.
+    // A `QPointer` goes null when the widget dies, which turns a
+    // use-after-free at every exit into a no-op.
+    Waterfall* fall() const { return waterfall_.data(); }
+    // The 4:3 picture area. Read by tests and by the screenshot tool;
+    // nothing sizes it from outside any more.
+    QWidget* picture_area() const;
+    // Everything below the picture, as one widget, so the container can
+    // hold it to the same height as the transmit pane's strip -- which
+    // is what makes the two pictures the same size.
+    QWidget* control_strip() const;
+
     // Re-read the settings the panel mirrors in its own controls. The
     // autosave checkbox exists in both places, so a change made in the
     // dialog has to show up here or the two disagree about what is on.
@@ -65,6 +93,16 @@ public slots:
     bool start();
     void stop();
     void save_current();
+    // Reveal the last saved picture in the desktop's file manager.
+    void open_saved_folder();
+
+    // Fill every text surface with the longest content it can hold, for
+    // `sstvae-gui-shot`. A slot for the same reason `Waterfall::tick`
+    // is one: the layout facts worth looking at -- whether the status
+    // line, the card and the five-button controls row fit a narrow pane
+    // -- are invisible on a freshly constructed panel, where all three
+    // are empty. Touches no engine and starts nothing.
+    void fill_for_screenshot();
 
     // Half duplex. Our own audio would otherwise be decoded straight
     // back into a "received" picture.
@@ -77,6 +115,11 @@ signals:
     // partial one would be a poor keepsake.
     void imageReceived(const images::Picture& image);
     void listeningChanged(bool listening);
+    // Whatever the panel's own status line now reads. Emitted for every
+    // change, so a second display of it (the status bar, while the
+    // window is tabbed and this pane may be behind the other one) cannot
+    // drift from the first.
+    void statusChanged(const QString& text);
 
     // Emitted from the decode thread; connected queued to the slots
     // below so the work lands on the GUI thread.
@@ -84,6 +127,7 @@ signals:
     void errorOccurred(const QString& message);
 
 protected:
+    // Only to keep the error banner sitting over the top of the picture.
     void resizeEvent(QResizeEvent* event) override;
 
 private slots:
@@ -94,6 +138,12 @@ private slots:
 
 private:
     void build_ui();
+    // Keeps the floating error banner across the top of the picture.
+    void place_banner();
+    // The one way the status line is written. A bare `status_->setText`
+    // would leave the status bar's copy stale on whichever of the five
+    // call sites someone forgot.
+    void set_status(const QString& text);
     void show_image(const images::Picture& image);
     void set_displayed(const images::Picture& image, const std::string& callsign,
                        const std::optional<std::string>& mode_name);
@@ -104,13 +154,17 @@ private:
     AppState* app_ = nullptr;
 
     // --- widgets
-    QLabel* preview_ = nullptr;
+    ErrorBanner* banner_ = nullptr;
+    PictureBox* preview_ = nullptr;
+    QWidget* strip_ = nullptr;
     QLabel* status_ = nullptr;
+    QLabel* last_card_ = nullptr;
     QProgressBar* progress_ = nullptr;
-    Waterfall* waterfall_ = nullptr;
+    QPointer<Waterfall> waterfall_;
     QPushButton* start_button_ = nullptr;
     QPushButton* stop_button_ = nullptr;
     QPushButton* save_button_ = nullptr;
+    QPushButton* folder_button_ = nullptr;
     QCheckBox* autosave_ = nullptr;
 
     // --- reception
@@ -129,9 +183,6 @@ private:
     std::optional<images::Picture> displayed_;
     std::string displayed_callsign_;
     std::optional<std::string> displayed_mode_;
-    // Unscaled, so a resize rescales from the original rather than
-    // compounding losses.
-    QPixmap preview_pixmap_;
     // Identity check, to avoid repainting a picture already on screen.
     const images::Picture* shown_ = nullptr;
 
@@ -142,6 +193,10 @@ private:
 
     std::optional<std::string> last_saved_path_;
     bool suspended_for_tx_ = false;
+    // Edge detection for the log: the engine has no "sync acquired"
+    // event, only a status that polls as "receiving", so the transition
+    // is detected here and logged once per acquisition.
+    bool was_receiving_ = false;
 };
 
 }  // namespace sstvae::gui

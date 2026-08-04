@@ -261,6 +261,30 @@ void read_transmit(const Reader& r, TransmitConfig& c) {
     r.report_unknown({"mode", "level", "optimize"});
 }
 
+void read_ui(const Reader& r, UiConfig& c) {
+    r.get("layout", c.layout);
+    r.get("waterfall_height", c.waterfall_height);
+    // Negative is meaningless and a huge value would push the panes off
+    // the window; clamp quietly rather than refuse, since the only way
+    // to get one is to hand-edit the file.
+    if (c.waterfall_height < 0 || c.waterfall_height > 2000) {
+        r.notes.add(r.path("waterfall_height"),
+                    "is out of range (0-2000); ignoring " +
+                        std::to_string(c.waterfall_height));
+        c.waterfall_height = 0;
+    }
+    // An unrecognised value falls back to "auto" *and says so*, rather
+    // than being kept and quietly meaning "side by side" downstream --
+    // this is the one setting whose wrong value makes the window
+    // unusable on the screen it was set for.
+    if (c.layout != "auto" && c.layout != "split" && c.layout != "tabs") {
+        r.notes.add(r.path("layout"), "unknown layout '" + c.layout +
+                                          "'; expected auto, split or tabs");
+        c.layout = "auto";
+    }
+    r.report_unknown({"layout", "waterfall_height"});
+}
+
 // Empty string <-> JSON null, for the fields Python declares optional.
 json or_null(const std::string& s) {
     if (s.empty()) return nullptr;
@@ -353,8 +377,9 @@ Config from_json(const std::string& text, std::vector<Note>* sink) {
     if (auto s = r.section("folders")) read_folders(*s, c.folders);
     if (auto s = r.section("receive")) read_receive(*s, c.receive);
     if (auto s = r.section("transmit")) read_transmit(*s, c.transmit);
+    if (auto s = r.section("ui")) read_ui(*s, c.ui);
     r.report_unknown({"callsign", "model_path", "precision", "version", "audio", "rig",
-                      "folders", "receive", "transmit"});
+                      "folders", "receive", "transmit", "ui"});
 
     if (c.version > CONFIG_VERSION) {
         notes.add("version",
@@ -412,6 +437,7 @@ std::string to_json(const Config& c) {
          {{"mode", c.transmit.mode},
           {"level", c.transmit.level},
           {"optimize", c.transmit.optimize}}},
+        {"ui", {{"layout", c.ui.layout}, {"waterfall_height", c.ui.waterfall_height}}},
         {"version", c.version},
     };
     return root.dump(2) + "\n";

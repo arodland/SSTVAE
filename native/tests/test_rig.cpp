@@ -147,7 +147,7 @@ struct Published {
         };
     }
     rig::OnStatus status_fn() {
-        return [this](const std::string& text) {
+        return [this](const std::string& text, bool /*error*/) {
             {
                 std::lock_guard<std::mutex> lock(m);
                 statuses.push_back(text);

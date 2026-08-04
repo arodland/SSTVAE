@@ -32,24 +32,49 @@ Picture resize(const Picture& img, int width, int height) {
     return out;
 }
 
-Picture fit(const Picture& img) {
-    if (img.width == IMG_W && img.height == IMG_H) return img;
+Picture fit(const Picture& img) { return fit(img, Framing{}); }
+
+Picture fit(const Picture& img, const Framing& framing) {
+    // The identity short-circuit only applies to the default framing:
+    // an operator who has zoomed or panned an already-4:3 picture means
+    // it, and returning the original would silently ignore them.
+    const bool defaulted = framing.zoom == 1.0 && framing.center_x == 0.5 &&
+                           framing.center_y == 0.5;
+    if (defaulted && img.width == IMG_W && img.height == IMG_H) return img;
     if (img.width <= 0 || img.height <= 0) {
         throw std::runtime_error("cannot fit an empty picture");
     }
 
-    // Scale to *cover* the target, then centre-crop -- the same shape of
-    // operation as images.py, though not the same filter.
+    // Scale to *cover* the target, then crop -- the same shape of
+    // operation as images.py, though not the same filter. Zoom below 1
+    // would expose edges with no picture behind them.
+    const double zoom = std::max(1.0, framing.zoom);
     const double scale = std::max(static_cast<double>(IMG_W) / img.width,
-                                  static_cast<double>(IMG_H) / img.height);
+                                  static_cast<double>(IMG_H) / img.height) *
+                         zoom;
     const int sw = std::max(IMG_W, static_cast<int>(std::lround(img.width * scale)));
     const int sh = std::max(IMG_H, static_cast<int>(std::lround(img.height * scale)));
 
     const Picture scaled = resize(img, sw, sh);
 
+    // `floor`, not `lround`: for the default centre this has to reduce
+    // to the old `(sw - IMG_W) / 2` integer division exactly, and those
+    // agree only under truncation of a non-negative value. With an odd
+    // `sw` they differ by one pixel, so adding framing would have
+    // silently shifted every odd-intermediate picture -- 1920x1080
+    // scales to 853 wide, so that is most photographs. `test_framing`
+    // pins this against the old formula written out; the Python parity
+    // suite cannot, since it deliberately skips `fit_image` wherever
+    // resampling is involved (PIL LANCZOS vs stb).
+    const auto offset = [](double center, int scaled_size, int target) {
+        const double raw = center * scaled_size - target / 2.0;
+        const int limit = scaled_size - target;
+        return std::clamp(static_cast<int>(std::floor(raw)), 0, limit);
+    };
+    const int left = offset(framing.center_x, sw, IMG_W);
+    const int top = offset(framing.center_y, sh, IMG_H);
+
     Picture out(IMG_W, IMG_H);
-    const int left = (sw - IMG_W) / 2;
-    const int top = (sh - IMG_H) / 2;
     for (int y = 0; y < IMG_H; ++y) {
         const std::uint8_t* src =
             scaled.rgb.data() + (static_cast<std::size_t>(y + top) * sw + left) * 3;

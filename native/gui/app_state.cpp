@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "checkpoint/checkpoint.hpp"
+#include "checkpoint/qt_fetcher.hpp"
 #include "rig_config.hpp"
 
 namespace sstvae::gui {
@@ -26,17 +27,75 @@ codec::Resolver model_resolver(const std::string& path,
 
 AppState::AppState(QObject* parent)
     : QObject(parent),
-      config_(settings::load().config),
       rig_(
           // Both callbacks arrive on the rig's worker thread. Emitting
           // a Qt signal across threads is the supported way to hand
           // that to the GUI -- the connection becomes queued, so the
           // slot runs on the receiving object's thread and nothing on
-          // the GUI thread ever touches the rig.
+          // the GUI thread ever touches the rig. log_event is
+          // thread-safe by design, so logging here is fine too.
           [](std::optional<double>) {},
-          [this](const std::string& text) {
-              emit rigStatus(QString::fromStdString(text));
-          }) {}
+          [this](const std::string& text, bool error) {
+              const QString qtext = QString::fromStdString(text);
+              log_event("rig", error ? log::Severity::Error : log::Severity::Info,
+                        qtext);
+              emit rigStatus(qtext, error);
+          }) {
+    // Every append reaches the pane (queued signal; non-blocking from
+    // any thread) and, if it opened, the file. Registered before the
+    // first append so nothing is ever visible in one place and not the
+    // other.
+    log_.add_sink([this](const log::Entry& e) {
+        emit logEntry(static_cast<qlonglong>(e.ms),
+                      QString::fromStdString(e.source),
+                      static_cast<int>(e.severity),
+                      QString::fromStdString(e.text));
+    });
+    try {
+        file_log_ = std::make_unique<log::FileWriter>(
+            settings::config_path().parent_path() / "sstvae.log");
+        log_.add_sink([this](const log::Entry& e) {
+            file_log_->write(e);
+            // A write failure is permanent (FileWriter closes the
+            // stream), so it must be reported, once, whenever it
+            // happens -- a full disk hours in must not fail quietly.
+            if (!file_log_reported_.load(std::memory_order_relaxed)) {
+                const std::string err = file_log_->error();
+                if (!err.empty() && !file_log_reported_.exchange(true)) {
+                    emit fileLogFailed(QString::fromStdString(err));
+                }
+            }
+        });
+    } catch (const std::exception&) {
+        // No config directory at all; the in-memory log still works and
+        // log_file_note() reports the absence.
+    }
+
+    // The load happens here rather than in the member initializer so the
+    // validation notes can be kept: a corrupt or out-of-range field is
+    // coerced to its default *and reported*, where previously the notes
+    // were discarded wholesale.
+    const settings::LoadResult loaded = settings::load();
+    config_ = loaded.config;
+    for (const std::string& message : loaded.messages()) {
+        log_event("app", log::Severity::Warning,
+                  tr("config: %1").arg(QString::fromStdString(message)));
+    }
+
+    // The fetcher that downloads the published checkpoint, with live
+    // progress. Installed here rather than in main() so the progress
+    // hook has somewhere to land. Three threads fetch through it: the
+    // model thread (decoder preload), the transmit worker (the lazily
+    // loaded encoder) and the optimizer worker (the gradient graph).
+    // The `this` capture outlives all of them because ~MainWindow
+    // destroys the panels -- which join those workers -- *before* its
+    // AppState child, and ~AppState then joins the model thread.
+    checkpoint::install_qt_fetcher([this](std::int64_t received,
+                                          std::int64_t total) {
+        emit modelProgress(static_cast<qlonglong>(received),
+                           static_cast<qlonglong>(total));
+    });
+}
 
 AppState::~AppState() {
     // stop() detaches by design, so a worker may still be inside
@@ -80,6 +139,12 @@ void AppState::load_model_async() {
             model_ = std::move(loaded);
             model_error_ = error;
         }
+        if (error.isEmpty()) {
+            log_event("app", log::Severity::Info, tr("model ready"));
+        } else {
+            log_event("app", log::Severity::Error,
+                      tr("model failed to load: %1").arg(error));
+        }
         emit modelLoaded();
     });
 }
@@ -110,7 +175,7 @@ std::function<void(bool)> AppState::ptt() {
 void AppState::connect_rig() {
     rig_.stop();
     if (!config_.rig.enabled) {
-        emit rigStatus(QStringLiteral("Rig control off"));
+        emit rigStatus(QStringLiteral("Rig control off"), false);
         return;
     }
     rig_.start(make_backend(config_.rig), controller_config(config_.rig));
@@ -125,9 +190,32 @@ void AppState::resume_rig_polling() { rig_.resume_polling(); }
 void AppState::save_config() {
     try {
         settings::save(config_);
-    } catch (const std::exception&) {
-        // A read-only config directory must not break the session.
+    } catch (const std::exception& e) {
+        // A read-only config directory must not break the session --
+        // but the operator has to find out *somewhere* that their
+        // settings are not sticking.
+        log_event("app", log::Severity::Error,
+                  tr("could not save settings: %1").arg(QString::fromUtf8(e.what())));
     }
+}
+
+void AppState::log_event(const char* source, log::Severity severity,
+                         const QString& text) {
+    log_.append(source, severity, text.toStdString());
+}
+
+QString AppState::log_file_path() const {
+    if (!file_log_) return QString();
+    return QString::fromStdString(file_log_->path().string());
+}
+
+QString AppState::log_file_note() const {
+    if (!file_log_) return tr("(no log file: no config directory)");
+    const std::string error = file_log_->error();
+    if (!error.empty()) {
+        return tr("(log file unavailable: %1)").arg(QString::fromStdString(error));
+    }
+    return QString();
 }
 
 }  // namespace sstvae::gui

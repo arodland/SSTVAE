@@ -325,9 +325,28 @@ jobs:
         # `D:\a\_temp`, and bash eats the backslashes as escapes, so the
         # tool was handed `D:a_temp` and correctly refused to write
         # there. The shots are also worth keeping -- step 2 uploads them.
+        #
+        # `--panes` shoots both window layouts and prints the minimum
+        # size each imposes. It is here rather than opt-in because the
+        # thing these shots exist to catch is a *layout* regression, and
+        # until this flag existed the only layout under the camera was
+        # the settings dialog -- the two arrangements of the main window
+        # were not photographed on any platform, which is exactly where
+        # a font-driven regression comes from. It also puts the pane
+        # minimums in the log on all five platforms, so a widget that
+        # starts demanding width or height is visible in the diff of two
+        # runs rather than only to whoever thinks to measure.
+        #
+        # Unlike `--transmit` and `--receive` it needs no network:
+        # `AppState`'s constructor wires logging and the rig, and the
+        # checkpoint fetch is in `load_model_async`, which only
+        # `MainWindow` calls. Verified with an empty `SSTVAE_MODEL_CACHE`
+        # in a stripped environment -- the cache was still empty
+        # afterwards. Keep it that way; a link check must not depend on
+        # the Hub being up.
         run: |
           mkdir -p gui-shots
-          ./native/build/sstvae-gui-shot --out gui-shots
+          ./native/build/sstvae-gui-shot --out gui-shots --panes
         shell: bash
       # The C++ side checked against the committed corpus.
       - name: C++ tests
