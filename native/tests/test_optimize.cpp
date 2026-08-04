@@ -287,6 +287,174 @@ void test_the_reported_loss_is_a_mean_over_channel_draws() {
                  "eight draws report the mean, not the sum");
 }
 
+
+// The fading objective's draw. What can be wrong here is silent: a
+// profile that is sampled but whose weights never reach the graph
+// optimizes the flat channel while looking like it does not, and a
+// weight applied without the matching noise scale (or the reverse)
+// models a channel that does not exist. Both are checked against the
+// declared distribution rather than against a golden number, since the
+// RNG stream is deliberately not shared with Python.
+void test_the_fading_profile_reaches_the_gradient() {
+    const config::ModeSpec& m = mode("C");
+    const std::vector<double> z0 = flat_latents(m.n_latents, 0.3);
+
+    // Record the weight every draw actually presents to the graph.
+    std::vector<float> seen;
+    auto recorder = [&seen](const std::vector<float>& z, const std::vector<float>& w,
+                            std::vector<float>& grad, double& mse) {
+        grad.assign(z.size(), 0.0f);
+        seen.insert(seen.end(), w.begin(), w.end());
+        mse = 1.0;
+    };
+
+    optimize::Options o;
+    o.max_steps = 4;
+    o.channel_samples = 2;
+    o.time_budget_s = 1e9;
+    o.patience = 1000;
+    o.fading_profile = &optimize::MEASURED_FADING_PROFILE;
+    o.objective_snr_db = optimize::FADING_OBJECTIVE_SNR_DB;
+    optimize::run(recorder, z0, m, o);
+
+    // Every weight seen must be one of the profile's, times the mode
+    // mask -- so 0 (untransmitted, though mode C has none) or one of
+    // the nine. A profile that was drawn but not applied would show a
+    // solid 1.0 here.
+    std::size_t matched = 0;
+    for (float w : seen) {
+        for (int b = 0; b < optimize::FADING_BINS; ++b) {
+            if (std::abs(w - optimize::MEASURED_FADING_PROFILE.weight[b]) < 1e-6f) {
+                ++matched;
+                break;
+            }
+        }
+    }
+    check::equal(matched, seen.size(), "every weight drawn comes from the profile");
+
+    // And the histogram must match the declared probabilities. With
+    // ~1.3M draws the sampling error is far below the 0.02 tolerance,
+    // so a transposed or truncated table fails loudly.
+    std::vector<double> hist(optimize::FADING_BINS, 0.0);
+    for (float w : seen) {
+        for (int b = 0; b < optimize::FADING_BINS; ++b) {
+            if (std::abs(w - optimize::MEASURED_FADING_PROFILE.weight[b]) < 1e-6f) {
+                hist[b] += 1.0;
+                break;
+            }
+        }
+    }
+    for (double& h : hist) h /= static_cast<double>(seen.size());
+    check::close(hist,
+                 std::vector<double>(optimize::MEASURED_FADING_PROFILE.prob.begin(),
+                                     optimize::MEASURED_FADING_PROFILE.prob.end()),
+                 0.02, "the drawn weights follow the profile's probabilities");
+}
+
+// The fading profile is **on by default** (2026-08-04). Two things are
+// pinned here, and the first is what caught the switchover: a null
+// profile still reproduces the old flat channel exactly, and the
+// default is genuinely not that -- so flipping the default back, or
+// wiring the profile in without it reaching the draw, fails loudly
+// rather than silently optimizing the wrong channel.
+void test_the_fading_profile_is_the_default_and_null_restores_the_flat_one() {
+    const config::ModeSpec& m = mode("C");
+    const std::vector<double> z0 = flat_latents(m.n_latents, 0.3);
+    std::vector<float> target(latents::N_LATENTS, 0.0f);
+    for (std::size_t i = 0; i < target.size(); ++i) {
+        target[i] = (i % 7 == 0) ? 1.5f : -0.5f;
+    }
+
+    optimize::Options flat;
+    flat.max_steps = 6;
+    flat.channel_samples = 2;
+    flat.time_budget_s = 1e9;
+    flat.patience = 1000;
+    flat.clean_probe_every = 0;
+    // The two always move together -- a null profile at the fading
+    // SNR is a channel nobody measured.
+    flat.fading_profile = nullptr;
+    flat.objective_snr_db = optimize::OBJECTIVE_SNR_DB;
+
+    const optimize::Result a = optimize::run(bowl(target), z0, m, flat);
+    const optimize::Result b = optimize::run(bowl(target), z0, m, flat);
+    check::close(a.latents, b.latents, 0.0, "the flat channel is reproducible");
+
+    optimize::Options def;
+    def.max_steps = flat.max_steps;
+    def.channel_samples = flat.channel_samples;
+    def.time_budget_s = flat.time_budget_s;
+    def.patience = flat.patience;
+    def.clean_probe_every = 0;
+    check::is_true(def.fading_profile == &optimize::MEASURED_FADING_PROFILE,
+                   "the default profile is the measured one");
+    check::close(std::vector<double>{def.objective_snr_db},
+                 std::vector<double>{optimize::FADING_OBJECTIVE_SNR_DB}, 1e-12,
+                 "the default SNR is the fading one, not the flat one");
+
+    const optimize::Result c = optimize::run(bowl(target), z0, m, def);
+    double diff = 0.0;
+    for (std::size_t i = 0; i < c.latents.size(); ++i) {
+        diff = std::max(diff, std::abs(c.latents[i] - a.latents[i]));
+    }
+    check::is_true(diff > 1e-6, "the default differs from the flat channel");
+}
+
+// The clean probe. Its value is that it is a real PSNR number rather
+// than a proxy, so what must hold is that it equals the noise-free loss
+// ratio exactly -- and that it costs the extra graph calls it claims,
+// since "free" would mean it is not running.
+void test_the_clean_probe_measures_the_noise_free_loss() {
+    const config::ModeSpec& m = mode("C");
+    const std::vector<double> z0 = flat_latents(m.n_latents, 0.3);
+    // Non-uniform on purpose: a target that is a constant is radially
+    // symmetric, so the unit-RMS projection undoes every Adam step
+    // exactly and the loss cannot fall. That is a property of the stub,
+    // not of the optimizer, and it silently makes an improvement test
+    // vacuous -- this one caught it by failing.
+    std::vector<float> target(latents::N_LATENTS, 0.0f);
+    for (std::size_t i = 0; i < target.size(); ++i) {
+        target[i] = (i % 7 == 0) ? 1.5f : -0.5f;
+    }
+
+    optimize::Options o;
+    o.max_steps = 4;
+    o.channel_samples = 2;
+    o.time_budget_s = 1e9;
+    o.patience = 1000;
+    o.clean_probe_every = 2;
+
+    int calls = 0;
+    double last_clean = -1.0, last_est = -1.0;
+    optimize::run(bowl(target, &calls), z0, m, o, [&](const optimize::Progress& p) {
+        last_clean = p.clean_gain_db;
+        last_est = p.estimated_gain_db;
+        return true;
+    });
+
+    // 4 steps x 2 draws = 8, plus one baseline probe and probes at
+    // steps 1, 2 and 4 = 4 more. A probe that never ran would give 8.
+    check::equal(calls, 12, "the probe costs one extra gradient call each time");
+    check::is_true(last_clean > 0.0, "the clean gain climbs as the bowl is descended");
+    check::close(std::vector<double>{last_est},
+                 std::vector<double>{last_clean * optimize::RETENTION}, 1e-12,
+                 "the estimate is the clean gain times RETENTION");
+
+    // Off by default: no probe, no extra calls, and the field stays 0.
+    int plain_calls = 0;
+    double plain_clean = -1.0;
+    optimize::Options q = o;
+    q.clean_probe_every = 0;
+    optimize::run(bowl(target, &plain_calls), z0, m, q,
+                  [&](const optimize::Progress& p) {
+                      plain_clean = p.clean_gain_db;
+                      return true;
+                  });
+    check::equal(plain_calls, 8, "no probing means no extra calls");
+    check::close(std::vector<double>{plain_clean}, std::vector<double>{0.0}, 0.0,
+                 "clean_gain_db stays zero when probing is off");
+}
+
 }  // namespace
 
 int main() {
@@ -297,5 +465,8 @@ int main() {
     test_it_returns_the_best_iterate_not_the_last();
     test_each_stop_reason_fires();
     test_the_reported_loss_is_a_mean_over_channel_draws();
+    test_the_fading_profile_reaches_the_gradient();
+    test_the_fading_profile_is_the_default_and_null_restores_the_flat_one();
+    test_the_clean_probe_measures_the_noise_free_loss();
     return check::report("optimize");
 }
