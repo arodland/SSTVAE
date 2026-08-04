@@ -1264,7 +1264,14 @@ Developer ID` on both slices, Windows signs all three executables and
 the NSIS setup. It is a **loud no-op with exit 0 when the credentials
 are absent**, so a fork's CI still produces unsigned installers, and
 `SSTVAE_REQUIRE_SIGNING=1` turns that skip into a failure — the same
-hazard and the same answer as `SSTVAE_REQUIRE_CODEC`. Three traps it
+hazard and the same answer as `SSTVAE_REQUIRE_CODEC`. **On a pull
+request it is opt-in behind the `sign` label** (quota is monthly and
+notarization is a round trip); a push to master, a manual dispatch and
+a release all sign, the release naming it explicitly rather than
+relying on the input's default, which is *off*. An unsigned release is
+the invisible failure — it builds, attaches and publishes exactly as
+usual — so `native-build.yml` asserts `release-tag` implies `sign`
+right after checkout. Three traps it
 cost, all in `docs/native-app.md`: `security import` sniffs the format
 from the *file extension*, so the p12 needs a `.p12` name and
 `-f pkcs12` or it fails as "Unknown format" and reads like a bad

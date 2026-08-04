@@ -918,6 +918,45 @@ because the platforms disagree about when a signature can exist:
   ran perfectly unsigned — library validation rejecting a dylib nobody
   signed looks exactly like a crash on launch. Checking the signed tree
   means the check covers what an operator receives.
+- **On a pull request, signing is opt-in behind the `sign` label**
+  (2026-08-04). Every signature spends Azure quota against a monthly
+  allowance and every macOS package spends a notarization round trip, so
+  signing each push of each branch is a finite resource going into builds
+  nobody will install. A push to master and a manual dispatch still sign,
+  which keeps the path exercised — a signing path exercised only at
+  releases is one whose first exercise is a release, the same argument
+  the installer step makes about itself — and a release always signs,
+  named explicitly in `release.yml` rather than left to a default.
+
+  Three details are not obvious and each was a way to get it wrong. The
+  input **defaults to off**, because the two mistakes are not
+  symmetric: signing unasked costs quota and a few minutes, while not
+  signing produces artifacts that build, attach and publish
+  indistinguishably and are first reported by an operator meeting
+  Gatekeeper — so the default is the cheap error and the expensive one
+  is an assertion in `native-build.yml` (`release-tag` set and `sign`
+  off is a hard failure, placed immediately after checkout so it costs
+  thirty seconds rather than twenty minutes). The gate is an `if:` on
+  the *step* rather than a check inside `sign.sh`, so a deliberate "not
+  this time" reads as a skipped step in the run's list, while the
+  script's own skip stays what it always was — a missing credential,
+  which is a different thing and should stay loud. And a
+  **label-triggered run is its own concurrency group**: `ci.yml` has
+  `cancel-in-progress`, so sharing a group would mean labelling a pull
+  request whose CI is still running cancels it, leaving the four jobs
+  that have nothing to do with signing showing "cancelled" while the new
+  run redoes work that was already passing.
+
+  `pull_request` therefore lists `types:` explicitly to add `labeled` to
+  the three defaults, and every job in `ci.yml` carries the same guard
+  (a YAML anchor, one condition, five aliases) so that an unrelated
+  `bug` or `docs` label does not rebuild five platforms. All five jobs
+  re-run on a `sign` label rather than just the native one: mixing this
+  run's results with the previous run's on one commit reads fine right
+  up until the two disagree, and the saving is a few runner-minutes on
+  something done by hand a handful of times per release. Note the one
+  thing the label cannot do — the label is read from the event payload
+  when the run starts, so it never affects a run already under way.
 - **With no credentials it is a loud no-op that exits 0**, so a fork's
   pull request still produces the unsigned installers steps 1–3 gave it.
   That is the `SSTVAE_REQUIRE_CODEC` hazard exactly — the strongest step

@@ -20,10 +20,23 @@ on:
   push:
     branches: [master]
   pull_request:
+    # `labeled` in addition to the three defaults (opened, synchronize,
+    # reopened), so that adding the `sign` label to an open pull request
+    # produces a signed build without having to push an empty commit to
+    # get one. It is the only way in: the label is read from the event
+    # payload when the run starts, so a run already under way was
+    # decided before the label existed.
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # A label-triggered run is a **separate** group from the ordinary one
+  # for this ref, and that is not tidiness. `cancel-in-progress` is on,
+  # so sharing a group would mean labelling a pull request whose CI is
+  # still running cancels it -- and the four jobs that have nothing to do
+  # with signing would be left showing "cancelled" on the pull request
+  # while the new run redid work that was already passing.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.action == 'labeled' && 'label' || 'main' }}
   cancel-in-progress: true
 
 jobs:
@@ -32,6 +45,18 @@ jobs:
   # if config.hpp is stale, every other job is testing the wrong thing.
   generated:
     name: Generated artifacts are current
+    # Shared by every job in this file. Labelling a pull request fires
+    # the whole workflow, and `sign` is the only label that should mean
+    # anything to CI -- without this, filing a `bug` or `docs` label
+    # would rebuild five platforms and re-run two sanitizers for nothing.
+    #
+    # One condition for all five jobs rather than "only the native job
+    # re-runs", deliberately: mixing this run's results with the previous
+    # run's on one commit reads fine right up until the two disagree, and
+    # the saving is a few runner-minutes on an action taken by hand a
+    # handful of times per release.
+    if: &label_is_relevant >-
+      github.event.action != 'labeled' || github.event.label.name == 'sign'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -67,6 +92,7 @@ jobs:
 
   python:
     name: Python reference (${{ matrix.os }})
+    if: *label_is_relevant
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -101,12 +127,26 @@ jobs:
   # blunt form; the alternative is naming all eleven twice, which is one
   # more list to keep in step with tools/sign.sh for no gain -- the
   # called workflow is in this repository and is not a third party.
+  #
+  # **Signing is opt-in on a pull request, and the opt-in is the `sign`
+  # label.** Every signature costs Azure quota and every macOS package
+  # costs a notarization round trip, so signing each push of each branch
+  # spends a finite resource on builds nobody will install. A push to
+  # master and a manual dispatch still sign: those are the builds the
+  # README currently sends people to, and a signing path exercised only
+  # at releases is one whose first exercise is a release -- the same
+  # argument the installer step makes about itself.
   native:
+    if: *label_is_relevant
     uses: ./.github/workflows/native-build.yml
+    with:
+      sign: ${{ github.event_name != 'pull_request'
+                || contains(github.event.pull_request.labels.*.name, 'sign') }}
     secrets: inherit
 
   sanitizers:
     name: ASan + UBSan
+    if: *label_is_relevant
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -141,6 +181,7 @@ jobs:
 
   tsan:
     name: ThreadSanitizer
+    if: *label_is_relevant
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

@@ -190,6 +190,16 @@ jobs:
       version: ${{ needs.resolve.outputs.version }}
       release-tag: ${{ needs.resolve.outputs.tag }}
       ref: ${{ needs.resolve.outputs.sha }}
+      # Always, and never conditionally. On a pull request signing is
+      # opt-in behind a label, because every signature spends Azure
+      # quota and every macOS package spends a notarization round trip
+      # on a build nobody will install -- but the whole point of a
+      # release is that people install it. Said here rather than left to
+      # the input's default, and asserted a second time inside
+      # native-build.yml, because an unsigned release is invisible from
+      # this side: the artifacts build, attach and publish exactly as
+      # usual, and the first report is an operator meeting Gatekeeper.
+      sign: true
     secrets: inherit
 
   # ---------------------------------------------------------------- publish
