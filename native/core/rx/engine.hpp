@@ -284,7 +284,7 @@ void decode_loop_low_cpu(RingBuffer& ring, const Decoder& decode,
 // demodulates the same transmission from `rings[0]` and `rings[1]` --
 // different antennas/audio devices, independent noise and fading, no
 // assumption of phase lock between them -- then maximal-ratio combines
-// the two branches (`sstvae::modem::diversity::combine_demod_results`)
+// the branches (`sstvae::modem::diversity::combine_diversity_results`)
 // before decoding. The two rings are assumed to start filling at the
 // same wall-clock moment, so a reception position recorded in one
 // ring's coordinate is directly comparable to the other's; see
@@ -296,14 +296,30 @@ void decode_loop_low_cpu(RingBuffer& ring, const Decoder& decode,
 // at the cost of duplication here -- the same tradeoff the Python port
 // makes (`sstvae/rx/engine.py`'s `decode_loop_diversity`).
 //
-// Deliberately preamble-path only, like the Python port: no blind
-// fallback, no retrospective mid-stream decode. Combining two branches'
-// *blind* results needs matching them by the beacon's absolute frame
-// counter rather than by preamble position, and a different result
-// shape (`BlindDemodResult` has no `.mode`) -- real additional work this
-// does not attempt. If only one branch locks a transmission (the other
-// never acquires, or acquires a peak more than `SAME_RECEPTION_EPSILON_S`
-// away), that branch's result is used alone.
+// Each branch independently prefers a header lock and falls back to a
+// blind one, same as `decode_loop` does for a single receiver
+// (`find_branch_reception`) -- so a branch too weak for the preamble
+// path can still contribute once enough audio has accumulated for a
+// beacon superframe. Branches are matched by their *position*
+// (`reception_start`, always expressed at the preamble's sample offset
+// whichever path found it) within `SAME_RECEPTION_EPSILON_S`, the same
+// criterion `decode_loop` itself uses -- for two blind locks this
+// position agreement is a sanity check ("are these really the same
+// transmission"), not an alignment requirement, since
+// `BlindDemodResult::latents`/`weights` are already aligned by the
+// beacon's absolute frame counter regardless of sample position (see
+// `combine_diversity_results`). If only one branch locks (the other
+// never acquires at all, or its lock is more than
+// `SAME_RECEPTION_EPSILON_S` away -- most likely a spurious hit), that
+// branch is used alone, same erasure/weight semantics as
+// `combine_diversity_results` given a single branch.
+//
+// Progress/completion tracking mirrors `decode_loop`'s own preference: a
+// header-locked combine (the common case) reports an exact frame count
+// and finishes when it is reached; an all-blind combine (true duration
+// unknown) finishes when progress stops advancing for `config.end_grace`
+// seconds, the same stall detection `decode_loop` uses for its own
+// blind path.
 //
 // `debug_sink`, if non-null, is handed `contribution_image` for every
 // finished reception where both branches actually contributed --
