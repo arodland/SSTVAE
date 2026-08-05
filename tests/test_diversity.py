@@ -2,11 +2,13 @@ import numpy as np
 import pytest
 
 from sstvae import hfchannel
-from sstvae.config import LATENT_CHANNELS
+from sstvae.config import FRAMES_PER_GROUP, LATENT_CHANNELS, LATENT_GROUPS, MODES
 from sstvae.modem import Modem, SyncError
 from sstvae.modem.diversity import (
     branch_contribution,
+    combine_blind_results,
     combine_demod_results,
+    combine_diversity_results,
     contribution_image,
     demodulate_diversity,
 )
@@ -210,3 +212,140 @@ def test_contribution_image_pure_branch_is_saturated_in_its_color(modem):
     lit = arr.sum(axis=-1) > 0
     assert np.all(arr[:, :, 0][lit] >= 250)  # saturated red
     assert np.all(arr[:, :, 2][lit] == 0)  # no blue at all
+
+
+# --- blind-acquisition branches ------------------------------------------
+
+@pytest.fixture(scope="module")
+def blind_pair(modem):
+    """Two branches of the same mode-A transmission, each demodulated
+    *blind* (no preamble/header used) -- the whole 32 s buffer is enough
+    for MIN_FRAMES_FOR_SYNC (~10.5 s) to see a full beacon superframe."""
+    lat = unit_latents("A", seed=42)
+    x = modem.modulate(lat, "A", callsign="BLIND")
+    a = hfchannel.apply_channel(x, snr_db=8.0, seed=101)
+    b = hfchannel.apply_channel(x, snr_db=8.0, seed=202)
+    return lat, modem.demodulate_blind(a), modem.demodulate_blind(b)
+
+
+def test_blind_results_actually_locked(blind_pair):
+    """Sanity check on the fixture itself: if the blind lock silently
+    stopped working, every test built on it would pass vacuously."""
+    _, ra, rb = blind_pair
+    assert ra.beacon is not None and rb.beacon is not None
+    assert ra.callsign == "BLIND" and rb.callsign == "BLIND"
+
+
+def test_combine_blind_single_branch_is_identity(blind_pair):
+    _, ra, _ = blind_pair
+    combined = combine_blind_results([ra])
+    assert combined is ra
+
+
+def test_combine_blind_needs_at_least_one_branch():
+    with pytest.raises(ValueError):
+        combine_blind_results([])
+
+
+def test_combine_blind_two_branches_are_directly_aligned(blind_pair, modem):
+    """No sample-timebase matching needed for blind branches: they place
+    latents by the beacon's absolute frame counter, so combining two
+    independent locks of the same transmission should recover (close to)
+    every latent mode A actually carries, same as the header path does."""
+    lat, ra, rb = blind_pair
+    combined = combine_blind_results([ra, rb])
+    assert combined.weights.max() <= 1.0 + 1e-9
+    n_a = MODES["A"].n_latents
+    # Every mode-A latent actually carried on air (n_tx_latents -- the
+    # rest is DROPPED_LATENTS_PER_GROUP, a permanent erasure, never
+    # transmitted at all) should have landed somewhere in the combined
+    # full-C-sized weight array.
+    assert np.count_nonzero(combined.weights[:n_a]) == MODES["A"].n_tx_latents
+    s = latent_snr_db(lat, combined.latents[:n_a], combined.weights[:n_a])
+    sa = latent_snr_db(lat, ra.latents[:n_a], ra.weights[:n_a])
+    sb = latent_snr_db(lat, rb.latents[:n_a], rb.weights[:n_a])
+    assert s > max(sa, sb) - 0.5  # combining shouldn't ever do meaningfully worse
+
+
+# --- combine_diversity_results: any mix of header/blind -------------------
+
+def test_diversity_results_pure_headered_matches_combine_demod_results(modem):
+    lat = unit_latents("A")
+    x = modem.modulate(lat, "A")
+    ra = modem.demodulate(hfchannel.apply_channel(x, snr_db=8.0, seed=1))
+    rb = modem.demodulate(hfchannel.apply_channel(x, snr_db=8.0, seed=2))
+    via_diversity = combine_diversity_results([ra, rb])
+    via_demod = combine_demod_results([ra, rb])
+    np.testing.assert_allclose(via_diversity.latents, via_demod.latents)
+    np.testing.assert_allclose(via_diversity.weights, via_demod.weights)
+
+
+def test_diversity_results_pure_blind_matches_combine_blind_results(blind_pair):
+    _, ra, rb = blind_pair
+    via_diversity = combine_diversity_results([ra, rb])
+    via_blind = combine_blind_results([ra, rb])
+    np.testing.assert_allclose(via_diversity.latents, via_blind.latents)
+    np.testing.assert_allclose(via_diversity.weights, via_blind.weights)
+
+
+def test_diversity_results_mixed_header_and_blind(modem):
+    """One branch header-locked, the other only blind-locked -- the
+    result should still be a DemodResult (the header's mode is
+    authoritative), sized to that mode, with the blind branch's data
+    folded in rather than ignored."""
+    lat = unit_latents("A", seed=7)
+    x = modem.modulate(lat, "A", callsign="MIXED")
+    headered = modem.demodulate(hfchannel.apply_channel(x, snr_db=6.0, seed=11))
+    blind = modem.demodulate_blind(hfchannel.apply_channel(x, snr_db=6.0, seed=22))
+    assert blind.beacon is not None  # fixture sanity
+
+    combined = combine_diversity_results([headered, blind])
+    assert combined.mode.name == "A"
+    assert len(combined.latents) == MODES["A"].n_latents
+    assert combined.weights.max() <= 1.0 + 1e-9
+
+    s_combined = latent_snr_db(lat, combined.latents, combined.weights)
+    s_headered = latent_snr_db(lat, headered.latents, headered.weights)
+    assert s_combined > s_headered - 0.5
+
+
+def test_diversity_results_mixed_beats_either_branch_alone(modem):
+    lat = unit_latents("A", seed=9)
+    x = modem.modulate(lat, "A")
+    headered = modem.demodulate(hfchannel.apply_channel(x, snr_db=6.0, seed=33))
+    blind = modem.demodulate_blind(hfchannel.apply_channel(x, snr_db=6.0, seed=44))
+    combined = combine_diversity_results([headered, blind])
+
+    s_combined = latent_snr_db(lat, combined.latents, combined.weights)
+    s_headered = latent_snr_db(lat, headered.latents, headered.weights)
+    n_a = MODES["A"].n_latents
+    s_blind = latent_snr_db(lat, blind.latents[:n_a], blind.weights[:n_a])
+    assert s_combined > max(s_headered, s_blind) + 1.0
+
+
+def test_diversity_results_rejects_mismatched_header_modes(modem):
+    ra = modem.demodulate(modem.modulate(unit_latents("A"), "A"))
+    rb = modem.demodulate(modem.modulate(unit_latents("B"), "B"))
+    with pytest.raises(ValueError):
+        combine_diversity_results([ra, rb])
+
+
+def test_diversity_results_rejects_unknown_branch_type(modem):
+    ra = modem.demodulate(modem.modulate(unit_latents("A"), "A"))
+    with pytest.raises(TypeError):
+        combine_diversity_results([ra, object()])
+
+
+def test_branch_contribution_and_image_accept_mixed_branches(modem):
+    lat = unit_latents("A", seed=13)
+    x = modem.modulate(lat, "A")
+    headered = modem.demodulate(hfchannel.apply_channel(x, snr_db=8.0, seed=55))
+    blind = modem.demodulate_blind(hfchannel.apply_channel(x, snr_db=8.0, seed=66))
+
+    frac = branch_contribution([headered, blind])
+    assert frac.shape == (2, len(blind.latents))  # full C range, blind sets the size
+
+    img = contribution_image([headered, blind], scale=1)
+    # Mixed/blind combos can't assume the header's mode range, so the
+    # image spans mode C's full frame count.
+    assert img.size == (LATENT_GROUPS * FRAMES_PER_GROUP, LATENT_CHANNELS)
