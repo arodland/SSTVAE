@@ -30,7 +30,7 @@ from dataclasses import replace
 import numpy as np
 from PIL import Image
 
-from ..config import FRAMES_PER_GROUP, LATENT_CHANNELS, LATENT_GROUPS, LATENT_H, LATENT_W, MODES
+from ..config import FRAMES_PER_GROUP, LATENT_GROUPS, MODES, NC_LATENT
 from . import framing
 from .modem import BlindDemodResult, DemodResult
 from .sync import SyncError
@@ -323,15 +323,30 @@ def branch_contribution(results) -> np.ndarray:
 
 def contribution_image(results, scale: int = 6) -> Image.Image:
     """Debug visualization of which branch supplied each transmitted
-    latent: rows are latent channel (0..`LATENT_CHANNELS`-1), columns
-    are absolute frame index (time). Red is branch 0's fractional share
-    of the combined MRC estimate at that channel/frame, blue is branch
-    1's -- a cell that's pure red or pure blue means one branch carried
-    that latent essentially alone (the other faded), magenta means both
-    contributed roughly equally, and black means either no transmitted
-    latent that frame touched that channel (the interleaver scatters
-    each frame's latents across channels, not one-per-frame) or the
-    latent was erased on both branches.
+    latent: rows are the data carrier index (0..`NC_LATENT`-1, row 0 the
+    lowest frequency), columns are absolute frame index (time). Red is
+    branch 0's fractional share of the combined MRC estimate on that
+    carrier/frame, blue is branch 1's -- a cell that's pure red or pure
+    blue means one branch carried that carrier essentially alone (the
+    other faded), magenta means both contributed roughly equally.
+
+    Rows are carrier index, not the decoder's latent-channel index
+    `branch_contribution`'s columns are ordered by: that index is where
+    the interleaver's PAPR-motivated permutation *sends* a canonical
+    latent to be transmitted, which scrambles frequency order and, for
+    modes B/C -- whose groups are sent as sequential blocks, each
+    confined to its own slice of decoder channels -- would render as a
+    staircase instead of one continuous band. Carrier index is instead
+    read off each latent's on-air *position*, `slot_range_for_frame`'s
+    index into its own returned array (not the array's value, which is
+    the scrambled canonical index) -- `framing.slots_to_symbols` reshapes
+    a frame's `LATENTS_PER_FRAME` slots as `(DATA_SYMS_PER_FRAME,
+    NC_LATENT, 2)`, so position `k`'s carrier is `(k // 2) % NC_LATENT`,
+    real/imag-independent and identical across every group and mode.
+    Every carrier carries data in every symbol of every frame, so unlike
+    the old channel-indexed image there are no structurally-black
+    cells -- black here always means both branches erased that carrier
+    this frame, never "the interleaver didn't touch it."
 
     Requires exactly two branches (red/blue is a two-way encoding), any
     mix of `DemodResult`/`BlindDemodResult`. `n_frames` is the
@@ -349,24 +364,23 @@ def contribution_image(results, scale: int = 6) -> Image.Image:
         n_frames = results[0].mode.n_frames
     else:
         n_frames = _FULL_C_FRAMES
-    per_channel = LATENT_H * LATENT_W
 
-    grid = np.zeros((LATENT_CHANNELS, n_frames, 2))
-    counts = np.zeros((LATENT_CHANNELS, n_frames))
+    grid = np.zeros((NC_LATENT, n_frames, 2))
+    counts = np.zeros((NC_LATENT, n_frames))
     for f in range(n_frames):
         _, idx = framing.slot_range_for_frame(f)
-        channels = idx // per_channel
-        np.add.at(grid[:, f, 0], channels, frac[0, idx])
-        np.add.at(grid[:, f, 1], channels, frac[1, idx])
-        np.add.at(counts[:, f], channels, 1)
+        carriers = (np.arange(len(idx)) // 2) % NC_LATENT
+        np.add.at(grid[:, f, 0], carriers, frac[0, idx])
+        np.add.at(grid[:, f, 1], carriers, frac[1, idx])
+        np.add.at(counts[:, f], carriers, 1)
 
     mask = counts > 0
     grid = np.divide(grid, counts[:, :, None], out=grid, where=mask[:, :, None])
 
-    rgb = np.zeros((LATENT_CHANNELS, n_frames, 3), dtype=np.uint8)
+    rgb = np.zeros((NC_LATENT, n_frames, 3), dtype=np.uint8)
     rgb[:, :, 0] = np.clip(grid[:, :, 0] * 255, 0, 255).astype(np.uint8)
     rgb[:, :, 2] = np.clip(grid[:, :, 1] * 255, 0, 255).astype(np.uint8)
     img = Image.fromarray(rgb, "RGB")
     if scale != 1:
-        img = img.resize((n_frames * scale, LATENT_CHANNELS * scale), Image.NEAREST)
+        img = img.resize((n_frames * scale, NC_LATENT * scale), Image.NEAREST)
     return img
