@@ -152,12 +152,18 @@ SettingsDialog::SettingsDialog(const settings::Config& config, QWidget* parent)
     resize(640, 700);
 
     auto* tabs = new QTabWidget(this);
-    tabs->addTab(scrolling(station_tab()), tr("Station"));
+    // Ordered by how often an operator has to touch them, not by how the
+    // config file is structured. Folders and the model are the two that
+    // are set once and then never again -- the model's correct setting
+    // is "blank" for the life of the station -- so they go at the end;
+    // the callsign, which is the one field nobody can leave alone, moved
+    // to the top of Transmit, next to the CW ID that sends it.
     tabs->addTab(scrolling(audio_tab()), tr("Audio"));
     tabs->addTab(scrolling(rig_tab()), tr("Rig control"));
-    tabs->addTab(scrolling(folders_tab()), tr("Folders"));
     tabs->addTab(scrolling(receive_tab()), tr("Receive"));
     tabs->addTab(scrolling(transmit_tab()), tr("Transmit"));
+    tabs->addTab(scrolling(folders_tab()), tr("Folders"));
+    tabs->addTab(scrolling(model_tab()), tr("Model"));
 
     auto* buttons = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
@@ -174,20 +180,11 @@ SettingsDialog::SettingsDialog(const settings::Config& config, QWidget* parent)
 
 SettingsDialog::~SettingsDialog() = default;
 
-// --- station ----------------------------------------------------------------
+// --- model ------------------------------------------------------------------
 
-QWidget* SettingsDialog::station_tab() {
+QWidget* SettingsDialog::model_tab() {
     auto* page = new QWidget(this);
     auto* form = new QFormLayout(page);
-
-    callsign_ = new QLineEdit(QString::fromStdString(config_.callsign), page);
-    callsign_->setMaxLength(8);  // the beacon's callsign field
-    callsign_->setPlaceholderText(QStringLiteral("N0CALL"));
-    form->addRow(tr("Callsign"), callsign_);
-    form->addRow(note(tr("Up to 8 characters. Sent continuously on the beacon "
-                         "carrier, so a receiver can identify you even from a "
-                         "partial reception."),
-                      page));
 
     model_path_ = new QLineEdit(QString::fromStdString(config_.model_path), page);
     model_path_->setPlaceholderText(tr("(published model)"));
@@ -700,6 +697,15 @@ QWidget* SettingsDialog::transmit_tab() {
     auto* page = new QWidget(this);
     auto* form = new QFormLayout(page);
 
+    callsign_ = new QLineEdit(QString::fromStdString(config_.callsign), page);
+    callsign_->setMaxLength(8);  // the beacon's callsign field
+    callsign_->setPlaceholderText(QStringLiteral("N0CALL"));
+    form->addRow(tr("Callsign"), callsign_);
+    form->addRow(note(tr("Up to 8 characters. Sent continuously on the beacon "
+                         "carrier, so a receiver can identify you even from a "
+                         "partial reception."),
+                      page));
+
     optimize_ = new QCheckBox(tr("Refine each picture before sending"), page);
     optimize_->setChecked(config_.transmit.optimize);
     form->addRow(optimize_);
@@ -719,9 +725,9 @@ QWidget* SettingsDialog::transmit_tab() {
     cw_id_ = new QCheckBox(tr("Send CW ID after each transmission"), page);
     cw_id_->setChecked(config_.transmit.cw_id);
     form->addRow(cw_id_);
-    form->addRow(note(tr("Sends the callsign from the settings dialog in Morse "
-                         "(18 wpm, 1000 Hz), 500 ms after the picture ends, under"
-                         "the same PTT key-up."),
+    form->addRow(note(tr("Sends the callsign above in Morse "
+                         "(18 wpm, 1000 Hz), 500 ms after the picture ends, "
+                         "under the same PTT key-up."),
                       page));
 
     // The transmit level itself stays on the send bar, where it is

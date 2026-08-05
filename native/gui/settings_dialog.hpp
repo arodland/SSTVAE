@@ -59,7 +59,7 @@ signals:
     void rigTestFinished(bool ok, const QString& message);
 
 private:
-    QWidget* station_tab();
+    QWidget* model_tab();
     QWidget* audio_tab();
     QWidget* rig_tab();
     QWidget* folders_tab();
@@ -75,8 +75,7 @@ private:
 
     settings::Config config_;
 
-    // Station
-    QLineEdit* callsign_ = nullptr;
+    // Model
     QLineEdit* model_path_ = nullptr;
     QComboBox* precision_ = nullptr;
     QLabel* precision_note_ = nullptr;
@@ -113,9 +112,12 @@ private:
     QLineEdit* transmit_dir_ = nullptr;
     QLineEdit* template_dir_ = nullptr;
 
-    // Receive
+    // Transmit
+    QLineEdit* callsign_ = nullptr;
     QCheckBox* optimize_ = nullptr;
     QCheckBox* cw_id_ = nullptr;
+
+    // Receive
     QCheckBox* autosave_ = nullptr;
     QCheckBox* save_audio_ = nullptr;
     QCheckBox* low_cpu_ = nullptr;
