@@ -916,38 +916,51 @@ void decode_loop_diversity(std::span<RingBuffer* const> rings, const Decoder& de
         state.update([](Progress& s) { ++s.polls; });
 
         using BranchHit = std::pair<modem::diversity::Branch, std::int64_t>;
-        std::vector<BranchHit> found;
+        std::array<std::optional<BranchHit>, 2> found_by_branch;
         for (int i = 0; i < 2; ++i) {
             const auto buf_start = static_cast<std::int64_t>(totals[i]) -
                                    static_cast<std::int64_t>(samples[i].size());
-            if (auto hit = find_branch_reception(modem, samples[i], buf_start, finished_starts,
-                                                 epsilon, config.blind_search_seconds,
-                                                 config.drift_track)) {
-                found.push_back(std::move(*hit));
-            }
+            found_by_branch[i] = find_branch_reception(modem, samples[i], buf_start,
+                                                        finished_starts, epsilon,
+                                                        config.blind_search_seconds,
+                                                        config.drift_track);
         }
 
         std::optional<modem::diversity::Branch> combined;
         std::optional<std::int64_t> reception_start;
         std::vector<modem::diversity::Branch> branch_results;
-        if (found.size() == 2 && std::llabs(found[0].second - found[1].second) <= epsilon) {
-            branch_results = {found[0].first, found[1].first};
+        bool branch_a_locked = false;
+        bool branch_b_locked = false;
+        if (found_by_branch[0] && found_by_branch[1] &&
+            std::llabs(found_by_branch[0]->second - found_by_branch[1]->second) <= epsilon) {
+            branch_results = {found_by_branch[0]->first, found_by_branch[1]->first};
             combined = modem::diversity::combine_diversity_results(branch_results);
-            reception_start = found[0].second;
-        } else if (!found.empty()) {
+            reception_start = found_by_branch[0]->second;
+            branch_a_locked = true;
+            branch_b_locked = true;
+        } else if (found_by_branch[0] || found_by_branch[1]) {
             // Only one branch locked, or the two locks are further apart
             // than a same-transmission match tolerates (most likely a
             // spurious hit on one branch). Use whichever branch is
             // furthest along, same as an operator picking the stronger
             // antenna.
-            auto& best = *std::max_element(
-                found.begin(), found.end(), [](const BranchHit& a, const BranchHit& b) {
-                    return branch_progress_frac(a.first) < branch_progress_frac(b.first);
-                });
-            combined = best.first;
-            reception_start = best.second;
-            branch_results = {best.first};
+            int best = found_by_branch[0] && found_by_branch[1]
+                           ? (branch_progress_frac(found_by_branch[0]->first) >=
+                                      branch_progress_frac(found_by_branch[1]->first)
+                                  ? 0
+                                  : 1)
+                           : (found_by_branch[0] ? 0 : 1);
+            combined = found_by_branch[best]->first;
+            reception_start = found_by_branch[best]->second;
+            branch_results = {found_by_branch[best]->first};
+            branch_a_locked = (best == 0);
+            branch_b_locked = (best == 1);
         }
+
+        state.update([&](Progress& s) {
+            s.branch_a_locked = branch_a_locked;
+            s.branch_b_locked = branch_b_locked;
+        });
 
         if (!combined) {
             state.update([](Progress& s) {

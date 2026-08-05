@@ -111,6 +111,8 @@ def test_diversity_combines_two_branches_into_one_save(tmp_path):
         assert state.status == "done"
         assert state.frames_received == state.n_frames_expected
         assert state.callsign == "TEST"
+        assert state.branch_a_locked
+        assert state.branch_b_locked
 
 
 @pytest.mark.slow
@@ -126,6 +128,8 @@ def test_diversity_falls_back_to_single_branch_when_the_other_is_dead(tmp_path):
     assert len(saves) == 1
     with state.lock:
         assert state.status == "done"
+        assert state.branch_a_locked
+        assert not state.branch_b_locked
 
 
 @pytest.mark.slow
@@ -194,6 +198,8 @@ def test_diversity_combines_a_header_branch_with_a_blind_only_branch(tmp_path):
     assert len(saves) == 1, f"expected 1 saved image, got {len(saves)}: {saves}"
     with state.lock:
         assert state.status == "done"
+        assert state.branch_a_locked  # header lock
+        assert state.branch_b_locked  # blind lock still counts as locked
 
 
 @pytest.mark.slow
@@ -250,5 +256,8 @@ def test_diversity_completes_when_both_branches_are_blind_only(tmp_path):
 
     assert len(sink.received) == 1, "an all-blind diversity combine should still finish once"
     assert sink.received[0].mode_name is None  # true mode/duration never became known
+    with state.lock:
+        assert state.branch_a_locked
+        assert state.branch_b_locked
     with state.lock:
         assert state.status == "done"

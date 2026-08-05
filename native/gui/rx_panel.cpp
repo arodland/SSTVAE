@@ -1,13 +1,16 @@
 #include "rx_panel.hpp"
 
 #include <QCheckBox>
+#include <QColor>
 #include <QDesktopServices>
 #include <QSignalBlocker>
 #include <QFileDialog>
+#include <QFont>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
+#include <QPalette>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -62,6 +65,41 @@ fs::path unique_path(fs::path path) {
         if (!fs::exists(candidate)) return candidate;
     }
     return path;
+}
+
+// SNR for display, with a placeholder when there is none.
+//
+// `rx::fmt_snr` returns an empty string for NaN, which is right for it
+// -- it mirrors Python's and feeds the CLI. But on screen an absent
+// field is indistinguishable from a field that was never going to be
+// there: the operator cannot tell "no SNR estimate yet" from "this
+// build does not show SNR". The engine formats; the panel decides how
+// to show absence.
+QString snr_text(double snr_db) {
+    const QString formatted = QString::fromStdString(rx::fmt_snr(snr_db));
+    return formatted.isEmpty() ? QStringLiteral("  SNR --") : formatted;
+}
+
+// A filled chip, not coloured text -- the same argument as the PTT lamp
+// (main_window.cpp): a lock state is exactly the kind of thing that
+// must read at a glance, and coloured text on the panel's own
+// background is a contrast problem waiting for a dark theme. Locked is
+// `style::color::ok()`/`on_ok()`, the same pair the waterfall's level
+// meter already uses for "healthy". Not locked deliberately reuses the
+// palette's own Button/ButtonText pair rather than a second hand-picked
+// grey: every theme already keeps that pairing legible, and it is what
+// makes the chip read as an inactive control without being a disabled
+// one (`style::dim` is for text, not for a filled surface).
+void set_lock_chip(QLabel* chip, bool locked) {
+    QPalette pal = chip->palette();
+    if (locked) {
+        pal.setColor(QPalette::Window, style::color::ok());
+        pal.setColor(QPalette::WindowText, style::color::on_ok());
+    } else {
+        pal.setColor(QPalette::Window, pal.color(QPalette::Button));
+        pal.setColor(QPalette::WindowText, pal.color(QPalette::ButtonText));
+    }
+    chip->setPalette(pal);
 }
 
 }  // namespace
@@ -135,6 +173,30 @@ void ReceivePanel::build_ui() {
     status_ = new style::ElidingLabel(tr("Stopped"), lower);
     status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     lower_layout->addWidget(status_);
+
+    // The diversity lock chips: which of the two receivers is currently
+    // contributing to the combine. Hidden until a diversity session
+    // starts (set_lock_chip below never runs otherwise, so these stay in
+    // their "not locked" look, which would be misleading to show for an
+    // ordinary single-receiver session).
+    auto* lock_row = new QHBoxLayout();
+    lock_row->setContentsMargins(0, 0, 0, 0);
+    auto make_lock_chip = [this](const QString& text) {
+        auto* chip = new QLabel(text, this);
+        QFont f = chip->font();
+        f.setBold(true);
+        label->setFont(f);
+        label->hide();
+        return label;
+    };
+    branch_a_chip_ = make_lock_chip(tr("Primary"));
+    branch_b_chip_ = make_lock_chip(tr("Secondary"));
+    set_lock_chip(branch_a_chip_, false);
+    set_lock_chip(branch_b_chip_, false);
+    lock_row->addWidget(branch_a_chip_);
+    lock_row->addWidget(branch_b_chip_);
+    lock_row->addStretch(1);
+    lower_layout->addLayout(lock_row);
 
     progress_ = new QProgressBar(lower);
     progress_->setRange(0, 100);
@@ -364,6 +426,11 @@ bool ReceivePanel::start() {
     // keeps the history.
     banner_->clear();
     was_receiving_ = false;
+    diversity_active_ = diversity;
+    branch_a_chip_->setVisible(diversity_active_);
+    branch_b_chip_->setVisible(diversity_active_);
+    set_lock_chip(branch_a_chip_, false);
+    set_lock_chip(branch_b_chip_, false);
     app_->log_event("rx", log::Severity::Info,
                     tr("listening (device at %1 Hz)").arg(device_rate));
     emit listeningChanged(true);
@@ -387,6 +454,7 @@ void ReceivePanel::stop() {
     if (Waterfall* w = fall()) w->set_ring(nullptr);
     ring_.reset();
     ring2_.reset();
+    diversity_active_ = false;
 
     if (start_button_ != nullptr) {
         start_button_->setEnabled(true);
@@ -396,6 +464,8 @@ void ReceivePanel::stop() {
         // this the bar keeps whatever fraction the reception had
         // reached: "Stopped" over a bar still reading 63%.
         progress_->setValue(0);
+        branch_a_chip_->hide();
+        branch_b_chip_->hide();
     }
     if (was_listening) {
         app_->log_event("rx", log::Severity::Info, tr("stopped"));
@@ -573,6 +643,11 @@ void ReceivePanel::refresh_status() {
     set_status(text);
     progress_->setValue(static_cast<int>(100.0 * progress.progress_frac));
 
+    if (diversity_active_) {
+        set_lock_chip(branch_a_chip_, progress.branch_a_locked);
+        set_lock_chip(branch_b_chip_, progress.branch_b_locked);
+    }
+
     if (progress.image && progress.image.get() != shown_) {
         shown_ = progress.image.get();
         set_displayed(*progress.image, progress.callsign, progress.mode_name);
@@ -732,6 +807,10 @@ void ReceivePanel::fill_for_screenshot() {
     set_status(
         tr("Receiving mode C: frame 220/220 (100%)  ·  SNR 8.3 dB  ·  de KD8XYZ"));
     progress_->setValue(100);
+    branch_a_chip_->show();
+    branch_b_chip_->show();
+    set_lock_chip(branch_a_chip_, true);
+    set_lock_chip(branch_b_chip_, false);
     last_card_->setText(
         tr("Last: 14:32  ·  mode C  ·  de KD8XYZ  ·  SNR 8.3 dB"
            "  ·  220/220 frames  ·  KD8XYZ-C-14230000.png"));
