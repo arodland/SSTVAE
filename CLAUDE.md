@@ -1245,21 +1245,38 @@ need when `--native` fails and you want to know *where*.
   latent space, not raw samples — each branch already resyncs and
   deinterleaves independently, so their canonical-order
   `DemodResult.latents`/`.weights` are directly comparable with no
-  shared timebase needed. Live in both `sstvae/rx/engine.py` and the
-  native `core/rx/engine.cpp` (`decode_loop_diversity`, preamble-path
-  only — no blind fallback, both branches must independently acquire,
-  unlike raw-domain diversity combining, which was considered and set
-  aside — see the doc for why), `sstvae_listen.py --device2`, and the
-  native app's Receive settings tab. `contribution_image` (Python and
-  `modem::diversity::contribution_image` in C++) is an optional debug
-  heatmap of which branch supplied each transmitted latent. The `core/`
-  side of the native port has real ctest coverage
-  (`test_diversity.cpp`, `test_rx_engine.cpp`'s `DiversityHarness`) from
-  an offline `--no-codec --no-gui` build; the Qt settings-dialog and
-  receive-panel changes were written against the existing patterns but
-  **could not be built or tested in the environment that wrote them**
-  (no Qt6 installed) — verify on a machine with Qt before trusting that
-  part.
+  shared timebase needed. Each branch independently falls back to
+  `Modem.demodulate_blind` when it can't get a header lock, same as
+  `decode_loop` already does for one receiver — `combine_diversity_
+  results` (Python) / the `Branch` variant overloads (C++) handle any
+  mix of header- and blind-locked branches, since `BlindDemodResult` is
+  already full mode-C-sized and aligned by the beacon's absolute frame
+  counter, so unlike two header locks it needs no sample-position
+  matching to combine, only a sanity check that the positions agree.
+  Live in both `sstvae/rx/engine.py` and the native `core/rx/engine.cpp`
+  (`decode_loop_diversity`; kept as a separate function from
+  `decode_loop` on both sides rather than folded in, since that
+  function's state machine is the reference's load-bearing one),
+  `sstvae_listen.py --device2`, and the native app's Receive settings
+  tab. `contribution_image` (Python and `modem::diversity::
+  contribution_image` in C++) is an optional debug heatmap of which
+  branch supplied each transmitted latent — rows are the *carrier*
+  index (frequency order), not the decoder's latent-channel index:
+  channel order is what the interleaver's PAPR-motivated permutation
+  scatters latents to for transmission, which for modes B/C — sent as
+  sequential per-group blocks — drew as a staircase instead of one
+  continuous band; carrier index is read off each latent's on-air
+  *position* rather than the (scrambled) value at that position, and is
+  identical across every group and mode. Raw-domain (pre-equalization)
+  combining and cross-branch acquisition-threshold lowering were both
+  considered and set aside — see the doc for why neither is a strict
+  improvement on what's here. The `core/` side of the native port has
+  real ctest coverage (`test_diversity.cpp`, `test_rx_engine.cpp`'s
+  `DiversityHarness`) from an offline `--no-codec --no-gui` build; the
+  Qt settings-dialog and receive-panel changes were written against the
+  existing patterns but **could not be built or tested in the
+  environment that wrote them** (no Qt6 installed) — verify on a
+  machine with Qt before trusting that part.
 - `docs/todo.md` — open work items with the reasoning behind them.
   Currently one: a wider acquisition search so a mis-tuned counterpart
   still decodes — measured, the demod path is entirely independent of
