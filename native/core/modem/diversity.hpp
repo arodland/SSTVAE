@@ -76,23 +76,33 @@ std::vector<std::vector<double>> branch_contribution(
     const std::vector<DemodResult>& results);
 std::vector<std::vector<double>> branch_contribution(const std::vector<Branch>& results);
 
-// Debug visualization of which branch supplied each transmitted latent:
-// rows are the data carrier index (0..NC_LATENT-1, row 0 the lowest
-// frequency -- carriers are contiguous on-air positions, in frequency
-// order by construction, unlike the decoder's latent-channel index,
-// which the interleaver's PAPR-motivated permutation scatters and which
-// -- for modes B/C, whose groups transmit as sequential blocks each
-// confined to its own slice of decoder channels -- would draw as a
-// staircase instead of one continuous band). Columns are absolute frame
-// index (time). Red is branch 0's fractional share, blue is branch 1's;
-// black means both branches erased that carrier that frame (every
-// carrier carries data in every frame, so there is no "not touched this
-// frame" black the way the decoder-channel indexing had). `scale`
-// replicates each cell into a scale x scale block (nearest-neighbor, not
-// a smoothing resize -- the data is categorical per cell). Requires
-// exactly two branches; the DemodResult overload requires the same mode,
-// the Branch overload allows any mix (using mode C's full frame range
-// unless both branches happen to be header-locked to the same mode).
+// Debug visualization of which branch supplied each transmitted latent,
+// and how much either of them had to offer: rows are the data carrier
+// index (0..NC_LATENT-1, row 0 the lowest frequency -- carriers are
+// contiguous on-air positions, in frequency order by construction,
+// unlike the decoder's latent-channel index, which the interleaver's
+// PAPR-motivated permutation scatters and which -- for modes B/C, whose
+// groups transmit as sequential blocks each confined to its own slice of
+// decoder channels -- would draw as a staircase instead of one
+// continuous band). Columns are absolute frame index (time). Hue is
+// branch_contribution -- red is branch 0's fractional share, blue is
+// branch 1's, magenta means both contributed roughly equally -- and
+// brightness is the branches' combined confidence at that latent,
+// normalized to the brightest cell this particular reception ever
+// reached (not the raw [0, 1] weight scale, which would make two
+// receptions' images incomparable at a glance for no benefit). A carrier
+// that fades on one branch but stays strong on the other still reads as
+// a saturated, bright color; a carrier that fades on *both* branches
+// goes dark regardless of how evenly they split what little they had,
+// down to black where every branch erased it -- without the brightness
+// term, two branches equally weak would draw identically to two
+// branches equally strong, giving no visual signal that combining them
+// didn't actually help there. `scale` replicates each cell into a scale
+// x scale block (nearest-neighbor, not a smoothing resize -- the data is
+// categorical per cell). Requires exactly two branches; the DemodResult
+// overload requires the same mode, the Branch overload allows any mix
+// (using mode C's full frame range unless both branches happen to be
+// header-locked to the same mode).
 images::Picture contribution_image(const std::vector<DemodResult>& results,
                                    int scale = 6);
 images::Picture contribution_image(const std::vector<Branch>& results, int scale = 6);

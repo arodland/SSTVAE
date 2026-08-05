@@ -1267,7 +1267,23 @@ need when `--native` fails and you want to know *where*.
   sequential per-group blocks — drew as a staircase instead of one
   continuous band; carrier index is read off each latent's on-air
   *position* rather than the (scrambled) value at that position, and is
-  identical across every group and mode. Raw-domain (pre-equalization)
+  identical across every group and mode. **Brightness is the combined
+  weight, not just hue (2026-08-05)**: hue alone (each branch's
+  *fractional* share) can't tell "both branches contributed a lot here"
+  from "both branches barely had anything, but split it evenly" — two
+  branches at 0.9 each and two branches at 0.05 each both draw as the
+  same saturated magenta on hue alone. Brightness now scales by the
+  combined MRC weight (`min(1, sqrt(sum_i(snr_lin_i*w_i[k]**2) /
+  max_i(snr_lin_i)))` — the same value `DemodResult.weights` reports
+  post-combine), normalized to *this reception's own peak cell* rather
+  than the raw `[0, 1]` scale. A carrier that fades on one branch but
+  stays strong on the other still reads bright and saturated; a carrier
+  that fades on *both* goes dark regardless of how evenly they split
+  what little they had. Python's `_combined_weight` and C++'s
+  `contribution_data` (an internal struct pairing `frac` with
+  `overall`, computed from the same MRC pass so there's no second array
+  build) share the arithmetic with `branch_contribution`, which uses
+  only the `frac` half. Raw-domain (pre-equalization)
   combining and cross-branch acquisition-threshold lowering were both
   considered and set aside — see the doc for why neither is a strict
   improvement on what's here. The `core/` side of the native port has

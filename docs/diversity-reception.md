@@ -29,9 +29,13 @@ also support an optional debug visualization,
 `contribution_image`/`modem::diversity::contribution_image` --
 `--diversity-debug-image` on the CLI, a checkbox in the native
 settings dialog -- a red/blue heatmap of which branch supplied each
-transmitted latent, written as `<name>_diversity.png` beside the
-picture: rows are the data carrier index (frequency order, contiguous),
-columns are absolute frame index (time). Each branch also independently
+transmitted latent *and* how much either had to offer, written as
+`<name>_diversity.png` beside the picture: rows are the data carrier
+index (frequency order, contiguous), columns are absolute frame index
+(time), hue is the fractional split and brightness is the combined
+strength relative to this reception's own peak cell -- see
+"`contribution_image`: hue and brightness together" below for why both
+axes are needed. Each branch also independently
 falls back to blind acquisition (`Modem.demodulate_blind`) when it
 can't get a header lock, same as `decode_loop` does for a single
 receiver -- see "Combining blind-acquired branches". `Progress`/
@@ -127,6 +131,59 @@ diversity scenario (the "noise" is perfectly correlated) and overstates
 the combined confidence; the combined latent value is still correct in
 that degenerate case since there's nothing to average away, only the
 reported weight is optimistic (`test_two_identical_clean_branches_dont_distort_the_signal`).
+
+## `contribution_image`: hue and brightness together (2026-08-05)
+
+The first version of this heatmap encoded only `branch_contribution`
+-- each branch's *fractional* share of the combine, `mrc_w / sum(mrc_w)`
+from the derivation above -- as hue: red for branch 0, blue for branch
+1, magenta for an even split. That has a blind spot. Fraction says
+nothing about *magnitude*: two branches each contributing a healthy
+weight of 0.9 and two branches each contributing a faded 0.05 both
+split the latent 50/50, and both drew as the identical saturated
+magenta. The image could not tell "combining these two helped a lot
+here" from "combining these two barely mattered here, there was almost
+nothing to combine" -- exactly the distinction a debug view like this
+exists to show.
+
+The fix adds a second channel of information, riding on data the
+combine already computes: `weight[k]` from "The combining weight"
+above (the branches' *combined*, not fractional, confidence at that
+latent -- `min(1, sqrt(sum_i(snr_lin_i * w_i[k]**2) / max_i(snr_lin_i)))`).
+Brightness scales by this value, normalized to the *brightest cell this
+particular reception ever reached* rather than exposed on its raw
+`[0, 1]` scale -- a reception that never got much above 0.3 anywhere
+should still show its strongest carriers at full brightness, the same
+way the hue itself is relative to what the two branches had between
+them rather than to some absolute unit. A carrier that fades on one
+branch but stays strong on the other still reads as a saturated, bright
+color (that is the case diversity reception exists to rescue); a
+carrier that fades on *both* branches goes dark regardless of how
+evenly they split what little they had, down to black at the limit
+where every branch erased it.
+
+Implementation-wise this is one extra array riding alongside
+`branch_contribution`'s fractional-share one, computed from the same
+per-latent MRC weights so there is no second pass over the branches:
+Python's `_combined_weight` (private; `contribution_image` is the only
+caller with a reason to want the un-normalized value) and C++'s
+`contribution_data` (an internal struct pairing `frac` with `overall`,
+which `branch_contribution` uses just the first half of). Both are
+verified directly (`test_contribution_image_darkens_when_both_branches_
+fade_together` in both suites): two branches given *identical* weights
+throughout, so the hue is an even 50/50 split everywhere by
+construction, but pinned to full strength for one frame's latents and a
+low baseline for the rest -- the full-strength frame's column comes out
+more than 5x brighter than the low-baseline one despite matching hue in
+both, and the peak column reaches full brightness (255) by construction
+of the normalization. `test_contribution_image_pure_branch_is_
+saturated_in_its_color` (renamed `..._is_pure_hue_peaking_at_full_
+brightness`) had to change with this: a single live branch against a
+dead one is no longer *uniformly* saturated red -- brightness now
+tracks the live branch's own per-carrier weight, which even on an
+unfaded channel varies slightly carrier to carrier from ordinary pilot
+estimation noise -- only its hue (no blue at all) and its peak cell
+(near-255) are still asserted.
 
 ## Combining blind-acquired branches
 

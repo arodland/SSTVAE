@@ -131,12 +131,16 @@ double snr_of_blind(const BlindDemodResult& r) { return r.snr_db; }
 // Per (row, frame) cell, averaged over whichever latents this frame's
 // slots bucket into that row -- shared by both contribution_image
 // overloads. `row_of(position_in_frame_slots)` decides what a slot's
-// row is; contribution_image passes the carrier-index rule.
+// row is; contribution_image passes the carrier-index rule. `overall`
+// is the branches' combined confidence at every latent (see
+// combined_weight below), used to scale brightness relative to this
+// reception's own peak cell, on top of frac's fractional-share hue.
 images::Picture render_contribution_grid(
-    const std::vector<std::vector<double>>& frac, int n_frames, int n_rows, int scale,
-    const std::function<int(std::size_t)>& row_of) {
+    const std::vector<std::vector<double>>& frac, const std::vector<double>& overall,
+    int n_frames, int n_rows, int scale, const std::function<int(std::size_t)>& row_of) {
     std::vector<double> sum_r(static_cast<std::size_t>(n_rows) * n_frames, 0.0);
     std::vector<double> sum_b(sum_r.size(), 0.0);
+    std::vector<double> sum_w(sum_r.size(), 0.0);
     std::vector<int> counts(sum_r.size(), 0);
 
     for (int f = 0; f < n_frames; ++f) {
@@ -147,8 +151,23 @@ images::Picture render_contribution_grid(
             const std::size_t cell = static_cast<std::size_t>(row) * n_frames + f;
             sum_r[cell] += frac[0][static_cast<std::size_t>(idx)];
             sum_b[cell] += frac[1][static_cast<std::size_t>(idx)];
+            sum_w[cell] += overall[static_cast<std::size_t>(idx)];
             ++counts[cell];
         }
+    }
+
+    // Per-cell means first, then find the reception's own peak cell --
+    // brightness is normalized to *that*, not to the raw [0, 1]
+    // confidence scale (see the header comment for why).
+    std::vector<double> mean_r(sum_r.size(), 0.0), mean_b(sum_r.size(), 0.0),
+        mean_w(sum_r.size(), 0.0);
+    double peak = 0.0;
+    for (std::size_t cell = 0; cell < sum_r.size(); ++cell) {
+        if (counts[cell] == 0) continue;
+        mean_r[cell] = sum_r[cell] / counts[cell];
+        mean_b[cell] = sum_b[cell] / counts[cell];
+        mean_w[cell] = sum_w[cell] / counts[cell];
+        peak = std::max(peak, mean_w[cell]);
     }
 
     const int sc = std::max(1, scale);
@@ -164,11 +183,12 @@ images::Picture render_contribution_grid(
         for (int f = 0; f < n_frames; ++f) {
             const std::size_t cell = static_cast<std::size_t>(row) * n_frames + f;
             std::uint8_t r = 0, b = 0;
-            if (counts[cell] > 0) {
+            if (counts[cell] > 0 && peak > 0.0) {
+                const double norm = mean_w[cell] / peak;
                 r = static_cast<std::uint8_t>(
-                    std::clamp(sum_r[cell] / counts[cell] * 255.0, 0.0, 255.0));
+                    std::clamp(mean_r[cell] * norm * 255.0, 0.0, 255.0));
                 b = static_cast<std::uint8_t>(
-                    std::clamp(sum_b[cell] / counts[cell] * 255.0, 0.0, 255.0));
+                    std::clamp(mean_b[cell] * norm * 255.0, 0.0, 255.0));
             }
             for (int dy = 0; dy < sc; ++dy) {
                 const int y = row * sc + dy;
@@ -196,6 +216,113 @@ images::Picture render_contribution_grid(
 // land on.
 int carrier_of_position(std::size_t pos) {
     return static_cast<int>((pos / 2) % static_cast<std::size_t>(config::NC_LATENT));
+}
+
+// frac: branch_contribution's (n_branches, n_latents) fractional share.
+// overall: (n_latents,) the branches' combined confidence -- the same
+// min(sqrt(sum(mrc_w)/ref), 1) mrc_combine_arrays reports as a
+// DemodResult's post-combine weights. One pass computes both, since
+// they share the same MrcWeights -- branch_contribution below returns
+// just .frac; contribution_image needs both, to scale hue by overall
+// strength.
+struct ContributionData {
+    std::vector<std::vector<double>> frac;
+    std::vector<double> overall;
+};
+
+ContributionData contribution_data(const std::vector<DemodResult>& results) {
+    validate_branches(results);
+    const std::size_t nb = results.size();
+    const std::size_t nl = results[0].latents.size();
+    std::vector<std::vector<double>> frac(nb, std::vector<double>(nl, 0.0));
+    std::vector<double> overall(nl, 0.0);
+
+    if (nb == 1) {
+        for (std::size_t k = 0; k < nl; ++k) {
+            frac[0][k] = results[0].weights[k] > 0.0 ? 1.0 : 0.0;
+            overall[k] = results[0].weights[k];
+        }
+        return {std::move(frac), std::move(overall)};
+    }
+
+    const MrcWeights mw = mrc_weights(results);
+    const double ref = *std::max_element(mw.snr_lin.begin(), mw.snr_lin.end());
+    for (std::size_t k = 0; k < nl; ++k) {
+        double denom = 0.0;
+        for (std::size_t i = 0; i < nb; ++i) denom += mw.w[i * nl + k];
+        if (denom > 0.0) {
+            for (std::size_t i = 0; i < nb; ++i) frac[i][k] = mw.w[i * nl + k] / denom;
+            overall[k] = std::min(1.0, std::sqrt(denom / ref));
+        }
+    }
+    return {std::move(frac), std::move(overall)};
+}
+
+ContributionData contribution_data(const std::vector<Branch>& results) {
+    if (results.empty()) throw std::invalid_argument("branch_contribution needs at least one branch");
+    if (results.size() == 1) {
+        const std::vector<double>* w = nullptr;
+        if (const auto* d = std::get_if<DemodResult>(&results[0])) {
+            w = &d->weights;
+        } else {
+            w = &std::get<BlindDemodResult>(results[0]).weights;
+        }
+        std::vector<double> frac0(w->size()), overall(w->size());
+        for (std::size_t k = 0; k < w->size(); ++k) {
+            frac0[k] = (*w)[k] > 0.0 ? 1.0 : 0.0;
+            overall[k] = (*w)[k];
+        }
+        return {{std::move(frac0)}, std::move(overall)};
+    }
+
+    std::vector<DemodResult> headered;
+    std::vector<BlindDemodResult> blind;
+    for (const Branch& b : results) {
+        if (const auto* d = std::get_if<DemodResult>(&b)) headered.push_back(*d);
+        else blind.push_back(std::get<BlindDemodResult>(b));
+    }
+
+    std::vector<std::vector<double>> padded;  // owns padded copies, if any
+    std::vector<const std::vector<double>*> w_ptrs;
+    std::vector<double> snr_dbs;
+    if (blind.empty()) {
+        validate_branches(headered);
+        for (const DemodResult& r : headered) {
+            w_ptrs.push_back(&r.weights);
+            snr_dbs.push_back(r.snr_db);
+        }
+    } else {
+        if (headered.size() > 1) validate_branches(headered);
+        padded.reserve(headered.size());
+        for (const DemodResult& r : headered) padded.push_back(latents::pad_to_full(r.weights));
+        std::size_t next_padded = 0;
+        for (const Branch& b : results) {
+            if (const auto* d = std::get_if<DemodResult>(&b)) {
+                w_ptrs.push_back(&padded[next_padded++]);
+                snr_dbs.push_back(d->snr_db);
+            } else {
+                const auto& bd = std::get<BlindDemodResult>(b);
+                w_ptrs.push_back(&bd.weights);
+                snr_dbs.push_back(bd.snr_db);
+            }
+        }
+    }
+
+    const MrcWeights mw = mrc_weights_raw(w_ptrs, snr_dbs);
+    const double ref = *std::max_element(mw.snr_lin.begin(), mw.snr_lin.end());
+    const std::size_t nb = w_ptrs.size();
+    const std::size_t nl = mw.n_latents;
+    std::vector<std::vector<double>> frac(nb, std::vector<double>(nl, 0.0));
+    std::vector<double> overall(nl, 0.0);
+    for (std::size_t k = 0; k < nl; ++k) {
+        double denom = 0.0;
+        for (std::size_t i = 0; i < nb; ++i) denom += mw.w[i * nl + k];
+        if (denom > 0.0) {
+            for (std::size_t i = 0; i < nb; ++i) frac[i][k] = mw.w[i * nl + k] / denom;
+            overall[k] = std::min(1.0, std::sqrt(denom / ref));
+        }
+    }
+    return {std::move(frac), std::move(overall)};
 }
 
 }  // namespace
@@ -312,102 +439,26 @@ Branch combine_diversity_results(const std::vector<Branch>& results) {
 
 std::vector<std::vector<double>> branch_contribution(
     const std::vector<DemodResult>& results) {
-    validate_branches(results);
-    const std::size_t nb = results.size();
-    const std::size_t nl = results[0].latents.size();
-    std::vector<std::vector<double>> frac(nb, std::vector<double>(nl, 0.0));
-
-    if (nb == 1) {
-        for (std::size_t k = 0; k < nl; ++k)
-            frac[0][k] = results[0].weights[k] > 0.0 ? 1.0 : 0.0;
-        return frac;
-    }
-
-    const MrcWeights mw = mrc_weights(results);
-    for (std::size_t k = 0; k < nl; ++k) {
-        double denom = 0.0;
-        for (std::size_t i = 0; i < nb; ++i) denom += mw.w[i * nl + k];
-        if (denom > 0.0) {
-            for (std::size_t i = 0; i < nb; ++i) frac[i][k] = mw.w[i * nl + k] / denom;
-        }
-    }
-    return frac;
+    return contribution_data(results).frac;
 }
 
 std::vector<std::vector<double>> branch_contribution(const std::vector<Branch>& results) {
-    if (results.empty()) throw std::invalid_argument("branch_contribution needs at least one branch");
-    if (results.size() == 1) {
-        const std::vector<double>* w = nullptr;
-        if (const auto* d = std::get_if<DemodResult>(&results[0])) {
-            w = &d->weights;
-        } else {
-            w = &std::get<BlindDemodResult>(results[0]).weights;
-        }
-        std::vector<double> frac0(w->size());
-        for (std::size_t k = 0; k < w->size(); ++k) frac0[k] = (*w)[k] > 0.0 ? 1.0 : 0.0;
-        return {std::move(frac0)};
-    }
-
-    std::vector<DemodResult> headered;
-    std::vector<BlindDemodResult> blind;
-    for (const Branch& b : results) {
-        if (const auto* d = std::get_if<DemodResult>(&b)) headered.push_back(*d);
-        else blind.push_back(std::get<BlindDemodResult>(b));
-    }
-
-    std::vector<std::vector<double>> padded;  // owns padded copies, if any
-    std::vector<const std::vector<double>*> w_ptrs;
-    std::vector<double> snr_dbs;
-    if (blind.empty()) {
-        validate_branches(headered);
-        for (const DemodResult& r : headered) {
-            w_ptrs.push_back(&r.weights);
-            snr_dbs.push_back(r.snr_db);
-        }
-    } else {
-        if (headered.size() > 1) validate_branches(headered);
-        padded.reserve(headered.size());
-        for (const DemodResult& r : headered) padded.push_back(latents::pad_to_full(r.weights));
-        std::size_t next_padded = 0;
-        for (const Branch& b : results) {
-            if (const auto* d = std::get_if<DemodResult>(&b)) {
-                w_ptrs.push_back(&padded[next_padded++]);
-                snr_dbs.push_back(d->snr_db);
-            } else {
-                const auto& bd = std::get<BlindDemodResult>(b);
-                w_ptrs.push_back(&bd.weights);
-                snr_dbs.push_back(bd.snr_db);
-            }
-        }
-    }
-
-    const MrcWeights mw = mrc_weights_raw(w_ptrs, snr_dbs);
-    const std::size_t nb = w_ptrs.size();
-    const std::size_t nl = mw.n_latents;
-    std::vector<std::vector<double>> frac(nb, std::vector<double>(nl, 0.0));
-    for (std::size_t k = 0; k < nl; ++k) {
-        double denom = 0.0;
-        for (std::size_t i = 0; i < nb; ++i) denom += mw.w[i * nl + k];
-        if (denom > 0.0) {
-            for (std::size_t i = 0; i < nb; ++i) frac[i][k] = mw.w[i * nl + k] / denom;
-        }
-    }
-    return frac;
+    return contribution_data(results).frac;
 }
 
 images::Picture contribution_image(const std::vector<DemodResult>& results, int scale) {
     if (results.size() != 2)
         throw std::invalid_argument("contribution_image needs exactly two branches");
     validate_branches(results);
-    const std::vector<std::vector<double>> frac = branch_contribution(results);
-    return render_contribution_grid(frac, results[0].mode.n_frames, config::NC_LATENT, scale,
-                                    carrier_of_position);
+    const ContributionData cd = contribution_data(results);
+    return render_contribution_grid(cd.frac, cd.overall, results[0].mode.n_frames,
+                                    config::NC_LATENT, scale, carrier_of_position);
 }
 
 images::Picture contribution_image(const std::vector<Branch>& results, int scale) {
     if (results.size() != 2)
         throw std::invalid_argument("contribution_image needs exactly two branches");
-    const std::vector<std::vector<double>> frac = branch_contribution(results);
+    const ContributionData cd = contribution_data(results);
 
     int n_frames;
     if (std::holds_alternative<DemodResult>(results[0]) &&
@@ -419,7 +470,8 @@ images::Picture contribution_image(const std::vector<Branch>& results, int scale
     } else {
         n_frames = config::LATENT_GROUPS * config::FRAMES_PER_GROUP;
     }
-    return render_contribution_grid(frac, n_frames, config::NC_LATENT, scale, carrier_of_position);
+    return render_contribution_grid(cd.frac, cd.overall, n_frames, config::NC_LATENT, scale,
+                                    carrier_of_position);
 }
 
 }  // namespace sstvae::modem::diversity
