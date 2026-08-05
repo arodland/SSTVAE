@@ -218,6 +218,14 @@ private:
 // the sink chose to save it at all.
 using Sink = std::function<std::optional<std::string>(const Reception&)>;
 
+// Where `decode_loop_diversity`'s per-latent branch-contribution image
+// goes (see `sstvae::modem::diversity::contribution_image`). Takes the
+// image and the picture's own saved path (nullopt if the picture sink
+// declined to save), and returns the path it wrote, if any.
+using DebugImageSink =
+    std::function<std::optional<std::string>(const images::Picture&,
+                                              const std::optional<std::string>&)>;
+
 // Latents + weights -> picture. Supplied by the caller so this library
 // need not link the codec; `sstvae-listen` passes one that calls
 // `OnnxCodec::decode`.
@@ -251,6 +259,12 @@ Sink save_to_dir_sink(std::string out_dir,
                       std::optional<std::pair<int, int>> size = std::nullopt,
                       bool verbose = true);
 
+// Writes the contribution image beside the picture it belongs to
+// (`<name>_diversity.png`); a nullopt saved path (the picture sink
+// declined to save) means there is nothing to write beside, so it
+// writes nothing and returns nullopt.
+DebugImageSink save_debug_image_to_dir_sink(bool verbose = true);
+
 // Blocks until `stop` is set. Both loops are exception-safe in the sense
 // that matters to a receiver: a decode that throws for one poll is not
 // allowed to end the session.
@@ -265,6 +279,40 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
 void decode_loop_low_cpu(RingBuffer& ring, const Decoder& decode,
                          SharedState& state, const RxConfig& config,
                          StopFlag& stop, const Sink& sink);
+
+// Two-branch counterpart of `decode_loop`: independently finds and
+// demodulates the same transmission from `rings[0]` and `rings[1]` --
+// different antennas/audio devices, independent noise and fading, no
+// assumption of phase lock between them -- then maximal-ratio combines
+// the two branches (`sstvae::modem::diversity::combine_demod_results`)
+// before decoding. The two rings are assumed to start filling at the
+// same wall-clock moment, so a reception position recorded in one
+// ring's coordinate is directly comparable to the other's; see
+// docs/diversity-reception.md.
+//
+// Kept separate from `decode_loop` rather than generalized to N rings:
+// that function's state machine is the reference's load-bearing one
+// (CLAUDE.md), and this keeps it unchanged for the single-device case
+// at the cost of duplication here -- the same tradeoff the Python port
+// makes (`sstvae/rx/engine.py`'s `decode_loop_diversity`).
+//
+// Deliberately preamble-path only, like the Python port: no blind
+// fallback, no retrospective mid-stream decode. Combining two branches'
+// *blind* results needs matching them by the beacon's absolute frame
+// counter rather than by preamble position, and a different result
+// shape (`BlindDemodResult` has no `.mode`) -- real additional work this
+// does not attempt. If only one branch locks a transmission (the other
+// never acquires, or acquires a peak more than `SAME_RECEPTION_EPSILON_S`
+// away), that branch's result is used alone.
+//
+// `debug_sink`, if non-null, is handed `contribution_image` for every
+// finished reception where both branches actually contributed --
+// skipped when only one branch locked, since there is nothing to
+// compare. `rings` must have exactly two elements.
+void decode_loop_diversity(std::span<RingBuffer* const> rings, const Decoder& decode,
+                           SharedState& state, const RxConfig& config,
+                           StopFlag& stop, const Sink& sink,
+                           const DebugImageSink* debug_sink = nullptr);
 
 }  // namespace sstvae::rx
 
