@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <numbers>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -84,8 +85,8 @@ void add_awgn(std::vector<double>& x, double sigma, std::uint64_t seed) {
     for (std::size_t i = 0; i + 1 < x.size(); i += 2) {
         const double u1 = next_uniform(), u2 = next_uniform();
         const double mag = sigma * std::sqrt(-2.0 * std::log(u1));
-        x[i] += mag * std::cos(2.0 * M_PI * u2);
-        x[i + 1] += mag * std::sin(2.0 * M_PI * u2);
+        x[i] += mag * std::cos(2.0 * std::numbers::pi * u2);
+        x[i + 1] += mag * std::sin(2.0 * std::numbers::pi * u2);
     }
 }
 
