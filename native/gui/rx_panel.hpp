@@ -170,6 +170,12 @@ private:
     // --- reception
     std::shared_ptr<rx::RingBuffer> ring_;
     std::unique_ptr<audio::qt::InputStream> stream_;
+    // Diversity reception's second branch (docs/diversity-reception.md,
+    // settings::ReceiveConfig::diversity_enabled); null otherwise. The
+    // waterfall only ever follows ring_, the primary branch -- a second
+    // spectrum strip for the diversity device is not implemented here.
+    std::shared_ptr<rx::RingBuffer> ring2_;
+    std::unique_ptr<audio::qt::InputStream> stream2_;
     std::unique_ptr<rx::SharedState> shared_;
     rx::StopFlag stop_flag_;
     std::thread thread_;

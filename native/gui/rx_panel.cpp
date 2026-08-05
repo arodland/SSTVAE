@@ -20,6 +20,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <exception>
 #include <filesystem>
@@ -265,6 +266,42 @@ bool ReceivePanel::start() {
         return false;
     }
 
+    // Diversity reception's second branch. Failing to open it fails the
+    // whole start, the same as the primary device above -- silently
+    // falling back to single-branch reception would mean the operator's
+    // "diversity reception" setting quietly stopped meaning what it
+    // said, which is worse than a clear error naming the device that
+    // did not open.
+    if (config.receive.diversity_enabled) {
+        ring2_ = std::make_shared<rx::RingBuffer>(config.receive.buffer_seconds);
+        try {
+            stream2_ = std::make_unique<audio::qt::InputStream>(
+                config.receive.diversity_device, *ring2_, config::FS,
+                [this](const std::string& message) {
+                    app_->log_event("rx", log::Severity::Info,
+                                    QString::fromStdString(message));
+                },
+                [this](const std::string& message) {
+                    emit errorOccurred(QString::fromStdString(message));
+                });
+        } catch (const std::exception& e) {
+            ring2_.reset();
+            if (Waterfall* w = fall()) w->set_ring(nullptr);
+            ring_.reset();
+            stream_.reset();
+            app_->log_event(
+                "rx", log::Severity::Error,
+                tr("could not open the diversity input device: %1")
+                    .arg(QString::fromUtf8(e.what())));
+            QMessageBox::critical(
+                this, tr("Could not open the diversity input device"),
+                tr("%1\n\nCheck the second input device in Settings, or turn "
+                   "diversity reception off there.")
+                    .arg(QString::fromUtf8(e.what())));
+            return false;
+        }
+    }
+
     rx::RxConfig rx_config;
     rx_config.out_dir = config.folders.receive_dir;
     rx_config.poll_interval = config.receive.poll_interval;
@@ -285,13 +322,29 @@ bool ReceivePanel::start() {
     };
 
     stop_flag_.clear();
+    const bool diversity = config.receive.diversity_enabled;
     const bool low_cpu = config.receive.low_cpu;
     const int device_rate = stream_->device_rate();
 
+    // Empty (falsy) unless diversity reception's debug image is on --
+    // decode_loop_diversity takes a pointer, so this has to outlive the
+    // call, hence captured by value into the thread lambda below rather
+    // than constructed inside it.
+    rx::DebugImageSink debug_sink;
+    if (diversity && config.receive.diversity_debug_image) {
+        debug_sink = rx::save_debug_image_to_dir_sink();
+    }
+
     running_.store(true);
-    thread_ = std::thread([this, rx_config, decoder, sink, low_cpu] {
+    thread_ = std::thread([this, rx_config, decoder, sink, low_cpu, diversity,
+                           debug_sink] {
         try {
-            if (low_cpu) {
+            if (diversity) {
+                const std::array<rx::RingBuffer*, 2> rings{ring_.get(), ring2_.get()};
+                const rx::DebugImageSink* debug_ptr = debug_sink ? &debug_sink : nullptr;
+                rx::decode_loop_diversity(rings, decoder, *shared_, rx_config,
+                                          stop_flag_, sink, debug_ptr);
+            } else if (low_cpu) {
                 rx::decode_loop_low_cpu(*ring_, decoder, *shared_, rx_config,
                                         stop_flag_, sink);
             } else {
@@ -326,14 +379,16 @@ void ReceivePanel::stop() {
     const bool was_listening = thread_.joinable();
 
     stop_flag_.set();
-    // The stream first: it is what feeds the loop, and stopping it means
+    // The streams first: they feed the loop, and stopping them means
     // the loop's next poll sees no new audio rather than racing us.
     stream_.reset();
+    stream2_.reset();
     if (thread_.joinable()) thread_.join();
     running_.store(false);
 
     if (Waterfall* w = fall()) w->set_ring(nullptr);
     ring_.reset();
+    ring2_.reset();
 
     if (start_button_ != nullptr) {
         start_button_->setEnabled(true);
