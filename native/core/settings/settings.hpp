@@ -169,6 +169,11 @@ struct TransmitConfig {
     // measured constant rather than a setting, and the budgets only
     // matter through a plateau test that usually ends the run first.
     bool optimize = false;
+
+    // Send the configured callsign in Morse (18 wpm, 1000 Hz) 500 ms
+    // after each transmission, under the same PTT key-up. A no-op with
+    // no callsign set.
+    bool cw_id = false;
 };
 
 // How the window arranges the receive and transmit halves.

@@ -716,6 +716,14 @@ QWidget* SettingsDialog::transmit_tab() {
                          "quickly and sends what it has."),
                       page));
 
+    cw_id_ = new QCheckBox(tr("Send CW ID after each transmission"), page);
+    cw_id_->setChecked(config_.transmit.cw_id);
+    form->addRow(cw_id_);
+    form->addRow(note(tr("Sends the callsign from the settings dialog in Morse "
+                         "(18 wpm, 1000 Hz), 500 ms after the picture ends, under"
+                         "the same PTT key-up."),
+                      page));
+
     // The transmit level itself stays on the send bar, where it is
     // adjusted, and keeps a short tooltip there. What lives here is the
     // *procedure*, because a tooltip only ever reaches an operator who
@@ -754,6 +762,7 @@ void SettingsDialog::apply_to(settings::Config& config) const {
     config.folders.template_dir = template_dir_->text().toStdString();
 
     config.transmit.optimize = optimize_->isChecked();
+    config.transmit.cw_id = cw_id_->isChecked();
     config.receive.autosave = autosave_->isChecked();
     config.receive.save_audio = save_audio_->isChecked();
     config.receive.low_cpu = low_cpu_->isChecked();

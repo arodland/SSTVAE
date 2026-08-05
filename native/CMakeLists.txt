@@ -90,6 +90,7 @@ add_library(sstvae_core STATIC
   core/beacon/beacon.cpp
   core/dsp/dsp.cpp
   core/dsp/spectrum.cpp
+  core/dsp/morse.cpp
   core/framing/framing.cpp
   core/audio/audio.cpp
   core/checkpoint/checkpoint.cpp

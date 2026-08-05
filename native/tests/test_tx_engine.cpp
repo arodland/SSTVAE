@@ -30,6 +30,7 @@
 
 #include "check.hpp"
 #include "config.hpp"
+#include "dsp/morse.hpp"
 #include "modem/modem.hpp"
 #include "tx/engine.hpp"
 
@@ -169,6 +170,100 @@ void test_a_successful_transmission() {
     check::equal(r.callsign, std::string("KC2G"), "tx/ok: the beacon carries the callsign");
     check::equal(r.frames_received, r.mode.n_frames,
                  "tx/ok: every frame is present in the waveform");
+}
+
+// A player that just captures the waveform it was handed.
+tx::Player capturing_player(std::vector<double>& out) {
+    return [&out](const std::string&, std::span<const double> wave, int,
+                 const std::function<void(double)>&, const std::function<bool()>&,
+                 const std::function<void(const std::string&)>&) {
+        out.assign(wave.begin(), wave.end());
+        return true;
+    };
+}
+
+void test_cw_id_appends_after_the_transmission() {
+    std::vector<double> plain;
+    tx::TxEngine baseline(nullptr, capturing_player(plain), good_encoder());
+    tx::TxConfig config = fast_config();
+    config.cw_id = false;
+    check::is_true(baseline.transmit(test_picture(), config),
+                   "tx/cwid: baseline transmits");
+
+    std::vector<double> with_id;
+    tx::TxEngine engine(nullptr, capturing_player(with_id), good_encoder());
+    config.cw_id = true;
+    check::is_true(engine.transmit(test_picture(), config),
+                   "tx/cwid: transmits with the ID on");
+
+    const std::vector<double> id_tone = dsp::generate_morse(
+        config.callsign, config::FS, tx::CW_ID_WPM, tx::CW_ID_TONE_HZ, 1.0);
+    check::is_true(!id_tone.empty(), "tx/cwid: KC2G produces a tone");
+    const std::size_t gap_n =
+        static_cast<std::size_t>(std::lround(tx::CW_ID_GAP_S * config::FS));
+
+    check::equal(with_id.size(), plain.size() + gap_n + id_tone.size(),
+                "tx/cwid: appended exactly one gap plus one ID's worth of samples");
+
+    bool gap_is_silent = true;
+    for (std::size_t i = plain.size(); i < plain.size() + gap_n; ++i) {
+        if (with_id[i] != 0.0) gap_is_silent = false;
+    }
+    check::is_true(gap_is_silent, "tx/cwid: the 500 ms gap is silence");
+
+    double tail_peak = 0.0;
+    for (std::size_t i = plain.size() + gap_n; i < with_id.size(); ++i) {
+        tail_peak = std::max(tail_peak, std::abs(with_id[i]));
+    }
+    check::is_true(tail_peak > 0.0, "tx/cwid: the ID tone actually plays");
+
+    // Appended before conditioning: the overall peak (and so the
+    // transmit level the operator set) is unchanged by adding the ID.
+    double plain_peak = 0.0, with_id_peak = 0.0;
+    for (double v : plain) plain_peak = std::max(plain_peak, std::abs(v));
+    for (double v : with_id) with_id_peak = std::max(with_id_peak, std::abs(v));
+    check::close(std::vector<double>{with_id_peak}, std::vector<double>{plain_peak}, 1e-12,
+                "tx/cwid: adding the ID does not change the transmit peak");
+
+    // The picture itself still decodes exactly as it would have.
+    //
+    // A steady CW tone is exactly periodic at whatever lag the preamble
+    // correlator uses whenever its frequency is a multiple of the
+    // carrier spacing (1000 Hz here, 20x50 Hz) -- so an unrestricted
+    // search can find a higher-scoring "preamble" in the ID tone than
+    // in the real one. That is the same class of event the sync layer
+    // already tolerates (a spurious lock that fails the header and
+    // never completes, see `test_rx_engine.cpp`'s
+    // "noise never finishes a reception" case), not specific to this
+    // feature -- but a real receiver already knows roughly where its
+    // own transmission starts, so bound the search here rather than
+    // relying on that tolerance to prove the picture decodes.
+    const modem::Modem m;
+    const modem::DemodResult r =
+        m.demodulate(with_id, std::make_pair(0.0, static_cast<double>(plain.size()) /
+                                                       config::FS));
+    check::equal(r.callsign, std::string("KC2G"), "tx/cwid: beacon still decodes");
+    check::equal(r.frames_received, r.mode.n_frames,
+                "tx/cwid: every SSTVAE frame is still present");
+}
+
+void test_cw_id_does_nothing_with_no_callsign() {
+    std::vector<double> played;
+    tx::TxEngine engine(nullptr, capturing_player(played), good_encoder());
+    tx::TxConfig config = fast_config();
+    config.callsign = "";
+    config.cw_id = true;
+    check::is_true(engine.transmit(test_picture(), config),
+                   "tx/cwid-none: still transmits");
+
+    std::vector<double> plain;
+    tx::TxEngine baseline(nullptr, capturing_player(plain), good_encoder());
+    config.cw_id = false;
+    check::is_true(baseline.transmit(test_picture(), config),
+                   "tx/cwid-none: baseline transmits");
+
+    check::equal(played.size(), plain.size(),
+                "tx/cwid-none: no callsign means nothing is appended");
 }
 
 void test_no_rig_control_still_transmits() {
@@ -405,6 +500,8 @@ int main() {
         test_an_unknown_mode_is_refused_before_keying();
         test_cancelling_during_encode_never_keys();
         test_a_successful_transmission();
+        test_cw_id_appends_after_the_transmission();
+        test_cw_id_does_nothing_with_no_callsign();
         test_no_rig_control_still_transmits();
         test_a_throwing_player_still_unkeys();
         test_cancelling_during_playback_unkeys();

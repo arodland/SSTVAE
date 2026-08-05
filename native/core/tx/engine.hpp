@@ -50,6 +50,12 @@ namespace sstvae::tx {
 // resampled stream on a busy machine can legitimately lag by seconds.
 inline constexpr double WATCHDOG_MARGIN_S = 15.0;
 
+// Silence between the end of the SSTVAE audio and the start of the CW
+// ID tone, matching a normal human-keyed ID's spacing.
+inline constexpr double CW_ID_GAP_S = 0.5;
+inline constexpr double CW_ID_WPM = 18.0;
+inline constexpr double CW_ID_TONE_HZ = 1000.0;
+
 enum class TxPhase {
     Idle,
     Encoding,    // neural encoder; no progress fraction available
@@ -90,6 +96,11 @@ struct TxConfig {
     double level = 0.9;      // output peak, 0..1
     double ptt_lead_s = 0.3; // PTT up -> audio start (relay + ALC settling)
     double ptt_tail_s = 0.3; // audio end -> PTT down
+    // Send `callsign` in Morse (18 wpm, 1000 Hz) 500 ms after the
+    // SSTVAE audio ends, under the same PTT key-up -- one continuous
+    // transmission rather than a second relay click. No-op if callsign
+    // is empty; there is nothing to identify with.
+    bool cw_id = false;
     // Exposed rather than compiled in for the same reason
     // `Modem::modulate` exposes its clip headroom: the reference's tests
     // shorten it by patching a module constant, which is unreachable

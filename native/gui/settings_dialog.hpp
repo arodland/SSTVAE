@@ -115,6 +115,7 @@ private:
 
     // Receive
     QCheckBox* optimize_ = nullptr;
+    QCheckBox* cw_id_ = nullptr;
     QCheckBox* autosave_ = nullptr;
     QCheckBox* save_audio_ = nullptr;
     QCheckBox* low_cpu_ = nullptr;

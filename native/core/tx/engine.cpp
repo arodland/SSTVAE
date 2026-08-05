@@ -7,6 +7,7 @@
 #include <string>
 #include <utility>
 
+#include "dsp/morse.hpp"
 #include "images/images.hpp"
 #include "modem/modem.hpp"
 
@@ -115,9 +116,28 @@ std::vector<double> TxEngine::prepare(const images::Picture& image,
         throw std::runtime_error("encoder produced too few latents for this mode");
     }
     const modem::Modem m;
-    const std::vector<double> wave = m.modulate(
+    std::vector<double> wave = m.modulate(
         std::span<const double>(flat.data(), static_cast<std::size_t>(spec.n_latents)),
         spec, true, config.callsign);
+
+    // Appended before conditioning, not after: `condition_for_output`
+    // then picks its scale from whichever of the two has the higher
+    // peak, and the tone's amplitude is set to the SSTVAE wave's own
+    // peak so appending it never changes that scale in the first
+    // place. Silently skipped with no callsign -- there is nothing to
+    // identify with.
+    if (config.cw_id && !config.callsign.empty()) {
+        double peak = 0.0;
+        for (double v : wave) peak = std::max(peak, std::abs(v));
+        const std::vector<double> id_tone = dsp::generate_morse(
+            config.callsign, FS, CW_ID_WPM, CW_ID_TONE_HZ, peak);
+        if (!id_tone.empty()) {
+            wave.insert(wave.end(),
+                        static_cast<std::size_t>(std::lround(CW_ID_GAP_S * FS)), 0.0);
+            wave.insert(wave.end(), id_tone.begin(), id_tone.end());
+        }
+    }
+
     return condition_for_output(wave, config.level);
 }
 
