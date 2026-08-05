@@ -110,7 +110,7 @@ NATIVE_SUBSTITUTIONS = [
 # no longer literally the same call, so a bug in an adapter looks like a
 # bug in the port.
 def _native_adapters(native):
-    from sstvae.config import MODES_BY_INDEX
+    from sstvae.config import MODES_BY_INDEX, PREAMBLE_THRESHOLD
     from sstvae.modem.beacon import BeaconResult
 
     fr = native.framing
@@ -137,7 +137,15 @@ def _native_adapters(native):
         # their own dataclasses from the dict's fields.
         return result if ctor is dict else ctor(*result)
 
-    def acquire(z, threshold=0.5, max_bins=2, search=None):
+    # The defaults here are the *reference's* defaults, taken from
+    # config rather than written out again: a shim keeps its Python
+    # counterpart's exact signature, and a hand-copied default is the
+    # one part of that signature that can drift without any import
+    # failing. It did -- a stale 0.5 here against the reference's
+    # PREAMBLE_THRESHOLD had this shim asking the C++ a different
+    # question than the parity test asked it, which reads exactly like
+    # an implementation disagreement.
+    def acquire(z, threshold=PREAMBLE_THRESHOLD, max_bins=2, search=None):
         from sstvae.modem.sync import Acquisition
 
         return _sync_call(native.sync.acquire, Acquisition, z, threshold,

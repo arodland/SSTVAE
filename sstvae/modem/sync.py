@@ -13,7 +13,16 @@ import numpy as np
 from scipy import signal
 from scipy.fft import next_fast_len, fft, ifft
 
-from ..config import FS, M, FRAME_SAMPLES, PREAMBLE_CP, PREAMBLE_SAMPLES
+from ..config import (
+    FS,
+    M,
+    FRAME_SAMPLES,
+    PREAMBLE_CORR_WINDOW,
+    PREAMBLE_CP,
+    PREAMBLE_REPEATS,
+    PREAMBLE_SAMPLES,
+    PREAMBLE_THRESHOLD,
+)
 from .dsp import freq_correct, sync_lowpass
 from .ofdm import preamble_template, pilot_template
 
@@ -30,23 +39,29 @@ class Acquisition:
 
 
 def _autocorr_metric(z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Sliding lag-M autocorrelation over an M-sample window."""
+    """Sliding lag-M autocorrelation over a PREAMBLE_CORR_WINDOW window.
+
+    The window, not the preamble's length, is what sets this metric's
+    noise floor: it must be widened along with the preamble or the
+    extra repeats buy nothing at all. See config.PREAMBLE_REPEATS.
+    """
+    W = PREAMBLE_CORR_WINDOW
     prod = z[M:] * np.conj(z[:-M])
     power = np.abs(z) ** 2
-    kernel = np.ones(M)
-    a = signal.fftconvolve(prod, kernel, mode="valid")  # A[n] over window n..n+M
+    kernel = np.ones(W)
+    a = signal.fftconvolve(prod, kernel, mode="valid")  # A[n] over window n..n+W
     e1 = signal.fftconvolve(power[:-M], kernel, mode="valid")
     e2 = signal.fftconvolve(power[M:], kernel, mode="valid")
     # Floor the energies at a fraction of the typical window energy so
     # near-silent regions (filter ringing) can't produce inflated metrics.
-    floor = 1e-3 * M * np.mean(power)
+    floor = 1e-3 * W * np.mean(power)
     energy = np.sqrt(np.maximum(e1, floor) * np.maximum(e2, floor)) + 1e-12
     return np.abs(a) / energy, a
 
 
 def acquire(
     z: np.ndarray,
-    threshold: float = 0.5,
+    threshold: float = PREAMBLE_THRESHOLD,
     max_bins: int = 2,
     search: tuple[int, int] | None = None,
 ) -> Acquisition:
@@ -98,13 +113,14 @@ def acquire(
 
     _, p0, f_hat = best
 
-    # Refine CFO from the phase between the two preamble periods at the
-    # now-known timing (same lag-M estimate, but noise-averaged at the
-    # exact alignment).
+    # Refine CFO from the phase between successive preamble periods at
+    # the now-known timing (same lag-M estimate, but noise-averaged at
+    # the exact alignment, over every repeat rather than one pair).
+    n_pre = PREAMBLE_REPEATS * M
     u0 = p0 + PREAMBLE_CP
-    zc = freq_correct(z[u0 : u0 + 2 * M], f_hat)
-    if len(zc) == 2 * M:
-        d = np.sum(zc[M:] * np.conj(zc[:M]))
+    zc = freq_correct(z[u0 : u0 + n_pre], f_hat)
+    if len(zc) == n_pre:
+        d = np.sum(zc[M:] * np.conj(zc[:-M]))
         if np.abs(d) > 0:
             f_hat += np.angle(d) / (2 * np.pi * M / FS)
 

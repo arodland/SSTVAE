@@ -234,16 +234,26 @@ DemodResult Modem::demodulate(std::span<const double> x,
     if (search_s)
         search = sync::SearchWindow{static_cast<std::int64_t>(search_s->first * FS),
                                     static_cast<std::int64_t>(search_s->second * FS)};
-    const sync::Acquisition acq = sync::acquire(z, 0.5, 2, search);
+    const sync::Acquisition acq =
+        sync::acquire(z, config::PREAMBLE_THRESHOLD, 2, search);
     z = dsp::freq_correct(z, acq.freq_offset);
 
+    // Channel reference from the preamble, averaged over every repeat.
+    // Backing DEMOD_BACKOFF samples into the *previous* repeat is safe
+    // for the same reason it is safe into the CP: the block is periodic
+    // with M throughout.
     const std::int64_t u0 = acq.preamble_start + PREAMBLE_CP;
-    const auto w0 = ofdm::demod_window(z, u0, DEMOD_BACKOFF);
-    const auto w1 = ofdm::demod_window(z, u0 + M, DEMOD_BACKOFF);
-    std::vector<cdouble> h_pre(NC);
+    std::vector<cdouble> h_pre(NC, cdouble{0.0, 0.0});
+    for (int r = 0; r < config::PREAMBLE_REPEATS; ++r) {
+        const auto w = ofdm::demod_window(z, u0 + r * M, DEMOD_BACKOFF);
+        for (int k = 0; k < NC; ++k) {
+            const std::size_t i = static_cast<std::size_t>(k);
+            h_pre[i] += w[i];
+        }
+    }
     for (int k = 0; k < NC; ++k) {
         const std::size_t i = static_cast<std::size_t>(k);
-        h_pre[i] = (w0[i] + w1[i]) / (2.0 * pilot_[i]);
+        h_pre[i] /= static_cast<double>(config::PREAMBLE_REPEATS) * pilot_[i];
     }
 
     // Header: two identical BPSK symbols, matched-filter combined so

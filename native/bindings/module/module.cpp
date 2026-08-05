@@ -384,7 +384,7 @@ PYBIND11_MODULE(sstvae_native, m) {
                  const auto a = sstvae::sync::acquire(in, threshold, max_bins, win);
                  return py::make_tuple(a.preamble_start, a.freq_offset, a.metric);
              },
-             py::arg("z"), py::arg("threshold") = 0.5, py::arg("max_bins") = 2,
+             py::arg("z"), py::arg("threshold") = sstvae::config::PREAMBLE_THRESHOLD, py::arg("max_bins") = 2,
              py::arg("search") = py::none());
     sync.def("acquire_blind",
              [](CArray z, double max_offset_hz, double bin_step_hz,

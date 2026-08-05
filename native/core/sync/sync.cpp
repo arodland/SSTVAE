@@ -17,12 +17,17 @@ namespace {
 using config::FRAME_SAMPLES;
 using config::FS;
 using config::M;
+using config::PREAMBLE_CORR_WINDOW;
 using config::PREAMBLE_CP;
+using config::PREAMBLE_REPEATS;
 using config::PREAMBLE_SAMPLES;
 
 constexpr double PI = std::numbers::pi;
 
-// Sliding lag-M autocorrelation over an M-sample window.
+// Sliding lag-M autocorrelation over a PREAMBLE_CORR_WINDOW window.
+// The window, not the preamble's length, is what sets this metric's
+// noise floor -- it must be widened along with the preamble or the
+// extra repeats buy nothing. See config::PREAMBLE_REPEATS.
 struct AutocorrMetric {
     std::vector<double> metric;
     std::vector<cdouble> a;
@@ -35,8 +40,9 @@ AutocorrMetric autocorr_metric(std::span<const cdouble> z) {
     for (std::size_t i = 0; i < n; ++i) power[i] = std::norm(z[i]);
     for (std::size_t i = 0; i < n - M; ++i) prod[i] = z[i + M] * std::conj(z[i]);
 
-    const std::vector<cdouble> kernel_c(M, cdouble{1.0, 0.0});
-    const std::vector<double> kernel_r(M, 1.0);
+    constexpr std::size_t W = PREAMBLE_CORR_WINDOW;
+    const std::vector<cdouble> kernel_c(W, cdouble{1.0, 0.0});
+    const std::vector<double> kernel_r(W, 1.0);
     const std::vector<cdouble> a = dsp::fftconvolve_valid(prod, kernel_c);
     const std::vector<double> e1 = dsp::fftconvolve_valid(
         std::span<const double>(power.data(), n - M), kernel_r);
@@ -49,7 +55,7 @@ AutocorrMetric autocorr_metric(std::span<const cdouble> z) {
     double mean_power = 0.0;
     for (double p : power) mean_power += p;
     mean_power /= static_cast<double>(n);
-    const double floor = 1e-3 * M * mean_power;
+    const double floor = 1e-3 * static_cast<double>(W) * mean_power;
 
     AutocorrMetric out;
     out.a = a;
@@ -172,15 +178,16 @@ Acquisition acquire(std::span<const cdouble> z_in, double threshold, int max_bin
     std::int64_t p0 = best_p0;
     double f_hat = best_f;
 
-    // Refine CFO from the phase between the two preamble periods at the
-    // now-known timing: the same lag-M estimate, but noise-averaged at
-    // the exact alignment.
+    // Refine CFO from the phase between successive preamble periods at
+    // the now-known timing: the same lag-M estimate, but noise-averaged
+    // at the exact alignment, over every repeat rather than one pair.
+    constexpr std::int64_t N_PRE = PREAMBLE_REPEATS * M;
     const std::int64_t u0 = p0 + PREAMBLE_CP;
-    if (u0 >= 0 && u0 + 2 * M <= static_cast<std::int64_t>(z.size())) {
-        const std::span<const cdouble> win(z.data() + u0, 2 * M);
+    if (u0 >= 0 && u0 + N_PRE <= static_cast<std::int64_t>(z.size())) {
+        const std::span<const cdouble> win(z.data() + u0, N_PRE);
         const std::vector<cdouble> zc = dsp::freq_correct(win, f_hat);
         cdouble d{0.0, 0.0};
-        for (int i = 0; i < M; ++i)
+        for (std::int64_t i = 0; i < N_PRE - M; ++i)
             d += zc[static_cast<std::size_t>(M + i)] *
                  std::conj(zc[static_cast<std::size_t>(i)]);
         if (std::abs(d) > 0.0)
