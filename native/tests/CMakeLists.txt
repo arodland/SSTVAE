@@ -21,6 +21,11 @@ target_link_libraries(test_modem_roundtrip PRIVATE sstvae_core)
 target_include_directories(test_modem_roundtrip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME modem_roundtrip COMMAND test_modem_roundtrip)
 
+add_executable(test_diversity test_diversity.cpp)
+target_link_libraries(test_diversity PRIVATE sstvae_core)
+target_include_directories(test_diversity PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME diversity COMMAND test_diversity)
+
 add_executable(test_ringbuffer test_ringbuffer.cpp)
 target_link_libraries(test_ringbuffer PRIVATE sstvae_core)
 target_include_directories(test_ringbuffer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
