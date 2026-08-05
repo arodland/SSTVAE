@@ -191,6 +191,19 @@ std::vector<double> noise(std::size_t n, std::uint64_t seed, double scale = 0.05
     return out;
 }
 
+// Silences the lead-in/preamble/header of a real transmission, as if
+// that antenna's preamble were too faded to detect at all: the header
+// path fails to lock on it, but the frame pilots behind it (at exactly
+// the same buffer position as an untouched branch's) are untouched, so
+// blind acquisition still locks on the same reception_start a header
+// lock on the unmodified signal would report.
+std::vector<double> zero_preamble(std::vector<double> x) {
+    const auto end = static_cast<std::size_t>(
+        config::LEADIN_SAMPLES + config::PREAMBLE_SAMPLES + config::HEADER_SAMPLES);
+    std::fill(x.begin(), x.begin() + static_cast<std::ptrdiff_t>(std::min(end, x.size())), 0.0);
+    return x;
+}
+
 // Two-ring counterpart of Harness, for decode_loop_diversity. A sink
 // that returns a fixed path (rather than declining, like Harness's)
 // because the debug-image tests need something for
@@ -441,6 +454,46 @@ void test_diversity_debug_image_written_only_when_both_branches_lock() {
     }
 }
 
+void test_diversity_combines_a_header_branch_with_a_blind_only_branch() {
+    // Branch B's preamble/header is silence (as if too faded to detect
+    // at all), so it can only ever blind-lock -- but the frames behind
+    // it are clean, so the reception should still complete, combining a
+    // header-locked branch A with a blind-locked branch B.
+    DiversityHarness h(40.0);
+    h.config.once = true;
+    const std::vector<double> x = transmission("MIXED", 20);
+    write_all(h.ring_a, x);
+    write_all(h.ring_b, zero_preamble(x));
+
+    rx::decode_loop_diversity(h.rings(), h.decoder(), h.state, h.config, h.stop, h.sink());
+
+    check::equal(h.received.size(), std::size_t{1}, "rx/div-mix: exactly one reception");
+    if (h.received.empty()) return;
+    check::equal(h.received[0].callsign, std::string("MIXED"), "rx/div-mix: callsign");
+    check::is_true(h.received[0].mode_name.has_value() && *h.received[0].mode_name == "A",
+                   "rx/div-mix: the header branch's mode is authoritative");
+}
+
+void test_diversity_completes_when_both_branches_are_blind_only() {
+    // Neither branch's preamble/header survives -- both can only
+    // blind-lock. Completion has to fall back to progress-stall
+    // detection (config.end_grace), the same as decode_loop's own
+    // all-blind path, since neither branch knows the true frame count.
+    DiversityHarness h(40.0);
+    h.config.once = true;
+    const std::vector<double> x = transmission("BLIND2", 21);
+    write_all(h.ring_a, zero_preamble(x));
+    write_all(h.ring_b, zero_preamble(x));
+
+    rx::decode_loop_diversity(h.rings(), h.decoder(), h.state, h.config, h.stop, h.sink());
+
+    check::equal(h.received.size(), std::size_t{1},
+                "rx/div-blind2: an all-blind diversity combine still finishes once");
+    if (h.received.empty()) return;
+    check::is_true(!h.received[0].mode_name.has_value(),
+                   "rx/div-blind2: true mode/duration never became known");
+}
+
 void test_noise_produces_nothing() {
     // What is asserted here is that noise never *finishes* a reception,
     // and deliberately not that it never starts one.
@@ -546,6 +599,8 @@ int main() {
         test_diversity_falls_back_to_single_branch_when_the_other_is_dead();
         test_diversity_two_transmissions_are_both_received();
         test_diversity_debug_image_written_only_when_both_branches_lock();
+        test_diversity_combines_a_header_branch_with_a_blind_only_branch();
+        test_diversity_completes_when_both_branches_are_blind_only();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;
