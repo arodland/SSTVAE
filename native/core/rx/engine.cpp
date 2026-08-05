@@ -117,7 +117,8 @@ std::optional<FoundReception> find_new_reception(
         while (lo < span_hi && tries < max_tries) {
             sync::Acquisition acq{};
             try {
-                acq = sync::acquire(z, 0.5, 2, sync::SearchWindow{lo, span_hi});
+                acq = sync::acquire(z, config::PREAMBLE_THRESHOLD, 2,
+                                    sync::SearchWindow{lo, span_hi});
             } catch (const sync::SyncError&) {
                 break;
             }
@@ -475,7 +476,7 @@ void decode_loop_low_cpu(RingBuffer& ring, const Decoder& decode, SharedState& s
 
         sync::Acquisition acq{};
         try {
-            acq = sync::acquire(dsp::to_baseband(samples), 0.5, 2,
+            acq = sync::acquire(dsp::to_baseband(samples), config::PREAMBLE_THRESHOLD, 2,
                                 sync::SearchWindow{search_lo, search_hi});
         } catch (const std::exception&) {
             last_search_pos = static_cast<std::int64_t>(total);

@@ -31,6 +31,7 @@ from ..config import (
     FRAMES_PER_GROUP,
     LATENTS_PER_FRAME,
     PREAMBLE_CP,
+    PREAMBLE_REPEATS,
     PREAMBLE_SAMPLES,
     SNR_REF_BW_HZ,
     HEADER_SAMPLES,
@@ -201,11 +202,15 @@ class Modem:
         acq = acquire(z, search=search)
         z = freq_correct(z, acq.freq_offset)
 
+        # Channel reference from the preamble, averaged over every
+        # repeat. Backing DEMOD_BACKOFF samples into the *previous*
+        # repeat is safe for the same reason it is safe into the CP:
+        # the block is periodic with M throughout.
         u0 = acq.preamble_start + PREAMBLE_CP
-        h_pre = (
-            ofdm.demod_window(z, u0, DEMOD_BACKOFF)
-            + ofdm.demod_window(z, u0 + M, DEMOD_BACKOFF)
-        ) / (2 * self.pilot)
+        h_pre = sum(
+            ofdm.demod_window(z, u0 + r * M, DEMOD_BACKOFF)
+            for r in range(PREAMBLE_REPEATS)
+        ) / (PREAMBLE_REPEATS * self.pilot)
 
         # Header: two identical BPSK symbols, soft-combined.
         h0 = acq.preamble_start + PREAMBLE_SAMPLES

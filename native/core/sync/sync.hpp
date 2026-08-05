@@ -41,7 +41,7 @@ struct SearchWindow {
     std::int64_t end;
 };
 
-Acquisition acquire(std::span<const cdouble> z, double threshold = 0.5,
+Acquisition acquire(std::span<const cdouble> z, double threshold = config::PREAMBLE_THRESHOLD,
                     int max_bins = 2,
                     std::optional<SearchWindow> search = std::nullopt);
 

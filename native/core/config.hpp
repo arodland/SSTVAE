@@ -38,8 +38,10 @@ inline constexpr int BEACON_CALLSIGN_CHARS = 8;
 inline constexpr int BEACON_CALLSIGN_CHAR_BITS = 6;
 inline constexpr int BEACON_CALLSIGN_BITS = 48;
 inline constexpr int BEACON_CRC_BITS = 16;
+inline constexpr int PREAMBLE_REPEATS = 4;
 inline constexpr int PREAMBLE_CP = 64;
-inline constexpr int PREAMBLE_SAMPLES = 384;
+inline constexpr int PREAMBLE_SAMPLES = 704;
+inline constexpr int PREAMBLE_CORR_WINDOW = 480;
 inline constexpr int HEADER_SYMS = 2;
 inline constexpr int HEADER_SAMPLES = 384;
 inline constexpr int LEADIN_SAMPLES = 800;
@@ -56,8 +58,9 @@ inline constexpr int DROPPED_LATENTS_PER_GROUP = 2200;
 inline constexpr int DEMOD_BACKOFF = 6;
 inline constexpr int INTERLEAVER_SEED = 1000;
 inline constexpr int PILOT_SEED = 42;
-inline constexpr int PROTOCOL_VERSION = 1;
+inline constexpr int PROTOCOL_VERSION = 2;
 
+inline constexpr double PREAMBLE_THRESHOLD = 0x1.ae147ae147ae1p-2;  // 0.42
 inline constexpr double CLIP_HEADROOM_DB = 0x1.0000000000000p-1;  // 0.5
 inline constexpr double SNR_REF_BW_HZ = 0x1.3880000000000p+11;  // 2500.0
 
@@ -103,9 +106,9 @@ struct ModeSpec {
 
 inline constexpr int N_MODES = 3;
 inline constexpr std::array<ModeSpec, N_MODES> MODES = {{
-    {"A", 0, 1, 220, 52800, 50600, 0x1.ff9db22d0e560p+4},  // ~32 s
-    {"B", 1, 2, 440, 105600, 101200, 0x1.fd3f7ced91687p+5},  // ~64 s
-    {"C", 2, 3, 660, 158400, 151800, 0x1.7d5810624dd2fp+6},  // ~95 s
+    {"A", 0, 1, 220, 52800, 50600, 0x1.0020c49ba5e35p+5},  // ~32 s
+    {"B", 1, 2, 440, 105600, 101200, 0x1.fd916872b020cp+5},  // ~64 s
+    {"C", 2, 3, 660, 158400, 151800, 0x1.7d810624dd2f2p+6},  // ~95 s
 }};
 
 // Modes are indexed by their on-air index, which is also their position

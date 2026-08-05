@@ -60,8 +60,33 @@ audio and rig bugs found so far were all invisible to unit tests.
 - `sstvae/modem/` — NumPy DSP, no torch:
   - `ofdm.py` DFT-matrix mod/demod (24 carriers × 50 Hz at 950–2100 Hz;
     carriers on integer multiples of 50 Hz so the CP is truly cyclic).
-  - `sync.py` preamble detect (lag-160 autocorrelation, energy-floored
-    metric), fractional + integer-bin CFO, template timing.
+  - `sync.py` preamble detect (lag-160 autocorrelation over a
+    480-sample window, energy-floored metric), fractional + integer-bin
+    CFO, template timing.
+    **The preamble is four repeats, not two, and the correlation window
+    is what the length buys** (2026-08-04, `PROTOCOL_VERSION` 2). At two
+    repeats the metric's noise floor sat *inside* the threshold: on AWGN
+    the median 5-second maximum measured 0.461 against a threshold of
+    0.50, i.e. 0.47 crossings per second of noise, and the only gate
+    behind it is the header — which admits 3 of 4096 Golay codewords
+    (7.2e-4, measured) and **cannot be tightened without more header
+    bits**, 3 valid messages in a 12-bit payload being its floor. That
+    product is the false lock every few hours a live receiver sees on a
+    quiet band. Four repeats at threshold 0.42 give **no crossing at all
+    in 3000 s** (24M positions, peak 0.358) *and* mode A acquisition at
+    −2 dB of 0.93 against 0.40 — both directions at once, which the old
+    preamble could not do: raising *its* threshold to 0.64 cleared the
+    false alarms too and cost 0 dB acquisition (0.82 → 0.53) to do it.
+    Costs 40 ms on a 32–95 s transmission. The trap is that
+    `PREAMBLE_SAMPLES` and `PREAMBLE_CORR_WINDOW` are **one change, not
+    two**: a longer preamble read through the old one-symbol window has
+    exactly the old noise floor and the old false-alarm rate, with every
+    other test still passing, which is what `tests/test_preamble.py`
+    exists to catch (through the metric's output length, since a stale
+    kernel is invisible in its values). Measured on AWGN — what the
+    field false locks actually trigger on is unknown, and an MPP number
+    here would be reporting a ±4-sample timing criterion rather than
+    acquisition.
     `acquire_blind()` is a separate, preamble-free path: matched-filters
     against the bare pilot symbol at lag-FRAME_SAMPLES, folds energy
     into 1152 phase bins across many periods, and searches CFO bins
@@ -961,6 +986,13 @@ need when `--native` fails and you want to know *where*.
   interface would break the mechanism. `from x import y` sites bind at
   import time and are invisible to it, so they are listed explicitly in
   `NATIVE_SUBSTITUTIONS`; a missed one silently keeps testing Python.
+  **"Exact signature" includes the defaults**, and a hand-copied one is
+  the part that drifts without any import failing: a stale
+  `threshold=0.5` in the `acquire` shim outlived the constant it was
+  copied from, so the shim asked the C++ a different question than the
+  parity test asked it — and the result reads exactly like an
+  implementation disagreement, at a single threshold-boundary cell. The
+  defaults now come from `config`.
 - Without the extension module built, the parity tests **skip** and
   `--native` **errors**. Both are deliberate: a parity suite that
   quietly passes because it tested nothing is worse than no suite.

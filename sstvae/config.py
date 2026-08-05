@@ -53,10 +53,44 @@ BEACON_CALLSIGN_CHAR_BITS = 6  # 64-symbol alphabet, see beacon.py
 BEACON_CALLSIGN_BITS = BEACON_CALLSIGN_CHARS * BEACON_CALLSIGN_CHAR_BITS  # 48
 BEACON_CRC_BITS = 16
 
-# Preamble: one OFDM symbol repeated twice with a double-length cyclic
-# prefix, so the waveform is periodic with M over the whole block.
+# Preamble: one OFDM symbol repeated PREAMBLE_REPEATS times with a
+# double-length cyclic prefix, so the waveform is periodic with M over
+# the whole block.
+#
+# Four repeats rather than two, because the detector's noise floor is
+# set by how many sample pairs it can integrate, and at two repeats it
+# sat *inside* the threshold: on AWGN the median 5-second maximum of
+# the lag-M metric measured 0.461 against a threshold of 0.50, i.e.
+# 0.47 threshold crossings per second of noise. The only thing behind
+# it is the header, which admits 3 of 4096 Golay codewords (7.2e-4,
+# measured) -- and that gate cannot be tightened without more header
+# bits, since 3 valid messages in a 12-bit payload is already its
+# floor. Hence a live receiver on a quiet band false-locks and starts
+# decoding every few hours. See PREAMBLE_CORR_WINDOW: the length is
+# only half the change, and on its own buys nothing.
+PREAMBLE_REPEATS = 4
 PREAMBLE_CP = 2 * NCP
-PREAMBLE_SAMPLES = PREAMBLE_CP + 2 * M  # 384
+PREAMBLE_SAMPLES = PREAMBLE_CP + PREAMBLE_REPEATS * M  # 704 (88 ms)
+
+# Samples the lag-M autocorrelation integrates over. With R repeats
+# there are (R-1)*M sample pairs M apart that both land inside the
+# preamble, so this is what the length actually buys -- a longer
+# preamble read through the old one-symbol window has the same noise
+# floor and the same false-alarm rate as before.
+PREAMBLE_CORR_WINDOW = (PREAMBLE_REPEATS - 1) * M  # 480
+
+# Detection threshold on that metric. A *receiver* parameter, not part
+# of the on-air format -- it lives here so the two implementations
+# cannot disagree about it, not because a transmitter cares.
+#
+# Measured at 0.42 with the 480-sample window: 3000 s of AWGN (24M
+# metric positions) produced no crossing at all and peaked at 0.358,
+# against the two-repeat preamble's 0.47 crossings/s; mode A
+# acquisition at -2 dB went from 0.40 to 0.93, at -4 dB from 0.17 to
+# 0.35. Both directions at once, which the old preamble could not do:
+# raising *its* threshold to 0.64 also cleared the false alarms, and
+# cost 0 dB acquisition (0.82 -> 0.53) to do it.
+PREAMBLE_THRESHOLD = 0.42
 HEADER_SYMS = 2  # identical Golay-coded BPSK symbols
 HEADER_SAMPLES = HEADER_SYMS * NSYM  # 384
 
@@ -129,7 +163,12 @@ PILOT_QUADRANTS = (
     2, 3, 2, 3, 2, 0, 3, 1, 2, 1, 0, 3,
 )
 
-PROTOCOL_VERSION = 1
+# Bumped to 2 with the 4-repeat preamble. The two formats cannot sync
+# to each other anyway (the acquisition template is a different
+# length), so this is belt and braces: it stops a v1 header that
+# happens to survive a v2 correlation peak from decoding to a plausible
+# mode.
+PROTOCOL_VERSION = 2
 
 
 @dataclass(frozen=True)
