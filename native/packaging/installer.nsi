@@ -73,7 +73,20 @@ VIAddVersionKey "LegalCopyright" "Artistic License 2.0"
 !insertmacro MUI_PAGE_INSTFILES
 ; Offer to launch it: the first thing an operator wants to do after
 ; installing is see whether it starts.
-!define MUI_FINISHPAGE_RUN "$INSTDIR\sstvae-gui.exe"
+;
+; Through a function rather than as a path, because a path here is
+; `Exec`ed by *this* process -- which asked for administrator, so the
+; app would inherit an elevated token it must never have. That is wrong
+; in three ways beyond any crash it may cause: UIPI blocks drags from a
+; normal Explorer to an elevated window, so dropping a picture on the
+; transmit panel silently does nothing; if the installer was elevated
+; with another account's credentials, the config and the model cache
+; land in *that* account's LOCALAPPDATA; and the session then differs
+; from every later launch off the Start Menu, which is exactly the shape
+; of "it crashes from the installer and is fine afterwards".
+!define MUI_FINISHPAGE_RUN
+!define MUI_FINISHPAGE_RUN_TEXT "Run SSTVAE"
+!define MUI_FINISHPAGE_RUN_FUNCTION LaunchAsUser
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -139,6 +152,17 @@ Function .onInit
     Abort
   ${EndIf}
   SetRegView 64
+FunctionEnd
+
+; Launch the app as the logged-on user, not as the administrator this
+; installer is running as. Explorer is the standard plugin-free way to
+; do it: it is already running unelevated in the user's session, so the
+; process it starts inherits *its* token rather than ours. The exit code
+; is explorer's and means nothing, which is fine -- there is nothing to
+; report here that the app cannot report itself.
+Function LaunchAsUser
+  SetOutPath "$INSTDIR"
+  Exec '"$WINDIR\explorer.exe" "$INSTDIR\sstvae-gui.exe"'
 FunctionEnd
 
 Section "Uninstall"
