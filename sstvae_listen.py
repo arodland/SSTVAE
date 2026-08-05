@@ -45,9 +45,11 @@ from sstvae.rx import (  # noqa: F401
     Reception,
     RingBuffer,
     RxConfig,
+    SaveDebugImageToDirSink,
     SaveToDirSink,
     SharedState,
     decode_loop,
+    decode_loop_diversity,
     decode_loop_low_cpu,
     fmt_snr,
 )
@@ -128,6 +130,23 @@ def main() -> None:
     ap.add_argument("--out-dir", default="received", help="directory for saved images")
     ap.add_argument("--device", default=None, help="input device name/index (see --list-devices)")
     ap.add_argument(
+        "--device2", default=None,
+        help="second input device name/index: enables diversity reception "
+        "(sstvae.modem.diversity) -- both devices must be tuned to the same "
+        "frequency, receiving from independent antennas, and are assumed to "
+        "start capturing together. Combined with --device via maximal-ratio "
+        "combining on the demodulated latents; see docs/diversity-reception.md. "
+        "Not combinable with --low-cpu (diversity reception has no blind-sync "
+        "fallback either way, same tradeoff --low-cpu makes for a different "
+        "reason).",
+    )
+    ap.add_argument(
+        "--diversity-debug-image", action="store_true",
+        help="with --device2, also save a <name>_diversity.png beside each "
+        "picture: a red/blue heatmap (time x latent channel) of which "
+        "receiver supplied each transmitted latent",
+    )
+    ap.add_argument(
         "--buffer-seconds", type=float, default=130.0,
         help="rolling audio buffer length; must exceed the longest mode duration "
         "(mode C is ~95s) with margin for retrospective decode",
@@ -185,6 +204,13 @@ def main() -> None:
             print(d.label())
         return
 
+    if args.device2 and args.low_cpu:
+        ap.error("--device2 (diversity reception) and --low-cpu are not combinable "
+                 "-- diversity reception has no blind-sync fallback either way, so "
+                 "there is nothing --low-cpu would still be trading away")
+    if args.diversity_debug_image and not args.device2:
+        ap.error("--diversity-debug-image needs --device2")
+
     config = RxConfig(
         out_dir=args.out_dir,
         poll_interval=args.poll_interval,
@@ -197,17 +223,34 @@ def main() -> None:
     )
 
     model = load_codec(args.model, precision=args.precision)
-    ring = RingBuffer(args.buffer_seconds)
     state = SharedState()
     stop_event = threading.Event()
 
-    stream, actual_rate = open_input_stream(args.device, ring, FS)
-    print(f"listening at {actual_rate} Hz, buffer {args.buffer_seconds:.0f}s -- Ctrl+C to stop")
-
-    target = decode_loop_low_cpu if args.low_cpu else decode_loop
-    worker = threading.Thread(
-        target=target, args=(ring, model, state, config, stop_event), daemon=True
-    )
+    streams = []
+    if args.device2:
+        ring_a = RingBuffer(args.buffer_seconds)
+        ring_b = RingBuffer(args.buffer_seconds)
+        stream_a, rate_a = open_input_stream(args.device, ring_a, FS)
+        stream_b, rate_b = open_input_stream(args.device2, ring_b, FS)
+        streams = [stream_a, stream_b]
+        print(f"diversity reception: branch A at {rate_a} Hz, branch B at {rate_b} Hz, "
+              f"buffer {args.buffer_seconds:.0f}s -- Ctrl+C to stop")
+        debug_sink = SaveDebugImageToDirSink() if args.diversity_debug_image else None
+        worker = threading.Thread(
+            target=decode_loop_diversity,
+            args=([ring_a, ring_b], model, state, config, stop_event),
+            kwargs={"debug_sink": debug_sink},
+            daemon=True,
+        )
+    else:
+        ring = RingBuffer(args.buffer_seconds)
+        stream, actual_rate = open_input_stream(args.device, ring, FS)
+        streams = [stream]
+        print(f"listening at {actual_rate} Hz, buffer {args.buffer_seconds:.0f}s -- Ctrl+C to stop")
+        target = decode_loop_low_cpu if args.low_cpu else decode_loop
+        worker = threading.Thread(
+            target=target, args=(ring, model, state, config, stop_event), daemon=True
+        )
     worker.start()
 
     try:
@@ -219,8 +262,9 @@ def main() -> None:
         pass
     finally:
         stop_event.set()
-        stream.stop()
-        stream.close()
+        for stream in streams:
+            stream.stop()
+            stream.close()
         worker.join(timeout=2.0)
 
 
