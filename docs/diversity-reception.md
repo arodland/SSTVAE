@@ -28,11 +28,15 @@ reception (second antenna)" plus a second input-device picker). Both
 also support an optional debug visualization,
 `contribution_image`/`modem::diversity::contribution_image` --
 `--diversity-debug-image` on the CLI, a checkbox in the native
-settings dialog -- a red/blue heatmap (time x latent channel) of which
-branch supplied each transmitted latent, written as
-`<name>_diversity.png` beside the picture. See "What's not done" for
-what this integration deliberately leaves out (blind-fallback
-diversity, raw-domain combining).
+settings dialog -- a red/blue heatmap of which branch supplied each
+transmitted latent, written as `<name>_diversity.png` beside the
+picture: rows are the data carrier index (frequency order, contiguous),
+columns are absolute frame index (time). Each branch also independently
+falls back to blind acquisition (`Modem.demodulate_blind`) when it
+can't get a header lock, same as `decode_loop` does for a single
+receiver -- see "Combining blind-acquired branches". See "What's not
+done" for what's left (raw-domain combining, a second waterfall,
+unequal-branch/N>2 measurements).
 
 ## Why combine after `demodulate`, not inside it
 
@@ -53,8 +57,10 @@ latent `k` in branch 1 and latent `k` in branch 2 are estimates of the
 *same* picture coefficient, with no shared timebase required to see
 that. So `sstvae/modem/diversity.py` is a pure post-processing step over
 `DemodResult`, not a change to `modem.py`, `sync.py`, or `framing.py`.
-The cost is that each branch must *independently* acquire the preamble
-and decode the header -- see "What's not done".
+The cost is that each branch must *independently* acquire -- the
+preamble path if it can, `demodulate_blind`'s pilot-periodicity path
+if it can't (see "Combining blind-acquired branches" below) -- rather
+than one branch's acquisition ever assisting another's.
 
 ## The combining weight
 
@@ -114,24 +120,90 @@ the combined confidence; the combined latent value is still correct in
 that degenerate case since there's nothing to average away, only the
 reported weight is optimistic (`test_two_identical_clean_branches_dont_distort_the_signal`).
 
+## Combining blind-acquired branches
+
+A branch too weak for the preamble path isn't necessarily useless --
+`Modem.demodulate_blind` locks onto the frame pilot's own periodicity
+and, once the beacon's absolute frame counter decodes, places latents
+in canonical order without ever having seen a header (see
+`sstvae/modem/beacon.py`). `BlindDemodResult.latents`/`.weights` are
+always sized to mode C's full range and positioned by that absolute
+counter, so two independent blind locks of the *same* transmission land
+in the same array positions automatically -- more directly comparable
+than two header locks, whose sample positions need the epsilon-based
+matching above. That makes blind-acquired branches combine with exactly
+the same MRC arithmetic as header-acquired ones; only the branch's
+*type* differs, not the math.
+
+`combine_diversity_results` (Python) / `combine_diversity_results`
+taking a `Branch = std::variant<DemodResult, BlindDemodResult>` (C++)
+handles any mix:
+
+- **Both header-locked** -- delegates to `combine_demod_results`
+  unchanged (requires one mode, as before).
+- **Both blind-locked** -- delegates to `combine_blind_results`, which
+  needs no mode check and no size reconciliation (both already full
+  mode-C-sized).
+- **Mixed** -- the header-locked branch's mode is authoritative for
+  what was actually sent, so the blind branch's arrays are combined at
+  full mode-C size, then truncated back down to the header mode's
+  range. A header branch's own (mode-sized, not full-C-sized) arrays
+  are padded up to match first, using the same zero-fill
+  `codec.pad_to_full` already does elsewhere.
+
+`decode_loop_diversity` uses this per-branch preference -- header first,
+falling back to blind (`_find_branch_reception` in Python,
+`find_branch_reception` in C++) -- mirroring `decode_loop`'s own
+single-receiver preference exactly. Both paths report a branch's
+position as `reception_start`, expressed at the *preamble's* sample
+offset regardless of which path found it (the blind path's
+`frame0_start` is one preamble+header later, so it's shifted back by
+that much, the same correction `decode_loop`'s blind branch already
+applies) -- which is what lets two branches be matched by the same
+epsilon criterion no matter how each one locked. For two blind
+branches that position agreement is a sanity check ("are these really
+the same transmission"), not an alignment requirement, since their
+arrays are already aligned by the frame counter regardless of sample
+position.
+
+Completion tracking follows the same header-beats-blind preference: if
+the combine ended up header-locked, the exact frame count is known and
+the reception finishes when it's reached; if every branch was
+blind-locked, completion falls back to the progress-stall detection
+(`config.end_grace`) `decode_loop` already uses for its own blind path.
+`contribution_image` follows the same rule for `n_frames` -- the
+header-locked mode's frame count if there is one, else mode C's full
+range.
+
 ## API
 
 ```python
 from sstvae.modem import Modem
-from sstvae.modem.diversity import combine_demod_results, demodulate_diversity
+from sstvae.modem.diversity import (
+    combine_demod_results,      # header-locked branches only
+    combine_blind_results,      # blind-locked branches only
+    combine_diversity_results,  # any mix of the two
+    demodulate_diversity,
+)
 
 modem = Modem()
 result = demodulate_diversity(modem, [branch_a_audio, branch_b_audio])
-# or, if you already have DemodResults:
+# or, if you already have DemodResults / BlindDemodResults:
 result = combine_demod_results([modem.demodulate(a), modem.demodulate(b)])
+result = combine_diversity_results([modem.demodulate(a), modem.demodulate_blind(b)])
 ```
 
 `demodulate_diversity` drops a branch that fails to acquire at all
 (`SyncError`) rather than failing the combine -- that's the point of
 diversity reception, one antenna losing lock entirely while the other
 doesn't. If every branch fails, the first branch's `SyncError`
-propagates. `combine_demod_results` generalizes to any number of
-branches (`N >= 1`), not just two.
+propagates; it is header-path only (`Modem.demodulate`) -- a caller
+that wants blind-fallback diversity from raw audio combines
+`Modem.demodulate`/`demodulate_blind` results itself with
+`combine_diversity_results`, which is what `decode_loop_diversity`
+does. All three combine functions generalize to any number of branches
+(`N >= 1`), not just two -- `contribution_image` is the one exception,
+fixed at two (red/blue is a two-way encoding).
 
 ## Measured gain
 
@@ -180,40 +252,44 @@ for a larger, fuller AWGN/fading grid.
 
 ## What's not done
 
-- **Both branches must acquire independently.** `demodulate_diversity`
-  runs full preamble acquisition (`sync.acquire`) and header decode per
-  branch before any combining happens, so a branch too weak to lock at
-  all contributes nothing -- diversity reception classically also helps
-  exactly in that regime (one antenna too faded to demod alone, but
-  useful once combined with the other's channel estimate). Reaching
-  that would mean acquiring on one branch and using its timing to
-  *assist* the other's demod (or a true raw-domain multi-branch MRC,
-  which was considered and set aside -- see below), not the
-  post-`demodulate()` combine this implements.
+- **A branch that can't even blind-lock still contributes nothing.**
+  Blind acquisition needs `MIN_FRAMES_FOR_SYNC` (~10.5 s) of intact
+  frame pilots to see a full beacon superframe and has its own
+  SNR/threshold behavior (`sync.acquire_blind`), so a branch degraded
+  enough to fail *that* too is still dropped, same as it always was for
+  the header path alone. Diversity reception classically also helps in
+  that regime (one antenna too faded to demod alone, but useful once
+  combined with the other's channel estimate); reaching it would mean
+  acquiring on one branch and using its timing to *assist* the other's
+  demod, or a true raw-domain multi-branch MRC (see below) -- neither
+  attempted here.
 - **No raw-domain (pre-equalization) combining.** MRC on the raw OFDM
   symbols, weighted by each branch's own noise variance, would in
   principle do slightly better (it doesn't lose anything to each
   branch's independent zero-forcing step first) and could combine
   header soft-bits too, which would help right at the acquisition
-  threshold above. It needs per-branch noise-variance estimates *during*
-  demod (not just the post-hoc `snr_db`) and duplicating or refactoring
-  the frame loop in `modem.py`'s `demodulate()`, which is meaningfully
-  more invasive for a gain this experiment didn't need in order to show
-  the effect is real and worth the complexity.
-- **`decode_loop_diversity` (both languages) is preamble-path only, no
-  blind fallback.** It inherits the "both branches must acquire
-  independently" limitation above, and additionally gives up
-  `decode_loop`'s retrospective mid-stream decode and progress-stall
-  detection for a reception that never gets a full header lock on
-  either branch. Combining two branches' *blind* results needs matching
-  them by the beacon's absolute frame counter rather than by preamble
-  position, and a different result shape
-  (`BlindDemodResult`/`modem::BlindDemodResult` has no `.mode`) -- real
-  additional work this does not attempt. Kept as a separate function
-  from `decode_loop` on both sides rather than folded in, since that
-  function's state machine is the reference's load-bearing one
-  (CLAUDE.md); the two-ring case is therefore some duplication rather
-  than a generalization.
+  threshold. It needs per-branch noise-variance estimates *during* demod
+  (not just the post-hoc `snr_db`) and duplicating or refactoring the
+  frame loop in `modem.py`'s `demodulate()`, which is meaningfully more
+  invasive for a gain this experiment didn't need in order to show the
+  effect is real and worth the complexity.
+- **Cross-branch threshold lowering, considered and not implemented.**
+  Once one branch has a *confirmed* preamble lock, the other branches'
+  search window for the same transmission could run at a lower
+  detection threshold: a real preamble is now known to be in that
+  window (from the confirming branch), so the usual false-alarm concern
+  a low threshold buys into doesn't apply the same way -- distinct from,
+  and not obsoleted by, blind-fallback above. Blind acquisition rescues
+  a branch too degraded for the preamble path *at all*, using a longer
+  window (~10.5 s) and its own acquisition statistics; threshold
+  lowering would instead rescue a branch whose preamble is only
+  marginally below the normal threshold, without waiting for that
+  longer window or giving up the header path's richer per-frame
+  progress tracking. Restricting the search to a narrow window around
+  the confirmed branch's position (rather than the whole buffer) already
+  suppresses false alarms geometrically on its own, similar to how
+  `decode_loop_low_cpu` narrows its search window for a different
+  reason -- worth quantifying before picking a lowered threshold.
 - **The waterfall only ever follows the primary branch.** The native
   app's receive panel does not show a second spectrum strip for the
   diversity device, and there is no equivalent live view on the CLI
