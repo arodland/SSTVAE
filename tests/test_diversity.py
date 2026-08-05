@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from sstvae import hfchannel
-from sstvae.config import FRAMES_PER_GROUP, LATENT_CHANNELS, LATENT_GROUPS, MODES
+from sstvae.config import FRAMES_PER_GROUP, LATENT_GROUPS, MODES, NC_LATENT
 from sstvae.modem import Modem, SyncError
 from sstvae.modem.diversity import (
     branch_contribution,
@@ -186,15 +186,54 @@ def test_contribution_image_shape_and_needs_two_branches(modem):
         contribution_image([r1])
 
     img = contribution_image([r1, r2], scale=1)
-    assert img.size == (r1.mode.n_frames, LATENT_CHANNELS)
+    assert img.size == (r1.mode.n_frames, NC_LATENT)
     assert img.mode == "RGB"
     arr = np.asarray(img)
     assert arr[:, :, 1].max() == 0  # green channel unused
-    # Some cells got no latent that frame or were erased on both
-    # branches -- black -- and some cells did get data; a real
-    # transmission should show both, not an all-black or all-lit image.
+    # Every carrier carries data in every frame (unlike the old
+    # decoder-channel indexing, where the interleaver's scatter left
+    # most cells with no coverage at all) -- at a decent SNR almost
+    # every cell should be lit, black only from real erasure.
     lit = arr.sum(axis=-1) > 0
-    assert 0.0 < lit.mean() < 1.0
+    assert lit.mean() > 0.9
+
+
+def test_contribution_image_black_means_erased_not_missing_coverage(modem):
+    """Unlike the old decoder-channel-indexed image, every carrier is
+    used in every frame, so a black cell can only mean both branches
+    erased that carrier that frame -- never "the interleaver didn't
+    touch it". Verified directly rather than trusting real fading to
+    produce one."""
+    lat = unit_latents("A")
+    r1 = modem.demodulate(modem.modulate(lat, "A"))
+    r2 = modem.demodulate(modem.modulate(lat, "A"))
+    r1.weights[:] = 0.0
+    r2.weights[:] = 0.0
+    img = contribution_image([r1, r2], scale=1)
+    assert np.asarray(img).sum() == 0
+
+
+def test_contribution_image_no_stair_stepping_across_mode_b_groups(modem):
+    """Mode B transmits group 0's frames, then group 1's, as two
+    sequential blocks over disjoint *decoder-channel* ranges -- the old
+    channel-indexed image showed that as a staircase (each block lit
+    only its own channel range). Carrier index is the same physical set
+    throughout, so every row must show data in frames from *both*
+    groups, not just one."""
+    lat = unit_latents("B")
+    x = modem.modulate(lat, "B")
+    r1 = modem.demodulate(hfchannel.apply_channel(x, snr_db=10.0, seed=31))
+    r2 = modem.demodulate(hfchannel.apply_channel(x, snr_db=10.0, seed=32))
+    img = contribution_image([r1, r2], scale=1)
+    arr = np.asarray(img)
+
+    n_frames = r1.mode.n_frames
+    early_frame = n_frames // 4  # well inside group 0's block
+    late_frame = 3 * n_frames // 4  # well inside group 1's block
+    lit_early = arr[:, early_frame, :].sum(axis=-1) > 0
+    lit_late = arr[:, late_frame, :].sum(axis=-1) > 0
+    assert lit_early.mean() > 0.9
+    assert lit_late.mean() > 0.9
 
 
 def test_contribution_image_pure_branch_is_saturated_in_its_color(modem):
@@ -348,4 +387,4 @@ def test_branch_contribution_and_image_accept_mixed_branches(modem):
     img = contribution_image([headered, blind], scale=1)
     # Mixed/blind combos can't assume the header's mode range, so the
     # image spans mode C's full frame count.
-    assert img.size == (LATENT_GROUPS * FRAMES_PER_GROUP, LATENT_CHANNELS)
+    assert img.size == (LATENT_GROUPS * FRAMES_PER_GROUP, NC_LATENT)
