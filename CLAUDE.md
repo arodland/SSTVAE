@@ -1543,6 +1543,18 @@ need when `--native` fails and you want to know *where*.
   which is also why `spectrum.cpp`'s peak-hold matters more there, a
   ragged comb from point-sampling being the worst available lie on a
   display whose whole job is "are you tuned right".
+- `docs/diversity-reception.md` — two receivers on independent
+  antennas, MRC-combined post-`demodulate()` (`sstvae/modem/diversity.py`,
+  `combine_demod_results`/`demodulate_diversity`), **experiment,
+  2026-08-05, positive**: +2.9 to +5.9 dB latent SNR (mode A, AWGN and
+  `mpp`), measured by `scripts/diversity_sweep.py`. Combines in latent
+  space, not raw samples — each branch already resyncs and deinterleaves
+  independently, so their canonical-order `DemodResult.latents`/
+  `.weights` are directly comparable with no shared timebase needed. Not
+  wired into `sstvae/rx/`, the native app, or the GUI; both branches
+  must independently acquire (a branch too weak to lock alone
+  contributes nothing, unlike raw-domain diversity combining, which was
+  considered and set aside — see the doc for why).
 - `docs/todo.md` — open work items with the reasoning behind them.
   Completed items keep only a short summary there; the full measurement
   records moved to `docs/todo-done.md` (2026-08-12).
