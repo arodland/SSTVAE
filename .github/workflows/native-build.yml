@@ -445,6 +445,25 @@ jobs:
           name: ${{ env.pkg }}-portable
           path: dist
           if-no-files-found: error
+      # The debug symbols, separately -- not inside the package, which
+      # nobody wants 100 MB of PDB in, and not omitted, which is where
+      # this started. A Windows crash report names the faulting module
+      # and an offset into it and nothing else; without the PDB that
+      # built *that* exe the offset is unresolvable, and the runner's
+      # build tree is gone the moment the job ends. The build is
+      # RelWithDebInfo, so the PDBs exist and cost only the upload.
+      #
+      # Resolve one from Linux with:
+      #   llvm-symbolizer --obj=sstvae-gui.exe <fault offset>
+      # with the .pdb beside the .exe.
+      - uses: actions/upload-artifact@v7
+        if: runner.os == 'Windows'
+        with:
+          name: ${{ env.pkg }}-symbols
+          path: |
+            native/build/*.pdb
+            native/build/sstvae-gui.exe
+          if-no-files-found: error
       # The platform's own container: a .dmg, an AppImage, a setup .exe.
       # Built from the *same* staged tree that was just proven to start,
       # so a packaging bug here cannot be confused with a build one.
