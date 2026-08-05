@@ -16,11 +16,52 @@ preamble and does its own clock-drift tracking. See
 from dataclasses import replace
 
 import numpy as np
+from PIL import Image
 
+from ..config import LATENT_CHANNELS, LATENT_H, LATENT_W
+from . import framing
 from .modem import DemodResult
 from .sync import SyncError
 
-__all__ = ["combine_demod_results", "demodulate_diversity"]
+__all__ = [
+    "combine_demod_results",
+    "demodulate_diversity",
+    "branch_contribution",
+    "contribution_image",
+]
+
+
+def _validate_branches(results: list[DemodResult]):
+    """Common precondition for every function below: every branch must
+    have locked onto the same mode -- a header mismatch means the
+    branches aren't looking at the same transmission, or one badly
+    misdecoded its header, and guessing which one to believe would be
+    worse than failing loud."""
+    if not results:
+        raise ValueError("needs at least one branch")
+    spec = results[0].mode
+    for r in results[1:]:
+        if r.mode.name != spec.name:
+            raise ValueError(f"branch mode mismatch: {spec.name!r} vs {r.mode.name!r}")
+
+
+def _mrc_weights(results: list[DemodResult]) -> tuple[np.ndarray, np.ndarray]:
+    """`(snr_lin, mrc_w)`: each branch's linear SNR, and the
+    `(n_branches, n_latents)` inverse-variance (MRC) combining weight
+    per branch/latent -- `snr_lin * w**2`, see `combine_demod_results`
+    for the derivation. Shared by `combine_demod_results` (which sums
+    these into a combined estimate) and `branch_contribution` (which
+    normalizes them into each branch's fractional share)."""
+    snr_lin = np.array(
+        [10 ** (r.snr_db / 10) if np.isfinite(r.snr_db) else 0.0 for r in results]
+    )
+    if not np.any(snr_lin > 0):
+        # No branch has a usable SNR estimate (e.g. too few received
+        # frames to form one) -- fall back to unweighted averaging
+        # rather than producing an all-zero combine.
+        snr_lin = np.ones(len(results))
+    weights = np.stack([r.weights for r in results])
+    return snr_lin, snr_lin[:, None] * weights**2
 
 
 def combine_demod_results(results: list[DemodResult]) -> DemodResult:
@@ -54,29 +95,14 @@ def combine_demod_results(results: list[DemodResult]) -> DemodResult:
     correct in that degenerate case (there's nothing to average away),
     only the reported weight would be optimistic.
     """
-    if not results:
-        raise ValueError("combine_demod_results needs at least one branch")
-    spec = results[0].mode
-    for r in results[1:]:
-        if r.mode.name != spec.name:
-            raise ValueError(f"branch mode mismatch: {spec.name!r} vs {r.mode.name!r}")
+    _validate_branches(results)
     if len(results) == 1:
         return results[0]
 
-    snr_lin = np.array(
-        [10 ** (r.snr_db / 10) if np.isfinite(r.snr_db) else 0.0 for r in results]
-    )
-    if not np.any(snr_lin > 0):
-        # No branch has a usable SNR estimate (e.g. too few received
-        # frames to form one) -- fall back to unweighted averaging
-        # rather than producing an all-zero combine.
-        snr_lin = np.ones(len(results))
+    snr_lin, mrc_w = _mrc_weights(results)
     ref = float(np.max(snr_lin))
 
     latents = np.stack([r.latents for r in results])
-    weights = np.stack([r.weights for r in results])
-    mrc_w = snr_lin[:, None] * weights**2  # (branch, latent) MRC weight
-
     denom = mrc_w.sum(axis=0)
     combined_latents = np.divide(
         (mrc_w * latents).sum(axis=0), denom,
@@ -121,3 +147,67 @@ def demodulate_diversity(modem, streams: list[np.ndarray], search_s=None) -> Dem
             "demodulate_diversity: no branches provided"
         )
     return combine_demod_results(results)
+
+
+def branch_contribution(results: list[DemodResult]) -> np.ndarray:
+    """`(n_branches, n_latents)`: each branch's fractional share of the
+    MRC combine at every latent -- `mrc_w / sum(mrc_w)`, so the columns
+    sum to 1 wherever at least one branch has nonzero weight there, and
+    to 0 where every branch erased that latent (nothing to attribute).
+    This is what `contribution_image` visualizes; exposed separately so
+    a caller that only wants the numbers doesn't have to render an
+    image to get them.
+    """
+    _validate_branches(results)
+    if len(results) == 1:
+        return (results[0].weights > 0).astype(np.float64)[None, :]
+    _, mrc_w = _mrc_weights(results)
+    denom = mrc_w.sum(axis=0)
+    return np.divide(mrc_w, denom, out=np.zeros_like(mrc_w), where=denom > 0)
+
+
+def contribution_image(results: list[DemodResult], scale: int = 6) -> Image.Image:
+    """Debug visualization of which branch supplied each transmitted
+    latent: rows are latent channel (0..`LATENT_CHANNELS`-1), columns
+    are absolute frame index (time). Red is branch 0's fractional share
+    of the combined MRC estimate at that channel/frame, blue is branch
+    1's -- a cell that's pure red or pure blue means one branch carried
+    that latent essentially alone (the other faded), magenta means both
+    contributed roughly equally, and black means either no transmitted
+    latent that frame touched that channel (the interleaver scatters
+    each frame's latents across channels, not one-per-frame) or the
+    latent was erased on both branches.
+
+    Requires exactly two branches (red/blue is a two-way encoding) of
+    the same mode. Frame `f`'s transmitted latents are wherever
+    `framing.slot_range_for_frame(f)` says, which is mode-independent
+    (every mode's frames are a prefix of the same canonical layout), so
+    this reads directly off `results[0].mode.n_frames` without needing
+    the interleaver detail beyond that lookup.
+    """
+    if len(results) != 2:
+        raise ValueError("contribution_image needs exactly two branches")
+    _validate_branches(results)
+    frac = branch_contribution(results)  # (2, n_latents)
+    n_frames = results[0].mode.n_frames
+    per_channel = LATENT_H * LATENT_W
+
+    grid = np.zeros((LATENT_CHANNELS, n_frames, 2))
+    counts = np.zeros((LATENT_CHANNELS, n_frames))
+    for f in range(n_frames):
+        _, idx = framing.slot_range_for_frame(f)
+        channels = idx // per_channel
+        np.add.at(grid[:, f, 0], channels, frac[0, idx])
+        np.add.at(grid[:, f, 1], channels, frac[1, idx])
+        np.add.at(counts[:, f], channels, 1)
+
+    mask = counts > 0
+    grid = np.divide(grid, counts[:, :, None], out=grid, where=mask[:, :, None])
+
+    rgb = np.zeros((LATENT_CHANNELS, n_frames, 3), dtype=np.uint8)
+    rgb[:, :, 0] = np.clip(grid[:, :, 0] * 255, 0, 255).astype(np.uint8)
+    rgb[:, :, 2] = np.clip(grid[:, :, 1] * 255, 0, 255).astype(np.uint8)
+    img = Image.fromarray(rgb, "RGB")
+    if scale != 1:
+        img = img.resize((n_frames * scale, LATENT_CHANNELS * scale), Image.NEAREST)
+    return img
