@@ -220,9 +220,9 @@ training pipeline. Those live in
 ## Credits
 
 The radio-autoencoder concept, the two-stage training recipe and the
-PAPR-penalty approach all come from **FreeDV RADE** by David Rowe and
-the FreeDV team. SSTVAE applies those ideas to still images; any
-mistakes in the translation are mine.
+PAPR-penalty approach all come from **FreeDV RADE** by David Rowe,
+Jean-Marc Valin and the FreeDV team. SSTVAE applies those ideas to
+still images; any mistakes in the translation are mine.
 
 The autoencoder is trained on **[COCO](https://cocodataset.org)**
 (Common Objects in Context), Lin *et al.*, 2014 — resized to 640×480 as
