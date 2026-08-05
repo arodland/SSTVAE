@@ -26,6 +26,7 @@
 #include "modem/modem.hpp"
 
 using namespace sstvae;
+using modem::BlindDemodResult;
 using modem::DemodResult;
 
 namespace {
@@ -46,6 +47,31 @@ DemodResult make_result(std::vector<double> latents, std::vector<double> weights
     r.sync_metric = 1.0;
     r.preamble_start = 0;
     return r;
+}
+
+BlindDemodResult make_blind_result(std::vector<double> latents, std::vector<double> weights,
+                                   double snr_db, int n_frames = 220) {
+    BlindDemodResult r;
+    r.latents = std::move(latents);
+    r.weights = std::move(weights);
+    r.freq_offset = 0.0;
+    r.n_frames = n_frames;
+    r.frame_offset = 0;
+    r.frame0_start = 0;
+    r.snr_db = snr_db;
+    return r;
+}
+
+// Silences the lead-in/preamble/header of a real transmission, as if
+// that antenna's preamble were too faded to detect at all: the header
+// path fails to lock on it, but the frame pilots behind it (at exactly
+// the same buffer position as an untouched branch's) are untouched, so
+// blind acquisition still locks.
+std::vector<double> zero_preamble(std::vector<double> x) {
+    const auto end = static_cast<std::size_t>(
+        config::LEADIN_SAMPLES + config::PREAMBLE_SAMPLES + config::HEADER_SAMPLES);
+    std::fill(x.begin(), x.begin() + static_cast<std::ptrdiff_t>(std::min(end, x.size())), 0.0);
+    return x;
 }
 
 std::vector<double> test_latents(int n, std::uint64_t seed) {
@@ -173,7 +199,7 @@ void test_frames_received_is_the_max() {
 void test_branch_contribution_columns_sum_to_one_or_zero() {
     const DemodResult a = make_result({1.0, 0.0}, {0.9, 0.0}, 8.0);
     const DemodResult b = make_result({1.0, 0.0}, {0.4, 0.0}, 8.0);
-    const auto frac = modem::diversity::branch_contribution({a, b});
+    const auto frac = modem::diversity::branch_contribution(std::vector<DemodResult>{a, b});
     check::equal(frac.size(), std::size_t{2}, "diversity/contrib: one row per branch");
     for (std::size_t k = 0; k < a.latents.size(); ++k) {
         const double total = frac[0][k] + frac[1][k];
@@ -186,7 +212,7 @@ void test_branch_contribution_columns_sum_to_one_or_zero() {
 
 void test_branch_contribution_single_branch_is_erasure_mask() {
     const DemodResult r = make_result({1.0, 0.0}, {0.6, 0.0}, 10.0);
-    const auto frac = modem::diversity::branch_contribution({r});
+    const auto frac = modem::diversity::branch_contribution(std::vector<DemodResult>{r});
     check::equal(frac[0][0], 1.0, "diversity/contrib1: nonzero weight -> full credit");
     check::equal(frac[0][1], 0.0, "diversity/contrib1: erased -> no credit");
 }
@@ -196,7 +222,7 @@ void test_contribution_image_needs_two_branches() {
                                       std::vector<double>(mode_a().n_latents, 1.0), 10.0);
     bool threw = false;
     try {
-        modem::diversity::contribution_image({r});
+        modem::diversity::contribution_image(std::vector<DemodResult>{r});
     } catch (const std::invalid_argument&) {
         threw = true;
     }
@@ -211,9 +237,10 @@ void test_contribution_image_shape_and_pure_branch_saturation() {
         make_result(std::vector<double>(n, 0.0), std::vector<double>(n, 0.0), -1.0);
     dead.snr_db = -std::numeric_limits<double>::infinity();
 
-    const images::Picture img = modem::diversity::contribution_image({good, dead}, 1);
+    const images::Picture img =
+        modem::diversity::contribution_image(std::vector<DemodResult>{good, dead}, 1);
     check::equal(img.width, mode_a().n_frames, "diversity/image: width is n_frames");
-    check::equal(img.height, config::LATENT_CHANNELS, "diversity/image: height is LATENT_CHANNELS");
+    check::equal(img.height, config::NC_LATENT, "diversity/image: height is NC_LATENT (carrier rows)");
 
     // `good` carries every latent alone: every touched cell should be
     // saturated red, with no blue at all.
@@ -254,6 +281,151 @@ void test_diversity_improves_snr_under_independent_awgn() {
                    "beats either alone by a real margin");
 }
 
+// --- blind-acquisition branches ---------------------------------------
+
+void test_combine_blind_single_branch_is_identity() {
+    const BlindDemodResult r = make_blind_result({1.0, -1.0, 0.5}, {1.0, 0.8, 0.0}, 10.0);
+    const BlindDemodResult combined = modem::diversity::combine_blind_results({r});
+    check::close(combined.latents, r.latents, 1e-12, "diversity/blind-single: latents unchanged");
+    check::close(combined.weights, r.weights, 1e-12, "diversity/blind-single: weights unchanged");
+}
+
+void test_combine_blind_needs_at_least_one_branch() {
+    bool threw = false;
+    try {
+        modem::diversity::combine_blind_results({});
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check::is_true(threw, "diversity/blind-empty: raises on no branches");
+}
+
+void test_combine_blind_weight_never_exceeds_one() {
+    const BlindDemodResult a = make_blind_result({1.0, 1.0, 1.0}, {1.0, 0.9, 0.3}, 15.0);
+    const BlindDemodResult b = make_blind_result({1.0, 1.0, 1.0}, {1.0, 0.9, 0.3}, 15.0);
+    const BlindDemodResult combined = modem::diversity::combine_blind_results({a, b});
+    for (double w : combined.weights)
+        check::is_true(w <= 1.0 + 1e-9, "diversity/blind-cap: combined weight <= 1");
+}
+
+// --- combine_diversity_results: any mix of header/blind ----------------
+
+void test_diversity_results_pure_headered_matches_combine_demod_results() {
+    const DemodResult a = make_result({1.0, 1.0, 1.0}, {1.0, 0.9, 0.3}, 15.0);
+    const DemodResult b = make_result({1.0, 1.0, 1.0}, {1.0, 0.9, 0.3}, 15.0);
+    const modem::diversity::Branch combined =
+        modem::diversity::combine_diversity_results({modem::diversity::Branch(a),
+                                                      modem::diversity::Branch(b)});
+    const DemodResult expected = modem::diversity::combine_demod_results({a, b});
+
+    check::is_true(std::holds_alternative<DemodResult>(combined),
+                   "diversity/mix-pure-header: returns a DemodResult");
+    const DemodResult& got = std::get<DemodResult>(combined);
+    check::close(got.latents, expected.latents, 1e-12,
+                "diversity/mix-pure-header: latents match combine_demod_results");
+    check::close(got.weights, expected.weights, 1e-12,
+                "diversity/mix-pure-header: weights match combine_demod_results");
+}
+
+void test_diversity_results_pure_blind_matches_combine_blind_results() {
+    const BlindDemodResult a = make_blind_result({1.0, 1.0}, {0.9, 0.5}, 10.0);
+    const BlindDemodResult b = make_blind_result({1.0, 1.0}, {0.4, 0.5}, 10.0);
+    const modem::diversity::Branch combined =
+        modem::diversity::combine_diversity_results({modem::diversity::Branch(a),
+                                                      modem::diversity::Branch(b)});
+    const BlindDemodResult expected = modem::diversity::combine_blind_results({a, b});
+
+    check::is_true(std::holds_alternative<BlindDemodResult>(combined),
+                   "diversity/mix-pure-blind: returns a BlindDemodResult");
+    const BlindDemodResult& got = std::get<BlindDemodResult>(combined);
+    check::close(got.latents, expected.latents, 1e-12,
+                "diversity/mix-pure-blind: latents match combine_blind_results");
+    check::close(got.weights, expected.weights, 1e-12,
+                "diversity/mix-pure-blind: weights match combine_blind_results");
+}
+
+void test_diversity_results_rejects_mismatched_header_modes() {
+    const DemodResult a = make_result({0.0}, {1.0}, 10.0, mode_a());
+    const DemodResult b =
+        make_result(std::vector<double>(mode_b().n_latents, 0.0),
+                   std::vector<double>(mode_b().n_latents, 1.0), 10.0, mode_b());
+    bool threw = false;
+    try {
+        modem::diversity::combine_diversity_results(
+            {modem::diversity::Branch(a), modem::diversity::Branch(b)});
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check::is_true(threw, "diversity/mix-mismatch: raises on differing header modes");
+}
+
+// One branch header-locked, the other only blind-locked (its
+// preamble/header zeroed out, as if too faded to detect at all) -- real
+// modem output, not hand-built, since the sizes have to agree exactly
+// with what demodulate_blind actually produces (mode C's full range).
+void test_diversity_results_mixed_header_and_blind_real() {
+    const modem::Modem m;
+    const std::vector<double> lat = test_latents(mode_a().n_latents, 40);
+    const std::vector<double> x = m.modulate(lat, mode_a(), true, "MIXED");
+
+    std::vector<double> a = x;
+    add_awgn(a, 0.3, 401);
+    std::vector<double> b = zero_preamble(x);
+    add_awgn(b, 0.3, 402);
+
+    const DemodResult headered = m.demodulate(a);
+    const BlindDemodResult blind = m.demodulate_blind(b);
+    check::is_true(blind.beacon.has_value(), "diversity/mix-real: the blind branch actually locked");
+
+    const modem::diversity::Branch combined = modem::diversity::combine_diversity_results(
+        {modem::diversity::Branch(headered), modem::diversity::Branch(blind)});
+    check::is_true(std::holds_alternative<DemodResult>(combined),
+                   "diversity/mix-real: a header lock present makes the result a DemodResult");
+    const DemodResult& got = std::get<DemodResult>(combined);
+    check::equal(got.latents.size(), static_cast<std::size_t>(mode_a().n_latents),
+                "diversity/mix-real: truncated to the header-locked mode's range");
+    check::is_true(got.mode.name == "A", "diversity/mix-real: mode A");
+    for (double w : got.weights)
+        check::is_true(w <= 1.0 + 1e-9, "diversity/mix-real: weight cap");
+
+    const double s_combined = latent_snr_db(lat, got.latents, got.weights);
+    const double s_headered = latent_snr_db(lat, headered.latents, headered.weights);
+    check::is_true(s_combined > s_headered - 0.5,
+                   "diversity/mix-real: combining with the blind branch doesn't hurt");
+}
+
+// --- contribution_image's Branch overload -------------------------------
+
+void test_contribution_image_variant_overload_needs_two_branches() {
+    const DemodResult r = make_result(std::vector<double>(mode_a().n_latents, 1.0),
+                                      std::vector<double>(mode_a().n_latents, 1.0), 10.0);
+    bool threw = false;
+    try {
+        modem::diversity::contribution_image(
+            std::vector<modem::diversity::Branch>{modem::diversity::Branch(r)});
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check::is_true(threw, "diversity/image-variant: needs exactly two branches");
+}
+
+void test_contribution_image_variant_overload_matches_demod_overload() {
+    const int n = mode_a().n_latents;
+    const DemodResult a = make_result(std::vector<double>(n, 1.0), std::vector<double>(n, 1.0), 12.0);
+    const DemodResult b = make_result(std::vector<double>(n, -1.0), std::vector<double>(n, 0.7), 12.0);
+
+    const images::Picture direct =
+        modem::diversity::contribution_image(std::vector<DemodResult>{a, b}, 1);
+    const images::Picture via_variant = modem::diversity::contribution_image(
+        std::vector<modem::diversity::Branch>{modem::diversity::Branch(a),
+                                              modem::diversity::Branch(b)},
+        1);
+    check::equal(via_variant.width, direct.width, "diversity/image-variant: same width");
+    check::equal(via_variant.height, direct.height, "diversity/image-variant: same height");
+    check::equal(via_variant.height, config::NC_LATENT, "diversity/image-variant: carrier rows");
+    check::is_true(via_variant.rgb == direct.rgb, "diversity/image-variant: pixel-identical");
+}
+
 }  // namespace
 
 int main() {
@@ -270,6 +442,15 @@ int main() {
         test_contribution_image_needs_two_branches();
         test_contribution_image_shape_and_pure_branch_saturation();
         test_diversity_improves_snr_under_independent_awgn();
+        test_combine_blind_single_branch_is_identity();
+        test_combine_blind_needs_at_least_one_branch();
+        test_combine_blind_weight_never_exceeds_one();
+        test_diversity_results_pure_headered_matches_combine_demod_results();
+        test_diversity_results_pure_blind_matches_combine_blind_results();
+        test_diversity_results_rejects_mismatched_header_modes();
+        test_diversity_results_mixed_header_and_blind_real();
+        test_contribution_image_variant_overload_needs_two_branches();
+        test_contribution_image_variant_overload_matches_demod_overload();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;
