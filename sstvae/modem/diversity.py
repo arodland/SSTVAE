@@ -96,6 +96,19 @@ def _mrc_weights(results) -> tuple[np.ndarray, np.ndarray]:
     return _mrc_weights_raw([r.weights for r in results], [r.snr_db for r in results])
 
 
+def _combined_confidence(mrc_w: np.ndarray, snr_lin: np.ndarray) -> np.ndarray:
+    """`(n_latents,)` overall combined-branch confidence, on the same
+    [0, 1] scale as `DemodResult.weights`: `min(sqrt(sum(mrc_w)/ref), 1)`
+    where `ref` is the best single branch's own linear SNR. Shared by
+    `_mrc_combine_arrays` (which reports this as the combine's weights)
+    and `contribution_image`'s brightness channel (which instead
+    normalizes it to the reception's own peak rather than capping it at
+    1 -- see `_combined_weight`)."""
+    ref = float(np.max(snr_lin))
+    denom = mrc_w.sum(axis=0)
+    return np.minimum(np.sqrt(denom / ref), 1.0)
+
+
 def _mrc_combine_arrays(
     latents_list: list[np.ndarray], weights_list: list[np.ndarray], snr_dbs: list[float]
 ) -> tuple[np.ndarray, np.ndarray, float]:
@@ -105,13 +118,12 @@ def _mrc_combine_arrays(
     themselves (each dataclass has its own "return unchanged" semantics).
     """
     snr_lin, mrc_w = _mrc_weights_raw(weights_list, snr_dbs)
-    ref = float(np.max(snr_lin))
     denom = mrc_w.sum(axis=0)
     latents = np.divide(
         (mrc_w * np.stack(latents_list)).sum(axis=0), denom,
         out=np.zeros_like(denom), where=denom > 0,
     )
-    weights = np.minimum(np.sqrt(denom / ref), 1.0)
+    weights = _combined_confidence(mrc_w, snr_lin)
     # snr_lin always has at least one positive entry after the fallback
     # above, so this sum is always > 0.
     snr_db = 10 * np.log10(float(np.sum(snr_lin)))
@@ -282,14 +294,37 @@ def demodulate_diversity(modem, streams: list[np.ndarray], search_s=None) -> Dem
     return combine_demod_results(results)
 
 
+def _weights_list(results) -> list[np.ndarray]:
+    """Each branch's weight array, padded to mode C's full length when
+    the mix includes a blind branch (see `combine_diversity_results`)
+    -- the validation/padding shared by `branch_contribution` and
+    `_combined_weight` below."""
+    headered = [r for r in results if isinstance(r, DemodResult)]
+    blind = [r for r in results if isinstance(r, BlindDemodResult)]
+    if len(headered) + len(blind) != len(results):
+        raise TypeError("branches must be DemodResult or BlindDemodResult")
+
+    if not blind:
+        _validate_branches(headered)
+        return [r.weights for r in results]
+    if len(headered) > 1:
+        _validate_branches(headered)
+    return [
+        _pad_to_full(r.weights) if isinstance(r, DemodResult) else r.weights
+        for r in results
+    ]
+
+
 def branch_contribution(results) -> np.ndarray:
     """`(n_branches, n_latents)`: each branch's fractional share of the
     MRC combine at every latent -- `mrc_w / sum(mrc_w)`, so the columns
     sum to 1 wherever at least one branch has nonzero weight there, and
     to 0 where every branch erased that latent (nothing to attribute).
-    This is what `contribution_image` visualizes; exposed separately so
-    a caller that only wants the numbers doesn't have to render an
-    image to get them.
+    This is what `contribution_image` visualizes as hue; exposed
+    separately so a caller that only wants the numbers doesn't have to
+    render an image to get them. See `_combined_weight` for the
+    complementary *overall* strength `contribution_image` visualizes as
+    brightness.
 
     Accepts the same mix of `DemodResult`/`BlindDemodResult` branches as
     `combine_diversity_results`; `n_latents` is the header-locked mode's
@@ -300,35 +335,48 @@ def branch_contribution(results) -> np.ndarray:
     if len(results) == 1:
         return (results[0].weights > 0).astype(np.float64)[None, :]
 
-    headered = [r for r in results if isinstance(r, DemodResult)]
-    blind = [r for r in results if isinstance(r, BlindDemodResult)]
-    if len(headered) + len(blind) != len(results):
-        raise TypeError("branches must be DemodResult or BlindDemodResult")
-
-    if not blind:
-        _validate_branches(headered)
-        weights_list = [r.weights for r in results]
-    else:
-        if len(headered) > 1:
-            _validate_branches(headered)
-        weights_list = [
-            _pad_to_full(r.weights) if isinstance(r, DemodResult) else r.weights
-            for r in results
-        ]
-
+    weights_list = _weights_list(results)
     _, mrc_w = _mrc_weights_raw(weights_list, [r.snr_db for r in results])
     denom = mrc_w.sum(axis=0)
     return np.divide(mrc_w, denom, out=np.zeros_like(mrc_w), where=denom > 0)
 
 
+def _combined_weight(results) -> np.ndarray:
+    """`(n_latents,)`: the branches' *overall* combined confidence at
+    every latent -- what `contribution_image` scales brightness by, on
+    top of `branch_contribution`'s hue, so a latent both branches faded
+    on goes dark rather than staying a saturated color just because the
+    two branches happened to split it evenly. A single branch is its
+    own weight (nothing to combine); two or more use the same MRC
+    confidence `_mrc_combine_arrays` reports as `DemodResult.weights`.
+    Internal: `contribution_image` normalizes this to its own
+    reception's peak rather than exposing the raw [0, 1] scale, which
+    would make two different receptions' images incomparable at a
+    glance for no benefit."""
+    if len(results) == 1:
+        return results[0].weights
+    weights_list = _weights_list(results)
+    snr_lin, mrc_w = _mrc_weights_raw(weights_list, [r.snr_db for r in results])
+    return _combined_confidence(mrc_w, snr_lin)
+
+
 def contribution_image(results, scale: int = 6) -> Image.Image:
     """Debug visualization of which branch supplied each transmitted
-    latent: rows are the data carrier index (0..`NC_LATENT`-1, row 0 the
-    lowest frequency), columns are absolute frame index (time). Red is
-    branch 0's fractional share of the combined MRC estimate on that
-    carrier/frame, blue is branch 1's -- a cell that's pure red or pure
-    blue means one branch carried that carrier essentially alone (the
-    other faded), magenta means both contributed roughly equally.
+    latent, and how much either of them had to offer: rows are the data
+    carrier index (0..`NC_LATENT`-1, row 0 the lowest frequency),
+    columns are absolute frame index (time). Hue is `branch_contribution`
+    -- red is branch 0's fractional share of the combined MRC estimate
+    on that carrier/frame, blue is branch 1's, magenta means both
+    contributed roughly equally -- and brightness is `_combined_weight`,
+    normalized to the *brightest* cell this reception ever reached. A
+    carrier that fades on one branch but stays strong on the other still
+    reads as a saturated, bright color (that's the case this feature
+    exists to keep transmitting through); a carrier that fades on
+    *both* branches goes dark regardless of how evenly they split what
+    little they had, down to black where every branch erased it. Without
+    the brightness term, two branches equally weak would draw exactly
+    like two branches equally strong -- a pure hue -- and give no visual
+    signal that combining them didn't actually help there.
 
     Rows are carrier index, not the decoder's latent-channel index
     `branch_contribution`'s columns are ordered by: that index is where
@@ -345,8 +393,9 @@ def contribution_image(results, scale: int = 6) -> Image.Image:
     real/imag-independent and identical across every group and mode.
     Every carrier carries data in every symbol of every frame, so unlike
     the old channel-indexed image there are no structurally-black
-    cells -- black here always means both branches erased that carrier
-    this frame, never "the interleaver didn't touch it."
+    cells from unused positions -- black here always means the combine
+    was weak (at the limit, both branches erased that carrier this
+    frame), never "the interleaver didn't touch it."
 
     Requires exactly two branches (red/blue is a two-way encoding), any
     mix of `DemodResult`/`BlindDemodResult`. `n_frames` is the
@@ -358,6 +407,7 @@ def contribution_image(results, scale: int = 6) -> Image.Image:
     if len(results) != 2:
         raise ValueError("contribution_image needs exactly two branches")
     frac = branch_contribution(results)  # (2, n_latents)
+    overall = _combined_weight(results)  # (n_latents,)
 
     if all(isinstance(r, DemodResult) for r in results):
         _validate_branches(results)
@@ -366,20 +416,31 @@ def contribution_image(results, scale: int = 6) -> Image.Image:
         n_frames = _FULL_C_FRAMES
 
     grid = np.zeros((NC_LATENT, n_frames, 2))
+    strength = np.zeros((NC_LATENT, n_frames))
     counts = np.zeros((NC_LATENT, n_frames))
     for f in range(n_frames):
         _, idx = framing.slot_range_for_frame(f)
         carriers = (np.arange(len(idx)) // 2) % NC_LATENT
         np.add.at(grid[:, f, 0], carriers, frac[0, idx])
         np.add.at(grid[:, f, 1], carriers, frac[1, idx])
+        np.add.at(strength[:, f], carriers, overall[idx])
         np.add.at(counts[:, f], carriers, 1)
 
     mask = counts > 0
     grid = np.divide(grid, counts[:, :, None], out=grid, where=mask[:, :, None])
+    strength = np.divide(strength, counts, out=strength, where=mask)
+
+    # Relative to this reception's own peak, not the [0, 1] confidence
+    # scale: a reception that never got much above 0.3 anywhere should
+    # still show its strongest carriers at full brightness, the same
+    # way the fractional-share hue is relative to what the two branches
+    # had between them rather than to some absolute unit.
+    peak = float(strength.max())
+    norm = strength / peak if peak > 0 else strength  # all zero -> stays black
 
     rgb = np.zeros((NC_LATENT, n_frames, 3), dtype=np.uint8)
-    rgb[:, :, 0] = np.clip(grid[:, :, 0] * 255, 0, 255).astype(np.uint8)
-    rgb[:, :, 2] = np.clip(grid[:, :, 1] * 255, 0, 255).astype(np.uint8)
+    rgb[:, :, 0] = np.clip(grid[:, :, 0] * norm * 255, 0, 255).astype(np.uint8)
+    rgb[:, :, 2] = np.clip(grid[:, :, 1] * norm * 255, 0, 255).astype(np.uint8)
     img = Image.fromarray(rgb, "RGB")
     if scale != 1:
         img = img.resize((n_frames * scale, NC_LATENT * scale), Image.NEAREST)
