@@ -4,6 +4,7 @@ import pytest
 from sstvae import hfchannel
 from sstvae.config import FRAMES_PER_GROUP, LATENT_GROUPS, MODES, NC_LATENT
 from sstvae.modem import Modem, SyncError
+from sstvae.modem import framing
 from sstvae.modem.diversity import (
     branch_contribution,
     combine_blind_results,
@@ -236,9 +237,15 @@ def test_contribution_image_no_stair_stepping_across_mode_b_groups(modem):
     assert lit_late.mean() > 0.9
 
 
-def test_contribution_image_pure_branch_is_saturated_in_its_color(modem):
+def test_contribution_image_pure_branch_is_pure_hue_peaking_at_full_brightness(modem):
     """One branch dead, the other clean: every covered cell should be
-    saturated in that branch's color (no half-mixed magenta)."""
+    pure red (no blue at all -- the dead branch never contributes a
+    share), and the strongest cell should read at essentially full
+    brightness, since brightness is normalized to this reception's own
+    peak. Individual cells needn't all hit 255 themselves -- brightness
+    tracks the *good* branch's own per-carrier weight, which on a real
+    (if unfaded) channel varies slightly carrier to carrier, and that
+    variation is exactly what this feature exists to show."""
     lat = unit_latents("A")
     x = modem.modulate(lat, "A")
     good = modem.demodulate(x)
@@ -249,8 +256,57 @@ def test_contribution_image_pure_branch_is_saturated_in_its_color(modem):
     img = contribution_image([good, dead], scale=1)
     arr = np.asarray(img).astype(np.int32)
     lit = arr.sum(axis=-1) > 0
-    assert np.all(arr[:, :, 0][lit] >= 250)  # saturated red
-    assert np.all(arr[:, :, 2][lit] == 0)  # no blue at all
+    assert np.all(arr[:, :, 2][lit] == 0)  # no blue at all: pure hue
+    assert arr[:, :, 0][lit].max() >= 250  # the peak cell is near-saturated
+    assert arr[:, :, 0][lit].min() > 0  # but nothing lit is fully dark
+
+
+def test_contribution_image_darkens_when_both_branches_fade_together(modem):
+    """The feature this test exists for: two branches splitting a
+    latent evenly (magenta hue either way) must still draw differently
+    depending on how *much* either had to offer -- a carrier both
+    branches faded on should go dark, not stay a bright, fully-mixed
+    magenta just because the split was even. Constructed directly
+    rather than via real fading so the two frames being compared are
+    known exactly: one frame's underlying latents pinned to full
+    weight on both branches, everything else (including a second,
+    distinct frame used as the "faded" comparison) at a low baseline,
+    identical between branches throughout -- so the fractional hue is
+    exactly 50/50 red/blue everywhere, and only the brightness differs.
+    """
+    lat = unit_latents("A")
+    x = modem.modulate(lat, "A")
+    r1 = modem.demodulate(x)
+    r2 = modem.demodulate(x)
+
+    baseline = 0.05
+    r1.weights[:] = baseline
+    r2.weights[:] = baseline
+    r1.snr_db = r2.snr_db = 10.0
+
+    f_strong, f_weak = 0, r1.mode.n_frames // 2
+    _, idx_strong = framing.slot_range_for_frame(f_strong)
+    r1.weights[idx_strong] = 1.0
+    r2.weights[idx_strong] = 1.0
+
+    img = contribution_image([r1, r2], scale=1)
+    arr = np.asarray(img).astype(np.int32)
+    col_strong = arr[:, f_strong, :]
+    col_weak = arr[:, f_weak, :]
+
+    # Hue is even in both columns: red and blue nearly equal, since both
+    # branches carry the identical weight everywhere.
+    assert np.allclose(col_strong[:, 0], col_strong[:, 2], atol=2)
+    assert np.allclose(col_weak[:, 0], col_weak[:, 2], atol=2)
+
+    # But the faded column is far dimmer than the full-strength one,
+    # despite the identical 50/50 split -- brightness tracks overall
+    # strength, not just how evenly it was shared.
+    assert col_weak.sum() > 0  # still lit, not erased -- baseline > 0
+    assert col_strong.sum() > 5 * col_weak.sum()
+    # An even 50/50 split caps each channel at ~half brightness; the
+    # peak column's R+B should still sum to essentially full (255).
+    assert (col_strong[:, 0] + col_strong[:, 2]).max() >= 250
 
 
 # --- blind-acquisition branches ------------------------------------------

@@ -21,6 +21,7 @@
 
 #include "check.hpp"
 #include "config.hpp"
+#include "framing/framing.hpp"
 #include "images/types.hpp"
 #include "modem/diversity.hpp"
 #include "modem/modem.hpp"
@@ -256,6 +257,63 @@ void test_contribution_image_shape_and_pure_branch_saturation() {
     check::is_true(!any_blue, "diversity/image: the dead branch contributes no blue");
 }
 
+// The feature this test exists for: two branches splitting a latent
+// evenly (magenta hue either way) must still draw differently depending
+// on how *much* either had to offer -- a frame both branches faded on
+// should go dark, not stay a bright, fully-mixed magenta just because
+// the split was even. One frame's underlying latents are pinned to full
+// weight on both branches (identical between them, so the hue is an
+// even 50/50 split); everything else, including a second, distinct
+// frame used as the "faded" comparison, sits at a low baseline -- also
+// identical between branches, so only brightness differs, never hue.
+void test_contribution_image_darkens_when_both_branches_fade_together() {
+    const config::ModeSpec& mode = mode_a();
+    const int n = mode.n_latents;
+    const double baseline = 0.05;
+    std::vector<double> w1(n, baseline), w2(n, baseline);
+
+    const int f_strong = 0;
+    const framing::FrameSlots fs = framing::slot_range_for_frame(f_strong);
+    for (const std::int64_t idx : fs.indices) {
+        w1[static_cast<std::size_t>(idx)] = 1.0;
+        w2[static_cast<std::size_t>(idx)] = 1.0;
+    }
+
+    const DemodResult r1 = make_result(std::vector<double>(n, 0.0), w1, 10.0, mode);
+    const DemodResult r2 = make_result(std::vector<double>(n, 0.0), w2, 10.0, mode);
+    const images::Picture img =
+        modem::diversity::contribution_image(std::vector<DemodResult>{r1, r2}, 1);
+
+    const int f_weak = mode.n_frames / 2;
+    std::int64_t sum_strong = 0, sum_weak = 0;
+    int max_rb_strong = 0;
+    for (int row = 0; row < config::NC_LATENT; ++row) {
+        const std::size_t px_strong =
+            (static_cast<std::size_t>(row) * static_cast<std::size_t>(img.width) +
+             static_cast<std::size_t>(f_strong)) * 3;
+        const std::size_t px_weak =
+            (static_cast<std::size_t>(row) * static_cast<std::size_t>(img.width) +
+             static_cast<std::size_t>(f_weak)) * 3;
+        const int r_strong = img.rgb[px_strong], b_strong = img.rgb[px_strong + 2];
+        const int r_weak = img.rgb[px_weak], b_weak = img.rgb[px_weak + 2];
+        sum_strong += r_strong + b_strong;
+        sum_weak += r_weak + b_weak;
+        max_rb_strong = std::max(max_rb_strong, r_strong + b_strong);
+        // Hue is even in both columns: both branches carry identical
+        // weight everywhere, so red and blue should nearly match.
+        if (std::abs(r_strong - b_strong) > 2)
+            check::fail("diversity/image-darken", "strong column hue is not even");
+        if (std::abs(r_weak - b_weak) > 2)
+            check::fail("diversity/image-darken", "weak column hue is not even");
+    }
+
+    check::is_true(sum_weak > 0, "diversity/image-darken: faded column still lit (baseline > 0)");
+    check::is_true(sum_strong > 5 * sum_weak,
+                   "diversity/image-darken: full-strength column is far brighter");
+    check::is_true(max_rb_strong >= 250,
+                   "diversity/image-darken: the peak column reaches full brightness");
+}
+
 void test_diversity_improves_snr_under_independent_awgn() {
     const modem::Modem m;
     const std::vector<double> lat = test_latents(mode_a().n_latents, 1);
@@ -441,6 +499,7 @@ int main() {
         test_branch_contribution_single_branch_is_erasure_mask();
         test_contribution_image_needs_two_branches();
         test_contribution_image_shape_and_pure_branch_saturation();
+        test_contribution_image_darkens_when_both_branches_fade_together();
         test_diversity_improves_snr_under_independent_awgn();
         test_combine_blind_single_branch_is_identity();
         test_combine_blind_needs_at_least_one_branch();
