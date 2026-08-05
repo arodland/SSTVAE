@@ -444,6 +444,11 @@ void SettingsDialog::refresh_devices() {
                       input_device_->currentData().toString().toStdString());
     fill_device_combo(output_device_, false,
                       output_device_->currentData().toString().toStdString());
+    // diversity_device_ lives on the Receive tab, but it is an input
+    // device like input_device_ above -- one Refresh button covers
+    // both rather than duplicating it there.
+    fill_device_combo(diversity_device_, true,
+                      diversity_device_->currentData().toString().toStdString());
 }
 
 void SettingsDialog::fill_device_combo(QComboBox* combo, bool input,
@@ -883,6 +888,41 @@ QWidget* SettingsDialog::receive_tab() {
                              page));
     add_gap(form);
 
+    // Diversity reception (docs/diversity-reception.md): a second
+    // receive-only device on an independent antenna, maximal-ratio
+    // combined with the primary input above. Mutually exclusive with
+    // Low-CPU mode at the engine level -- decode_loop_diversity has no
+    // blind fallback either way, so Low-CPU would trade away nothing
+    // that is not already gone -- enforced here by disabling one
+    // checkbox while the other is checked, rather than letting both be
+    // set and silently picking one at connect time.
+    diversity_enabled_ =
+        new QCheckBox(tr("Diversity reception (second antenna)"), page);
+    diversity_enabled_->setChecked(receive.diversity_enabled);
+    form->addRow(diversity_enabled_);
+
+    diversity_device_ = new QComboBox(page);
+    fill_device_combo(diversity_device_, true, receive.diversity_device);
+    form->addRow(tr("Second input"), diversity_device_);
+
+    diversity_debug_image_ = new QCheckBox(
+        tr("Save a branch-contribution heatmap beside each picture"), page);
+    diversity_debug_image_->setChecked(receive.diversity_debug_image);
+    form->addRow(diversity_debug_image_);
+    form->addRow(note(tr("Independent noise and fading, same frequency: the two "
+                         "devices are combined per latent, weighted by each "
+                         "branch's own confidence. The heatmap (red = this "
+                         "input, blue = the second one) shows which receiver "
+                         "supplied each part of the picture -- diagnostic only, "
+                         "written as <name>_diversity.png."),
+                      page));
+
+    connect(diversity_enabled_, &QCheckBox::toggled, this,
+            &SettingsDialog::sync_diversity_enabled);
+    connect(low_cpu_, &QCheckBox::toggled, this,
+            &SettingsDialog::sync_diversity_enabled);
+    sync_diversity_enabled();
+
     filename_template_ =
         new QLineEdit(QString::fromStdString(receive.filename_template), page);
     form->addRow(tr("Filename"), filename_template_);
@@ -935,6 +975,19 @@ QWidget* SettingsDialog::receive_tab() {
     poll_interval_->setValue(receive.poll_interval);
     form->addRow(tr("Decode every"), style::row(page, {poll_interval_}));
     return page;
+}
+
+void SettingsDialog::sync_diversity_enabled() {
+    // Mutually exclusive, each direction: checking one disables the
+    // other's checkbox outright, so the operator cannot set both and
+    // discover only later which one won. Unchecking either re-enables
+    // the other, since this runs off both checkboxes' toggled signal.
+    low_cpu_->setEnabled(!diversity_enabled_->isChecked());
+    diversity_enabled_->setEnabled(!low_cpu_->isChecked());
+
+    const bool on = diversity_enabled_->isChecked();
+    diversity_device_->setEnabled(on);
+    diversity_debug_image_->setEnabled(on);
 }
 
 QWidget* SettingsDialog::transmit_tab() {
@@ -1072,6 +1125,10 @@ void SettingsDialog::apply_to(settings::Config& config) const {
     config.receive.save_size = save_size_->text().trimmed().toStdString();
     config.receive.buffer_seconds = buffer_seconds_->value();
     config.receive.poll_interval = poll_interval_->value();
+    config.receive.diversity_enabled = diversity_enabled_->isChecked();
+    config.receive.diversity_device =
+        diversity_device_->currentData().toString().toStdString();
+    config.receive.diversity_debug_image = diversity_debug_image_->isChecked();
 }
 
 }  // namespace sstvae::gui
