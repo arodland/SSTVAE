@@ -619,6 +619,14 @@ void MainWindow::open_settings() {
                                   ok ? log::Severity::Info : log::Severity::Error,
                                   tr("rig test: %1").arg(message));
             });
+    // The message box the dialog itself shows is dismissed by hand; the
+    // log keeps what it said, same as the rig test above.
+    connect(&dialog, &SettingsDialog::modelDownloadFinished, state_,
+            [this](bool ok, const QString& message) {
+                state_->log_event("app",
+                                  ok ? log::Severity::Info : log::Severity::Error,
+                                  tr("download all models:\n%1").arg(message));
+            });
     if (dialog.exec() != QDialog::Accepted) return;
 
     // The sequence is the window's, not the dialog's: apply, save,

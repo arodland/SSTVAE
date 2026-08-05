@@ -18,6 +18,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSizePolicy>
+#include <QStringList>
 #include <QTabWidget>
 #include <QThread>
 #include <QVBoxLayout>
@@ -139,6 +140,21 @@ QWidget* scrolling(QWidget* page) {
     return area;
 }
 
+// One artifact "Download All" fetches, with the label its report uses.
+struct ModelPart {
+    std::string_view part;
+    const char* label;
+};
+
+const std::vector<ModelPart>& model_parts() {
+    static const std::vector<ModelPart> parts = {
+        {"encoder", "Encoder"},
+        {"decoder", "Decoder"},
+        {checkpoint::GRAD_PART, "Refinement gradient graph"},
+    };
+    return parts;
+}
+
 }  // namespace
 
 SettingsDialog::SettingsDialog(const settings::Config& config, QWidget* parent)
@@ -176,6 +192,8 @@ SettingsDialog::SettingsDialog(const settings::Config& config, QWidget* parent)
 
     connect(this, &SettingsDialog::rigTestFinished, this,
             &SettingsDialog::on_rig_test_finished, Qt::QueuedConnection);
+    connect(this, &SettingsDialog::modelDownloadFinished, this,
+            &SettingsDialog::on_model_download_finished, Qt::QueuedConnection);
 }
 
 SettingsDialog::~SettingsDialog() = default;
@@ -229,6 +247,27 @@ QWidget* SettingsDialog::model_tab() {
     precision_note_ = note(QString(), page);
     form->addRow(QString(), precision_note_);
     sync_precision_enabled();
+
+    // Centred and set apart, like the rig tab's test buttons: everything
+    // else on this tab takes effect on OK, but this one does something --
+    // real network I/O -- the moment it is pressed.
+    download_all_ = new QPushButton(tr("Download All Models"), page);
+    connect(download_all_, &QPushButton::clicked, this,
+            &SettingsDialog::download_all_models);
+    auto* download_row = new QWidget(page);
+    auto* download_layout = new QHBoxLayout(download_row);
+    download_layout->setContentsMargins(0, 14, 0, 0);
+    download_layout->addStretch(1);
+    download_layout->addWidget(download_all_);
+    download_layout->addStretch(1);
+    form->addRow(download_row);
+    form->addRow(note(tr("Fetches the encoder, decoder and refinement gradient "
+                         "graph now, so a complete set is cached before going "
+                         "somewhere with no connection. Otherwise each is only "
+                         "fetched the first time it is actually needed -- the "
+                         "encoder on the first Send, the gradient graph on the "
+                         "first refined transmission."),
+                      page));
     return page;
 }
 
@@ -255,6 +294,62 @@ void SettingsDialog::sync_precision_enabled() {
                            suffix != QLatin1String("pt") &&
                            suffix != QLatin1String("ckpt"));
     precision_note_->setText(text);
+}
+
+void SettingsDialog::set_download_busy(bool busy) {
+    download_all_->setEnabled(!busy);
+    download_all_->setText(busy ? tr("Downloading...") : tr("Download All Models"));
+}
+
+void SettingsDialog::download_all_models() {
+    // On a worker thread, for the same reason as the rig tests: a fetch
+    // of the published model is a real HTTP download, and the GUI
+    // thread must not block on the network any more than it blocks on
+    // the rig. The path/precision are read from the *pending* values in
+    // the dialog, not `config_`, so pointing the picker at a folder and
+    // pressing this button downloads nothing -- resolving those parts is
+    // pure local path arithmetic.
+    set_download_busy(true);
+    const std::string path = model_path_->text().trimmed().toStdString();
+    const std::string precision = precision_->currentData().toString().toStdString();
+
+    std::thread([this, path, precision] {
+        QStringList lines;
+        bool ok = true;
+        for (const ModelPart& part : model_parts()) {
+            const bool was_cached =
+                path.empty() &&
+                checkpoint::find_cached(checkpoint::onnx_filename(part.part, precision))
+                    .has_value();
+            try {
+                checkpoint::resolve_onnx(part.part, path, precision);
+                if (path.empty()) {
+                    lines << tr("%1: %2").arg(
+                        QString::fromUtf8(part.label),
+                        was_cached ? tr("already cached") : tr("downloaded"));
+                } else {
+                    lines << tr("%1: ready").arg(QString::fromUtf8(part.label));
+                }
+            } catch (const std::exception& e) {
+                ok = false;
+                lines << tr("%1: FAILED\n%2").arg(QString::fromUtf8(part.label),
+                                                   QString::fromUtf8(e.what()));
+            }
+        }
+        emit modelDownloadFinished(ok, lines.join(QStringLiteral("\n\n")));
+    }).detach();
+}
+
+void SettingsDialog::on_model_download_finished(bool ok, const QString& message) {
+    set_download_busy(false);
+    if (ok) {
+        QMessageBox::information(
+            this, tr("Models"), tr("All model artifacts are ready.\n\n%1").arg(message));
+    } else {
+        QMessageBox::warning(
+            this, tr("Models"),
+            tr("Some artifacts could not be fetched.\n\n%1").arg(message));
+    }
 }
 
 // --- audio ------------------------------------------------------------------

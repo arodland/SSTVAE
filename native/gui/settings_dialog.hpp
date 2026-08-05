@@ -51,12 +51,18 @@ private slots:
     void test_cat();
     void test_ptt();
     void on_rig_test_finished(bool ok, const QString& message);
+    void download_all_models();
+    void on_model_download_finished(bool ok, const QString& message);
 
 signals:
     // Emitted from the worker thread the rig test runs on; queued, so
     // the message box opens on the GUI thread. Nothing on the GUI
     // thread may block on the rig, not even for a test button.
     void rigTestFinished(bool ok, const QString& message);
+    // Emitted from the worker thread that fetches the model artifacts;
+    // queued for the same reason -- a download is real network I/O, and
+    // the GUI thread must not wait on it.
+    void modelDownloadFinished(bool ok, const QString& message);
 
 private:
     QWidget* model_tab();
@@ -72,6 +78,7 @@ private:
     settings::RigConfig pending_rig() const;
     int rig_model_number() const;
     void set_rig_test_busy(bool busy);
+    void set_download_busy(bool busy);
 
     settings::Config config_;
 
@@ -79,6 +86,7 @@ private:
     QLineEdit* model_path_ = nullptr;
     QComboBox* precision_ = nullptr;
     QLabel* precision_note_ = nullptr;
+    QPushButton* download_all_ = nullptr;
 
     // Audio
     QComboBox* input_device_ = nullptr;
