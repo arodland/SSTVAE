@@ -38,6 +38,7 @@ from PIL import Image
 from ..codec import pad_to_full, reconstruct
 from ..config import FS, FRAME_SAMPLES, HEADER_SAMPLES, MODES, PREAMBLE_SAMPLES
 from ..modem import Modem, SyncError
+from ..modem.diversity import combine_demod_results, contribution_image
 from ..modem.dsp import to_baseband
 from ..modem.sync import acquire as sync_acquire
 from .ringbuffer import RingBuffer
@@ -47,8 +48,10 @@ __all__ = [
     "SharedState",
     "Reception",
     "SaveToDirSink",
+    "SaveDebugImageToDirSink",
     "decode_loop",
     "decode_loop_low_cpu",
+    "decode_loop_diversity",
     "RingBuffer",
 ]
 
@@ -145,6 +148,28 @@ class SaveToDirSink:
                 f"saved {out_path} (mode={rec.mode_name or 'unknown, blind sync'}, "
                 f"callsign={rec.callsign or '(none)'}{fmt_snr(rec.snr_db)})"
             )
+        return str(out_path)
+
+
+class SaveDebugImageToDirSink:
+    """Optional companion to a picture sink, for `decode_loop_diversity`'s
+    per-latent branch-contribution image (`sstvae.modem.diversity.
+    contribution_image`) -- which branch supplied each transmitted
+    latent, red vs blue. Not a `Reception` sink itself (there is no
+    picture here, just a diagnostic), so it takes the image and the
+    already-saved picture's path directly and writes alongside it."""
+
+    def __init__(self, verbose: bool = True):
+        self.verbose = verbose
+
+    def on_contribution_image(self, image: Image.Image, saved_path: str | None) -> str | None:
+        if saved_path is None:
+            return None
+        p = Path(saved_path)
+        out_path = p.with_name(p.stem + "_diversity" + p.suffix)
+        image.save(out_path)
+        if self.verbose:
+            print(f"saved {out_path} (diversity branch-contribution map)")
         return str(out_path)
 
 
@@ -531,3 +556,142 @@ def decode_loop_low_cpu(ring: RingBuffer, model, state: SharedState, config: RxC
             state.progress_frac = 0.0
             state.callsign = ""
             state.snr_db = float("nan")
+
+
+def decode_loop_diversity(rings, model, state: SharedState, config: RxConfig,
+                          stop_event: threading.Event, sink=None, debug_sink=None):
+    """Two-branch counterpart of `decode_loop`: independently finds and
+    demodulates the same transmission from two `RingBuffer`s -- different
+    antennas/audio devices, independent noise and fading, no assumption
+    of phase lock between them -- then maximal-ratio combines the two
+    branches' `DemodResult`s (`sstvae.modem.diversity.
+    combine_demod_results`) before reconstructing. `rings` is a
+    2-element sequence; the two are assumed to start filling at the same
+    wall-clock moment (the caller opens both input streams together), so
+    a reception position recorded in one ring's `total_written`
+    coordinate is directly comparable to the other's without any shared
+    sample timebase -- `SAME_RECEPTION_EPSILON_S` covers device startup
+    jitter and the "within a frame time" independent-clock drift this is
+    designed for (see docs/diversity-reception.md).
+
+    Kept as its own function rather than folded into `decode_loop`:
+    that function's state machine is explicitly load-bearing (CLAUDE.md)
+    for the single-device slow tests, and this keeps it byte-for-byte
+    unchanged for that case at the cost of some duplication here.
+
+    Deliberately preamble-path only -- no blind fallback, no
+    retrospective mid-stream decode, unlike `decode_loop`. Combining two
+    branches' *blind* results needs matching them by the beacon's
+    absolute frame counter rather than by preamble position and
+    combining a different result shape (`BlindDemodResult` has no
+    `.mode`), which is real additional work this doesn't attempt --
+    diversity reception here means acquiring on both branches, same as
+    `decode_loop_low_cpu` forgoes blind sync for a different reason (CPU
+    cost). If only one branch locks a transmission (the other never
+    acquires, or acquires a peak more than `SAME_RECEPTION_EPSILON_S`
+    away -- a spurious lock, or genuinely a different transmission),
+    that branch's result is used alone: same erasure/weight semantics as
+    `combine_demod_results` given a single branch.
+
+    `debug_sink`, if given (a `SaveDebugImageToDirSink`), is handed
+    `sstvae.modem.diversity.contribution_image([branch_a, branch_b])`
+    for every finished reception where both branches actually
+    contributed -- skipped when only one branch locked, since there is
+    nothing to compare.
+    """
+    if len(rings) != 2:
+        raise ValueError("decode_loop_diversity needs exactly two ring buffers")
+    if sink is None:
+        sink = SaveToDirSink(config.out_dir, config.size)
+    modem = Modem()
+    epsilon_samples = SAME_RECEPTION_EPSILON_S * FS
+    finished_starts = deque(maxlen=50)
+
+    while not stop_event.is_set():
+        stop_event.wait(config.poll_interval)
+        if stop_event.is_set():
+            break
+
+        snaps = [ring.snapshot() for ring in rings]
+        seconds_captured = min(total for _, total in snaps) / FS
+        with state.lock:
+            state.seconds_captured = seconds_captured
+        if any(len(samples) < MIN_SECONDS_BEFORE_ATTEMPT * FS for samples, _ in snaps):
+            continue
+
+        found = []  # (DemodResult, reception_start) per branch that locked
+        for samples, total in snaps:
+            buf_start = total - len(samples)
+            r, start = _find_new_reception(
+                modem, samples, to_baseband(samples), buf_start,
+                finished_starts, epsilon_samples,
+            )
+            if r is not None:
+                found.append((r, start))
+
+        r = reception_start = None
+        branch_results = []
+        if len(found) == 2 and abs(found[0][1] - found[1][1]) <= epsilon_samples:
+            branch_results = [found[0][0], found[1][0]]
+            r = combine_demod_results(branch_results)
+            reception_start = found[0][1]
+        elif found:
+            # Only one branch locked, or the two locks are further apart
+            # than a same-transmission match tolerates (a spurious hit on
+            # one branch, most likely). Use whichever branch is furthest
+            # along, same as an operator picking the stronger antenna.
+            r, reception_start = max(found, key=lambda x: x[0].frames_received)
+            branch_results = [r]
+
+        if r is None:
+            with state.lock:
+                if state.status != "receiving":
+                    state.status = "listening"
+            continue
+
+        latents_full = pad_to_full(r.latents)
+        weights_full = pad_to_full(r.weights)
+        img = reconstruct(model, latents_full, weights_full)
+        with state.lock:
+            state.status = "receiving"
+            state.mode_name = r.mode.name
+            state.frames_received = r.frames_received
+            state.n_frames_expected = r.mode.n_frames
+            state.progress_frac = min(r.frames_received / r.mode.n_frames, 1.0)
+            state.callsign = r.callsign
+            state.snr_db = r.snr_db
+            state.image = img
+
+        if r.frames_received >= r.mode.n_frames:
+            saved_path = sink.on_reception(
+                Reception(
+                    image=img,
+                    mode_name=r.mode.name,
+                    callsign=r.callsign,
+                    snr_db=r.snr_db,
+                    frames_received=r.frames_received,
+                    n_frames_expected=r.mode.n_frames,
+                )
+            )
+            if debug_sink is not None and len(branch_results) == 2:
+                debug_sink.on_contribution_image(
+                    contribution_image(branch_results), saved_path
+                )
+            finished_starts.append(reception_start)
+            with state.lock:
+                state.status = "done"
+                state.saved_path = saved_path
+
+            if config.once:
+                stop_event.set()
+                break
+
+            stop_event.wait(2.0)
+            with state.lock:
+                state.status = "listening"
+                state.mode_name = None
+                state.frames_received = None
+                state.n_frames_expected = None
+                state.progress_frac = 0.0
+                state.callsign = ""
+                state.snr_db = float("nan")

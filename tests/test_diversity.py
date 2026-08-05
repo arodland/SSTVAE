@@ -2,8 +2,14 @@ import numpy as np
 import pytest
 
 from sstvae import hfchannel
+from sstvae.config import LATENT_CHANNELS
 from sstvae.modem import Modem, SyncError
-from sstvae.modem.diversity import combine_demod_results, demodulate_diversity
+from sstvae.modem.diversity import (
+    branch_contribution,
+    combine_demod_results,
+    contribution_image,
+    demodulate_diversity,
+)
 
 from conftest import latent_snr_db, unit_latents
 
@@ -134,3 +140,73 @@ def test_demodulate_diversity_raises_if_every_branch_fails(modem):
     dead = np.random.default_rng(0).normal(scale=0.05, size=48000)
     with pytest.raises(SyncError):
         demodulate_diversity(modem, [dead, dead.copy()])
+
+
+def test_branch_contribution_columns_sum_to_one_or_zero(modem):
+    lat = unit_latents("A")
+    x = modem.modulate(lat, "A")
+    r1 = modem.demodulate(hfchannel.apply_channel(x, snr_db=8.0, seed=1))
+    r2 = modem.demodulate(hfchannel.apply_channel(x, snr_db=8.0, seed=2))
+    frac = branch_contribution([r1, r2])
+    assert frac.shape == (2, len(r1.latents))
+    totals = frac.sum(axis=0)
+    # Every column is either fully accounted for (weight somewhere) or
+    # fully erased on both branches (0) -- never a fraction that would
+    # imply a third, uncounted source.
+    assert np.all((np.isclose(totals, 1.0)) | (np.isclose(totals, 0.0)))
+
+
+def test_branch_contribution_single_branch_is_its_own_erasure_mask(modem):
+    lat = unit_latents("A")
+    r = modem.demodulate(modem.modulate(lat, "A"))
+    frac = branch_contribution([r])
+    np.testing.assert_array_equal(frac[0], (r.weights > 0).astype(float))
+
+
+def test_branch_contribution_favors_the_stronger_branch(modem):
+    """A branch that's essentially noise everywhere should get ~0 credit
+    against a clean branch, latent by latent."""
+    lat = unit_latents("A")
+    x = modem.modulate(lat, "A")
+    clean = modem.demodulate(x)
+    noisy = modem.demodulate(hfchannel.apply_channel(x, snr_db=-5.0, seed=7))
+    frac = branch_contribution([clean, noisy])
+    assert frac[0].mean() > frac[1].mean()
+
+
+def test_contribution_image_shape_and_needs_two_branches(modem):
+    lat = unit_latents("A")
+    x = modem.modulate(lat, "A")
+    r1 = modem.demodulate(hfchannel.apply_channel(x, snr_db=8.0, seed=1))
+    r2 = modem.demodulate(hfchannel.apply_channel(x, snr_db=8.0, seed=2))
+
+    with pytest.raises(ValueError):
+        contribution_image([r1])
+
+    img = contribution_image([r1, r2], scale=1)
+    assert img.size == (r1.mode.n_frames, LATENT_CHANNELS)
+    assert img.mode == "RGB"
+    arr = np.asarray(img)
+    assert arr[:, :, 1].max() == 0  # green channel unused
+    # Some cells got no latent that frame or were erased on both
+    # branches -- black -- and some cells did get data; a real
+    # transmission should show both, not an all-black or all-lit image.
+    lit = arr.sum(axis=-1) > 0
+    assert 0.0 < lit.mean() < 1.0
+
+
+def test_contribution_image_pure_branch_is_saturated_in_its_color(modem):
+    """One branch dead, the other clean: every covered cell should be
+    saturated in that branch's color (no half-mixed magenta)."""
+    lat = unit_latents("A")
+    x = modem.modulate(lat, "A")
+    good = modem.demodulate(x)
+    dead = modem.demodulate(x)
+    dead.weights[:] = 0.0
+    dead.snr_db = float("-inf")
+
+    img = contribution_image([good, dead], scale=1)
+    arr = np.asarray(img).astype(np.int32)
+    lit = arr.sum(axis=-1) > 0
+    assert np.all(arr[:, :, 0][lit] >= 250)  # saturated red
+    assert np.all(arr[:, :, 2][lit] == 0)  # no blue at all
