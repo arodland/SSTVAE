@@ -351,15 +351,27 @@ int main(int argc, char** argv) {
                 source.rgb[i + 2] = static_cast<unsigned char>(y * 255 / SH);
             }
         }
-        sstvae::gui::CropDialog dialog(source, sstvae::images::Framing{});
-        dialog.resize(width > 0 ? width : 640, height > 0 ? height : 560);
-        dialog.show();
-        app.processEvents();
-        const QString path = QStringLiteral("%1/crop.png").arg(out);
-        dialog.grab().save(path);
-        std::printf("%s (min %dx%d)\n", path.toLocal8Bit().constData(),
-                    dialog.minimumSizeHint().width(),
-                    dialog.minimumSizeHint().height());
+        // Both ends of the zoom: the crop the dialog was written for,
+        // and the fully zoomed-out framing, where the window overhangs
+        // the picture and the overhang is the black that goes on the
+        // air. The second is the one worth eyes -- padding drawn as the
+        // dialog's background instead of black would look plausible and
+        // be a lie about what is transmitted.
+        sstvae::images::Framing framings[2];
+        framings[1].zoom = sstvae::images::min_zoom(SW, SH);
+        const char* names[2] = {"crop", "crop-zoomed-out"};
+        for (int i = 0; i < 2; ++i) {
+            sstvae::gui::CropDialog dialog(source, framings[i]);
+            dialog.resize(width > 0 ? width : 640, height > 0 ? height : 560);
+            dialog.show();
+            app.processEvents();
+            const QString path = QStringLiteral("%1/%2.png")
+                                     .arg(out, QLatin1String(names[i]));
+            dialog.grab().save(path);
+            std::printf("%s (min %dx%d)\n", path.toLocal8Bit().constData(),
+                        dialog.minimumSizeHint().width(),
+                        dialog.minimumSizeHint().height());
+        }
     }
 
     // The observability widgets, with representative content: the pane

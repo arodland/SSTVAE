@@ -755,7 +755,12 @@ void TransmitPanel::apply_framing() {
     caption += tr("\n%1x%2").arg(source_->width).arg(source_->height);
     const bool four_by_three =
         source_->width * images::IMG_H == source_->height * images::IMG_W;
-    if (!four_by_three || framing_.zoom > 1.0) {
+    // Zoomed out, nothing is cropped -- the canvas is padded instead,
+    // and saying "cropped" there would be exactly as misleading as the
+    // bare filename this replaced.
+    if (framing_.zoom < 1.0) {
+        caption += tr(", padded to 4:3");
+    } else if (!four_by_three || framing_.zoom > 1.0) {
         caption += tr(", cropped to 4:3");
     }
     image_label_->setText(caption);

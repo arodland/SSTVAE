@@ -34,6 +34,15 @@ Picture resize(const Picture& img, int width, int height) {
 
 Picture fit(const Picture& img) { return fit(img, Framing{}); }
 
+double min_zoom(int width, int height) {
+    if (width <= 0 || height <= 0) return 1.0;
+    const double src = static_cast<double>(width) / height;
+    const double target = static_cast<double>(IMG_W) / IMG_H;
+    // contain / cover, which is the ratio of the two aspects whichever
+    // way round they are.
+    return std::min(src, target) / std::max(src, target);
+}
+
 Picture fit(const Picture& img, const Framing& framing) {
     // The identity short-circuit only applies to the default framing:
     // an operator who has zoomed or panned an already-4:3 picture means
@@ -45,15 +54,23 @@ Picture fit(const Picture& img, const Framing& framing) {
         throw std::runtime_error("cannot fit an empty picture");
     }
 
-    // Scale to *cover* the target, then crop -- the same shape of
-    // operation as images.py, though not the same filter. Zoom below 1
-    // would expose edges with no picture behind them.
-    const double zoom = std::max(1.0, framing.zoom);
+    // Scale relative to *cover* the target, then crop -- the same shape
+    // of operation as images.py, though not the same filter. Below
+    // `min_zoom` there is nothing left to reveal, only more black.
+    const double zoom =
+        std::max(min_zoom(img.width, img.height), framing.zoom);
     const double scale = std::max(static_cast<double>(IMG_W) / img.width,
                                   static_cast<double>(IMG_H) / img.height) *
                          zoom;
-    const int sw = std::max(IMG_W, static_cast<int>(std::lround(img.width * scale)));
-    const int sh = std::max(IMG_H, static_cast<int>(std::lround(img.height * scale)));
+    // At zoom 1 and above the scaled picture covers the target, and the
+    // floor of IMG_W/IMG_H is the old guard against rounding a pixel
+    // short of it. Below 1 an axis is *meant* to come up short, so the
+    // guard would be exactly the bug -- it would silently cancel the
+    // padding the operator asked for.
+    const int floor_w = zoom >= 1.0 ? IMG_W : 1;
+    const int floor_h = zoom >= 1.0 ? IMG_H : 1;
+    const int sw = std::max(floor_w, static_cast<int>(std::lround(img.width * scale)));
+    const int sh = std::max(floor_h, static_cast<int>(std::lround(img.height * scale)));
 
     const Picture scaled = resize(img, sw, sh);
 
@@ -66,20 +83,34 @@ Picture fit(const Picture& img, const Framing& framing) {
     // pins this against the old formula written out; the Python parity
     // suite cannot, since it deliberately skips `fit_image` wherever
     // resampling is involved (PIL LANCZOS vs stb).
+    //
+    // The two clamp bounds are `0` and `scaled - target` in whichever
+    // order they come: when the scaled picture is the larger the window
+    // must stay inside it (the original rule), and when it is the
+    // smaller the same expression keeps the *picture* inside the
+    // window, so the padding never lands all on one side with the
+    // photograph half off the canvas.
     const auto offset = [](double center, int scaled_size, int target) {
         const double raw = center * scaled_size - target / 2.0;
-        const int limit = scaled_size - target;
-        return std::clamp(static_cast<int>(std::floor(raw)), 0, limit);
+        const int slack = scaled_size - target;
+        return std::clamp(static_cast<int>(std::floor(raw)), std::min(0, slack),
+                          std::max(0, slack));
     };
     const int left = offset(framing.center_x, sw, IMG_W);
     const int top = offset(framing.center_y, sh, IMG_H);
 
+    // Zero-initialized, which is the black the uncovered part is padded
+    // with -- so the copy below only has to skip what it cannot fill.
     Picture out(IMG_W, IMG_H);
+    const int x0 = std::max(0, -left);            // first covered column
+    const int x1 = std::min(IMG_W, sw - left);    // one past the last
     for (int y = 0; y < IMG_H; ++y) {
+        const int sy = y + top;
+        if (sy < 0 || sy >= sh || x1 <= x0) continue;
         const std::uint8_t* src =
-            scaled.rgb.data() + (static_cast<std::size_t>(y + top) * sw + left) * 3;
-        std::copy(src, src + static_cast<std::size_t>(IMG_W) * 3,
-                  out.rgb.begin() + static_cast<std::size_t>(y) * IMG_W * 3);
+            scaled.rgb.data() + (static_cast<std::size_t>(sy) * sw + (x0 + left)) * 3;
+        std::copy(src, src + static_cast<std::size_t>(x1 - x0) * 3,
+                  out.rgb.begin() + (static_cast<std::size_t>(y) * IMG_W + x0) * 3);
     }
     return out;
 }
