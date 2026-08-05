@@ -16,7 +16,7 @@ import pytest
 from PIL import Image
 
 from sstvae import hfchannel
-from sstvae.config import FS, HEADER_SAMPLES, LEADIN_SAMPLES, MODES, PREAMBLE_SAMPLES
+from sstvae.config import FS, HEADER_SAMPLES, LEADIN_SAMPLES, MODES, NC_LATENT, PREAMBLE_SAMPLES
 from sstvae.modem import Modem
 from sstvae.rx import (
     RingBuffer,
@@ -160,7 +160,7 @@ def test_diversity_writes_debug_contribution_image_when_both_branches_lock(tmp_p
     debug_files = list(Path(tmp_path).glob("*_diversity.png"))
     assert len(debug_files) == 1, debug_files
     img = Image.open(debug_files[0])
-    assert img.size[1] % 132 == 0  # LATENT_CHANNELS rows, at whatever scale
+    assert img.size[1] % NC_LATENT == 0  # carrier rows, at whatever scale
 
 
 @pytest.mark.slow
