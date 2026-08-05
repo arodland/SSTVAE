@@ -1,6 +1,7 @@
 #include "rx/engine.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -11,12 +12,14 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "dsp/dsp.hpp"
 #include "images/images.hpp"
 #include "latents/latents.hpp"
+#include "modem/diversity.hpp"
 #include "modem/modem.hpp"
 #include "sync/sync.hpp"
 
@@ -243,6 +246,24 @@ Sink save_to_dir_sink(std::string out_dir, std::optional<std::pair<int, int>> si
             std::fflush(stdout);
         }
         return path;
+    };
+}
+
+DebugImageSink save_debug_image_to_dir_sink(bool verbose) {
+    return [verbose](const images::Picture& img,
+                     const std::optional<std::string>& saved_path)
+               -> std::optional<std::string> {
+        if (!saved_path) return std::nullopt;
+        const std::filesystem::path p(*saved_path);
+        const std::filesystem::path out_path =
+            p.parent_path() / (p.stem().string() + "_diversity" + p.extension().string());
+        images::save_png(img, out_path.string());
+        if (verbose) {
+            std::printf("saved %s (diversity branch-contribution map)\n",
+                        out_path.string().c_str());
+            std::fflush(stdout);
+        }
+        return out_path.string();
     };
 }
 
@@ -565,6 +586,123 @@ void decode_loop_low_cpu(RingBuffer& ring, const Decoder& decode, SharedState& s
             s.progress_frac =
                 std::min(static_cast<double>(r.frames_received) / r.mode.n_frames, 1.0);
             s.snr_db = r.snr_db;
+            s.saved_path = saved_path;
+        });
+
+        if (config.once) {
+            stop.set();
+            break;
+        }
+
+        stop.wait(2.0);
+        reset_to_listening(state);
+    }
+}
+
+// --- the diversity loop ------------------------------------------------------
+
+void decode_loop_diversity(std::span<RingBuffer* const> rings, const Decoder& decode,
+                           SharedState& state, const RxConfig& config,
+                           StopFlag& stop, const Sink& sink,
+                           const DebugImageSink* debug_sink) {
+    if (rings.size() != 2)
+        throw std::invalid_argument("decode_loop_diversity needs exactly two ring buffers");
+    const modem::Modem modem;
+    const auto epsilon = static_cast<std::int64_t>(SAME_RECEPTION_EPSILON_S * FS);
+    std::deque<std::int64_t> finished_starts;
+
+    while (!stop.is_set()) {
+        if (stop.wait(config.poll_interval)) break;
+
+        std::array<std::uint64_t, 2> totals{};
+        std::array<std::vector<double>, 2> samples;
+        for (int i = 0; i < 2; ++i) samples[i] = rings[i]->snapshot(&totals[i]);
+        const double seconds_captured =
+            static_cast<double>(std::min(totals[0], totals[1])) / FS;
+        state.update([&](Progress& s) { s.seconds_captured = seconds_captured; });
+        if (samples[0].size() < MIN_SECONDS_BEFORE_ATTEMPT * FS ||
+            samples[1].size() < MIN_SECONDS_BEFORE_ATTEMPT * FS)
+            continue;
+        state.update([](Progress& s) { ++s.polls; });
+
+        std::vector<FoundReception> found;
+        for (int i = 0; i < 2; ++i) {
+            const auto buf_start = static_cast<std::int64_t>(totals[i]) -
+                                   static_cast<std::int64_t>(samples[i].size());
+            try {
+                const std::vector<std::complex<double>> z = dsp::to_baseband(samples[i]);
+                if (auto f = find_new_reception(modem, samples[i], z, buf_start,
+                                                finished_starts, epsilon)) {
+                    found.push_back(std::move(*f));
+                }
+            } catch (const std::exception&) {
+                // One bad poll on one branch must not end the session.
+            }
+        }
+
+        std::optional<modem::DemodResult> r;
+        std::optional<std::int64_t> reception_start;
+        std::vector<modem::DemodResult> branch_results;
+        if (found.size() == 2 && std::llabs(found[0].start - found[1].start) <= epsilon) {
+            branch_results = {found[0].result, found[1].result};
+            r = modem::diversity::combine_demod_results(branch_results);
+            reception_start = found[0].start;
+        } else if (!found.empty()) {
+            // Only one branch locked, or the two locks are further apart
+            // than a same-transmission match tolerates (most likely a
+            // spurious hit on one branch). Use whichever branch is
+            // furthest along, same as an operator picking the stronger
+            // antenna.
+            auto& best = *std::max_element(
+                found.begin(), found.end(), [](const FoundReception& a, const FoundReception& b) {
+                    return a.result.frames_received < b.result.frames_received;
+                });
+            r = best.result;
+            reception_start = best.start;
+            branch_results = {best.result};
+        }
+
+        if (!r) {
+            state.update([](Progress& s) {
+                if (s.status != Status::Receiving) s.status = Status::Listening;
+            });
+            continue;
+        }
+
+        const std::vector<double> latents_full = latents::pad_to_full(r->latents);
+        const std::vector<double> weights_full = latents::pad_to_full(r->weights);
+        auto img = std::make_shared<const images::Picture>(decode(latents_full, weights_full));
+        const std::string mode_name(r->mode.name);
+        state.update([&](Progress& s) {
+            s.status = Status::Receiving;
+            s.mode_name = mode_name;
+            s.frames_received = r->frames_received;
+            s.n_frames_expected = r->mode.n_frames;
+            s.progress_frac =
+                std::min(static_cast<double>(r->frames_received) / r->mode.n_frames, 1.0);
+            s.callsign = r->callsign;
+            s.snr_db = r->snr_db;
+            s.image = img;
+        });
+
+        if (r->frames_received < r->mode.n_frames) continue;
+
+        Reception rec;
+        rec.image = *img;
+        rec.mode_name = mode_name;
+        rec.callsign = r->callsign;
+        rec.snr_db = r->snr_db;
+        rec.frames_received = r->frames_received;
+        rec.n_frames_expected = r->mode.n_frames;
+        const std::optional<std::string> saved_path = sink(rec);
+
+        if (debug_sink && branch_results.size() == 2) {
+            (*debug_sink)(modem::diversity::contribution_image(branch_results), saved_path);
+        }
+
+        if (reception_start) remember_finished(finished_starts, *reception_start);
+        state.update([&](Progress& s) {
+            s.status = Status::Done;
             s.saved_path = saved_path;
         });
 

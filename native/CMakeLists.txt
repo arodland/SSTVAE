@@ -98,6 +98,7 @@ add_library(sstvae_core STATIC
   core/framing/interleaver_table.cpp
   core/images/images.cpp
   core/modem/modem.cpp
+  core/modem/diversity.cpp
   core/latents/latents.cpp
   core/log/log.cpp
   core/util/event.cpp
