@@ -103,6 +103,7 @@ NON_DEFAULT = {
         "mode": "C",
         "level": 0.72,
         "optimize": True,
+        "cw_id": True,
     },
     "ui": {
         # Neither is a default: the default layout is "auto" and the

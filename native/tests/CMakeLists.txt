@@ -26,6 +26,11 @@ target_link_libraries(test_ringbuffer PRIVATE sstvae_core)
 target_include_directories(test_ringbuffer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME ringbuffer COMMAND test_ringbuffer)
 
+add_executable(test_morse test_morse.cpp)
+target_link_libraries(test_morse PRIVATE sstvae_core)
+target_include_directories(test_morse PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME morse COMMAND test_morse)
+
 add_executable(test_framing test_framing.cpp)
 target_link_libraries(test_framing PRIVATE sstvae_core)
 target_include_directories(test_framing PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

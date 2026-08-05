@@ -949,6 +949,7 @@ void TransmitPanel::begin_transmit(const images::Picture& picture,
     tx_config.level = config.transmit.level;
     tx_config.ptt_lead_s = config.rig.ptt_lead_s;
     tx_config.ptt_tail_s = config.rig.ptt_tail_s;
+    tx_config.cw_id = config.transmit.cw_id;
 
     engine_ = std::make_unique<tx::TxEngine>(
         app_->ptt(),
