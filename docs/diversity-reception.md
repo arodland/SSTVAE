@@ -1,4 +1,4 @@
-# Diversity reception (experiment, 2026-08-05)
+# Diversity reception (2026-08-05)
 
 **Hypothesis.** Two receivers on independent antennas, tuned to the
 same frequency and no more than a frame apart in time, each demodulate
@@ -9,14 +9,30 @@ antenna alone, using nothing beyond what the modem already computes:
 derived from the pilots (`DemodResult.weights`) alongside a whole-burst
 SNR estimate (`DemodResult.snr_db`).
 
-**Result.** Positive. `sstvae/modem/diversity.py` combines two
-independently-demodulated branches by maximal-ratio combining (MRC) in
-the latent domain; measured gain (mode A, `scripts/diversity_sweep.py`,
-20 trials/point) is **+2.9 dB at 6 dB single-branch AWGN, rising to +5.8
-dB at -2 dB**, and **+5.1 to +5.9 dB under independent `mpp` fading at
-3-10 dB**. This is a modem-level, offline experiment: no change to
-`sstvae/rx/engine.py`, the native app, or the on-air format. See
-"What's not done" below.
+**Result.** Positive, and implemented end to end. `sstvae/modem/
+diversity.py` combines two independently-demodulated branches by
+maximal-ratio combining (MRC) in the latent domain; measured gain (mode
+A, `scripts/diversity_sweep.py`, 20 trials/point) is **+2.9 dB at 6 dB
+single-branch AWGN, rising to +5.8 dB at -2 dB**, and **+5.1 to +5.9 dB
+under independent `mpp` fading at 3-10 dB** -- see "Measured gain"
+below, including a 12-trial/point run confirming the same numbers hold
+on modes B and C. No on-air format change: this is a receive-side
+combine over ordinary `DemodResult`s, so a diversity-capable station
+still transmits and is heard exactly as before.
+
+**Wired in, on both sides of the port.** `sstvae/rx/engine.py`'s
+`decode_loop_diversity` and `native/core/rx/engine.cpp`'s C++
+counterpart run the two-branch state machine live (`sstvae_listen.py
+--device2`, and the native app's Receive settings tab: "Diversity
+reception (second antenna)" plus a second input-device picker). Both
+also support an optional debug visualization,
+`contribution_image`/`modem::diversity::contribution_image` --
+`--diversity-debug-image` on the CLI, a checkbox in the native
+settings dialog -- a red/blue heatmap (time x latent channel) of which
+branch supplied each transmitted latent, written as
+`<name>_diversity.png` beside the picture. See "What's not done" for
+what this integration deliberately leaves out (blind-fallback
+diversity, raw-domain combining).
 
 ## Why combine after `demodulate`, not inside it
 
@@ -184,10 +200,33 @@ for a larger, fuller AWGN/fading grid.
   the frame loop in `modem.py`'s `demodulate()`, which is meaningfully
   more invasive for a gain this experiment didn't need in order to show
   the effect is real and worth the complexity.
-- **No live integration.** `sstvae/rx/engine.py`, the native `core/rx/`
-  port, and the GUI all assume one audio device. Wiring in a second
-  capture stream, aligning two `RingBuffer`s, and surfacing per-branch
-  SNR in the UI is unstarted and not scoped here.
+- **`decode_loop_diversity` (both languages) is preamble-path only, no
+  blind fallback.** It inherits the "both branches must acquire
+  independently" limitation above, and additionally gives up
+  `decode_loop`'s retrospective mid-stream decode and progress-stall
+  detection for a reception that never gets a full header lock on
+  either branch. Combining two branches' *blind* results needs matching
+  them by the beacon's absolute frame counter rather than by preamble
+  position, and a different result shape
+  (`BlindDemodResult`/`modem::BlindDemodResult` has no `.mode`) -- real
+  additional work this does not attempt. Kept as a separate function
+  from `decode_loop` on both sides rather than folded in, since that
+  function's state machine is the reference's load-bearing one
+  (CLAUDE.md); the two-ring case is therefore some duplication rather
+  than a generalization.
+- **The waterfall only ever follows the primary branch.** The native
+  app's receive panel does not show a second spectrum strip for the
+  diversity device, and there is no equivalent live view on the CLI
+  side either.
 - **No test with genuinely unequal branches** (e.g. one antenna 10 dB
   worse than the other) or with more than two branches -- the formula
   and the tests both generalize to `N > 2`, but it's unmeasured.
+- **The GUI side of the native port (`native/gui/rx_panel.{hpp,cpp}`,
+  `native/gui/settings_dialog.{hpp,cpp}`) was written against the
+  existing Qt patterns but could not be built or screenshot-tested in
+  the environment that wrote it** (no Qt6 installed) -- unlike the
+  `core/` changes, which have real ctest coverage
+  (`native/tests/test_diversity.cpp`, `test_rx_engine.cpp`'s
+  `DiversityHarness`) and were verified against a from-scratch offline
+  build. Build and exercise the GUI on a machine with Qt before
+  trusting it.

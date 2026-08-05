@@ -47,6 +47,7 @@ public:
 private slots:
     void sync_precision_enabled();
     void refresh_devices();
+    void sync_diversity_enabled();
     void sync_ptt_enabled();
     // Show what the current filename template would actually produce.
     void sync_filename_preview();
@@ -141,6 +142,12 @@ private:
     QLineEdit* save_size_ = nullptr;
     QDoubleSpinBox* buffer_seconds_ = nullptr;
     QDoubleSpinBox* poll_interval_ = nullptr;
+
+    // Diversity reception (docs/diversity-reception.md), also on the
+    // Receive tab
+    QCheckBox* diversity_enabled_ = nullptr;
+    QComboBox* diversity_device_ = nullptr;
+    QCheckBox* diversity_debug_image_ = nullptr;
 };
 
 }  // namespace sstvae::gui
