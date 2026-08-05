@@ -98,6 +98,9 @@ NON_DEFAULT = {
         "save_size": "320x240",
         "save_audio": True,
         "filename_template": "{callsign}_{date}",
+        "diversity_enabled": True,
+        "diversity_device": "USB Audio CODEC 2",
+        "diversity_debug_image": True,
     },
     "transmit": {
         "mode": "C",

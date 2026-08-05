@@ -154,6 +154,29 @@ struct ReceiveConfig {
     // Fields: date, time, freq, callsign, mode. Missing ones drop out
     // of the name rather than leaving an empty gap.
     std::string filename_template = "{date}_{time}Z_{freq}_{callsign}";
+
+    // Diversity reception (docs/diversity-reception.md): decode from a
+    // second receive-only audio device -- same frequency, independent
+    // antenna -- alongside `audio.input_device`, and maximal-ratio
+    // combine the two (sstvae::modem::diversity::combine_demod_results).
+    // `diversity_device` follows `audio.input_device`'s own convention:
+    // empty means the system default input, not "off" -- the separate
+    // `diversity_enabled` switch is what turns the feature on, so "on
+    // with no device chosen" still means "the default device", the same
+    // as leaving `audio.input_device` blank does today.
+    //
+    // Mutually exclusive with `low_cpu` at the engine level --
+    // `decode_loop_diversity` has no blind fallback either way, so
+    // `low_cpu` would trade away nothing that is not already gone. This
+    // struct does not enforce that; the settings dialog does, by
+    // disabling one control when the other is set.
+    bool diversity_enabled = false;
+    std::string diversity_device;
+    // Also write the per-latent branch-contribution heatmap
+    // (sstvae::modem::diversity::contribution_image) beside each
+    // picture diversity reception produces. No effect while
+    // diversity_enabled is false.
+    bool diversity_debug_image = false;
 };
 
 struct TransmitConfig {
