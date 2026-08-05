@@ -395,6 +395,10 @@ void test_diversity_combines_two_branches_into_one_reception() {
                        *r.frames_received == mode_a().n_frames,
                    "rx/div: every frame arrived combining two clean branches");
     check::equal(r.callsign, std::string("TEST"), "rx/div: the beacon's callsign");
+
+    const rx::Progress p = h.state.get();
+    check::is_true(p.branch_a_locked, "rx/div: branch A reported locked");
+    check::is_true(p.branch_b_locked, "rx/div: branch B reported locked");
 }
 
 void test_diversity_falls_back_to_single_branch_when_the_other_is_dead() {
@@ -410,6 +414,11 @@ void test_diversity_falls_back_to_single_branch_when_the_other_is_dead() {
                  "rx/div-fallback: still received with only one branch locked");
     if (h.received.empty()) return;
     check::equal(h.received[0].callsign, std::string("SOLO"), "rx/div-fallback: callsign");
+
+    const rx::Progress p = h.state.get();
+    check::is_true(p.branch_a_locked, "rx/div-fallback: branch A (the live one) reported locked");
+    check::is_true(!p.branch_b_locked,
+                   "rx/div-fallback: branch B (noise) reported not locked");
 }
 
 void test_diversity_two_transmissions_are_both_received() {
@@ -483,6 +492,10 @@ void test_diversity_combines_a_header_branch_with_a_blind_only_branch() {
     check::equal(h.received[0].callsign, std::string("MIXED"), "rx/div-mix: callsign");
     check::is_true(h.received[0].mode_name.has_value() && *h.received[0].mode_name == "A",
                    "rx/div-mix: the header branch's mode is authoritative");
+
+    const rx::Progress p = h.state.get();
+    check::is_true(p.branch_a_locked, "rx/div-mix: header-locked branch A reported locked");
+    check::is_true(p.branch_b_locked, "rx/div-mix: blind-locked branch B also reported locked");
 }
 
 void test_diversity_completes_when_both_branches_are_blind_only() {

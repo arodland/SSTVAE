@@ -34,7 +34,15 @@ picture: rows are the data carrier index (frequency order, contiguous),
 columns are absolute frame index (time). Each branch also independently
 falls back to blind acquisition (`Modem.demodulate_blind`) when it
 can't get a header lock, same as `decode_loop` does for a single
-receiver -- see "Combining blind-acquired branches". See "What's not
+receiver -- see "Combining blind-acquired branches". `Progress`/
+`SharedState` also publish `branch_a_locked`/`branch_b_locked` --
+whichever ring most recently supplied a hit (header or blind) that fed
+the last poll's combine, `False` for a branch that never acquired, is
+too far from the other's `reception_start` to be treated as the same
+transmission, or has dropped out of range since the previous poll (this
+is *not* latched for a reception's lifetime; the native receive panel's
+"Primary"/"Secondary" lamps track it every poll and can flip back to
+unlocked mid-reception, same as the underlying state). See "What's not
 done" for what's left (raw-domain combining, a second waterfall,
 unequal-branch/N>2 measurements).
 
@@ -303,6 +311,11 @@ for a larger, fuller AWGN/fading grid.
   the environment that wrote it** (no Qt6 installed) -- unlike the
   `core/` changes, which have real ctest coverage
   (`native/tests/test_diversity.cpp`, `test_rx_engine.cpp`'s
-  `DiversityHarness`) and were verified against a from-scratch offline
-  build. Build and exercise the GUI on a machine with Qt before
-  trusting it.
+  `DiversityHarness`, including `Progress::branch_a_locked`/
+  `branch_b_locked` assertions for the both-locked, single-branch-
+  fallback and header+blind-mix cases) and were verified against a
+  from-scratch offline build. The receive panel's "Primary"/"Secondary"
+  lock lamps (`rx_panel.cpp`'s `set_lock_lamp`, following the
+  `ptt_label_`/`QPalette` pattern from `main_window.cpp` -- never a
+  stylesheet) are part of that unverified GUI surface. Build and
+  exercise the GUI on a machine with Qt before trusting it.
