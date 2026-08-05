@@ -100,6 +100,14 @@ class SharedState:
     saved_path: str | None = None
     seconds_captured: float = 0.0
     last_decode_s: float = 0.0
+    # Per-branch lock state, published only by decode_loop_diversity --
+    # both stay False for the single-receiver loops. Each reflects
+    # whichever ring most recently supplied a hit that fed the last
+    # poll's combine, so a branch that acquires and later drops out of
+    # range goes False again on the next poll that doesn't see it, not
+    # just at reception end.
+    branch_a_locked: bool = False
+    branch_b_locked: bool = False
 
     def __post_init__(self):
         self.lock = threading.Lock()
@@ -690,29 +698,41 @@ def decode_loop_diversity(rings, model, state: SharedState, config: RxConfig,
         if any(len(samples) < MIN_SECONDS_BEFORE_ATTEMPT * FS for samples, _ in snaps):
             continue
 
-        found = []  # (result, reception_start) per branch that locked
-        for samples, total in snaps:
+        found_by_branch = [None, None]  # (result, reception_start) per ring, indexed
+        for i, (samples, total) in enumerate(snaps):
             buf_start = total - len(samples)
             r, start = _find_branch_reception(
                 modem, samples, buf_start, finished_starts, epsilon_samples,
                 config.blind_search_seconds,
             )
             if r is not None:
-                found.append((r, start))
+                found_by_branch[i] = (r, start)
 
         combined = reception_start = None
         branch_results = []
-        if len(found) == 2 and abs(found[0][1] - found[1][1]) <= epsilon_samples:
-            branch_results = [found[0][0], found[1][0]]
+        branch_a_locked = branch_b_locked = False
+        if (found_by_branch[0] is not None and found_by_branch[1] is not None
+                and abs(found_by_branch[0][1] - found_by_branch[1][1]) <= epsilon_samples):
+            branch_results = [found_by_branch[0][0], found_by_branch[1][0]]
             combined = combine_diversity_results(branch_results)
-            reception_start = found[0][1]
-        elif found:
+            reception_start = found_by_branch[0][1]
+            branch_a_locked = branch_b_locked = True
+        elif found_by_branch[0] is not None or found_by_branch[1] is not None:
             # Only one branch locked, or the two locks are further apart
             # than a same-transmission match tolerates (a spurious hit on
             # one branch, most likely). Use whichever branch is furthest
             # along, same as an operator picking the stronger antenna.
-            combined, reception_start = max(found, key=lambda x: _progress_frac(x[0]))
+            found = [(i, hit) for i, hit in enumerate(found_by_branch) if hit is not None]
+            best_i, (combined, reception_start) = max(
+                found, key=lambda x: _progress_frac(x[1][0])
+            )
             branch_results = [combined]
+            branch_a_locked = best_i == 0
+            branch_b_locked = best_i == 1
+
+        with state.lock:
+            state.branch_a_locked = branch_a_locked
+            state.branch_b_locked = branch_b_locked
 
         if combined is None:
             with state.lock:

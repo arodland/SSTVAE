@@ -158,6 +158,11 @@ private:
     PictureBox* preview_ = nullptr;
     QWidget* strip_ = nullptr;
     QLabel* status_ = nullptr;
+    // Diversity-only lock lamps ("Primary"/"Secondary"), hidden unless
+    // diversity_active_ -- a single-receiver session has no second
+    // branch for these to describe.
+    QLabel* branch_a_label_ = nullptr;
+    QLabel* branch_b_label_ = nullptr;
     QLabel* last_card_ = nullptr;
     QProgressBar* progress_ = nullptr;
     QPointer<Waterfall> waterfall_;
@@ -176,6 +181,10 @@ private:
     // spectrum strip for the diversity device is not implemented here.
     std::shared_ptr<rx::RingBuffer> ring2_;
     std::unique_ptr<audio::qt::InputStream> stream2_;
+    // Set for the lifetime of a diversity session (mirrors ring2_'s
+    // presence), so the lamps can be shown/hidden once at start()/stop()
+    // rather than re-checked every poll.
+    bool diversity_active_ = false;
     std::unique_ptr<rx::SharedState> shared_;
     rx::StopFlag stop_flag_;
     std::thread thread_;

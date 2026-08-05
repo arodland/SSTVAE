@@ -121,6 +121,14 @@ struct Progress {
     // it is what lets the tests assert on the state machine's decisions
     // without asserting on how fast it makes them.
     std::uint64_t polls = 0;
+    // Per-branch lock state, published only by decode_loop_diversity --
+    // both stay false for the single-receiver loops. Each is whichever
+    // ring most recently supplied a hit that fed the last poll's
+    // combine, so a branch that acquires and then drops out of range
+    // (never remains locked forever) goes false again on the next poll
+    // that doesn't see it, not just at reception end.
+    bool branch_a_locked = false;
+    bool branch_b_locked = false;
 
     Progress();
 };

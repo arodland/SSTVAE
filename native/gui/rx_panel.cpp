@@ -1,14 +1,17 @@
 #include "rx_panel.hpp"
 
 #include <QCheckBox>
+#include <QColor>
 #include <QDesktopServices>
 #include <QSignalBlocker>
 #include <QFileDialog>
+#include <QFont>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QImage>
 #include <QLabel>
 #include <QMessageBox>
+#include <QPalette>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -78,6 +81,22 @@ QString snr_text(double snr_db) {
     return formatted.isEmpty() ? QStringLiteral("  SNR --") : formatted;
 }
 
+// Colour through the palette, not a stylesheet -- the same reason
+// settings_dialog.cpp's `note()` does: a stylesheet on any widget makes
+// Qt wrap the whole application style in QStyleSheetStyle. Green while
+// locked, the platform's own disabled text colour otherwise -- reusing
+// `QPalette::Disabled` rather than a second hand-picked grey keeps this
+// consistent with every other "inactive" label in the app.
+void set_lock_lamp(QLabel* label, bool locked) {
+    QPalette pal = label->palette();
+    if (locked) {
+        pal.setColor(QPalette::WindowText, QColor(0x1e, 0x7d, 0x32));
+    } else {
+        pal.setColor(QPalette::WindowText, pal.color(QPalette::Disabled, QPalette::WindowText));
+    }
+    label->setPalette(pal);
+}
+
 }  // namespace
 
 ReceivePanel::ReceivePanel(AppState* state, QWidget* parent)
@@ -144,6 +163,28 @@ void ReceivePanel::build_ui() {
     // progress text that is rebuilt twice a second anyway.
     status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     lower_layout->addWidget(status_);
+
+    // The diversity lock lamps: which of the two receivers is currently
+    // contributing to the combine. Hidden until a diversity session
+    // starts (set_diversity_lock below never runs otherwise, so these
+    // stay in their "not locked" look, which would be misleading to
+    // show for an ordinary single-receiver session).
+    auto* lock_row = new QHBoxLayout();
+    lock_row->setContentsMargins(0, 0, 0, 0);
+    auto make_lock_label = [this](const QString& text) {
+        auto* label = new QLabel(text, this);
+        QFont f = label->font();
+        f.setBold(true);
+        label->setFont(f);
+        label->hide();
+        return label;
+    };
+    branch_a_label_ = make_lock_label(tr("Primary"));
+    branch_b_label_ = make_lock_label(tr("Secondary"));
+    lock_row->addWidget(branch_a_label_);
+    lock_row->addWidget(branch_b_label_);
+    lock_row->addStretch(1);
+    lower_layout->addLayout(lock_row);
 
     progress_ = new QProgressBar(lower);
     progress_->setRange(0, 100);
@@ -366,6 +407,11 @@ bool ReceivePanel::start() {
     // keeps the history.
     banner_->clear();
     was_receiving_ = false;
+    diversity_active_ = diversity;
+    branch_a_label_->setVisible(diversity_active_);
+    branch_b_label_->setVisible(diversity_active_);
+    set_lock_lamp(branch_a_label_, false);
+    set_lock_lamp(branch_b_label_, false);
     app_->log_event("rx", log::Severity::Info,
                     tr("listening (device at %1 Hz)").arg(device_rate));
     emit listeningChanged(true);
@@ -389,11 +435,14 @@ void ReceivePanel::stop() {
     if (Waterfall* w = fall()) w->set_ring(nullptr);
     ring_.reset();
     ring2_.reset();
+    diversity_active_ = false;
 
     if (start_button_ != nullptr) {
         start_button_->setEnabled(true);
         stop_button_->setEnabled(false);
         set_status(tr("Stopped"));
+        branch_a_label_->hide();
+        branch_b_label_->hide();
     }
     if (was_listening) {
         app_->log_event("rx", log::Severity::Info, tr("stopped"));
@@ -571,6 +620,11 @@ void ReceivePanel::refresh_status() {
     set_status(text);
     progress_->setValue(static_cast<int>(100.0 * progress.progress_frac));
 
+    if (diversity_active_) {
+        set_lock_lamp(branch_a_label_, progress.branch_a_locked);
+        set_lock_lamp(branch_b_label_, progress.branch_b_locked);
+    }
+
     if (progress.image && progress.image.get() != shown_) {
         shown_ = progress.image.get();
         set_displayed(*progress.image, progress.callsign, progress.mode_name);
@@ -730,6 +784,10 @@ void ReceivePanel::fill_for_screenshot() {
     set_status(
         tr("Receiving mode C: frame 220/220 (100%)  SNR 8.3dB  de KD8XYZ"));
     progress_->setValue(100);
+    branch_a_label_->show();
+    branch_b_label_->show();
+    set_lock_lamp(branch_a_label_, true);
+    set_lock_lamp(branch_b_label_, false);
     last_card_->setText(
         tr("Last: 14:32 - mode C - de KD8XYZ - SNR 8.3dB - 220/220 frames"
            " - KD8XYZ-C-14230000.png"));

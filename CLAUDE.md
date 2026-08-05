@@ -1276,7 +1276,17 @@ need when `--native` fails and you want to know *where*.
   Qt settings-dialog and receive-panel changes were written against the
   existing patterns but **could not be built or tested in the
   environment that wrote them** (no Qt6 installed) — verify on a
-  machine with Qt before trusting that part.
+  machine with Qt before trusting that part. `Progress`/`SharedState`
+  publish `branch_a_locked`/`branch_b_locked` per poll (which ring most
+  recently fed the combine — header or blind lock both count, and it is
+  not latched, so a branch that drops out mid-reception goes false
+  again on the next poll), which the receive panel shows as two
+  "Primary"/"Secondary" lock lamps next to the status line — same
+  `QPalette`-colored-`QLabel` idiom as `ptt_label_`, never a stylesheet.
+  Covered by `DiversityHarness` assertions in `test_rx_engine.cpp` and
+  by `state.branch_a_locked`/`branch_b_locked` checks in
+  `tests/test_diversity_rx.py`; the lamp widgets themselves are
+  unverified GUI, same caveat as the rest of this bullet.
 - `docs/todo.md` — open work items with the reasoning behind them.
   Currently one: a wider acquisition search so a mis-tuned counterpart
   still decodes — measured, the demod path is entirely independent of
