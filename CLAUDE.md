@@ -1237,6 +1237,18 @@ need when `--native` fails and you want to know *where*.
   with, measured ±0.05 dB: the clipper absorbs it and stage-2 trained
   through that same clipper, so the *objective* was the real risk all
   along.
+- `docs/diversity-reception.md` — two receivers on independent
+  antennas, MRC-combined post-`demodulate()` (`sstvae/modem/diversity.py`,
+  `combine_demod_results`/`demodulate_diversity`), **experiment,
+  2026-08-05, positive**: +2.9 to +5.9 dB latent SNR (mode A, AWGN and
+  `mpp`), measured by `scripts/diversity_sweep.py`. Combines in latent
+  space, not raw samples — each branch already resyncs and deinterleaves
+  independently, so their canonical-order `DemodResult.latents`/
+  `.weights` are directly comparable with no shared timebase needed. Not
+  wired into `sstvae/rx/`, the native app, or the GUI; both branches
+  must independently acquire (a branch too weak to lock alone
+  contributes nothing, unlike raw-domain diversity combining, which was
+  considered and set aside — see the doc for why).
 - `docs/todo.md` — open work items with the reasoning behind them.
   Currently one: a wider acquisition search so a mis-tuned counterpart
   still decodes — measured, the demod path is entirely independent of
