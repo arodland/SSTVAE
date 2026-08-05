@@ -147,11 +147,20 @@ effect gets stronger, not weaker, as the channel gets worse. Second,
 itself starts failing often enough that too few trials had *both*
 branches lock to report a mean (see "What's not done").
 
+A 12-trial/point run across all three modes (`--modes ABC --trials 12`)
+reproduces the mode A numbers above to within 0.1 dB on modes B and C as
+well, at every AWGN and `mpp` point both reached -- expected, since
+latent SNR is a per-latent modem-domain quantity that doesn't depend on
+how many frames a mode sends, but worth checking rather than assuming.
+That run also got far enough to see `AWGN -4 dB`, at +5.5 dB (mode B)
+and +5.6 dB (mode C) -- consistent with the trend above, but from a
+single both-branches-locked trial out of 12 each (`docs/todo.md`'s
+warning applies: single-digit trials at threshold will show you
+whatever pattern it feels like), so treat those two numbers as "a data
+point," not a measurement.
+
 Re-run with `python scripts/diversity_sweep.py --modes ABC --trials 20`
-for the other modes and a fuller AWGN/fading grid; the numbers above are
-mode A only, chosen because it is both the mode most likely to be run
-near threshold (the situation diversity reception is actually for) and
-the cheapest to get a large trial count on.
+for a larger, fuller AWGN/fading grid.
 
 ## What's not done
 
