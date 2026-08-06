@@ -446,10 +446,35 @@ BlindDemodResult Modem::demodulate_blind(
         p += FRAME_SAMPLES;
     }
 
+    // Blind demod always covers every frame the *whole current buffer*
+    // can hold, since the transmission's true length is unknown until
+    // the beacon resolves it -- unlike demodulate() above, which
+    // restricts this same computation to the header's known real frame
+    // count via `received`. Most of that range is often not the real
+    // transmission at all (silence or noise before it starts, or
+    // accumulating after it ends, while the caller waits to see whether
+    // a longer mode is still arriving) -- a straight median over the
+    // *whole* range describes "typical", which is the noise floor
+    // whenever noise frames are the numerical majority, and noise then
+    // reads as fully trustworthy (weight ~1) right alongside real
+    // frames instead of being down-weighted. Anchoring instead on
+    // frames within an order of magnitude of the strongest ones seen
+    // needs only a few genuinely real frames to set the right
+    // reference, regardless of how much silence surrounds them; a real
+    // (even faded) frame is never excluded by this on its own account,
+    // since a *minority* of low-|h| frames barely moves a median in the
+    // first place. Mirrors sstvae/modem/modem.py's demodulate_blind.
     std::vector<double> mags;
     mags.reserve(h_pilot.size());
     for (const cdouble& v : h_pilot) mags.push_back(std::abs(v));
-    const double med_h = median(mags);
+    const double peak_h = mags.empty()
+        ? 0.0
+        : *std::max_element(mags.begin(), mags.end());
+    std::vector<double> plausible_mags;
+    plausible_mags.reserve(mags.size());
+    for (double m : mags)
+        if (m > 0.1 * peak_h) plausible_mags.push_back(m);
+    const double med_h = plausible_mags.empty() ? 1.0 : median(plausible_mags);
     const double floor = std::max(0.05 * med_h, 1e-9);
 
     auto pilot_at = [&h_pilot, n_f](int i) {

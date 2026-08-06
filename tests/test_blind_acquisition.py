@@ -147,6 +147,59 @@ def test_window_shorter_than_min_frames_for_sync_may_fail_gracefully():
             assert r.frame_offset == start_frame
 
 
+def test_demodulate_blind_does_not_trust_silence_as_signal():
+    """demodulate_blind's per-latent confidence weight comes from how
+    each frame's pilot response compares to a "typical" |h| — but unlike
+    demodulate() (which only ever looks at the header's known real frame
+    count), the blind range is whatever the whole buffer holds, and a
+    short real transmission sitting in a lot of leading/trailing silence
+    or low-level noise made that "typical" value describe the noise
+    floor instead of the signal: a plain median() over the whole range
+    is dominated by however many silent frames surround the real ones,
+    so noise reads back as fully trustworthy (weight ~1) right alongside
+    the real signal, feeding reconstruct() latents that are mostly
+    garbage at full confidence -- the reported symptom was a
+    near-black decoded image when acquisition locked onto a buffer that
+    was mostly pre- or post-transmission silence.
+
+    Regression: real transmission is a small fraction of a much longer
+    buffer of low-level ambient noise (not exact digital silence, which
+    is the more realistic case and also exercises the >0 floor). Every
+    canonical latent slot the real transmission's own frames could not
+    have written to must come back at ~0 weight.
+    """
+    from sstvae.modem import framing
+
+    mode = "A"
+    modem = Modem()
+    lat = np.random.default_rng(3).normal(size=MODES[mode].n_latents)
+    lat /= np.sqrt(np.mean(lat**2))
+    x = modem.modulate(lat, mode, callsign="TEST")
+    frames_start = LEADIN_SAMPLES + PREAMBLE_SAMPLES + HEADER_SAMPLES
+    sig = x[frames_start:]
+    n_real_frames = MODES[mode].n_frames
+
+    rng = np.random.default_rng(1)
+    pre = rng.normal(scale=0.01, size=int(100.0 * FS))
+    audio = np.concatenate([pre, sig])
+
+    r = modem.demodulate_blind(audio)
+    assert r.beacon is not None
+
+    real_indices = np.zeros(MODES["C"].n_latents, dtype=bool)
+    for abs_frame in range(n_real_frames):
+        _, idx = framing.slot_range_for_frame(abs_frame)
+        real_indices[idx] = True
+
+    spurious = r.weights[~real_indices]
+    assert np.all(spurious < 0.3), (
+        f"{np.count_nonzero(spurious >= 0.3)} canonical latent slots outside "
+        "the real transmission's own frames came back with high confidence "
+        f"(max spurious weight {spurious.max():.3f}) -- silence is being "
+        "trusted as signal"
+    )
+
+
 def test_blind_accumulator_chunking_is_invariant():
     """The whole point of BlindAccumulator is that a caller can feed it
     audio in whatever pieces arrive off the ring buffer -- so the
