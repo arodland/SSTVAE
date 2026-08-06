@@ -233,7 +233,18 @@ bool ReceivePanel::start() {
 
     const settings::Config& config = app_->config();
     ring_ = std::make_shared<rx::RingBuffer>(config.receive.buffer_seconds);
-    if (Waterfall* w = fall()) w->set_ring(ring_);
+    if (Waterfall* w = fall()) {
+        w->set_ring(ring_);
+        // The ring itself is already empty (a fresh object), but the
+        // waterfall's own displayed rows are not: without this, a plain
+        // Stop/Start cycle leaves old history on screen scrolling down
+        // as if it were continuous audio, which is what
+        // `resume_after_transmit` already avoids for the half-duplex
+        // case. We have no sample-accurate measurement of how long
+        // receive was stopped, so there is no meaningful way to splice
+        // the display across the gap -- blank it instead of guessing.
+        w->clear();
+    }
 
     try {
         stream_ = std::make_unique<audio::qt::InputStream>(
@@ -374,10 +385,10 @@ void ReceivePanel::resume_after_transmit() {
     preview_->setEnabled(true);
     if (Waterfall* w = fall()) w->setEnabled(true);
     start_button_->setEnabled(true);  // start() disables it again
-    // start() allocates a fresh ring buffer, so the tail of our own
-    // transmission is dropped rather than decoded back as a reception.
+    // start() allocates a fresh ring buffer and blanks the waterfall, so
+    // the tail of our own transmission is dropped rather than decoded
+    // back as a reception or left on screen.
     start();
-    if (Waterfall* w = fall()) w->clear();
 }
 
 // --- the sink, on the decode thread -----------------------------------------
