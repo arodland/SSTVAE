@@ -334,11 +334,23 @@ PYBIND11_MODULE(sstvae_native, m) {
               },
               py::arg("x"), py::arg("search_s") = py::none());
     modem.def("demodulate_blind",
-              [](DArray x, std::optional<std::pair<double, double>> search_s) {
+              [](DArray x, std::optional<std::pair<double, double>> search_s,
+                 std::optional<std::tuple<std::int64_t, double, double>> acquisition) {
                   std::span<const double> in(
                       x.data(), static_cast<std::size_t>(x.size()));
                   const sstvae::modem::Modem md;
-                  const auto r = md.demodulate_blind(in, search_s);
+                  std::optional<sstvae::sync::BlindAcquisition> acq;
+                  // Same (frame_start, freq_offset, metric) tuple shape
+                  // acquire_blind/BlindAccumulator.result return above --
+                  // a caller (rx/engine.py) that already located the
+                  // signal via its own persistent accumulator passes
+                  // that straight through rather than making this run
+                  // acquire_blind again from scratch.
+                  if (acquisition)
+                      acq = sstvae::sync::BlindAcquisition{
+                          std::get<0>(*acquisition), std::get<1>(*acquisition),
+                          std::get<2>(*acquisition)};
+                  const auto r = md.demodulate_blind(in, search_s, acq);
                   py::dict out;
                   out["latents"] = to_numpy(r.latents);
                   out["weights"] = to_numpy(r.weights);
@@ -358,7 +370,8 @@ PYBIND11_MODULE(sstvae_native, m) {
                       out["beacon"] = py::none();
                   return out;
               },
-              py::arg("x"), py::arg("search_s") = py::none());
+              py::arg("x"), py::arg("search_s") = py::none(),
+              py::arg("acquisition") = py::none());
 
     py::module_ sync = m.def_submodule("sync");
     // SyncError is raised through to Python as the reference's own

@@ -228,11 +228,15 @@ def _native_adapters(native):
             beacon=_beacon_from_tuple(d["beacon"]), callsign=d["callsign"],
             preamble_start=d["preamble_start"], snr_db=d["snr_db"])
 
-    def modem_demodulate_blind(self, x, search_s=None):
+    def modem_demodulate_blind(self, x, search_s=None, acquisition=None):
         from sstvae.modem.modem import BlindDemodResult
 
+        acq_tuple = (
+            None if acquisition is None
+            else (acquisition.frame_start, acquisition.freq_offset, acquisition.metric)
+        )
         d = _sync_call(native.modem.demodulate_blind, dict,
-                       np.asarray(x, dtype=np.float64), search_s)
+                       np.asarray(x, dtype=np.float64), search_s, acq_tuple)
         return BlindDemodResult(
             latents=d["latents"], weights=d["weights"],
             freq_offset=d["freq_offset"], beacon=_beacon_from_tuple(d["beacon"]),

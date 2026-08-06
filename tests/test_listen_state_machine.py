@@ -126,6 +126,187 @@ def test_two_transmissions_in_buffer_save_two_distinct_images(tmp_path):
     assert len(digests) == 2, "the same image was saved twice"
 
 
+def _frames_only(mode: str, seed: int) -> np.ndarray:
+    """A transmission with no preamble/header at all -- forces
+    decode_loop past `_find_new_reception` (which needs one) and into
+    the blind path on every poll, the situation these tests target."""
+    x = _transmission(mode, seed)
+    from sstvae.config import LEADIN_SAMPLES, PREAMBLE_SAMPLES, HEADER_SAMPLES
+
+    return x[LEADIN_SAMPLES + PREAMBLE_SAMPLES + HEADER_SAMPLES :]
+
+
+def _run_decode_loop_incremental(loop_fn, chunks, tmp_path, args,
+                                 timeout_s=180.0, expect_saves=1,
+                                 ring_seconds=None):
+    """Like `_run_decode_loop`, but the audio arrives as a sequence of
+    `chunks` written to the ring buffer one at a time rather than all up
+    front -- needed to reproduce bugs that only show up while the buffer
+    is still growing. Returns (saves, state, handle) once `chunks` has
+    been written and either `expect_saves` images have appeared or
+    `timeout_s` has elapsed.
+
+    The decode_loop thread is left running: the caller owns its
+    lifecycle from here and must call `handle.stop()` when done (whether
+    or not more is fed via `handle.feed()` first) -- stopping it here
+    instead would join the thread before a caller-fed follow-up chunk
+    ever reached it.
+
+    `ring_seconds`, if given, must cover everything that will ever be
+    fed, including via the handle's `feed` after this returns -- a ring
+    too small for a later feed silently evicts the reception's own
+    earlier audio instead of erroring."""
+    total_len = sum(len(c) for c in chunks)
+    ring = sstvae_listen.RingBuffer(
+        ring_seconds if ring_seconds is not None else total_len / FS + 5.0
+    )
+
+    from PIL import Image
+
+    def fake_reconstruct(model, latents, weights):
+        img = Image.new("RGB", (8, 8))
+        img.putdata([(1, 2, 3)] * 64)
+        return img
+
+    real_reconstruct = rx_engine.reconstruct
+    rx_engine.reconstruct = fake_reconstruct
+
+    state = sstvae_listen.SharedState()
+    stop = threading.Event()
+    th = threading.Thread(
+        target=loop_fn, args=(ring, None, state, args, stop), daemon=True
+    )
+    th.start()
+
+    class _Handle:
+        def feed(self, chunk):
+            ring.write(chunk)
+
+        def wait_for_saves(self, n, timeout_s):
+            deadline = time.time() + timeout_s
+            while time.time() < deadline:
+                files = sorted(Path(tmp_path).glob("*.png"))
+                if len(files) >= n:
+                    return files
+                if not th.is_alive():
+                    break
+                time.sleep(0.05)
+            return sorted(Path(tmp_path).glob("*.png"))
+
+        def stop(self):
+            stop.set()
+            th.join(timeout=10.0)
+            rx_engine.reconstruct = real_reconstruct
+
+    h = _Handle()
+    for c in chunks:
+        h.feed(c)
+    saves = h.wait_for_saves(expect_saves, timeout_s)
+    return saves, state, h
+
+
+@pytest.mark.slow
+def test_blind_reception_completes_promptly_despite_a_growing_buffer(tmp_path):
+    """A short (mode A) blind-only reception must finish shortly after
+    end_grace once the real transmission is over -- not stay in
+    "receiving" while trailing silence keeps accumulating.
+
+    demodulate_blind's weight for a frame it demodulates is nonzero
+    (just small, for noise) essentially always, and it demodulates every
+    frame the *whole current buffer* can hold. A bare nonzero count as
+    the stall-detector's progress metric therefore keeps climbing every
+    poll as the buffer grows and touches more of the legal frame range —
+    real signal or not — so the "progress stopped changing" condition
+    was never met until buffer growth had mapped the *entire* range,
+    tens of seconds after the real (32 s) transmission was long over.
+    Regression for a report of receptions sitting in "receiving"
+    seemingly forever.
+    """
+    sig = _frames_only("A", seed=11)
+    pre = np.random.default_rng(1).normal(scale=0.01, size=int(5.0 * FS))
+    trailing = np.random.default_rng(2).normal(scale=0.01, size=int(40.0 * FS))
+
+    args = _Args(tmp_path, poll_interval=0.3, end_grace=2.0)
+    real_end_s = (len(pre) + len(sig)) / FS
+
+    t0 = time.time()
+    saves, state, h = _run_decode_loop_incremental(
+        sstvae_listen.decode_loop,
+        [pre, sig, trailing],
+        tmp_path,
+        args,
+        timeout_s=60.0,
+        expect_saves=1,
+    )
+    h.stop()
+    elapsed_after_end = time.time() - t0 - real_end_s
+    assert len(saves) == 1, f"expected 1 saved image, got {len(saves)}: {saves}"
+    # Generous margin over end_grace for scheduling/poll-interval slop,
+    # but nowhere near the ~55 s of trailing silence available, let
+    # alone mode C's ~95 s deadline -- this is what pins the fix rather
+    # than merely re-checking the (much weaker) "it saved eventually"
+    # deadline test below.
+    assert elapsed_after_end < 15.0, (
+        f"reception took {elapsed_after_end:.1f}s past the real transmission's end "
+        f"to finish (end_grace={args.end_grace}s) -- still climbing on buffer growth?"
+    )
+
+
+@pytest.mark.slow
+def test_blind_reception_has_a_hard_deadline_even_if_progress_never_settles(tmp_path):
+    """Even if the stall detector's "progress stopped changing" never
+    fires -- end_grace set absurdly high here, to isolate this from the
+    prompt-completion behavior tested above -- a blind reception must
+    still finish once the buffer holds audio past mode C's own duration
+    from the transmission's known start (from the beacon). Before this
+    backstop existed, a reception stuck for any reason simply never
+    ended -- observed sitting in "receiving" for many minutes.
+    """
+    from sstvae.config import MODES, FRAME_SAMPLES
+
+    sig = _frames_only("A", seed=12)
+    pre = np.random.default_rng(3).normal(scale=0.01, size=int(5.0 * FS))
+    # Enough trailing silence after this to lock and sit in "receiving",
+    # but nowhere near mode C's duration past the transmission's start.
+    short_trailing = np.random.default_rng(4).normal(scale=0.01, size=int(10.0 * FS))
+
+    args = _Args(tmp_path, poll_interval=0.1, end_grace=1e9)
+    needed_total_s = len(pre) / FS + MODES["C"].n_frames * FRAME_SAMPLES / FS
+
+    saves, state, h = _run_decode_loop_incremental(
+        sstvae_listen.decode_loop,
+        [pre, sig, short_trailing],
+        tmp_path,
+        args,
+        timeout_s=20.0,
+        expect_saves=1,
+        ring_seconds=needed_total_s + 15.0,
+    )
+    try:
+        assert len(saves) == 0, (
+            "reception finished before its deadline could possibly be reached -- "
+            "end_grace=1e9 should have made that impossible; the fix under test "
+            "isn't isolated"
+        )
+        assert state.status != "done"
+
+        # Push the buffer well past frame 0's position + mode C's duration.
+        # reception_start lands close to len(pre) (see decode_loop's blind
+        # branch); pad generously past exactness rather than reproduce its
+        # arithmetic here.
+        have_s = (len(pre) + len(sig) + len(short_trailing)) / FS
+        more = np.random.default_rng(5).normal(
+            scale=0.01, size=int((needed_total_s - have_s + 5.0) * FS)
+        )
+        h.feed(more)
+        saves = h.wait_for_saves(1, timeout_s=60.0)
+        assert len(saves) == 1, (
+            f"expected 1 saved image past the deadline, got {len(saves)}: {saves}"
+        )
+    finally:
+        h.stop()
+
+
 @pytest.mark.slow
 def test_low_cpu_does_not_resave_the_same_transmission(tmp_path):
     """The low-CPU loop resumes its preamble search from the position it
