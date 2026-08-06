@@ -37,6 +37,14 @@ target_include_directories(test_framing PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME framing COMMAND test_framing)
 set_tests_properties(framing PROPERTIES TIMEOUT 180)
 
+# EXIF orientation. Writes JPEGs, so it is given a directory to write
+# them in rather than dropping them in whatever the runner's cwd is.
+add_executable(test_images test_images.cpp)
+target_link_libraries(test_images PRIVATE sstvae_core)
+target_include_directories(test_images PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME images COMMAND test_images ${CMAKE_CURRENT_BINARY_DIR})
+set_tests_properties(images PROPERTIES TIMEOUT 120)
+
 add_executable(test_beacon test_beacon.cpp)
 target_link_libraries(test_beacon PRIVATE sstvae_core)
 target_include_directories(test_beacon PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

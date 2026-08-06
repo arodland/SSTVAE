@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
-from PIL import Image, ImageFont
+from PIL import Image, ImageFont, ImageOps
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     import torch
@@ -83,6 +83,51 @@ def fit_image(img: Image.Image) -> Image.Image:
     return img.crop((left, top, left + IMG_W, top + IMG_H))
 
 
+MAX_FILE_BYTES = 1024 * 1024 * 1024
+"""The largest picture file that will be opened at all.
+
+Matches `images::MAX_FILE_BYTES` in the native app, which needs the
+limit for a concrete reason -- it reads the whole file into memory
+before decoding. Here it buys less, since PIL opens lazily, but the two
+declining the same files is worth more than the few lines: an operator
+who is told a picture is too large by one implementation should not
+find the other sending it.
+
+A GiB is far above any real photograph, so meeting it means the file is
+almost certainly not a picture.
+"""
+
+
+def open_image(path: str | Path) -> Image.Image:
+    """Open a picture file, upright.
+
+    JPEGs from phones and most cameras are stored in the sensor's own
+    orientation with an EXIF tag (0x0112) saying how to turn them; a
+    portrait photograph is a landscape file plus "rotate 90". Ignoring
+    the tag doesn't merely turn the picture -- it changes which pixels
+    `fit_image` keeps, because the cover-crop is computed from the wrong
+    aspect ratio, so a portrait photo goes out as a centre-crop of its
+    sideways self.
+
+    `exif_transpose` handles all eight orientations, including the two
+    diagonal ones, and strips the tag so the transform cannot be applied
+    twice. The native app does the same thing at the same point
+    (`images::load`); doing it at *open* rather than inside `fit_image`
+    is what keeps the two comparable, since a C++ `Picture` carries no
+    metadata to defer the decision with.
+
+    Raises `ValueError` for a file above `MAX_FILE_BYTES`, before
+    opening it.
+    """
+    size = os.path.getsize(path)
+    if size > MAX_FILE_BYTES:
+        raise ValueError(
+            f"{path} is {size} bytes; the limit for a picture file is "
+            f"{MAX_FILE_BYTES}"
+        )
+    return ImageOps.exif_transpose(Image.open(path))
+
+
 def image_to_array(img: Image.Image) -> np.ndarray:
     """IMG_W x IMG_H RGB image -> (3, IMG_H, IMG_W) float32 in [0,1]."""
     return np.array(img, dtype=np.float32).transpose(2, 0, 1) / 255.0
@@ -91,10 +136,11 @@ def image_to_array(img: Image.Image) -> np.ndarray:
 def load_image(path: str | Path) -> np.ndarray:
     """Open any PIL-readable image -> (3, IMG_H, IMG_W) float32 in [0,1].
 
-    Deterministic: cover-resize then centre-crop. For the augmented
-    training variant see `sstvae.data.load_image`.
+    Deterministic: cover-resize then centre-crop, after EXIF orientation
+    (see `open_image`). For the augmented training variant see
+    `sstvae.data.load_image`.
     """
-    return image_to_array(fit_image(Image.open(path)))
+    return image_to_array(fit_image(open_image(path)))
 
 
 def image_to_tensor(img: Image.Image) -> "torch.Tensor":

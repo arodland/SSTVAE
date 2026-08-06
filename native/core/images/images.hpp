@@ -13,6 +13,8 @@
 #ifndef SSTVAE_IMAGES_IMAGES_HPP
 #define SSTVAE_IMAGES_IMAGES_HPP
 
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -71,8 +73,41 @@ Picture fit(const Picture& img, const Framing& framing);
 // Exact: a transpose and a divide by 255.
 ImageArray to_array(const Picture& img);
 
+// The largest picture file that will be opened at all. `load` reads the
+// whole file into memory before decoding -- both the decoder and the
+// EXIF parser want the bytes -- so an absurd file is refused up front
+// rather than allocated for. A GiB is far above any real photograph and
+// far below what would trouble a desktop, so it is a guard against a
+// mistake (a WAV, a disk image, a truncated download of something else)
+// rather than a limit anyone should meet.
+inline constexpr std::size_t MAX_FILE_BYTES = 1024u * 1024u * 1024u;
+
+// The EXIF orientation tag (0x0112), 1..8, as it appears in a JPEG's
+// APP1 segment. 1 is the identity: stored top-left, no transform.
+// Values 5..8 exchange width and height.
+//
+// Returns 1 for a file with no EXIF, no orientation tag, a value
+// outside 1..8, or metadata too corrupt to parse -- an unreadable tag
+// costs the operator a rotation, never the picture. `data` is the whole
+// file, not a segment.
+int exif_orientation(const std::uint8_t* data, std::size_t len);
+
+// Undo an EXIF orientation, producing the upright picture. Orientation
+// 1 (and anything outside 1..8) returns the input untouched.
+//
+// The counterpart of Pillow's `ImageOps.exif_transpose`, and required
+// to agree with it exactly -- `tests/test_native_parity.py -k exif`
+// holds both implementations to the same eight results, since a
+// disagreement here is a rotated transmission rather than an error.
+Picture apply_orientation(const Picture& img, int orientation);
+
 // Open any stb-readable picture (PNG, JPEG, BMP, GIF, TGA, ...).
 // Throws with the file name and stb's reason on failure.
+//
+// JPEG orientation metadata is applied here, so everything downstream
+// -- `fit`'s framing above all -- sees the picture the way it was
+// taken. stb decodes pixels and ignores EXIF entirely; the tag is read
+// separately (third_party/easyexif).
 Picture load(const std::string& path);
 
 // Cover-resize, centre-crop, convert -- `images.load_image`.
