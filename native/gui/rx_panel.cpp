@@ -233,6 +233,17 @@ bool ReceivePanel::start() {
 
     const settings::Config& config = app_->config();
     ring_ = std::make_shared<rx::RingBuffer>(config.receive.buffer_seconds);
+    // decode_loop's own locals (blind_acc included) already start clean
+    // just by being a fresh function call, but the Progress this panel
+    // *displays* lives here, not in the loop -- and stop() (called by
+    // both the Stop button and suspend_for_transmit) never touches it.
+    // Without this, stopping while a reception was in progress leaves
+    // shared_ holding a stale "Receiving" Progress -- old mode, old
+    // frame count, old callsign -- and the 500 ms status timer shows it
+    // immediately on the next Start, before the new loop has run a
+    // single poll. A fresh SharedState is the rest of what "start() is
+    // the one method that resets all receiver state" needs to be true.
+    shared_ = std::make_unique<rx::SharedState>();
     if (Waterfall* w = fall()) w->set_ring(ring_);
 
     try {
