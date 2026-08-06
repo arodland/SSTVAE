@@ -2,7 +2,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <fstream>
 #include <stdexcept>
+#include <vector>
+
+// Vendored; read for the orientation tag alone. See
+// native/third_party/easyexif/README.md.
+#include "easyexif/exif.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_FAILURE_USERMSG
@@ -15,6 +23,37 @@
 #include "stb_image_resize2.h"
 
 namespace sstvae::images {
+namespace {
+
+// Whole file into memory. Both consumers -- the stb decoder and the
+// EXIF parser -- want the bytes rather than a path, and a picture is
+// already being held decoded at several times this size.
+std::vector<std::uint8_t> read_file(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot read " + path);
+    std::vector<std::uint8_t> bytes;
+    in.seekg(0, std::ios::end);
+    const std::streamoff size = in.tellg();
+    if (size < 0) throw std::runtime_error("cannot read " + path);
+    // Refused before the allocation, not after -- the point is to not
+    // reserve a gigabyte on the strength of a file name. The message
+    // names the size, because the usual cause is a file that is not a
+    // picture at all and the operator will recognise it by its length.
+    if (static_cast<std::uintmax_t>(size) > MAX_FILE_BYTES) {
+        throw std::runtime_error(path + " is " + std::to_string(size) +
+                                 " bytes; the limit for a picture file is " +
+                                 std::to_string(MAX_FILE_BYTES));
+    }
+    in.seekg(0, std::ios::beg);
+    bytes.resize(static_cast<std::size_t>(size));
+    if (size > 0) {
+        in.read(reinterpret_cast<char*>(bytes.data()), size);
+        if (!in) throw std::runtime_error("cannot read " + path);
+    }
+    return bytes;
+}
+
+}  // namespace
 
 Picture resize(const Picture& img, int width, int height) {
     if (img.width == width && img.height == height) return img;
@@ -108,18 +147,130 @@ ImageArray to_array(const Picture& img) {
     return out;
 }
 
+namespace {
+
+// PNG stores EXIF in an `eXIf` chunk holding a bare TIFF stream -- no
+// `Exif\0\0` signature, which is what a JPEG APP1 segment carries and
+// what easyexif's segment entry point expects. So the chunk is located
+// here and the signature prepended, leaving the TIFF parsing (byte
+// order, IFD offsets, bounds) where it belongs: in the vendored code.
+//
+// Walking PNG chunks is not the same kind of undertaking as walking a
+// TIFF: every chunk is a 4-byte big-endian length followed by a 4-byte
+// type, so the whole walk is bounds-checkable by inspection and there
+// are no internal offsets that can point anywhere.
+//
+// Pillow honours this chunk, so not reading it would mean a tagged PNG
+// rotating in `sstvae/images.py` and not here -- exactly the silent,
+// consequential disagreement the parity test exists to prevent.
+std::vector<std::uint8_t> png_exif_segment(const std::uint8_t* data, std::size_t len) {
+    static constexpr std::uint8_t SIGNATURE[8] = {0x89, 0x50, 0x4E, 0x47,
+                                                  0x0D, 0x0A, 0x1A, 0x0A};
+    if (len < sizeof(SIGNATURE) || !std::equal(SIGNATURE, SIGNATURE + sizeof(SIGNATURE), data)) {
+        return {};
+    }
+    std::size_t pos = sizeof(SIGNATURE);
+    while (pos + 8 <= len) {
+        const std::size_t size = (static_cast<std::size_t>(data[pos]) << 24) |
+                                 (static_cast<std::size_t>(data[pos + 1]) << 16) |
+                                 (static_cast<std::size_t>(data[pos + 2]) << 8) |
+                                 static_cast<std::size_t>(data[pos + 3]);
+        const std::uint8_t* type = data + pos + 4;
+        const std::size_t body = pos + 8;
+        // The 4-byte CRC follows the body. Overflow is not reachable --
+        // `size` is at most 2^32-1 and `body` at most `len` -- but the
+        // comparison is written so it would not matter if it were.
+        if (size > len || body > len - size || body + size + 4 > len) break;
+        if (std::equal(type, type + 4, "eXIf")) {
+            std::vector<std::uint8_t> out = {'E', 'x', 'i', 'f', 0x00, 0x00};
+            out.insert(out.end(), data + body, data + body + size);
+            return out;
+        }
+        pos = body + size + 4;
+    }
+    return {};
+}
+
+}  // namespace
+
+int exif_orientation(const std::uint8_t* data, std::size_t len) {
+    if (data == nullptr || len == 0) return 1;
+    easyexif::EXIFInfo info;
+    // Anything either parser objects to -- not a JPEG or PNG, no EXIF, a
+    // truncated or corrupt segment -- is an unrotated picture, not a
+    // failure. The return code is deliberately not distinguished: there
+    // is nothing a caller could do differently with "no EXIF" than with
+    // "corrupt".
+    const std::vector<std::uint8_t> png = png_exif_segment(data, len);
+    const int status =
+        png.empty()
+            ? info.parseFrom(data, static_cast<unsigned>(len))
+            : info.parseFromEXIFSegment(png.data(), static_cast<unsigned>(png.size()));
+    if (status != PARSE_EXIF_SUCCESS) return 1;
+    const int value = static_cast<int>(info.Orientation);
+    // 0 is easyexif's "tag absent"; anything above 8 is undefined in the
+    // spec and has been seen in the wild from buggy writers.
+    return (value >= 1 && value <= 8) ? value : 1;
+}
+
+Picture apply_orientation(const Picture& img, int orientation) {
+    if (orientation <= 1 || orientation > 8 || img.empty()) return img;
+
+    // Each case is the *inverse* map: where in the source does the
+    // destination pixel come from. Written out rather than composed from
+    // flip/transpose flags because the composition order is exactly the
+    // thing that is easy to get backwards, and eight explicit lines can
+    // be read against the spec's table one at a time.
+    //
+    // 5..8 exchange the axes, so the output's geometry changes -- which
+    // is the whole point, and why this must run before `fit` decides
+    // what to crop.
+    const int sw = img.width, sh = img.height;
+    const bool swap_axes = orientation >= 5;
+    Picture out(swap_axes ? sh : sw, swap_axes ? sw : sh);
+
+    for (int dy = 0; dy < out.height; ++dy) {
+        for (int dx = 0; dx < out.width; ++dx) {
+            int sx = 0, sy = 0;
+            switch (orientation) {
+                case 2: sx = sw - 1 - dx; sy = dy;             break;  // mirror
+                case 3: sx = sw - 1 - dx; sy = sh - 1 - dy;    break;  // 180
+                case 4: sx = dx;          sy = sh - 1 - dy;    break;  // flip
+                case 5: sx = dy;          sy = dx;             break;  // transpose
+                case 6: sx = dy;          sy = sh - 1 - dx;    break;  // 90 CW
+                case 7: sx = sw - 1 - dy; sy = sh - 1 - dx;    break;  // transverse
+                case 8: sx = sw - 1 - dy; sy = dx;             break;  // 90 CCW
+                default: sx = dx;         sy = dy;             break;
+            }
+            const std::size_t src = (static_cast<std::size_t>(sy) * sw + sx) * 3;
+            const std::size_t dst = (static_cast<std::size_t>(dy) * out.width + dx) * 3;
+            out.rgb[dst] = img.rgb[src];
+            out.rgb[dst + 1] = img.rgb[src + 1];
+            out.rgb[dst + 2] = img.rgb[src + 2];
+        }
+    }
+    return out;
+}
+
 Picture load(const std::string& path) {
+    // Read the file once and decode from memory, because the orientation
+    // tag and the pixels come from the same bytes: stb ignores EXIF, and
+    // easyexif wants the whole file. `stbi_load(path, ...)` would mean
+    // opening it twice.
+    std::vector<std::uint8_t> bytes = read_file(path);
+
     int w = 0, h = 0, channels = 0;
     // Forced to 3 channels: an RGBA or greyscale source is converted the
     // way `Image.convert("RGB")` would.
-    std::uint8_t* data = stbi_load(path.c_str(), &w, &h, &channels, 3);
+    std::uint8_t* data = stbi_load_from_memory(bytes.data(), static_cast<int>(bytes.size()),
+                                               &w, &h, &channels, 3);
     if (data == nullptr) {
         throw std::runtime_error("cannot read " + path + ": " + stbi_failure_reason());
     }
     Picture out(w, h);
     std::copy(data, data + static_cast<std::size_t>(w) * h * 3, out.rgb.begin());
     stbi_image_free(data);
-    return out;
+    return apply_orientation(out, exif_orientation(bytes.data(), bytes.size()));
 }
 
 ImageArray load_array(const std::string& path) { return to_array(fit(load(path))); }

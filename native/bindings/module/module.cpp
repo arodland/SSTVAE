@@ -665,6 +665,10 @@ PYBIND11_MODULE(sstvae_native, m) {
     images.attr("IMG_H") = sstvae::images::IMG_H;
     images.attr("MIN_W") = sstvae::images::MIN_W;
     images.attr("MIN_H") = sstvae::images::MIN_H;
+    // Exposed so the parity suite can assert the two implementations
+    // refuse the same files, rather than each asserting its own copy of
+    // the number.
+    images.attr("MAX_FILE_BYTES") = sstvae::images::MAX_FILE_BYTES;
 
 #ifdef SSTVAE_HAVE_CODEC
     // --- codec ---------------------------------------------------------

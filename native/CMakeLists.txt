@@ -117,6 +117,9 @@ add_library(sstvae_core STATIC
   core/optimize/speculative.cpp
   core/overlay/model.cpp
   core/sync/sync.cpp
+  # Vendored, and the only non-header-only one -- see
+  # third_party/easyexif/README.md. Read for JPEG orientation alone.
+  third_party/easyexif/exif.cpp
 )
 target_include_directories(sstvae_core PUBLIC core third_party/pocketfft)
 # stb is SYSTEM: 20k lines of vendored single-header C that is not

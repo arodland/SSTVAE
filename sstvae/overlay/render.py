@@ -22,7 +22,7 @@ from .model import ImageItem, OverlayDoc, SOURCE_LAST_RX, TextItem
 # Same font search the training overlays use, so the GUI's default face
 # matches what the model was trained on rather than being an arbitrary
 # second choice.
-from ..images import AVAILABLE_FONTS
+from ..images import AVAILABLE_FONTS, open_image
 
 
 @lru_cache(maxsize=64)
@@ -70,8 +70,15 @@ def _resolve_source(source: str, last_rx: Image.Image | None) -> Image.Image | N
     if not source or not os.path.exists(source):
         return None
     try:
-        return Image.open(source).convert("RGB")
-    except OSError:
+        # Upright, like the main picture -- an inset is usually a
+        # photograph too, and one of the two arriving sideways would be
+        # the more confusing outcome.
+        return open_image(source).convert("RGB")
+    except (OSError, ValueError):
+        # ValueError is `open_image`'s size refusal. An inset that is too
+        # large to open draws nothing, like every other unusable source
+        # here -- refusing to render the whole composition over one
+        # decorative element would be the worse failure.
         return None
 
 
