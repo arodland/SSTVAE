@@ -158,11 +158,11 @@ private:
     PictureBox* preview_ = nullptr;
     QWidget* strip_ = nullptr;
     QLabel* status_ = nullptr;
-    // Diversity-only lock lamps ("Primary"/"Secondary"), hidden unless
+    // Diversity-only lock chips ("Primary"/"Secondary"), hidden unless
     // diversity_active_ -- a single-receiver session has no second
     // branch for these to describe.
-    QLabel* branch_a_label_ = nullptr;
-    QLabel* branch_b_label_ = nullptr;
+    QLabel* branch_a_chip_ = nullptr;
+    QLabel* branch_b_chip_ = nullptr;
     QLabel* last_card_ = nullptr;
     QProgressBar* progress_ = nullptr;
     QPointer<Waterfall> waterfall_;

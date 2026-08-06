@@ -3,6 +3,8 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <utility>
+#include <vector>
 
 namespace sstvae::gui {
 
@@ -81,6 +83,30 @@ int FlowLayout::reflow(const QRect& rect, bool apply) const {
     int y = inner.y();
     int line_height = 0;
 
+    // **Placed a line at a time, so each line can be centred.**
+    //
+    // Setting each item's geometry as it is visited puts every one of
+    // them at the *top* of its line, because the line's height is not
+    // known until the line is finished. A row that mixes buttons with
+    // text then hangs its text off the top edge of the buttons: "No
+    // image selected" sat a few pixels above the captions either side
+    // of it, and "Level:" above the slider it labels. Every other
+    // layout in Qt centres, so this read as a mistake -- which it was.
+    //
+    // Centred rather than baseline-aligned: a push button's text sits
+    // near its own vertical centre once the style's padding is counted,
+    // so centring lands the baselines together, and it is also what a
+    // QHBoxLayout does by default. Getting true baselines out of
+    // arbitrary widgets means asking each one where its is, which Qt
+    // does not offer.
+    std::vector<std::pair<QLayoutItem*, QRect>> line;
+    auto place_line = [&] {
+        for (const auto& [item, box] : line) {
+            item->setGeometry(box.translated(0, (line_height - box.height()) / 2));
+        }
+        line.clear();
+    };
+
     for (QLayoutItem* item : items_) {
         const QSize want = item_size(item);
         int next = x + want.width();
@@ -89,15 +115,17 @@ int FlowLayout::reflow(const QRect& rect, bool apply) const {
         // for it to go and it is allowed to overhang rather than be
         // dropped somewhere invisible.
         if (next > inner.right() + 1 && line_height > 0) {
+            if (apply) place_line();
             x = inner.x();
             y += line_height + vspace_;
             next = x + want.width();
             line_height = 0;
         }
-        if (apply) item->setGeometry(QRect(QPoint(x, y), want));
+        if (apply) line.emplace_back(item, QRect(QPoint(x, y), want));
         x = next + hspace_;
         line_height = std::max(line_height, want.height());
     }
+    if (apply) place_line();
     return y + line_height - rect.y() + m.bottom();
 }
 

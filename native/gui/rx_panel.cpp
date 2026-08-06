@@ -8,7 +8,6 @@
 #include <QFont>
 #include <QGroupBox>
 #include <QHBoxLayout>
-#include <QImage>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPalette>
@@ -37,6 +36,7 @@
 #include "images/images.hpp"
 #include "flow_layout.hpp"
 #include "picture_box.hpp"
+#include "style.hpp"
 #include "settings/settings.hpp"
 #include "waterfall.hpp"
 
@@ -46,12 +46,11 @@ namespace {
 
 namespace fs = std::filesystem;
 
-QPixmap to_pixmap(const images::Picture& picture) {
-    if (picture.empty()) return QPixmap();
-    const QImage view(picture.rgb.data(), picture.width, picture.height,
-                      picture.width * 3, QImage::Format_RGB888);
-    return QPixmap::fromImage(view.copy());
-}
+// One field separator, shared by the live status line and the
+// last-reception card. They describe the same reception a second apart
+// and used to punctuate it differently -- the status line with a double
+// hyphen, the card with a single one.
+const QString SEP = QStringLiteral("  ·  ");
 
 // Never overwrite: two receptions can finish in the same second with the
 // same callsign and frequency.
@@ -68,33 +67,26 @@ fs::path unique_path(fs::path path) {
     return path;
 }
 
-// SNR for display, with a placeholder when there is none.
-//
-// `rx::fmt_snr` returns an empty string for NaN, which is right for it
-// -- it mirrors Python's and feeds the CLI. But on screen an absent
-// field is indistinguishable from a field that was never going to be
-// there: the operator cannot tell "no SNR estimate yet" from "this
-// build does not show SNR". The engine formats; the panel decides how
-// to show absence.
-QString snr_text(double snr_db) {
-    const QString formatted = QString::fromStdString(rx::fmt_snr(snr_db));
-    return formatted.isEmpty() ? QStringLiteral("  SNR --") : formatted;
-}
-
-// Colour through the palette, not a stylesheet -- the same reason
-// settings_dialog.cpp's `note()` does: a stylesheet on any widget makes
-// Qt wrap the whole application style in QStyleSheetStyle. Green while
-// locked, the platform's own disabled text colour otherwise -- reusing
-// `QPalette::Disabled` rather than a second hand-picked grey keeps this
-// consistent with every other "inactive" label in the app.
-void set_lock_lamp(QLabel* label, bool locked) {
-    QPalette pal = label->palette();
+// A filled chip, not coloured text -- the same argument as the PTT lamp
+// (main_window.cpp): a lock state is exactly the kind of thing that
+// must read at a glance, and coloured text on the panel's own
+// background is a contrast problem waiting for a dark theme. Locked is
+// `style::color::ok()`/`on_ok()`, the same pair the waterfall's level
+// meter already uses for "healthy". Not locked deliberately reuses the
+// palette's own Button/ButtonText pair rather than a second hand-picked
+// grey: every theme already keeps that pairing legible, and it is what
+// makes the chip read as an inactive control without being a disabled
+// one (`style::dim` is for text, not for a filled surface).
+void set_lock_chip(QLabel* chip, bool locked) {
+    QPalette pal = chip->palette();
     if (locked) {
-        pal.setColor(QPalette::WindowText, QColor(0x1e, 0x7d, 0x32));
+        pal.setColor(QPalette::Window, style::color::ok());
+        pal.setColor(QPalette::WindowText, style::color::on_ok());
     } else {
-        pal.setColor(QPalette::WindowText, pal.color(QPalette::Disabled, QPalette::WindowText));
+        pal.setColor(QPalette::Window, pal.color(QPalette::Button));
+        pal.setColor(QPalette::WindowText, pal.color(QPalette::ButtonText));
     }
-    label->setPalette(pal);
+    chip->setPalette(pal);
 }
 
 }  // namespace
@@ -155,34 +147,44 @@ void ReceivePanel::build_ui() {
     lower_layout->setSpacing(4);
     QWidget* lower = strip_;
 
-    status_ = new QLabel(tr("Stopped"), lower);
     // A progress-tier surface must not set a width floor. Its longest
     // line ("Receiving mode C: frame 220/220 ... de KD8XYZ") is ~400 px,
     // and both panes are locked to one width, so every such floor is
-    // paid twice. Errors go to the banner, so what clips here is
+    // paid twice. Errors go to the banner, so what gives way here is
     // progress text that is rebuilt twice a second anyway.
+    //
+    // `ElidingLabel`, because giving way must not mean being cut off
+    // mid-word: a truncated "de KD8X" reads as a callsign that did not
+    // decode. See the same argument in `settings_dialog.cpp`'s scroll
+    // areas.
+    status_ = new style::ElidingLabel(tr("Stopped"), lower);
     status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     lower_layout->addWidget(status_);
 
-    // The diversity lock lamps: which of the two receivers is currently
+    // The diversity lock chips: which of the two receivers is currently
     // contributing to the combine. Hidden until a diversity session
-    // starts (set_diversity_lock below never runs otherwise, so these
-    // stay in their "not locked" look, which would be misleading to
-    // show for an ordinary single-receiver session).
+    // starts (set_lock_chip below never runs otherwise, so these stay in
+    // their "not locked" look, which would be misleading to show for an
+    // ordinary single-receiver session).
     auto* lock_row = new QHBoxLayout();
     lock_row->setContentsMargins(0, 0, 0, 0);
-    auto make_lock_label = [this](const QString& text) {
-        auto* label = new QLabel(text, this);
-        QFont f = label->font();
+    auto make_lock_chip = [this](const QString& text) {
+        auto* chip = new QLabel(text, this);
+        QFont f = chip->font();
         f.setBold(true);
-        label->setFont(f);
-        label->hide();
-        return label;
+        chip->setFont(f);
+        chip->setAutoFillBackground(true);
+        chip->setAlignment(Qt::AlignCenter);
+        chip->setContentsMargins(6, 1, 6, 1);
+        chip->hide();
+        return chip;
     };
-    branch_a_label_ = make_lock_label(tr("Primary"));
-    branch_b_label_ = make_lock_label(tr("Secondary"));
-    lock_row->addWidget(branch_a_label_);
-    lock_row->addWidget(branch_b_label_);
+    branch_a_chip_ = make_lock_chip(tr("Primary"));
+    branch_b_chip_ = make_lock_chip(tr("Secondary"));
+    set_lock_chip(branch_a_chip_, false);
+    set_lock_chip(branch_b_chip_, false);
+    lock_row->addWidget(branch_a_chip_);
+    lock_row->addWidget(branch_b_chip_);
     lock_row->addStretch(1);
     lower_layout->addLayout(lock_row);
 
@@ -198,25 +200,30 @@ void ReceivePanel::build_ui() {
     last_card_ = new QLabel(lower);
     last_card_->setTextFormat(Qt::PlainText);
     last_card_->setWordWrap(true);
-    last_card_->setEnabled(false);  // reads as secondary until it has content
+    // No `setEnabled(false)` to make it read as secondary. Disabling is
+    // a state change standing in for an appearance one -- it also takes
+    // the widget out of the accessibility tree as
+    // interactive-but-unavailable, and it says "you cannot use this"
+    // about a label nobody was going to click. An empty label shows
+    // nothing anyway, so the dimming bought exactly nothing.
     lower_layout->addWidget(last_card_);
 
     // Wraps rather than crushes -- see flow_layout.hpp.
     auto* controls = new FlowLayout();
-    start_button_ = new QPushButton(tr("Start receiving"), this);
+    start_button_ = new QPushButton(tr("&Start receiving"), this);
     connect(start_button_, &QPushButton::clicked, this, &ReceivePanel::start);
-    stop_button_ = new QPushButton(tr("Stop"), this);
+    stop_button_ = new QPushButton(tr("Sto&p"), this);
     connect(stop_button_, &QPushButton::clicked, this, &ReceivePanel::stop);
     stop_button_->setEnabled(false);
-    save_button_ = new QPushButton(tr("Save image"), this);
+    save_button_ = new QPushButton(tr("Sa&ve image..."), this);
     connect(save_button_, &QPushButton::clicked, this, &ReceivePanel::save_current);
     save_button_->setEnabled(false);
-    folder_button_ = new QPushButton(tr("Show folder"), this);
-    folder_button_->setToolTip(tr("Open the folder holding the last saved picture"));
+    folder_button_ = new QPushButton(tr("Show f&older"), this);
+    folder_button_->setToolTip(tr("Open the folder holding the last saved image"));
     connect(folder_button_, &QPushButton::clicked, this,
             &ReceivePanel::open_saved_folder);
     folder_button_->setEnabled(false);
-    autosave_ = new QCheckBox(tr("Autosave"), this);
+    autosave_ = new QCheckBox(tr("&Autosave"), this);
     autosave_->setChecked(app_->config().receive.autosave);
     connect(autosave_, &QCheckBox::toggled, this,
             &ReceivePanel::on_autosave_toggled);
@@ -239,18 +246,7 @@ void ReceivePanel::resizeEvent(QResizeEvent* event) {
     place_banner();
 }
 
-void ReceivePanel::place_banner() {
-    if (banner_ == nullptr || preview_ == nullptr) return;
-    const QRect over = preview_->geometry();
-    // `heightForWidth`, not `sizeHint`: the message wraps, and a hint
-    // taken at unconstrained width is one line -- so a long device name
-    // was clipped to a sliver of its own text. Measured at the width it
-    // will actually get.
-    const int wanted = banner_->heightForWidth(over.width());
-    banner_->setGeometry(over.x(), over.y(), over.width(),
-                         std::max(banner_->sizeHint().height(), wanted));
-    banner_->raise();
-}
+void ReceivePanel::place_banner() { style::place_over(banner_, preview_); }
 
 bool ReceivePanel::listening() const { return running_.load(); }
 
@@ -275,6 +271,17 @@ bool ReceivePanel::start() {
 
     const settings::Config& config = app_->config();
     ring_ = std::make_shared<rx::RingBuffer>(config.receive.buffer_seconds);
+    // decode_loop's own locals (blind_acc included) already start clean
+    // just by being a fresh function call, but the Progress this panel
+    // *displays* lives here, not in the loop -- and stop() (called by
+    // both the Stop button and suspend_for_transmit) never touches it.
+    // Without this, stopping while a reception was in progress leaves
+    // shared_ holding a stale "Receiving" Progress -- old mode, old
+    // frame count, old callsign -- and the 500 ms status timer shows it
+    // immediately on the next Start, before the new loop has run a
+    // single poll. A fresh SharedState is the rest of what "start() is
+    // the one method that resets all receiver state" needs to be true.
+    shared_ = std::make_unique<rx::SharedState>();
     if (Waterfall* w = fall()) w->set_ring(ring_);
 
     try {
@@ -408,10 +415,10 @@ bool ReceivePanel::start() {
     banner_->clear();
     was_receiving_ = false;
     diversity_active_ = diversity;
-    branch_a_label_->setVisible(diversity_active_);
-    branch_b_label_->setVisible(diversity_active_);
-    set_lock_lamp(branch_a_label_, false);
-    set_lock_lamp(branch_b_label_, false);
+    branch_a_chip_->setVisible(diversity_active_);
+    branch_b_chip_->setVisible(diversity_active_);
+    set_lock_chip(branch_a_chip_, false);
+    set_lock_chip(branch_b_chip_, false);
     app_->log_event("rx", log::Severity::Info,
                     tr("listening (device at %1 Hz)").arg(device_rate));
     emit listeningChanged(true);
@@ -441,8 +448,12 @@ void ReceivePanel::stop() {
         start_button_->setEnabled(true);
         stop_button_->setEnabled(false);
         set_status(tr("Stopped"));
-        branch_a_label_->hide();
-        branch_b_label_->hide();
+        branch_a_chip_->hide();
+        branch_b_chip_->hide();
+        // `refresh_status` returns early when not listening, so without
+        // this the bar keeps whatever fraction the reception had
+        // reached: "Stopped" over a bar still reading 63%.
+        progress_->setValue(0);
     }
     if (was_listening) {
         app_->log_event("rx", log::Severity::Info, tr("stopped"));
@@ -458,7 +469,7 @@ void ReceivePanel::suspend_for_transmit() {
     // pause has to look deliberate rather than like a receiver that
     // died: the waterfall stops dead when the ring goes away, and
     // without this it is the same picture as a wedged capture.
-    set_status(tr("Paused -- transmitting"));
+    set_status(tr("Paused — transmitting"));
     preview_->setEnabled(false);
     if (Waterfall* w = fall()) w->setEnabled(false);
     // And the button that would undo half duplex. `stop()` re-enables
@@ -590,7 +601,7 @@ void ReceivePanel::refresh_status() {
 
     QString text;
     if (progress.status == rx::Status::Listening) {
-        text = tr("Listening... (%1s captured)")
+        text = tr("Listening... (%1 s captured)")
                    .arg(progress.seconds_captured, 0, 'f', 0);
     } else if (progress.status == rx::Status::Receiving) {
         if (progress.n_frames_expected) {
@@ -604,16 +615,16 @@ void ReceivePanel::refresh_status() {
             text = tr("Receiving (blind sync): %1% of latents")
                        .arg(100.0 * progress.progress_frac, 0, 'f', 0);
         }
-        text += snr_text(progress.snr_db);
+        text += SEP + style::fmt_snr_db(progress.snr_db);
         if (!progress.callsign.empty()) {
-            text += tr("  de %1").arg(QString::fromStdString(progress.callsign));
+            text += SEP + tr("de %1").arg(QString::fromStdString(progress.callsign));
         }
     } else {
-        text = tr("Complete%1").arg(snr_text(progress.snr_db));
+        text = tr("Complete") + SEP + style::fmt_snr_db(progress.snr_db);
         if (last_saved_path_) {
-            text += tr(" -- saved %1")
-                        .arg(QString::fromStdString(
-                            fs::path(*last_saved_path_).filename().string()));
+            text += SEP + tr("saved %1")
+                              .arg(QString::fromStdString(
+                                  fs::path(*last_saved_path_).filename().string()));
         }
     }
 
@@ -621,8 +632,8 @@ void ReceivePanel::refresh_status() {
     progress_->setValue(static_cast<int>(100.0 * progress.progress_frac));
 
     if (diversity_active_) {
-        set_lock_lamp(branch_a_label_, progress.branch_a_locked);
-        set_lock_lamp(branch_b_label_, progress.branch_b_locked);
+        set_lock_chip(branch_a_chip_, progress.branch_a_locked);
+        set_lock_chip(branch_b_chip_, progress.branch_b_locked);
     }
 
     if (progress.image && progress.image.get() != shown_) {
@@ -660,9 +671,10 @@ void ReceivePanel::on_reception(const QString& saved_path) {
                     .arg(reception->frames_received.value_or(0))
                     .arg(*reception->n_frames_expected);
     }
-    const QString snr = QString::fromStdString(rx::fmt_snr(reception->snr_db));
-    if (!snr.isEmpty()) line += tr(",%1").arg(snr);
-    if (!saved_path.isEmpty()) line += tr(" -- saved %1").arg(saved_path);
+    if (!std::isnan(reception->snr_db)) {
+        line += tr(", %1").arg(style::fmt_snr_db(reception->snr_db));
+    }
+    if (!saved_path.isEmpty()) line += tr(" — saved %1").arg(saved_path);
     app_->log_event("rx", log::Severity::Info, line);
 
     // And the same facts on screen, where they stay. The engine resets
@@ -670,24 +682,24 @@ void ReceivePanel::on_reception(const QString& saved_path) {
     // below this point was previously unrecoverable from the UI.
     QString card = tr("Last: %1").arg(QTime::currentTime().toString(QStringLiteral("HH:mm")));
     if (reception->mode_name) {
-        card += tr(" - mode %1").arg(QString::fromStdString(*reception->mode_name));
+        card += SEP + tr("mode %1").arg(QString::fromStdString(*reception->mode_name));
     }
     if (!reception->callsign.empty()) {
-        card += tr(" - de %1").arg(QString::fromStdString(reception->callsign));
+        card += SEP + tr("de %1").arg(QString::fromStdString(reception->callsign));
     }
-    const QString card_snr = QString::fromStdString(rx::fmt_snr(reception->snr_db));
-    if (!card_snr.isEmpty()) card += QStringLiteral(" -") + card_snr;
+    if (!std::isnan(reception->snr_db)) {
+        card += SEP + style::fmt_snr_db(reception->snr_db);
+    }
     if (reception->n_frames_expected) {
-        card += tr(" - %1/%2 frames")
-                    .arg(reception->frames_received.value_or(0))
-                    .arg(*reception->n_frames_expected);
+        card += SEP + tr("%1/%2 frames")
+                          .arg(reception->frames_received.value_or(0))
+                          .arg(*reception->n_frames_expected);
     }
     if (!saved_path.isEmpty()) {
-        card += tr(" - %1").arg(
-            QString::fromStdString(fs::path(saved_path.toStdString()).filename().string()));
+        card += SEP + QString::fromStdString(
+                          fs::path(saved_path.toStdString()).filename().string());
     }
     last_card_->setText(card);
-    last_card_->setEnabled(true);
     folder_button_->setEnabled(!saved_path.isEmpty());
 
     emit imageReceived(reception->image);
@@ -710,7 +722,7 @@ void ReceivePanel::on_autosave_toggled(bool on) {
 }
 
 void ReceivePanel::show_image(const images::Picture& image) {
-    const QPixmap pixmap = to_pixmap(image);
+    const QPixmap pixmap = style::to_pixmap(image);
     if (pixmap.isNull()) return;
     // The box keeps the original and rescales itself on every resize;
     // the panel no longer has to notice.
@@ -771,9 +783,8 @@ void ReceivePanel::save_current() {
         fs::path(path.toStdString()).filename().string());
     if (last_card_->text().isEmpty()) {
         last_card_->setText(tr("Saved %1").arg(name));
-        last_card_->setEnabled(true);
     } else {
-        last_card_->setText(tr("%1 - saved %2").arg(last_card_->text(), name));
+        last_card_->setText(last_card_->text() + SEP + tr("saved %1").arg(name));
     }
     emit receptionSaved(path);
 }
@@ -782,16 +793,15 @@ void ReceivePanel::fill_for_screenshot() {
     // The longest line `refresh_status` can build, the longest card
     // `on_reception` can build, and the banner inside the layout.
     set_status(
-        tr("Receiving mode C: frame 220/220 (100%)  SNR 8.3dB  de KD8XYZ"));
+        tr("Receiving mode C: frame 220/220 (100%)  ·  SNR 8.3 dB  ·  de KD8XYZ"));
     progress_->setValue(100);
-    branch_a_label_->show();
-    branch_b_label_->show();
-    set_lock_lamp(branch_a_label_, true);
-    set_lock_lamp(branch_b_label_, false);
+    branch_a_chip_->show();
+    branch_b_chip_->show();
+    set_lock_chip(branch_a_chip_, true);
+    set_lock_chip(branch_b_chip_, false);
     last_card_->setText(
-        tr("Last: 14:32 - mode C - de KD8XYZ - SNR 8.3dB - 220/220 frames"
-           " - KD8XYZ-C-14230000.png"));
-    last_card_->setEnabled(true);
+        tr("Last: 14:32  ·  mode C  ·  de KD8XYZ  ·  SNR 8.3 dB"
+           "  ·  220/220 frames  ·  KD8XYZ-C-14230000.png"));
     save_button_->setEnabled(true);
     folder_button_->setEnabled(true);
     place_banner();
@@ -818,7 +828,7 @@ void ReceivePanel::open_saved_folder() {
     app_->log_event("rx", log::Severity::Info, tr("opening %1").arg(dir));
     if (!QDesktopServices::openUrl(QUrl::fromLocalFile(dir))) {
         app_->log_event("rx", log::Severity::Error,
-                        tr("could not open %1 -- no handler for local "
+                        tr("could not open %1 — no handler for local "
                            "folders on this desktop")
                             .arg(dir));
     }

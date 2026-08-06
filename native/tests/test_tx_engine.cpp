@@ -196,9 +196,14 @@ void test_cw_id_appends_after_the_transmission() {
     check::is_true(engine.transmit(test_picture(), config),
                    "tx/cwid: transmits with the ID on");
 
+    // The default message is the whole point of the feature (issue #14):
+    // it both identifies the station and advertises SSTVAE, not just the
+    // bare callsign.
+    check::equal(config.cw_message, std::string("SSTVAE DE {callsign}"),
+                "tx/cwid: the default CW message advertises the mode and software");
     const std::vector<double> id_tone = dsp::generate_morse(
-        config.callsign, config::FS, tx::CW_ID_WPM, tx::CW_ID_TONE_HZ, 1.0);
-    check::is_true(!id_tone.empty(), "tx/cwid: KC2G produces a tone");
+        "SSTVAE DE KC2G", config::FS, tx::CW_ID_WPM, tx::CW_ID_TONE_HZ, 1.0);
+    check::is_true(!id_tone.empty(), "tx/cwid: SSTVAE DE KC2G produces a tone");
     const std::size_t gap_n =
         static_cast<std::size_t>(std::lround(tx::CW_ID_GAP_S * config::FS));
 
@@ -264,6 +269,59 @@ void test_cw_id_does_nothing_with_no_callsign() {
 
     check::equal(played.size(), plain.size(),
                 "tx/cwid-none: no callsign means nothing is appended");
+}
+
+void test_cw_message_is_customizable() {
+    // issue #14: the operator can replace the default message. Every
+    // `{callsign}` in it becomes the configured callsign; the rest goes
+    // out verbatim.
+    std::vector<double> custom;
+    tx::TxEngine engine(nullptr, capturing_player(custom), good_encoder());
+    tx::TxConfig config = fast_config();
+    config.cw_id = true;
+    config.cw_message = "DE {callsign} {callsign} SSTV TEST";
+    check::is_true(engine.transmit(test_picture(), config),
+                   "tx/cwmsg: transmits with a custom message");
+
+    std::vector<double> plain;
+    tx::TxEngine baseline(nullptr, capturing_player(plain), good_encoder());
+    config.cw_id = false;
+    check::is_true(baseline.transmit(test_picture(), config),
+                   "tx/cwmsg: baseline transmits");
+
+    const std::vector<double> id_tone = dsp::generate_morse(
+        "DE KC2G KC2G SSTV TEST", config::FS, tx::CW_ID_WPM, tx::CW_ID_TONE_HZ, 1.0);
+    check::is_true(!id_tone.empty(), "tx/cwmsg: the substituted message produces a tone");
+    const std::size_t gap_n =
+        static_cast<std::size_t>(std::lround(tx::CW_ID_GAP_S * config::FS));
+    check::equal(custom.size(), plain.size() + gap_n + id_tone.size(),
+                "tx/cwmsg: every {callsign} placeholder was substituted, not just the first");
+}
+
+void test_cw_message_with_no_placeholder_is_sent_as_is() {
+    // A message with no `{callsign}` in it is still sent verbatim --
+    // useful for an operator who wants to spell the callsign into the
+    // message text themselves, or add nothing beyond a fixed phrase.
+    std::vector<double> custom;
+    tx::TxEngine engine(nullptr, capturing_player(custom), good_encoder());
+    tx::TxConfig config = fast_config();
+    config.cw_id = true;
+    config.cw_message = "SSTVAE";
+    check::is_true(engine.transmit(test_picture(), config),
+                   "tx/cwmsg-fixed: transmits");
+
+    std::vector<double> plain;
+    tx::TxEngine baseline(nullptr, capturing_player(plain), good_encoder());
+    config.cw_id = false;
+    check::is_true(baseline.transmit(test_picture(), config),
+                   "tx/cwmsg-fixed: baseline transmits");
+
+    const std::vector<double> id_tone = dsp::generate_morse(
+        "SSTVAE", config::FS, tx::CW_ID_WPM, tx::CW_ID_TONE_HZ, 1.0);
+    const std::size_t gap_n =
+        static_cast<std::size_t>(std::lround(tx::CW_ID_GAP_S * config::FS));
+    check::equal(custom.size(), plain.size() + gap_n + id_tone.size(),
+                "tx/cwmsg-fixed: the fixed message is sent with no substitution");
 }
 
 void test_no_rig_control_still_transmits() {
@@ -502,6 +560,8 @@ int main() {
         test_a_successful_transmission();
         test_cw_id_appends_after_the_transmission();
         test_cw_id_does_nothing_with_no_callsign();
+        test_cw_message_is_customizable();
+        test_cw_message_with_no_placeholder_is_sent_as_is();
         test_no_rig_control_still_transmits();
         test_a_throwing_player_still_unkeys();
         test_cancelling_during_playback_unkeys();

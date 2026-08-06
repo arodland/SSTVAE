@@ -79,6 +79,16 @@ std::vector<double> transmission(const std::string& callsign, std::uint64_t seed
 // something the loop invented.
 constexpr std::uint8_t kDecoderMark = 0x5A;
 
+// No preamble/header at all -- forces decode_loop past find_new_
+// reception (which needs one) and into the blind path on every poll,
+// mirroring `_frames_only` in tests/test_listen_state_machine.py.
+std::vector<double> frames_only(const std::string& callsign, std::uint64_t seed) {
+    const std::vector<double> full = transmission(callsign, seed);
+    const auto skip = static_cast<std::size_t>(
+        config::LEADIN_SAMPLES + config::PREAMBLE_SAMPLES + config::HEADER_SAMPLES);
+    return std::vector<double>(full.begin() + static_cast<std::ptrdiff_t>(skip), full.end());
+}
+
 // Everything a running loop and the test share.
 struct Harness {
     rx::RingBuffer ring;
@@ -579,6 +589,72 @@ void test_low_cpu_loop_receives() {
                    "rx/lowcpu: the decoder's picture");
 }
 
+void test_fresh_session_does_not_inherit_blind_evidence_from_a_prior_one() {
+    // The app's "start receiving" button and ReceivePanel::resume_after_
+    // transmit both work by discarding the whole RingBuffer and calling
+    // decode_loop again from scratch (see rx_panel.cpp's start() /
+    // resume_after_transmit(), and RingBuffer::clear()'s comment, which
+    // records that clear() is *not* how that path works), rather than
+    // clearing state in place. blind_acc is a plain local inside
+    // decode_loop, so a brand-new call gets a clean one for free -- but
+    // that is a property of scoping, not something pinned against a
+    // future change that keeps decode_loop (and its locals) running
+    // across a session boundary instead of restarting it, which is
+    // exactly the scenario an indeterminate gap in real captured audio
+    // (silence while transmitting, or whatever a fresh capture stream
+    // first hands back) has no way to signal to a *stale* accumulator.
+    //
+    // Session 1 gets a real, complete mode-A transmission (no preamble/
+    // header, to force the blind path) and is left to lock and finish,
+    // so it isn't just idling. Session 2 is a brand-new RingBuffer +
+    // SharedState + decode_loop call, exactly as start()/resume_after_
+    // transmit() produce, fed nothing but noise: it must never report a
+    // reception. If blind_acc's folded evidence ever leaked across that
+    // boundary, session 2 would begin already most of the way to
+    // session 1's lock rather than from nothing.
+    Harness h1(40.0);
+    h1.config.once = true;
+    write_all(h1.ring, frames_only("KC2G", 41));
+
+    rx::decode_loop(h1.ring, h1.decoder(), h1.state, h1.config, h1.stop, h1.sink());
+
+    check::equal(h1.received.size(), std::size_t{1},
+                 "rx/session-reset: session 1 should lock on and finish a real "
+                 "transmission -- otherwise this isn't exercising real "
+                 "blind-accumulator evidence");
+
+    // A brand-new session: fresh RingBuffer, fresh SharedState, fresh
+    // decode_loop call. Fed nothing but noise -- a fixed seed, so this
+    // is deterministic rather than a rare-false-lock flake.
+    Harness h2(10.0);
+    std::vector<double> noise(static_cast<std::size_t>(8.0 * config::FS));
+    std::uint64_t s = 4242;
+    for (double& v : noise) {
+        s += 0x9E3779B97F4A7C15ULL;
+        std::uint64_t z = s;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        z = z ^ (z >> 31);
+        v = 0.2 * (static_cast<double>(z >> 11) / 9007199254740992.0 - 0.5);
+    }
+    write_all(h2.ring, noise);
+
+    std::thread loop([&] {
+        rx::decode_loop(h2.ring, h2.decoder(), h2.state, h2.config, h2.stop, h2.sink());
+    });
+    std::thread watcher([&] { h2.poll_watcher(); });
+
+    h2.until([&] { return h2.polls() >= 4; }, "rx/session-reset: four polls on session 2");
+    h2.stop.set();
+    loop.join();
+    watcher.join();
+
+    check::equal(h2.count(), std::size_t{0},
+                 "rx/session-reset: a fresh session fed only noise must not report "
+                 "a reception -- blind_acc leaked evidence across a session "
+                 "boundary");
+}
+
 void test_stop_interrupts_a_wait_in_progress() {
     // Shutting the receiver down must not cost a poll interval. If the
     // condition variable were replaced by a polled flag this would sit
@@ -614,6 +690,7 @@ int main() {
         test_diversity_debug_image_written_only_when_both_branches_lock();
         test_diversity_combines_a_header_branch_with_a_blind_only_branch();
         test_diversity_completes_when_both_branches_are_blind_only();
+        test_fresh_session_does_not_inherit_blind_evidence_from_a_prior_one();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;

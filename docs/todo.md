@@ -63,6 +63,69 @@ typical 300–2700 Hz SSB filter, which limits the centre to roughly
 900–2100 Hz — exactly the range measured above. Beyond that the
 transmitter's own filtering, not the modem, is the limit.
 
+## ~~Blind acquisition: does longer integration reach weaker signals?~~ — no, and multi-timescale is implemented
+
+**Closed 2026-08-06.** `sync.BlindAccumulator` (the incremental,
+block-decomposed replacement for `acquire_blind`'s one-shot search — see
+`docs/native-app.md`'s history for why it exists) was built on the
+assumption that a longer integration window lets it detect weaker
+signals, the same way more samples lower a radiometer's noise floor.
+**Measured, that assumption is wrong for this detector.**
+
+`result()`'s score is peak-bin-sum / median-of-other-bins-sum, both sums
+of matched-filter *power* across periods. Both grow roughly
+proportionally with the number of periods folded in, so the ratio
+converges to a value set by the signal's *per-period* SNR — a ceiling
+integration doesn't push through, unlike coherent (voltage) integration
+or a radiometer's magnitude averaging. Measured (mode C frame data,
+`mpp` fading, one-shot `acquire_blind` with a growing search window from
+~10% to 100% of the real 95 s transmission):
+
+| SNR | window length dependence |
+|---|---|
+| −6 dB | passes at every length from ~10 s to 95 s, 8/8 seeds, score flat (4.2–5.4) |
+| −7 dB | mostly flat too; **one seed of eight missed at a 10 s window and caught at 95 s** |
+| −10 dB | fails at every length up to and including the full 95 s, no exceptions, no seed rescued |
+
+So a signal below the floor cannot be rescued by any amount of
+integration. What longer integration *does* buy is **reliability near
+the floor**: a signal whose true ratio sits just above threshold can
+read below it on a short, noisy sample and get missed, and integrating
+over more of it converges the estimate and catches it — the −7 dB
+result above. That benefit runs out once the window covers the
+transmission's own duration; audio *older* than the transmission is
+pure dilution (already documented on `BlindAccumulator` itself), not
+more signal to integrate.
+
+**That reframes, but doesn't remove, the original motivation**
+(Andrew: "we want ~90 s for mode C without giving up on mode A's own
+36 s"). The right lever isn't a longer window in general, it's matching
+each mode's own duration — long enough to get mode C's full reliability
+benefit, short enough that mode A isn't sitting diluted behind 60+
+irrelevant seconds a mode-C-tuned window would still weight
+non-negligibly. Implemented: `BlindAccumulator.window_s` now accepts
+several decay timescales run in parallel off the *same* shared, expensive
+per-block matched-filter result (only the cheap decay-and-fold step
+repeats per timescale, so N timescales cost barely more than one);
+`result()` reports whichever timescale's score is highest.
+`rx/engine.py`/`engine.cpp` pass one timescale per `config.MODES`, each
+capped at that mode's own `duration_s` by (the now-repurposed)
+`blind_search_seconds` — default above every mode's duration, so nothing
+is capped unless deliberately lowered. Ported to C++ and cross-checked
+against the Python reference via `pytest --native`
+(`tests/test_blind_acquisition.py::test_blind_accumulator_multi_timescale_picks_the_better_one`).
+
+**Caveats on the measurement.** Single-digit-to-low-double-digit seed
+counts per cell, same order as the acquisition-near-threshold sweeps
+this file warns about elsewhere ("40–80% success rate... any sweep with
+single-digit trials per cell will invent a pattern") — the −6 dB / −10 dB
+rows are each other's sanity check (comfortably-above and clearly-below
+the floor, both flat, in opposite directions), which is stronger
+evidence than either alone, but the exact floor location and the exact
+size of the near-floor benefit were not swept at the 25-seed rigor that
+section demands. Good enough to justify the multi-timescale design;
+not a citable number for where the floor sits.
+
 ## ~~Improve acquisition at large frequency offsets~~ — did not reproduce
 
 **Withdrawn 2026-07-26. There is no offset effect; the original result

@@ -193,10 +193,19 @@ struct TransmitConfig {
     // matter through a plateau test that usually ends the run first.
     bool optimize = false;
 
-    // Send the configured callsign in Morse (18 wpm, 1000 Hz) 500 ms
-    // after each transmission, under the same PTT key-up. A no-op with
-    // no callsign set.
+    // Send `cw_message` in Morse (18 wpm, 1000 Hz) 500 ms after each
+    // transmission, under the same PTT key-up. A no-op with no callsign
+    // set -- there is nothing to identify with, whatever the message
+    // says.
     bool cw_id = false;
+
+    // What to send. `{callsign}` is replaced with the configured
+    // callsign; any other text is sent verbatim. The default both
+    // identifies the station and advertises the mode and software: a
+    // human who tunes across the OFDM signal with no idea what it is
+    // hears the CW ID and can go find SSTVAE and a successful decode,
+    // rather than just an unexplained tone.
+    std::string cw_message = "SSTVAE DE {callsign}";
 };
 
 // How the window arranges the receive and transmit halves.
@@ -213,6 +222,20 @@ struct UiConfig {
     // should tune -- 0 means "never set", which takes the initial
     // height instead.
     int waterfall_height = 0;
+
+    // Whether the status-log dock is open.
+    //
+    // Open by default, which is what it has always been -- the log is
+    // where an error's detail lives, and a station that has never
+    // touched it should see one arrive.
+    //
+    // **An error re-opens a closed dock, and that does not change this
+    // value.** Only the operator's own toggle writes here. Otherwise a
+    // condition that logs an error on every single run -- a read-only
+    // config directory, say, which fails the file log every time --
+    // would rewrite "closed" to "open" at each startup, and the setting
+    // could never be made to stick.
+    bool log_visible = true;
 
     // "auto" | "split" | "tabs".
     //

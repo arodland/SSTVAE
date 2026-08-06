@@ -7,6 +7,7 @@ carrier spacing, resolved by trying integer-bin candidates against the
 known preamble template. Net tolerance comfortably exceeds +/-50 Hz.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -212,3 +213,235 @@ def acquire_blind(
 
     off = (search[0] if search is not None else 0) + phase
     return BlindAcquisition(frame_start=off, freq_offset=f_hat, metric=float(score))
+
+
+class BlindAccumulator:
+    """Incremental counterpart to `acquire_blind()`.
+
+    `rx/engine.py` used to bound the one-shot function's search window
+    purely for CPU reasons: it recomputes the whole window's per-CFO-bin
+    FFT from scratch on every poll, even though most of a sliding window
+    is audio it already folded last poll. This class instead keeps a
+    running per-CFO-bin, per-phase-bin energy accumulator and folds in
+    only the *new* samples each call, via block-wise overlap-save -- so
+    the cost of `push()` is O(new samples), not O(window length).
+
+    That does **not** mean longer integration lets this pull a weaker
+    signal out of the noise, and it is worth being precise about why,
+    because the intuitive "more integration = deeper into the noise"
+    story is wrong for this detector specifically. `result()`'s score is
+    a ratio: the winning phase bin's summed matched-filter *power* over
+    the other 1151 bins' median. Both numerator and denominator grow
+    roughly proportionally with the number of periods folded in, so the
+    ratio converges to a value set by the signal's *per-period* SNR, not
+    by how many periods you integrate -- confirmed by measurement
+    (`docs/todo.md`): at a fading SNR comfortably above the algorithm's
+    floor, score barely moves between a 10 s and a 95 s one-shot window;
+    well below the floor, no window length up to and including the
+    entire transmission ever crosses threshold. What longer integration
+    *does* buy is reliability near that floor: a signal whose true ratio
+    sits just above threshold can read below it on a short, noisy sample
+    and get missed, and a longer window converges to the true ratio and
+    catches it -- measured, one seed in eight went from a miss at a
+    10 s window to a catch at 95 s, at an SNR where every other seed
+    already passed at 10 s. That benefit runs out once the window covers
+    the transmission's own duration; audio older than the transmission
+    is pure dilution, not more signal to integrate (see `window_s`
+    below).
+
+    The block size is chosen purely from the frequency resolution the
+    search needs (`FS / bin_step_hz`), not from how long the caller
+    intends to integrate for -- decoupling those two is the entire
+    point, and it also means the block's own FFT and the per-bin
+    circular-shift table are computed once for the accumulator's whole
+    lifetime rather than once per poll.
+
+    Correctness rests on one fact about the circular-shift CFO trick:
+    applied per block instead of over one huge segment, it is no longer
+    equivalent to continuous-phase demodulation from sample 0 of the
+    whole recording -- each block's phase resets to 0 at the block's own
+    start, introducing a constant (per block, per CFO bin) phase error
+    relative to the "true" correction. But the accumulator only ever
+    uses `|matched filter|**2`: multiplying an entire block by a
+    constant unit-magnitude phasor before a linear matched filter
+    multiplies that block's whole correlation output by the same
+    constant, which a squared magnitude removes exactly. So block-local
+    and whole-recording CFO correction fold to the same energy. Checked
+    against `acquire_blind`'s one-shot result in
+    `tests/test_blind_acquisition.py`.
+
+    `window_s` bounds how long old audio keeps influencing the result --
+    without it, an ever-growing accumulator is wrong independent of the
+    integration-time argument above: each phase bin's fold sums matched-
+    filter power over every period pushed, real signal or not, so a
+    real (but short) transmission surrounded by a long stretch of
+    silence or noise gets its peak diluted by all that irrelevant
+    history, and the score drifts toward 1 as the irrelevant fraction
+    grows. Implemented as exponential decay (`window_s` is the ~1/e time
+    constant) rather than exact eviction of aged-out blocks: eviction
+    needs to retain every bin's per-block contribution for the whole
+    window to undo it later (67 bins x ~8k samples x 25 blocks, tens of
+    MB), while decay needs none -- just scale the existing `folded`
+    array down before adding each new block, which is also this
+    codebase's established idiom for "recent-weighted, bounded-memory"
+    state (see the pilot clock-drift tracker in modem.py).
+
+    Since the two things `window_s` needs to balance -- enough of it to
+    get a marginal, long (mode C, ~95 s) transmission's full reliability
+    benefit, not so much that a short (mode A, ~32 s) one sits diluted by
+    an unrelated 60+ s of history behind it -- depend on which mode is
+    transmitting, which is exactly what blind acquisition does not know
+    yet, `window_s` accepts **several** timescales run in parallel
+    instead of a single one. The expensive part (block FFT + per-bin
+    matched filter) is shared and computed once per block regardless of
+    how many timescales are given; each just gets its own cheap decay-
+    and-fold pass over the same per-block result, so running e.g. three
+    timescales costs almost nothing beyond one. `result()` reports
+    whichever timescale's peak score is highest. `rx/engine.py` passes
+    one timescale per mode, each capped at that mode's own duration
+    (`config.MODES`), so no timescale ever integrates past the point
+    where there is any more real signal to gain from it. A single float
+    (or `None`, meaning no decay at all) still means one timescale, for
+    equivalence testing against `acquire_blind`'s unweighted one-shot
+    integration.
+    """
+
+    def __init__(
+        self,
+        max_offset_hz: float = 55.0,
+        bin_step_hz: float = 1.7,
+        min_periods: int = 8,
+        threshold: float = 4.0,
+        block_samples: int | None = None,
+        window_s: float | None | Sequence[float | None] = 25.0,
+    ) -> None:
+        template = pilot_template()
+        kernel = np.conj(template[::-1])
+        m = len(kernel)
+        self._m = m
+        self._min_periods = min_periods
+        self._threshold = threshold
+
+        # Large enough that a block's own FFT still resolves
+        # bin_step_hz, and well above the kernel so overlap-save stays
+        # efficient (a 160-sample kernel against an ~8k block, not
+        # against the whole window as acquire_blind's single big FFT
+        # does).
+        min_block = int(np.ceil(FS / bin_step_hz))
+        self._block = next_fast_len(max(min_block, 4 * m))
+        self._step = self._block - (m - 1)
+        if self._step <= 0:
+            raise ValueError("block_samples too small for the pilot kernel")
+        if block_samples is not None:
+            self._block = block_samples
+            self._step = self._block - (m - 1)
+        self._bin_hz = FS / self._block
+
+        n_bins = int(np.ceil(max_offset_hz / bin_step_hz))
+        shift_bins = np.array(
+            [int(round(k * bin_step_hz / self._bin_hz)) for k in range(-n_bins, n_bins + 1)]
+        )
+        self._shift_bins = shift_bins
+        self._freqs = shift_bins * self._bin_hz
+        self._kernel_f = fft(np.concatenate([kernel, np.zeros(self._block - m, dtype=complex)]))
+
+        # One or several decay timescales, run in parallel off the same
+        # per-block matched-filter result -- see the class docstring for
+        # why a single one can't serve every mode well. A bare float or
+        # None is still one timescale, for callers (and the equivalence
+        # tests) that only want that.
+        window_s_list = (
+            list(window_s) if isinstance(window_s, Sequence) and not isinstance(window_s, str)
+            else [window_s]
+        )
+        # Applied once per processed block, uniformly across every phase
+        # and CFO bin *within one timescale*, so it never changes the
+        # *shape* of a fresh block's contribution to that timescale --
+        # only how much the past is still worth relative to it. Because
+        # it scales a timescale's bins equally, that timescale's peak/
+        # median score is unaffected by decay alone; only the mix of
+        # old-vs-new evidence behind it changes.
+        self._decay_per_block = np.array(
+            [1.0 if w is None else float(np.exp(-self._step / (w * FS))) for w in window_s_list]
+        )
+
+        self._folded = np.zeros((len(window_s_list), len(shift_bins), FRAME_SAMPLES))
+        self._n_valid = 0
+        self._buf = np.zeros(0, dtype=complex)
+        self._buf_start: int | None = None
+
+    def push(self, z: np.ndarray, start_sample: int) -> None:
+        """Fold new complex-baseband samples in. `z[0]` must sit at
+        absolute sample index `start_sample`, and pushes must be
+        contiguous (no gaps, no re-sent samples) -- the overlap-save
+        history this needs is carried internally between calls."""
+        if self._buf_start is None:
+            self._buf_start = start_sample
+        elif start_sample != self._buf_start + self._buf.size:
+            raise ValueError(
+                "BlindAccumulator.push: expected a contiguous continuation "
+                f"at sample {self._buf_start + self._buf.size}, got {start_sample}"
+            )
+        buf = np.concatenate([self._buf, z]) if self._buf.size else np.asarray(z, dtype=complex)
+
+        B, m, step = self._block, self._m, self._step
+        pos = 0
+        while pos + B <= buf.size:
+            block_f = fft(buf[pos : pos + B])
+            # mf[i] (0-indexed within the valid slice) is the matched
+            # filter's response for a pilot window starting at block-
+            # local index i -- the same convention acquire_blind's p2[j]
+            # uses (its "lo = m - 1" offset into the FFT's own index
+            # space exactly cancels against the "-(m-1)" in a matched
+            # filter's window-start-from-output-index formula, so no
+            # (m - 1) belongs here).
+            abs0 = self._buf_start + pos
+            phase0 = abs0 % FRAME_SAMPLES
+            idx = (phase0 + np.arange(step)) % FRAME_SAMPLES
+            # Decay every timescale's whole array first -- cheap
+            # (n_timescales x n_bins x FRAME_SAMPLES scalars) next to the
+            # per-bin FFT below, which is why adding timescales barely
+            # moves push()'s cost.
+            self._folded *= self._decay_per_block[:, None, None]
+            for i, shift in enumerate(self._shift_bins):
+                mf = ifft(np.roll(block_f, -shift) * self._kernel_f)[m - 1 : B]
+                p2 = np.abs(mf) ** 2
+                # Every timescale folds in the *same* per-block matched-
+                # filter power -- only the decay each one already applied
+                # to its own history differs. Looped rather than
+                # vectorized across timescales: np.add.at must run once
+                # per target array to handle idx's repeats (step exceeds
+                # FRAME_SAMPLES, so each block wraps the phase several
+                # times) correctly, and n_timescales is small enough
+                # (2-3) that the loop costs nothing next to the FFT.
+                for t in range(len(self._decay_per_block)):
+                    np.add.at(self._folded[t, i], idx, p2)
+            self._n_valid += step
+            pos += step
+
+        self._buf = buf[pos:]
+        self._buf_start += pos
+
+    def result(self) -> BlindAcquisition:
+        """The best (timescale, bin, phase) so far, in the same shape as
+        `acquire_blind`'s return value -- reports whichever timescale's
+        peak score is highest, not a fixed one, since which timescale
+        that is depends on which mode (if any) is actually transmitting.
+        Raises `SyncError` exactly as the one-shot function does: too
+        little data pushed yet, or no timescale's peak clears
+        `threshold`."""
+        if self._n_valid < FRAME_SAMPLES * self._min_periods:
+            raise SyncError("window too short for blind acquisition")
+
+        # self._folded is (n_timescales, n_bins, FRAME_SAMPLES); reduce
+        # the phase axis to a score per (timescale, bin), then pick the
+        # best cell over both.
+        scores = self._folded.max(axis=2) / (np.median(self._folded, axis=2) + 1e-12)
+        t, i = np.unravel_index(np.argmax(scores), scores.shape)
+        t, i = int(t), int(i)
+        score = float(scores[t, i])
+        if score < self._threshold:
+            raise SyncError(f"no periodic pilot found (peak prominence {score:.3g})")
+
+        phase = int(np.argmax(self._folded[t, i]))
+        return BlindAcquisition(frame_start=phase, freq_offset=float(self._freqs[i]), metric=score)

@@ -10,6 +10,7 @@
 
 #include <complex>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -27,6 +28,17 @@ using cdouble = std::complex<double>;
 // image exactly (all image spacings are carrier-spacing multiples) and
 // provides per-carrier noise selectivity. Sync filters its own copy.
 std::vector<cdouble> to_baseband(std::span<const double> x);
+
+// to_baseband(x), but as if `x` were a slice of a longer signal starting
+// at absolute sample index `start_sample` rather than at 0 -- i.e.
+// exactly to_baseband(full)[start_sample : start_sample + x.size()] for
+// whatever longer `full` array `x` actually came from. See
+// sstvae.modem.dsp.to_baseband_at's docstring: needed by any caller
+// that baseband-converts one long recording as a series of independent
+// chunks and carries state *across* them (sync::BlindAccumulator's live
+// caller in rx/engine.cpp), because to_baseband always treats its own
+// input's first sample as the heterodyne's local n=0.
+std::vector<cdouble> to_baseband_at(std::span<const double> x, std::int64_t start_sample);
 
 // Fractional part of a phase in cycles, in [0, 1). For arbitrary
 // frequencies the product cannot be made exact the way the integer
@@ -56,7 +68,19 @@ std::vector<double> kaiser(int m, double beta);
 // that per-chunk resampling cost. This function is the whole-signal
 // form, correct for a file or a complete waveform and wrong for a
 // stream of blocks.
-std::vector<double> resample_poly(std::span<const double> x, int up, int down);
+//
+// The Kaiser-windowed sinc filter this designs depends only on (up,
+// down), not on `x`, so `filter_cache`, if given, is a slot this fills
+// in on first use and reuses on every later call with it -- for a
+// caller (StreamResampler) that resamples many chunks at one fixed
+// ratio and would otherwise redesign the same (up to ~8821-tap) filter
+// from scratch on every chunk. Owned entirely by the caller: no shared
+// state, no locking, no eviction policy -- the caller's own lifetime is
+// the cache's lifetime. Passing the same slot across two different
+// (up, down) ratios is a caller bug, same as reusing any other
+// single-purpose local for two things, and is not detected.
+std::vector<double> resample_poly(std::span<const double> x, int up, int down,
+                                  std::optional<std::vector<double>>* filter_cache = nullptr);
 
 // numpy.convolve(a, v, mode="same"): the centre len(a) samples of the
 // full convolution, for len(a) >= len(v).

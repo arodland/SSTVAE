@@ -74,12 +74,20 @@ void test_append_and_filter() {
     // Filtering to another source re-renders from the log.
     auto* filter = pane.findChild<QComboBox*>();
     check::is_true(filter != nullptr, "pane has a filter");
-    filter->setCurrentText(QStringLiteral("rig"));
+    // **By item data, not by display text.** The entries are labelled
+    // for a reader ("Rig", "Receive", "Transmit") and carry the log's
+    // source key ("rig", "rx", "tx") in their data, like every other
+    // combo in this application -- so selecting by the visible string
+    // finds nothing and the filter silently stays on "All", which is a
+    // pass-shaped way for this check to test nothing.
+    const int rig_index = filter->findData(QStringLiteral("rig"));
+    check::is_true(rig_index >= 0, "pane/filter: the rig source is offered");
+    filter->setCurrentIndex(rig_index);
     check::is_true(!text->toPlainText().contains("tx error line"),
                    "pane/filter: other sources drop out");
     check::is_true(text->toPlainText().contains("rig line"),
                    "pane/filter: the wanted source stays");
-    filter->setCurrentText(QStringLiteral("All"));
+    filter->setCurrentIndex(filter->findData(QString()));
     check::is_true(text->toPlainText().contains("tx error line"),
                    "pane/filter: All restores everything");
 }

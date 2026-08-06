@@ -154,7 +154,7 @@ int main(int argc, char** argv) {
         QMetaObject::invokeMethod(
             &panel, "on_error", Qt::DirectConnection,
             Q_ARG(QString,
-                  QStringLiteral("PTT OFF FAILED: read timeout -- the rig "
+                  QStringLiteral("PTT OFF FAILED: read timeout — the rig "
                                  "may still be transmitting. Unkey it "
                                  "manually.")));
         panel.show();
@@ -374,11 +374,11 @@ int main(int argc, char** argv) {
         log.append("rx", sstvae::log::Severity::Info,
                    "sync acquired: mode B de KD8XYZ");
         log.append("rx", sstvae::log::Severity::Info,
-                   "reception complete: mode B de KD8XYZ, 32/32 frames,  SNR "
-                   "8.3dB -- saved /home/op/Pictures/rx/KD8XYZ-B-14230.png");
+                   "reception complete: mode B de KD8XYZ, 32/32 frames, SNR "
+                   "8.3 dB — saved /home/op/Pictures/rx/KD8XYZ-B-14230.png");
         log.append("tx", sstvae::log::Severity::Info, "keying rig");
         log.append("tx", sstvae::log::Severity::Error,
-                   "PTT OFF FAILED: read timeout -- the rig may still be "
+                   "PTT OFF FAILED: read timeout — the rig may still be "
                    "transmitting. Unkey it manually.");
         sstvae::gui::LogPane pane(&log);
         pane.resize(width > 0 ? width : 1000, 180);
@@ -390,7 +390,7 @@ int main(int argc, char** argv) {
 
         sstvae::gui::ErrorBanner banner;
         banner.show_error(QStringLiteral(
-            "PTT OFF FAILED: read timeout -- the rig may still be "
+            "PTT OFF FAILED: read timeout — the rig may still be "
             "transmitting. Unkey it manually."));
         banner.resize(width > 0 ? width : 1000, banner.sizeHint().height());
         banner.show();

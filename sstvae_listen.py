@@ -40,7 +40,7 @@ from sstvae.codec import (  # noqa: F401  (re-exported)
     pad_to_full,
     reconstruct,
 )
-from sstvae.config import FS
+from sstvae.config import FS, MODES
 from sstvae.rx import (  # noqa: F401
     Reception,
     RingBuffer,
@@ -153,13 +153,20 @@ def main() -> None:
     )
     ap.add_argument("--poll-interval", type=float, default=5.0, help="seconds between decode attempts")
     ap.add_argument(
-        "--blind-search-seconds", type=float, default=25.0,
-        help="how much of the buffer's most recent audio the blind CFO/timing "
-        "search scans, rather than the whole --buffer-seconds window. Must "
-        "exceed MIN_FRAMES_FOR_SYNC's ~10.5s with margin; the retrospective "
-        "decode itself still covers the full buffer once locked, this only "
-        "bounds where acquisition looks (the dominant CPU cost of the blind "
-        "path).",
+        "--blind-search-seconds", type=float, default=MODES["C"].duration_s,
+        help="a cap, not a fixed window: the blind CFO/timing search runs "
+        "one decay timescale per mode, each capped at min(mode duration, "
+        "this value), so audio older than roughly a mode's own duration "
+        "decays out of that mode's search rather than being scanned fresh "
+        "each poll (folding in only new audio is what makes this cheap "
+        "regardless of how long it is). Default is above every mode's own "
+        "duration, so nothing is capped by default -- lower it only to "
+        "shrink below a mode's duration (e.g. for a quick test), since "
+        "there is no reliability benefit to integrating past a mode's own "
+        "length. Must exceed MIN_FRAMES_FOR_SYNC's ~10.5s with margin; the "
+        "retrospective decode itself still covers the full buffer once "
+        "locked, this only bounds how long stale audio keeps influencing "
+        "acquisition.",
     )
     ap.add_argument(
         "--end-grace", type=float, default=8.0,

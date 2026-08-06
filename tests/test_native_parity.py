@@ -1009,6 +1009,11 @@ def test_images_geometry_agrees(native):
     assert native.images.IMG_H == ref.IMG_H
     assert native.images.MIN_W == ref.MIN_W
     assert native.images.MIN_H == ref.MIN_H
+    # Two implementations that refused different files would mean an
+    # operator being told a picture is too large by one and watching the
+    # other send it. Neither number is derived from anything, so this is
+    # the only thing keeping them equal.
+    assert native.images.MAX_FILE_BYTES == ref.MAX_FILE_BYTES
 
 
 def test_images_to_array_is_exact(native):
@@ -1044,6 +1049,111 @@ def test_images_load_reads_the_same_pixels(native, tmp_path):
     Image.fromarray(pic).save(path)
 
     assert np.array_equal(native.images.load(str(path)), pic)
+
+
+# EXIF orientation is the one place where the two loaders could disagree
+# *silently and consequentially*: a phone photograph would go out
+# sideways from one implementation and upright from the other, with
+# neither raising anything. It is also the one image comparison that
+# cannot be exact -- these are JPEGs, and stb's decoder is not libjpeg
+# (CLAUDE.md records that as an accepted above-the-modem difference).
+#
+# So the claim under test is "both applied the same transform", not
+# "both produced the same bytes", and it is made falsifiable by
+# requiring the intended transform to beat all seven alternatives by a
+# wide margin rather than merely to be within a tolerance. A tolerance
+# on its own would be satisfied by any sufficiently blurry picture.
+
+def _exif_probe(width: int = 61, height: int = 37):
+    """A picture no two of whose eight transforms are equal.
+
+    Both odd and non-square: a symmetric probe would let a swapped pair
+    of cases pass unnoticed, which is the failure this exists to catch.
+    Smooth rather than random, because JPEG at quality 95 keeps a
+    gradient nearly intact and turns white noise into porridge.
+    """
+    from PIL import Image
+
+    y, x = np.mgrid[0:height, 0:width]
+    pic = np.stack(
+        [(x * 4) % 256, (y * 6) % 256, ((x * 2 + y * 3) % 256)], axis=-1
+    ).astype(np.uint8)
+    return Image.fromarray(pic)
+
+
+@pytest.mark.parametrize("orientation", range(1, 9))
+def test_images_exif_orientation_agrees_exactly_on_png(native, tmp_path, orientation):
+    """PNG carries orientation in an `eXIf` chunk, and Pillow honours it.
+
+    This is the sharper of the two comparisons and the reason it exists:
+    PNG is lossless, so *both* decoders must produce the same bytes, and
+    the transform can be held to equality rather than to a margin. It is
+    also the case that actually diverged during development -- easyexif
+    parses JPEG only, so reading the chunk is code on the C++ side with
+    no counterpart in Pillow, and without this test a tagged PNG would
+    have rotated in Python and not in C++ with nothing to say so.
+    """
+    from PIL import Image
+
+    from sstvae.images import open_image
+
+    src = _exif_probe()
+    exif = Image.Exif()
+    exif[0x0112] = orientation
+    path = tmp_path / f"o{orientation}.png"
+    src.save(path, exif=exif)
+
+    want = np.array(open_image(path).convert("RGB"))
+    got = native.images.load(str(path))
+    assert got.shape == want.shape
+    assert np.array_equal(got, want)
+
+
+@pytest.mark.parametrize("orientation", range(1, 9))
+def test_images_exif_orientation_agrees(native, tmp_path, orientation):
+    from PIL import Image
+
+    from sstvae.images import open_image
+
+    src = _exif_probe()
+    exif = Image.Exif()
+    exif[0x0112] = orientation
+    path = tmp_path / f"o{orientation}.jpg"
+    src.save(path, exif=exif, quality=95)
+
+    want = np.array(open_image(path).convert("RGB"))
+    got = native.images.load(str(path))
+
+    assert got.shape == want.shape, (
+        f"orientation {orientation}: C++ produced {got.shape}, "
+        f"Pillow {want.shape} -- the axes were exchanged by one and not "
+        "the other"
+    )
+    err = float(np.mean(np.abs(got.astype(float) - want.astype(float))))
+
+    # The alternatives, built from Pillow's own primitives so this is not
+    # a restatement of either implementation's arithmetic.
+    others = []
+    for other in range(1, 9):
+        if other == orientation:
+            continue
+        alt = Image.Exif()
+        alt[0x0112] = other
+        alt_path = tmp_path / f"alt{other}.jpg"
+        src.save(alt_path, exif=alt, quality=95)
+        cand = np.array(open_image(alt_path).convert("RGB"))
+        if cand.shape == got.shape:
+            others.append(float(np.mean(np.abs(got.astype(float) - cand.astype(float)))))
+
+    assert err < 4.0, (
+        f"orientation {orientation}: the two loaders disagree by {err:.2f} "
+        "levels on average, which is more than two JPEG decoders should"
+    )
+    assert err * 4 < min(others), (
+        f"orientation {orientation}: {err:.2f} against the intended "
+        f"transform but {min(others):.2f} against the nearest other -- "
+        "not a decisive enough margin to call these the same transform"
+    )
 
 
 # --- resampling -------------------------------------------------------------

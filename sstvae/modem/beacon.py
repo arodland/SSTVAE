@@ -217,8 +217,11 @@ def find_sync(chips: np.ndarray, threshold: float = 0.6, max_candidates: int = 8
 def decode(chips: np.ndarray, threshold: float = 0.6) -> BeaconResult | None:
     """Find and decode one beacon superframe anywhere in `chips` (soft
     values, any length >= SUPERFRAME_LEN). Tries the best-correlated sync
-    candidates in order and returns the first one whose CRC checks out."""
-    for off in find_sync(chips, threshold=threshold):
+    candidates in order and returns the first one whose CRC checks out;
+    falls back to combining evidence across every repetition in `chips`
+    (see `_decode_combined`) if no single one decodes alone."""
+    candidates = find_sync(chips, threshold=threshold)
+    for off in candidates:
         end = off + SYNC_LEN + CODED_LEN
         if end > len(chips):
             continue
@@ -226,4 +229,400 @@ def decode(chips: np.ndarray, threshold: float = 0.6) -> BeaconResult | None:
         if result is not None:
             frame_index, callsign = result
             return BeaconResult(chip_offset=off, frame_index=frame_index, callsign=callsign)
+    for off in candidates:
+        result = _decode_combined(chips, off)
+        if result is not None:
+            return result
+    for off in _folded_sync_phases(chips):
+        result = _decode_combined(chips, off)
+        if result is not None:
+            return result
     return None
+
+
+# --- multi-repetition combining ----------------------------------------------
+#
+# The superframe repeats continuously through the whole transmission
+# (~5.2 s apart -- up to ~18 times in a mode C transmission), but
+# `decode()` above only ever looks at ONE of them: whichever sync
+# candidate's own single-shot Golay+CRC decode happens to succeed. That
+# throws away the other repetitions' evidence entirely, even though two
+# things are guaranteed about them within one transmission:
+#
+# - The callsign is the same in every repetition.
+# - The frame counter is not the same, but it is an *exact*, fully
+#   predictable function of chip position: `chip_stream()` lays
+#   superframes back-to-back with no gaps, and every decoder-side chip
+#   array indexes frames uniformly (`beacon_soft[f * CHIPS_PER_FRAME +
+#   ...]`), so knowing any one repetition's true counter value fixes
+#   every other repetition's counter exactly -- no estimation needed,
+#   just `(chip_delta // CHIPS_PER_FRAME)` arithmetic.
+#
+# `_decode_combined` is a limited (not fully maximum-likelihood) way to
+# use that, in three tiers of decreasing simplicity:
+#
+# - Chunks that fall entirely inside the callsign field are identical,
+#   chip for chip, in every repetition, so their *signs* (see below) can
+#   simply be summed across repetitions before Golay-decoding once --
+#   genuine coherent combining, and the cheap case.
+# - The chunk carrying the counter's own low bit varies by design (a
+#   different value is genuinely correct at every repetition), so it
+#   can't be summed the same way -- but the exact value at every
+#   repetition is a known function of one hypothesis for the anchor's
+#   own value, so `_search_counter_chunk` evaluates every hypothesis by
+#   regenerating each repetition's expected codeword and summing its
+#   correlation, combining evidence across repetitions *before*
+#   choosing rather than voting on independent per-repetition guesses.
+#   Voting was tried first and measured useless here: 18 repetitions,
+#   18 different guesses, no repeat at all, because at the SNRs this is
+#   meant to help with individual repetitions rarely decode correctly
+#   on their own.
+# - The chunk mixing leftover callsign bits with the per-repetition CRC
+#   has the same voting problem (CRC depends on the whole payload, not
+#   just a shift), but no simple arithmetic predicts it -- so
+#   `_search_crc_mixed_chunk` brute-forces its free bits and asks
+#   `_payload_bits` what the CRC-inclusive chunk *should* look like for
+#   each hypothesis at each repetition's own counter, same combine-
+#   before-choose principle applied through the actual encoder.
+#
+# Summing/correlating by *sign*, not raw chip value, throughout: under
+# fading, the per-frame channel estimate the equalizer divides by can
+# itself sit near a fade null, amplifying that frame's noise into an
+# enormous, essentially random magnitude rather than a merely noisy
+# one. A single such repetition then dominates a raw sum or a raw
+# dot-product and wrecks it (measured on one case: raw summing
+# recovered 6/12 bits -- chance -- where every individual repetition
+# also decoded at only ~7/12; summing signs instead recovered 12/12).
+# Equal-gain (sign) combining gives up some of coherent combining's
+# theoretical SNR gain in exchange for not being destroyed by exactly
+# the outliers fading produces routinely.
+#
+# A final correlation check against every repetition's full superframe
+# (sync word included) guards against returning a wrong assembly as if
+# it were a real decode.
+
+
+def _folded_sync_phases(chips: np.ndarray, max_candidates: int = 4) -> list[int]:
+    """Candidate anchor phases (mod SUPERFRAME_LEN) for the combining
+    fallback, found by folding the sync-word correlation across every
+    period instead of trusting any single repetition's own (noisy,
+    13-chip) peak -- the same "fold across periods" idea
+    BlindAccumulator uses for the pilot, applied here to the Barker-13
+    word. A single repetition's find_sync() candidate can be the wrong
+    phase under fading (any one 13-chip correlation has its own noise-
+    driven false peaks, and the strongest one isn't always the true
+    one); summing the same signed correlation across every repetition
+    in the buffer before picking a phase is far more robust, since a
+    real periodic sync word reinforces at one phase while noise at the
+    wrong phases mostly cancels."""
+    if len(chips) < SYNC_LEN + SUPERFRAME_LEN:
+        return []
+    corr = np.correlate(chips, SYNC, mode="valid")
+    folded = np.array([corr[p::SUPERFRAME_LEN].sum() for p in range(SUPERFRAME_LEN)])
+    order = np.argsort(-folded)[:max_candidates]
+    return [int(p) for p in order]
+
+
+def _chunk_bit_range(chunk_idx: int) -> tuple[int, int]:
+    return chunk_idx * 12, (chunk_idx + 1) * 12
+
+
+def _decode_chunk_bits(chip_slice: np.ndarray) -> np.ndarray:
+    return _int_to_bits(golay.decode_soft(chip_slice), 12)
+
+
+def _repetition_grid(n_chips: int, anchor_off: int) -> list[int]:
+    """Every chip offset spaced an exact multiple of SUPERFRAME_LEN from
+    `anchor_off` that has a full superframe's worth of chips available
+    -- the repetition positions are *known* exactly once the anchor is
+    fixed, so this doesn't depend on find_sync() having independently
+    flagged each one (weak repetitions it missed are included anyway).
+    Checks each direction's fit explicitly rather than assuming the
+    anchor's own position (k=0) fits -- it doesn't always, e.g. an
+    anchor near the very end of a short buffer."""
+    def fits(pos: int) -> bool:
+        return 0 <= pos and pos + SYNC_LEN + CODED_LEN <= n_chips
+
+    grid = [anchor_off] if fits(anchor_off) else []
+    k = 1
+    while fits(anchor_off + k * SUPERFRAME_LEN):
+        grid.append(anchor_off + k * SUPERFRAME_LEN)
+        k += 1
+    k = -1
+    while fits(anchor_off + k * SUPERFRAME_LEN):
+        grid.append(anchor_off + k * SUPERFRAME_LEN)
+        k -= 1
+    return sorted(grid)
+
+
+def _search_counter_chunk(
+    chips: np.ndarray, grid: list[int], anchor_off: int, chunk_idx: int, n_counter_bits: int
+) -> tuple[int, int] | None:
+    """Joint search over the chunk carrying the counter's low bit 0 --
+    the one chunk voting can't help, since a *different* 12-bit value
+    is genuinely correct at every repetition (counter, not callsign),
+    so independently hard-decoding each repetition and voting on the
+    (delta-normalized) results only works if a real plurality of
+    individual repetitions already decode correctly on their own. Under
+    fading, at exactly the SNRs where combining would matter most, they
+    routinely don't (measured: 18 repetitions, 18 different normalized
+    guesses, no repeat at all).
+
+    Instead this evaluates *every* possible value of this chunk's
+    remaining unknown bits (assumed to be `12 - n_counter_bits` extra
+    callsign bits after the counter, matching chunk 0's layout) at the
+    anchor, regenerates what each repetition's *own* counter-shifted
+    12-bit value and Golay codeword would be for that hypothesis (the
+    counter delta between repetitions is exact, see the module
+    docstring), and scores each hypothesis by summing its predicted
+    codeword's sign-correlation against every repetition's actual
+    chips -- combining evidence across repetitions *before* choosing,
+    the same principle as the coherent chunk combining above, just
+    applied to a field that varies (predictably) instead of one that
+    doesn't. Cheap: (2**n_counter_bits) * n_extra_hyp * n_grid * 24
+    multiply-adds, done once in the fallback path only.
+    """
+    clo, chi = chunk_idx * 24, (chunk_idx + 1) * 24
+    anchor_frame = anchor_off // CHIPS_PER_FRAME
+    received = np.array(
+        [np.sign(chips[pos + SYNC_LEN + clo : pos + SYNC_LEN + chi]) for pos in grid]
+    )  # (n_grid, 24)
+    frame_deltas = np.array([pos // CHIPS_PER_FRAME - anchor_frame for pos in grid])
+
+    n_extra = 12 - n_counter_bits
+    counter_mask = (1 << n_counter_bits) - 1
+    counters = np.arange(1 << n_counter_bits)
+    best_score, best = -np.inf, None
+    for extra in range(1 << n_extra):
+        counter_vals = (counters[:, None] + frame_deltas[None, :]) & counter_mask
+        data12 = (counter_vals << n_extra) | extra  # (2**n_counter_bits, n_grid)
+        signs = golay._SIGNS[data12]  # (2**n_counter_bits, n_grid, 24)
+        scores = np.einsum("hgc,gc->h", signs, received)
+        h = int(np.argmax(scores))
+        if scores[h] > best_score:
+            best_score = float(scores[h])
+            best = (int(counters[h]), extra)
+    return best
+
+
+def _search_crc_mixed_chunk(
+    chips: np.ndarray,
+    grid: list[int],
+    anchor_off: int,
+    chunk_idx: int,
+    frame_index: int,
+    known_callsign_bits: np.ndarray,
+) -> np.ndarray | None:
+    """Joint search for a chunk mixing still-unknown callsign bits with
+    the per-repetition CRC (chunk 4 in the current layout) -- unlike
+    the counter chunk, the part that varies per repetition here isn't a
+    simple shift, since CRC depends on the *whole* payload. So this
+    can't reuse _search_counter_chunk's trick directly: instead it
+    brute-forces only this chunk's free (non-CRC) bits, and for each
+    hypothesis derives the exact expected per-repetition chunk content
+    from `_payload_bits` itself (which already knows how to fold in a
+    candidate callsign and a repetition's own counter and compute the
+    CRC that goes with them) rather than voting on independent
+    per-repetition guesses -- which, like the counter, routinely don't
+    agree at the SNRs this is meant to help with. Returns the chunk's
+    free-bit fragment (aligned to its position within the chunk), or
+    None if the chunk isn't shaped as assumed (free callsign bits
+    followed by CRC bits, no counter overlap)."""
+    blo, bhi = _chunk_bit_range(chunk_idx)
+    callsign_lo = BEACON_COUNTER_BITS
+    callsign_hi = callsign_lo + BEACON_CALLSIGN_BITS
+    free_lo, free_hi = max(blo, callsign_lo), min(bhi, callsign_hi)
+    n_free = free_hi - free_lo
+    if free_lo != blo or n_free + (bhi - callsign_hi) != 12:
+        return None  # not "free callsign bits then CRC bits" -- bail rather than guess wrong
+
+    anchor_frame = anchor_off // CHIPS_PER_FRAME
+    clo, chi = chunk_idx * 24, (chunk_idx + 1) * 24
+    received = np.array(
+        [np.sign(chips[pos + SYNC_LEN + clo : pos + SYNC_LEN + chi]) for pos in grid]
+    )
+    frame_deltas = [pos // CHIPS_PER_FRAME - anchor_frame for pos in grid]
+
+    best_score, best_frag = -np.inf, None
+    for free_val in range(1 << n_free):
+        frag_bits = _int_to_bits(free_val, n_free)
+        trial = known_callsign_bits.copy()
+        trial[free_lo - callsign_lo : free_hi - callsign_lo] = frag_bits
+        codes = [
+            _bits_to_int(trial[i : i + BEACON_CALLSIGN_CHAR_BITS])
+            for i in range(0, BEACON_CALLSIGN_BITS, BEACON_CALLSIGN_CHAR_BITS)
+        ]
+        callsign = codes_to_callsign(np.array(codes))
+        score = 0.0
+        for k, pos in enumerate(grid):
+            fi = frame_index + frame_deltas[k]
+            if not (0 <= fi <= MAX_FRAME_COUNTER):
+                continue
+            payload = _payload_bits(fi, callsign)
+            chunk_bits = payload[blo:bhi]
+            if len(chunk_bits) < 12:  # padding-only tail, zeros
+                chunk_bits = np.concatenate(
+                    [chunk_bits, np.zeros(12 - len(chunk_bits), dtype=np.int64)]
+                )
+            data12 = _bits_to_int(chunk_bits)
+            score += float(golay._SIGNS[data12] @ received[k])
+        if score > best_score:
+            best_score = score
+            best_frag = frag_bits
+    return best_frag
+
+
+def _decode_combined(chips: np.ndarray, anchor_off: int) -> BeaconResult | None:
+    n = len(chips)
+    grid = _repetition_grid(n, anchor_off)
+    if len(grid) < 3:  # too few repetitions for voting to mean anything
+        return None
+
+    counter_lo = 0
+    callsign_lo = BEACON_COUNTER_BITS
+    callsign_hi = BEACON_COUNTER_BITS + BEACON_CALLSIGN_BITS
+
+    invariant_chunks = [
+        c for c in range(N_CHUNKS)
+        if callsign_lo <= _chunk_bit_range(c)[0] and _chunk_bit_range(c)[1] <= callsign_hi
+    ]
+    variant_chunks = [
+        c for c in range(N_CHUNKS)
+        if c not in invariant_chunks and _chunk_bit_range(c)[0] < callsign_hi
+    ]
+
+    callsign_bits = np.full(BEACON_CALLSIGN_BITS, -1, dtype=np.int64)
+
+    # Coherent case: sum this chunk's coded chips across every
+    # repetition (identical by construction), decode once. Sums the
+    # *sign* of each repetition's chips, not the raw values: under
+    # fading, the per-frame channel estimate the equalizer divides by
+    # can itself be near a fade null, which amplifies that frame's
+    # noise into an enormous, essentially random magnitude rather than
+    # a merely noisy one -- a single such repetition then dominates a
+    # raw sum and wrecks it (measured: raw summing recovered 6/12 bits,
+    # i.e. chance, on a case where every individual repetition also
+    # decoded at only ~7/12; summing signs instead recovered 12/12).
+    # Equal-gain (sign) combining gives up some of coherent combining's
+    # theoretical SNR gain in exchange for not being destroyed by
+    # exactly the outliers fading produces routinely.
+    for c in invariant_chunks:
+        clo, chi = c * 24, (c + 1) * 24
+        summed = np.zeros(24)
+        for pos in grid:
+            summed += np.sign(chips[pos + SYNC_LEN + clo : pos + SYNC_LEN + chi])
+        bits = _decode_chunk_bits(summed)
+        blo, bhi = _chunk_bit_range(c)
+        callsign_bits[blo - callsign_lo : bhi - callsign_lo] = bits
+
+    # The chunk carrying the counter's own low bit 0 can't be voted on
+    # like the others below -- a genuinely *different* 12-bit value is
+    # correct at every repetition, not the same one imperfectly
+    # received, so joint-search it instead (see _search_counter_chunk).
+    counter_chunk = next(c for c in variant_chunks if _chunk_bit_range(c)[0] <= counter_lo)
+    result = _search_counter_chunk(chips, grid, anchor_off, counter_chunk, BEACON_COUNTER_BITS)
+    if result is None:
+        return None
+    frame_index, extra_bits_value = result
+    if not (0 <= frame_index <= MAX_FRAME_COUNTER):
+        return None
+    n_extra = 12 - BEACON_COUNTER_BITS
+    blo, bhi = _chunk_bit_range(counter_chunk)
+    lo, hi = max(blo, callsign_lo), min(bhi, callsign_hi)
+    if lo < hi:  # the counter chunk's tail bits are callsign, not counter
+        callsign_bits[lo - callsign_lo : hi - callsign_lo] = _int_to_bits(
+            extra_bits_value, n_extra
+        )[lo - (bhi - n_extra) :]
+
+    # Remaining variant chunks (here: the one mixing still-unknown
+    # callsign bits with the per-repetition CRC) can't be voted on
+    # either, for the same reason as the counter chunk above: the CRC
+    # bits riding along with the callsign differ every repetition
+    # (CRC depends on that repetition's own counter), so a "vote on
+    # independent per-repetition decodes" measured zero consensus at
+    # all -- 18 repetitions, 18 different guesses. Joint-search it too.
+    other_variant_chunks = [c for c in variant_chunks if c != counter_chunk]
+    for c in other_variant_chunks:
+        blo, bhi = _chunk_bit_range(c)
+        frag = _search_crc_mixed_chunk(chips, grid, anchor_off, c, frame_index, callsign_bits)
+        if frag is None:
+            return None
+        lo, hi = max(blo, callsign_lo), min(bhi, callsign_hi)
+        callsign_bits[lo - callsign_lo : hi - callsign_lo] = frag
+
+    if np.any(callsign_bits < 0):
+        return None  # a fragment nobody resolved (shouldn't happen given the layout)
+
+    codes = [
+        _bits_to_int(callsign_bits[i : i + BEACON_CALLSIGN_CHAR_BITS])
+        for i in range(0, BEACON_CALLSIGN_BITS, BEACON_CALLSIGN_CHAR_BITS)
+    ]
+    callsign = codes_to_callsign(np.array(codes))
+
+    # This assembly came from combined evidence, not a single verified
+    # CRC, and needs a real check before it's trusted -- not a
+    # correlation against the whole superframe, which is the wrong
+    # thing to check against.
+    #
+    # Chunks 0-4 were *used* to build (frame_index, callsign): both
+    # searches above pick whichever hypothesis best matches the noisy
+    # chips there, so a wrong hypothesis can still score deceptively
+    # well on them -- it's not really testing anything independent, and
+    # correlating against it measures how good a curve-fit the search
+    # found, not whether the fit is *right*. Diluted into a whole-
+    # superframe correlation this was silently catastrophic: measured on
+    # pure noise long enough to hold this many repetitions, 40 of 40
+    # trials produced a confident, fully-assembled, completely fake
+    # BeaconResult before this fix, at what looked like a comfortable
+    # multiple of a "3-sigma" bar -- exhaustively searching thousands of
+    # hypotheses and keeping the best one produces exactly the inflated,
+    # not-actually-3-sigma correlations extreme-value statistics predict.
+    # Restricting the correlation to just the chunks nothing was
+    # searched against (the two pure CRC/padding chunks) fixed the false
+    # locks, but a correlation *threshold* over so few chips (48, next
+    # to the whole superframe's 181) turned out to cost most of the
+    # measured gain: fading routinely knocks a real repetition's own
+    # agreement down far enough that no threshold cleanly separates a
+    # correct combine from a wrong one on 48 chips alone.
+    #
+    # A bit-exact check does, and needs no threshold to calibrate: Golay
+    # -decode the verify chunks at each repetition (a plain, unsearched
+    # decode, no hypothesis-fitting involved) and compare against what
+    # `_payload_bits` says they should be for that repetition's own
+    # counter -- if even *one* repetition matches exactly, accept. A
+    # wrong hypothesis's chance of an exact coincidental match this way
+    # is about (1/4096) per verify chunk (a Golay decode of noise is
+    # effectively a uniform draw over its 4096 codewords), roughly
+    # 6e-8 for both chunks in this layout at any one repetition -- comparable
+    # to or better than the false-accept rate the original single-
+    # superframe CRC check itself already relies on (1/65536 per
+    # attempt), and unlike a correlation threshold it doesn't get
+    # weaker just because fading make the chips noisier.
+    callsign_hi = BEACON_COUNTER_BITS + BEACON_CALLSIGN_BITS
+    verify_chunks = [c for c in range(N_CHUNKS) if _chunk_bit_range(c)[0] >= callsign_hi]
+    if not verify_chunks:
+        return None  # layout has no untouched chunk to verify against -- refuse rather than guess
+    verified = False
+    for pos in grid:
+        fi = frame_index + (pos // CHIPS_PER_FRAME - anchor_off // CHIPS_PER_FRAME)
+        if not (0 <= fi <= MAX_FRAME_COUNTER):
+            continue
+        payload = _payload_bits(fi, callsign)
+        if all(
+            np.array_equal(
+                _decode_chunk_bits(chips[pos + SYNC_LEN + c * 24 : pos + SYNC_LEN + (c + 1) * 24]),
+                payload[_chunk_bit_range(c)[0] : _chunk_bit_range(c)[1]]
+                if _chunk_bit_range(c)[1] <= len(payload)
+                else np.concatenate([
+                    payload[_chunk_bit_range(c)[0] :],
+                    np.zeros(_chunk_bit_range(c)[1] - len(payload), dtype=np.int64),
+                ]),
+            )
+            for c in verify_chunks
+        ):
+            verified = True
+            break
+    if not verified:
+        return None
+
+    return BeaconResult(chip_offset=anchor_off, frame_index=frame_index, callsign=callsign)

@@ -126,7 +126,7 @@ std::vector<double> StreamResampler::operator()(std::span<const double> chunk) {
     if (n == 0) return {};
 
     const std::vector<double> y = dsp::resample_poly(
-        std::span<const double>(buf_.data(), 2 * pad_ + n), up_, down_);
+        std::span<const double>(buf_.data(), 2 * pad_ + n), up_, down_, &filter_taps_);
     const std::size_t skip = pad_ * static_cast<std::size_t>(up_) / d;
     const std::size_t take = n * static_cast<std::size_t>(up_) / d;
 

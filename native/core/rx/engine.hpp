@@ -73,7 +73,15 @@ struct RxConfig {
     // Downscale saved pictures, e.g. {320, 240}. Unset = full size.
     std::optional<std::pair<int, int>> size;
     bool once = false;
-    double blind_search_seconds = 25.0;
+    // A cap, not a fixed timescale: sync::BlindAccumulator runs one
+    // decay timescale per mode (config::MODES), each capped at
+    // min(mode.duration_s, blind_search_seconds), so by default (above
+    // every mode's own duration) no mode's timescale is capped at all --
+    // see decode_loop. Only useful to *shrink* below a mode's own
+    // duration (a fast synthetic test's short buffer, e.g.); there is no
+    // reliability reason to raise it past the longest mode's duration,
+    // since there is no more real signal beyond that to integrate.
+    double blind_search_seconds = config::MODES[config::N_MODES - 1].duration_s;
 };
 
 // The `threading.Event` the reference stops on. Shared with the

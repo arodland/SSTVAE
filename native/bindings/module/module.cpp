@@ -334,11 +334,23 @@ PYBIND11_MODULE(sstvae_native, m) {
               },
               py::arg("x"), py::arg("search_s") = py::none());
     modem.def("demodulate_blind",
-              [](DArray x, std::optional<std::pair<double, double>> search_s) {
+              [](DArray x, std::optional<std::pair<double, double>> search_s,
+                 std::optional<std::tuple<std::int64_t, double, double>> acquisition) {
                   std::span<const double> in(
                       x.data(), static_cast<std::size_t>(x.size()));
                   const sstvae::modem::Modem md;
-                  const auto r = md.demodulate_blind(in, search_s);
+                  std::optional<sstvae::sync::BlindAcquisition> acq;
+                  // Same (frame_start, freq_offset, metric) tuple shape
+                  // acquire_blind/BlindAccumulator.result return above --
+                  // a caller (rx/engine.py) that already located the
+                  // signal via its own persistent accumulator passes
+                  // that straight through rather than making this run
+                  // acquire_blind again from scratch.
+                  if (acquisition)
+                      acq = sstvae::sync::BlindAcquisition{
+                          std::get<0>(*acquisition), std::get<1>(*acquisition),
+                          std::get<2>(*acquisition)};
+                  const auto r = md.demodulate_blind(in, search_s, acq);
                   py::dict out;
                   out["latents"] = to_numpy(r.latents);
                   out["weights"] = to_numpy(r.weights);
@@ -358,7 +370,8 @@ PYBIND11_MODULE(sstvae_native, m) {
                       out["beacon"] = py::none();
                   return out;
               },
-              py::arg("x"), py::arg("search_s") = py::none());
+              py::arg("x"), py::arg("search_s") = py::none(),
+              py::arg("acquisition") = py::none());
 
     py::module_ sync = m.def_submodule("sync");
     // SyncError is raised through to Python as the reference's own
@@ -402,6 +415,28 @@ PYBIND11_MODULE(sstvae_native, m) {
              py::arg("z"), py::arg("max_offset_hz") = 55.0,
              py::arg("bin_step_hz") = 1.7, py::arg("min_periods") = 8,
              py::arg("threshold") = 4.0, py::arg("search") = py::none());
+
+    // result() returns a plain tuple, like acquire_blind above -- the
+    // conftest adapter wraps it into the reference's BlindAcquisition,
+    // keeping this core free of any knowledge of that Python type.
+    py::class_<sstvae::sync::BlindAccumulator>(sync, "BlindAccumulator")
+        .def(py::init<double, double, int, double, std::optional<int>,
+                      std::vector<std::optional<double>>>(),
+             py::arg("max_offset_hz") = 55.0, py::arg("bin_step_hz") = 1.7,
+             py::arg("min_periods") = 8, py::arg("threshold") = 4.0,
+             py::arg("block_samples") = py::none(),
+             py::arg("window_s") = std::vector<std::optional<double>>{25.0})
+        .def("push",
+             [](sstvae::sync::BlindAccumulator& self, CArray z,
+                std::int64_t start_sample) {
+                 std::span<const cdouble> in(z.data(), static_cast<std::size_t>(z.size()));
+                 self.push(in, start_sample);
+             },
+             py::arg("z"), py::arg("start_sample"))
+        .def("result", [](const sstvae::sync::BlindAccumulator& self) {
+            const auto a = self.result();
+            return py::make_tuple(a.frame_start, a.freq_offset, a.metric);
+        });
 
     py::module_ dsp = m.def_submodule("dsp");
     dsp.def("to_baseband",
@@ -630,6 +665,10 @@ PYBIND11_MODULE(sstvae_native, m) {
     images.attr("IMG_H") = sstvae::images::IMG_H;
     images.attr("MIN_W") = sstvae::images::MIN_W;
     images.attr("MIN_H") = sstvae::images::MIN_H;
+    // Exposed so the parity suite can assert the two implementations
+    // refuse the same files, rather than each asserting its own copy of
+    // the number.
+    images.attr("MAX_FILE_BYTES") = sstvae::images::MAX_FILE_BYTES;
 
 #ifdef SSTVAE_HAVE_CODEC
     // --- codec ---------------------------------------------------------

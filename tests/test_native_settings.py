@@ -107,11 +107,14 @@ NON_DEFAULT = {
         "level": 0.72,
         "optimize": True,
         "cw_id": True,
+        "cw_message": "TEST DE {callsign}",
     },
     "ui": {
-        # Neither is a default: the default layout is "auto" and the
-        # default waterfall height is 0 ("never dragged").
+        # None is a default: the default layout is "auto", the default
+        # waterfall height is 0 ("never dragged"), and the log dock
+        # starts open.
         "layout": "tabs",
+        "log_visible": False,
         "waterfall_height": 140,
     },
     "version": 2,

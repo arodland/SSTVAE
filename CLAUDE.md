@@ -312,9 +312,23 @@ erased itself while the operator was still looking at the picture.
 Layout, 2026-08-02), because the splitter's floor is a property of the
 *arrangement* and only the arrangement can move it: measured on the
 real panels with `sstvae-gui-shot --panes`, **1043 px side by side
-against 545 px tabbed**. The scroll-area idea that was filed against
-this treats the symptom. Three things are settled and worth not
-re-deciding. **"auto" is resolved once, at startup, against the
+against 545 px tabbed** *at the time*. The scroll-area idea that was
+filed against this treats the symptom.
+
+**Those numbers are long gone, and the conclusion with them**
+(re-measured 2026-08-08): side by side now asks **766 x 467** against
+tabbed's **342 x 464**. Everything that shrank the panels since —
+`Ignored` size policies, `FlowLayout`, retiring the duplicate properties
+box — came off the side-by-side figure. At 766 px it fits every screen
+anyone will run this on, so `resolve_layout` will not choose tabs on any
+real display and the startup log line explaining that choice will never
+fire. Worse on the axis tabs were meant to help: at 900 px wide the
+tabbed layout measures **49 px taller**, and its
+`minimumHeightForWidth` is 755 against the splitter's 518. Tabs are
+therefore a *preference* now (View > Layout), not a screen-size
+adaptation — kept deliberately (Andrew, 2026-08-07) rather than retired,
+but do not reach for the old numbers to justify it. Three things are
+settled and worth not re-deciding. **"auto" is resolved once, at startup, against the
 screen** — a live breakpoint reads like the obvious implementation and
 cannot work, since while side by side is in force the splitter's own
 minimum is exactly what stops the window reaching the width that would
@@ -1297,11 +1311,14 @@ need when `--native` fails and you want to know *where*.
   recently fed the combine — header or blind lock both count, and it is
   not latched, so a branch that drops out mid-reception goes false
   again on the next poll), which the receive panel shows as two
-  "Primary"/"Secondary" lock lamps next to the status line — same
-  `QPalette`-colored-`QLabel` idiom as `ptt_label_`, never a stylesheet.
+  "Primary"/"Secondary" lock **chips** next to the status line — filled,
+  not coloured text, the same argument as `ptt_label_`'s chip (see the
+  GUI review below): `style::color::ok()`/`on_ok()` while locked, the
+  palette's own Button/ButtonText pair otherwise, painted through
+  `setAutoFillBackground` and a `QPalette`, never a stylesheet.
   Covered by `DiversityHarness` assertions in `test_rx_engine.cpp` and
   by `state.branch_a_locked`/`branch_b_locked` checks in
-  `tests/test_diversity_rx.py`; the lamp widgets themselves are
+  `tests/test_diversity_rx.py`; the chip widgets themselves are
   unverified GUI, same caveat as the rest of this bullet.
 - `docs/todo.md` — open work items with the reasoning behind them.
   Currently one: a wider acquisition search so a mis-tuned counterpart

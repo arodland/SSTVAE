@@ -159,6 +159,35 @@ def _native_adapters(native):
                           max_offset_hz, bin_step_hz, min_periods, threshold,
                           search)
 
+    # A whole class, not a function -- wraps the native object rather
+    # than replacing sstvae.modem.sync.BlindAccumulator's *instances*
+    # with a native one directly, since result() needs the same
+    # tuple->BlindAcquisition translation acquire_blind's shim does
+    # above, and push()/result() need the same SyncError translation.
+    class BlindAccumulator:
+        def __init__(self, max_offset_hz=55.0, bin_step_hz=1.7, min_periods=8,
+                     threshold=4.0, block_samples=None, window_s=25.0):
+            # The reference accepts a bare float/None as shorthand for one
+            # timescale; the binding always takes a list.
+            from collections.abc import Sequence
+
+            window_s_list = (
+                list(window_s)
+                if isinstance(window_s, Sequence) and not isinstance(window_s, str)
+                else [window_s]
+            )
+            self._native = native.sync.BlindAccumulator(
+                max_offset_hz, bin_step_hz, min_periods, threshold,
+                block_samples, window_s_list)
+
+        def push(self, z, start_sample):
+            self._native.push(z, start_sample)
+
+        def result(self):
+            from sstvae.modem.sync import BlindAcquisition
+
+            return _sync_call(self._native.result, BlindAcquisition)
+
     # Modem's methods, rebuilt into the reference's dataclasses. The
     # binding returns plain dicts so the C++ core carries no knowledge of
     # Python object layout -- it is the same core the application links.
@@ -199,11 +228,15 @@ def _native_adapters(native):
             beacon=_beacon_from_tuple(d["beacon"]), callsign=d["callsign"],
             preamble_start=d["preamble_start"], snr_db=d["snr_db"])
 
-    def modem_demodulate_blind(self, x, search_s=None):
+    def modem_demodulate_blind(self, x, search_s=None, acquisition=None):
         from sstvae.modem.modem import BlindDemodResult
 
+        acq_tuple = (
+            None if acquisition is None
+            else (acquisition.frame_start, acquisition.freq_offset, acquisition.metric)
+        )
         d = _sync_call(native.modem.demodulate_blind, dict,
-                       np.asarray(x, dtype=np.float64), search_s)
+                       np.asarray(x, dtype=np.float64), search_s, acq_tuple)
         return BlindDemodResult(
             latents=d["latents"], weights=d["weights"],
             freq_offset=d["freq_offset"], beacon=_beacon_from_tuple(d["beacon"]),
@@ -226,6 +259,7 @@ def _native_adapters(native):
         ("sstvae.modem.modem.Modem", "demodulate_blind"): modem_demodulate_blind,
         ("sstvae.modem.sync", "acquire"): acquire,
         ("sstvae.modem.sync", "acquire_blind"): acquire_blind,
+        ("sstvae.modem.sync", "BlindAccumulator"): BlindAccumulator,
         # modem.py from-imports both, so its copies need replacing too.
         ("sstvae.modem.modem", "acquire"): acquire,
         ("sstvae.modem.modem", "acquire_blind"): acquire_blind,

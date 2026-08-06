@@ -46,7 +46,7 @@ from ..config import (
 from . import beacon, framing, ofdm
 from .beacon import BeaconResult
 from .dsp import to_baseband, freq_correct, tx_condition
-from .sync import acquire, acquire_blind, SyncError
+from .sync import acquire, acquire_blind, BlindAcquisition, SyncError
 
 __all__ = ["Modem", "DemodResult", "BlindDemodResult", "SyncError"]
 
@@ -322,7 +322,8 @@ class Modem:
         )
 
     def demodulate_blind(
-        self, x: np.ndarray, search_s: tuple[float, float] | None = None
+        self, x: np.ndarray, search_s: tuple[float, float] | None = None,
+        acquisition: BlindAcquisition | None = None,
     ) -> BlindDemodResult:
         """Recover frame timing purely from the pilot's own periodicity
         (sync.acquire_blind) — no preamble or header needed, so this
@@ -335,12 +336,23 @@ class Modem:
 
         No sample-clock drift tracking (that needs a preamble-phase
         reference); fine for the bounded windows this is meant for.
+
+        `acquisition`, if given, skips the internal acquire_blind call
+        and demodulates at that position instead -- for a caller (e.g.
+        rx/engine.py) that already found it via a persistent
+        sync.BlindAccumulator rather than a fresh bounded-window search.
+        The rest of this method is unaffected: it still demodulates
+        every frame the *whole* of `x` can hold, using `acquisition`
+        only to place frame 0.
         """
         z = to_baseband(np.asarray(x, dtype=np.float64))
-        search = None
-        if search_s is not None:
-            search = (int(search_s[0] * FS), int(search_s[1] * FS))
-        ba = acquire_blind(z, search=search)
+        if acquisition is not None:
+            ba = acquisition
+        else:
+            search = None
+            if search_s is not None:
+                search = (int(search_s[0] * FS), int(search_s[1] * FS))
+            ba = acquire_blind(z, search=search)
         z = freq_correct(z, ba.freq_offset)
 
         p0 = ba.frame_start - NCP  # CP-start of local frame 0
@@ -360,7 +372,30 @@ class Modem:
             h_pilot[f] = raw[f, 0] / self.pilot
             p += FRAME_SAMPLES
 
-        med_h = np.median(np.abs(h_pilot))
+        # Blind demod always covers every frame the *whole current
+        # buffer* can hold, since the transmission's true length is
+        # unknown until the beacon resolves it -- unlike the preamble
+        # path (demodulate() above), which restricts this same
+        # computation to the header's known real frame count. Most of
+        # that range is often not the real transmission at all (silence
+        # or noise before it starts, or accumulating after it ends,
+        # while the loop waits to see whether a longer mode is still
+        # arriving) -- a straight median over the *whole* range
+        # describes "typical", which is the noise floor whenever noise
+        # frames are the numerical majority, and noise then reads as
+        # fully trustworthy (weight ~1) right alongside real frames
+        # instead of being down-weighted, feeding reconstruct() latents
+        # that are mostly garbage at full confidence. Anchoring instead
+        # on frames within an order of magnitude of the strongest ones
+        # seen needs only a few genuinely real frames to set the right
+        # reference, regardless of how much silence surrounds them; a
+        # real (even faded) frame is never excluded by this on its own
+        # account, since a *minority* of low-|h| frames barely moves a
+        # median in the first place.
+        h_mag = np.abs(h_pilot)
+        peak_h = np.max(h_mag) if h_mag.size else 0.0
+        plausible = h_mag > 0.1 * peak_h
+        med_h = np.median(h_mag[plausible]) if np.any(plausible) else 1.0
         floor = max(0.05 * med_h, 1e-9)
 
         def pilot_at(i: int) -> np.ndarray:

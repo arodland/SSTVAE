@@ -13,7 +13,7 @@
 #   SSTVAE_SANITIZE        ASan + UBSan (there is no memory-safety net here)
 
 cmake_minimum_required(VERSION 3.24)
-project(sstvae_native VERSION 0.2.1 LANGUAGES CXX)
+project(sstvae_native VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -81,6 +81,12 @@ if(SSTVAE_SANITIZE)
   endif()
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
   add_link_options(-fsanitize=address,undefined)
+  # A named, project-wide define rather than a compiler-detection macro
+  # like __SANITIZE_ADDRESS__: a test that wants to trade trial count
+  # for runtime under instrumentation is answering "is this the
+  # sanitizer build", not "did the compiler happen to define ASan's own
+  # macro" -- see test_beacon.cpp's use of it.
+  add_compile_definitions(SSTVAE_SANITIZE_BUILD)
 endif()
 
 # --- core -------------------------------------------------------------------
@@ -112,6 +118,9 @@ add_library(sstvae_core STATIC
   core/optimize/speculative.cpp
   core/overlay/model.cpp
   core/sync/sync.cpp
+  # Vendored, and the only non-header-only one -- see
+  # third_party/easyexif/README.md. Read for JPEG orientation alone.
+  third_party/easyexif/exif.cpp
 )
 target_include_directories(sstvae_core PUBLIC core third_party/pocketfft)
 # stb is SYSTEM: 20k lines of vendored single-header C that is not
@@ -339,6 +348,7 @@ if(_want_gui)
   # layering rules forbid.
   add_library(sstvae_gui STATIC
     gui/main_window.cpp
+    gui/style.cpp
     gui/flow_layout.cpp
     gui/pane_container.cpp
     gui/picture_box.cpp
@@ -353,6 +363,11 @@ if(_want_gui)
     gui/log_pane.cpp
     gui/app_state.cpp)
   set_target_properties(sstvae_gui PROPERTIES AUTOMOC ON)
+  # The application's own version, for the About box. It reported
+  # Hamlib's and Qt's and omitted this one -- which is the number every
+  # bug report needs first, and the only one nobody could read off the
+  # running program.
+  target_compile_definitions(sstvae_gui PUBLIC SSTVAE_VERSION="${PROJECT_VERSION}")
   target_include_directories(sstvae_gui PUBLIC core gui)
   target_link_libraries(sstvae_gui PUBLIC
     sstvae_core sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render

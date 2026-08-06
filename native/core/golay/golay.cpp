@@ -100,4 +100,6 @@ int min_distance() {
     return best;
 }
 
+std::span<const double> signs_table() { return tables().signs; }
+
 }  // namespace sstvae::golay
