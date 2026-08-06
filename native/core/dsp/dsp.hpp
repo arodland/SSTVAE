@@ -29,6 +29,17 @@ using cdouble = std::complex<double>;
 // provides per-carrier noise selectivity. Sync filters its own copy.
 std::vector<cdouble> to_baseband(std::span<const double> x);
 
+// to_baseband(x), but as if `x` were a slice of a longer signal starting
+// at absolute sample index `start_sample` rather than at 0 -- i.e.
+// exactly to_baseband(full)[start_sample : start_sample + x.size()] for
+// whatever longer `full` array `x` actually came from. See
+// sstvae.modem.dsp.to_baseband_at's docstring: needed by any caller
+// that baseband-converts one long recording as a series of independent
+// chunks and carries state *across* them (sync::BlindAccumulator's live
+// caller in rx/engine.cpp), because to_baseband always treats its own
+// input's first sample as the heterodyne's local n=0.
+std::vector<cdouble> to_baseband_at(std::span<const double> x, std::int64_t start_sample);
+
 // Fractional part of a phase in cycles, in [0, 1). For arbitrary
 // frequencies the product cannot be made exact the way the integer
 // cases can, but reducing before exp() removes the large-argument error.

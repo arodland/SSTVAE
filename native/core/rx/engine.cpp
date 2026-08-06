@@ -268,6 +268,19 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
     // the next one can make a brand-new reception look as though it has
     // already stalled, and end it early.
     std::optional<std::int64_t> tracked_reception_start;
+    // Blind acquisition's persistent search state: a BlindAccumulator
+    // folds in only the audio that is new since the last poll (see
+    // sync::BlindAccumulator), so unlike the preamble path it carries
+    // state across iterations of this loop instead of re-deriving
+    // everything from the current snapshot each time. blind_acc_pushed
+    // is the absolute (ring-buffer-coordinate) sample count already
+    // folded in; unset means "nothing pushed yet, or the last push's
+    // position fell out of the ring buffer's retained window" -- either
+    // way there is a gap push() cannot bridge contiguously, so the right
+    // response is a fresh accumulator over what is available now rather
+    // than guessing at what filled it.
+    std::optional<sync::BlindAccumulator> blind_acc;
+    std::optional<std::int64_t> blind_acc_pushed;
 
     while (!stop.is_set()) {
         if (stop.wait(config.poll_interval)) break;
@@ -321,23 +334,44 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
             progress_metric = r.frames_received;
             reception_start = found->start;
         } else {
-            // Bound where blind acquisition searches (the dominant CPU
-            // cost of this path) to the most recent slice of the buffer;
-            // the retrospective decode still covers everything once
-            // locked. Whole buffer if it is shorter than the window.
-            const auto blind_span =
-                static_cast<std::int64_t>(config.blind_search_seconds * FS);
-            const auto n = static_cast<std::int64_t>(samples.size());
-            const auto blind_search =
-                n <= blind_span ? std::nullopt : window_s(n - blind_span, n);
+            // Fold whatever is new since the last poll into the running
+            // accumulator -- O(new samples), not O(window) -- which is
+            // what lets this search as far back as
+            // config.blind_search_seconds of *decayed* history rather
+            // than a hard-bounded recent slice. The retrospective decode
+            // below still covers the whole current buffer once locked,
+            // exactly as before.
+            if (!blind_acc || !blind_acc_pushed || *blind_acc_pushed < buf_start) {
+                blind_acc.emplace(55.0, 1.7, 8, 4.0, std::nullopt,
+                                  config.blind_search_seconds);
+                blind_acc_pushed = buf_start;
+            }
+            const auto new_lo = *blind_acc_pushed - buf_start;
+            if (new_lo < static_cast<std::int64_t>(samples.size())) {
+                const std::vector<double> new_raw(
+                    samples.begin() + new_lo, samples.end());
+                const std::vector<std::complex<double>> new_chunk =
+                    dsp::to_baseband_at(new_raw, *blind_acc_pushed);
+                blind_acc->push(new_chunk, *blind_acc_pushed);
+                blind_acc_pushed = static_cast<std::int64_t>(total);
+            }
+
+            std::optional<sync::BlindAcquisition> ba;
+            try {
+                ba = blind_acc->result();
+            } catch (const sync::SyncError&) {
+                ba = std::nullopt;
+            }
 
             std::optional<modem::BlindDemodResult> rb;
-            try {
-                rb = modem.demodulate_blind(samples, blind_search);
-            } catch (const sync::SyncError&) {
-                rb = std::nullopt;
-            } catch (const std::exception&) {
-                rb = std::nullopt;
+            if (ba) {
+                try {
+                    rb = modem.demodulate_blind(samples, std::nullopt, ba);
+                } catch (const sync::SyncError&) {
+                    rb = std::nullopt;
+                } catch (const std::exception&) {
+                    rb = std::nullopt;
+                }
             }
 
             if (rb && rb->beacon && rb->frame0_start) {

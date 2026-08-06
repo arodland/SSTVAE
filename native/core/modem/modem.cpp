@@ -400,14 +400,20 @@ DemodResult Modem::demodulate(std::span<const double> x,
 
 BlindDemodResult Modem::demodulate_blind(
     std::span<const double> x,
-    std::optional<std::pair<double, double>> search_s) const {
+    std::optional<std::pair<double, double>> search_s,
+    std::optional<sync::BlindAcquisition> acquisition) const {
     std::vector<cdouble> z = dsp::to_baseband(x);
 
-    std::optional<sync::SearchWindow> search;
-    if (search_s)
-        search = sync::SearchWindow{static_cast<std::int64_t>(search_s->first * FS),
-                                    static_cast<std::int64_t>(search_s->second * FS)};
-    const sync::BlindAcquisition ba = sync::acquire_blind(z, 55.0, 1.7, 8, 4.0, search);
+    sync::BlindAcquisition ba{};
+    if (acquisition) {
+        ba = *acquisition;
+    } else {
+        std::optional<sync::SearchWindow> search;
+        if (search_s)
+            search = sync::SearchWindow{static_cast<std::int64_t>(search_s->first * FS),
+                                        static_cast<std::int64_t>(search_s->second * FS)};
+        ba = sync::acquire_blind(z, 55.0, 1.7, 8, 4.0, search);
+    }
     z = dsp::freq_correct(z, ba.freq_offset);
 
     const std::int64_t p0 = ba.frame_start - NCP;  // CP-start of local frame 0

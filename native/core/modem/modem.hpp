@@ -104,9 +104,17 @@ class Modem {
     //
     // No sample-clock drift tracking (that needs a preamble phase
     // reference); fine for the bounded windows this targets.
+    //
+    // `acquisition`, if given, skips the internal acquire_blind call and
+    // demodulates at that position instead -- for a caller (rx/engine.cpp)
+    // that already found it via a persistent sync::BlindAccumulator
+    // rather than a fresh bounded-window search. The rest is unaffected:
+    // it still demodulates every frame the whole of `x` can hold, using
+    // `acquisition` only to place frame 0.
     BlindDemodResult demodulate_blind(
         std::span<const double> x,
-        std::optional<std::pair<double, double>> search_s = std::nullopt) const;
+        std::optional<std::pair<double, double>> search_s = std::nullopt,
+        std::optional<sync::BlindAcquisition> acquisition = std::nullopt) const;
 
    private:
     std::vector<cdouble> pilot_;

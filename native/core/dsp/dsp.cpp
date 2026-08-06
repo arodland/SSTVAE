@@ -191,6 +191,18 @@ std::vector<cdouble> to_baseband(std::span<const double> x) {
     return out;
 }
 
+std::vector<cdouble> to_baseband_at(std::span<const double> x, std::int64_t start_sample) {
+    const Heterodyne& h = heterodyne();
+    // (step * start_sample) mod period, computed defensively for a
+    // negative start_sample even though the caller never passes one.
+    std::int64_t idx = (h.step * start_sample) % h.period;
+    if (idx < 0) idx += h.period;
+    const cdouble correction = h.table[static_cast<std::size_t>(idx)];
+    std::vector<cdouble> out = to_baseband(x);
+    for (cdouble& v : out) v *= correction;
+    return out;
+}
+
 double wrap_cycles(double cycles) { return cycles - std::floor(cycles); }
 
 std::vector<cdouble> freq_correct(std::span<const cdouble> z, double f_hz) {
