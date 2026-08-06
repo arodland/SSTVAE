@@ -14,6 +14,28 @@
 #include <cstddef>
 #include <vector>
 
+// Cache a handful of FFT plans (twiddle factors) instead of rebuilding
+// one on every call. Must be defined before pocketfft_hdronly.h is
+// first included, which happens right below -- this is that header's
+// only include site in the codebase.
+//
+// Off (0) by default upstream. A live-decode-loop perf capture showed
+// 5.45% of total CPU time in `cfftp<double>::cfftp` -- the plan
+// *constructor*, not the transform itself -- because every FFT call
+// anywhere in the native code, including 67 back-to-back same-length
+// calls inside a single acquire_blind() invocation, was rebuilding its
+// twiddle-factor table from scratch. The cache is a thread-safe,
+// mutex-protected LRU keyed by transform length (pocketfft_hdronly.h's
+// own `get_plan`), so this only removes redundant setup work; the
+// transform math, and so every golden vector's tolerance, is unchanged.
+// Sized generously above the small, fixed set of distinct lengths this
+// codebase's hot paths actually use, not tuned to it exactly -- eviction
+// churn from an undersized cache would be worse than the memory a few
+// extra unused slots cost.
+#ifndef POCKETFFT_CACHE_SIZE
+#define POCKETFFT_CACHE_SIZE 16
+#endif
+
 #include "pocketfft_hdronly.h"
 
 namespace sstvae::dsp {
