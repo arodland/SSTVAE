@@ -105,7 +105,24 @@ void test_no_false_lock_on_long_pure_noise() {
     constexpr int kModeCFrames = 660;
     const std::size_t n_chips = static_cast<std::size_t>(kModeCFrames) * config::CHIPS_PER_FRAME;
 
+    // ASan+UBSan's instrumentation makes decode()'s search markedly
+    // slower -- measured 2.4 s/trial at this length under
+    // SSTVAE_SANITIZE against ~0.05 s/trial without it, roughly 50x, so
+    // 200 trials (the unsanitized run, ~10 s) becomes several minutes
+    // and blows past both this file's own watchdog (180 s) and the
+    // ctest TIMEOUT (240 s). The statistical claim -- 0 false locks in
+    // 200 trials -- is still checked at full strength and full speed by
+    // every unsanitized build (every local run, CI's `native` job, and
+    // ThreadSanitizer, which doesn't set SSTVAE_SANITIZE); a sanitizer
+    // run exists to catch a memory-safety bug in the same code path, not
+    // to re-derive that statistic, and a fifth of the trials is still
+    // plenty of distinct seeds for that. 20 trials measures at ~48 s
+    // here -- comfortable margin under both deadlines, not "just enough".
+#ifdef SSTVAE_SANITIZE_BUILD
+    constexpr int kTrials = 20;
+#else
     constexpr int kTrials = 200;
+#endif
     int false_locks = 0;
     for (int trial = 0; trial < kTrials; ++trial) {
         Rng rng(10000 + static_cast<std::uint64_t>(trial));
