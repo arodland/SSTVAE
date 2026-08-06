@@ -11,7 +11,8 @@ from sstvae.config import (
     FRAME_SAMPLES,
 )
 from sstvae.modem import Modem, beacon
-from sstvae.modem.sync import acquire_blind, SyncError
+from sstvae.modem.dsp import to_baseband
+from sstvae.modem.sync import BlindAccumulator, acquire_blind, SyncError
 
 from conftest import snr_floor_db
 
@@ -144,3 +145,60 @@ def test_window_shorter_than_min_frames_for_sync_may_fail_gracefully():
             continue
         if r.beacon is not None:
             assert r.frame_offset == start_frame
+
+
+def test_blind_accumulator_chunking_is_invariant():
+    """The whole point of BlindAccumulator is that a caller can feed it
+    audio in whatever pieces arrive off the ring buffer -- so the
+    accumulated result must not depend on how the same total signal was
+    sliced into push() calls. Uses ragged, mutually-prime-ish chunk
+    sizes deliberately, so a bug that only shows up when a chunk
+    boundary lands mid-block (rather than conveniently on a block
+    boundary) has somewhere to hide."""
+    _, _, x, frames_start = _tx(seed=6)
+    win = _frames_slice(x, frames_start, 100, beacon.MIN_FRAMES_FOR_SYNC + 20)
+    z = to_baseband(win)
+
+    whole = BlindAccumulator()
+    whole.push(z, 0)
+
+    chunked = BlindAccumulator()
+    chunk_sizes = [4001, 1500, 9999, 2000, 12345]
+    pos = 0
+    i = 0
+    while pos < len(z):
+        n = min(chunk_sizes[i % len(chunk_sizes)], len(z) - pos)
+        chunked.push(z[pos : pos + n], pos)
+        pos += n
+        i += 1
+
+    np.testing.assert_allclose(chunked._folded, whole._folded, rtol=1e-9, atol=1e-6)
+    assert chunked._n_valid == whole._n_valid
+
+    r_whole = whole.result()
+    r_chunked = chunked.result()
+    assert r_chunked.frame_start == r_whole.frame_start
+    assert r_chunked.freq_offset == pytest.approx(r_whole.freq_offset)
+    assert r_chunked.metric == pytest.approx(r_whole.metric, rel=1e-6)
+
+
+def test_blind_accumulator_matches_acquire_blind_one_shot():
+    """Cross-checks the streaming, block-decomposed accumulator against
+    the existing one-shot acquire_blind (one huge FFT over the whole
+    window) on the same signal. The two use different-sized FFTs and so
+    a different, independently-rounded grid of candidate CFO bins --
+    exact frequency/score agreement isn't expected -- but they must
+    agree on the thing that actually matters: which pilot phase wins."""
+    _, _, x, frames_start = _tx(seed=7)
+    win = _frames_slice(x, frames_start, 300, beacon.MIN_FRAMES_FOR_SYNC + 5)
+    z = to_baseband(win)
+
+    one_shot = acquire_blind(z)
+
+    acc = BlindAccumulator()
+    acc.push(z, 0)
+    streamed = acc.result()
+
+    assert streamed.frame_start == one_shot.frame_start
+    assert abs(streamed.freq_offset - one_shot.freq_offset) < 2.0
+    assert streamed.metric > 4.0

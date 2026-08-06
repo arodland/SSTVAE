@@ -212,3 +212,136 @@ def acquire_blind(
 
     off = (search[0] if search is not None else 0) + phase
     return BlindAcquisition(frame_start=off, freq_offset=f_hat, metric=float(score))
+
+
+class BlindAccumulator:
+    """Incremental counterpart to `acquire_blind()`.
+
+    The one-shot function's search window is bounded (`rx/engine.py`
+    caps it at `blind_search_seconds`) purely for CPU reasons: it
+    recomputes the whole window's per-CFO-bin FFT from scratch on every
+    poll, even though most of a sliding window is audio it already
+    folded last poll. This class instead keeps a running per-CFO-bin,
+    per-phase-bin energy accumulator and folds in only the *new* samples
+    each call, via block-wise overlap-save -- so the cost of `push()` is
+    O(new samples), not O(window length), and the achievable integration
+    window becomes a memory question rather than a CPU one.
+
+    The block size is chosen purely from the frequency resolution the
+    search needs (`FS / bin_step_hz`), not from how long the caller
+    intends to integrate for -- decoupling those two is the entire
+    point, and it also means the block's own FFT and the per-bin
+    circular-shift table are computed once for the accumulator's whole
+    lifetime rather than once per poll.
+
+    Correctness rests on one fact about the circular-shift CFO trick:
+    applied per block instead of over one huge segment, it is no longer
+    equivalent to continuous-phase demodulation from sample 0 of the
+    whole recording -- each block's phase resets to 0 at the block's own
+    start, introducing a constant (per block, per CFO bin) phase error
+    relative to the "true" correction. But the accumulator only ever
+    uses `|matched filter|**2`: multiplying an entire block by a
+    constant unit-magnitude phasor before a linear matched filter
+    multiplies that block's whole correlation output by the same
+    constant, which a squared magnitude removes exactly. So block-local
+    and whole-recording CFO correction fold to the same energy. Checked
+    against `acquire_blind`'s one-shot result in
+    `tests/test_blind_acquisition.py`.
+    """
+
+    def __init__(
+        self,
+        max_offset_hz: float = 55.0,
+        bin_step_hz: float = 1.7,
+        min_periods: int = 8,
+        threshold: float = 4.0,
+        block_samples: int | None = None,
+    ) -> None:
+        template = pilot_template()
+        kernel = np.conj(template[::-1])
+        m = len(kernel)
+        self._m = m
+        self._min_periods = min_periods
+        self._threshold = threshold
+
+        # Large enough that a block's own FFT still resolves
+        # bin_step_hz, and well above the kernel so overlap-save stays
+        # efficient (a 160-sample kernel against an ~8k block, not
+        # against the whole window as acquire_blind's single big FFT
+        # does).
+        min_block = int(np.ceil(FS / bin_step_hz))
+        self._block = next_fast_len(max(min_block, 4 * m))
+        self._step = self._block - (m - 1)
+        if self._step <= 0:
+            raise ValueError("block_samples too small for the pilot kernel")
+        if block_samples is not None:
+            self._block = block_samples
+            self._step = self._block - (m - 1)
+        self._bin_hz = FS / self._block
+
+        n_bins = int(np.ceil(max_offset_hz / bin_step_hz))
+        shift_bins = np.array(
+            [int(round(k * bin_step_hz / self._bin_hz)) for k in range(-n_bins, n_bins + 1)]
+        )
+        self._shift_bins = shift_bins
+        self._freqs = shift_bins * self._bin_hz
+        self._kernel_f = fft(np.concatenate([kernel, np.zeros(self._block - m, dtype=complex)]))
+
+        self._folded = np.zeros((len(shift_bins), FRAME_SAMPLES))
+        self._n_valid = 0
+        self._buf = np.zeros(0, dtype=complex)
+        self._buf_start: int | None = None
+
+    def push(self, z: np.ndarray, start_sample: int) -> None:
+        """Fold new complex-baseband samples in. `z[0]` must sit at
+        absolute sample index `start_sample`, and pushes must be
+        contiguous (no gaps, no re-sent samples) -- the overlap-save
+        history this needs is carried internally between calls."""
+        if self._buf_start is None:
+            self._buf_start = start_sample
+        elif start_sample != self._buf_start + self._buf.size:
+            raise ValueError(
+                "BlindAccumulator.push: expected a contiguous continuation "
+                f"at sample {self._buf_start + self._buf.size}, got {start_sample}"
+            )
+        buf = np.concatenate([self._buf, z]) if self._buf.size else np.asarray(z, dtype=complex)
+
+        B, m, step = self._block, self._m, self._step
+        pos = 0
+        while pos + B <= buf.size:
+            block_f = fft(buf[pos : pos + B])
+            # mf[i] (0-indexed within the valid slice) is the matched
+            # filter's response for a pilot window starting at block-
+            # local index i -- the same convention acquire_blind's p2[j]
+            # uses (its "lo = m - 1" offset into the FFT's own index
+            # space exactly cancels against the "-(m-1)" in a matched
+            # filter's window-start-from-output-index formula, so no
+            # (m - 1) belongs here).
+            abs0 = self._buf_start + pos
+            phase0 = abs0 % FRAME_SAMPLES
+            idx = (phase0 + np.arange(step)) % FRAME_SAMPLES
+            for i, shift in enumerate(self._shift_bins):
+                mf = ifft(np.roll(block_f, -shift) * self._kernel_f)[m - 1 : B]
+                np.add.at(self._folded[i], idx, np.abs(mf) ** 2)
+            self._n_valid += step
+            pos += step
+
+        self._buf = buf[pos:]
+        self._buf_start += pos
+
+    def result(self) -> BlindAcquisition:
+        """The best (bin, phase) so far, in the same shape as
+        `acquire_blind`'s return value. Raises `SyncError` exactly as
+        the one-shot function does: too little data pushed yet, or no
+        bin's peak clears `threshold`."""
+        if self._n_valid < FRAME_SAMPLES * self._min_periods:
+            raise SyncError("window too short for blind acquisition")
+
+        scores = self._folded.max(axis=1) / (np.median(self._folded, axis=1) + 1e-12)
+        i = int(np.argmax(scores))
+        score = float(scores[i])
+        if score < self._threshold:
+            raise SyncError(f"no periodic pilot found (peak prominence {score:.3g})")
+
+        phase = int(np.argmax(self._folded[i]))
+        return BlindAcquisition(frame_start=phase, freq_offset=float(self._freqs[i]), metric=score)
