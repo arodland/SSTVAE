@@ -6,6 +6,7 @@
 #include <numbers>
 #include <numeric>
 #include <stdexcept>
+#include <utility>
 
 #include "dsp/fft.hpp"
 
@@ -147,6 +148,33 @@ std::vector<T> convolve_same_impl(std::span<const T> a, std::span<const double> 
     return out;
 }
 
+// numpy.convolve(a, v, mode="same") for complex a / real v, via FFT
+// rather than the direct sum convolve_same_impl uses. Only sync_lowpass
+// wants this: its 129-tap kernel against a's full length (the whole
+// ring-buffer snapshot, not a bounded search window) made the direct sum
+// the single largest cost in a live decode-loop profile -- a poll-cycle
+// tax that scaled with total buffer duration rather than with anything
+// acquisition actually needs. Same offset arithmetic as
+// convolve_same_impl, just applied to the FFT-computed full convolution
+// instead of a materialized one.
+std::vector<cdouble> fftconvolve_same(std::span<const cdouble> a,
+                                       std::span<const double> v) {
+    const std::size_t full = a.size() + v.size() - 1;
+    const std::size_t n = next_fast_len(full, /*real=*/false);
+    std::vector<cdouble> pa(n, cdouble{}), pv(n, cdouble{});
+    std::copy(a.begin(), a.end(), pa.begin());
+    for (std::size_t i = 0; i < v.size(); ++i) pv[i] = cdouble{v[i], 0.0};
+    std::vector<cdouble> fa = fft(pa, true);
+    const std::vector<cdouble> fv = fft(pv, true);
+    for (std::size_t i = 0; i < n; ++i) fa[i] *= fv[i];
+    const std::vector<cdouble> conv = fft(fa, false);
+
+    const std::size_t offset = (v.size() - 1) / 2;
+    return std::vector<cdouble>(
+        conv.begin() + static_cast<std::ptrdiff_t>(offset),
+        conv.begin() + static_cast<std::ptrdiff_t>(offset + a.size()));
+}
+
 }  // namespace
 
 std::vector<cdouble> to_baseband(std::span<const double> x) {
@@ -233,7 +261,8 @@ std::size_t upfirdn_out_len(std::size_t len_h, std::size_t len_x, int up, int do
     return (in_len - 1) / static_cast<std::size_t>(down) + 1;
 }
 
-std::vector<double> resample_poly(std::span<const double> x, int up, int down) {
+std::vector<double> resample_poly(std::span<const double> x, int up, int down,
+                                  std::optional<std::vector<double>>* filter_cache) {
     if (up <= 0 || down <= 0) throw std::invalid_argument("resample_poly: up/down must be positive");
     const int g = static_cast<int>(std::gcd(up, down));
     up /= g;
@@ -248,12 +277,22 @@ std::vector<double> resample_poly(std::span<const double> x, int up, int down) {
 
     // Filter design, exactly scipy's: cutoff 1/max(up,down) relative to
     // Nyquist, 10*max(up,down) taps either side, Kaiser(5.0).
+    //
+    // `slot` is the caller's filter_cache if one was given, or a local
+    // optional that only lives for this one call otherwise -- either
+    // way the design-and-populate logic below runs unchanged, and reads
+    // back through the same `h` reference.
     const int max_rate = std::max(up, down);
-    const double f_c = 1.0 / max_rate;
     const int half_len = 10 * max_rate;
-    const int numtaps = 2 * half_len + 1;
-    std::vector<double> h = firwin_band(numtaps, 0.0, f_c, kaiser(numtaps, 5.0));
-    for (double& v : h) v *= up;
+    std::optional<std::vector<double>> local_filter;
+    std::optional<std::vector<double>>& slot = filter_cache ? *filter_cache : local_filter;
+    if (!slot.has_value()) {
+        const int numtaps = 2 * half_len + 1;
+        std::vector<double> h = firwin_band(numtaps, 0.0, 1.0 / max_rate, kaiser(numtaps, 5.0));
+        for (double& v : h) v *= up;
+        slot = std::move(h);
+    }
+    const std::vector<double>& h = *slot;
 
     // Zero-pad the filter so the output samples land at the centre.
     const std::size_t n_pre_pad =
@@ -306,7 +345,7 @@ std::vector<cdouble> convolve_same(std::span<const cdouble> a,
 
 std::vector<cdouble> sync_lowpass(std::span<const cdouble> z) {
     static const std::vector<double> taps = firwin_lowpass(129, 850.0);
-    return convolve_same(z, std::span<const double>(taps));
+    return fftconvolve_same(z, std::span<const double>(taps));
 }
 
 std::vector<cdouble> hilbert(std::span<const double> x) {

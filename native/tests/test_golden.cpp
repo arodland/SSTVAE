@@ -200,8 +200,13 @@ void test_dsp() {
     check::close(dsp::hilbert(x_odd), load_c16(g("dsp/hilbert_odd")), 1e-11,
                  "dsp/hilbert at odd length (the other mask branch)");
 
+    // FFT-based here (pocketfft) against a direct-sum-equivalent Python
+    // reference (scipy.signal.fftconvolve, itself within 1e-15 of the
+    // np.convolve values the golden vector was generated from) -- same
+    // "FFT sums 4096 terms" cross-implementation spread as dsp/hilbert
+    // just above, hence the same bound.
     check::close(dsp::sync_lowpass(dsp::to_baseband(x)),
-                 load_c16(g("dsp/sync_lowpass")), 1e-13, "dsp/sync_lowpass");
+                 load_c16(g("dsp/sync_lowpass")), 1e-11, "dsp/sync_lowpass");
 
     const std::vector<double> papr = load_f8(g("dsp/papr_db"));
     check::close(std::vector<double>{dsp::papr_db(x)}, papr, 1e-11, "dsp/papr_db");

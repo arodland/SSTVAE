@@ -47,9 +47,18 @@ def to_baseband(x: np.ndarray) -> np.ndarray:
 def sync_lowpass(z: np.ndarray) -> np.ndarray:
     """Selective lowpass used only for preamble detection, where FIR
     smearing is harmless and out-of-band noise would degrade the
-    autocorrelation metric."""
+    autocorrelation metric.
+
+    FFT-based rather than a direct sum: `acquire()` runs this over the
+    whole ring-buffer snapshot (up to the full ~130 s capacity) on every
+    poll, not just a bounded search window, and the direct convolution
+    was measured as the single largest item in a live decode-loop
+    profile -- a per-poll cost that scaled with total buffer duration
+    rather than with anything acquisition actually needs. `convolve_same`
+    stays a direct sum for its other caller (`tx_condition`'s clip
+    filter), which runs once per transmit, not every poll."""
     taps = signal.firwin(129, 850.0, fs=FS)
-    return np.convolve(z, taps, mode="same")
+    return signal.fftconvolve(z, taps, mode="same")
 
 
 def wrap_cycles(cycles: np.ndarray) -> np.ndarray:
