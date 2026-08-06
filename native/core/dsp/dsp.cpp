@@ -147,6 +147,33 @@ std::vector<T> convolve_same_impl(std::span<const T> a, std::span<const double> 
     return out;
 }
 
+// numpy.convolve(a, v, mode="same") for complex a / real v, via FFT
+// rather than the direct sum convolve_same_impl uses. Only sync_lowpass
+// wants this: its 129-tap kernel against a's full length (the whole
+// ring-buffer snapshot, not a bounded search window) made the direct sum
+// the single largest cost in a live decode-loop profile -- a poll-cycle
+// tax that scaled with total buffer duration rather than with anything
+// acquisition actually needs. Same offset arithmetic as
+// convolve_same_impl, just applied to the FFT-computed full convolution
+// instead of a materialized one.
+std::vector<cdouble> fftconvolve_same(std::span<const cdouble> a,
+                                       std::span<const double> v) {
+    const std::size_t full = a.size() + v.size() - 1;
+    const std::size_t n = next_fast_len(full, /*real=*/false);
+    std::vector<cdouble> pa(n, cdouble{}), pv(n, cdouble{});
+    std::copy(a.begin(), a.end(), pa.begin());
+    for (std::size_t i = 0; i < v.size(); ++i) pv[i] = cdouble{v[i], 0.0};
+    std::vector<cdouble> fa = fft(pa, true);
+    const std::vector<cdouble> fv = fft(pv, true);
+    for (std::size_t i = 0; i < n; ++i) fa[i] *= fv[i];
+    const std::vector<cdouble> conv = fft(fa, false);
+
+    const std::size_t offset = (v.size() - 1) / 2;
+    return std::vector<cdouble>(
+        conv.begin() + static_cast<std::ptrdiff_t>(offset),
+        conv.begin() + static_cast<std::ptrdiff_t>(offset + a.size()));
+}
+
 }  // namespace
 
 std::vector<cdouble> to_baseband(std::span<const double> x) {
@@ -306,7 +333,7 @@ std::vector<cdouble> convolve_same(std::span<const cdouble> a,
 
 std::vector<cdouble> sync_lowpass(std::span<const cdouble> z) {
     static const std::vector<double> taps = firwin_lowpass(129, 850.0);
-    return convolve_same(z, std::span<const double>(taps));
+    return fftconvolve_same(z, std::span<const double>(taps));
 }
 
 std::vector<cdouble> hilbert(std::span<const double> x) {
