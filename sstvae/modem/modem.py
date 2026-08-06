@@ -46,7 +46,7 @@ from ..config import (
 from . import beacon, framing, ofdm
 from .beacon import BeaconResult
 from .dsp import to_baseband, freq_correct, tx_condition
-from .sync import acquire, acquire_blind, SyncError
+from .sync import acquire, acquire_blind, BlindAcquisition, SyncError
 
 __all__ = ["Modem", "DemodResult", "BlindDemodResult", "SyncError"]
 
@@ -322,7 +322,8 @@ class Modem:
         )
 
     def demodulate_blind(
-        self, x: np.ndarray, search_s: tuple[float, float] | None = None
+        self, x: np.ndarray, search_s: tuple[float, float] | None = None,
+        acquisition: BlindAcquisition | None = None,
     ) -> BlindDemodResult:
         """Recover frame timing purely from the pilot's own periodicity
         (sync.acquire_blind) — no preamble or header needed, so this
@@ -335,12 +336,23 @@ class Modem:
 
         No sample-clock drift tracking (that needs a preamble-phase
         reference); fine for the bounded windows this is meant for.
+
+        `acquisition`, if given, skips the internal acquire_blind call
+        and demodulates at that position instead -- for a caller (e.g.
+        rx/engine.py) that already found it via a persistent
+        sync.BlindAccumulator rather than a fresh bounded-window search.
+        The rest of this method is unaffected: it still demodulates
+        every frame the *whole* of `x` can hold, using `acquisition`
+        only to place frame 0.
         """
         z = to_baseband(np.asarray(x, dtype=np.float64))
-        search = None
-        if search_s is not None:
-            search = (int(search_s[0] * FS), int(search_s[1] * FS))
-        ba = acquire_blind(z, search=search)
+        if acquisition is not None:
+            ba = acquisition
+        else:
+            search = None
+            if search_s is not None:
+                search = (int(search_s[0] * FS), int(search_s[1] * FS))
+            ba = acquire_blind(z, search=search)
         z = freq_correct(z, ba.freq_offset)
 
         p0 = ba.frame_start - NCP  # CP-start of local frame 0

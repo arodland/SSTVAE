@@ -38,8 +38,9 @@ from PIL import Image
 from ..codec import pad_to_full, reconstruct
 from ..config import FS, FRAME_SAMPLES, HEADER_SAMPLES, MODES, PREAMBLE_SAMPLES
 from ..modem import Modem, SyncError
-from ..modem.dsp import to_baseband
+from ..modem.dsp import to_baseband, to_baseband_at
 from ..modem.sync import acquire as sync_acquire
+from ..modem.sync import BlindAccumulator
 from .ringbuffer import RingBuffer
 
 __all__ = [
@@ -68,6 +69,12 @@ class RxConfig:
     end_grace: float = 8.0
     size: str | None = None  # "320x240" to downscale saved images
     once: bool = False
+    # BlindAccumulator's decay time constant, not a hard search-window
+    # bound any more: the accumulator folds in new audio incrementally
+    # (see decode_loop), so there is no longer a CPU reason to bound how
+    # far back it can search. This still bounds how far back it
+    # *effectively* searches, because integrating forever is wrong in a
+    # different way -- see BlindAccumulator's docstring.
     blind_search_seconds: float = 25.0
 
 
@@ -238,6 +245,19 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
     # the next one can make a brand-new reception look like it has
     # already stalled and end it early.
     tracked_reception_start = None
+    # Blind acquisition's persistent search state: a BlindAccumulator
+    # folds in only the audio that's new since the last poll (see
+    # sync.BlindAccumulator), so unlike the preamble path it carries
+    # state across iterations of this loop instead of re-deriving
+    # everything from the current snapshot each time. blind_acc_pushed
+    # is the absolute (ring-buffer-coordinate) sample count already
+    # folded in; None means "nothing pushed yet, or the last push's
+    # position fell out of the ring buffer's retained window" -- either
+    # way there is a gap push() cannot bridge contiguously, so the right
+    # response is a fresh accumulator over what is available now rather
+    # than guessing at what filled it.
+    blind_acc = None
+    blind_acc_pushed = None
 
     while not stop_event.is_set():
         stop_event.wait(config.poll_interval)
@@ -282,18 +302,27 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
             progress_frac = frames_received / n_frames_expected
             progress_metric = frames_received
         else:
-            # Bound where blind acquisition searches (the dominant CPU
-            # cost of this path) to the most recent slice of the buffer;
-            # the retrospective decode still covers everything once
-            # locked. Whole buffer if it's shorter than the window.
-            blind_span = int(config.blind_search_seconds * FS)
-            blind_search = (
-                None
-                if len(samples) <= blind_span
-                else ((len(samples) - blind_span) / FS, len(samples) / FS)
-            )
+            # Fold whatever's new since the last poll into the running
+            # accumulator -- O(new samples), not O(window), which is
+            # what lets this search as far back as config.blind_search_seconds
+            # of *decayed* history rather than a hard-bounded recent
+            # slice. The retrospective decode below still covers the
+            # whole current buffer once locked, exactly as before.
+            if blind_acc is None or blind_acc_pushed is None or blind_acc_pushed < buf_start:
+                blind_acc = BlindAccumulator(window_s=config.blind_search_seconds)
+                blind_acc_pushed = buf_start
+            new_lo = blind_acc_pushed - buf_start
+            if new_lo < len(samples):
+                new_chunk = to_baseband_at(samples[new_lo:], blind_acc_pushed)
+                blind_acc.push(new_chunk, blind_acc_pushed)
+                blind_acc_pushed = total
+
             try:
-                rb = modem.demodulate_blind(samples, search_s=blind_search)
+                ba = blind_acc.result()
+            except SyncError:
+                ba = None
+            try:
+                rb = modem.demodulate_blind(samples, acquisition=ba) if ba is not None else None
             except SyncError:
                 rb = None
             if rb is not None and rb.beacon is not None and rb.frame0_start is not None:
