@@ -296,20 +296,58 @@ QWidget* SettingsDialog::audio_tab() {
                          "sending, so it has to be reachable without a modal "
                          "dialog in the way."),
                       page));
+
+    // Diversity reception (docs/diversity-reception.md): a second
+    // receive-only device on an independent antenna, maximal-ratio
+    // combined with the primary input above. Lives here, next to the
+    // input device it is combined with, rather than on the Receive tab.
+    // Mutually exclusive with Receive's Low-CPU mode at the engine level
+    // -- decode_loop_diversity has no blind fallback either way, so
+    // Low-CPU would trade away nothing that is not already gone --
+    // enforced by disabling one checkbox while the other is checked,
+    // rather than letting both be set and silently picking one at
+    // connect time. The other half of that wiring is in receive_tab(),
+    // which runs after this one.
+    diversity_enabled_ =
+        new QCheckBox(tr("Diversity reception (second antenna)"), page);
+    diversity_enabled_->setChecked(config_.receive.diversity_enabled);
+    form->addRow(diversity_enabled_);
+
+    diversity_device_ = new QComboBox(page);
+    fill_device_combo(diversity_device_, true, config_.receive.diversity_device);
+    form->addRow(tr("Second input"), diversity_device_);
+
+    diversity_debug_image_ = new QCheckBox(
+        tr("Save a branch-contribution heatmap beside each picture"), page);
+    diversity_debug_image_->setChecked(config_.receive.diversity_debug_image);
+    form->addRow(diversity_debug_image_);
+    form->addRow(note(tr("Independent noise and fading, same frequency: the two "
+                         "devices are combined per latent, weighted by each "
+                         "branch's own confidence. The heatmap (red = this "
+                         "input, blue = the second one) shows which receiver "
+                         "supplied each part of the picture -- diagnostic only, "
+                         "written as <name>_diversity.png."),
+                      page));
+
+    connect(diversity_enabled_, &QCheckBox::toggled, this,
+            &SettingsDialog::sync_diversity_enabled);
+    // Not synced here: low_cpu_ (Receive tab) does not exist yet. The
+    // initial sync_diversity_enabled() call happens at the end of
+    // receive_tab(), once both checkboxes are built.
+
     return page;
 }
 
 void SettingsDialog::refresh_devices() {
     // Re-enumerate, keeping whatever is selected now rather than what
     // was in the config when the dialog opened -- otherwise Refresh
-    // quietly discards a choice the operator just made.
+    // quietly discards a choice the operator just made. diversity_device_
+    // is an input device just like input_device_ above, so one Refresh
+    // button covers both.
     fill_device_combo(input_device_, true,
                       input_device_->currentData().toString().toStdString());
     fill_device_combo(output_device_, false,
                       output_device_->currentData().toString().toStdString());
-    // diversity_device_ lives on the Receive tab, but it is an input
-    // device like input_device_ above -- one Refresh button covers
-    // both rather than duplicating it there.
     fill_device_combo(diversity_device_, true,
                       diversity_device_->currentData().toString().toStdString());
 }
@@ -669,40 +707,14 @@ QWidget* SettingsDialog::receive_tab() {
     form->addRow(low_cpu_);
     form->addRow(note(tr("Low-CPU mode only looks for the start of a "
                          "transmission, so it cannot pick up one already in "
-                         "progress or decode retrospectively."),
+                         "progress or decode retrospectively. Mutually "
+                         "exclusive with Diversity reception, on the Audio "
+                         "tab."),
                       page));
 
-    // Diversity reception (docs/diversity-reception.md): a second
-    // receive-only device on an independent antenna, maximal-ratio
-    // combined with the primary input above. Mutually exclusive with
-    // Low-CPU mode at the engine level -- decode_loop_diversity has no
-    // blind fallback either way, so Low-CPU would trade away nothing
-    // that is not already gone -- enforced here by disabling one
-    // checkbox while the other is checked, rather than letting both be
-    // set and silently picking one at connect time.
-    diversity_enabled_ =
-        new QCheckBox(tr("Diversity reception (second antenna)"), page);
-    diversity_enabled_->setChecked(receive.diversity_enabled);
-    form->addRow(diversity_enabled_);
-
-    diversity_device_ = new QComboBox(page);
-    fill_device_combo(diversity_device_, true, receive.diversity_device);
-    form->addRow(tr("Second input"), diversity_device_);
-
-    diversity_debug_image_ = new QCheckBox(
-        tr("Save a branch-contribution heatmap beside each picture"), page);
-    diversity_debug_image_->setChecked(receive.diversity_debug_image);
-    form->addRow(diversity_debug_image_);
-    form->addRow(note(tr("Independent noise and fading, same frequency: the two "
-                         "devices are combined per latent, weighted by each "
-                         "branch's own confidence. The heatmap (red = this "
-                         "input, blue = the second one) shows which receiver "
-                         "supplied each part of the picture -- diagnostic only, "
-                         "written as <name>_diversity.png."),
-                      page));
-
-    connect(diversity_enabled_, &QCheckBox::toggled, this,
-            &SettingsDialog::sync_diversity_enabled);
+    // The other half of this wiring -- diversity_enabled_'s toggled
+    // connection -- is in audio_tab(), which runs first. Safe to call
+    // sync_diversity_enabled() here since both checkboxes now exist.
     connect(low_cpu_, &QCheckBox::toggled, this,
             &SettingsDialog::sync_diversity_enabled);
     sync_diversity_enabled();

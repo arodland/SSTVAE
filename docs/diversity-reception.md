@@ -23,8 +23,9 @@ still transmits and is heard exactly as before.
 **Wired in, on both sides of the port.** `sstvae/rx/engine.py`'s
 `decode_loop_diversity` and `native/core/rx/engine.cpp`'s C++
 counterpart run the two-branch state machine live (`sstvae_listen.py
---device2`, and the native app's Receive settings tab: "Diversity
-reception (second antenna)" plus a second input-device picker). Both
+--device2`, and the native app's Audio settings tab, beside the primary
+input device: "Diversity reception (second antenna)" plus a second
+input-device picker). Both
 also support an optional debug visualization,
 `contribution_image`/`modem::diversity::contribution_image` --
 `--diversity-debug-image` on the CLI, a checkbox in the native
