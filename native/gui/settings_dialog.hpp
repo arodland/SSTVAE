@@ -143,8 +143,12 @@ private:
     QDoubleSpinBox* buffer_seconds_ = nullptr;
     QDoubleSpinBox* poll_interval_ = nullptr;
 
-    // Diversity reception (docs/diversity-reception.md), also on the
-    // Receive tab
+    // Diversity reception (docs/diversity-reception.md). Lives on the
+    // Audio tab, next to the primary input device it is combined with --
+    // built before the Receive tab (see the addTab order in the .cpp),
+    // so low_cpu_'s toggled connection and the initial
+    // sync_diversity_enabled() call, both in receive_tab(), can rely on
+    // these already existing.
     QCheckBox* diversity_enabled_ = nullptr;
     QComboBox* diversity_device_ = nullptr;
     QCheckBox* diversity_debug_image_ = nullptr;
