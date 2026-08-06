@@ -1563,8 +1563,8 @@ need when `--native` fails and you want to know *where*.
   (`decode_loop_diversity`; kept as a separate function from
   `decode_loop` on both sides rather than folded in, since that
   function's state machine is the reference's load-bearing one),
-  `sstvae_listen.py --device2`, and the native app's Receive settings
-  tab. `contribution_image` (Python and `modem::diversity::
+  `sstvae_listen.py --device2`, and the native app's Audio settings
+  tab, beside the primary input device. `contribution_image` (Python and `modem::diversity::
   contribution_image` in C++) is an optional debug heatmap of which
   branch supplied each transmitted latent — rows are the *carrier*
   index (frequency order), not the decoder's latent-channel index:
