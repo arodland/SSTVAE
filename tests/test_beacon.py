@@ -77,7 +77,7 @@ def test_noise_tolerant_decode():
 # --- multi-repetition combining ----------------------------------------------
 
 
-def test_combining_decodes_where_no_single_repetition_can(request):
+def test_combining_decodes_where_no_single_repetition_can():
     """The core claim of the multi-repetition fallback: chip noise too
     heavy for any single ~5 s repetition's own Golay+CRC decode to
     survive can still be resolved once enough repetitions (here, mode
@@ -89,12 +89,13 @@ def test_combining_decodes_where_no_single_repetition_can(request):
     success to 100% once every case where the pilot itself locks also
     got a beacon decode.
 
-    Python-only for now -- the combining fallback hasn't been ported to
-    the C++ core, so this exercises exactly the feature `--native`
-    would otherwise silently not have.
+    Ported to native/ too -- `beacon._decode_payload` below is always
+    the Python reference regardless of --native (it isn't in
+    NATIVE_SUBSTITUTIONS, and doesn't need to be: it's only this test's
+    own diagnostic for "did combining actually have to do anything",
+    not the thing under test), but `beacon.decode` itself resolves to
+    the native binding under --native.
     """
-    if request.config.getoption("--native"):
-        pytest.skip("multi-repetition beacon combining is not yet ported to native/")
     n_frames = MODES["C"].n_frames
     chips = beacon.chip_stream(0, n_frames, "TEST")
     rng = np.random.default_rng(6)
