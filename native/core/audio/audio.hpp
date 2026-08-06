@@ -88,6 +88,10 @@ private:
     int down_;
     std::size_t pad_;
     std::vector<double> buf_;
+    // dsp::resample_poly's filter_cache slot: designed on this instance's
+    // first operator() call and reused on every later one, since up_/
+    // down_ never change -- see resample_poly's doc comment.
+    std::optional<std::vector<double>> filter_taps_;
 };
 
 // The device sample formats we can convert, named as QtMultimedia names

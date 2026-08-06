@@ -6,6 +6,7 @@
 #include <numbers>
 #include <numeric>
 #include <stdexcept>
+#include <utility>
 
 #include "dsp/fft.hpp"
 
@@ -260,7 +261,8 @@ std::size_t upfirdn_out_len(std::size_t len_h, std::size_t len_x, int up, int do
     return (in_len - 1) / static_cast<std::size_t>(down) + 1;
 }
 
-std::vector<double> resample_poly(std::span<const double> x, int up, int down) {
+std::vector<double> resample_poly(std::span<const double> x, int up, int down,
+                                  std::optional<std::vector<double>>* filter_cache) {
     if (up <= 0 || down <= 0) throw std::invalid_argument("resample_poly: up/down must be positive");
     const int g = static_cast<int>(std::gcd(up, down));
     up /= g;
@@ -275,12 +277,22 @@ std::vector<double> resample_poly(std::span<const double> x, int up, int down) {
 
     // Filter design, exactly scipy's: cutoff 1/max(up,down) relative to
     // Nyquist, 10*max(up,down) taps either side, Kaiser(5.0).
+    //
+    // `slot` is the caller's filter_cache if one was given, or a local
+    // optional that only lives for this one call otherwise -- either
+    // way the design-and-populate logic below runs unchanged, and reads
+    // back through the same `h` reference.
     const int max_rate = std::max(up, down);
-    const double f_c = 1.0 / max_rate;
     const int half_len = 10 * max_rate;
-    const int numtaps = 2 * half_len + 1;
-    std::vector<double> h = firwin_band(numtaps, 0.0, f_c, kaiser(numtaps, 5.0));
-    for (double& v : h) v *= up;
+    std::optional<std::vector<double>> local_filter;
+    std::optional<std::vector<double>>& slot = filter_cache ? *filter_cache : local_filter;
+    if (!slot.has_value()) {
+        const int numtaps = 2 * half_len + 1;
+        std::vector<double> h = firwin_band(numtaps, 0.0, 1.0 / max_rate, kaiser(numtaps, 5.0));
+        for (double& v : h) v *= up;
+        slot = std::move(h);
+    }
+    const std::vector<double>& h = *slot;
 
     // Zero-pad the filter so the output samples land at the centre.
     const std::size_t n_pre_pad =

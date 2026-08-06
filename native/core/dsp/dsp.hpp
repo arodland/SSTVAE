@@ -10,6 +10,7 @@
 
 #include <complex>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -56,7 +57,19 @@ std::vector<double> kaiser(int m, double beta);
 // that per-chunk resampling cost. This function is the whole-signal
 // form, correct for a file or a complete waveform and wrong for a
 // stream of blocks.
-std::vector<double> resample_poly(std::span<const double> x, int up, int down);
+//
+// The Kaiser-windowed sinc filter this designs depends only on (up,
+// down), not on `x`, so `filter_cache`, if given, is a slot this fills
+// in on first use and reuses on every later call with it -- for a
+// caller (StreamResampler) that resamples many chunks at one fixed
+// ratio and would otherwise redesign the same (up to ~8821-tap) filter
+// from scratch on every chunk. Owned entirely by the caller: no shared
+// state, no locking, no eviction policy -- the caller's own lifetime is
+// the cache's lifetime. Passing the same slot across two different
+// (up, down) ratios is a caller bug, same as reusing any other
+// single-purpose local for two things, and is not detected.
+std::vector<double> resample_poly(std::span<const double> x, int up, int down,
+                                  std::optional<std::vector<double>>* filter_cache = nullptr);
 
 // numpy.convolve(a, v, mode="same"): the centre len(a) samples of the
 // full convolution, for len(a) >= len(v).
