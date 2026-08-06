@@ -93,9 +93,23 @@ std::vector<std::int64_t> find_sync(std::span<const double> chips,
                                     double threshold = 0.6,
                                     int max_candidates = 8);
 
-// Find and decode one superframe anywhere in `chips`. Tries the
-// best-correlated candidates in order and returns the first whose CRC
-// checks out.
+// Decode exactly one repetition's SUPERFRAME_LEN-SYNC_LEN=CODED_LEN
+// coded chips (i.e. `chips[off+SYNC_LEN : off+SYNC_LEN+CODED_LEN]` for
+// some sync offset `off`), or nullopt if its CRC does not check out.
+// `decode()` tries this at every find_sync() candidate before falling
+// back to combining evidence across repetitions (see the .cpp); exposed
+// separately so a caller (or a test) that wants single-repetition
+// behaviour specifically doesn't have to reconstruct it.
+std::optional<BeaconResult> decode_single_repetition(
+    std::int64_t chip_offset, std::span<const double> coded_chips);
+
+// Find and decode one beacon superframe anywhere in `chips` (soft
+// values, any length >= SUPERFRAME_LEN). Tries the best-correlated sync
+// candidates in order and returns the first one whose CRC checks out;
+// falls back to combining evidence across every repetition in `chips`
+// if no single one decodes alone -- see the .cpp for why and how (port
+// of sstvae/modem/beacon.py's module docstring on multi-repetition
+// combining).
 std::optional<BeaconResult> decode(std::span<const double> chips,
                                    double threshold = 0.6);
 

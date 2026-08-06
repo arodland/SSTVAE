@@ -37,6 +37,12 @@ target_include_directories(test_framing PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME framing COMMAND test_framing)
 set_tests_properties(framing PROPERTIES TIMEOUT 180)
 
+add_executable(test_beacon test_beacon.cpp)
+target_link_libraries(test_beacon PRIVATE sstvae_core)
+target_include_directories(test_beacon PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME beacon COMMAND test_beacon)
+set_tests_properties(beacon PROPERTIES TIMEOUT 240)
+
 add_executable(test_log test_log.cpp)
 target_link_libraries(test_log PRIVATE sstvae_core)
 target_include_directories(test_log PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

@@ -81,6 +81,12 @@ if(SSTVAE_SANITIZE)
   endif()
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer -g)
   add_link_options(-fsanitize=address,undefined)
+  # A named, project-wide define rather than a compiler-detection macro
+  # like __SANITIZE_ADDRESS__: a test that wants to trade trial count
+  # for runtime under instrumentation is answering "is this the
+  # sanitizer build", not "did the compiler happen to define ASan's own
+  # macro" -- see test_beacon.cpp's use of it.
+  add_compile_definitions(SSTVAE_SANITIZE_BUILD)
 endif()
 
 # --- core -------------------------------------------------------------------

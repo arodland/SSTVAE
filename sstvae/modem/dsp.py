@@ -44,6 +44,31 @@ def to_baseband(x: np.ndarray) -> np.ndarray:
     return x.astype(np.float64) * _HET_TABLE[(_HET_STEP * n) % _HET_PERIOD]
 
 
+def to_baseband_at(x: np.ndarray, start_sample: int) -> np.ndarray:
+    """`to_baseband(x)`, but as if `x` were a slice of a longer signal
+    starting at absolute sample index `start_sample` rather than at 0 --
+    i.e. exactly `to_baseband(full)[start_sample : start_sample + len(x)]`
+    for whatever longer `full` array `x` actually came from.
+
+    `to_baseband` always treats its own input's first sample as the
+    heterodyne's local n=0, which only matches the true carrier phase
+    when `start_sample` happens to be 0. A caller that baseband-converts
+    one long recording as a series of independent chunks (rather than
+    the whole thing in one call) needs this instead, or consecutive
+    chunks disagree about the carrier phase by an amount that depends on
+    where the chunk boundary fell -- invisible to code that only ever
+    looks within one chunk, and it matters only to code that carries
+    state *across* chunks the way sync.BlindAccumulator does.
+
+    Cheap because the heterodyne is periodic in 16 samples (see
+    to_baseband's own docstring): the correction needed is one constant
+    phasor for the whole chunk (`_HET_TABLE` composes multiplicatively
+    under addition of its index), not something that varies through it.
+    """
+    correction = _HET_TABLE[(_HET_STEP * start_sample) % _HET_PERIOD]
+    return correction * to_baseband(x)
+
+
 def sync_lowpass(z: np.ndarray) -> np.ndarray:
     """Selective lowpass used only for preamble detection, where FIR
     smearing is harmless and out-of-band noise would degrade the

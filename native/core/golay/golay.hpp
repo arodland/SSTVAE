@@ -36,4 +36,12 @@ int decode_soft(std::span<const double> soft);
 // Minimum distance of the code (8). Used by tests.
 int min_distance();
 
+// Sign pattern (+1/-1, MSB first) for every message, N_MESSAGES rows of
+// N_BITS each, row-major -- message `m`'s row is exactly what
+// `decode_soft` correlates candidate soft values against. Exposed so a
+// caller searching many hypotheses (beacon::_search_counter_chunk) can
+// index straight into the precomputed table instead of re-deriving each
+// hypothesis's codeword via codeword_bits() one at a time.
+std::span<const double> signs_table();
+
 }  // namespace sstvae::golay

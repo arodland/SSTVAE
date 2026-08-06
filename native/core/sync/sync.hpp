@@ -68,4 +68,49 @@ BlindAcquisition acquire_blind(std::span<const cdouble> z,
                                double threshold = 4.0,
                                std::optional<SearchWindow> search = std::nullopt);
 
+// Incremental counterpart to acquire_blind(). Port of
+// sstvae.modem.sync.BlindAccumulator -- see that class's docstring for
+// the full design rationale (block-wise overlap-save so push() costs
+// O(new samples) rather than O(window length); why the block-local
+// circular-shift CFO trick still folds to the correct energy; why
+// window_s is exponential decay rather than exact eviction).
+//
+// push() requires contiguous input (no gaps, no re-sent samples) and
+// throws SyncError otherwise. result() throws SyncError exactly as
+// acquire_blind() does: too little data pushed yet, or no bin's peak
+// clears `threshold`.
+// `window_s` runs one decay timescale per entry in parallel, off the
+// same (shared, expensive) per-block matched-filter result -- see the
+// Python class's docstring for why a single timescale can't serve every
+// mode well. result() reports whichever timescale's peak score is
+// highest. A single-element vector (the default) is one timescale.
+class BlindAccumulator {
+   public:
+    explicit BlindAccumulator(double max_offset_hz = 55.0, double bin_step_hz = 1.7,
+                              int min_periods = 8, double threshold = 4.0,
+                              std::optional<int> block_samples = std::nullopt,
+                              std::vector<std::optional<double>> window_s = {25.0});
+
+    void push(std::span<const cdouble> z, std::int64_t start_sample);
+    BlindAcquisition result() const;
+
+   private:
+    int m_;
+    int min_periods_;
+    double threshold_;
+    int block_;
+    int step_;
+    std::vector<double> decay_per_block_;  // one per timescale
+    std::vector<int> shift_bins_;
+    std::vector<double> freqs_;
+    std::vector<cdouble> kernel_f_;
+
+    int n_bins_;
+    int n_scales_;
+    std::vector<double> folded_;  // n_scales_ x n_bins_ x FRAME_SAMPLES, row-major
+    std::int64_t n_valid_ = 0;
+    std::vector<cdouble> buf_;
+    std::int64_t buf_start_ = -1;  // -1 until the first push()
+};
+
 }  // namespace sstvae::sync

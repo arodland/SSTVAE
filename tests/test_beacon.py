@@ -74,6 +74,53 @@ def test_noise_tolerant_decode():
     assert r.callsign == "KJ7ABC"
 
 
+# --- multi-repetition combining ----------------------------------------------
+
+
+def test_combining_decodes_where_no_single_repetition_can():
+    """The core claim of the multi-repetition fallback: chip noise too
+    heavy for any single ~5 s repetition's own Golay+CRC decode to
+    survive can still be resolved once enough repetitions (here, mode
+    C's ~18) are combined -- see beacon.py's module docstring on why
+    (invariant chunks summed by sign, the counter and CRC-mixed chunks
+    resolved by a joint search across repetitions, not per-repetition
+    voting). Regression for a real, measured gain: this exact scenario
+    (mode C, mpp fading, SNR -6..0 dB) went from 12-88% end-to-end
+    success to 100% once every case where the pilot itself locks also
+    got a beacon decode.
+
+    Ported to native/ too -- `beacon._decode_payload` below is always
+    the Python reference regardless of --native (it isn't in
+    NATIVE_SUBSTITUTIONS, and doesn't need to be: it's only this test's
+    own diagnostic for "did combining actually have to do anything",
+    not the thing under test), but `beacon.decode` itself resolves to
+    the native binding under --native.
+    """
+    n_frames = MODES["C"].n_frames
+    chips = beacon.chip_stream(0, n_frames, "TEST")
+    rng = np.random.default_rng(6)
+    # Calibrated so most *individual* repetitions fail on their own --
+    # asserted below -- while the combined decode still succeeds.
+    noisy = chips + rng.normal(scale=1.3, size=chips.shape)
+
+    n_solo_ok = 0
+    for off in beacon.find_sync(noisy, threshold=0.3, max_candidates=30):
+        end = off + beacon.SYNC_LEN + beacon.CODED_LEN
+        if end > len(noisy):
+            continue
+        if beacon._decode_payload(noisy[off + beacon.SYNC_LEN : end]) is not None:
+            n_solo_ok += 1
+    assert n_solo_ok <= 2, (
+        f"{n_solo_ok} individual repetitions already decoded on their own -- "
+        "noise scale needs raising so this test actually exercises combining"
+    )
+
+    r = beacon.decode(noisy)
+    assert r is not None, "combining should have rescued this from noise too heavy for any single repetition"
+    assert r.frame_index == r.chip_offset // CHIPS_PER_FRAME
+    assert r.callsign == "TEST"
+
+
 # --- integration with the real modem ----------------------------------------
 
 

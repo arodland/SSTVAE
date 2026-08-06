@@ -35,6 +35,12 @@ constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 // Mode C, the longest -- the denominator for blind progress, where the
 // real mode is unknown.
 constexpr int kTotalCLatents = config::MODES[config::N_MODES - 1].n_latents;
+constexpr int kMaxModeFrames = config::MODES[config::N_MODES - 1].n_frames;
+
+// Weight a blind-path latent must clear to count as "confidently
+// received" for the stall-detection progress metric -- see its use
+// below. Matches the "good" cutoff tests already judge latents by.
+constexpr double kProgressWeightThreshold = 0.5;
 
 // How many finished receptions to remember. They only need to outlive
 // their own audio in the ring buffer; 50 is the reference's bound.
@@ -138,6 +144,20 @@ std::optional<FoundReception> find_new_reception(
 int count_nonzero(const std::vector<double>& v) {
     return static_cast<int>(std::count_if(v.begin(), v.end(),
                                           [](double w) { return w != 0.0; }));
+}
+
+// Confidently-received latents only, not a bare nonzero count:
+// demodulate_blind assigns *some* nonzero weight to essentially every
+// legal abs_frame slot its ever-growing search range touches, real
+// signal or not (just small for noise, after the med_h fix in
+// modem.cpp), so a nonzero count keeps climbing every poll purely from
+// the buffer growing -- independent of whether any new real data has
+// arrived -- until buffer growth has mapped the *entire* legal
+// abs_frame range. That read as "stuck receiving forever": the stall
+// detector below never saw a stable metric to end_grace against.
+int count_confident(const std::vector<double>& v) {
+    return static_cast<int>(std::count_if(
+        v.begin(), v.end(), [](double w) { return w > kProgressWeightThreshold; }));
 }
 
 void remember_finished(std::deque<std::int64_t>& finished, std::int64_t pos) {
@@ -268,6 +288,19 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
     // the next one can make a brand-new reception look as though it has
     // already stalled, and end it early.
     std::optional<std::int64_t> tracked_reception_start;
+    // Blind acquisition's persistent search state: a BlindAccumulator
+    // folds in only the audio that is new since the last poll (see
+    // sync::BlindAccumulator), so unlike the preamble path it carries
+    // state across iterations of this loop instead of re-deriving
+    // everything from the current snapshot each time. blind_acc_pushed
+    // is the absolute (ring-buffer-coordinate) sample count already
+    // folded in; unset means "nothing pushed yet, or the last push's
+    // position fell out of the ring buffer's retained window" -- either
+    // way there is a gap push() cannot bridge contiguously, so the right
+    // response is a fresh accumulator over what is available now rather
+    // than guessing at what filled it.
+    std::optional<sync::BlindAccumulator> blind_acc;
+    std::optional<std::int64_t> blind_acc_pushed;
 
     while (!stop.is_set()) {
         if (stop.wait(config.poll_interval)) break;
@@ -321,23 +354,47 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
             progress_metric = r.frames_received;
             reception_start = found->start;
         } else {
-            // Bound where blind acquisition searches (the dominant CPU
-            // cost of this path) to the most recent slice of the buffer;
-            // the retrospective decode still covers everything once
-            // locked. Whole buffer if it is shorter than the window.
-            const auto blind_span =
-                static_cast<std::int64_t>(config.blind_search_seconds * FS);
-            const auto n = static_cast<std::int64_t>(samples.size());
-            const auto blind_search =
-                n <= blind_span ? std::nullopt : window_s(n - blind_span, n);
+            // Fold whatever is new since the last poll into the running
+            // accumulator -- O(new samples), not O(window) -- which is
+            // what lets this run one decay timescale per mode (see
+            // RxConfig::blind_search_seconds) rather than a single
+            // one-size-fits-all window. The retrospective decode below
+            // still covers the whole current buffer once locked, exactly
+            // as before.
+            if (!blind_acc || !blind_acc_pushed || *blind_acc_pushed < buf_start) {
+                std::vector<std::optional<double>> timescales;
+                for (const auto& mode : config::MODES)
+                    timescales.push_back(
+                        std::min(mode.duration_s, config.blind_search_seconds));
+                blind_acc.emplace(55.0, 1.7, 8, 4.0, std::nullopt, std::move(timescales));
+                blind_acc_pushed = buf_start;
+            }
+            const auto new_lo = *blind_acc_pushed - buf_start;
+            if (new_lo < static_cast<std::int64_t>(samples.size())) {
+                const std::vector<double> new_raw(
+                    samples.begin() + new_lo, samples.end());
+                const std::vector<std::complex<double>> new_chunk =
+                    dsp::to_baseband_at(new_raw, *blind_acc_pushed);
+                blind_acc->push(new_chunk, *blind_acc_pushed);
+                blind_acc_pushed = static_cast<std::int64_t>(total);
+            }
+
+            std::optional<sync::BlindAcquisition> ba;
+            try {
+                ba = blind_acc->result();
+            } catch (const sync::SyncError&) {
+                ba = std::nullopt;
+            }
 
             std::optional<modem::BlindDemodResult> rb;
-            try {
-                rb = modem.demodulate_blind(samples, blind_search);
-            } catch (const sync::SyncError&) {
-                rb = std::nullopt;
-            } catch (const std::exception&) {
-                rb = std::nullopt;
+            if (ba) {
+                try {
+                    rb = modem.demodulate_blind(samples, std::nullopt, ba);
+                } catch (const sync::SyncError&) {
+                    rb = std::nullopt;
+                } catch (const std::exception&) {
+                    rb = std::nullopt;
+                }
             }
 
             if (rb && rb->beacon && rb->frame0_start) {
@@ -355,7 +412,7 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
                 have_latents = true;
                 callsign = rb->callsign;
                 snr_db = rb->snr_db;
-                progress_metric = count_nonzero(weights_full);
+                progress_metric = count_confident(weights_full);
                 progress_frac = static_cast<double>(progress_metric) / kTotalCLatents;
             }
         }
@@ -400,11 +457,32 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
         bool done = false;
         if (n_frames_expected) {
             done = *frames_received >= *n_frames_expected;
-        } else if (progress_metric > 0 && progress_metric == last_progress_metric) {
-            if (!stable_since) stable_since = Clock::now();
-            done = seconds_since(*stable_since) >= config.end_grace;
         } else {
-            stable_since.reset();
+            // Deterministic backstop: the beacon already told us exactly
+            // where this transmission's frame 0 sits
+            // (current_reception_start, in the same "preamble start"
+            // coordinate the header path uses), so the latest a real
+            // frame of it can possibly still be arriving is mode C's own
+            // duration -- the longest mode -- after that point, fixed the
+            // moment current_reception_start is known. That is unlike
+            // "progress stopped changing" below, which rides on
+            // demodulate_blind's own noise floor and is not guaranteed to
+            // ever settle: a stuck reception was observed sitting in
+            // Receiving for many minutes, far past any mode's duration.
+            // Once the buffer holds audio past this deadline there is
+            // provably no more real signal left to arrive for this
+            // reception, done or not.
+            const std::int64_t deadline_abs = *current_reception_start + PREAMBLE_SAMPLES +
+                                              HEADER_SAMPLES +
+                                              static_cast<std::int64_t>(kMaxModeFrames) *
+                                                  FRAME_SAMPLES;
+            if (progress_metric > 0 && progress_metric == last_progress_metric) {
+                if (!stable_since) stable_since = Clock::now();
+                done = seconds_since(*stable_since) >= config.end_grace;
+            } else {
+                stable_since.reset();
+            }
+            done = done || static_cast<std::int64_t>(total) >= deadline_abs;
         }
         last_progress_metric = progress_metric;
 

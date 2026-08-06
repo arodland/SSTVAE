@@ -12,7 +12,12 @@ from-here-on.
 
 Reception is considered finished either when a fully-synced decode
 reports all its frames received, or (blind case, true mode/duration
-unknown) when decoded progress stops advancing for --end-grace seconds.
+unknown) when decoded progress stops advancing for --end-grace seconds
+-- backstopped by a hard deadline, mode C's own duration (the longest
+mode) past the transmission's start as the beacon already reported it,
+so a reception can't sit in "receiving" indefinitely if the stall
+detector's metric never settles (see PROGRESS_WEIGHT_THRESHOLD and the
+deadline computation in decode_loop's blind branch).
 
 `decode_loop_low_cpu` is a cheaper variant that drops the blind fallback
 (and with it retrospective mid-stream decoding); see its docstring.
@@ -38,8 +43,9 @@ from PIL import Image
 from ..codec import pad_to_full, reconstruct
 from ..config import FS, FRAME_SAMPLES, HEADER_SAMPLES, MODES, PREAMBLE_SAMPLES
 from ..modem import Modem, SyncError
-from ..modem.dsp import to_baseband
+from ..modem.dsp import to_baseband, to_baseband_at
 from ..modem.sync import acquire as sync_acquire
+from ..modem.sync import BlindAccumulator
 from .ringbuffer import RingBuffer
 
 __all__ = [
@@ -56,6 +62,10 @@ MIN_SECONDS_BEFORE_ATTEMPT = 3.0
 # How close two acquisitions' transmission-start sample position must be
 # to be treated as "the same reception" rather than a new one.
 SAME_RECEPTION_EPSILON_S = 1.0
+# Weight a blind-path latent must clear to count as "confidently
+# received" for the stall-detection progress metric -- see its use
+# below. Matches the "good" cutoff tests already judge latents by.
+PROGRESS_WEIGHT_THRESHOLD = 0.5
 
 
 @dataclass
@@ -68,7 +78,15 @@ class RxConfig:
     end_grace: float = 8.0
     size: str | None = None  # "320x240" to downscale saved images
     once: bool = False
-    blind_search_seconds: float = 25.0
+    # A cap, not a fixed timescale: BlindAccumulator runs one decay
+    # timescale per mode (config.MODES), each capped at
+    # min(mode.duration_s, blind_search_seconds) -- see decode_loop.
+    # Default is above every mode's own duration, so nothing is capped:
+    # there is no reliability reason to raise it further, since there is
+    # no more real signal beyond a mode's own duration to integrate (see
+    # BlindAccumulator's docstring). Only useful to *shrink* below a
+    # mode's own duration.
+    blind_search_seconds: float = MODES["C"].duration_s
 
 
 @dataclass
@@ -238,6 +256,19 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
     # the next one can make a brand-new reception look like it has
     # already stalled and end it early.
     tracked_reception_start = None
+    # Blind acquisition's persistent search state: a BlindAccumulator
+    # folds in only the audio that's new since the last poll (see
+    # sync.BlindAccumulator), so unlike the preamble path it carries
+    # state across iterations of this loop instead of re-deriving
+    # everything from the current snapshot each time. blind_acc_pushed
+    # is the absolute (ring-buffer-coordinate) sample count already
+    # folded in; None means "nothing pushed yet, or the last push's
+    # position fell out of the ring buffer's retained window" -- either
+    # way there is a gap push() cannot bridge contiguously, so the right
+    # response is a fresh accumulator over what is available now rather
+    # than guessing at what filled it.
+    blind_acc = None
+    blind_acc_pushed = None
 
     while not stop_event.is_set():
         stop_event.wait(config.poll_interval)
@@ -282,18 +313,29 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
             progress_frac = frames_received / n_frames_expected
             progress_metric = frames_received
         else:
-            # Bound where blind acquisition searches (the dominant CPU
-            # cost of this path) to the most recent slice of the buffer;
-            # the retrospective decode still covers everything once
-            # locked. Whole buffer if it's shorter than the window.
-            blind_span = int(config.blind_search_seconds * FS)
-            blind_search = (
-                None
-                if len(samples) <= blind_span
-                else ((len(samples) - blind_span) / FS, len(samples) / FS)
-            )
+            # Fold whatever's new since the last poll into the running
+            # accumulator -- O(new samples), not O(window) -- which is
+            # what lets this run one decay timescale per mode (see
+            # RxConfig.blind_search_seconds) rather than a single
+            # one-size-fits-all window. The retrospective decode below
+            # still covers the whole current buffer once locked, exactly
+            # as before.
+            if blind_acc is None or blind_acc_pushed is None or blind_acc_pushed < buf_start:
+                timescales = [min(m.duration_s, config.blind_search_seconds) for m in MODES.values()]
+                blind_acc = BlindAccumulator(window_s=timescales)
+                blind_acc_pushed = buf_start
+            new_lo = blind_acc_pushed - buf_start
+            if new_lo < len(samples):
+                new_chunk = to_baseband_at(samples[new_lo:], blind_acc_pushed)
+                blind_acc.push(new_chunk, blind_acc_pushed)
+                blind_acc_pushed = total
+
             try:
-                rb = modem.demodulate_blind(samples, search_s=blind_search)
+                ba = blind_acc.result()
+            except SyncError:
+                ba = None
+            try:
+                rb = modem.demodulate_blind(samples, acquisition=ba) if ba is not None else None
             except SyncError:
                 rb = None
             if rb is not None and rb.beacon is not None and rb.frame0_start is not None:
@@ -312,7 +354,24 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
                 weights_full = rb.weights
                 callsign = rb.callsign
                 snr_db = rb.snr_db
-                progress_metric = int(np.count_nonzero(weights_full))
+                # Confidently-received latents only, not a bare nonzero
+                # count: demodulate_blind assigns *some* nonzero weight
+                # to essentially every legal abs_frame slot its ever-
+                # growing search range touches, real signal or not (just
+                # small for noise, after the med_h fix above), so a
+                # nonzero count keeps climbing every poll purely from
+                # the buffer growing -- independent of whether any new
+                # real data has arrived -- until buffer growth has
+                # mapped the *entire* legal abs_frame range, which can
+                # take up to a whole mode's duration after the real
+                # transmission already ended. That read as "stuck
+                # receiving forever": the stall detector below never saw
+                # a stable metric to end_grace against. PROGRESS_WEIGHT_
+                # THRESHOLD matches the "good" cutoff already used to
+                # judge latents elsewhere (see tests/test_blind_
+                # acquisition.py); only real frames clear it, so the
+                # count stops climbing exactly when the real data does.
+                progress_metric = int(np.count_nonzero(weights_full > PROGRESS_WEIGHT_THRESHOLD))
                 progress_frac = progress_metric / total_c_latents
             else:
                 reception_start = None
@@ -358,12 +417,33 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
         if n_frames_expected is not None:
             done = frames_received >= n_frames_expected
         else:
+            # Deterministic backstop: the beacon already told us exactly
+            # where this transmission's frame 0 sits (reception_start,
+            # in the same "preamble start" coordinate the header path
+            # uses), so the latest a real frame of it can possibly still
+            # be arriving is mode C's own duration -- the longest mode --
+            # after that point, fixed the moment reception_start is
+            # known. That is unlike "progress stopped changing" below,
+            # which rides on demodulate_blind's own noise floor and is
+            # not guaranteed to ever settle: a stuck reception was
+            # observed sitting in "receiving" for many minutes, far past
+            # any mode's duration, because the buffer kept growing and
+            # touching more of the blind search's legal frame range
+            # (see PROGRESS_WEIGHT_THRESHOLD above) or some other reason
+            # the metric kept moving. Once the buffer holds audio past
+            # this deadline there is provably no more real signal left
+            # to arrive for this reception, done or not.
+            deadline_abs = (
+                current_reception_start + PREAMBLE_SAMPLES + HEADER_SAMPLES
+                + MODES["C"].n_frames * FRAME_SAMPLES
+            )
             if progress_metric > 0 and progress_metric == last_progress_metric:
                 stable_since = stable_since or time.time()
                 done = (time.time() - stable_since) >= config.end_grace
             else:
                 stable_since = None
                 done = False
+            done = done or total >= deadline_abs
         last_progress_metric = progress_metric
 
         if done and progress_metric > 0:
