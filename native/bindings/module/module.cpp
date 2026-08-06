@@ -408,10 +408,11 @@ PYBIND11_MODULE(sstvae_native, m) {
     // keeping this core free of any knowledge of that Python type.
     py::class_<sstvae::sync::BlindAccumulator>(sync, "BlindAccumulator")
         .def(py::init<double, double, int, double, std::optional<int>,
-                      std::optional<double>>(),
+                      std::vector<std::optional<double>>>(),
              py::arg("max_offset_hz") = 55.0, py::arg("bin_step_hz") = 1.7,
              py::arg("min_periods") = 8, py::arg("threshold") = 4.0,
-             py::arg("block_samples") = py::none(), py::arg("window_s") = 25.0)
+             py::arg("block_samples") = py::none(),
+             py::arg("window_s") = std::vector<std::optional<double>>{25.0})
         .def("push",
              [](sstvae::sync::BlindAccumulator& self, CArray z,
                 std::int64_t start_sample) {

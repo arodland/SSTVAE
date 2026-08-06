@@ -69,13 +69,15 @@ class RxConfig:
     end_grace: float = 8.0
     size: str | None = None  # "320x240" to downscale saved images
     once: bool = False
-    # BlindAccumulator's decay time constant, not a hard search-window
-    # bound any more: the accumulator folds in new audio incrementally
-    # (see decode_loop), so there is no longer a CPU reason to bound how
-    # far back it can search. This still bounds how far back it
-    # *effectively* searches, because integrating forever is wrong in a
-    # different way -- see BlindAccumulator's docstring.
-    blind_search_seconds: float = 25.0
+    # A cap, not a fixed timescale: BlindAccumulator runs one decay
+    # timescale per mode (config.MODES), each capped at
+    # min(mode.duration_s, blind_search_seconds) -- see decode_loop.
+    # Default is above every mode's own duration, so nothing is capped:
+    # there is no reliability reason to raise it further, since there is
+    # no more real signal beyond a mode's own duration to integrate (see
+    # BlindAccumulator's docstring). Only useful to *shrink* below a
+    # mode's own duration.
+    blind_search_seconds: float = MODES["C"].duration_s
 
 
 @dataclass
@@ -303,13 +305,15 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
             progress_metric = frames_received
         else:
             # Fold whatever's new since the last poll into the running
-            # accumulator -- O(new samples), not O(window), which is
-            # what lets this search as far back as config.blind_search_seconds
-            # of *decayed* history rather than a hard-bounded recent
-            # slice. The retrospective decode below still covers the
-            # whole current buffer once locked, exactly as before.
+            # accumulator -- O(new samples), not O(window) -- which is
+            # what lets this run one decay timescale per mode (see
+            # RxConfig.blind_search_seconds) rather than a single
+            # one-size-fits-all window. The retrospective decode below
+            # still covers the whole current buffer once locked, exactly
+            # as before.
             if blind_acc is None or blind_acc_pushed is None or blind_acc_pushed < buf_start:
-                blind_acc = BlindAccumulator(window_s=config.blind_search_seconds)
+                timescales = [min(m.duration_s, config.blind_search_seconds) for m in MODES.values()]
+                blind_acc = BlindAccumulator(window_s=timescales)
                 blind_acc_pushed = buf_start
             new_lo = blind_acc_pushed - buf_start
             if new_lo < len(samples):

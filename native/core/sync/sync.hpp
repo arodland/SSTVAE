@@ -79,12 +79,17 @@ BlindAcquisition acquire_blind(std::span<const cdouble> z,
 // throws SyncError otherwise. result() throws SyncError exactly as
 // acquire_blind() does: too little data pushed yet, or no bin's peak
 // clears `threshold`.
+// `window_s` runs one decay timescale per entry in parallel, off the
+// same (shared, expensive) per-block matched-filter result -- see the
+// Python class's docstring for why a single timescale can't serve every
+// mode well. result() reports whichever timescale's peak score is
+// highest. A single-element vector (the default) is one timescale.
 class BlindAccumulator {
    public:
     explicit BlindAccumulator(double max_offset_hz = 55.0, double bin_step_hz = 1.7,
                               int min_periods = 8, double threshold = 4.0,
                               std::optional<int> block_samples = std::nullopt,
-                              std::optional<double> window_s = 25.0);
+                              std::vector<std::optional<double>> window_s = {25.0});
 
     void push(std::span<const cdouble> z, std::int64_t start_sample);
     BlindAcquisition result() const;
@@ -95,13 +100,14 @@ class BlindAccumulator {
     double threshold_;
     int block_;
     int step_;
-    double decay_per_block_;
+    std::vector<double> decay_per_block_;  // one per timescale
     std::vector<int> shift_bins_;
     std::vector<double> freqs_;
     std::vector<cdouble> kernel_f_;
 
     int n_bins_;
-    std::vector<double> folded_;  // n_bins_ x FRAME_SAMPLES, row-major
+    int n_scales_;
+    std::vector<double> folded_;  // n_scales_ x n_bins_ x FRAME_SAMPLES, row-major
     std::int64_t n_valid_ = 0;
     std::vector<cdouble> buf_;
     std::int64_t buf_start_ = -1;  // -1 until the first push()

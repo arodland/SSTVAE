@@ -336,14 +336,17 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
         } else {
             // Fold whatever is new since the last poll into the running
             // accumulator -- O(new samples), not O(window) -- which is
-            // what lets this search as far back as
-            // config.blind_search_seconds of *decayed* history rather
-            // than a hard-bounded recent slice. The retrospective decode
-            // below still covers the whole current buffer once locked,
-            // exactly as before.
+            // what lets this run one decay timescale per mode (see
+            // RxConfig::blind_search_seconds) rather than a single
+            // one-size-fits-all window. The retrospective decode below
+            // still covers the whole current buffer once locked, exactly
+            // as before.
             if (!blind_acc || !blind_acc_pushed || *blind_acc_pushed < buf_start) {
-                blind_acc.emplace(55.0, 1.7, 8, 4.0, std::nullopt,
-                                  config.blind_search_seconds);
+                std::vector<std::optional<double>> timescales;
+                for (const auto& mode : config::MODES)
+                    timescales.push_back(
+                        std::min(mode.duration_s, config.blind_search_seconds));
+                blind_acc.emplace(55.0, 1.7, 8, 4.0, std::nullopt, std::move(timescales));
                 blind_acc_pushed = buf_start;
             }
             const auto new_lo = *blind_acc_pushed - buf_start;

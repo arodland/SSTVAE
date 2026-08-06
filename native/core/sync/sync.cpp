@@ -287,8 +287,9 @@ BlindAcquisition acquire_blind(std::span<const cdouble> z, double max_offset_hz,
 
 BlindAccumulator::BlindAccumulator(double max_offset_hz, double bin_step_hz, int min_periods,
                                    double threshold, std::optional<int> block_samples,
-                                   std::optional<double> window_s)
+                                   std::vector<std::optional<double>> window_s)
     : min_periods_(min_periods), threshold_(threshold) {
+    if (window_s.empty()) throw SyncError("BlindAccumulator: window_s must not be empty");
     const std::vector<cdouble> templ = ofdm::pilot_template();
     std::vector<cdouble> kernel(templ.size());
     for (std::size_t i = 0; i < templ.size(); ++i)
@@ -317,14 +318,24 @@ BlindAccumulator::BlindAccumulator(double max_offset_hz, double bin_step_hz, int
     std::copy(kernel.begin(), kernel.end(), pad_kernel.begin());
     kernel_f_ = dsp::fft(pad_kernel, true);
 
-    // Applied once per processed block, uniformly across every phase and
-    // CFO bin -- see the BlindAccumulator docstring in sync.py for why
-    // this is exponential decay rather than exact eviction.
-    decay_per_block_ =
-        window_s ? std::exp(-static_cast<double>(step_) / (*window_s * static_cast<double>(FS)))
-                 : 1.0;
+    // One decay factor per timescale, applied once per processed block,
+    // uniformly across every phase and CFO bin within that timescale --
+    // see the BlindAccumulator docstring in sync.py for why this is
+    // exponential decay rather than exact eviction, and why several
+    // timescales run in parallel off the same per-block matched-filter
+    // result rather than a single one.
+    n_scales_ = static_cast<int>(window_s.size());
+    decay_per_block_.resize(static_cast<std::size_t>(n_scales_));
+    for (int t = 0; t < n_scales_; ++t)
+        decay_per_block_[static_cast<std::size_t>(t)] =
+            window_s[static_cast<std::size_t>(t)]
+                ? std::exp(-static_cast<double>(step_) /
+                          (*window_s[static_cast<std::size_t>(t)] * static_cast<double>(FS)))
+                : 1.0;
 
-    folded_.assign(shift_bins_.size() * static_cast<std::size_t>(FRAME_SAMPLES), 0.0);
+    folded_.assign(static_cast<std::size_t>(n_scales_) * shift_bins_.size() *
+                       static_cast<std::size_t>(FRAME_SAMPLES),
+                   0.0);
 }
 
 void BlindAccumulator::push(std::span<const cdouble> z, std::int64_t start_sample) {
@@ -354,8 +365,18 @@ void BlindAccumulator::push(std::span<const cdouble> z, std::int64_t start_sampl
         const std::int64_t abs0 = buf_start_ + static_cast<std::int64_t>(pos);
         const int phase0 = static_cast<int>(((abs0 % FRAME_SAMPLES) + FRAME_SAMPLES) % FRAME_SAMPLES);
 
-        if (decay_per_block_ != 1.0)
-            for (double& v : folded_) v *= decay_per_block_;
+        // Decay every timescale's whole array first -- cheap
+        // (n_scales_ x n_bins_ x FRAME_SAMPLES scalars) next to the
+        // per-bin FFT below, which is why adding timescales barely
+        // moves push()'s cost.
+        const std::size_t scale_stride =
+            shift_bins_.size() * static_cast<std::size_t>(FRAME_SAMPLES);
+        for (int t = 0; t < n_scales_; ++t) {
+            const double d = decay_per_block_[static_cast<std::size_t>(t)];
+            if (d == 1.0) continue;
+            double* base = &folded_[static_cast<std::size_t>(t) * scale_stride];
+            for (std::size_t i = 0; i < scale_stride; ++i) base[i] *= d;
+        }
 
         for (std::size_t bi = 0; bi < shift_bins_.size(); ++bi) {
             const int shift = shift_bins_[bi];
@@ -368,11 +389,17 @@ void BlindAccumulator::push(std::span<const cdouble> z, std::int64_t start_sampl
                     block_f[static_cast<std::size_t>(src)] * kernel_f_[static_cast<std::size_t>(i)];
             }
             const std::vector<cdouble> mf = dsp::fft(shifted, false);
-            double* row = &folded_[bi * static_cast<std::size_t>(FRAME_SAMPLES)];
-            int phase = phase0;
-            for (int i = 0; i < step; ++i) {
-                row[phase] += std::norm(mf[static_cast<std::size_t>(m - 1 + i)]);
-                if (++phase == FRAME_SAMPLES) phase = 0;
+            // Every timescale folds in the same per-block matched-filter
+            // power -- only the decay each one already applied to its
+            // own history (above) differs.
+            for (int t = 0; t < n_scales_; ++t) {
+                double* row = &folded_[static_cast<std::size_t>(t) * scale_stride +
+                                       bi * static_cast<std::size_t>(FRAME_SAMPLES)];
+                int phase = phase0;
+                for (int i = 0; i < step; ++i) {
+                    row[phase] += std::norm(mf[static_cast<std::size_t>(m - 1 + i)]);
+                    if (++phase == FRAME_SAMPLES) phase = 0;
+                }
             }
         }
         n_valid_ += step;
@@ -387,26 +414,38 @@ BlindAcquisition BlindAccumulator::result() const {
     if (n_valid_ < static_cast<std::int64_t>(FRAME_SAMPLES) * min_periods_)
         throw SyncError("window too short for blind acquisition");
 
+    // Best (timescale, bin) pair -- reports whichever timescale's peak
+    // score is highest, not a fixed one, since which timescale that is
+    // depends on which mode (if any) is actually transmitting.
+    const std::size_t scale_stride =
+        shift_bins_.size() * static_cast<std::size_t>(FRAME_SAMPLES);
     bool have_best = false;
     double best_score = 0.0;
     std::size_t best_bin = 0;
-    for (std::size_t bi = 0; bi < shift_bins_.size(); ++bi) {
-        const std::span<const double> row(&folded_[bi * static_cast<std::size_t>(FRAME_SAMPLES)],
-                                          static_cast<std::size_t>(FRAME_SAMPLES));
-        const std::size_t peak = argmax(row);
-        const double score =
-            row[peak] / (median(std::vector<double>(row.begin(), row.end())) + 1e-12);
-        if (!have_best || score > best_score) {
-            have_best = true;
-            best_score = score;
-            best_bin = bi;
+    int best_scale = 0;
+    for (int t = 0; t < n_scales_; ++t) {
+        const double* scale_base = &folded_[static_cast<std::size_t>(t) * scale_stride];
+        for (std::size_t bi = 0; bi < shift_bins_.size(); ++bi) {
+            const std::span<const double> row(
+                scale_base + bi * static_cast<std::size_t>(FRAME_SAMPLES),
+                static_cast<std::size_t>(FRAME_SAMPLES));
+            const std::size_t peak = argmax(row);
+            const double score =
+                row[peak] / (median(std::vector<double>(row.begin(), row.end())) + 1e-12);
+            if (!have_best || score > best_score) {
+                have_best = true;
+                best_score = score;
+                best_bin = bi;
+                best_scale = t;
+            }
         }
     }
     if (best_score < threshold_)
         throw SyncError("no periodic pilot found (peak prominence " +
                         std::to_string(best_score) + ")");
 
-    const std::span<const double> row(&folded_[best_bin * static_cast<std::size_t>(FRAME_SAMPLES)],
+    const double* scale_base = &folded_[static_cast<std::size_t>(best_scale) * scale_stride];
+    const std::span<const double> row(scale_base + best_bin * static_cast<std::size_t>(FRAME_SAMPLES),
                                       static_cast<std::size_t>(FRAME_SAMPLES));
     const std::size_t phase = argmax(row);
 

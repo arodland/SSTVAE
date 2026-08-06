@@ -249,3 +249,74 @@ def test_blind_accumulator_decay_forgets_stale_history():
     decayed_metric = decayed.result().metric
 
     assert decayed_metric > 2.0 * undiluted_metric
+
+
+def test_blind_accumulator_multi_timescale_picks_the_better_one():
+    """A single decay constant can't serve every mode well: short enough
+    to not dilute a short transmission behind unrelated history means a
+    long transmission's own real duration doesn't get folded in fully,
+    and vice versa. window_s accepts several timescales run in parallel
+    off the same (shared, expensive) per-block matched-filter result, and
+    result() reports whichever scores best -- so it should never do worse
+    than the single timescale that happens to suit the situation, on
+    either a short-signal-behind-noise case (short timescale wins) or a
+    long-signal case (long timescale wins, since it gets more of the
+    real transmission's own duration folded in)."""
+    rng = np.random.default_rng(11)
+
+    def noisy_prefix(seconds):
+        n = int(seconds * FS)
+        return rng.normal(size=n) + 1j * rng.normal(size=n)
+
+    # Case 1: short real signal behind a long stretch of unrelated noise
+    # -- the short timescale alone should win, and multi-scale should
+    # match it (not get dragged down by the long timescale's dilution).
+    _, _, x, frames_start = _tx(seed=12)
+    win = _frames_slice(x, frames_start, 300, beacon.MIN_FRAMES_FOR_SYNC + 5)
+    z_short_signal = to_baseband(win)
+    z_noise = noisy_prefix(90.0)
+
+    short_only = BlindAccumulator(window_s=10.0)
+    long_only = BlindAccumulator(window_s=90.0)
+    multi = BlindAccumulator(window_s=[10.0, 90.0])
+    for acc in (short_only, long_only, multi):
+        acc.push(z_noise, 0)
+        acc.push(z_short_signal, z_noise.size)
+
+    short_metric = short_only.result().metric
+    long_metric = long_only.result().metric
+    multi_metric = multi.result().metric
+    assert short_metric > long_metric  # the dilution effect this case is built to show
+    assert multi_metric == pytest.approx(short_metric, rel=1e-9)
+
+    # Case 2: a long, continuous, genuinely marginal signal -- right at
+    # the SNR where a short window misses it but integrating over more
+    # of the transmission's own real duration catches it (this is the
+    # *reliability near the ceiling* benefit the class docstring
+    # describes, not a lower noise floor -- found by sweeping seeds at
+    # -7 dB mpp fading until a short-window miss / long-window catch
+    # turned up; most seeds pass at both window lengths, matching the
+    # docstring's "score barely moves once comfortably above the floor"
+    # measurement). Multi-scale should still catch it, not get stuck
+    # with the short timescale that lost this case.
+    from sstvae import hfchannel
+    from sstvae.config import MODES
+
+    modem = Modem()
+    lat = np.random.default_rng(4).normal(size=MODES["C"].n_latents)
+    lat /= np.sqrt(np.mean(lat**2))
+    tx_wave = modem.modulate(lat, "C", callsign="N0CALL")
+    clean = tx_wave[frames_start:]  # the whole mode C frame region, ~95 s
+    noisy = hfchannel.apply_channel(clean, snr_db=-7.0, fading_preset="mpp", seed=54)
+    z_long_signal = to_baseband(noisy)
+
+    short_only2 = BlindAccumulator(window_s=10.0)
+    long_only2 = BlindAccumulator(window_s=90.0)
+    multi2 = BlindAccumulator(window_s=[10.0, 90.0])
+    for acc in (short_only2, long_only2, multi2):
+        acc.push(z_long_signal, 0)
+
+    with pytest.raises(SyncError):
+        short_only2.result()
+    assert long_only2.result().metric > 4.0
+    assert multi2.result().metric > 4.0

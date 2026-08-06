@@ -167,9 +167,18 @@ def _native_adapters(native):
     class BlindAccumulator:
         def __init__(self, max_offset_hz=55.0, bin_step_hz=1.7, min_periods=8,
                      threshold=4.0, block_samples=None, window_s=25.0):
+            # The reference accepts a bare float/None as shorthand for one
+            # timescale; the binding always takes a list.
+            from collections.abc import Sequence
+
+            window_s_list = (
+                list(window_s)
+                if isinstance(window_s, Sequence) and not isinstance(window_s, str)
+                else [window_s]
+            )
             self._native = native.sync.BlindAccumulator(
                 max_offset_hz, bin_step_hz, min_periods, threshold,
-                block_samples, window_s)
+                block_samples, window_s_list)
 
         def push(self, z, start_sample):
             self._native.push(z, start_sample)
