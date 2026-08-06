@@ -320,3 +320,65 @@ def test_low_cpu_does_not_resave_the_same_transmission(tmp_path):
         timeout_s=120.0, expect_saves=2,
     )
     assert len(saves) == 1, f"one transmission should save once, got {len(saves)}"
+
+
+@pytest.mark.slow
+def test_fresh_session_does_not_inherit_blind_evidence_from_a_prior_one(tmp_path):
+    """The app's 'start receiving' button and resume_after_transmit both
+    work by discarding the whole RingBuffer and calling decode_loop
+    again from scratch (see native/gui/rx_panel.cpp's start() /
+    resume_after_transmit(), and RingBuffer.clear()'s docstring, which
+    records that clear() is *not* how that path works) rather than
+    clearing state in place. blind_acc is a plain local inside
+    decode_loop, so a brand-new call gets a clean one for free -- but
+    that's a property of scoping, and nothing pins it against a future
+    change that keeps decode_loop (and its locals) running across a
+    'session' boundary instead of restarting it, which is exactly the
+    scenario the indeterminate gap in real captured audio -- silence
+    while transmitting, or whatever a fresh capture stream first hands
+    back -- has no way to signal to a *stale* accumulator.
+
+    Session 1 gets a real, complete mode-A transmission and is left to
+    lock and finish, so it isn't just idling. Session 2 is a brand-new
+    RingBuffer + decode_loop call, exactly as start()/resume_after_
+    transmit() produce, fed nothing but noise: it must never save a
+    reception. If blind_acc's folded evidence ever leaked across that
+    boundary, session 2 would begin already most of the way to session
+    1's lock rather than from nothing.
+    """
+    sig = _frames_only("A", seed=31)
+    pre = np.random.default_rng(8).normal(scale=0.01, size=int(2.0 * FS))
+    trailing = np.random.default_rng(9).normal(scale=0.01, size=int(10.0 * FS))
+
+    session1_dir = tmp_path / "session1"
+    session1_dir.mkdir()
+    args1 = _Args(session1_dir, poll_interval=0.1, end_grace=1.0)
+    saves1, _, h1 = _run_decode_loop_incremental(
+        sstvae_listen.decode_loop, [pre, sig, trailing], session1_dir, args1,
+        timeout_s=60.0, expect_saves=1,
+    )
+    h1.stop()
+    assert len(saves1) == 1, (
+        "session 1 should have locked on and saved a real transmission -- "
+        "otherwise this isn't exercising real blind-accumulator evidence"
+    )
+
+    # A brand-new session: fresh RingBuffer, fresh decode_loop call, same
+    # shape as what start()/resume_after_transmit() actually do. Fed
+    # nothing but noise -- a fixed seed, so this is deterministic rather
+    # than a rare-false-lock flake.
+    session2_dir = tmp_path / "session2"
+    session2_dir.mkdir()
+    noise = np.random.default_rng(10).normal(scale=0.01, size=int(10.0 * FS))
+    args2 = _Args(session2_dir, poll_interval=0.1, end_grace=1.0)
+    saves2, _, h2 = _run_decode_loop_incremental(
+        sstvae_listen.decode_loop, [noise], session2_dir, args2,
+        timeout_s=5.0, expect_saves=1,
+    )
+    try:
+        assert len(saves2) == 0, (
+            "a brand-new session fed only noise saved a reception -- "
+            "blind_acc leaked evidence across a session boundary"
+        )
+    finally:
+        h2.stop()

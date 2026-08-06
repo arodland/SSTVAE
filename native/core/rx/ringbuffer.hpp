@@ -70,11 +70,21 @@ public:
     // Drop everything captured so far, keeping the sample counter
     // monotonic.
     //
-    // Used when resuming receive after transmitting: the buffer is full
-    // of our own sidetone and the decode loop would happily lock onto
-    // it and "receive" the picture we just sent. Leaving `total_written`
-    // alone keeps every absolute sample position the loop has recorded
-    // still meaningful.
+    // Not currently on the resume-after-transmit path: both callers that
+    // need to keep our own sidetone out of the decoder (the "start
+    // receiving" button and ReceivePanel::resume_after_transmit) instead
+    // discard the whole RingBuffer and construct a fresh one, which
+    // starts decode_loop over from scratch -- so blind_acc and every
+    // other loop-local accumulator get a clean slate too, not just the
+    // audio. That leaves total_written() restarting at 0 rather than
+    // staying monotonic through the gap, which is fine because nothing
+    // survives the restart that could still be indexing against the old
+    // count. This method stays as a lower-overhead primitive (no
+    // reallocation, counter stays meaningful) for a caller that wants to
+    // wipe the audio in place without restarting the loop -- but pairing
+    // it with such a resume would need its own explicit reset of
+    // blind_acc/blind_acc_pushed and the other decode_loop locals, since
+    // none of those are reachable from here.
     void clear();
 
     std::size_t capacity() const { return buf_.size(); }
