@@ -285,4 +285,132 @@ BlindAcquisition acquire_blind(std::span<const cdouble> z, double max_offset_hz,
                             best_score};
 }
 
+BlindAccumulator::BlindAccumulator(double max_offset_hz, double bin_step_hz, int min_periods,
+                                   double threshold, std::optional<int> block_samples,
+                                   std::optional<double> window_s)
+    : min_periods_(min_periods), threshold_(threshold) {
+    const std::vector<cdouble> templ = ofdm::pilot_template();
+    std::vector<cdouble> kernel(templ.size());
+    for (std::size_t i = 0; i < templ.size(); ++i)
+        kernel[i] = std::conj(templ[templ.size() - 1 - i]);
+    m_ = static_cast<int>(kernel.size());
+
+    const int min_block = static_cast<int>(std::ceil(static_cast<double>(FS) / bin_step_hz));
+    block_ = static_cast<int>(dsp::next_fast_len(
+        static_cast<std::size_t>(std::max(min_block, 4 * m_)), /*real=*/false));
+    step_ = block_ - (m_ - 1);
+    if (step_ <= 0) throw SyncError("block_samples too small for the pilot kernel");
+    if (block_samples) {
+        block_ = *block_samples;
+        step_ = block_ - (m_ - 1);
+    }
+    const double bin_hz = static_cast<double>(FS) / static_cast<double>(block_);
+
+    n_bins_ = static_cast<int>(std::ceil(max_offset_hz / bin_step_hz));
+    for (int k = -n_bins_; k <= n_bins_; ++k) {
+        const int shift = static_cast<int>(std::nearbyint(static_cast<double>(k) * bin_step_hz / bin_hz));
+        shift_bins_.push_back(shift);
+        freqs_.push_back(static_cast<double>(shift) * bin_hz);
+    }
+
+    std::vector<cdouble> pad_kernel(static_cast<std::size_t>(block_), cdouble{});
+    std::copy(kernel.begin(), kernel.end(), pad_kernel.begin());
+    kernel_f_ = dsp::fft(pad_kernel, true);
+
+    // Applied once per processed block, uniformly across every phase and
+    // CFO bin -- see the BlindAccumulator docstring in sync.py for why
+    // this is exponential decay rather than exact eviction.
+    decay_per_block_ =
+        window_s ? std::exp(-static_cast<double>(step_) / (*window_s * static_cast<double>(FS)))
+                 : 1.0;
+
+    folded_.assign(shift_bins_.size() * static_cast<std::size_t>(FRAME_SAMPLES), 0.0);
+}
+
+void BlindAccumulator::push(std::span<const cdouble> z, std::int64_t start_sample) {
+    if (buf_start_ < 0) {
+        buf_start_ = start_sample;
+    } else if (start_sample != buf_start_ + static_cast<std::int64_t>(buf_.size())) {
+        throw SyncError(
+            "BlindAccumulator::push: expected a contiguous continuation at sample " +
+            std::to_string(buf_start_ + static_cast<std::int64_t>(buf_.size())) + ", got " +
+            std::to_string(start_sample));
+    }
+    buf_.insert(buf_.end(), z.begin(), z.end());
+
+    const int B = block_, m = m_, step = step_;
+    std::vector<cdouble> shifted(static_cast<std::size_t>(B));
+    std::size_t pos = 0;
+    while (pos + static_cast<std::size_t>(B) <= buf_.size()) {
+        const std::vector<cdouble> block(
+            buf_.begin() + static_cast<std::ptrdiff_t>(pos),
+            buf_.begin() + static_cast<std::ptrdiff_t>(pos) + B);
+        const std::vector<cdouble> block_f = dsp::fft(block, true);
+
+        // Same convention as acquire_blind's p2[j]: mf[i] (0-indexed
+        // within the valid slice, i.e. mf_full[m-1+i]) is the matched
+        // filter's response for a pilot window starting at block-local
+        // index i, so no (m - 1) belongs in abs0.
+        const std::int64_t abs0 = buf_start_ + static_cast<std::int64_t>(pos);
+        const int phase0 = static_cast<int>(((abs0 % FRAME_SAMPLES) + FRAME_SAMPLES) % FRAME_SAMPLES);
+
+        if (decay_per_block_ != 1.0)
+            for (double& v : folded_) v *= decay_per_block_;
+
+        for (std::size_t bi = 0; bi < shift_bins_.size(); ++bi) {
+            const int shift = shift_bins_[bi];
+            // np.roll(block_f, -shift): out[i] = block_f[(i + shift) mod B]
+            for (int i = 0; i < B; ++i) {
+                long src = static_cast<long>(i) + shift;
+                src %= B;
+                if (src < 0) src += B;
+                shifted[static_cast<std::size_t>(i)] =
+                    block_f[static_cast<std::size_t>(src)] * kernel_f_[static_cast<std::size_t>(i)];
+            }
+            const std::vector<cdouble> mf = dsp::fft(shifted, false);
+            double* row = &folded_[bi * static_cast<std::size_t>(FRAME_SAMPLES)];
+            int phase = phase0;
+            for (int i = 0; i < step; ++i) {
+                row[phase] += std::norm(mf[static_cast<std::size_t>(m - 1 + i)]);
+                if (++phase == FRAME_SAMPLES) phase = 0;
+            }
+        }
+        n_valid_ += step;
+        pos += static_cast<std::size_t>(step);
+    }
+
+    buf_.erase(buf_.begin(), buf_.begin() + static_cast<std::ptrdiff_t>(pos));
+    buf_start_ += static_cast<std::int64_t>(pos);
+}
+
+BlindAcquisition BlindAccumulator::result() const {
+    if (n_valid_ < static_cast<std::int64_t>(FRAME_SAMPLES) * min_periods_)
+        throw SyncError("window too short for blind acquisition");
+
+    bool have_best = false;
+    double best_score = 0.0;
+    std::size_t best_bin = 0;
+    for (std::size_t bi = 0; bi < shift_bins_.size(); ++bi) {
+        const std::span<const double> row(&folded_[bi * static_cast<std::size_t>(FRAME_SAMPLES)],
+                                          static_cast<std::size_t>(FRAME_SAMPLES));
+        const std::size_t peak = argmax(row);
+        const double score =
+            row[peak] / (median(std::vector<double>(row.begin(), row.end())) + 1e-12);
+        if (!have_best || score > best_score) {
+            have_best = true;
+            best_score = score;
+            best_bin = bi;
+        }
+    }
+    if (best_score < threshold_)
+        throw SyncError("no periodic pilot found (peak prominence " +
+                        std::to_string(best_score) + ")");
+
+    const std::span<const double> row(&folded_[best_bin * static_cast<std::size_t>(FRAME_SAMPLES)],
+                                      static_cast<std::size_t>(FRAME_SAMPLES));
+    const std::size_t phase = argmax(row);
+
+    return BlindAcquisition{static_cast<std::int64_t>(phase), freqs_[best_bin], best_score};
+}
+
 }  // namespace sstvae::sync

@@ -247,6 +247,26 @@ class BlindAccumulator:
     and whole-recording CFO correction fold to the same energy. Checked
     against `acquire_blind`'s one-shot result in
     `tests/test_blind_acquisition.py`.
+
+    `window_s` bounds how long old audio keeps influencing the result --
+    without it, an ever-growing accumulator is wrong in a way that has
+    nothing to do with CPU cost: each phase bin's fold sums matched-
+    filter *power* over every period pushed, real signal or not, so a
+    real (but short) transmission surrounded by a long stretch of
+    silence or noise gets its peak diluted by all that irrelevant
+    history, and the score (peak / median) drifts toward 1 as the
+    irrelevant fraction grows -- a bounded-window search that only ever
+    looked at the recent signal would still find it clearly. Implemented
+    as exponential decay (`window_s` is the ~1/e time constant) rather
+    than exact eviction of aged-out blocks: eviction needs to retain
+    every bin's per-block contribution for the whole window to undo it
+    later (67 bins x ~8k samples x 25 blocks, tens of MB), while decay
+    needs none -- just scale the existing `folded` array down before
+    adding each new block, which is also this codebase's established
+    idiom for "recent-weighted, bounded-memory" state (see the pilot
+    clock-drift tracker in modem.py). `window_s=None` disables it, for
+    equivalence testing against acquire_blind's unweighted one-shot
+    integration.
     """
 
     def __init__(
@@ -256,6 +276,7 @@ class BlindAccumulator:
         min_periods: int = 8,
         threshold: float = 4.0,
         block_samples: int | None = None,
+        window_s: float | None = 25.0,
     ) -> None:
         template = pilot_template()
         kernel = np.conj(template[::-1])
@@ -286,6 +307,17 @@ class BlindAccumulator:
         self._shift_bins = shift_bins
         self._freqs = shift_bins * self._bin_hz
         self._kernel_f = fft(np.concatenate([kernel, np.zeros(self._block - m, dtype=complex)]))
+
+        # Applied once per processed block, uniformly across every phase
+        # and CFO bin, so it never changes the *shape* of a fresh block's
+        # contribution -- only how much the past is still worth relative
+        # to it. Because it scales every bin equally, the peak/median
+        # score (what's actually compared to `threshold`) is unaffected
+        # by decay alone; only the mix of old-vs-new evidence behind it
+        # changes.
+        self._decay_per_block = (
+            1.0 if window_s is None else float(np.exp(-self._step / (window_s * FS)))
+        )
 
         self._folded = np.zeros((len(shift_bins), FRAME_SAMPLES))
         self._n_valid = 0
@@ -320,6 +352,8 @@ class BlindAccumulator:
             abs0 = self._buf_start + pos
             phase0 = abs0 % FRAME_SAMPLES
             idx = (phase0 + np.arange(step)) % FRAME_SAMPLES
+            if self._decay_per_block != 1.0:
+                self._folded *= self._decay_per_block
             for i, shift in enumerate(self._shift_bins):
                 mf = ifft(np.roll(block_f, -shift) * self._kernel_f)[m - 1 : B]
                 np.add.at(self._folded[i], idx, np.abs(mf) ** 2)

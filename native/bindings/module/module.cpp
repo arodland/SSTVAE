@@ -403,6 +403,27 @@ PYBIND11_MODULE(sstvae_native, m) {
              py::arg("bin_step_hz") = 1.7, py::arg("min_periods") = 8,
              py::arg("threshold") = 4.0, py::arg("search") = py::none());
 
+    // result() returns a plain tuple, like acquire_blind above -- the
+    // conftest adapter wraps it into the reference's BlindAcquisition,
+    // keeping this core free of any knowledge of that Python type.
+    py::class_<sstvae::sync::BlindAccumulator>(sync, "BlindAccumulator")
+        .def(py::init<double, double, int, double, std::optional<int>,
+                      std::optional<double>>(),
+             py::arg("max_offset_hz") = 55.0, py::arg("bin_step_hz") = 1.7,
+             py::arg("min_periods") = 8, py::arg("threshold") = 4.0,
+             py::arg("block_samples") = py::none(), py::arg("window_s") = 25.0)
+        .def("push",
+             [](sstvae::sync::BlindAccumulator& self, CArray z,
+                std::int64_t start_sample) {
+                 std::span<const cdouble> in(z.data(), static_cast<std::size_t>(z.size()));
+                 self.push(in, start_sample);
+             },
+             py::arg("z"), py::arg("start_sample"))
+        .def("result", [](const sstvae::sync::BlindAccumulator& self) {
+            const auto a = self.result();
+            return py::make_tuple(a.frame_start, a.freq_offset, a.metric);
+        });
+
     py::module_ dsp = m.def_submodule("dsp");
     dsp.def("to_baseband",
             [](DArray x) {
