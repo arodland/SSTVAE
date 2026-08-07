@@ -158,12 +158,20 @@ endif()
 # is no ctest output at all to say which test it was.
 #
 # Sized against the sanitizer build, which is the slowest thing that
-# runs these: rx_engine measures ~150 s there and tx_engine ~26 s, so
-# these are roughly 2.5x headroom. They bound the job where the
+# runs these: tx_engine measures ~26 s there, so its bound is roughly
+# 2.5x headroom. rx_engine's own bound was re-measured the same way
+# after diversity reception added six scenarios that each demodulate
+# two branches independently per poll (`decode_loop_diversity`) -- the
+# old ~150 s/360 s pair was sized before that code existed. Direct run
+# under the sanitizer build (bypassing ctest's own bound): 569 s. 1400 s
+# keeps the same ~2.5x headroom rather than "just enough" -- a bound
+# sized at the measurement is indistinguishable from a hang the next
+# time someone adds a scenario (see ci.yml and CLAUDE.md for the -O0
+# episode that headroom rule comes from). They bound the job where the
 # per-wait watchdog inside test_rx_engine.cpp cannot -- that one gives
 # the better message, but several waits expiring in turn would still
 # outlast the run.
-set_tests_properties(rx_engine PROPERTIES TIMEOUT 360)
+set_tests_properties(rx_engine PROPERTIES TIMEOUT 1400)
 set_tests_properties(tx_engine PROPERTIES TIMEOUT 180)
 set_tests_properties(golden npy modem_roundtrip ringbuffer audio rig
                      checkpoint
