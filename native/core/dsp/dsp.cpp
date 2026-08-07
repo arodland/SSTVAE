@@ -395,8 +395,7 @@ std::vector<cdouble> fftconvolve_valid(std::span<const cdouble> a,
     std::vector<cdouble> pa(n, cdouble{}), pv(n, cdouble{});
     std::copy(a.begin(), a.end(), pa.begin());
     std::copy(v.begin(), v.end(), pv.begin());
-    std::vector<cdouble> fa = fft(pa, true);
-    const std::vector<cdouble> fv = fft(pv, true);
+    auto [fa, fv] = fft_pair(pa, pv, true);
     for (std::size_t i = 0; i < n; ++i) fa[i] *= fv[i];
     const std::vector<cdouble> conv = fft(fa, false);
 
@@ -420,17 +419,13 @@ std::vector<double> fftconvolve_valid(std::span<const double> a,
     std::copy(a.begin(), a.end(), pa.begin());
     std::copy(v.begin(), v.end(), pv.begin());
 
-    std::vector<cdouble> fa(nc), fv(nc);
-    const pocketfft::shape_t shape{n};
-    const pocketfft::stride_t stride_r{static_cast<std::ptrdiff_t>(sizeof(double))};
-    const pocketfft::stride_t stride_c{static_cast<std::ptrdiff_t>(sizeof(cdouble))};
-    pocketfft::r2c(shape, stride_r, stride_c, pocketfft::shape_t{0}, true,
-                   pa.data(), fa.data(), 1.0);
-    pocketfft::r2c(shape, stride_r, stride_c, pocketfft::shape_t{0}, true,
-                   pv.data(), fv.data(), 1.0);
+    auto [fa, fv] = r2c_pair(pa, pv);
     for (std::size_t i = 0; i < nc; ++i) fa[i] *= fv[i];
 
     std::vector<double> conv(n);
+    const pocketfft::shape_t shape{n};
+    const pocketfft::stride_t stride_r{static_cast<std::ptrdiff_t>(sizeof(double))};
+    const pocketfft::stride_t stride_c{static_cast<std::ptrdiff_t>(sizeof(cdouble))};
     pocketfft::c2r(shape, stride_c, stride_r, pocketfft::shape_t{0}, false,
                    fa.data(), conv.data(), 1.0 / static_cast<double>(n));
 
