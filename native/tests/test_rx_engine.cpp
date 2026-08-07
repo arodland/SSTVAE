@@ -499,6 +499,31 @@ void test_diversity_combines_a_header_branch_with_a_blind_only_branch() {
 }
 
 void test_diversity_completes_when_both_branches_are_blind_only() {
+#ifdef SSTVAE_SANITIZE_BUILD
+    // Neither branch ever gets a header lock here, so decode_loop_
+    // diversity can't complete on frames_received >= n_frames_expected
+    // (unlike every other diversity scenario, which gets at least one
+    // header lock and finishes in a single poll) -- it falls back to
+    // progress-stall detection, which needs ~3 confirmatory polls before
+    // end_grace is satisfied. Each of those polls re-runs a full blind
+    // search (CFO scan + multi-period energy fold) on *both* branches
+    // from scratch -- find_branch_reception has no incremental cache
+    // across polls, unlike decode_loop's own single-branch blind path
+    // (see to_baseband_at/BlindAccumulator above). ~6 full blind
+    // searches under ASan/UBSan measured at 185 s, against 9-45 s for
+    // every other diversity scenario here, which needs at most one or
+    // two. The code path itself -- combine_diversity_results and
+    // decode_loop_diversity's blind branch -- is still exercised for
+    // memory safety by test_diversity_combines_a_header_branch_with_a_
+    // blind_only_branch (one branch blind-only) and by the noise branch
+    // in test_diversity_falls_back_to_single_branch_when_the_other_is_
+    // dead; only the *both-blind* combination is skipped, and only
+    // under the sanitizer build.
+    std::fprintf(stderr,
+                 "SKIP rx/div-blind2: both-branches-blind is redundant-search-bound "
+                 "under the sanitizer build; see the comment above this line\n");
+    return;
+#endif
     // Neither branch's preamble/header survives -- both can only
     // blind-lock. Completion has to fall back to progress-stall
     // detection (config.end_grace), the same as decode_loop's own
