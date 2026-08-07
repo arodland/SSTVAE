@@ -170,6 +170,22 @@ struct Published {
         }
         return false;
     }
+    // Frequency and status are two separate, unsynchronized callbacks
+    // from the worker thread (`RigSession::publish_frequency` then
+    // `publish_status`) -- waiting on the former is not a guarantee the
+    // latter has landed yet. Bounded rather than an unconditional
+    // `cv.wait`, so a status that never arrives is a ctest TIMEOUT
+    // failure with a clear predicate rather than a silent hang.
+    bool wait_for_status_containing(const std::string& needle,
+                                    double timeout_s = 5.0) {
+        std::unique_lock<std::mutex> lock(m);
+        return cv.wait_for(lock, std::chrono::duration<double>(timeout_s), [&] {
+            for (const std::string& s : statuses) {
+                if (s.find(needle) != std::string::npos) return true;
+            }
+            return false;
+        });
+    }
 };
 
 // --- backoff ----------------------------------------------------------------
@@ -330,7 +346,7 @@ void test_polling_publishes_frequency_and_status() {
     pub.wait_for_frequency();
     check::is_true(controller.frequency_hz().has_value(),
                    "rig/poll: the cached frequency is available to read");
-    check::is_true(pub.saw_status_containing("14.2300 MHz"),
+    check::is_true(pub.wait_for_status_containing("14.2300 MHz"),
                    "rig/poll: the status text carries the dial frequency");
     check::is_true(pub.saw_status_containing("Fake Rig"),
                    "rig/poll: and the rig announces itself on connecting");
