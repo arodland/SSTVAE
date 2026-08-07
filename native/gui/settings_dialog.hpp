@@ -124,6 +124,7 @@ private:
     QLineEdit* callsign_ = nullptr;
     QCheckBox* optimize_ = nullptr;
     QCheckBox* cw_id_ = nullptr;
+    QLineEdit* cw_message_ = nullptr;
 
     // Receive
     QCheckBox* autosave_ = nullptr;

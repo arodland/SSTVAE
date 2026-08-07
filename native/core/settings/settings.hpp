@@ -170,10 +170,19 @@ struct TransmitConfig {
     // matter through a plateau test that usually ends the run first.
     bool optimize = false;
 
-    // Send the configured callsign in Morse (18 wpm, 1000 Hz) 500 ms
-    // after each transmission, under the same PTT key-up. A no-op with
-    // no callsign set.
+    // Send `cw_message` in Morse (18 wpm, 1000 Hz) 500 ms after each
+    // transmission, under the same PTT key-up. A no-op with no callsign
+    // set -- there is nothing to identify with, whatever the message
+    // says.
     bool cw_id = false;
+
+    // What to send. `{callsign}` is replaced with the configured
+    // callsign; any other text is sent verbatim. The default both
+    // identifies the station and advertises the mode and software: a
+    // human who tunes across the OFDM signal with no idea what it is
+    // hears the CW ID and can go find SSTVAE and a successful decode,
+    // rather than just an unexplained tone.
+    std::string cw_message = "SSTVAE DE {callsign}";
 };
 
 // How the window arranges the receive and transmit halves.
