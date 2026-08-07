@@ -96,11 +96,19 @@ struct TxConfig {
     double level = 0.9;      // output peak, 0..1
     double ptt_lead_s = 0.3; // PTT up -> audio start (relay + ALC settling)
     double ptt_tail_s = 0.3; // audio end -> PTT down
-    // Send `callsign` in Morse (18 wpm, 1000 Hz) 500 ms after the
+    // Send `cw_message` in Morse (18 wpm, 1000 Hz) 500 ms after the
     // SSTVAE audio ends, under the same PTT key-up -- one continuous
     // transmission rather than a second relay click. No-op if callsign
-    // is empty; there is nothing to identify with.
+    // is empty; there is nothing to identify with, whatever the message
+    // says.
     bool cw_id = false;
+    // What to send as the CW ID. `{callsign}` is replaced with
+    // `callsign` above; any other text goes out verbatim. The default
+    // both identifies the station and advertises the mode and software:
+    // a human who tunes across the OFDM signal with no idea what it is
+    // hears the CW ID and can go find SSTVAE and a successful decode,
+    // rather than just an unexplained tone.
+    std::string cw_message = "SSTVAE DE {callsign}";
     // Exposed rather than compiled in for the same reason
     // `Modem::modulate` exposes its clip headroom: the reference's tests
     // shorten it by patching a module constant, which is unreachable

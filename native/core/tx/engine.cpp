@@ -23,6 +23,27 @@ std::string sending_message(double duration_s) {
     return buf;
 }
 
+// Every occurrence of `{callsign}` becomes `callsign`; anything else in
+// `tmpl` is sent to the Morse generator verbatim, which is itself
+// tolerant of characters it cannot key (see dsp::generate_morse).
+std::string render_cw_message(const std::string& tmpl, const std::string& callsign) {
+    static const std::string placeholder = "{callsign}";
+    std::string out;
+    out.reserve(tmpl.size());
+    std::size_t pos = 0;
+    while (true) {
+        const std::size_t next = tmpl.find(placeholder, pos);
+        if (next == std::string::npos) {
+            out.append(tmpl, pos, std::string::npos);
+            break;
+        }
+        out.append(tmpl, pos, next - pos);
+        out += callsign;
+        pos = next + placeholder.size();
+    }
+    return out;
+}
+
 }  // namespace
 
 const char* phase_name(TxPhase p) {
@@ -129,8 +150,9 @@ std::vector<double> TxEngine::prepare(const images::Picture& image,
     if (config.cw_id && !config.callsign.empty()) {
         double peak = 0.0;
         for (double v : wave) peak = std::max(peak, std::abs(v));
+        const std::string text = render_cw_message(config.cw_message, config.callsign);
         const std::vector<double> id_tone = dsp::generate_morse(
-            config.callsign, FS, CW_ID_WPM, CW_ID_TONE_HZ, peak);
+            text, FS, CW_ID_WPM, CW_ID_TONE_HZ, peak);
         if (!id_tone.empty()) {
             wave.insert(wave.end(),
                         static_cast<std::size_t>(std::lround(CW_ID_GAP_S * FS)), 0.0);

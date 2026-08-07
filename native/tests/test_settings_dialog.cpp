@@ -54,6 +54,8 @@ settings::Config populated() {
     c.folders.receive_dir = "/srv/sstv/in";
     c.folders.transmit_dir = "/srv/sstv/out";
     c.transmit.optimize = true;  // not the default, per this fixture's rule
+    c.transmit.cw_id = true;
+    c.transmit.cw_message = "TEST DE {callsign}";
     c.folders.template_dir = "/srv/sstv/tpl";
 
     c.receive.autosave = false;

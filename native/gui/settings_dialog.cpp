@@ -820,9 +820,22 @@ QWidget* SettingsDialog::transmit_tab() {
     cw_id_ = new QCheckBox(tr("Send CW ID after each transmission"), page);
     cw_id_->setChecked(config_.transmit.cw_id);
     form->addRow(cw_id_);
-    form->addRow(note(tr("Sends the callsign above in Morse "
+    form->addRow(note(tr("Sends the message below in Morse "
                          "(18 wpm, 1000 Hz), 500 ms after the picture ends, "
-                         "under the same PTT key-up."),
+                         "under the same PTT key-up. No-op with no callsign "
+                         "set above, whatever the message says."),
+                      page));
+
+    cw_message_ = new QLineEdit(
+        QString::fromStdString(config_.transmit.cw_message), page);
+    cw_message_->setPlaceholderText(QStringLiteral("SSTVAE DE {callsign}"));
+    form->addRow(tr("CW message"), cw_message_);
+    form->addRow(note(tr("{callsign} is replaced with the callsign above; "
+                         "everything else is sent as typed. The default "
+                         "both identifies you and advertises the mode and "
+                         "software: someone who tunes across the signal "
+                         "with no idea what it is hears the CW ID and can "
+                         "go find SSTVAE and a successful decode."),
                       page));
 
     // The transmit level itself stays on the send bar, where it is
@@ -864,6 +877,7 @@ void SettingsDialog::apply_to(settings::Config& config) const {
 
     config.transmit.optimize = optimize_->isChecked();
     config.transmit.cw_id = cw_id_->isChecked();
+    config.transmit.cw_message = cw_message_->text().toStdString();
     config.receive.autosave = autosave_->isChecked();
     config.receive.save_audio = save_audio_->isChecked();
     config.receive.low_cpu = low_cpu_->isChecked();

@@ -104,6 +104,7 @@ NON_DEFAULT = {
         "level": 0.72,
         "optimize": True,
         "cw_id": True,
+        "cw_message": "TEST DE {callsign}",
     },
     "ui": {
         # Neither is a default: the default layout is "auto" and the
