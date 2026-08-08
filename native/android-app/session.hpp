@@ -22,16 +22,26 @@
 #ifndef SSTVAE_ANDROID_SESSION_HPP
 #define SSTVAE_ANDROID_SESSION_HPP
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <utility>
 #include <thread>
 
 #include "audio/android/androidaudio.hpp"
+#include "codec/codec.hpp"
 #include "rx/engine.hpp"
 #include "rx/ringbuffer.hpp"
 
 namespace sstvae::androidapp {
+
+// What the model is doing, for a UI that must say so without guessing.
+// `Downloading` is a distinct state rather than a flavour of `Loading`
+// because it is the one that can take minutes on a phone's connection,
+// and the one where "nothing is happening" is the wrong conclusion.
+enum class ModelState { Absent, Downloading, Loading, Ready, Failed };
 
 class Session {
 public:
@@ -59,6 +69,25 @@ public:
     // message overwrites it is an error nobody reads.
     std::string last_error() const;
 
+    // Fetch and load the decoder, off the calling thread. Safe to call
+    // before, during or after a session: **listening never waits on the
+    // model.** The engine reports mode, frames, callsign and SNR from
+    // the moment capture starts, and pictures begin appearing whenever
+    // the decoder arrives -- which on a first run means a download, and
+    // a receiver that refused to listen until it finished would be
+    // useless exactly when someone is trying it out.
+    void load_model_async();
+
+    // Where finished receptions are written, as a PNG plus a JSON
+    // sidecar. Empty (the default) means nothing is saved.
+    void set_picture_dir(std::string dir);
+
+    ModelState model_state() const;
+    std::string model_error() const;
+    // Bytes received / total for the current download, both 0 when not
+    // downloading. `total` is -1 when the server does not say.
+    std::pair<std::int64_t, std::int64_t> model_progress() const;
+
     // Device-level facts, empty when not running. Read from the stream
     // rather than remembered, for the same reason as `progress()`.
     int device_rate() const;
@@ -73,6 +102,8 @@ private:
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
 
+    std::optional<std::string> save_reception(const rx::Reception& r);
+
     // Guards the members below against a view thread reading while the
     // UI thread starts or stops. It is never held across a decode: the
     // engine thread touches `ring_` and `state_`, which have their own
@@ -84,6 +115,21 @@ private:
     std::unique_ptr<rx::StopFlag> stop_;
     std::thread thread_;
     std::string error_;
+    std::string picture_dir_;
+
+    // Separate lock from `mu_`: the engine thread reads `codec_` on
+    // every decode and the model thread writes it once, and neither has
+    // any business waiting on a start/stop.
+    mutable std::mutex model_mu_;
+    // `shared_ptr` so the decode lambda can take a copy and use it
+    // outside the lock. Nothing replaces a loaded codec today, but a
+    // reload would otherwise be free to destroy one mid-inference.
+    std::shared_ptr<codec::OnnxCodec> codec_;
+    ModelState model_state_ = ModelState::Absent;
+    std::string model_error_;
+    std::int64_t model_received_ = 0;
+    std::int64_t model_total_ = 0;
+    std::thread model_thread_;
 };
 
 }  // namespace sstvae::androidapp

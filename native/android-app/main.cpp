@@ -6,15 +6,40 @@
 // renders the right numbers on a phone, the shared core really is linked
 // rather than merely compiled.
 
+#include <QDir>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QStandardPaths>
 #include <QString>
+
+#include <cstdlib>
 
 #include "config.hpp"
 
+namespace {
+
+// Point the model cache at app-private storage.
+//
+// `checkpoint::cache_dir()` reads `SSTVAE_MODEL_CACHE` first and
+// otherwise follows the platform convention -- which on Android means
+// the XDG branch, and `$HOME` is not a useful place on a phone. Setting
+// the override is better than exporting `XDG_CACHE_HOME` and hoping:
+// this is not an XDG platform, and saying so directly leaves nothing to
+// infer. Must happen before anything resolves an artifact.
+void set_model_cache() {
+    const QString dir =
+        QStandardPaths::writableLocation(QStandardPaths::CacheLocation) +
+        QStringLiteral("/models");
+    QDir().mkpath(dir);
+    qputenv("SSTVAE_MODEL_CACHE", dir.toUtf8());
+}
+
+}  // namespace
+
 int main(int argc, char* argv[]) {
     QGuiApplication app(argc, argv);
+    set_model_cache();
 
     using namespace sstvae;
     const QString waveform =

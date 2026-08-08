@@ -33,6 +33,8 @@ class Listener : public QObject {
     Q_PROPERTY(QString audioRoute READ audioRoute NOTIFY changed)
     Q_PROPERTY(QString level READ level NOTIFY changed)
     Q_PROPERTY(QString lastError READ lastError NOTIFY changed)
+    Q_PROPERTY(QString modelStatus READ modelStatus NOTIFY changed)
+    Q_PROPERTY(bool modelReady READ modelReady NOTIFY changed)
 
 public:
     explicit Listener(QObject* parent = nullptr);
@@ -44,8 +46,11 @@ public:
     QString audioRoute() const;
     QString level() const;
     QString lastError() const;
+    QString modelStatus() const;
+    bool modelReady() const;
 
     Q_INVOKABLE void refreshDevices();
+    Q_INVOKABLE void loadModel();
     Q_INVOKABLE void start(const QString& deviceName);
     Q_INVOKABLE void stop();
 

@@ -1,7 +1,9 @@
 #include "listener.hpp"
 
+#include <QDir>
 #include <QJniEnvironment>
 #include <QJniObject>
+#include <QStandardPaths>
 #include <QtCore/qcoreapplication_platform.h>
 
 #include <cmath>
@@ -51,6 +53,20 @@ bool init_audio_bridge(QString* error) {
 Listener::Listener(QObject* parent) : QObject(parent) {
     if (!init_audio_bridge(&error_)) return;
     refreshDevices();
+
+    // Receptions land in app-private storage. Not the shared gallery:
+    // that needs a MediaStore insert and a scoped-storage story, which
+    // belongs with the Pictures screen rather than smuggled in here.
+    const QString pics =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) +
+        QStringLiteral("/pictures");
+    QDir().mkpath(pics);
+    Session::instance().set_picture_dir(pics.toStdString());
+
+    // Start fetching the decoder now rather than at the first
+    // reception. It is a ~9 MB download on a first run, and the moment
+    // a picture is arriving is the worst possible time to begin it.
+    loadModel();
 
     // 500 ms, which is a *display* refresh and not a decode cadence --
     // the engine polls on its own 5 s schedule and this only reads what
@@ -160,4 +176,42 @@ QString Listener::level() const {
     return QStringLiteral("peak %1   %2% near-zero")
         .arg(db)
         .arg(100.0 * s.near_zero_fraction(), 0, 'f', 1);
+}
+
+void Listener::loadModel() {
+    Session::instance().load_model_async();
+    emit changed();
+}
+
+bool Listener::modelReady() const {
+    return Session::instance().model_state() == sstvae::androidapp::ModelState::Ready;
+}
+
+QString Listener::modelStatus() const {
+    using sstvae::androidapp::ModelState;
+    Session& s = Session::instance();
+    switch (s.model_state()) {
+        case ModelState::Ready:
+            return QStringLiteral("model ready");
+        case ModelState::Loading:
+            return QStringLiteral("loading model...");
+        case ModelState::Downloading: {
+            const auto [got, total] = s.model_progress();
+            if (total > 0) {
+                return QStringLiteral("downloading model  %1%")
+                    .arg(100.0 * static_cast<double>(got) / static_cast<double>(total),
+                         0, 'f', 0);
+            }
+            return QStringLiteral("downloading model  %1 kB").arg(got / 1024);
+        }
+        case ModelState::Failed:
+            // Named as a *decode* consequence rather than a load error,
+            // because that is what it costs the operator: the station
+            // still hears everything, and only the picture is missing.
+            return QStringLiteral("no model - receiving without pictures\n%1")
+                .arg(QString::fromStdString(s.model_error()));
+        case ModelState::Absent:
+        default:
+            return QStringLiteral("no model");
+    }
 }

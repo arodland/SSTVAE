@@ -278,9 +278,13 @@ endif()
 # Only the downloader; resolution and the cache live in the core with no
 # dependency, so a build without this still honours --model and still
 # finds an already-cached artifact.
-if(_want_qtaudio)
-  find_package(Qt6 6.2 COMPONENTS Network QUIET)
-endif()
+# Gated on Qt Network being available and nothing else. It used to be
+# gated on `_want_qtaudio`, which happened to hold for every desktop
+# build and is the wrong condition: the Android app wants the downloader
+# and explicitly does *not* want Qt audio, and the coupling made the
+# fetcher silently vanish there -- a missing artifact reported as
+# "offline" on a machine with a working network.
+find_package(Qt6 6.2 COMPONENTS Network QUIET)
 if(Qt6Network_FOUND)
   add_library(sstvae_fetch STATIC core/checkpoint/qt_fetcher.cpp)
   set_target_properties(sstvae_fetch PROPERTIES POSITION_INDEPENDENT_CODE ON)
