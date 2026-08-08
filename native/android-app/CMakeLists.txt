@@ -44,9 +44,10 @@ set(SSTVAE_BUILD_RIG OFF CACHE BOOL "" FORCE)
 set(SSTVAE_BUILD_PYMODULE OFF CACHE BOOL "" FORCE)
 add_subdirectory(.. sstvae_native EXCLUDE_FROM_ALL)
 
-qt_add_executable(sstvae_android main.cpp listener.cpp session.cpp service_jni.cpp java_fetcher.cpp)
+qt_add_executable(sstvae_android main.cpp listener.cpp session.cpp service_jni.cpp java_fetcher.cpp
+    waterfall.cpp pictures.cpp)
 qt_add_qml_module(sstvae_android URI SSTVAE VERSION 1.0 QML_FILES Main.qml)
-target_link_libraries(sstvae_android PRIVATE Qt6::Quick sstvae_core
+target_link_libraries(sstvae_android PRIVATE Qt6::Quick Qt6::Gui sstvae_core
                                              sstvae_audio_android
                                              sstvae_codec)
 

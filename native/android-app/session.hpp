@@ -28,6 +28,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 #include <thread>
 
 #include "audio/android/androidaudio.hpp"
@@ -96,6 +97,12 @@ public:
     double peak_level() const;
     double near_zero_fraction() const;
     double capture_drift_ppm() const;
+
+    // The most recent `n` samples, for the waterfall. `tail` rather
+    // than `snapshot` deliberately: snapshot copies the whole 130 s
+    // buffer, and doing that at display rates is how the desktop tore
+    // holes in its own audio.
+    std::vector<double> audio_tail(std::size_t n) const;
 
 private:
     Session() = default;

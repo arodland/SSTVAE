@@ -72,7 +72,17 @@ Listener::Listener(QObject* parent) : QObject(parent) {
     // the engine polls on its own 5 s schedule and this only reads what
     // it published.
     poll_.setInterval(500);
-    connect(&poll_, &QTimer::timeout, this, &Listener::changed);
+    connect(&poll_, &QTimer::timeout, this, [this] {
+        // Bump the image id only when the engine actually published a
+        // different picture. Bumping every tick would re-decode and
+        // re-upload a 900 kB image twice a second for nothing.
+        const auto p = Session::instance().progress();
+        if (p.image.get() != last_image_) {
+            last_image_ = p.image.get();
+            ++live_id_;
+        }
+        emit changed();
+    });
     poll_.start();
 }
 
@@ -226,4 +236,9 @@ QString Listener::modelStatus() const {
         default:
             return QStringLiteral("no model");
     }
+}
+
+bool Listener::hasLiveImage() const {
+    const auto p = Session::instance().progress();
+    return p.image && p.image->width > 0;
 }

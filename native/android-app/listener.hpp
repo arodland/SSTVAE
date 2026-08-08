@@ -35,6 +35,11 @@ class Listener : public QObject {
     Q_PROPERTY(QString lastError READ lastError NOTIFY changed)
     Q_PROPERTY(QString modelStatus READ modelStatus NOTIFY changed)
     Q_PROPERTY(bool modelReady READ modelReady NOTIFY changed)
+    // Bumped whenever the engine publishes a new frame. QML caches
+    // images by URL, so the *id* has to change or the preview freezes
+    // on the first frame it ever showed.
+    Q_PROPERTY(int liveImageId READ liveImageId NOTIFY changed)
+    Q_PROPERTY(bool hasLiveImage READ hasLiveImage NOTIFY changed)
 
 public:
     explicit Listener(QObject* parent = nullptr);
@@ -48,6 +53,8 @@ public:
     QString lastError() const;
     QString modelStatus() const;
     bool modelReady() const;
+    int liveImageId() const { return live_id_; }
+    bool hasLiveImage() const;
 
     Q_INVOKABLE void refreshDevices();
     Q_INVOKABLE void loadModel();
@@ -62,6 +69,8 @@ private:
     QStringList devices_;
     QString error_;
     QTimer poll_;
+    int live_id_ = 0;
+    const void* last_image_ = nullptr;
 };
 
 #endif

@@ -16,6 +16,7 @@
 #include <cstdlib>
 
 #include "config.hpp"
+#include "pictures.hpp"
 
 namespace {
 
@@ -52,6 +53,9 @@ int main(int argc, char* argv[]) {
             .arg(config::FRAME_SAMPLES);
 
     QQmlApplicationEngine engine;
+    // Serves both the reception in progress and saved ones; see
+    // pictures.hpp for why the two come from different places.
+    engine.addImageProvider(QStringLiteral("sstvae"), new PictureProvider);
     engine.rootContext()->setContextProperty("waveformText", waveform);
     engine.loadFromModule("SSTVAE", "Main");
     if (engine.rootObjects().isEmpty()) return 1;
