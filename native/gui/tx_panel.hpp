@@ -165,7 +165,6 @@ private:
     QPlainTextEdit* text_edit_ = nullptr;
     QComboBox* align_combo_ = nullptr;
     QDoubleSpinBox* size_spin_ = nullptr;
-    QDoubleSpinBox* rotation_spin_ = nullptr;
     QPushButton* color_button_ = nullptr;
     // What the swatch currently shows, so a drag's per-mouse-move
     // selectionChanged does not rebuild an identical icon.

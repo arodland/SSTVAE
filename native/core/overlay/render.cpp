@@ -306,6 +306,69 @@ Bbox item_bbox(int canvas_w, int canvas_h, const Item& item,
     return Bbox{x, y, size.width(), size.height()};
 }
 
+Point item_pivot(int canvas_w, int canvas_h, const Item& item,
+                 const images::Picture* last_rx) {
+    if (const TextItem* text = std::get_if<TextItem>(&item)) {
+        // The raw anchor position, before the anchor letters move the
+        // *layout* around it -- `draw_text` translates to exactly this
+        // point before rotating.
+        return Point{static_cast<double>(std::lround(text->x * canvas_w)),
+                     static_cast<double>(std::lround(text->y * canvas_h))};
+    }
+    // `draw_image` turns about the inset's centre, and the inset is
+    // what `item_bbox` measures (border included), so the box's centre
+    // is that same point.
+    const Bbox box = item_bbox(canvas_w, canvas_h, item, last_rx);
+    return Point{box.x + box.w / 2.0, box.y + box.h / 2.0};
+}
+
+Quad item_quad(int canvas_w, int canvas_h, const Item& item,
+               const images::Picture* last_rx) {
+    const Bbox box = item_bbox(canvas_w, canvas_h, item, last_rx);
+    const double degrees = std::visit([](const auto& i) { return i.rotation; }, item);
+    const Point pivot = item_pivot(canvas_w, canvas_h, item, last_rx);
+
+    // The same sense as the renderer's `painter.rotate(-rotation)`: the
+    // document's angle is counter-clockwise as PIL's is, and a screen's
+    // y runs downward, so a positive angle subtracts from y.
+    constexpr double DEG = 3.14159265358979323846 / 180.0;
+    const double c = std::cos(degrees * DEG);
+    const double s = std::sin(degrees * DEG);
+    const double xs[4] = {static_cast<double>(box.x),
+                          static_cast<double>(box.x + box.w),
+                          static_cast<double>(box.x + box.w),
+                          static_cast<double>(box.x)};
+    const double ys[4] = {static_cast<double>(box.y),
+                          static_cast<double>(box.y),
+                          static_cast<double>(box.y + box.h),
+                          static_cast<double>(box.y + box.h)};
+    Quad quad;
+    for (int i = 0; i < 4; ++i) {
+        const double dx = xs[i] - pivot.x;
+        const double dy = ys[i] - pivot.y;
+        quad.corner[i] = Point{pivot.x + dx * c + dy * s,
+                               pivot.y - dx * s + dy * c};
+    }
+    return quad;
+}
+
+bool quad_contains(const Quad& quad, double x, double y) {
+    // Sign of the cross product against each edge. The quad is a
+    // rotated rectangle, so it is convex and all four must agree --
+    // with >= 0 on both branches so a point exactly on an edge counts
+    // as inside, which is what makes a click on the outline select.
+    bool positive = false;
+    bool negative = false;
+    for (int i = 0; i < 4; ++i) {
+        const Point& a = quad.corner[i];
+        const Point& b = quad.corner[(i + 1) % 4];
+        const double cross = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x);
+        if (cross > 0.0) positive = true;
+        if (cross < 0.0) negative = true;
+    }
+    return !(positive && negative);
+}
+
 images::Picture render(const images::Picture& base, const Doc& doc,
                        const images::Picture* last_rx) {
     if (base.empty()) return base;

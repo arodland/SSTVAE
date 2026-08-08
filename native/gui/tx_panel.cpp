@@ -533,19 +533,12 @@ QGroupBox* TransmitPanel::build_properties(QWidget* parent) {
         tr("A fraction of the image, so it means the same at any window size."));
     form->addWidget(style::row(box, {new QLabel(tr("Size"), box), size_spin_}));
 
-    rotation_spin_ = new QDoubleSpinBox(box);
-    rotation_spin_->setRange(-180.0, 180.0);
-    rotation_spin_->setSingleStep(1.0);
-    connect(rotation_spin_, &QDoubleSpinBox::valueChanged, this,
-            [this](double value) {
-                auto* item = editing_item();
-                if (item == nullptr) return;
-                std::visit([value](auto& i) { i.rotation = value; }, *item);
-                editor_->refresh_item();
-            });
-    rotation_spin_->setToolTip(tr("Degrees, clockwise."));
-    form->addWidget(
-        style::row(box, {new QLabel(tr("Rotation"), box), rotation_spin_}));
+    // **No rotation field.** Turning an item is the round grip on its
+    // top-right corner now: drag it round, and it snaps to upright,
+    // sideways or upside-down when it passes near one. A number was the
+    // wrong control for an angle you are judging by eye against the
+    // picture underneath -- you set it, looked up, and set it again.
+    // `overlay_editor.cpp` carries the snap; Shift suppresses it.
 
     color_button_ = new QPushButton(tr("Colour..."), box);
     connect(color_button_, &QPushButton::clicked, this, [this] {
@@ -982,8 +975,6 @@ void TransmitPanel::on_selection(overlay::Item* item) {
         size_spin_->setValue(std::get<overlay::ImageItem>(*item).width);
         set_color_swatch(QColor());  // no colour on an image item
     }
-    rotation_spin_->setValue(std::visit([](const auto& i) { return i.rotation; },
-                                        *item));
     loading_properties_ = false;
 }
 
