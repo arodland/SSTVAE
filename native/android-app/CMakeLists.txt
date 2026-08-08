@@ -44,7 +44,7 @@ set(SSTVAE_BUILD_RIG OFF CACHE BOOL "" FORCE)
 set(SSTVAE_BUILD_PYMODULE OFF CACHE BOOL "" FORCE)
 add_subdirectory(.. sstvae_native EXCLUDE_FROM_ALL)
 
-qt_add_executable(sstvae_android main.cpp)
+qt_add_executable(sstvae_android main.cpp listener.cpp)
 qt_add_qml_module(sstvae_android URI SSTVAE VERSION 1.0 QML_FILES Main.qml)
 target_link_libraries(sstvae_android PRIVATE Qt6::Quick sstvae_core
                                              sstvae_audio_android)
@@ -59,4 +59,5 @@ set_target_properties(sstvae_android PROPERTIES
     QT_ANDROID_TARGET_SDK_VERSION 36
     QT_ANDROID_MIN_SDK_VERSION 28
     QT_ANDROID_VERSION_NAME "${PROJECT_VERSION}"
-    QT_ANDROID_VERSION_CODE 1)
+    QT_ANDROID_VERSION_CODE 1
+    QT_ANDROID_PERMISSIONS "android.permission.RECORD_AUDIO")
