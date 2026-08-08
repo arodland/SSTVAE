@@ -1251,21 +1251,30 @@ need when `--native` fails and you want to know *where*.
   with, measured ±0.05 dB: the clipper absorbs it and stage-2 trained
   through that same clipper, so the *objective* was the real risk all
   along.
-- `docs/android.md` — feasibility assessment for an Android port
-  (2026-08-08). **Nothing is implemented and no decision is taken**;
-  read it before assuming either way. The short version: the 17.5k
-  Qt-free lines under `native/core/` port unchanged and create **no new
-  parity surface** — an Android app is a fourth build of the same code,
-  not a reimplementation, so the golden vectors and `pytest --native`
-  still cover it. onnxruntime publishes an Android AAR at the **exact
-  pinned version** (1.28.0, with the C++ headers), so the codec's
-  "same version, two builds" basis survives. The work is all at the
-  platform edge — audio routing, foreground service, storage, touch UI
-  — and the one question that decides the project is whether a phone
-  can get audio to and from a radio at all. Rig control drops out for a
-  structural reason (Hamlib opens a path; Android has no `/dev/ttyUSB`
-  for an unprivileged app), which is why "RX+TX without rig control" is
-  the natural shape rather than a compromise.
+- `docs/android.md` — feasibility and design for an Android port.
+  **Direction decided 2026-08-08, nothing implemented**: a Qt Quick
+  front end over the existing `native/core/`, starting at Tier 0 (a
+  receive-only listener) with later tiers optional, and **native Android
+  audio from the beginning rather than QtMultimedia**. The 17.5k Qt-free
+  lines under `native/core/` port unchanged and create **no new parity
+  surface** — an Android app is a fourth build of the same code, not a
+  reimplementation, so the golden vectors and `pytest --native` still
+  cover it. onnxruntime publishes an Android AAR at the **exact pinned
+  version** (1.28.0, with the C++ headers), so the codec's "same
+  version, two builds" basis survives — a better position than macOS
+  x86_64. Two points worth not re-deriving. The audio layer is **Java
+  `AudioRecord` on a blocking reader thread, not AAudio/Oboe**: there is
+  no latency requirement here at all (2 s of buffer, 5 s polls), so
+  AAudio's only real benefit is worth nothing, while its `setDeviceId`
+  is silently ignored on the OpenSL ES fallback and USB capture has open
+  glitch reports — and enumeration needs Java either way. That design is
+  also the blocking-read architecture the desktop app wanted and could
+  not have, since PortAudio's blocking API corrupts the heap on JACK.
+  And rig control drops for a **structural** reason, not a scoping one:
+  Hamlib's serial layer opens a path and Android gives an unprivileged
+  app no `/dev/ttyUSB`, which is what makes "RX+TX without rig control"
+  the natural shape rather than a compromise. `rig::Backend` is still a
+  seam, so NET rigctl over wifi is ~200 lines whenever it is wanted.
 - `docs/todo.md` — open work items with the reasoning behind them.
   Currently one: a wider acquisition search so a mis-tuned counterpart
   still decodes — measured, the demod path is entirely independent of

@@ -1,7 +1,24 @@
-# Android: feasibility
+# Android: feasibility and design
 
-Assessment only — nothing here is implemented, and no decision has been
-taken. Written 2026-08-08 against `native/` at v0.3.1.
+Assessed 2026-08-08. **Nothing is implemented.** The direction below is
+decided; the code is not written and no schedule is attached.
+
+## Decisions (Andrew, 2026-08-08)
+
+1. **Qt Quick front end over the existing `native/core/`.** One
+   codebase, one toolchain, a touch-idiomatic UI. Not QtWidgets-as-is
+   (desktop hit targets on a phone), not Kotlin/Compose over JNI (a
+   second language and an FFI boundary, which is the trade
+   `docs/native-app.md` already rejected for the desktop).
+2. **Tier 0 first — a receive-only listener.** Later tiers are optional
+   and explicitly not committed to.
+3. **Native Android audio from the beginning, not QtMultimedia.** The
+   audio subsystem is already isolated behind a Qt-free layer, so this
+   costs little now and avoids building on a backend whose device
+   selection is in doubt. Acoustic coupling works — SSTVAE survives it,
+   which is known, not assumed — but USB audio is a large enough jump in
+   what the app is worth that it should be in from the start rather than
+   retrofitted.
 
 ## Verdict
 
@@ -12,15 +29,10 @@ compile for Android with no changes anyone has to argue about. CI
 already builds and tests that code for `linux-aarch64`, so ARM is not a
 new platform for it.
 
-What has to be built is the platform edge: audio routing, background
-execution, storage, and a touch UI. That is real work, and it is the
-part with no existing test coverage and no oracle, which is also where
-every expensive bug in this project's history has lived.
-
-The single question that decides whether an Android app is *useful*
-rather than merely buildable is **can it get audio to and from a
-radio**, and it is answerable in about a week of work. Everything else
-in this document is sizing.
+What has to be built is the platform edge: audio, background execution,
+storage, and a touch UI. That is real work, and it is the part with no
+existing test coverage and no oracle, which is also where every
+expensive bug in this project's history has lived.
 
 **One thing does not need re-litigating, and it is the thing that
 usually sinks a second implementation.** An Android app built this way
@@ -35,7 +47,7 @@ Kotlin or Rust reimplementation, which would need the whole harness in
 
 - **`native/core/`, minus `audio/qt/` and `overlay/render.cpp`**:
   17,523 lines, no Qt, no platform assumptions beyond `std::filesystem`
-  and a handful of `getenv` calls (see "Paths" below).
+  and a handful of `getenv` calls (see "Paths").
 - **The seams already exist, and they were built for a different
   reason.** `rx::Decoder`, `tx::Encoder`, `tx::Player`,
   `optimize::GradFn`/`GradFactory`, `rig::Backend`,
@@ -61,17 +73,133 @@ Kotlin or Rust reimplementation, which would need the whole harness in
 - **pocketfft, stb, dr_libs, easyexif**: header-only or vendored C with
   no platform surface.
 
-## What has to be written
+## The audio layer
+
+This is the risky piece and the one decision worth spelling out, since
+it is where the app is won or lost.
+
+### Why not QtMultimedia
+
+Qt 6's Android audio backend is reported not to honour a `QAudioDevice`
+selection for capture — the account is that `QAndroidAudioSource`
+compares the device id against a few presets rather than using it. That
+report is a forum thread, not a measurement of ours, and it might be
+wrong or fixed. It does not need resolving: the app has to reach a USB
+interface by name, and building that on a backend whose device selection
+is *in question* is a bad trade when the alternative is small and the
+layer beneath it is already device-agnostic.
+
+Dropping QtMultimedia also shrinks the Qt module set to Core, Gui, Qml,
+Quick and Network, and removes one Android backend from the list of
+things that can surprise us.
+
+### Java `AudioRecord`, not AAudio/Oboe
+
+Refining "native audio" one step further, because the obvious NDK answer
+is the wrong one here:
+
+- **We have no latency requirement at all.** The capture layer
+  deliberately buffers 2 seconds and the decode loop polls every 5. Low
+  latency is the entire reason AAudio exists, so its headline benefit is
+  worth exactly nothing to this app.
+- **`setDeviceId` on AAudio is honoured only when the underlying API is
+  AAudio (API 28+), silently ignored on the OpenSL ES fallback** — a
+  setting that quietly does nothing on some devices is the shape of bug
+  this project has spent the most time on.
+- **USB capture through AAudio has open glitch reports.** Since USB is
+  the whole point of choosing a native layer, taking the path with
+  reported USB trouble to gain latency we do not want is backwards.
+- **Enumeration needs Java regardless.**
+  `AudioManager.getDevices(GET_DEVICES_INPUTS)` is the only way to see
+  what is attached, so a Java layer exists either way.
+
+So: **a Java thread doing blocking `AudioRecord.read()`**, pushing each
+chunk across JNI into the existing Qt-free pipeline. Worth noticing what
+that architecture *is* — it is the blocking-read design the desktop app
+wanted and could not have. PortAudio's blocking API was the right answer
+to the GIL bug and had to be abandoned because `stream.read()` corrupts
+the heap on its JACK backend. Android has no such obstacle: there is no
+interpreter on any thread, and the reader is a plain blocking loop
+rather than a realtime callback, so the hazard class that cost 5 dB is
+absent by construction rather than by tuning.
+
+### Shape
+
+`core/audio/android/`, a new optional library
+(`SSTVAE_BUILD_ANDROIDAUDIO`) mirroring `core/audio/qt/`'s header
+**entry point for entry point**, so nothing above it changes:
+
+    input_device_names()   output_device_names()
+    default_input_name()   default_output_name()
+    class InputStream      play()
+
+`play()` already matches `tx::Player`, so it drops into `TxEngine`'s
+seam unchanged and the PTT guarantee is unaffected by which player is in
+use. Seven entry points is the whole surface.
+
+**Everything with logic in it stays where it is.** `bytes_to_mono`, the
+sample-format conversions, `resample_ratio`, `StreamResampler` and
+`match_device` are in `core/audio/audio.hpp`, Qt-free and tested against
+a fake device — precisely because every audio bug this project has had
+lived there and not in the code talking to the driver. The Android layer
+is enumeration and moving bytes, same as the Qt one, and inherits the
+three rules that were bought with real losses: open at the device's own
+rate and resample in our code, resample *statefully* across blocks, and
+never hold the ring buffer's lock across a bulk copy.
+
+Two rules for the JNI boundary, both cheap to keep and expensive to
+discover:
+
+- **Java calls into C++, never the reverse on the data path.** The
+  reader thread is already attached; a C++ thread calling back into Java
+  needs `AttachCurrentThread` and gives nothing in return. Chunks land
+  in a direct `ByteBuffer` and cross once per read.
+- **Device names must be stable strings**, because `match_device`
+  matches against what the config file stored — the same reason the
+  desktop stores a human-readable description rather than an opaque id.
+  `AudioDeviceInfo.getProductName()` plus the type is the candidate.
+  Note it is not unique when two identical interfaces are attached; the
+  desktop has the same ambiguity and lives with it.
+
+`tools/check_layering.py` gets one more clause: **only
+`core/audio/android/` may include `<jni.h>`.** Same rule and same reason
+as Qt Multimedia's — the engines stay drivable with no platform audio at
+all, which is what keeps the headless tests possible.
+
+### What still has to be measured on hardware
+
+Everything expensive this project has found in audio was found on real
+hardware and was invisible to unit tests: 5 dB from a GIL-starved
+callback, 4.7 dB from per-chunk resampling, 0.35% of clock error from a
+lock held across a bulk copy. Budget for the same here, and build the
+Android equivalent of `sstvae-audio-check --loopback` early — it exists
+for exactly this and it is why the desktop soundcard path is trusted.
+
+Open questions, in the order they can hurt:
+
+1. Does a target phone capture from a class-compliant USB interface at
+   all, at what rate, and does the existing `StreamResampler` path
+   decode what comes out? Note 48 kHz → 8 kHz is an exact 1:6, the
+   friendliest case the resampler has.
+2. Does a USB audio-class device need a permission prompt of its own?
+   Class-compliant audio is routed by the framework rather than claimed
+   through the USB host API, so it should not — but "should not" is not
+   a measurement, and getting it wrong is a first-run failure.
+3. Bus power. A phone feeding an interface over OTG may need a powered
+   hub, which is a documentation problem, not a code one.
+4. What happens on device disconnect mid-reception, and on an incoming
+   call taking the microphone.
+
+## Everything else that has to be written
 
 | Piece | Today | On Android |
 |---|---|---|
-| Audio capture/playback | `core/audio/qt/`, 656 lines | New backend, ~600–900 lines. **The one that decides the project** — see below. |
 | Paths (config, model cache) | `getenv` of `HOME`/`XDG_*`/`LOCALAPPDATA` | Two env vars set from JNI at startup. Near-free; see below. |
 | Saving received pictures | `std::filesystem` into `received/` | MediaStore or SAF, so the gallery can see them. New. |
-| Model download | `core/checkpoint/qt_fetcher.cpp`, QtNetwork, behind a `Fetcher` seam | Keep it if Qt is in; otherwise ~150 lines over `HttpURLConnection`. **The manual-redirect requirement carries over** — whatever client is used must not auto-follow, or the `x-linked-etag` checksum on the 302 is lost. |
-| Overlay rendering | `core/overlay/render.cpp`, 329 lines, QtGui only | Works under Qt on Android unchanged. Without Qt it is a re-implementation, and the font handling is the fiddly part, not the drawing. |
-| UI | 6,170 lines of QtWidgets | See "The UI decision". |
-| Rig control | `core/rig/hamlib.cpp` + libhamlib | Drop, or re-derive behind the existing `rig::Backend`. See below. |
+| Model download | `core/checkpoint/qt_fetcher.cpp`, QtNetwork, behind a `Fetcher` seam | **Keep it.** QtNetwork is in the module set anyway now that Qt Quick is the UI, so this is free. The manual-redirect requirement is unchanged — the client must not auto-follow, or the `x-linked-etag` checksum on the 302 is lost. |
+| Overlay rendering | `core/overlay/render.cpp`, 329 lines, QtGui only | Unchanged. QtGui is in the module set; Tier 1+ only. |
+| UI | 6,170 lines of QtWidgets | Rewritten in Qt Quick; see below. |
+| Rig control | `core/rig/hamlib.cpp` + libhamlib | Dropped. See below. |
 
 ### Paths: cheaper than it looks
 
@@ -90,56 +218,7 @@ Note what this does *not* cover: a received picture written to
 `filesDir` is invisible to the user. Getting pictures into the gallery
 is MediaStore work with no desktop counterpart.
 
-## The three genuinely hard parts
-
-### 1. Audio routing to the radio — the real risk
-
-The desktop app's entire audio design assumes you can name a device and
-open it. On Android that assumption is shaky in a specific way:
-
-- **Qt 6's Android audio backend reportedly does not honour a
-  `QAudioDevice` selection for capture** — the account is that
-  `QAndroidAudioSource` compares the device id against a few presets
-  rather than using it. If that holds, `audio::match_device` and the
-  whole settings picker have nothing to act on under QtMultimedia.
-  **This is a forum report, not a measurement of ours** — see "What to
-  measure first".
-- **Android's own API does support it**:
-  `AudioManager.getDevices(GET_DEVICES_INPUTS)` plus
-  `AudioRecord.setPreferredDevice()`, and class-compliant USB interfaces
-  appear there as `TYPE_USB_DEVICE`/`TYPE_USB_HEADSET`. That is the
-  argument for a Java/AAudio audio layer rather than QtMultimedia, and
-  it is **independent of the UI decision** — the audio backend and the
-  toolkit can be chosen separately, which is precisely what
-  `core/audio/audio.hpp` being Qt-free buys.
-
-Station setups, in descending order of how well they will work:
-
-- A class-compliant USB interface (Digirig, SignaLink, or the radio's
-  own USB codec) over OTG. Needs the device selection above, and needs
-  the phone to supply bus power or a powered hub.
-- **Acoustic coupling** — phone mic in front of the radio's speaker.
-  Needs no routing at all, and is a perfectly legitimate first target
-  for a receive-only app. It is a much lower bar than the desktop app
-  ever had to clear on day one.
-- A TRRS cable into the headset jack. Fine where the jack still exists.
-
-**Budget for hardware-only bugs.** Everything expensive this project has
-found in audio was found on real hardware and was invisible to unit
-tests: 5 dB from a GIL-starved callback, 4.7 dB from per-chunk
-resampling, 0.35% of clock error from a lock held across a bulk copy.
-There is no reason to expect Android to be the exception, and
-`sstvae-audio-check --loopback` — which exists because of exactly this —
-would need an Android equivalent.
-
-Two structural advantages carry over. The realtime-thread hazard that
-cost 5 dB has no analogue here (there is no interpreter to block), and
-the rules that were bought with the other two — resample statefully,
-open at the device's own rate, never hold the ring lock across a copy —
-already live in the Qt-free layer, so any new backend inherits them
-rather than rediscovering them.
-
-### 2. Background execution
+### Background execution
 
 A reception is 32–95 s and a listening session is hours. Android needs a
 foreground service with `foregroundServiceType="microphone"` and the
@@ -147,82 +226,95 @@ foreground service with `foregroundServiceType="microphone"` and the
 `RECORD_AUDIO`; screen-off capture is only allowed under that. Add
 battery-optimisation exemption prompts, audio focus, and surviving an
 incoming call taking the microphone — the decode loop has to resume
-rather than wedge, and the ring buffer's history across that gap is a
-decision someone has to make.
+rather than wedge, and what happens to the ring buffer's history across
+that gap is a decision someone has to make.
 
 None of this is difficult. All of it is new code with no desktop
 counterpart, and it is where an app that "just works" is won or lost.
 
-### 3. Rig control — drop it, and the reason is structural
+### Rig control drops for a structural reason, not a scoping one
 
 `sstvae_rig` links libhamlib, which opens `/dev/ttyUSB*`. Android hands
 an unprivileged app no such node: USB serial goes through the Java USB
 host API, where `usb-serial-for-android` is the standard library
 (FTDI/CDC/CP210x/PL2303, **no root**). Hamlib's serial layer opens a
 *path* and has no way to be handed an already-open descriptor, so using
-it would mean patching Hamlib — which is a fork of a pinned dependency,
-in the one area (`docs/native-app.md`) where "which radios work" is
-already a per-platform property we went to some trouble to avoid.
+it would mean patching Hamlib — a fork of a pinned dependency, in the
+one area where "which radios work" is already a per-platform property we
+went to some trouble to avoid.
 
-The alternative is a `rig::Backend` that speaks CAT over the Java layer
-directly for the handful of operations actually used — PTT, frequency
-read, mode set. The seam already exists, and `RigController`'s threading
-design (one worker, PTT as priority work, `stop()` detaches) has no
-external dependency and ports unchanged. That is a real project, not a
-weekend, and it is per-radio rather than per-platform.
+**So: VOX for PTT, no CAT, in any transmitting version.** That is what
+"RX+TX without rig control" actually costs — the operator arms VOX and
+reads the frequency off the radio's own display.
 
-**So: VOX for PTT, no CAT, in any first version.** That is what "RX+TX
-without rig control" actually costs — the operator arms VOX and reads
-the frequency off the radio's own display.
+Two things make this less final than it sounds. `rig::Backend` is a
+seam, and `RigController`'s threading design (one worker, PTT as
+priority work, `stop()` detaches) has no external dependency and ports
+unchanged — so a CAT backend can be added later without restructuring
+anything. And **Hamlib model 2 (NET rigctl) needs no USB at all**: a
+phone on the same wifi as a station running `rigctld` gets full CAT over
+TCP. Since the wire format is trivial ASCII, that is roughly 200 lines
+of `rig::Backend` that does not link Hamlib — which on Android is a much
+better trade than cross-compiling an autotools tarball for four ABIs.
 
-One free consolation: **Hamlib model 2 (NET rigctl) needs no USB at
-all.** A phone on the same wifi as a station running `rigctld` gets full
-CAT over TCP, and that path is already just a model number in the
-existing picker. It would want a real Hamlib to speak the protocol —
-or, since the wire format is trivial ASCII, about 200 lines of
-`rig::Backend` that does not link Hamlib at all. On Android that is
-probably the better trade, given `hamlib.cmake` builds from an autotools
-tarball that would need NDK cross-compilation for four ABIs.
+## The Qt Quick front end
 
-## The UI decision
+Replacing 6,170 lines of QtWidgets, but less of it is new than that
+implies — the parts of those files with logic in them are mostly already
+in the core:
 
-1. **Ship the QtWidgets UI as-is.** Cheapest by a wide margin — the
-   6,170 lines compile — and genuinely bad on a phone: desktop hit
-   targets, no gestures, dialogs sized for a monitor. Note that
-   `picture_box.cpp` and `overlay_editor.cpp` have *already* fought Qt's
-   layout over minimum heights on small screens; that work helps a
-   tablet and does not make a phone good. Right answer for a spike, not
-   for a release.
-2. **A Qt Quick front end over the same core.** One codebase, one
-   toolchain, touch-idiomatic. The waterfall and the picture box become
-   QML items over the same `core/dsp/spectrum.cpp`; `rx_panel` and
-   `tx_panel` are largely wiring and translate rather than port. Costs a
-   rewrite of most of the 6,170 lines. Qt for Android is LGPLv3 and
-   `androiddeployqt` bundles Qt as shared `.so`s, which satisfies the
-   relinking obligation the same way the desktop build does.
-3. **Kotlin/Compose over a JNI'd core.** The best-feeling app and the
-   most work, plus a second language and an FFI boundary — which is
-   precisely the trade `docs/native-app.md` rejected for "Rust core + Qt
-   front end", and the reasoning transfers intact.
+- **Waterfall.** `core/dsp/spectrum.cpp` is the arithmetic and is
+  Qt-free, including `reduce_to_width`'s peak-hold (point-sampling
+  produces a ragged comb that reads as a *reception* problem). A
+  `QQuickPaintedItem` over the same functions is the straight
+  translation. The history-scrolls-down and survives-a-resize
+  properties are still worth testing, and `tick()` should stay a slot
+  for the same reason.
+- **Picture view.** A `QQuickImageProvider` over the received `QImage`.
+  Note the whole `picture_box.cpp` aspect-ratio fight — `setFixedHeight`
+  ratcheting a window's minimum height — is a QtWidgets layout problem
+  that simply does not exist in Quick, where an `Item` imposes nothing
+  upward. That is one of the more annoying pieces of the desktop app
+  evaporating.
+- **Status log.** `core/log/` is Qt-free and bounded; a
+  `QAbstractListModel` over `snapshot()` gives the same backfill the
+  dock has.
+- **Settings.** `core/settings/` is Qt-free JSON at `CONFIG_VERSION` 2.
+  Android drops the rig keys and the `audio.backend` key and gains a
+  device selection; whether that is a version 3 or an additive change
+  the desktop ignores is a decision for whoever writes it. The
+  round-trip test discipline in `test_settings_dialog.cpp` — a fixture
+  in which no field holds its default — applies unchanged and is worth
+  keeping, since a field displayed but not written back is still the
+  characteristic settings bug.
 
-**Recommendation: (2) for a real app, (1) to answer the audio question
-first.** The audio question decides the project and is answerable under
-either, so there is no reason to spend the UI budget before knowing it.
+Two desktop layout decisions do not carry over and should not be ported
+out of habit: the splitter-versus-tabs arrangement is a large-screen
+problem, and the receive/transmit panes on a phone are simply separate
+screens. The rule *behind* them does carry: half duplex means
+transmitting suspends receive, with a fresh ring buffer on resume, and
+the pause has to look deliberate rather than wedged.
+
+**Qt 6.8 is the sensible floor**, which sets `minSdkVersion` to 28
+(Android 9). Nothing else we need is above that — `getDevices()` and
+`setPreferredDevice()` are API 23 — so Qt is the binding constraint.
 
 ## Scoping tiers
 
-### Tier 0 — receive-only listener
+### Tier 0 — receive-only listener (the committed one)
 
-Mic or USB capture → `RingBuffer` → `decode_loop` → picture. Needs audio
-in, a foreground service, storage-out, model fetch, a picture view and a
-waterfall. Does **not** need the overlay renderer, the editor, the tx
-engine, the rig, the optimizer, the crop dialog, or settings for any of
-them.
+USB or mic capture → `RingBuffer` → `decode_loop` → picture. Needs the
+audio layer, a foreground service, storage-out, model fetch, a picture
+view and a waterfall. Does **not** need the overlay renderer, the
+editor, the tx engine, the rig, the optimizer, the crop dialog, or
+settings for any of them.
 
-The appeal is that acoustic coupling makes tier 0 **usable with no cable
-at all**, so a first release does not depend on the USB question
-resolving well. Only the decoder needs fetching — 9 MB, not 21 — because
-`load_codec`'s per-part laziness already does that.
+Only the decoder needs fetching — 9 MB, not 21 — because `load_codec`'s
+per-part laziness already does that.
+
+Acoustic coupling remains the zero-hardware fallback and should stay
+supported, but it is the *fallback*: the app is worth having because it
+takes a USB interface.
 
 ### Tier 1 — receive and transmit, VOX keying
 
@@ -230,14 +322,13 @@ Adds `core/tx/engine.cpp`, which ports unchanged. Its PTT guarantee
 degenerates to "VOX drops when the audio stops" and `PttWatchdog` has
 nothing to unkey — keep the state machine anyway, so CAT can be added
 later without restructuring the transmit path. Adds audio *output*
-routing, which on Android is the same problem as input and is solved by
-the same layer. Picture source is the camera or the gallery;
-`images::fit` already handles the resize, and 320×240 is still the
-minimum accepted input.
+routing, which is the same problem as input and is solved by the same
+layer. Picture source is the camera or the gallery; `images::fit`
+already handles the resize, and 320×240 is still the minimum accepted
+input.
 
-Skipping the overlay editor means skipping `overlay/render.cpp` too, if
-transmissions are the bare picture — but on a ham mode a callsign
-caption will be wanted, and under option (2) the renderer comes free.
+A callsign caption will be wanted on a ham mode, so
+`core/overlay/render.cpp` comes in here even if the *editor* does not.
 
 ### Tier 2 — CAT, overlay editing, the refiner
 
@@ -256,12 +347,11 @@ which is the same property that was supposed to buy templates.
 ## Sizes and performance
 
 **APK.** `libonnxruntime.so` is 28.6 MB raw / 10.6 MB compressed for
-arm64-v8a. Qt Core/Gui/Quick/Multimedia adds roughly 25–40 MB
-uncompressed depending on modules, plus our own core. Ballpark
-**60–80 MB per-ABI**, and an arm64-only App Bundle keeps the user's
-download near that instead of multiplying it by four ABIs. Model
-artifacts are **not** in the APK — the 9 MB decoder is fetched on first
-run, unchanged from desktop.
+arm64-v8a. Qt Core/Gui/Qml/Quick/Network adds roughly 25–35 MB
+uncompressed, plus our own core. Ballpark **55–75 MB per-ABI**, and an
+arm64-only App Bundle keeps the user's download near that instead of
+multiplying it by four ABIs. Model artifacts are **not** in the APK —
+the 9 MB decoder is fetched on first run, unchanged from desktop.
 
 **CPU.** The desktop figures are `demodulate` at 173 ms and an fp16
 decode at 86 ms per five-second poll, on a 24-core x86 box with
@@ -288,34 +378,24 @@ the one number worth revisiting on big.LITTLE.
 - **Qt**: LGPLv3, dynamically linked, which is what `androiddeployqt`
   does. Do not static-link without a commercial licence — same rule as
   the desktop build.
-- **Hamlib**: LGPL-2.1+, moot if dropped.
 - **onnxruntime**: MIT.
+- **Hamlib**: LGPL-2.1+, moot now that rig control is dropped.
 - **The icon is not free.** `NOTICE` covers `native/packaging/sstvae.svg`
   and the seven files generated from it under
   `LicenseRef-SSTVAE-Branding`; a store listing and a launcher icon both
   carry it. Nothing new, but a Play Store presence makes it more visible
   than a CI artifact does, and a fork publishing its own build must
-  replace it.
-
-## What to measure first
-
-In this order, because the first one can end the project:
-
-1. **Can a target phone capture from a class-compliant USB interface at
-   all**, at what rate, and does the existing `StreamResampler` path
-   decode what comes out? One evening, on tier 0 built as option (1).
-2. **Is the Qt Android device-selection limitation real** at current Qt,
-   or does `QT_MEDIA_BACKEND=android` or a newer release honour the
-   selection? The claim above is a forum report; if it is wrong, the
-   audio layer is much cheaper than this document assumes.
-3. **Battery per hour of listening**, with the screen off.
-4. **int8 against fp16 on the target's CPU**, which `docs/onnx.md`
-   explicitly declines to predict from the x86 numbers.
+  replace it. Android also wants its own icon sizes, which means
+  `tools/gen_icons.py` grows a target — and it writes the REUSE sidecar
+  beside each file it generates for exactly this reason.
 
 ## Sources
 
 - [onnxruntime — Build for Android](https://onnxruntime.ai/docs/build/android.html)
-- [Qt 6 — Android Platform Notes](https://doc.qt.io/qt-6/android-platform-notes.html)
+- [Qt 6.8 — Android Platform Notes](https://doc.qt.io/qt-6.8/android-platform-notes.html)
+- [Qt for Android supported versions guidelines](https://www.qt.io/blog/qt-for-android-supported-versions-guidelines)
 - [Qt Forum — Qt6 AudioSource on Android: unable to select non-default source](https://forum.qt.io/topic/157041/qt6-audiosource-on-android-unable-to-select-non-default-source)
+- [AAudio | Android NDK](https://developer.android.com/ndk/guides/audio/aaudio/aaudio)
+- [Oboe — Full Guide](https://github.com/google/oboe/blob/main/docs/FullGuide.md)
 - [Android — USB digital audio](https://source.android.com/docs/core/audio/usb)
 - [mik3y/usb-serial-for-android](https://github.com/mik3y/usb-serial-for-android)
