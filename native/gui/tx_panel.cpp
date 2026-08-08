@@ -560,6 +560,23 @@ QGroupBox* TransmitPanel::build_properties(QWidget* parent) {
         set_color_swatch(color);
         editor_->refresh_item();
     });
+    // **Given its swatch now, before anything is selected.**
+    //
+    // A QPushButton grows when it is handed an icon: measured 80x22
+    // without and 80x24 with, on the same style. The swatch used to
+    // arrive on the first *text* selection, so the button silently got
+    // 2 px taller at that moment and stayed there -- and on a platform
+    // where this button is the tallest thing on its line of the
+    // wrapping row, that is 4 px on the whole control strip, which the
+    // panes are then locked to. It cost a Windows CI failure that
+    // reproduced nowhere else, because on Linux a taller sibling on the
+    // same line absorbed it.
+    //
+    // An empty swatch is transparent and draws nothing, so this is
+    // invisible; what it buys is a button whose metrics never move.
+    // `test_tx_panel.cpp` asserts that directly, which is a check every
+    // platform can run.
+    set_color_swatch(QColor());
     form->addWidget(style::row(box, {new QLabel(tr("Colour"), box), color_button_}));
 
     // Removing acts on the selection, so it belongs with the selection's
@@ -888,7 +905,14 @@ void TransmitPanel::set_color_swatch(const QColor& color) {
     // so without this guard the whole rebuild -- parse, allocate, paint,
     // setIcon, and the layout invalidation setIcon triggers -- runs at
     // mouse-move rate on the app's most latency-sensitive path.
-    if (color == swatch_color_) return;
+    //
+    // **`swatch_set_`, not just the colour.** An invalid QColor equals
+    // an invalid QColor, so before this flag existed the button could
+    // not be given its *first* swatch at construction -- the guard ate
+    // the call -- and it therefore acquired one only when a text item
+    // was first selected. See `build_properties` for why that mattered.
+    if (swatch_set_ && color == swatch_color_) return;
+    swatch_set_ = true;
     swatch_color_ = color;
 
     const int size = style()->pixelMetric(QStyle::PM_SmallIconSize);
