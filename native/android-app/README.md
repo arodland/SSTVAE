@@ -102,3 +102,40 @@ In roughly the order the doc argues for:
    app, not an obligation to discharge.
 6. **Model fetch** — `core/checkpoint/qt_fetcher.cpp` should port as is
    now that QtNetwork is in the module set.
+
+## `core/audio/android/`
+
+The permanent audio layer, entry point for entry point the same surface
+as `core/audio/qt/` — so `InputStream` and `play()` drop into the
+engines' existing seams unchanged. Built only when targeting Android
+(`<jni.h>` and the NDK's `android`/`log` libraries have to exist), and
+`tools/check_layering.py` enforces that nothing else under `core/`
+includes `<jni.h>`, for the same reason it guards Qt Multimedia: the
+engines must stay drivable with no platform audio at all.
+
+Its Java half lives with it, at
+`core/audio/android/java/org/cleverdomain/sstvae/AudioBridge.java`,
+rather than in an app — an app supplying its own would be free to get
+the blocking-read loop subtly wrong, and that loop is what the layer
+exists to own. Consumers add that directory to their Gradle
+`sourceSets`; `SSTVAE_ANDROID_AUDIO_JAVA_DIR` names it.
+
+**Java calls into C++ on the data path and never the reverse.** The
+reader thread is one we own and therefore already attached, so pushing a
+chunk is a plain call; C++ calls into Java only to enumerate, open and
+close, which is rare, off the audio path, and attaches explicitly.
+Backwards, this would put an `AttachCurrentThread` on every buffer.
+
+Three things carried over from what the hardware runs taught:
+
+- **Routing is judged by `getRoutedDevice()` after the stream is live**,
+  never by `setPreferredDevice`'s return value — measured against a
+  TH-D75 over USB that returned false while routing correctly.
+  `routing_warning()` is empty unless the audio is genuinely coming from
+  somewhere other than the operator thinks.
+- **`peak_level()` and `near_zero_fraction()` are both exposed**, because
+  a path that is quiet and a path delivering silence have the same mean
+  and are not the same failure.
+- **`UNPROCESSED` first, `VOICE_RECOGNITION` as fallback.** AGC or noise
+  suppression on an OFDM signal degrades it in a way that reads like a
+  bad radio rather than a bad setting.

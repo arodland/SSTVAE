@@ -46,7 +46,12 @@ add_subdirectory(.. sstvae_native EXCLUDE_FROM_ALL)
 
 qt_add_executable(sstvae_android main.cpp)
 qt_add_qml_module(sstvae_android URI SSTVAE VERSION 1.0 QML_FILES Main.qml)
-target_link_libraries(sstvae_android PRIVATE Qt6::Quick sstvae_core)
+target_link_libraries(sstvae_android PRIVATE Qt6::Quick sstvae_core
+                                             sstvae_audio_android)
+
+# The audio layer's Java half ships with the layer, not with this app.
+set_property(TARGET sstvae_android APPEND PROPERTY
+    QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android")
 
 set_target_properties(sstvae_android PROPERTIES
     QT_ANDROID_PACKAGE_NAME "org.cleverdomain.sstvae"

@@ -210,6 +210,25 @@ if(_want_qtaudio)
   message(STATUS "Qt Multimedia audio: ${Qt6_VERSION}")
 endif()
 
+# --- Android audio ----------------------------------------------------------
+# The Android counterpart of core/audio/qt/, and a separate library for the
+# same reason: the modem, the codec and both engines must still build with no
+# platform audio at all. Only built when targeting Android, where <jni.h> and
+# the NDK's log/android libraries exist -- ON elsewhere would be a request
+# that cannot be satisfied, so this is not a tri-state switch like the others.
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+  add_library(sstvae_audio_android STATIC core/audio/android/androidaudio.cpp)
+  set_target_properties(sstvae_audio_android PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(sstvae_audio_android PUBLIC core)
+  target_link_libraries(sstvae_audio_android PUBLIC sstvae_core PRIVATE android log)
+  # The Java half lives with the C++ half rather than in an app: an app
+  # supplying its own would be free to get the blocking-read loop wrong.
+  # Consumers add this to their Gradle sourceSets.
+  set(SSTVAE_ANDROID_AUDIO_JAVA_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/core/audio/android/java" CACHE INTERNAL "")
+  message(STATUS "Android audio: ${ANDROID_ABI}")
+endif()
+
 # --- Overlay rendering ------------------------------------------------------
 # Separate from sstvae_core for the same reason Qt audio is: the modem,
 # the golden vectors and the parity module have no business needing a
