@@ -674,9 +674,15 @@ QWidget* TransmitPanel::build_send_bar() {
     // No "Mode:" label: every item in the combo already begins with the
     // word, so the row read "Mode: Mode B - 64 s".
     layout->addWidget(mode_combo_);
-    layout->addWidget(new QLabel(tr("Level:"), bar));
-    layout->addWidget(level_slider_);
-    layout->addWidget(level_label_);
+    // **Caption, slider and readout are one item.** A `FlowLayout` wraps
+    // between items, and these were three of them, so a narrow pane
+    // could leave the slider on one line and the number it is showing
+    // on the next -- or strand "Level:" above the thing it names. None
+    // of the three means anything alone: the slider has no scale
+    // printed on it, so the readout *is* how you know where it is set.
+    // Grouped, they wrap as a unit or not at all.
+    layout->addWidget(style::row(
+        bar, {new QLabel(tr("Level:"), bar), level_slider_, level_label_}));
     layout->addWidget(send_button_);
     layout->addWidget(cancel_button_);
     layout->addWidget(status_);
