@@ -19,6 +19,18 @@ using sstvae::androidapp::Session;
 
 constexpr const char* kServiceClass = "org/cleverdomain/sstvae/ListenerService";
 
+// Hold the screen while a session is running and this window is up.
+// A window flag rather than a wake lock, so the platform drops it on
+// backgrounding by itself -- see ScreenOn.java.
+void keep_screen_on(bool on) {
+    QJniObject ctx = QNativeInterface::QAndroidApplication::context();
+    if (!ctx.isValid()) return;
+    QJniObject::callStaticMethod<void>("org/cleverdomain/sstvae/ScreenOn", "set",
+                                       "(Landroid/content/Context;Z)V", ctx.object(),
+                                       static_cast<jboolean>(on));
+    QJniEnvironment().checkAndClearExceptions();
+}
+
 // The label for "let the platform decide", which has to be
 // distinguishable from a device that merely happens to be listed first.
 const QString kSystemDefault = QStringLiteral("System default");
@@ -80,6 +92,16 @@ Listener::Listener(QObject* parent) : QObject(parent) {
         if (p.image.get() != last_image_) {
             last_image_ = p.image.get();
             ++live_id_;
+        }
+        // Driven from the poll rather than from start()/stop(),
+        // because the session can also end without the UI asking --
+        // a capture error, or the service being stopped from the
+        // notification. Tracking the button would leave the screen
+        // pinned on after one of those.
+        const bool live = Session::instance().running();
+        if (live != screen_held_) {
+            screen_held_ = live;
+            keep_screen_on(live);
         }
         emit changed();
     });

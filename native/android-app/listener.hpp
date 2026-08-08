@@ -70,6 +70,7 @@ private:
     QString error_;
     QTimer poll_;
     int live_id_ = 0;
+    bool screen_held_ = false;
     const void* last_image_ = nullptr;
 };
 
