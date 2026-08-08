@@ -10,6 +10,7 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.drawable.Icon;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -222,11 +223,38 @@ public class ListenerService extends Service {
         PendingIntent pi = PendingIntent.getActivity(
                 this, 0, open, PendingIntent.FLAG_IMMUTABLE);
 
+        // Stop from the shade, without going through the UI.
+        //
+        // This is not a shortcut for the button on the Listen screen —
+        // it is the only control that exists in the state the service
+        // is built for. An ongoing notification is what the operator
+        // sees after swiping the app away, and {@code
+        // stopWithTask="false"} means that session is still holding the
+        // microphone and the wake path with no activity to return to.
+        // Without this, ending it means relaunching the app or digging
+        // through the system settings, and a foreground service the
+        // user cannot stop from its own notification is the kind that
+        // gets uninstalled.
+        //
+        // Request code 1, not 0: a PendingIntent is identified by
+        // (context, requestCode, intent-modulo-extras), so reusing 0
+        // would collide with the content intent above and one of the
+        // two would silently become the other.
+        Intent stop = new Intent(this, ListenerService.class);
+        stop.setAction(ACTION_STOP);
+        PendingIntent stopPi = PendingIntent.getService(
+                this, 1, stop, PendingIntent.FLAG_IMMUTABLE);
+
         return new Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle("SSTVAE")
                 .setContentText(text)
                 .setSmallIcon(android.R.drawable.ic_btn_speak_now)
                 .setContentIntent(pi)
+                .addAction(new Notification.Action.Builder(
+                                   Icon.createWithResource(
+                                           this, android.R.drawable.ic_menu_close_clear_cancel),
+                                   "Stop", stopPi)
+                                   .build())
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .build();

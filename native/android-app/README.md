@@ -207,6 +207,20 @@ In roughly the order the doc argues for. The first two are **done**:
    `START_NOT_STICKY`, not sticky: a restarted service arrives with a
    null intent and so no device, and silently opening the *wrong*
    microphone is worse than not restarting.
+
+   **The notification carries a Stop action**, and it is not a
+   convenience duplicate of the button on the Listen screen: after the
+   app is swiped away — which `stopWithTask="false"` is specifically
+   there to survive — it is the *only* control that exists, with the
+   session still holding the microphone and no activity to return to.
+   The UI needs no wiring for it, because the view already polls
+   `Session::running()` rather than tracking its own button; stopping
+   from the shade reverts the pane on the next tick, which is what that
+   poll was written for. One trap: a `PendingIntent` is identified by
+   (context, requestCode, intent-modulo-extras), so the action reuses
+   neither the content intent's request code nor its target — 0 and
+   `getActivity` against 1 and `getService`. Sharing a code would make
+   one of the two silently become the other.
 3. **Listen / Pictures / Settings**, with the waterfall over
    `core/dsp/spectrum.cpp` as the *tuning instrument* — with no CAT it
    is the only frequency feedback there is.
