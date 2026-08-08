@@ -78,6 +78,7 @@ QColor on_danger();       // that light text
 QColor danger_bright();   // over the waterfall's own dark image
 QColor caution();         // approaching clipping
 QColor ok();              // a healthy level
+QColor on_ok();           // dark text that reads on an ok() fill
 
 // The picture viewport, deliberately theme-independent: a photograph is
 // judged against a neutral dark ground whatever the desktop is doing,

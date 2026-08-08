@@ -18,6 +18,7 @@
 // into a message rather than a stalled CI job.
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -183,6 +184,106 @@ void write_all(rx::RingBuffer& ring, const std::vector<double>& x) {
     ring.write(std::span<const double>(x.data(), x.size()));
 }
 
+// Deterministic noise, same generator shape as test_noise_produces_nothing
+// below -- used here to stand in for a branch whose antenna never
+// acquires anything.
+std::vector<double> noise(std::size_t n, std::uint64_t seed, double scale = 0.05) {
+    std::vector<double> out(n);
+    std::uint64_t s = seed;
+    for (double& v : out) {
+        s += 0x9E3779B97F4A7C15ULL;
+        std::uint64_t z = s;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        z = z ^ (z >> 31);
+        v = scale * (static_cast<double>(z >> 11) / 9007199254740992.0 - 0.5);
+    }
+    return out;
+}
+
+// Silences the lead-in/preamble/header of a real transmission, as if
+// that antenna's preamble were too faded to detect at all: the header
+// path fails to lock on it, but the frame pilots behind it (at exactly
+// the same buffer position as an untouched branch's) are untouched, so
+// blind acquisition still locks on the same reception_start a header
+// lock on the unmodified signal would report.
+std::vector<double> zero_preamble(std::vector<double> x) {
+    const auto end = static_cast<std::size_t>(
+        config::LEADIN_SAMPLES + config::PREAMBLE_SAMPLES + config::HEADER_SAMPLES);
+    std::fill(x.begin(), x.begin() + static_cast<std::ptrdiff_t>(std::min(end, x.size())), 0.0);
+    return x;
+}
+
+// Two-ring counterpart of Harness, for decode_loop_diversity. A sink
+// that returns a fixed path (rather than declining, like Harness's)
+// because the debug-image tests need something for
+// save_debug_image_to_dir_sink-style callers to key off of.
+struct DiversityHarness {
+    rx::RingBuffer ring_a;
+    rx::RingBuffer ring_b;
+    rx::SharedState state;
+    rx::StopFlag stop;
+    rx::RxConfig config;
+
+    std::mutex m;
+    std::condition_variable cv;
+    std::vector<rx::Reception> received;
+    int debug_images = 0;
+
+    explicit DiversityHarness(double seconds) : ring_a(seconds), ring_b(seconds) {
+        config.poll_interval = 0.02;
+        config.end_grace = 0.2;
+    }
+
+    std::array<rx::RingBuffer*, 2> rings() { return {&ring_a, &ring_b}; }
+
+    rx::Decoder decoder() {
+        return [](std::span<const double>, std::span<const double> w) {
+            images::Picture p(2, 2);
+            p.rgb[0] = kDecoderMark;
+            p.rgb[1] = static_cast<std::uint8_t>(
+                std::count_if(w.begin(), w.end(), [](double v) { return v != 0.0; }) & 0xFF);
+            return p;
+        };
+    }
+
+    rx::Sink sink() {
+        return [this](const rx::Reception& r) -> std::optional<std::string> {
+            {
+                std::lock_guard<std::mutex> lock(m);
+                received.push_back(r);
+            }
+            cv.notify_all();
+            return std::string("fake_reception.png");
+        };
+    }
+
+    rx::DebugImageSink debug_sink() {
+        return [this](const images::Picture&,
+                     const std::optional<std::string>& saved_path) -> std::optional<std::string> {
+            if (!saved_path) return std::nullopt;
+            {
+                std::lock_guard<std::mutex> lock(m);
+                ++debug_images;
+            }
+            cv.notify_all();
+            return std::string("fake_reception_diversity.png");
+        };
+    }
+
+    bool until(const std::function<bool()>& pred, const std::string& what) {
+        std::unique_lock<std::mutex> lock(m);
+        const bool ok = cv.wait_for(lock, std::chrono::seconds(120), pred);
+        if (!ok) check::fail(what, "timed out waiting for the loop to get there");
+        return ok;
+    }
+
+    std::size_t count() {
+        std::lock_guard<std::mutex> lock(m);
+        return received.size();
+    }
+};
+
 void test_a_clean_transmission_is_received_once() {
     Harness h(40.0);
     h.config.once = true;
@@ -275,6 +376,170 @@ void test_two_transmissions_are_both_received() {
     const bool both = (h.received[0].callsign == "KC2G" && h.received[1].callsign == "W1AW") ||
                       (h.received[0].callsign == "W1AW" && h.received[1].callsign == "KC2G");
     check::is_true(both, "rx/two: two different transmissions, not one twice");
+}
+
+void test_diversity_combines_two_branches_into_one_reception() {
+    DiversityHarness h(40.0);
+    h.config.once = true;
+    const std::vector<double> x = transmission("TEST", 6);
+    write_all(h.ring_a, x);
+    write_all(h.ring_b, x);
+
+    rx::decode_loop_diversity(h.rings(), h.decoder(), h.state, h.config, h.stop, h.sink());
+
+    check::equal(h.received.size(), std::size_t{1}, "rx/div: exactly one reception");
+    if (h.received.empty()) return;
+    const rx::Reception& r = h.received[0];
+    check::is_true(r.frames_received.has_value() &&
+                       *r.frames_received == mode_a().n_frames,
+                   "rx/div: every frame arrived combining two clean branches");
+    check::equal(r.callsign, std::string("TEST"), "rx/div: the beacon's callsign");
+
+    const rx::Progress p = h.state.get();
+    check::is_true(p.branch_a_locked, "rx/div: branch A reported locked");
+    check::is_true(p.branch_b_locked, "rx/div: branch B reported locked");
+}
+
+void test_diversity_falls_back_to_single_branch_when_the_other_is_dead() {
+    DiversityHarness h(40.0);
+    h.config.once = true;
+    const std::vector<double> x = transmission("SOLO", 7);
+    write_all(h.ring_a, x);
+    write_all(h.ring_b, noise(x.size(), 99));
+
+    rx::decode_loop_diversity(h.rings(), h.decoder(), h.state, h.config, h.stop, h.sink());
+
+    check::equal(h.received.size(), std::size_t{1},
+                 "rx/div-fallback: still received with only one branch locked");
+    if (h.received.empty()) return;
+    check::equal(h.received[0].callsign, std::string("SOLO"), "rx/div-fallback: callsign");
+
+    const rx::Progress p = h.state.get();
+    check::is_true(p.branch_a_locked, "rx/div-fallback: branch A (the live one) reported locked");
+    check::is_true(!p.branch_b_locked,
+                   "rx/div-fallback: branch B (noise) reported not locked");
+}
+
+void test_diversity_two_transmissions_are_both_received() {
+    std::vector<double> audio = transmission("KC2G", 8);
+    const std::vector<double> second = transmission("W1AW", 9);
+    audio.insert(audio.end(), second.begin(), second.end());
+
+    DiversityHarness h(80.0);
+    write_all(h.ring_a, audio);
+    write_all(h.ring_b, audio);
+
+    std::thread loop([&] {
+        rx::decode_loop_diversity(h.rings(), h.decoder(), h.state, h.config, h.stop, h.sink());
+    });
+
+    h.until([&] { return h.received.size() >= 2; }, "rx/div-two: both receptions");
+    h.stop.set();
+    loop.join();
+
+    check::equal(h.count(), std::size_t{2}, "rx/div-two: exactly two, no repeats");
+    if (h.count() != 2) return;
+    std::lock_guard<std::mutex> lock(h.m);
+    const bool both = (h.received[0].callsign == "KC2G" && h.received[1].callsign == "W1AW") ||
+                      (h.received[0].callsign == "W1AW" && h.received[1].callsign == "KC2G");
+    check::is_true(both, "rx/div-two: two different transmissions, not one twice");
+}
+
+void test_diversity_debug_image_written_only_when_both_branches_lock() {
+    // Both branches lock: the debug sink is invoked once.
+    {
+        DiversityHarness h(40.0);
+        h.config.once = true;
+        const std::vector<double> x = transmission("BOTH", 10);
+        write_all(h.ring_a, x);
+        write_all(h.ring_b, x);
+        rx::DebugImageSink debug = h.debug_sink();
+        rx::decode_loop_diversity(h.rings(), h.decoder(), h.state, h.config, h.stop, h.sink(),
+                                  &debug);
+        check::equal(h.debug_images, 1, "rx/div-debug: written when both branches contribute");
+    }
+    // Only one branch locks: nothing to compare, so the debug sink is
+    // never called.
+    {
+        DiversityHarness h(40.0);
+        h.config.once = true;
+        const std::vector<double> x = transmission("ONE", 11);
+        write_all(h.ring_a, x);
+        write_all(h.ring_b, noise(x.size(), 55));
+        rx::DebugImageSink debug = h.debug_sink();
+        rx::decode_loop_diversity(h.rings(), h.decoder(), h.state, h.config, h.stop, h.sink(),
+                                  &debug);
+        check::equal(h.debug_images, 0, "rx/div-debug: skipped with only one branch locked");
+    }
+}
+
+void test_diversity_combines_a_header_branch_with_a_blind_only_branch() {
+    // Branch B's preamble/header is silence (as if too faded to detect
+    // at all), so it can only ever blind-lock -- but the frames behind
+    // it are clean, so the reception should still complete, combining a
+    // header-locked branch A with a blind-locked branch B.
+    DiversityHarness h(40.0);
+    h.config.once = true;
+    const std::vector<double> x = transmission("MIXED", 20);
+    write_all(h.ring_a, x);
+    write_all(h.ring_b, zero_preamble(x));
+
+    rx::decode_loop_diversity(h.rings(), h.decoder(), h.state, h.config, h.stop, h.sink());
+
+    check::equal(h.received.size(), std::size_t{1}, "rx/div-mix: exactly one reception");
+    if (h.received.empty()) return;
+    check::equal(h.received[0].callsign, std::string("MIXED"), "rx/div-mix: callsign");
+    check::is_true(h.received[0].mode_name.has_value() && *h.received[0].mode_name == "A",
+                   "rx/div-mix: the header branch's mode is authoritative");
+
+    const rx::Progress p = h.state.get();
+    check::is_true(p.branch_a_locked, "rx/div-mix: header-locked branch A reported locked");
+    check::is_true(p.branch_b_locked, "rx/div-mix: blind-locked branch B also reported locked");
+}
+
+void test_diversity_completes_when_both_branches_are_blind_only() {
+#ifdef SSTVAE_SANITIZE_BUILD
+    // Neither branch ever gets a header lock here, so decode_loop_
+    // diversity can't complete on frames_received >= n_frames_expected
+    // (unlike every other diversity scenario, which gets at least one
+    // header lock and finishes in a single poll) -- it falls back to
+    // progress-stall detection, which needs ~3 confirmatory polls before
+    // end_grace is satisfied. Each of those polls re-runs a full blind
+    // search (CFO scan + multi-period energy fold) on *both* branches
+    // from scratch -- find_branch_reception has no incremental cache
+    // across polls, unlike decode_loop's own single-branch blind path
+    // (see to_baseband_at/BlindAccumulator above). ~6 full blind
+    // searches under ASan/UBSan measured at 185 s, against 9-45 s for
+    // every other diversity scenario here, which needs at most one or
+    // two. The code path itself -- combine_diversity_results and
+    // decode_loop_diversity's blind branch -- is still exercised for
+    // memory safety by test_diversity_combines_a_header_branch_with_a_
+    // blind_only_branch (one branch blind-only) and by the noise branch
+    // in test_diversity_falls_back_to_single_branch_when_the_other_is_
+    // dead; only the *both-blind* combination is skipped, and only
+    // under the sanitizer build.
+    std::fprintf(stderr,
+                 "SKIP rx/div-blind2: both-branches-blind is redundant-search-bound "
+                 "under the sanitizer build; see the comment above this line\n");
+    return;
+#endif
+    // Neither branch's preamble/header survives -- both can only
+    // blind-lock. Completion has to fall back to progress-stall
+    // detection (config.end_grace), the same as decode_loop's own
+    // all-blind path, since neither branch knows the true frame count.
+    DiversityHarness h(40.0);
+    h.config.once = true;
+    const std::vector<double> x = transmission("BLIND2", 21);
+    write_all(h.ring_a, zero_preamble(x));
+    write_all(h.ring_b, zero_preamble(x));
+
+    rx::decode_loop_diversity(h.rings(), h.decoder(), h.state, h.config, h.stop, h.sink());
+
+    check::equal(h.received.size(), std::size_t{1},
+                "rx/div-blind2: an all-blind diversity combine still finishes once");
+    if (h.received.empty()) return;
+    check::is_true(!h.received[0].mode_name.has_value(),
+                   "rx/div-blind2: true mode/duration never became known");
 }
 
 void test_noise_produces_nothing() {
@@ -444,6 +709,12 @@ int main() {
         test_low_cpu_loop_receives();
         test_a_finished_reception_is_not_rediscovered();
         test_two_transmissions_are_both_received();
+        test_diversity_combines_two_branches_into_one_reception();
+        test_diversity_falls_back_to_single_branch_when_the_other_is_dead();
+        test_diversity_two_transmissions_are_both_received();
+        test_diversity_debug_image_written_only_when_both_branches_lock();
+        test_diversity_combines_a_header_branch_with_a_blind_only_branch();
+        test_diversity_completes_when_both_branches_are_blind_only();
         test_fresh_session_does_not_inherit_blind_evidence_from_a_prior_one();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());

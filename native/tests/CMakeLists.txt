@@ -21,6 +21,11 @@ target_link_libraries(test_modem_roundtrip PRIVATE sstvae_core)
 target_include_directories(test_modem_roundtrip PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME modem_roundtrip COMMAND test_modem_roundtrip)
 
+add_executable(test_diversity test_diversity.cpp)
+target_link_libraries(test_diversity PRIVATE sstvae_core)
+target_include_directories(test_diversity PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME diversity COMMAND test_diversity)
+
 add_executable(test_ringbuffer test_ringbuffer.cpp)
 target_link_libraries(test_ringbuffer PRIVATE sstvae_core)
 target_include_directories(test_ringbuffer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -153,12 +158,24 @@ endif()
 # is no ctest output at all to say which test it was.
 #
 # Sized against the sanitizer build, which is the slowest thing that
-# runs these: rx_engine measures ~150 s there and tx_engine ~26 s, so
-# these are roughly 2.5x headroom. They bound the job where the
-# per-wait watchdog inside test_rx_engine.cpp cannot -- that one gives
-# the better message, but several waits expiring in turn would still
+# runs these: tx_engine measures ~26 s there, so its bound is roughly
+# 2.5x headroom. rx_engine's own ~150 s/360 s pair predates diversity
+# reception, which added six scenarios that each demodulate two
+# branches independently per poll (`decode_loop_diversity`). Five of
+# those got a header lock quickly like every other scenario here; the
+# sixth (both branches blind-only) needed ~3 confirmatory stall-
+# detection polls of a full, uncached blind search on *both*
+# branches and measured 185 s alone under the sanitizer build --
+# skipped there (see test_rx_engine.cpp's SSTVAE_SANITIZE_BUILD guard)
+# since the same combine/blind code path is still exercised by the
+# cheaper mixed-lock scenarios. What's left measures 381 s. 950 s keeps
+# the same ~2.5x headroom rather than "just enough" -- a bound sized at
+# the measurement is indistinguishable from a hang the next time
+# someone adds a scenario. They bound the job where the per-wait
+# watchdog inside test_rx_engine.cpp cannot -- that one gives the
+# better message, but several waits expiring in turn would still
 # outlast the run.
-set_tests_properties(rx_engine PROPERTIES TIMEOUT 360)
+set_tests_properties(rx_engine PROPERTIES TIMEOUT 950)
 set_tests_properties(tx_engine PROPERTIES TIMEOUT 180)
 set_tests_properties(golden npy modem_roundtrip ringbuffer audio rig
                      checkpoint

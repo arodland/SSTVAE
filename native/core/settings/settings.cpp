@@ -249,9 +249,13 @@ void read_receive(const Reader& r, ReceiveConfig& c) {
     r.get("save_size", c.save_size);
     r.get("save_audio", c.save_audio);
     r.get("filename_template", c.filename_template);
+    r.get("diversity_enabled", c.diversity_enabled);
+    r.get("diversity_device", c.diversity_device);
+    r.get("diversity_debug_image", c.diversity_debug_image);
     r.report_unknown({"autosave", "low_cpu", "buffer_seconds", "poll_interval",
                       "blind_search_seconds", "end_grace", "save_size", "save_audio",
-                      "filename_template"});
+                      "filename_template", "diversity_enabled", "diversity_device",
+                      "diversity_debug_image"});
 }
 
 void read_transmit(const Reader& r, TransmitConfig& c) {
@@ -435,7 +439,10 @@ std::string to_json(const Config& c) {
           {"end_grace", c.receive.end_grace},
           {"save_size", or_null(c.receive.save_size)},
           {"save_audio", c.receive.save_audio},
-          {"filename_template", c.receive.filename_template}}},
+          {"filename_template", c.receive.filename_template},
+          {"diversity_enabled", c.receive.diversity_enabled},
+          {"diversity_device", or_null(c.receive.diversity_device)},
+          {"diversity_debug_image", c.receive.diversity_debug_image}}},
         {"transmit",
          {{"mode", c.transmit.mode},
           {"level", c.transmit.level},

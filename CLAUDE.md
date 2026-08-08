@@ -1251,6 +1251,75 @@ need when `--native` fails and you want to know *where*.
   with, measured ±0.05 dB: the clipper absorbs it and stage-2 trained
   through that same clipper, so the *objective* was the real risk all
   along.
+- `docs/diversity-reception.md` — two receivers on independent
+  antennas, MRC-combined post-`demodulate()` (`sstvae/modem/diversity.py`,
+  `combine_demod_results`/`demodulate_diversity`), **positive, and wired
+  in end to end (2026-08-05)**: +2.9 to +5.9 dB latent SNR (mode A, AWGN
+  and `mpp`), measured by `scripts/diversity_sweep.py`. Combines in
+  latent space, not raw samples — each branch already resyncs and
+  deinterleaves independently, so their canonical-order
+  `DemodResult.latents`/`.weights` are directly comparable with no
+  shared timebase needed. Each branch independently falls back to
+  `Modem.demodulate_blind` when it can't get a header lock, same as
+  `decode_loop` already does for one receiver — `combine_diversity_
+  results` (Python) / the `Branch` variant overloads (C++) handle any
+  mix of header- and blind-locked branches, since `BlindDemodResult` is
+  already full mode-C-sized and aligned by the beacon's absolute frame
+  counter, so unlike two header locks it needs no sample-position
+  matching to combine, only a sanity check that the positions agree.
+  Live in both `sstvae/rx/engine.py` and the native `core/rx/engine.cpp`
+  (`decode_loop_diversity`; kept as a separate function from
+  `decode_loop` on both sides rather than folded in, since that
+  function's state machine is the reference's load-bearing one),
+  `sstvae_listen.py --device2`, and the native app's Audio settings
+  tab, beside the primary input device. `contribution_image` (Python and `modem::diversity::
+  contribution_image` in C++) is an optional debug heatmap of which
+  branch supplied each transmitted latent — rows are the *carrier*
+  index (frequency order), not the decoder's latent-channel index:
+  channel order is what the interleaver's PAPR-motivated permutation
+  scatters latents to for transmission, which for modes B/C — sent as
+  sequential per-group blocks — drew as a staircase instead of one
+  continuous band; carrier index is read off each latent's on-air
+  *position* rather than the (scrambled) value at that position, and is
+  identical across every group and mode. **Brightness is the combined
+  weight, not just hue (2026-08-05)**: hue alone (each branch's
+  *fractional* share) can't tell "both branches contributed a lot here"
+  from "both branches barely had anything, but split it evenly" — two
+  branches at 0.9 each and two branches at 0.05 each both draw as the
+  same saturated magenta on hue alone. Brightness now scales by the
+  combined MRC weight (`min(1, sqrt(sum_i(snr_lin_i*w_i[k]**2) /
+  max_i(snr_lin_i)))` — the same value `DemodResult.weights` reports
+  post-combine), normalized to *this reception's own peak cell* rather
+  than the raw `[0, 1]` scale. A carrier that fades on one branch but
+  stays strong on the other still reads bright and saturated; a carrier
+  that fades on *both* goes dark regardless of how evenly they split
+  what little they had. Python's `_combined_weight` and C++'s
+  `contribution_data` (an internal struct pairing `frac` with
+  `overall`, computed from the same MRC pass so there's no second array
+  build) share the arithmetic with `branch_contribution`, which uses
+  only the `frac` half. Raw-domain (pre-equalization)
+  combining and cross-branch acquisition-threshold lowering were both
+  considered and set aside — see the doc for why neither is a strict
+  improvement on what's here. The `core/` side of the native port has
+  real ctest coverage (`test_diversity.cpp`, `test_rx_engine.cpp`'s
+  `DiversityHarness`) from an offline `--no-codec --no-gui` build; the
+  Qt settings-dialog and receive-panel changes were written against the
+  existing patterns but **could not be built or tested in the
+  environment that wrote them** (no Qt6 installed) — verify on a
+  machine with Qt before trusting that part. `Progress`/`SharedState`
+  publish `branch_a_locked`/`branch_b_locked` per poll (which ring most
+  recently fed the combine — header or blind lock both count, and it is
+  not latched, so a branch that drops out mid-reception goes false
+  again on the next poll), which the receive panel shows as two
+  "Primary"/"Secondary" lock **chips** next to the status line — filled,
+  not coloured text, the same argument as `ptt_label_`'s chip (see the
+  GUI review below): `style::color::ok()`/`on_ok()` while locked, the
+  palette's own Button/ButtonText pair otherwise, painted through
+  `setAutoFillBackground` and a `QPalette`, never a stylesheet.
+  Covered by `DiversityHarness` assertions in `test_rx_engine.cpp` and
+  by `state.branch_a_locked`/`branch_b_locked` checks in
+  `tests/test_diversity_rx.py`; the chip widgets themselves are
+  unverified GUI, same caveat as the rest of this bullet.
 - `docs/todo.md` — open work items with the reasoning behind them.
   Currently one: a wider acquisition search so a mis-tuned counterpart
   still decodes — measured, the demod path is entirely independent of
