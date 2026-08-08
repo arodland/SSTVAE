@@ -30,6 +30,8 @@
 #include <QLabel>
 #include <QLayout>
 #include <QPoint>
+#include <QPushButton>
+#include <QSize>
 #include <QSlider>
 #include <QWidget>
 
@@ -155,6 +157,56 @@ void test_the_level_controls_are_one_flow_item() {
                    "their container does not wrap between them");
 }
 
+// The colour button's size never moves.
+//
+// **This is the platform-independent form of a Windows-only CI
+// failure.** `set_color_swatch` paints the current colour onto the
+// button as an icon, and it used to do so for the first time when a
+// text item was first selected -- a QPushButton grows when it is handed
+// an icon, measured 80x22 without and 80x24 with. The button therefore
+// got 2 px taller at that moment and stayed there.
+//
+// On Linux that was invisible: a taller sibling on the same line of the
+// wrapping row absorbed it, and the strip stayed 143. On Windows this
+// button *is* the tallest thing on its line, so the strip went 185 to
+// 189 and `test_the_strip_height_survives_a_selection` failed there and
+// nowhere else.
+//
+// Asserting on the strip alone would leave that a Windows-only check --
+// green on the machine in front of whoever breaks it next. Asserting on
+// the button says the same thing everywhere.
+void test_the_colour_button_does_not_change_size() {
+    AppState state;
+    QWidget host;
+    host.resize(900, 700);
+    auto* panel = new TransmitPanel(&state, &host);
+    panel->setGeometry(0, 0, 900, 700);
+    host.show();
+    QCoreApplication::processEvents();
+
+    QPushButton* colour = nullptr;
+    for (QPushButton* button : panel->findChildren<QPushButton*>()) {
+        if (button->text().startsWith(QLatin1String("Colour"))) colour = button;
+    }
+    check::is_true(colour != nullptr, "the panel has a colour button");
+    if (colour == nullptr) return;
+    const QSize idle = colour->sizeHint();
+
+    auto* editor = panel->findChild<OverlayEditor*>();
+    check::is_true(editor != nullptr, "the panel has an overlay editor");
+    // A *text* item, which is the only kind with a colour and therefore
+    // the only one that ever painted a swatch.
+    editor->add_text(std::string("KD8XYZ"));
+    QCoreApplication::processEvents();
+    check::is_true(colour->sizeHint() == idle,
+                   "the colour button is the same size with a text item selected");
+
+    editor->remove_selected();
+    QCoreApplication::processEvents();
+    check::is_true(colour->sizeHint() == idle,
+                   "and the same size again with nothing selected");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -164,5 +216,6 @@ int main(int argc, char** argv) {
 
     test_the_strip_height_survives_a_selection();
     test_the_level_controls_are_one_flow_item();
+    test_the_colour_button_does_not_change_size();
     return check::report("transmit panel");
 }

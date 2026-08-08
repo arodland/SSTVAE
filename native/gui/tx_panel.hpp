@@ -170,6 +170,10 @@ private:
     // What the swatch currently shows, so a drag's per-mouse-move
     // selectionChanged does not rebuild an identical icon.
     QColor swatch_color_;
+    // Whether the button has ever been given a swatch. Distinct from
+    // `swatch_color_` being invalid, which is also a legal *state* --
+    // an image item has no colour.
+    bool swatch_set_ = false;
     // Set while the property widgets are being filled from an item, so
     // their change signals do not write straight back into it.
     bool loading_properties_ = false;
