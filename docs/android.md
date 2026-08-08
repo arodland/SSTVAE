@@ -220,19 +220,38 @@ what Tier 0 wants.
   x86_64; the debug APK with both ABIs is 72 MB.
 - The `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` trick holds: no path code changed.
 
-**On a real phone it works end to end** (Andrew, 2026-08-08): acoustic
-coupling into the built-in microphone, decoded, picture displayed. That
-is the core of Tier 0 demonstrated on real hardware — capture, sync,
-framing, the beacon, onnxruntime and the display, on a device, off the
-air-ish. **The USB path is the remaining unknown** and is being tested
-next; everything in "What still has to be measured on hardware" above
-that concerns a class-compliant interface is still open.
+**On a real phone it works end to end, over USB** (Andrew, 2026-08-08).
+Two runs:
 
-Worth keeping in proportion: acoustic coupling was described earlier in
-this document as the zero-hardware *fallback*, the thing that makes a
-first release not depend on the USB question resolving well. It is now
-demonstrated rather than assumed, which is exactly the bar that claim
-needed.
+- **Acoustic coupling** into the built-in microphone: decoded, picture
+  displayed. This document had leaned on acoustic coupling as the
+  zero-hardware *fallback* that keeps a first release from depending on
+  USB; it is now demonstrated rather than assumed.
+- **A Kenwood TH-D75 over USB**: clean decode at **SNR above 24 dB**.
+
+That is the question the whole port hung on, and it is answered. A
+class-compliant interface works, `AudioRecord` reaches it, and the
+picture comes out. Questions 1 and 2 in "What still has to be measured
+on hardware" are closed for this radio; bus power (3) was not an issue
+with a TH-D75 and remains open for interfaces that draw more.
+
+Two things the hardware run taught that no emulator would have:
+
+- **Squelch can eat the preamble.** The first attempt failed and the
+  second succeeded with nothing changed — the radio's squelch did not
+  open fast enough to pass the start of the transmission. Operator
+  guidance is therefore *open the squelch* (monitor), the same advice
+  every other digital mode gives. But it is also worth noting what
+  should have rescued it: a clipped preamble is exactly the case
+  `demodulate_blind` and the beacon's absolute frame counter exist for,
+  and `decode_loop` does try that path. Whether the blind path simply
+  needed longer (`MIN_FRAMES_FOR_SYNC` is ~10.5 s of *transmission*, and
+  a closed squelch means silence rather than a late join) or whether
+  something prevents it is **not established** and is worth a deliberate
+  test — squelch-clipped capture is a common enough real-world case to
+  be worth knowing about rather than guessing.
+- **`setPreferredDevice` returns false and routes correctly anyway.**
+  See below; it was our diagnostic that was wrong, not the routing.
 
 **The emulator, by contrast, never exercised the microphone path at
 all**, because it hands back **zeroed audio**. That diagnosis took two
@@ -287,6 +306,18 @@ remotely the same failure. Log the percentiles, not the average.
 
 Two things worth keeping:
 
+- **Never conclude from an API's opinion of a request when the outcome
+  is observable.** `setPreferredDevice` returned false against the
+  TH-D75 while the routing plainly *had* taken effect — silence with the
+  squelch closed, signal with it open, a clean decode — so the app
+  reported a routing failure that had not happened. Two mistakes, and
+  the second is the general one: the warning was keyed off the return
+  value rather than `getRoutedDevice()`, and it was read *before*
+  `startRecording()`, when there is no routing to report. A diagnostic
+  that contradicts reality is worse than none, because it sends the
+  operator to debug the wrong thing — the same reason
+  `gui/rig_config.cpp` insists the Test CAT button share one mapping
+  with the app.
 - **`Native.dumpAudio` is the diagnostic that settled it**, and it is the
   Android form of the desktop's `receive.save_audio`: dump the ring, pull
   it, decode it on the host. Comparing two captures of one playback is how

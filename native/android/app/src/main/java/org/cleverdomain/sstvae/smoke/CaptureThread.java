@@ -55,6 +55,9 @@ final class CaptureThread extends Thread {
     volatile int levelPeak = 0;
     volatile double levelNearZeroPct = 100.0;
 
+    private boolean preferredAccepted;
+    private String requestedName = "";
+
     private final AudioManager audioManager;
     private final int preferredDeviceId;
     private final Listener listener;
@@ -66,6 +69,38 @@ final class CaptureThread extends Thread {
         this.audioManager = audioManager;
         this.preferredDeviceId = preferredDeviceId;
         this.listener = listener;
+    }
+
+    /**
+     * Report where capture actually landed, and warn only on a genuine
+     * mismatch with what was asked for.
+     */
+    private void checkRouting() {
+        AudioRecord r = record;
+        if (r == null) return;
+        AudioDeviceInfo routed = r.getRoutedDevice();
+        if (routed == null) {
+            routedTo = "(not reported)";
+            return;
+        }
+        routedTo = AudioDevices.describeType(routed.getType()) + " \""
+                + routed.getProductName() + "\"";
+        if (preferredDeviceId == 0) return;
+
+        if (routed.getId() == preferredDeviceId) {
+            // Got what was asked for. Whether setPreferredDevice admitted
+            // to it is not interesting, so nothing is shown -- but it is
+            // logged, because "returns false and works anyway" is exactly
+            // the sort of platform behaviour worth having on record.
+            routingWarning = "";
+            if (!preferredAccepted) {
+                Log.i(TAG, "setPreferredDevice returned false but routing "
+                        + "landed on the requested device anyway");
+            }
+            return;
+        }
+        routingWarning = "routed to " + routedTo + ", not the selected "
+                + requestedName;
     }
 
     void shutdown() {
@@ -160,19 +195,25 @@ final class CaptureThread extends Thread {
                     break;
                 }
             }
-            // The return value is checked because this is exactly the call
-            // that silently does nothing on the paths we are avoiding. If the
-            // platform declines the routing, the operator has to be told —
-            // capturing from the built-in mic while the UI claims USB is the
-            // worst available outcome.
-            boolean ok = target != null && r.setPreferredDevice(target);
-            if (!ok) {
-                // Sticky, not a Toast. "Capturing from the built-in mic while
-                // the UI claims USB" is the worst available outcome here, and
-                // a message that fades after two seconds is how it happens --
-                // the same reasoning as the desktop's error tiers.
-                routingWarning = "the system refused to route capture to the "
-                        + "selected device; using its own choice instead";
+            // Ask, and remember what it said -- but do **not** conclude
+            // anything from it. Measured against a TH-D75 over USB,
+            // setPreferredDevice returned false while the routing plainly
+            // did take effect: silence with the squelch closed, signal with
+            // it open, and a clean decode at >24 dB. A diagnostic that
+            // contradicts reality is worse than none, because it sends the
+            // operator to debug the wrong thing.
+            //
+            // The verdict is deferred to getRoutedDevice() *after* the
+            // stream is running. That is the outcome rather than the API's
+            // opinion of the request, which is the same rule the level
+            // display already follows.
+            preferredAccepted = target != null && r.setPreferredDevice(target);
+            requestedName = target == null ? ("id " + preferredDeviceId)
+                    : AudioDevices.describeType(target.getType()) + " \""
+                            + target.getProductName() + "\"";
+            if (target == null) {
+                routingWarning = "the selected input is gone; using the "
+                        + "system's own choice";
                 listener.onError(routingWarning);
             }
         }
@@ -185,21 +226,7 @@ final class CaptureThread extends Thread {
             return;
         }
 
-        AudioDeviceInfo routed = r.getRoutedDevice();
-        // What it *actually* opened and where it *actually* went. Displayed,
-        // not just logged: on a USB test the whole question is whether the
-        // interface got used, and answering it should not need adb.
         openedAs = sourceName + " " + r.getSampleRate() + " Hz";
-        routedTo = routed == null ? "(unknown)"
-                : AudioDevices.describeType(routed.getType()) + " \""
-                        + routed.getProductName() + "\"";
-        Log.i(TAG, "AudioRecord: source=" + sourceName
-                + " requested=" + rate + " actual=" + r.getSampleRate()
-                + " channels=" + r.getChannelCount()
-                + " encoding=" + r.getAudioFormat()
-                + " routedTo=" + (routed == null ? "(unknown)"
-                        : routed.getProductName() + "/type" + routed.getType()));
-
         listener.onOpened(rate, 1, "Int16");
 
         // Direct, so the bytes are visible to C++ without a copy across the
@@ -216,6 +243,14 @@ final class CaptureThread extends Thread {
             record = null;
             return;
         }
+
+        // Now that the stream is live, ask where it actually went.
+        //
+        // **Before startRecording() this is not a meaningful question** --
+        // getRoutedDevice() has nothing to report on an idle stream, which
+        // is why the previous version showed "(unknown)" and why its
+        // warning fired against a device that was working perfectly.
+        checkRouting();
 
         long reportedAt = System.nanoTime();
         long bytesSinceReport = 0;
@@ -241,6 +276,10 @@ final class CaptureThread extends Thread {
                             "input: %.0f bytes/s (expect %d)  peak %d  %.1f%% below 16 LSB",
                             bytesSinceReport / secs, r.getSampleRate() * 2, peak,
                             100.0 * nearZero / Math.max(1, counted)));
+                    // Re-checked each report: a device can be unplugged
+                    // mid-session, and on Android that is a routing change
+                    // rather than an error.
+                    checkRouting();
                     levelPeak = peak;
                     levelNearZeroPct = 100.0 * nearZero / Math.max(1, counted);
                     reportedAt = now;
