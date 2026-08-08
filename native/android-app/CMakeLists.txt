@@ -31,7 +31,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # sums those tolerances measure.
 add_compile_options(-fno-fast-math)
 
-find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Quick Network)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Quick)
 qt_standard_project_setup(REQUIRES 6.8)
 
 # The shared core. Everything the desktop switches on that has no
@@ -44,11 +44,11 @@ set(SSTVAE_BUILD_RIG OFF CACHE BOOL "" FORCE)
 set(SSTVAE_BUILD_PYMODULE OFF CACHE BOOL "" FORCE)
 add_subdirectory(.. sstvae_native EXCLUDE_FROM_ALL)
 
-qt_add_executable(sstvae_android main.cpp listener.cpp session.cpp service_jni.cpp)
+qt_add_executable(sstvae_android main.cpp listener.cpp session.cpp service_jni.cpp java_fetcher.cpp)
 qt_add_qml_module(sstvae_android URI SSTVAE VERSION 1.0 QML_FILES Main.qml)
 target_link_libraries(sstvae_android PRIVATE Qt6::Quick sstvae_core
                                              sstvae_audio_android
-                                             sstvae_codec sstvae_fetch)
+                                             sstvae_codec)
 
 # **androiddeployqt only packages libraries it knows about.** Qt's own
 # and the app's are found by walking dependencies; a third-party

@@ -7,7 +7,7 @@
 #include <sstream>
 
 #include "checkpoint/checkpoint.hpp"
-#include "checkpoint/qt_fetcher.hpp"
+#include "java_fetcher.hpp"
 #include "config.hpp"
 #include "images/images.hpp"
 #include "images/types.hpp"
@@ -122,7 +122,10 @@ void Session::load_model_async() {
         // The progress hook is also what distinguishes Downloading from
         // Loading: `resolve_onnx` is silent on a cache hit, so the state
         // only moves to Downloading if bytes actually start arriving.
-        checkpoint::install_qt_fetcher(
+        // The Java transport, not Qt's: Qt for Android has no TLS
+        // backend. See java_fetcher.hpp for why the split falls where
+        // it does.
+        install_java_fetcher(
             [this](std::int64_t received, std::int64_t total) {
                 std::lock_guard<std::mutex> lk(model_mu_);
                 model_state_ = ModelState::Downloading;
