@@ -523,6 +523,63 @@ void test_snap_arithmetic() {
                    "snap: just below zero returns to upright");
 }
 
+// Ctrl with the arrows turns the selection.
+//
+// The grip is the only other way to set an angle now that the spin box
+// is gone, so without this rotation is unreachable from the keyboard --
+// a step backwards from a field that was in the tab order. On macOS
+// `Qt::ControlModifier` *is* the Command key, so one code path serves
+// both conventions; a test cannot tell them apart and does not need to.
+void test_ctrl_arrows_turn_the_selection() {
+    gui::OverlayEditor* editor = make_editor();
+    const images::Picture inset = grey(40, 30);
+    editor->set_last_rx(inset);
+    editor->add_last_rx_inset();
+    auto angle = [&] {
+        return std::visit([](const auto& i) { return i.rotation; },
+                          editor->doc().items.front());
+    };
+    check::is_true(angle() == 0.0, "a new item is upright");
+
+    key(*editor, Qt::Key_Left, Qt::ControlModifier);
+    check::is_true(angle() == 15.0, "Ctrl+Left turns counter-clockwise by 15");
+    key(*editor, Qt::Key_Right, Qt::ControlModifier);
+    check::is_true(angle() == 0.0, "Ctrl+Right turns back");
+
+    // Six presses reach a right angle exactly -- the step is chosen so
+    // that it does, and a rounding drift would show up here rather than
+    // as an item that is nearly sideways.
+    for (int i = 0; i < 6; ++i) key(*editor, Qt::Key_Left, Qt::ControlModifier);
+    check::is_true(angle() == 90.0, "six steps land exactly on a right angle");
+
+    // Shift is the coarse step, and coarse means the *next* right angle
+    // rather than a bigger number of degrees.
+    key(*editor, Qt::Key_Left, Qt::ControlModifier | Qt::ShiftModifier);
+    check::is_true(angle() == 180.0, "Ctrl+Shift+Left jumps to the next right angle");
+    key(*editor, Qt::Key_Right, Qt::ControlModifier | Qt::ShiftModifier);
+    check::is_true(angle() == 90.0, "and back the other way");
+
+    // From an angle that is not already a multiple of 90, the coarse
+    // step goes to the next one rather than adding 90 -- which is the
+    // difference between "align this" and "turn this".
+    key(*editor, Qt::Key_Left, Qt::ControlModifier);  // 105
+    check::is_true(angle() == 105.0, "an off-angle to work from");
+    key(*editor, Qt::Key_Left, Qt::ControlModifier | Qt::ShiftModifier);
+    check::is_true(angle() == 180.0, "coarse from 105 aligns to 180, not 195");
+
+    // Ctrl with a key this widget does not claim must not fall through
+    // to the position nudge: a chord that says "rotate" moving the item
+    // is worse than a chord that does nothing.
+    const double before_x =
+        std::visit([](const auto& i) { return i.x; }, editor->doc().items.front());
+    key(*editor, Qt::Key_Up, Qt::ControlModifier);
+    key(*editor, Qt::Key_Down, Qt::ControlModifier);
+    check::is_true(std::visit([](const auto& i) { return i.x; },
+                              editor->doc().items.front()) == before_x,
+                   "Ctrl+Up/Down does not move the item");
+    delete editor;
+}
+
 void test_it_pins_no_window_height() {
     QWidget container;
     auto* layout = new QVBoxLayout(&container);
@@ -583,6 +640,7 @@ int main(int argc, char** argv) {
     test_dragging_the_round_grip_turns_the_item();
     test_rotation_snaps_to_right_angles_unless_shift_is_held();
     test_snap_arithmetic();
+    test_ctrl_arrows_turn_the_selection();
 
     return check::report("overlay editor");
 }

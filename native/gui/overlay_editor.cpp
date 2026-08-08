@@ -54,8 +54,10 @@ OverlayEditor::OverlayEditor(QWidget* parent) : QWidget(parent) {
     setMouseTracking(true);
     setToolTip(tr("Drag an item to move it. The square grip resizes, the "
                   "round one rotates -- rotation snaps to upright, sideways "
-                  "and upside-down, with Shift for a free angle. Arrow keys "
-                  "nudge the selection (Shift for a coarser step); Delete "
+                  "and upside-down, with Shift for a free angle.\n\n"
+                  "Arrow keys nudge the selection and Ctrl with them turns "
+                  "it, 15 degrees at a time; add Shift for a coarser step, "
+                  "which for rotation is the next right angle. Delete "
                   "removes it."));
     // Strong, not ClickFocus: the arrow keys and Delete are useless to
     // an operator who cannot get focus onto this widget, and ClickFocus
@@ -508,14 +510,66 @@ void OverlayEditor::keyPressEvent(QKeyEvent* event) {
         return;
     }
 
+    const bool coarse = (event->modifiers() & Qt::ShiftModifier) != 0;
+
+    // **Ctrl turns the item instead of moving it**, on Left and Right.
+    //
+    // With the spin box gone the grip was the only way to set an angle,
+    // which left rotation reachable by mouse alone -- a step backwards
+    // from a field that was in the tab order.
+    //
+    // `Qt::ControlModifier` is the Command key on macOS: Qt swaps it
+    // with Control there by default, so this is Ctrl+Arrow on Windows
+    // and Linux and Cmd+Arrow on a Mac without a second code path, and
+    // each platform gets the modifier it uses for "same key, stronger
+    // verb". Cmd+Arrow is unclaimed on a canvas -- macOS binds it for
+    // navigation in text and lists, neither of which this is.
+    //
+    // Shift is the *coarse* step here as it is for position, which is
+    // what makes the pair learnable, and coarse means the next right
+    // angle rather than a bigger number of degrees -- upright, sideways
+    // and upside-down are the angles worth one keypress, and they are
+    // the same four the drag snaps to.
+    if (event->modifiers() & Qt::ControlModifier) {
+        constexpr double STEP = 15.0;  // 6 presses to a right angle, 3 to 45
+        const double now = std::visit([](const auto& i) { return i.rotation; },
+                                      *item);
+        double turned = now;
+        // The nudge the epsilon protects is landing *on* a right angle
+        // and pressing again: at exactly 90, `floor(90/90)` is 1 and
+        // "the next one up" has to come out 180, not 90. It biases the
+        // division toward the direction of travel for that reason, and
+        // getting its sign backwards costs a keypress that does nothing
+        // -- which is what the first draft of this did.
+        if (event->key() == Qt::Key_Left) {
+            turned = coarse ? std::floor(now / 90.0 + 1e-9) * 90.0 + 90.0
+                            : now + STEP;
+        } else if (event->key() == Qt::Key_Right) {
+            turned = coarse ? std::ceil(now / 90.0 - 1e-9) * 90.0 - 90.0
+                            : now - STEP;
+        } else {
+            // Ctrl with any other key is not ours. Left alone rather
+            // than falling through to the nudge below, which would move
+            // the item on a chord that says "rotate".
+            QWidget::keyPressEvent(event);
+            return;
+        }
+        // Through the same wrap the drag uses, so the keyboard and the
+        // mouse cannot disagree about what -181 degrees means.
+        std::visit([turned](auto& i) { i.rotation = snap_rotation(turned, true); },
+                   *item);
+        refresh_item();
+        event->accept();
+        return;
+    }
+
     // A fraction of the canvas, not a pixel: positions are normalized,
     // so a fixed step means the same nudge whatever the window size.
     // Shift is the coarse step, for getting somewhere; the fine one is
     // roughly a canvas pixel at 640 wide.
     constexpr double FINE = 1.0 / 640.0;
     constexpr double COARSE = 1.0 / 64.0;
-    const double step =
-        (event->modifiers() & Qt::ShiftModifier) ? COARSE : FINE;
+    const double step = coarse ? COARSE : FINE;
 
     double dx = 0.0;
     double dy = 0.0;

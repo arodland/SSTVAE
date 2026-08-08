@@ -63,6 +63,7 @@ summaries with disclosures, and each setting grouped with its own help.
 
 Rotation, added afterwards: the round grip on an item's top-right corner
 turns it, and the outline and both grips follow. 0, 30 and 90 degrees.
+Ctrl with the arrow keys does the same from the keyboard.
 
 ![The overlay editor at three angles](images/gui-review-rotation.png)
 
