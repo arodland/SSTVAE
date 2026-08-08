@@ -6,6 +6,7 @@
 #include <QSignalBlocker>
 #include <QFileDialog>
 #include <QFont>
+#include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -176,6 +177,16 @@ void ReceivePanel::build_ui() {
         chip->setAutoFillBackground(true);
         chip->setAlignment(Qt::AlignCenter);
         chip->setContentsMargins(6, 1, 6, 1);
+        // A boundary, not just a fill: measured against this platform's
+        // own light theme, the "not locked" state's Button colour sits
+        // only ~20 levels from Window -- filled but not obviously a
+        // chip. `ok()`/`on_ok()` is high-contrast by construction and
+        // needs no help; a frame is what keeps the *other* state
+        // reading as a chip rather than as bold text with an
+        // almost-invisible box.
+        chip->setFrameShape(QFrame::Box);
+        chip->setFrameShadow(QFrame::Plain);
+        chip->setLineWidth(1);
         chip->hide();
         return chip;
     };
