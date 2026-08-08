@@ -20,6 +20,7 @@
 #include "config.hpp"
 #include "dsp/spectrum.hpp"
 #include "rx/ringbuffer.hpp"
+#include "style.hpp"
 
 namespace sstvae::gui {
 
@@ -215,7 +216,7 @@ void Waterfall::draw_disabled_scrim(QPainter& painter) {
     if (isEnabled()) return;
     painter.fillRect(rect(), QColor(0, 0, 0, 150));
     painter.setPen(QColor(220, 220, 220, 220));
-    const QString label = tr("paused - transmitting");
+    const QString label = tr("Paused — transmitting");
     const QRect box = rect();
     painter.drawText(box, Qt::AlignCenter, label);
 }
@@ -285,11 +286,13 @@ void Waterfall::draw_level_meter(QPainter& painter) {
     const double frac = std::clamp((db + 60.0) / 60.0, 0.0, 1.0);
     const int filled = static_cast<int>((h - 4) * frac);
 
-    QColor color(90, 220, 120);
+    // From the shared table: this bar, the CLIP marker and the PTT lamp
+    // are one idea in three places, and were three unrelated literals.
+    QColor color = style::color::ok();
     if (clipping_) {
-        color = QColor(255, 60, 60);
+        color = style::color::danger_bright();
     } else if (frac > 0.85) {
-        color = QColor(255, 190, 60);
+        color = style::color::caution();
     }
     painter.fillRect(x0, h - 2 - filled, bar_w, filled, color);
 
@@ -302,7 +305,9 @@ void Waterfall::draw_level_meter(QPainter& painter) {
             x0 - painter.fontMetrics().horizontalAdvance(label) - 4;
         painter.setPen(QColor(0, 0, 0, 160));
         painter.drawText(text_x + 1, 15, label);
-        painter.setPen(QColor(255, 60, 60, 230));
+        QColor clip = style::color::danger_bright();
+        clip.setAlpha(230);
+        painter.setPen(clip);
         painter.drawText(text_x, 14, label);
     }
 }

@@ -3,6 +3,36 @@
 2026-08-07. `docs/native-app.md`'s Phase 3 lists "look-and-feel review,
 iterated" as the thing it needs eyes for. This is one pass of that.
 
+> **Status, 2026-08-08 — most of this is done.** §1 (all six defects),
+> §2 (the whole consistency sweep) and §5 (the duplication) are
+> implemented, along with everything in §3 except the three items named
+> below. Scope decided by Andrew:
+>
+> - **The "Selected item" row stays visible and disabled** (§1.1's first
+>   option). `test_tx_panel.cpp` is the new guard: it asserts the control
+>   strip's height across a select/deselect cycle, which is the property
+>   the panes' equality actually rests on.
+> - **Help text got both halves** (§3.1): `style::secondary_text` now
+>   measures **5.07:1** where it measured 1.62:1, and the long notes are
+>   behind `style::note_with_detail` disclosures.
+> - **The tabbed layout is untouched** (§4). Only the stale numbers were
+>   corrected — see below and in `CLAUDE.md`.
+> - **§2.1's recommendation is reversed**: the sweep standardised on
+>   **image**, not *picture*. It matches the `images::` namespace, the
+>   folder settings and the file-dialog captions already, so it was both
+>   the consistent choice and the smaller diff.
+>
+> Deliberately **not** done, and still open: the waterfall's fixed
+> −95/−20 dB window and missing gain control (§3.5), the log pane's
+> repeated date column, missing severity filter and filter-ignoring Copy
+> (§3.12), and replacing the model-still-loading message boxes with
+> disabled buttons (§3.9, first half — the `closeEvent` default *was*
+> fixed). §3.8 stands as written: `tr()` is still paid for and no
+> translator is installed.
+>
+> Re-measured after the work: side by side asks **766 x 467**, tabbed
+> **342 x 464**.
+
 **Method.** Built `native/` against Qt 6.4.2 and rendered every panel
 and dialog headless with `sstvae-gui-shot`, at 1360x760 and 900x700, and
 read all 7,109 lines of `native/gui/`. Everything below with a number in
@@ -130,9 +160,12 @@ the receive button says **Save image**, the settings checkbox says
 **Refine each picture before sending**, and the folders are **Received
 images** / **Images to send**.
 
-Pick one and sweep. *Picture* is the better choice — it is what the
-project's own docs and CLAUDE.md use, and it distinguishes the thing on
-the air from an image *file*.
+Pick one and sweep. **Settled on *image*** (Andrew, 2026-08-07), against
+this section's original recommendation of *picture*. It is already what
+the `images::` namespace, the folder settings and every file-dialog
+caption say, so it was the smaller sweep as well as the consistent one.
+The C++ type names and config keys are untouched — `images::Picture` is
+still `images::Picture`; this is about what the operator reads.
 
 ### 2.2 Units are formatted four different ways
 

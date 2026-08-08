@@ -25,7 +25,24 @@ namespace {
 // "All" plus the sources AppState hands out. A source not in this list
 // still logs and still shows under All; it just has no dedicated
 // filter entry, which is the right default for a source added later.
-const char* const FILTERS[] = {"All", "rig", "rx", "tx", "opt", "app"};
+//
+// **The label is not the key.** These read `rig, rx, tx, opt, app` --
+// lowercase source keys beside a capitalised "All", naming panes the
+// window itself calls Receive and Transmit, and one ("opt") that is not
+// a word the operator has seen anywhere. The key goes in the item's
+// data, like every other combo in this application.
+struct Filter {
+    const char* key;    // matches log::Entry::source; empty means "all"
+    const char* label;
+};
+const Filter FILTERS[] = {
+    {"", QT_TRANSLATE_NOOP("LogPane", "All")},
+    {"rig", QT_TRANSLATE_NOOP("LogPane", "Rig")},
+    {"rx", QT_TRANSLATE_NOOP("LogPane", "Receive")},
+    {"tx", QT_TRANSLATE_NOOP("LogPane", "Transmit")},
+    {"opt", QT_TRANSLATE_NOOP("LogPane", "Refinement")},
+    {"app", QT_TRANSLATE_NOOP("LogPane", "Application")},
+};
 
 }  // namespace
 
@@ -42,8 +59,8 @@ LogPane::LogPane(const log::StatusLog* log, QWidget* parent)
     header->setContentsMargins(4, 2, 4, 2);
     header->addWidget(new QLabel(tr("Filter:"), header_));
     filter_ = new QComboBox(header_);
-    for (const char* name : FILTERS) {
-        filter_->addItem(QString::fromLatin1(name));
+    for (const Filter& entry : FILTERS) {
+        filter_->addItem(tr(entry.label), QString::fromLatin1(entry.key));
     }
     connect(filter_, &QComboBox::currentIndexChanged, this, &LogPane::refill);
     header->addWidget(filter_);
@@ -53,7 +70,7 @@ LogPane::LogPane(const log::StatusLog* log, QWidget* parent)
     header->addWidget(file_note_, 1);
 
     auto* copy = new QPushButton(tr("Copy"), header_);
-    copy->setToolTip(tr("Copy the whole log (unfiltered) to the clipboard"));
+    copy->setToolTip(tr("Copy the whole log to the clipboard, ignoring the filter"));
     connect(copy, &QPushButton::clicked, this, &LogPane::copy_all);
     header->addWidget(copy);
     layout->addWidget(header_);
@@ -81,9 +98,8 @@ void LogPane::set_file_note(const QString& note) {
 }
 
 bool LogPane::passes_filter(const std::string& source) const {
-    const QString wanted = filter_->currentText();
-    return wanted == QLatin1String("All") ||
-           wanted == QString::fromStdString(source);
+    const QString wanted = filter_->currentData().toString();
+    return wanted.isEmpty() || wanted == QString::fromStdString(source);
 }
 
 void LogPane::append_line(const log::Entry& entry) {

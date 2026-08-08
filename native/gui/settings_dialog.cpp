@@ -15,6 +15,8 @@
 #include <QMessageBox>
 #include <QPalette>
 #include <QFrame>
+#include <QRegularExpression>
+#include <QRegularExpressionValidator>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSizePolicy>
@@ -36,6 +38,7 @@
 #include "rig/backend.hpp"
 #include "rig/hamlib.hpp"
 #include "rig_config.hpp"
+#include "style.hpp"
 
 namespace sstvae::gui {
 
@@ -77,25 +80,6 @@ std::string chosen(const QComboBox* combo) {
     return combo->currentData().toString().toStdString();
 }
 
-// Dimmed explanatory text.
-//
-// Coloured through the palette rather than a stylesheet, and that is
-// not a style preference. **Setting a stylesheet on any widget makes Qt
-// wrap the application style in QStyleSheetStyle**, whose defaults
-// differ from the platform's -- most visibly, padding drops to zero, so
-// every combo, spin box and line edit in the dialog has its text jammed
-// against the left border. One `color:` rule on a label was enough to
-// do that to the whole window.
-QLabel* note(const QString& text, QWidget* parent) {
-    auto* label = new QLabel(text, parent);
-    label->setWordWrap(true);
-    QPalette dim = label->palette();
-    dim.setColor(QPalette::WindowText,
-                 dim.color(QPalette::Disabled, QPalette::WindowText));
-    label->setPalette(dim);
-    return label;
-}
-
 // A combo that is only as wide as it needs to be. In a QFormLayout the
 // field column stretches, which left a three-item combo as wide as the
 // dialog with its options huddled at one end.
@@ -103,21 +87,6 @@ QComboBox* compact(QComboBox* combo) {
     combo->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     combo->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
     return combo;
-}
-
-// A row of widgets, left-aligned, with the slack pushed to the right.
-QWidget* row(QWidget* parent, std::initializer_list<QWidget*> widgets,
-             int stretch_last = -1) {
-    auto* holder = new QWidget(parent);
-    auto* layout = new QHBoxLayout(holder);
-    layout->setContentsMargins(0, 0, 0, 0);
-    int index = 0;
-    for (QWidget* widget : widgets) {
-        layout->addWidget(widget, index == stretch_last ? 1 : 0);
-        ++index;
-    }
-    if (stretch_last < 0) layout->addStretch(1);
-    return holder;
 }
 
 // A tab page that scrolls rather than clips.
@@ -208,13 +177,13 @@ QWidget* SettingsDialog::model_tab() {
     model_path_->setPlaceholderText(tr("(published model)"));
     connect(model_path_, &QLineEdit::textChanged, this,
             &SettingsDialog::sync_precision_enabled);
-    auto* browse_dir = new QPushButton(tr("Folder..."), page);
+    auto* browse_dir = new QPushButton(tr("Browse folder..."), page);
     connect(browse_dir, &QPushButton::clicked, this, [this] {
         const QString path = QFileDialog::getExistingDirectory(
             this, tr("Folder of exported .onnx files"), QDir::homePath());
         if (!path.isEmpty()) model_path_->setText(path);
     });
-    auto* browse_file = new QPushButton(tr("File..."), page);
+    auto* browse_file = new QPushButton(tr("Browse file..."), page);
     connect(browse_file, &QPushButton::clicked, this, [this] {
         const QString path = QFileDialog::getOpenFileName(
             this, tr("Model file"), QDir::homePath(),
@@ -229,12 +198,15 @@ QWidget* SettingsDialog::model_tab() {
     model_layout->addWidget(browse_dir);
     model_layout->addWidget(browse_file);
     form->addRow(tr("Model"), model_row);
-    form->addRow(note(tr("Leave blank for the published model, downloaded once "
-                         "and cached. Otherwise a folder of exported .onnx "
-                         "files, or a single .onnx. Both stations must run the "
-                         "same model to exchange pictures -- but not the same "
-                         "precision, which is a local choice."),
-                      page));
+    form->addRow(QString(),
+                 style::note_with_detail(
+                     tr("Leave blank for the published model, downloaded once "
+                        "and cached."),
+                     tr("Otherwise a folder of exported .onnx files, or a "
+                        "single .onnx. Both stations must run the same model to "
+                        "exchange images — but not the same precision, which is "
+                        "a local choice."),
+                     page));
 
     precision_ = new QComboBox(page);
     for (const std::string_view p : checkpoint::PRECISIONS) {
@@ -243,15 +215,15 @@ QWidget* SettingsDialog::model_tab() {
     }
     const int index = precision_->findData(QString::fromStdString(config_.precision));
     precision_->setCurrentIndex(index >= 0 ? index : 0);
-    form->addRow(tr("Precision"), precision_);
-    precision_note_ = note(QString(), page);
+    form->addRow(tr("Precision"), compact(precision_));
+    precision_note_ = style::note(QString(), page);
     form->addRow(QString(), precision_note_);
     sync_precision_enabled();
 
     // Centred and set apart, like the rig tab's test buttons: everything
     // else on this tab takes effect on OK, but this one does something --
     // real network I/O -- the moment it is pressed.
-    download_all_ = new QPushButton(tr("Download All Models"), page);
+    download_all_ = new QPushButton(tr("Download all models"), page);
     connect(download_all_, &QPushButton::clicked, this,
             &SettingsDialog::download_all_models);
     auto* download_row = new QWidget(page);
@@ -261,13 +233,14 @@ QWidget* SettingsDialog::model_tab() {
     download_layout->addWidget(download_all_);
     download_layout->addStretch(1);
     form->addRow(download_row);
-    form->addRow(note(tr("Fetches the encoder, decoder and refinement gradient "
-                         "graph now, so a complete set is cached before going "
-                         "somewhere with no connection. Otherwise each is only "
-                         "fetched the first time it is actually needed -- the "
-                         "encoder on the first Send, the gradient graph on the "
-                         "first refined transmission."),
-                      page));
+    form->addRow(QString(),
+                 style::note_with_detail(
+                     tr("Caches a complete set now, before going somewhere with "
+                        "no connection."),
+                     tr("Otherwise each artifact is only fetched the first time "
+                        "it is actually needed — the encoder on the first Send, "
+                        "the gradient graph on the first refined transmission."),
+                     page));
     return page;
 }
 
@@ -282,7 +255,7 @@ void SettingsDialog::sync_precision_enabled() {
         QFileInfo(model_path_->text().trimmed()).suffix().toLower();
     QString text;
     if (suffix == QLatin1String("onnx")) {
-        text = tr("Set by the file name -- that artifact is already one precision.");
+        text = tr("Set by the file name — that artifact is already one precision.");
     } else if (suffix == QLatin1String("pt") || suffix == QLatin1String("ckpt")) {
         text = tr("Not applicable to a .pt checkpoint (that runs on torch, which "
                   "this app does not embed).");
@@ -298,7 +271,7 @@ void SettingsDialog::sync_precision_enabled() {
 
 void SettingsDialog::set_download_busy(bool busy) {
     download_all_->setEnabled(!busy);
-    download_all_->setText(busy ? tr("Downloading...") : tr("Download All Models"));
+    download_all_->setText(busy ? tr("Downloading...") : tr("Download all models"));
 }
 
 void SettingsDialog::download_all_models() {
@@ -376,21 +349,23 @@ QWidget* SettingsDialog::audio_tab() {
     // and reopening it to see the result is a poor answer.
     auto* refresh = new QPushButton(tr("Refresh"), page);
     connect(refresh, &QPushButton::clicked, this, &SettingsDialog::refresh_devices);
-    form->addRow(QString(), row(page, {refresh}));
-    form->addRow(note(tr("Qt does not list PulseAudio/PipeWire *monitor* "
-                         "sources. To loop the output back for testing, publish "
-                         "it as a real source first:\n"
-                         "  pactl load-module module-null-sink sink_name=null-sink\n"
-                         "  pactl load-module module-remap-source "
-                         "source_name=sstvae_loop master=null-sink.monitor "
-                         "channels=1"),
-                      page));
+    form->addRow(QString(), style::row(page, {refresh}));
+    form->addRow(QString(),
+                 style::note_with_detail(
+                     tr("Qt does not list PulseAudio/PipeWire monitor sources, "
+                        "so a loopback has to be published as a real source."),
+                     tr("  pactl load-module module-null-sink "
+                        "sink_name=null-sink\n"
+                        "  pactl load-module module-remap-source "
+                        "source_name=sstvae_loop master=null-sink.monitor "
+                        "channels=1"),
+                     page));
 
-    form->addRow(note(tr("Transmit level lives on the transmit panel, not here: "
-                         "setting it means watching the radio's ALC while "
-                         "sending, so it has to be reachable without a modal "
-                         "dialog in the way."),
-                      page));
+    form->addRow(QString(),
+                 style::note(tr("Transmit level is on the Transmit panel, not here — "
+                                "setting it means watching the radio's ALC while "
+                                "sending, so no modal dialog may be in the way."),
+                             page));
     return page;
 }
 
@@ -474,7 +449,7 @@ QWidget* SettingsDialog::rig_tab() {
     }
     form->addRow(tr("Rig"), rig_model_);
     if (!model_error.isEmpty()) {
-        rig_model_note_ = note(tr("%1 -- enter a model number by hand.").arg(model_error),
+        rig_model_note_ = style::note(tr("%1 — enter a model number by hand.").arg(model_error),
                                page);
         form->addRow(QString(), rig_model_note_);
     }
@@ -485,7 +460,7 @@ QWidget* SettingsDialog::rig_tab() {
     rig_device_->setPlaceholderText(tr("/dev/ttyUSB0, COM5, or host:port"));
     form->addRow(tr("Device"), rig_device_);
     form->addRow(QString(),
-                 note(tr("A serial port, or host:port for a networked radio or "
+                 style::note(tr("A serial port, or host:port for a networked radio or "
                          "for model 2 (\"NET rigctl\"), which shares one radio "
                          "with WSJT-X or fldigi."),
                       page));
@@ -518,11 +493,17 @@ QWidget* SettingsDialog::rig_tab() {
                                  {"hardware", "Hardware"}},
                                 rig.handshake));
 
-    form->addRow(tr("Baud / bits"),
-                 row(page, {rig_baud_, new QLabel(tr("Data"), page), data_bits_,
-                            new QLabel(tr("Stop"), page), stop_bits_}));
-    form->addRow(tr("Parity / handshake"),
-                 row(page, {parity_, new QLabel(tr("Handshake"), page), handshake_}));
+    // **Every control in a compound row is labelled, including the
+    // first.** These read "Baud / bits [combo] Data [combo] Stop
+    // [combo]", so two of the three were named inline and the first was
+    // named only by the row -- which you have to work out from position.
+    form->addRow(tr("Serial"),
+                 style::row(page, {new QLabel(tr("Baud"), page), rig_baud_,
+                                   new QLabel(tr("Data"), page), data_bits_,
+                                   new QLabel(tr("Stop"), page), stop_bits_}));
+    form->addRow(QString(),
+                 style::row(page, {new QLabel(tr("Parity"), page), parity_,
+                                   new QLabel(tr("Handshake"), page), handshake_}));
 
     // A checkbox plus a value, rather than a three-item combo whose
     // first entry was "Default". "Default" reads as a *level* next to
@@ -543,9 +524,9 @@ QWidget* SettingsDialog::rig_tab() {
     rts_->setEnabled(rts_forced_->isChecked());
 
     form->addRow(tr("Force control lines"),
-                 row(page, {dtr_forced_, dtr_, rts_forced_, rts_}));
+                 style::row(page, {dtr_forced_, dtr_, rts_forced_, rts_}));
     form->addRow(QString(),
-                 note(tr("Held for the whole session, which is how an interface "
+                 style::note(tr("Held for the whole session, which is how an interface "
                          "powered from the control lines stays fed."),
                       page));
 
@@ -557,16 +538,17 @@ QWidget* SettingsDialog::rig_tab() {
     ptt_device_ = new QLineEdit(QString::fromStdString(rig.ptt_device), page);
     ptt_device_->setPlaceholderText(tr("(the device above)"));
     form->addRow(tr("PTT"),
-                 row(page, {ptt_method_, new QLabel(tr("Port"), page), ptt_device_}, 2));
+                 style::row(page, {ptt_method_, new QLabel(tr("Port"), page), ptt_device_}, 2));
     form->addRow(QString(),
-                 note(tr("VOX means do not key at all -- the radio is keyed by "
-                         "the audio. DTR and RTS may use a different port from CAT."),
-                      page));
+                 style::note(tr("VOX means do not key at all — the radio is keyed "
+                                "by the audio. DTR and RTS may use a different "
+                                "port from CAT."),
+                             page));
     sync_ptt_enabled();
 
     rig_mode_ = compact(choice(
         page, {{"none", "None"}, {"usb", "USB"}, {"pkt_usb", "Data/Pkt"}}, rig.mode));
-    form->addRow(tr("Mode on connect"), row(page, {rig_mode_}));
+    form->addRow(tr("Mode on connect"), style::row(page, {rig_mode_}));
 
     poll_interval_s_ = new QDoubleSpinBox(page);
     poll_interval_s_->setRange(0.5, 60.0);
@@ -583,9 +565,10 @@ QWidget* SettingsDialog::rig_tab() {
     ptt_tail_->setSingleStep(0.05);
     ptt_tail_->setSuffix(tr(" s"));
     ptt_tail_->setValue(rig.ptt_tail_s);
-    form->addRow(tr("Poll / PTT timing"),
-                 row(page, {poll_interval_s_, new QLabel(tr("Lead"), page), ptt_lead_,
-                            new QLabel(tr("Tail"), page), ptt_tail_}));
+    form->addRow(tr("Timing"),
+                 style::row(page, {new QLabel(tr("Poll"), page), poll_interval_s_,
+                                   new QLabel(tr("Lead"), page), ptt_lead_,
+                                   new QLabel(tr("Tail"), page), ptt_tail_}));
 
     // Centred, and set apart from the rows above. Everything else on
     // this tab is a setting that takes effect on OK; these two *do*
@@ -606,6 +589,21 @@ QWidget* SettingsDialog::rig_tab() {
     tests_layout->addStretch(1);
     form->addRow(tests);
     return page;
+}
+
+void SettingsDialog::sync_filename_preview() {
+    // The same function that actually names the file, with sample
+    // fields -- so the preview cannot describe a rule the saver does
+    // not follow.
+    settings::FilenameFields sample;
+    sample.callsign = "KD8XYZ";
+    sample.mode = "B";
+    sample.freq_hz = 14'230'000.0;
+    const std::string name = settings::format_filename(
+        filename_template_->text().toStdString(), sample);
+    filename_preview_->setText(
+        name.empty() ? tr("(empty — the reception would be saved unnamed)")
+                     : tr("e.g. %1.png").arg(QString::fromStdString(name)));
 }
 
 void SettingsDialog::sync_ptt_enabled() {
@@ -726,9 +724,10 @@ QWidget* SettingsDialog::folders_tab() {
                  folder_row(&template_dir_,
                             QString::fromStdString(folders.template_dir),
                             tr("Overlay templates"), page));
-    form->addRow(note(tr("Saving and reusing overlay templates is not "
-                         "implemented yet; this is where they will go."),
-                      page));
+    form->addRow(QString(),
+                 style::note(tr("Saving and reusing overlay templates is not "
+                                "implemented yet; this is where they will go."),
+                             page));
     return page;
 }
 
@@ -748,43 +747,72 @@ QWidget* SettingsDialog::receive_tab() {
                                 page);
     save_audio_->setChecked(receive.save_audio);
     form->addRow(save_audio_);
-    form->addRow(note(tr("Writes a .wav beside each received picture, exactly as "
-                         "captured. Use it when a picture decodes badly: run "
-                         "sstvae-decode on the dump to see whether the audio or "
-                         "the decoder was at fault."),
-                      page));
+    form->addRow(QString(),
+                 style::note_with_detail(
+                     tr("Writes a .wav beside each received image, exactly as "
+                        "captured."),
+                     tr("Use it when an image decodes badly: run sstvae-decode "
+                        "on the dump to see whether the audio or the decoder "
+                        "was at fault."),
+                     page));
 
     low_cpu_ = new QCheckBox(tr("Low-CPU mode"), page);
     low_cpu_->setChecked(receive.low_cpu);
     form->addRow(low_cpu_);
-    form->addRow(note(tr("Low-CPU mode only looks for the start of a "
-                         "transmission, so it cannot pick up one already in "
-                         "progress or decode retrospectively."),
-                      page));
+    form->addRow(QString(),
+                 style::note(tr("Low-CPU mode only looks for the start of a "
+                                "transmission, so it cannot pick up one already in "
+                                "progress or decode retrospectively."),
+                             page));
 
     filename_template_ =
         new QLineEdit(QString::fromStdString(receive.filename_template), page);
     form->addRow(tr("Filename"), filename_template_);
-    form->addRow(note(tr("Fields: {date} {time} {freq} {callsign} {mode}.\n"
-                         "Fields with no value are dropped from the name."),
-                      page));
+    // **A live preview, not a list of fields to imagine.** The template
+    // has five substitutions and the operator was expected to hold the
+    // result in their head; `settings::format_filename` is right here
+    // and is the same function that names the file.
+    filename_preview_ = style::note(QString(), page);
+    connect(filename_template_, &QLineEdit::textChanged, this,
+            &SettingsDialog::sync_filename_preview);
+    form->addRow(QString(), filename_preview_);
+    sync_filename_preview();
+    form->addRow(QString(),
+                 style::note(tr("Fields: {date} {time} {freq} {callsign} {mode}. "
+                                "Fields with no value are dropped from the name."),
+                             page));
 
     save_size_ = new QLineEdit(QString::fromStdString(receive.save_size), page);
     save_size_->setPlaceholderText(tr("640x480 (as received)"));
+    // **Validated, because the failure was silent and permanent.**
+    // `rx::parse_size` returns nothing for anything it does not
+    // understand and the caller then just does not resize -- so
+    // "640 x 480" or "640x480 " was accepted by the dialog, saved to
+    // the config, and quietly ignored on every reception thereafter.
+    // Empty stays legal: it means "as received".
+    save_size_->setValidator(new QRegularExpressionValidator(
+        QRegularExpression(QStringLiteral("^(\\d{1,5}x\\d{1,5})?$")), save_size_));
     form->addRow(tr("Saved size"), save_size_);
 
+    // `setSuffix(" s")` and a bare label, which is what the Rig tab
+    // does -- the two tabs used to state the same unit two ways, one in
+    // the field and one in parentheses after the label. `compact`,
+    // because a three-digit number does not want the whole field column.
     buffer_seconds_ = new QDoubleSpinBox(page);
     buffer_seconds_->setRange(100.0, 600.0);
+    buffer_seconds_->setSuffix(tr(" s"));
     buffer_seconds_->setValue(receive.buffer_seconds);
-    form->addRow(tr("Buffer (s)"), buffer_seconds_);
-    form->addRow(note(tr("Must exceed the longest mode (C, ~95 s) with margin "
-                         "for retrospective decoding."),
-                      page));
+    form->addRow(tr("Buffer"), style::row(page, {buffer_seconds_}));
+    form->addRow(QString(),
+                 style::note(tr("Must exceed the longest mode (C, ~95 s) with margin "
+                                "for retrospective decoding."),
+                             page));
 
     poll_interval_ = new QDoubleSpinBox(page);
     poll_interval_->setRange(1.0, 30.0);
+    poll_interval_->setSuffix(tr(" s"));
     poll_interval_->setValue(receive.poll_interval);
-    form->addRow(tr("Decode every (s)"), poll_interval_);
+    form->addRow(tr("Decode every"), style::row(page, {poll_interval_}));
     return page;
 }
 
@@ -795,48 +823,59 @@ QWidget* SettingsDialog::transmit_tab() {
     callsign_ = new QLineEdit(QString::fromStdString(config_.callsign), page);
     callsign_->setMaxLength(8);  // the beacon's callsign field
     callsign_->setPlaceholderText(QStringLiteral("N0CALL"));
+    // Only what a callsign can contain. `apply_to` upper-cases it, so
+    // lower case is accepted here and normalised on the way out.
+    callsign_->setValidator(new QRegularExpressionValidator(
+        QRegularExpression(QStringLiteral("^[A-Za-z0-9/]{0,8}$")), callsign_));
     form->addRow(tr("Callsign"), callsign_);
-    form->addRow(note(tr("Up to 8 characters. Sent continuously on the beacon "
-                         "carrier, so a receiver can identify you even from a "
-                         "partial reception."),
-                      page));
+    form->addRow(QString(),
+                 style::note(tr("Up to 8 characters. Sent continuously on the beacon "
+                                "carrier, so a receiver can identify you even from "
+                                "a partial reception."),
+                             page));
 
-    optimize_ = new QCheckBox(tr("Refine each picture before sending"), page);
+    optimize_ = new QCheckBox(tr("Refine each image before sending"), page);
     optimize_->setChecked(config_.transmit.optimize);
     form->addRow(optimize_);
-    form->addRow(note(tr("The encoder is trained to do well on average, not on "
-                         "the picture in front of it. Given the composing time "
-                         "before you press Send, a search for better latents is "
-                         "worth around 1.5 dB of recovered quality -- most "
-                         "visibly on text and line art.\n\n"
-                         "Costs no extra airtime, and needs nothing of the "
-                         "receiving station: every station decodes it as an "
-                         "ordinary transmission and simply gets a better "
-                         "picture. Downloads an extra 18 MB the first time. If "
-                         "Send arrives before it has settled, it finishes "
-                         "quickly and sends what it has."),
-                      page));
+    form->addRow(QString(),
+                 style::note_with_detail(
+                     tr("Worth around 1.5 dB of recovered quality, for no extra "
+                        "airtime — most visibly on text and line art."),
+                     tr("The encoder is trained to do well on average, not on "
+                        "the image in front of it, so for any one image there "
+                        "are better inputs to the same decoder. The search runs "
+                        "in the time you spend composing.\n\n"
+                        "It needs nothing of the receiving station: every "
+                        "station decodes it as an ordinary transmission and "
+                        "simply gets a better image. Downloads an extra 18 MB "
+                        "the first time. If Send arrives before it has settled, "
+                        "it finishes quickly and sends what it has."),
+                     page));
 
     cw_id_ = new QCheckBox(tr("Send CW ID after each transmission"), page);
     cw_id_->setChecked(config_.transmit.cw_id);
     form->addRow(cw_id_);
-    form->addRow(note(tr("Sends the message below in Morse "
-                         "(18 wpm, 1000 Hz), 500 ms after the picture ends, "
-                         "under the same PTT key-up. No-op with no callsign "
-                         "set above, whatever the message says."),
-                      page));
+    form->addRow(QString(),
+                 style::note_with_detail(
+                     tr("18 wpm at 1000 Hz, 500 ms after the image ends, under "
+                        "the same PTT key-up."),
+                     tr("A no-op with no callsign set above, whatever the "
+                        "message says."),
+                     page));
 
     cw_message_ = new QLineEdit(
         QString::fromStdString(config_.transmit.cw_message), page);
     cw_message_->setPlaceholderText(QStringLiteral("SSTVAE DE {callsign}"));
     form->addRow(tr("CW message"), cw_message_);
-    form->addRow(note(tr("{callsign} is replaced with the callsign above; "
-                         "everything else is sent as typed. The default "
-                         "both identifies you and advertises the mode and "
-                         "software: someone who tunes across the signal "
-                         "with no idea what it is hears the CW ID and can "
-                         "go find SSTVAE and a successful decode."),
-                      page));
+    form->addRow(QString(),
+                 style::note_with_detail(
+                     tr("{callsign} is replaced with the callsign above; "
+                        "everything else is sent as typed."),
+                     tr("The default both identifies you and advertises the mode "
+                        "and the software: someone who tunes across the signal "
+                        "with no idea what it is hears the CW ID, and can go "
+                        "find SSTVAE and a successful decode."),
+                     page));
 
     // The transmit level itself stays on the send bar, where it is
     // adjusted, and keeps a short tooltip there. What lives here is the
@@ -845,15 +884,21 @@ QWidget* SettingsDialog::transmit_tab() {
     // adjustment that ruins a transmission silently. The two texts name
     // the same target on purpose; if this one changes, change the
     // tooltip in `tx_panel.cpp` with it.
-    form->addRow(note(tr("Transmit level is on the Transmit panel, beside the "
-                         "mode.\n\n"
-                         "Set it so the radio shows no ALC action at all. ALC "
-                         "is a compressor: it flattens the peaks this waveform "
-                         "carries information in, and the far end sees that as "
-                         "a lower SNR and a mangled picture -- while your own "
-                         "meters look healthy. Start low and raise it until "
-                         "power output stops rising, then back off."),
-                      page));
+    // One disclosure, not two paragraphs always on screen. The tooltip
+    // on the slider in `tx_panel.cpp` is the short form and must name
+    // the same target as this: "barely moving ALC" and "no ALC action"
+    // are different drive levels, and an operator following either
+    // should land in the same place.
+    form->addRow(QString(),
+                 style::note_with_detail(
+                     tr("Transmit level is on the Transmit panel, beside the "
+                        "mode. Set it so the radio shows no ALC action at all."),
+                     tr("ALC is a compressor: it flattens the peaks this "
+                        "waveform carries information in, and the far end sees "
+                        "that as a lower SNR and a mangled image — while your "
+                        "own meters look healthy. Start low and raise it until "
+                        "power output stops rising, then back off."),
+                     page));
     return page;
 }
 
