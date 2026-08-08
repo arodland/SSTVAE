@@ -485,6 +485,15 @@ live, and shown in the gallery whenever the picture is opened. The
 desktop card was a workaround; persisting is the actual fix, and the
 phone is what makes that obvious.
 
+**Observed rather than predicted, on the very first run of the Tier 0
+listener** (2026-08-08). A clean mode A transmission decoded on the
+emulator and reported its mode and callsign correctly — and by the time
+a screenshot was taken twelve seconds later the line read `listening`
+again, with nothing anywhere to say a reception had happened at all.
+Andrew was watching the screen and saw it; the machine driving the test
+did not. That is the operator's pocket exactly, and it is the argument
+for persistence in one observation.
+
 ### The waterfall is the tuning instrument, not a diagnostic
 
 With no CAT there is no frequency readout, no rig chip, nothing to say

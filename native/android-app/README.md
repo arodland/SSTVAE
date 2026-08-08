@@ -12,9 +12,24 @@ device and decode a picture". It can: a Kenwood TH-D75 over USB decodes
 at over 24 dB, and acoustic coupling into the built-in mic works too.
 This is the app that question was asked on behalf of.
 
-**Status: skeleton.** Qt Quick, `sstvae_core` and the onnxruntime AAR
-build and package together for arm64. None of Tier 0's actual behaviour
-is here yet — see the plan below.
+**Status: the audio path is real, the UI is a probe.** Qt Quick,
+`sstvae_core` and the onnxruntime AAR build and package together for
+both ABIs, and — verified on the emulator 2026-08-08 — the app
+enumerates the device's real inputs through JNI, captures through
+`core/audio/android/` into a `RingBuffer` at the device's own 48 kHz,
+resamples through `CapturePipeline`, and runs `rx::decode_loop` on it:
+a clean mode A transmission reported **mode A, callsign KC2G**, and a
+low-SNR one reported a beacon-only lock, which is the right answer to
+each. None of Tier 0's *screens* exist yet — see the plan below.
+
+Two things that first run settled beyond the audio layer. **The engine
+wipes a reception's metadata two seconds later**, so the completed
+decode was gone before a screenshot twelve seconds on could catch it —
+which is the persistence requirement in `docs/android.md` demonstrated
+rather than argued. And the level readout earns its keep: `peak silent
+100.0% near-zero` is what a dead capture path looks like, and it is
+distinguishable at a glance from merely quiet, which a mean level is
+not.
 
 ## Building
 
@@ -63,20 +78,51 @@ adb install -r build-android/android-build/build/outputs/apk/debug/android-build
 
 **Build both ABIs and keep the emulator in the loop** (Andrew,
 2026-08-08). It is tempting to go arm64-only on the grounds that the
-emulator cannot carry audio — it hands back zeroed buffers — but that
+emulator cannot carry audio — but it can, and in any case that
 mistakes the emulator's job. Most of Tier 0's work is *layout*, and
 `adb install` + `adb exec-out screencap` is a build-to-picture loop with
 no phone in hand, which is the Android equivalent of what
 `sstvae-gui-shot` does for the desktop and is there for the same reason:
 "is this laid out well" has no oracle and needs eyes, repeatedly.
 
-The audio objection is handled by the **WAV feeder** (see
-`native/android/`, `WavFeeder.java`): it pushes a file through the same
-capture path in ragged chunks and in real time, so the emulator gets a
-live audio source without a microphone. Tier 0 should carry that
-mechanism over rather than leave it behind in the smoke test.
+**The emulator does carry real audio**, through the AVD's *Extended
+Controls > Microphone > "Virtual microphone uses host audio input"*
+(Andrew found it; it is a per-AVD GUI setting and **not** the same thing
+as the `-allow-host-audio` command-line flag, which was the wrong answer
+tried first). With it on, the host's default source reaches
+`AudioRecord` unchanged: the desktop's own loopback recipe then feeds it,
+
+```sh
+pactl load-module module-null-sink sink_name=null-sink
+pactl load-module module-remap-source source_name=sstvae_loop \
+    master=null-sink.monitor channels=1
+pactl move-source-output <qemu-system-x86_64's index> sstvae_loop
+pw-play --target=null-sink transmission-48k.wav   # pre-resample!
+```
+
+and a whole transmission decodes on the emulator. Two traps. The qemu
+capture stream has to be **moved to the loopback** — it opens on the
+host's real default source, so without the move the app faithfully
+records the room. And **pre-resample the file to 48 kHz**, the same rule
+as the desktop: an on-the-fly 44.1k conversion cost ~4 dB there.
+
+The **WAV feeder** (see `native/android/`, `WavFeeder.java`) is still
+worth carrying over: it pushes a file through the capture path in ragged
+chunks with no host audio stack involved at all, which is reproducible
+in a way a live loopback is not.
 
 A real phone stays the only place the *driver* can be tested.
+
+**`ANDROID_HOME` beats `ANDROID_SDK_ROOT` for the emulator's
+system-image lookup**, and a profile that exports the first to a
+different SDK costs an afternoon: the emulator reports
+`/opt/android-sdk/system-images/… is not a valid directory` and exits,
+naming a path nothing in the command asked for. Export *both*.
+
+**Never set `QT_ANDROID_PERMISSIONS` by hand** — each element is a
+nested `name;<value>` list, so a bare permission string is valid CMake
+that emits invalid JSON, and androiddeployqt fails with a byte offset
+into a generated file. Use `qt_add_android_permission(target NAME …)`.
 
 ## What is left
 

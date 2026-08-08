@@ -59,5 +59,13 @@ set_target_properties(sstvae_android PROPERTIES
     QT_ANDROID_TARGET_SDK_VERSION 36
     QT_ANDROID_MIN_SDK_VERSION 28
     QT_ANDROID_VERSION_NAME "${PROJECT_VERSION}"
-    QT_ANDROID_VERSION_CODE 1
-    QT_ANDROID_PERMISSIONS "android.permission.RECORD_AUDIO")
+    QT_ANDROID_VERSION_CODE 1)
+
+# **Never set `QT_ANDROID_PERMISSIONS` by hand.** Each element is itself
+# a `name;<value>` list, joined into JSON as `"name": "<value>"`, so a
+# bare permission string emits `{ "android.permission.RECORD_AUDIO" }` --
+# valid CMake, invalid JSON, and androiddeployqt fails with a byte
+# offset into a generated file rather than anything naming the property.
+# `qt_add_android_permission` builds the pair correctly.
+qt_add_android_permission(sstvae_android
+    NAME android.permission.RECORD_AUDIO)
