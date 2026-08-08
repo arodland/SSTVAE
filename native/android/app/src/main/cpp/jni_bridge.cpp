@@ -175,6 +175,17 @@ private:
             [model_dir](const std::string& part) {
                 return model_dir + "/v3-" + part + "-fp16.onnx";
             });
+        // **Load the decoder now, not on first use.** The parts are
+        // deliberately lazy -- a receive-only station never touches the
+        // encoder -- but laziness puts a missing artifact's error at the
+        // worst possible moment: on real hardware this surfaced as
+        // "file doesn't exist" *when a picture finally arrived*, after
+        // the operator had waited through a whole transmission, with
+        // everything up to that point reporting success.
+        //
+        // `preload` exists for exactly this, and the error propagates
+        // out of `Native.start` so it lands on the Start button.
+        codec->preload("decoder");
         return [codec](std::span<const double> latents,
                        std::span<const double> weights) {
             return codec->decode(std::vector<double>(latents.begin(), latents.end()),

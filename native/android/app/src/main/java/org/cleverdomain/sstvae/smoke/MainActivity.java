@@ -115,6 +115,7 @@ public final class MainActivity extends AppCompatActivity {
         // where the emulator's virtual mic cannot carry a signal.
         startButton.setOnLongClickListener(v -> {
             if (capture != null || feeder != null) return true;
+            if (modelMissing()) return true;
             File wav = new File("/data/local/tmp/tx48.wav");
             if (!wav.exists()) {
                 Toast.makeText(this, "no " + wav, Toast.LENGTH_LONG).show();
@@ -149,7 +150,18 @@ public final class MainActivity extends AppCompatActivity {
         deviceSpinner.setAdapter(adapter);
     }
 
+    private boolean modelMissing() {
+        if (!Native.hasCodec() || App.foundModelDir() != null) return false;
+        statusText.setText("No decoder model.\nPut " + App.DECODER + " in\n"
+                + App.preferredModelDir()
+                + "\n\nadb push <file> " + App.preferredModelDir() + "/");
+        Toast.makeText(this, "No decoder model - see the status text",
+                Toast.LENGTH_LONG).show();
+        return true;
+    }
+
     private void startCapture() {
+        if (modelMissing()) return;
         int position = deviceSpinner.getSelectedItemPosition();
         int id = position >= 0 && position < devices.size() ? devices.get(position).id : 0;
         AudioManager am = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
@@ -186,6 +198,13 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void refresh() {
+        // Nothing to overwrite the message with, and overwriting it is
+        // exactly the bug the desktop's three error tiers exist to stop:
+        // a sticky explanation destroyed by a routine status line.
+        if (capture == null && feeder == null && Native.hasCodec()
+                && App.foundModelDir() == null) {
+            return;
+        }
         String json = Native.status();
         try {
             JSONObject o = new JSONObject(json);

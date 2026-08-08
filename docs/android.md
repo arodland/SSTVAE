@@ -246,6 +246,24 @@ second is the kind that ends an investigation prematurely:
   the emulator's audio-input plumbing and is not worth further time —
   the real measurement is a real device.
 
+**On real hardware (Andrew, 2026-08-08) the audio path works**: the app
+sits polling and then picks up a transmission, reaching the decoder — so
+capture, sync, framing and the beacon all fire on a real device with a
+real signal. What it hit there was a missing model file, which is a
+smoke-test provisioning gap (there is no Hub fetcher without QtNetwork)
+and not an audio finding.
+
+**But *when* that error appeared is a real bug, and it generalises.**
+`OnnxCodec` loads its parts lazily and independently on purpose — a
+receive-only station never fetches the encoder — and laziness put the
+failure at the worst possible moment: "file doesn't exist" **after the
+operator had waited through an entire transmission**, with every step
+until then reporting success. A missing prerequisite has to fail when
+the session starts. `preload` is in the codec's API for precisely this
+("only useful for surfacing a missing-artifact error early") and Tier 0
+must call it too, for the model *and* for anything else it needs before
+it claims to be listening.
+
 **Our side is exonerated, and by construction rather than by argument.**
 The level meter reads `buf.getShort(i)` straight off `AudioRecord` *before*
 `Native.push`, so the zeros are upstream of every line of our code. And

@@ -22,20 +22,63 @@ import java.io.File;
  */
 public final class App extends Application {
 
+    private static App instance;
     private static File filesDirectory;
     private static File cacheDirectory;
 
     @Override
     public void onCreate() {
         super.onCreate();
+        instance = this;
         filesDirectory = getFilesDir();
         cacheDirectory = getCacheDir();
         new File(filesDirectory, "models").mkdirs();
+        File external = getExternalFilesDir("models");
+        if (external != null) external.mkdirs();
         new File(filesDirectory, "received").mkdirs();
     }
 
+    /** The decoder the smoke test needs; there is no Hub fetcher here. */
+    static final String DECODER = "v3-decoder-fp16.onnx";
+
+    /**
+     * Where to look for the model, in order.
+     *
+     * <p>The internal directory is first because it is what the app owns, but
+     * it is also the one a person cannot write to without {@code run-as} — so
+     * the external ones are what make this usable on a real phone: {@code adb
+     * push} reaches {@code getExternalFilesDir} with no root and no {@code
+     * run-as}, and it is visible over MTP, so the file can simply be dragged
+     * across.
+     */
+    static File[] modelDirs() {
+        File external = instance == null ? null : instance.getExternalFilesDir("models");
+        return new File[] {
+            new File(filesDirectory, "models"),
+            external,
+            new File("/sdcard/Download"),
+        };
+    }
+
+    /** The directory holding the decoder, or null if it is nowhere. */
+    static File foundModelDir() {
+        for (File d : modelDirs()) {
+            if (d != null && new File(d, DECODER).isFile()) return d;
+        }
+        return null;
+    }
+
+    /** Where the operator should be told to put it. */
+    static String preferredModelDir() {
+        File external = instance == null ? null : instance.getExternalFilesDir("models");
+        return (external != null ? external : new File(filesDirectory, "models"))
+                .getAbsolutePath();
+    }
+
     static String modelDir() {
-        return new File(filesDirectory, "models").getAbsolutePath();
+        File found = foundModelDir();
+        return (found != null ? found : new File(filesDirectory, "models"))
+                .getAbsolutePath();
     }
 
     static String outDir() {

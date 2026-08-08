@@ -52,11 +52,21 @@ picture — available only because `rx::Decoder` is a seam.
 ```sh
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell pm grant org.cleverdomain.sstvae.smoke android.permission.RECORD_AUDIO
-# the decoder, since there is no Hub fetcher here (that is QtNetwork)
-adb push ~/.cache/sstvae/models/v3-decoder-fp16.onnx /data/local/tmp/dec.onnx
-adb shell "run-as org.cleverdomain.sstvae.smoke sh -c \
-  'cat /data/local/tmp/dec.onnx > /data/data/org.cleverdomain.sstvae.smoke/files/models/v3-decoder-fp16.onnx'"
+# The decoder, since there is no Hub fetcher here (that is QtNetwork).
+# External files dir: no run-as, no root, and visible over MTP so the
+# file can just be dragged across instead.
+adb push ~/.cache/sstvae/models/v3-decoder-fp16.onnx \
+  /storage/emulated/0/Android/data/org.cleverdomain.sstvae.smoke/files/models/
 ```
+
+The app searches its internal `files/models`, then that external
+directory, then `/sdcard/Download`. If the decoder is in none of them it
+says so **when you press Start**, naming the path and the push command —
+not when a picture finally arrives. `OnnxCodec` loads its parts lazily on
+purpose (a receive-only station never touches the encoder), and on real
+hardware that laziness put "file doesn't exist" at the end of a whole
+transmission with everything until then reporting success. `preload` is
+in the API for exactly this and the smoke test now calls it.
 
 Tap **Start** to capture from the selected input.
 
