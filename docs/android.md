@@ -1,7 +1,9 @@
 # Android: feasibility and design
 
-Assessed 2026-08-08. **Nothing is implemented.** The direction below is
-decided; the code is not written and no schedule is attached.
+Assessed 2026-08-08. The direction below is decided and **Tier 0 is not
+written**; no schedule is attached. What does exist is a pre-Tier-0
+smoke test (`native/android/`, and the section on it below), which is a
+probe rather than the app.
 
 ## Decisions (Andrew, 2026-08-08)
 
