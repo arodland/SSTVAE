@@ -1262,6 +1262,92 @@ need when `--native` fails and you want to know *where*.
   40–80% of the time, so any sweep with single-digit trials per cell
   will invent a pattern — see the warning kept in that section.
 
+## The wiki
+
+Most of what used to be in the README is now in the **GitHub wiki**, and
+the README links to each page by URL. Eight pages: `Home`,
+`Command-line-tools`, `Channel-simulator`, `Performance`, `How-it-works`,
+`Comparison-with-other-modes`, `Training`, `Development`.
+
+**It is a separate git repository**, `https://github.com/arodland/SSTVAE.wiki.git`
+— not a directory in this one. Nothing in the test suite, no CI job and
+no staleness gate touches it, so a page contradicting the code is
+invisible until a reader hits it. That is the whole reason it is
+documented here: it is the project's only prose with no check behind it.
+
+**Cloning is the only mechanism.** There is no wiki API — `gh` has no
+wiki commands and the GitHub REST/MCP tools have no wiki endpoints, so
+`get_file_contents` and friends cannot see these pages at all. Clone it
+(anonymously; it is public) to read or edit:
+
+```sh
+git clone https://github.com/arodland/SSTVAE.wiki.git
+```
+
+**In a sandboxed session that clone is read-only in practice.** The git
+proxy will not inject a credential for `arodland/SSTVAE.wiki` — it is
+not in the session's authorized repository set — and `add_repo` cannot
+add it, because GitHub does not expose a wiki as a repository. `git
+push` returns 403. So: make the edit, commit it in the clone, and say
+plainly that it needs pushing from a machine with ordinary GitHub auth
+(where it is an unremarkable `git push`). Do not report a wiki change as
+published when it is sitting in a scratch clone.
+
+**Renaming a page breaks the README.** GitHub does not redirect a
+renamed wiki page and nothing checks the links, so a rename is a
+two-repository change: the page and every `README.md` URL naming it, in
+the same sitting.
+
+### What each page tracks
+
+Change one of these and the page is stale — the mapping is the point of
+this list:
+
+- **Command-line-tools** — the flags of `sstvae_encode.py`,
+  `sstvae_decode.py`, `sstvae_listen.py`, the install extras in
+  `pyproject.toml` (`cli`/`listen`/`train`, and the installed sizes it
+  quotes), and what `--model` accepts.
+- **Channel-simulator** — `sstvae_simulate.py`'s options and
+  `config.SNR_REF_BW_HZ` (it states the 2.5 kHz convention and the
+  0.79 dB offset from pre-2026-07-26 figures).
+- **Performance** — the PSNR/SNR tables, the acquisition fractions and
+  the late-join table. Regenerate with `scripts/snr_sweep.py` and
+  `scripts/late_join_sweep.py` rather than editing numbers by hand; a
+  new codec revision moves all of them, including the 1.4–1.8 dB quoted
+  for latent optimization (which is anti-correlated with encoder
+  quality, so it erodes as checkpoints improve).
+- **How-it-works** — the beacon, the nested groups, the interleaver, and
+  a **waveform table hand-copied from `sstvae/config.py`**. That is the
+  same hazard `native/core/config.hpp` retires with a generator and a CI
+  gate, here with neither: currently 24 carriers × 50 Hz at 950–2100 Hz,
+  20 ms + 4 ms CP, 230 latents + 5 beacon chips per frame, 32/64/95 s.
+  Any `config.py` change to those must be copied over by hand.
+- **Comparison-with-other-modes** — the side-by-side table; airtime and
+  bandwidth rows come from the same constants, and it embeds
+  `docs/images/ota-vs-analog.png` by raw URL, so moving that file breaks
+  the image.
+- **Training** — `scripts/train.py`'s flags and the two stages,
+  `scripts/export_onnx.py`'s artifact set, the Hub dataset name.
+- **Development** — `pytest` / `pytest -m slow` / `pytest --native`,
+  `tools/build_native.sh`, the `sstvae/` layout, the Qt/CMake build and
+  its Linux `dlopen` dependency list, and the three
+  generated-and-committed artifacts. This is the page most likely to
+  rot, because it names directories.
+- **Home** — the page index plus a list of the repo's own `docs/*.md`.
+  Adding a doc there means adding it here too.
+
+### Worth reading from here
+
+Not just an obligation — some of it is the measured record and lives
+nowhere else. **Performance** has the late-join table (group 0 ends at
+32 s; losing part of it is nearly free, losing all of it costs ~6 dB at a
+stroke) and the acquisition-vs-quality split that the bracketed
+fractions encode. **How-it-works** has the waveform table in one place
+and the distinction between "lost the preamble while recording" (beacon
+rescues it, full quality) and "tuned in late" (complete picture, lower
+fidelity). **Comparison-with-other-modes** is where the on-air analog
+comparison and its caveats are written down.
+
 ## Status / next steps
 
 Phase 1 (modem) complete; stage-1 training pipeline complete with Hub
