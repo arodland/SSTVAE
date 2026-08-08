@@ -122,6 +122,51 @@ all.
 
 A real phone stays the only place the *driver* can be tested.
 
+**The emulator drops audio and a phone does not**, so its SNR figures
+are worthless and its drift figures are the point: −7247 ppm measured
+there against a phone's clean capture of a whole mode B transmission
+(440/440, 17.4 dB) over nothing but acoustic coupling. Use it for
+layout and for the state machine; never quote a number off it.
+
+## Two device-measured behaviours worth knowing
+
+Both from Andrew's 2026-08-08 run, and both now handled rather than
+merely observed.
+
+**Capture drift is measured over a sliding 30 s window, not since the
+stream opened.** A cumulative figure reports the session average, which
+gets the timing wrong in both directions: a startup transient — and
+there is one — stays on the meter long after the audio it describes has
+been decoded (`DROPPING AUDIO` showed for the first stretch of a
+session that then produced two clean pictures), while loss that
+*begins* an hour in is diluted by the clean hour in front of it. The
+second is the case the meter exists for: the emulator's own failure
+looked exactly like that, SNR high early and falling.
+
+**The poll interval backs off on slow devices**
+(`RxConfig::max_decode_duty`, 0.5 here, 1.0 — off — everywhere else).
+The desktop's decode is ~1% of its 5 s interval and needs nothing; a
+mid-range phone's can approach the interval, at which point the device
+decodes back to back, the UI starves, and the extra polls buy nothing,
+since each one re-decodes a picture that has grown by one interval.
+Adaptive rather than a bigger constant because the spread across
+devices is the whole problem — a number slow enough for the worst phone
+would make the best one needlessly stale. Nothing is lost by waiting:
+the audio is still in the ring buffer, so backing off delays a picture
+rather than dropping one. The cost that drives it is on the Listen
+screen (`decode 2.3 s`), shown always, so the next report of "it feels
+slow" arrives as a number from the device it happened on.
+
+**The lever that is *not* available is a faster execution provider.**
+The onnxruntime Android AAR exports NNAPI and nothing else — no
+XNNPACK — and NNAPI is both deprecated from Android 15 and free to run
+a graph in reduced precision on whatever accelerator it finds. That
+would trade the codec's "same runtime, same artifact, exact" basis for
+an unpredictable amount of speed, which is a bigger decision than a
+laggy UI justifies. Thread count (`SetIntraOpNumThreads(4)`, measured
+on a desktop) is the untested knob, and the `decode` readout is what
+would settle it.
+
 **`ANDROID_HOME` beats `ANDROID_SDK_ROOT` for the emulator's
 system-image lookup**, and a profile that exports the first to a
 different SDK costs an afternoon: the emulator reports

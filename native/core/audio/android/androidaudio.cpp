@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <mutex>
 #include <stdexcept>
 
@@ -22,6 +23,15 @@ namespace sstvae::audio::android {
 namespace {
 
 constexpr const char* kBridge = "org/cleverdomain/sstvae/AudioBridge";
+
+// How much recent history the capture-rate estimate is taken over, and
+// the least it will report on. Thirty seconds is long enough that a
+// chunk boundary is noise against it (a 4096-sample chunk at 48 kHz is
+// 85 ms, i.e. 2800 ppm of a single second and 95 ppm of thirty) and
+// short enough that a fault is still news: a transmission is 32-95 s,
+// so a window this size cannot hide loss that would cost a picture.
+constexpr auto kDriftWindow = std::chrono::seconds(30);
+constexpr double kDriftMinSpan = 10.0;
 
 JavaVM* g_vm = nullptr;
 
@@ -149,24 +159,46 @@ struct InputStream::Impl {
     double peak = 0.0;
     double near_zero = 1.0;
     std::atomic<std::uint64_t> captured{0};
-    // Wall clock at the first chunk, for the capture-rate check below.
-    // Started on the first *chunk* rather than at open, because the
-    // gap before audio begins flowing is not lost audio.
-    std::chrono::steady_clock::time_point first_chunk{};
-    // Samples already in hand when that clock started. **Both halves
-    // of the ratio must start at the same instant**: the timestamp is
-    // taken after the first chunk has been counted, so measuring
-    // against the raw total attributes that chunk's samples to zero
-    // elapsed time. Measured, it read +2821 ppm five seconds in --
-    // alarming, and entirely an artifact.
-    std::uint64_t first_samples = 0;
-    bool have_first = false;
+    // Marks for the capture-rate check below: a sliding window rather
+    // than a running total since the stream opened.
+    //
+    // **A cumulative figure answers the wrong question.** It reports
+    // the average rate over the whole session, so a startup transient
+    // -- and there is one; Andrew saw DROPPING AUDIO for the first
+    // stretch of a session that then decoded two clean pictures --
+    // stays on the meter until enough good audio has arrived to
+    // average it away, long after the audio it describes has been
+    // decoded. Worse in the other direction: loss that *begins* an
+    // hour in is diluted by the hour of clean history in front of it,
+    // and that is the shape the emulator showed (SNR high early, then
+    // falling), i.e. the case the meter exists for.
+    //
+    // Each entry pairs a timestamp with the sample count at it. Both
+    // halves must be recorded at the same instant: taking the
+    // timestamp after the chunk had been counted attributed a whole
+    // chunk to zero elapsed time and read +2821 ppm five seconds in.
+    struct Mark {
+        std::chrono::steady_clock::time_point at;
+        std::uint64_t samples;
+    };
+    std::deque<Mark> marks;
     std::atomic<bool> stopped{false};
     jint token = -1;
 
     Impl(rx::RingBuffer& r, int rate, Report opened, Report err)
         : ring(r), want_rate(rate), on_opened(std::move(opened)),
           on_error(std::move(err)) {}
+
+    // Called with `m` held, once per chunk. Drops marks that have aged
+    // past the window, keeping the oldest one that is still inside it
+    // -- so the window slides forward and never grows without bound.
+    void push_mark() {
+        const auto now = std::chrono::steady_clock::now();
+        marks.push_back({now, captured.load(std::memory_order_relaxed)});
+        while (marks.size() >= 2 && now - marks[1].at >= kDriftWindow) {
+            marks.pop_front();
+        }
+    }
 };
 
 namespace {
@@ -276,23 +308,23 @@ double InputStream::near_zero_fraction() const {
 // and the picture. Anything past about -1000 ppm is audio being
 // dropped, not a crystal being imprecise.
 //
-// Returns 0 before enough audio has arrived to mean anything: over a
-// short window the quantisation of the first chunk dominates.
+// Measured over a sliding window (see `Impl::marks`), so the number is
+// the *current* rate rather than the session average. Returns 0 before
+// the window holds enough audio to mean anything: over a short span the
+// quantisation of one chunk dominates, and a meter that cries wolf for
+// the first quarter-minute of every session is one nobody reads by the
+// time it matters.
 double InputStream::capture_drift_ppm() const {
     std::lock_guard<std::mutex> lk(impl_->m);
-    if (!impl_->have_first || impl_->device_rate <= 0) return 0.0;
-    const double elapsed = std::chrono::duration<double>(
-                               std::chrono::steady_clock::now() - impl_->first_chunk)
-                               .count();
-    // Ten seconds, not five: the estimate is a ratio of two small
-    // numbers early on, and a meter that cries wolf for the first
-    // quarter-minute of every session is one nobody reads by the time
-    // it matters.
-    if (elapsed < 10.0) return 0.0;
+    if (impl_->marks.empty() || impl_->device_rate <= 0) return 0.0;
+    const auto& first = impl_->marks.front();
+    const double elapsed =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - first.at)
+            .count();
+    if (elapsed < kDriftMinSpan) return 0.0;
     const double expected = elapsed * impl_->device_rate;
-    const double actual =
-        static_cast<double>(impl_->captured.load(std::memory_order_relaxed) -
-                            impl_->first_samples);
+    const double actual = static_cast<double>(
+        impl_->captured.load(std::memory_order_relaxed) - first.samples);
     return (actual / expected - 1.0) * 1e6;
 }
 
@@ -437,11 +469,7 @@ JNIEXPORT void JNICALL Java_org_cleverdomain_sstvae_AudioBridge_nativePush(
         s->peak = peak / 32768.0;
         s->near_zero = near_zero;
         s->captured.store((*s->pipeline).samples_in(), std::memory_order_relaxed);
-        if (!s->have_first) {
-            s->first_chunk = std::chrono::steady_clock::now();
-            s->first_samples = s->captured.load(std::memory_order_relaxed);
-            s->have_first = true;
-        }
+        s->push_mark();
     }
     // Written outside the lock: `RingBuffer::write` takes its own, and
     // nesting the two would put this thread's progress at the mercy of

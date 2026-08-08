@@ -78,7 +78,16 @@ ApplicationWindow {
             // pointed.
             Waterfall {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 180
+                // Taller while there is no picture, which is both when
+                // the space is free and when the waterfall is the thing
+                // being used: tuning happens before a decode, not
+                // during one. Once a picture is arriving the picture is
+                // what the operator is looking at, and the strip goes
+                // back to being a check that the signal is still there.
+                Layout.preferredHeight: listener.hasLiveImage ? 180 : 300
+                Behavior on Layout.preferredHeight {
+                    NumberAnimation { duration: 150 }
+                }
             }
 
             Image {
@@ -87,14 +96,54 @@ ApplicationWindow {
                 fillMode: Image.PreserveAspectFit
                 visible: listener.hasLiveImage
                 cache: false
+                // **Asynchronous, because the provider does real work.**
+                // A synchronous provider runs on the GUI thread, so
+                // every refresh converts a 640x480 picture there while
+                // the decode thread already has the CPU busy. This is
+                // the cheapest part of the lag to remove.
+                asynchronous: true
                 source: listener.hasLiveImage
                         ? "image://sstvae/live/" + listener.liveImageId
                         : ""
             }
 
+            // What the operator sees for most of a session: no picture
+            // yet. An empty half-screen of white reads as a broken
+            // layout, and it is also the moment with the most to say --
+            // whether anything is being heard at all, and that a
+            // picture builds up over a minute rather than arriving.
             Item {
+                Layout.fillWidth: true
                 Layout.fillHeight: true
                 visible: !listener.hasLiveImage
+
+                ColumnLayout {
+                    anchors.centerIn: parent
+                    width: parent.width - 48
+                    spacing: 6
+
+                    Label {
+                        Layout.fillWidth: true
+                        horizontalAlignment: Text.AlignHCenter
+                        font.pixelSize: 15
+                        color: "#888"
+                        text: !listener.listening ? "Not listening"
+                            : !listener.modelReady ? "Waiting for the model"
+                            : "Listening for a transmission"
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.Wrap
+                        font.pixelSize: 12
+                        color: "#aaa"
+                        text: !listener.listening
+                              ? "Tune the radio, then start. The waterfall above shows the band whether or not anything is decoding."
+                              : !listener.modelReady
+                              ? "Reception has already begun; the picture appears as soon as the model finishes downloading."
+                              : "A picture appears here as it decodes, and fills in over the length of the transmission."
+                    }
+                }
             }
 
             Label {

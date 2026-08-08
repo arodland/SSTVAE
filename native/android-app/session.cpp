@@ -233,6 +233,17 @@ bool Session::start(const std::string& device_name) {
     };
     rx::RxConfig cfg;
     cfg.poll_interval = 5.0;
+    // **Half, on a phone.** The desktop leaves this at 1.0 because its
+    // decode is ~1% of the interval; here a decode is seconds, and at
+    // the fixed interval a slow device ends up decoding back to back --
+    // which starves the UI (Andrew: "decoding was pretty laggy") and
+    // buys nothing, since each poll re-decodes a picture that has only
+    // grown by one interval. A fast phone never reaches the cap and
+    // polls every 5 s exactly as before; a slow one stretches out on
+    // its own measured cost rather than on a constant guessed from
+    // here. Anything not yet decoded is still in the ring buffer, so
+    // backing off delays a picture rather than losing one.
+    cfg.max_decode_duty = 0.5;
     rx::Sink sink = [this](const rx::Reception& r) -> std::optional<std::string> {
         return save_reception(r);
     };

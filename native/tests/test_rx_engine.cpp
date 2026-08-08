@@ -434,10 +434,50 @@ void test_stop_interrupts_a_wait_in_progress() {
     check::is_true(stop.wait(3600.0), "rx/stop: waiting on an already-set flag returns");
 }
 
+// The adaptive backoff, as arithmetic.
+//
+// Checked here rather than by running the loop with a slow decoder and
+// timing it: that would assert on latency, and this is a decision, not
+// a duration. The mutants worth catching are an inverted comparison
+// (which would make a *fast* poll back off) and dropping the
+// `poll_interval` floor (which would make a fast device poll faster
+// than it ever did).
+void test_poll_backoff() {
+    sstvae::rx::RxConfig cfg;
+    cfg.poll_interval = 5.0;
+
+    // Default is off: the interval, whatever the last poll cost.
+    check::is_true(std::abs(sstvae::rx::poll_wait(cfg, 0.0) - 5.0) < 1e-12,
+                 "rx/backoff: default is the fixed interval");
+    check::is_true(std::abs(sstvae::rx::poll_wait(cfg, 30.0) - 5.0) < 1e-12,
+                 "rx/backoff: default ignores an expensive poll");
+
+    cfg.max_decode_duty = 0.5;
+    // A desktop-speed poll never reaches the cap.
+    check::is_true(std::abs(sstvae::rx::poll_wait(cfg, 0.05) - 5.0) < 1e-12,
+                 "rx/backoff: a cheap poll still waits the interval");
+    // At the duty exactly, the interval is still what governs.
+    check::is_true(std::abs(sstvae::rx::poll_wait(cfg, 5.0) - 5.0) < 1e-12,
+                 "rx/backoff: a poll costing the interval is the boundary");
+    // Past it, the wait matches the cost, so half the time is idle.
+    check::is_true(std::abs(sstvae::rx::poll_wait(cfg, 9.0) - 9.0) < 1e-12,
+                 "rx/backoff: a slow poll is followed by equal idle");
+
+    cfg.max_decode_duty = 0.25;
+    check::is_true(std::abs(sstvae::rx::poll_wait(cfg, 4.0) - 12.0) < 1e-12,
+                 "rx/backoff: a quarter duty waits three times the cost");
+
+    // An absurd request is floored rather than obeyed.
+    cfg.max_decode_duty = 0.0;
+    check::is_true(std::abs(sstvae::rx::poll_wait(cfg, 10.0) - 190.0) < 1e-12,
+                 "rx/backoff: the duty floor bounds the wait");
+}
+
 }  // namespace
 
 int main() {
     try {
+        test_poll_backoff();
         test_stop_interrupts_a_wait_in_progress();
         test_a_clean_transmission_is_received_once();
         test_noise_produces_nothing();
