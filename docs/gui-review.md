@@ -33,6 +33,28 @@ iterated" as the thing it needs eyes for. This is one pass of that.
 > Re-measured after the work: side by side asks **766 x 467**, tabbed
 > **342 x 464**.
 
+## Before and after
+
+Both pairs are `sstvae-gui-shot` output at the same size, so they differ
+only by the changes.
+
+The two panes at 1360x760 — before, then after. The transmit strip is
+where most of §1 lands: "Rotation" separated from its spin box, an
+invisible group separator, and a progress bar that read as a disabled
+line edit.
+
+![The two panes before](images/gui-review-panes-before.png)
+
+![The two panes after](images/gui-review-panes-after.png)
+
+The Transmit settings tab, which was the worst case for §3.1 — roughly
+60% grey prose by area, at 1.62:1 contrast. After: 5.07:1, four short
+summaries with disclosures, and each setting grouped with its own help.
+
+![The Transmit settings tab before](images/gui-review-transmit-tab-before.png)
+
+![The Transmit settings tab after](images/gui-review-transmit-tab-after.png)
+
 **Method.** Built `native/` against Qt 6.4.2 and rendered every panel
 and dialog headless with `sstvae-gui-shot`, at 1360x760 and 900x700, and
 read all 7,109 lines of `native/gui/`. Everything below with a number in
