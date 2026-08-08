@@ -1,5 +1,6 @@
 package org.cleverdomain.sstvae;
 
+import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
@@ -45,8 +46,22 @@ public final class Sharing {
             send.putExtra(Intent.EXTRA_TEXT, caption);
         }
         send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        // **The grant has to travel on the ClipData, not only on
+        // EXTRA_STREAM.** A flag alone covers the intent's own data
+        // URI, and this one is in an extra, so the system has nothing
+        // to attach the grant to -- the target app gets it when it is
+        // launched, but the chooser's own thumbnail loader does not,
+        // and fails with `Permission Denial: opening provider ...
+        // FileProvider`. Visible as a share sheet with a broken preview
+        // for a share that then works, which is a confusing half
+        // failure to be handed.
+        send.setClipData(ClipData.newUri(context.getContentResolver(), "reception", uri));
 
         final Intent chooser = Intent.createChooser(send, "Share reception");
+        // `createChooser` *wraps* the intent, so the flags above are on
+        // the inner one and the resolver process is not covered by
+        // them. It needs its own copy.
+        chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         // The chooser is started from whatever context we were handed,
         // which may not be an Activity on every path.
         chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
