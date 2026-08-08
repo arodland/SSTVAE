@@ -70,6 +70,10 @@ final class AudioDevices {
         return product + " (" + type + ")";
     }
 
+    static String describeType(int type) {
+        return typeName(type);
+    }
+
     private static String typeName(int type) {
         switch (type) {
             case AudioDeviceInfo.TYPE_BUILTIN_MIC:

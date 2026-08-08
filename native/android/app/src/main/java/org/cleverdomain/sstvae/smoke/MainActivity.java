@@ -231,6 +231,25 @@ public final class MainActivity extends AppCompatActivity {
                 sb.append(String.format("SNR %.1f dB", o.optDouble("snr")));
             }
             sb.append("\ncompleted ").append(o.optInt("completed"));
+
+            // The audio side, shown while capturing. A level in dBFS plus the
+            // share of near-silent samples, because those are different
+            // questions: "is it too quiet" and "is anything arriving at all"
+            // have the same mean and are not the same problem.
+            CaptureThread c = capture;
+            if (c != null && !c.openedAs.isEmpty()) {
+                sb.append("\nin: ").append(c.openedAs)
+                        .append("  ->  ").append(c.routedTo);
+                int pk = c.levelPeak;
+                String db = pk > 0
+                        ? String.format("%.0f dBFS", 20 * Math.log10(pk / 32768.0))
+                        : "silent";
+                sb.append(String.format("%n    peak %s   %.1f%% near-zero",
+                        db, c.levelNearZeroPct));
+                if (!c.routingWarning.isEmpty()) {
+                    sb.append("\n    ! ").append(c.routingWarning);
+                }
+            }
             if (!Native.hasCodec()) sb.append("   (no codec: frames only)");
 
             String error = o.optString("error", "");

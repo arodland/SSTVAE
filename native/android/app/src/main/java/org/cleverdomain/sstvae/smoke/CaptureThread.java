@@ -46,6 +46,15 @@ final class CaptureThread extends Thread {
 
     private String sourceName = "?";
 
+    // Polled by the UI every 500 ms. Volatile rather than locked: these are
+    // a display, and a torn read of a level meter is not worth a mutex on
+    // the capture thread.
+    volatile String openedAs = "";
+    volatile String routedTo = "";
+    volatile String routingWarning = "";
+    volatile int levelPeak = 0;
+    volatile double levelNearZeroPct = 100.0;
+
     private final AudioManager audioManager;
     private final int preferredDeviceId;
     private final Listener listener;
@@ -158,8 +167,13 @@ final class CaptureThread extends Thread {
             // worst available outcome.
             boolean ok = target != null && r.setPreferredDevice(target);
             if (!ok) {
-                listener.onError("the system refused to route capture to the "
-                        + "selected device; it is using its own choice instead");
+                // Sticky, not a Toast. "Capturing from the built-in mic while
+                // the UI claims USB" is the worst available outcome here, and
+                // a message that fades after two seconds is how it happens --
+                // the same reasoning as the desktop's error tiers.
+                routingWarning = "the system refused to route capture to the "
+                        + "selected device; using its own choice instead";
+                listener.onError(routingWarning);
             }
         }
 
@@ -172,6 +186,13 @@ final class CaptureThread extends Thread {
         }
 
         AudioDeviceInfo routed = r.getRoutedDevice();
+        // What it *actually* opened and where it *actually* went. Displayed,
+        // not just logged: on a USB test the whole question is whether the
+        // interface got used, and answering it should not need adb.
+        openedAs = sourceName + " " + r.getSampleRate() + " Hz";
+        routedTo = routed == null ? "(unknown)"
+                : AudioDevices.describeType(routed.getType()) + " \""
+                        + routed.getProductName() + "\"";
         Log.i(TAG, "AudioRecord: source=" + sourceName
                 + " requested=" + rate + " actual=" + r.getSampleRate()
                 + " channels=" + r.getChannelCount()
@@ -220,6 +241,8 @@ final class CaptureThread extends Thread {
                             "input: %.0f bytes/s (expect %d)  peak %d  %.1f%% below 16 LSB",
                             bytesSinceReport / secs, r.getSampleRate() * 2, peak,
                             100.0 * nearZero / Math.max(1, counted)));
+                    levelPeak = peak;
+                    levelNearZeroPct = 100.0 * nearZero / Math.max(1, counted);
                     reportedAt = now;
                     bytesSinceReport = 0;
                     peak = 0;

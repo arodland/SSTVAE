@@ -68,7 +68,26 @@ hardware that laziness put "file doesn't exist" at the end of a whole
 transmission with everything until then reporting success. `preload` is
 in the API for exactly this and the smoke test now calls it.
 
-Tap **Start** to capture from the selected input.
+Tap **Start** to capture from the selected input. While capturing, the
+status text reports the audio side:
+
+```
+in: UNPROCESSED 48000 Hz  ->  USB Device "Digirig"
+    peak -18 dBFS   2.1% near-zero
+```
+
+That first line is **what actually opened and where it actually routed**,
+asked of `AudioRecord` rather than echoed back from the request — the
+two can differ, and on a USB test that difference is the entire
+question. If the platform refuses the routing, a sticky `!` line says so
+rather than a Toast that fades: capturing from the built-in mic while
+the UI claims USB is the worst outcome available here.
+
+The level is reported as peak dBFS *and* the share of near-silent
+samples, because those answer different questions. "Too quiet" and
+"nothing is arriving" have the same mean level and are not the same
+problem — which is exactly how the emulator's zeroed audio was
+misdiagnosed once already.
 
 Two hidden gestures, both diagnostics rather than UI:
 
