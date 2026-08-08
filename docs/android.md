@@ -218,14 +218,45 @@ what Tier 0 wants.
   x86_64; the debug APK with both ABIs is 72 MB.
 - The `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` trick holds: no path code changed.
 
-**What it did not prove, and this is the important part.** The emulator's
-virtual microphone cannot carry the signal — measured at **1/60th of the
-reference amplitude with only 32.5% of its power in the 900–2150 Hz band**
-and spectral peaks at 2484/2934/3379 Hz, i.e. not our transmission at all.
-The host loopback it was fed from decodes at **34.6 dB**, so the signal was
-clean right up to the emulator. Everything downstream of the driver is
-therefore exercised, and **the driver itself is not**. That was always
-going to need hardware, and the USB questions above are all still open.
+**What it did not prove, and this is the important part.** The
+microphone path was never exercised, because the emulator hands back
+**zeroed audio**. Everything downstream of the driver is covered; **the
+driver itself is not**. That always needed hardware, and every USB
+question above is still open.
+
+That diagnosis took two wrong turns, both worth recording because the
+second is the kind that ends an investigation prematurely:
+
+- The first reading was "the emulator's mic is deaf" — from the captured
+  RMS being 1/60th of the reference with two thirds of its power out of
+  band. **Wrong, and it was wrong in the direction of giving up.** The
+  capture had 3 s of silence, then **31.5 s of activity against a 32 s
+  transmission**, then silence. Something was getting through; a deaf
+  device does not keep time with the signal.
+- What it actually is: the byte rate is *correct* (96037 against 96000
+  expected, so no underrun and no rate error) while **99.9% of samples
+  sit below 16 LSB** with occasional full-scale impulses — kurtosis 175
+  against the reference's 2.18. Near-silence with clicks, not attenuated
+  audio. `emulator -help` names it exactly: **`-allow-host-audio`**,
+  "Allows sending of audio from audio input devices. *Otherwise, zeroes
+  out audio.*" Passing that flag alone did not change it, and the
+  PulseAudio routing was verified correct at the time (the emulator's
+  source-output really was attached to `sstvae_loop`, the same source a
+  `parecord` decodes from at **34.6 dB**). So the remaining gap is inside
+  the emulator's audio-input plumbing and is not worth further time —
+  the real measurement is a real device.
+
+**Our side is exonerated, and by construction rather than by argument.**
+The level meter reads `buf.getShort(i)` straight off `AudioRecord` *before*
+`Native.push`, so the zeros are upstream of every line of our code. And
+the WAV feeder is the control: identical `Native.push` → `CapturePipeline`
+→ ring path, ragged chunks, real time — and it decodes a picture.
+
+The general lesson, which is the one this project keeps relearning: **a
+capture path that reports the right byte rate can still be delivering
+nothing**, and the distribution is what tells you. Mean level cannot: a
+quiet path and a silence-plus-clicks path have the same RMS and are not
+remotely the same failure. Log the percentiles, not the average.
 
 Two things worth keeping:
 

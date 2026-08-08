@@ -76,9 +76,21 @@ Two hidden gestures, both diagnostics rather than UI:
 
 ## Emulator caveat
 
-The emulator's virtual microphone **cannot carry the signal**: measured
-at 1/60th of the reference amplitude with two thirds of its power outside
-the 900–2150 Hz band. Route a host loopback into it if you like — the
-recipe in `CLAUDE.md` plus `pactl move-source-output <id> sstvae_loop` —
-but what arrives is not the transmission. Use the WAV feeder on the
-emulator, and a real device for anything about the driver.
+**The emulator hands back zeroed audio**, so the microphone path cannot
+be tested on it. `AudioRecord` returns the correct byte rate (96037/s
+against 96000 expected) while 99.9% of samples sit below 16 LSB with
+occasional full-scale impulses. `emulator -help` names the cause:
+`-allow-host-audio`, "Allows sending of audio from audio input devices.
+Otherwise, zeroes out audio." Passing that flag alone did not fix it
+here, with the PulseAudio routing verified correct — the emulator's
+source-output attached to `sstvae_loop`, the same source `parecord`
+decodes from at 34.6 dB.
+
+So: **use the WAV feeder on the emulator, and a real device for anything
+about the driver.**
+
+Do not read a low capture level as "the device is deaf" — that was the
+first (wrong) conclusion here, and it nearly ended the investigation.
+A path delivering silence and a path delivering quiet audio have the
+same RMS; the percentiles tell them apart, which is why the capture
+thread logs `% below 16 LSB` and peak rather than a mean level.

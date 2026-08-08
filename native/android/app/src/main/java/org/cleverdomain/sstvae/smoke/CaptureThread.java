@@ -44,6 +44,8 @@ final class CaptureThread extends Thread {
     /** Candidate rates, most-likely-native first. */
     private static final int[] RATES = {48000, 44100, 32000, 16000, 8000};
 
+    private String sourceName = "?";
+
     private final AudioManager audioManager;
     private final int preferredDeviceId;
     private final Listener listener;
@@ -89,6 +91,7 @@ final class CaptureThread extends Thread {
                 r = new AudioRecord(MediaRecorder.AudioSource.UNPROCESSED, candidate,
                         AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
                         bytes);
+                sourceName = "UNPROCESSED";
             } catch (IllegalArgumentException e) {
                 r = null;
             }
@@ -117,6 +120,7 @@ final class CaptureThread extends Thread {
                     r = new AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION,
                             candidate, AudioFormat.CHANNEL_IN_MONO,
                             AudioFormat.ENCODING_PCM_16BIT, bytes);
+                    sourceName = "VOICE_RECOGNITION";
                 } catch (IllegalArgumentException e) {
                     r = null;
                 }
@@ -167,6 +171,14 @@ final class CaptureThread extends Thread {
             return;
         }
 
+        AudioDeviceInfo routed = r.getRoutedDevice();
+        Log.i(TAG, "AudioRecord: source=" + sourceName
+                + " requested=" + rate + " actual=" + r.getSampleRate()
+                + " channels=" + r.getChannelCount()
+                + " encoding=" + r.getAudioFormat()
+                + " routedTo=" + (routed == null ? "(unknown)"
+                        : routed.getProductName() + "/type" + routed.getType()));
+
         listener.onOpened(rate, 1, "Int16");
 
         // Direct, so the bytes are visible to C++ without a copy across the
@@ -184,10 +196,36 @@ final class CaptureThread extends Thread {
             return;
         }
 
+        long reportedAt = System.nanoTime();
+        long bytesSinceReport = 0;
+        int peak = 0;
+        long nearZero = 0;
+        long counted = 0;
+
         while (running) {
             buf.clear();
             int n = r.read(buf, chunk);
             if (n > 0) {
+                for (int i = 0; i + 1 < n; i += 2) {
+                    int v = Math.abs(buf.getShort(i));
+                    if (v > peak) peak = v;
+                    if (v < 16) nearZero++;
+                    counted++;
+                }
+                bytesSinceReport += n;
+                long now = System.nanoTime();
+                if (now - reportedAt > 5_000_000_000L) {
+                    double secs = (now - reportedAt) / 1e9;
+                    Log.i(TAG, String.format(
+                            "input: %.0f bytes/s (expect %d)  peak %d  %.1f%% below 16 LSB",
+                            bytesSinceReport / secs, r.getSampleRate() * 2, peak,
+                            100.0 * nearZero / Math.max(1, counted)));
+                    reportedAt = now;
+                    bytesSinceReport = 0;
+                    peak = 0;
+                    nearZero = 0;
+                    counted = 0;
+                }
                 Native.push(buf, n);
             } else if (n < 0) {
                 // ERROR_INVALID_OPERATION and friends. A negative read while
