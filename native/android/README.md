@@ -105,18 +105,22 @@ Two hidden gestures, both diagnostics rather than UI:
 
 ## Emulator caveat
 
-**The emulator hands back zeroed audio**, so the microphone path cannot
-be tested on it. `AudioRecord` returns the correct byte rate (96037/s
-against 96000 expected) while 99.9% of samples sit below 16 LSB with
-occasional full-scale impulses. `emulator -help` names the cause:
-`-allow-host-audio`, "Allows sending of audio from audio input devices.
-Otherwise, zeroes out audio." Passing that flag alone did not fix it
-here, with the PulseAudio routing verified correct — the emulator's
-source-output attached to `sstvae_loop`, the same source `parecord`
-decodes from at 34.6 dB.
+**Turn on Extended Controls > Microphone > "Virtual microphone uses host
+audio input"** before expecting any audio. It is a per-AVD switch, off by
+default, and it is *not* the same as the `-allow-host-audio` command-line
+flag — that flag alone changes nothing. With the switch on, a host
+loopback decodes on the emulator at 33.2 dB.
 
-So: **use the WAV feeder on the emulator, and a real device for anything
-about the driver.**
+Without it the emulator hands back zeroed audio and the microphone path
+cannot be tested at all. `AudioRecord` returns the correct byte rate (96037/s
+against 96000 expected) while 99.9% of samples sit below 16 LSB with
+occasional full-scale impulses. `emulator -help` describes the symptom under `-allow-host-audio`
+("Otherwise, zeroes out audio"), which is misleading: that flag alone
+did not fix it, and the AVD switch alone did.
+
+The WAV feeder remains the quicker path when you only want a signal —
+it needs no routing at all — and a real device is still the only place
+the driver itself gets tested.
 
 Do not read a low capture level as "the device is deaf" — that was the
 first (wrong) conclusion here, and it nearly ended the investigation.

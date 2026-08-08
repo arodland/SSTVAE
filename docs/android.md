@@ -253,10 +253,23 @@ Two things the hardware run taught that no emulator would have:
 - **`setPreferredDevice` returns false and routes correctly anyway.**
   See below; it was our diagnostic that was wrong, not the routing.
 
-**The emulator, by contrast, never exercised the microphone path at
-all**, because it hands back **zeroed audio**. That diagnosis took two
-wrong turns, both worth recording because the second is the kind that
-ends an investigation prematurely:
+**The emulator can carry audio after all** — the missing piece was a
+per-AVD switch, **Extended Controls > Microphone > "Virtual microphone
+uses host audio input"** (Andrew found it, 2026-08-08). With it on, and
+*without* any command-line flag, the same loopback that had been
+delivering 99.9% below 16 LSB delivers **0.0%**, and the smoke test
+decodes a picture from the virtual microphone at 33.2 dB against a host
+decode of the same transmission.
+
+So the emulator exercises the microphone path too, and is short only a
+*real* driver — one more reason it belongs in the loop rather than being
+written off. Note the switch is persisted in the AVD and is **not** the
+same thing as `-allow-host-audio`: that flag alone changed nothing,
+which is exactly why the earlier attempt with it looked conclusive and
+was not.
+
+Getting there took two wrong turns, both worth recording because the
+second is the kind that ends an investigation prematurely:
 
 - The first reading was "the emulator's mic is deaf" — from the captured
   RMS being 1/60th of the reference with two thirds of its power out of
@@ -275,7 +288,12 @@ ends an investigation prematurely:
   source-output really was attached to `sstvae_loop`, the same source a
   `parecord` decodes from at **34.6 dB**). So the remaining gap is inside
   the emulator's audio-input plumbing and is not worth further time —
-  the real measurement is a real device.
+  the real measurement is a real device. **Superseded**: the cause was
+  the AVD's own microphone switch, above. Worth noticing that the
+  reasoning which produced "not worth further time" was sound at each
+  step and still reached the wrong stopping point — the flag's
+  documentation described the symptom exactly, which made it look like
+  the answer rather than one of two things that had to be true.
 
 **The one bug the hardware run did find was about error *timing*, and it
 generalises.** The first attempt reached the decoder and then reported a
