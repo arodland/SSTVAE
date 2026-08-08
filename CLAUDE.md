@@ -1275,6 +1275,23 @@ need when `--native` fails and you want to know *where*.
   app no `/dev/ttyUSB`, which is what makes "RX+TX without rig control"
   the natural shape rather than a compromise. `rig::Backend` is still a
   seam, so NET rigctl over wifi is ~200 lines whenever it is wanted.
+  **The UI is explicitly not a port of the desktop's** (Andrew,
+  2026-08-08) — the desktop layout history in this file is a record of
+  QtWidgets on a desktop, and reaching for it there would be inheriting
+  answers to questions nobody is asking. Three consequences are
+  structural rather than cosmetic. **The foreground service owns the
+  engine and the UI is a detachable view**, inverting the desktop's
+  `AppState`, because a listening session must survive the screen going
+  off — which also means rendering stops entirely with no UI attached,
+  and that is most of the battery answer. **Reception metadata must be
+  persisted beside the picture**, because `rx/engine` wipes it from
+  shared state after two seconds and on a phone the operator is usually
+  not looking; the desktop's last-reception card was a workaround for
+  the same thing. And **the waterfall is the tuning instrument**, not a
+  diagnostic, since with no CAT there is no frequency readout at all —
+  which is also why `spectrum.cpp`'s peak-hold matters more there, a
+  ragged comb from point-sampling being the worst available lie on a
+  display whose whole job is "are you tuned right".
 - `docs/todo.md` — open work items with the reasoning behind them.
   Currently one: a wider acquisition search so a mis-tuned counterpart
   still decodes — measured, the demod path is entirely independent of

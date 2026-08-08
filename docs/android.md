@@ -257,43 +257,124 @@ TCP. Since the wire format is trivial ASCII, that is roughly 200 lines
 of `rig::Backend` that does not link Hamlib — which on Android is a much
 better trade than cross-compiling an autotools tarball for four ABIs.
 
-## The Qt Quick front end
+## The front end
 
-Replacing 6,170 lines of QtWidgets, but less of it is new than that
-implies — the parts of those files with logic in them are mostly already
-in the core:
+**This is not a port of the desktop UI, and it should not be read as
+one** (Andrew, 2026-08-08). The app gets the interface appropriate to a
+phone and to the feature set actually shipped. The desktop layout
+history in `CLAUDE.md` — splitter versus tabs, the picture box's
+minimum-height ratchet, `QFormLayout` truncation, stylesheet versus
+`QPalette` — is a record of *QtWidgets on a desktop*, and reaching for
+it here would be inheriting the answers to questions nobody is asking.
+What survives from it is a short list of rules, at the bottom of this
+section.
 
-- **Waterfall.** `core/dsp/spectrum.cpp` is the arithmetic and is
-  Qt-free, including `reduce_to_width`'s peak-hold (point-sampling
-  produces a ragged comb that reads as a *reception* problem). A
-  `QQuickPaintedItem` over the same functions is the straight
-  translation. The history-scrolls-down and survives-a-resize
-  properties are still worth testing, and `tick()` should stay a slot
-  for the same reason.
-- **Picture view.** A `QQuickImageProvider` over the received `QImage`.
-  Note the whole `picture_box.cpp` aspect-ratio fight — `setFixedHeight`
-  ratcheting a window's minimum height — is a QtWidgets layout problem
-  that simply does not exist in Quick, where an `Item` imposes nothing
-  upward. That is one of the more annoying pieces of the desktop app
-  evaporating.
-- **Status log.** `core/log/` is Qt-free and bounded; a
-  `QAbstractListModel` over `snapshot()` gives the same backfill the
-  dock has.
-- **Settings.** `core/settings/` is Qt-free JSON at `CONFIG_VERSION` 2.
-  Android drops the rig keys and the `audio.backend` key and gains a
-  device selection; whether that is a version 3 or an additive change
-  the desktop ignores is a decision for whoever writes it. The
-  round-trip test discipline in `test_settings_dialog.cpp` — a fixture
-  in which no field holds its default — applies unchanged and is worth
-  keeping, since a field displayed but not written back is still the
-  characteristic settings bug.
+### The service owns the engine, and the UI is a detachable view
 
-Two desktop layout decisions do not carry over and should not be ported
-out of habit: the splitter-versus-tabs arrangement is a large-screen
-problem, and the receive/transmit panes on a phone are simply separate
-screens. The rule *behind* them does carry: half duplex means
-transmitting suspends receive, with a fresh ring buffer on resume, and
-the pause has to look deliberate rather than wedged.
+The one consequence that is architectural rather than cosmetic, and it
+is forced by the platform rather than chosen.
+
+On the desktop, `AppState` owns the codec and the engines and the window
+owns `AppState`: the GUI is the process. On Android the process is the
+**foreground service** — it has to be, because a listening session must
+survive the screen going off, the app being backgrounded, and the task
+switcher. So the ownership inverts: the service holds the ring buffer,
+the audio layer, the codec and `decode_loop`, and the UI attaches to it,
+reads shared state, and detaches without disturbing anything.
+
+That has a concrete cost if it is discovered late and almost none if it
+is designed in: nothing in the UI may own engine state, and every live
+display has to be reconstructible from `SharedState` on attach rather
+than accumulated by watching. It also has a concrete benefit — **with no
+UI attached, rendering stops entirely** while decoding continues, which
+is most of the battery answer for a multi-hour session and is not
+something the desktop app has any equivalent of.
+
+### The phone can tell you, and that is what it is for
+
+A desktop listener requires you to be at the desk. A phone in a pocket,
+cabled to a radio, can put a decoded picture on the lock screen. That is
+not a nicety bolted onto a port — it is the reason to want this app at
+all, and it should be designed first rather than treated as an Android
+obligation to be discharged.
+
+Two surfaces, both with no desktop counterpart:
+
+- **The ongoing notification** is where "listening / receiving, 43% /
+  decoded" lives. It is the service's obligation anyway, so the only
+  question is whether it is informative or boilerplate.
+- **A completed reception posts a picture notification.** Big-picture
+  style, so the image itself is on the lock screen.
+
+This also settles something the desktop got wrong twice.
+`rx/engine.cpp` wipes mode, callsign, SNR and frame count from shared
+state two seconds after a reception; the desktop answer was a
+"last reception card" that keeps them on screen. On a phone the operator
+is frequently *not looking*, so state that expires is worthless —
+**reception metadata has to be persisted beside the picture**, not held
+live, and shown in the gallery whenever the picture is opened. The
+desktop card was a workaround; persisting is the actual fix, and the
+phone is what makes that obvious.
+
+### The waterfall is the tuning instrument, not a diagnostic
+
+With no CAT there is no frequency readout, no rig chip, nothing to say
+where the radio is pointed. The waterfall with band markers is the only
+tuning feedback the operator has, which makes it *more* important here
+than on the desktop, where it competes with a rig panel.
+
+Two things follow. It gets real vertical extent, which portrait suits
+better than any desktop arrangement did — the desktop squashed it into a
+horizontal strip to fit beside a picture pane, and that constraint is
+absent. And `core/dsp/spectrum.cpp`'s peak-hold in `reduce_to_width`
+matters more, not less: the carriers are one or two bins wide and about
+six apart, so point-sampling leaves a ragged comb that reads as a
+*reception* problem — on a display whose entire job is to tell you
+whether you are tuned correctly, that is the worst available lie.
+
+### Screens
+
+Three, not panels:
+
+- **Listen** — waterfall, live status, the picture currently arriving.
+  The only screen that exists while nothing has been received.
+- **Pictures** — a grid of what has been received, each with its
+  metadata. This is the app's actual product and the desktop has nothing
+  like it; `received/` in a file manager is not a gallery.
+- **Settings** — an Android preference list: audio source, model
+  precision, save location, keep-screen-on. Not a tabbed dialog.
+
+Tier 0 has no transmit screen, no overlay editor, no crop dialog, no rig
+chip, no PTT lamp, and no log dock — `core/log/`'s `FileWriter` still
+runs for bug reports, reachable from Settings, but a dock is a desktop
+answer to a desktop problem.
+
+Portrait is primary; landscape should work, since the picture is 4:3.
+Use the Material style so controls look like the platform's rather than
+like Qt's idea of a desktop.
+
+### What carries over
+
+Short, and none of it is layout:
+
+- **Errors must never be written where something else will overwrite
+  them.** The desktop's three tiers came from `"PTT OFF FAILED"` being
+  destroyed by the `"Sent"` that followed it on the same label. The
+  Android trap is the same shape with a different name: a `Snackbar` is
+  transient, so it is the wrong home for an error, however convenient.
+- **A stopped display must look deliberate.** Half duplex still suspends
+  receive with a fresh ring buffer on resume (Tier 1), and a frozen
+  waterfall is otherwise indistinguishable from a wedged capture.
+- **The settings round-trip discipline.** `core/settings/` is Qt-free
+  JSON at `CONFIG_VERSION` 2; Android drops the rig keys and
+  `audio.backend` and gains a device selection. Whether that is a
+  version 3 or an additive change the desktop ignores is open. What is
+  not open is `test_settings_dialog.cpp`'s method — a fixture in which
+  no field holds its default — because a field displayed but not written
+  back is still the characteristic settings bug, in any toolkit.
+- **A preview is `overlay::render()`'s output, never a toolkit-drawn
+  imitation** (Tier 1+). The rule is what stops a second representation
+  drifting from what goes on the air, and it is toolkit-independent.
 
 **Qt 6.8 is the sensible floor**, which sets `minSdkVersion` to 28
 (Android 9). Nothing else we need is above that — `getDevices()` and
@@ -304,10 +385,11 @@ the pause has to look deliberate rather than wedged.
 ### Tier 0 — receive-only listener (the committed one)
 
 USB or mic capture → `RingBuffer` → `decode_loop` → picture. Needs the
-audio layer, a foreground service, storage-out, model fetch, a picture
-view and a waterfall. Does **not** need the overlay renderer, the
-editor, the tx engine, the rig, the optimizer, the crop dialog, or
-settings for any of them.
+audio layer, a foreground service that owns the engine, storage-out with
+metadata persisted beside each picture, model fetch, and the three
+screens above. Does **not** need the overlay renderer, the editor, the
+tx engine, the rig, the optimizer, the crop dialog, or settings for any
+of them.
 
 Only the decoder needs fetching — 9 MB, not 21 — because `load_codec`'s
 per-part laziness already does that.
