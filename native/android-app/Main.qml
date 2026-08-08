@@ -263,9 +263,11 @@ ApplicationWindow {
         modal: true
         property alias source: full.source
         property string caption
+        property string path
 
-        function open(path, summary) {
-            full.source = "image://sstvae/file/" + path
+        function open(p, summary) {
+            full.source = "image://sstvae/file/" + p
+            viewer.path = p
             viewer.caption = summary
             visible = true
         }
@@ -283,8 +285,17 @@ ApplicationWindow {
                 font.family: "monospace"
                 font.pixelSize: 12
                 Layout.fillWidth: true
+                Layout.maximumHeight: implicitHeight
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.Wrap
+            }
+            Button {
+                text: "Share"
+                Layout.fillWidth: true
+                Layout.topMargin: 8
+                // Receptions live in app-private storage, so this is
+                // the only way a picture leaves the app at all.
+                onClicked: listener.sharePicture(viewer.path, viewer.caption)
             }
         }
     }

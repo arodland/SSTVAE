@@ -58,6 +58,9 @@ public:
 
     Q_INVOKABLE void refreshDevices();
     Q_INVOKABLE void loadModel();
+    // Hand a saved reception to the system share sheet. On the UI
+    // rather than the gallery model because it is an action, not data.
+    Q_INVOKABLE void sharePicture(const QString& path, const QString& caption);
     Q_INVOKABLE void start(const QString& deviceName);
     Q_INVOKABLE void stop();
 

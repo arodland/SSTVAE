@@ -319,3 +319,17 @@ bool Listener::hasLiveImage() const {
     const auto p = Session::instance().progress();
     return p.image && p.image->width > 0;
 }
+
+void Listener::sharePicture(const QString& path, const QString& caption) {
+    QJniObject ctx = QNativeInterface::QAndroidApplication::context();
+    if (!ctx.isValid()) return;
+    QJniObject::callStaticMethod<void>(
+        "org/cleverdomain/sstvae/Sharing", "share",
+        "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)V", ctx.object(),
+        QJniObject::fromString(path).object<jstring>(),
+        QJniObject::fromString(caption).object<jstring>());
+    if (QJniEnvironment().checkAndClearExceptions()) {
+        error_ = tr("Could not share that picture.");
+        emit changed();
+    }
+}
