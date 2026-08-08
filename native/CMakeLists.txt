@@ -347,6 +347,7 @@ if(_want_gui)
   # layering rules forbid.
   add_library(sstvae_gui STATIC
     gui/main_window.cpp
+    gui/style.cpp
     gui/flow_layout.cpp
     gui/pane_container.cpp
     gui/picture_box.cpp
@@ -361,6 +362,11 @@ if(_want_gui)
     gui/log_pane.cpp
     gui/app_state.cpp)
   set_target_properties(sstvae_gui PROPERTIES AUTOMOC ON)
+  # The application's own version, for the About box. It reported
+  # Hamlib's and Qt's and omitted this one -- which is the number every
+  # bug report needs first, and the only one nobody could read off the
+  # running program.
+  target_compile_definitions(sstvae_gui PUBLIC SSTVAE_VERSION="${PROJECT_VERSION}")
   target_include_directories(sstvae_gui PUBLIC core gui)
   target_link_libraries(sstvae_gui PUBLIC
     sstvae_core sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render
