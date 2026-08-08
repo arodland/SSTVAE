@@ -28,6 +28,7 @@
 #include <QThread>
 #include <QVBoxLayout>
 #include <QWidget>
+#include <QtGlobal>
 
 #include <exception>
 #include <memory>
@@ -401,6 +402,15 @@ QWidget* SettingsDialog::audio_tab() {
     auto* refresh = new QPushButton(tr("Refresh"), page);
     connect(refresh, &QPushButton::clicked, this, &SettingsDialog::refresh_devices);
     form->addRow(QString(), style::row(page, {refresh}));
+    // The note is about PulseAudio/PipeWire and its detail is a pair of
+    // `pactl` commands, so it is advice only where those exist. On macOS
+    // and Windows it is not merely irrelevant, it points at tooling the
+    // operator does not have -- and a loopback there is a different
+    // product entirely (BlackHole, WASAPI loopback), not this recipe with
+    // the names changed. Compiled out rather than hidden at runtime: the
+    // condition is a property of the build, and `tr()` on text no one can
+    // reach is work for translators as well.
+#if defined(Q_OS_UNIX) && !defined(Q_OS_MACOS)
     form->addRow(QString(),
                  style::note_with_detail(
                      tr("Qt does not list PulseAudio/PipeWire monitor sources, "
@@ -411,6 +421,7 @@ QWidget* SettingsDialog::audio_tab() {
                         "source_name=sstvae_loop master=null-sink.monitor "
                         "channels=1"),
                      page));
+#endif
     add_gap(form);
 
     // Labelled rather than left floating in the field column: it is a
