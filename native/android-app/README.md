@@ -111,6 +111,15 @@ worth carrying over: it pushes a file through the capture path in ragged
 chunks with no host audio stack involved at all, which is reproducible
 in a way a live loopback is not.
 
+**Use `-gpu host` for anything you intend to look at.** The default
+`swiftshader_indirect` composites a diagonal tear across every
+`screencap`, cutting through the system status bar as well as the app,
+and it is indistinguishable from a real rendering bug: it cost one
+round of investigating a "clipped" toolbar title that was never
+clipped. On a machine with a GPU, `-gpu host` gives pixel-clean frames
+and boots no slower. Keep swiftshader only where there is no GPU at
+all.
+
 A real phone stays the only place the *driver* can be tested.
 
 **`ANDROID_HOME` beats `ANDROID_SDK_ROOT` for the emulator's
