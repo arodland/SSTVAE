@@ -93,7 +93,15 @@ QColor viewport_text();   // the empty-state caption
 
 // --- text --------------------------------------------------------------------
 
-// Dimmed explanatory text. Wraps.
+// The width a note reserves at its left for a disclosure triangle.
+//
+// Reserved whether or not the note has one, so plain help and a
+// disclosure's summary start in the same column and the triangle hangs
+// in the margin beside the text rather than pushing it right. Measured
+// from `reference`'s style, so it matches the platform.
+int note_gutter(const QWidget* reference);
+
+// Dimmed explanatory text. Wraps, and reserves `note_gutter` at the left.
 QLabel* note(const QString& text, QWidget* parent);
 
 // The same treatment applied to a widget that already exists.

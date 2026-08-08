@@ -29,6 +29,7 @@
 #include <QLabel>
 #include <QPalette>
 #include <QPixmap>
+#include <QPoint>
 #include <QString>
 #include <QWidget>
 
@@ -159,6 +160,49 @@ void test_eliding_label_shortens_without_losing_text() {
                    "not elided: identical to a plain label when the text fits");
 }
 
+// A disclosure's summary and a plain note start in the same column.
+//
+// **This is arithmetic, not taste, which is why it is here.** The rest
+// of "does this dialog group properly" has no oracle and belongs to
+// `sstvae-gui-shot` and a pair of eyes. But two kinds of help text
+// starting 20 px apart is a number, and it is the exact fault this
+// gutter was added to fix: without it a plain note began at the left
+// edge while a summary was pushed right by its triangle, so the same
+// form showed help in two columns.
+void test_notes_and_disclosures_share_a_column() {
+    QWidget host;
+    host.resize(600, 400);
+
+    QLabel* plain = style::note(QStringLiteral("A plain note."), &host);
+    QWidget* disclosed = style::note_with_detail(
+        QStringLiteral("A summary."), QStringLiteral("The detail."), &host);
+
+    // Where the *text* begins in each, relative to the widget's own
+    // left edge: a margin for the plain label, and the position the
+    // head row's layout gives the summary for the disclosure.
+    const int plain_x = plain->contentsMargins().left();
+
+    QLabel* summary = nullptr;
+    for (QLabel* label : disclosed->findChildren<QLabel*>()) {
+        if (label->text() == QLatin1String("A summary.")) summary = label;
+    }
+    check::is_true(summary != nullptr, "the disclosure has its summary");
+
+    host.show();
+    plain->setGeometry(0, 0, 500, 40);
+    disclosed->setGeometry(0, 40, 500, 40);
+    QCoreApplication::processEvents();
+
+    // mapTo, not x(): the summary sits inside a head row inside the
+    // holder, so its own x() is relative to a parent that is not the
+    // one the plain note is measured against.
+    const int summary_x = summary->mapTo(disclosed, QPoint(0, 0)).x() +
+                          summary->contentsMargins().left();
+    check::equal(summary_x, plain_x,
+                 "a disclosure's summary starts where a plain note does");
+    check::is_true(plain_x > 0, "the gutter is actually reserved");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -169,5 +213,6 @@ int main(int argc, char** argv) {
     test_contrast_ratio_matches_wcag();
     test_secondary_text_is_legible();
     test_eliding_label_shortens_without_losing_text();
+    test_notes_and_disclosures_share_a_column();
     return check::report("style");
 }

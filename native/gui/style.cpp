@@ -4,11 +4,13 @@
 #include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QHelpEvent>
+#include <QMouseEvent>
 #include <QImage>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPalette>
 #include <QPixmap>
+#include <QStyle>
 #include <QToolButton>
 #include <QToolTip>
 #include <QVBoxLayout>
@@ -16,6 +18,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <utility>
 
 #include "banner.hpp"
@@ -23,6 +26,10 @@
 namespace sstvae::gui::style {
 
 namespace {
+
+// The gap between a disclosure's triangle and the text beside it, and
+// therefore also the tail of the gutter every note reserves.
+constexpr int GUTTER_SPACING = 4;
 
 // The one red. Everything else in `color::` is derived from it, so
 // "the red" is a single edit rather than three literals in three files
@@ -33,6 +40,38 @@ double srgb_to_linear(int channel) {
     const double v = channel / 255.0;
     return v <= 0.03928 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4);
 }
+
+// A wrapped note that runs a callback when clicked, so a disclosure's
+// summary is as clickable as its triangle.
+//
+// No Q_OBJECT: it needs no signal of its own, only a virtual override
+// and a stored callable -- the same reason `PictureBox` and
+// `ElidingLabel` have none.
+class ClickableNote : public QLabel {
+public:
+    ClickableNote(const QString& text, QWidget* parent, std::function<void()> on_click)
+        : QLabel(text, parent), on_click_(std::move(on_click)) {
+        setWordWrap(true);
+        // The one cue that this paragraph is also a control. Without it
+        // the triangle beside it is the only thing that looks live, and
+        // the click target is 16 px wide.
+        setCursor(Qt::PointingHandCursor);
+    }
+
+protected:
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        // Only a release that lands inside counts -- pressing here and
+        // dragging away is how a person changes their mind.
+        if (event->button() == Qt::LeftButton && rect().contains(event->pos()) &&
+            on_click_) {
+            on_click_();
+        }
+        QLabel::mouseReleaseEvent(event);
+    }
+
+private:
+    std::function<void()> on_click_;
+};
 
 }  // namespace
 
@@ -112,10 +151,35 @@ void undim(QWidget* widget) {
     if (widget != nullptr) widget->setPalette(QPalette());
 }
 
-QLabel* note(const QString& text, QWidget* parent) {
+int note_gutter(const QWidget* reference) {
+    const QStyle* s = reference != nullptr ? reference->style() : nullptr;
+    const int arrow = s != nullptr ? s->pixelMetric(QStyle::PM_IndicatorWidth) : 14;
+    return arrow + GUTTER_SPACING;
+}
+
+namespace {
+
+// A note without the gutter, for use *inside* a disclosure where the
+// gutter is already accounted for by the row it sits in.
+QLabel* bare_note(const QString& text, QWidget* parent) {
     auto* label = new QLabel(text, parent);
     label->setWordWrap(true);
     dim(label);
+    return label;
+}
+
+}  // namespace
+
+QLabel* note(const QString& text, QWidget* parent) {
+    QLabel* label = bare_note(text, parent);
+    // **Every note starts in the same column, whether or not it has a
+    // triangle.** A disclosure's summary is pushed right by its arrow,
+    // so without reserving the same space here a plain note and a
+    // summary in the same form began 20 px apart -- two kinds of help
+    // text in two columns, which is the disconnection this whole change
+    // is about. Reserving the gutter turns the triangle into a hanging
+    // indent instead: text aligned, handles in the margin beside it.
+    label->setContentsMargins(note_gutter(parent), 0, 0, 0);
     return label;
 }
 
@@ -126,26 +190,64 @@ QWidget* note_with_detail(const QString& summary, const QString& detail,
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(2);
 
-    layout->addWidget(note(summary, holder));
-
-    QLabel* body = note(detail, holder);
+    QLabel* body = bare_note(detail, holder);
     body->hide();
 
-    // Full contrast, deliberately: it is a control, and the argument
-    // for dimming the prose is exactly the argument against dimming the
-    // thing that reveals it.
-    auto* more = new QToolButton(holder);
-    more->setAutoRaise(true);
-    more->setCheckable(true);
-    more->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    more->setArrowType(Qt::RightArrow);
-    more->setText(QObject::tr("More"));
-    QObject::connect(more, &QToolButton::toggled, holder, [more, body](bool on) {
-        more->setArrowType(on ? Qt::DownArrow : Qt::RightArrow);
-        more->setText(on ? QObject::tr("Less") : QObject::tr("More"));
-        body->setVisible(on);
-    });
-    layout->addWidget(more, 0, Qt::AlignLeft);
+    // **The triangle leads the summary; there is no separate "More"
+    // line.** It used to be one: summary, then a `▸ More` button on a
+    // row of its own, indented *further* than the text it opened, with
+    // the same amount of whitespace above it as below. Nothing tied it
+    // to anything, so it read as a control floating in the margin
+    // rather than as a handle on the paragraph above.
+    //
+    // A triangle at the head of the first line is the disclosure idiom
+    // every desktop uses, and it puts the affordance where the thing it
+    // reveals will appear.
+    auto* arrow = new QToolButton(holder);
+    arrow->setAutoRaise(true);
+    arrow->setCheckable(true);
+    arrow->setArrowType(Qt::RightArrow);
+    arrow->setFocusPolicy(Qt::TabFocus);
+
+    // The whole summary is the click target, not just the triangle.
+    // A triangle is a small thing to hit, and the paragraph beside it
+    // is what the operator is actually reading when they decide they
+    // want more of it.
+    auto* head = new ClickableNote(summary, holder,
+                                   [arrow] { arrow->toggle(); });
+    dim(head);  // it is a note first and a control second
+
+    QObject::connect(arrow, &QToolButton::toggled, holder,
+                     [arrow, body](bool on) {
+                         arrow->setArrowType(on ? Qt::DownArrow : Qt::RightArrow);
+                         arrow->setToolTip(on ? QObject::tr("Show less")
+                                              : QObject::tr("Show more"));
+                         body->setVisible(on);
+                     });
+    arrow->setToolTip(QObject::tr("Show more"));
+
+    // Pinned to the gutter's width, so the triangle and the text beside
+    // it land on exactly the columns a plain `note` reserves. Left to
+    // its own size hint the two drift apart with the platform style.
+    const int gutter = note_gutter(parent);
+    arrow->setFixedWidth(gutter - GUTTER_SPACING);
+
+    auto* head_row = new QWidget(holder);
+    auto* head_layout = new QHBoxLayout(head_row);
+    head_layout->setContentsMargins(0, 0, 0, 0);
+    head_layout->setSpacing(GUTTER_SPACING);
+    // Top-aligned: against a summary that wraps to three lines, a
+    // vertically centred triangle points at the middle of the paragraph
+    // instead of at its start.
+    head_layout->addWidget(arrow, 0, Qt::AlignTop);
+    head_layout->addWidget(head, 1);
+
+    // The detail lines up with the summary rather than with the
+    // triangle, so the two paragraphs read as one column of text with a
+    // handle beside it.
+    body->setContentsMargins(gutter, 0, 0, 0);
+
+    layout->addWidget(head_row);
     layout->addWidget(body);
     return holder;
 }

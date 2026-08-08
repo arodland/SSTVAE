@@ -12,6 +12,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMargins>
 #include <QMessageBox>
 #include <QPalette>
 #include <QFrame>
@@ -19,6 +20,8 @@
 #include <QRegularExpressionValidator>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSpacerItem>
+#include <QStyle>
 #include <QSizePolicy>
 #include <QStringList>
 #include <QTabWidget>
@@ -87,6 +90,52 @@ QComboBox* compact(QComboBox* combo) {
     combo->setSizeAdjustPolicy(QComboBox::AdjustToContents);
     combo->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
     return combo;
+}
+
+// The form every tab uses, spaced so that a setting reads as a block.
+//
+// **Uniform row spacing is what made the dialog look like a flat list.**
+// A QFormLayout gives every row the same gap, so the space between a
+// control and its own help text was the same as the space between that
+// help text and the *next* control -- and nothing then says which help
+// belongs to which setting. Tight rows plus an explicit gap between
+// settings (`add_gap`) is the whole of the fix: proximity is the only
+// grouping cue that costs no chrome.
+QFormLayout* make_form(QWidget* page) {
+    auto* form = new QFormLayout(page);
+    form->setVerticalSpacing(3);
+    return form;
+}
+
+// The gap between one setting and the next.
+void add_gap(QFormLayout* form) {
+    form->addItem(new QSpacerItem(0, 14, QSizePolicy::Minimum, QSizePolicy::Fixed));
+}
+
+// Help belonging to the checkbox immediately above it.
+//
+// **Indented to the checkbox's text, not to the field column.** A
+// checkbox row spans both columns and starts at the left margin, so
+// routing its help through the field column jumped it 83 px to the
+// right, under a column the checkbox is not in. Aligning it under the
+// checkbox's own caption is what makes the two read as one thing; the
+// indent comes from the style so it matches whatever indicator the
+// platform draws.
+void add_check_note(QFormLayout* form, QWidget* page, QWidget* note) {
+    const QStyle* style = page->style();
+    const int indent = style->pixelMetric(QStyle::PM_IndicatorWidth) +
+                       style->pixelMetric(QStyle::PM_CheckBoxLabelSpacing);
+    // **Added to what is already there, not assigned over it.**
+    // `style::note` reserves a gutter at its left so plain help and a
+    // disclosure's summary start in the same column; overwriting that
+    // put a plain note 20 px left of a disclosure's text in the same
+    // form, which is the two-columns-of-help problem again. A
+    // disclosure holder carries no margin of its own -- its gutter is
+    // internal -- so this lands its triangle on the checkbox's caption
+    // and its text one gutter further, exactly where a plain note goes.
+    const QMargins m = note->contentsMargins();
+    note->setContentsMargins(m.left() + indent, m.top(), m.right(), m.bottom());
+    form->addRow(note);
 }
 
 // A tab page that scrolls rather than clips.
@@ -171,7 +220,7 @@ SettingsDialog::~SettingsDialog() = default;
 
 QWidget* SettingsDialog::model_tab() {
     auto* page = new QWidget(this);
-    auto* form = new QFormLayout(page);
+    QFormLayout* form = make_form(page);
 
     model_path_ = new QLineEdit(QString::fromStdString(config_.model_path), page);
     model_path_->setPlaceholderText(tr("(published model)"));
@@ -207,6 +256,7 @@ QWidget* SettingsDialog::model_tab() {
                         "exchange images — but not the same precision, which is "
                         "a local choice."),
                      page));
+    add_gap(form);
 
     precision_ = new QComboBox(page);
     for (const std::string_view p : checkpoint::PRECISIONS) {
@@ -329,7 +379,7 @@ void SettingsDialog::on_model_download_finished(bool ok, const QString& message)
 
 QWidget* SettingsDialog::audio_tab() {
     auto* page = new QWidget(this);
-    auto* form = new QFormLayout(page);
+    QFormLayout* form = make_form(page);
 
     // No backend picker. The reference has one because it carries a
     // PortAudio path as well; here there is only QtMultimedia, and a
@@ -342,6 +392,7 @@ QWidget* SettingsDialog::audio_tab() {
     fill_device_combo(output_device_, false, config_.audio.output_device);
     form->addRow(tr("Input (from radio)"), input_device_);
     form->addRow(tr("Output (to radio)"), output_device_);
+    add_gap(form);
 
     // Enumeration happens once, when the dialog opens. Plugging in a USB
     // interface -- or loading the loopback modules below -- is exactly
@@ -360,11 +411,15 @@ QWidget* SettingsDialog::audio_tab() {
                         "source_name=sstvae_loop master=null-sink.monitor "
                         "channels=1"),
                      page));
+    add_gap(form);
 
-    form->addRow(QString(),
-                 style::note(tr("Transmit level is on the Transmit panel, not here — "
-                                "setting it means watching the radio's ALC while "
-                                "sending, so no modal dialog may be in the way."),
+    // Labelled rather than left floating in the field column: it is a
+    // pointer to a control that lives elsewhere, and a label is what
+    // says which control.
+    form->addRow(tr("Transmit level"),
+                 style::note(tr("On the Transmit panel, not here — setting it means "
+                                "watching the radio's ALC while sending, so no modal "
+                                "dialog may be in the way."),
                              page));
     return page;
 }
@@ -412,12 +467,13 @@ void SettingsDialog::fill_device_combo(QComboBox* combo, bool input,
 
 QWidget* SettingsDialog::rig_tab() {
     auto* page = new QWidget(this);
-    auto* form = new QFormLayout(page);
+    QFormLayout* form = make_form(page);
     const settings::RigConfig& rig = config_.rig;
 
     rig_enabled_ = new QCheckBox(tr("Use rig control (PTT and frequency)"), page);
     rig_enabled_->setChecked(rig.enabled);
     form->addRow(rig_enabled_);
+    add_gap(form);
 
     // Editable on purpose: the list can fail to load, and a config
     // written by a different Hamlib may name a model this one does not
@@ -464,6 +520,7 @@ QWidget* SettingsDialog::rig_tab() {
                          "for model 2 (\"NET rigctl\"), which shares one radio "
                          "with WSJT-X or fldigi."),
                       page));
+    add_gap(form);
 
     // Five one-per-row combos became two rows: these are the settings
     // almost nobody changes, and giving each its own row pushed the
@@ -504,6 +561,7 @@ QWidget* SettingsDialog::rig_tab() {
     form->addRow(QString(),
                  style::row(page, {new QLabel(tr("Parity"), page), parity_,
                                    new QLabel(tr("Handshake"), page), handshake_}));
+    add_gap(form);
 
     // A checkbox plus a value, rather than a three-item combo whose
     // first entry was "Default". "Default" reads as a *level* next to
@@ -529,6 +587,7 @@ QWidget* SettingsDialog::rig_tab() {
                  style::note(tr("Held for the whole session, which is how an interface "
                          "powered from the control lines stays fed."),
                       page));
+    add_gap(form);
 
     ptt_method_ = compact(choice(
         page, {{"vox", "VOX"}, {"cat", "CAT"}, {"dtr", "DTR"}, {"rts", "RTS"}},
@@ -545,10 +604,12 @@ QWidget* SettingsDialog::rig_tab() {
                                 "port from CAT."),
                              page));
     sync_ptt_enabled();
+    add_gap(form);
 
     rig_mode_ = compact(choice(
         page, {{"none", "None"}, {"usb", "USB"}, {"pkt_usb", "Data/Pkt"}}, rig.mode));
     form->addRow(tr("Mode on connect"), style::row(page, {rig_mode_}));
+    add_gap(form);
 
     poll_interval_s_ = new QDoubleSpinBox(page);
     poll_interval_s_->setRange(0.5, 60.0);
@@ -710,7 +771,7 @@ void SettingsDialog::on_rig_test_finished(bool ok, const QString& message) {
 
 QWidget* SettingsDialog::folders_tab() {
     auto* page = new QWidget(this);
-    auto* form = new QFormLayout(page);
+    QFormLayout* form = make_form(page);
     const settings::FolderConfig& folders = config_.folders;
     form->addRow(tr("Received images"),
                  folder_row(&receive_dir_,
@@ -735,35 +796,38 @@ QWidget* SettingsDialog::folders_tab() {
 
 QWidget* SettingsDialog::receive_tab() {
     auto* page = new QWidget(this);
-    auto* form = new QFormLayout(page);
+    QFormLayout* form = make_form(page);
     const settings::ReceiveConfig& receive = config_.receive;
 
     autosave_ = new QCheckBox(tr("Save every completed reception automatically"),
                               page);
     autosave_->setChecked(receive.autosave);
     form->addRow(autosave_);
+    add_gap(form);
 
     save_audio_ = new QCheckBox(tr("Also save the captured audio (diagnostic)"),
                                 page);
     save_audio_->setChecked(receive.save_audio);
     form->addRow(save_audio_);
-    form->addRow(QString(),
-                 style::note_with_detail(
-                     tr("Writes a .wav beside each received image, exactly as "
-                        "captured."),
-                     tr("Use it when an image decodes badly: run sstvae-decode "
-                        "on the dump to see whether the audio or the decoder "
-                        "was at fault."),
-                     page));
+    add_check_note(form, page,
+                   style::note_with_detail(
+                       tr("Writes a .wav beside each received image, exactly as "
+                          "captured."),
+                       tr("Use it when an image decodes badly: run sstvae-decode "
+                          "on the dump to see whether the audio or the decoder "
+                          "was at fault."),
+                       page));
+    add_gap(form);
 
     low_cpu_ = new QCheckBox(tr("Low-CPU mode"), page);
     low_cpu_->setChecked(receive.low_cpu);
     form->addRow(low_cpu_);
-    form->addRow(QString(),
-                 style::note(tr("Low-CPU mode only looks for the start of a "
-                                "transmission, so it cannot pick up one already in "
-                                "progress or decode retrospectively."),
-                             page));
+    add_check_note(form, page,
+                   style::note(tr("Low-CPU mode only looks for the start of a "
+                                  "transmission, so it cannot pick up one already "
+                                  "in progress or decode retrospectively."),
+                               page));
+    add_gap(form);
 
     filename_template_ =
         new QLineEdit(QString::fromStdString(receive.filename_template), page);
@@ -781,6 +845,7 @@ QWidget* SettingsDialog::receive_tab() {
                  style::note(tr("Fields: {date} {time} {freq} {callsign} {mode}. "
                                 "Fields with no value are dropped from the name."),
                              page));
+    add_gap(form);
 
     save_size_ = new QLineEdit(QString::fromStdString(receive.save_size), page);
     save_size_->setPlaceholderText(tr("640x480 (as received)"));
@@ -793,6 +858,7 @@ QWidget* SettingsDialog::receive_tab() {
     save_size_->setValidator(new QRegularExpressionValidator(
         QRegularExpression(QStringLiteral("^(\\d{1,5}x\\d{1,5})?$")), save_size_));
     form->addRow(tr("Saved size"), save_size_);
+    add_gap(form);
 
     // `setSuffix(" s")` and a bare label, which is what the Rig tab
     // does -- the two tabs used to state the same unit two ways, one in
@@ -807,6 +873,7 @@ QWidget* SettingsDialog::receive_tab() {
                  style::note(tr("Must exceed the longest mode (C, ~95 s) with margin "
                                 "for retrospective decoding."),
                              page));
+    add_gap(form);
 
     poll_interval_ = new QDoubleSpinBox(page);
     poll_interval_->setRange(1.0, 30.0);
@@ -818,7 +885,7 @@ QWidget* SettingsDialog::receive_tab() {
 
 QWidget* SettingsDialog::transmit_tab() {
     auto* page = new QWidget(this);
-    auto* form = new QFormLayout(page);
+    QFormLayout* form = make_form(page);
 
     callsign_ = new QLineEdit(QString::fromStdString(config_.callsign), page);
     callsign_->setMaxLength(8);  // the beacon's callsign field
@@ -833,12 +900,14 @@ QWidget* SettingsDialog::transmit_tab() {
                                 "carrier, so a receiver can identify you even from "
                                 "a partial reception."),
                              page));
+    add_gap(form);
 
     optimize_ = new QCheckBox(tr("Refine each image before sending"), page);
     optimize_->setChecked(config_.transmit.optimize);
     form->addRow(optimize_);
-    form->addRow(QString(),
-                 style::note_with_detail(
+    add_check_note(
+        form, page,
+        style::note_with_detail(
                      tr("Worth around 1.5 dB of recovered quality, for no extra "
                         "airtime — most visibly on text and line art."),
                      tr("The encoder is trained to do well on average, not on "
@@ -851,17 +920,19 @@ QWidget* SettingsDialog::transmit_tab() {
                         "the first time. If Send arrives before it has settled, "
                         "it finishes quickly and sends what it has."),
                      page));
+    add_gap(form);
 
     cw_id_ = new QCheckBox(tr("Send CW ID after each transmission"), page);
     cw_id_->setChecked(config_.transmit.cw_id);
     form->addRow(cw_id_);
-    form->addRow(QString(),
-                 style::note_with_detail(
-                     tr("18 wpm at 1000 Hz, 500 ms after the image ends, under "
-                        "the same PTT key-up."),
-                     tr("A no-op with no callsign set above, whatever the "
-                        "message says."),
-                     page));
+    add_check_note(form, page,
+                   style::note_with_detail(
+                       tr("18 wpm at 1000 Hz, 500 ms after the image ends, under "
+                          "the same PTT key-up."),
+                       tr("A no-op with no callsign set above, whatever the "
+                          "message says."),
+                       page));
+    add_gap(form);
 
     cw_message_ = new QLineEdit(
         QString::fromStdString(config_.transmit.cw_message), page);
@@ -876,6 +947,7 @@ QWidget* SettingsDialog::transmit_tab() {
                         "with no idea what it is hears the CW ID, and can go "
                         "find SSTVAE and a successful decode."),
                      page));
+    add_gap(form);
 
     // The transmit level itself stays on the send bar, where it is
     // adjusted, and keeps a short tooltip there. What lives here is the
@@ -889,10 +961,10 @@ QWidget* SettingsDialog::transmit_tab() {
     // the same target as this: "barely moving ALC" and "no ALC action"
     // are different drive levels, and an operator following either
     // should land in the same place.
-    form->addRow(QString(),
+    form->addRow(tr("Transmit level"),
                  style::note_with_detail(
-                     tr("Transmit level is on the Transmit panel, beside the "
-                        "mode. Set it so the radio shows no ALC action at all."),
+                     tr("On the Transmit panel, beside the mode. Set it so the "
+                        "radio shows no ALC action at all."),
                      tr("ALC is a compressor: it flattens the peaks this "
                         "waveform carries information in, and the far end sees "
                         "that as a lower SNR and a mangled image — while your "
