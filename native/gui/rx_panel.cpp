@@ -6,7 +6,6 @@
 #include <QFileDialog>
 #include <QGroupBox>
 #include <QHBoxLayout>
-#include <QImage>
 #include <QLabel>
 #include <QMessageBox>
 #include <QProgressBar>
@@ -33,6 +32,7 @@
 #include "images/images.hpp"
 #include "flow_layout.hpp"
 #include "picture_box.hpp"
+#include "style.hpp"
 #include "settings/settings.hpp"
 #include "waterfall.hpp"
 
@@ -42,12 +42,11 @@ namespace {
 
 namespace fs = std::filesystem;
 
-QPixmap to_pixmap(const images::Picture& picture) {
-    if (picture.empty()) return QPixmap();
-    const QImage view(picture.rgb.data(), picture.width, picture.height,
-                      picture.width * 3, QImage::Format_RGB888);
-    return QPixmap::fromImage(view.copy());
-}
+// One field separator, shared by the live status line and the
+// last-reception card. They describe the same reception a second apart
+// and used to punctuate it differently -- the status line with a double
+// hyphen, the card with a single one.
+const QString SEP = QStringLiteral("  ·  ");
 
 // Never overwrite: two receptions can finish in the same second with the
 // same callsign and frequency.
@@ -62,19 +61,6 @@ fs::path unique_path(fs::path path) {
         if (!fs::exists(candidate)) return candidate;
     }
     return path;
-}
-
-// SNR for display, with a placeholder when there is none.
-//
-// `rx::fmt_snr` returns an empty string for NaN, which is right for it
-// -- it mirrors Python's and feeds the CLI. But on screen an absent
-// field is indistinguishable from a field that was never going to be
-// there: the operator cannot tell "no SNR estimate yet" from "this
-// build does not show SNR". The engine formats; the panel decides how
-// to show absence.
-QString snr_text(double snr_db) {
-    const QString formatted = QString::fromStdString(rx::fmt_snr(snr_db));
-    return formatted.isEmpty() ? QStringLiteral("  SNR --") : formatted;
 }
 
 }  // namespace
@@ -135,12 +121,17 @@ void ReceivePanel::build_ui() {
     lower_layout->setSpacing(4);
     QWidget* lower = strip_;
 
-    status_ = new QLabel(tr("Stopped"), lower);
     // A progress-tier surface must not set a width floor. Its longest
     // line ("Receiving mode C: frame 220/220 ... de KD8XYZ") is ~400 px,
     // and both panes are locked to one width, so every such floor is
-    // paid twice. Errors go to the banner, so what clips here is
+    // paid twice. Errors go to the banner, so what gives way here is
     // progress text that is rebuilt twice a second anyway.
+    //
+    // `ElidingLabel`, because giving way must not mean being cut off
+    // mid-word: a truncated "de KD8X" reads as a callsign that did not
+    // decode. See the same argument in `settings_dialog.cpp`'s scroll
+    // areas.
+    status_ = new style::ElidingLabel(tr("Stopped"), lower);
     status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     lower_layout->addWidget(status_);
 
@@ -156,25 +147,30 @@ void ReceivePanel::build_ui() {
     last_card_ = new QLabel(lower);
     last_card_->setTextFormat(Qt::PlainText);
     last_card_->setWordWrap(true);
-    last_card_->setEnabled(false);  // reads as secondary until it has content
+    // No `setEnabled(false)` to make it read as secondary. Disabling is
+    // a state change standing in for an appearance one -- it also takes
+    // the widget out of the accessibility tree as
+    // interactive-but-unavailable, and it says "you cannot use this"
+    // about a label nobody was going to click. An empty label shows
+    // nothing anyway, so the dimming bought exactly nothing.
     lower_layout->addWidget(last_card_);
 
     // Wraps rather than crushes -- see flow_layout.hpp.
     auto* controls = new FlowLayout();
-    start_button_ = new QPushButton(tr("Start receiving"), this);
+    start_button_ = new QPushButton(tr("&Start receiving"), this);
     connect(start_button_, &QPushButton::clicked, this, &ReceivePanel::start);
-    stop_button_ = new QPushButton(tr("Stop"), this);
+    stop_button_ = new QPushButton(tr("Sto&p"), this);
     connect(stop_button_, &QPushButton::clicked, this, &ReceivePanel::stop);
     stop_button_->setEnabled(false);
-    save_button_ = new QPushButton(tr("Save image"), this);
+    save_button_ = new QPushButton(tr("Sa&ve image..."), this);
     connect(save_button_, &QPushButton::clicked, this, &ReceivePanel::save_current);
     save_button_->setEnabled(false);
-    folder_button_ = new QPushButton(tr("Show folder"), this);
-    folder_button_->setToolTip(tr("Open the folder holding the last saved picture"));
+    folder_button_ = new QPushButton(tr("Show f&older"), this);
+    folder_button_->setToolTip(tr("Open the folder holding the last saved image"));
     connect(folder_button_, &QPushButton::clicked, this,
             &ReceivePanel::open_saved_folder);
     folder_button_->setEnabled(false);
-    autosave_ = new QCheckBox(tr("Autosave"), this);
+    autosave_ = new QCheckBox(tr("&Autosave"), this);
     autosave_->setChecked(app_->config().receive.autosave);
     connect(autosave_, &QCheckBox::toggled, this,
             &ReceivePanel::on_autosave_toggled);
@@ -197,18 +193,7 @@ void ReceivePanel::resizeEvent(QResizeEvent* event) {
     place_banner();
 }
 
-void ReceivePanel::place_banner() {
-    if (banner_ == nullptr || preview_ == nullptr) return;
-    const QRect over = preview_->geometry();
-    // `heightForWidth`, not `sizeHint`: the message wraps, and a hint
-    // taken at unconstrained width is one line -- so a long device name
-    // was clipped to a sliver of its own text. Measured at the width it
-    // will actually get.
-    const int wanted = banner_->heightForWidth(over.width());
-    banner_->setGeometry(over.x(), over.y(), over.width(),
-                         std::max(banner_->sizeHint().height(), wanted));
-    banner_->raise();
-}
+void ReceivePanel::place_banner() { style::place_over(banner_, preview_); }
 
 bool ReceivePanel::listening() const { return running_.load(); }
 
@@ -350,6 +335,10 @@ void ReceivePanel::stop() {
         start_button_->setEnabled(true);
         stop_button_->setEnabled(false);
         set_status(tr("Stopped"));
+        // `refresh_status` returns early when not listening, so without
+        // this the bar keeps whatever fraction the reception had
+        // reached: "Stopped" over a bar still reading 63%.
+        progress_->setValue(0);
     }
     if (was_listening) {
         app_->log_event("rx", log::Severity::Info, tr("stopped"));
@@ -365,7 +354,7 @@ void ReceivePanel::suspend_for_transmit() {
     // pause has to look deliberate rather than like a receiver that
     // died: the waterfall stops dead when the ring goes away, and
     // without this it is the same picture as a wedged capture.
-    set_status(tr("Paused -- transmitting"));
+    set_status(tr("Paused — transmitting"));
     preview_->setEnabled(false);
     if (Waterfall* w = fall()) w->setEnabled(false);
     // And the button that would undo half duplex. `stop()` re-enables
@@ -497,7 +486,7 @@ void ReceivePanel::refresh_status() {
 
     QString text;
     if (progress.status == rx::Status::Listening) {
-        text = tr("Listening... (%1s captured)")
+        text = tr("Listening... (%1 s captured)")
                    .arg(progress.seconds_captured, 0, 'f', 0);
     } else if (progress.status == rx::Status::Receiving) {
         if (progress.n_frames_expected) {
@@ -511,16 +500,16 @@ void ReceivePanel::refresh_status() {
             text = tr("Receiving (blind sync): %1% of latents")
                        .arg(100.0 * progress.progress_frac, 0, 'f', 0);
         }
-        text += snr_text(progress.snr_db);
+        text += SEP + style::fmt_snr_db(progress.snr_db);
         if (!progress.callsign.empty()) {
-            text += tr("  de %1").arg(QString::fromStdString(progress.callsign));
+            text += SEP + tr("de %1").arg(QString::fromStdString(progress.callsign));
         }
     } else {
-        text = tr("Complete%1").arg(snr_text(progress.snr_db));
+        text = tr("Complete") + SEP + style::fmt_snr_db(progress.snr_db);
         if (last_saved_path_) {
-            text += tr(" -- saved %1")
-                        .arg(QString::fromStdString(
-                            fs::path(*last_saved_path_).filename().string()));
+            text += SEP + tr("saved %1")
+                              .arg(QString::fromStdString(
+                                  fs::path(*last_saved_path_).filename().string()));
         }
     }
 
@@ -562,9 +551,10 @@ void ReceivePanel::on_reception(const QString& saved_path) {
                     .arg(reception->frames_received.value_or(0))
                     .arg(*reception->n_frames_expected);
     }
-    const QString snr = QString::fromStdString(rx::fmt_snr(reception->snr_db));
-    if (!snr.isEmpty()) line += tr(",%1").arg(snr);
-    if (!saved_path.isEmpty()) line += tr(" -- saved %1").arg(saved_path);
+    if (!std::isnan(reception->snr_db)) {
+        line += tr(", %1").arg(style::fmt_snr_db(reception->snr_db));
+    }
+    if (!saved_path.isEmpty()) line += tr(" — saved %1").arg(saved_path);
     app_->log_event("rx", log::Severity::Info, line);
 
     // And the same facts on screen, where they stay. The engine resets
@@ -572,24 +562,24 @@ void ReceivePanel::on_reception(const QString& saved_path) {
     // below this point was previously unrecoverable from the UI.
     QString card = tr("Last: %1").arg(QTime::currentTime().toString(QStringLiteral("HH:mm")));
     if (reception->mode_name) {
-        card += tr(" - mode %1").arg(QString::fromStdString(*reception->mode_name));
+        card += SEP + tr("mode %1").arg(QString::fromStdString(*reception->mode_name));
     }
     if (!reception->callsign.empty()) {
-        card += tr(" - de %1").arg(QString::fromStdString(reception->callsign));
+        card += SEP + tr("de %1").arg(QString::fromStdString(reception->callsign));
     }
-    const QString card_snr = QString::fromStdString(rx::fmt_snr(reception->snr_db));
-    if (!card_snr.isEmpty()) card += QStringLiteral(" -") + card_snr;
+    if (!std::isnan(reception->snr_db)) {
+        card += SEP + style::fmt_snr_db(reception->snr_db);
+    }
     if (reception->n_frames_expected) {
-        card += tr(" - %1/%2 frames")
-                    .arg(reception->frames_received.value_or(0))
-                    .arg(*reception->n_frames_expected);
+        card += SEP + tr("%1/%2 frames")
+                          .arg(reception->frames_received.value_or(0))
+                          .arg(*reception->n_frames_expected);
     }
     if (!saved_path.isEmpty()) {
-        card += tr(" - %1").arg(
-            QString::fromStdString(fs::path(saved_path.toStdString()).filename().string()));
+        card += SEP + QString::fromStdString(
+                          fs::path(saved_path.toStdString()).filename().string());
     }
     last_card_->setText(card);
-    last_card_->setEnabled(true);
     folder_button_->setEnabled(!saved_path.isEmpty());
 
     emit imageReceived(reception->image);
@@ -612,7 +602,7 @@ void ReceivePanel::on_autosave_toggled(bool on) {
 }
 
 void ReceivePanel::show_image(const images::Picture& image) {
-    const QPixmap pixmap = to_pixmap(image);
+    const QPixmap pixmap = style::to_pixmap(image);
     if (pixmap.isNull()) return;
     // The box keeps the original and rescales itself on every resize;
     // the panel no longer has to notice.
@@ -673,9 +663,8 @@ void ReceivePanel::save_current() {
         fs::path(path.toStdString()).filename().string());
     if (last_card_->text().isEmpty()) {
         last_card_->setText(tr("Saved %1").arg(name));
-        last_card_->setEnabled(true);
     } else {
-        last_card_->setText(tr("%1 - saved %2").arg(last_card_->text(), name));
+        last_card_->setText(last_card_->text() + SEP + tr("saved %1").arg(name));
     }
     emit receptionSaved(path);
 }
@@ -684,12 +673,11 @@ void ReceivePanel::fill_for_screenshot() {
     // The longest line `refresh_status` can build, the longest card
     // `on_reception` can build, and the banner inside the layout.
     set_status(
-        tr("Receiving mode C: frame 220/220 (100%)  SNR 8.3dB  de KD8XYZ"));
+        tr("Receiving mode C: frame 220/220 (100%)  ·  SNR 8.3 dB  ·  de KD8XYZ"));
     progress_->setValue(100);
     last_card_->setText(
-        tr("Last: 14:32 - mode C - de KD8XYZ - SNR 8.3dB - 220/220 frames"
-           " - KD8XYZ-C-14230000.png"));
-    last_card_->setEnabled(true);
+        tr("Last: 14:32  ·  mode C  ·  de KD8XYZ  ·  SNR 8.3 dB"
+           "  ·  220/220 frames  ·  KD8XYZ-C-14230000.png"));
     save_button_->setEnabled(true);
     folder_button_->setEnabled(true);
     place_banner();
@@ -716,7 +704,7 @@ void ReceivePanel::open_saved_folder() {
     app_->log_event("rx", log::Severity::Info, tr("opening %1").arg(dir));
     if (!QDesktopServices::openUrl(QUrl::fromLocalFile(dir))) {
         app_->log_event("rx", log::Severity::Error,
-                        tr("could not open %1 -- no handler for local "
+                        tr("could not open %1 — no handler for local "
                            "folders on this desktop")
                             .arg(dir));
     }
