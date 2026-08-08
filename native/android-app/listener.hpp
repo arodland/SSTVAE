@@ -32,6 +32,11 @@ class Listener : public QObject {
     Q_PROPERTY(QString status READ status NOTIFY changed)
     Q_PROPERTY(QString audioRoute READ audioRoute NOTIFY changed)
     Q_PROPERTY(QString level READ level NOTIFY changed)
+    // Numbers, not a parsed string. The QML meter binds to these; the
+    // text line stays for the detail that will not fit on a bar.
+    Q_PROPERTY(double peakLevel READ peakLevel NOTIFY changed)
+    Q_PROPERTY(double driftPpm READ driftPpm NOTIFY changed)
+    Q_PROPERTY(bool droppingAudio READ droppingAudio NOTIFY changed)
     Q_PROPERTY(QString lastError READ lastError NOTIFY changed)
     Q_PROPERTY(QString modelStatus READ modelStatus NOTIFY changed)
     Q_PROPERTY(bool modelReady READ modelReady NOTIFY changed)
@@ -50,6 +55,9 @@ public:
     QString status() const;
     QString audioRoute() const;
     QString level() const;
+    double peakLevel() const;
+    double driftPpm() const;
+    bool droppingAudio() const;
     QString lastError() const;
     QString modelStatus() const;
     bool modelReady() const;

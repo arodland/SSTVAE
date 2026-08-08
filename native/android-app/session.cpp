@@ -4,6 +4,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 
 #include "checkpoint/checkpoint.hpp"
@@ -96,7 +97,32 @@ std::optional<std::string> Session::save_reception(const rx::Reception& r) {
         error_ = std::string("could not save the reception: ") + e.what();
         return std::nullopt;
     }
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        saved_picture_ = png;
+        std::ostringstream sum;
+        sum << (r.callsign.empty() ? "unknown" : r.callsign.c_str());
+        if (r.mode_name) sum << "  mode " << *r.mode_name;
+        sum << "  " << std::fixed << std::setprecision(1) << r.snr_db << " dB";
+        if (r.n_frames_expected.value_or(0) > 0) {
+            sum << "  " << r.frames_received.value_or(0) << "/"
+                << *r.n_frames_expected;
+        }
+        saved_summary_ = sum.str();
+    }
     return png;
+}
+
+std::optional<std::string> Session::take_saved_picture() {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::optional<std::string> out = saved_picture_;
+    saved_picture_.reset();
+    return out;
+}
+
+std::string Session::last_saved_summary() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return saved_summary_;
 }
 
 Session::~Session() {

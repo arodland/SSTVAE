@@ -8,6 +8,8 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
@@ -35,6 +37,10 @@ public class ListenerService extends Service {
     private static final String TAG = "SSTVAE";
     private static final String CHANNEL_ID = "sstvae.listening";
     private static final int NOTIFICATION_ID = 1;
+    private static final String PICTURE_CHANNEL_ID = "sstvae.received";
+    // Each reception gets its own id, so a second picture does not
+    // replace the first in the shade.
+    private int nextPictureId = 100;
 
     public static final String ACTION_START = "org.cleverdomain.sstvae.START";
     public static final String ACTION_STOP = "org.cleverdomain.sstvae.STOP";
@@ -48,6 +54,8 @@ public class ListenerService extends Service {
     private static native boolean nativeStart(String device);
     private static native void nativeStop();
     private static native String nativeStatusLine();
+    private static native String nativeTakeSavedPicture();
+    private static native String nativeLastSavedSummary();
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean running = false;
@@ -57,7 +65,15 @@ public class ListenerService extends Service {
         public void run() {
             if (!running) return;
             NotificationManager nm = getSystemService(NotificationManager.class);
-            if (nm != null) nm.notify(NOTIFICATION_ID, buildNotification(nativeStatusLine()));
+            if (nm != null) {
+                nm.notify(NOTIFICATION_ID, buildNotification(nativeStatusLine()));
+                // Polled here rather than pushed from C++: the engine
+                // finishes a reception on its own thread, and this is
+                // already the place with a Looper and a
+                // NotificationManager.
+                final String saved = nativeTakeSavedPicture();
+                if (saved != null) postPicture(nm, saved, nativeLastSavedSummary());
+            }
             handler.postDelayed(this, REFRESH_MS);
         }
     };
@@ -146,6 +162,41 @@ public class ListenerService extends Service {
         }
     }
 
+    /**
+     * A finished reception, with the picture itself on the lock screen.
+     *
+     * <p>This is the reason to want the app on a phone rather than a
+     * laptop: the operator is not watching, and a decoded picture is
+     * worth interrupting for in a way that "listening, 43 polls" is
+     * not. Hence its own channel at DEFAULT importance while the
+     * ongoing one stays at LOW — they are different kinds of event and
+     * sharing a channel would force one setting on both.
+     */
+    private void postPicture(NotificationManager nm, String path, String summary) {
+        final Bitmap bmp = BitmapFactory.decodeFile(path);
+        if (bmp == null) return;
+
+        Intent open = new Intent(this, org.qtproject.qt.android.bindings.QtActivity.class);
+        open.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent pi = PendingIntent.getActivity(
+                this, nextPictureId, open, PendingIntent.FLAG_IMMUTABLE);
+
+        Notification n = new Notification.Builder(this, PICTURE_CHANNEL_ID)
+                .setContentTitle("Picture received")
+                .setContentText(summary)
+                .setSmallIcon(android.R.drawable.ic_menu_gallery)
+                .setLargeIcon(bmp)
+                .setStyle(new Notification.BigPictureStyle()
+                        .bigPicture(bmp)
+                        // Drop the thumbnail once expanded, so the
+                        // picture is not shown twice in the same card.
+                        .bigLargeIcon((Bitmap) null))
+                .setContentIntent(pi)
+                .setAutoCancel(true)
+                .build();
+        nm.notify(nextPictureId++, n);
+    }
+
     private void createChannel() {
         NotificationManager nm = getSystemService(NotificationManager.class);
         if (nm == null) return;
@@ -157,6 +208,12 @@ public class ListenerService extends Service {
         ch.setDescription("Shown while SSTVAE is receiving");
         ch.setShowBadge(false);
         nm.createNotificationChannel(ch);
+
+        NotificationChannel pics = new NotificationChannel(
+                PICTURE_CHANNEL_ID, "Received pictures",
+                NotificationManager.IMPORTANCE_DEFAULT);
+        pics.setDescription("One notification per decoded picture");
+        nm.createNotificationChannel(pics);
     }
 
     private Notification buildNotification(String text) {

@@ -333,3 +333,14 @@ void Listener::sharePicture(const QString& path, const QString& caption) {
         emit changed();
     }
 }
+
+double Listener::peakLevel() const { return Session::instance().peak_level(); }
+double Listener::driftPpm() const { return Session::instance().capture_drift_ppm(); }
+
+// The threshold the meter turns red on. -1000 ppm is the project's own
+// scale: a clean path measured +211 ppm, and 3500 ppm of loss cost 5 dB
+// and the picture. Past this it is audio being dropped, not a crystal
+// being imprecise.
+bool Listener::droppingAudio() const {
+    return Session::instance().capture_drift_ppm() < -1000.0;
+}

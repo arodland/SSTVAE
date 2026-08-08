@@ -106,6 +106,15 @@ ApplicationWindow {
                 Layout.maximumHeight: implicitHeight
                 wrapMode: Text.Wrap
             }
+            LevelMeter {
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                visible: listener.listening
+                peak: listener.peakLevel
+                dropping: listener.droppingAudio
+            }
+
             Label {
                 text: listener.level
                 font.family: "monospace"

@@ -81,4 +81,18 @@ Java_org_cleverdomain_sstvae_ListenerService_nativeStatusLine(JNIEnv* env, jclas
     return env->NewStringUTF(s.c_str());
 }
 
+// The path of a reception saved since the last call, or null.
+// Consuming, so the service posts each picture exactly once.
+JNIEXPORT jstring JNICALL
+Java_org_cleverdomain_sstvae_ListenerService_nativeTakeSavedPicture(JNIEnv* env, jclass) {
+    const auto path = Session::instance().take_saved_picture();
+    if (!path) return nullptr;
+    return env->NewStringUTF(path->c_str());
+}
+
+JNIEXPORT jstring JNICALL
+Java_org_cleverdomain_sstvae_ListenerService_nativeLastSavedSummary(JNIEnv* env, jclass) {
+    return env->NewStringUTF(Session::instance().last_saved_summary().c_str());
+}
+
 }  // extern "C"

@@ -83,6 +83,17 @@ public:
     // sidecar. Empty (the default) means nothing is saved.
     void set_picture_dir(std::string dir);
 
+    // The path of a reception saved since this was last called, once.
+    // **Consuming**, because the caller is the notification poller and
+    // a non-consuming read would repost the same picture every tick.
+    std::optional<std::string> take_saved_picture();
+
+    // The metadata line for that reception, for the notification's
+    // text. Read alongside the path and not from live state, which the
+    // engine wipes two seconds later -- the same reason the sidecar
+    // exists.
+    std::string last_saved_summary() const;
+
     ModelState model_state() const;
     std::string model_error() const;
     // Bytes received / total for the current download, both 0 when not
@@ -124,6 +135,8 @@ private:
     std::thread thread_;
     std::string error_;
     std::string picture_dir_;
+    std::optional<std::string> saved_picture_;
+    std::string saved_summary_;
 
     // Separate lock from `mu_`: the engine thread reads `codec_` on
     // every decode and the model thread writes it once, and neither has

@@ -153,6 +153,13 @@ struct InputStream::Impl {
     // Started on the first *chunk* rather than at open, because the
     // gap before audio begins flowing is not lost audio.
     std::chrono::steady_clock::time_point first_chunk{};
+    // Samples already in hand when that clock started. **Both halves
+    // of the ratio must start at the same instant**: the timestamp is
+    // taken after the first chunk has been counted, so measuring
+    // against the raw total attributes that chunk's samples to zero
+    // elapsed time. Measured, it read +2821 ppm five seconds in --
+    // alarming, and entirely an artifact.
+    std::uint64_t first_samples = 0;
     bool have_first = false;
     std::atomic<bool> stopped{false};
     jint token = -1;
@@ -277,10 +284,15 @@ double InputStream::capture_drift_ppm() const {
     const double elapsed = std::chrono::duration<double>(
                                std::chrono::steady_clock::now() - impl_->first_chunk)
                                .count();
-    if (elapsed < 5.0) return 0.0;
+    // Ten seconds, not five: the estimate is a ratio of two small
+    // numbers early on, and a meter that cries wolf for the first
+    // quarter-minute of every session is one nobody reads by the time
+    // it matters.
+    if (elapsed < 10.0) return 0.0;
     const double expected = elapsed * impl_->device_rate;
     const double actual =
-        static_cast<double>(impl_->captured.load(std::memory_order_relaxed));
+        static_cast<double>(impl_->captured.load(std::memory_order_relaxed) -
+                            impl_->first_samples);
     return (actual / expected - 1.0) * 1e6;
 }
 
@@ -427,6 +439,7 @@ JNIEXPORT void JNICALL Java_org_cleverdomain_sstvae_AudioBridge_nativePush(
         s->captured.store((*s->pipeline).samples_in(), std::memory_order_relaxed);
         if (!s->have_first) {
             s->first_chunk = std::chrono::steady_clock::now();
+            s->first_samples = s->captured.load(std::memory_order_relaxed);
             s->have_first = true;
         }
     }
