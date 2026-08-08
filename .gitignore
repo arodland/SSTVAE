@@ -40,3 +40,6 @@ runs/
 /*.jpg
 /*.csv
 dist/
+
+# Android CMake build tree (native/android-app)
+build-android/
