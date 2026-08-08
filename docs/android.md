@@ -190,6 +190,59 @@ Open questions, in the order they can hurt:
 4. What happens on device disconnect mid-reception, and on an incoming
    call taking the microphone.
 
+## The smoke test (2026-08-08)
+
+`native/android/` is a pre-Tier-0 app whose only job is the question
+above: select an audio device, receive a signal. It is **not** the Tier 0
+interface and does not follow the UI section — no service, no gallery, no
+waterfall, no notification. It is a spinner, a button and an ImageView.
+
+It needs **no Qt at all**, which is the useful part: device selection plus
+receive is the Java audio layer, the C++ core and JNI, so a plain Views UI
+does it and the Qt Quick decision stays entirely ahead of us. Everything
+reusable is reusable: `audio::CapturePipeline` went into the Qt-free layer
+with a host test, and the Java `AudioDevices`/`CaptureThread` are close to
+what Tier 0 wants.
+
+**What it proved, on an x86_64 emulator (API 36):**
+
+- The whole chain runs on Android: `AudioRecord` → JNI → `CapturePipeline`
+  → `RingBuffer` → `decode_loop` → onnxruntime → a picture. Fed a mode A
+  transmission at 48 kHz in ragged chunks, it locked the **preamble path,
+  reported mode A with a high SNR and correct progress**, and saved a
+  correct 640x480 picture — 35.4 dB against a host decode of the same
+  transmission (they differ only because the host decoded a separate noisy
+  capture of it).
+- onnxruntime 1.28.0's Android AAR works against `core/codec/` unmodified.
+  The APK carries `libonnxruntime.so` at 28.6 MB for arm64 and 34.6 MB for
+  x86_64; the debug APK with both ABIs is 72 MB.
+- The `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` trick holds: no path code changed.
+
+**What it did not prove, and this is the important part.** The emulator's
+virtual microphone cannot carry the signal — measured at **1/60th of the
+reference amplitude with only 32.5% of its power in the 900–2150 Hz band**
+and spectral peaks at 2484/2934/3379 Hz, i.e. not our transmission at all.
+The host loopback it was fed from decodes at **34.6 dB**, so the signal was
+clean right up to the emulator. Everything downstream of the driver is
+therefore exercised, and **the driver itself is not**. That was always
+going to need hardware, and the USB questions above are all still open.
+
+Two things worth keeping:
+
+- **`Native.dumpAudio` is the diagnostic that settled it**, and it is the
+  Android form of the desktop's `receive.save_audio`: dump the ring, pull
+  it, decode it on the host. Comparing two captures of one playback is how
+  the PortAudio/JACK sample loss was pinned, and it is what separated "the
+  emulator's mic is deaf" from "our pipeline is broken" in one step here.
+- **After a reception is saved, the display goes wrong** (Andrew's
+  observation): the loop keeps running, the blind accumulator re-integrates
+  the transmission still sitting in the ring, and mode A at a good SNR is
+  replaced by "mode C, −3.2 dB" a few seconds later. That is a live
+  instance of exactly why Tier 0 must **persist reception metadata beside
+  the picture** rather than read it from shared state — the desktop's
+  last-reception card is a workaround for the same thing, and on a phone
+  nobody is watching the moment it happens.
+
 ## Everything else that has to be written
 
 | Piece | Today | On Android |

@@ -141,8 +141,11 @@ if(SSTVAE_BUILD_CODEC)
   target_link_libraries(sstvae_codec PUBLIC sstvae_core PRIVATE onnxruntime)
   # onnxruntime's headers are not ours and are not warning-clean under
   # -Wall -Wextra; treat them as system so our own warnings stay signal.
+  # The resolved include directory, not ROOT/include: the Android AAR
+  # spells it `headers/`, and hardcoding the desktop layout finds the
+  # right download and then looks for a directory that was never in it.
   target_include_directories(sstvae_codec SYSTEM PRIVATE
-    ${SSTVAE_ONNXRUNTIME_ROOT}/include)
+    ${SSTVAE_ONNXRUNTIME_INCLUDE})
 endif()
 
 # Put the onnxruntime runtime where `target` can find it.
