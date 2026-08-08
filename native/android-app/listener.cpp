@@ -173,9 +173,21 @@ QString Listener::level() const {
                            : QStringLiteral("silent");
     // Both numbers, always: quiet and silent have the same mean level
     // and are not the same failure.
-    return QStringLiteral("peak %1   %2% near-zero")
-        .arg(db)
-        .arg(100.0 * s.near_zero_fraction(), 0, 'f', 1);
+    QString out = QStringLiteral("peak %1   %2% near-zero")
+                      .arg(db)
+                      .arg(100.0 * s.near_zero_fraction(), 0, 'f', 1);
+    // Shown always, not only when bad. A number that appears only on
+    // failure teaches nobody what healthy looks like, and this is the
+    // one measurement that distinguishes "the band is quiet" from "the
+    // capture path is eating your audio".
+    const double ppm = s.capture_drift_ppm();
+    if (ppm != 0.0) {
+        out += QStringLiteral("\ncapture %1%2 ppm")
+                   .arg(ppm > 0 ? "+" : "")
+                   .arg(ppm, 0, 'f', 0);
+        if (ppm < -1000.0) out += QStringLiteral("  DROPPING AUDIO");
+    }
+    return out;
 }
 
 void Listener::loadModel() {

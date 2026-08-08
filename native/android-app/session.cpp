@@ -294,4 +294,9 @@ double Session::near_zero_fraction() const {
     return stream_ ? stream_->near_zero_fraction() : 0.0;
 }
 
+double Session::capture_drift_ppm() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return stream_ ? stream_->capture_drift_ppm() : 0.0;
+}
+
 }  // namespace sstvae::androidapp

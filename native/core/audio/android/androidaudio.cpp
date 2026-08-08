@@ -11,6 +11,7 @@
 #include <jni.h>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <stdexcept>
 
@@ -148,6 +149,11 @@ struct InputStream::Impl {
     double peak = 0.0;
     double near_zero = 1.0;
     std::atomic<std::uint64_t> captured{0};
+    // Wall clock at the first chunk, for the capture-rate check below.
+    // Started on the first *chunk* rather than at open, because the
+    // gap before audio begins flowing is not lost audio.
+    std::chrono::steady_clock::time_point first_chunk{};
+    bool have_first = false;
     std::atomic<bool> stopped{false};
     jint token = -1;
 
@@ -248,6 +254,34 @@ double InputStream::peak_level() const {
 double InputStream::near_zero_fraction() const {
     std::lock_guard<std::mutex> lk(impl_->m);
     return impl_->near_zero;
+}
+
+// How far the capture rate has drifted from the device's nominal one,
+// in parts per million, negative when samples are going missing.
+//
+// **This is the instrument for the failure mode that looks like
+// everything working.** Lost input samples do not arrive as noise or as
+// a gap; they arrive as *timing error*, so sync still succeeds, every
+// frame is still reported, and the picture is quietly mangled -- which
+// is how the PortAudio-on-JACK bug survived several rounds of being
+// investigated as a decoder problem. The project's own numbers set the
+// scale: a clean path measured +211 ppm, and 3500 ppm of loss cost 5 dB
+// and the picture. Anything past about -1000 ppm is audio being
+// dropped, not a crystal being imprecise.
+//
+// Returns 0 before enough audio has arrived to mean anything: over a
+// short window the quantisation of the first chunk dominates.
+double InputStream::capture_drift_ppm() const {
+    std::lock_guard<std::mutex> lk(impl_->m);
+    if (!impl_->have_first || impl_->device_rate <= 0) return 0.0;
+    const double elapsed = std::chrono::duration<double>(
+                               std::chrono::steady_clock::now() - impl_->first_chunk)
+                               .count();
+    if (elapsed < 5.0) return 0.0;
+    const double expected = elapsed * impl_->device_rate;
+    const double actual =
+        static_cast<double>(impl_->captured.load(std::memory_order_relaxed));
+    return (actual / expected - 1.0) * 1e6;
 }
 
 // --- playback ----------------------------------------------------------
@@ -391,6 +425,10 @@ JNIEXPORT void JNICALL Java_org_cleverdomain_sstvae_AudioBridge_nativePush(
         s->peak = peak / 32768.0;
         s->near_zero = near_zero;
         s->captured.store((*s->pipeline).samples_in(), std::memory_order_relaxed);
+        if (!s->have_first) {
+            s->first_chunk = std::chrono::steady_clock::now();
+            s->have_first = true;
+        }
     }
     // Written outside the lock: `RingBuffer::write` takes its own, and
     // nesting the two would put this thread's progress at the mercy of

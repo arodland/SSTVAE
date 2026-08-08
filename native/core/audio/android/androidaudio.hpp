@@ -123,6 +123,13 @@ public:
     double peak_level() const;
     double near_zero_fraction() const;
 
+    // Capture rate against the wall clock, in ppm, negative when input
+    // samples are being dropped. 0 until a few seconds have accrued.
+    // This is the one number that names the failure mode where sync
+    // succeeds, every frame is reported, and the picture is mangled
+    // anyway -- see the definition for the scale.
+    double capture_drift_ppm() const;
+
     // Public because the JNI callbacks at the bottom of
     // androidaudio.cpp have to reach it, and they are free functions
     // with C linkage -- there is no `this` for them to be a friend of.

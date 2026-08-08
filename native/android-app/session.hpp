@@ -95,6 +95,7 @@ public:
     std::string routing_warning() const;
     double peak_level() const;
     double near_zero_fraction() const;
+    double capture_drift_ppm() const;
 
 private:
     Session() = default;
