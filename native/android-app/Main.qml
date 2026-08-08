@@ -20,9 +20,22 @@ ApplicationWindow {
     Listener { id: listener }
     PictureList { id: pictures }
 
+    // **Edge-to-edge is mandatory from targetSdk 35 up**, so the window
+    // extends under the status bar and the navigation bar and it is on
+    // us to inset. Andrew hit the consequence on a device with the
+    // 3-button nav bar: the tab bar painted *behind* it and could not
+    // be tapped at all. Gesture navigation hides this almost
+    // completely -- its inset is a few pixels -- which is exactly why
+    // it has to be handled by asking the system rather than by looking
+    // at an emulator.
     header: ToolBar {
-        RowLayout {
-            anchors.fill: parent
+        topPadding: SafeArea.margins.top
+
+        // `contentItem`, not a child with `anchors.fill: parent` --
+        // anchoring to the Control bypasses its padding entirely, so
+        // the inset above would have been computed correctly and then
+        // ignored, leaving the title under the status bar.
+        contentItem: RowLayout {
             Label {
                 text: "SSTVAE"
                 font.bold: true
@@ -45,6 +58,7 @@ ApplicationWindow {
 
     footer: TabBar {
         id: tabs
+        bottomPadding: SafeArea.margins.bottom
         TabButton { text: "Listen" }
         TabButton { text: "Pictures"; onClicked: pictures.refresh() }
         TabButton { text: "Settings" }
