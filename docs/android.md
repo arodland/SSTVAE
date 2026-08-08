@@ -220,14 +220,24 @@ what Tier 0 wants.
   x86_64; the debug APK with both ABIs is 72 MB.
 - The `XDG_CONFIG_HOME`/`XDG_CACHE_HOME` trick holds: no path code changed.
 
-**What it did not prove, and this is the important part.** The
-microphone path was never exercised, because the emulator hands back
-**zeroed audio**. Everything downstream of the driver is covered; **the
-driver itself is not**. That always needed hardware, and every USB
-question above is still open.
+**On a real phone it works end to end** (Andrew, 2026-08-08): acoustic
+coupling into the built-in microphone, decoded, picture displayed. That
+is the core of Tier 0 demonstrated on real hardware — capture, sync,
+framing, the beacon, onnxruntime and the display, on a device, off the
+air-ish. **The USB path is the remaining unknown** and is being tested
+next; everything in "What still has to be measured on hardware" above
+that concerns a class-compliant interface is still open.
 
-That diagnosis took two wrong turns, both worth recording because the
-second is the kind that ends an investigation prematurely:
+Worth keeping in proportion: acoustic coupling was described earlier in
+this document as the zero-hardware *fallback*, the thing that makes a
+first release not depend on the USB question resolving well. It is now
+demonstrated rather than assumed, which is exactly the bar that claim
+needed.
+
+**The emulator, by contrast, never exercised the microphone path at
+all**, because it hands back **zeroed audio**. That diagnosis took two
+wrong turns, both worth recording because the second is the kind that
+ends an investigation prematurely:
 
 - The first reading was "the emulator's mic is deaf" — from the captured
   RMS being 1/60th of the reference with two thirds of its power out of
@@ -248,16 +258,13 @@ second is the kind that ends an investigation prematurely:
   the emulator's audio-input plumbing and is not worth further time —
   the real measurement is a real device.
 
-**On real hardware (Andrew, 2026-08-08) the audio path works**: the app
-sits polling and then picks up a transmission, reaching the decoder — so
-capture, sync, framing and the beacon all fire on a real device with a
-real signal. What it hit there was a missing model file, which is a
-smoke-test provisioning gap (there is no Hub fetcher without QtNetwork)
-and not an audio finding.
+**The one bug the hardware run did find was about error *timing*, and it
+generalises.** The first attempt reached the decoder and then reported a
+missing model file — a provisioning gap (there is no Hub fetcher without
+QtNetwork), not an audio finding.
 
-**But *when* that error appeared is a real bug, and it generalises.**
 `OnnxCodec` loads its parts lazily and independently on purpose — a
-receive-only station never fetches the encoder — and laziness put the
+receive-only station never fetches the encoder — and laziness put that
 failure at the worst possible moment: "file doesn't exist" **after the
 operator had waited through an entire transmission**, with every step
 until then reporting success. A missing prerequisite has to fail when
