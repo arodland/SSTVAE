@@ -5,6 +5,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPen>
+#include <QPolygonF>
 #include <QResizeEvent>
 #include <QStyle>
 
@@ -51,9 +52,13 @@ OverlayEditor::OverlayEditor(QWidget* parent) : QWidget(parent) {
     // explains why -- a widget that moves things under the pointer has
     // to say so before the pointer is pressed.
     setMouseTracking(true);
-    setToolTip(tr("Drag an item to move it, or its corner to resize. Arrow "
-                  "keys nudge the selection (Shift for a coarser step); "
-                  "Delete removes it."));
+    setToolTip(tr("Drag an item to move it. The square grip resizes, the "
+                  "round one rotates -- rotation snaps to upright, sideways "
+                  "and upside-down, with Shift for a free angle.\n\n"
+                  "Arrow keys nudge the selection and Ctrl with them turns "
+                  "it, 15 degrees at a time; add Shift for a coarser step, "
+                  "which for rotation is the next right angle. Delete "
+                  "removes it."));
     // Strong, not ClickFocus: the arrow keys and Delete are useless to
     // an operator who cannot get focus onto this widget, and ClickFocus
     // keeps it out of the Tab chain entirely.
@@ -198,13 +203,13 @@ int OverlayEditor::hit_test(const QPointF& point) const {
     // Front to back, so the item drawn on top is the one you grab --
     // the same order the eye resolves an overlap in.
     for (int i = static_cast<int>(doc_.items.size()) - 1; i >= 0; --i) {
-        const overlay::Bbox box =
-            overlay::item_bbox(overlay::CANVAS_W, overlay::CANVAS_H, doc_.items[i],
+        // The *rotated* quad, not the axis-aligned box: a turned item
+        // whose box was tested unrotated could be selected by clicking
+        // empty canvas beside it, and not selected by clicking itself.
+        const overlay::Quad quad =
+            overlay::item_quad(overlay::CANVAS_W, overlay::CANVAS_H, doc_.items[i],
                                last_rx_ ? &*last_rx_ : nullptr);
-        if (point.x() >= box.x && point.x() < box.x + box.w &&
-            point.y() >= box.y && point.y() < box.y + box.h) {
-            return i;
-        }
+        if (overlay::quad_contains(quad, point.x(), point.y())) return i;
     }
     return -1;
 }
@@ -221,14 +226,70 @@ int OverlayEditor::handle_px() const {
     return std::max(10, style()->pixelMetric(QStyle::PM_SmallIconSize) * 2 / 3);
 }
 
-QRect OverlayEditor::handle_rect(const overlay::Bbox& box) const {
+// The angle of a canvas point about the selected item's pivot, in
+// degrees, in the document's sense: counter-clockwise, matching
+// `overlay::item_quad` and the renderer.
+//
+// `atan2` is negated because a screen's y runs downward, so a point
+// *above* the pivot has a negative dy and must read as a positive
+// angle.
+double OverlayEditor::angle_about_pivot(const QPointF& canvas_point) const {
+    auto* self = const_cast<OverlayEditor*>(this);
+    overlay::Item* item = self->selected_item();
+    if (item == nullptr) return 0.0;
+    const overlay::Point pivot = overlay::item_pivot(
+        overlay::CANVAS_W, overlay::CANVAS_H, *item,
+        last_rx_ ? &*last_rx_ : nullptr);
+    const double dx = canvas_point.x() - pivot.x;
+    const double dy = canvas_point.y() - pivot.y;
+    if (dx == 0.0 && dy == 0.0) return 0.0;
+    return -std::atan2(dy, dx) * 180.0 / 3.14159265358979323846;
+}
+
+// Wrap to (-180, 180] and pull to a right angle when close to one.
+//
+// **Magnetic rather than stepped**, so any angle is still reachable --
+// with the spin box gone, a hard 90-degree ladder would put 45 degrees
+// out of reach entirely and there would be nothing else to type it
+// into. Within `SNAP_DEGREES` of a multiple of 90 it lands exactly on
+// it, which is what makes upright, sideways and upside-down repeatable
+// by hand; further away it is free.
+//
+// Shift suppresses the snap, for the angles that live near a right one.
+double OverlayEditor::snap_rotation(double degrees, bool free) {
+    constexpr double SNAP_DEGREES = 7.0;
+    double wrapped = std::fmod(degrees, 360.0);
+    if (wrapped <= -180.0) wrapped += 360.0;
+    if (wrapped > 180.0) wrapped -= 360.0;
+    if (free) return wrapped;
+    const double nearest = std::round(wrapped / 90.0) * 90.0;
+    if (std::abs(wrapped - nearest) <= SNAP_DEGREES) {
+        // Never -180: it draws the same as 180 and reads worse.
+        return nearest <= -180.0 ? nearest + 360.0 : nearest;
+    }
+    return wrapped;
+}
+
+QPointF OverlayEditor::to_widget(const overlay::Point& canvas_point) const {
     const QRect rect = canvas_rect();
     const double sx = static_cast<double>(rect.width()) / overlay::CANVAS_W;
     const double sy = static_cast<double>(rect.height()) / overlay::CANVAS_H;
-    const int x = rect.x() + static_cast<int>(std::lround((box.x + box.w) * sx));
-    const int y = rect.y() + static_cast<int>(std::lround((box.y + box.h) * sy));
+    return QPointF(rect.x() + canvas_point.x * sx, rect.y() + canvas_point.y * sy);
+}
+
+std::optional<overlay::Quad> OverlayEditor::selected_quad() const {
+    auto* self = const_cast<OverlayEditor*>(this);
+    overlay::Item* item = self->selected_item();
+    if (item == nullptr) return std::nullopt;
+    return overlay::item_quad(overlay::CANVAS_W, overlay::CANVAS_H, *item,
+                              last_rx_ ? &*last_rx_ : nullptr);
+}
+
+QRect OverlayEditor::handle_rect(const overlay::Quad& quad, int corner) const {
+    const QPointF at = to_widget(quad.corner[corner]);
     const int side = handle_px();
-    return QRect(x - side / 2, y - side / 2, side, side);
+    return QRect(static_cast<int>(std::lround(at.x())) - side / 2,
+                 static_cast<int>(std::lround(at.y())) - side / 2, side, side);
 }
 
 void OverlayEditor::paintEvent(QPaintEvent*) {
@@ -263,27 +324,31 @@ void OverlayEditor::paintEvent(QPaintEvent*) {
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     painter.drawImage(rect, style::to_qimage(composed_));
 
-    if (overlay::Item* item = const_cast<OverlayEditor*>(this)->selected_item()) {
-        const overlay::Bbox box = overlay::item_bbox(
-            overlay::CANVAS_W, overlay::CANVAS_H, *item,
-            last_rx_ ? &*last_rx_ : nullptr);
-        const double sx = static_cast<double>(rect.width()) / overlay::CANVAS_W;
-        const double sy = static_cast<double>(rect.height()) / overlay::CANVAS_H;
-        const QRect on_screen(
-            rect.x() + static_cast<int>(std::lround(box.x * sx)),
-            rect.y() + static_cast<int>(std::lround(box.y * sy)),
-            std::max(1, static_cast<int>(std::lround(box.w * sx))),
-            std::max(1, static_cast<int>(std::lround(box.h * sy))));
+    if (const std::optional<overlay::Quad> quad = selected_quad()) {
+        QPolygonF outline;
+        for (const overlay::Point& corner : quad->corner) {
+            outline << to_widget(corner);
+        }
 
+        painter.setRenderHint(QPainter::Antialiasing, true);
         // Two-tone, so the outline is visible over both a bright and a
         // dark picture without knowing which it is.
         painter.setPen(QPen(QColor(0, 0, 0, 160), 3));
-        painter.drawRect(on_screen);
+        painter.drawPolygon(outline);
         painter.setPen(QPen(QColor(255, 255, 255, 230), 1, Qt::DashLine));
-        painter.drawRect(on_screen);
-        painter.fillRect(handle_rect(box), QColor(255, 255, 255, 230));
+        painter.drawPolygon(outline);
+
+        // **A square resizes and a circle rotates.** Two grips that
+        // looked alike would be two grips nobody could tell apart, and
+        // this widget has no labels to explain them with.
+        const QRect resize = handle_rect(*quad, RESIZE_CORNER);
+        painter.setBrush(QColor(255, 255, 255, 230));
         painter.setPen(QPen(QColor(0, 0, 0, 200), 1));
-        painter.drawRect(handle_rect(box));
+        painter.drawRect(resize);
+
+        const QRect rotate = handle_rect(*quad, ROTATE_CORNER);
+        painter.drawEllipse(rotate);
+        painter.setBrush(Qt::NoBrush);
     }
 }
 
@@ -291,13 +356,18 @@ void OverlayEditor::mousePressEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) return;
     const QPointF point = event->position();
 
-    // The grip first: it sits on the item's corner, so testing the item
-    // before the handle would make the corner unresizable.
+    // The grips first: they sit on the item's corners, so testing the
+    // item before them would make those corners unusable.
     if (overlay::Item* item = selected_item()) {
-        const overlay::Bbox box = overlay::item_bbox(
-            overlay::CANVAS_W, overlay::CANVAS_H, *item,
-            last_rx_ ? &*last_rx_ : nullptr);
-        if (handle_rect(box).contains(point.toPoint())) {
+        const std::optional<overlay::Quad> quad = selected_quad();
+        if (handle_rect(*quad, ROTATE_CORNER).contains(point.toPoint())) {
+            drag_ = Drag::Rotate;
+            rotate_start_ = std::visit([](const auto& i) { return i.rotation; },
+                                       *item);
+            rotate_grab_angle_ = angle_about_pivot(to_canvas(point));
+            return;
+        }
+        if (handle_rect(*quad, RESIZE_CORNER).contains(point.toPoint())) {
             drag_ = Drag::Resize;
             resize_origin_ = to_canvas(point);
             resize_start_ = std::holds_alternative<overlay::TextItem>(*item)
@@ -329,11 +399,14 @@ void OverlayEditor::mousePressEvent(QMouseEvent* event) {
 // grip first, exactly as `mousePressEvent` tests it, so the cursor
 // cannot promise a resize where a press would start a move.
 void OverlayEditor::update_hover_cursor(const QPointF& point) {
-    if (overlay::Item* item = selected_item()) {
-        const overlay::Bbox box = overlay::item_bbox(
-            overlay::CANVAS_W, overlay::CANVAS_H, *item,
-            last_rx_ ? &*last_rx_ : nullptr);
-        if (handle_rect(box).contains(point.toPoint())) {
+    if (const std::optional<overlay::Quad> quad = selected_quad()) {
+        // Tested in the same order as the press, so the cursor cannot
+        // promise one gesture where a click would start another.
+        if (handle_rect(*quad, ROTATE_CORNER).contains(point.toPoint())) {
+            setCursor(Qt::CrossCursor);
+            return;
+        }
+        if (handle_rect(*quad, RESIZE_CORNER).contains(point.toPoint())) {
             setCursor(Qt::SizeFDiagCursor);
             return;
         }
@@ -365,13 +438,31 @@ void OverlayEditor::mouseMoveEvent(QMouseEvent* event) {
                 i.y = std::clamp(y, -0.5, 1.5);
             },
             *item);
+    } else if (drag_ == Drag::Rotate) {
+        // How far the pointer has swung about the pivot since the grab,
+        // added to where the item already was -- so the grip turns with
+        // the pointer rather than jumping to it.
+        const double swept = angle_about_pivot(canvas) - rotate_grab_angle_;
+        const bool free = (event->modifiers() & Qt::ShiftModifier) != 0;
+        const double turned = snap_rotation(rotate_start_ + swept, free);
+        std::visit([turned](auto& i) { i.rotation = turned; }, *item);
     } else {
-        // Resize from the grabbed corner: the change in distance from
-        // the item's anchor scales the size.
-        const double x0 = std::visit([](const auto& i) { return i.x; }, *item) *
-                          overlay::CANVAS_W;
-        const double start = std::max(1.0, resize_origin_.x() - x0);
-        const double now = std::max(1.0, canvas.x() - x0);
+        // Resize from the grabbed corner: the change in *distance from
+        // the pivot* scales the size.
+        //
+        // Distance, not the difference in x, which is what this used to
+        // measure. On an un-turned item the two agree; on a turned one
+        // the horizontal difference shrinks as the corner swings toward
+        // vertical and vanishes at 90 degrees, so a resize drag either
+        // did nothing or ran away. Nobody met that before because
+        // nothing could turn an item without a spin box.
+        const overlay::Point pivot = overlay::item_pivot(
+            overlay::CANVAS_W, overlay::CANVAS_H, *item,
+            last_rx_ ? &*last_rx_ : nullptr);
+        const double start = std::max(1.0, std::hypot(resize_origin_.x() - pivot.x,
+                                                      resize_origin_.y() - pivot.y));
+        const double now = std::max(1.0, std::hypot(canvas.x() - pivot.x,
+                                                    canvas.y() - pivot.y));
         const double factor = now / start;
         if (auto* text = std::get_if<overlay::TextItem>(item)) {
             text->size = std::clamp(resize_start_ * factor, 0.01, 1.5);
@@ -419,14 +510,66 @@ void OverlayEditor::keyPressEvent(QKeyEvent* event) {
         return;
     }
 
+    const bool coarse = (event->modifiers() & Qt::ShiftModifier) != 0;
+
+    // **Ctrl turns the item instead of moving it**, on Left and Right.
+    //
+    // With the spin box gone the grip was the only way to set an angle,
+    // which left rotation reachable by mouse alone -- a step backwards
+    // from a field that was in the tab order.
+    //
+    // `Qt::ControlModifier` is the Command key on macOS: Qt swaps it
+    // with Control there by default, so this is Ctrl+Arrow on Windows
+    // and Linux and Cmd+Arrow on a Mac without a second code path, and
+    // each platform gets the modifier it uses for "same key, stronger
+    // verb". Cmd+Arrow is unclaimed on a canvas -- macOS binds it for
+    // navigation in text and lists, neither of which this is.
+    //
+    // Shift is the *coarse* step here as it is for position, which is
+    // what makes the pair learnable, and coarse means the next right
+    // angle rather than a bigger number of degrees -- upright, sideways
+    // and upside-down are the angles worth one keypress, and they are
+    // the same four the drag snaps to.
+    if (event->modifiers() & Qt::ControlModifier) {
+        constexpr double STEP = 15.0;  // 6 presses to a right angle, 3 to 45
+        const double now = std::visit([](const auto& i) { return i.rotation; },
+                                      *item);
+        double turned = now;
+        // The nudge the epsilon protects is landing *on* a right angle
+        // and pressing again: at exactly 90, `floor(90/90)` is 1 and
+        // "the next one up" has to come out 180, not 90. It biases the
+        // division toward the direction of travel for that reason, and
+        // getting its sign backwards costs a keypress that does nothing
+        // -- which is what the first draft of this did.
+        if (event->key() == Qt::Key_Left) {
+            turned = coarse ? std::floor(now / 90.0 + 1e-9) * 90.0 + 90.0
+                            : now + STEP;
+        } else if (event->key() == Qt::Key_Right) {
+            turned = coarse ? std::ceil(now / 90.0 - 1e-9) * 90.0 - 90.0
+                            : now - STEP;
+        } else {
+            // Ctrl with any other key is not ours. Left alone rather
+            // than falling through to the nudge below, which would move
+            // the item on a chord that says "rotate".
+            QWidget::keyPressEvent(event);
+            return;
+        }
+        // Through the same wrap the drag uses, so the keyboard and the
+        // mouse cannot disagree about what -181 degrees means.
+        std::visit([turned](auto& i) { i.rotation = snap_rotation(turned, true); },
+                   *item);
+        refresh_item();
+        event->accept();
+        return;
+    }
+
     // A fraction of the canvas, not a pixel: positions are normalized,
     // so a fixed step means the same nudge whatever the window size.
     // Shift is the coarse step, for getting somewhere; the fine one is
     // roughly a canvas pixel at 640 wide.
     constexpr double FINE = 1.0 / 640.0;
     constexpr double COARSE = 1.0 / 64.0;
-    const double step =
-        (event->modifiers() & Qt::ShiftModifier) ? COARSE : FINE;
+    const double step = coarse ? COARSE : FINE;
 
     double dx = 0.0;
     double dy = 0.0;

@@ -77,6 +77,12 @@ void release(gui::OverlayEditor& editor, QPoint at) {
     QApplication::sendEvent(&editor, &event);
 }
 
+void move_to(gui::OverlayEditor& editor, QPoint at, Qt::KeyboardModifiers mods) {
+    QMouseEvent event(QEvent::MouseMove, QPointF(at), QPointF(at), Qt::NoButton,
+                      Qt::LeftButton, mods);
+    QApplication::sendEvent(&editor, &event);
+}
+
 void key(gui::OverlayEditor& editor, int code,
          Qt::KeyboardModifiers mods = Qt::NoModifier) {
     QKeyEvent event(QEvent::KeyPress, code, mods);
@@ -314,6 +320,266 @@ void test_an_added_item_can_be_nudged_without_clicking_first() {
 // both directions, so a pane too short for 4:3 draws a smaller centred
 // canvas and the handles follow it, because they come from that same
 // rectangle.
+
+// --- rotation ---------------------------------------------------------------
+//
+// The round grip on an item's top-right corner turns it, and the
+// numeric field that used to do this is gone -- so the drag is now the
+// *only* way to set an angle, and none of it has an oracle in a
+// screenshot: a wrongly-turned item is still a turned item.
+
+// Where a canvas point lands in the widget, and back, so a test can
+// aim at a grip.
+QPoint widget_of(const gui::OverlayEditor& editor, overlay::Point canvas) {
+    Q_UNUSED(editor);
+    return widget_point(canvas.x, canvas.y);
+}
+
+void test_the_quad_follows_the_renderer_s_pivot() {
+    // Geometry only, no widget: `item_quad` is what positions the
+    // outline and both grips, and it has to turn about the same point
+    // the renderer does or the handles sit off the item.
+    overlay::TextItem text;
+    text.text = "KD8XYZ";
+    text.x = 0.25;
+    text.y = 0.40;
+
+    const overlay::Item unturned = text;
+    const overlay::Point pivot =
+        overlay::item_pivot(overlay::CANVAS_W, overlay::CANVAS_H, unturned);
+    // Text turns about the point the document pins, not the box centre.
+    check::is_true(std::abs(pivot.x - std::lround(0.25 * overlay::CANVAS_W)) < 1e-9 &&
+                       std::abs(pivot.y - std::lround(0.40 * overlay::CANVAS_H)) < 1e-9,
+                   "pivot: text turns about its anchor");
+
+    // A quarter turn takes the box's width onto the vertical axis. The
+    // corner that was directly right of the pivot must end up directly
+    // above it -- counter-clockwise, as the document's angle is.
+    const overlay::Bbox box =
+        overlay::item_bbox(overlay::CANVAS_W, overlay::CANVAS_H, unturned);
+    text.rotation = 90.0;
+    const overlay::Item turned = text;
+    const overlay::Quad quad =
+        overlay::item_quad(overlay::CANVAS_W, overlay::CANVAS_H, turned);
+
+    // A quarter turn maps an offset (dx, dy) from the pivot to
+    // (dy, -dx): what pointed right now points up, and what pointed
+    // down now points right. Derived from the corner's own offset
+    // rather than assumed to be zero -- a text box's top is *near* its
+    // anchor, not on it, because the anchor addresses the ascender line
+    // and the box carries the stroke as well.
+    const double dx = (box.x + box.w) - pivot.x;
+    const double dy = box.y - pivot.y;
+    check::is_true(std::abs((quad.corner[1].x - pivot.x) - dy) < 1.0,
+                   "quad: a quarter turn sends the downward offset rightward");
+    check::is_true(std::abs((pivot.y - quad.corner[1].y) - dx) < 1.0,
+                   "quad: and the rightward offset upward");
+
+    // At zero it is exactly the box, or every un-turned item's handles
+    // would have moved.
+    text.rotation = 0.0;
+    const overlay::Item flat = text;
+    const overlay::Quad plain =
+        overlay::item_quad(overlay::CANVAS_W, overlay::CANVAS_H, flat);
+    check::is_true(std::abs(plain.corner[0].x - box.x) < 1e-9 &&
+                       std::abs(plain.corner[2].y - (box.y + box.h)) < 1e-9,
+                   "quad: rotation 0 is the box itself");
+}
+
+void test_hit_testing_follows_the_turned_item() {
+    // A wide, short item turned a quarter turn: the point that was
+    // inside it is now outside, and vice versa. Testing the un-turned
+    // box would get both backwards -- which is what the editor did
+    // before, invisibly, because nothing could turn an item.
+    overlay::ImageItem image;
+    image.x = 0.4;
+    image.y = 0.4;
+    image.width = 0.4;
+    const overlay::Item flat = image;
+    const overlay::Bbox box =
+        overlay::item_bbox(overlay::CANVAS_W, overlay::CANVAS_H, flat);
+
+    const double cx = box.x + box.w / 2.0;
+    const double cy = box.y + box.h / 2.0;
+    check::is_true(box.w > box.h, "the fixture item is wider than it is tall");
+
+    // Between the two half-extents, so it is outside the upright box
+    // and inside the turned one whatever the exact numbers are. Picking
+    // a fraction by eye is how the first draft of this got a point that
+    // was outside both.
+    const double between = (box.h / 2.0 + box.w / 2.0) / 2.0;
+
+    image.rotation = 90.0;
+    const overlay::Item turned = image;
+    const overlay::Quad quad =
+        overlay::item_quad(overlay::CANVAS_W, overlay::CANVAS_H, turned);
+    const overlay::Quad upright =
+        overlay::item_quad(overlay::CANVAS_W, overlay::CANVAS_H, flat);
+
+    check::is_true(!overlay::quad_contains(upright, cx, cy + between),
+                   "hit: the probe is outside the upright item");
+    check::is_true(overlay::quad_contains(quad, cx, cy + between),
+                   "hit: a turned item covers what its height did not");
+    check::is_true(overlay::quad_contains(upright, cx + between, cy),
+                   "hit: and the mirror probe is inside the upright one");
+    check::is_true(!overlay::quad_contains(quad, cx + between, cy),
+                   "hit: but outside once turned");
+    check::is_true(overlay::quad_contains(quad, cx, cy),
+                   "hit: the centre is inside at any angle");
+}
+
+void test_dragging_the_round_grip_turns_the_item() {
+    gui::OverlayEditor* editor = make_editor();
+    const images::Picture inset = grey(40, 30);
+    editor->set_last_rx(inset);
+    editor->add_last_rx_inset();
+
+    const overlay::Item& item = editor->doc().items.front();
+    const overlay::Point pivot = overlay::item_pivot(
+        overlay::CANVAS_W, overlay::CANVAS_H, item, &inset);
+    const overlay::Quad quad = overlay::item_quad(
+        overlay::CANVAS_W, overlay::CANVAS_H, item, &inset);
+
+    // Grab the round grip (top-right) and swing it a long way round --
+    // far enough that no snap band can account for the result.
+    press(*editor, widget_of(*editor, quad.corner[1]));
+    // Straight down from the pivot is -90 degrees in the document's
+    // counter-clockwise sense; the grip started up and to the right.
+    move_to(*editor, widget_point(pivot.x, pivot.y + 120), Qt::ShiftModifier);
+    release(*editor, widget_point(pivot.x, pivot.y + 120));
+
+    const double turned =
+        std::visit([](const auto& i) { return i.rotation; },
+                   editor->doc().items.front());
+    check::is_true(turned != 0.0, "rotate: the drag turned the item");
+    // The grip was at +45ish and went to -90, so the item swung
+    // clockwise on screen, which is a decreasing document angle.
+    check::is_true(turned < 0.0, "rotate: it turned the way the pointer went");
+    delete editor;
+}
+
+void test_rotation_snaps_to_right_angles_unless_shift_is_held() {
+    gui::OverlayEditor* editor = make_editor();
+    const images::Picture inset = grey(40, 30);
+    editor->set_last_rx(inset);
+    editor->add_last_rx_inset();
+
+    const overlay::Item& item = editor->doc().items.front();
+    const overlay::Point pivot = overlay::item_pivot(
+        overlay::CANVAS_W, overlay::CANVAS_H, item, &inset);
+    const overlay::Quad quad = overlay::item_quad(
+        overlay::CANVAS_W, overlay::CANVAS_H, item, &inset);
+    const QPoint grip = widget_of(*editor, quad.corner[1]);
+
+    // The grip starts at the top-right corner, so its angle about the
+    // pivot is some positive value; dragging to the mirror-image point
+    // on the *left* is a half turn from wherever it began, whatever
+    // that was. A half turn is a multiple of 90, so the snap should
+    // land it exactly.
+    const double gx = quad.corner[1].x - pivot.x;
+    const double gy = quad.corner[1].y - pivot.y;
+    press(*editor, grip);
+    move_to(*editor, widget_point(pivot.x - gx, pivot.y - gy));
+    release(*editor, widget_point(pivot.x - gx, pivot.y - gy));
+    const double snapped =
+        std::visit([](const auto& i) { return i.rotation; },
+                   editor->doc().items.front());
+    check::is_true(std::abs(std::abs(snapped) - 180.0) < 1e-9,
+                   "snap: a half turn lands exactly on 180");
+
+    // Now nudge a few degrees off a right angle without Shift: it must
+    // be pulled back. Aim at 4 degrees past straight up (+90).
+    constexpr double DEG = 3.14159265358979323846 / 180.0;
+    const double r = std::hypot(gx, gy);
+    const double off = 86.0 * DEG;  // 4 degrees short of a quarter turn
+    press(*editor, widget_of(*editor,
+                             overlay::Point{pivot.x + r * std::cos(off),
+                                            pivot.y - r * std::sin(off)}));
+    move_to(*editor, widget_point(pivot.x + r * std::cos(off),
+                                  pivot.y - r * std::sin(off)));
+    release(*editor, widget_point(pivot.x + r * std::cos(off),
+                                  pivot.y - r * std::sin(off)));
+    const double held =
+        std::visit([](const auto& i) { return i.rotation; },
+                   editor->doc().items.front());
+    check::is_true(std::abs(std::fmod(std::abs(held), 90.0)) < 1e-9,
+                   "snap: a few degrees off a right angle is pulled onto it");
+    delete editor;
+}
+
+void test_snap_arithmetic() {
+    // The pure function, over the cases the drag cannot reach reliably.
+    check::is_true(gui::OverlayEditor::snap_rotation(88.0, false) == 90.0,
+                   "snap: 88 goes to 90");
+    check::is_true(gui::OverlayEditor::snap_rotation(88.0, true) == 88.0,
+                   "snap: Shift leaves 88 alone");
+    check::is_true(gui::OverlayEditor::snap_rotation(45.0, false) == 45.0,
+                   "snap: 45 is out of every band and stays reachable");
+    check::is_true(gui::OverlayEditor::snap_rotation(370.0, false) == 10.0,
+                   "snap: past a full turn wraps");
+    check::is_true(gui::OverlayEditor::snap_rotation(-181.0, false) == 180.0,
+                   "snap: -181 wraps to 179 and snaps to 180, never -180");
+    check::is_true(gui::OverlayEditor::snap_rotation(-3.0, false) == 0.0,
+                   "snap: just below zero returns to upright");
+}
+
+// Ctrl with the arrows turns the selection.
+//
+// The grip is the only other way to set an angle now that the spin box
+// is gone, so without this rotation is unreachable from the keyboard --
+// a step backwards from a field that was in the tab order. On macOS
+// `Qt::ControlModifier` *is* the Command key, so one code path serves
+// both conventions; a test cannot tell them apart and does not need to.
+void test_ctrl_arrows_turn_the_selection() {
+    gui::OverlayEditor* editor = make_editor();
+    const images::Picture inset = grey(40, 30);
+    editor->set_last_rx(inset);
+    editor->add_last_rx_inset();
+    auto angle = [&] {
+        return std::visit([](const auto& i) { return i.rotation; },
+                          editor->doc().items.front());
+    };
+    check::is_true(angle() == 0.0, "a new item is upright");
+
+    key(*editor, Qt::Key_Left, Qt::ControlModifier);
+    check::is_true(angle() == 15.0, "Ctrl+Left turns counter-clockwise by 15");
+    key(*editor, Qt::Key_Right, Qt::ControlModifier);
+    check::is_true(angle() == 0.0, "Ctrl+Right turns back");
+
+    // Six presses reach a right angle exactly -- the step is chosen so
+    // that it does, and a rounding drift would show up here rather than
+    // as an item that is nearly sideways.
+    for (int i = 0; i < 6; ++i) key(*editor, Qt::Key_Left, Qt::ControlModifier);
+    check::is_true(angle() == 90.0, "six steps land exactly on a right angle");
+
+    // Shift is the coarse step, and coarse means the *next* right angle
+    // rather than a bigger number of degrees.
+    key(*editor, Qt::Key_Left, Qt::ControlModifier | Qt::ShiftModifier);
+    check::is_true(angle() == 180.0, "Ctrl+Shift+Left jumps to the next right angle");
+    key(*editor, Qt::Key_Right, Qt::ControlModifier | Qt::ShiftModifier);
+    check::is_true(angle() == 90.0, "and back the other way");
+
+    // From an angle that is not already a multiple of 90, the coarse
+    // step goes to the next one rather than adding 90 -- which is the
+    // difference between "align this" and "turn this".
+    key(*editor, Qt::Key_Left, Qt::ControlModifier);  // 105
+    check::is_true(angle() == 105.0, "an off-angle to work from");
+    key(*editor, Qt::Key_Left, Qt::ControlModifier | Qt::ShiftModifier);
+    check::is_true(angle() == 180.0, "coarse from 105 aligns to 180, not 195");
+
+    // Ctrl with a key this widget does not claim must not fall through
+    // to the position nudge: a chord that says "rotate" moving the item
+    // is worse than a chord that does nothing.
+    const double before_x =
+        std::visit([](const auto& i) { return i.x; }, editor->doc().items.front());
+    key(*editor, Qt::Key_Up, Qt::ControlModifier);
+    key(*editor, Qt::Key_Down, Qt::ControlModifier);
+    check::is_true(std::visit([](const auto& i) { return i.x; },
+                              editor->doc().items.front()) == before_x,
+                   "Ctrl+Up/Down does not move the item");
+    delete editor;
+}
+
 void test_it_pins_no_window_height() {
     QWidget container;
     auto* layout = new QVBoxLayout(&container);
@@ -369,6 +635,12 @@ int main(int argc, char** argv) {
     test_delete_removes_the_selection();
     test_an_added_item_can_be_nudged_without_clicking_first();
     test_it_pins_no_window_height();
+    test_the_quad_follows_the_renderer_s_pivot();
+    test_hit_testing_follows_the_turned_item();
+    test_dragging_the_round_grip_turns_the_item();
+    test_rotation_snaps_to_right_angles_unless_shift_is_held();
+    test_snap_arithmetic();
+    test_ctrl_arrows_turn_the_selection();
 
     return check::report("overlay editor");
 }

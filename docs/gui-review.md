@@ -30,8 +30,14 @@ iterated" as the thing it needs eyes for. This is one pass of that.
 > fixed). §3.8 stands as written: `tr()` is still paid for and no
 > translator is installed.
 >
-> Re-measured after the work: side by side asks **766 x 467**, tabbed
-> **342 x 464**.
+> Re-measured after the work: side by side asks **766 x 466**, tabbed
+> **342 x 463**.
+>
+> **One thing here is a feature rather than a fix.** Rotation moved from
+> a spin box in §1.2's row onto a grip on the item itself (Andrew's
+> request, 2026-08-08). It is in this branch because it lands in the
+> same row, and it is what removed "Rotation" from the properties box
+> the section below still describes.
 
 ## Before and after
 
@@ -54,6 +60,12 @@ summaries with disclosures, and each setting grouped with its own help.
 ![The Transmit settings tab before](images/gui-review-transmit-tab-before.png)
 
 ![The Transmit settings tab after](images/gui-review-transmit-tab-after.png)
+
+Rotation, added afterwards: the round grip on an item's top-right corner
+turns it, and the outline and both grips follow. 0, 30 and 90 degrees.
+Ctrl with the arrow keys does the same from the keyboard.
+
+![The overlay editor at three angles](images/gui-review-rotation.png)
 
 **Method.** Built `native/` against Qt 6.4.2 and rendered every panel
 and dialog headless with `sstvae-gui-shot`, at 1360x760 and 900x700, and

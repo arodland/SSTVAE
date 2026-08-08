@@ -39,6 +39,16 @@ public:
     explicit OverlayEditor(QWidget* parent = nullptr);
     ~OverlayEditor() override;
 
+    // Wrap an angle to (-180, 180] and pull it to a right angle when
+    // within a few degrees of one; `free` (Shift held during the drag)
+    // suppresses the pull.
+    //
+    // Public because it is the rotation *policy* and a pure function.
+    // A synthesized drag can show that turning works; the bands, the
+    // wrap, and the rule that -180 comes back as 180 are far easier to
+    // state directly than to aim a mouse at.
+    static double snap_rotation(double degrees, bool free);
+
     QSize sizeHint() const override;
     // **No `heightForWidth`, deliberately.** It was here, with a
     // comment saying a `QSplitter` ignores it -- true, and the reason it
@@ -116,7 +126,15 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
-    enum class Drag { None, Move, Resize };
+    enum class Drag { None, Move, Resize, Rotate };
+
+    // Which corner of `overlay::item_quad` carries which grip.
+    // Bottom-right stays the resize grip it has always been; rotation
+    // takes the opposite corner so the two can never be confused for
+    // one another, and so an operator's muscle memory for resizing is
+    // untouched.
+    static constexpr int RESIZE_CORNER = 2;  // bottom-right
+    static constexpr int ROTATE_CORNER = 1;  // top-right
 
     void rerender();
     // Where the canvas is drawn inside the widget, letter-boxed.
@@ -125,10 +143,18 @@ private:
     // callers check the rect.
     QPointF to_canvas(const QPointF& widget_point) const;
     int hit_test(const QPointF& canvas_point) const;
-    QRect handle_rect(const overlay::Bbox& box) const;
+    // A grip centred on one corner of the rotated quad.
+    QRect handle_rect(const overlay::Quad& quad, int corner) const;
+    // Canvas pixel -> widget point, the inverse of `to_canvas`.
+    QPointF to_widget(const overlay::Point& canvas_point) const;
+    // The selected item's quad, or nullopt with nothing selected.
+    std::optional<overlay::Quad> selected_quad() const;
     // The grip's side, from the style rather than a pixel literal --
     // see the .cpp.
     int handle_px() const;
+    // The angle of a canvas point about the selected item's pivot, in
+    // the document's counter-clockwise sense.
+    double angle_about_pivot(const QPointF& canvas_point) const;
     // Cursor feedback for the no-drag path of mouseMoveEvent.
     void update_hover_cursor(const QPointF& point);
     void select(int index);
@@ -148,6 +174,11 @@ private:
     QPointF grab_offset_;
     double resize_start_ = 0.0;
     QPointF resize_origin_;
+    // Where the item was turned to when a rotate drag began, and the
+    // angle of the cursor about the pivot at that moment -- so the
+    // handle turns *with* the pointer rather than jumping to it.
+    double rotate_start_ = 0.0;
+    double rotate_grab_angle_ = 0.0;
 };
 
 }  // namespace sstvae::gui
