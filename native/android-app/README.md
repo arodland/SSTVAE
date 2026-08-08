@@ -25,7 +25,12 @@ SDK. Both kits via [aqtinstall](https://github.com/miurahr/aqtinstall):
 aqt install-qt linux desktop 6.11.1 linux_gcc_64 -O ~/Qt -m qtimageformats
 aqt install-qt all_os android 6.11.1 android_arm64_v8a -O ~/Qt \
     -m qtimageformats qtshadertools
+aqt install-qt all_os android 6.11.1 android_x86_64 -O ~/Qt \
+    -m qtimageformats qtshadertools
 ```
+
+Both Android ABIs: **arm64-v8a for phones, x86_64 for the emulator.**
+176 MB each.
 
 Two things that are easy to get wrong. Qt 6.8+ publishes Android under
 the **`all_os`** host, not `linux` — under `linux` the listing stops at
@@ -41,7 +46,7 @@ export JAVA_HOME=/opt/android-studio/jbr
 cmake -S native/android-app -B build-android -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=$QT_ANDROID/lib/cmake/Qt6/qt.toolchain.cmake \
   -DQT_HOST_PATH=$QT_HOST \
-  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-28 \
+  -DQT_ANDROID_BUILD_ALL_ABIS=ON \
   -DANDROID_SDK_ROOT=$HOME/Android/Sdk \
   -DANDROID_NDK_ROOT=$HOME/Android/Sdk/ndk/28.2.13676358 \
   -DCMAKE_BUILD_TYPE=Debug
@@ -56,10 +61,22 @@ release target emits `-release-unsigned.apk`, which will not install.
 adb install -r build-android/android-build/build/outputs/apk/debug/android-build-debug.apk
 ```
 
-arm64-v8a only, deliberately. The emulator is x86_64 and **cannot carry
-audio at all** (it hands back zeroed buffers), so an x86_64 kit would
-double the download to enable a device that cannot run the one test that
-matters. Develop against a real phone.
+**Build both ABIs and keep the emulator in the loop** (Andrew,
+2026-08-08). It is tempting to go arm64-only on the grounds that the
+emulator cannot carry audio — it hands back zeroed buffers — but that
+mistakes the emulator's job. Most of Tier 0's work is *layout*, and
+`adb install` + `adb exec-out screencap` is a build-to-picture loop with
+no phone in hand, which is the Android equivalent of what
+`sstvae-gui-shot` does for the desktop and is there for the same reason:
+"is this laid out well" has no oracle and needs eyes, repeatedly.
+
+The audio objection is handled by the **WAV feeder** (see
+`native/android/`, `WavFeeder.java`): it pushes a file through the same
+capture path in ragged chunks and in real time, so the emulator gets a
+live audio source without a microphone. Tier 0 should carry that
+mechanism over rather than leave it behind in the smoke test.
+
+A real phone stays the only place the *driver* can be tested.
 
 ## What is left
 

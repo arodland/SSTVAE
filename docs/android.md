@@ -332,6 +332,15 @@ Two things worth keeping:
   last-reception card is a workaround for the same thing, and on a phone
   nobody is watching the moment it happens.
 
+**The emulator stays in the loop, and the WAV feeder is what makes that
+work** (Andrew, 2026-08-08). It cannot carry audio, but most of Tier 0
+is layout, and `adb install` + `adb exec-out screencap` is a
+build-to-picture loop needing no phone in hand — the Android equivalent
+of `sstvae-gui-shot`, kept for the same reason: "is this laid out well"
+has no oracle and needs eyes, repeatedly. The feeder supplies a live
+signal through the real capture path, so the emulator is short only a
+driver. Build both ABIs; the x86_64 Qt kit is 176 MB.
+
 ## Everything else that has to be written
 
 | Piece | Today | On Android |
