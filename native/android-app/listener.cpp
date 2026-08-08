@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QJniEnvironment>
 #include <QJniObject>
+#include <QPermissions>
 #include <QStandardPaths>
 #include <QtCore/qcoreapplication_platform.h>
 
@@ -22,6 +23,16 @@ constexpr const char* kServiceClass = "org/cleverdomain/sstvae/ListenerService";
 // Hold the screen while a session is running and this window is up.
 // A window flag rather than a wake lock, so the platform drops it on
 // backgrounding by itself -- see ScreenOn.java.
+void request_notification_permission() {
+    if (QNativeInterface::QAndroidApplication::sdkVersion() < 33) return;
+    QJniObject ctx = QNativeInterface::QAndroidApplication::context();
+    if (!ctx.isValid()) return;
+    QJniObject::callStaticMethod<void>("org/cleverdomain/sstvae/Permissions",
+                                       "requestNotifications",
+                                       "(Landroid/content/Context;)V", ctx.object());
+    QJniEnvironment().checkAndClearExceptions();
+}
+
 void keep_screen_on(bool on) {
     QJniObject ctx = QNativeInterface::QAndroidApplication::context();
     if (!ctx.isValid()) return;
@@ -74,6 +85,12 @@ Listener::Listener(QObject* parent) : QObject(parent) {
         QStringLiteral("/pictures");
     QDir().mkpath(pics);
     Session::instance().set_picture_dir(pics.toStdString());
+
+    // The ongoing notification needs POST_NOTIFICATIONS from API 33.
+    // Fire and forget: the answer is not waited on because denial is
+    // not fatal -- it costs the notification, not the session -- and
+    // the service is written to treat it that way.
+    request_notification_permission();
 
     // Start fetching the decoder now rather than at the first
     // reception. It is a ~9 MB download on a first run, and the moment
@@ -137,9 +154,47 @@ void Listener::refreshDevices() {
     emit changed();
 }
 
+// Ask for the microphone, then start.
+//
+// **Nothing is pre-granted on an ordinary sideload** -- `adb install
+// -g` had been hiding this throughout development, which is its own
+// small lesson about testing the install path people will actually
+// use. Qt's permission type is used rather than raw JNI because the
+// result arrives asynchronously through the activity, and Qt already
+// owns that plumbing.
+//
+// The request is made from `start()` rather than at launch, so the
+// prompt arrives when the operator has just asked to listen and its
+// reason is self-evident. It is also required to be here: a
+// microphone-typed foreground service may not be started without the
+// permission, so the service call has to wait for the answer.
 void Listener::start(const QString& deviceName) {
     error_.clear();
     const QString want = deviceName == kSystemDefault ? QString{} : deviceName;
+
+    const QMicrophonePermission mic;
+    switch (qApp->checkPermission(mic)) {
+        case Qt::PermissionStatus::Undetermined:
+            qApp->requestPermission(mic, this, [this, deviceName](const QPermission& p) {
+                if (p.status() == Qt::PermissionStatus::Granted) {
+                    start(deviceName);
+                } else {
+                    error_ = tr("Microphone access is required to receive.");
+                    emit changed();
+                }
+            });
+            return;
+        case Qt::PermissionStatus::Denied:
+            // Android stops showing the prompt after a denial, so
+            // repeating the request here would look like the button
+            // doing nothing at all. Say where to fix it instead.
+            error_ = tr("Microphone access is denied. Enable it in "
+                        "Settings > Apps > SSTVAE > Permissions.");
+            emit changed();
+            return;
+        case Qt::PermissionStatus::Granted:
+            break;
+    }
     QJniObject ctx = QNativeInterface::QAndroidApplication::context();
     QJniObject::callStaticMethod<void>(
         kServiceClass, "startListening", "(Landroid/content/Context;Ljava/lang/String;)V",
