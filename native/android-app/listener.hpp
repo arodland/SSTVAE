@@ -1,14 +1,18 @@
 // The receive session, as QML sees it.
 //
-// **Deliberately thin, and deliberately owning nothing that matters.**
-// Tier 0's shape (docs/android.md) is that the foreground service owns
-// the engine and the UI is a detachable view, which inverts the
-// desktop's `AppState`. This class is a placeholder for the service in
-// that arrangement, so it is written to the rule already: every property
-// it exposes is *derived* from `rx::SharedState` or the `InputStream` on
-// demand, and none of it is accumulated by watching. When the service
-// arrives, what moves is the ownership of `ring_`/`engine_`, not the way
-// the UI reads them.
+// **A view, owning nothing.** The session lives in `Session` and its
+// lifetime is guaranteed by `ListenerService`; this class holds no ring
+// buffer, no stream and no engine thread, and caches nothing they say.
+// Every property is derived on demand, so an instance created after a
+// reception started is in exactly the same position as one that was
+// there all along -- which is what "the UI is a detachable view" has to
+// mean in practice for it to survive a rotation or the screen going
+// off.
+//
+// Starting and stopping go *through the service*, never straight to
+// `Session`. That is the whole ownership inversion: if the UI could
+// start a session directly, the session would belong to something
+// Android may destroy mid-reception.
 
 #ifndef SSTVAE_ANDROID_LISTENER_HPP
 #define SSTVAE_ANDROID_LISTENER_HPP
@@ -18,14 +22,6 @@
 #include <QStringList>
 #include <QTimer>
 #include <QtQml/qqmlregistration.h>
-
-#include <memory>
-#include <optional>
-#include <thread>
-
-#include "audio/android/androidaudio.hpp"
-#include "rx/engine.hpp"
-#include "rx/ringbuffer.hpp"
 
 class Listener : public QObject {
     Q_OBJECT
@@ -43,11 +39,11 @@ public:
     ~Listener() override;
 
     QStringList inputDevices() const;
-    bool listening() const { return stream_ != nullptr; }
+    bool listening() const;
     QString status() const;
     QString audioRoute() const;
     QString level() const;
-    QString lastError() const { return error_; }
+    QString lastError() const;
 
     Q_INVOKABLE void refreshDevices();
     Q_INVOKABLE void start(const QString& deviceName);
@@ -60,14 +56,6 @@ signals:
 private:
     QStringList devices_;
     QString error_;
-
-    // Everything below moves to the service. Nothing in the UI holds a
-    // copy of any of it.
-    std::unique_ptr<sstvae::rx::RingBuffer> ring_;
-    std::unique_ptr<sstvae::audio::android::InputStream> stream_;
-    std::unique_ptr<sstvae::rx::SharedState> state_;
-    std::unique_ptr<sstvae::rx::StopFlag> stop_;
-    std::thread thread_;
     QTimer poll_;
 };
 

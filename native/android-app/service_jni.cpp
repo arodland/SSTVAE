@@ -1,0 +1,84 @@
+// What `ListenerService` calls to drive the session.
+//
+// **The service starts and stops the session; the UI never does.** A
+// view asks the service (via `startForegroundService`) and the service
+// asks here, so there is exactly one path into `Session::start` and it
+// is the one whose lifetime Android guarantees. The alternative --
+// starting the session from the activity and posting a notification
+// alongside it -- reads simpler and is the bug: the session would then
+// belong to something the system may destroy while a reception is in
+// progress.
+
+#include <jni.h>
+
+#include <string>
+
+#include "rx/engine.hpp"
+#include "session.hpp"
+
+namespace {
+
+using sstvae::androidapp::Session;
+
+std::string to_utf8(JNIEnv* env, jstring s) {
+    if (!s) return {};
+    const char* c = env->GetStringUTFChars(s, nullptr);
+    std::string out = c ? c : "";
+    if (c) env->ReleaseStringUTFChars(s, c);
+    return out;
+}
+
+}  // namespace
+
+extern "C" {
+
+JNIEXPORT jboolean JNICALL Java_org_cleverdomain_sstvae_ListenerService_nativeStart(
+    JNIEnv* env, jclass, jstring device) {
+    return Session::instance().start(to_utf8(env, device)) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_org_cleverdomain_sstvae_ListenerService_nativeStop(JNIEnv*, jclass) {
+    Session::instance().stop();
+}
+
+// One line for the ongoing notification.
+//
+// Deliberately *not* the UI's status string. The notification is read
+// at a glance from a lock screen and has room for one clause, so it
+// answers the only question worth answering there -- is this still
+// working, and is something arriving -- while the pane gives the
+// diagnostics. Built here rather than in Java so that the field
+// meanings live next to the engine that publishes them.
+JNIEXPORT jstring JNICALL
+Java_org_cleverdomain_sstvae_ListenerService_nativeStatusLine(JNIEnv* env, jclass) {
+    const sstvae::rx::Progress p = Session::instance().progress();
+    std::string s;
+    switch (p.status) {
+        case sstvae::rx::Status::Receiving: {
+            s = "Receiving";
+            if (p.mode_name) s += " mode " + *p.mode_name;
+            if (p.frames_received) {
+                s += "  " + std::to_string(*p.frames_received);
+                if (p.n_frames_expected) s += "/" + std::to_string(*p.n_frames_expected);
+                s += " frames";
+            }
+            if (!p.callsign.empty()) s += "  " + p.callsign;
+            break;
+        }
+        case sstvae::rx::Status::Done:
+            s = "Reception complete";
+            break;
+        case sstvae::rx::Status::Listening:
+        default:
+            // The poll count is the difference between "alive and
+            // hearing nothing" and "wedged", which is otherwise
+            // invisible from outside and is the question a listener
+            // left running for an hour actually has.
+            s = "Listening  " + std::to_string(p.polls) + " polls";
+            break;
+    }
+    return env->NewStringUTF(s.c_str());
+}
+
+}  // extern "C"

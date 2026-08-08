@@ -44,7 +44,7 @@ set(SSTVAE_BUILD_RIG OFF CACHE BOOL "" FORCE)
 set(SSTVAE_BUILD_PYMODULE OFF CACHE BOOL "" FORCE)
 add_subdirectory(.. sstvae_native EXCLUDE_FROM_ALL)
 
-qt_add_executable(sstvae_android main.cpp listener.cpp)
+qt_add_executable(sstvae_android main.cpp listener.cpp session.cpp service_jni.cpp)
 qt_add_qml_module(sstvae_android URI SSTVAE VERSION 1.0 QML_FILES Main.qml)
 target_link_libraries(sstvae_android PRIVATE Qt6::Quick sstvae_core
                                              sstvae_audio_android)
@@ -69,3 +69,11 @@ set_target_properties(sstvae_android PROPERTIES
 # `qt_add_android_permission` builds the pair correctly.
 qt_add_android_permission(sstvae_android
     NAME android.permission.RECORD_AUDIO)
+qt_add_android_permission(sstvae_android
+    NAME android.permission.FOREGROUND_SERVICE)
+qt_add_android_permission(sstvae_android
+    NAME android.permission.FOREGROUND_SERVICE_MICROPHONE)
+# API 33+. Denying it costs the ongoing notification but not the
+# session, which is why the service never treats it as fatal.
+qt_add_android_permission(sstvae_android
+    NAME android.permission.POST_NOTIFICATIONS)

@@ -126,18 +126,33 @@ into a generated file. Use `qt_add_android_permission(target NAME …)`.
 
 ## What is left
 
-In roughly the order the doc argues for:
+In roughly the order the doc argues for. The first two are **done**:
 
-1. **`core/audio/android/`** — the permanent audio layer: seven entry
-   points mirroring `core/audio/qt/qtaudio.hpp`, so `InputStream` and
-   `play()` drop into the existing seams unchanged. The smoke test's
-   Java `AudioDevices`/`CaptureThread` are most of it already, and
-   `audio::CapturePipeline` is done and host-tested.
-2. **The foreground service**, owning the engine, with the UI as a
-   detachable view. This inverts the desktop's `AppState` and is cheap
-   only if it is designed in: nothing in the UI may own engine state,
-   and every live display must be reconstructible from `SharedState` on
-   attach.
+1. ~~**`core/audio/android/`**~~ — the permanent audio layer: seven
+   entry points mirroring `core/audio/qt/qtaudio.hpp`, so `InputStream`
+   and `play()` drop into the existing seams unchanged. Capture is
+   verified end to end (see Status); `play()` is written but entirely
+   unexercised, which is a Tier 1 concern.
+2. ~~**The foreground service**~~ — `ListenerService` plus `Session`,
+   the process-wide owner of the ring, the stream and the engine
+   thread. Verified with the screen off and the app backgrounded: the
+   ongoing notification walked `Listening 19 polls` → `Receiving mode A
+   92/220 frames KC2G` → `207/220` → `Listening`, with no UI attached at
+   any point.
+
+   Three things in it are load-bearing rather than incidental.
+   `stopWithTask="false"` is what makes a reception survive the app
+   being swiped away, which on a phone is a normal thing to do while
+   waiting. **Only the service starts a session** — the UI asks it, and
+   `Session::start` has exactly one caller — because a session started
+   from the activity belongs to something Android may destroy
+   mid-reception. And `Listener`'s destructor deliberately does
+   *nothing*: a `stop()` there reads like tidiness and would end the
+   session on every rotation.
+
+   `START_NOT_STICKY`, not sticky: a restarted service arrives with a
+   null intent and so no device, and silently opening the *wrong*
+   microphone is worse than not restarting.
 3. **Listen / Pictures / Settings**, with the waterfall over
    `core/dsp/spectrum.cpp` as the *tuning instrument* — with no CAT it
    is the only frequency feedback there is.
