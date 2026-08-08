@@ -111,6 +111,9 @@ private:
     QLabel* rig_label_ = nullptr;
     QLabel* model_label_ = nullptr;
     QDockWidget* log_dock_ = nullptr;
+    // Set only while an error is forcing the log dock open, so the
+    // toggle that causes is not mistaken for the operator's own.
+    bool auto_opening_log_ = false;
     LogPane* log_pane_ = nullptr;
     QMenu* view_menu_ = nullptr;
     QAction* split_action_ = nullptr;

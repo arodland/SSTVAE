@@ -265,6 +265,7 @@ void read_transmit(const Reader& r, TransmitConfig& c) {
 
 void read_ui(const Reader& r, UiConfig& c) {
     r.get("layout", c.layout);
+    r.get("log_visible", c.log_visible);
     r.get("waterfall_height", c.waterfall_height);
     // Negative is meaningless and a huge value would push the panes off
     // the window; clamp quietly rather than refuse, since the only way
@@ -284,7 +285,7 @@ void read_ui(const Reader& r, UiConfig& c) {
                                           "'; expected auto, split or tabs");
         c.layout = "auto";
     }
-    r.report_unknown({"layout", "waterfall_height"});
+    r.report_unknown({"layout", "log_visible", "waterfall_height"});
 }
 
 // Empty string <-> JSON null, for the fields Python declares optional.
@@ -441,7 +442,10 @@ std::string to_json(const Config& c) {
           {"optimize", c.transmit.optimize},
           {"cw_id", c.transmit.cw_id},
           {"cw_message", c.transmit.cw_message}}},
-        {"ui", {{"layout", c.ui.layout}, {"waterfall_height", c.ui.waterfall_height}}},
+        {"ui",
+         {{"layout", c.ui.layout},
+          {"log_visible", c.ui.log_visible},
+          {"waterfall_height", c.ui.waterfall_height}}},
         {"version", c.version},
     };
     return root.dump(2) + "\n";

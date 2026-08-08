@@ -528,14 +528,47 @@ void MainWindow::build_log_dock() {
     addDockWidget(Qt::BottomDockWidgetArea, log_dock_);
     view_menu_->addAction(log_dock_->toggleViewAction());
 
+    // Open or closed as it was left. Before the connection below, so
+    // restoring a preference is not itself recorded as a change to it.
+    log_dock_->setVisible(state_->config().ui.log_visible);
+
+    // **`toggleViewAction`, not `visibilityChanged`.** The signal is
+    // the tempting one and it is wrong: Qt emits it whenever the dock
+    // stops being visible for *any* reason, including the main window
+    // being minimised. Minimising would then save "closed", and the log
+    // would be gone on the next run without the operator ever having
+    // closed it. The action tracks explicit show/hide -- the intent --
+    // which is the thing worth remembering.
+    connect(log_dock_->toggleViewAction(), &QAction::toggled, this,
+            [this](bool open) {
+                if (auto_opening_log_) return;  // see below
+                if (state_->config().ui.log_visible == open) return;
+                state_->config().ui.log_visible = open;
+                // Written now rather than at exit, for the same reason
+                // the waterfall's height is: an app that is killed, or
+                // that dies inside a rig backend, still owes the
+                // operator the layout they set.
+                state_->save_config();
+            });
+
     // An error re-opens a closed dock: the log is where the detail
     // lives, and an error with the log hidden would be exactly the
     // silent failure this pane exists to end.
+    //
+    // **It does not become their preference.** The flag brackets the
+    // `show()` so the handler above ignores the toggle it causes --
+    // `show()` is synchronous and the signal is direct, so the bracket
+    // is tight. Without it, any condition that logs an error on every
+    // run (a read-only config directory fails the file log at each
+    // startup) would rewrite "closed" to "open" every time, and the
+    // operator could never make the setting stick. Opening it because
+    // something went wrong is a temporary override, not an instruction.
     connect(state_, &AppState::logEntry, this,
             [this](qlonglong, const QString&, int severity, const QString&) {
-                if (severity == static_cast<int>(log::Severity::Error)) {
-                    log_dock_->show();
-                }
+                if (severity != static_cast<int>(log::Severity::Error)) return;
+                auto_opening_log_ = true;
+                log_dock_->show();
+                auto_opening_log_ = false;
             });
 
     // Queued is mandatory, not a preference: the signal is emitted

@@ -200,6 +200,20 @@ struct UiConfig {
     // height instead.
     int waterfall_height = 0;
 
+    // Whether the status-log dock is open.
+    //
+    // Open by default, which is what it has always been -- the log is
+    // where an error's detail lives, and a station that has never
+    // touched it should see one arrive.
+    //
+    // **An error re-opens a closed dock, and that does not change this
+    // value.** Only the operator's own toggle writes here. Otherwise a
+    // condition that logs an error on every single run -- a read-only
+    // config directory, say, which fails the file log every time --
+    // would rewrite "closed" to "open" at each startup, and the setting
+    // could never be made to stick.
+    bool log_visible = true;
+
     // "auto" | "split" | "tabs".
     //
     // "auto" is resolved **once, at startup, against the screen** --
