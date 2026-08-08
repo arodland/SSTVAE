@@ -18,6 +18,7 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QPlainTextEdit>
+#include <QTextDocument>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -45,6 +46,7 @@
 #include "images/images.hpp"
 #include "flow_layout.hpp"
 #include "overlay_editor.hpp"
+#include "style.hpp"
 #include "settings/settings.hpp"
 
 namespace sstvae::gui {
@@ -236,13 +238,13 @@ void TransmitPanel::on_optimizer_progress() {
         QString::asprintf("~%+.1f dB", st.progress.estimated_gain_db);
 
     if (st.running) {
-        status_->setText(tr("Refining picture... %1 on air").arg(gain));
+        status_->setText(tr("Refining image... %1 on air").arg(gain));
     } else if (st.finished && awaiting_optimizer_) {
-        status_->setText(tr("Refining picture... finishing"));
+        status_->setText(tr("Refining image... finishing"));
     } else if (st.finished && st.progress.step > 0) {
         // Whatever ended it -- plateau, either budget, or Send cutting
         // it short -- the gain it did reach stays on screen.
-        status_->setText(tr("Picture refined: %1 on air").arg(gain));
+        status_->setText(tr("Image refined: %1 on air").arg(gain));
         if (!optimizer_result_logged_) {
             // The status label cannot say *why* it stopped, so plateau
             // and out-of-time looked identical -- and the figure
@@ -329,7 +331,12 @@ void TransmitPanel::build_ui() {
     // and therefore part of what the receive pane matches.
     properties_->setEnabled(false);
     strip_layout->addWidget(properties_);
-    strip_layout->addWidget(build_send_bar());
+    // The send bar is built first because it is what constructs
+    // `progress_`, but the bar goes in *below* it -- a full-width row
+    // of its own, the same shape the receive pane gives its progress.
+    QWidget* send_bar = build_send_bar();
+    strip_layout->addWidget(progress_);
+    strip_layout->addWidget(send_bar);
     layout->addWidget(strip_);
 }
 
@@ -344,14 +351,14 @@ QWidget* TransmitPanel::build_tool_row() {
 
     auto* source = panel;
     auto* source_layout = column;
-    choose_button_ = new QPushButton(tr("Picture..."), source);
+    choose_button_ = new QPushButton(tr("&Image..."), source);
     connect(choose_button_, &QPushButton::clicked, this,
             &TransmitPanel::choose_image);
-    image_label_ = new QLabel(tr("No image selected"), source);
+    image_label_ = new style::ElidingLabel(tr("No image selected"), source);
     image_label_->setWordWrap(true);
-    frame_button_ = new QPushButton(tr("Framing..."), source);
+    frame_button_ = new QPushButton(tr("&Framing..."), source);
     frame_button_->setToolTip(
-        tr("Choose which part of the picture is sent, for anything that is "
+        tr("Choose which part of the image is sent, for anything that is "
            "not 4:3"));
     frame_button_->setEnabled(false);
     connect(frame_button_, &QPushButton::clicked, this,
@@ -364,28 +371,35 @@ QWidget* TransmitPanel::build_tool_row() {
     source_layout->addWidget(frame_button_);
     source_layout->addWidget(image_label_);
 
+    // **The rule needs a height of its own.** `FlowLayout` lays every
+    // item out at its own size hint rather than stretching it to the
+    // row, and a bare `QFrame`'s hint is a few pixels -- so this
+    // painted as an invisible dot and the Picture/Overlay grouping the
+    // comment above describes did not exist on screen at all. Matched
+    // to a button, which is what it stands between.
     auto* rule = new QFrame(panel);
     rule->setFrameShape(QFrame::VLine);
     rule->setFrameShadow(QFrame::Sunken);
+    rule->setFixedHeight(choose_button_->sizeHint().height());
     column->addWidget(rule);
 
     auto* overlay_box = panel;
     auto* overlay_layout = column;
-    auto* add_text = new QPushButton(tr("+ Text"), overlay_box);
+    auto* add_text = new QPushButton(tr("Add &text"), overlay_box);
     connect(add_text, &QPushButton::clicked, this, [this] {
         const std::string& callsign = app_->config().callsign;
         editor_->add_text(callsign.empty() ? std::string("TEXT") : callsign);
     });
-    add_rx_button_ = new QPushButton(tr("+ Last RX"), overlay_box);
+    add_rx_button_ = new QPushButton(tr("Add &last received"), overlay_box);
     // Nothing to insert until something has been received: the item it
     // adds resolves at render time, so before the first reception it
     // drew nothing and looked like a button that did not work.
     add_rx_button_->setEnabled(false);
     add_rx_button_->setToolTip(
-        tr("Insert the last received picture. Available once one has arrived."));
+        tr("Insert the last received image. Available once one has arrived."));
     connect(add_rx_button_, &QPushButton::clicked, editor_,
             &OverlayEditor::add_last_rx_inset);
-    auto* add_image = new QPushButton(tr("+ Image..."), overlay_box);
+    auto* add_image = new QPushButton(tr("Add i&mage..."), overlay_box);
     connect(add_image, &QPushButton::clicked, this, [this] {
         const QString path = QFileDialog::getOpenFileName(
             this, tr("Choose an inset image"),
@@ -393,10 +407,15 @@ QWidget* TransmitPanel::build_tool_row() {
             QString::fromLatin1(IMAGE_FILTER));
         if (!path.isEmpty()) editor_->add_image_inset(path.toStdString());
     });
-    auto* remove = new QPushButton(tr("Remove"), overlay_box);
-    connect(remove, &QPushButton::clicked, editor_,
-            &OverlayEditor::remove_selected);
-    for (QPushButton* button : {add_text, add_rx_button_, add_image, remove}) {
+    // **Remove is not here; it is in the "Selected item" box.** It is
+    // the only control in this row that acts on the *selection* rather
+    // than adding something, and the box below is where the selection
+    // lives -- so it was both misfiled and, at 85 px, the button that
+    // tipped this row onto a second line once the captions were spelled
+    // out. Two rows here cost 30 px of picture height on *both* panes,
+    // the strips being locked equal, and the received image is the one
+    // that cannot be asked for again.
+    for (QPushButton* button : {add_text, add_rx_button_, add_image}) {
         overlay_layout->addWidget(button);
     }
     // **No `column->addWidget(overlay_box)` here.** `overlay_box` is an
@@ -424,6 +443,14 @@ QGroupBox* TransmitPanel::build_properties(QWidget* parent) {
     // cost five rows of height. Side by side it is one.
     // Wrapping, for the same reason as the tool row: five fields on a
     // half-width pane is exactly where a single line gives up.
+    //
+    // **Each label and its control go in as one item**, through
+    // `style::row`. A `FlowLayout` has no notion that two adjacent
+    // items belong together, so adding them separately let a wrap fall
+    // between them: measured at 1360 px wide, "Rotation" ended line one
+    // and its spin box started line two, with "Size 0.010" in between.
+    // At 900 px the same row wrapped cleanly, which is why it survived
+    // -- it is only wrong at some widths.
     auto* form = new FlowLayout(box);
 
     // Multi-line: a station's callsign, grid and name belong to one
@@ -439,11 +466,31 @@ QGroupBox* TransmitPanel::build_properties(QWidget* parent) {
     // Two lines rather than four: still multi-line (a callsign, a grid
     // and a name belong to one item), but in a row under the canvas the
     // height is the picture's.
-    text_edit_->setFixedHeight(46);
-    // Ignored horizontally: in a row this would otherwise be a width
-    // floor under the whole window, which is what the tool row's long
-    // button captions already were.
-    text_edit_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    //
+    // **Measured, not 46 px.** A pixel constant standing in for "two
+    // lines" is two lines at exactly one font size: at 150% scaling it
+    // is one and a bit, and the second line -- the reason the field is
+    // multi-line at all -- is cut off. The rest of this project already
+    // sizes from metrics (`level_label_`'s minimum width, the log
+    // pane's minimum height); this was the exception.
+    text_edit_->setFixedHeight(text_edit_->fontMetrics().lineSpacing() * 2 +
+                               text_edit_->document()->documentMargin() * 2 +
+                               text_edit_->frameWidth() * 2 + 4);
+    // **`Preferred` with a small floor, not `Ignored`.** `Ignored` was
+    // right while this widget was added to the `FlowLayout` directly:
+    // that layout falls back to asking the widget for its hint, so the
+    // field still got a width. Inside a `style::row` -- which it needs
+    // to be, so a wrap cannot separate it from its label -- the hint
+    // goes through a `QHBoxLayout`, which honours `Ignored` and gives it
+    // *nothing*: the field disappeared entirely, leaving a "Text" label
+    // captioning empty space. A modest minimum is not a window floor
+    // either way, because `FlowLayout::minimumSize` takes the widest
+    // single item and the button rows are wider than this.
+    text_edit_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    text_edit_->setMinimumWidth(120);
+    text_edit_->setToolTip(
+        tr("The text drawn on the image. Enter starts a new line; Tab leaves "
+           "the field."));
     connect(text_edit_, &QPlainTextEdit::textChanged, this, [this] {
         if (auto* item = editing_item()) {
             if (auto* text = std::get_if<overlay::TextItem>(item)) {
@@ -452,8 +499,7 @@ QGroupBox* TransmitPanel::build_properties(QWidget* parent) {
             }
         }
     });
-    form->addWidget(new QLabel(tr("Text"), box));
-    form->addWidget(text_edit_);
+    form->addWidget(style::row(box, {new QLabel(tr("Text"), box), text_edit_}, 1));
 
     align_combo_ = new QComboBox(box);
     align_combo_->addItem(tr("Left"), QStringLiteral("left"));
@@ -467,8 +513,7 @@ QGroupBox* TransmitPanel::build_properties(QWidget* parent) {
             }
         }
     });
-    form->addWidget(new QLabel(tr("Align"), box));
-    form->addWidget(align_combo_);
+    form->addWidget(style::row(box, {new QLabel(tr("Align"), box), align_combo_}));
 
     size_spin_ = new QDoubleSpinBox(box);
     size_spin_->setRange(0.01, 1.5);
@@ -484,8 +529,9 @@ QGroupBox* TransmitPanel::build_properties(QWidget* parent) {
         }
         editor_->refresh_item();
     });
-    form->addWidget(new QLabel(tr("Size"), box));
-    form->addWidget(size_spin_);
+    size_spin_->setToolTip(
+        tr("A fraction of the image, so it means the same at any window size."));
+    form->addWidget(style::row(box, {new QLabel(tr("Size"), box), size_spin_}));
 
     rotation_spin_ = new QDoubleSpinBox(box);
     rotation_spin_->setRange(-180.0, 180.0);
@@ -497,8 +543,9 @@ QGroupBox* TransmitPanel::build_properties(QWidget* parent) {
                 std::visit([value](auto& i) { i.rotation = value; }, *item);
                 editor_->refresh_item();
             });
-    form->addWidget(new QLabel(tr("Rotation"), box));
-    form->addWidget(rotation_spin_);
+    rotation_spin_->setToolTip(tr("Degrees, clockwise."));
+    form->addWidget(
+        style::row(box, {new QLabel(tr("Rotation"), box), rotation_spin_}));
 
     color_button_ = new QPushButton(tr("Colour..."), box);
     connect(color_button_, &QPushButton::clicked, this, [this] {
@@ -513,8 +560,35 @@ QGroupBox* TransmitPanel::build_properties(QWidget* parent) {
         set_color_swatch(color);
         editor_->refresh_item();
     });
-    form->addWidget(new QLabel(tr("Colour"), box));
-    form->addWidget(color_button_);
+    // **Given its swatch now, before anything is selected.**
+    //
+    // A QPushButton grows when it is handed an icon: measured 80x22
+    // without and 80x24 with, on the same style. The swatch used to
+    // arrive on the first *text* selection, so the button silently got
+    // 2 px taller at that moment and stayed there -- and on a platform
+    // where this button is the tallest thing on its line of the
+    // wrapping row, that is 4 px on the whole control strip, which the
+    // panes are then locked to. It cost a Windows CI failure that
+    // reproduced nowhere else, because on Linux a taller sibling on the
+    // same line absorbed it.
+    //
+    // An empty swatch is transparent and draws nothing, so this is
+    // invisible; what it buys is a button whose metrics never move.
+    // `test_tx_panel.cpp` asserts that directly, which is a check every
+    // platform can run.
+    set_color_swatch(QColor());
+    form->addWidget(style::row(box, {new QLabel(tr("Colour"), box), color_button_}));
+
+    // Removing acts on the selection, so it belongs with the selection's
+    // own controls rather than among the buttons that add things. The
+    // box is disabled with nothing selected, which is exactly when
+    // Remove has nothing to do -- something the tool row could not say
+    // about it.
+    auto* remove = new QPushButton(tr("&Remove"), box);
+    remove->setToolTip(tr("Remove the selected item (or press Delete)."));
+    connect(remove, &QPushButton::clicked, editor_,
+            &OverlayEditor::remove_selected);
+    form->addWidget(remove);
     return box;
 }
 
@@ -535,6 +609,9 @@ QWidget* TransmitPanel::build_send_bar() {
     const int mode_index =
         mode_combo_->findData(QString::fromStdString(app_->config().transmit.mode));
     mode_combo_->setCurrentIndex(std::max(0, mode_index));
+    mode_combo_->setToolTip(
+        tr("How long the transmission takes, and how much detail it carries. "
+           "Longer modes send more latents, so they survive a poorer path."));
     connect(mode_combo_, &QComboBox::currentIndexChanged, this,
             &TransmitPanel::on_mode_changed);
 
@@ -582,32 +659,49 @@ QWidget* TransmitPanel::build_send_bar() {
             [this] { app_->save_config(); });
     update_level_label();
 
-    send_button_ = new QPushButton(tr("Send"), bar);
+    send_button_ = new QPushButton(tr("&Send"), bar);
     connect(send_button_, &QPushButton::clicked, this, &TransmitPanel::send);
-    cancel_button_ = new QPushButton(tr("Cancel"), bar);
+    send_button_->setToolTip(
+        tr("Encode the composition, key the radio and send it. Any refinement "
+           "still running is finished first."));
+    cancel_button_ = new QPushButton(tr("&Cancel"), bar);
+    cancel_button_->setToolTip(
+        tr("Stop the transmission and unkey the radio."));
     connect(cancel_button_, &QPushButton::clicked, this, &TransmitPanel::cancel);
     cancel_button_->setEnabled(false);
 
-    progress_ = new QProgressBar(bar);
+    // **Not in this row.** Inline among the buttons, with `Ignored`
+    // horizontally, it rendered as a blank rounded rectangle between
+    // Cancel and the status text -- indistinguishable from a disabled
+    // line edit, and nothing on screen said it was the transmission's
+    // progress. The receive pane gives its bar a full-width row of its
+    // own; `build_ui` now does the same here, and the two panes report
+    // progress the same way. Built here because this is where its
+    // siblings are configured.
+    progress_ = new QProgressBar(strip_);
     progress_->setRange(0, 100);
-    // The bar stretches, so it needs no width of its own; without this
-    // its default hint is a floor under the whole send bar.
-    progress_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    status_ = new QLabel(tr("Ready"), bar);
+
+    status_ = new style::ElidingLabel(tr("Ready"), bar);
     // Progress-tier text must not set a width floor: the two panes sit
     // in a splitter whose minimum is the *sum* of its children's, so
     // every pixel this label demands is a pixel the window cannot be
     // narrowed by. Errors go to the banner above, which wraps.
     status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 
-    layout->addWidget(new QLabel(tr("Mode:"), bar));
+    // No "Mode:" label: every item in the combo already begins with the
+    // word, so the row read "Mode: Mode B - 64 s".
     layout->addWidget(mode_combo_);
-    layout->addWidget(new QLabel(tr("Level:"), bar));
-    layout->addWidget(level_slider_);
-    layout->addWidget(level_label_);
+    // **Caption, slider and readout are one item.** A `FlowLayout` wraps
+    // between items, and these were three of them, so a narrow pane
+    // could leave the slider on one line and the number it is showing
+    // on the next -- or strand "Level:" above the thing it names. None
+    // of the three means anything alone: the slider has no scale
+    // printed on it, so the readout *is* how you know where it is set.
+    // Grouped, they wrap as a unit or not at all.
+    layout->addWidget(style::row(
+        bar, {new QLabel(tr("Level:"), bar), level_slider_, level_label_}));
     layout->addWidget(send_button_);
     layout->addWidget(cancel_button_);
-    layout->addWidget(progress_);
     layout->addWidget(status_);
     return bar;
 }
@@ -742,7 +836,7 @@ void TransmitPanel::apply_framing() {
                         tr("could not frame %1: %2")
                             .arg(QFileInfo(source_path_).fileName(),
                                  QString::fromUtf8(e.what())));
-        QMessageBox::critical(this, tr("Could not frame the picture"),
+        QMessageBox::critical(this, tr("Could not frame the image"),
                               QString::fromUtf8(e.what()));
         return;
     }
@@ -811,7 +905,14 @@ void TransmitPanel::set_color_swatch(const QColor& color) {
     // so without this guard the whole rebuild -- parse, allocate, paint,
     // setIcon, and the layout invalidation setIcon triggers -- runs at
     // mouse-move rate on the app's most latency-sensitive path.
-    if (color == swatch_color_) return;
+    //
+    // **`swatch_set_`, not just the colour.** An invalid QColor equals
+    // an invalid QColor, so before this flag existed the button could
+    // not be given its *first* swatch at construction -- the guard ate
+    // the call -- and it therefore acquired one only when a text item
+    // was first selected. See `build_properties` for why that mattered.
+    if (swatch_set_ && color == swatch_color_) return;
+    swatch_set_ = true;
     swatch_color_ = color;
 
     const int size = style()->pixelMetric(QStyle::PM_SmallIconSize);
@@ -841,9 +942,21 @@ overlay::Item* TransmitPanel::editing_item() {
 }
 
 void TransmitPanel::on_selection(overlay::Item* item) {
-    // Shown only with a selection: under the canvas this row is height
-    // the picture could have had.
-    properties_->setVisible(item != nullptr);
+    // **Disabled, never hidden** -- see `build_ui`, which this used to
+    // contradict outright while both sites carried a comment asserting
+    // the opposite rule.
+    //
+    // Two things went wrong when it hid. The row is ~90 px, so the
+    // canvas jumped under the pointer on every select and deselect,
+    // which is the one thing a composing surface must not do. And
+    // `PaneContainer::equalise_strips` runs only from
+    // `set_control_strips` and a resize -- nothing re-runs it when a
+    // strip's *content* changes height -- so from the first click the
+    // two strips held minimums computed for a layout that no longer
+    // existed and the two pictures silently stopped matching until the
+    // window was resized. `test_pane_container.cpp` cannot see that:
+    // its stand-in panes have static strips. `test_tx_panel.cpp` is the
+    // guard.
     properties_->setEnabled(item != nullptr);
     if (item == nullptr) {
         // Otherwise the last item's colour stays painted on a disabled
@@ -881,14 +994,7 @@ void TransmitPanel::resizeEvent(QResizeEvent* event) {
     place_banner();
 }
 
-void TransmitPanel::place_banner() {
-    if (banner_ == nullptr || editor_ == nullptr) return;
-    const QRect over = editor_->geometry();
-    const int wanted = banner_->heightForWidth(over.width());
-    banner_->setGeometry(over.x(), over.y(), over.width(),
-                         std::max(banner_->sizeHint().height(), wanted));
-    banner_->raise();
-}
+void TransmitPanel::place_banner() { style::place_over(banner_, editor_); }
 
 bool TransmitPanel::transmitting() const { return running_.load(); }
 
@@ -897,7 +1003,7 @@ void TransmitPanel::send() {
 
     const std::optional<images::Picture> image = editor_->composed_image();
     if (!image) {
-        QMessageBox::information(this, tr("No picture"),
+        QMessageBox::information(this, tr("No image"),
                                  tr("Choose an image to transmit first."));
         return;
     }
@@ -925,7 +1031,7 @@ void TransmitPanel::send() {
             awaiting_optimizer_ = true;
             send_button_->setEnabled(false);
             set_picture_controls_enabled(false);
-            status_->setText(tr("Refining picture..."));
+            status_->setText(tr("Refining image..."));
             progress_->setRange(0, 0);
             wait_timer_->start();
             return;

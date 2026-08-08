@@ -2,6 +2,7 @@
 
 #include <QAction>
 #include <QCloseEvent>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDockWidget>
 #include <QGroupBox>
@@ -29,6 +30,7 @@
 #include "rig/hamlib.hpp"
 #include "rx_panel.hpp"
 #include "settings_dialog.hpp"
+#include "style.hpp"
 #include "tx/engine.hpp"
 #include "tx_panel.hpp"
 
@@ -187,10 +189,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             [this](int phase, double, const QString&) { on_tx_state(phase); });
     connect(tx_panel_, &TransmitPanel::sendFinished, this,
             [this](bool) { on_tx_state(static_cast<int>(tx::TxPhase::Idle)); });
+    // Dimmed, not disabled, while polling is paused: a frozen frequency
+    // must not read as current, but `setEnabled(false)` says "you cannot
+    // use this" about a label and takes it out of the accessibility tree
+    // as an unavailable control. `style::dim` is an appearance change
+    // expressed as one.
     connect(tx_panel_, &TransmitPanel::transmitStarted, this,
-            [this] { rig_label_->setEnabled(false); });
+            [this] { style::dim(rig_label_); });
     connect(tx_panel_, &TransmitPanel::transmitFinished, this,
-            [this] { rig_label_->setEnabled(true); });
+            [this] { style::undim(rig_label_); });
     connect(rx_panel_, &ReceivePanel::receptionSaved, this,
             [this](const QString& path) {
                 statusBar()->showMessage(tr("Saved %1").arg(path), 5000);
@@ -432,10 +439,15 @@ void MainWindow::show_about() {
     // problem raises, and an operator should not have to find a
     // terminal to answer it. Same for the log's location, which is
     // what a bug report needs attached.
-    QString text = tr("<b>SSTVAE</b><br>"
+    // **Our own version first.** This box reported Hamlib's and Qt's --
+    // both worth having, and both there for good reasons -- and omitted
+    // the one number every bug report needs, which was then readable
+    // nowhere in the running application.
+    QString text = tr("<b>SSTVAE %1</b><br>"
                       "Image transmission over HF radio.<br><br>"
-                      "Hamlib %1<br>Qt %2")
-                       .arg(QString::fromStdString(rig::hamlib_version()),
+                      "Hamlib %2<br>Qt %3")
+                       .arg(QCoreApplication::applicationVersion(),
+                            QString::fromStdString(rig::hamlib_version()),
                             QString::fromLatin1(qVersion()));
     const QString log_note = state_->log_file_note();
     if (log_note.isEmpty()) {
@@ -449,17 +461,27 @@ void MainWindow::show_about() {
 void MainWindow::build_status_bar() {
     auto* bar = new QStatusBar(this);
     setStatusBar(bar);
-    // The PTT lamp: hidden except while the rig is keyed. Bold red
-    // text on the standard background -- a state indicator, not chrome
-    // -- because "the radio is transmitting" is the one state in the
-    // app that must be visible at a glance.
-    ptt_label_ = new QLabel(tr("TX"), this);
+    // The PTT lamp: hidden except while the rig is keyed. "The radio is
+    // transmitting" is the one state in this application that must be
+    // readable at a glance from across a shack.
+    //
+    // **A filled chip, not coloured text.** It was bold `#b3261e` on
+    // whatever the status bar's own background happened to be -- a
+    // colour chosen against a light theme, which on a dark one is dark
+    // red on dark grey. Painting both the ground and the text fixes the
+    // contrast by construction instead of leaving it to the theme, and
+    // it is what every other application's transmit indicator does.
+    // Palette, never a stylesheet.
+    ptt_label_ = new QLabel(tr(" TX "), this);
     QFont ptt_font = ptt_label_->font();
     ptt_font.setBold(true);
     ptt_label_->setFont(ptt_font);
+    ptt_label_->setAutoFillBackground(true);
     QPalette ptt_palette = ptt_label_->palette();
-    ptt_palette.setColor(QPalette::WindowText, QColor(0xb3, 0x26, 0x1e));
+    ptt_palette.setColor(QPalette::Window, style::color::danger());
+    ptt_palette.setColor(QPalette::WindowText, style::color::on_danger());
     ptt_label_->setPalette(ptt_palette);
+    ptt_label_->setToolTip(tr("The radio is keyed."));
     ptt_label_->hide();
 
     // The receive summary, for tabbed mode -- hidden in split mode,
@@ -467,7 +489,7 @@ void MainWindow::build_status_bar() {
     // `Ignored` so a long reception line ("Receiving mode C: frame
     // 431/440 (98%) -- SNR 12.4 dB de W1AW") cannot pin the window's
     // minimum width, which is the whole reason the tabbed layout exists.
-    rx_status_label_ = new QLabel(QString(), this);
+    rx_status_label_ = new style::ElidingLabel(QString(), this);
     rx_status_label_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     rx_status_label_->hide();
     bar->addWidget(rx_status_label_, 1);
@@ -506,14 +528,47 @@ void MainWindow::build_log_dock() {
     addDockWidget(Qt::BottomDockWidgetArea, log_dock_);
     view_menu_->addAction(log_dock_->toggleViewAction());
 
+    // Open or closed as it was left. Before the connection below, so
+    // restoring a preference is not itself recorded as a change to it.
+    log_dock_->setVisible(state_->config().ui.log_visible);
+
+    // **`toggleViewAction`, not `visibilityChanged`.** The signal is
+    // the tempting one and it is wrong: Qt emits it whenever the dock
+    // stops being visible for *any* reason, including the main window
+    // being minimised. Minimising would then save "closed", and the log
+    // would be gone on the next run without the operator ever having
+    // closed it. The action tracks explicit show/hide -- the intent --
+    // which is the thing worth remembering.
+    connect(log_dock_->toggleViewAction(), &QAction::toggled, this,
+            [this](bool open) {
+                if (auto_opening_log_) return;  // see below
+                if (state_->config().ui.log_visible == open) return;
+                state_->config().ui.log_visible = open;
+                // Written now rather than at exit, for the same reason
+                // the waterfall's height is: an app that is killed, or
+                // that dies inside a rig backend, still owes the
+                // operator the layout they set.
+                state_->save_config();
+            });
+
     // An error re-opens a closed dock: the log is where the detail
     // lives, and an error with the log hidden would be exactly the
     // silent failure this pane exists to end.
+    //
+    // **It does not become their preference.** The flag brackets the
+    // `show()` so the handler above ignores the toggle it causes --
+    // `show()` is synchronous and the signal is direct, so the bracket
+    // is tight. Without it, any condition that logs an error on every
+    // run (a read-only config directory fails the file log at each
+    // startup) would rewrite "closed" to "open" every time, and the
+    // operator could never make the setting stick. Opening it because
+    // something went wrong is a temporary override, not an instruction.
     connect(state_, &AppState::logEntry, this,
             [this](qlonglong, const QString&, int severity, const QString&) {
-                if (severity == static_cast<int>(log::Severity::Error)) {
-                    log_dock_->show();
-                }
+                if (severity != static_cast<int>(log::Severity::Error)) return;
+                auto_opening_log_ = true;
+                log_dock_->show();
+                auto_opening_log_ = false;
             });
 
     // Queued is mandatory, not a preference: the signal is emitted
@@ -655,9 +710,14 @@ void MainWindow::open_settings() {
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (tx_panel_->transmitting()) {
+        // **`No` is the default.** `QMessageBox::question` with default
+        // arguments makes `Yes` the default button, so Enter on a
+        // keyboard-driven quit cut a transmission off mid-picture. The
+        // safe answer is the one that costs nothing to repeat.
         const auto answer = QMessageBox::question(
             this, tr("Transmitting"),
-            tr("A transmission is in progress. Stop it and quit?"));
+            tr("A transmission is in progress. Stop it and quit?"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
         if (answer != QMessageBox::Yes) {
             event->ignore();
             return;

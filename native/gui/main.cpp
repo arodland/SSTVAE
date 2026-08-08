@@ -9,6 +9,12 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("SSTVAE"));
     QCoreApplication::setOrganizationName(QStringLiteral("SSTVAE"));
+    // From CMake's `project(... VERSION ...)`, so there is one copy.
+    // Read back by the About box, which previously named Hamlib's
+    // version and Qt's and not this application's -- the number a bug
+    // report needs first, and the only one an operator could not read
+    // off the running program.
+    QCoreApplication::setApplicationVersion(QStringLiteral(SSTVAE_VERSION));
     // Also the identifier the desktop uses to match a window to its
     // .desktop file. Wayland has no other way to do it, so without this
     // the taskbar shows an unnamed, iconless second entry beside the

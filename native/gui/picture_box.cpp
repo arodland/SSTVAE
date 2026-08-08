@@ -9,6 +9,7 @@
 #include <algorithm>
 
 #include "images/images.hpp"
+#include "style.hpp"
 
 namespace sstvae::gui {
 
@@ -25,8 +26,8 @@ PictureBox::PictureBox(const QString& text, QWidget* parent) : QWidget(parent) {
     // settings dialog, which has nothing to do with this widget.
     setAutoFillBackground(true);
     QPalette dark = palette();
-    dark.setColor(QPalette::Window, QColor(0x20, 0x20, 0x24));
-    dark.setColor(QPalette::WindowText, QColor(0x88, 0x88, 0x88));
+    dark.setColor(QPalette::Window, style::color::viewport());
+    dark.setColor(QPalette::WindowText, style::color::viewport_text());
     setPalette(dark);
 
     label_ = new QLabel(text, this);
@@ -81,11 +82,12 @@ void PictureBox::paintEvent(QPaintEvent* event) {
     const QRect frame = label_->geometry();
     // A shade lighter than the viewport, plus a hairline: enough to read
     // as "the picture goes here" without competing with a picture once
-    // one arrives. Colours from the palette this widget already carries,
-    // never a stylesheet -- one stylesheet anywhere re-styles every combo
-    // and spin box in the application.
-    painter.fillRect(frame, QColor(0x31, 0x31, 0x3a));
-    painter.setPen(QColor(0x55, 0x55, 0x61));
+    // one arrives. From `style::color`, which `overlay_editor.cpp` also
+    // uses to paint its empty canvas -- the two are seen side by side
+    // and were previously kept in step by hand. Never a stylesheet: one
+    // anywhere re-styles every combo and spin box in the application.
+    painter.fillRect(frame, style::color::viewport_frame());
+    painter.setPen(style::color::viewport_edge());
     painter.drawRect(frame.adjusted(0, 0, -1, -1));
 }
 

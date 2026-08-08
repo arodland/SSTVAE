@@ -312,9 +312,23 @@ erased itself while the operator was still looking at the picture.
 Layout, 2026-08-02), because the splitter's floor is a property of the
 *arrangement* and only the arrangement can move it: measured on the
 real panels with `sstvae-gui-shot --panes`, **1043 px side by side
-against 545 px tabbed**. The scroll-area idea that was filed against
-this treats the symptom. Three things are settled and worth not
-re-deciding. **"auto" is resolved once, at startup, against the
+against 545 px tabbed** *at the time*. The scroll-area idea that was
+filed against this treats the symptom.
+
+**Those numbers are long gone, and the conclusion with them**
+(re-measured 2026-08-08): side by side now asks **766 x 467** against
+tabbed's **342 x 464**. Everything that shrank the panels since —
+`Ignored` size policies, `FlowLayout`, retiring the duplicate properties
+box — came off the side-by-side figure. At 766 px it fits every screen
+anyone will run this on, so `resolve_layout` will not choose tabs on any
+real display and the startup log line explaining that choice will never
+fire. Worse on the axis tabs were meant to help: at 900 px wide the
+tabbed layout measures **49 px taller**, and its
+`minimumHeightForWidth` is 755 against the splitter's 518. Tabs are
+therefore a *preference* now (View > Layout), not a screen-size
+adaptation — kept deliberately (Andrew, 2026-08-07) rather than retired,
+but do not reach for the old numbers to justify it. Three things are
+settled and worth not re-deciding. **"auto" is resolved once, at startup, against the
 screen** — a live breakpoint reads like the obvious implementation and
 cannot work, since while side by side is in force the splitter's own
 minimum is exactly what stops the window reaching the width that would

@@ -48,6 +48,8 @@ private slots:
     void sync_precision_enabled();
     void refresh_devices();
     void sync_ptt_enabled();
+    // Show what the current filename template would actually produce.
+    void sync_filename_preview();
     void test_cat();
     void test_ptt();
     void on_rig_test_finished(bool ok, const QString& message);
@@ -131,6 +133,7 @@ private:
     QCheckBox* save_audio_ = nullptr;
     QCheckBox* low_cpu_ = nullptr;
     QLineEdit* filename_template_ = nullptr;
+    QLabel* filename_preview_ = nullptr;
     QLineEdit* save_size_ = nullptr;
     QDoubleSpinBox* buffer_seconds_ = nullptr;
     QDoubleSpinBox* poll_interval_ = nullptr;

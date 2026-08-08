@@ -126,6 +126,11 @@ private:
     QPointF to_canvas(const QPointF& widget_point) const;
     int hit_test(const QPointF& canvas_point) const;
     QRect handle_rect(const overlay::Bbox& box) const;
+    // The grip's side, from the style rather than a pixel literal --
+    // see the .cpp.
+    int handle_px() const;
+    // Cursor feedback for the no-drag path of mouseMoveEvent.
+    void update_hover_cursor(const QPointF& point);
     void select(int index);
 
     overlay::Doc doc_;

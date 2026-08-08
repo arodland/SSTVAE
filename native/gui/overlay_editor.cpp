@@ -6,6 +6,7 @@
 #include <QPainter>
 #include <QPen>
 #include <QResizeEvent>
+#include <QStyle>
 
 #include <algorithm>
 #include <cmath>
@@ -14,30 +15,9 @@
 
 #include "images/images.hpp"
 #include "overlay/render.hpp"
+#include "style.hpp"
 
 namespace sstvae::gui {
-
-namespace {
-
-// Side of the square resize grip, in widget pixels.
-constexpr int HANDLE = 10;
-
-// The empty canvas, matching `PictureBox`'s empty state exactly so the
-// two panes look like a pair before either holds a picture. Kept in
-// step with picture_box.cpp by hand -- two constants rather than a
-// shared header, because the receive side is a palette on a QLabel and
-// this side is a painter fill, and a shared symbol would imply they are
-// applied the same way.
-const QColor EMPTY_CANVAS(0x20, 0x20, 0x24);
-const QColor EMPTY_CANVAS_TEXT(0x88, 0x88, 0x88);
-
-QImage to_qimage(const images::Picture& picture) {
-    const QImage view(picture.rgb.data(), picture.width, picture.height,
-                      picture.width * 3, QImage::Format_RGB888);
-    return view.copy();
-}
-
-}  // namespace
 
 OverlayEditor::OverlayEditor(QWidget* parent) : QWidget(parent) {
     setMinimumSize(320, 240);
@@ -64,7 +44,16 @@ OverlayEditor::OverlayEditor(QWidget* parent) : QWidget(parent) {
     // room. It imposes no cap of its own -- `canvas_rect()` centres
     // a 4:3 canvas in whatever it is given.
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    setMouseTracking(false);
+    // **Tracking on, so the cursor can answer.** Nothing in this widget
+    // announced itself: items drag, the corner grip resizes, the arrow
+    // keys nudge, and the pointer stayed an arrow over all of it.
+    // `CropView` in this same application deliberately sets a cursor and
+    // explains why -- a widget that moves things under the pointer has
+    // to say so before the pointer is pressed.
+    setMouseTracking(true);
+    setToolTip(tr("Drag an item to move it, or its corner to resize. Arrow "
+                  "keys nudge the selection (Shift for a coarser step); "
+                  "Delete removes it."));
     // Strong, not ClickFocus: the arrow keys and Delete are useless to
     // an operator who cannot get focus onto this widget, and ClickFocus
     // keeps it out of the Tab chain entirely.
@@ -220,13 +209,26 @@ int OverlayEditor::hit_test(const QPointF& point) const {
     return -1;
 }
 
+// The side of the square resize grip.
+//
+// **Not a constant 10.** A logical-pixel literal is a fixed physical
+// size only on the display it was chosen on; on a HiDPI panel at 200%
+// scaling it is a ~3 mm target for the one gesture in this widget that
+// needs precision. `PM_SmallIconSize` is the style's own answer to "how
+// big is a small thing here", so it tracks both the screen and the
+// font. Floored at the old value so nothing gets *worse*.
+int OverlayEditor::handle_px() const {
+    return std::max(10, style()->pixelMetric(QStyle::PM_SmallIconSize) * 2 / 3);
+}
+
 QRect OverlayEditor::handle_rect(const overlay::Bbox& box) const {
     const QRect rect = canvas_rect();
     const double sx = static_cast<double>(rect.width()) / overlay::CANVAS_W;
     const double sy = static_cast<double>(rect.height()) / overlay::CANVAS_H;
     const int x = rect.x() + static_cast<int>(std::lround((box.x + box.w) * sx));
     const int y = rect.y() + static_cast<int>(std::lround((box.y + box.h) * sy));
-    return QRect(x - HANDLE / 2, y - HANDLE / 2, HANDLE, HANDLE);
+    const int side = handle_px();
+    return QRect(x - side / 2, y - side / 2, side, side);
 }
 
 void OverlayEditor::paintEvent(QPaintEvent*) {
@@ -246,20 +248,20 @@ void OverlayEditor::paintEvent(QPaintEvent*) {
         // Viewport, then the 4:3 frame inside it -- the composer has to
         // show the shape it will send before anything is in it, for the
         // same reason the receive box does.
-        painter.fillRect(this->rect(), EMPTY_CANVAS);
-        painter.fillRect(rect, QColor(0x31, 0x31, 0x3a));
-        painter.setPen(QColor(0x55, 0x55, 0x61));
+        painter.fillRect(this->rect(), style::color::viewport());
+        painter.fillRect(rect, style::color::viewport_frame());
+        painter.setPen(style::color::viewport_edge());
         painter.drawRect(rect.adjusted(0, 0, -1, -1));
-        painter.setPen(EMPTY_CANVAS_TEXT);
-        painter.drawText(rect, Qt::AlignCenter, tr("Choose a picture to send"));
+        painter.setPen(style::color::viewport_text());
+        painter.drawText(rect, Qt::AlignCenter, tr("Choose an image to send"));
         return;
     }
 
     // The same fill as the empty state, so the viewport around the
     // canvas does not change colour the moment a picture arrives.
-    painter.fillRect(this->rect(), EMPTY_CANVAS);
+    painter.fillRect(this->rect(), style::color::viewport());
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-    painter.drawImage(rect, to_qimage(composed_));
+    painter.drawImage(rect, style::to_qimage(composed_));
 
     if (overlay::Item* item = const_cast<OverlayEditor*>(this)->selected_item()) {
         const overlay::Bbox box = overlay::item_bbox(
@@ -321,8 +323,30 @@ void OverlayEditor::mousePressEvent(QMouseEvent* event) {
                            canvas.y() - y * overlay::CANVAS_H);
 }
 
+// What the pointer is over, expressed as a cursor.
+//
+// Split out and called from the no-drag path of `mouseMoveEvent`: the
+// grip first, exactly as `mousePressEvent` tests it, so the cursor
+// cannot promise a resize where a press would start a move.
+void OverlayEditor::update_hover_cursor(const QPointF& point) {
+    if (overlay::Item* item = selected_item()) {
+        const overlay::Bbox box = overlay::item_bbox(
+            overlay::CANVAS_W, overlay::CANVAS_H, *item,
+            last_rx_ ? &*last_rx_ : nullptr);
+        if (handle_rect(box).contains(point.toPoint())) {
+            setCursor(Qt::SizeFDiagCursor);
+            return;
+        }
+    }
+    setCursor(hit_test(to_canvas(point)) >= 0 ? Qt::SizeAllCursor
+                                              : Qt::ArrowCursor);
+}
+
 void OverlayEditor::mouseMoveEvent(QMouseEvent* event) {
-    if (drag_ == Drag::None) return;
+    if (drag_ == Drag::None) {
+        update_hover_cursor(event->position());
+        return;
+    }
     overlay::Item* item = selected_item();
     if (item == nullptr) return;
     const QPointF canvas = to_canvas(event->position());
