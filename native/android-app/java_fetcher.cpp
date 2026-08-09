@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <utility>
 
 namespace sstvae::androidapp {
 namespace {

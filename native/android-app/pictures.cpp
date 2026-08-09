@@ -7,6 +7,8 @@
 #include <QJsonObject>
 #include <QStandardPaths>
 
+#include <cstring>
+
 #include "rx/engine.hpp"
 #include "session.hpp"
 
