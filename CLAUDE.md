@@ -1251,8 +1251,50 @@ need when `--native` fails and you want to know *where*.
   with, measured ±0.05 dB: the clipper absorbs it and stage-2 trained
   through that same clipper, so the *objective* was the real risk all
   along.
-- `docs/android.md` — feasibility and design for an Android port.
-  **Direction decided 2026-08-08, nothing implemented**: a Qt Quick
+- `docs/android.md` — design for the Android port, plus the
+  implementation notes from building it. **Tier 0 is done (2026-08-08)
+  and receives on hardware**: `native/android-app/` decodes complete
+  pictures on a Galaxy S25+ over acoustic coupling, no artifacts,
+  capture inside ±100 ppm, ~0.5 s of DSP per five-second poll.
+  `native/android-app/README.md` is the working document — build
+  commands, the emulator recipe, and the traps; read it before touching
+  the app. **`tools/build_android.sh` is how you build it**, and the
+  reason it exists is the sharpest lesson of the port: the NDK's Debug
+  configuration passes no `-O` flag at all (clang defaults to `-O0`),
+  which costs 6–15x in a receive loop that is scalar DSP over a 130 s
+  ring, and the alternative (`RelWithDebInfo`) emits an unsigned APK
+  that will not install — so everyone picks Debug. The script does
+  RelWithDebInfo + zipalign + debug-sign in one command.
+  **Three of the port's bugs were bugs in its own instruments**, none
+  in the modem, engine or codec, and each presented as a fault
+  elsewhere: the `-O0` build read as a slow onnxruntime; the capture
+  drift meter timed to `now` while counting samples to the last chunk,
+  charging in-flight audio as lost and reporting a steady −4500 ppm
+  `DROPPING AUDIO` on a phone whose pictures were perfect; and the
+  emulator's default `swiftshader_indirect` renderer tears every
+  screenshot, which read as a clipped toolbar. Expect that pattern —
+  `native/core/` is covered by golden vectors and `pytest --native`,
+  the instruments around it are covered by nothing. Two of them
+  corrupted this file's own record before being found, so **re-measure
+  before quoting any Android number from before 2026-08-08 evening**.
+  Two consequences worth not re-deriving. **The poll cost is DSP, not
+  the codec** — `Progress::last_decode_s` is measured *before* the
+  codec runs, in both implementations, so it never contained any
+  inference; at a full ring it is `sync::acquire` 171 ms +
+  `demodulate` 192 ms against a 2 ms `to_baseband`, which is why
+  `decode_loop_low_cpu` (no blind accumulator, searches only new
+  audio) is the battery lever and ORT thread count is not. And **the
+  model fetcher is Java, not `qt_fetcher.cpp`** — Qt for Android ships
+  no TLS backend, so transport is `ModelFetcher.java` behind the
+  existing `checkpoint::Fetcher` seam, with the sha256 check and the
+  `.part` rename kept in C++ because that is the half where a mistake
+  silently corrupts a cache. `RxConfig::max_decode_duty` (default 1.0
+  = off, unchanged desktop behaviour; Android sets 0.5) is the one
+  change this made to shared code. **Before any beta**: the debug
+  keystore is per machine, so an APK from one machine cannot upgrade
+  one from another, and `QT_ANDROID_VERSION_CODE` is hardcoded to 1, so
+  every tester build after the first is silently un-upgradable.
+  The original design, which survived contact almost intact: a Qt Quick
   front end over the existing `native/core/`, starting at Tier 0 (a
   receive-only listener) with later tiers optional, and **native Android
   audio from the beginning rather than QtMultimedia**. The 17.5k Qt-free
@@ -1405,6 +1447,23 @@ acquisition path (`sync.acquire_blind` / `Modem.demodulate_blind`).
 with the real modem, but does not simulate/train through beacon content
 itself (synthesizes random BPSK there just for realistic PAPR
 statistics).
+
+Android: **Tier 0 is built and receiving** (2026-08-08),
+`native/android-app/` — a Qt Quick front end over the same
+`native/core/`, so no new parity surface. All six Tier 0 items are in
+(audio layer, foreground service, three screens, persisted reception
+metadata, notifications, model fetch), plus sharing, a technical-detail
+switch that is off by default, and keep-screen-on. Verified on a Galaxy
+S25+ over acoustic coupling. Deliberately not done: a MediaStore save
+to the shared gallery, and `play()` (written, unexercised, Tier 1).
+**Never tried at all: USB capture on this app** — the smoke test
+decoded a TH-D75 over USB at >24 dB, so the path exists, but the four
+hardware questions in `docs/android.md` are all still open, and USB is
+what the app is really for. Battery over a multi-hour session is
+likewise unmeasured. Next, in whatever order: private beta (read the
+signing and version-code items in `docs/android.md` *first* — both fail
+as "app not installed" rather than as an error), further UI work,
+Tier 1 (transmit, VOX keying), or store signing and release.
 
 Desktop app: **one implementation**, `native/` (Phases 0-3), which
 reached parity, passed the loopback shakedown in all three directions

@@ -1,9 +1,19 @@
 # Android: feasibility and design
 
-Assessed 2026-08-08. The direction below is decided and **Tier 0 is not
-written**; no schedule is attached. What does exist is a pre-Tier-0
-smoke test (`native/android/`, and the section on it below), which is a
-probe rather than the app.
+Assessed 2026-08-08, and **Tier 0 was built the same day**: the app in
+`native/android-app/` decodes complete pictures on a Galaxy S25+ over
+acoustic coupling, with no artifacts, a capture rate inside ±100 ppm
+and ~0.5 s of DSP per poll. The design below is what was decided
+beforehand and it survived contact almost intact; the places it did
+not, and everything the build turned out to require, are in
+"Implementation notes" near the end. `native/android-app/README.md` is
+the working document for anyone touching the code — this file is the
+reasoning, that one is the recipe.
+
+The pre-Tier-0 smoke test (`native/android/`, and the section on it
+below) is still in the tree. It answered "can a phone select an audio
+device and decode a picture" and is kept as the one probe with no Qt in
+it at all.
 
 ## Decisions (Andrew, 2026-08-08)
 
@@ -560,7 +570,16 @@ Short, and none of it is layout:
 
 ## Scoping tiers
 
-### Tier 0 — receive-only listener (the committed one)
+### Tier 0 — receive-only listener (the committed one) — **DONE**
+
+Built 2026-08-08 and receiving on hardware. Everything below was
+needed and is in; what is *not* done is a MediaStore "save to gallery"
+(Share reaches gallery, mail and chat for one intent and no storage
+permission, so it went first) and **USB capture, which has never been
+tried on this app** — the four hardware questions above are all still
+open, and acoustic coupling is what has been measured. The smoke test
+did decode a TH-D75 over USB at >24 dB, so the path is known to exist;
+it has simply not been walked with `native/android-app/`.
 
 USB or mic capture → `RingBuffer` → `decode_loop` → picture. Needs the
 audio layer, a foreground service that owns the engine, storage-out with
@@ -604,6 +623,136 @@ The overlay **editor** on touch is a redesign, not a port:
 The *document* is unaffected — coordinates are normalized 0..1 already,
 which is the same property that was supposed to buy templates.
 
+## Implementation notes (2026-08-08)
+
+What the build changed about the design, and what it cost to find out.
+The operational detail — exact commands, emulator recipes — lives in
+`native/android-app/README.md`; this is the part worth reasoning about.
+
+### Three bugs, and all three were in our own instruments
+
+Not one of them was in the modem, the engine or the codec, and each
+presented as a fault in a different subsystem than the one it was in.
+That is the pattern to expect from this port, because an Android build
+is the same `native/core/` with a new set of measuring devices around
+it — the code is covered by golden vectors and `pytest --native`, and
+the instruments are covered by nothing.
+
+- **The APK was `-O0`.** The NDK's Debug configuration passes no `-O`
+  flag at all, which for clang means no optimization, and the receive
+  loop is scalar floating-point DSP over a 130 s ring buffer.
+  Measured: `sync::acquire` 171 ms → 1513 ms (8.9x), the blind
+  accumulator's full-buffer push 547 ms → 8412 ms (15x). On the S25+
+  that was 5–8 s per poll with excursions to 20–40 s, and it was
+  reported — reasonably — as "onnxruntime is slow on Android". Nothing
+  was misconfigured: the default configuration installs but is `-O0`,
+  while `RelWithDebInfo` is `-O2` and emits an unsigned APK that will
+  not install, so Debug is what anyone picks. `tools/build_android.sh`
+  now does RelWithDebInfo + zipalign + debug-sign in one command, and
+  CMake warns if you ask for Debug.
+- **The drift meter charged in-flight audio as lost.** Elapsed time ran
+  to `now` while the sample count stopped at the last chunk that had
+  arrived, so the whole in-flight interval read as missing audio — a
+  bias of −(time since last chunk) / window, negligible on a desktop
+  and about −4500 ppm on a phone with a ~270 ms chunk period. It
+  reported `DROPPING AUDIO` continuously on a device whose pictures
+  were perfect. **The contradiction is what exposed it**: 0.45% is
+  ~3400 samples over a mode C transmission and the desktop's history
+  says 1718 over 50 s mangles a picture, so both readings could not be
+  true. Both endpoints now come from the same two chunk arrivals.
+- **The emulator's default renderer tears every screenshot.**
+  `swiftshader_indirect` composites a diagonal seam through the system
+  status bar as well as the app, which cost a round of investigating a
+  clipped toolbar title that was never clipped. `-gpu host`.
+
+A fourth, smaller: Qt hex colours are `#AARRGGBB`, not `#RRGGBBAA`, so
+a CSS-style alpha lands in the red channel and comes out fully
+transparent. The level meter shipped a commit that way and still looked
+like a widget.
+
+**Two of these corrupted the record before they were found.** The
+emulator was written up here as dropping audio badly (−7247 ppm) on the
+strength of readings that were mostly the `-O0` build starving the
+capture thread plus the meter's own bias; with both fixed the same
+emulator reads −4 ppm and is trustworthy again. Re-measure before
+quoting any Android number from before 2026-08-08 evening.
+
+### The poll cost is DSP, not the codec
+
+`Progress::last_decode_s` is measured *before* the codec runs — in the
+Python reference and therefore in the port — so it is sync plus
+demodulation with no inference in it. That is why a slow app pointed at
+onnxruntime. The Android readout now says `dsp` for exactly this
+reason.
+
+Where the time actually goes, at a full 130 s ring and `-O2`:
+`sync::acquire` 171 ms, `modem::demodulate` 192 ms, the blind
+accumulator's incremental push ~20 ms per 5 s poll (its *full* push,
+only on a reset, is 547 ms), `to_baseband` 2 ms, `demodulate_blind`
+26 ms. **The codec is not the expensive part and tuning it is not where
+battery comes from.** `decode_loop_low_cpu` is the lever the original
+sizing section names, and it is the right one for a reason now
+visible: it searches only the audio that is new since the last poll and
+runs no blind accumulator at all, so it skips precisely the two costs
+above.
+
+`RxConfig::max_decode_duty` (new, default 1.0 = off, Android sets 0.5)
+bounds the fraction of wall time the loop may spend decoding, backing
+off on its own measured cost. It exists because the device spread is
+the problem: a constant slow enough for the worst phone makes the best
+one needlessly stale.
+
+### Where the design was wrong
+
+- **The model fetcher is Java, not `qt_fetcher.cpp`.** Qt for Android
+  ships no TLS backend (`qt.tlsbackend.ossl: Failed to load
+  libssl/libcrypto`), so HTTPS through `QNetworkAccessManager` does not
+  work at all. Transport is `ModelFetcher.java` — `HttpsURLConnection`,
+  redirects followed by hand so the `x-linked-etag` on the 302 can be
+  read — behind the existing `checkpoint::Fetcher` seam. **The sha256
+  check and the `.part` rename stayed in C++**, deliberately: that is
+  the half where a mistake silently corrupts a cache, and it should
+  have one implementation across all four builds.
+- **The desktop's `AppState` inversion was right, and the UI needed
+  even less than expected.** Because the view polls `Session::running()`
+  rather than tracking its own button, stopping from the notification's
+  Stop action reverts the pane with no wiring at all.
+- Everything else held: the Qt-free core compiled unchanged, the audio
+  layer's JNI direction rule (Java calls into C++ on the data path)
+  needed no revision, and the tier scoping was accurate.
+
+### Private beta: what has to change first
+
+`tools/build_android.sh` signs with `~/.android/debug.keystore`, which
+is **generated per machine**. That is fine for one developer and wrong
+for testers in two ways that both surface as a dead end rather than an
+error: an APK signed by machine A cannot upgrade one from machine B
+(Android reports only "App not installed"), and there is no path from a
+debug-signed build to a Play listing. Before handing an APK to anyone:
+
+1. **A real keystore**, created once and kept, with the same key used
+   for every build a tester will ever see. This is the decision that
+   cannot be undone — an app's signing identity is permanent, and Play
+   App Signing wants to be enrolled at the start rather than migrated
+   into.
+2. **`QT_ANDROID_VERSION_CODE` must increment**, and it is hardcoded to
+   1 in `native/android-app/CMakeLists.txt`. Android refuses an
+   install whose version code is not greater than the installed one, so
+   every tester build after the first is silently un-upgradable until
+   this is driven from something monotonic.
+3. **Sideload friction is per-source**, not per-app: a tester has to
+   allow "install unknown apps" for whatever delivered the file. Worth
+   saying in the invitation rather than fielding as a bug report.
+4. Decide APK or **App Bundle** at the same time. Both ABIs in one APK
+   is 66 MB; an AAB lets Play ship arm64 only. `androiddeployqt` can
+   produce an AAB, and the emulator needs the x86_64 slice, so a beta
+   over Play and a locally-installable build stop being the same
+   artifact.
+
+None of this is hard, but all of it is upstream of the first tester,
+and (2) in particular will look like the app being broken rather than
+the build being misnumbered.
+
 ## Sizes and performance
 
 **APK.** `libonnxruntime.so` is 28.6 MB raw / 10.6 MB compressed for
@@ -613,13 +762,18 @@ arm64-only App Bundle keeps the user's download near that instead of
 multiplying it by four ABIs. Model artifacts are **not** in the APK —
 the 9 MB decoder is fetched on first run, unchanged from desktop.
 
-**CPU.** The desktop figures are `demodulate` at 173 ms and an fp16
-decode at 86 ms per five-second poll, on a 24-core x86 box with
-`SetIntraOpNumThreads(4)`. A modern phone's big cores should land within
-a small multiple of that, comfortably inside the duty cycle — but that
-is arithmetic, not a measurement, and the number that actually matters
-is battery over a multi-hour session, which does not follow from it.
-`decode_loop_low_cpu` exists and is the right starting point.
+**CPU — now measured.** A Galaxy S25+ spends **~0.5 s of DSP per
+five-second poll** at a full ring, against 0.2–0.3 s on an x86_64
+emulator and ~0.2 s on the desktop: within a small multiple, as
+predicted, and comfortably inside the duty cycle. The prediction was
+right and the reasoning behind it was wrong in one place — see
+"Implementation notes": the codec is not what the poll is made of, so
+`SetIntraOpNumThreads(4)` is a much smaller lever here than the
+paragraph below assumes. **Battery over a multi-hour session is still
+unmeasured**, and it does not follow from the per-poll figure.
+`decode_loop_low_cpu` is the right starting point and now for a
+concrete reason: it skips the blind accumulator and the whole-buffer
+acquisition, which are the two costs.
 
 **int8 may be the right default here, unlike on desktop.**
 `docs/onnx.md` records the int8 slowdown as an x86 artifact and notes
