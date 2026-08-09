@@ -1290,10 +1290,15 @@ need when `--native` fails and you want to know *where*.
   `.part` rename kept in C++ because that is the half where a mistake
   silently corrupts a cache. `RxConfig::max_decode_duty` (default 1.0
   = off, unchanged desktop behaviour; Android sets 0.5) is the one
-  change this made to shared code. **Before any beta**: the debug
-  keystore is per machine, so an APK from one machine cannot upgrade
-  one from another, and `QT_ANDROID_VERSION_CODE` is hardcoded to 1, so
-  every tester build after the first is silently un-upgradable.
+  change this made to shared code. **A debug-signed APK is a usable
+  beta artifact** — it installs and upgrades in place after the
+  warnings (Andrew, 2026-08-08), and two blockers this file previously
+  asserted were wrong: Android blocks a *downgrade*, not an equal
+  `versionCode`, and the per-machine debug keystore only bites once a
+  *second* machine builds a tester APK. What is real is that switching
+  to a proper signing key is **not** an upgrade — every tester must
+  uninstall, losing settings and saved receptions — so warn them in
+  advance and get the real key in early.
   The original design, which survived contact almost intact: a Qt Quick
   front end over the existing `native/core/`, starting at Tier 0 (a
   receive-only listener) with later tiers optional, and **native Android
@@ -1460,10 +1465,13 @@ to the shared gallery, and `play()` (written, unexercised, Tier 1).
 decoded a TH-D75 over USB at >24 dB, so the path exists, but the four
 hardware questions in `docs/android.md` are all still open, and USB is
 what the app is really for. Battery over a multi-hour session is
-likewise unmeasured. Next, in whatever order: private beta (read the
-signing and version-code items in `docs/android.md` *first* — both fail
-as "app not installed" rather than as an error), further UI work,
-Tier 1 (transmit, VOX keying), or store signing and release.
+likewise unmeasured. Next, in whatever order: private beta (debug-signed sideload is
+sufficient and is what has been verified — the one thing to tell
+testers in advance is that the eventual switch to a real signing key
+forces an uninstall, not an upgrade), further UI work, Tier 1
+(transmit, VOX keying), or store signing and release. Signing
+credentials are pending external verification (2026-08-08), so that
+last one is not on our timeline.
 
 Desktop app: **one implementation**, `native/` (Phases 0-3), which
 reached parity, passed the loopback shakedown in all three directions

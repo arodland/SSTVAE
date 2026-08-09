@@ -721,37 +721,49 @@ one needlessly stale.
   layer's JNI direction rule (Java calls into C++ on the data path)
   needed no revision, and the tier scoping was accurate.
 
-### Private beta: what has to change first
+### Private beta: debug-signed sideload works
 
-`tools/build_android.sh` signs with `~/.android/debug.keystore`, which
-is **generated per machine**. That is fine for one developer and wrong
-for testers in two ways that both surface as a dead end rather than an
-error: an APK signed by machine A cannot upgrade one from machine B
-(Android reports only "App not installed"), and there is no path from a
-debug-signed build to a Play listing. Before handing an APK to anyone:
+**A debug-signed APK is a usable beta artifact**, verified in practice
+(Andrew, 2026-08-08): it installs, and it upgrades in place over a
+previous build, after clicking through the warnings. Two things this
+file previously claimed would block that are wrong or overstated, and
+are corrected here because "the build is broken" is the conclusion a
+false blocker produces:
 
-1. **A real keystore**, created once and kept, with the same key used
-   for every build a tester will ever see. This is the decision that
-   cannot be undone — an app's signing identity is permanent, and Play
-   App Signing wants to be enrolled at the start rather than migrated
-   into.
-2. **`QT_ANDROID_VERSION_CODE` must increment**, and it is hardcoded to
-   1 in `native/android-app/CMakeLists.txt`. Android refuses an
-   install whose version code is not greater than the installed one, so
-   every tester build after the first is silently un-upgradable until
-   this is driven from something monotonic.
-3. **Sideload friction is per-source**, not per-app: a tester has to
-   allow "install unknown apps" for whatever delivered the file. Worth
-   saying in the invitation rather than fielding as a bug report.
-4. Decide APK or **App Bundle** at the same time. Both ABIs in one APK
-   is 66 MB; an AAB lets Play ship arm64 only. `androiddeployqt` can
-   produce an AAB, and the emulator needs the x86_64 slice, so a beta
-   over Play and a locally-installable build stop being the same
-   artifact.
+- **Version code does not have to increment for a sideload.** Android
+  blocks a *downgrade* — a strictly lower `versionCode` — and installs
+  an equal one straight over the top. `QT_ANDROID_VERSION_CODE` is
+  hardcoded to 1 in `native/android-app/CMakeLists.txt` and every
+  build so far has upgraded fine. It still wants driving from something
+  monotonic before **Play**, which does require each upload to be
+  strictly higher, and it is the only thing that lets a tester say
+  which build they are on — but it is a nicety for a sideloaded beta,
+  not a gate.
+- **The per-machine debug keystore only bites across machines.**
+  `~/.android/debug.keystore` is generated per machine, so an APK from
+  machine A cannot upgrade one from machine B — Android reports only
+  "App not installed". With one build machine that never arises. It
+  becomes real the moment a second machine builds a tester APK, or CI
+  does.
 
-None of this is hard, but all of it is upstream of the first tester,
-and (2) in particular will look like the app being broken rather than
-the build being misnumbered.
+What is genuinely upstream of a tester:
+
+1. **Sideload friction is per-source**, not per-app: the tester allows
+   "install unknown apps" for whatever delivered the file, and Play
+   Protect warns on top of that. Say so in the invitation rather than
+   fielding it as a bug report.
+2. **The switch to a real signing key is a clean break.** Changing an
+   app's signing identity is not an upgrade — every tester has to
+   uninstall first, losing their settings and any saved receptions. So
+   the earlier the real key arrives the cheaper it is, and the beta
+   should be told in advance that one reinstall is coming rather than
+   discovering it as a failure. An app's signing identity is permanent
+   afterwards, and Play App Signing wants enrolling at the start rather
+   than migrating into.
+3. **APK or App Bundle** is a decision, not a default. Both ABIs in one
+   APK is 66 MB; an AAB lets Play ship arm64 only, but the emulator
+   needs the x86_64 slice — so a Play beta and a locally-installable
+   build stop being the same artifact.
 
 ## Sizes and performance
 
