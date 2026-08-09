@@ -32,6 +32,10 @@ constexpr const char* kBridge = "org/cleverdomain/sstvae/AudioBridge";
 // so a window this size cannot hide loss that would cost a picture.
 constexpr auto kDriftWindow = std::chrono::seconds(30);
 constexpr double kDriftMinSpan = 10.0;
+// Longer than any plausible chunk period (a large AudioRecord buffer
+// is a few hundred ms), short enough that a wedged capture is news
+// well inside one transmission.
+constexpr double kDriftStallS = 3.0;
 
 JavaVM* g_vm = nullptr;
 
@@ -314,17 +318,44 @@ double InputStream::near_zero_fraction() const {
 // quantisation of one chunk dominates, and a meter that cries wolf for
 // the first quarter-minute of every session is one nobody reads by the
 // time it matters.
+//
+// **Both ends of the ratio come from marks, never from `now`.** Audio
+// arrives in chunks, so at any instant the newest samples the device
+// has produced have not been handed to us yet; measuring the elapsed
+// time to `now` while counting samples only up to the last chunk
+// charges that entire in-flight interval as *lost audio*. The bias is
+// -(time since the last chunk) / window, which is invisible on a
+// desktop and large on a phone: a ~270 ms chunk period against a 30 s
+// window reads a steady **-4500 ppm** on hardware whose pictures
+// decode perfectly. That was reported as dropped audio, and the giveaway
+// was the contradiction -- 0.45% is ~3400 samples over a mode C
+// transmission, and this project's own history says 1718 samples over
+// 50 s is enough to mangle a picture. Taking both endpoints from the
+// same two chunk arrivals makes the measurement exact instead.
 double InputStream::capture_drift_ppm() const {
     std::lock_guard<std::mutex> lk(impl_->m);
-    if (impl_->marks.empty() || impl_->device_rate <= 0) return 0.0;
+    if (impl_->marks.size() < 2 || impl_->device_rate <= 0) return 0.0;
     const auto& first = impl_->marks.front();
-    const double elapsed =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - first.at)
-            .count();
+    const auto& last = impl_->marks.back();
+
+    // The one case where `now` is the honest end point: nothing has
+    // arrived for a long time. A stalled stream would otherwise stop
+    // moving both halves of the ratio together and report a serene
+    // 0 ppm, which is the worst answer available -- and neither
+    // `peak_level` nor `near_zero_fraction` catches it, since they keep
+    // returning whatever the last chunk held.
+    const auto now = std::chrono::steady_clock::now();
+    const double since_last = std::chrono::duration<double>(now - last.at).count();
+    const auto end_at = since_last > kDriftStallS ? now : last.at;
+    const std::uint64_t end_samples =
+        since_last > kDriftStallS
+            ? impl_->captured.load(std::memory_order_relaxed)
+            : last.samples;
+
+    const double elapsed = std::chrono::duration<double>(end_at - first.at).count();
     if (elapsed < kDriftMinSpan) return 0.0;
     const double expected = elapsed * impl_->device_rate;
-    const double actual = static_cast<double>(
-        impl_->captured.load(std::memory_order_relaxed) - first.samples);
+    const double actual = static_cast<double>(end_samples - first.samples);
     return (actual / expected - 1.0) * 1e6;
 }
 

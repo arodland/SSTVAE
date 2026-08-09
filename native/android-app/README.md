@@ -146,11 +146,15 @@ all.
 
 A real phone stays the only place the *driver* can be tested.
 
-**The emulator drops audio and a phone does not**, so its SNR figures
-are worthless and its drift figures are the point: −7247 ppm measured
-there against a phone's clean capture of a whole mode B transmission
-(440/440, 17.4 dB) over nothing but acoustic coupling. Use it for
-layout and for the state machine; never quote a number off it.
+**The emulator's audio is worse than a phone's, but by much less than
+this file used to claim.** The −7247 ppm recorded here earlier was
+mostly two artifacts of our own: an `-O0` build starving the capture
+thread, and the drift meter's endpoint bias (both below). With the
+optimizer on and the meter fixed, the same emulator reads **−4 ppm**.
+Treat its *SNR* figures with suspicion still — a phone captured a whole
+mode B transmission at 440/440 and 17.4 dB over nothing but acoustic
+coupling — but the sample-loss story it seemed to tell was largely our
+instrument.
 
 ## The technical switch
 
@@ -198,6 +202,25 @@ session that then produced two clean pictures), while loss that
 *begins* an hour in is diluted by the clean hour in front of it. The
 second is the case the meter exists for: the emulator's own failure
 looked exactly like that, SNR high early and falling.
+
+**And both ends of the ratio come from chunk arrivals, never from
+`now`.** Audio arrives in chunks, so the newest samples the device has
+produced have not been handed over yet; timing the elapsed interval to
+`now` while counting samples only to the last chunk charges that whole
+in-flight gap as lost audio. The bias is −(time since last chunk) /
+window — negligible on a desktop, large on a phone, and it read a
+steady **−4500 ppm with `DROPPING AUDIO`** on an S25+ whose pictures
+were decoding perfectly. The contradiction is what exposed it: 0.45% is
+~3400 samples over a mode C transmission, and 1718 samples over 50 s
+was enough to mangle a picture in this project's history, so "dropping
+badly" and "perfect decodes" could not both be true. Taking both
+endpoints from the same two chunk arrivals makes it exact; the emulator
+went from −567 ppm to **−4 ppm** on the same session. The one place
+`now` is still the honest end point is a *stalled* stream, where
+otherwise both halves stop moving together and the meter reports a
+serene 0 ppm — the worst answer available, and one neither `peak_level`
+nor `near_zero_fraction` catches, since they keep returning whatever
+the last chunk held.
 
 **The poll interval backs off on slow devices**
 (`RxConfig::max_decode_duty`, 0.5 here, 1.0 — off — everywhere else).
