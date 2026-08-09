@@ -22,14 +22,15 @@
 #ifndef SSTVAE_ANDROID_SESSION_HPP
 #define SSTVAE_ANDROID_SESSION_HPP
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
-#include <thread>
 
 #include "audio/android/androidaudio.hpp"
 #include "codec/codec.hpp"
@@ -109,6 +110,13 @@ public:
     double near_zero_fraction() const;
     double capture_drift_ppm() const;
 
+    // Whether the notification line carries diagnostics. Atomic rather
+    // than under `mu_`: it is set from the GUI thread and read by the
+    // service's handler, and it must not be able to wait behind a
+    // session that is starting or stopping.
+    void set_show_technical(bool on) { show_technical_.store(on); }
+    bool show_technical() const { return show_technical_.load(); }
+
     // The most recent `n` samples, for the waterfall. `tail` rather
     // than `snapshot` deliberately: snapshot copies the whole 130 s
     // buffer, and doing that at display rates is how the desktop tore
@@ -122,6 +130,8 @@ private:
     Session& operator=(const Session&) = delete;
 
     std::optional<std::string> save_reception(const rx::Reception& r);
+
+    std::atomic<bool> show_technical_{false};
 
     // Guards the members below against a view thread reading while the
     // UI thread starts or stops. It is never held across a decode: the

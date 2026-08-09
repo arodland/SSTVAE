@@ -4,6 +4,7 @@
 #include <QJniEnvironment>
 #include <QJniObject>
 #include <QPermissions>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QtCore/qcoreapplication_platform.h>
 
@@ -73,7 +74,26 @@ bool init_audio_bridge(QString* error) {
 
 }  // namespace
 
+namespace {
+constexpr auto kTechnicalKey = "ui/showTechnical";
+}  // namespace
+
+void Listener::setShowTechnical(bool on) {
+    if (on == technical_) return;
+    technical_ = on;
+    QSettings().setValue(QLatin1String(kTechnicalKey), on);
+    // The notification is built from the session, not from here, and
+    // it is drawn by a service that may outlive this object -- so the
+    // flag has to reach the session rather than being consulted only
+    // where the QML asks for it. Otherwise the shade would keep
+    // reporting poll counts with the switch off.
+    Session::instance().set_show_technical(on);
+    emit changed();
+}
+
 Listener::Listener(QObject* parent) : QObject(parent) {
+    technical_ = QSettings().value(QLatin1String(kTechnicalKey), false).toBool();
+    Session::instance().set_show_technical(technical_);
     if (!init_audio_bridge(&error_)) return;
     refreshDevices();
 
@@ -215,9 +235,37 @@ void Listener::stop() {
     emit changed();
 }
 
+// What the status line says with the technical detail switched off.
+//
+// Less, but not merely less: the plain line answers "is a picture
+// coming and how far along is it", which is the question the operator
+// has, while the technical one answers "is the receiver working",
+// which is the question a bug has. Empty while merely listening,
+// because the placeholder under the waterfall already says so and
+// repeating it twice on one screen is noise.
+QString Listener::plain_status() const {
+    const rx::Progress p = Session::instance().progress();
+    if (p.status == rx::Status::Done) return QStringLiteral("Picture complete");
+    if (p.status != rx::Status::Receiving) return {};
+
+    QString out = QStringLiteral("Receiving a picture");
+    if (!p.callsign.empty()) {
+        out = QStringLiteral("Receiving from %1").arg(QString::fromStdString(p.callsign));
+    }
+    // A percentage rather than a frame count. Frames are the unit the
+    // modem thinks in and mean nothing to the operator; the fraction is
+    // already computed for both the header and the blind path, which
+    // are counted differently and would need two branches here.
+    if (p.progress_frac > 0.0) {
+        out += QStringLiteral("  %1%").arg(100.0 * p.progress_frac, 0, 'f', 0);
+    }
+    return out;
+}
+
 QString Listener::status() const {
     Session& s = Session::instance();
-    if (!s.running()) return QStringLiteral("idle");
+    if (!s.running()) return technical_ ? QStringLiteral("idle") : QString();
+    if (!technical_) return plain_status();
     const rx::Progress p = s.progress();
     QString out = QString::fromLatin1(rx::status_name(p.status));
     out += QStringLiteral("   polls %1").arg(p.polls);
@@ -243,9 +291,15 @@ QString Listener::status() const {
 QString Listener::audioRoute() const {
     Session& s = Session::instance();
     if (!s.running()) return {};
-    QString out = QStringLiteral("%1 Hz -> %2")
-                      .arg(s.device_rate())
-                      .arg(QString::fromStdString(s.routed_device()));
+    // The sample rate is a fact about the driver, not about the
+    // radio; the device *name* is what an operator is checking. The
+    // warning below is neither -- it fires only when the audio is
+    // genuinely coming from somewhere other than was asked for, which
+    // is actionable at any level of interest, so it is never hidden.
+    QString out = technical_ ? QStringLiteral("%1 Hz -> %2")
+                                   .arg(s.device_rate())
+                                   .arg(QString::fromStdString(s.routed_device()))
+                             : QString::fromStdString(s.routed_device());
     const std::string w = s.routing_warning();
     if (!w.empty()) out += QStringLiteral("\n! %1").arg(QString::fromStdString(w));
     return out;
@@ -253,7 +307,11 @@ QString Listener::audioRoute() const {
 
 QString Listener::level() const {
     Session& s = Session::instance();
-    if (!s.running()) return {};
+    // The whole line is diagnostics -- peak, near-zero fraction,
+    // capture drift, decode cost. There is no plain-language half of
+    // it worth keeping: the one judgement an operator needs from it is
+    // already on the meter as a colour and a word.
+    if (!s.running() || !technical_) return {};
     const double peak = s.peak_level();
     const QString db = peak > 0.0
                            ? QStringLiteral("%1 dBFS").arg(20 * std::log10(peak), 0, 'f', 0)

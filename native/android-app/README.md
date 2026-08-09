@@ -128,6 +128,38 @@ there against a phone's clean capture of a whole mode B transmission
 (440/440, 17.4 dB) over nothing but acoustic coupling. Use it for
 layout and for the state machine; never quote a number off it.
 
+## The technical switch
+
+**Everything numeric is behind Settings > Advanced > Show technical
+details, off by default** (`ui/showTechnical` in `QSettings`). Poll
+counts, ring depth, capture drift in ppm, peak dBFS, near-zero
+fraction, decode cost, the device's sample rate — the readouts that
+made several bugs findable at all, and also the first thing an operator
+sees on a screen that should look like a radio.
+
+Two rules kept it from becoming a UI with two personalities. **The
+plain wording answers a different question, not a smaller one**: the
+status line goes from "is the receiver working" (`listening polls 8
+ring 45.0 s`) to "is a picture coming and how far along" (`Receiving
+from KC2G 43%`), and the level meter's centred number becomes `Level
+good` / `Quiet` / `Too loud`, tracking exactly the thresholds the bar is
+already coloured by so the word and the colour cannot disagree. And
+**anything actionable stays visible at both levels** — the routing
+warning, which fires only when the audio is genuinely coming from
+somewhere other than was asked for, and the error line.
+
+The switch reaches `Session` as well as the QML, because the ongoing
+notification is drawn by the service from native state and would
+otherwise keep reporting poll counts with the switch off.
+
+**Qt hex colours are `#AARRGGBB`, not `#RRGGBBAA`.** Written the CSS
+way in `LevelMeter.qml`, every alpha landed in the red channel and the
+alpha came out `0x00`: background, border and text fully transparent,
+and the faint green "good" band painting as pale red. It still looked
+like a widget — an offset pink rectangle — which is how it survived a
+commit. The meter only draws while listening, so no idle screenshot
+shows it.
+
 ## Two device-measured behaviours worth knowing
 
 Both from Andrew's 2026-08-08 run, and both now handled rather than

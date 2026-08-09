@@ -45,6 +45,17 @@ class Listener : public QObject {
     // on the first frame it ever showed.
     Q_PROPERTY(int liveImageId READ liveImageId NOTIFY changed)
     Q_PROPERTY(bool hasLiveImage READ hasLiveImage NOTIFY changed)
+    // **Off by default, and the default is the whole point.** Poll
+    // counts, ppm, dBFS and ring depth are how this app was debugged
+    // and they are the reason several bugs were findable at all -- but
+    // they are also the first thing an operator sees, and a screen that
+    // opens with "peak -23 dBFS 4.1% near-zero / capture +180 ppm"
+    // reads as equipment rather than as a radio. Kept in full, one
+    // switch away, because the failures they catch (dropped samples
+    // above all) are invisible without them and do not announce
+    // themselves.
+    Q_PROPERTY(bool showTechnical READ showTechnical WRITE setShowTechnical
+                   NOTIFY changed)
 
 public:
     explicit Listener(QObject* parent = nullptr);
@@ -63,6 +74,8 @@ public:
     bool modelReady() const;
     int liveImageId() const { return live_id_; }
     bool hasLiveImage() const;
+    bool showTechnical() const { return technical_; }
+    void setShowTechnical(bool on);
 
     Q_INVOKABLE void refreshDevices();
     Q_INVOKABLE void loadModel();
@@ -77,11 +90,14 @@ signals:
     void changed();
 
 private:
+    QString plain_status() const;
+
     QStringList devices_;
     QString error_;
     QTimer poll_;
     int live_id_ = 0;
     bool screen_held_ = false;
+    bool technical_ = false;
     const void* last_image_ = nullptr;
 };
 

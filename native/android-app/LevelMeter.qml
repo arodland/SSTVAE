@@ -20,8 +20,23 @@ Item {
 
     property real peak: 0.0        // 0..1 linear
     property bool dropping: false
+    // Numbers when the technical switch is on, a judgement when it is
+    // off. The bar and its colour are unchanged either way -- what is
+    // hidden is the reading, not the meter, because "is my level all
+    // right" is a question every operator has and "-23 dBFS" answers
+    // it only for someone who already knows the answer.
+    property bool technical: false
 
     implicitHeight: 26
+
+    // **Qt hex colours are `#AARRGGBB`, not `#RRGGBBAA`.** Written the
+    // CSS way, every alpha here landed in the red channel and the alpha
+    // came out 0x00: the background, the border and the text were fully
+    // transparent, and the good band -- meant to be a faint green --
+    // painted as pale red. The result still *looked* like a widget, an
+    // offset pink rectangle with no text, which is why it survived a
+    // commit. It is only visible while listening, so no idle screenshot
+    // shows it.
 
     readonly property real floorDb: -60
     readonly property real db: peak > 0 ? 20 * Math.log(peak) / Math.LN10 : floorDb
@@ -32,8 +47,8 @@ Item {
     Rectangle {
         anchors.fill: parent
         radius: 3
-        color: "#00000014"
-        border.color: "#00000022"
+        color: "#14000000"
+        border.color: "#22000000"
     }
 
     // The good band, drawn as a backdrop so the bar reads against it.
@@ -41,7 +56,7 @@ Item {
         x: root.xFor(-30)
         width: root.xFor(-6) - x
         height: parent.height
-        color: "#2e7d3218"
+        color: "#182e7d32"
     }
 
     Rectangle {
@@ -64,16 +79,24 @@ Item {
         x: parent.width - 2
         width: 2
         height: parent.height
-        color: "#00000033"
+        color: "#33000000"
     }
 
     Text {
         anchors.centerIn: parent
         font.pixelSize: 11
         font.family: "monospace"
-        color: "#000000aa"
-        text: root.dropping ? "DROPPING AUDIO"
-            : root.peak <= 0 ? "no signal"
-            : root.db.toFixed(0) + " dBFS"
+        color: "#aa000000"
+        // The plain wording tracks exactly the same thresholds the bar
+        // is coloured by, so the word and the colour can never
+        // disagree. "Audio problem" for dropped samples rather than
+        // anything more specific: the operator cannot act on ppm, and
+        // the number is one switch away for whoever can.
+        text: root.dropping ? (root.technical ? "DROPPING AUDIO" : "Audio problem")
+            : root.peak <= 0 ? (root.technical ? "no signal" : "No audio")
+            : root.technical ? root.db.toFixed(0) + " dBFS"
+            : root.db > -3  ? "Too loud"
+            : root.db > -30 ? "Level good"
+            : "Quiet"
     }
 }

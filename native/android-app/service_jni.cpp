@@ -74,8 +74,13 @@ Java_org_cleverdomain_sstvae_ListenerService_nativeStatusLine(JNIEnv* env, jclas
             // The poll count is the difference between "alive and
             // hearing nothing" and "wedged", which is otherwise
             // invisible from outside and is the question a listener
-            // left running for an hour actually has.
-            s = "Listening  " + std::to_string(p.polls) + " polls";
+            // left running for an hour actually has -- but it is also
+            // the single most technical thing on an otherwise plain
+            // notification, so it follows the same switch as the pane.
+            s = "Listening";
+            if (Session::instance().show_technical()) {
+                s += "  " + std::to_string(p.polls) + " polls";
+            }
             break;
     }
     return env->NewStringUTF(s.c_str());

@@ -148,8 +148,13 @@ ApplicationWindow {
 
             Label {
                 text: listener.status
-                font.family: "monospace"
-                font.pixelSize: 12
+                // Monospace only when it is a table of numbers. Plain
+                // prose in a fixed pitch is the house style of a
+                // diagnostic, and this line is not one with the switch
+                // off.
+                font.family: listener.showTechnical ? "monospace" : Qt.application.font.family
+                font.pixelSize: listener.showTechnical ? 12 : 14
+                visible: text.length > 0
                 Layout.fillWidth: true
                 Layout.leftMargin: 12
                 Layout.maximumHeight: implicitHeight
@@ -162,10 +167,14 @@ ApplicationWindow {
                 visible: listener.listening
                 peak: listener.peakLevel
                 dropping: listener.droppingAudio
+                technical: listener.showTechnical
             }
 
+            // Empty unless the technical switch is on; see
+            // Listener::level.
             Label {
                 text: listener.level
+                visible: text.length > 0
                 font.family: "monospace"
                 font.pixelSize: 12
                 // The drift line turns red on its own threshold; this
@@ -304,6 +313,35 @@ ApplicationWindow {
                 Layout.leftMargin: 12
                 visible: !listener.modelReady
                 onClicked: listener.loadModel()
+            }
+
+            Label {
+                text: "Advanced"
+                font.bold: true
+                Layout.margins: 12
+                Layout.bottomMargin: 0
+            }
+            Switch {
+                text: "Show technical details"
+                Layout.leftMargin: 4
+                checked: listener.showTechnical
+                onToggled: listener.showTechnical = checked
+            }
+            Label {
+                // Says what it is *for*, not what it shows. Someone
+                // reading this is either curious or being walked
+                // through a problem by whoever wrote the app, and the
+                // second reader is the one who needs to know the
+                // switch exists.
+                text: "Signal levels, capture timing, decode cost and poll counts, "
+                      + "on the Listen screen and in the notification. Useful when "
+                      + "something is not decoding and worth reporting with a bug."
+                font.pixelSize: 11
+                color: "#666"
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                wrapMode: Text.Wrap
             }
 
             Item { Layout.fillHeight: true }

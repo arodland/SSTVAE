@@ -40,6 +40,13 @@ void set_model_cache() {
 
 int main(int argc, char* argv[]) {
     QGuiApplication app(argc, argv);
+    // QSettings keys off these, so they have to be set before anything
+    // reads a preference -- an unnamed application writes to a file
+    // named after the executable and silently loses everything the
+    // next time that name changes.
+    QCoreApplication::setOrganizationName(QStringLiteral("SSTVAE"));
+    QCoreApplication::setOrganizationDomain(QStringLiteral("cleverdomain.org"));
+    QCoreApplication::setApplicationName(QStringLiteral("SSTVAE"));
     set_model_cache();
 
     using namespace sstvae;
