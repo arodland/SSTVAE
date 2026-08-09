@@ -185,7 +185,7 @@ public class ListenerService extends Service {
         Notification n = new Notification.Builder(this, PICTURE_CHANNEL_ID)
                 .setContentTitle("Picture received")
                 .setContentText(summary)
-                .setSmallIcon(android.R.drawable.ic_menu_gallery)
+                .setSmallIcon(smallIcon())
                 .setLargeIcon(bmp)
                 .setStyle(new Notification.BigPictureStyle()
                         .bigPicture(bmp)
@@ -215,6 +215,12 @@ public class ListenerService extends Service {
                 NotificationManager.IMPORTANCE_DEFAULT);
         pics.setDescription("One notification per decoded picture");
         nm.createNotificationChannel(pics);
+    }
+
+    /** The bird silhouette, by name so no generated R class is needed. */
+    private int smallIcon() {
+        int id = getResources().getIdentifier("ic_stat_sstvae", "drawable", getPackageName());
+        return id != 0 ? id : android.R.drawable.ic_btn_speak_now;
     }
 
     private Notification buildNotification(String text) {
@@ -248,7 +254,7 @@ public class ListenerService extends Service {
         return new Notification.Builder(this, CHANNEL_ID)
                 .setContentTitle("SSTVAE")
                 .setContentText(text)
-                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                .setSmallIcon(smallIcon())
                 .setContentIntent(pi)
                 .addAction(new Notification.Action.Builder(
                                    Icon.createWithResource(

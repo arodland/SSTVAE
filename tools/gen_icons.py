@@ -53,6 +53,7 @@ import sys
 from io import BytesIO
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -83,6 +84,11 @@ ANDROID_RES = ROOT / "native" / "android-app" / "android" / "res"
 ANDROID_LAYER_DP = 108
 ANDROID_LEGACY_DP = 48
 ANDROID_SAFE_FRACTION = 0.58
+# The notification icon is a different thing again: Android takes only
+# the **alpha** and tints it, so this one is a white silhouette on
+# transparent and any colour in it is thrown away. 24dp is the fixed
+# size for a status-bar icon.
+ANDROID_NOTIFICATION_DP = 24
 # The standard buckets. mdpi is 1dp = 1px and everything else multiplies.
 ANDROID_DENSITIES = (
     ("mdpi", 1.0),
@@ -239,27 +245,57 @@ def foreground_layer(bird: Image.Image, px: int) -> Image.Image:
     bounds of. The reduction is from a 4x render of the largest bucket,
     so the worst case is a 432px layer coming from 1728px.
     """
-    box = bird.getbbox()
-    if box is None:
+    if bird.getbbox() is None:
         raise SystemExit("gen_icons: the foreground rendered empty")
-    subject = bird.crop(box)
-    target = int(round(px * ANDROID_SAFE_FRACTION))
-    scale = target / max(subject.width, subject.height)
-    fitted = subject.resize(
-        (max(1, round(subject.width * scale)), max(1, round(subject.height * scale))),
+    return fit(bird, px, ANDROID_SAFE_FRACTION)
+
+
+def silhouette(bird: Image.Image) -> Image.Image:
+    """The subject as white-on-transparent, for the notification icon.
+
+    Nothing but the alpha channel survives -- Android tints a status-bar
+    icon to whatever the system theme wants, so the colours are
+    discarded either way and shipping them would only mislead whoever
+    opens the file next.
+
+    Flattening to a plain silhouette is the whole design, arrived at by
+    trying the alternatives on a device (2026-08-09). Knocking out the
+    drawing's dark markings **shatters** it: those lines are the
+    outlines of the colour regions, not detail on top of them, so
+    removing them leaves disconnected fragments. Knocking out the eye
+    fails differently and more instructively -- the darkest region in
+    the head is the *beak* line, not a pupil, so the hole lands on the
+    skull and reads as damage. There is no pupil shape in the artwork
+    big enough to survive 24dp regardless.
+    """
+    a = np.array(bird)
+    out = np.zeros_like(a)
+    out[..., 0:3] = 255
+    out[..., 3] = a[..., 3]
+    return Image.fromarray(out, "RGBA")
+
+
+def fit(img: Image.Image, px: int, fraction: float = 0.84) -> Image.Image:
+    """`img` centred on a transparent `px` square at `fraction` of it."""
+    target = int(round(px * fraction))
+    scale = target / max(img.width, img.height)
+    r = img.resize(
+        (max(1, round(img.width * scale)), max(1, round(img.height * scale))),
         Image.LANCZOS,
     )
-    layer = Image.new("RGBA", (px, px), (0, 0, 0, 0))
-    layer.paste(fitted, ((px - fitted.width) // 2, (px - fitted.height) // 2), fitted)
-    return layer
+    out = Image.new("RGBA", (px, px), (0, 0, 0, 0))
+    out.paste(r, ((px - r.width) // 2, (px - r.height) // 2), r)
+    return out
 
 
 def write_android(images: dict[int, Image.Image]) -> list[Path]:
-    """The adaptive icon, plus a legacy raster per density."""
+    """The adaptive icon, a legacy raster and a notification silhouette."""
     foreground_svg, background = split_artwork()
     # One big render, measured once and reduced per bucket.
     biggest = int(ANDROID_LAYER_DP * ANDROID_DENSITIES[-1][1]) * 4
     bird = rasterize_text(foreground_svg, biggest)
+    bird = bird.crop(bird.getbbox())
+    mono = silhouette(bird)
 
     written: list[Path] = []
     for name, factor in ANDROID_DENSITIES:
@@ -282,6 +318,17 @@ def write_android(images: dict[int, Image.Image]) -> list[Path]:
         images.setdefault(px, rasterize(px))
         images[px].save(legacy, "png", optimize=True)
         written.append(legacy)
+
+        # Notification icons live in drawable-, not mipmap-: mipmap is
+        # for launcher icons, which the system keeps at densities other
+        # than the device's own so a launcher can show them larger.
+        dd = ANDROID_RES / f"drawable-{name}"
+        dd.mkdir(parents=True, exist_ok=True)
+        stat = dd / "ic_stat_sstvae.png"
+        fit(mono, int(round(ANDROID_NOTIFICATION_DP * factor))).save(
+            stat, "png", optimize=True
+        )
+        written.append(stat)
 
     anydpi = ANDROID_RES / "mipmap-anydpi-v26"
     anydpi.mkdir(parents=True, exist_ok=True)

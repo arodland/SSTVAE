@@ -199,9 +199,30 @@ Two things that bit:
   the literal `@mipmap/ic_launcher` over it and the substitution simply
   does not happen.
 
-Still the system microphone glyph: the **notification** icon. It wants a
-white silhouette on transparent at 24dp, which a flat reduction of the
-bird would not give, and "listening" is not a bad thing for it to say.
+**The notification icon is the same bird as a flat silhouette**, and
+flat is the design rather than a shortcut. Android keeps only the alpha
+and tints it, so a 24dp white shape is all there is to work with. Two
+richer versions were tried on a device and are worse, both
+instructively (2026-08-09):
+
+- **Knocking out the dark markings shatters it.** Those lines are the
+  outlines of the colour regions, not detail drawn on top of them, so
+  removing them leaves disconnected fragments rather than a bird.
+- **Knocking out the eye lands on the beak.** The darkest region in the
+  head is the beak line; there is no pupil shape in the artwork big
+  enough to survive 24dp. The hole ends up on the skull and reads as
+  damage.
+
+It reads as a perched parrot in the status bar next to the system
+glyphs, and as something closer to a feather in the shade badge, where
+it is smaller and tinted into a filled circle. Used for both the
+ongoing notification and the picture one (Andrew, 2026-08-09), in place
+of the system microphone glyph that was there before.
+
+Note the directory: notification icons go in `drawable-`, **not**
+`mipmap-`. mipmap is for launcher icons, which the system deliberately
+keeps at densities other than the device's own so a launcher can
+display them larger than life.
 
 ## The technical switch
 
