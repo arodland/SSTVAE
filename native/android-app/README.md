@@ -166,6 +166,43 @@ mode B transmission at 440/440 and 17.4 dB over nothing but acoustic
 coupling — but the sample-loss story it seemed to tell was largely our
 instrument.
 
+## The launcher icon
+
+The same `native/packaging/sstvae.svg` the desktop uses, rendered by the
+same `tools/gen_icons.py` — re-run it when the artwork changes, and look
+at the result, which is the only check an icon has.
+
+**An adaptive icon is two layers, not a picture.** Each is 108dp square
+and the launcher guarantees only the central 72dp survives its mask,
+which the user and the OEM choose (circle, squircle, teardrop). Handing
+over the flattened desktop icon would put a hard circular edge inside
+that mask and get it clipped into a lens on any non-circular launcher.
+Ours splits cleanly because the SVG is a navy disc with the macaw on
+top: the disc becomes a flat background colour, the bird becomes the
+foreground, inset to 58% so it does not touch the mask edge.
+`gen_icons.py` removes exactly one filled `<circle>` and **fails loudly
+if it is not there**, because the silent alternative ships the clipped
+version.
+
+Two things that bit:
+
+- **Nothing but `*.xml` and `*.png` may exist under `res/`.** The
+  Android resource merger fails the build on anything else — which is
+  at least loud, but it means the REUSE `.license` sidecars this
+  project puts beside every generated icon are impossible here. The
+  Android set is covered by `native/android-app/REUSE.toml` instead,
+  written by the same generator so a new density cannot slip in
+  unlabelled. The icon is licensed artwork and the repository's LICENSE
+  does not cover it; see `NOTICE`.
+- **`android:icon` is a Qt template token.** The manifest ships
+  `-- %%INSERT_APP_ICON%% --`, which androiddeployqt substitutes; write
+  the literal `@mipmap/ic_launcher` over it and the substitution simply
+  does not happen.
+
+Still the system microphone glyph: the **notification** icon. It wants a
+white silhouette on transparent at 24dp, which a flat reduction of the
+bird would not give, and "listening" is not a bad thing for it to say.
+
 ## The technical switch
 
 **Everything numeric is behind Settings > Advanced > Show technical
