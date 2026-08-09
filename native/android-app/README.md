@@ -12,24 +12,32 @@ device and decode a picture". It can: a Kenwood TH-D75 over USB decodes
 at over 24 dB, and acoustic coupling into the built-in mic works too.
 This is the app that question was asked on behalf of.
 
-**Status: the audio path is real, the UI is a probe.** Qt Quick,
+**Status: Tier 0 is built and has received real pictures.** Qt Quick,
 `sstvae_core` and the onnxruntime AAR build and package together for
-both ABIs, and — verified on the emulator 2026-08-08 — the app
-enumerates the device's real inputs through JNI, captures through
-`core/audio/android/` into a `RingBuffer` at the device's own 48 kHz,
-resamples through `CapturePipeline`, and runs `rx::decode_loop` on it:
-a clean mode A transmission reported **mode A, callsign KC2G**, and a
-low-SNR one reported a beacon-only lock, which is the right answer to
-each. None of Tier 0's *screens* exist yet — see the plan below.
+both ABIs; the app enumerates the device's real inputs through JNI,
+captures through `core/audio/android/` into a `RingBuffer` at the
+device's own 48 kHz, resamples through `CapturePipeline`, and runs
+`rx::decode_loop` on it. On a **Galaxy S25+** (2026-08-08, Andrew's
+measurement) it decodes complete pictures over nothing but acoustic
+coupling, with no artifacts, a capture rate inside ±100 ppm and ~0.5 s
+of DSP per poll. All three screens, the foreground service, the
+notifications, sharing and the model fetch are in.
 
-Two things that first run settled beyond the audio layer. **The engine
-wipes a reception's metadata two seconds later**, so the completed
-decode was gone before a screenshot twelve seconds on could catch it —
-which is the persistence requirement in `docs/android.md` demonstrated
-rather than argued. And the level readout earns its keep: `peak silent
-100.0% near-zero` is what a dead capture path looks like, and it is
-distinguishable at a glance from merely quiet, which a mean level is
-not.
+Two things that the first run settled and that shaped everything after.
+**The engine wipes a reception's metadata two seconds later**, so a
+completed decode was gone before a screenshot twelve seconds on could
+catch it — the persistence requirement in `docs/android.md`
+demonstrated rather than argued. And the level readout earns its keep:
+`peak silent 100.0% near-zero` is what a dead capture path looks like,
+and it is distinguishable at a glance from merely quiet, which a mean
+level is not.
+
+**Three of this port's bugs were bugs in its own instruments**, and
+they are worth reading before trusting a number from here: the drift
+meter charging in-flight audio as lost, the `-O0` build that made the
+DSP look like a slow codec, and the emulator's renderer tearing a
+screenshot that read as a layout fault. Each is written up below at the
+place it bites.
 
 ## Building
 
@@ -70,9 +78,11 @@ S25+ an `-O0` build spent **5–8 s per poll with excursions to 20–40 s**
 where the real figure is a fraction of a second, and it read as
 "onnxruntime is slow on Android" — which it is not; the codec is not
 even inside the number that was being looked at (see the technical
-switch below). It also starved the capture thread: on the emulator the
-same session went from **−5432 ppm to −567 ppm** of drift purely by
-being compiled with the optimizer.
+switch below). It also starved the capture thread: switching the
+optimizer on visibly improved the emulator's measured capture rate,
+though how much is no longer separable from the meter's own bias, fixed
+later the same day. The figure that stands is the one after both:
+**−4 ppm**.
 
 Nothing was misconfigured. The trap is that the two obvious choices are
 each half-right: the default configuration signs with the debug
@@ -265,9 +275,12 @@ nested `name;<value>` list, so a bare permission string is valid CMake
 that emits invalid JSON, and androiddeployqt fails with a byte offset
 into a generated file. Use `qt_add_android_permission(target NAME …)`.
 
-## What is left
+## Tier 0, and what is left
 
-In roughly the order the doc argues for. The first two are **done**:
+**All six of Tier 0's items are done** (2026-08-08), and the app has
+received real pictures on a Galaxy S25+ over acoustic coupling with no
+visible artifacts. What follows is kept as the record of what each one
+turned out to require.
 
 1. ~~**`core/audio/android/`**~~ — the permanent audio layer: seven
    entry points mirroring `core/audio/qt/qtaudio.hpp`, so `InputStream`
@@ -308,16 +321,32 @@ In roughly the order the doc argues for. The first two are **done**:
    neither the content intent's request code nor its target — 0 and
    `getActivity` against 1 and `getService`. Sharing a code would make
    one of the two silently become the other.
-3. **Listen / Pictures / Settings**, with the waterfall over
-   `core/dsp/spectrum.cpp` as the *tuning instrument* — with no CAT it
-   is the only frequency feedback there is.
-4. **Reception metadata persisted beside the picture**, not read from
-   shared state, which wipes it two seconds after a reception.
-5. **Notifications**, ongoing and per-reception. The phone being able to
-   put a decoded picture on the lock screen is the reason to want this
-   app, not an obligation to discharge.
-6. **Model fetch** — `core/checkpoint/qt_fetcher.cpp` should port as is
-   now that QtNetwork is in the module set.
+3. ~~**Listen / Pictures / Settings**~~ — three screens in a
+   `StackLayout` behind a bottom `TabBar`, with the waterfall over
+   `core/dsp/spectrum.cpp` as the *tuning instrument* it is: with no CAT
+   it is the only frequency feedback there is. Insets come from
+   `SafeArea.margins`, which is not optional — edge-to-edge is mandatory
+   from targetSdk 35 and the tab bar painted *behind* a 3-button
+   navigation bar until it was handled.
+4. ~~**Reception metadata persisted beside the picture**~~ — a JSON
+   sidecar per PNG, read by the Pictures list, because shared state is
+   wiped two seconds after a reception and on a phone nobody is looking.
+5. ~~**Notifications**~~ — an ongoing one with a Stop action, and one
+   per reception carrying the picture itself as a `BigPictureStyle` on
+   its own channel. The phone being able to put a decoded picture on the
+   lock screen is the reason to want this app.
+6. ~~**Model fetch**~~ — not the Qt fetcher after all. Qt for Android
+   ships no TLS backend, so transport is `ModelFetcher.java`
+   (`HttpsURLConnection`, redirects followed by hand to read
+   `x-linked-etag`) behind the existing `checkpoint::Fetcher` seam,
+   while the sha256 check and the `.part` rename stay in C++ — one
+   implementation of the part that can silently corrupt a cache.
+
+Not done, and deliberately so: **saving to the shared gallery**
+(a MediaStore insert; Share reaches gallery, mail and chat for one
+intent and no storage permission, so it went first) and **`play()`**,
+which is written, unexercised, and a Tier 1 concern — Tier 0 does not
+transmit.
 
 ## `core/audio/android/`
 
