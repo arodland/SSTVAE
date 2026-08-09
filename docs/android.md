@@ -723,6 +723,15 @@ one needlessly stale.
 
 ### Private beta: debug-signed sideload works
 
+**Scale first: "closed beta" here means one or two friends** (Andrew,
+2026-08-08), so in practice this is *send them the APK and mention two
+things* — they will have to allow installs from wherever the file came
+from, and one day they will have to uninstall and reinstall when the
+real signing key lands. Nothing below needs doing before that. The
+detail is kept because it is what changes if this ever becomes a beta
+with a tester list, and because two of the items were recorded wrong
+the first time.
+
 **A debug-signed APK is a usable beta artifact**, verified in practice
 (Andrew, 2026-08-08): it installs, and it upgrades in place over a
 previous build, after clicking through the warnings. Two things this
