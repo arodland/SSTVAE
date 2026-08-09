@@ -58,22 +58,46 @@ export QT_ANDROID=$HOME/Qt/6.11.1/android_arm64_v8a
 export QT_HOST=$HOME/Qt/6.11.1/gcc_64
 export JAVA_HOME=/opt/android-studio/jbr
 
+tools/build_android.sh --install
+```
+
+**Use the script, and know what it is for.** The obvious command builds
+at `-O0`, and the receive loop is scalar floating-point DSP over a
+130 s ring buffer — the shape the optimizer matters most for. Measured
+on this code: `sync::acquire` 171 ms → 1513 ms (**8.9x**), the blind
+accumulator's full-buffer push 547 ms → 8412 ms (**15x**). On a Galaxy
+S25+ an `-O0` build spent **5–8 s per poll with excursions to 20–40 s**
+where the real figure is a fraction of a second, and it read as
+"onnxruntime is slow on Android" — which it is not; the codec is not
+even inside the number that was being looked at (see the technical
+switch below). It also starved the capture thread: on the emulator the
+same session went from **−5432 ppm to −567 ppm** of drift purely by
+being compiled with the optimizer.
+
+Nothing was misconfigured. The trap is that the two obvious choices are
+each half-right: the default configuration signs with the debug
+keystore and installs but passes no `-O` flag at all (clang's default
+is `-O0`), while `RelWithDebInfo` compiles at `-O2` and then emits
+`-release-unsigned.apk`, which will not install. So everyone picks
+Debug. The script configures `RelWithDebInfo`, then zipaligns and signs
+with the same debug keystore Gradle would have used — installs like a
+debug APK, runs at full speed. `--debug` is there for single-stepping
+the C++ and for nothing else; every timing figure taken in that
+configuration is fiction, and CMake says so at configure time.
+
+Under the covers it is an ordinary CMake build — `androiddeployqt`
+generates the Gradle project — so this is equivalent, minus the
+signing:
+
+```sh
 cmake -S native/android-app -B build-android -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE=$QT_ANDROID/lib/cmake/Qt6/qt.toolchain.cmake \
   -DQT_HOST_PATH=$QT_HOST \
   -DQT_ANDROID_BUILD_ALL_ABIS=ON \
   -DANDROID_SDK_ROOT=$HOME/Android/Sdk \
   -DANDROID_NDK_ROOT=$HOME/Android/Sdk/ndk/28.2.13676358 \
-  -DCMAKE_BUILD_TYPE=Debug
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build-android --target apk
-```
-
-This is a **CMake** build, not a Gradle one: `androiddeployqt` generates
-the Gradle project. Build `Debug` unless you intend to sign — the
-release target emits `-release-unsigned.apk`, which will not install.
-
-```sh
-adb install -r build-android/android-build/build/outputs/apk/debug/android-build-debug.apk
 ```
 
 **Build both ABIs and keep the emulator in the loop** (Andrew,
@@ -133,7 +157,7 @@ layout and for the state machine; never quote a number off it.
 **Everything numeric is behind Settings > Advanced > Show technical
 details, off by default** (`ui/showTechnical` in `QSettings`). Poll
 counts, ring depth, capture drift in ppm, peak dBFS, near-zero
-fraction, decode cost, the device's sample rate — the readouts that
+fraction, DSP cost, the device's sample rate — the readouts that
 made several bugs findable at all, and also the first thing an operator
 sees on a screen that should look like a radio.
 
@@ -188,6 +212,14 @@ the audio is still in the ring buffer, so backing off delays a picture
 rather than dropping one. The cost that drives it is on the Listen
 screen (`decode 2.3 s`), shown always, so the next report of "it feels
 slow" arrives as a number from the device it happened on.
+
+**The readout says `dsp`, not `decode`, and the rename is the point.**
+`Progress::last_decode_s` is measured *before* the codec runs, in both
+implementations — it is sync plus demodulation, with no inference in it
+at all. Labelled "decode" it sent a slow-app report straight at
+onnxruntime while every millisecond of the number was in the DSP, and
+the real cause was the build type. The adaptive backoff uses the true
+whole-poll cost, measured separately, which does include the codec.
 
 **The lever that is *not* available is a faster execution provider.**
 The onnxruntime Android AAR exports NNAPI and nothing else — no

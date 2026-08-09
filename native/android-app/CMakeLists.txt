@@ -20,6 +20,34 @@
 #   cmake --build build-android --target apk
 
 cmake_minimum_required(VERSION 3.24)
+
+# **Never ship or field-test an -O0 build of this app.** The NDK's
+# Debug configuration passes no -O flag at all, which for clang means
+# -O0, and the receive loop is scalar floating-point DSP over a 130 s
+# ring buffer -- exactly the shape the optimizer matters most for.
+# Measured on the same code: sync::acquire 171 ms -> 1513 ms (8.9x),
+# the blind accumulator's full-buffer push 547 ms -> 8412 ms (15x).
+#
+# That is not an abstract slowdown. On a Galaxy S25+ an -O0 build spent
+# 5-8 s per poll with excursions to 20-40 s, on a device whose real
+# figure is a fraction of a second -- and it read as "onnxruntime is
+# slow on Android", which it is not: the codec is not even inside the
+# number that was being looked at. Same lesson as the sanitizer jobs in
+# CLAUDE.md, on a platform where Debug is what the tooling hands you.
+#
+# So RelWithDebInfo is the default, and asking for Debug says so out
+# loud rather than quietly costing an afternoon.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)
+endif()
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    message(WARNING
+        "CMAKE_BUILD_TYPE=Debug builds the DSP at -O0, which costs ~6-15x "
+        "in the receive loop and makes every timing figure meaningless. "
+        "Use RelWithDebInfo (tools/build_android.sh) unless you are "
+        "single-stepping the C++.")
+endif()
+
 project(sstvae_android VERSION 0.3.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)

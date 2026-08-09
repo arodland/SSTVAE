@@ -332,13 +332,16 @@ QString Listener::level() const {
                    .arg(ppm, 0, 'f', 0);
         if (ppm < -1000.0) out += QStringLiteral("  DROPPING AUDIO");
     }
-    // What a poll costs, which is the whole basis of the adaptive
-    // backoff in `RxConfig::max_decode_duty` -- shown so that "the app
-    // feels slow" arrives as a number from the device it happened on,
-    // rather than as something to guess at from a desktop.
-    const double dec = s.progress().last_decode_s;
-    if (dec > 0.0) {
-        out += QStringLiteral("   decode %1 s").arg(dec, 0, 'f', 1);
+    // **"dsp", not "decode".** `last_decode_s` is measured before the
+    // codec runs (see rx/engine.cpp, and the Python reference it
+    // mirrors), so it is sync plus demodulation and no inference at
+    // all. Labelling it "decode" sent one investigation straight at
+    // onnxruntime when every millisecond of it was in the DSP. The
+    // adaptive backoff uses the true whole-poll cost, which is
+    // measured separately and is not this number.
+    const double dsp = s.progress().last_decode_s;
+    if (dsp > 0.0) {
+        out += QStringLiteral("   dsp %1 s").arg(dsp, 0, 'f', 1);
     }
     return out;
 }
