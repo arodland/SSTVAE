@@ -133,7 +133,54 @@ endfunction()
 # an unpacked distribution, whose version we cannot know.
 set(_ort_version "${SSTVAE_ONNXRUNTIME_VERSION}")
 
-if(SSTVAE_ONNXRUNTIME_DIR)
+# Android is served by the Maven AAR rather than a GitHub release
+# archive, and the AAR's layout is its own: `headers/` where every other
+# platform has `include/`, and `jni/<abi>/libonnxruntime.so` where they
+# have `lib/`. Hence a branch rather than another row in the table.
+#
+# The important part is that the **version is the same pin**. onnxruntime
+# publishes the Android AAR for 1.28.0, so the codec's "same runtime
+# version, two builds" basis -- the thing the bit-identical encoder and
+# byte-identical decoder claims rest on -- holds here exactly. That is a
+# better position than Intel macOS, which is the one platform that had to
+# give it up.
+#
+# This is the full AAR, not `onnxruntime-mobile`: the reduced build ships
+# a trimmed operator set and would need the published graphs re-exported,
+# which is precisely the divergence the pin exists to prevent.
+set(_ort_is_aar OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Android" AND NOT SSTVAE_ONNXRUNTIME_DIR)
+  set(_ort_is_aar ON)
+  set(_ort_aar_sha256
+      "f351a0638696f54b35184290dbc001d66daae17281ad0b548d2c70347d53b8a9")
+  set(_ort_aar_url
+      "https://repo1.maven.org/maven2/com/microsoft/onnxruntime/onnxruntime-android/${_ort_version}/onnxruntime-android-${_ort_version}.aar")
+  set(_ort_root "${CMAKE_BINARY_DIR}/onnxruntime-android-${_ort_version}")
+  # Downloaded and extracted by hand rather than through FetchContent,
+  # which picks its extractor from the file extension and does not know
+  # `.aar` (it is a zip). Naming the format is one less thing to be
+  # surprised by than relying on that guess.
+  if(NOT EXISTS "${_ort_root}/headers/onnxruntime_cxx_api.h")
+    set(_ort_aar "${CMAKE_BINARY_DIR}/onnxruntime-android-${_ort_version}.aar")
+    if(NOT EXISTS "${_ort_aar}")
+      message(STATUS "onnxruntime: fetching ${_ort_aar_url}")
+      file(DOWNLOAD "${_ort_aar_url}" "${_ort_aar}"
+           EXPECTED_HASH "SHA256=${_ort_aar_sha256}" SHOW_PROGRESS STATUS _dl)
+      list(GET _dl 0 _dl_code)
+      if(NOT _dl_code EQUAL 0)
+        list(GET _dl 1 _dl_msg)
+        file(REMOVE "${_ort_aar}")
+        message(FATAL_ERROR "onnxruntime AAR download failed: ${_dl_msg}")
+      endif()
+    endif()
+    file(ARCHIVE_EXTRACT INPUT "${_ort_aar}" DESTINATION "${_ort_root}")
+  endif()
+  message(STATUS "onnxruntime: ${_ort_root} (AAR, ${ANDROID_ABI})")
+endif()
+
+if(_ort_is_aar)
+  # Nothing below this point applies: the AAR's paths are set here.
+elseif(SSTVAE_ONNXRUNTIME_DIR)
   set(_ort_root "${SSTVAE_ONNXRUNTIME_DIR}")
   message(STATUS "onnxruntime: using ${_ort_root}")
 else()
@@ -145,7 +192,18 @@ else()
   set(_ort_root "${onnxruntime_prebuilt_SOURCE_DIR}")
 endif()
 
-if(NOT EXISTS "${_ort_root}/include/onnxruntime_cxx_api.h")
+if(_ort_is_aar)
+  set(_ort_include "${_ort_root}/headers")
+else()
+  set(_ort_include "${_ort_root}/include")
+endif()
+
+if(NOT EXISTS "${_ort_include}/onnxruntime_cxx_api.h")
+  if(_ort_is_aar)
+    message(FATAL_ERROR
+      "onnxruntime AAR at ${_ort_root} has no headers/onnxruntime_cxx_api.h. "
+      "Delete it and configure again; a partial extraction is the likely cause.")
+  endif()
   if(SSTVAE_ONNXRUNTIME_DIR)
     message(FATAL_ERROR
       "onnxruntime at ${_ort_root} has no include/onnxruntime_cxx_api.h; "
@@ -171,9 +229,17 @@ endif()
 # built here is one thing to keep working rather than two.
 add_library(onnxruntime SHARED IMPORTED GLOBAL)
 set_target_properties(onnxruntime PROPERTIES
-  INTERFACE_INCLUDE_DIRECTORIES "${_ort_root}/include")
+  INTERFACE_INCLUDE_DIRECTORIES "${_ort_include}")
 
-if(WIN32)
+if(_ort_is_aar)
+  # One unversioned .so per ABI, and ANDROID_ABI is what says which. Get
+  # this wrong and the link succeeds against the wrong architecture only
+  # if the file happens to exist, so name it explicitly and check.
+  set(_ort_lib "${_ort_root}/jni/${ANDROID_ABI}/libonnxruntime.so")
+  set_target_properties(onnxruntime PROPERTIES
+    IMPORTED_LOCATION "${_ort_lib}"
+    IMPORTED_SONAME "libonnxruntime.so")
+elseif(WIN32)
   set_target_properties(onnxruntime PROPERTIES
     IMPORTED_LOCATION "${_ort_root}/lib/onnxruntime.dll"
     IMPORTED_IMPLIB "${_ort_root}/lib/onnxruntime.lib")
@@ -209,5 +275,14 @@ if(NOT EXISTS "${_ort_loc}")
 endif()
 
 # Tests and the app both need the shared library findable at run time.
+# ROOT is consumed as an include path by sstvae_codec, so on Android it
+# has to be the AAR's `headers` rather than its top level.
 set(SSTVAE_ONNXRUNTIME_ROOT "${_ort_root}" CACHE INTERNAL "")
-set(SSTVAE_ONNXRUNTIME_LIBDIR "${_ort_root}/lib" CACHE INTERNAL "")
+if(_ort_is_aar)
+  get_filename_component(_ort_libdir "${_ort_lib}" DIRECTORY)
+  set(SSTVAE_ONNXRUNTIME_LIBDIR "${_ort_libdir}" CACHE INTERNAL "")
+  set(SSTVAE_ONNXRUNTIME_INCLUDE "${_ort_include}" CACHE INTERNAL "")
+else()
+  set(SSTVAE_ONNXRUNTIME_LIBDIR "${_ort_root}/lib" CACHE INTERNAL "")
+  set(SSTVAE_ONNXRUNTIME_INCLUDE "${_ort_root}/include" CACHE INTERNAL "")
+endif()

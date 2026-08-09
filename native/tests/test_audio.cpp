@@ -252,6 +252,105 @@ void test_device_matching() {
                    "audio/dev: exact beats ambiguous-substring");
 }
 
+// The pipeline is the three conversions a backend must not get wrong,
+// driven the way a device drives them: arbitrary byte chunks, never
+// aligned to anything. The property is that the chunking is *invisible*
+// -- feed the same stream in one piece and in ragged pieces and the
+// output must be identical, because that is exactly what per-chunk
+// resampling breaks (4.7 dB, on a real recording, while still reporting
+// 440/440 frames).
+void test_capture_pipeline_is_chunking_invariant() {
+    constexpr int kChannels = 2;
+    constexpr int kDeviceRate = 48000;
+    // A second of stereo int16 at the device's rate.
+    const std::vector<double> left = noise(kDeviceRate, 11);
+    const std::vector<double> right = noise(kDeviceRate, 12);
+    std::vector<double> interleaved(left.size() * kChannels);
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        interleaved[i * kChannels] = left[i];
+        interleaved[i * kChannels + 1] = right[i];
+    }
+    const std::vector<std::byte> raw =
+        audio::mono_to_bytes(interleaved, audio::SampleFormat::Int16, 1);
+
+    const auto run = [&](std::span<const std::size_t> chunk_bytes) {
+        audio::CapturePipeline pipe(audio::SampleFormat::Int16, kChannels, kDeviceRate,
+                                    config::FS);
+        std::vector<double> out;
+        std::size_t i = 0;
+        std::size_t k = 0;
+        while (i < raw.size()) {
+            const std::size_t n = std::min(chunk_bytes[k++ % chunk_bytes.size()],
+                                           raw.size() - i);
+            const std::vector<double> got =
+                pipe(std::span<const std::byte>(raw.data() + i, n));
+            out.insert(out.end(), got.begin(), got.end());
+            i += n;
+        }
+        return out;
+    };
+
+    // One giant chunk against ragged ones. Every size is a multiple of
+    // the 4-byte stereo frame, since a backend delivers whole frames and
+    // a partial one is a different (also tested) concern.
+    const std::size_t whole[] = {raw.size()};
+    const std::size_t ragged[] = {512, 4096, 76, 20000, 1024};
+    const std::vector<double> a = run(whole);
+    const std::vector<double> b = run(ragged);
+
+    check::is_true(!a.empty(), "audio/pipe: the one-shot pass produced audio");
+    check::equal(b.size(), a.size(), "audio/pipe: ragged chunking emits the same count");
+    double worst = 0.0;
+    for (std::size_t i = 0; i < std::min(a.size(), b.size()); ++i) {
+        worst = std::max(worst, std::abs(a[i] - b[i]));
+    }
+    // Exactly zero, not a tolerance: both passes run the same filter
+    // over the same samples, and StreamResampler consumes whole
+    // multiples of `down`, so the block boundaries land identically.
+    // Anything nonzero means the state is not being carried.
+    check::equal(worst, 0.0, "audio/pipe: ... sample for sample");
+
+    // 48k stereo in, 8k mono out: a second of input is 8000 samples,
+    // less the resampler's pad latency. Asserting the count catches the
+    // direction being inverted, which is the bug that sent 32 s of
+    // transmission out as 0.9 s of noise.
+    constexpr std::size_t kExpected = kDeviceRate / 6;
+    check::is_true(a.size() <= kExpected,
+                   "audio/pipe: 48k->8k does not invent samples");
+    check::is_true(a.size() * 100 >= kExpected * 99,
+                   "audio/pipe: ... and emits all but the pad latency (" +
+                       std::to_string(a.size()) + " of " + std::to_string(kExpected) +
+                       ")");
+
+    // The mixdown is the average, not channel 0. Left and right are
+    // independent noise here, so taking one channel would not halve the
+    // RMS the way averaging two uncorrelated signals does.
+    double sum_sq = 0.0;
+    for (const double v : a) sum_sq += v * v;
+    const double rms = std::sqrt(sum_sq / static_cast<double>(a.size()));
+    check::is_true(rms > 0.0, "audio/pipe: the mixdown is not silence");
+}
+
+void test_capture_pipeline_skips_the_resampler_at_rate() {
+    audio::CapturePipeline at_rate(audio::SampleFormat::Float, 1, config::FS, config::FS);
+    check::is_true(!at_rate.resampling(),
+                   "audio/pipe: no resampler when the device is already at FS");
+    audio::CapturePipeline off_rate(audio::SampleFormat::Float, 1, 44100, config::FS);
+    check::is_true(off_rate.resampling(),
+                   "audio/pipe: ... and one when it is not");
+
+    // samples_in counts at the *device's* rate, so it is nonzero on the
+    // very first chunk even while the resampler is still filling.
+    const std::vector<double> x = noise(64, 5);
+    const std::vector<std::byte> raw =
+        audio::mono_to_bytes(x, audio::SampleFormat::Float, 1);
+    const std::vector<double> out = off_rate(raw);
+    check::equal(off_rate.samples_in(), std::uint64_t{64},
+                 "audio/pipe: samples_in counts pre-resample input");
+    check::equal(out.size(), std::size_t{0},
+                 "audio/pipe: ... while the output is still held back");
+}
+
 }  // namespace
 
 int main() {
@@ -259,6 +358,8 @@ int main() {
         test_resample_ratio_is_directional();
         test_streaming_matches_one_shot();
         test_streaming_holds_back_rather_than_guessing();
+        test_capture_pipeline_is_chunking_invariant();
+        test_capture_pipeline_skips_the_resampler_at_rate();
         test_sample_format_round_trip();
         test_full_scale_does_not_wrap();
         test_channels_are_mixed_down_not_picked();

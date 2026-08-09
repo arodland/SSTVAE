@@ -82,7 +82,34 @@ struct RxConfig {
     // reliability reason to raise it past the longest mode's duration,
     // since there is no more real signal beyond that to integrate.
     double blind_search_seconds = config::MODES[config::N_MODES - 1].duration_s;
+    // The largest fraction of wall time the loop may spend decoding.
+    // **1.0 is off**, and off is the historical behaviour exactly: poll
+    // every `poll_interval` no matter how long a poll takes.
+    //
+    // Below 1.0 the loop waits longer after a slow poll, so it backs
+    // off on a machine where a decode costs seconds instead of
+    // milliseconds. That is a phone: the desktop's decode is ~50 ms
+    // against a 5 s interval (1% duty) and needs nothing, while on a
+    // mid-range Android the same decode can approach the interval
+    // itself, at which point the device is decoding continuously, the
+    // UI starves, and -- the part that matters -- the extra polls buy
+    // nothing, since each one re-decodes a picture that has grown by
+    // one interval's worth of frames.
+    //
+    // Adaptive rather than a larger constant because the spread across
+    // devices is the whole problem: a number slow enough for the worst
+    // phone would make the best one needlessly stale, and neither is
+    // knowable from here. The measurement is already published as
+    // `Progress::last_decode_s`.
+    double max_decode_duty = 1.0;
 };
+
+// How long `decode_loop` waits before its next poll, given what the
+// last one cost. Exposed rather than kept internal so the backoff can
+// be checked as arithmetic: the alternative is a test that runs the
+// loop with a slow decoder and asserts on elapsed time, which would be
+// asserting on latency instead of on the decision.
+double poll_wait(const RxConfig& config, double last_cost_s);
 
 // The `threading.Event` the reference stops on. Shared with the
 // transmitter, which needs the same primitive for its cancel flag and

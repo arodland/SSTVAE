@@ -1251,6 +1251,94 @@ need when `--native` fails and you want to know *where*.
   with, measured ±0.05 dB: the clipper absorbs it and stage-2 trained
   through that same clipper, so the *objective* was the real risk all
   along.
+- `docs/android.md` — design for the Android port, plus the
+  implementation notes from building it. **Tier 0 is done (2026-08-08)
+  and receives on hardware**: `native/android-app/` decodes complete
+  pictures on a Galaxy S25+ over acoustic coupling, no artifacts,
+  capture inside ±100 ppm, ~0.5 s of DSP per five-second poll.
+  `native/android-app/README.md` is the working document — build
+  commands, the emulator recipe, and the traps; read it before touching
+  the app. **`tools/build_android.sh` is how you build it**, and the
+  reason it exists is the sharpest lesson of the port: the NDK's Debug
+  configuration passes no `-O` flag at all (clang defaults to `-O0`),
+  which costs 6–15x in a receive loop that is scalar DSP over a 130 s
+  ring, and the alternative (`RelWithDebInfo`) emits an unsigned APK
+  that will not install — so everyone picks Debug. The script does
+  RelWithDebInfo + zipalign + debug-sign in one command.
+  **Three of the port's bugs were bugs in its own instruments**, none
+  in the modem, engine or codec, and each presented as a fault
+  elsewhere: the `-O0` build read as a slow onnxruntime; the capture
+  drift meter timed to `now` while counting samples to the last chunk,
+  charging in-flight audio as lost and reporting a steady −4500 ppm
+  `DROPPING AUDIO` on a phone whose pictures were perfect; and the
+  emulator's default `swiftshader_indirect` renderer tears every
+  screenshot, which read as a clipped toolbar. Expect that pattern —
+  `native/core/` is covered by golden vectors and `pytest --native`,
+  the instruments around it are covered by nothing. Two of them
+  corrupted this file's own record before being found, so **re-measure
+  before quoting any Android number from before 2026-08-08 evening**.
+  Two consequences worth not re-deriving. **The poll cost is DSP, not
+  the codec** — `Progress::last_decode_s` is measured *before* the
+  codec runs, in both implementations, so it never contained any
+  inference; at a full ring it is `sync::acquire` 171 ms +
+  `demodulate` 192 ms against a 2 ms `to_baseband`, which is why
+  `decode_loop_low_cpu` (no blind accumulator, searches only new
+  audio) is the battery lever and ORT thread count is not. And **the
+  model fetcher is Java, not `qt_fetcher.cpp`** — Qt for Android ships
+  no TLS backend, so transport is `ModelFetcher.java` behind the
+  existing `checkpoint::Fetcher` seam, with the sha256 check and the
+  `.part` rename kept in C++ because that is the half where a mistake
+  silently corrupts a cache. `RxConfig::max_decode_duty` (default 1.0
+  = off, unchanged desktop behaviour; Android sets 0.5) is the one
+  change this made to shared code. **A debug-signed APK is a usable
+  beta artifact** — it installs and upgrades in place after the
+  warnings (Andrew, 2026-08-08), and two blockers this file previously
+  asserted were wrong: Android blocks a *downgrade*, not an equal
+  `versionCode`, and the per-machine debug keystore only bites once a
+  *second* machine builds a tester APK. What is real is that switching
+  to a proper signing key is **not** an upgrade — every tester must
+  uninstall, losing settings and saved receptions — so warn them in
+  advance and get the real key in early.
+  The original design, which survived contact almost intact: a Qt Quick
+  front end over the existing `native/core/`, starting at Tier 0 (a
+  receive-only listener) with later tiers optional, and **native Android
+  audio from the beginning rather than QtMultimedia**. The 17.5k Qt-free
+  lines under `native/core/` port unchanged and create **no new parity
+  surface** — an Android app is a fourth build of the same code, not a
+  reimplementation, so the golden vectors and `pytest --native` still
+  cover it. onnxruntime publishes an Android AAR at the **exact pinned
+  version** (1.28.0, with the C++ headers), so the codec's "same
+  version, two builds" basis survives — a better position than macOS
+  x86_64. Two points worth not re-deriving. The audio layer is **Java
+  `AudioRecord` on a blocking reader thread, not AAudio/Oboe**: there is
+  no latency requirement here at all (2 s of buffer, 5 s polls), so
+  AAudio's only real benefit is worth nothing, while its `setDeviceId`
+  is silently ignored on the OpenSL ES fallback and USB capture has open
+  glitch reports — and enumeration needs Java either way. That design is
+  also the blocking-read architecture the desktop app wanted and could
+  not have, since PortAudio's blocking API corrupts the heap on JACK.
+  And rig control drops for a **structural** reason, not a scoping one:
+  Hamlib's serial layer opens a path and Android gives an unprivileged
+  app no `/dev/ttyUSB`, which is what makes "RX+TX without rig control"
+  the natural shape rather than a compromise. `rig::Backend` is still a
+  seam, so NET rigctl over wifi is ~200 lines whenever it is wanted.
+  **The UI is explicitly not a port of the desktop's** (Andrew,
+  2026-08-08) — the desktop layout history in this file is a record of
+  QtWidgets on a desktop, and reaching for it there would be inheriting
+  answers to questions nobody is asking. Three consequences are
+  structural rather than cosmetic. **The foreground service owns the
+  engine and the UI is a detachable view**, inverting the desktop's
+  `AppState`, because a listening session must survive the screen going
+  off — which also means rendering stops entirely with no UI attached,
+  and that is most of the battery answer. **Reception metadata must be
+  persisted beside the picture**, because `rx/engine` wipes it from
+  shared state after two seconds and on a phone the operator is usually
+  not looking; the desktop's last-reception card was a workaround for
+  the same thing. And **the waterfall is the tuning instrument**, not a
+  diagnostic, since with no CAT there is no frequency readout at all —
+  which is also why `spectrum.cpp`'s peak-hold matters more there, a
+  ragged comb from point-sampling being the worst available lie on a
+  display whose whole job is "are you tuned right".
 - `docs/todo.md` — open work items with the reasoning behind them.
   Currently one: a wider acquisition search so a mis-tuned counterpart
   still decodes — measured, the demod path is entirely independent of
@@ -1364,6 +1452,26 @@ acquisition path (`sync.acquire_blind` / `Modem.demodulate_blind`).
 with the real modem, but does not simulate/train through beacon content
 itself (synthesizes random BPSK there just for realistic PAPR
 statistics).
+
+Android: **Tier 0 is built and receiving** (2026-08-08),
+`native/android-app/` — a Qt Quick front end over the same
+`native/core/`, so no new parity surface. All six Tier 0 items are in
+(audio layer, foreground service, three screens, persisted reception
+metadata, notifications, model fetch), plus sharing, a technical-detail
+switch that is off by default, and keep-screen-on. Verified on a Galaxy
+S25+ over acoustic coupling. Deliberately not done: a MediaStore save
+to the shared gallery, and `play()` (written, unexercised, Tier 1).
+**Never tried at all: USB capture on this app** — the smoke test
+decoded a TH-D75 over USB at >24 dB, so the path exists, but the four
+hardware questions in `docs/android.md` are all still open, and USB is
+what the app is really for. Battery over a multi-hour session is
+likewise unmeasured. Next, in whatever order: private beta (debug-signed sideload is
+sufficient and is what has been verified — the one thing to tell
+testers in advance is that the eventual switch to a real signing key
+forces an uninstall, not an upgrade), further UI work, Tier 1
+(transmit, VOX keying), or store signing and release. Signing
+credentials are pending external verification (2026-08-08), so that
+last one is not on our timeline.
 
 Desktop app: **one implementation**, `native/` (Phases 0-3), which
 reached parity, passed the loopback shakedown in all three directions

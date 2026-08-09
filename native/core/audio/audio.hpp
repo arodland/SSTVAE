@@ -25,6 +25,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -121,6 +122,45 @@ std::vector<double> bytes_to_mono(std::span<const std::byte> raw, SampleFormat f
 // both directions free of wraparound.
 std::vector<std::byte> mono_to_bytes(std::span<const double> x, SampleFormat fmt,
                                      int channels);
+
+// One capture device's whole byte-to-ring conversion, in one object.
+//
+// Every backend has to do exactly this and in exactly this order:
+// interleaved device bytes -> mono doubles -> resample to the ring's
+// rate. It is four lines, and every one of them has been a bug: mixing
+// down instead of taking channel 0, resampling *statefully* rather than
+// per chunk (4.7 dB and a mangled picture), and getting the ratio's
+// direction right (a 32 s transmission that went out as 0.9 s of noise).
+//
+// So it lives here, once, device-free and testable against bytes rather
+// than against hardware -- which is the same reason `bytes_to_mono` and
+// `StreamResampler` are here rather than in the layer that talks to the
+// driver. A second backend that reimplemented this would be free to
+// reintroduce any of the three.
+//
+// `device_rate` is what the device actually opened at, not what was
+// asked for; `out_rate` is the ring's, which the modem fixes at FS.
+// When they are equal no resampler is constructed at all.
+class CapturePipeline {
+public:
+    CapturePipeline(SampleFormat fmt, int channels, int device_rate, int out_rate);
+
+    // One chunk in, whatever is ready out -- often nothing, since the
+    // resampler only emits whole multiples of `down`.
+    std::vector<double> operator()(std::span<const std::byte> raw);
+
+    // Mono samples seen at the *device's* rate, before resampling. This
+    // is the honest "is audio arriving" counter: taking it after the
+    // resampler would read zero for the first few chunks.
+    std::uint64_t samples_in() const { return in_; }
+    bool resampling() const { return resampler_ != nullptr; }
+
+private:
+    SampleFormat fmt_;
+    int channels_;
+    std::unique_ptr<StreamResampler> resampler_;
+    std::uint64_t in_ = 0;
+};
 
 // Index of the device to use, or nothing for "the system default".
 //

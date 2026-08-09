@@ -141,8 +141,11 @@ if(SSTVAE_BUILD_CODEC)
   target_link_libraries(sstvae_codec PUBLIC sstvae_core PRIVATE onnxruntime)
   # onnxruntime's headers are not ours and are not warning-clean under
   # -Wall -Wextra; treat them as system so our own warnings stay signal.
+  # The resolved include directory, not ROOT/include: the Android AAR
+  # spells it `headers/`, and hardcoding the desktop layout finds the
+  # right download and then looks for a directory that was never in it.
   target_include_directories(sstvae_codec SYSTEM PRIVATE
-    ${SSTVAE_ONNXRUNTIME_ROOT}/include)
+    ${SSTVAE_ONNXRUNTIME_INCLUDE})
 endif()
 
 # Put the onnxruntime runtime where `target` can find it.
@@ -207,6 +210,25 @@ if(_want_qtaudio)
   message(STATUS "Qt Multimedia audio: ${Qt6_VERSION}")
 endif()
 
+# --- Android audio ----------------------------------------------------------
+# The Android counterpart of core/audio/qt/, and a separate library for the
+# same reason: the modem, the codec and both engines must still build with no
+# platform audio at all. Only built when targeting Android, where <jni.h> and
+# the NDK's log/android libraries exist -- ON elsewhere would be a request
+# that cannot be satisfied, so this is not a tri-state switch like the others.
+if(CMAKE_SYSTEM_NAME STREQUAL "Android")
+  add_library(sstvae_audio_android STATIC core/audio/android/androidaudio.cpp)
+  set_target_properties(sstvae_audio_android PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(sstvae_audio_android PUBLIC core)
+  target_link_libraries(sstvae_audio_android PUBLIC sstvae_core PRIVATE android log)
+  # The Java half lives with the C++ half rather than in an app: an app
+  # supplying its own would be free to get the blocking-read loop wrong.
+  # Consumers add this to their Gradle sourceSets.
+  set(SSTVAE_ANDROID_AUDIO_JAVA_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/core/audio/android/java" CACHE INTERNAL "")
+  message(STATUS "Android audio: ${ANDROID_ABI}")
+endif()
+
 # --- Overlay rendering ------------------------------------------------------
 # Separate from sstvae_core for the same reason Qt audio is: the modem,
 # the golden vectors and the parity module have no business needing a
@@ -256,9 +278,13 @@ endif()
 # Only the downloader; resolution and the cache live in the core with no
 # dependency, so a build without this still honours --model and still
 # finds an already-cached artifact.
-if(_want_qtaudio)
-  find_package(Qt6 6.2 COMPONENTS Network QUIET)
-endif()
+# Gated on Qt Network being available and nothing else. It used to be
+# gated on `_want_qtaudio`, which happened to hold for every desktop
+# build and is the wrong condition: the Android app wants the downloader
+# and explicitly does *not* want Qt audio, and the coupling made the
+# fetcher silently vanish there -- a missing artifact reported as
+# "offline" on a machine with a working network.
+find_package(Qt6 6.2 COMPONENTS Network QUIET)
 if(Qt6Network_FOUND)
   add_library(sstvae_fetch STATIC core/checkpoint/qt_fetcher.cpp)
   set_target_properties(sstvae_fetch PROPERTIES POSITION_INDEPENDENT_CODE ON)

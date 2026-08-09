@@ -212,6 +212,26 @@ std::vector<std::byte> mono_to_bytes(std::span<const double> x, SampleFormat fmt
     return out;
 }
 
+CapturePipeline::CapturePipeline(SampleFormat fmt, int channels, int device_rate,
+                                 int out_rate)
+    : fmt_(fmt), channels_(channels < 1 ? 1 : channels) {
+    if (device_rate > 0 && device_rate != out_rate) {
+        const Ratio r = resample_ratio(device_rate, out_rate);
+        resampler_ = std::make_unique<StreamResampler>(r.up, r.down);
+    }
+}
+
+std::vector<double> CapturePipeline::operator()(std::span<const std::byte> raw) {
+    std::vector<double> mono = bytes_to_mono(raw, fmt_, channels_);
+    if (mono.empty()) return {};
+    in_ += mono.size();
+    // Note the resampler is fed and returned wholesale rather than
+    // accumulated here: it already keeps the cross-chunk context that
+    // makes its output identical to one-shot resampling of the stream.
+    if (resampler_ == nullptr) return mono;
+    return (*resampler_)(mono);
+}
+
 std::optional<std::size_t> match_device(std::span<const std::string> descriptions,
                                         std::string_view wanted) {
     if (wanted.empty()) return std::nullopt;

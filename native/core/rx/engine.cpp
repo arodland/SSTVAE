@@ -32,6 +32,19 @@ using config::PREAMBLE_SAMPLES;
 
 constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 
+// Records how long a poll took, on every path out of the loop body --
+// including the early `continue`s, which are cheap and must not leave
+// an expensive poll's cost standing as the estimate.
+class PollCost {
+public:
+    PollCost(double& out) : out_(out), t0_(Clock::now()) {}
+    ~PollCost() { out_ = std::chrono::duration<double>(Clock::now() - t0_).count(); }
+
+private:
+    double& out_;
+    Clock::time_point t0_;
+};
+
 // Mode C, the longest -- the denominator for blind progress, where the
 // real mode is unknown.
 constexpr int kTotalCLatents = config::MODES[config::N_MODES - 1].n_latents;
@@ -180,6 +193,16 @@ void reset_to_listening(SharedState& state) {
 
 }  // namespace
 
+double poll_wait(const RxConfig& config, double last_cost_s) {
+    if (config.max_decode_duty >= 1.0 || last_cost_s <= 0.0) {
+        return config.poll_interval;
+    }
+    // Floored, so a config asking for an absurd duty backs off by a
+    // bounded amount rather than by minutes.
+    const double d = std::max(0.05, config.max_decode_duty);
+    return std::max(config.poll_interval, last_cost_s * (1.0 / d - 1.0));
+}
+
 std::string fmt_snr(double snr_db) {
     if (std::isnan(snr_db)) return "";
     char buf[32];
@@ -301,9 +324,11 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
     // than guessing at what filled it.
     std::optional<sync::BlindAccumulator> blind_acc;
     std::optional<std::int64_t> blind_acc_pushed;
+    double last_poll_cost_s = 0.0;
 
     while (!stop.is_set()) {
-        if (stop.wait(config.poll_interval)) break;
+        if (stop.wait(poll_wait(config, last_poll_cost_s))) break;
+        const PollCost cost(last_poll_cost_s);
 
         std::uint64_t total = 0;
         const std::vector<double> samples = ring.snapshot(&total);
