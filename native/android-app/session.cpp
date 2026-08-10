@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <sstream>
 
+#include "assets.hpp"
 #include "checkpoint/checkpoint.hpp"
 #include "java_fetcher.hpp"
 #include "config.hpp"
@@ -201,6 +202,11 @@ void Session::load_model_async() {
         try {
             loaded = std::make_shared<codec::OnnxCodec>(
                 [](const std::string& part) { return checkpoint::resolve_onnx(part); });
+            // Bundled artifacts first; the fetcher above is the
+            // fallback, not the plan. On a build that carries them this
+            // never touches the network, which is the whole point --
+            // see assets.hpp.
+            loaded->set_blob_resolver(assets::model_blob);
             // Force the decoder now. The parts are lazy and independent
             // on purpose -- a receive-only station never fetches the
             // encoder -- but "the model is ready" has to mean something,
@@ -417,6 +423,7 @@ void Session::preload_encoder_async() {
             if (!c) {
                 c = std::make_shared<codec::OnnxCodec>(
                     [](const std::string& part) { return checkpoint::resolve_onnx(part); });
+                c->set_blob_resolver(assets::model_blob);
             }
             c->preload("encoder");
         } catch (const std::exception& e) {

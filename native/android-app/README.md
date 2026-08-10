@@ -110,6 +110,145 @@ cmake -S native/android-app -B build-android -G Ninja \
 cmake --build build-android --target apk
 ```
 
+## The models ship inside the APK
+
+**Bundled since 2026-08-10, and the reason is not download size.** The
+model *is* part of the on-air contract: the latent space is learned, so
+an encoder from one checkpoint only means anything to a decoder from
+the same one, and two stations must be running the same artifacts to
+talk at all. "Update the model without an app update" therefore reads
+as flexibility and behaves as a way to silently desynchronise a station
+from the band — a codec revision is a coordinated everyone-at-once
+event, which is what an app release already is. So the argument that
+usually favours fetching does not apply here, and what is left is the
+argument for bundling: **first run has to work with no network.** This
+is a radio app, and the moment of need is disproportionately a field
+site with no coverage; an operator who installs at home and first opens
+the app on a hilltop otherwise has a listener that cannot decode
+anything, and the failure is total rather than degraded.
+
+Measured, on the v3 fp16 artifacts: decoder 8.5 MB, encoder 11.3 MB,
+**18 MB** added to the APK (55 MB against 37 MB with
+`-DSSTVAE_ANDROID_BUNDLE_MODELS=OFF`). Model weights barely compress —
+AAPT deflates these to 92% — so that is close to the raw size and there
+is no packing trick to be had.
+
+Four decisions inside that:
+
+- **`assets/`, not a Qt resource.** A `.qrc` is compiled into the app
+  library, and the bundle carries one library *per ABI*, so 20 MB of
+  weights would land in the download twice. Assets live in the bundle's
+  base module and are shared by every ABI.
+- **Downloaded at configure time and pinned by sha256**, the same shape
+  as the onnxruntime and Hamlib pins. These are published immutable
+  filenames, so a hash mismatch means the wrong file, never a stale one.
+  `SSTVAE_ANDROID_MODEL_DIR` is where they land — pinned by
+  `tools/build_android.sh` to the *top* build directory, because a
+  multi-ABI build configures this file once per ABI in nested build
+  trees and would otherwise fetch 20 MB twice.
+- **The bytes are read out and released once the ORT session exists**,
+  rather than held for the process. `AAsset_getBuffer` on a compressed
+  asset inflates into a block owned by the open asset, which would mean
+  ~20 MB resident forever; reading into a `codec::ModelBlob` puts that
+  memory somewhere with a lifetime. What makes it safe is stated in
+  code rather than assumed: `codec.cpp` sets
+  `session.use_ort_model_bytes_directly` to `0` explicitly, because that
+  opt-in is the one thing that would make ORT reference the caller's
+  buffer, and a change of default would otherwise land as a
+  use-after-free with no diagnostic.
+- **The fetcher stays, and OFF is a supported configuration.** With no
+  assets staged, `assets::model_blob` returns nullopt, the codec falls
+  through to `checkpoint::resolve_onnx`, and the app fetches exactly as
+  it did before — one code path, two builds. That is what makes the
+  switch cheap to flip while developing, where 20 MB per clean build
+  tree is not free.
+
+**`assets::init()` runs on the UI thread**, from `Listener`'s
+constructor, for the same reason `audio::android::set_java_vm` does: it
+needs the Java context. After it, nothing else does — the `AAsset_*`
+family is a plain NDK C API with no JNIEnv in it, so the model thread
+reads assets with no JNI at all and the `FindClass` hazard cannot
+apply.
+
+Verified on the emulator the only way that means anything: **uninstall,
+fresh install, airplane mode on, no cache** — model reports ready, and a
+mode A transmission decodes 220/220 with the network off for the whole
+run.
+
+## The Play upload
+
+```sh
+tools/build_android.sh --aab --version-code N   # -> build-android/sstvae-upload.aab
+```
+
+A bundle rather than an APK because Play takes nothing else, and it is
+a **different job from the sideload build in one respect that decides
+the rest**: a sideload APK is signed with the debug key, which is
+world-known and per-machine, while a bundle is signed with the *upload
+key*, which is an identity. So `--aab` shares no fallback with the APK
+path — it refuses to emit anything rather than quietly producing an
+unsigned or debug-signed bundle, since Play rejects both and the
+rejection arrives minutes later in a browser, a long way from the
+build. For the same reason it refuses `--abi` (a single-ABI bundle is a
+store listing half the world cannot install), `--debug`, and
+`--install` (nothing installs a bundle).
+
+**The upload key lives outside the repository and must be backed up.**
+`~/.android-keys/sstvae-upload.jks`, PKCS12, RSA-2048, valid to 2053 —
+comfortably past the 2033 floor Play checks — with its password in
+`sstvae-upload.pass` beside it at mode 600, which is what the script
+reads (`SSTVAE_UPLOAD_KEYSTORE`, `SSTVAE_UPLOAD_KEYSTORE_PASS`,
+`SSTVAE_UPLOAD_ALIAS` override all three). A password *file* rather
+than an argument or an exported variable, because both of those are
+readable in `ps` by every process on the machine. Keeping the password
+next to the keystore does mean one compromise gets both; moving it into
+a password manager and deleting the file is strictly better, and the
+script does not care where it points.
+
+With **Play App Signing** — which is not optional for new apps — Google
+holds the actual app signing key and this is only the key you *upload*
+with, so losing it is a support request rather than the end of the app.
+That is a much softer failure than the pre-2021 arrangement, and it is
+still worth backing up: a reset is days.
+
+**`--version-code` is mandatory reading even though it defaults.** Play
+requires the code to increase on every upload, forever, and it is the
+one number a build cannot infer — `PROJECT_VERSION` moves for its own
+reasons, and re-shipping a fixed build of the same release still needs a
+new code. Hence an explicit input rather than something derived. Getting
+it wrong is tedious, not dangerous: Play refuses the bundle and names
+the number it already has.
+
+Four things that were checked on the first bundle and are worth
+re-checking only when something below them changes:
+
+- **16 KB page alignment**, which Play requires of anything targeting
+  SDK 35+. All 78 native libraries report `0x4000` LOAD alignment,
+  onnxruntime's prebuilt `.so` included — NDK 28 does this by default,
+  but the prebuilt is the one we do not compile, so it is the one worth
+  looking at. `llvm-readelf -l` over `base/lib/*/` is the check.
+  It cannot be fixed downstream: the bundle is not zipaligned, because
+  alignment is a property of the APKs Play *generates* from it.
+- **`jarsigner`, not `apksigner`** — an AAB is a jar and apksigner does
+  not handle one. `keytool -printcert -jarfile` on the result shows the
+  signing cert, and its SHA256 should equal the keystore's.
+- The self-signed / no-timestamp warnings from `jarsigner -verify` are
+  **expected and benign**: self-signed is what an upload key *is*, and
+  Play does not want a timestamp.
+- **armeabi-v7a is not in the bundle**, because only the arm64 and
+  x86_64 Qt kits are installed. 32-bit-only devices — essentially
+  nothing since ~2019, and nothing anyone drives a radio from — simply
+  will not be offered the app. Adding it means a third Qt kit and a
+  third slice of build time, and it is a deliberate omission rather than
+  an oversight.
+
+**Existing sideload testers must uninstall.** The debug-signed APKs and
+this bundle have different signing keys, so Play's copy is not an
+upgrade over a sideloaded one; it is a different app as far as Android
+is concerned, and the install fails until the old one goes. That costs
+testers their settings and saved receptions, which is a thing to say in
+advance rather than after.
+
 **Build both ABIs and keep the emulator in the loop** (Andrew,
 2026-08-08). It is tempting to go arm64-only on the grounds that the
 emulator cannot carry audio — but it can, and in any case that

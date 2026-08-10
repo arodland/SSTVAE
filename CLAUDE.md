@@ -1324,7 +1324,25 @@ need when `--native` fails and you want to know *where*.
   `.part` rename kept in C++ because that is the half where a mistake
   silently corrupts a cache. `RxConfig::max_decode_duty` (default 1.0
   = off, unchanged desktop behaviour; Android sets 0.5) is the one
-  change this made to shared code. **A debug-signed APK is a usable
+  change this made to shared code.
+  **Since 2026-08-10 that fetcher is the fallback, not the normal
+  path: the codec ships inside the APK** (+18 MB, 55 against 37). The
+  argument is not download size — the model *is* part of the on-air
+  contract, since stations must run the same checkpoint to
+  interoperate, so "update the model without an app update" is a way
+  to desynchronise a station rather than a feature, and what is left is
+  that first run has to work on a hilltop with no coverage. Three
+  things it settled. It goes in **`assets/`, never a `.qrc`** — a
+  resource is compiled into the app library and a bundle carries one
+  per ABI, so the weights would ship twice. The bytes are **released
+  once the ORT session is built**, and `codec.cpp` sets
+  `session.use_ort_model_bytes_directly` to `0` explicitly rather than
+  relying on that being the default, because that opt-in is exactly
+  what would turn the transient buffer into a use-after-free with no
+  diagnostic. And `SSTVAE_ANDROID_BUNDLE_MODELS=OFF` is a supported
+  configuration that changes no code path — `assets::model_blob`
+  returns nullopt and the codec falls through to `resolve_onnx`, which
+  is what keeps that flag from being a fork. **A debug-signed APK is a usable
   beta artifact** — it installs and upgrades in place after the
   warnings (Andrew, 2026-08-08), and two blockers this file previously
   asserted were wrong: Android blocks a *downgrade*, not an equal
@@ -1333,6 +1351,20 @@ need when `--native` fails and you want to know *where*.
   to a proper signing key is **not** an upgrade — every tester must
   uninstall, losing settings and saved receptions — so warn them in
   advance and get the real key in early.
+  **The Play bundle exists as of 2026-08-10** (`tools/build_android.sh
+  --aab`, signed with an upload key under `~/.android-keys/`, outside
+  the repo). Read "The Play upload" in `native/android-app/README.md`
+  before touching it. Three things it settled. `--aab` deliberately
+  shares **no fallback** with the APK path — it refuses rather than
+  emit an unsigned or debug-signed bundle, because Play rejects both
+  and does so minutes later in a browser, a long way from the build.
+  `--version-code` is an **explicit input**, since Play requires it to
+  increase forever and no build can infer it. And the gate worth
+  knowing about in advance is **16 KB page alignment**, required of
+  anything targeting SDK 35+: all 78 libraries pass, onnxruntime's
+  prebuilt `.so` included, and it is *not* fixable downstream, because
+  a bundle is not zipaligned — alignment belongs to the APKs Play
+  generates from it, so it has to be right in the `.so` files.
   The original design, which survived contact almost intact: a Qt Quick
   front end over the existing `native/core/`, starting at Tier 0 (a
   receive-only listener) with later tiers optional, and **native Android
@@ -1531,13 +1563,15 @@ found the `FindClass` bug above.
 in both directions, which retires the caveat this section used to
 carry. What is still unmeasured: battery over a multi-hour session,
 and the VOX leader against a real VOX circuit (the test radio has none
-on its USB input). Next, in whatever order: private beta
-(debug-signed sideload is sufficient and is what has been verified —
-the one thing to tell testers in advance is that the eventual switch to
-a real signing key forces an uninstall, not an upgrade), further UI
-work, Tier 2, or store signing and release. Signing
-credentials are pending external verification (2026-08-08), so that
-last one is not on our timeline.
+on its USB input). Next, in whatever order: further UI work, Tier 2, or
+the Play internal test. **A signed upload bundle exists** as of
+2026-08-10 — `tools/build_android.sh --aab`, version code 1, both
+ABIs — so the Android half of "store signing" is no longer waiting on
+the external verification that still gates the *desktop* installers.
+What has not happened is the upload itself, and the thing to tell
+existing sideload testers in advance is unchanged: the switch from the
+debug key to the upload key forces an uninstall, not an upgrade, and
+takes their settings and saved receptions with it.
 
 Desktop app: **one implementation**, `native/` (Phases 0-3), which
 reached parity, passed the loopback shakedown in all three directions

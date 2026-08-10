@@ -10,6 +10,7 @@
 
 #include <cmath>
 
+#include "assets.hpp"
 #include "audio/android/androidaudio.hpp"
 #include "rx/engine.hpp"
 #include "session.hpp"
@@ -118,6 +119,14 @@ Listener::Listener(QObject* parent) : QObject(parent) {
     Session::instance().set_show_technical(technical_);
     gallery_ = QSettings().value(QLatin1String(kGalleryKey), false).toBool();
     Session::instance().set_save_to_gallery(gallery_);
+    // Resolve the AssetManager here, on the UI thread, because that is
+    // the only thread with a Java context to ask -- after this the
+    // bundled models are reachable from the model thread with no JNI at
+    // all. A false return means no bundled artifacts, which the codec
+    // treats as "fetch them" rather than as a failure, so it is not
+    // fatal and deliberately does not set `error_`.
+    androidapp::assets::init();
+
     if (!init_audio_bridge(&error_)) return;
     refreshDevices();
 

@@ -602,7 +602,10 @@ tx engine, the rig, the optimizer, the crop dialog, or settings for any
 of them.
 
 Only the decoder needs fetching — 9 MB, not 21 — because `load_codec`'s
-per-part laziness already does that.
+per-part laziness already does that. (**Superseded 2026-08-10**: both
+parts ship in the APK, so nothing is fetched on a normal run. The
+laziness is still real and still what a `BUNDLE_MODELS=OFF` build uses;
+it simply stopped being the thing that decides a first run.)
 
 Acoustic coupling remains the zero-hardware fallback and should stay
 supported, but it is the *fallback*: the app is worth having because it
@@ -813,7 +816,10 @@ one needlessly stale.
   read — behind the existing `checkpoint::Fetcher` seam. **The sha256
   check and the `.part` rename stayed in C++**, deliberately: that is
   the half where a mistake silently corrupts a cache, and it should
-  have one implementation across all four builds.
+  have one implementation across all four builds. Since 2026-08-10 this
+  is the *fallback* rather than the normal path — the artifacts are
+  bundled — but it is still what a `BUNDLE_MODELS=OFF` build runs on,
+  and deleting it would have made that switch a fork instead of a flag.
 - **The desktop's `AppState` inversion was right, and the UI needed
   even less than expected.** Because the view polls `Session::running()`
   rather than tracking its own button, stopping from the notification's
@@ -881,8 +887,14 @@ What is genuinely upstream of a tester:
 arm64-v8a. Qt Core/Gui/Qml/Quick/Network adds roughly 25–35 MB
 uncompressed, plus our own core. Ballpark **55–75 MB per-ABI**, and an
 arm64-only App Bundle keeps the user's download near that instead of
-multiplying it by four ABIs. Model artifacts are **not** in the APK —
-the 9 MB decoder is fetched on first run, unchanged from desktop.
+multiplying it by four ABIs. **Model artifacts are in the APK as of
+2026-08-10** — this section previously said they were not, and the
+reasoning that changed it is that the model is part of the on-air
+contract rather than a swappable asset: stations must run the same
+checkpoint to interoperate, so "update the model without an app update"
+is a hazard and not a feature, while a first run that needs the network
+is one on a hilltop. Measured at **+18 MB** (55 MB against 37 MB
+with the switch off). See `native/android-app/README.md`.
 
 **CPU — now measured.** A Galaxy S25+ spends **~0.5 s of DSP per
 five-second poll** at a full ring, against 0.2–0.3 s on an x86_64
