@@ -66,5 +66,36 @@ int main(int argc, char* argv[]) {
     engine.rootContext()->setContextProperty("waveformText", waveform);
     engine.loadFromModule("SSTVAE", "Main");
     if (engine.rootObjects().isEmpty()) return 1;
-    return app.exec();
+    const int rc = app.exec();
+
+    // **End the process without unwinding.**
+    //
+    // Returning from here runs static destructors and then lets Android
+    // tear the process down around threads that are still using what
+    // they destroy. Measured on API 36, backing out of the app:
+    //
+    //     FORTIFY: pthread_mutex_lock called on a destroyed mutex
+    //     Fatal signal 6 (SIGABRT) in tid ... (hwuiTask1)
+    //     tombstoned: received crash request
+    //
+    // Not our thread and not our mutex -- it is Android's own HWUI
+    // render threads outliving the graphics state -- but it is a
+    // tombstone all the same, so an ordinary exit was being recorded as
+    // a native crash, which is exactly what Play's vitals count.
+    //
+    // `_Exit` skips both: no static destructors, no atexit handlers, no
+    // teardown for a late thread to race. Nothing is lost by it. Every
+    // `QSettings` write in this app goes through a temporary that syncs
+    // when it dies, so no preference is pending here; the audio device,
+    // PTT and the engine threads are the service's to release and it
+    // does that on its stop path, while the world is still standing;
+    // and the rest is memory the kernel reclaims anyway.
+    //
+    // Third instance of one rule in this codebase, and the reason it
+    // keeps recurring: at teardown, *not running code* is the reliable
+    // option. `Session` is deliberately immortal for the same reason
+    // (it aborted in `~OnnxCodec` from an atexit handler), and
+    // `check::Watchdog` calls `std::_Exit` rather than unwinding
+    // because a wedged library is somewhere unwinding can hang.
+    std::_Exit(rc);
 }

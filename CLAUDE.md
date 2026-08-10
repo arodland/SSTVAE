@@ -1299,6 +1299,25 @@ need when `--native` fails and you want to know *where*.
   ring, and the alternative (`RelWithDebInfo`) emits an unsigned APK
   that will not install — so everyone picks Debug. The script does
   RelWithDebInfo + zipalign + debug-sign in one command.
+  **Back has three behaviours and the split is the design**
+  (2026-08-10): it closes the picture viewer if that is open; it
+  **backgrounds the app** if a session is running or an over is in
+  flight; and only otherwise does it leave. Ending the activity ends
+  the *process*, and the process owns the engine, so the most ordinary
+  gesture on a phone silently killed a reception and left the shade
+  claiming the station was still listening —
+  `stopWithTask="false"` does not cover this, since that is about a
+  swipe from Recents rather than the activity finishing.
+  `moveTaskToBack` is what recorders and media apps do and what the
+  ongoing notification already implies. Do **not** extend it to the
+  no-session case: hijacking Back unconditionally is the thing this
+  avoids. Measuring that bug found a second one — the exit was
+  **recorded as a native crash**, a SIGABRT tombstone in Android's own
+  `hwuiTask` threads during teardown, which is what Play's vitals
+  count — so `main()` now ends with **`std::_Exit`** rather than
+  returning. Third instance of the rule that `Session`'s immortality
+  and `check::Watchdog` are the other two: at teardown, not running
+  code is the reliable option.
   **Three of the port's bugs were bugs in its own instruments**, none
   in the modem, engine or codec, and each presented as a fault
   elsewhere: the `-O0` build read as a slow onnxruntime; the capture

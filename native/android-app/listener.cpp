@@ -424,6 +424,15 @@ bool Listener::hasLiveImage() const {
     return p.image && p.image->width > 0;
 }
 
+void Listener::moveToBackground() {
+    QJniObject ctx = QNativeInterface::QAndroidApplication::context();
+    if (!ctx.isValid()) return;
+    QJniObject::callStaticMethod<void>("org/cleverdomain/sstvae/Background",
+                                       "moveToBack",
+                                       "(Landroid/content/Context;)V", ctx.object());
+    QJniEnvironment().checkAndClearExceptions();
+}
+
 void Listener::sharePicture(const QString& path, const QString& caption) {
     QJniObject ctx = QNativeInterface::QAndroidApplication::context();
     if (!ctx.isValid()) return;

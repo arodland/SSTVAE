@@ -110,6 +110,62 @@ cmake -S native/android-app -B build-android -G Ninja \
 cmake --build build-android --target apk
 ```
 
+## What Back does
+
+Three behaviours, and which one applies is the whole design:
+
+1. **Something is open on top** (the picture viewer) — Back closes it.
+2. **A session is running or an over is in flight** — Back sends the
+   task to the background. The app keeps running.
+3. **Nothing is running** — Back leaves the app, as Android users
+   expect.
+
+Case 2 is the fix for a reported bug and case 3 is a second one found
+while measuring it (2026-08-10).
+
+**Ending the activity ends the process, and the process owns the
+engine.** So the single most ordinary gesture on a phone silently killed
+a reception in progress, and the shade went on claiming the station was
+listening. `stopWithTask="false"` does not help here: that covers a
+swipe from Recents, not the activity finishing. Measured on API 36
+before the fix, one Back press at the root:
+
+```
+F libc     : FORTIFY: pthread_mutex_lock called on a destroyed mutex
+F libc     : Fatal signal 6 (SIGABRT) in tid 28516 (hwuiTask1)
+I tombstoned: received crash request for pid 28516
+```
+
+So an ordinary exit was **recorded as a native crash** — a tombstone,
+which is exactly what Play's vitals count — and the notification's text
+froze wherever the poller had last left it.
+
+`moveTaskToBack` is what recorders, navigation and media apps do, and it
+is what the ongoing notification already implies. The session
+continues, the 2-second poller keeps the notification honest, the task
+stays in Recents so the launcher or the notification returns to the
+screen that was left, and Stop is still one tap away in the
+notification — which is where an operator already looks for it.
+Measured after: **23 → 25 polls while backgrounded**, and an over
+carried on from 53% to 63% and then finished, stopped its own service
+and cleared its own notification with the app still in the background.
+
+**Hijacking Back unconditionally is what this deliberately does not
+do.** With nothing to protect it exits, so the gesture keeps its
+meaning.
+
+And case 3 is why `main()` ends with **`std::_Exit`** rather than
+returning: the tombstone above is Android's own HWUI render threads
+outliving the graphics state during teardown, not our thread and not our
+mutex, and the reliable answer is not to unwind at all. Nothing is lost
+— every `QSettings` write goes through a temporary that syncs when it
+dies, and the audio device, PTT and engine threads are the service's to
+release on its stop path while the world is still standing. Third
+instance of one rule here, after `Session` being deliberately immortal
+and `check::Watchdog` calling `std::_Exit`: **at teardown, not running
+code is the reliable option.** Verified: zero crash records where there
+was a tombstone every time.
+
 ## The first-transmit prompt, and the CW ID that cannot work
 
 **Send opens a one-time prompt before the first over** (2026-08-10):

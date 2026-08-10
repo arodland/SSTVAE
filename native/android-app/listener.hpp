@@ -87,6 +87,11 @@ public:
     void setSaveToGallery(bool on);
     QString galleryError() const;
 
+    // Send the task to the background, as Back does on a home screen.
+    // What Back has to mean while a session is running -- see
+    // Background.java and the `onClosing` handler in Main.qml.
+    Q_INVOKABLE void moveToBackground();
+
     Q_INVOKABLE void refreshDevices();
     Q_INVOKABLE void loadModel();
     // Hand a saved reception to the system share sheet. On the UI

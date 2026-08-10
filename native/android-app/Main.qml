@@ -30,11 +30,35 @@ ApplicationWindow {
     // own `CloseOnEscape` does not cover this: that is Qt::Key_Escape,
     // and Android sends a close request, not an Escape.
     //
-    // Declining the close is the whole fix. Anywhere else Back still
-    // does what Android users expect and leaves the app.
+    // Declining the close is the whole fix for that case.
+    //
+    // **At the root, Back backgrounds the app rather than ending it,
+    // whenever there is a session to protect.** Ending the activity ends
+    // the *process*, and the process is what owns the engine — so the
+    // single most ordinary gesture on a phone silently killed a
+    // reception in progress and left the shade's promise that we were
+    // listening untrue. Measured on API 36: the process died on SIGABRT
+    // in Android's own HWUI teardown, which is a tombstone and would be
+    // counted as a native crash, and the notification's last text froze
+    // wherever the poller had left it.
+    //
+    // Backgrounding is what recorders, navigation and media apps do, and
+    // it is what the ongoing notification already implies: the session
+    // continues, the poller keeps the notification honest, and the task
+    // stays in Recents so the launcher or the notification returns to
+    // the screen that was left. Stopping is still one tap away — the
+    // notification's own Stop action — which is where an operator
+    // already looks for it.
+    //
+    // With nothing running there is nothing to protect, so Back leaves
+    // the app exactly as Android users expect. Hijacking Back
+    // unconditionally is the thing this deliberately does not do.
     onClosing: function(close) {
         if (viewer.visible) {
             viewer.close()
+            close.accepted = false
+        } else if (listener.listening || transmitter.transmitting) {
+            listener.moveToBackground()
             close.accepted = false
         }
     }
