@@ -37,16 +37,20 @@ Picture resize(const Picture& img, int width, int height);
 // How a picture is framed into the target rectangle.
 //
 // The pictures the codec sends are 4:3, and anything else has to lose
-// something. The default here is what this function has always done
-// silently -- scale to cover, crop the centre -- expressed as data so
-// the operator can move it. There is no letterbox option: padding
-// would spend airtime on black, and the decision (2026-08-01) was that
-// an operator who wants the whole frame pads the file themselves.
+// something -- or pad. The default here is what this function has
+// always done silently -- scale to cover, crop the centre -- expressed
+// as data so the operator can move it. Zooming *out* past cover is
+// allowed and letterboxes: the earlier "no letterbox" decision
+// (2026-08-01) was reversed, because spending a little airtime on black
+// is the operator's call to make and the alternative was editing the
+// file outside the app.
 struct Framing {
     // Multiplier on the *cover* scale -- the smallest scale that fills
     // the target. 1.0 is the tightest framing that keeps the picture
-    // full-bleed; above 1.0 crops in further. Below 1.0 would expose
-    // edges with nothing behind them, so callers clamp there.
+    // full-bleed; above 1.0 crops in further; below 1.0 shows more of
+    // the source than the target rectangle can fill, and the rest is
+    // black. `min_zoom` is the floor, where the whole source is
+    // visible; callers clamp there.
     double zoom = 1.0;
     // Centre of the crop window in normalized source coordinates.
     // (0.5, 0.5) is the middle of the picture, which is what the
@@ -55,8 +59,18 @@ struct Framing {
     double center_y = 0.5;
 };
 
-// Any picture -> exactly IMG_W x IMG_H RGB, by scaling to cover the
-// target and cropping. Deterministic and aspect-preserving.
+// The smallest useful zoom for a source of this size: the one at which
+// the crop window is exactly the whole picture. Always <= 1, and
+// exactly 1 for a 4:3 source, where cover and contain are the same
+// scale. Zooming further out would only add black, so `fit` clamps to
+// this and the framing dialog's slider stops here -- one function so
+// the preview and the transmitted picture cannot disagree about where
+// the end of the travel is.
+double min_zoom(int width, int height);
+
+// Any picture -> exactly IMG_W x IMG_H RGB, by scaling and cropping.
+// Deterministic and aspect-preserving. Below zoom 1 the scaled picture
+// no longer fills the target and what it does not cover is black.
 //
 // Already-correct input is returned untouched, which is the path the
 // parity tests use.

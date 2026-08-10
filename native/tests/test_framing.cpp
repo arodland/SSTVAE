@@ -22,6 +22,7 @@
 #include "images/images.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -205,13 +206,128 @@ void test_zoom_crops_both_axes_equally() {
                    "framing/zoom: the output is exactly the centre 640x480 "
                    "of a 2x-zoomed 1280x960 source");
 
-    // Below 1 would expose edges with nothing behind them.
+    // A 4:3 source has nowhere to zoom out to -- cover and contain are
+    // the same scale -- so below 1 is clamped back to it and no black
+    // appears.
     Framing under;
     under.zoom = 0.25;
     check::is_true(
         sstvae::images::fit(src, under).rgb ==
             sstvae::images::fit(src, Framing{}).rgb,
-        "framing/zoom: below 1 is clamped to cover");
+        "framing/zoom: on a 4:3 source, below 1 is clamped to cover");
+    check::is_true(std::abs(sstvae::images::min_zoom(1280, 960) - 1.0) < 1e-12,
+                   "framing/zoom: min_zoom of a 4:3 source is exactly 1");
+}
+
+void test_zooming_out_shows_the_whole_source_and_pads() {
+    // 1280x480 is twice as wide as 4:3. The cover scale is 1.0, so at
+    // min zoom the whole 1280 wide source is squeezed into the 640 wide
+    // canvas -- exactly half height, 240 rows, with 120 black rows above
+    // and below.
+    const Picture src = ramp(1280, 480);
+    const double mz = sstvae::images::min_zoom(1280, 480);
+    check::is_true(std::abs(mz - 0.5) < 1e-12,
+                   "framing/out: min_zoom of a 2:1 source is 0.5");
+
+    Framing wide;
+    wide.zoom = mz;
+    const Picture out = sstvae::images::fit(src, wide);
+
+    const int W = sstvae::images::IMG_W;
+    const int H = sstvae::images::IMG_H;
+    const int band = (H - 240) / 2;  // 120 rows of padding, top and bottom
+    auto pixel = [&](int x, int y) {
+        const std::size_t i = (static_cast<std::size_t>(y) * W + x) * 3;
+        return std::array<int, 3>{out.rgb[i], out.rgb[i + 1], out.rgb[i + 2]};
+    };
+
+    // Named rows rather than "some black exists": a padding that landed
+    // all on one side, or a picture drawn at the wrong offset, both
+    // still produce black somewhere.
+    for (const int y : {0, band - 1, H - band, H - 1}) {
+        const auto p = pixel(W / 2, y);
+        check::is_true(p[0] == 0 && p[1] == 0 && p[2] == 0,
+                       "framing/out: row " + std::to_string(y) + " is black");
+    }
+    // And the picture itself fills every column of the band between
+    // them -- the whole width of the source is on the canvas, which is
+    // the thing zooming out is for. `ramp` has a black pixel only at
+    // (0,0), so a lit pixel anywhere in the row proves coverage; the
+    // corners are the columns a one-sided error would drop.
+    for (const int x : {0, 1, W / 2, W - 1}) {
+        const auto p = pixel(x, H / 2);
+        check::is_true(p[0] != 0 || p[1] != 0 || p[2] != 0,
+                       "framing/out: column " + std::to_string(x) +
+                           " of the middle band carries picture");
+    }
+    // The green channel encodes the source row, so the top of the
+    // picture band must be near source row 0 and the bottom near 479 --
+    // a vertically flipped or half-height fit fails this.
+    check::is_true(pixel(W / 2, band + 2)[1] < 20,
+                   "framing/out: the band starts at the top of the source");
+    // (source row 474 is green 474 % 256 = 218)
+    check::is_true(pixel(W / 2, H - band - 3)[1] > 200,
+                   "framing/out: and ends at the bottom of it");
+
+    // Below the minimum is clamped to it, not honoured: there is
+    // nothing further to reveal, only more black.
+    Framing further;
+    further.zoom = mz / 4.0;
+    check::is_true(sstvae::images::fit(src, further).rgb == out.rgb,
+                   "framing/out: below min_zoom is clamped to min_zoom");
+}
+
+void test_zoomed_out_panning_moves_the_padding_not_the_picture() {
+    // A portrait source, so the overhang is horizontal: 480x640 fits
+    // the canvas at 360x480, leaving 280 columns of black to place.
+    // The centre still means something -- an operator may want the
+    // picture against one edge -- but it may never cost a column of it.
+    const Picture src = ramp(480, 640);
+    const int W = sstvae::images::IMG_W;
+    const int H = sstvae::images::IMG_H;
+
+    // `ramp`'s green channel is the row, so on the middle row every
+    // source column is non-black and the black ones are padding.
+    auto span = [&](const Picture& out) {
+        const std::size_t row = static_cast<std::size_t>(H / 2) * W * 3;
+        int first = -1;
+        int last = -1;
+        for (int x = 0; x < W; ++x) {
+            const std::size_t i = row + static_cast<std::size_t>(x) * 3;
+            const bool black =
+                out.rgb[i] == 0 && out.rgb[i + 1] == 0 && out.rgb[i + 2] == 0;
+            if (black) continue;
+            if (first < 0) first = x;
+            last = x;
+        }
+        return std::pair<int, int>{first, last};
+    };
+
+    struct Case {
+        double center_x;
+        int want_first;
+        const char* what;
+    };
+    // left = clamp(floor(cx*360 - 320), -280, 0), and the picture then
+    // starts at column -left.
+    const Case cases[] = {
+        {0.0, 280, "hard left: the picture sits against the right edge"},
+        {0.5, 140, "centred: the padding splits evenly"},
+        {1.0, 0, "hard right: the picture sits against the left edge"},
+    };
+    for (const Case& c : cases) {
+        Framing f;
+        f.zoom = sstvae::images::min_zoom(480, 640);
+        f.center_x = c.center_x;
+        const auto [first, last] = span(sstvae::images::fit(src, f));
+        check::equal(first, c.want_first, std::string("framing/out: ") + c.what);
+        // The whole 360 columns are there whatever the centre does --
+        // this is the assertion that fails if a pan can slide the
+        // photograph off the edge of the canvas.
+        check::equal(last - first + 1, 360,
+                     std::string("framing/out: all 360 columns survive, ") +
+                         c.what);
+    }
 }
 
 void test_out_of_range_centres_are_clamped() {
@@ -255,6 +371,10 @@ int main() {
     test_panning_selects_the_named_columns();
     check::current_step.store("zoom");
     test_zoom_crops_both_axes_equally();
+    check::current_step.store("zoom_out");
+    test_zooming_out_shows_the_whole_source_and_pads();
+    check::current_step.store("zoom_out_pan");
+    test_zoomed_out_panning_moves_the_padding_not_the_picture();
     check::current_step.store("clamp");
     test_out_of_range_centres_are_clamped();
     check::current_step.store("identity");
