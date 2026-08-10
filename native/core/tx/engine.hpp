@@ -70,6 +70,27 @@ enum class TxPhase {
 
 const char* phase_name(TxPhase p);
 
+// Empty when a CW ID as configured will key a meaningful message.
+// Non-empty is a reason not to transmit, phrased for an operator to act
+// on rather than for a log.
+//
+// **There is exactly one bad combination**: the message still contains
+// `{callsign}` and no callsign is set, so it would render to a partial
+// identification -- "SSTVAE DE " and then nothing. A literal message
+// with no placeholder is *fine* with no callsign, and is one of the
+// three ways out of this (the others being to set a callsign or to turn
+// CW ID off); that is why the check is about the placeholder and not
+// about the callsign alone.
+//
+// Shared between the UI, which uses it to block Send and say why, and
+// the engine, which uses it as a backstop and silently sends no ID --
+// the same thing it did before this existed. Two implementations of
+// "is this CW ID sane" would eventually disagree, and the direction
+// that disagreement takes is a station transmitting an ID it was told
+// it had turned off.
+std::string cw_id_problem(bool cw_id, std::string_view cw_message,
+                          std::string_view callsign);
+
 // Thrown out of `prepare` when the operator cancelled mid-encode.
 // Distinct from a failure because it is not an error to report -- the
 // phase becomes Cancelled, not Failed.
@@ -98,9 +119,9 @@ struct TxConfig {
     double ptt_tail_s = 0.3; // audio end -> PTT down
     // Send `cw_message` in Morse (18 wpm, 1000 Hz) 500 ms after the
     // SSTVAE audio ends, under the same PTT key-up -- one continuous
-    // transmission rather than a second relay click. No-op if callsign
-    // is empty; there is nothing to identify with, whatever the message
-    // says.
+    // transmission rather than a second relay click. No-op when
+    // `cw_id_problem` below has something to say about the combination,
+    // and when the message renders to nothing.
     bool cw_id = false;
     // What to send as the CW ID. `{callsign}` is replaced with
     // `callsign` above; any other text goes out verbatim. The default
@@ -109,6 +130,16 @@ struct TxConfig {
     // hears the CW ID and can go find SSTVAE and a successful decode,
     // rather than just an unexplained tone.
     std::string cw_message = "SSTVAE DE {callsign}";
+    // Seconds of swept-tone leader in front of the transmission, to open
+    // a VOX-keyed transmitter's relay before the modem's signal starts.
+    // 0 (the default) sends none, which is right whenever PTT is under
+    // our control -- the lead delay already covers a relay.
+    //
+    // **A swept tone, and `dsp::vox_leader` is where that is argued.** A
+    // steady one reads 1.000 on the preamble detector and takes the lock
+    // away from the transmission it was meant to introduce. Add
+    // `dsp::VOX_LEAD_GAP_S` to this for the airtime it actually costs.
+    double vox_lead_s = 0.0;
     // Exposed rather than compiled in for the same reason
     // `Modem::modulate` exposes its clip headroom: the reference's tests
     // shorten it by patching a module constant, which is unreachable

@@ -9,11 +9,13 @@
 
 #include <cstring>
 
+#include "composition.hpp"
 #include "rx/engine.hpp"
 #include "session.hpp"
 
 namespace {
 
+using sstvae::androidapp::Composition;
 using sstvae::androidapp::Session;
 
 QString pictures_dir() {
@@ -47,6 +49,16 @@ QImage PictureProvider::requestImage(const QString& id, QSize* size, const QSize
         if (p.image) out = to_qimage(*p.image);
     } else if (id.startsWith(QStringLiteral("file/"))) {
         out.load(id.mid(5));
+    } else if (id.startsWith(QStringLiteral("compose/"))) {
+        // **The composition preview is `images::fit`'s own output**, run
+        // with the framing the transmitter will use, rather than a
+        // scaled-and-clipped QML Image imitating a crop. The desktop's
+        // rule, for the desktop's reason: a second representation of the
+        // picture is a second thing that can disagree with what goes on
+        // the air, and here the whole screen exists to decide exactly
+        // that. Cheap enough to re-run per drag -- it is one stb resize
+        // to 640x480 -- and the QML side loads it asynchronously.
+        out = to_qimage(Composition::instance().preview());
     }
     if (size) *size = out.size();
     return out;

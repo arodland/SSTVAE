@@ -30,6 +30,8 @@
 
 #include "check.hpp"
 #include "config.hpp"
+#include "dsp/dsp.hpp"
+#include "dsp/leader.hpp"
 #include "dsp/morse.hpp"
 #include "modem/modem.hpp"
 #include "tx/engine.hpp"
@@ -182,6 +184,166 @@ tx::Player capturing_player(std::vector<double>& out) {
     };
 }
 
+// The preamble detector's own metric, reimplemented here on purpose.
+//
+// `sync::acquire` does not expose it, and the leader's whole safety
+// argument is a statement about this number -- so the test states it
+// numerically rather than inferring it from a decode. A decode-based
+// test cannot do the job: on a clean signal the true preamble reads
+// exactly 1.000 and wins the argmax against *any* leader, so the
+// dangerous designs pass. See dsp/leader.hpp for the measurements.
+//
+// Sliding lag-M autocorrelation over PREAMBLE_CORR_WINDOW, normalized by
+// the window's own energy, as sstvae/modem/sync.py's _autocorr_metric.
+// Returns the highest value over windows *starting* before `limit`.
+//
+// **Measured on the leader in front of a real transmission, not on the
+// leader alone**, and that is not a nicety. The energy floor and the
+// filter state both depend on what surrounds the leader, and measuring
+// it in isolation understates it by a lot: the same 500 ms stretched
+// sweep reads 0.104 standalone and 0.44 in the position it will actually
+// occupy. The number that matters is the one a receiver computes on the
+// signal it receives.
+double peak_preamble_metric(std::span<const double> x, std::size_t limit) {
+    const std::vector<dsp::cdouble> z = dsp::sync_lowpass(dsp::to_baseband(x));
+    const std::size_t m = config::M;
+    const std::size_t w = config::PREAMBLE_CORR_WINDOW;
+    if (z.size() < m + w + 1) return 0.0;
+
+    double mean_power = 0.0;
+    for (const dsp::cdouble& v : z) mean_power += std::norm(v);
+    mean_power /= static_cast<double>(z.size());
+    const double floor_e = 1e-3 * static_cast<double>(w) * mean_power;
+
+    dsp::cdouble acc{};
+    double e1 = 0.0, e2 = 0.0;
+    double best = 0.0;
+    const std::size_t n = z.size() - m;
+    for (std::size_t i = 0; i < n; ++i) {
+        acc += z[i + m] * std::conj(z[i]);
+        e1 += std::norm(z[i]);
+        e2 += std::norm(z[i + m]);
+        if (i >= w) {
+            acc -= z[i - w + m] * std::conj(z[i - w]);
+            e1 -= std::norm(z[i - w]);
+            e2 -= std::norm(z[i - w + m]);
+        }
+        if (i + 1 < w) continue;
+        const std::size_t start = i + 1 - w;
+        if (start >= limit) break;
+        const double energy =
+            std::sqrt(std::max(e1, floor_e) * std::max(e2, floor_e)) + 1e-12;
+        best = std::max(best, std::abs(acc) / energy);
+    }
+    return best;
+}
+
+// **The leader must not look like a preamble, at any duration.**
+//
+// This is the test that makes `VOX_SWEEP_S` load-bearing rather than
+// decorative. Replace the repeated fixed-rate sweep with one sweep
+// stretched over the requested duration -- the obvious implementation,
+// and the one a reader would call a simplification -- and the leader's
+// metric climbs with duration: 0.443 at the default 500 ms, already over
+// the 0.42 threshold, and 0.969 at 10 s, which is a tone in all but
+// name. Nothing else in the suite notices, because a stretched leader
+// still decodes fine on a clean signal.
+void test_the_vox_leader_never_looks_like_a_preamble() {
+    // One real transmission, reused: the leader has to be measured in
+    // the position it will occupy, and modulating five times is the
+    // slowest thing this file could do for no extra information.
+    std::vector<double> wave;
+    tx::TxEngine engine(nullptr, capturing_player(wave), good_encoder());
+    check::is_true(engine.transmit(test_picture(), fast_config()),
+                   "tx/vox: baseline transmission for the metric");
+
+    const auto gap_n =
+        static_cast<std::size_t>(std::lround(dsp::VOX_LEAD_GAP_S * config::FS));
+
+    for (const double seconds : {0.3, 0.5, 1.0, 3.0, 10.0}) {
+        const std::vector<double> lead =
+            dsp::vox_leader(seconds, config::FS, 1.0);
+        check::equal(lead.size(),
+                     static_cast<std::size_t>(std::lround(seconds * config::FS)),
+                     "tx/vox: the leader is the requested length");
+
+        std::vector<double> signal = lead;
+        signal.insert(signal.end(), gap_n, 0.0);
+        signal.insert(signal.end(), wave.begin(), wave.end());
+        const double metric = peak_preamble_metric(signal, lead.size());
+
+        char what[128];
+        std::snprintf(what, sizeof what,
+                      "tx/vox: %.1f s leader stays under the 0.42 threshold (%.3f)",
+                      seconds, metric);
+        check::is_true(metric < config::PREAMBLE_THRESHOLD, what);
+        // Not merely under it: under the 0.358 peak that 3000 s of AWGN
+        // produces through this detector (CLAUDE.md, PREAMBLE_REPEATS),
+        // so the leader is no likelier to cause a false lock than the
+        // silence it replaces.
+        std::snprintf(what, sizeof what,
+                      "tx/vox: %.1f s leader stays under the AWGN peak (%.3f)",
+                      seconds, metric);
+        check::is_true(metric < 0.358, what);
+    }
+}
+
+// And the transmission behind it still decodes -- lock on the real
+// preamble, every frame, callsign intact.
+void test_a_transmission_behind_a_vox_leader_still_decodes() {
+    std::vector<double> played;
+    tx::TxEngine engine(nullptr, capturing_player(played), good_encoder());
+    tx::TxConfig config = fast_config();
+    config.vox_lead_s = 0.5;
+    check::is_true(engine.transmit(test_picture(), config),
+                   "tx/vox: transmits with the leader on");
+
+    const modem::Modem m;
+    const modem::DemodResult r = m.demodulate(played);
+    check::is_true(std::string(r.mode.name) == "A", "tx/vox: the mode still decodes");
+    check::equal(r.callsign, std::string("KC2G"), "tx/vox: the callsign survives");
+    check::equal(r.frames_received, r.mode.n_frames,
+                 "tx/vox: every frame is still there");
+}
+
+// Prepended before conditioning, at the wave's own peak -- so turning
+// the leader on does not change the level the operator set. Same
+// property the CW ID has, and the same reason.
+void test_the_vox_leader_costs_only_its_own_airtime() {
+    std::vector<double> plain;
+    tx::TxEngine baseline(nullptr, capturing_player(plain), good_encoder());
+    tx::TxConfig config = fast_config();
+    // Off unless asked for: whenever PTT is under our control the lead
+    // delay already covers the relay, and this is airtime.
+    check::equal(config.vox_lead_s, 0.0, "tx/vox: off by default");
+    check::is_true(baseline.transmit(test_picture(), config),
+                   "tx/vox: baseline transmits");
+
+    std::vector<double> with_lead;
+    tx::TxEngine engine(nullptr, capturing_player(with_lead), good_encoder());
+    config.vox_lead_s = 0.5;
+    check::is_true(engine.transmit(test_picture(), config),
+                   "tx/vox: transmits with the leader on");
+
+    const auto lead_n = static_cast<std::size_t>(std::lround(0.5 * config::FS));
+    const auto gap_n =
+        static_cast<std::size_t>(std::lround(dsp::VOX_LEAD_GAP_S * config::FS));
+    check::equal(with_lead.size(), plain.size() + lead_n + gap_n,
+                 "tx/vox: exactly one leader plus one gap was prepended");
+
+    bool gap_is_silent = true;
+    for (std::size_t i = lead_n; i < lead_n + gap_n; ++i) {
+        if (with_lead[i] != 0.0) gap_is_silent = false;
+    }
+    check::is_true(gap_is_silent, "tx/vox: the gap before the preamble is silence");
+
+    double plain_peak = 0.0, lead_peak = 0.0;
+    for (double v : plain) plain_peak = std::max(plain_peak, std::abs(v));
+    for (double v : with_lead) lead_peak = std::max(lead_peak, std::abs(v));
+    check::close(std::vector<double>{lead_peak}, std::vector<double>{plain_peak}, 1e-12,
+                 "tx/vox: the transmit level is unchanged by the leader");
+}
+
 void test_cw_id_appends_after_the_transmission() {
     std::vector<double> plain;
     tx::TxEngine baseline(nullptr, capturing_player(plain), good_encoder());
@@ -269,6 +431,48 @@ void test_cw_id_does_nothing_with_no_callsign() {
 
     check::equal(played.size(), plain.size(),
                 "tx/cwid-none: no callsign means nothing is appended");
+}
+
+// The predicate the UI blocks Send on and the engine skips the ID on.
+// Exactly one combination is bad; the three ways out all have to work,
+// because the UI offers all three.
+void test_cw_id_problem_names_only_the_broken_combination() {
+    check::is_true(tx::cw_id_problem(true, "SSTVAE DE {callsign}", "").empty() == false,
+                   "tx/cwid-problem: placeholder with no callsign is a problem");
+    check::is_true(tx::cw_id_problem(true, "SSTVAE DE {callsign}", "KC2G").empty(),
+                   "tx/cwid-problem: way out 1 -- set a callsign");
+    check::is_true(tx::cw_id_problem(true, "SSTVAE DE KC2G", "").empty(),
+                   "tx/cwid-problem: way out 2 -- write the call into the message");
+    check::is_true(tx::cw_id_problem(false, "SSTVAE DE {callsign}", "").empty(),
+                   "tx/cwid-problem: way out 3 -- turn CW ID off");
+}
+
+// The behaviour change that makes way out 2 real: before this, *any*
+// empty callsign dropped the ID, so rewriting the template did nothing
+// and the UI would have been offering an escape the engine ignored.
+void test_cw_literal_message_is_sent_with_no_callsign() {
+    std::vector<double> custom;
+    tx::TxEngine engine(nullptr, capturing_player(custom), good_encoder());
+    tx::TxConfig config = fast_config();
+    config.callsign = "";
+    config.cw_id = true;
+    config.cw_message = "SSTVAE DE KC2G";
+    check::is_true(engine.transmit(test_picture(), config),
+                   "tx/cwid-literal: transmits");
+
+    std::vector<double> plain;
+    tx::TxEngine baseline(nullptr, capturing_player(plain), good_encoder());
+    config.cw_id = false;
+    check::is_true(baseline.transmit(test_picture(), config),
+                   "tx/cwid-literal: baseline transmits");
+
+    const std::vector<double> id_tone = dsp::generate_morse(
+        "SSTVAE DE KC2G", config::FS, tx::CW_ID_WPM, tx::CW_ID_TONE_HZ, 1.0);
+    const std::size_t gap_n =
+        static_cast<std::size_t>(std::lround(tx::CW_ID_GAP_S * config::FS));
+    check::equal(custom.size(), plain.size() + gap_n + id_tone.size(),
+                "tx/cwid-literal: a message with no placeholder is keyed "
+                "even with no callsign set");
 }
 
 void test_cw_message_is_customizable() {
@@ -558,8 +762,13 @@ int main() {
         test_an_unknown_mode_is_refused_before_keying();
         test_cancelling_during_encode_never_keys();
         test_a_successful_transmission();
+        test_the_vox_leader_never_looks_like_a_preamble();
+        test_a_transmission_behind_a_vox_leader_still_decodes();
+        test_the_vox_leader_costs_only_its_own_airtime();
         test_cw_id_appends_after_the_transmission();
         test_cw_id_does_nothing_with_no_callsign();
+        test_cw_id_problem_names_only_the_broken_combination();
+        test_cw_literal_message_is_sent_with_no_callsign();
         test_cw_message_is_customizable();
         test_cw_message_with_no_placeholder_is_sent_as_is();
         test_no_rig_control_still_transmits();

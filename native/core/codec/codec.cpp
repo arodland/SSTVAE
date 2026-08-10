@@ -29,6 +29,7 @@ inline int quantize(float v) {
 
 struct OnnxCodec::Impl {
     Resolver resolver;
+    BlobResolver blob_resolver;
     Ort::Env env{ORT_LOGGING_LEVEL_ERROR, "sstvae"};
     Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     std::map<std::string, Ort::Session> sessions;
@@ -38,11 +39,10 @@ struct OnnxCodec::Impl {
     Ort::Session& session(const std::string& part) {
         auto it = sessions.find(part);
         if (it != sessions.end()) return it->second;
-        if (!resolver) {
+        if (!resolver && !blob_resolver) {
             throw std::runtime_error("codec has no resolver; cannot locate the " +
                                      part + " artifact");
         }
-        const std::string path = resolver(part);
 
         Ort::SessionOptions opts;
         // Measured best of 1/4/24 on x86-64; 1 was ~5x worse. The
@@ -51,6 +51,36 @@ struct OnnxCodec::Impl {
         opts.SetIntraOpNumThreads(4);
         opts.SetLogSeverityLevel(3);
 
+        // A bundled part first. Nullopt is not a failure -- it means
+        // this build does not carry that artifact, and the path
+        // resolver below is the answer. Only when there is no path
+        // resolver either does a miss become an error, and then it is
+        // the same "cannot locate" as any other.
+        if (blob_resolver) {
+            if (const std::optional<ModelBlob> blob = blob_resolver(part)) {
+                // **Says out loud what lets `blob` die at the end of
+                // this scope.** ORT's default is to parse a model given
+                // by pointer into its own structures; the opt-in
+                // `use_ort_model_bytes_directly` makes it reference the
+                // caller's buffer instead, which would turn this into a
+                // use-after-free with no diagnostic. Setting it
+                // explicitly means a future change of default cannot
+                // reach us, and the assumption is written where it is
+                // relied on rather than in a comment somewhere.
+                Ort::SessionOptions blob_opts = opts.Clone();
+                blob_opts.AddConfigEntry("session.use_ort_model_bytes_directly", "0");
+                Ort::Session sess(env, blob->data.data(), blob->data.size(), blob_opts);
+                auto [pos, _] = sessions.emplace(part, std::move(sess));
+                check_same_checkpoint(part, blob->name, pos->second);
+                return pos->second;
+            }
+            if (!resolver) {
+                throw std::runtime_error("this build carries no " + part +
+                                         " artifact and has no way to fetch one");
+            }
+        }
+
+        const std::string path = resolver(part);
 #ifdef _WIN32
         // ORT takes a wide path on Windows. The artifacts live under a
         // user profile, which can be non-ASCII.
@@ -103,6 +133,10 @@ OnnxCodec::OnnxCodec(OnnxCodec&&) noexcept = default;
 OnnxCodec& OnnxCodec::operator=(OnnxCodec&&) noexcept = default;
 
 void OnnxCodec::set_resolver(Resolver resolver) { impl_->resolver = std::move(resolver); }
+
+void OnnxCodec::set_blob_resolver(BlobResolver resolver) {
+    impl_->blob_resolver = std::move(resolver);
+}
 
 void OnnxCodec::preload(const std::string& part) { (void)impl_->session(part); }
 

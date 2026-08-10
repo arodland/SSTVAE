@@ -49,13 +49,32 @@
              34 up, and the service may then only be started while the
              app is in the foreground, which is why nothing starts it
              but a button press.
+             mediaPlayback is the transmit half: an over is 32 to 95 s of
+             committed airtime and must not be truncated because the
+             activity went away. Half duplex means only one of the two
+             types is ever in use at a time, but both are declared for
+             the service's whole lifetime rather than re-declared at each
+             transition.
              (No double hyphens in here: XML forbids them inside a
              comment, and aapt reports it as a column number.) -->
         <service
             android:name="org.cleverdomain.sstvae.ListenerService"
             android:exported="false"
             android:stopWithTask="false"
-            android:foregroundServiceType="microphone" />
+            android:foregroundServiceType="microphone|mediaPlayback" />
+
+        <!-- Picking a picture to transmit. Its own activity because an
+             activity result comes back to whoever launched it, and
+             reaching QtActivity's means subclassing Qt's bindings or
+             using its private API. Translucent and title-less: it exists
+             to launch an intent and finish, and must never look like a
+             screen of this app. exported="false" because nothing outside
+             the app has any business starting it. -->
+        <activity
+            android:name="org.cleverdomain.sstvae.ImagePicker"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

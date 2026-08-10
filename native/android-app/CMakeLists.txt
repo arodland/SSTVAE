@@ -50,6 +50,9 @@ endif()
 
 project(sstvae_android VERSION 0.3.1 LANGUAGES CXX)
 
+set(SSTVAE_ANDROID_VERSION_CODE 1 CACHE STRING
+    "Play upload version code; must increase on every upload")
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -73,8 +76,9 @@ set(SSTVAE_BUILD_PYMODULE OFF CACHE BOOL "" FORCE)
 add_subdirectory(.. sstvae_native EXCLUDE_FROM_ALL)
 
 qt_add_executable(sstvae_android main.cpp listener.cpp session.cpp service_jni.cpp java_fetcher.cpp
-    waterfall.cpp pictures.cpp)
-qt_add_qml_module(sstvae_android URI SSTVAE VERSION 1.0 QML_FILES Main.qml LevelMeter.qml)
+    assets.cpp waterfall.cpp pictures.cpp composition.cpp transmitter.cpp)
+qt_add_qml_module(sstvae_android URI SSTVAE VERSION 1.0
+    QML_FILES Main.qml LevelMeter.qml CropView.qml TransmitPane.qml)
 target_link_libraries(sstvae_android PRIVATE Qt6::Quick Qt6::Gui sstvae_core
                                              sstvae_audio_android
                                              sstvae_codec)
@@ -90,17 +94,126 @@ get_target_property(_ort_so onnxruntime IMPORTED_LOCATION)
 set_property(TARGET sstvae_android APPEND PROPERTY
     QT_ANDROID_EXTRA_LIBS "${_ort_so}")
 
-# The audio layer's Java half ships with the layer, not with this app.
+# **The package source directory is assembled, not pointed at.**
+#
+# androiddeployqt takes exactly one `QT_ANDROID_PACKAGE_SOURCE_DIR`, and
+# this app needs two sources in it: its own `android/` tree, and the
+# audio layer's Java half, which lives with the layer
+# (`SSTVAE_ANDROID_AUDIO_JAVA_DIR`) precisely so an app cannot supply its
+# own subtly-wrong blocking-read loop. The obvious workaround -- keep a
+# copy of `AudioBridge.java` under `android/src/` and remember to sync it
+# -- is what was here, and it is a trap with no failure mode: the two
+# copies were byte-identical, so nothing was wrong yet, and the first
+# edit to either one would have shipped the other. That is exactly the
+# hazard `native/core/config.hpp` has a generator and a CI gate for.
+#
+# So both are copied into a build-tree directory. `configure_file`
+# rather than `file(COPY)` so CMake re-runs when a Java file changes, and
+# `CONFIGURE_DEPENDS` so adding one is noticed too.
+set(_pkg_dir "${CMAKE_CURRENT_BINARY_DIR}/android-package")
+function(sstvae_stage_package_dir from into)
+    file(GLOB_RECURSE _files CONFIGURE_DEPENDS RELATIVE "${from}" "${from}/*")
+    foreach(_f IN LISTS _files)
+        configure_file("${from}/${_f}" "${into}/${_f}" COPYONLY)
+    endforeach()
+endfunction()
+sstvae_stage_package_dir("${CMAKE_CURRENT_SOURCE_DIR}/android" "${_pkg_dir}")
+sstvae_stage_package_dir("${SSTVAE_ANDROID_AUDIO_JAVA_DIR}" "${_pkg_dir}/src")
+
+# **The model artifacts ship inside the APK** (assets.hpp says why: the
+# model is part of the on-air contract, and first run has to work with
+# no network). Downloaded at configure time and pinned by sha256, the
+# same shape as the onnxruntime and Hamlib pins -- these are published
+# immutable filenames, so a hash mismatch means the wrong file, never a
+# stale one.
+#
+# `assets/` inside the package source dir, **not** a Qt resource:
+# a .qrc is compiled into the app library, which the bundle carries once
+# per ABI, so 20 MB of weights would land in the download twice. Assets
+# live in the bundle's base module and are shared by every ABI.
+#
+# OFF is a supported configuration and needs no other change: with no
+# assets staged, `assets::model_blob` returns nullopt, the codec falls
+# through to `checkpoint::resolve_onnx`, and the app fetches exactly as
+# it did before. That is what makes this switch cheap to flip while
+# developing, where 20 MB per clean build tree is not free.
+option(SSTVAE_ANDROID_BUNDLE_MODELS
+       "Ship the ONNX codec inside the APK instead of fetching it" ON)
+if(SSTVAE_ANDROID_BUNDLE_MODELS)
+    # Pinned to `checkpoint::DEFAULT_REVISION` and
+    # `DEFAULT_PRECISION`; the app looks the filenames up through
+    # `checkpoint::onnx_filename`, so a revision bump is one edit there
+    # plus the two hashes here, and a mismatch fails the build rather
+    # than shipping an artifact the code will not ask for.
+    # **A multi-ABI build configures this file once per ABI**, in nested
+    # build directories, so a download location under `CMAKE_BINARY_DIR`
+    # is fetched once per ABI -- which onnxruntime.cmake accepts for a
+    # small AAR and is 40 MB here. Hence a shared location that
+    # `tools/build_android.sh` pins to the *top* build directory;
+    # pointing it at an already-populated directory (a Hub cache, a USB
+    # stick) skips the network entirely.
+    set(SSTVAE_ANDROID_MODEL_DIR "${CMAKE_BINARY_DIR}/sstvae-models" CACHE PATH
+        "Where the bundled ONNX artifacts are downloaded to and read from")
+    # **A cache variable does not reach the per-ABI builds by itself.**
+    # Qt configures each extra ABI as a separate CMake project and
+    # forwards only what this list names, so without it the secondary
+    # ABI re-downloads all 20 MB into its own nested build directory --
+    # which is exactly what it did, visibly, on the first two-ABI run.
+    list(APPEND QT_ANDROID_MULTI_ABI_FORWARD_VARS SSTVAE_ANDROID_MODEL_DIR)
+    set(_model_base "https://huggingface.co/arodland/sstvae/resolve/main")
+    # `|` rather than `;` between name and hash: `foreach(IN LISTS)`
+    # splits on semicolons, so a list of "a;b" pairs arrives flattened
+    # into single items and the hash silently goes missing.
+    foreach(_m IN ITEMS
+        "v3-decoder-fp16.onnx|82935521e69bd1687cdf318ced26d1b469c1c61428f26022a955ffad9d6a0561"
+        "v3-encoder-fp16.onnx|18a3805b80a3137d6a1544545fc24c13dd51dc8a2b983e391df5a3b72a5b4548")
+        string(REPLACE "|" ";" _pair "${_m}")
+        list(GET _pair 0 _name)
+        list(GET _pair 1 _sha)
+        set(_dl "${SSTVAE_ANDROID_MODEL_DIR}/${_name}")
+        if(NOT EXISTS "${_dl}")
+            message(STATUS "Fetching model artifact ${_name}")
+            file(DOWNLOAD "${_model_base}/${_name}" "${_dl}"
+                 EXPECTED_HASH SHA256=${_sha}
+                 SHOW_PROGRESS STATUS _st)
+            list(GET _st 0 _code)
+            if(NOT _code EQUAL 0)
+                file(REMOVE "${_dl}")
+                list(GET _st 1 _msg)
+                message(FATAL_ERROR
+                    "could not fetch ${_name}: ${_msg}\n"
+                    "Build with -DSSTVAE_ANDROID_BUNDLE_MODELS=OFF to fall back "
+                    "to fetching the model at run time.")
+            endif()
+        endif()
+        configure_file("${_dl}" "${_pkg_dir}/assets/models/${_name}" COPYONLY)
+    endforeach()
+endif()
 set_property(TARGET sstvae_android APPEND PROPERTY
-    QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android")
+    QT_ANDROID_PACKAGE_SOURCE_DIR "${_pkg_dir}")
 
 set_target_properties(sstvae_android PROPERTIES
     QT_ANDROID_PACKAGE_NAME "org.cleverdomain.sstvae"
     QT_ANDROID_APP_NAME "SSTVAE"
     QT_ANDROID_TARGET_SDK_VERSION 36
-    QT_ANDROID_MIN_SDK_VERSION 28
+    # **29, because of the gallery export.** Inserting into MediaStore
+    # with `RELATIVE_PATH` and `IS_PENDING` is API 29; the API 28 way is
+    # `WRITE_EXTERNAL_STORAGE`, a public-directory write and a
+    # `MediaScannerConnection` scan -- a second implementation of the
+    # same feature, and a runtime storage prompt on every install, to
+    # support one API level from 2018. Qt 6.8 itself requires 28, so
+    # this gives up a single version.
+    QT_ANDROID_MIN_SDK_VERSION 29
     QT_ANDROID_VERSION_NAME "${PROJECT_VERSION}"
-    QT_ANDROID_VERSION_CODE 1)
+    # **Play requires this to increase on every upload, forever**, and it
+    # is the one number a rebuild cannot infer: `PROJECT_VERSION` moves
+    # for reasons of its own and a version that ships twice (a fixed
+    # build of the same release) still needs a new code. So it stays an
+    # explicit input -- `--version-code N` on the build script -- with 1
+    # as the first upload. Getting it wrong is not dangerous, only
+    # tedious: Play refuses the bundle at upload and says which number it
+    # already has.
+    QT_ANDROID_VERSION_CODE "${SSTVAE_ANDROID_VERSION_CODE}")
 
 # **Never set `QT_ANDROID_PERMISSIONS` by hand.** Each element is itself
 # a `name;<value>` list, joined into JSON as `"name": "<value>"`, so a
@@ -114,6 +227,10 @@ qt_add_android_permission(sstvae_android
     NAME android.permission.FOREGROUND_SERVICE)
 qt_add_android_permission(sstvae_android
     NAME android.permission.FOREGROUND_SERVICE_MICROPHONE)
+# The transmit half. Declared alongside the microphone one because half
+# duplex swaps between them within a single service lifetime.
+qt_add_android_permission(sstvae_android
+    NAME android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK)
 # API 33+. Denying it costs the ongoing notification but not the
 # session, which is why the service never treats it as fatal.
 qt_add_android_permission(sstvae_android

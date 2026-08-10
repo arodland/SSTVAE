@@ -1019,6 +1019,21 @@ void TransmitPanel::send() {
             tr("The codec checkpoint is still loading. Try again in a moment."));
         return;
     }
+    // The same predicate the engine skips the ID on, asked here so it
+    // is a refusal the operator can act on rather than a CW ID that
+    // silently never goes out. Blocking rather than warning, because
+    // every way out of it is in Settings and none of them is something
+    // to decide with the radio keyed.
+    {
+        const settings::Config& config = app_->config();
+        const std::string problem = tx::cw_id_problem(
+            config.transmit.cw_id, config.transmit.cw_message, config.callsign);
+        if (!problem.empty()) {
+            QMessageBox::warning(this, tr("CW ID is not set up"),
+                                 QString::fromStdString(problem));
+            return;
+        }
+    }
     if (thread_.joinable()) thread_.join();
 
     // A fresh attempt clears the previous one's error; the log keeps it.

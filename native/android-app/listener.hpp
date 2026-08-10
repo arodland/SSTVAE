@@ -56,6 +56,13 @@ class Listener : public QObject {
     // themselves.
     Q_PROPERTY(bool showTechnical READ showTechnical WRITE setShowTechnical
                    NOTIFY changed)
+    // Mirror finished receptions into `Pictures/SSTVAE`, which is what
+    // puts them in Google Photos' "On this device" collections. Off by
+    // default -- see `Session::set_save_to_gallery` for why that is not
+    // just conservatism.
+    Q_PROPERTY(bool saveToGallery READ saveToGallery WRITE setSaveToGallery
+                   NOTIFY changed)
+    Q_PROPERTY(QString galleryError READ galleryError NOTIFY changed)
 
 public:
     explicit Listener(QObject* parent = nullptr);
@@ -76,6 +83,14 @@ public:
     bool hasLiveImage() const;
     bool showTechnical() const { return technical_; }
     void setShowTechnical(bool on);
+    bool saveToGallery() const { return gallery_; }
+    void setSaveToGallery(bool on);
+    QString galleryError() const;
+
+    // Send the task to the background, as Back does on a home screen.
+    // What Back has to mean while a session is running -- see
+    // Background.java and the `onClosing` handler in Main.qml.
+    Q_INVOKABLE void moveToBackground();
 
     Q_INVOKABLE void refreshDevices();
     Q_INVOKABLE void loadModel();
@@ -98,6 +113,7 @@ private:
     int live_id_ = 0;
     bool screen_held_ = false;
     bool technical_ = false;
+    bool gallery_ = false;
     const void* last_image_ = nullptr;
 };
 

@@ -7,6 +7,7 @@
 #include <string>
 #include <utility>
 
+#include "dsp/leader.hpp"
 #include "dsp/morse.hpp"
 #include "images/images.hpp"
 #include "modem/modem.hpp"
@@ -45,6 +46,17 @@ std::string render_cw_message(const std::string& tmpl, const std::string& callsi
 }
 
 }  // namespace
+
+std::string cw_id_problem(bool cw_id, std::string_view cw_message,
+                          std::string_view callsign) {
+    if (!cw_id) return {};
+    if (cw_message.find("{callsign}") == std::string_view::npos) return {};
+    if (!callsign.empty()) return {};
+    return "The CW ID message still has {callsign} in it, but no callsign is "
+           "set -- it would key an incomplete identification. Set a callsign, "
+           "write the identification into the message itself, or turn CW ID "
+           "off.";
+}
 
 const char* phase_name(TxPhase p) {
     switch (p) {
@@ -141,15 +153,41 @@ std::vector<double> TxEngine::prepare(const images::Picture& image,
         std::span<const double>(flat.data(), static_cast<std::size_t>(spec.n_latents)),
         spec, true, config.callsign);
 
+    // The modulated signal's own peak, which is what both the leader and
+    // the CW ID are scaled to. Taken here, before either is attached, so
+    // each is measured against the transmission rather than against
+    // whichever of them happened to be added first.
+    double peak = 0.0;
+    for (double v : wave) peak = std::max(peak, std::abs(v));
+
+    // Prepended before conditioning, for the same reason the CW ID is
+    // appended before it: at the wave's own peak, so
+    // `condition_for_output` picks the same scale either way and turning
+    // the leader on cannot change the level of the picture.
+    if (config.vox_lead_s > 0.0) {
+        std::vector<double> lead =
+            dsp::vox_leader(config.vox_lead_s, FS, peak);
+        if (!lead.empty()) {
+            lead.insert(lead.end(),
+                        static_cast<std::size_t>(
+                            std::lround(dsp::VOX_LEAD_GAP_S * FS)),
+                        0.0);
+            wave.insert(wave.begin(), lead.begin(), lead.end());
+        }
+    }
+
     // Appended before conditioning, not after: `condition_for_output`
     // then picks its scale from whichever of the two has the higher
     // peak, and the tone's amplitude is set to the SSTVAE wave's own
     // peak so appending it never changes that scale in the first
-    // place. Silently skipped with no callsign -- there is nothing to
-    // identify with.
-    if (config.cw_id && !config.callsign.empty()) {
-        double peak = 0.0;
-        for (double v : wave) peak = std::max(peak, std::abs(v));
+    // place. Silently skipped when `cw_id_problem` objects -- which is
+    // what this used to spell as `!config.callsign.empty()`, and the
+    // difference is that a *literal* message now goes out with no
+    // callsign set instead of being dropped. That is what makes
+    // "rewrite the template" a real way out of the missing-callsign
+    // case rather than one the UI offers and the engine ignores.
+    if (config.cw_id &&
+        cw_id_problem(config.cw_id, config.cw_message, config.callsign).empty()) {
         const std::string text = render_cw_message(config.cw_message, config.callsign);
         const std::vector<double> id_tone = dsp::generate_morse(
             text, FS, CW_ID_WPM, CW_ID_TONE_HZ, peak);

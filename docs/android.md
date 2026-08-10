@@ -3,7 +3,12 @@
 Assessed 2026-08-08, and **Tier 0 was built the same day**: the app in
 `native/android-app/` decodes complete pictures on a Galaxy S25+ over
 acoustic coupling, with no artifacts, a capture rate inside ±100 ppm
-and ~0.5 s of DSP per poll. The design below is what was decided
+and ~0.5 s of DSP per poll. **Tier 1 — transmit — followed on
+2026-08-09 and worked on the air the same day**: phone to radio over
+USB, received on an Android tablet on another radio, mode B, 25 dB.
+The Tier 1 section below is the record of what it changed about this
+design, and the biggest of those is that the overlay renderer is *not*
+wanted after all. The design below is what was decided
 beforehand and it survived contact almost intact; the places it did
 not, and everything the build turned out to require, are in
 "Implementation notes" near the end. `native/android-app/README.md` is
@@ -374,9 +379,9 @@ driver. Build both ABIs; the x86_64 Qt kit is 176 MB.
 | Piece | Today | On Android |
 |---|---|---|
 | Paths (config, model cache) | `getenv` of `HOME`/`XDG_*`/`LOCALAPPDATA` | Two env vars set from JNI at startup. Near-free; see below. |
-| Saving received pictures | `std::filesystem` into `received/` | MediaStore or SAF, so the gallery can see them. New. |
+| Saving received pictures | `std::filesystem` into `received/` | **Both, and the split is the design.** `std::filesystem` into app-private storage stays the canonical copy, because the sidecar is what makes a picture answerable later and MediaStore has nowhere to put it. A MediaStore insert mirrors it into `Pictures/SSTVAE` when the operator asks — that, and only that, is what a gallery can see. |
 | Model download | `core/checkpoint/qt_fetcher.cpp`, QtNetwork, behind a `Fetcher` seam | **Keep it.** QtNetwork is in the module set anyway now that Qt Quick is the UI, so this is free. The manual-redirect requirement is unchanged — the client must not auto-follow, or the `x-linked-etag` checksum on the 302 is lost. |
-| Overlay rendering | `core/overlay/render.cpp`, 329 lines, QtGui only | Unchanged. QtGui is in the module set; Tier 1+ only. |
+| Overlay rendering | `core/overlay/render.cpp`, 329 lines, QtGui only | **Not ported, and not planned.** Assumed here to be a Tier 1 item; Tier 1 shipped without it, because the beacon and the CW ID identify the station and a caption in the pixels does not. See the Tier 1 section. |
 | UI | 6,170 lines of QtWidgets | Rewritten in Qt Quick; see below. |
 | Rig control | `core/rig/hamlib.cpp` + libhamlib | Dropped. See below. |
 
@@ -394,8 +399,10 @@ place where getting it wrong means silently writing a config nobody
 reads.
 
 Note what this does *not* cover: a received picture written to
-`filesDir` is invisible to the user. Getting pictures into the gallery
-is MediaStore work with no desktop counterpart.
+`filesDir` is invisible to every other app on the phone. Getting
+pictures into the gallery is MediaStore work with no desktop
+counterpart, and it is a *mirror* rather than a relocation — see
+`Gallery.java`.
 
 ### Background execution
 
@@ -572,14 +579,20 @@ Short, and none of it is layout:
 
 ### Tier 0 — receive-only listener (the committed one) — **DONE**
 
-Built 2026-08-08 and receiving on hardware. Everything below was
-needed and is in; what is *not* done is a MediaStore "save to gallery"
-(Share reaches gallery, mail and chat for one intent and no storage
-permission, so it went first) and **USB capture, which has never been
-tried on this app** — the four hardware questions above are all still
-open, and acoustic coupling is what has been measured. The smoke test
-did decode a TH-D75 over USB at >24 dB, so the path is known to exist;
-it has simply not been walked with `native/android-app/`.
+Built 2026-08-08 and receiving on hardware. Everything below was needed
+and is in. The MediaStore "save to gallery" this section used to list as
+outstanding landed 2026-08-10, off by default; Share went first and
+remains the per-picture route, while the insert is what makes receptions
+a *collection* in Google Photos. See `native/android-app/README.md` for
+why it lives in the service rather than beside the file write, and for
+the two MediaStore traps (`IS_PENDING`, and `DATE_TAKEN` not surviving
+the post-pending rescan).
+
+**USB was untried on this app until Tier 1, and then it carried the
+first RF contact** (2026-08-09) — out of a phone through a USB audio
+interface and in on a tablet, mode B, 25 dB. Acoustic coupling is what
+Tier 0 measured; USB is what the app is really for, and it now works in
+both directions rather than only in `native/android/`'s smoke test.
 
 USB or mic capture → `RingBuffer` → `decode_loop` → picture. Needs the
 audio layer, a foreground service that owns the engine, storage-out with
@@ -589,25 +602,116 @@ tx engine, the rig, the optimizer, the crop dialog, or settings for any
 of them.
 
 Only the decoder needs fetching — 9 MB, not 21 — because `load_codec`'s
-per-part laziness already does that.
+per-part laziness already does that. (**Superseded 2026-08-10**: both
+parts ship in the APK, so nothing is fetched on a normal run. The
+laziness is still real and still what a `BUNDLE_MODELS=OFF` build uses;
+it simply stopped being the thing that decides a first run.)
 
 Acoustic coupling remains the zero-hardware fallback and should stay
 supported, but it is the *fallback*: the app is worth having because it
 takes a USB interface.
 
-### Tier 1 — receive and transmit, VOX keying
+### Tier 1 — receive and transmit — **DONE, AND ON AIR**
 
-Adds `core/tx/engine.cpp`, which ports unchanged. Its PTT guarantee
+Built 2026-08-09, and **verified over RF the same day** (Andrew): a
+picture transmitted from a phone into a radio over a USB audio
+interface, received on an Android tablet on another radio, **mode B,
+CW ID on, 25 dB SNR reported, no issues**. That is the first
+Android-to-Android contact and the first time this app has transmitted
+into anything but an emulator's null sink.
+
+Two things it settles that were open an hour earlier. **A phone's USB
+audio output drives a radio cleanly enough to transmit** — the whole
+Tier 1 claim rested on emulator playback until this. And **USB audio on
+this app is no longer untried in either direction**: the tablet
+received over its own radio, which is what the app is really for and
+what `native/android/`'s smoke test could only suggest.
+
+**What was *not* exercised is the VOX leader.** The radio was keyed by
+hand, because that particular radio offers no VOX on its USB/data
+input. So the leader remains tested against the preamble detector and
+the emulator, and never against a real VOX circuit.
+
+**That is a coverage gap and nothing more** (Andrew, 2026-08-09). It is
+tempting to read it as evidence that VOX keying is the wrong premise
+for this tier, and that would be wrong: plenty of radios do offer VOX
+on the USB input, and a USB soundcard interface wired to a radio's
+*microphone* input works with VOX regardless of what the radio's data
+port does. This radio's limitation is not a common one. The "RX+TX
+without rig control" shape the section below argues for stands.
+
+`core/tx/engine.cpp` ported unchanged, as predicted. Its PTT guarantee
 degenerates to "VOX drops when the audio stops" and `PttWatchdog` has
-nothing to unkey — keep the state machine anyway, so CAT can be added
-later without restructuring the transmit path. Adds audio *output*
-routing, which is the same problem as input and is solved by the same
-layer. Picture source is the camera or the gallery; `images::fit`
-already handles the resize, and 320×240 is still the minimum accepted
-input.
+nothing to unkey — the state machine is kept anyway, and it cost
+nothing to keep: a `PttWatchdog` with a null `Ptt` stands itself down,
+so `run_transmit` has no special case and CAT over NET rigctl later is
+a `Ptt` to pass rather than a restructure. Audio output was already
+written (`audio::android::play`, unexercised since Tier 0) and needed
+one real fix, below. Picture source is the camera or the gallery.
 
-A callsign caption will be wanted on a ham mode, so
-`core/overlay/render.cpp` comes in here even if the *editor* does not.
+**The overlay does not come in after all** (Andrew, 2026-08-09), which
+is the one place this section was wrong. It assumed "a callsign caption
+will be wanted on a ham mode", so `core/overlay/render.cpp` would land
+here even without the editor. It is not wanted: the station is
+identified by the **beacon carrier**, which every receiver decodes
+whether or not the picture came through well enough to read text in,
+and optionally by a **CW ID** a human can copy by ear. A callsign
+burnt into the pixels identifies the station only to someone who
+already decoded the picture, and spends the codec's bit budget doing
+it. So the operator picks an image, crops it, and it goes out
+unmodified — no overlay renderer in the Android build at all.
+
+**A callsign is not required to transmit**, and an earlier draft gating
+the Send button on one was wrong. Identifying is required of an amateur
+station; the app does not know it is connected to a radio and does not
+take responsibility for the operator's identification even when it is.
+It offers two ways to do it and voice is a third it never sees.
+
+**The VOX leader is a chirp, not a tone, and that is not a detail.**
+`sync::acquire`'s metric is a lag-M autocorrelation normalized by the
+window's own energy, so *any* steady sinusoid reads exactly 1.000 —
+above what a real preamble reaches in any noise — and `acquire` takes a
+hard argmax. Measured: a 500 ms 1500 Hz leader in front of a mode A
+transmission takes the lock and the whole thing fails with "header
+decode failed". `dsp::vox_leader` sweeps the carrier band instead, and
+sweeps it at a **fixed rate repeated** rather than once stretched over
+the requested duration — what decorrelates the leader is the rate, so
+the stretched form gets more tone-like the longer it is (0.443 at the
+default 500 ms, already over the 0.42 threshold; 0.969 at 10 s) while
+the repeated form is flat at 0.330 at every duration, below even the
+0.358 peak that 3000 s of AWGN produces. See `core/dsp/leader.hpp`.
+The general weakness this dodges — that the receiver loses its lock to
+a steady carrier, which HF is full of — is an open item in
+`docs/todo.md`.
+
+**Half duplex, and it says so.** Capture stops for the whole over and
+restarts afterwards *if it was running*, with a fresh `RingBuffer`, so
+the tail of our own transmission is never decoded back as a reception.
+The Listen screen says "Transmitting / receiving is paused… and resumes
+on its own" for the desktop's reason: a frozen waterfall is otherwise
+byte for byte what a wedged capture looks like.
+
+Two things this needed that had no Tier 0 counterpart:
+
+- **`FindClass` cannot find an application class from a thread we
+  created**, and the transmit thread is the first one in this app to
+  call into Java. It resolves against the class loader of a frame on
+  the call stack, and a thread attached with `AttachCurrentThread` has
+  no Java frames — so JNI falls back to the *system* loader, which has
+  never heard of `AudioBridge`. It stayed hidden through the whole of
+  Tier 0 because every control call came from Qt's thread and the data
+  path is Java calling us. `set_java_vm` now caches a global reference,
+  resolved on the UI thread at startup. The symptom was `android audio:
+  org/cleverdomain/sstvae/AudioBridge not found` at the moment of
+  transmitting, and nothing before it.
+- **The service grew a transmit action and the `mediaPlayback`
+  foreground type.** An over is 32–95 s of committed airtime and must
+  not be cut off because the activity went away, which is the same
+  argument that put the receive session in the service. Both types are
+  declared for the service's whole lifetime rather than re-declared at
+  each transition — except that `microphone` may not be claimed without
+  RECORD_AUDIO, and from API 34 asking anyway throws, so a
+  transmit-only station that denied the microphone drops it.
 
 ### Tier 2 — CAT, overlay editing, the refiner
 
@@ -712,7 +816,10 @@ one needlessly stale.
   read — behind the existing `checkpoint::Fetcher` seam. **The sha256
   check and the `.part` rename stayed in C++**, deliberately: that is
   the half where a mistake silently corrupts a cache, and it should
-  have one implementation across all four builds.
+  have one implementation across all four builds. Since 2026-08-10 this
+  is the *fallback* rather than the normal path — the artifacts are
+  bundled — but it is still what a `BUNDLE_MODELS=OFF` build runs on,
+  and deleting it would have made that switch a fork instead of a flag.
 - **The desktop's `AppState` inversion was right, and the UI needed
   even less than expected.** Because the view polls `Session::running()`
   rather than tracking its own button, stopping from the notification's
@@ -780,8 +887,14 @@ What is genuinely upstream of a tester:
 arm64-v8a. Qt Core/Gui/Qml/Quick/Network adds roughly 25–35 MB
 uncompressed, plus our own core. Ballpark **55–75 MB per-ABI**, and an
 arm64-only App Bundle keeps the user's download near that instead of
-multiplying it by four ABIs. Model artifacts are **not** in the APK —
-the 9 MB decoder is fetched on first run, unchanged from desktop.
+multiplying it by four ABIs. **Model artifacts are in the APK as of
+2026-08-10** — this section previously said they were not, and the
+reasoning that changed it is that the model is part of the on-air
+contract rather than a swappable asset: stations must run the same
+checkpoint to interoperate, so "update the model without an app update"
+is a hazard and not a feature, while a first run that needs the network
+is one on a hilltop. Measured at **+18 MB** (55 MB against 37 MB
+with the switch off). See `native/android-app/README.md`.
 
 **CPU — now measured.** A Galaxy S25+ spends **~0.5 s of DSP per
 five-second poll** at a full ring, against 0.2–0.3 s on an x86_64

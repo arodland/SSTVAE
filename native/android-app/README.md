@@ -1,10 +1,10 @@
-# SSTVAE for Android (Tier 0)
+# SSTVAE for Android (Tiers 0 and 1)
 
-The receive-only listener from `docs/android.md`: a Qt Quick front end
-over the **same** `native/core/` the desktop app uses. An Android build
-is a fourth build of that code, not a reimplementation, which is what
-keeps the golden vectors and `pytest --native` covering it with no new
-parity surface.
+The listener from `docs/android.md`, and since 2026-08-09 the
+transmitter as well: a Qt Quick front end over the **same**
+`native/core/` the desktop app uses. An Android build is a fourth build
+of that code, not a reimplementation, which is what keeps the golden
+vectors and `pytest --native` covering it with no new parity surface.
 
 Not to be confused with **`native/android/`**, the pre-Tier-0 smoke
 test — a plain Views probe that answered "can a phone select an audio
@@ -12,7 +12,7 @@ device and decode a picture". It can: a Kenwood TH-D75 over USB decodes
 at over 24 dB, and acoustic coupling into the built-in mic works too.
 This is the app that question was asked on behalf of.
 
-**Status: Tier 0 is built and has received real pictures.** Qt Quick,
+**Status: Tier 0 receives real pictures; Tier 1 transmits.** Qt Quick,
 `sstvae_core` and the onnxruntime AAR build and package together for
 both ABIs; the app enumerates the device's real inputs through JNI,
 captures through `core/audio/android/` into a `RingBuffer` at the
@@ -109,6 +109,256 @@ cmake -S native/android-app -B build-android -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build-android --target apk
 ```
+
+## What Back does
+
+Three behaviours, and which one applies is the whole design:
+
+1. **Something is open on top** (the picture viewer) — Back closes it.
+2. **A session is running or an over is in flight** — Back sends the
+   task to the background. The app keeps running.
+3. **Nothing is running** — Back leaves the app, as Android users
+   expect.
+
+Case 2 is the fix for a reported bug and case 3 is a second one found
+while measuring it (2026-08-10).
+
+**Ending the activity ends the process, and the process owns the
+engine.** So the single most ordinary gesture on a phone silently killed
+a reception in progress, and the shade went on claiming the station was
+listening. `stopWithTask="false"` does not help here: that covers a
+swipe from Recents, not the activity finishing. Measured on API 36
+before the fix, one Back press at the root:
+
+```
+F libc     : FORTIFY: pthread_mutex_lock called on a destroyed mutex
+F libc     : Fatal signal 6 (SIGABRT) in tid 28516 (hwuiTask1)
+I tombstoned: received crash request for pid 28516
+```
+
+So an ordinary exit was **recorded as a native crash** — a tombstone,
+which is exactly what Play's vitals count — and the notification's text
+froze wherever the poller had last left it.
+
+`moveTaskToBack` is what recorders, navigation and media apps do, and it
+is what the ongoing notification already implies. The session
+continues, the 2-second poller keeps the notification honest, the task
+stays in Recents so the launcher or the notification returns to the
+screen that was left, and Stop is still one tap away in the
+notification — which is where an operator already looks for it.
+Measured after: **23 → 25 polls while backgrounded**, and an over
+carried on from 53% to 63% and then finished, stopped its own service
+and cleared its own notification with the app still in the background.
+
+**Hijacking Back unconditionally is what this deliberately does not
+do.** With nothing to protect it exits, so the gesture keeps its
+meaning.
+
+And case 3 is why `main()` ends with **`std::_Exit`** rather than
+returning: the tombstone above is Android's own HWUI render threads
+outliving the graphics state during teardown, not our thread and not our
+mutex, and the reliable answer is not to unwind at all. Nothing is lost
+— every `QSettings` write goes through a temporary that syncs when it
+dies, and the audio device, PTT and engine threads are the service's to
+release on its stop path while the world is still standing. Third
+instance of one rule here, after `Session` being deliberately immortal
+and `check::Watchdog` calling `std::_Exit`: **at teardown, not running
+code is the reliable option.** Verified: zero crash records where there
+was a tombstone every time.
+
+## The first-transmit prompt, and the CW ID that cannot work
+
+**Send opens a one-time prompt before the first over** (2026-08-10):
+callsign, an offer of CW ID, and an acknowledgement that the operator
+holds whatever licence their transmission requires and is responsible
+for using the app legally. Only the acknowledgement is required —
+declining the callsign is a supported answer, and "Not now" closes
+without recording anything, so the prompt returns on the next Send.
+
+**It is not a gate and must not become one.** The app cannot tell
+whether it is connected to a radio at all; the service may not be
+amateur; the operator may be identifying by voice, on a band with
+different rules, or handling the whole question themselves. Refusing to
+transmit would be the app claiming an authority it does not have —
+the same argument that keeps a callsign optional. What it is is a
+roadblock to casual misuse: someone who has not thought about any of it
+has now been asked to, once, immediately before the first transmission.
+Hence its position *behind* Send rather than at first launch: a station
+that only ever listens should never see it.
+
+**The CW ID check is a different kind of thing and does block.** A
+message still containing `{callsign}` with no callsign set would key a
+partial identification — "SSTVAE DE " and then nothing — so Send is
+disabled with the reason on screen, on the transmit pane and again in
+Settings where the fix is. It is a setting that cannot do what it says,
+and there are three ways out, all of which the message names: set a
+callsign, write the identification into the message itself, or turn CW
+ID off.
+
+`tx::cw_id_problem` is that predicate, shared. The UI blocks on it and
+the engine skips the ID on it, because two implementations of "is this
+CW ID sane" would eventually disagree and the direction that
+disagreement takes is a station transmitting an ID it was told it had
+turned off. The desktop asks the same question in `TransmitPanel::send`.
+
+**Making it shared changed the engine's behaviour, deliberately.** The
+guard used to be `!config.callsign.empty()`, so *any* empty callsign
+dropped the ID — which meant "write the identification into the message
+itself" was an escape the UI could offer and the engine would ignore. A
+literal message now goes out with no callsign set;
+`test_cw_literal_message_is_sent_with_no_callsign` is that case, and
+`test_cw_id_problem_names_only_the_broken_combination` pins all three
+escapes.
+
+Two things the on-device pass caught that reading would not have. A
+`CheckBox` with a wrapping `contentItem` puts **the indicator in the
+middle of the text** — the control centres it against the whole content
+height, so a three-line label leaves the box floating over line two; it
+is a `CheckBox` beside a `Label` in a `RowLayout` now, which also makes
+the sentence a tap target instead of a 24 px box. And the dialog is
+**bounded and scrolled** rather than merely tall: a Popup that outgrows
+its parent does not compress, it puts the buttons off the bottom where
+there is nothing to reach and nothing to say so — the same failure the
+desktop's settings tabs have a `QScrollArea` for.
+
+## The models ship inside the APK
+
+**Bundled since 2026-08-10, and the reason is not download size.** The
+model *is* part of the on-air contract: the latent space is learned, so
+an encoder from one checkpoint only means anything to a decoder from
+the same one, and two stations must be running the same artifacts to
+talk at all. "Update the model without an app update" therefore reads
+as flexibility and behaves as a way to silently desynchronise a station
+from the band — a codec revision is a coordinated everyone-at-once
+event, which is what an app release already is. So the argument that
+usually favours fetching does not apply here, and what is left is the
+argument for bundling: **first run has to work with no network.** This
+is a radio app, and the moment of need is disproportionately a field
+site with no coverage; an operator who installs at home and first opens
+the app on a hilltop otherwise has a listener that cannot decode
+anything, and the failure is total rather than degraded.
+
+Measured, on the v3 fp16 artifacts: decoder 8.5 MB, encoder 11.3 MB,
+**18 MB** added to the APK (55 MB against 37 MB with
+`-DSSTVAE_ANDROID_BUNDLE_MODELS=OFF`). Model weights barely compress —
+AAPT deflates these to 92% — so that is close to the raw size and there
+is no packing trick to be had.
+
+Four decisions inside that:
+
+- **`assets/`, not a Qt resource.** A `.qrc` is compiled into the app
+  library, and the bundle carries one library *per ABI*, so 20 MB of
+  weights would land in the download twice. Assets live in the bundle's
+  base module and are shared by every ABI.
+- **Downloaded at configure time and pinned by sha256**, the same shape
+  as the onnxruntime and Hamlib pins. These are published immutable
+  filenames, so a hash mismatch means the wrong file, never a stale one.
+  `SSTVAE_ANDROID_MODEL_DIR` is where they land — pinned by
+  `tools/build_android.sh` to the *top* build directory, because a
+  multi-ABI build configures this file once per ABI in nested build
+  trees and would otherwise fetch 20 MB twice.
+- **The bytes are read out and released once the ORT session exists**,
+  rather than held for the process. `AAsset_getBuffer` on a compressed
+  asset inflates into a block owned by the open asset, which would mean
+  ~20 MB resident forever; reading into a `codec::ModelBlob` puts that
+  memory somewhere with a lifetime. What makes it safe is stated in
+  code rather than assumed: `codec.cpp` sets
+  `session.use_ort_model_bytes_directly` to `0` explicitly, because that
+  opt-in is the one thing that would make ORT reference the caller's
+  buffer, and a change of default would otherwise land as a
+  use-after-free with no diagnostic.
+- **The fetcher stays, and OFF is a supported configuration.** With no
+  assets staged, `assets::model_blob` returns nullopt, the codec falls
+  through to `checkpoint::resolve_onnx`, and the app fetches exactly as
+  it did before — one code path, two builds. That is what makes the
+  switch cheap to flip while developing, where 20 MB per clean build
+  tree is not free.
+
+**`assets::init()` runs on the UI thread**, from `Listener`'s
+constructor, for the same reason `audio::android::set_java_vm` does: it
+needs the Java context. After it, nothing else does — the `AAsset_*`
+family is a plain NDK C API with no JNIEnv in it, so the model thread
+reads assets with no JNI at all and the `FindClass` hazard cannot
+apply.
+
+Verified on the emulator the only way that means anything: **uninstall,
+fresh install, airplane mode on, no cache** — model reports ready, and a
+mode A transmission decodes 220/220 with the network off for the whole
+run.
+
+## The Play upload
+
+```sh
+tools/build_android.sh --aab --version-code N   # -> build-android/sstvae-upload.aab
+```
+
+A bundle rather than an APK because Play takes nothing else, and it is
+a **different job from the sideload build in one respect that decides
+the rest**: a sideload APK is signed with the debug key, which is
+world-known and per-machine, while a bundle is signed with the *upload
+key*, which is an identity. So `--aab` shares no fallback with the APK
+path — it refuses to emit anything rather than quietly producing an
+unsigned or debug-signed bundle, since Play rejects both and the
+rejection arrives minutes later in a browser, a long way from the
+build. For the same reason it refuses `--abi` (a single-ABI bundle is a
+store listing half the world cannot install), `--debug`, and
+`--install` (nothing installs a bundle).
+
+**The upload key lives outside the repository and must be backed up.**
+`~/.android-keys/sstvae-upload.jks`, PKCS12, RSA-2048, valid to 2053 —
+comfortably past the 2033 floor Play checks — with its password in
+`sstvae-upload.pass` beside it at mode 600, which is what the script
+reads (`SSTVAE_UPLOAD_KEYSTORE`, `SSTVAE_UPLOAD_KEYSTORE_PASS`,
+`SSTVAE_UPLOAD_ALIAS` override all three). A password *file* rather
+than an argument or an exported variable, because both of those are
+readable in `ps` by every process on the machine. Keeping the password
+next to the keystore does mean one compromise gets both; moving it into
+a password manager and deleting the file is strictly better, and the
+script does not care where it points.
+
+With **Play App Signing** — which is not optional for new apps — Google
+holds the actual app signing key and this is only the key you *upload*
+with, so losing it is a support request rather than the end of the app.
+That is a much softer failure than the pre-2021 arrangement, and it is
+still worth backing up: a reset is days.
+
+**`--version-code` is mandatory reading even though it defaults.** Play
+requires the code to increase on every upload, forever, and it is the
+one number a build cannot infer — `PROJECT_VERSION` moves for its own
+reasons, and re-shipping a fixed build of the same release still needs a
+new code. Hence an explicit input rather than something derived. Getting
+it wrong is tedious, not dangerous: Play refuses the bundle and names
+the number it already has.
+
+Four things that were checked on the first bundle and are worth
+re-checking only when something below them changes:
+
+- **16 KB page alignment**, which Play requires of anything targeting
+  SDK 35+. All 78 native libraries report `0x4000` LOAD alignment,
+  onnxruntime's prebuilt `.so` included — NDK 28 does this by default,
+  but the prebuilt is the one we do not compile, so it is the one worth
+  looking at. `llvm-readelf -l` over `base/lib/*/` is the check.
+  It cannot be fixed downstream: the bundle is not zipaligned, because
+  alignment is a property of the APKs Play *generates* from it.
+- **`jarsigner`, not `apksigner`** — an AAB is a jar and apksigner does
+  not handle one. `keytool -printcert -jarfile` on the result shows the
+  signing cert, and its SHA256 should equal the keystore's.
+- The self-signed / no-timestamp warnings from `jarsigner -verify` are
+  **expected and benign**: self-signed is what an upload key *is*, and
+  Play does not want a timestamp.
+- **armeabi-v7a is not in the bundle**, because only the arm64 and
+  x86_64 Qt kits are installed. 32-bit-only devices — essentially
+  nothing since ~2019, and nothing anyone drives a radio from — simply
+  will not be offered the app. Adding it means a third Qt kit and a
+  third slice of build time, and it is a deliberate omission rather than
+  an oversight.
+
+**Existing sideload testers must uninstall.** The debug-signed APKs and
+this bundle have different signing keys, so Play's copy is not an
+upgrade over a sideloaded one; it is a different app as far as Android
+is concerned, and the install fails until the old one goes. That costs
+testers their settings and saved receptions, which is a thing to say in
+advance rather than after.
 
 **Build both ABIs and keep the emulator in the loop** (Andrew,
 2026-08-08). It is tempting to go arm64-only on the grounds that the
@@ -400,11 +650,188 @@ turned out to require.
    while the sha256 check and the `.part` rename stay in C++ — one
    implementation of the part that can silently corrupt a cache.
 
-Not done, and deliberately so: **saving to the shared gallery**
-(a MediaStore insert; Share reaches gallery, mail and chat for one
-intent and no storage permission, so it went first) and **`play()`**,
-which is written, unexercised, and a Tier 1 concern — Tier 0 does not
-transmit.
+**Saving to the shared gallery is in** (2026-08-10, `Gallery.java`),
+behind a `Save to gallery` switch that is **off by default**. Share came
+first and still earns its place — it reaches gallery, mail and chat for
+one intent — but it is a per-picture action, and only a MediaStore row
+makes receptions a *collection*: Google Photos builds "On this device"
+from `MediaStore.Images` grouped by `BUCKET_DISPLAY_NAME`, so the folder
+name is the collection title and app-private storage can never appear
+there however it is arranged.
+
+Five things worth not re-deriving.
+
+**The export runs in `ListenerService`, not beside the file write.** The
+notification poller already holds a `Context`, which is what a MediaStore
+insert needs; doing it from `Session::save_reception` would mean calling
+an application class from a thread the engine created — the `FindClass`
+hazard that cost the transmit path a run — for no gain. It is one
+`Thread` per reception (they arrive 32–95 s apart at best) because the
+poller is on the main Looper and the copy is about a megabyte.
+
+**The private copy stays canonical.** The sidecar is what makes a
+picture answerable a week later and MediaStore has no column Photos will
+show, so the gallery copy is deliberately provenance-free and a failed
+export costs an export, not a reception.
+
+**`minSdk` went 28 → 29.** `RELATIVE_PATH` + `IS_PENDING` is API 29 and
+needs no permission at all; API 28 wants `WRITE_EXTERNAL_STORAGE`, a
+public-directory write and a `MediaScannerConnection` scan — a second
+implementation and a runtime prompt for one API level. (Qt still injects
+`WRITE_EXTERNAL_STORAGE` into the manifest on its own account; it is
+inert at 29+, but it reads badly next to a gallery feature and is worth
+capping some time.)
+
+**`IS_PENDING` is not decoration** — without it the scanner can index a
+half-written file and Photos shows a truncated picture that never
+repairs itself. The logcat trace of a working export is the `.pending-`
+name being moved to the final one when it clears.
+
+**`DATE_TAKEN` on the insert does not survive, measured.** Once
+`IS_PENDING` clears the scanner re-derives the metadata columns from the
+file, and a PNG carries no EXIF date, so the column reads NULL whatever
+was written. `date_added`/`date_modified` — the moment the reception
+finished — is what Photos ends up sorting on, which is the right answer
+anyway. Forcing a timeline position would mean writing metadata *into
+the file*.
+
+Verified end to end on the emulator through the host-audio loopback
+below: a mode A transmission decoded 220/220, and the row came back
+`bucket_display_name=SSTVAE`, `relative_path=Pictures/SSTVAE/`,
+`is_pending=0`. With the switch off, the same transmission decodes and
+produces **no row and no file** — which is the half worth testing,
+since off is the default and the reason it is the default is that a
+listener left running overnight otherwise puts whatever arrives on the
+band into the operator's camera roll and their photo backup.
+
+## Tier 1: transmitting
+
+**Built 2026-08-09 and on the air the same day.** Pick a picture from
+the gallery or the camera, frame it by touch, send it; the session
+suspends receiving for the over and resumes by itself afterwards.
+`docs/android.md`'s Tier 1 section is the reasoning; this is the shape
+of the code.
+
+Verified over RF, not loopback (Andrew, 2026-08-09): transmitted from a
+phone into a radio through a **USB audio interface**, received on an
+Android tablet on another radio, **mode B, CW ID on, 25 dB SNR, no
+issues** — the first Android-to-Android contact. So a phone's USB audio
+output drives a radio, and USB is now exercised in both directions on
+this app rather than only on the pre-Tier-0 smoke test.
+
+**The VOX leader was not part of that test**, so it is still tested
+only against the preamble detector and the emulator. The radio was
+keyed by hand because that radio offers no VOX on its USB/data input —
+an uncommon limitation, not a reason to doubt VOX keying generally:
+many radios do offer it there, and a USB soundcard wired to a radio's
+*microphone* input keys on VOX whatever its data port does.
+
+The pieces mirror the receive side deliberately, so there is one
+arrangement to understand rather than two. `Session` owns the
+`TxEngine` exactly as it owns the decode loop, for the same reason — an
+over is 32–95 s of committed airtime and must survive the activity
+being destroyed. `Transmitter` is a *view* over it, as `Listener` is
+over the receive half. `Composition` holds the picked picture and its
+framing, process-wide, so a rotation mid-crop loses nothing.
+
+- **The picture goes out unmodified. No overlay, not even a callsign
+  caption.** The station is identified by the beacon carrier and
+  optionally a CW ID; burning a callsign into the pixels identifies it
+  only to someone who already decoded the picture. So
+  `core/overlay/` is not in the Android build at all, and
+  `docs/android.md`'s Tier 1 prediction that it would be is the one
+  part of that design that was wrong.
+- **A callsign is not required to send.** Identifying is required of an
+  amateur station, but the app does not know it is attached to a radio
+  and does not take responsibility for the operator's identification
+  even when it is — voice is a third way it never sees.
+- **The crop preview is `images::fit`'s own output**, served through
+  the image provider as `compose/<id>`, not a QML `Image` with a clip
+  imitating a crop. The desktop's rule and the desktop's reason: a
+  second representation is a second thing that can disagree with what
+  goes on the air, and this screen exists to decide exactly that.
+- **Two `Image`s, swapped on load, and one render in flight.** A single
+  `Image` following the id blanks for the duration of every load, so a
+  drag becomes a flicker with the picture appearing only when the
+  finger stops. Revealing a frame only when it is `Ready` keeps the
+  previous one up meanwhile. The throttle is the other half: `fit` is a
+  real resize, and one request per touch event queues work faster than
+  it drains, so moves during a load collapse into a single repeat.
+- **Zoom goes below 1 and letterboxes**, via `images::min_zoom` — the
+  desktop's zoom-out work, which the Android slider and pinch clamp
+  against so both stop where `fit` does. Below zoom 1 the crop window
+  is wider than the source on an axis, so its half-extent exceeds 0.5
+  and the centre has to be *pinned* rather than clamped: `std::clamp`
+  with an inverted range is undefined behaviour, not a no-op.
+- **`Session::stage_transmit` then `start_staged_transmit`**, two calls,
+  because the service is the only thing that may start an over and a
+  640x480 picture is not something to marshal through an Intent. The
+  staged request is *consumed*, so a redelivered intent or a double tap
+  cannot put a second copy of the picture on the air. Staging also
+  fixes the composition at the moment of the tap: an edit afterwards
+  belongs to the next over.
+
+### What Tier 1 cost that Tier 0 did not
+
+- **`FindClass` cannot see an application class from a thread we
+  created.** The transmit thread is the first in this app to call into
+  Java, and it failed on its first run with `android audio:
+  org/cleverdomain/sstvae/AudioBridge not found`. JNI resolves against
+  the class loader of a frame on the call stack; a thread attached with
+  `AttachCurrentThread` has none, so it falls back to the system loader.
+  `set_java_vm` now caches a global reference from the UI thread. This
+  was invisible through all of Tier 0 because every control call came
+  from Qt's thread and the data path is Java calling us — so it is a
+  hazard for *any* new C++→Java call made off the UI thread, not a
+  one-off.
+- **`AudioBridge.java` was a hand-synced duplicate**, one copy under
+  `core/audio/android/java/` and an identical one under
+  `android/src/`. androiddeployqt takes exactly one
+  `QT_ANDROID_PACKAGE_SOURCE_DIR`, which is why. It is now assembled in
+  the build tree from both sources (`sstvae_stage_package_dir`), so the
+  layer owns its blocking-read loop the way the CMake comment always
+  claimed. Nothing was wrong yet, which is exactly what made it worth
+  fixing: the first edit to either copy would have shipped the other.
+- **The service gained a transmit action and `mediaPlayback`.** Both
+  foreground types are declared for its whole lifetime rather than
+  re-declared per transition — except `microphone`, which may not be
+  claimed without RECORD_AUDIO and throws from API 34, so a station
+  that denied the microphone and only transmits drops it.
+- **Settings needed a `ScrollView`.** The transmit settings pushed the
+  page past the screen, and a QML column does not compress when it does
+  not fit, it truncates — "Model" simply disappeared behind the tab bar.
+  Same failure and same fix as the desktop's per-tab `QScrollArea`. The
+  trap on this side: the content must be bound to the ScrollView **by
+  id**, because a ScrollView reparents its content into a Flickable's
+  `contentItem`, so `parent` is neither the ScrollView nor anything with
+  its width. The symptom is not a missing scrollbar but text running off
+  the right edge with nothing to scroll it back.
+
+### Picking a picture
+
+`ImagePicker.java` is a **transparent activity of our own**, not a call
+into Qt's. An activity result comes back to whoever launched it, and
+reaching `QtActivity`'s means either subclassing Qt's bindings — and
+maintaining that subclass across Qt upgrades — or using its private
+`QtAndroidPrivate::startActivity`. An activity that launches an intent
+and finishes is smaller than either.
+
+Two things it does that are not obvious. The result is **copied into
+app-private storage before any path reaches C++**: what the picker
+returns is a `content://` URI whose grant lasts as long as that
+activity, so handing it over would produce a path that reads fine while
+composing and fails at the moment of transmitting. And the camera's
+output file goes in `getExternalCacheDir()`, because Qt's FileProvider
+covers that and not the internal cache — declaring a second provider
+would collide with Qt's, the same trap `Sharing.java` records.
+
+### Not done
+
+`Composition` does not survive the process being killed, so swiping the
+app away loses the picked picture and its framing. A rotation does not,
+which is what the process-wide singleton is for. Persisting the source
+path and framing in `QSettings` would fix it and is a few lines; it has
+not been done because nothing has asked for it yet.
 
 ## `core/audio/android/`
 
