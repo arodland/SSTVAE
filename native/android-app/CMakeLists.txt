@@ -123,7 +123,14 @@ set_target_properties(sstvae_android PROPERTIES
     QT_ANDROID_PACKAGE_NAME "org.cleverdomain.sstvae"
     QT_ANDROID_APP_NAME "SSTVAE"
     QT_ANDROID_TARGET_SDK_VERSION 36
-    QT_ANDROID_MIN_SDK_VERSION 28
+    # **29, because of the gallery export.** Inserting into MediaStore
+    # with `RELATIVE_PATH` and `IS_PENDING` is API 29; the API 28 way is
+    # `WRITE_EXTERNAL_STORAGE`, a public-directory write and a
+    # `MediaScannerConnection` scan -- a second implementation of the
+    # same feature, and a runtime storage prompt on every install, to
+    # support one API level from 2018. Qt 6.8 itself requires 28, so
+    # this gives up a single version.
+    QT_ANDROID_MIN_SDK_VERSION 29
     QT_ANDROID_VERSION_NAME "${PROJECT_VERSION}"
     QT_ANDROID_VERSION_CODE 1)
 

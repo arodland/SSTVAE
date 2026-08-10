@@ -120,6 +120,23 @@ Java_org_cleverdomain_sstvae_ListenerService_nativeLastSavedSummary(JNIEnv* env,
     return env->NewStringUTF(Session::instance().last_saved_summary().c_str());
 }
 
+// The gallery-export switch, read by the service rather than pushed to
+// it: the export happens on the Java side (that is where the Context
+// is), so the setting has to be readable from there, and the session is
+// already the one place both halves of the app agree about.
+JNIEXPORT jboolean JNICALL
+Java_org_cleverdomain_sstvae_ListenerService_nativeSaveToGallery(JNIEnv*, jclass) {
+    return Session::instance().save_to_gallery() ? JNI_TRUE : JNI_FALSE;
+}
+
+// The other direction: an export failure has to reach a screen, and the
+// service has no UI of its own. Empty clears it.
+JNIEXPORT void JNICALL
+Java_org_cleverdomain_sstvae_ListenerService_nativeReportGalleryError(JNIEnv* env, jclass,
+                                                                     jstring message) {
+    Session::instance().set_gallery_error(to_utf8(env, message));
+}
+
 // The over the UI staged. The picture never crosses this boundary -- see
 // Session::stage_transmit for why it is two calls rather than one.
 JNIEXPORT jboolean JNICALL

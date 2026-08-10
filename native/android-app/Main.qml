@@ -512,6 +512,49 @@ ApplicationWindow {
             }
 
             Label {
+                text: "Received pictures"
+                font.bold: true
+                Layout.margins: 12
+                Layout.bottomMargin: 0
+            }
+            Switch {
+                text: "Save to gallery"
+                Layout.leftMargin: 4
+                checked: listener.saveToGallery
+                onToggled: listener.saveToGallery = checked
+            }
+            Label {
+                // Says what it does *and* what follows from it. The
+                // consequence is the part an operator cannot guess:
+                // "save to gallery" sounds local, and on a phone with
+                // photo backup switched on it is not.
+                text: "Copies each reception into Pictures/SSTVAE, where the "
+                      + "gallery and Google Photos will show it as a device "
+                      + "folder. Whatever arrives on the band goes into your "
+                      + "camera roll — and into your photo backup, if you have "
+                      + "one. Receptions are always kept in the app either way."
+                font.pixelSize: 11
+                color: "#666"
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                wrapMode: Text.Wrap
+            }
+            Label {
+                // The export runs in the service, after the operator has
+                // stopped looking, so this is the only place a failure
+                // can surface at all. Cleared by the next success.
+                text: "Last export failed: " + listener.galleryError
+                visible: listener.saveToGallery && listener.galleryError !== ""
+                font.pixelSize: 11
+                color: "#a60"
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                wrapMode: Text.Wrap
+            }
+
+            Label {
                 text: "Model"
                 font.bold: true
                 Layout.margins: 12

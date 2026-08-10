@@ -58,6 +58,10 @@ public class ListenerService extends Service {
     private static native String nativeStatusLine();
     private static native String nativeTakeSavedPicture();
     private static native String nativeLastSavedSummary();
+    /** Whether the operator asked for receptions in the shared gallery. */
+    private static native boolean nativeSaveToGallery();
+    /** Empty clears it; anything else is shown on the Settings screen. */
+    private static native void nativeReportGalleryError(String message);
     /** Begins the over the UI already staged on the native session. */
     private static native boolean nativeStartTransmit();
     private static native void nativeCancelTransmit();
@@ -91,7 +95,10 @@ public class ListenerService extends Service {
                 // already the place with a Looper and a
                 // NotificationManager.
                 final String saved = nativeTakeSavedPicture();
-                if (saved != null) postPicture(nm, saved, nativeLastSavedSummary());
+                if (saved != null) {
+                    postPicture(nm, saved, nativeLastSavedSummary());
+                    exportToGallery(saved);
+                }
             }
             handler.postDelayed(this, REFRESH_MS);
         }
@@ -282,6 +289,42 @@ public class ListenerService extends Service {
                 .setAutoCancel(true)
                 .build();
         nm.notify(nextPictureId++, n);
+    }
+
+    /**
+     * Mirror a reception into the shared gallery, if the operator asked
+     * for that.
+     *
+     * <p>Here rather than beside the file write in {@code
+     * Session::save_reception}, and that placement is the point: this
+     * poller is already the one thing holding a {@link Context}, and a
+     * {@code Context} is what a MediaStore insert needs. Doing it from
+     * C++ would mean calling into an application class from a thread the
+     * engine created, which is the {@code FindClass} hazard
+     * docs/android.md records — real, and entirely avoidable by exporting
+     * from the side that was in Java to begin with.
+     *
+     * <p>A thread per reception rather than an executor: these arrive
+     * 32–95 s apart at the very best, so there is nothing to pool, and a
+     * plain thread has no lifecycle to get wrong when the service stops.
+     * It must not run inline — this runnable is on the main Looper and
+     * the copy is about a megabyte of I/O.
+     */
+    private void exportToGallery(final String path) {
+        if (!nativeSaveToGallery()) return;
+        final Context context = getApplicationContext();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String error = Gallery.save(context, path);
+                if (error != null) Log.w(TAG, "gallery export failed: " + error);
+                // Reported either way, so a failure that has since been
+                // fixed (storage was full, and is not any more) stops
+                // being shown. A sticky error nobody can clear is the
+                // one the operator learns to ignore.
+                nativeReportGalleryError(error == null ? "" : error);
+            }
+        }, "sstvae-gallery").start();
     }
 
     private void createChannel() {

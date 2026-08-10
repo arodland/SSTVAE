@@ -379,7 +379,7 @@ driver. Build both ABIs; the x86_64 Qt kit is 176 MB.
 | Piece | Today | On Android |
 |---|---|---|
 | Paths (config, model cache) | `getenv` of `HOME`/`XDG_*`/`LOCALAPPDATA` | Two env vars set from JNI at startup. Near-free; see below. |
-| Saving received pictures | `std::filesystem` into `received/` | MediaStore or SAF, so the gallery can see them. New. |
+| Saving received pictures | `std::filesystem` into `received/` | **Both, and the split is the design.** `std::filesystem` into app-private storage stays the canonical copy, because the sidecar is what makes a picture answerable later and MediaStore has nowhere to put it. A MediaStore insert mirrors it into `Pictures/SSTVAE` when the operator asks — that, and only that, is what a gallery can see. |
 | Model download | `core/checkpoint/qt_fetcher.cpp`, QtNetwork, behind a `Fetcher` seam | **Keep it.** QtNetwork is in the module set anyway now that Qt Quick is the UI, so this is free. The manual-redirect requirement is unchanged — the client must not auto-follow, or the `x-linked-etag` checksum on the 302 is lost. |
 | Overlay rendering | `core/overlay/render.cpp`, 329 lines, QtGui only | **Not ported, and not planned.** Assumed here to be a Tier 1 item; Tier 1 shipped without it, because the beacon and the CW ID identify the station and a caption in the pixels does not. See the Tier 1 section. |
 | UI | 6,170 lines of QtWidgets | Rewritten in Qt Quick; see below. |
@@ -399,8 +399,10 @@ place where getting it wrong means silently writing a config nobody
 reads.
 
 Note what this does *not* cover: a received picture written to
-`filesDir` is invisible to the user. Getting pictures into the gallery
-is MediaStore work with no desktop counterpart.
+`filesDir` is invisible to every other app on the phone. Getting
+pictures into the gallery is MediaStore work with no desktop
+counterpart, and it is a *mirror* rather than a relocation — see
+`Gallery.java`.
 
 ### Background execution
 
@@ -577,10 +579,14 @@ Short, and none of it is layout:
 
 ### Tier 0 — receive-only listener (the committed one) — **DONE**
 
-Built 2026-08-08 and receiving on hardware. Everything below was
-needed and is in; what is *not* done is a MediaStore "save to gallery"
-(Share reaches gallery, mail and chat for one intent and no storage
-permission, so it went first).
+Built 2026-08-08 and receiving on hardware. Everything below was needed
+and is in. The MediaStore "save to gallery" this section used to list as
+outstanding landed 2026-08-10, off by default; Share went first and
+remains the per-picture route, while the insert is what makes receptions
+a *collection* in Google Photos. See `native/android-app/README.md` for
+why it lives in the service rather than beside the file write, and for
+the two MediaStore traps (`IS_PENDING`, and `DATE_TAKEN` not surviving
+the post-pending rescan).
 
 **USB was untried on this app until Tier 1, and then it carried the
 first RF contact** (2026-08-09) — out of a phone through a USB audio

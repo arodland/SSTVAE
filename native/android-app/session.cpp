@@ -57,6 +57,16 @@ void Session::set_picture_dir(std::string dir) {
     picture_dir_ = std::move(dir);
 }
 
+void Session::set_gallery_error(std::string message) {
+    std::lock_guard<std::mutex> lk(gallery_mu_);
+    gallery_error_ = std::move(message);
+}
+
+std::string Session::gallery_error() const {
+    std::lock_guard<std::mutex> lk(gallery_mu_);
+    return gallery_error_;
+}
+
 // Write the picture and its metadata together.
 //
 // **The sidecar is not optional.** `rx/engine` wipes mode, callsign,

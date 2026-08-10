@@ -76,6 +76,7 @@ bool init_audio_bridge(QString* error) {
 
 namespace {
 constexpr auto kTechnicalKey = "ui/showTechnical";
+constexpr auto kGalleryKey = "receive/saveToGallery";
 }  // namespace
 
 void Listener::setShowTechnical(bool on) {
@@ -91,15 +92,40 @@ void Listener::setShowTechnical(bool on) {
     emit changed();
 }
 
+// Exporting is done by the service, on the Java side where the Context
+// is, so this only records the choice and hands it to the session for
+// the service to read. Turning it on does not export the receptions
+// already on disk: they can go out through Share, and silently copying a
+// backlog into someone's camera roll is exactly the surprise the switch
+// exists to prevent.
+void Listener::setSaveToGallery(bool on) {
+    if (on == gallery_) return;
+    gallery_ = on;
+    QSettings().setValue(QLatin1String(kGalleryKey), on);
+    Session::instance().set_save_to_gallery(on);
+    // A stale failure from the last time it was on would otherwise
+    // outlive the setting itself.
+    if (!on) Session::instance().set_gallery_error(std::string());
+    emit changed();
+}
+
+QString Listener::galleryError() const {
+    return QString::fromStdString(Session::instance().gallery_error());
+}
+
 Listener::Listener(QObject* parent) : QObject(parent) {
     technical_ = QSettings().value(QLatin1String(kTechnicalKey), false).toBool();
     Session::instance().set_show_technical(technical_);
+    gallery_ = QSettings().value(QLatin1String(kGalleryKey), false).toBool();
+    Session::instance().set_save_to_gallery(gallery_);
     if (!init_audio_bridge(&error_)) return;
     refreshDevices();
 
-    // Receptions land in app-private storage. Not the shared gallery:
-    // that needs a MediaStore insert and a scoped-storage story, which
-    // belongs with the Pictures screen rather than smuggled in here.
+    // Receptions land in app-private storage, and that stays true even
+    // with `saveToGallery` on: the sidecar is what makes a picture
+    // answerable a week later, and MediaStore has nowhere to put it. The
+    // shared-gallery copy is a mirror written by the service (see
+    // `Gallery.java`), never the original.
     const QString pics =
         QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) +
         QStringLiteral("/pictures");

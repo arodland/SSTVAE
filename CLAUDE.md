@@ -1504,8 +1504,18 @@ Android: **Tier 0 is built and receiving** (2026-08-08),
 (audio layer, foreground service, three screens, persisted reception
 metadata, notifications, model fetch), plus sharing, a technical-detail
 switch that is off by default, and keep-screen-on. Verified on a Galaxy
-S25+ over acoustic coupling. Deliberately not done: a MediaStore save
-to the shared gallery.
+S25+ over acoustic coupling. The MediaStore save to the shared gallery
+that used to be listed here as deliberately skipped landed 2026-08-10
+(`Gallery.java`), **off by default**, and took `minSdk` from 28 to 29
+with it. Three things it settled. It runs in `ListenerService`'s
+notification poller, not beside the file write, because that is the
+side that already holds a `Context` — doing it from C++ would walk into
+the `FindClass` hazard for nothing. The app-private copy stays
+canonical and the gallery copy is deliberately provenance-free, since
+MediaStore has no column Photos will display and the sidecar is what
+answers "who sent this". And `DATE_TAKEN` on the insert **does not
+survive** — measured NULL, because the scanner re-derives metadata from
+the file once `IS_PENDING` clears and a PNG carries no EXIF date.
 
 **Tier 1 (transmit) is built too** (2026-08-09): a Send screen with
 gallery/camera picking and a touch crop, `Session` owning the

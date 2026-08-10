@@ -400,9 +400,59 @@ turned out to require.
    while the sha256 check and the `.part` rename stay in C++ — one
    implementation of the part that can silently corrupt a cache.
 
-Not done, and deliberately so: **saving to the shared gallery** — a
-MediaStore insert; Share reaches gallery, mail and chat for one intent
-and no storage permission, so it went first.
+**Saving to the shared gallery is in** (2026-08-10, `Gallery.java`),
+behind a `Save to gallery` switch that is **off by default**. Share came
+first and still earns its place — it reaches gallery, mail and chat for
+one intent — but it is a per-picture action, and only a MediaStore row
+makes receptions a *collection*: Google Photos builds "On this device"
+from `MediaStore.Images` grouped by `BUCKET_DISPLAY_NAME`, so the folder
+name is the collection title and app-private storage can never appear
+there however it is arranged.
+
+Five things worth not re-deriving.
+
+**The export runs in `ListenerService`, not beside the file write.** The
+notification poller already holds a `Context`, which is what a MediaStore
+insert needs; doing it from `Session::save_reception` would mean calling
+an application class from a thread the engine created — the `FindClass`
+hazard that cost the transmit path a run — for no gain. It is one
+`Thread` per reception (they arrive 32–95 s apart at best) because the
+poller is on the main Looper and the copy is about a megabyte.
+
+**The private copy stays canonical.** The sidecar is what makes a
+picture answerable a week later and MediaStore has no column Photos will
+show, so the gallery copy is deliberately provenance-free and a failed
+export costs an export, not a reception.
+
+**`minSdk` went 28 → 29.** `RELATIVE_PATH` + `IS_PENDING` is API 29 and
+needs no permission at all; API 28 wants `WRITE_EXTERNAL_STORAGE`, a
+public-directory write and a `MediaScannerConnection` scan — a second
+implementation and a runtime prompt for one API level. (Qt still injects
+`WRITE_EXTERNAL_STORAGE` into the manifest on its own account; it is
+inert at 29+, but it reads badly next to a gallery feature and is worth
+capping some time.)
+
+**`IS_PENDING` is not decoration** — without it the scanner can index a
+half-written file and Photos shows a truncated picture that never
+repairs itself. The logcat trace of a working export is the `.pending-`
+name being moved to the final one when it clears.
+
+**`DATE_TAKEN` on the insert does not survive, measured.** Once
+`IS_PENDING` clears the scanner re-derives the metadata columns from the
+file, and a PNG carries no EXIF date, so the column reads NULL whatever
+was written. `date_added`/`date_modified` — the moment the reception
+finished — is what Photos ends up sorting on, which is the right answer
+anyway. Forcing a timeline position would mean writing metadata *into
+the file*.
+
+Verified end to end on the emulator through the host-audio loopback
+below: a mode A transmission decoded 220/220, and the row came back
+`bucket_display_name=SSTVAE`, `relative_path=Pictures/SSTVAE/`,
+`is_pending=0`. With the switch off, the same transmission decodes and
+produces **no row and no file** — which is the half worth testing,
+since off is the default and the reason it is the default is that a
+listener left running overnight otherwise puts whatever arrives on the
+band into the operator's camera roll and their photo backup.
 
 ## Tier 1: transmitting
 

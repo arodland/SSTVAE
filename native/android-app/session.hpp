@@ -119,6 +119,27 @@ public:
     void set_show_technical(bool on) { show_technical_.store(on); }
     bool show_technical() const { return show_technical_.load(); }
 
+    // Whether a finished reception is also mirrored into the shared
+    // gallery (`Pictures/SSTVAE`, which is what Google Photos shows as a
+    // device collection). Atomic and for the same reason as the switch
+    // above: it is written by the UI and read by the service's poller,
+    // which is the thread that does the export.
+    //
+    // **Off by default, deliberately.** A listener left running
+    // overnight puts whatever arrives on the band into the operator's
+    // camera roll, and from there into whatever cloud backup they have
+    // turned on. That is a surprising consequence of leaving the app
+    // open, so it is a choice rather than a behaviour.
+    void set_save_to_gallery(bool on) { save_to_gallery_.store(on); }
+    bool save_to_gallery() const { return save_to_gallery_.load(); }
+
+    // The last gallery export's outcome: empty when the last one worked
+    // or none has run. Reported from Java, shown by the Settings screen
+    // — an export is the only part of saving a reception that happens
+    // out of the operator's sight and can fail on its own.
+    void set_gallery_error(std::string message);
+    std::string gallery_error() const;
+
     // The most recent `n` samples, for the waterfall. `tail` rather
     // than `snapshot` deliberately: snapshot copies the whole 130 s
     // buffer, and doing that at display rates is how the desktop tore
@@ -196,6 +217,13 @@ private:
     std::optional<std::string> save_reception(const rx::Reception& r);
 
     std::atomic<bool> show_technical_{false};
+    std::atomic<bool> save_to_gallery_{false};
+
+    // Its own lock rather than `mu_`: it is written by a Java export
+    // thread and read by the UI, and neither has any business waiting
+    // on a session that is starting or stopping.
+    mutable std::mutex gallery_mu_;
+    std::string gallery_error_;
 
     // Guards the members below against a view thread reading while the
     // UI thread starts or stops. It is never held across a decode: the
