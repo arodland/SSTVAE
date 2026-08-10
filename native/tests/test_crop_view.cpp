@@ -141,9 +141,55 @@ void test_zoom_is_bounded() {
     wheel(view, 120, 200);
     check::is_true(view.framing().zoom <= 4.0 + 1e-9,
                    "crop/wheel: zoom stops at the ceiling");
+    // 1600x900 is 16:9, so the whole picture fits the 4:3 canvas at
+    // (640/1600)/(480/900) = 0.75 -- and the floor is that, not 1.
+    // Asserting the named value rather than "< 1" is what catches a
+    // floor that stops early or one that keeps going into pure black.
     wheel(view, -120, 400);
-    check::is_true(view.framing().zoom >= 1.0 - 1e-9,
-                   "crop/wheel: and never below cover");
+    check::is_true(std::abs(view.framing().zoom - 0.75) < 1e-9,
+                   "crop/wheel: out to exactly the whole-picture zoom");
+    check::is_true(std::abs(view.min_zoom() - 0.75) < 1e-12,
+                   "crop/wheel: which is what the view reports as its floor");
+}
+
+void test_a_four_by_three_source_cannot_zoom_out() {
+    // Cover and contain are the same scale here, so there is no
+    // outward travel at all and zooming out must not letterbox a
+    // picture that already fits.
+    CropView view;
+    view.resize(W, H);
+    view.set_source(flat(1600, 1200));
+    view.set_framing(Framing{});
+
+    wheel(view, -120, 20);
+    check::is_true(std::abs(view.framing().zoom - 1.0) < 1e-9,
+                   "crop/wheel: a 4:3 source stays at cover");
+}
+
+void test_zoomed_out_panning_is_bounded_by_the_window() {
+    // Zoomed all the way out on a 16:9 source the window is taller than
+    // the picture, so the rule inverts: the picture stays inside the
+    // window rather than the other way round. Dragging must not shove
+    // the photograph off the canvas.
+    CropView view;
+    view.resize(W, H);
+    Framing wide;
+    wide.zoom = 0.75;
+    view.set_source(flat(1600, 900));
+    view.set_framing(wide);
+
+    drag(view, W / 2.0, H / 2.0, 0, 5000);
+    const double down = view.framing().center_y;
+    drag(view, W / 2.0, H / 2.0, 0, -5000);
+    const double up = view.framing().center_y;
+    // The legal range is [1 - half, half] with half = 2/3, i.e.
+    // [0.333, 0.667]: symmetric about the centre and strictly inside
+    // the picture's own coordinates.
+    check::is_true(std::abs(down - 2.0 / 3.0) < 1e-6,
+                   "crop/drag: zoomed out, downward travel stops where the "
+                   "picture reaches the window's bottom");
+    check::is_true(std::abs(up - 1.0 / 3.0) < 1e-6,
+                   "crop/drag: and upward travel stops symmetrically");
 }
 
 void test_an_empty_source_is_harmless() {
@@ -172,6 +218,8 @@ int main(int argc, char** argv) {
     test_drag_stops_at_the_edges();
     test_a_trackpad_gesture_does_not_slam_the_zoom();
     test_zoom_is_bounded();
+    test_a_four_by_three_source_cannot_zoom_out();
+    test_zoomed_out_panning_is_bounded_by_the_window();
     test_an_empty_source_is_harmless();
 
     return check::report("crop view");

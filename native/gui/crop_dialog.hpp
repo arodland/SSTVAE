@@ -11,9 +11,16 @@
 // So: when a chosen picture is not 4:3, this dialog opens on top of
 // the original with an aspect-locked window over it. Accepting the
 // default is exactly the old behaviour, one keypress away, which is
-// what keeps it out of the way of an operator in a hurry. There is no
-// letterbox alternative (decided 2026-08-01): padding spends airtime
-// on black, and anyone who wants the whole frame can pad the file.
+// what keeps it out of the way of an operator in a hurry.
+//
+// The zoom travels *out* as well as in, down to the point where the
+// window covers the whole source and the parts of the canvas the
+// picture cannot fill go out black. That reverses the 2026-08-01 "no
+// letterbox" decision -- it is airtime spent on black, but which
+// trade-off is right belongs to the operator, and the alternative was
+// padding the file in another program. The end of the travel is
+// `images::min_zoom`, shared with `images::fit` so the preview and the
+// transmitted picture agree about where it is.
 //
 // The dialog owns no picture data beyond the source it is handed; what
 // it returns is a `images::Framing`, so the caller keeps the original
@@ -49,6 +56,9 @@ public:
     void set_source(const images::Picture& source);
     void set_framing(const images::Framing& framing);
     const images::Framing& framing() const { return framing_; }
+    // The end of the outward travel for the current source, which the
+    // dialog needs to size its slider.
+    double min_zoom() const;
 
     QSize sizeHint() const override;
 
@@ -64,8 +74,15 @@ protected:
 
 private:
     // Where the whole source picture is drawn inside this widget,
-    // letterboxed to preserve its aspect.
+    // letterboxed to preserve its aspect -- and shrunk far enough that
+    // the *widest* crop window still fits, so the window's edges never
+    // leave the widget and the operator can see the black it is
+    // enclosing.
     QRectF source_rect() const;
+    // The crop window's size as a fraction of the source, at a given
+    // zoom. Above 1 in an axis means the window overhangs the picture,
+    // which is what `fit` pads.
+    QSizeF crop_fractions(double zoom) const;
     // The crop window in widget coordinates, derived from `framing_` --
     // never stored, so what is drawn cannot disagree with what is
     // returned.

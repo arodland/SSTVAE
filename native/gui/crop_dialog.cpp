@@ -23,13 +23,20 @@ namespace {
 // Zoom is exposed as integer slider steps because QSlider is integral;
 // 100 steps is 1.00x (exactly cover) and the top is a 4x crop, which is
 // tighter than anyone sensibly wants and still leaves the arithmetic
-// well away from the single-pixel end.
-constexpr int ZOOM_MIN = 100;
+// well away from the single-pixel end. The *bottom* is not a constant:
+// it depends on the source's aspect, since that is what decides how far
+// out the window can go before it is showing the whole picture.
 constexpr int ZOOM_MAX = 400;
 
 double steps_to_zoom(int steps) { return steps / 100.0; }
 int zoom_to_steps(double zoom) {
-    return std::clamp(static_cast<int>(std::lround(zoom * 100.0)), ZOOM_MIN, ZOOM_MAX);
+    return std::clamp(static_cast<int>(std::lround(zoom * 100.0)), 1, ZOOM_MAX);
+}
+// One step below the exact minimum, floored: the slider's bottom
+// position must be *reachable* as the full-picture framing, and
+// `CropView` clamps whatever it is handed up to the exact value.
+int min_steps_for(double min_zoom) {
+    return std::max(1, static_cast<int>(std::floor(min_zoom * 100.0)));
 }
 
 QPixmap to_pixmap(const images::Picture& picture) {
@@ -66,23 +73,15 @@ void CropView::set_framing(const images::Framing& framing) {
     update();
 }
 
-QRectF CropView::source_rect() const {
-    if (source_.empty()) return {};
-    const double sw = source_.width;
-    const double sh = source_.height;
-    const double scale = std::min(width() / sw, height() / sh);
-    const double w = sw * scale;
-    const double h = sh * scale;
-    return {(width() - w) / 2.0, (height() - h) / 2.0, w, h};
+double CropView::min_zoom() const {
+    return images::min_zoom(source_.width, source_.height);
 }
 
-QRectF CropView::crop_rect() const {
-    const QRectF area = source_rect();
-    if (area.isEmpty()) return {};
-
-    // The crop window's size as a *fraction of the source*, which is
-    // what the framing means: at zoom 1 the window is the largest 4:3
-    // rectangle that fits, and zoom shrinks it from there.
+QSizeF CropView::crop_fractions(double zoom) const {
+    // At zoom 1 the window is the largest 4:3 rectangle that fits
+    // inside the source; zoom shrinks it from there, and zooming out
+    // grows it past the source's short axis -- which is exactly the
+    // black `images::fit` pads with.
     const double src_aspect =
         static_cast<double>(source_.width) / source_.height;
     const double target_aspect =
@@ -95,31 +94,60 @@ QRectF CropView::crop_rect() const {
     } else {
         frac_h = src_aspect / target_aspect;  // taller: lose height
     }
-    const double zoom = std::max(1.0, framing_.zoom);
-    frac_w /= zoom;
-    frac_h /= zoom;
+    const double z = std::max(1e-6, zoom);
+    return {frac_w / z, frac_h / z};
+}
 
-    const double w = area.width() * frac_w;
-    const double h = area.height() * frac_h;
+QRectF CropView::source_rect() const {
+    if (source_.empty()) return {};
+    const double sw = source_.width;
+    const double sh = source_.height;
+    // Room is reserved for the widest window the zoom can reach, at a
+    // fixed size rather than one that changes with the zoom: the
+    // picture must not slide around under the operator while they are
+    // sizing a window over it, and a window drawn past the widget's
+    // edge would hide the very padding it is there to show.
+    const QSizeF widest = crop_fractions(min_zoom());
+    const double scale = std::min(width() / (sw * std::max(1.0, widest.width())),
+                                  height() / (sh * std::max(1.0, widest.height())));
+    const double w = sw * scale;
+    const double h = sh * scale;
+    return {(width() - w) / 2.0, (height() - h) / 2.0, w, h};
+}
+
+QRectF CropView::crop_rect() const {
+    const QRectF area = source_rect();
+    if (area.isEmpty()) return {};
+
+    const QSizeF frac = crop_fractions(framing_.zoom);
+    const double w = area.width() * frac.width();
+    const double h = area.height() * frac.height();
     const double cx = area.left() + area.width() * framing_.center_x;
     const double cy = area.top() + area.height() * framing_.center_y;
     return {cx - w / 2.0, cy - h / 2.0, w, h};
 }
 
 void CropView::clamp_center() {
-    framing_.zoom = std::clamp(framing_.zoom, steps_to_zoom(ZOOM_MIN),
-                               steps_to_zoom(ZOOM_MAX));
+    framing_.zoom =
+        std::clamp(framing_.zoom, min_zoom(), steps_to_zoom(ZOOM_MAX));
     if (source_.empty()) return;
     const QRectF area = source_rect();
     if (area.isEmpty()) return;
     const QRectF crop = crop_rect();
-    // Half the window's size, as a fraction of the source: the centre
-    // cannot come closer to an edge than that without the window
-    // hanging over nothing.
+    // Half the window's size, as a fraction of the source. While the
+    // window is the smaller of the two this keeps it inside the
+    // picture; once it overhangs, `half` passes 0.5 and the two bounds
+    // swap, which keeps the *picture* inside the window instead -- the
+    // same rule `images::fit` clamps its pixel offsets by, so the
+    // preview cannot promise a framing the transmitted picture will not
+    // have. std::clamp is UB with its bounds the wrong way round, hence
+    // the explicit min/max rather than passing them straight through.
     const double half_w = crop.width() / area.width() / 2.0;
     const double half_h = crop.height() / area.height() / 2.0;
-    framing_.center_x = std::clamp(framing_.center_x, half_w, 1.0 - half_w);
-    framing_.center_y = std::clamp(framing_.center_y, half_h, 1.0 - half_h);
+    framing_.center_x = std::clamp(framing_.center_x, std::min(half_w, 1.0 - half_w),
+                                   std::max(half_w, 1.0 - half_w));
+    framing_.center_y = std::clamp(framing_.center_y, std::min(half_h, 1.0 - half_h),
+                                   std::max(half_h, 1.0 - half_h));
 }
 
 void CropView::paintEvent(QPaintEvent* event) {
@@ -137,14 +165,21 @@ void CropView::paintEvent(QPaintEvent* event) {
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     painter.drawPixmap(area, pixmap_, QRectF(pixmap_.rect()));
 
-    // Everything outside the window is dimmed rather than hidden, so
-    // the operator can see what is being given up -- which is the whole
-    // complaint this dialog answers.
     const QRectF crop = crop_rect();
     QPainterPath outside;
     outside.addRect(area);
     QPainterPath inside;
     inside.addRect(crop);
+
+    // Whatever the window covers that the picture does not is drawn as
+    // the black it will actually be sent as -- opaque, and not the
+    // dialog's background, so what the operator sees inside the window
+    // is the transmitted frame.
+    painter.fillPath(inside.subtracted(outside), QColor(0, 0, 0));
+
+    // Everything outside the window is dimmed rather than hidden, so
+    // the operator can see what is being given up -- which is the whole
+    // complaint this dialog answers.
     painter.fillPath(outside.subtracted(inside), QColor(0, 0, 0, 140));
 
     // A two-tone border, the same idiom the overlay editor's selection
@@ -226,7 +261,8 @@ CropDialog::CropDialog(const images::Picture& source,
 
     summary_ = new QLabel(this);
     summary_->setText(tr("%1x%2 source, sent as %3x%4. Drag to reposition; "
-                         "the wheel or the slider zooms.")
+                         "the wheel or the slider zooms. Zoom all the way "
+                         "out to send the whole picture, padded with black.")
                           .arg(source.width)
                           .arg(source.height)
                           .arg(images::IMG_W)
@@ -243,7 +279,11 @@ CropDialog::CropDialog(const images::Picture& source,
     auto* zoom_row = new QHBoxLayout();
     zoom_row->addWidget(new QLabel(tr("Zoom:"), this));
     zoom_ = new QSlider(Qt::Horizontal, this);
-    zoom_->setRange(ZOOM_MIN, ZOOM_MAX);
+    // The bottom of the range is the source's own full-picture zoom,
+    // asked of the view rather than recomputed here: two copies of that
+    // arithmetic would let the slider stop somewhere the framing does
+    // not.
+    zoom_->setRange(min_steps_for(view_->min_zoom()), ZOOM_MAX);
     zoom_->setValue(zoom_to_steps(view_->framing().zoom));
     connect(zoom_, &QSlider::valueChanged, this, &CropDialog::on_zoom_changed);
     zoom_row->addWidget(zoom_, 1);
