@@ -40,6 +40,27 @@ constexpr double kDriftStallS = 3.0;
 
 JavaVM* g_vm = nullptr;
 
+// A global reference to AudioBridge, resolved once from a thread that
+// can see it.
+//
+// **`FindClass` from a thread we created cannot find an application
+// class.** It resolves against the class loader of the frame on the
+// call stack, and a thread attached with `AttachCurrentThread` has no
+// Java frames at all -- so JNI falls back to the *system* class loader,
+// which knows `java.lang.String` and nothing of ours. The failure is
+// a plain "class not found" a long way from that explanation.
+//
+// It stayed hidden through the whole of Tier 0 because every control
+// call was made from Qt's thread, which does have the app's loader:
+// enumeration and open are called from the UI, and on the data path
+// Java calls *us*. The transmit path is the first caller on a thread
+// this library created, and it failed on its first run.
+//
+// So the class is resolved in `set_java_vm`, which is called from the
+// UI thread during startup, and kept as a global reference -- valid on
+// any thread, for the life of the process.
+jclass g_bridge = nullptr;
+
 // Attaches the calling thread for the duration of a *control* call.
 // Never used on the data path -- Java calls us there, already attached.
 class Env {
@@ -69,6 +90,11 @@ public:
     JNIEnv* get() const { return env_; }
 
     jclass bridge() const {
+        // The cached global reference first: on a thread this library
+        // created, it is the only thing that works. FindClass remains
+        // as the fallback for the case where `set_java_vm` was called
+        // before the class was loadable.
+        if (g_bridge != nullptr) return g_bridge;
         jclass c = env_->FindClass(kBridge);
         if (c == nullptr) {
             env_->ExceptionClear();
@@ -137,7 +163,25 @@ std::string single_string(const char* method) {
 
 }  // namespace
 
-void set_java_vm(JavaVM_* vm) { g_vm = reinterpret_cast<JavaVM*>(vm); }
+void set_java_vm(JavaVM_* vm) {
+    g_vm = reinterpret_cast<JavaVM*>(vm);
+    if (g_vm == nullptr || g_bridge != nullptr) return;
+    // Must run here, on the caller's thread, and the caller is the UI --
+    // see g_bridge for why anywhere else is too late.
+    try {
+        Env env;
+        jclass local = env->FindClass(kBridge);
+        if (local != nullptr) {
+            g_bridge = static_cast<jclass>(env->NewGlobalRef(local));
+            env->DeleteLocalRef(local);
+        } else {
+            env->ExceptionClear();
+        }
+    } catch (const std::exception&) {
+        // Leave g_bridge null and let `bridge()` fall back to
+        // FindClass, which is no worse than before this cache existed.
+    }
+}
 bool ready() { return g_vm != nullptr; }
 
 std::vector<std::string> input_device_names() { return string_array("inputDeviceNames"); }
