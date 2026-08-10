@@ -11,10 +11,12 @@
 
 #include <jni.h>
 
+#include <cstdio>
 #include <string>
 
 #include "rx/engine.hpp"
 #include "session.hpp"
+#include "tx/engine.hpp"
 
 namespace {
 
@@ -52,6 +54,24 @@ Java_org_cleverdomain_sstvae_ListenerService_nativeStop(JNIEnv*, jclass) {
 // meanings live next to the engine that publishes them.
 JNIEXPORT jstring JNICALL
 Java_org_cleverdomain_sstvae_ListenerService_nativeStatusLine(JNIEnv* env, jclass) {
+    // Transmitting first, and unconditionally: it is the state where the
+    // radio is on the air, it is short, and half duplex means the
+    // receive line has nothing to say meanwhile anyway. An operator
+    // glancing at the shade during an over needs to see that the station
+    // is transmitting before anything else.
+    if (Session::instance().transmitting()) {
+        const sstvae::tx::TxState t = Session::instance().tx_state();
+        std::string s = "Transmitting";
+        if (t.phase == sstvae::tx::TxPhase::Sending) {
+            char pct[16];
+            std::snprintf(pct, sizeof pct, "  %.0f%%", 100.0 * t.progress);
+            s += pct;
+        } else if (!t.message.empty()) {
+            s = "Transmitting - " + t.message;
+        }
+        return env->NewStringUTF(s.c_str());
+    }
+
     const sstvae::rx::Progress p = Session::instance().progress();
     std::string s;
     switch (p.status) {
@@ -98,6 +118,23 @@ Java_org_cleverdomain_sstvae_ListenerService_nativeTakeSavedPicture(JNIEnv* env,
 JNIEXPORT jstring JNICALL
 Java_org_cleverdomain_sstvae_ListenerService_nativeLastSavedSummary(JNIEnv* env, jclass) {
     return env->NewStringUTF(Session::instance().last_saved_summary().c_str());
+}
+
+// The over the UI staged. The picture never crosses this boundary -- see
+// Session::stage_transmit for why it is two calls rather than one.
+JNIEXPORT jboolean JNICALL
+Java_org_cleverdomain_sstvae_ListenerService_nativeStartTransmit(JNIEnv*, jclass) {
+    return Session::instance().start_staged_transmit() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_org_cleverdomain_sstvae_ListenerService_nativeCancelTransmit(JNIEnv*, jclass) {
+    Session::instance().cancel_transmit();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_org_cleverdomain_sstvae_ListenerService_nativeTransmitting(JNIEnv*, jclass) {
+    return Session::instance().transmitting() ? JNI_TRUE : JNI_FALSE;
 }
 
 }  // extern "C"

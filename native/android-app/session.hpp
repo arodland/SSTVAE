@@ -34,8 +34,10 @@
 
 #include "audio/android/androidaudio.hpp"
 #include "codec/codec.hpp"
+#include "images/types.hpp"
 #include "rx/engine.hpp"
 #include "rx/ringbuffer.hpp"
+#include "tx/engine.hpp"
 
 namespace sstvae::androidapp {
 
@@ -123,7 +125,69 @@ public:
     // holes in its own audio.
     std::vector<double> audio_tail(std::size_t n) const;
 
+    // --- transmit ----------------------------------------------------
+    //
+    // **Owned here for the same reason receiving is**, and it is not the
+    // weaker argument of the two: an over is 32-95 s of committed
+    // airtime, and a transmission cut off because the activity was
+    // destroyed is worse on the band than a reception cut off is. So the
+    // engine outlives any view, and the UI drives it through the same
+    // service that guarantees the process.
+
+    // Fetch and load the *encoder*, off the calling thread. Separate
+    // from `load_model_async` and not folded into it: the parts are lazy
+    // and independent by design, and a station that only ever listens
+    // must not be made to fetch 9 MB it will never run. Called the first
+    // time the Transmit screen is opened, not at startup.
+    void preload_encoder_async();
+    ModelState encoder_state() const;
+    std::string encoder_error() const;
+
+    // Everything one over needs. A value rather than a reference to
+    // configuration, because the transmitting thread must keep sending
+    // what the operator committed to at the moment they pressed Send.
+    struct TxRequest {
+        images::Picture picture;  // already framed to IMG_W x IMG_H
+        std::string mode = "B";
+        std::string callsign;
+        double level = 0.9;
+        bool cw_id = false;
+        std::string cw_message;
+        double vox_lead_s = 0.0;
+        std::string output_device;
+    };
+
+    // Stage the over, then let the service start it.
+    //
+    // Two calls rather than one because **the service is the only thing
+    // that may start a transmission**, exactly as it is the only thing
+    // that may start capture -- but a request carries a 640x480 picture,
+    // which is not something to marshal through an Intent. So the view
+    // leaves it here and asks the service to go; the service calls
+    // `start_staged_transmit()` and never sees the picture.
+    //
+    // Staging also fixes the composition at the moment of the Send tap:
+    // an edit afterwards belongs to the next over, which is the rule the
+    // desktop settled on for the same reason.
+    void stage_transmit(TxRequest request);
+    bool start_staged_transmit();
+
+    // Start transmitting, on a worker thread. False if a transmission is
+    // already in flight, or the encoder is not loaded -- both of which
+    // the UI already prevents, so this is the backstop rather than the
+    // check.
+    //
+    // **Half duplex.** Capture is stopped for the duration and restarted
+    // afterwards *if it was running*, with a fresh ring buffer -- so the
+    // tail of our own transmission is never decoded back as a reception.
+    bool start_transmit(TxRequest request);
+    void cancel_transmit();
+    bool transmitting() const;
+    tx::TxState tx_state() const;
+
 private:
+    void join_tx();
+    void run_transmit(const TxRequest& request);
     Session() = default;
     ~Session();
     Session(const Session&) = delete;
@@ -144,6 +208,9 @@ private:
     std::unique_ptr<rx::StopFlag> stop_;
     std::thread thread_;
     std::string error_;
+    // The device the last `start` was given, so the half-duplex resume
+    // reopens the one the operator chose rather than the default.
+    std::string device_;
     std::string picture_dir_;
     std::optional<std::string> saved_picture_;
     std::string saved_summary_;
@@ -161,6 +228,19 @@ private:
     std::int64_t model_received_ = 0;
     std::int64_t model_total_ = 0;
     std::thread model_thread_;
+    ModelState encoder_state_ = ModelState::Absent;
+    std::string encoder_error_;
+    std::thread encoder_thread_;
+
+    // Transmit state. Its own lock again: `tx_state()` is polled by the
+    // UI several times a second while the transmitting thread writes it
+    // from the audio callback, and neither may end up waiting on a
+    // capture start or a model load.
+    mutable std::mutex tx_mu_;
+    std::unique_ptr<tx::TxEngine> tx_engine_;
+    std::thread tx_thread_;
+    tx::TxState tx_state_;
+    std::optional<TxRequest> staged_;
 };
 
 }  // namespace sstvae::androidapp

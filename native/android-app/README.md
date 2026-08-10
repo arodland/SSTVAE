@@ -1,10 +1,10 @@
-# SSTVAE for Android (Tier 0)
+# SSTVAE for Android (Tiers 0 and 1)
 
-The receive-only listener from `docs/android.md`: a Qt Quick front end
-over the **same** `native/core/` the desktop app uses. An Android build
-is a fourth build of that code, not a reimplementation, which is what
-keeps the golden vectors and `pytest --native` covering it with no new
-parity surface.
+The listener from `docs/android.md`, and since 2026-08-09 the
+transmitter as well: a Qt Quick front end over the **same**
+`native/core/` the desktop app uses. An Android build is a fourth build
+of that code, not a reimplementation, which is what keeps the golden
+vectors and `pytest --native` covering it with no new parity surface.
 
 Not to be confused with **`native/android/`**, the pre-Tier-0 smoke
 test — a plain Views probe that answered "can a phone select an audio
@@ -12,7 +12,7 @@ device and decode a picture". It can: a Kenwood TH-D75 over USB decodes
 at over 24 dB, and acoustic coupling into the built-in mic works too.
 This is the app that question was asked on behalf of.
 
-**Status: Tier 0 is built and has received real pictures.** Qt Quick,
+**Status: Tier 0 receives real pictures; Tier 1 transmits.** Qt Quick,
 `sstvae_core` and the onnxruntime AAR build and package together for
 both ABIs; the app enumerates the device's real inputs through JNI,
 captures through `core/audio/android/` into a `RingBuffer` at the
@@ -400,11 +400,138 @@ turned out to require.
    while the sha256 check and the `.part` rename stay in C++ — one
    implementation of the part that can silently corrupt a cache.
 
-Not done, and deliberately so: **saving to the shared gallery**
-(a MediaStore insert; Share reaches gallery, mail and chat for one
-intent and no storage permission, so it went first) and **`play()`**,
-which is written, unexercised, and a Tier 1 concern — Tier 0 does not
-transmit.
+Not done, and deliberately so: **saving to the shared gallery** — a
+MediaStore insert; Share reaches gallery, mail and chat for one intent
+and no storage permission, so it went first.
+
+## Tier 1: transmitting
+
+**Built 2026-08-09 and on the air the same day.** Pick a picture from
+the gallery or the camera, frame it by touch, send it; the session
+suspends receiving for the over and resumes by itself afterwards.
+`docs/android.md`'s Tier 1 section is the reasoning; this is the shape
+of the code.
+
+Verified over RF, not loopback (Andrew, 2026-08-09): transmitted from a
+phone into a radio through a **USB audio interface**, received on an
+Android tablet on another radio, **mode B, CW ID on, 25 dB SNR, no
+issues** — the first Android-to-Android contact. So a phone's USB audio
+output drives a radio, and USB is now exercised in both directions on
+this app rather than only on the pre-Tier-0 smoke test.
+
+**The VOX leader was not part of that test**, so it is still tested
+only against the preamble detector and the emulator. The radio was
+keyed by hand because that radio offers no VOX on its USB/data input —
+an uncommon limitation, not a reason to doubt VOX keying generally:
+many radios do offer it there, and a USB soundcard wired to a radio's
+*microphone* input keys on VOX whatever its data port does.
+
+The pieces mirror the receive side deliberately, so there is one
+arrangement to understand rather than two. `Session` owns the
+`TxEngine` exactly as it owns the decode loop, for the same reason — an
+over is 32–95 s of committed airtime and must survive the activity
+being destroyed. `Transmitter` is a *view* over it, as `Listener` is
+over the receive half. `Composition` holds the picked picture and its
+framing, process-wide, so a rotation mid-crop loses nothing.
+
+- **The picture goes out unmodified. No overlay, not even a callsign
+  caption.** The station is identified by the beacon carrier and
+  optionally a CW ID; burning a callsign into the pixels identifies it
+  only to someone who already decoded the picture. So
+  `core/overlay/` is not in the Android build at all, and
+  `docs/android.md`'s Tier 1 prediction that it would be is the one
+  part of that design that was wrong.
+- **A callsign is not required to send.** Identifying is required of an
+  amateur station, but the app does not know it is attached to a radio
+  and does not take responsibility for the operator's identification
+  even when it is — voice is a third way it never sees.
+- **The crop preview is `images::fit`'s own output**, served through
+  the image provider as `compose/<id>`, not a QML `Image` with a clip
+  imitating a crop. The desktop's rule and the desktop's reason: a
+  second representation is a second thing that can disagree with what
+  goes on the air, and this screen exists to decide exactly that.
+- **Two `Image`s, swapped on load, and one render in flight.** A single
+  `Image` following the id blanks for the duration of every load, so a
+  drag becomes a flicker with the picture appearing only when the
+  finger stops. Revealing a frame only when it is `Ready` keeps the
+  previous one up meanwhile. The throttle is the other half: `fit` is a
+  real resize, and one request per touch event queues work faster than
+  it drains, so moves during a load collapse into a single repeat.
+- **Zoom goes below 1 and letterboxes**, via `images::min_zoom` — the
+  desktop's zoom-out work, which the Android slider and pinch clamp
+  against so both stop where `fit` does. Below zoom 1 the crop window
+  is wider than the source on an axis, so its half-extent exceeds 0.5
+  and the centre has to be *pinned* rather than clamped: `std::clamp`
+  with an inverted range is undefined behaviour, not a no-op.
+- **`Session::stage_transmit` then `start_staged_transmit`**, two calls,
+  because the service is the only thing that may start an over and a
+  640x480 picture is not something to marshal through an Intent. The
+  staged request is *consumed*, so a redelivered intent or a double tap
+  cannot put a second copy of the picture on the air. Staging also
+  fixes the composition at the moment of the tap: an edit afterwards
+  belongs to the next over.
+
+### What Tier 1 cost that Tier 0 did not
+
+- **`FindClass` cannot see an application class from a thread we
+  created.** The transmit thread is the first in this app to call into
+  Java, and it failed on its first run with `android audio:
+  org/cleverdomain/sstvae/AudioBridge not found`. JNI resolves against
+  the class loader of a frame on the call stack; a thread attached with
+  `AttachCurrentThread` has none, so it falls back to the system loader.
+  `set_java_vm` now caches a global reference from the UI thread. This
+  was invisible through all of Tier 0 because every control call came
+  from Qt's thread and the data path is Java calling us — so it is a
+  hazard for *any* new C++→Java call made off the UI thread, not a
+  one-off.
+- **`AudioBridge.java` was a hand-synced duplicate**, one copy under
+  `core/audio/android/java/` and an identical one under
+  `android/src/`. androiddeployqt takes exactly one
+  `QT_ANDROID_PACKAGE_SOURCE_DIR`, which is why. It is now assembled in
+  the build tree from both sources (`sstvae_stage_package_dir`), so the
+  layer owns its blocking-read loop the way the CMake comment always
+  claimed. Nothing was wrong yet, which is exactly what made it worth
+  fixing: the first edit to either copy would have shipped the other.
+- **The service gained a transmit action and `mediaPlayback`.** Both
+  foreground types are declared for its whole lifetime rather than
+  re-declared per transition — except `microphone`, which may not be
+  claimed without RECORD_AUDIO and throws from API 34, so a station
+  that denied the microphone and only transmits drops it.
+- **Settings needed a `ScrollView`.** The transmit settings pushed the
+  page past the screen, and a QML column does not compress when it does
+  not fit, it truncates — "Model" simply disappeared behind the tab bar.
+  Same failure and same fix as the desktop's per-tab `QScrollArea`. The
+  trap on this side: the content must be bound to the ScrollView **by
+  id**, because a ScrollView reparents its content into a Flickable's
+  `contentItem`, so `parent` is neither the ScrollView nor anything with
+  its width. The symptom is not a missing scrollbar but text running off
+  the right edge with nothing to scroll it back.
+
+### Picking a picture
+
+`ImagePicker.java` is a **transparent activity of our own**, not a call
+into Qt's. An activity result comes back to whoever launched it, and
+reaching `QtActivity`'s means either subclassing Qt's bindings — and
+maintaining that subclass across Qt upgrades — or using its private
+`QtAndroidPrivate::startActivity`. An activity that launches an intent
+and finishes is smaller than either.
+
+Two things it does that are not obvious. The result is **copied into
+app-private storage before any path reaches C++**: what the picker
+returns is a `content://` URI whose grant lasts as long as that
+activity, so handing it over would produce a path that reads fine while
+composing and fails at the moment of transmitting. And the camera's
+output file goes in `getExternalCacheDir()`, because Qt's FileProvider
+covers that and not the internal cache — declaring a second provider
+would collide with Qt's, the same trap `Sharing.java` records.
+
+### Not done
+
+`Composition` does not survive the process being killed, so swiping the
+app away loses the picked picture and its framing. A rotation does not,
+which is what the process-wide singleton is for. Persisting the source
+path and framing in `QSettings` would fix it and is a few lines; it has
+not been done because nothing has asked for it yet.
 
 ## `core/audio/android/`
 

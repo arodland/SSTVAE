@@ -126,8 +126,11 @@ std::string Session::last_saved_summary() const {
 }
 
 Session::~Session() {
+    cancel_transmit();
+    join_tx();
     stop();
     if (model_thread_.joinable()) model_thread_.join();
+    if (encoder_thread_.joinable()) encoder_thread_.join();
 }
 
 void Session::load_model_async() {
@@ -208,6 +211,7 @@ bool Session::start(const std::string& device_name) {
     std::lock_guard<std::mutex> lk(mu_);
     if (stream_) return true;
     error_.clear();
+    device_ = device_name;
 
     ring_ = std::make_unique<rx::RingBuffer>(130.0);
     state_ = std::make_unique<rx::SharedState>();
@@ -340,6 +344,206 @@ std::vector<double> Session::audio_tail(std::size_t n) const {
 double Session::capture_drift_ppm() const {
     std::lock_guard<std::mutex> lk(mu_);
     return stream_ ? stream_->capture_drift_ppm() : 0.0;
+}
+
+// --- transmit ---------------------------------------------------------
+
+void Session::preload_encoder_async() {
+    {
+        std::lock_guard<std::mutex> lk(model_mu_);
+        if (encoder_state_ == ModelState::Downloading ||
+            encoder_state_ == ModelState::Loading || encoder_state_ == ModelState::Ready) {
+            return;
+        }
+        encoder_state_ = ModelState::Loading;
+        encoder_error_.clear();
+    }
+    if (encoder_thread_.joinable()) encoder_thread_.join();
+
+    encoder_thread_ = std::thread([this] {
+        install_java_fetcher([this](std::int64_t received, std::int64_t total) {
+            std::lock_guard<std::mutex> lk(model_mu_);
+            encoder_state_ = ModelState::Downloading;
+            model_received_ = received;
+            model_total_ = total;
+        });
+
+        // The *same* codec object the decoder half lives in, so the two
+        // parts are cross-checked against one stamped `source_sha256`.
+        // Building a second one for the encoder would run an encoder and
+        // a decoder from different checkpoints without complaint, which
+        // OnnxCodec exists partly to prevent.
+        std::shared_ptr<codec::OnnxCodec> c;
+        {
+            std::lock_guard<std::mutex> lk(model_mu_);
+            c = codec_;
+        }
+        std::string error;
+        try {
+            if (!c) {
+                c = std::make_shared<codec::OnnxCodec>(
+                    [](const std::string& part) { return checkpoint::resolve_onnx(part); });
+            }
+            c->preload("encoder");
+        } catch (const std::exception& e) {
+            error = e.what();
+            c.reset();
+        }
+
+        std::lock_guard<std::mutex> lk(model_mu_);
+        if (c) codec_ = c;
+        encoder_state_ = c ? ModelState::Ready : ModelState::Failed;
+        encoder_error_ = error;
+        model_received_ = 0;
+        model_total_ = 0;
+    });
+}
+
+ModelState Session::encoder_state() const {
+    std::lock_guard<std::mutex> lk(model_mu_);
+    return encoder_state_;
+}
+
+std::string Session::encoder_error() const {
+    std::lock_guard<std::mutex> lk(model_mu_);
+    return encoder_error_;
+}
+
+bool Session::transmitting() const {
+    std::lock_guard<std::mutex> lk(tx_mu_);
+    return tx_engine_ != nullptr;
+}
+
+tx::TxState Session::tx_state() const {
+    std::lock_guard<std::mutex> lk(tx_mu_);
+    return tx_state_;
+}
+
+void Session::cancel_transmit() {
+    std::lock_guard<std::mutex> lk(tx_mu_);
+    if (tx_engine_) tx_engine_->cancel();
+}
+
+void Session::join_tx() {
+    if (tx_thread_.joinable()) tx_thread_.join();
+}
+
+void Session::stage_transmit(TxRequest request) {
+    std::lock_guard<std::mutex> lk(tx_mu_);
+    staged_ = std::move(request);
+}
+
+bool Session::start_staged_transmit() {
+    std::optional<TxRequest> req;
+    {
+        std::lock_guard<std::mutex> lk(tx_mu_);
+        // **Consumed, not merely read.** The service may be handed the
+        // same intent twice -- Android redelivers, and a double tap
+        // reaches it as two starts -- and a staged request that survived
+        // its own transmission would put a second copy of the picture on
+        // the air.
+        req.swap(staged_);
+    }
+    if (!req) return false;
+    return start_transmit(std::move(*req));
+}
+
+bool Session::start_transmit(TxRequest request) {
+    {
+        std::lock_guard<std::mutex> lk(tx_mu_);
+        if (tx_engine_) return false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(model_mu_);
+        if (encoder_state_ != ModelState::Ready || !codec_) return false;
+    }
+    join_tx();  // the previous over's thread, already finished
+
+    tx_thread_ = std::thread([this, request] { run_transmit(request); });
+    return true;
+}
+
+void Session::run_transmit(const TxRequest& request) {
+    // **Capture stops before anything else happens**, including the
+    // encode -- not because the encode would disturb it, but because a
+    // phone's microphone is going to hear our own transmission and the
+    // ring buffer must not contain it. `start()` builds a fresh
+    // RingBuffer, so the resume below cannot replay our own audio back
+    // into the decoder.
+    std::string resume_device;
+    bool resume_capture = false;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        resume_capture = stream_ != nullptr;
+        resume_device = device_;
+    }
+    if (resume_capture) stop();
+
+    std::shared_ptr<codec::OnnxCodec> model;
+    {
+        std::lock_guard<std::mutex> lk(model_mu_);
+        model = codec_;
+    }
+
+    tx::TxConfig cfg;
+    cfg.mode = request.mode;
+    cfg.callsign = request.callsign;
+    cfg.device = request.output_device;
+    cfg.level = request.level;
+    cfg.cw_id = request.cw_id;
+    if (!request.cw_message.empty()) cfg.cw_message = request.cw_message;
+    cfg.vox_lead_s = request.vox_lead_s;
+    // **No PTT, and that is the whole keying story on this platform.**
+    // Android gives an unprivileged app no serial node, so rig control
+    // is structurally absent (docs/android.md) and the transmitter is
+    // keyed by its own audio. The state machine is kept exactly as it
+    // is anyway: `PttWatchdog` with a null `Ptt` stands itself down and
+    // does nothing, so there is no special case here, and CAT over
+    // NET rigctl later is a `Ptt` to pass rather than a restructure.
+    auto engine = std::make_unique<tx::TxEngine>(
+        nullptr,
+        [](const std::string& device, std::span<const double> wave, int samplerate,
+           const std::function<void(double)>& on_progress,
+           const std::function<bool()>& should_stop,
+           const std::function<void(const std::string&)>& on_error) {
+            return audio::android::play(device, wave, samplerate, on_progress,
+                                        should_stop, on_error);
+        },
+        [model](const images::ImageArray& array) { return model->encode(array); },
+        [this](const tx::TxState& s) {
+            std::lock_guard<std::mutex> lk(tx_mu_);
+            tx_state_ = s;
+        },
+        [this](const std::string& message) {
+            std::lock_guard<std::mutex> lk(mu_);
+            error_ = message;
+        });
+
+    tx::TxEngine* raw = engine.get();
+    {
+        std::lock_guard<std::mutex> lk(tx_mu_);
+        tx_engine_ = std::move(engine);
+        tx_state_ = tx::TxState{};
+    }
+
+    try {
+        raw->transmit(request.picture, cfg);
+    } catch (const std::exception& e) {
+        std::lock_guard<std::mutex> lk(mu_);
+        error_ = std::string("transmission failed: ") + e.what();
+    }
+
+    // The final state is read out *before* the engine is dropped, so a
+    // UI polling across this moment sees Done or Failed rather than the
+    // default-constructed Idle -- which would read as "nothing
+    // happened" at exactly the point something did.
+    {
+        std::lock_guard<std::mutex> lk(tx_mu_);
+        tx_state_ = raw->state();
+        tx_engine_.reset();
+    }
+
+    if (resume_capture) start(resume_device);
 }
 
 }  // namespace sstvae::androidapp

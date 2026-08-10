@@ -45,6 +45,7 @@ public class ListenerService extends Service {
 
     public static final String ACTION_START = "org.cleverdomain.sstvae.START";
     public static final String ACTION_STOP = "org.cleverdomain.sstvae.STOP";
+    public static final String ACTION_TRANSMIT = "org.cleverdomain.sstvae.TRANSMIT";
     public static final String EXTRA_DEVICE = "device";
 
     /** How often the notification is refreshed. Not a decode cadence —
@@ -57,14 +58,31 @@ public class ListenerService extends Service {
     private static native String nativeStatusLine();
     private static native String nativeTakeSavedPicture();
     private static native String nativeLastSavedSummary();
+    /** Begins the over the UI already staged on the native session. */
+    private static native boolean nativeStartTransmit();
+    private static native void nativeCancelTransmit();
+    private static native boolean nativeTransmitting();
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean running = false;
+    /** True between a transmit request and the engine going idle again. */
+    private boolean transmitting = false;
 
     private final Runnable refresh = new Runnable() {
         @Override
         public void run() {
-            if (!running) return;
+            if (!running && !transmitting) return;
+            // An over ends on its own, on a worker thread, and this is
+            // the only place watching. Noticing here is what lets a
+            // transmit-only service stop itself afterwards rather than
+            // sitting foreground forever.
+            if (transmitting && !nativeTransmitting()) {
+                transmitting = false;
+                if (!running) {
+                    stopEverything();
+                    return;
+                }
+            }
             NotificationManager nm = getSystemService(NotificationManager.class);
             if (nm != null) {
                 nm.notify(NOTIFICATION_ID, buildNotification(nativeStatusLine()));
@@ -98,6 +116,26 @@ public class ListenerService extends Service {
         context.startService(i);
     }
 
+    /**
+     * Send the over the UI has staged on the native session.
+     *
+     * <p>Routed through the service for the same reason listening is: an
+     * over is 32–95 s of committed airtime, and a transmission that stops
+     * halfway because the activity was destroyed puts a truncated picture
+     * on the band. The activity is in the foreground when Send is pressed
+     * — that is what makes starting the service legal — but it need not
+     * still be there when the audio ends.
+     */
+    public static void transmit(Context context) {
+        Intent i = new Intent(context, ListenerService.class);
+        i.setAction(ACTION_TRANSMIT);
+        context.startForegroundService(i);
+    }
+
+    public static void cancelTransmit(Context context) {
+        nativeCancelTransmit();
+    }
+
     @Override
     public IBinder onBind(Intent intent) {
         // Nothing binds: the UI reaches the session directly through
@@ -111,7 +149,24 @@ public class ListenerService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         final String action = intent != null ? intent.getAction() : null;
         if (ACTION_STOP.equals(action)) {
-            stopListening();
+            stopEverything();
+            return START_NOT_STICKY;
+        }
+
+        if (ACTION_TRANSMIT.equals(action)) {
+            createChannel();
+            // Re-asserted every time, because the type has to cover what
+            // the service is about to do: a station that is not listening
+            // has no microphone claim to transmit under.
+            startAsForeground();
+            if (!nativeStartTransmit()) {
+                Log.e(TAG, "the session refused the transmit request");
+                if (!running) stopEverything();
+                return START_NOT_STICKY;
+            }
+            transmitting = true;
+            handler.removeCallbacks(refresh);
+            handler.postDelayed(refresh, REFRESH_MS);
             return START_NOT_STICKY;
         }
 
@@ -126,7 +181,7 @@ public class ListenerService extends Service {
 
         if (!nativeStart(device == null ? "" : device)) {
             Log.e(TAG, "capture did not start; stopping the service");
-            stopListening();
+            stopEverything();
             return START_NOT_STICKY;
         }
 
@@ -142,25 +197,56 @@ public class ListenerService extends Service {
 
     @Override
     public void onDestroy() {
-        stopListening();
+        stopEverything();
         super.onDestroy();
     }
 
-    private void stopListening() {
+    /**
+     * End the session, in both directions.
+     *
+     * <p>Cancelling the transmission first is deliberate and is the one
+     * ordering that matters here: {@code nativeStop()} would otherwise
+     * return while an over was still playing, and the service would go
+     * away underneath a transmission it is supposed to be protecting.
+     */
+    private void stopEverything() {
         running = false;
+        transmitting = false;
         handler.removeCallbacks(refresh);
+        nativeCancelTransmit();
         nativeStop();
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
 
+    /**
+     * Both types, whenever both are available.
+     *
+     * <p>The service does two things Android wants declared, and which of
+     * them applies changes during a session: listening is {@code
+     * microphone}, an over is {@code mediaPlayback}, and half duplex
+     * means the first stops for the duration of the second. Re-declaring
+     * on each transition is a thing to get wrong once, so both are
+     * declared for the whole lifetime, as in the manifest.
+     *
+     * <p><b>Except that {@code microphone} may not be claimed without
+     * RECORD_AUDIO</b>, and from API 34 asking anyway throws. A station
+     * that denied the microphone and only wants to transmit is a real
+     * configuration — one this app should support rather than crash on —
+     * so the type is dropped when the permission is not held.
+     */
     private void startAsForeground() {
         Notification n = buildNotification("Starting…");
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
-        } else {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, n);
+            return;
         }
+        int types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK;
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            types |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+        }
+        startForeground(NOTIFICATION_ID, n, types);
     }
 
     /**

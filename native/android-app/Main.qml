@@ -18,6 +18,7 @@ ApplicationWindow {
     title: "SSTVAE"
 
     Listener { id: listener }
+    Transmitter { id: transmitter }
     PictureList { id: pictures }
 
     // **Edge-to-edge is mandatory from targetSdk 35 up**, so the window
@@ -60,6 +61,11 @@ ApplicationWindow {
         id: tabs
         bottomPadding: SafeArea.margins.bottom
         TabButton { text: "Listen" }
+        // The encoder is a second 9 MB artifact, fetched on the first
+        // visit to this tab rather than at startup: a station that only
+        // ever listens must never pay for it, which is the whole reason
+        // `load_codec`'s parts are lazy and independent.
+        TabButton { text: "Send"; onClicked: transmitter.loadEncoder() }
         TabButton { text: "Pictures"; onClicked: pictures.refresh() }
         TabButton { text: "Settings" }
     }
@@ -127,7 +133,14 @@ ApplicationWindow {
                         horizontalAlignment: Text.AlignHCenter
                         font.pixelSize: 15
                         color: "#888"
-                        text: !listener.listening ? "Not listening"
+                        // **Transmitting has to be said out loud here.**
+                        // Half duplex stops capture for the whole over,
+                        // so the waterfall freezes and nothing decodes —
+                        // which is byte for byte what a wedged capture
+                        // looks like. The desktop learned this when the
+                        // receive pane stayed on screen through an over.
+                        text: transmitter.transmitting ? "Transmitting"
+                            : !listener.listening ? "Not listening"
                             : !listener.modelReady ? "Waiting for the model"
                             : "Listening for a transmission"
                     }
@@ -137,7 +150,9 @@ ApplicationWindow {
                         wrapMode: Text.Wrap
                         font.pixelSize: 12
                         color: "#aaa"
-                        text: !listener.listening
+                        text: transmitter.transmitting
+                              ? "Receiving is paused until the transmission finishes, and resumes on its own."
+                              : !listener.listening
                               ? "Tune the radio, then start. The waterfall above shows the band whether or not anything is decoding."
                               : !listener.modelReady
                               ? "Reception has already begun; the picture appears as soon as the model finishes downloading."
@@ -200,10 +215,20 @@ ApplicationWindow {
             Button {
                 Layout.fillWidth: true
                 Layout.margins: 12
+                // Half duplex owns the audio path for the duration of an
+                // over, and the session resumes by itself afterwards --
+                // so starting or stopping it by hand here would either
+                // do nothing or fight the resume.
+                enabled: !transmitter.transmitting
                 text: listener.listening ? "Stop" : "Start listening"
                 onClicked: listener.listening ? listener.stop()
                                               : listener.start(deviceBox.currentText)
             }
+        }
+
+        // ---- Send ---------------------------------------------------
+        TransmitPane {
+            transmitter: transmitter
         }
 
         // ---- Pictures -----------------------------------------------
@@ -257,7 +282,35 @@ ApplicationWindow {
         }
 
         // ---- Settings -----------------------------------------------
+        //
+        // **Scrolled, because a settings page that does not fit does not
+        // compress -- it truncates**, and what goes first is the
+        // explanatory text at the bottom of the last section. The
+        // desktop has the identical construct for the identical reason
+        // (`QScrollArea` per settings tab): there is no default size
+        // that is right on every panel, and a reader cannot tell
+        // clipped text from text that simply ends. It became true here
+        // the moment the transmit settings landed -- before them the
+        // page fitted, and "Model" was the first thing to disappear
+        // behind the tab bar.
+        //
+        // Horizontal scrolling off: the width is the window's, so a
+        // horizontal bar could only ever mean a label refusing to wrap.
+        ScrollView {
+            id: settingsScroll
+            contentWidth: availableWidth
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            clip: true
+
         ColumnLayout {
+            // **Bound to the ScrollView by id, and `parent` will not do
+            // it.** A ScrollView reparents its content into a Flickable's
+            // contentItem, so `parent` here is neither the ScrollView nor
+            // anything with its width -- and the layout then takes its
+            // own implicit width, which is wider than the viewport. The
+            // symptom is not a missing scrollbar but text running off the
+            // right edge with nothing to scroll it back.
+            width: settingsScroll.availableWidth
             spacing: 12
 
             Label {
@@ -285,11 +338,159 @@ ApplicationWindow {
                 Layout.rightMargin: 12
                 wrapMode: Text.Wrap
             }
+            // **One button, both directions.** It sits under "Audio
+            // input" because that is where the first device picker is,
+            // but plugging in a USB interface adds a capture *and* a
+            // playback device at the same instant, and a rescan that
+            // refreshed only the list you happened to be looking at is
+            // a button that appears not to work. Two buttons would be
+            // worse: two lists that can disagree about when they were
+            // last looked at.
             Button {
-                text: "Rescan devices"
+                text: "Rescan audio devices"
                 Layout.leftMargin: 12
-                enabled: !listener.listening
-                onClicked: listener.refreshDevices()
+                enabled: !listener.listening && !transmitter.transmitting
+                onClicked: {
+                    listener.refreshDevices()
+                    transmitter.refreshDevices()
+                }
+            }
+            Label {
+                text: "Refreshes both the input and output lists."
+                font.pixelSize: 11
+                color: "#666"
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                wrapMode: Text.Wrap
+            }
+
+            Label {
+                text: "Station"
+                font.bold: true
+                Layout.margins: 12
+                Layout.bottomMargin: 0
+            }
+            TextField {
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                placeholderText: "Callsign"
+                text: transmitter.callsign
+                // Written on every keystroke rather than on editing
+                // finished: a phone keyboard is dismissed by the back
+                // gesture as often as by a done key, and that path fires
+                // no editingFinished at all — so the callsign would be
+                // silently lost by the most ordinary way of leaving the
+                // field.
+                onTextEdited: transmitter.callsign = text
+                inputMethodHints: Qt.ImhUppercaseOnly | Qt.ImhNoPredictiveText
+            }
+            Label {
+                text: "Sent on the beacon carrier with every transmission, and "
+                      + "used by the CW ID. Every receiver decodes it, so nothing "
+                      + "is written into the picture."
+                font.pixelSize: 11
+                color: "#666"
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                wrapMode: Text.Wrap
+            }
+
+            Label {
+                text: "Transmit"
+                font.bold: true
+                Layout.margins: 12
+                Layout.bottomMargin: 0
+            }
+            ComboBox {
+                id: outputBox
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                model: transmitter.outputDevices
+                enabled: !transmitter.transmitting
+                currentIndex: Math.max(0, model.indexOf(transmitter.outputDevice))
+                onActivated: transmitter.outputDevice = currentValue
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                Label { text: "Level" }
+                Slider {
+                    Layout.fillWidth: true
+                    from: 0.1
+                    to: 1.0
+                    value: transmitter.level
+                    enabled: !transmitter.transmitting
+                    onMoved: transmitter.level = value
+                }
+                Label {
+                    text: Math.round(transmitter.level * 100) + "%"
+                    color: "#666"
+                }
+            }
+            Label {
+                text: "Set this so the radio's ALC barely moves. The waveform is "
+                      + "already clipped to its designed 4.2 dB peak-to-average; "
+                      + "driving it harder splatters rather than getting out further."
+                font.pixelSize: 11
+                color: "#666"
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                wrapMode: Text.Wrap
+            }
+
+            Switch {
+                text: "VOX leader tone"
+                Layout.leftMargin: 4
+                checked: transmitter.voxLead > 0
+                enabled: !transmitter.transmitting
+                onToggled: transmitter.voxLead = checked ? 0.5 : 0.0
+            }
+            Label {
+                text: "Half a second of swept tone before each transmission, to "
+                      + "bring a VOX-keyed radio up before the signal starts. "
+                      + "Leave it off if the radio is keyed any other way — it is "
+                      + "airtime."
+                font.pixelSize: 11
+                color: "#666"
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                wrapMode: Text.Wrap
+            }
+
+            Switch {
+                text: "CW identification"
+                Layout.leftMargin: 4
+                checked: transmitter.cwId
+                enabled: !transmitter.transmitting
+                onToggled: transmitter.cwId = checked
+            }
+            TextField {
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                visible: transmitter.cwId
+                text: transmitter.cwMessage
+                onTextEdited: transmitter.cwMessage = text
+            }
+            Label {
+                text: "Morse at 18 wpm after the picture, under the same key-up. "
+                      + "{callsign} is replaced. The default also advertises the "
+                      + "mode, so someone who hears the signal and does not know "
+                      + "what it is can find out."
+                font.pixelSize: 11
+                color: "#666"
+                visible: transmitter.cwId
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                wrapMode: Text.Wrap
             }
 
             Label {
@@ -344,7 +545,10 @@ ApplicationWindow {
                 wrapMode: Text.Wrap
             }
 
-            Item { Layout.fillHeight: true }
+            // Breathing room under the last control, so it is not
+            // pressed against the tab bar at the end of the scroll.
+            Item { Layout.preferredHeight: 24 }
+        }
         }
     }
 

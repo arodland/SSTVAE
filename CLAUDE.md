@@ -1256,6 +1256,40 @@ need when `--native` fails and you want to know *where*.
   and receives on hardware**: `native/android-app/` decodes complete
   pictures on a Galaxy S25+ over acoustic coupling, no artifacts,
   capture inside ±100 ppm, ~0.5 s of DSP per five-second poll.
+  **Tier 1 (transmit) is done too (2026-08-09) and worked on the air
+  the same day**: phone into a radio over a USB audio interface,
+  received on an Android tablet on another radio, mode B, CW ID on,
+  **25 dB SNR** — the first Android-to-Android contact, and the first
+  time a phone's USB audio output has been shown to drive a radio.
+  **The VOX leader was not exercised**, because that radio has no VOX
+  on the USB/data input and it was keyed by hand; the leader is still
+  tested only against the preamble detector and the emulator. **A
+  coverage gap, not a design signal** (Andrew): that limitation is
+  uncommon, plenty of radios do offer VOX on the USB input, and a USB
+  soundcard into a radio's *microphone* input keys on VOX regardless —
+  so "RX+TX without rig control" remains the right shape for Android
+  and this is not an argument for pulling CAT forward. Four other
+  things it
+  settled that are not obvious from the design. **No overlay, not even
+  an automatic callsign caption** (Andrew): the beacon carrier
+  identifies the station to every receiver whether or not the picture
+  came through readably, and a CW ID identifies it to a human by ear,
+  so text burnt into the pixels only reaches someone who already
+  decoded it — the design doc's prediction that `core/overlay/` would
+  land in Tier 1 is the one part of it that was wrong, and a callsign
+  is **not** required to send, because the app does not know it is
+  attached to a radio and does not take responsibility for the
+  operator's identification. **The VOX leader must be a swept tone**
+  (`core/dsp/leader.hpp`) — a steady one reads 1.000 on the preamble
+  detector and steals the lock, measured. **`FindClass` cannot see an
+  application class from a thread we created**, which is a hazard for
+  every future C++→Java call off the UI thread and was invisible
+  through all of Tier 0 because every control call came from Qt's
+  thread; `set_java_vm` caches a global reference now. And
+  `AudioBridge.java` had become a **hand-synced duplicate** between
+  `core/audio/android/java/` and the app's package source dir, because
+  androiddeployqt takes only one `QT_ANDROID_PACKAGE_SOURCE_DIR` — it
+  is assembled in the build tree from both sources now.
   `native/android-app/README.md` is the working document — build
   commands, the emulator recipe, and the traps; read it before touching
   the app. **`tools/build_android.sh` is how you build it**, and the
@@ -1340,10 +1374,21 @@ need when `--native` fails and you want to know *where*.
   ragged comb from point-sampling being the worst available lie on a
   display whose whole job is "are you tuned right".
 - `docs/todo.md` — open work items with the reasoning behind them.
-  Currently one: a wider acquisition search so a mis-tuned counterpart
+  Two on the acquisition side. **A steady carrier is a perfect-looking
+  preamble** (2026-08-09): `_autocorr_metric` is normalized by the
+  window's own energy, so any pure tone reads exactly **1.000** — above
+  what a real preamble reaches in noise — and `acquire` takes a hard
+  argmax with no second chance. A noise floor is what saves this in
+  practice (the lock holds up to a tone around −3 dB of the signal),
+  but the quality cost arrives far earlier: a tone 10 dB *under* the
+  signal costs 6.5 dB of latent SNR. The best fix looks like top-K
+  peaks arbitrated by the Golay header, which cannot cost sensitivity
+  because candidate 1 is today's argmax. Read that section before
+  adding any transmit-side tone — it is why the Android VOX leader is a
+  chirp. And a wider acquisition search so a mis-tuned counterpart
   still decodes — measured, the demod path is entirely independent of
   absolute centre frequency (8.73 dB latent SNR from 900 to 2100 Hz), so
-  this is acquisition-side only. The second item, "acquisition costs
+  this is acquisition-side only. A third item, "acquisition costs
   ~1 dB of threshold at large frequency offset", was **withdrawn
   2026-07-26**: it did not reproduce at 25 seeds per point and was an
   artifact of 6-seed sampling. Acquisition near threshold succeeds
@@ -1460,16 +1505,27 @@ Android: **Tier 0 is built and receiving** (2026-08-08),
 metadata, notifications, model fetch), plus sharing, a technical-detail
 switch that is off by default, and keep-screen-on. Verified on a Galaxy
 S25+ over acoustic coupling. Deliberately not done: a MediaStore save
-to the shared gallery, and `play()` (written, unexercised, Tier 1).
-**Never tried at all: USB capture on this app** — the smoke test
-decoded a TH-D75 over USB at >24 dB, so the path exists, but the four
-hardware questions in `docs/android.md` are all still open, and USB is
-what the app is really for. Battery over a multi-hour session is
-likewise unmeasured. Next, in whatever order: private beta (debug-signed sideload is
-sufficient and is what has been verified — the one thing to tell
-testers in advance is that the eventual switch to a real signing key
-forces an uninstall, not an upgrade), further UI work, Tier 1
-(transmit, VOX keying), or store signing and release. Signing
+to the shared gallery.
+
+**Tier 1 (transmit) is built too** (2026-08-09): a Send screen with
+gallery/camera picking and a touch crop, `Session` owning the
+`TxEngine` the way it owns the decode loop, the over routed through the
+service under a `mediaPlayback` foreground type so it cannot be
+truncated, half duplex with a fresh ring buffer on resume, and an
+optional swept-tone VOX leader. **Verified over RF** (2026-08-09):
+phone → radio over USB → radio → Android tablet, mode B, CW ID, 25 dB,
+no issues. `play()` is no longer "written, unexercised": exercising it
+found the `FindClass` bug above.
+
+**USB is no longer untried on this app** — it carried that RF contact
+in both directions, which retires the caveat this section used to
+carry. What is still unmeasured: battery over a multi-hour session,
+and the VOX leader against a real VOX circuit (the test radio has none
+on its USB input). Next, in whatever order: private beta
+(debug-signed sideload is sufficient and is what has been verified —
+the one thing to tell testers in advance is that the eventual switch to
+a real signing key forces an uninstall, not an upgrade), further UI
+work, Tier 2, or store signing and release. Signing
 credentials are pending external verification (2026-08-08), so that
 last one is not on our timeline.
 

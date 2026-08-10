@@ -73,8 +73,9 @@ set(SSTVAE_BUILD_PYMODULE OFF CACHE BOOL "" FORCE)
 add_subdirectory(.. sstvae_native EXCLUDE_FROM_ALL)
 
 qt_add_executable(sstvae_android main.cpp listener.cpp session.cpp service_jni.cpp java_fetcher.cpp
-    waterfall.cpp pictures.cpp)
-qt_add_qml_module(sstvae_android URI SSTVAE VERSION 1.0 QML_FILES Main.qml LevelMeter.qml)
+    waterfall.cpp pictures.cpp composition.cpp transmitter.cpp)
+qt_add_qml_module(sstvae_android URI SSTVAE VERSION 1.0
+    QML_FILES Main.qml LevelMeter.qml CropView.qml TransmitPane.qml)
 target_link_libraries(sstvae_android PRIVATE Qt6::Quick Qt6::Gui sstvae_core
                                              sstvae_audio_android
                                              sstvae_codec)
@@ -90,9 +91,33 @@ get_target_property(_ort_so onnxruntime IMPORTED_LOCATION)
 set_property(TARGET sstvae_android APPEND PROPERTY
     QT_ANDROID_EXTRA_LIBS "${_ort_so}")
 
-# The audio layer's Java half ships with the layer, not with this app.
+# **The package source directory is assembled, not pointed at.**
+#
+# androiddeployqt takes exactly one `QT_ANDROID_PACKAGE_SOURCE_DIR`, and
+# this app needs two sources in it: its own `android/` tree, and the
+# audio layer's Java half, which lives with the layer
+# (`SSTVAE_ANDROID_AUDIO_JAVA_DIR`) precisely so an app cannot supply its
+# own subtly-wrong blocking-read loop. The obvious workaround -- keep a
+# copy of `AudioBridge.java` under `android/src/` and remember to sync it
+# -- is what was here, and it is a trap with no failure mode: the two
+# copies were byte-identical, so nothing was wrong yet, and the first
+# edit to either one would have shipped the other. That is exactly the
+# hazard `native/core/config.hpp` has a generator and a CI gate for.
+#
+# So both are copied into a build-tree directory. `configure_file`
+# rather than `file(COPY)` so CMake re-runs when a Java file changes, and
+# `CONFIGURE_DEPENDS` so adding one is noticed too.
+set(_pkg_dir "${CMAKE_CURRENT_BINARY_DIR}/android-package")
+function(sstvae_stage_package_dir from into)
+    file(GLOB_RECURSE _files CONFIGURE_DEPENDS RELATIVE "${from}" "${from}/*")
+    foreach(_f IN LISTS _files)
+        configure_file("${from}/${_f}" "${into}/${_f}" COPYONLY)
+    endforeach()
+endfunction()
+sstvae_stage_package_dir("${CMAKE_CURRENT_SOURCE_DIR}/android" "${_pkg_dir}")
+sstvae_stage_package_dir("${SSTVAE_ANDROID_AUDIO_JAVA_DIR}" "${_pkg_dir}/src")
 set_property(TARGET sstvae_android APPEND PROPERTY
-    QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android")
+    QT_ANDROID_PACKAGE_SOURCE_DIR "${_pkg_dir}")
 
 set_target_properties(sstvae_android PROPERTIES
     QT_ANDROID_PACKAGE_NAME "org.cleverdomain.sstvae"
@@ -114,6 +139,10 @@ qt_add_android_permission(sstvae_android
     NAME android.permission.FOREGROUND_SERVICE)
 qt_add_android_permission(sstvae_android
     NAME android.permission.FOREGROUND_SERVICE_MICROPHONE)
+# The transmit half. Declared alongside the microphone one because half
+# duplex swaps between them within a single service lifetime.
+qt_add_android_permission(sstvae_android
+    NAME android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK)
 # API 33+. Denying it costs the ongoing notification but not the
 # session, which is why the service never treats it as fatal.
 qt_add_android_permission(sstvae_android
