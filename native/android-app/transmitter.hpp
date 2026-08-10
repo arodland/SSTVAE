@@ -76,6 +76,17 @@ class Transmitter : public QObject {
     // operator can decide whether to start one now.
     Q_PROPERTY(QString airtime READ airtime NOTIFY changed)
     Q_PROPERTY(QString lastError READ lastError NOTIFY changed)
+    // Empty unless the CW ID settings would key a partial
+    // identification; see `tx::cw_id_problem`. Non-empty blocks Send,
+    // and the text is shown rather than merely disabling the button --
+    // a control that is off for an invisible reason is worse than one
+    // that refuses out loud.
+    Q_PROPERTY(QString cwIdProblem READ cwIdProblem NOTIFY changed)
+    // True until the operator has been through the first-transmit
+    // prompt once. Send opens that instead of transmitting while it is
+    // true.
+    Q_PROPERTY(bool needsFirstTransmitPrompt READ needsFirstTransmitPrompt
+                   NOTIFY changed)
 
 public:
     explicit Transmitter(QObject* parent = nullptr);
@@ -114,6 +125,20 @@ public:
     double txProgress() const;
     QString airtime() const;
     QString lastError() const;
+    QString cwIdProblem() const;
+    bool needsFirstTransmitPrompt() const { return !acknowledged_; }
+
+    // Record that the operator has read the first-transmit prompt and
+    // accepted responsibility for operating legally. Persisted, so it
+    // is asked once per install rather than once per launch.
+    //
+    // **Not a licence check and not a gate**, deliberately: the app
+    // cannot tell whether it is connected to a radio at all, the
+    // service may not be amateur, and the operator may be identifying
+    // by voice or by a means this app never sees. What it is is a
+    // roadblock to casual misuse -- someone who has not thought about
+    // any of that has now been asked to.
+    Q_INVOKABLE void acknowledgeFirstTransmit();
 
     // Drag motion, as a fraction of the *preview's* own width and
     // height -- so QML passes `-dx/width, -dy/height` and never has to
@@ -149,6 +174,7 @@ private:
     double level_ = 0.9;
     bool cw_id_ = false;
     QString cw_message_;
+    bool acknowledged_ = false;
     double vox_lead_s_ = 0.0;
     QString device_;
 };

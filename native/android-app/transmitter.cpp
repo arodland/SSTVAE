@@ -42,6 +42,10 @@ constexpr auto kCwId = "transmit/cwId";
 constexpr auto kCwMessage = "transmit/cwMessage";
 constexpr auto kVoxLead = "transmit/voxLeadSeconds";
 constexpr auto kOutputDevice = "audio/outputDevice";
+// Versioned in the name, so that if the prompt ever has to say
+// something materially different it can be asked again by bumping the
+// key rather than by adding a second flag beside a stale one.
+constexpr auto kAcknowledged = "transmit/firstTransmitAcknowledgedV1";
 
 // The instance the picker's result goes to.
 //
@@ -76,6 +80,7 @@ Transmitter::Transmitter(QObject* parent) : QObject(parent) {
     // **Off by default**, because it is only right for a VOX-keyed
     // station and it is airtime everyone else would pay for silently.
     vox_lead_s_ = s.value(QLatin1String(kVoxLead), 0.0).toDouble();
+    acknowledged_ = s.value(QLatin1String(kAcknowledged), false).toBool();
     device_ = s.value(QLatin1String(kOutputDevice)).toString();
     if (find_mode(mode_) == nullptr) mode_ = QStringLiteral("B");
 
@@ -286,8 +291,27 @@ QString Transmitter::encoderStatus() const {
 
 bool Transmitter::transmitting() const { return Session::instance().transmitting(); }
 
+QString Transmitter::cwIdProblem() const {
+    return QString::fromStdString(tx::cw_id_problem(
+        cw_id_, cw_message_.toStdString(), callsign_.toStdString()));
+}
+
+void Transmitter::acknowledgeFirstTransmit() {
+    if (acknowledged_) return;
+    acknowledged_ = true;
+    QSettings().setValue(QLatin1String(kAcknowledged), true);
+    emit changed();
+}
+
 bool Transmitter::canSend() const {
-    return hasPicture() && encoderReady() && !transmitting();
+    // **The CW check blocks; the first-transmit prompt does not.** They
+    // are different kinds of thing: a broken CW ID is a setting that
+    // cannot do what it says, and the only fix is in Settings, so Send
+    // stays disabled with the reason on screen. The prompt is something
+    // to read once, and it is reached *through* Send -- disabling the
+    // button would leave nothing to press to get to it.
+    return hasPicture() && encoderReady() && !transmitting() &&
+           cwIdProblem().isEmpty();
 }
 
 QString Transmitter::txStatus() const {

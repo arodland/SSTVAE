@@ -110,6 +110,61 @@ cmake -S native/android-app -B build-android -G Ninja \
 cmake --build build-android --target apk
 ```
 
+## The first-transmit prompt, and the CW ID that cannot work
+
+**Send opens a one-time prompt before the first over** (2026-08-10):
+callsign, an offer of CW ID, and an acknowledgement that the operator
+holds whatever licence their transmission requires and is responsible
+for using the app legally. Only the acknowledgement is required —
+declining the callsign is a supported answer, and "Not now" closes
+without recording anything, so the prompt returns on the next Send.
+
+**It is not a gate and must not become one.** The app cannot tell
+whether it is connected to a radio at all; the service may not be
+amateur; the operator may be identifying by voice, on a band with
+different rules, or handling the whole question themselves. Refusing to
+transmit would be the app claiming an authority it does not have —
+the same argument that keeps a callsign optional. What it is is a
+roadblock to casual misuse: someone who has not thought about any of it
+has now been asked to, once, immediately before the first transmission.
+Hence its position *behind* Send rather than at first launch: a station
+that only ever listens should never see it.
+
+**The CW ID check is a different kind of thing and does block.** A
+message still containing `{callsign}` with no callsign set would key a
+partial identification — "SSTVAE DE " and then nothing — so Send is
+disabled with the reason on screen, on the transmit pane and again in
+Settings where the fix is. It is a setting that cannot do what it says,
+and there are three ways out, all of which the message names: set a
+callsign, write the identification into the message itself, or turn CW
+ID off.
+
+`tx::cw_id_problem` is that predicate, shared. The UI blocks on it and
+the engine skips the ID on it, because two implementations of "is this
+CW ID sane" would eventually disagree and the direction that
+disagreement takes is a station transmitting an ID it was told it had
+turned off. The desktop asks the same question in `TransmitPanel::send`.
+
+**Making it shared changed the engine's behaviour, deliberately.** The
+guard used to be `!config.callsign.empty()`, so *any* empty callsign
+dropped the ID — which meant "write the identification into the message
+itself" was an escape the UI could offer and the engine would ignore. A
+literal message now goes out with no callsign set;
+`test_cw_literal_message_is_sent_with_no_callsign` is that case, and
+`test_cw_id_problem_names_only_the_broken_combination` pins all three
+escapes.
+
+Two things the on-device pass caught that reading would not have. A
+`CheckBox` with a wrapping `contentItem` puts **the indicator in the
+middle of the text** — the control centres it against the whole content
+height, so a three-line label leaves the box floating over line two; it
+is a `CheckBox` beside a `Label` in a `RowLayout` now, which also makes
+the sentence a tap target instead of a 24 px box. And the dialog is
+**bounded and scrolled** rather than merely tall: a Popup that outgrows
+its parent does not compress, it puts the buttons off the bottom where
+there is nothing to reach and nothing to say so — the same failure the
+desktop's settings tabs have a `QScrollArea` for.
+
 ## The models ship inside the APK
 
 **Bundled since 2026-08-10, and the reason is not download size.** The

@@ -510,6 +510,19 @@ ApplicationWindow {
                 Layout.rightMargin: 12
                 wrapMode: Text.Wrap
             }
+            // Shown here as well as on the transmit screen, because this
+            // is the screen the fix is on. Send is disabled while this
+            // has anything to say.
+            Label {
+                text: transmitter.cwIdProblem
+                font.pixelSize: 11
+                color: "#c00"
+                visible: text.length > 0
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                wrapMode: Text.Wrap
+            }
 
             Label {
                 text: "Received pictures"
