@@ -3,6 +3,106 @@
 Known work items that aren't bugs with a clear fix, kept here so the
 reasoning doesn't have to be rediscovered.
 
+## Preamble detection against a steady-carrier interferer
+
+**A pure tone is a perfect-looking preamble to `sync.acquire()`, and
+carriers are everywhere on HF.** Found 2026-08-09 while designing the
+Android app's VOX leader tone; the leader was the trigger, but the
+general case is the reason this is here.
+
+**Mechanism.** `_autocorr_metric` is `|sum of z[n+M]·conj(z[n])| /
+energy` over a 480-sample window. For a steady tone the product is
+constant, so numerator and denominator are equal and the metric is
+**exactly 1.000** — the ceiling, above anything a real preamble reaches
+in noise (0.936 at 10 dB, 0.853 at 6 dB, measured below). The metric is
+deliberately scale invariant, so a *weak* tone reads 1.000 too. And
+`acquire()` takes a hard `argmax` over the whole search window, so if
+the tone's window ever out-scores the preamble's there is no second
+chance: the template-correlation stage only searches ±200 samples around
+the winner, and the real preamble is thousands of samples away.
+
+**Measured** (mode A, AWGN, tone at 1400 Hz — on a carrier — 2 s of
+lead-in before the transmission, one seed per cell). "lock err" is the
+acquired preamble start minus the true one; latent SNR after the picture
+decoded:
+
+| tone vs signal RMS | clean | 20 dB | 10 dB | 6 dB |
+|---|---|---|---|---|
+| none    | +800, 10.1 dB | +800, 9.7 dB | +800, 6.9 dB | +800, 3.9 dB |
+| −20 dB  | **wrong lock** | +800, 8.9 dB | +800, 6.5 dB | +800, 3.8 dB |
+| −10 dB  | **wrong lock** | +800, 3.2 dB | +800, 2.5 dB | +800, 1.2 dB |
+| −6 dB   | **wrong lock** | +800, 4.5 dB | +800, 3.4 dB | +800, 1.6 dB |
+| −3 dB   | **wrong lock** | +800, 5.2 dB | +800, 3.6 dB | +800, 1.2 dB |
+| 0 dB    | **wrong lock** | header fails | header fails | header fails |
+| +6 dB   | **wrong lock** | **wrong lock** | **wrong lock** | **wrong lock** |
+
+Three things to read out of that, in decreasing order of importance:
+
+- **A noise floor is what saves this today.** In the clean rows the
+  lead-in is digital silence, so a tone 20 dB *below* the signal is the
+  loudest periodic thing in the window and wins outright. Add any noise
+  and the preamble holds its lock up to a tone around −3 dB, which is
+  why this has never been seen on air. It also means the failure is a
+  property of the *quietest* part of the search window, not of the
+  signal-to-interference ratio where the signal is — so the case to
+  worry about is a strong carrier plus a weak wanted signal, which is
+  exactly the case someone reaches for the receiver in.
+- **At tone ≈ signal the lock is still exact and the header is what
+  fails.** So acquisition is only half the problem; the other half is
+  demod, and the two want different fixes.
+- **The quality cost arrives long before the lock does.** A tone 10 dB
+  under the signal costs 6.5 dB of latent SNR at 20 dB — a mangled
+  picture from an interferer most operators would not think twice about.
+  The row is non-monotonic (−10 dB is worse than −3 dB, consistently
+  across all three SNRs), which is suspicious in an interesting way: the
+  likely explanation is that the per-latent confidence weights notice a
+  *strong* interferer and effectively erase the affected carrier, while
+  a moderate one gets trusted. Unverified, and worth checking first if
+  anyone works on the demod half — if it is right, the fix is making
+  that de-weighting kick in earlier rather than anything new.
+
+**Fix candidates, best first.**
+
+1. **Keep the top-K metric peaks and let the header arbitrate.** The
+   template-correlation and Golay-header stages already reject a tone
+   convincingly (the 0 dB row locks correctly and *still* fails the
+   header, i.e. the header is a working discriminator); the only reason
+   a tone is fatal is the hard argmax in front of them. Take the K
+   highest peaks with a minimum separation, try each in turn, accept the
+   first whose header decodes. **This cannot cost sensitivity** — the
+   first candidate is exactly today's argmax, so every signal that
+   acquires now still acquires — which is the property the other options
+   do not have. Cost is K template correlations over a ±200-sample
+   segment, small next to the FFT already spent on the metric. Needs
+   `acquire()` restructured to return candidates or to take a "does this
+   one pass" predicate, since the header lives above it in `demodulate`.
+   Noted once before, as speculation, in the withdrawn large-offset
+   section below; the tone case makes it concrete.
+2. **Discriminate on bandwidth, not periodicity.** A tone is one bin
+   wide and the preamble is ~24, so a spectral flatness measure over the
+   correlation window separates them cleanly and is a multiplier on the
+   metric rather than a replacement. Costs sensitivity in principle
+   (anything multiplying the metric can push a marginal preamble under
+   threshold) and needs measuring against the acquisition curve, which
+   is why it ranks below option 1 despite being the more direct answer.
+3. **Notch the interferer for the sync path only.** `sync_lowpass()`
+   already has its own filter copy, so a notch there is free of the ISI
+   argument that keeps `to_baseband()` unfiltered — but it only helps
+   acquisition, and the table above says the quality loss is the bigger
+   cost. Notching in the demod path is a real question, not a free one.
+
+**Measurement caveats.** One seed per cell, one tone frequency, one
+mode, AWGN only. The −3 dB boundary is an order of magnitude, not a
+swept number — and this file's own standing warning applies (≥25 seeds
+before quoting any acquisition success rate).
+
+**What was done about it in the meantime.** Nothing in the receiver.
+The Android VOX leader is a **chirp**, not a tone, precisely because of
+this: a 500 ms sweep across the passband decorrelates at lag M, and
+measured, acquisition lands on the true preamble with the same latent
+SNR as no leader at all. That is a transmitter-side dodge of one
+instance of the problem, not a fix for the general one.
+
 ## Wider acquisition search, for a mis-tuned counterpart
 
 **Goal.** Recover a transmission from a station whose dial is off by
