@@ -109,6 +109,16 @@ struct TxConfig {
     // hears the CW ID and can go find SSTVAE and a successful decode,
     // rather than just an unexplained tone.
     std::string cw_message = "SSTVAE DE {callsign}";
+    // Seconds of swept-tone leader in front of the transmission, to open
+    // a VOX-keyed transmitter's relay before the modem's signal starts.
+    // 0 (the default) sends none, which is right whenever PTT is under
+    // our control -- the lead delay already covers a relay.
+    //
+    // **A swept tone, and `dsp::vox_leader` is where that is argued.** A
+    // steady one reads 1.000 on the preamble detector and takes the lock
+    // away from the transmission it was meant to introduce. Add
+    // `dsp::VOX_LEAD_GAP_S` to this for the airtime it actually costs.
+    double vox_lead_s = 0.0;
     // Exposed rather than compiled in for the same reason
     // `Modem::modulate` exposes its clip headroom: the reference's tests
     // shorten it by patching a module constant, which is unreachable
