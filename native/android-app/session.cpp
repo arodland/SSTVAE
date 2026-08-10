@@ -28,9 +28,28 @@ std::string json_escape(const std::string& s) {
 
 }  // namespace
 
+// **Deliberately immortal: never destroyed, so no destructor runs at
+// exit.**
+//
+// A function-local `static Session s;` registers a destructor with
+// `atexit`, and that destructor tears down an `OnnxCodec` — by which
+// time onnxruntime's own statics may already be gone. Measured: the app
+// aborted on every exit with `FORTIFY: pthread_mutex_lock called on a
+// destroyed mutex` inside `~OnnxCodec`, from `~Session`, on the Qt main
+// loop thread. Static destruction order across translation units and
+// shared libraries is not something this code can arrange, and there is
+// nothing to gain by trying: the process is ending, so the memory, the
+// audio device and the threads all go back to the OS anyway.
+//
+// Same instinct as `check::Watchdog` calling `std::_Exit` rather than
+// unwinding, and as `RigController::stop()` detaching rather than
+// joining: at teardown, *not running code* is the reliable option.
+// Anything that genuinely has to happen before the process ends —
+// dropping PTT, closing the capture stream — happens on the service's
+// stop path, while the world is still standing.
 Session& Session::instance() {
-    static Session s;
-    return s;
+    static Session* s = new Session();
+    return *s;
 }
 
 void Session::set_picture_dir(std::string dir) {
@@ -125,6 +144,11 @@ std::string Session::last_saved_summary() const {
     return saved_summary_;
 }
 
+// **Never runs in this application** -- see `instance()`, which leaks
+// the singleton on purpose. Kept because it is the correct teardown if
+// a Session is ever owned by something with a real lifetime, and
+// because deleting it would make the leak look accidental rather than
+// decided.
 Session::~Session() {
     cancel_transmit();
     join_tx();

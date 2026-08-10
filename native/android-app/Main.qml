@@ -21,6 +21,24 @@ ApplicationWindow {
     Transmitter { id: transmitter }
     PictureList { id: pictures }
 
+    // **Back closes the picture viewer instead of the app.**
+    //
+    // Android delivers the back gesture (and the 3-button Back) as a
+    // close request on the window, and nothing was refusing it — so
+    // backing out of a full-screen reception ended the activity, which
+    // is not what Back means when something is open on top. `Popup`'s
+    // own `CloseOnEscape` does not cover this: that is Qt::Key_Escape,
+    // and Android sends a close request, not an Escape.
+    //
+    // Declining the close is the whole fix. Anywhere else Back still
+    // does what Android users expect and leaves the app.
+    onClosing: function(close) {
+        if (viewer.visible) {
+            viewer.close()
+            close.accepted = false
+        }
+    }
+
     // **Edge-to-edge is mandatory from targetSdk 35 up**, so the window
     // extends under the status bar and the navigation bar and it is on
     // us to inset. Andrew hit the consequence on a device with the
@@ -247,7 +265,7 @@ ApplicationWindow {
             delegate: ItemDelegate {
                 width: ListView.view.width
                 height: 96
-                onClicked: viewer.open(model.path, model.summary)
+                onClicked: viewer.showPicture(model.path, model.summary)
 
                 RowLayout {
                     anchors.fill: parent
@@ -565,11 +583,14 @@ ApplicationWindow {
         property string caption
         property string path
 
-        function open(p, summary) {
+        // **Not called `open`.** `Popup` already has an `open()`, and
+        // shadowing it with a different signature leaves the type's own
+        // machinery calling something that is no longer its method.
+        function showPicture(p, summary) {
             full.source = "image://sstvae/file/" + p
             viewer.path = p
             viewer.caption = summary
-            visible = true
+            open()
         }
 
         ColumnLayout {
