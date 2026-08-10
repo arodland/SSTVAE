@@ -11,6 +11,17 @@
 # onnxruntime binary, 9-80 MB depending on platform). --no-codec gives
 # an offline build of everything else, which is the entire modem.
 #
+# **--no-codec is sticky, and dropping the flag does not undo it.** It
+# writes SSTVAE_BUILD_CODEC=OFF into the CMake cache, and a later plain
+# `tools/build_native.sh` in the same build directory says nothing and
+# keeps it off -- which also silently turns off the GUI, since
+# SSTVAE_BUILD_GUI is AUTO and the GUI needs the codec. The symptom is
+# ctest quietly reporting 19 passing tests instead of 29, with the ten
+# widget tests never registered rather than failing: the same shape of
+# green-but-testing-nothing that SSTVAE_REQUIRE_CODEC exists to catch
+# elsewhere. To go back, say so: `cmake -DSSTVAE_BUILD_CODEC=ON .` in
+# the build directory, or delete it.
+#
 # The interpreter matters: the extension module must be built for the
 # same Python that runs pytest, or the import silently fails and the
 # parity run skips instead of failing.
