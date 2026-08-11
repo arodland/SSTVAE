@@ -288,6 +288,8 @@ bool Session::start(const std::string& device_name) {
     // here. Anything not yet decoded is still in the ring buffer, so
     // backing off delays a picture rather than losing one.
     cfg.max_decode_duty = 0.5;
+    cfg.blind_wide = blind_wide_.load();
+    cfg.drift_track = drift_track_.load();
     rx::Sink sink = [this](const rx::Reception& r) -> std::optional<std::string> {
         return save_reception(r);
     };

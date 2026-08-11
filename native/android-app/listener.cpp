@@ -12,6 +12,7 @@
 
 #include "assets.hpp"
 #include "audio/android/androidaudio.hpp"
+#include "modem/modem.hpp"
 #include "rx/engine.hpp"
 #include "session.hpp"
 
@@ -78,6 +79,8 @@ bool init_audio_bridge(QString* error) {
 namespace {
 constexpr auto kTechnicalKey = "ui/showTechnical";
 constexpr auto kGalleryKey = "receive/saveToGallery";
+constexpr auto kBlindWideKey = "receive/blindWide";
+constexpr auto kDriftTrackKey = "receive/driftTrack";
 }  // namespace
 
 void Listener::setShowTechnical(bool on) {
@@ -114,11 +117,58 @@ QString Listener::galleryError() const {
     return QString::fromStdString(Session::instance().gallery_error());
 }
 
+// Both of these are read once, into the RxConfig `Session::start()`
+// builds -- there is no running poller consulting them mid-session the
+// way `showTechnical`/`saveToGallery` are, so a change here takes
+// effect on the *next* Start, same as changing the input device.
+void Listener::setBlindWide(bool on) {
+    if (on == blind_wide_) return;
+    blind_wide_ = on;
+    QSettings().setValue(QLatin1String(kBlindWideKey), on);
+    Session::instance().set_blind_wide(on);
+    emit changed();
+}
+
+void Listener::setDriftTrack(const QString& mode) {
+    if (mode == drift_track_) return;
+    // Validated against the same three spellings the desktop and the
+    // CLIs use (modem::drift_track_from_name), rather than trusted
+    // as-is: this can arrive from a persisted setting written by a
+    // different app version, not only from the fixed ComboBox choices
+    // QML offers today.
+    QString normalized = mode;
+    try {
+        const auto track = modem::drift_track_from_name(mode.toStdString());
+        normalized = QString::fromStdString(std::string(modem::drift_track_name(track)));
+        Session::instance().set_drift_track(track);
+    } catch (const std::invalid_argument&) {
+        normalized = QStringLiteral("off");
+        Session::instance().set_drift_track(modem::DriftTrack::Off);
+    }
+    drift_track_ = normalized;
+    QSettings().setValue(QLatin1String(kDriftTrackKey), drift_track_);
+    emit changed();
+}
+
 Listener::Listener(QObject* parent) : QObject(parent) {
     technical_ = QSettings().value(QLatin1String(kTechnicalKey), false).toBool();
     Session::instance().set_show_technical(technical_);
     gallery_ = QSettings().value(QLatin1String(kGalleryKey), false).toBool();
     Session::instance().set_save_to_gallery(gallery_);
+    blind_wide_ = QSettings().value(QLatin1String(kBlindWideKey), false).toBool();
+    Session::instance().set_blind_wide(blind_wide_);
+    {
+        const QString stored =
+            QSettings().value(QLatin1String(kDriftTrackKey), QStringLiteral("off")).toString();
+        try {
+            const auto track = modem::drift_track_from_name(stored.toStdString());
+            drift_track_ = QString::fromStdString(std::string(modem::drift_track_name(track)));
+            Session::instance().set_drift_track(track);
+        } catch (const std::invalid_argument&) {
+            drift_track_ = QStringLiteral("off");
+            Session::instance().set_drift_track(modem::DriftTrack::Off);
+        }
+    }
     // Resolve the AssetManager here, on the UI thread, because that is
     // the only thread with a Java context to ask -- after this the
     // bundled models are reachable from the model thread with no JNI at
