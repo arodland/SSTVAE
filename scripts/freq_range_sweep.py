@@ -34,6 +34,7 @@ import time
 
 import numpy as np
 from scipy import signal as sig
+from scipy.fft import fft, ifft, next_fast_len
 
 from sstvae import config, hfchannel
 from sstvae.config import (
@@ -85,6 +86,34 @@ def drift_shift(x, rate_hz_s, f0_hz=0.0, sinus=None):
         amp, period = sinus
         cycles = cycles + amp * period / (2 * np.pi) * np.sin(2 * np.pi * t / period)
     return np.real(sig.hilbert(x) * np.exp(2j * np.pi * dsp.wrap_cycles(cycles)))
+
+
+def ou_shift(x, rms_hz, tau_s, seed=0):
+    """Frequency wander drawn from an Ornstein-Uhlenbeck process, which
+    is what a mean-reverting random walk of the carrier looks like --
+    closer to ionospheric Doppler than either a ramp or a sinusoid,
+    because it has no characteristic phase and wanders back rather than
+    running away.
+
+    Parameterized the way a measurement would be: `rms_hz` is the
+    stationary standard deviation of the offset, `tau_s` its correlation
+    time. Exact AR(1) discretization (an OU process sampled at any
+    spacing is exactly AR(1), so this is not an approximation), run
+    through lfilter rather than a Python loop, and started from the
+    stationary distribution so there is no warm-up transient sitting
+    inside the transmission.
+
+    Returns (drifted signal, true frequency path in Hz).
+    """
+    rng = np.random.default_rng(seed)
+    n = len(x)
+    a = np.exp(-1.0 / (tau_s * FS))
+    c = rms_hz * np.sqrt(1.0 - a * a)
+    xi = rng.standard_normal(n)
+    f = sig.lfilter([c], [1.0, -a], xi, zi=np.array([rms_hz * rng.standard_normal()]))[0]
+    cycles = np.cumsum(f) / FS
+    y = np.real(sig.hilbert(x) * np.exp(2j * np.pi * dsp.wrap_cycles(cycles)))
+    return y, f
 
 
 # --- prototype 1: a widened acquisition ------------------------------------
@@ -140,12 +169,15 @@ def acq_ok(a, true_offset):
 
 # --- prototype 2: demod with residual-CFO (drift) tracking -----------------
 
-def demodulate_tracked(m, x, track=True, alpha=0.1, beta=0.01, oracle_rate=None):
+def demodulate_tracked(m, x, track=True, alpha=0.1, beta=0.01, oracle_rate=None,
+                       oracle_freq=None):
     """Modem.demodulate with an optional drift tracker.
 
     track=False must reproduce the reference exactly -- see --verify.
-    oracle_rate de-chirps with a known true rate instead of estimating
-    it, which is the upper bound on what any tracker could reach.
+    oracle_rate de-chirps with a known true rate, and oracle_freq with a
+    known per-sample frequency path (the general case, for drift that is
+    not a ramp). Either is the upper bound on what any tracker could
+    reach, since it is handed the answer.
 
     Second order (alpha on frequency, beta on rate) because drift is a
     *ramp*: a first-order loop leaves a steady-state lag proportional to
@@ -160,6 +192,17 @@ def demodulate_tracked(m, x, track=True, alpha=0.1, beta=0.01, oracle_rate=None)
     if oracle_rate:
         t = (np.arange(len(z)) - acq.preamble_start) / FS
         z = z * np.exp(-2j * np.pi * dsp.wrap_cycles(0.5 * oracle_rate * t**2))
+    if oracle_freq is not None:
+        # What is left to remove is the true path *minus what
+        # acquisition already took out*, anchored at the preamble.
+        # Removing the raw path double-corrects by acq.freq_offset --
+        # invisible for a ramp starting at zero (the preamble sits at
+        # t=0.1 s, so acq.freq_offset is ~0.01 Hz) and ruinous for
+        # wander, where the offset at the preamble is a full standard
+        # deviation. The tell was an "oracle" scoring below the tracker.
+        resid = np.asarray(oracle_freq[: len(z)]) - acq.freq_offset
+        cyc = np.cumsum(resid) / FS
+        z = z * np.exp(-2j * np.pi * dsp.wrap_cycles(cyc - cyc[acq.preamble_start]))
 
     u0 = acq.preamble_start + PREAMBLE_CP
     h_pre = sum(
@@ -280,6 +323,130 @@ def demodulate_tracked(m, x, track=True, alpha=0.1, beta=0.01, oracle_rate=None)
         callsign=br.callsign if br else "", preamble_start=acq.preamble_start,
         snr_db=_estimate_snr_db(h_pilot, received),
     )
+
+
+# --- prototype 3: a cheaper blind search -----------------------------------
+
+class FastBlindAccumulator:
+    """sync.BlindAccumulator with the same result and less work.
+
+    Two independent changes, and only one of them matters much:
+
+    * **Batched, threaded IFFTs.** One `ifft(..., axis=1, workers=-1)`
+      over a chunk of CFO bins rather than one call per bin, and the
+      periodic fold by reshape-and-sum rather than `np.add.at` (the
+      unbuffered `ufunc.at` path). Numerically identical -- the shift is
+      still a circular shift of the block spectrum, expressed as a
+      gather. Worth ~1.1x from batching and ~1.5x from the threads;
+      the IFFTs really are the work, so there is no large win here.
+
+    * **A coarser CFO grid, which is the actual win.** For a fixed lag,
+      the matched filter as a function of CFO is a DTFT of a
+      160-sample sequence, so |mf|**2 is exactly band-limited and
+      determined by samples every FS/(2*160) = 25 Hz. The default
+      1.7 Hz step oversamples that ~15x. Detection holds to a 12.5 Hz
+      step at every SNR measured, and `refine_cfo` recovers a *better*
+      frequency estimate than the 1.7 Hz grid's raw argmax.
+
+    `bin_chunk` bounds peak memory: the shifted spectra are
+    (chunk x block) complex, which at 737 bins in one go would be ~100 MB.
+    """
+
+    def __init__(self, max_offset_hz=55.0, bin_step_hz=1.7, min_periods=8,
+                 threshold=4.0, window_s=25.0, bin_chunk=128, workers=-1):
+        template = ofdm.pilot_template()
+        kernel = np.conj(template[::-1])
+        m = len(kernel)
+        self._m = m
+        self._min_periods = min_periods
+        self._threshold = threshold
+        self._workers = workers
+        self._bin_chunk = bin_chunk
+
+        self._block = next_fast_len(max(int(np.ceil(FS / bin_step_hz)), 4 * m))
+        self._step = self._block - (m - 1)
+        self._bin_hz = FS / self._block
+
+        n_bins = int(np.ceil(max_offset_hz / bin_step_hz))
+        shift_bins = np.array(
+            [int(round(k * bin_step_hz / self._bin_hz)) for k in range(-n_bins, n_bins + 1)])
+        self._shift_bins = shift_bins
+        self._freqs = shift_bins * self._bin_hz
+        B = self._block
+        self._kernel_f = fft(np.concatenate([kernel, np.zeros(B - m, dtype=complex)]))
+        # np.roll(v, -s)[j] == v[(j + s) % B], precomputed as a gather.
+        self._take = ((np.arange(B)[None, :] + shift_bins[:, None]) % B).astype(np.int32)
+
+        wl = list(window_s) if isinstance(window_s, (list, tuple)) else [window_s]
+        self._decay_per_block = np.array(
+            [1.0 if w is None else float(np.exp(-self._step / (w * FS))) for w in wl])
+        self._folded = np.zeros((len(wl), len(shift_bins), FRAME_SAMPLES))
+        self._n_valid = 0
+        self._buf = np.zeros(0, dtype=complex)
+        self._buf_start = None
+        self._K = int(np.ceil(self._step / FRAME_SAMPLES))
+        self._pad = self._K * FRAME_SAMPLES - self._step
+
+    def push(self, z, start_sample):
+        if self._buf_start is None:
+            self._buf_start = start_sample
+        elif start_sample != self._buf_start + self._buf.size:
+            raise ValueError("non-contiguous push")
+        buf = np.concatenate([self._buf, z]) if self._buf.size else np.asarray(z, dtype=complex)
+
+        B, m, step, F = self._block, self._m, self._step, FRAME_SAMPLES
+        n_bins = len(self._shift_bins)
+        pos = 0
+        while pos + B <= buf.size:
+            block_f = fft(buf[pos : pos + B], workers=self._workers)
+            phase0 = (self._buf_start + pos) % F
+            local = np.empty((n_bins, F))
+            for lo in range(0, n_bins, self._bin_chunk):
+                hi = min(lo + self._bin_chunk, n_bins)
+                mf = ifft(block_f[self._take[lo:hi]] * self._kernel_f, axis=1,
+                          workers=self._workers)
+                p2 = np.abs(mf[:, m - 1 : B]) ** 2
+                if self._pad:
+                    p2 = np.concatenate([p2, np.zeros((hi - lo, self._pad))], axis=1)
+                local[lo:hi] = p2.reshape(hi - lo, self._K, F).sum(axis=1)
+            self._folded *= self._decay_per_block[:, None, None]
+            self._folded += np.roll(local, phase0, axis=1)[None, :, :]
+            self._n_valid += step
+            pos += step
+
+        self._buf = buf[pos:]
+        self._buf_start += pos
+
+    def _scores(self):
+        return self._folded.max(axis=2) / (np.median(self._folded, axis=2) + 1e-12)
+
+    def result(self):
+        if self._n_valid < FRAME_SAMPLES * self._min_periods:
+            raise sync.SyncError("window too short for blind acquisition")
+        sc = self._scores()
+        t, i = (int(v) for v in np.unravel_index(np.argmax(sc), sc.shape))
+        score = float(sc[t, i])
+        if score < self._threshold:
+            raise sync.SyncError(f"no periodic pilot found (peak prominence {score:.3g})")
+        return sync.BlindAcquisition(int(np.argmax(self._folded[t, i])),
+                                     float(self._freqs[i]), score)
+
+
+def refine_cfo(acc):
+    """Sub-bin CFO by fitting a parabola through the winning bin and its
+    two neighbours. The folded score is band-limited in CFO (see
+    FastBlindAccumulator), so the peak between samples is recoverable
+    rather than lost -- which is what lets the grid be coarse."""
+    sc = acc._scores()
+    t, i = (int(v) for v in np.unravel_index(np.argmax(sc), sc.shape))
+    raw = float(acc._freqs[i])
+    if 0 < i < sc.shape[1] - 1:
+        y0, y1, y2 = sc[t, i - 1], sc[t, i], sc[t, i + 1]
+        denom = y0 - 2 * y1 + y2
+        if denom != 0:
+            delta = float(np.clip(0.5 * (y0 - y2) / denom, -1.0, 1.0))
+            return raw + delta * (acc._freqs[i + 1] - acc._freqs[i])
+    return raw
 
 
 # --- measurements ----------------------------------------------------------
@@ -534,6 +701,132 @@ def drift_fading(seeds=6):
             print(f"  {'':>6}{label:>14} |{cells[0]:8.2f} dB|{cells[1]:8.2f} dB")
 
 
+def blind_speed(seeds=12):
+    """How much of the wide blind search's cost is actually necessary."""
+    spec, lat, x = make_tx("A")
+    fr0 = LEADIN_SAMPLES + PREAMBLE_SAMPLES + HEADER_SAMPLES
+    win = x[fr0 : fr0 + 20 * FS]
+
+    def z_at(snr, off, seed):
+        return dsp.to_baseband(hfchannel.apply_channel(
+            win, snr_db=snr, freq_offset_hz=off, seed=seed))
+
+    z = z_at(6.0, 0.0, 0)
+
+    print("(a) the batched form is the same computation, not an approximation")
+    for mo in [55.0, 300.0]:
+        a = sync.BlindAccumulator(max_offset_hz=mo, window_s=25.0)
+        b = FastBlindAccumulator(max_offset_hz=mo, window_s=25.0)
+        a.push(z, 0)
+        b.push(z, 0)
+        rel = np.max(np.abs(a._folded - b._folded)) / np.max(np.abs(a._folded))
+        ra, rb = a.result(), b.result()
+        print(f"  +-{mo:5.0f} Hz  max rel diff {rel:.1e}  same phase {ra.frame_start == rb.frame_start}"
+              f"  same bin {ra.freq_offset == rb.freq_offset}")
+
+    print("\n(b) one push over a 20 s window, best of 3")
+    print(f"  {'configuration':>28} {'bins':>6} {'push':>9}")
+    for label, mo, sh, kind in [
+        ("reference   +-55 Hz @1.7", 55.0, 1.7, "ref"),
+        ("batched     +-55 Hz @1.7", 55.0, 1.7, "w1"),
+        ("batched+MT  +-55 Hz @1.7", 55.0, 1.7, "fast"),
+        ("batched+MT  +-55 Hz @12.5", 55.0, 12.5, "fast"),
+        ("batched+MT +-625 Hz @12.5", 625.0, 12.5, "fast"),
+        ("batched+MT +-625 Hz @25", 625.0, 25.0, "fast"),
+        ("reference  +-625 Hz @1.7", 625.0, 1.7, "ref"),
+    ]:
+        best = np.inf
+        for _ in range(3):
+            if kind == "ref":
+                acc = sync.BlindAccumulator(max_offset_hz=mo, bin_step_hz=sh, window_s=25.0)
+            else:
+                acc = FastBlindAccumulator(max_offset_hz=mo, bin_step_hz=sh, window_s=25.0,
+                                           workers=1 if kind == "w1" else -1)
+            t0 = time.perf_counter()
+            acc.push(z, 0)
+            best = min(best, time.perf_counter() - t0)
+        print(f"  {label:>28} {2*int(np.ceil(mo/sh))+1:6d} {best*1000:7.0f} ms")
+
+    print("\n(c) does a coarser grid cost detection? (+-55 Hz, offset drawn")
+    print("    uniformly so scalloping between bins is sampled fairly)")
+    snrs = [-3.0, -6.0, -8.0, -10.0]
+    print(f"  {'bin step':>9} |" + "".join(f"{s:>8.0f} dB" for s in snrs))
+    for sh in [1.7, 6.8, 12.5, 25.0, 50.0]:
+        row = f"  {sh:8.1f} |"
+        for snr in snrs:
+            hits = 0
+            for seed in range(seeds):
+                off = float(np.random.default_rng(900 + seed).uniform(-40, 40))
+                acc = FastBlindAccumulator(max_offset_hz=55.0, bin_step_hz=sh,
+                                           window_s=25.0, threshold=0.0)
+                acc.push(z_at(snr, off, seed), 0)
+                hits += acc.result().metric >= 4.0
+            row += f"  {hits:3d}/{seeds:<3d} "
+        print(row)
+
+    print("\n(d) full +-625 Hz range at a 12.5 Hz step, signal placed anywhere in it")
+    print(f"  {'SNR':>5} {'detects':>10} {'raw err Hz':>11} {'interp err':>11} {'interp worst':>13}")
+    for snr in [6.0, 0.0, -3.0, -6.0, -8.0]:
+        hits, raws, ints = 0, [], []
+        for seed in range(seeds):
+            off = float(np.random.default_rng(300 + seed).uniform(-600, 600))
+            acc = FastBlindAccumulator(max_offset_hz=625.0, bin_step_hz=12.5,
+                                       window_s=25.0, threshold=0.0)
+            acc.push(z_at(snr, off, seed), 0)
+            r = acc.result()
+            hits += r.metric >= 4.0
+            raws.append(abs(r.freq_offset - off))
+            ints.append(abs(refine_cfo(acc) - off))
+        print(f"  {snr:5.0f} {hits:8d}/{seeds:<3d} {np.mean(raws):11.2f} {np.mean(ints):11.2f}"
+              f" {np.max(ints):13.2f}")
+
+    print("\n(e) noise-only score -- more cells taken a max over (threshold 4.0)")
+    for mo, sh in [(55.0, 1.7), (625.0, 12.5), (625.0, 25.0)]:
+        peaks = []
+        for seed in range(6):
+            noise = np.random.default_rng(500 + seed).normal(size=20 * FS)
+            a = FastBlindAccumulator(max_offset_hz=mo, bin_step_hz=sh, threshold=0.0,
+                                     window_s=None)
+            a.push(dsp.to_baseband(noise), 0)
+            peaks.append(a.result().metric)
+        print(f"  +-{mo:5.0f} Hz @{sh:5.1f}  {2*int(np.ceil(mo/sh))+1:4d} bins   "
+              f"mean {np.mean(peaks):.2f}  worst {np.max(peaks):.2f}")
+
+
+def drift_ou(seeds=6):
+    """Drift as an Ornstein-Uhlenbeck process: mean-reverting, no
+    characteristic phase, parameterized by stationary RMS and
+    correlation time. The oracle here removes the *true* frequency path
+    rather than a fitted ramp, so it is the real ceiling."""
+    spec, lat, x = make_tx("A")
+    print("\nOrnstein-Uhlenbeck frequency wander (mode A, 6 dB)")
+    print(f"  {'RMS Hz':>7} {'tau s':>6} {'peak |f|':>9} {'RMS Hz/s':>9} |"
+          f"{'ref':>10} |{'track .1':>10} |{'track .3':>10} |{'oracle':>10}")
+    for rms_hz in [0.5, 1.0, 2.0, 5.0]:
+        for tau in [30.0, 10.0, 3.0]:
+            cells = {k: [] for k in ("ref", "t1", "t3", "oracle")}
+            peaks, rates = [], []
+            for seed in range(seeds):
+                y, f = ou_shift(x, rms_hz, tau, seed=seed)
+                y = hfchannel.awgn(y, 6.0, seed=seed + 1)
+                peaks.append(np.max(np.abs(f)))
+                # the rate the loop actually faces, measured over the
+                # pilot spacing rather than per sample
+                rates.append(np.std(np.diff(f[::FRAME_SAMPLES])) / FRAME_S)
+                for k, kw in [("ref", dict(track=False)),
+                              ("t1", dict(track=True, alpha=0.1, beta=0.01)),
+                              ("t3", dict(track=True, alpha=0.3, beta=0.05)),
+                              ("oracle", dict(track=False, oracle_freq=f))]:
+                    try:
+                        r = demodulate_tracked(Modem(), y, **kw)
+                        cells[k].append(latent_snr_db(lat, r.latents, r.weights))
+                    except sync.SyncError:
+                        cells[k].append(float("nan"))
+            print(f"  {rms_hz:7.1f} {tau:6.0f} {np.mean(peaks):9.2f} {np.mean(rates):9.3f} |"
+                  + "|".join(f"{np.nanmean(cells[k]):8.2f} dB"
+                             for k in ("ref", "t1", "t3", "oracle")))
+
+
 def wander(seeds=4):
     print("\nsinusoidal wander (mode A, 6 dB) -- Doppler looks more like this than a ramp")
     print(f"  {'amp Hz':>7} {'period s':>9} {'peak Hz/s':>10} |{'ref':>10} |{'track':>10}")
@@ -549,10 +842,12 @@ STEPS = {
     "sensitivity": sensitivity,
     "cpu": cpu,
     "blind-cost": blind_cost,
+    "blind-speed": blind_speed,
     "drift": lambda: (drift("A", 6.0), drift("C", 6.0, rates=[0, 0.01, 0.02, 0.05, 0.1, 1.0],
                                              seeds=2)),
     "drift-acquisition": drift_acquisition,
     "drift-fading": drift_fading,
+    "drift-ou": drift_ou,
     "wander": wander,
 }
 

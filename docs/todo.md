@@ -265,13 +265,14 @@ Every frame, exact CFO, and ≤0.4 dB across the range — consistent with
 the retuned-centre table at the top of this section, and small enough at
 3 seeds that it is not worth attributing to a mechanism.
 
-### The blind path is where CPU really is the trade
+### The blind path costs real CPU — but far less than it looks
 
 `sync.acquire_blind` / `BlindAccumulator` search CFO *directly* over
 `max_offset_hz` (default 55.0) at `bin_step_hz` (1.7) resolution, so
-their cost is linear in the range — and this is already the dominant
-per-poll cost of the receive loop. Measured on a 20 s window (the
-absolute times are machine- and load-dependent, the ratio is not):
+their cost is linear in the number of bins — and this is already the
+dominant per-poll cost of the receive loop. Widening the range naively
+is therefore ~linear in the range. Measured on a 20 s window (absolute
+times are machine- and load-dependent, ratios are not):
 
 | range | bins | `acquire_blind` | `BlindAccumulator.push` |
 |---|---|---|---|
@@ -280,22 +281,98 @@ absolute times are machine- and load-dependent, the ratio is not):
 | ±300 Hz | 355 | 2071 ms | 1356 ms |
 | ±625 Hz | 737 | 4435 ms | 2773 ms |
 
-**~10× for ±625 Hz** — the honest "spend CPU to buy range" trade, and
-the one place an opt-in switch is justified. What it does *not* cost,
-measured, is either of the things one would worry about:
+**But the bin count is the wrong thing to scale, because the grid is
+~15× finer than the signal can support.** For a fixed lag, the matched
+filter as a function of CFO is `|Σ_n (z[j+n]·k*[n]) e^{-2πi f n/FS}|`
+over n = 0..159 — a DTFT of a **160-sample** sequence. So `|mf|²` is
+exactly band-limited in CFO, with dual support 319 samples, and is fully
+determined by samples every **FS/(2·160) = 25 Hz**. The fold is a sum of
+such terms and inherits the property. A 1.7 Hz step is not resolution,
+it is interpolation done the expensive way.
+
+Measured, and it holds. Detection over ±55 Hz, 12 seeds, signal offset
+drawn uniformly so the scalloping between bins is sampled fairly:
+
+| bin step | −3 dB | −6 dB | −8 dB | −10 dB |
+|---|---|---|---|---|
+| 1.7 Hz (today) | 12/12 | 12/12 | 12/12 | 12/12 |
+| 6.8 Hz | 12/12 | 12/12 | 12/12 | 12/12 |
+| 12.5 Hz | 12/12 | 12/12 | 12/12 | 12/12 |
+| 25 Hz | 12/12 | 12/12 | 12/12 | 11/12 |
+| 50 Hz | 12/12 | 12/12 | 12/12 | **3/12** |
+
+12.5 Hz is free; 25 Hz is where the ~1 dB of worst-case scalloping loss
+starts to show at the very bottom; 50 Hz is past the sampling limit and
+collapses, exactly as predicted rather than gradually.
+
+**The frequency estimate does not have to suffer, and in fact improves.**
+A coarse grid's raw argmax is coarse — 3.7 Hz of mean error at a 12.5 Hz
+step, which matters, because the drift section below shows ~2 Hz of
+uncorrected residual CFO is already costing the picture. But the folded
+score is band-limited in CFO, so the peak *between* bins is recoverable;
+a parabola through the winning bin and its two neighbours is the cheapest
+version of that. Over the full ±625 Hz range at a 12.5 Hz step, 12 seeds,
+offset drawn uniformly across the whole range:
+
+| SNR | detects | raw error | interpolated | interpolated worst |
+|---|---|---|---|---|
+| +6 dB | 12/12 | 3.71 Hz | **0.14 Hz** | 0.45 Hz |
+| 0 dB | 12/12 | 3.71 Hz | 0.27 Hz | 0.60 Hz |
+| −3 dB | 12/12 | 3.71 Hz | 0.31 Hz | 0.57 Hz |
+| −6 dB | 12/12 | 3.71 Hz | 0.46 Hz | 1.02 Hz |
+| −8 dB | 12/12 | 3.71 Hz | 0.62 Hz | 1.47 Hz |
+
+That interpolated estimate is **better than today's 1.7 Hz grid gives
+raw** (0.56 Hz mean, 1.54 Hz worst, measured over ±55 Hz), from 101 bins
+instead of 737.
+
+**Batching and threads are the small win, not the big one.** Doing the
+per-bin IFFTs as one batched `ifft(..., axis=1, workers=-1)` and the
+periodic fold by reshape-and-sum instead of `np.add.at` is numerically
+identical (max relative difference 6.8e-16, same phase bin, same CFO
+bin) and worth ~1.1× from the batching, ~1.5× from the threads on four
+cores. The IFFTs genuinely are the work; there is no factor hiding in
+the loop overhead. Worth taking, but it is the grid that changes the
+answer.
+
+Put together, on a 20 s window, best of 3:
+
+| configuration | bins | `push` |
+|---|---|---|
+| reference, ±55 Hz @ 1.7 Hz (today) | 67 | 273 ms |
+| batched, ±55 Hz @ 1.7 Hz | 67 | 215 ms |
+| batched + threads, ±55 Hz @ 1.7 Hz | 67 | 161 ms |
+| batched + threads, **±55 Hz @ 12.5 Hz** | 11 | **131 ms** |
+| batched + threads, **±625 Hz @ 12.5 Hz** | 101 | **516 ms** |
+| batched + threads, ±625 Hz @ 25 Hz | 51 | 296 ms |
+| reference, ±625 Hz @ 1.7 Hz (the naive widening) | 737 | 2780 ms |
+
+So **11× the frequency range for under 2× today's CPU**, against 10× for
+the naive version — or, if the range is left alone, **today's range for
+half today's cost**, which is the more interesting number for Android,
+where this is the battery item and `decode_loop_low_cpu` exists because
+of it.
+
+What widening does *not* cost, measured either way:
 
 - **Sensitivity: none.** Mode A frames, 20 s window, 8 seeds: ±55 Hz and
-  ±625 Hz both detect 8/8 at +6, +3, 0 and −3 dB.
+  ±625 Hz both detect 8/8 at +6, +3, 0 and −3 dB; and the ±625 Hz @
+  12.5 Hz configuration detects 12/12 down to −8 dB with the signal
+  placed anywhere in the range.
 - **False alarms: essentially none.** Peak score on 20 s of pure noise,
-  6 seeds, against a threshold of 4.0: **1.34** at ±55 Hz rising only to
-  **1.39** at ±625 Hz (worst single seed 1.37 → 1.42). Taking a max over
-  11× more cells barely moves it, because adjacent CFO bins are heavily
-  correlated — the pilot matched filter is 20 ms long, so its response is
-  ~50 Hz wide and a 1.7 Hz bin step oversamples it by ~30×.
+  6 seeds, against a threshold of 4.0: **1.34** at ±55 Hz @ 1.7 Hz and
+  **1.38** at ±625 Hz @ 12.5 Hz (worst single seed 1.37 → 1.42). Taking
+  a max over more cells barely moves it, for the same reason the grid is
+  redundant — adjacent bins are heavily correlated.
 
-So on the blind path the widening is safe and purely a CPU decision;
-`max_offset_hz` is already a parameter, and the useful shape is a
-setting, not a redesign.
+**What this would touch.** `max_offset_hz` and `bin_step_hz` are already
+parameters, so the range and the grid are settings. The parabolic
+refinement is new and is where the care goes: it is what makes a coarse
+grid safe, and without it a coarse grid quietly hands `demodulate_blind`
+a 3.7 Hz error, which the drift section shows is enough to cost the
+picture on its own. Batching and threading `push` is a self-contained
+change to one loop with a bit-identical result to check against, in both
+implementations.
 
 **Non-issue: the 25 Hz grid.** A mis-tuned radio won't land on any
 convenient grid, but it doesn't need to. Working through the mixing
@@ -322,7 +399,8 @@ does not need moving.
 - `sync.acquire()`'s `max_bins`, from 2 to ~12. This is the change.
 - `sync.acquire_blind` / `BlindAccumulator`'s `max_offset_hz`, if the
   blind path is wanted at the same range — a setting, and the only part
-  that costs real CPU.
+  that costs real CPU, though far less than the bin count suggests once
+  `bin_step_hz` is coarsened and the peak interpolated (above).
 - **Not** `dsp.sync_lowpass()`, and **not** `dsp.to_baseband()`'s
   `FCENTER`. `ofdm.BASEBAND_FREQS` and the DFT matrix were already
   correctly identified as needing no change.
@@ -331,7 +409,7 @@ does not need moving.
   new `max_bins` default has to move in both implementations together.
 
 **Reproducing all of the above.** `scripts/freq_range_sweep.py reach
-filter-wall sensitivity cpu blind-cost` — it carries the parameterized
+filter-wall sensitivity cpu blind-cost blind-speed` — it carries the parameterized
 `acquire_wide` prototype, which is `sync.acquire` with `max_bins` and the
 filter cutoff exposed and nothing else changed.
 
@@ -348,11 +426,14 @@ cells in the ±700–800 Hz region, which are in exactly that regime — the
 never looks again.** `demodulate()` calls `acquire()`, applies one
 constant `freq_correct`, and runs 220–660 frames on it. That is fine for
 a stable pair of radios and it is the entire story for a drifting one:
-measured 2026-08-11, **today's receiver tolerates about ±2 Hz of total
-excursion over an over, whatever the mode** — which is a different and
-much harsher constraint than a drift *rate*, because a mode C over lasts
-three times as long as a mode A one and therefore tolerates a third of
-the rate.
+measured 2026-08-11, **today's receiver tolerates about ±2 Hz of
+residual offset, instant by instant** — not a drift *rate*, and not an
+average. For a ramp starting from an acquired zero the residual only
+grows, so that budget is spent as total excursion by the end of the
+over, and a mode C over lasting three times as long therefore tolerates
+a third of the rate. For wander it is the peak excursion that counts and
+the over's length does not enter at all. The Ornstein-Uhlenbeck sweep
+below is what separates those two readings; the ramp alone cannot.
 
 Mode A (32 s), AWGN at 6 dB, 3 seeds, recovered latent SNR. `ref` is
 today's receiver; `oracle` is de-chirped with the true drift rate, i.e.
@@ -380,8 +461,8 @@ the rate:
 | 0.05 | 4.8 | **−4.63** | 3.81 | 3.83 |
 | 1.00 | 95.4 | −7.59 | 3.79 | 3.80 |
 
-So: ~2 Hz of excursion is free, ~3 Hz costs the picture, ~5 Hz destroys
-it. In rate terms that is **0.06 Hz/s for mode A and 0.02 Hz/s for
+So: ~2 Hz of residual is free, ~3 Hz costs the picture, ~5 Hz destroys
+it. For a ramp that is **0.06 Hz/s for mode A and 0.02 Hz/s for
 mode C** — tight enough that a rig still warming up after key-down, or a
 disturbed path with real Doppler on it, can plausibly cross it.
 
@@ -490,7 +571,9 @@ the worst channel and within 0.23 dB of the oracle at 1 Hz/s. That is a
 comfortable window, not a knife edge, but it is not wide enough to pick
 the gains by eye.
 
-**2. The ceiling is a rate, and it moves with the loop bandwidth.** At
+**2. The ceiling is a rate, and it moves with the loop bandwidth** —
+see also the OU table below, where the gains that maximize this ceiling
+are the ones that cost the most under fading. At
 α=0.1 the loop holds to **2 Hz/s** (9.95 dB clean, oracle 10.06) and is
 gone at 5 Hz/s; at α=0.3 it holds to 5 Hz/s and is gone at 10. The hard
 bound behind both is the ±3.47 Hz per-frame ambiguity: the loop must
@@ -514,10 +597,68 @@ second-order loop is built for ramps. Mode A, 6 dB, 4 seeds, α=0.1:
 The reference falls over at ±1–2 Hz of wander, as the ramp table
 predicts. The loop handles everything up to a 30 s period at ±5 Hz, but
 a 10 s period at ±5 Hz beats it — and note it ends up *worse* than not
-tracking. If wander at that speed turns out to be real, the answer is a
-loop that adapts its bandwidth, or a smoother over the whole frame
-sequence rather than a causal loop; neither is worth designing before
-someone has seen it happen.
+tracking.
+
+**A sinusoid is still too tidy, so the same sweep with the drift drawn
+from an Ornstein-Uhlenbeck process** — mean-reverting, no characteristic
+phase, wandering back rather than running away, parameterized by
+stationary RMS and correlation time, which is the shape a measurement
+would actually report. Mode A, 6 dB, 6 seeds; the oracle removes the
+*true* frequency path rather than a fitted ramp, so it is the real
+ceiling:
+
+| RMS | τ | peak \|f\| | ref | track α=0.1 | track α=0.3 | oracle |
+|---|---|---|---|---|---|---|
+| 0.5 Hz | 30 s | 0.68 Hz | 3.78 | 3.80 | 3.80 | 3.80 |
+| 0.5 Hz | 10 s | 0.87 Hz | 3.71 | 3.78 | 3.78 | 3.78 |
+| 0.5 Hz | 3 s | 1.16 Hz | 3.77 | 3.78 | 3.77 | 3.80 |
+| 1.0 Hz | 30 s | 1.36 Hz | 3.45 | 3.72 | 3.73 | 3.74 |
+| 1.0 Hz | 10 s | 1.75 Hz | 3.19 | 3.77 | 3.77 | 3.79 |
+| 1.0 Hz | 3 s | 2.31 Hz | 3.22 | 3.64 | 3.68 | 3.79 |
+| 2.0 Hz | 30 s | 2.71 Hz | **0.32** | 3.69 | 3.69 | 3.73 |
+| 2.0 Hz | 10 s | 3.49 Hz | −0.64 | 3.53 | 3.66 | 3.78 |
+| 2.0 Hz | 3 s | 4.63 Hz | −1.09 | **0.09** | 3.23 | 3.78 |
+| 5.0 Hz | 30 s | 6.78 Hz | −4.83 | 2.16 | 3.55 | 3.84 |
+| 5.0 Hz | 10 s | 8.73 Hz | −5.14 | −5.34 | **0.17** | 3.87 |
+| 5.0 Hz | 3 s | 11.57 Hz | −5.10 | −6.00 | −6.64 | 3.77 |
+
+Four things come out of it.
+
+**It confirms the budget is on the instantaneous residual.** The
+reference's cliff tracks `peak |f|` and nothing else: healthy through
+1.75 Hz, wobbling at 2.31, gone at 2.71 — the same ~2 Hz as the ramp
+table, at a tenth of the drift rate and with no total-excursion story
+available. That is why the headline above is stated as a residual rather
+than as an excursion.
+
+**The gains that are right for a ramp under fading are wrong for fast
+wander, and vice versa.** α=0.3 was the setting that cost 2.3 dB by
+chasing `mpd` fading; here it is the setting that rescues 5 Hz RMS
+(3.55 against α=0.1's 2.16 at τ=30, and 0.17 against −5.34 at τ=10).
+The loop bandwidth has to sit above the drift's spectrum and below the
+channel's Doppler spread, and those two can overlap. **A single
+compiled-in pair of gains cannot serve both**, which is a stronger
+argument for an adaptive bandwidth than the sinusoid alone made — but it
+also cannot be settled without knowing which of the two is real on air.
+
+**Everything a causal loop loses, the oracle keeps**: 3.73–3.87 dB in
+every cell, including the ones where every tracker fails. So the ceiling
+here is the *estimator*, not the waveform. A non-causal smoother over
+the whole frame sequence — the pilots are all in memory by the time the
+picture is reconstructed, and `demodulate` is not a real-time loop — has
+that entire gap available to it, and would be immune to the bandwidth
+tension above because it does not have to choose a bandwidth in advance.
+That is the more interesting design if wander turns out to matter.
+
+**A measurement trap, recorded because it cost a round.** The first OU
+run showed the *oracle* scoring below the tracker, which is impossible
+and was the tell. `acquire()` has already removed a constant, so the
+oracle must remove the true path **minus `acq.freq_offset`**; removing
+the raw path double-corrects by that constant. Invisible for a ramp
+starting at zero — the preamble sits at t = 0.1 s, so `acq.freq_offset`
+is ~0.01 Hz — and ruinous for wander, where the offset at the preamble
+is a full standard deviation. An oracle that can be beaten is not an
+oracle.
 
 **4. Total excursion still has to stay inside the radio's filter.** At
 10 Hz/s over mode A the signal moves 320 Hz, and at 40 Hz/s it moves
@@ -546,7 +687,7 @@ checking both.
 ### Reproducing all of the above
 
 `scripts/freq_range_sweep.py --verify drift drift-acquisition
-drift-fading wander`. **Run `--verify` first and believe nothing without
+drift-fading drift-ou wander`. **Run `--verify` first and believe nothing without
 it**: the tracker prototype is a *fork* of `Modem.demodulate`, and with
 tracking off it is required to reproduce the reference bit for bit on
 clean audio and under two fading presets. A fork that has quietly drifted
@@ -554,10 +695,11 @@ would be measuring itself.
 
 ### Caveats
 
-2–6 seeds per cell, mode A except where mode C is named, and a *linear*
-ramp plus one sinusoidal family — real drift is neither, and in
-particular a rig warming up after key-down is fastest at the start,
-which is exactly when the loop has not converged. Nothing here has met a
+2–6 seeds per cell, mode A except where mode C is named, and three drift
+shapes (a linear ramp, a sinusoid, an OU process) none of which is a
+measurement of a radio. In particular a rig warming up after key-down is
+fastest at the start, which no stationary process models and which is
+exactly when the loop has not converged. Nothing here has met a
 real radio: `hfchannel` has no drift model at all, so `drift_shift`
 was written for this measurement and lives in the sweep script rather
 than in the package — deliberately, since a channel-simulator feature
