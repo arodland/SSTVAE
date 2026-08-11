@@ -41,7 +41,15 @@ import numpy as np
 from PIL import Image
 
 from ..codec import pad_to_full, reconstruct
-from ..config import FS, FRAME_SAMPLES, HEADER_SAMPLES, MODES, PREAMBLE_SAMPLES
+from ..config import (
+    BLIND_MAX_OFFSET_HZ,
+    BLIND_WIDE_MAX_OFFSET_HZ,
+    FS,
+    FRAME_SAMPLES,
+    HEADER_SAMPLES,
+    MODES,
+    PREAMBLE_SAMPLES,
+)
 from ..modem import Modem, SyncError
 from ..modem.dsp import to_baseband, to_baseband_at
 from ..modem.sync import acquire as sync_acquire
@@ -87,6 +95,20 @@ class RxConfig:
     # BlindAccumulator's docstring). Only useful to *shrink* below a
     # mode's own duration.
     blind_search_seconds: float = MODES["C"].duration_s
+
+    # Widen the preamble-free search to config.BLIND_WIDE_MAX_OFFSET_HZ,
+    # for a counterpart whose dial is off by hundreds of Hz. Opt-in
+    # because unlike the preamble path -- which searches frequency for
+    # free and so is always wide -- this one searches CFO directly and
+    # its cost is linear in the number of bins: measured, ~1.6x a poll.
+    blind_wide: bool = False
+
+    # "off" | "slow" | "fast": follow a carrier that moves during the
+    # transmission. Off by default; on HF with a modern radio the
+    # receiver's ~+-2 Hz budget is not usually threatened, and the two
+    # gains suit different things -- see config.drift_gains and
+    # docs/todo.md.
+    drift_track: str = "off"
 
 
 @dataclass
@@ -228,7 +250,9 @@ def _find_new_reception(modem, samples, z, buf_start, finished_starts,
                 break
             tries += 1
             try:
-                r = modem.demodulate(samples, search_s=(lo / FS, span_hi / FS))
+                r = modem.demodulate(
+                samples, search_s=(lo / FS, span_hi / FS), drift_track=config.drift_track
+            )
                 return r, buf_start + r.preamble_start
             except SyncError:
                 lo = acq.preamble_start + PREAMBLE_SAMPLES
@@ -322,7 +346,12 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
             # as before.
             if blind_acc is None or blind_acc_pushed is None or blind_acc_pushed < buf_start:
                 timescales = [min(m.duration_s, config.blind_search_seconds) for m in MODES.values()]
-                blind_acc = BlindAccumulator(window_s=timescales)
+                blind_acc = BlindAccumulator(
+                    max_offset_hz=(
+                        BLIND_WIDE_MAX_OFFSET_HZ if config.blind_wide else BLIND_MAX_OFFSET_HZ
+                    ),
+                    window_s=timescales,
+                )
                 blind_acc_pushed = buf_start
             new_lo = blind_acc_pushed - buf_start
             if new_lo < len(samples):
@@ -335,7 +364,13 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
             except SyncError:
                 ba = None
             try:
-                rb = modem.demodulate_blind(samples, acquisition=ba) if ba is not None else None
+                rb = (
+                    modem.demodulate_blind(
+                        samples, acquisition=ba, drift_track=config.drift_track
+                    )
+                    if ba is not None
+                    else None
+                )
             except SyncError:
                 rb = None
             if rb is not None and rb.beacon is not None and rb.frame0_start is not None:
@@ -529,7 +564,8 @@ def decode_loop_low_cpu(ring: RingBuffer, model, state: SharedState, config: RxC
             # different (older, already-saved) preamble than the one just
             # found -- see _find_new_reception's docstring.
             r = modem.demodulate(
-                samples, search_s=(search[0] / FS, search[1] / FS)
+                samples, search_s=(search[0] / FS, search[1] / FS),
+                drift_track=config.drift_track,
             )
         except SyncError:
             last_search_pos = total
@@ -571,7 +607,10 @@ def decode_loop_low_cpu(ring: RingBuffer, model, state: SharedState, config: RxC
         # coordinates, so the final decode can't lock a different preamble.
         lo = max(0, reception_start - (total - len(samples)))
         try:
-            r = modem.demodulate(samples, search_s=(lo / FS, len(samples) / FS))
+            r = modem.demodulate(
+                samples, search_s=(lo / FS, len(samples) / FS),
+                drift_track=config.drift_track,
+            )
         except SyncError:
             # transmission was cut short / corrupted after all; go back
             # to listening rather than crash the loop

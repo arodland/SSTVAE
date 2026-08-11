@@ -16,6 +16,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..config import (
+    DRIFT_TRACK_MODES,
+    drift_gains,
     FS,
     RS,
     NC,
@@ -45,7 +47,7 @@ from ..config import (
 )
 from . import beacon, framing, ofdm
 from .beacon import BeaconResult
-from .dsp import to_baseband, freq_correct, tx_condition
+from .dsp import to_baseband, freq_correct, tx_condition, wrap_cycles
 from .sync import acquire, acquire_blind, BlindAcquisition, SyncError
 
 __all__ = ["Modem", "DemodResult", "BlindDemodResult", "SyncError"]
@@ -131,6 +133,94 @@ def _estimate_snr_db(h_pilot: np.ndarray, received: np.ndarray | None = None) ->
     return 10 * np.log10(snr_ref_linear)
 
 
+FRAME_S = FRAME_SAMPLES / FS
+# The residual a pilot-rate estimator can measure without ambiguity:
+# one pilot per frame is a 6.94 Hz sampling rate for the phase.
+CFO_PULL_HZ = 1.0 / (2 * FRAME_S)
+
+
+class _DriftTracker:
+    """Second-order loop on the pilots' *common* phase, which is residual
+    carrier frequency. Off unless `drift_track` says otherwise, and when
+    off it is not merely a no-op but is never consulted, so the default
+    path is bit-identical to the receiver that had no tracker at all.
+
+    The phase **common to all carriers** between consecutive pilots is
+    frequency; the phase **slope across** carriers is timing, which
+    `_bin_phase_step` already tracks. They are orthogonal -- a common
+    rotation cancels out of the slope and a slope cancels out of the sum
+    -- so the two loops do not fight.
+
+    Three things here are load-bearing and each was wrong first:
+
+    * **The correction is a continuous ramp within the frame, not one
+      constant phase per frame.** A per-frame constant removes only the
+      frame-to-frame step, which the pilot equalizer already removes,
+      and leaves the frequency error *inside* the frame -- which is the
+      part that costs the picture (pilot-to-data rotation and ICI). With
+      a constant the tracker measurably hurt.
+    * **The measurement is the residual that survived the correction
+      already applied**, so both terms integrate it. Chasing it, EMA
+      style (`f += a*(measured - f)`), is a loop measuring its own
+      output.
+    * **Second order.** Drift is a ramp, and a first-order loop leaves a
+      steady-state lag proportional to rate/alpha -- exactly the error
+      being removed. The second integrator takes that to zero.
+
+    **Pull-in is +-CFO_PULL_HZ of residual, and outside it the loop does
+    not merely fail to help.** One pilot per frame samples the phase at
+    6.94 Hz, so a larger residual *aliases*: it is measured as a small
+    error rather than a large one, and the loop confidently locks to the
+    wrong frequency. That cannot be caught by testing the measurement's
+    magnitude, because the magnitude is what the aliasing makes small.
+    It does not arise on the preamble path -- acquisition leaves ~0.1 Hz
+    and drift only grows from there, so the loop is already locked when
+    the residual gets big -- but it does on the blind path, whose CFO
+    estimate describes the middle of its window and so starts out around
+    half the window's total drift away. See demodulate_blind.
+
+    Beyond that, the drift *rate* the loop can follow is bounded by the
+    same number over one frame; see docs/todo.md for the measured
+    ceiling and for why alpha is a user-facing choice rather than a
+    constant.
+    """
+
+    def __init__(self, alpha: float, beta: float):
+        self.alpha = alpha
+        self.beta = beta
+        self.f_est = 0.0  # residual CFO estimate, Hz
+        self.r_est = 0.0  # drift rate estimate, Hz/s
+        self.phase_acc = 0.0  # accumulated de-rotation, cycles
+        self._n = np.arange(FRAME_SAMPLES)
+
+    def frame(self, z: np.ndarray, p: int) -> np.ndarray:
+        """This frame's samples, de-rotated by the running estimate."""
+        return z[p : p + FRAME_SAMPLES] * np.exp(
+            -2j * np.pi * wrap_cycles(self.phase_acc + self.f_est * self._n / FS)
+        )
+
+    def update(self, h_cur: np.ndarray, h_prev: np.ndarray | None) -> None:
+        if h_prev is not None:
+            d = np.sum(h_cur * np.conj(h_prev))
+            if np.abs(d) > 0:
+                err = np.angle(d) / (2 * np.pi * FRAME_S)  # Hz, +-CFO_PULL_HZ
+                self.f_est += self.alpha * err
+                self.r_est += self.beta * err / FRAME_S
+        # Carry absolute phase across the boundary *before* stepping the
+        # frequency, so the correction stays continuous frame to frame.
+        self.phase_acc += self.f_est * FRAME_S
+        self.f_est += self.r_est * FRAME_S
+
+
+def _make_tracker(drift_track: str) -> _DriftTracker | None:
+    if drift_track not in DRIFT_TRACK_MODES:
+        raise ValueError(
+            f"drift_track must be one of {DRIFT_TRACK_MODES}, got {drift_track!r}"
+        )
+    alpha, beta = drift_gains(drift_track)
+    return _DriftTracker(alpha, beta) if alpha else None
+
+
 class Modem:
     def __init__(self):
         self.pilot = ofdm.pilot_sequence()
@@ -191,10 +281,18 @@ class Modem:
     # --- receive -----------------------------------------------------------
 
     def demodulate(
-        self, x: np.ndarray, search_s: tuple[float, float] | None = None
+        self, x: np.ndarray, search_s: tuple[float, float] | None = None,
+        drift_track: str = "off",
     ) -> DemodResult:
         """`search_s` restricts preamble acquisition to a time window
-        (seconds); frames are still demodulated past its end."""
+        (seconds); frames are still demodulated past its end.
+
+        `drift_track` ("off" | "slow" | "fast") follows a carrier that
+        moves during the transmission -- see `_DriftTracker`. Off by
+        default because acquisition already removes a static offset and
+        the remaining budget (~+-2 Hz of residual) is not usually
+        threatened on HF by a modern radio; the settings exist for the
+        cases where it is."""
         z = to_baseband(np.asarray(x, dtype=np.float64))
         search = None
         if search_s is not None:
@@ -239,12 +337,18 @@ class Modem:
         # samples/frame. A slow EMA keeps the fading wiggle out while
         # following the drift ramp; shifts are small and incremental.
         tau_ema = 0.0
+        tracker = _make_tracker(drift_track)
         p = h0 + HEADER_SAMPLES
         for f in range(n_f):
             if p + FRAME_SAMPLES > len(z):
                 break
-            for s in range(SYMS_PER_FRAME):
-                raw[f, s] = ofdm.demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF)
+            if tracker is None:
+                for s in range(SYMS_PER_FRAME):
+                    raw[f, s] = ofdm.demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF)
+            else:
+                zz = tracker.frame(z, p)
+                for s in range(SYMS_PER_FRAME):
+                    raw[f, s] = ofdm.demod_window(zz, s * NSYM + NCP, DEMOD_BACKOFF)
             h_pilot[f] = raw[f, 0] / self.pilot
             received[f] = True
             p += FRAME_SAMPLES
@@ -252,6 +356,12 @@ class Modem:
             power = float(np.mean(np.abs(raw[f, 0]) ** 2))
             pilot_powers.append(power)
             healthy = power > 0.1 * np.median(pilot_powers)
+            if tracker is not None:
+                # A faded frame's pilot phase is noise; feed the loop
+                # nothing rather than a bad measurement, but still let it
+                # coast forward on its rate estimate.
+                prev = h_pilot[f - 1] if (f > 0 and healthy and received[f - 1]) else None
+                tracker.update(h_pilot[f], prev)
             if healthy:
                 phi = self._bin_phase_step(h_pilot[f])
                 d = np.angle(np.exp(1j * (phi - phi_ref)))
@@ -324,6 +434,7 @@ class Modem:
     def demodulate_blind(
         self, x: np.ndarray, search_s: tuple[float, float] | None = None,
         acquisition: BlindAcquisition | None = None,
+        drift_track: str = "off",
     ) -> BlindDemodResult:
         """Recover frame timing purely from the pilot's own periodicity
         (sync.acquire_blind) — no preamble or header needed, so this
@@ -336,6 +447,21 @@ class Modem:
 
         No sample-clock drift tracking (that needs a preamble-phase
         reference); fine for the bounded windows this is meant for.
+        `drift_track` is the *carrier* drift loop, which needs no such
+        reference -- it works off the pilots, which this path has. It has
+        one limit here that it does not have on the preamble path, and
+        it is sharp rather than gradual: `acquire_blind` estimates one
+        frequency for its whole window, so on a drifting signal that
+        estimate describes the *middle* of the window and the residual
+        at the first frame is about half the window's total drift. Once
+        that exceeds `CFO_PULL_HZ` the per-frame measurement aliases and
+        the loop locks to the wrong frequency -- measured, at 0.5 Hz/s
+        over a 30 s window (7.7 Hz of initial residual) it takes the
+        beacon down, where leaving it off decodes. Roughly: helpful
+        while the total drift across the window stays under ~7 Hz,
+        harmful past it. Fixing that properly means anchoring the loop
+        at the window's middle and running it outward in both
+        directions, which is not implemented.
 
         `acquisition`, if given, skips the internal acquire_blind call
         and demodulates at that position instead -- for a caller (e.g.
@@ -365,11 +491,28 @@ class Modem:
 
         raw = np.zeros((n_f, SYMS_PER_FRAME, NC), dtype=np.complex128)
         h_pilot = np.zeros((n_f, NC), dtype=np.complex128)
+        tracker = _make_tracker(drift_track)
+        pilot_powers: list[float] = []
         p = p_start
         for f in range(n_f):
-            for s in range(SYMS_PER_FRAME):
-                raw[f, s] = ofdm.demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF)
+            if tracker is None:
+                for s in range(SYMS_PER_FRAME):
+                    raw[f, s] = ofdm.demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF)
+            else:
+                zz = tracker.frame(z, p)
+                for s in range(SYMS_PER_FRAME):
+                    raw[f, s] = ofdm.demod_window(zz, s * NSYM + NCP, DEMOD_BACKOFF)
             h_pilot[f] = raw[f, 0] / self.pilot
+            if tracker is not None:
+                # Most of this range is usually not the transmission at
+                # all (silence or noise before it starts, or accumulating
+                # after it ends -- see the med_h comment below), so the
+                # loop must not integrate phase out of noise frames. Same
+                # health test the preamble path uses.
+                power = float(np.mean(np.abs(raw[f, 0]) ** 2))
+                pilot_powers.append(power)
+                healthy = power > 0.1 * np.median(pilot_powers)
+                tracker.update(h_pilot[f], h_pilot[f - 1] if (f > 0 and healthy) else None)
             p += FRAME_SAMPLES
 
         # Blind demod always covers every frame the *whole current

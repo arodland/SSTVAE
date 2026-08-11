@@ -705,8 +705,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "7.6800000000e+02",
-        "mean_abs": "2.6401927769e+02",
-        "rms": "4.4362250444e+02"
+        "mean_abs": "2.6403339683e+02",
+        "rms": "4.4362250511e+02"
       },
       "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -718,8 +718,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "7.6800000000e+02",
-        "mean_abs": "2.7626855019e+02",
-        "rms": "4.4413822040e+02"
+        "mean_abs": "2.7627387219e+02",
+        "rms": "4.4413867105e+02"
       },
       "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -731,8 +731,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "7.6800000000e+02",
-        "mean_abs": "2.6180013063e+02",
-        "rms": "4.4350104365e+02"
+        "mean_abs": "2.6165806548e+02",
+        "rms": "4.4349994800e+02"
       },
       "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -744,8 +744,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "7.6800000000e+02",
-        "mean_abs": "2.6356653249e+02",
-        "rms": "4.4357498229e+02"
+        "mean_abs": "2.6307540662e+02",
+        "rms": "4.4357203799e+02"
       },
       "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
       "shape": [

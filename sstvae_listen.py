@@ -40,7 +40,7 @@ from sstvae.codec import (  # noqa: F401  (re-exported)
     pad_to_full,
     reconstruct,
 )
-from sstvae.config import FS, MODES
+from sstvae.config import DRIFT_TRACK_MODES, FS, MODES
 from sstvae.rx import (  # noqa: F401
     Reception,
     RingBuffer,
@@ -159,6 +159,19 @@ def main() -> None:
     ap.add_argument("--once", action="store_true", help="exit after the first successful reception")
     ap.add_argument("--list-devices", action="store_true", help="list audio devices and exit")
     ap.add_argument(
+        "--blind-wide", action="store_true",
+        help="widen the preamble-free search to +-625 Hz, for a counterpart whose "
+        "dial is far off. The preamble search is always this wide because it is "
+        "free; this one searches frequency directly and costs ~1.6x a poll.",
+    )
+    ap.add_argument(
+        "--drift-track", choices=DRIFT_TRACK_MODES, default="off",
+        help="follow a carrier that drifts during the transmission. Off suits HF "
+        "with a modern radio; 'slow' handles a drifting rig without disturbing "
+        "fading, 'fast' handles rapid wander (VHF/satellite) at some cost under "
+        "heavy Doppler spread.",
+    )
+    ap.add_argument(
         "--low-cpu", action="store_true",
         help="header-sync only: no blind fallback, no retrospective mid-stream "
         "decode. Searches only newly-arrived audio each poll instead of the "
@@ -179,6 +192,8 @@ def main() -> None:
         size=args.size,
         once=args.once,
         blind_search_seconds=args.blind_search_seconds,
+        blind_wide=args.blind_wide,
+        drift_track=args.drift_track,
     )
 
     model = load_codec(args.model, precision=args.precision)
