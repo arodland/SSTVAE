@@ -11,8 +11,17 @@
 // setting it out to about +/-700 Hz where the sync lowpass takes over.
 // Detection is CFO-blind -- an offset multiplies every lag-M product by
 // one constant phasor, which |.| removes -- so a wider search cannot
-// move the false-alarm rate, and measured it costs neither sensitivity
-// nor meaningful CPU. See docs/todo.md.
+// move the false-alarm rate *at the true preamble's own location*, and
+// measured it costs neither sensitivity nor meaningful CPU there. See
+// docs/todo.md.
+//
+// That does not cover every *other* location a real transmission's own
+// data can produce a passable lag-M metric peak at: a genuinely
+// off-frequency signal has real spectral content near its true offset
+// even away from the preamble, so more candidates means more chances
+// one of them resonates with it instead of noise.
+// config::TEMPLATE_SCORE_THRESHOLD is the second gate that catches
+// that -- see its comment in config.py for the measurement.
 
 #pragma once
 

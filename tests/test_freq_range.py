@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 from sstvae import config, hfchannel
-from sstvae.config import ACQUIRE_MAX_BINS, FS, LEADIN_SAMPLES, MODES
+from sstvae.config import ACQUIRE_MAX_BINS, FS, LEADIN_SAMPLES, MODES, TEMPLATE_SCORE_THRESHOLD
 from sstvae.modem import dsp, sync
 from sstvae.modem.modem import CFO_PULL_HZ, Modem, _make_tracker
 
@@ -80,6 +80,104 @@ def test_detection_is_blind_to_frequency_offset(mode_a):
         shifted = hfchannel.apply_channel(wave, snr_db=None, freq_offset_hz=offset)
         metric = sync._autocorr_metric(dsp.sync_lowpass(dsp.to_baseband(shifted)))[0].max()
         assert metric == pytest.approx(metric0, abs=0.05)
+
+
+# --- the template-score gate ------------------------------------------------
+#
+# Found 2026-08-13 against a real, deliberately mis-tuned recording: a
+# widened bin search can find a candidate, elsewhere in a real
+# transmission's own data, whose winning template-correlation score is
+# low but whose header still happens to Golay-decode -- a false lock
+# that reports a wrong, mangled picture as a completed reception. The
+# lag-M metric alone (PREAMBLE_THRESHOLD) doesn't catch this, because it
+# was calibrated against pure noise, and real signal data clears it too.
+# TEMPLATE_SCORE_THRESHOLD is the second gate, on the winning candidate's
+# match quality rather than just its availability.
+
+def test_a_steady_tone_no_longer_locks(mode_a):
+    """The scenario CLAUDE.md/docs/todo.md already documents as open
+    ("Preamble detection against a steady-carrier interferer"): a tone
+    is periodic with M, so it reads metric ~1.0 -- above anything a real
+    preamble reaches in noise -- and used to win the argmax outright.
+    It doesn't resemble the 24-carrier template at any frequency,
+    though, so the score gate now rejects it regardless of level.
+    Coincidental, not the bug this section exists for, but a genuine
+    second win from the same fix."""
+    _, _, wave = mode_a
+    sig_rms = float(np.sqrt(np.mean(wave**2)))
+    lead_n = int(2.0 * FS)
+    t = np.arange(lead_n) / FS
+    for tone_db in (-20.0, -6.0, 0.0, 6.0):
+        tone = sig_rms * 10 ** (tone_db / 20.0) * np.sqrt(2) * np.sin(2 * np.pi * 1400 * t)
+        y = np.concatenate([tone, wave[LEADIN_SAMPLES:]])
+        with pytest.raises(sync.SyncError):
+            sync.acquire(dsp.to_baseband(y))
+
+    # The same buffer with no tone must still lock, at the new lead-in's
+    # length -- otherwise this would be "acquire() always fails now."
+    clean = np.concatenate([np.zeros(lead_n), wave[LEADIN_SAMPLES:]])
+    acq = sync.acquire(dsp.to_baseband(clean))
+    assert abs(acq.preamble_start - lead_n) <= 4
+
+
+def test_the_gate_does_not_cost_real_acquisitions(modem, mode_a, monkeypatch):
+    """The other side of the same coin: real preambles, even weak and
+    faded ones, must clear TEMPLATE_SCORE_THRESHOLD comfortably.
+
+    Asserting a bare hit count here would invite exactly the trap
+    CLAUDE.md warns about -- acquisition near threshold is a coin flip
+    (measured 40-80% per point elsewhere in this file's own family of
+    tests), so a handful of seeds at a marginal SNR "proves" whatever
+    the RNG happened to do. An ablation sidesteps that: run the *same*
+    seeds with the gate at its real value and with it disabled, and
+    require identical outcomes -- if the gate ever costs a real
+    acquisition, the two runs diverge regardless of where the absolute
+    floor sits. (Measured separately, over ~1400 synthetic trials at
+    the sensitivity floor -- modes A/C, -4..-6 dB, no/mpp/mpd fading,
+    0/300/600 Hz -- the lowest winning score for a candidate whose
+    header went on to decode was 0.430, comfortably above the 0.40
+    gate; that sweep is not re-run here because it takes minutes, not
+    seconds.)"""
+    spec, latents, wave = mode_a
+
+    def modes_at(gate):
+        monkeypatch.setattr(sync, "TEMPLATE_SCORE_THRESHOLD", gate)
+        outcomes = []
+        for seed in range(25):
+            y = hfchannel.apply_channel(
+                wave, snr_db=-4.0, freq_offset_hz=300.0, fading_preset="mpp", seed=seed
+            )
+            try:
+                r = modem.demodulate(y)
+                outcomes.append(r.mode.name)
+            except sync.SyncError:
+                outcomes.append(None)
+        return outcomes
+
+    gated = modes_at(TEMPLATE_SCORE_THRESHOLD)
+    ungated = modes_at(0.0)
+    assert gated == ungated, "the gate changed a real acquisition's outcome"
+    # And not simply "changed nothing because nothing ever succeeds" --
+    # this SNR/fading point has to actually exercise the header path.
+    assert any(m is not None for m in gated)
+
+
+def test_low_score_candidates_are_rejected_not_merely_deprioritized(mode_a):
+    """Pins the mechanism directly, independent of any particular
+    interferer: a candidate below TEMPLATE_SCORE_THRESHOLD must raise
+    SyncError rather than being returned as a low-confidence result --
+    there is no caller downstream of acquire() that treats a returned
+    Acquisition as anything but trustworthy."""
+    assert 0.0 < TEMPLATE_SCORE_THRESHOLD < 1.0
+    # A buffer that clears the lag-M (periodicity) gate but is pure
+    # noise otherwise -- the tone above already demonstrates the
+    # real-content case; this is the noise-only floor of the same check.
+    rng = np.random.default_rng(0)
+    t = np.arange(int(2.0 * FS)) / FS
+    tone = 10 * np.sin(2 * np.pi * 1400 * t)
+    noise = rng.normal(scale=0.01, size=len(tone))
+    with pytest.raises(sync.SyncError, match="no preamble found"):
+        sync.acquire(dsp.to_baseband(tone + noise))
 
 
 # --- the blind search's coarse grid ----------------------------------------

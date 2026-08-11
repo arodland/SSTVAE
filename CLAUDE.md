@@ -1443,7 +1443,8 @@ need when `--native` fails and you want to know *where*.
   so past ~7 Hz of drift across the window the measurement aliases and
   the loop is worse than off. Anchoring it mid-window and running
   outward is the fix; not implemented.
-  Two other items are still open. **A steady carrier is a perfect-looking
+  Two other items were open; one of them is now mostly closed as a side
+  effect of a fix below. **A steady carrier is a perfect-looking
   preamble** (2026-08-09): `_autocorr_metric` is normalized by the
   window's own energy, so any pure tone reads exactly **1.000** — above
   what a real preamble reaches in noise — and `acquire` takes a hard
@@ -1463,8 +1464,24 @@ need when `--native` fails and you want to know *where*.
   that `sync_lowpass` binds *first* was wrong, and the stock 850 Hz
   filter carries acquisition to ±600 Hz at 0 dB unchanged. Detection is
   CFO-blind by construction, so widening cannot move the false-alarm
-  rate, and `max_bins` 2 vs 12 returned the identical preamble start and
-  CFO in 160/160 trials from 0 to −7 dB. It costs 0.14 ms per candidate
+  rate *at the true preamble's own location*, and `max_bins` 2 vs 12
+  returned the identical preamble start and CFO in 160/160 trials from
+  0 to −7 dB there. **That measurement did not cover a different
+  location — found 2026-08-13, against a real mis-tuned recording, not
+  a synthetic one**: real transmission data elsewhere in the same
+  buffer can clear `PREAMBLE_THRESHOLD` too (that threshold was
+  calibrated against pure noise), and a genuinely off-frequency signal
+  has real spectral content near its own true offset even away from
+  the preamble — so widening the bin search is more likely to resonate
+  with *that* than with unrelated noise, and can win a false lock deep
+  in a transmission's own frame data that Golay-decodes a plausible
+  header. `config.TEMPLATE_SCORE_THRESHOLD` (0.40) is the fix: a second
+  gate on the winning candidate's template-match quality, calibrated
+  against the measured false lock (score 0.338) and ~1400 synthetic
+  trials at the sensitivity floor (lowest score for a real acquisition:
+  0.430). See docs/todo.md's "A false lock this widening opened up" —
+  it also mostly closes the steady-carrier-tone item two paragraphs up,
+  as a side effect. It costs 0.14 ms per candidate
   (3.4 ms total, ~5% of one acquisition), so it is not the opt-in this
   file once implied. **The blind path is the opposite case**:
   `acquire_blind`/`BlindAccumulator` search CFO directly, so widening it

@@ -72,6 +72,7 @@ inline constexpr double DRIFT_SLOW_ALPHA = 0x1.999999999999ap-4;  // 0.1
 inline constexpr double DRIFT_SLOW_BETA = 0x1.47ae147ae147bp-7;  // 0.01
 inline constexpr double DRIFT_FAST_ALPHA = 0x1.3333333333333p-2;  // 0.3
 inline constexpr double DRIFT_FAST_BETA = 0x1.999999999999ap-5;  // 0.05
+inline constexpr double TEMPLATE_SCORE_THRESHOLD = 0x1.999999999999ap-2;  // 0.4
 
 // Post-clip transmit filter, Hz.
 inline constexpr double TX_BANDPASS_LO = 0x1.a900000000000p+9;  // 850.0

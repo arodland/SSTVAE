@@ -176,6 +176,18 @@ Acquisition acquire(std::span<const cdouble> z_in, double threshold, int max_bin
         }
     }
 
+    if (best_score < config::TEMPLATE_SCORE_THRESHOLD) {
+        // The winning candidate is the *best available* one, not
+        // necessarily a *good* one -- the lag-M metric above only rules
+        // out pure noise, and real transmission data elsewhere in the
+        // buffer can pass it too. This is the second gate: no candidate
+        // here explains enough of the template's energy to trust as an
+        // actual preamble.
+        throw SyncError("no preamble found (best candidate score " +
+                        std::to_string(best_score) + " at " + std::to_string(best_f) +
+                        " Hz)");
+    }
+
     std::int64_t p0 = best_p0;
     double f_hat = best_f;
 

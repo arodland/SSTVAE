@@ -5,6 +5,15 @@ reasoning doesn't have to be rediscovered.
 
 ## Preamble detection against a steady-carrier interferer
 
+**Mostly closed 2026-08-13, as a side effect of an unrelated fix — see
+"A false lock this widening opened up" under the wider-acquisition
+section below.** `config.TEMPLATE_SCORE_THRESHOLD`, added to reject a
+different false-lock mechanism, also rejects a tone at every level this
+section's table names, in the clean case; fix candidate 1 below (top-K
+peaks, header arbitrates) remains the more direct answer and is not
+implemented. The measurements and reasoning below are otherwise as
+they were found.
+
 **A pure tone is a perfect-looking preamble to `sync.acquire()`, and
 carriers are everywhere on HF.** Found 2026-08-09 while designing the
 Android app's VOX leader tone; the leader was the trigger, but the
@@ -103,7 +112,7 @@ measured, acquisition lands on the true preamble with the same latent
 SNR as no leader at all. That is a transmitter-side dodge of one
 instance of the problem, not a fix for the general one.
 
-## ~~Wider acquisition search, for a mis-tuned counterpart~~ — implemented 2026-08-11
+## ~~Wider acquisition search, for a mis-tuned counterpart~~ — implemented 2026-08-11, one gap found and closed 2026-08-13
 
 **Shipped, in both implementations.** The measurements below are kept
 because they are the reasoning, and because two of them contradict what
@@ -113,7 +122,10 @@ this section previously asserted. What landed:
   option: measured, a wider preamble search cannot cost false alarms
   (detection is CFO-blind), does not cost sensitivity (the extra
   candidates never win — 160/160 identical answers), and costs ~3.4 ms
-  of a 63 ms acquisition.
+  of a 63 ms acquisition. **That measurement was of the true preamble's
+  own location only — see "A false lock this widening opened up" below
+  for the gap it left, and `config.TEMPLATE_SCORE_THRESHOLD` for the
+  fix.**
 - **`config.BLIND_BIN_STEP_HZ` = 12.5 with `sync.refine_cfo`**, which
   makes the default blind search ~6.7x cheaper *and* more accurate than
   the 1.7 Hz grid it replaces. `config.BLIND_BLOCK_RES_HZ` is a separate
@@ -445,6 +457,116 @@ offset per trial. This file's standing warning (≥25 seeds before quoting
 an acquisition success rate near threshold) applies to the 7/8 and 2/8
 cells in the ±700–800 Hz region, which are in exactly that regime — the
 0/8-vs-8/8 cells that carry the argument are not.
+
+### A false lock this widening opened up — found and fixed 2026-08-13
+
+**The "extra candidates never win" measurement above answers a narrower
+question than it sounds like it does.** It compares `max_bins=2` against
+`max_bins=12` *at the true preamble's own location* — does the correct
+candidate still win with more competitors? Yes, always, 160/160. It says
+nothing about a *different* location, elsewhere in the same real
+transmission, where there is no preamble at all but the lag-M metric
+still clears `PREAMBLE_THRESHOLD` (that threshold was calibrated against
+pure noise — see its own comment in config.py — and real, in-band OFDM
+data can clear it too, which the AWGN-only false-alarm sweep never
+exercised). At such a location, more candidates is strictly more chances
+for one of them to happen to score well against the template, and —
+this is the part that makes a genuinely mis-tuned signal specifically
+vulnerable — a signal that is really offset from nominal has real
+spectral energy concentrated near *that* offset everywhere in its own
+transmission, not just at the preamble, so the widened search is more
+likely to resonate with it than with unrelated noise would be.
+
+**Found against a real recording**, not a synthetic one: a mode C
+transmission played back mistuned by roughly +142 Hz through a loopback
+device. Blind sync (`demodulate_blind`, unaffected by any of this)
+locked correctly and decoded a clean picture at 24 dB. The header path,
+though, intermittently produced a *second*, wrong "reception" partway
+through the same buffer: `_find_new_reception` found a candidate ~25 s
+into the transmission's own frame data (nowhere near the real preamble,
+which sits in the first ~100 ms), Golay-decoded a header claiming mode
+C — the real mode, most likely because the false candidate's frequency
+estimate landed near the signal's real ~142 Hz offset rather than
+because of anything about the header bits themselves — and then
+demodulated ~35–47% of a 660-frame picture at a *reported* −3 dB SNR.
+Reproduced deterministically offline (`sync.acquire()` with
+`search=(184627, 240000)` on the first 30 s of that recording finds
+`preamble_start=199199, freq=143.22 Hz` and Golay-decodes mode C; the
+identical call with `max_bins=2` finds a *different* wrong candidate at
+93 Hz and correctly fails the header). The false lock's winning
+template-correlation score was 0.338 in both places it was measured
+this way.
+
+**The gate that was missing: nothing checked whether the winning
+candidate was actually *good*, only that it was the *best available*
+one.** `acquire()`'s per-`m_bin` loop already computes a template-match
+score for every candidate (`score = |corr[peak]| / (t_norm *
+seg_energy)`, ~0..1, how much of the template's energy the correlation
+peak explains) and picks the highest — but never checked it against
+anything. `config.TEMPLATE_SCORE_THRESHOLD` (0.40) is that check, added
+to both implementations: below it, `acquire()` now raises `SyncError`
+("no preamble found (best candidate score ...)") instead of returning a
+low-confidence result no caller downstream was prepared to distrust.
+
+**Calibrated, not guessed**, against two independent measurements:
+- The false lock above scored 0.338, in a 30 s window built directly
+  from the real recording.
+- Across ~1400 synthetic trials at the sensitivity floor (modes A and
+  C, −4 to −6 dB, no/`mpp`/`mpd` fading, 0/300/600 Hz offset, 20 seeds
+  per cell), the lowest winning score for *any* candidate whose header
+  went on to decode correctly was 0.430.
+
+0.40 sits between the two, closer to the false-lock side than the
+midpoint — deliberately, because the two failure modes this trades
+against are not equally bad. A false rejection of a genuinely weak
+preamble only costs a fallback to blind sync (see the "safety net"
+paragraph near the end of this file: a missed preamble costs latency and
+the header's mode information, not the picture). A false *acceptance*
+reports a wrong, mangled picture as a completed reception — worse, and
+harder for an operator to catch, since nothing about it looks like a
+failure.
+
+**This also closes most of the "steady-carrier interferer" item
+above, as a side effect rather than by design.** A pure tone reads
+metric ≈1.000 (the exact mechanism that section documents) but its
+template-correlation score against the real 24-carrier preamble is
+~0.2–0.3 regardless of level, comfortably below 0.40 — so the tone table
+in that section's "clean" column, which used to read **wrong lock** at
+every level from −20 dB to +6 dB, now reads *rejected* at all of them
+(re-measured 2026-08-13, same construction: 2 s of tone-only lead-in
+ahead of an otherwise clean mode A transmission). The −6/−3/0 dB-SNR
+noisy columns were not re-measured in full; several of those rows
+already read "header fails" rather than "wrong lock", meaning the
+outcome (no picture) doesn't change even where the *point* of failure
+now moves from the header stage to `acquire()` itself. Fix candidate 1
+in that section (top-K peaks, header arbitrates) is still the more
+direct answer to the interferer problem specifically and remains
+un-implemented; this gate is a different mechanism that happens to
+overlap with it.
+
+**What this does not fix.** `acquire()`'s outer search still takes a
+hard argmax over `n_star` (the lag-M metric peak) before any of this
+runs — a location where a *stronger* false lag-M peak sits in front of
+the true preamble within the same search span still wins that first
+selection, and if its own best candidate score happens to clear 0.40
+too (measured not to, for a tone or for this real recording's other
+false peaks — see the per-peak scores in the reproduction script — but
+not proven never to for every signal), this gate would not catch it.
+That is exactly the gap fix candidate 1 above targets and this does not
+replace.
+
+**Reproducing this.** The real recording is private and not committed.
+`tests/test_freq_range.py::test_a_steady_tone_no_longer_locks` and
+`::test_low_score_candidates_are_rejected_not_merely_deprioritized`
+cover the mechanism deterministically (the tone is the vehicle, not the
+point);
+`::test_the_gate_does_not_cost_real_acquisitions` is an ablation —
+same seeds, gate on vs. off, `-4` dB/`mpp` fading — asserting the two
+runs agree exactly, which is a more robust sensitivity check than an
+absolute hit-count bound this close to the floor (see CLAUDE.md's
+standing warning about single-digit trial counts inventing a pattern).
+`tests/test_native_parity.py::test_sync_template_score_gate_matches`
+checks both implementations reject and accept identically.
 
 ## Frequency drift *during* a transmission — tracking implemented 2026-08-11, off by default
 

@@ -98,17 +98,56 @@ PREAMBLE_THRESHOLD = 0.42
 # and the parity shims cannot disagree about it.
 #
 # 12 (+-625 Hz) rather than the original 2 (+-125 Hz), because measured
-# it is free in every direction that matters (2026-08-11, see
-# docs/todo.md). Detection is CFO-blind -- an offset multiplies every
-# lag-M product by one constant phasor, which |.| removes -- so the
-# false-alarm rate cannot move; the extra candidates never win, so
-# sensitivity cannot either (max_bins 2 vs 12 returned the identical
-# preamble start and CFO in 160/160 trials from 0 to -4 dB); and a
-# candidate is one FFT convolution over an ~1100-sample segment, about
-# 0.14 ms, against a 63 ms detection stage. +-625 Hz covers the whole
-# range an SSB filter passes, and dsp.sync_lowpass takes over as the
-# limit at about +-700 Hz anyway.
+# it is free in every direction that matters *at the true preamble's own
+# location* (2026-08-11, see docs/todo.md). Detection there is CFO-blind
+# -- an offset multiplies every lag-M product by one constant phasor,
+# which |.| removes -- so the false-alarm rate at that location cannot
+# move, and the extra candidates never beat the true one there (max_bins
+# 2 vs 12 returned the identical preamble start and CFO in 160/160
+# trials from 0 to -4 dB); and a candidate is one FFT convolution over
+# an ~1100-sample segment, about 0.14 ms, against a 63 ms detection
+# stage. +-625 Hz covers the whole range an SSB filter passes, and
+# dsp.sync_lowpass takes over as the limit at about +-700 Hz anyway.
+#
+# That measurement did *not* cover a different question -- whether a
+# wrong LOCATION, elsewhere in a real transmission's own data, can win
+# more often with 25 candidates than with 5 -- and the answer turned out
+# to be yes (found 2026-08-13 against a real, deliberately mis-tuned
+# recording): a genuinely off-frequency signal has real spectral energy
+# spread near its own true offset even where there's no preamble, so
+# widening the bin search widens the chance one candidate resonates with
+# it enough to out-score the others and Golay-decode a plausible (wrong)
+# header. See TEMPLATE_SCORE_THRESHOLD, which is the fix -- max_bins
+# stays here as the tolerance and is not itself the problem.
 ACQUIRE_MAX_BINS = 12
+
+# Minimum accepted quality of `acquire()`'s winning integer-CFO
+# candidate: the fraction of the matched-filter template's energy the
+# best-scoring candidate actually explains, ~0..1. A second gate,
+# independent of PREAMBLE_THRESHOLD above -- that one only checks the
+# lag-M autocorrelation *before* any candidate is even tried, and real
+# transmission data can clear it too (unlike pure noise, which is what
+# PREAMBLE_THRESHOLD was calibrated against). Nothing previously checked
+# whether the winning candidate was actually a *good* match, only that
+# it was the *best available* one.
+#
+# Measured (2026-08-13): the winning score at the false lock this fixes
+# -- a real, deliberately mis-tuned mode C recording, found ~25 s into
+# its own data, nowhere near its actual preamble, decoding a plausible
+# but wrong mode C header -- was 0.338. Across ~1400 synthetic trials
+# at the sensitivity floor (modes A and C, -4 to -6 dB, no/mpp/mpd
+# fading, 0/300/600 Hz offset) the lowest winning score for a candidate
+# whose header *did* go on to decode correctly was 0.430. 0.40 sits
+# between the two, biased toward the false-lock side rather than the
+# midpoint: a rejected weak-but-genuine preamble only costs a fallback
+# to blind sync (see docs/todo.md's "safety net" paragraph), while an
+# accepted false lock reports a wrong, misleading picture as a
+# completed reception -- the worse failure of the two, so the gate
+# leans toward rejecting rather than accepting when unsure. One
+# concrete false-lock measurement and a synthetic floor are what this
+# rests on; revisit if a second real false lock is ever found scoring
+# above it.
+TEMPLATE_SCORE_THRESHOLD = 0.40
 
 HEADER_SYMS = 2  # identical Golay-coded BPSK symbols
 HEADER_SAMPLES = HEADER_SYMS * NSYM  # 384

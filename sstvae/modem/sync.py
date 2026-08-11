@@ -14,6 +14,14 @@ with "header decode failed" rather than "no preamble found". Raising it
 costs ~0.14 ms per extra candidate and, measured, returns bit-identical
 answers for every signal the narrow search already acquires -- see
 docs/todo.md, "Wider acquisition search, for a mis-tuned counterpart".
+
+That measurement covered the true preamble's own location, not every
+*other* location a real transmission's own data might produce a decent
+lag-M metric peak at. A genuinely off-frequency signal has real
+spectral content near its true offset even away from the preamble, so
+more candidates means more chances one of them resonates with that
+content instead of noise -- `TEMPLATE_SCORE_THRESHOLD` is the gate on
+that (config.py has the measurement).
 """
 
 from collections.abc import Sequence
@@ -36,6 +44,7 @@ from ..config import (
     PREAMBLE_REPEATS,
     PREAMBLE_SAMPLES,
     PREAMBLE_THRESHOLD,
+    TEMPLATE_SCORE_THRESHOLD,
 )
 from .dsp import freq_correct, sync_lowpass
 from .ofdm import preamble_template, pilot_template
@@ -86,7 +95,10 @@ def acquire(
 
     `max_bins` covers +-(25 + 50*max_bins) Hz and is not an opt-in wide
     mode: see config.ACQUIRE_MAX_BINS for why the wide search is free in
-    both sensitivity and false alarms, and nearly free in CPU.
+    both sensitivity and false alarms, and nearly free in CPU -- at the
+    true preamble's own location. Away from it, `TEMPLATE_SCORE_THRESHOLD`
+    is what keeps a wider search from occasionally finding a plausible
+    but wrong header somewhere in a real transmission's own data.
     """
     if len(z) < PREAMBLE_SAMPLES + 2 * M:
         raise SyncError("signal too short")
@@ -129,7 +141,18 @@ def acquire(
         if best is None or score > best[0]:
             best = (score, lo + peak, f_cand)
 
-    _, p0, f_hat = best
+    best_score, p0, f_hat = best
+    if best_score < TEMPLATE_SCORE_THRESHOLD:
+        # The winning candidate is the *best available* one, not
+        # necessarily a *good* one -- the lag-M metric above only rules
+        # out pure noise, and real transmission data elsewhere in the
+        # buffer can pass it too (see config.TEMPLATE_SCORE_THRESHOLD).
+        # This is the second gate: no candidate here explains enough of
+        # the template's energy to trust as an actual preamble.
+        raise SyncError(
+            f"no preamble found (best candidate score {best_score:.2f} at "
+            f"{f_hat:+.1f} Hz)"
+        )
 
     # Refine CFO from the phase between successive preamble periods at
     # the now-known timing (same lag-M estimate, but noise-averaged at

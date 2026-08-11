@@ -697,6 +697,38 @@ def test_sync_refuses_noise_on_both_sides(native):
         native.sync.acquire(z)
 
 
+def test_sync_template_score_gate_matches(native):
+    """The second acquisition gate (2026-08-13, TEMPLATE_SCORE_THRESHOLD):
+    a candidate can clear the lag-M metric (real signal content does,
+    not just noise) yet still be a bad match for the preamble template.
+    A steady tone is the deterministic trigger already on record in
+    docs/todo.md's "steady-carrier interferer" item -- metric ~1.0,
+    wins the argmax outright, but resembles the 24-carrier template at
+    no frequency. Both implementations must reject it, and must still
+    accept the same clean signal right after it."""
+    from sstvae.modem import sync as sync_ref
+
+    fs = 8000
+    lead_n = int(2.0 * fs)
+    t = np.arange(lead_n) / fs
+    tone = 3.0 * np.sin(2 * np.pi * 1400 * t)
+    wave = _mode_a_wave(seed=6)
+    y = np.concatenate([tone, wave[800:]])  # config.LEADIN_SAMPLES == 800
+    z = to_baseband(y)
+
+    with pytest.raises(sync_ref.SyncError):
+        sync_ref.acquire(z)
+    with pytest.raises(Exception):
+        native.sync.acquire(z)
+
+    clean = np.concatenate([np.zeros(lead_n), wave[800:]])
+    zc = to_baseband(clean)
+    ref = sync_ref.acquire(zc)
+    got = native.sync.acquire(zc)
+    assert got[0] == ref.preamble_start == lead_n
+    assert abs(got[1] - ref.freq_offset) < SYNC_TOL
+
+
 def test_sync_search_window_is_honoured(native):
     """`search` restricts the preamble hunt but not the returned index,
     which stays an index into the whole signal — an off-by-window here
