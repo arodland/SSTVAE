@@ -122,28 +122,180 @@ match, recovered latent SNR (mode B, no noise, so deterministic):
 Identical to the last digit across the whole usable passband. Once the
 signal is found and its centre known, where it sits is irrelevant.
 
-**What would have to change** (all small, all in acquisition):
+**Measured end to end 2026-08-11, and it is smaller than this section
+used to think.** The answer to "can we buy range by spending CPU" is
+that for the preamble path there is almost no CPU to spend: the range is
+set by a *constant*, `max_bins`, and raising it to cover ±600 Hz costs
+**about 4 ms on top of a 63 ms acquisition**, no sensitivity and no
+false alarms. Two of the three things this section previously listed as
+"would have to change" do not have to change, and one of them was
+wrong about why.
 
-- `sync.acquire()`'s `max_bins=2` caps the integer-bin search at
-  ±100 Hz. This is the hard limit today.
-- `dsp.sync_lowpass()` is `firwin(129, 850, fs=FS)` around the *nominal*
-  centre. At a 1000 Hz centre the carriers land at −1075..−475 Hz in
-  that filter's frame, so half of them are cut — this is why a
-  mis-tuned signal currently shows `NO LOCK` well before `max_bins`
-  becomes the binding constraint. Widen or recentre it. Sync-only, so
-  the ISI argument that keeps `to_baseband()` unfiltered doesn't apply.
-- `dsp.to_baseband()` takes `FCENTER` from config. Note
-  `ofdm.BASEBAND_FREQS` and the DFT matrix need *no* change: the wanted
-  carriers land at `g - FCENTER` regardless of where the signal is, so
-  only the mixing frequency moves.
-- `sync.acquire_blind()` already searches CFO directly over
-  `max_offset_hz` (default 55.0) at `bin_step_hz` resolution and has no
-  ±100 Hz structural limit — widening its range may be the cheaper path
-  to a "wide search" mode than reworking `acquire()`.
+### `max_bins` is the whole limit, out to ±700 Hz
 
-**Cost.** Acquisition CPU grows with the search range, which is why this
-should be opt-in rather than always-on — it's already the dominant cost
-of the blind path (see `--blind-search-seconds`).
+Mode A, AWGN at 0 dB, 8 seeds per cell, everything else stock. A trial
+counts as success only if acquisition lands within ±4 samples of the
+true preamble start **and** estimates CFO within 2 Hz — i.e. only if the
+header would then decode. `#` is 8/8, `.` is 0/8:
+
+| `max_bins` (reach) | 0 | 200 | 400 | 600 | 700 | 800 | 900 | 1000 | 1200 |
+|---|---|---|---|---|---|---|---|---|---|
+| 2 (±125 Hz, today) | # | . | . | . | . | . | . | . | . |
+| 6 (±325 Hz) | # | # | . | . | . | . | . | . | . |
+| 12 (±625 Hz) | # | # | # | # | . | . | . | . | . |
+| 16 (±825 Hz) | # | # | # | # | 7 | 2 | . | . | . |
+| 26 (±1325 Hz) | # | # | # | # | 7 | 2 | 1 | 1 | . |
+
+Each row holds right up to its own arithmetic reach and then stops, so
+up to ±625 Hz the bin count is the *only* thing in the way. Past that,
+more bins buy nothing: 16 and 26 are the same row.
+
+**Detection is CFO-blind by construction**, which is why none of this
+touches the threshold. `_autocorr_metric` sums `z[n+M]·conj(z[n])`; a
+frequency offset multiplies every one of those products by the same
+constant `exp(-2πi·f·M/FS)`, and `|·|` removes it. A mis-tuned preamble
+therefore produces the same metric as a correctly-tuned one, minus only
+whatever the sync filter has taken out of it. Clean, the peak metric
+reads 1.000 at every offset from 0 to ±400 Hz and the failure is always
+`header decode failed` — never `no preamble found`.
+
+### The sync lowpass is the *next* wall, not the first one
+
+**This section previously said `dsp.sync_lowpass()` is why a mis-tuned
+signal shows `NO LOCK` well before `max_bins` binds. That is wrong.**
+The stock `firwin(129, 850)` carries acquisition to ±600 Hz at 0 dB
+with no change at all (the 8/8 row above): the preamble is 24 carriers,
+and losing the third of them that has walked out of the passband still
+leaves an overwhelming correlation. Widening the filter does move the
+wall, and also costs — same measurement, `max_bins=26`, 0 dB:
+
+| detect cutoff | 600 | 700 | 800 | 900 | 1000 | 1200 |
+|---|---|---|---|---|---|---|
+| 850 Hz (stock) | 8/8 | 7/8 | 2/8 | 1/8 | 1/8 | 0/8 |
+| 1200 Hz | 8/8 | 7/8 | 7/8 | 8/8 | 2/8 | 0/8 |
+| 1600 Hz | 8/8 | 7/8 | 6/8 | 7/8 | 7/8 | 2/8 |
+| 2200 Hz | 1/8 | 0/8 | 0/8 | 0/8 | 1/8 | 0/8 |
+
+The 2200 Hz row is the trade arriving: the filter sets the noise
+bandwidth the metric integrates over, so a wide one admits enough noise
+to lose a 0 dB signal that a narrow one holds. **Don't widen it.**
+±600 Hz is already the whole physically reachable range (see *Practical
+bound* below), the stock filter reaches it, and the peak signal metric
+falls monotonically with cutoff — 0.856 → 0.737 at 6 dB going from 850
+to 3600 Hz, measured at zero offset, i.e. paid by *every* station
+whether mis-tuned or not.
+
+One thing widening does buy, worth recording because it is the opposite
+of the intuition: the **noise-only** metric floor *drops* with a wider
+filter (max over 60 s of AWGN, 5 seeds: 0.295 at 850 Hz, 0.227 at
+1600 Hz, 0.196 at 3600 Hz), because a wider band puts more independent
+samples inside the same 480-sample correlation window. So the false-alarm
+argument and the sensitivity argument point in opposite directions here,
+and sensitivity is the one that loses more.
+
+### It costs no sensitivity, and it cannot cost false alarms
+
+**Sensitivity: none, and not by a narrow margin — the extra candidates
+never win.** Zero offset, 25 seeds per cell:
+
+| `max_bins` | 0 dB | −1 dB | −2 dB | −3 dB | −4 dB |
+|---|---|---|---|---|---|
+| 2 | 25/25 | 25/25 | 24/25 | 16/25 | 11/25 |
+| 12 | 25/25 | 25/25 | 24/25 | 16/25 | 11/25 |
+| 26 | 25/25 | 25/25 | 24/25 | 16/25 | 11/25 |
+
+Identical rows, not merely similar ones. Checked directly rather than
+inferred: over 160 trials at 0, −3, −5 and −7 dB — spanning from "always
+acquires" to "never acquires" — `max_bins=2` and `max_bins=12` returned
+the **same preamble start and the same CFO in every single case**, 0
+disagreements. The correct bin's template-correlation score beats a
+wrong bin's by so much that adding candidates changes nothing.
+
+**False alarms: structurally unchanged.** The detection gate is the
+metric against `PREAMBLE_THRESHOLD`, and `max_bins` is not in that path
+at all, so the *rate* of false detections cannot move. What could have
+moved is what happens behind one: `acquire()` emits a single
+best-scoring candidate, so more candidates might mean a better-fitting
+noise segment reaching the Golay header. Measured by forcing a lock
+(threshold 0) on 400 windows of pure noise and running the header
+behind it: **1/400 accepted at `max_bins=2`, 0/400 at 12, 0/400 at 26**
+— consistent with the header's own 7.2e-4 and with no increase. The
+reason there can't be one is that the bin search takes an argmax and
+emits one answer, so exactly one header attempt happens regardless of
+how many bins were searched. (Contrast the top-K *time* peaks idea in
+the steady-carrier section above, which genuinely does multiply header
+trials — that is a different gate and needs its own accounting.)
+
+### CPU: the bin search is not where the time goes
+
+Warm, medians:
+
+| buffer | detection stage alone | `max_bins=2` | 12 | 26 |
+|---|---|---|---|---|
+| 32 s (mode A) | 63.6 ms | 63.4 ms | 67.0 ms | 71.0 ms |
+| 130 s (full ring) | ~365 ms | ~350–374 ms | ~371–382 ms | ~367–376 ms |
+
+The `sync_lowpass` + metric FFT over the whole buffer is essentially the
+entire cost and it does not depend on the search range; a candidate is a
+`freq_correct` plus an FFT convolution over an ~1100-sample segment,
+about **0.14 ms each**. Going from ±125 Hz to ±625 Hz is 24 extra
+candidates, ~3.4 ms, or **5% of one acquisition on a 32 s buffer**. On a
+full ring it is not measurable at all — every cell in that row, the
+bin-free detection stage included, lands inside one run-to-run spread of
+every other. On Android, where `sync::acquire` was measured at 171 ms
+per poll, expect the same 2–4% as the 32 s case.
+
+So this need not be opt-in on the preamble path, and need not be a
+second pass. `max_bins=12` as the default is defensible on the
+measurements above: it reaches the whole band an SSB filter passes, it
+returns bit-identical answers to today's code for every signal today's
+code acquires, and it costs 3.4 ms.
+
+### Decode after a wide acquisition
+
+Mode A at 6 dB, 3 seeds, `max_bins=14`, full `demodulate()`:
+
+| offset (Hz) | 0 | 200 | 400 | 600 | −600 |
+|---|---|---|---|---|---|
+| CFO estimate error (Hz) | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+| frames | 220 | 220 | 220 | 220 | 220 |
+| latent SNR (dB) | 3.95 | 3.79 | 3.64 | 3.60 | 3.84 |
+
+Every frame, exact CFO, and ≤0.4 dB across the range — consistent with
+the retuned-centre table at the top of this section, and small enough at
+3 seeds that it is not worth attributing to a mechanism.
+
+### The blind path is where CPU really is the trade
+
+`sync.acquire_blind` / `BlindAccumulator` search CFO *directly* over
+`max_offset_hz` (default 55.0) at `bin_step_hz` (1.7) resolution, so
+their cost is linear in the range — and this is already the dominant
+per-poll cost of the receive loop. Measured on a 20 s window (the
+absolute times are machine- and load-dependent, the ratio is not):
+
+| range | bins | `acquire_blind` | `BlindAccumulator.push` |
+|---|---|---|---|
+| ±55 Hz (today) | 67 | 453 ms | 263 ms |
+| ±125 Hz | 149 | 920 ms | 607 ms |
+| ±300 Hz | 355 | 2071 ms | 1356 ms |
+| ±625 Hz | 737 | 4435 ms | 2773 ms |
+
+**~10× for ±625 Hz** — the honest "spend CPU to buy range" trade, and
+the one place an opt-in switch is justified. What it does *not* cost,
+measured, is either of the things one would worry about:
+
+- **Sensitivity: none.** Mode A frames, 20 s window, 8 seeds: ±55 Hz and
+  ±625 Hz both detect 8/8 at +6, +3, 0 and −3 dB.
+- **False alarms: essentially none.** Peak score on 20 s of pure noise,
+  6 seeds, against a threshold of 4.0: **1.34** at ±55 Hz rising only to
+  **1.39** at ±625 Hz (worst single seed 1.37 → 1.42). Taking a max over
+  11× more cells barely moves it, because adjacent CFO bins are heavily
+  correlated — the pilot matched filter is 20 ms long, so its response is
+  ~50 Hz wide and a 1.7 Hz bin step oversamples it by ~30×.
+
+So on the blind path the widening is safe and purely a CPU decision;
+`max_offset_hz` is already a parameter, and the useful shape is a
+setting, not a redesign.
 
 **Non-issue: the 25 Hz grid.** A mis-tuned radio won't land on any
 convenient grid, but it doesn't need to. Working through the mixing
@@ -160,8 +312,262 @@ residual CFO, which is far more damaging than 0.1 dB.
 
 **Practical bound.** The 1150 Hz carrier span has to fit inside a
 typical 300–2700 Hz SSB filter, which limits the centre to roughly
-900–2100 Hz — exactly the range measured above. Beyond that the
-transmitter's own filtering, not the modem, is the limit.
+900–2100 Hz — exactly the range measured above, and ±600 Hz from the
+nominal 1525 Hz centre. Beyond that the transmitter's own filtering, not
+the modem, is the limit, which is why the sync filter's ±700 Hz wall
+does not need moving.
+
+**What would have to change**, revised:
+
+- `sync.acquire()`'s `max_bins`, from 2 to ~12. This is the change.
+- `sync.acquire_blind` / `BlindAccumulator`'s `max_offset_hz`, if the
+  blind path is wanted at the same range — a setting, and the only part
+  that costs real CPU.
+- **Not** `dsp.sync_lowpass()`, and **not** `dsp.to_baseband()`'s
+  `FCENTER`. `ofdm.BASEBAND_FREQS` and the DFT matrix were already
+  correctly identified as needing no change.
+- The C++ port and `NATIVE_SUBSTITUTIONS` carry `acquire`'s defaults, and
+  CLAUDE.md already records what a hand-copied stale default costs — a
+  new `max_bins` default has to move in both implementations together.
+
+**Reproducing all of the above.** `scripts/freq_range_sweep.py reach
+filter-wall sensitivity cpu blind-cost` — it carries the parameterized
+`acquire_wide` prototype, which is `sync.acquire` with `max_bins` and the
+filter cutoff exposed and nothing else changed.
+
+**Measurement caveats.** 8 seeds per cell for the reach tables and 25
+for the sensitivity ones; AWGN only, mode A only, one drift-free static
+offset per trial. This file's standing warning (≥25 seeds before quoting
+an acquisition success rate near threshold) applies to the 7/8 and 2/8
+cells in the ±700–800 Hz region, which are in exactly that regime — the
+0/8-vs-8/8 cells that carry the argument are not.
+
+## Frequency drift *during* a transmission
+
+**The receiver estimates carrier frequency once, from the preamble, and
+never looks again.** `demodulate()` calls `acquire()`, applies one
+constant `freq_correct`, and runs 220–660 frames on it. That is fine for
+a stable pair of radios and it is the entire story for a drifting one:
+measured 2026-08-11, **today's receiver tolerates about ±2 Hz of total
+excursion over an over, whatever the mode** — which is a different and
+much harsher constraint than a drift *rate*, because a mode C over lasts
+three times as long as a mode A one and therefore tolerates a third of
+the rate.
+
+Mode A (32 s), AWGN at 6 dB, 3 seeds, recovered latent SNR. `ref` is
+today's receiver; `oracle` is de-chirped with the true drift rate, i.e.
+the upper bound on what any correction could reach; `track` is the
+proposed loop (below):
+
+| Hz/s | total Hz | ref | track | oracle |
+|---|---|---|---|---|
+| 0 | 0.0 | 3.95 | 3.95 | 3.95 |
+| 0.05 | 1.6 | 3.61 | 3.88 | 3.90 |
+| 0.10 | 3.2 | **−0.05** | 3.67 | 3.69 |
+| 0.50 | 16.0 | −6.51 | 3.72 | 3.74 |
+| 1.00 | 32.0 | −7.32 | 3.90 | 3.92 |
+| 2.00 | 64.0 | −7.17 | 3.76 | 3.86 |
+| 5.00 | 160.1 | −7.09 | **−7.03** | 3.89 |
+
+Mode C (95 s), same conditions, 2 seeds — the same cliff, at a third of
+the rate:
+
+| Hz/s | total Hz | ref | track | oracle |
+|---|---|---|---|---|
+| 0 | 0.0 | 3.77 | 3.75 | 3.77 |
+| 0.01 | 1.0 | 3.73 | 3.79 | 3.80 |
+| 0.02 | 1.9 | 3.39 | 3.78 | 3.79 |
+| 0.05 | 4.8 | **−4.63** | 3.81 | 3.83 |
+| 1.00 | 95.4 | −7.59 | 3.79 | 3.80 |
+
+So: ~2 Hz of excursion is free, ~3 Hz costs the picture, ~5 Hz destroys
+it. In rate terms that is **0.06 Hz/s for mode A and 0.02 Hz/s for
+mode C** — tight enough that a rig still warming up after key-down, or a
+disturbed path with real Doppler on it, can plausibly cross it.
+
+**It fails silently in the worst way.** Every frame is still received
+(220/220, 660/660) and the beacon still decodes, so the receiver reports
+a complete, healthy reception and hands over a mangled picture. This is
+the same signature as the audio-loss and per-chunk-resampling bugs
+CLAUDE.md records — "still syncing and reporting every frame received"
+is, once again, not evidence of anything.
+
+### Where the damage is, and where it is not
+
+**Not in preamble acquisition.** The preamble is 88 ms long, so even a
+violent drift moves it a fraction of a Hz. Mode A, 6 dB, 6 seeds:
+
+| Hz/s | 0 | 0.1 | 1.0 | 5.0 | 20.0 |
+|---|---|---|---|---|---|
+| peak metric | 0.856 | 0.856 | 0.856 | 0.857 | 0.857 |
+| locked | 6/6 | 6/6 | 6/6 | 6/6 | 6/6 |
+| CFO estimate (Hz) | 0.14 | 0.16 | 0.30 | 0.89 | 3.04 |
+
+Flat. The estimate itself drifts away from the frames' true frequency
+(3 Hz at 20 Hz/s, because the estimate is taken at the preamble and the
+frames start ~150 ms later), but detection and timing do not care.
+
+**Not in blind acquisition either.** `BlindAccumulator` folds
+matched-filter power into fixed CFO bins over tens of seconds, so a
+drifting signal walking across bins looked like it should smear. It
+does not: mode A frames, 6 dB, 4 seeds, 20 s window, score against a
+threshold of 4.0 — **20.15 at 0 Hz/s, 20.05 at 0.5, 19.46 at 1.0**, 4/4
+throughout. The reason is that the pilot matched filter is one 20 ms
+symbol, so its frequency response is ~50 Hz wide and the 1.7 Hz bin step
+oversamples it ~30×; a 20 Hz walk stays inside a single bin's response.
+
+**All of it is in demod**, and the oracle column proves that nothing
+structural stands in the way: de-chirped with the true rate, mode A
+recovers 3.75–3.92 dB at *every* rate up to 10 Hz/s, indistinguishable
+from no drift at all.
+
+**The mechanism is pilot-rate aliasing, not inter-carrier
+interference.** The per-frame pilot EQ *does* remove the frame-to-frame
+phase rotation, which is why small residuals cost nothing. But pilots
+are one per frame — 6.94 Hz — so the phase sequence they sample aliases
+above ±3.47 Hz, and Catmull-Rom interpolation between them is hopeless
+well before that: at 3.2 Hz of residual the phase advances **166° per
+frame**, and the interpolated channel estimate the data symbols are
+divided by is simply wrong. That is why the cliff sits at ~3 Hz of
+excursion rather than at the ±25 Hz where a carrier-spacing argument
+would put it.
+
+### The fix: a second-order loop on the pilot common phase
+
+Prototyped in full (a ~30-line addition to `demodulate`'s frame loop,
+`track` in the tables above). Each frame, the phase **common to all
+carriers** between consecutive pilots is a residual-frequency
+measurement, `angle(Σ h_pilot[f]·conj(h_pilot[f−1])) / (2π·T_frame)`;
+the phase **slope across** carriers is timing and is already tracked by
+`tau_ema`. They are orthogonal — a common rotation cancels out of the
+slope, and a slope cancels out of the sum — so the new loop and the
+existing one do not fight.
+
+Three things the prototype got wrong first, each of which reads as "the
+tracker doesn't work" rather than as a bug:
+
+- **The correction must be a continuous phase ramp within the frame, not
+  a constant phase per frame.** A per-frame constant removes exactly
+  what the pilot EQ already removes and leaves the frequency error
+  inside the frame untouched — which is the part that costs the picture.
+  With this wrong, the tracker measurably *hurt*: 9.68 dB against the
+  reference's 10.05 at 0.02 Hz/s.
+- **The measurement is the residual that survived the correction already
+  applied, so it must be integrated, not chased.** An EMA of the form
+  `f += α(measured − f)` is a closed loop measuring its own output and
+  converges to nonsense; `f += α·measured` is right.
+- **It has to be second order.** Drift is a *ramp*, and a first-order
+  loop leaves a steady-state lag proportional to rate/α — exactly the
+  error being removed. A second integrator on the rate (`β`) takes the
+  steady-state ramp error to zero, which is why the `track` column lands
+  on the oracle rather than near it.
+
+**It costs nothing when there is no drift**, which is the property that
+makes it adoptable: 3.95 vs 3.95 dB clean, −2.85 vs −2.88 at 0 dB,
+−0.41 vs −0.41 under `mpg`, −1.56 vs −1.60 under `mpp`.
+
+### Limits
+
+**1. Loop bandwidth against the channel's Doppler spread — the real
+constraint.** Fading rotates the common pilot phase too, so a fast loop
+chases the channel. Measured on mode A at 6 dB, 6 seeds, the cost at
+zero drift and the reach at 1 Hz/s pull in opposite directions:
+
+| α, β | `mpd`, 0 Hz/s | `mpd`, 1 Hz/s | `mpp`, 0 Hz/s | `mpp`, 1 Hz/s |
+|---|---|---|---|---|
+| (reference, no loop) | −3.15 | −7.61 | −1.60 | −7.39 |
+| 0.3, 0.05 | **−5.45** | −4.82 | −1.60 | −1.72 |
+| **0.1, 0.01** | −3.40 | −3.33 | −1.56 | −1.69 |
+| 0.03, 0.002 | −3.21 | **−6.01** | −1.55 | −2.17 |
+| 0.01, 0.0005 | −3.15 | **−7.57** | −1.56 | — |
+| (oracle) | −3.15 | −3.10 | −1.60 | −1.62 |
+
+α=0.3 costs **2.3 dB** under `mpd` (2 Hz Doppler spread) at zero drift —
+the same trap CLAUDE.md already records for the timing tracker ("chasing
+it raw wrecked MPP fading performance"), in a different quantity. α=0.01
+is safe and tracks nothing. **α=0.1, β=0.01 is the window**: ≤0.25 dB on
+the worst channel and within 0.23 dB of the oracle at 1 Hz/s. That is a
+comfortable window, not a knife edge, but it is not wide enough to pick
+the gains by eye.
+
+**2. The ceiling is a rate, and it moves with the loop bandwidth.** At
+α=0.1 the loop holds to **2 Hz/s** (9.95 dB clean, oracle 10.06) and is
+gone at 5 Hz/s; at α=0.3 it holds to 5 Hz/s and is gone at 10. The hard
+bound behind both is the ±3.47 Hz per-frame ambiguity: the loop must
+correct faster than the residual accumulates, and it has 144 ms to do it
+in. Either way the ceiling is 30–100× today's ~0.06 Hz/s, and well past
+any rate a radio plausibly produces.
+
+**3. Wander is harder than a ramp, and the ceiling is lower.**
+Ionospheric Doppler looks more like a sinusoid than a ramp, and a
+second-order loop is built for ramps. Mode A, 6 dB, 4 seeds, α=0.1:
+
+| amplitude | period | peak Hz/s | ref | track |
+|---|---|---|---|---|
+| 0.5 Hz | 30 s | 0.10 | 3.80 | 3.81 |
+| 1.0 Hz | 30 s | 0.21 | 2.88 | 3.80 |
+| 2.0 Hz | 30 s | 0.42 | **−4.55** | 3.88 |
+| 2.0 Hz | 10 s | 1.26 | −4.56 | 3.13 |
+| 5.0 Hz | 30 s | 1.05 | −5.44 | 3.71 |
+| 5.0 Hz | 10 s | 3.14 | −5.33 | **−6.66** |
+
+The reference falls over at ±1–2 Hz of wander, as the ramp table
+predicts. The loop handles everything up to a 30 s period at ±5 Hz, but
+a 10 s period at ±5 Hz beats it — and note it ends up *worse* than not
+tracking. If wander at that speed turns out to be real, the answer is a
+loop that adapts its bandwidth, or a smoother over the whole frame
+sequence rather than a causal loop; neither is worth designing before
+someone has seen it happen.
+
+**4. Total excursion still has to stay inside the radio's filter.** At
+10 Hz/s over mode A the signal moves 320 Hz, and at 40 Hz/s it moves
+1281 Hz and even the oracle loses 1.9 dB. Below a couple of hundred Hz
+of total movement this is not a consideration, which covers everything
+in range of limit 2.
+
+**5. A large *initial* offset is a separate problem** — that is the
+mis-tuned-counterpart section above, and the two changes are
+independent: the wide search finds a station that started off-frequency,
+the loop follows one that does not stay there.
+
+### What this would touch
+
+Receiver-only, both halves. No on-air format change, no
+`PROTOCOL_VERSION` bump, nothing an existing station would notice — a
+tracking receiver and a non-tracking one decode the same waveform, one
+of them just better. `demodulate()`'s frame loop is where it goes;
+`demodulate_blind()` has pilots and the identical problem (and no
+preamble reference, so it starts from a coarser CFO and needs it more),
+and `sstvae/waveform_channel.py` does not model drift at all, so
+training is unaffected either way. The C++ port would need the same
+change in `native/core/modem/`, and `pytest --native` would then be
+checking both.
+
+### Reproducing all of the above
+
+`scripts/freq_range_sweep.py --verify drift drift-acquisition
+drift-fading wander`. **Run `--verify` first and believe nothing without
+it**: the tracker prototype is a *fork* of `Modem.demodulate`, and with
+tracking off it is required to reproduce the reference bit for bit on
+clean audio and under two fading presets. A fork that has quietly drifted
+would be measuring itself.
+
+### Caveats
+
+2–6 seeds per cell, mode A except where mode C is named, and a *linear*
+ramp plus one sinusoidal family — real drift is neither, and in
+particular a rig warming up after key-down is fastest at the start,
+which is exactly when the loop has not converged. Nothing here has met a
+real radio: `hfchannel` has no drift model at all, so `drift_shift`
+was written for this measurement and lives in the sweep script rather
+than in the package — deliberately, since a channel-simulator feature
+should be added because a channel needs simulating, not because one
+investigation wanted it.
+**The first thing to do before implementing any of this is to find out
+what real drift rates look like** — a recording of a few stations
+keying up, measured with the same pilot-phase estimator, would settle in
+an afternoon whether the reference's ~2 Hz budget is routinely exceeded
+or whether this is a problem nobody has.
 
 ## ~~Blind acquisition: does longer integration reach weaker signals?~~ — no, and multi-timescale is implemented
 

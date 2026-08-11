@@ -5,6 +5,15 @@ gives detection plus a fractional CFO estimate that is unambiguous over
 +/- FS/(2M) = +/-25 Hz. The remaining offset is a multiple of the 50 Hz
 carrier spacing, resolved by trying integer-bin candidates against the
 known preamble template. Net tolerance comfortably exceeds +/-50 Hz.
+
+`max_bins` is that tolerance and is the *only* thing setting it out to
+about +/-700 Hz, where the sync lowpass finally takes over: detection
+itself is CFO-blind (an offset multiplies every lag-M product by one
+constant phasor, which |.| removes), so a mis-tuned signal fails here
+with "header decode failed" rather than "no preamble found". Raising it
+costs ~0.14 ms per extra candidate and, measured, returns bit-identical
+answers for every signal the narrow search already acquires -- see
+docs/todo.md, "Wider acquisition search, for a mis-tuned counterpart".
 """
 
 from collections.abc import Sequence

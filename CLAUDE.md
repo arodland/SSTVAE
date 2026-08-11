@@ -1439,7 +1439,32 @@ need when `--native` fails and you want to know *where*.
   chirp. And a wider acquisition search so a mis-tuned counterpart
   still decodes — measured, the demod path is entirely independent of
   absolute centre frequency (8.73 dB latent SNR from 900 to 2100 Hz), so
-  this is acquisition-side only. A third item, "acquisition costs
+  this is acquisition-side only. **Measured end to end 2026-08-11, and
+  the answer is one constant**: `sync.acquire`'s `max_bins` is the whole
+  limit out to ±700 Hz, where the sync lowpass finally binds — the claim
+  that `sync_lowpass` binds *first* was wrong, and the stock 850 Hz
+  filter carries acquisition to ±600 Hz at 0 dB unchanged. Detection is
+  CFO-blind by construction, so widening cannot move the false-alarm
+  rate, and `max_bins` 2 vs 12 returned the identical preamble start and
+  CFO in 160/160 trials from 0 to −7 dB. It costs 0.14 ms per candidate
+  (3.4 ms total, ~5% of one acquisition), so it is not the opt-in this
+  file once implied. **The blind path is the opposite case**:
+  `acquire_blind`/`BlindAccumulator` search CFO directly, so ±625 Hz is
+  10.5× the CPU — and that one *is* the real "spend CPU to buy range"
+  trade, with no sensitivity or false-alarm cost either (noise-floor
+  score 1.34 → 1.39 against a threshold of 4.0). A fourth item is
+  **frequency drift during a transmission**, where the receiver corrects
+  once from the preamble and never looks again: the budget is ~±2 Hz of
+  *total excursion* whatever the mode (0.06 Hz/s for mode A, 0.02 for
+  mode C), it fails with every frame received and the beacon decoding,
+  and the cause is pilot-rate aliasing rather than ICI — pilots are
+  6.94 Hz apart and at 3.2 Hz of residual the phase advances 166° per
+  frame, so the interpolated channel estimate is simply wrong. A
+  second-order loop on the pilot *common* phase (the slope across
+  carriers is timing and is orthogonal) reaches the oracle at every rate
+  to 2 Hz/s and costs nothing at zero drift, but its gains are set by
+  the same trap as the timing tracker: at α=0.3 it chases `mpd` fading
+  for 2.3 dB. A third item, "acquisition costs
   ~1 dB of threshold at large frequency offset", was **withdrawn
   2026-07-26**: it did not reproduce at 25 seeds per point and was an
   artifact of 6-seed sampling. Acquisition near threshold succeeds
