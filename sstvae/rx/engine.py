@@ -219,7 +219,7 @@ def _free_spans(n: int, buf_start: int, finished_starts, epsilon_samples: int):
 
 
 def _find_new_reception(modem, samples, z, buf_start, finished_starts,
-                        epsilon_samples, max_tries=4):
+                        epsilon_samples, max_tries=4, drift_track="off"):
     """Decode the strongest preamble that is neither already saved nor a
     spurious peak. Returns (DemodResult, reception_start) or (None, None).
 
@@ -251,8 +251,9 @@ def _find_new_reception(modem, samples, z, buf_start, finished_starts,
             tries += 1
             try:
                 r = modem.demodulate(
-                samples, search_s=(lo / FS, span_hi / FS), drift_track=config.drift_track
-            )
+                    samples, search_s=(lo / FS, span_hi / FS),
+                    drift_track=drift_track,
+                )
                 return r, buf_start + r.preamble_start
             except SyncError:
                 lo = acq.preamble_start + PREAMBLE_SAMPLES
@@ -322,7 +323,7 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
         # hits are spurious correlation peaks).
         r, reception_start = _find_new_reception(
             modem, samples, to_baseband(samples), buf_start,
-            finished_starts, epsilon_samples,
+            finished_starts, epsilon_samples, drift_track=config.drift_track,
         )
         full_ok = r is not None
 

@@ -6,6 +6,13 @@
 // +/-25 Hz. The remaining offset is a multiple of the 50 Hz carrier
 // spacing, resolved by trying integer-bin candidates against the known
 // preamble template. Net tolerance comfortably exceeds +/-50 Hz.
+//
+// config::ACQUIRE_MAX_BINS is that tolerance, and is the only thing
+// setting it out to about +/-700 Hz where the sync lowpass takes over.
+// Detection is CFO-blind -- an offset multiplies every lag-M product by
+// one constant phasor, which |.| removes -- so a wider search cannot
+// move the false-alarm rate, and measured it costs neither sensitivity
+// nor meaningful CPU. See docs/todo.md.
 
 #pragma once
 
@@ -42,7 +49,7 @@ struct SearchWindow {
 };
 
 Acquisition acquire(std::span<const cdouble> z, double threshold = config::PREAMBLE_THRESHOLD,
-                    int max_bins = 2,
+                    int max_bins = config::ACQUIRE_MAX_BINS,
                     std::optional<SearchWindow> search = std::nullopt);
 
 struct BlindAcquisition {
@@ -63,10 +70,22 @@ struct BlindAcquisition {
 // 1151 bins (peak / median), so it is scale invariant and `threshold`
 // does not need retuning per signal level.
 BlindAcquisition acquire_blind(std::span<const cdouble> z,
-                               double max_offset_hz = 55.0,
-                               double bin_step_hz = 1.7, int min_periods = 8,
+                               double max_offset_hz = config::BLIND_MAX_OFFSET_HZ,
+                               double bin_step_hz = config::BLIND_BIN_STEP_HZ,
+                               int min_periods = 8,
                                double threshold = 4.0,
                                std::optional<SearchWindow> search = std::nullopt);
+
+// Sub-bin CFO from the winning bin and its two neighbours. The search
+// grid is deliberately far coarser than the estimate it has to produce
+// (see config::BLIND_BIN_STEP_HZ), and this is what makes that safe:
+// without it the demodulator gets several Hz of residual, which costs
+// the picture on its own. Legitimate because the folded score is
+// band-limited in CFO. Written for non-uniform abscissae because the
+// grid is non-uniform -- a shift must be a whole number of block-FFT
+// bins.
+double refine_cfo(std::span<const double> freqs, std::span<const double> scores,
+                  std::size_t i);
 
 // Incremental counterpart to acquire_blind(). Port of
 // sstvae.modem.sync.BlindAccumulator -- see that class's docstring for
@@ -86,7 +105,8 @@ BlindAcquisition acquire_blind(std::span<const cdouble> z,
 // highest. A single-element vector (the default) is one timescale.
 class BlindAccumulator {
    public:
-    explicit BlindAccumulator(double max_offset_hz = 55.0, double bin_step_hz = 1.7,
+    explicit BlindAccumulator(double max_offset_hz = config::BLIND_MAX_OFFSET_HZ,
+                              double bin_step_hz = config::BLIND_BIN_STEP_HZ,
                               int min_periods = 8, double threshold = 4.0,
                               std::optional<int> block_samples = std::nullopt,
                               std::vector<std::optional<double>> window_s = {25.0});

@@ -11,6 +11,99 @@
 #include "ofdm/ofdm.hpp"
 
 namespace sstvae::modem {
+
+namespace {
+
+constexpr double FRAME_S = static_cast<double>(config::FRAME_SAMPLES) / config::FS;
+
+// Second-order loop on the pilots' common phase. Port of
+// sstvae/modem/modem.py's _DriftTracker -- read that docstring before
+// changing anything here; three things in it are load-bearing and each
+// was wrong first (the correction is a continuous ramp *within* the
+// frame rather than one constant phase per frame; the measurement is the
+// residual that survived the correction already applied, so it is
+// integrated rather than chased; and the loop is second order because
+// drift is a ramp).
+class DriftTracker {
+   public:
+    DriftTracker(double alpha, double beta) : alpha_(alpha), beta_(beta) {}
+
+    // This frame's samples, de-rotated by the running estimate.
+    std::vector<cdouble> frame(std::span<const cdouble> z, std::int64_t p) const {
+        std::vector<cdouble> out(static_cast<std::size_t>(config::FRAME_SAMPLES));
+        for (int n = 0; n < config::FRAME_SAMPLES; ++n) {
+            const double cycles = dsp::wrap_cycles(
+                phase_acc_ + f_est_ * static_cast<double>(n) / config::FS);
+            const double theta = -2.0 * std::numbers::pi * cycles;
+            out[static_cast<std::size_t>(n)] =
+                z[static_cast<std::size_t>(p) + static_cast<std::size_t>(n)] *
+                cdouble{std::cos(theta), std::sin(theta)};
+        }
+        return out;
+    }
+
+    // `h_prev` empty means "no usable previous pilot": the loop coasts on
+    // its rate estimate rather than integrating phase out of noise.
+    void update(std::span<const cdouble> h_cur, std::span<const cdouble> h_prev) {
+        if (!h_prev.empty()) {
+            cdouble d{};
+            for (std::size_t k = 0; k < h_cur.size(); ++k) d += h_cur[k] * std::conj(h_prev[k]);
+            if (std::abs(d) > 0.0) {
+                const double err = std::arg(d) / (2.0 * std::numbers::pi * FRAME_S);
+                f_est_ += alpha_ * err;
+                r_est_ += beta_ * err / FRAME_S;
+            }
+        }
+        // Carry absolute phase across the boundary *before* stepping the
+        // frequency, so the correction stays continuous frame to frame.
+        phase_acc_ += f_est_ * FRAME_S;
+        f_est_ += r_est_ * FRAME_S;
+    }
+
+   private:
+    double alpha_;
+    double beta_;
+    double f_est_ = 0.0;    // residual CFO estimate, Hz
+    double r_est_ = 0.0;    // drift rate estimate, Hz/s
+    double phase_acc_ = 0.0;  // accumulated de-rotation, cycles
+};
+
+// Nullopt when tracking is off, so the default path never consults a
+// tracker at all rather than running one with zero gains.
+std::optional<DriftTracker> make_tracker(DriftTrack track) {
+    switch (track) {
+        case DriftTrack::Off:
+            return std::nullopt;
+        case DriftTrack::Slow:
+            return DriftTracker(config::DRIFT_SLOW_ALPHA, config::DRIFT_SLOW_BETA);
+        case DriftTrack::Fast:
+            return DriftTracker(config::DRIFT_FAST_ALPHA, config::DRIFT_FAST_BETA);
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+DriftTrack drift_track_from_name(std::string_view name) {
+    if (name == "off") return DriftTrack::Off;
+    if (name == "slow") return DriftTrack::Slow;
+    if (name == "fast") return DriftTrack::Fast;
+    throw std::invalid_argument("unknown drift_track \"" + std::string(name) +
+                                "\" (expected off, slow or fast)");
+}
+
+std::string_view drift_track_name(DriftTrack track) {
+    switch (track) {
+        case DriftTrack::Slow:
+            return "slow";
+        case DriftTrack::Fast:
+            return "fast";
+        case DriftTrack::Off:
+            break;
+    }
+    return "off";
+}
+
 namespace {
 
 using config::BEACON_CARRIER;
@@ -227,7 +320,8 @@ std::vector<double> Modem::modulate(std::span<const double> latents,
 }
 
 DemodResult Modem::demodulate(std::span<const double> x,
-                              std::optional<std::pair<double, double>> search_s) const {
+                              std::optional<std::pair<double, double>> search_s,
+                              DriftTrack drift_track) const {
     std::vector<cdouble> z = dsp::to_baseband(x);
 
     std::optional<sync::SearchWindow> search;
@@ -235,7 +329,7 @@ DemodResult Modem::demodulate(std::span<const double> x,
         search = sync::SearchWindow{static_cast<std::int64_t>(search_s->first * FS),
                                     static_cast<std::int64_t>(search_s->second * FS)};
     const sync::Acquisition acq =
-        sync::acquire(z, config::PREAMBLE_THRESHOLD, 2, search);
+        sync::acquire(z, config::PREAMBLE_THRESHOLD, config::ACQUIRE_MAX_BINS, search);
     z = dsp::freq_correct(z, acq.freq_offset);
 
     // Channel reference from the preamble, averaged over every repeat.
@@ -285,16 +379,27 @@ DemodResult Modem::demodulate(std::span<const double> x,
     // slow EMA keeps the fading wiggle out while following the drift
     // ramp; shifts are small and incremental.
     double tau_ema = 0.0;
+    auto tracker = make_tracker(drift_track);
     std::vector<double> pilot_powers;
     std::int64_t p = h0 + HEADER_SAMPLES;
     for (int f = 0; f < n_f; ++f) {
         if (p + FRAME_SAMPLES > static_cast<std::int64_t>(z.size())) break;
         const std::size_t fbase = static_cast<std::size_t>(f) * SYMS_PER_FRAME * NC;
-        for (int s = 0; s < SYMS_PER_FRAME; ++s) {
-            const auto sym = ofdm::demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF);
-            std::copy(sym.begin(), sym.end(),
-                      raw.begin() + static_cast<std::ptrdiff_t>(fbase +
-                                                               static_cast<std::size_t>(s) * NC));
+        if (!tracker) {
+            for (int s = 0; s < SYMS_PER_FRAME; ++s) {
+                const auto sym = ofdm::demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF);
+                std::copy(sym.begin(), sym.end(),
+                          raw.begin() + static_cast<std::ptrdiff_t>(
+                                            fbase + static_cast<std::size_t>(s) * NC));
+            }
+        } else {
+            const std::vector<cdouble> zz = tracker->frame(z, p);
+            for (int s = 0; s < SYMS_PER_FRAME; ++s) {
+                const auto sym = ofdm::demod_window(zz, s * NSYM + NCP, DEMOD_BACKOFF);
+                std::copy(sym.begin(), sym.end(),
+                          raw.begin() + static_cast<std::ptrdiff_t>(
+                                            fbase + static_cast<std::size_t>(s) * NC));
+            }
         }
         for (int k = 0; k < NC; ++k) {
             const std::size_t i = static_cast<std::size_t>(k);
@@ -308,7 +413,18 @@ DemodResult Modem::demodulate(std::span<const double> x,
             power += std::norm(raw[fbase + static_cast<std::size_t>(k)]);
         power /= NC;
         pilot_powers.push_back(power);
-        if (power > 0.1 * median(pilot_powers)) {
+        const bool healthy = power > 0.1 * median(pilot_powers);
+        if (tracker) {
+            // A faded frame's pilot phase is noise; feed the loop nothing
+            // rather than a bad measurement, but let it coast on its rate.
+            const bool usable = f > 0 && healthy && received[static_cast<std::size_t>(f - 1)];
+            tracker->update(
+                std::span<const cdouble>(h_pilot.data() + static_cast<std::size_t>(f) * NC, NC),
+                usable ? std::span<const cdouble>(
+                             h_pilot.data() + static_cast<std::size_t>(f - 1) * NC, NC)
+                       : std::span<const cdouble>{});
+        }
+        if (healthy) {
             const double phi = bin_phase_step(
                 std::span<const cdouble>(h_pilot.data() + static_cast<std::size_t>(f) * NC, NC));
             // Wrap the difference to (-pi, pi] before scaling.
@@ -401,7 +517,8 @@ DemodResult Modem::demodulate(std::span<const double> x,
 BlindDemodResult Modem::demodulate_blind(
     std::span<const double> x,
     std::optional<std::pair<double, double>> search_s,
-    std::optional<sync::BlindAcquisition> acquisition) const {
+    std::optional<sync::BlindAcquisition> acquisition,
+    DriftTrack drift_track) const {
     std::vector<cdouble> z = dsp::to_baseband(x);
 
     sync::BlindAcquisition ba{};
@@ -412,7 +529,8 @@ BlindDemodResult Modem::demodulate_blind(
         if (search_s)
             search = sync::SearchWindow{static_cast<std::int64_t>(search_s->first * FS),
                                         static_cast<std::int64_t>(search_s->second * FS)};
-        ba = sync::acquire_blind(z, 55.0, 1.7, 8, 4.0, search);
+        ba = sync::acquire_blind(z, config::BLIND_MAX_OFFSET_HZ,
+                                 config::BLIND_BIN_STEP_HZ, 8, 4.0, search);
     }
     z = dsp::freq_correct(z, ba.freq_offset);
 
@@ -430,18 +548,47 @@ BlindDemodResult Modem::demodulate_blind(
     std::vector<cdouble> raw(static_cast<std::size_t>(n_f) * SYMS_PER_FRAME * NC,
                              cdouble{});
     std::vector<cdouble> h_pilot(static_cast<std::size_t>(n_f) * NC, cdouble{});
+    auto tracker = make_tracker(drift_track);
+    std::vector<double> pilot_powers;
     std::int64_t p = p_start;
     for (int f = 0; f < n_f; ++f) {
         const std::size_t fbase = static_cast<std::size_t>(f) * SYMS_PER_FRAME * NC;
-        for (int s = 0; s < SYMS_PER_FRAME; ++s) {
-            const auto sym = ofdm::demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF);
-            std::copy(sym.begin(), sym.end(),
-                      raw.begin() + static_cast<std::ptrdiff_t>(
-                                        fbase + static_cast<std::size_t>(s) * NC));
+        if (!tracker) {
+            for (int s = 0; s < SYMS_PER_FRAME; ++s) {
+                const auto sym = ofdm::demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF);
+                std::copy(sym.begin(), sym.end(),
+                          raw.begin() + static_cast<std::ptrdiff_t>(
+                                            fbase + static_cast<std::size_t>(s) * NC));
+            }
+        } else {
+            const std::vector<cdouble> zz = tracker->frame(z, p);
+            for (int s = 0; s < SYMS_PER_FRAME; ++s) {
+                const auto sym = ofdm::demod_window(zz, s * NSYM + NCP, DEMOD_BACKOFF);
+                std::copy(sym.begin(), sym.end(),
+                          raw.begin() + static_cast<std::ptrdiff_t>(
+                                            fbase + static_cast<std::size_t>(s) * NC));
+            }
         }
         for (int k = 0; k < NC; ++k) {
             const std::size_t i = static_cast<std::size_t>(k);
             h_pilot[static_cast<std::size_t>(f) * NC + i] = raw[fbase + i] / pilot_[i];
+        }
+        if (tracker) {
+            // Most of this range is usually not the transmission at all
+            // (silence or noise around it -- see the med_h comment
+            // below), so the loop must not integrate phase out of noise
+            // frames. Same health test the preamble path uses.
+            double power = 0.0;
+            for (int k = 0; k < NC; ++k)
+                power += std::norm(raw[fbase + static_cast<std::size_t>(k)]);
+            power /= NC;
+            pilot_powers.push_back(power);
+            const bool usable = f > 0 && power > 0.1 * median(pilot_powers);
+            tracker->update(
+                std::span<const cdouble>(h_pilot.data() + static_cast<std::size_t>(f) * NC, NC),
+                usable ? std::span<const cdouble>(
+                             h_pilot.data() + static_cast<std::size_t>(f - 1) * NC, NC)
+                       : std::span<const cdouble>{});
         }
         p += FRAME_SAMPLES;
     }

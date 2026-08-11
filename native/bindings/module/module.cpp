@@ -309,11 +309,13 @@ PYBIND11_MODULE(sstvae_native, m) {
     // adapter rebuilds the reference's dataclasses from them, so the
     // core stays free of any knowledge of Python object layout.
     modem.def("demodulate",
-              [](DArray x, std::optional<std::pair<double, double>> search_s) {
+              [](DArray x, std::optional<std::pair<double, double>> search_s,
+                 const std::string& drift_track) {
                   std::span<const double> in(
                       x.data(), static_cast<std::size_t>(x.size()));
                   const sstvae::modem::Modem md;
-                  const auto r = md.demodulate(in, search_s);
+                  const auto r = md.demodulate(
+                      in, search_s, sstvae::modem::drift_track_from_name(drift_track));
                   py::dict out;
                   out["latents"] = to_numpy(r.latents);
                   out["weights"] = to_numpy(r.weights);
@@ -332,10 +334,23 @@ PYBIND11_MODULE(sstvae_native, m) {
                       out["beacon"] = py::none();
                   return out;
               },
-              py::arg("x"), py::arg("search_s") = py::none());
+              py::arg("x"), py::arg("search_s") = py::none(),
+              py::arg("drift_track") = "off");
+    // The enum crosses as its config-file spelling rather than as an
+    // int, so a parity test checks the same mapping the settings file
+    // and the command line go through.
+    modem.def("drift_track_from_name",
+              [](const std::string& name) {
+                  return std::string(sstvae::modem::drift_track_name(
+                      sstvae::modem::drift_track_from_name(name)));
+              },
+              py::arg("name"));
+    modem.def("drift_track_name", [](const std::string& name) { return name; },
+              py::arg("name"));
     modem.def("demodulate_blind",
               [](DArray x, std::optional<std::pair<double, double>> search_s,
-                 std::optional<std::tuple<std::int64_t, double, double>> acquisition) {
+                 std::optional<std::tuple<std::int64_t, double, double>> acquisition,
+                 const std::string& drift_track) {
                   std::span<const double> in(
                       x.data(), static_cast<std::size_t>(x.size()));
                   const sstvae::modem::Modem md;
@@ -350,7 +365,9 @@ PYBIND11_MODULE(sstvae_native, m) {
                       acq = sstvae::sync::BlindAcquisition{
                           std::get<0>(*acquisition), std::get<1>(*acquisition),
                           std::get<2>(*acquisition)};
-                  const auto r = md.demodulate_blind(in, search_s, acq);
+                  const auto r = md.demodulate_blind(
+                      in, search_s, acq,
+                      sstvae::modem::drift_track_from_name(drift_track));
                   py::dict out;
                   out["latents"] = to_numpy(r.latents);
                   out["weights"] = to_numpy(r.weights);
@@ -371,7 +388,8 @@ PYBIND11_MODULE(sstvae_native, m) {
                   return out;
               },
               py::arg("x"), py::arg("search_s") = py::none(),
-              py::arg("acquisition") = py::none());
+              py::arg("acquisition") = py::none(),
+              py::arg("drift_track") = "off");
 
     py::module_ sync = m.def_submodule("sync");
     // SyncError is raised through to Python as the reference's own
@@ -397,7 +415,8 @@ PYBIND11_MODULE(sstvae_native, m) {
                  const auto a = sstvae::sync::acquire(in, threshold, max_bins, win);
                  return py::make_tuple(a.preamble_start, a.freq_offset, a.metric);
              },
-             py::arg("z"), py::arg("threshold") = sstvae::config::PREAMBLE_THRESHOLD, py::arg("max_bins") = 2,
+             py::arg("z"), py::arg("threshold") = sstvae::config::PREAMBLE_THRESHOLD,
+             py::arg("max_bins") = sstvae::config::ACQUIRE_MAX_BINS,
              py::arg("search") = py::none());
     sync.def("acquire_blind",
              [](CArray z, double max_offset_hz, double bin_step_hz,
@@ -412,9 +431,21 @@ PYBIND11_MODULE(sstvae_native, m) {
                      in, max_offset_hz, bin_step_hz, min_periods, threshold, win);
                  return py::make_tuple(a.frame_start, a.freq_offset, a.metric);
              },
-             py::arg("z"), py::arg("max_offset_hz") = 55.0,
-             py::arg("bin_step_hz") = 1.7, py::arg("min_periods") = 8,
+             py::arg("z"), py::arg("max_offset_hz") = sstvae::config::BLIND_MAX_OFFSET_HZ,
+             py::arg("bin_step_hz") = sstvae::config::BLIND_BIN_STEP_HZ,
+             py::arg("min_periods") = 8,
              py::arg("threshold") = 4.0, py::arg("search") = py::none());
+
+    sync.def("refine_cfo",
+             [](DArray freqs, DArray scores, std::size_t i) {
+                 return sstvae::sync::refine_cfo(
+                     std::span<const double>(freqs.data(),
+                                             static_cast<std::size_t>(freqs.size())),
+                     std::span<const double>(scores.data(),
+                                             static_cast<std::size_t>(scores.size())),
+                     i);
+             },
+             py::arg("freqs"), py::arg("scores"), py::arg("i"));
 
     // result() returns a plain tuple, like acquire_blind above -- the
     // conftest adapter wraps it into the reference's BlindAcquisition,
@@ -422,7 +453,8 @@ PYBIND11_MODULE(sstvae_native, m) {
     py::class_<sstvae::sync::BlindAccumulator>(sync, "BlindAccumulator")
         .def(py::init<double, double, int, double, std::optional<int>,
                       std::vector<std::optional<double>>>(),
-             py::arg("max_offset_hz") = 55.0, py::arg("bin_step_hz") = 1.7,
+             py::arg("max_offset_hz") = sstvae::config::BLIND_MAX_OFFSET_HZ,
+             py::arg("bin_step_hz") = sstvae::config::BLIND_BIN_STEP_HZ,
              py::arg("min_periods") = 8, py::arg("threshold") = 4.0,
              py::arg("block_samples") = py::none(),
              py::arg("window_s") = std::vector<std::optional<double>>{25.0})

@@ -110,7 +110,13 @@ NATIVE_SUBSTITUTIONS = [
 # no longer literally the same call, so a bug in an adapter looks like a
 # bug in the port.
 def _native_adapters(native):
-    from sstvae.config import MODES_BY_INDEX, PREAMBLE_THRESHOLD
+    from sstvae.config import (
+        ACQUIRE_MAX_BINS,
+        BLIND_BIN_STEP_HZ,
+        BLIND_MAX_OFFSET_HZ,
+        MODES_BY_INDEX,
+        PREAMBLE_THRESHOLD,
+    )
     from sstvae.modem.beacon import BeaconResult
 
     fr = native.framing
@@ -145,13 +151,14 @@ def _native_adapters(native):
     # PREAMBLE_THRESHOLD had this shim asking the C++ a different
     # question than the parity test asked it, which reads exactly like
     # an implementation disagreement.
-    def acquire(z, threshold=PREAMBLE_THRESHOLD, max_bins=2, search=None):
+    def acquire(z, threshold=PREAMBLE_THRESHOLD, max_bins=ACQUIRE_MAX_BINS, search=None):
         from sstvae.modem.sync import Acquisition
 
         return _sync_call(native.sync.acquire, Acquisition, z, threshold,
                           max_bins, search)
 
-    def acquire_blind(z, max_offset_hz=55.0, bin_step_hz=1.7, min_periods=8,
+    def acquire_blind(z, max_offset_hz=BLIND_MAX_OFFSET_HZ,
+                      bin_step_hz=BLIND_BIN_STEP_HZ, min_periods=8,
                       threshold=4.0, search=None):
         from sstvae.modem.sync import BlindAcquisition
 
@@ -165,8 +172,10 @@ def _native_adapters(native):
     # tuple->BlindAcquisition translation acquire_blind's shim does
     # above, and push()/result() need the same SyncError translation.
     class BlindAccumulator:
-        def __init__(self, max_offset_hz=55.0, bin_step_hz=1.7, min_periods=8,
-                     threshold=4.0, block_samples=None, window_s=25.0):
+        def __init__(self, max_offset_hz=BLIND_MAX_OFFSET_HZ,
+                     bin_step_hz=BLIND_BIN_STEP_HZ, min_periods=8,
+                     threshold=4.0, block_samples=None, window_s=25.0,
+                     bin_chunk=128, workers=-1):
             # The reference accepts a bare float/None as shorthand for one
             # timescale; the binding always takes a list.
             from collections.abc import Sequence
@@ -215,12 +224,12 @@ def _native_adapters(native):
         return native.modem.modulate(latents, spec.index, normalize, callsign,
                                      modem_mod.CLIP_HEADROOM_DB)
 
-    def modem_demodulate(self, x, search_s=None):
+    def modem_demodulate(self, x, search_s=None, drift_track="off"):
         from sstvae.config import MODES_BY_INDEX
         from sstvae.modem.modem import DemodResult
 
         d = _sync_call(native.modem.demodulate, dict, np.asarray(x, dtype=np.float64),
-                       search_s)
+                       search_s, drift_track)
         return DemodResult(
             latents=d["latents"], weights=d["weights"],
             mode=MODES_BY_INDEX[d["mode_index"]], freq_offset=d["freq_offset"],
@@ -228,7 +237,8 @@ def _native_adapters(native):
             beacon=_beacon_from_tuple(d["beacon"]), callsign=d["callsign"],
             preamble_start=d["preamble_start"], snr_db=d["snr_db"])
 
-    def modem_demodulate_blind(self, x, search_s=None, acquisition=None):
+    def modem_demodulate_blind(self, x, search_s=None, acquisition=None,
+                               drift_track="off"):
         from sstvae.modem.modem import BlindDemodResult
 
         acq_tuple = (
@@ -236,7 +246,8 @@ def _native_adapters(native):
             else (acquisition.frame_start, acquisition.freq_offset, acquisition.metric)
         )
         d = _sync_call(native.modem.demodulate_blind, dict,
-                       np.asarray(x, dtype=np.float64), search_s, acq_tuple)
+                       np.asarray(x, dtype=np.float64), search_s, acq_tuple,
+                       drift_track)
         return BlindDemodResult(
             latents=d["latents"], weights=d["weights"],
             freq_offset=d["freq_offset"], beacon=_beacon_from_tuple(d["beacon"]),

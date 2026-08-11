@@ -34,6 +34,19 @@ using cdouble = std::complex<double>;
 using config::ModeSpec;
 using sync::SyncError;
 
+// Optional second-order loop on the pilots' *common* phase, which is
+// residual carrier frequency (the phase *slope across* carriers is
+// timing, which the demodulator already tracks; the two are orthogonal).
+// Off by default -- see sstvae/modem/modem.py's _DriftTracker for the
+// full rationale, and config::DRIFT_* for why there are two settings
+// rather than one.
+enum class DriftTrack { Off, Slow, Fast };
+
+// Parse a config-file / command-line spelling. Throws
+// std::invalid_argument naming what was asked for, like mode_by_name.
+DriftTrack drift_track_from_name(std::string_view name);
+std::string_view drift_track_name(DriftTrack track);
+
 struct DemodResult {
     std::vector<double> latents;  // canonical order, zeros where not received
     std::vector<double> weights;  // per-latent confidence 0..1 (0 = erased)
@@ -96,7 +109,8 @@ class Modem {
     // (seconds); frames are still demodulated past its end.
     DemodResult demodulate(
         std::span<const double> x,
-        std::optional<std::pair<double, double>> search_s = std::nullopt) const;
+        std::optional<std::pair<double, double>> search_s = std::nullopt,
+        DriftTrack drift_track = DriftTrack::Off) const;
 
     // Recover frame timing purely from the pilot's own periodicity -- no
     // preamble or header needed, so this works on a recording that
@@ -104,6 +118,16 @@ class Modem {
     //
     // No sample-clock drift tracking (that needs a preamble phase
     // reference); fine for the bounded windows this targets.
+    //
+    // `drift_track` is the *carrier* drift loop, which needs no such
+    // reference. It has one limit here it does not have on the preamble
+    // path, and it is a cliff rather than a slope: acquire_blind
+    // estimates one frequency for its whole window, so on a drifting
+    // signal that describes the window's *middle* and the first frame
+    // starts about half the window's total drift away. Past the
+    // pilot-rate ambiguity the per-frame measurement aliases and the
+    // loop locks to the wrong frequency -- measured, at 0.5 Hz/s over
+    // 30 s it takes the beacon down where leaving it off decodes.
     //
     // `acquisition`, if given, skips the internal acquire_blind call and
     // demodulates at that position instead -- for a caller (rx/engine.cpp)
@@ -114,7 +138,8 @@ class Modem {
     BlindDemodResult demodulate_blind(
         std::span<const double> x,
         std::optional<std::pair<double, double>> search_s = std::nullopt,
-        std::optional<sync::BlindAcquisition> acquisition = std::nullopt) const;
+        std::optional<sync::BlindAcquisition> acquisition = std::nullopt,
+        DriftTrack drift_track = DriftTrack::Off) const;
 
    private:
     std::vector<cdouble> pilot_;

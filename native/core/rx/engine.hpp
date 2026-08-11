@@ -54,6 +54,7 @@
 
 #include "config.hpp"
 #include "images/types.hpp"
+#include "modem/modem.hpp"
 #include "rx/ringbuffer.hpp"
 #include "util/event.hpp"
 
@@ -82,6 +83,18 @@ struct RxConfig {
     // reliability reason to raise it past the longest mode's duration,
     // since there is no more real signal beyond that to integrate.
     double blind_search_seconds = config::MODES[config::N_MODES - 1].duration_s;
+
+    // Widen the preamble-free search to config::BLIND_WIDE_MAX_OFFSET_HZ,
+    // for a counterpart whose dial is off by hundreds of Hz. Opt-in
+    // because unlike the preamble path -- which searches frequency for
+    // free and so is always wide -- this one searches CFO directly and
+    // its cost is linear in the number of bins.
+    bool blind_wide = false;
+
+    // Follow a carrier that moves during the transmission. Off by
+    // default; the two gains suit different things, see
+    // config::DRIFT_* and docs/todo.md.
+    modem::DriftTrack drift_track = modem::DriftTrack::Off;
     // The largest fraction of wall time the loop may spend decoding.
     // **1.0 is off**, and off is the historical behaviour exactly: poll
     // every `poll_interval` no matter how long a poll takes.
