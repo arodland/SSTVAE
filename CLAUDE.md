@@ -1425,7 +1425,25 @@ need when `--native` fails and you want to know *where*.
   ragged comb from point-sampling being the worst available lie on a
   display whose whole job is "are you tuned right".
 - `docs/todo.md` — open work items with the reasoning behind them.
-  Two on the acquisition side. **A steady carrier is a perfect-looking
+  Two acquisition items are now **implemented** (2026-08-11) and their
+  sections record the reasoning rather than outstanding work:
+  `config.ACQUIRE_MAX_BINS` is 12 (+-625 Hz) unconditionally,
+  `config.BLIND_BIN_STEP_HZ` is 12.5 with `sync.refine_cfo` recovering
+  the sub-bin peak, and the +-625 Hz *blind* range plus the off/slow/fast
+  drift loop are settings (`RxConfig.blind_wide` / `drift_track`,
+  `--blind-wide` / `--drift-track`, Settings > Receive). **The three
+  acquisition/blind defaults now live in `config.py` for the reason the
+  parity shims already document** -- porting the change turned up four
+  hardcoded copies in `native/` (`sync::acquire(z, PREAMBLE_THRESHOLD,
+  2, ...)` and `acquire_blind(z, 55.0, 1.7, ...)`), any of which would
+  have left the live receive loop on the old range with every test still
+  passing. One item remains open on the drift side and is pinned as a
+  test: the loop's pull-in is +-`CFO_PULL_HZ` of *initial* residual, and
+  on the blind path `acquire_blind` estimates the middle of its window,
+  so past ~7 Hz of drift across the window the measurement aliases and
+  the loop is worse than off. Anchoring it mid-window and running
+  outward is the fix; not implemented.
+  Two other items are still open. **A steady carrier is a perfect-looking
   preamble** (2026-08-09): `_autocorr_metric` is normalized by the
   window's own energy, so any pure tone reads exactly **1.000** — above
   what a real preamble reaches in noise — and `acquire` takes a hard

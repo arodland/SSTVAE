@@ -61,6 +61,8 @@ settings::Config populated() {
     c.receive.autosave = false;
     c.receive.save_audio = true;
     c.receive.low_cpu = true;
+    c.receive.blind_wide = true;
+    c.receive.drift_track = "fast";
     c.receive.filename_template = "{callsign}_{date}";
     c.receive.save_size = "320x240";
     c.receive.buffer_seconds = 155.0;

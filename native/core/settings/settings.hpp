@@ -145,6 +145,15 @@ struct ReceiveConfig {
     double poll_interval = 5.0;
     double blind_search_seconds = 25.0;
     double end_grace = 8.0;
+    // Widen the preamble-free search to +-625 Hz, for a counterpart
+    // whose dial is far off. Opt-in because it is the one acquisition
+    // change that costs real CPU -- the preamble search is always wide,
+    // being free. See docs/todo.md.
+    bool blind_wide = false;
+    // off | slow | fast: follow a carrier that drifts during the
+    // transmission. Off suits HF with a modern radio; the two gains are
+    // not "more" and "less" of one thing -- see config::DRIFT_*.
+    std::string drift_track = "off";
     std::string save_size;  // e.g. "320x240"; empty keeps 640x480
     // Diagnostic: also write the captured audio beside each received
     // picture, float32 at FS with nothing rescaled. Answers "was the

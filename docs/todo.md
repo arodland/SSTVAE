@@ -103,12 +103,38 @@ measured, acquisition lands on the true preamble with the same latent
 SNR as no leader at all. That is a transmitter-side dodge of one
 instance of the problem, not a fix for the general one.
 
-## Wider acquisition search, for a mis-tuned counterpart
+## ~~Wider acquisition search, for a mis-tuned counterpart~~ — implemented 2026-08-11
 
-**Goal.** Recover a transmission from a station whose dial is off by
-more than the current tolerance — hundreds of Hz, not tens. Not a
-user-facing "pick your centre frequency" knob; an opt-in wider search
-(or an automatic second pass) so a mis-tuned partner still decodes.
+**Shipped, in both implementations.** The measurements below are kept
+because they are the reasoning, and because two of them contradict what
+this section previously asserted. What landed:
+
+- **`config.ACQUIRE_MAX_BINS` = 12 (±625 Hz), unconditionally.** Not an
+  option: measured, a wider preamble search cannot cost false alarms
+  (detection is CFO-blind), does not cost sensitivity (the extra
+  candidates never win — 160/160 identical answers), and costs ~3.4 ms
+  of a 63 ms acquisition.
+- **`config.BLIND_BIN_STEP_HZ` = 12.5 with `sync.refine_cfo`**, which
+  makes the default blind search ~6.7x cheaper *and* more accurate than
+  the 1.7 Hz grid it replaces. `config.BLIND_BLOCK_RES_HZ` is a separate
+  constant so the block cannot follow the grid down.
+- **`RxConfig.blind_wide` / `--blind-wide` / Settings > Receive > Wide
+  frequency search** for the ±625 Hz blind range, opt-in because that
+  one really does cost CPU.
+
+Android picks the first two up from the defaults, which is a direct win
+on the battery item — the blind search is its dominant per-poll cost.
+
+**Still open here**: nothing on the preamble path. On the blind path,
+`bin_step_hz` could go to 25 Hz for another ~1.7x if the ~1 dB of
+worst-case scalloping is ever worth it; measured, 25 Hz costs one
+detection in twelve at −10 dB and 50 Hz collapses.
+
+**Goal (as originally written).** Recover a transmission from a station
+whose dial is off by more than the current tolerance — hundreds of Hz,
+not tens. Not a user-facing "pick your centre frequency" knob; an opt-in
+wider search (or an automatic second pass) so a mis-tuned partner still
+decodes.
 
 **This is achievable, and it is purely an acquisition-side change.**
 The demod path has no dependence on absolute centre frequency at all.
@@ -420,7 +446,41 @@ an acquisition success rate near threshold) applies to the 7/8 and 2/8
 cells in the ±700–800 Hz region, which are in exactly that regime — the
 0/8-vs-8/8 cells that carry the argument are not.
 
-## Frequency drift *during* a transmission
+## Frequency drift *during* a transmission — tracking implemented 2026-08-11, off by default
+
+**Shipped as an option, in both implementations**: `drift_track` is
+`off` | `slow` | `fast` on `Modem.demodulate` and `demodulate_blind`,
+`RxConfig.drift_track`, `--drift-track` on `sstvae_listen.py` and
+`sstvae_decode.py`, and Settings > Receive > Track drift.
+
+**Off by default and `off` means the loop is never constructed**, so the
+default path is bit-identical to the receiver that had none. Two
+settings rather than a single gain because, measured below, the loop
+bandwidth has to sit above the drift's own spectrum and below the
+channel's Doppler spread and those can overlap: `fast` costs 1.7 dB
+under `mpd` fading that `slow` leaves alone, and rescues wander that
+`slow` cannot follow. Neither is a safe always-on default, which is why
+this is a setting and the wider acquisition above is not.
+
+**One limit was found during implementation and is pinned as a test**
+(`test_the_blind_pull_in_limit_is_real_and_is_a_cliff`) rather than
+tuned around: the loop's pull-in is ±`CFO_PULL_HZ` of *initial*
+residual, and on the blind path `acquire_blind`'s estimate describes the
+middle of its window — so past ~7 Hz of drift across the window the
+per-frame measurement aliases, the loop locks to the wrong frequency,
+and the beacon stops decoding where leaving it off would have worked.
+It does not arise on the preamble path, where acquisition leaves ~0.1 Hz
+and the loop is locked before the residual grows. **The fix, not
+implemented, is to anchor the loop at the window's middle and run it
+outward in both directions**, so each half starts from ~0 residual.
+
+**Also still open**: the oracle rows below hold 3.8 dB in every cell
+where every causal loop fails, so the ceiling is the estimator rather
+than the waveform. `demodulate` is not a real-time loop and has all the
+pilots in memory by the time it reconstructs, so a non-causal smoother
+over the whole frame sequence has that entire gap available — and would
+not have to choose a bandwidth in advance, which is the tension the
+off/slow/fast split exists to hand to the operator.
 
 **The receiver estimates carrier frequency once, from the preamble, and
 never looks again.** `demodulate()` calls `acquire()`, applies one

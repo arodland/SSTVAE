@@ -132,6 +132,8 @@ private:
     QCheckBox* autosave_ = nullptr;
     QCheckBox* save_audio_ = nullptr;
     QCheckBox* low_cpu_ = nullptr;
+    QCheckBox* blind_wide_ = nullptr;
+    QComboBox* drift_track_ = nullptr;
     QLineEdit* filename_template_ = nullptr;
     QLabel* filename_preview_ = nullptr;
     QLineEdit* save_size_ = nullptr;
