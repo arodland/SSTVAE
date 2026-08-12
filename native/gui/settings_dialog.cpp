@@ -39,6 +39,7 @@
 
 #include "audio/qt/qtaudio.hpp"
 #include "checkpoint/checkpoint.hpp"
+#include "dsp/leader.hpp"
 #include "rig/backend.hpp"
 #include "rig/hamlib.hpp"
 #include "rig_config.hpp"
@@ -960,6 +961,17 @@ QWidget* SettingsDialog::transmit_tab() {
                      page));
     add_gap(form);
 
+    vox_lead_ = new QCheckBox(tr("Send a VOX leader tone before each transmission"), page);
+    vox_lead_->setChecked(config_.transmit.vox_lead_s > 0.0);
+    form->addRow(vox_lead_);
+    add_check_note(
+        form, page,
+        style::note(tr("Half a second of swept tone, to bring a VOX-keyed radio up "
+                       "before the signal starts. Leave it off if the radio is keyed "
+                       "any other way -- it is airtime."),
+                    page));
+    add_gap(form);
+
     // The transmit level itself stays on the send bar, where it is
     // adjusted, and keeps a short tooltip there. What lives here is the
     // *procedure*, because a tooltip only ever reaches an operator who
@@ -1006,6 +1018,7 @@ void SettingsDialog::apply_to(settings::Config& config) const {
     config.transmit.optimize = optimize_->isChecked();
     config.transmit.cw_id = cw_id_->isChecked();
     config.transmit.cw_message = cw_message_->text().toStdString();
+    config.transmit.vox_lead_s = vox_lead_->isChecked() ? dsp::VOX_LEAD_DEFAULT_S : 0.0;
     config.receive.autosave = autosave_->isChecked();
     config.receive.save_audio = save_audio_->isChecked();
     config.receive.low_cpu = low_cpu_->isChecked();

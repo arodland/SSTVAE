@@ -260,7 +260,8 @@ void read_transmit(const Reader& r, TransmitConfig& c) {
     r.get("optimize", c.optimize);
     r.get("cw_id", c.cw_id);
     r.get("cw_message", c.cw_message);
-    r.report_unknown({"mode", "level", "optimize", "cw_id", "cw_message"});
+    r.get("vox_lead_s", c.vox_lead_s);
+    r.report_unknown({"mode", "level", "optimize", "cw_id", "cw_message", "vox_lead_s"});
 }
 
 void read_ui(const Reader& r, UiConfig& c) {
@@ -441,7 +442,8 @@ std::string to_json(const Config& c) {
           {"level", c.transmit.level},
           {"optimize", c.transmit.optimize},
           {"cw_id", c.transmit.cw_id},
-          {"cw_message", c.transmit.cw_message}}},
+          {"cw_message", c.transmit.cw_message},
+          {"vox_lead_s", c.transmit.vox_lead_s}}},
         {"ui",
          {{"layout", c.ui.layout},
           {"log_visible", c.ui.log_visible},
