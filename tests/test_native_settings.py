@@ -105,6 +105,7 @@ NON_DEFAULT = {
         "optimize": True,
         "cw_id": True,
         "cw_message": "TEST DE {callsign}",
+        "vox_lead_s": 0.5,
     },
     "ui": {
         # None is a default: the default layout is "auto", the default

@@ -183,6 +183,13 @@ struct TransmitConfig {
     // hears the CW ID and can go find SSTVAE and a successful decode,
     // rather than just an unexplained tone.
     std::string cw_message = "SSTVAE DE {callsign}";
+
+    // Seconds of swept-tone leader (dsp::vox_leader) sent ahead of the
+    // transmission, to open a VOX-triggered transmitter's relay before
+    // the modem's own signal starts. 0 (the default) sends none. Off by
+    // default because a station keyed by CAT or a manual PTT foot switch
+    // has no use for it, and it costs airtime.
+    double vox_lead_s = 0.0;
 };
 
 // How the window arranges the receive and transmit halves.

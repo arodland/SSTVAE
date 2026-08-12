@@ -68,6 +68,13 @@ inline constexpr double VOX_SWEEP_S = 0.25;
 // the preamble's 480-sample correlation window.
 inline constexpr double VOX_LEAD_GAP_S = 0.1;
 
+// The duration behind the on/off switch in both apps' settings. Not a
+// dial: `vox_leader`'s repeated-sweep design (see the measurement table
+// above) makes the metric flat with duration, so there is nothing a
+// longer leader buys beyond opening the relay, and no reading to tune
+// it against -- an operator either has a VOX-keyed radio or does not.
+inline constexpr double VOX_LEAD_DEFAULT_S = 0.5;
+
 // `seconds` of repeated up-sweeps across the carrier band, at
 // `amplitude`, with 5 ms raised-cosine edges so keying it neither clicks
 // nor splatters. The sweep is phase-continuous across the wrap from the

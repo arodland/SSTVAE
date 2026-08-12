@@ -127,6 +127,7 @@ private:
     QCheckBox* optimize_ = nullptr;
     QCheckBox* cw_id_ = nullptr;
     QLineEdit* cw_message_ = nullptr;
+    QCheckBox* vox_lead_ = nullptr;
 
     // Receive
     QCheckBox* autosave_ = nullptr;
