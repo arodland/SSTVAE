@@ -1022,7 +1022,7 @@ need when `--native` fails and you want to know *where*.
   of a large argument disagree across glibc/musl/MSVC and across
   x86-64/Apple silicon by far more than near zero, so an unreduced
   argument makes a result a property of the machine rather than of the
-  signal. It had already broken CI. See `docs/todo.md` (closed
+  signal. It had already broken CI. See `docs/todo-done.md` (closed
   2026-07-28) for the measurements.
 
 ## Gotchas learned the hard way
@@ -1425,8 +1425,11 @@ need when `--native` fails and you want to know *where*.
   ragged comb from point-sampling being the worst available lie on a
   display whose whole job is "are you tuned right".
 - `docs/todo.md` — open work items with the reasoning behind them.
+  Completed items keep only a short summary there; the full measurement
+  records moved to `docs/todo-done.md` (2026-08-12).
   Two acquisition items are now **implemented** (2026-08-11) and their
-  sections record the reasoning rather than outstanding work:
+  full sections (now in `docs/todo-done.md`) record the reasoning
+  rather than outstanding work:
   `config.ACQUIRE_MAX_BINS` is 12 (+-625 Hz) unconditionally,
   `config.BLIND_BIN_STEP_HZ` is 12.5 with `sync.refine_cfo` recovering
   the sub-bin peak, and the +-625 Hz *blind* range plus the off/slow/fast
@@ -1479,7 +1482,8 @@ need when `--native` fails and you want to know *where*.
   gate on the winning candidate's template-match quality, calibrated
   against the measured false lock (score 0.338) and ~1400 synthetic
   trials at the sensitivity floor (lowest score for a real acquisition:
-  0.430). See docs/todo.md's "A false lock this widening opened up" —
+  0.430). See docs/todo-done.md's "A false lock this widening opened
+  up" —
   it also mostly closes the steady-carrier-tone item two paragraphs up,
   as a side effect. It costs 0.14 ms per candidate
   (3.4 ms total, ~5% of one acquisition), so it is not the opt-in this
@@ -1730,8 +1734,8 @@ to warn anyway at first** — reputation is per certificate and accrues
 over downloads and time — which is a thing to tell operators, not a
 signing bug to go and fix. See
 `docs/native-app.md` for the C++/Qt rewrite design (Phases 0-3 done,
-Phase 4 steps 1-3 done) and `docs/todo.md` for quantisation tolerance
-as a future training constraint.
+Phase 4 steps 1-3 done) and `docs/todo-done.md` for quantisation
+tolerance as a future training constraint.
 
 Transmit-time latent optimization is **implemented end to end**
 (`docs/latent-optimization.md`, 2026-07-31): published artifact, both
