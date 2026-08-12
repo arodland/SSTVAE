@@ -91,11 +91,132 @@ PREAMBLE_CORR_WINDOW = (PREAMBLE_REPEATS - 1) * M  # 480
 # raising *its* threshold to 0.64 also cleared the false alarms, and
 # cost 0 dB acquisition (0.82 -> 0.53) to do it.
 PREAMBLE_THRESHOLD = 0.42
+
+# Half-width of the integer-bin CFO search, in 50 Hz carrier spacings,
+# so acquisition covers +-(25 + 50*ACQUIRE_MAX_BINS) Hz. A *receiver*
+# parameter like the threshold above, here so the two implementations
+# and the parity shims cannot disagree about it.
+#
+# 12 (+-625 Hz) rather than the original 2 (+-125 Hz), because measured
+# it is free in every direction that matters *at the true preamble's own
+# location* (2026-08-11, see docs/todo.md). Detection there is CFO-blind
+# -- an offset multiplies every lag-M product by one constant phasor,
+# which |.| removes -- so the false-alarm rate at that location cannot
+# move, and the extra candidates never beat the true one there (max_bins
+# 2 vs 12 returned the identical preamble start and CFO in 160/160
+# trials from 0 to -4 dB); and a candidate is one FFT convolution over
+# an ~1100-sample segment, about 0.14 ms, against a 63 ms detection
+# stage. +-625 Hz covers the whole range an SSB filter passes, and
+# dsp.sync_lowpass takes over as the limit at about +-700 Hz anyway.
+#
+# That measurement did *not* cover a different question -- whether a
+# wrong LOCATION, elsewhere in a real transmission's own data, can win
+# more often with 25 candidates than with 5 -- and the answer turned out
+# to be yes (found 2026-08-13 against a real, deliberately mis-tuned
+# recording): a genuinely off-frequency signal has real spectral energy
+# spread near its own true offset even where there's no preamble, so
+# widening the bin search widens the chance one candidate resonates with
+# it enough to out-score the others and Golay-decode a plausible (wrong)
+# header. See TEMPLATE_SCORE_THRESHOLD, which is the fix -- max_bins
+# stays here as the tolerance and is not itself the problem.
+ACQUIRE_MAX_BINS = 12
+
+# Minimum accepted quality of `acquire()`'s winning integer-CFO
+# candidate: the fraction of the matched-filter template's energy the
+# best-scoring candidate actually explains, ~0..1. A second gate,
+# independent of PREAMBLE_THRESHOLD above -- that one only checks the
+# lag-M autocorrelation *before* any candidate is even tried, and real
+# transmission data can clear it too (unlike pure noise, which is what
+# PREAMBLE_THRESHOLD was calibrated against). Nothing previously checked
+# whether the winning candidate was actually a *good* match, only that
+# it was the *best available* one.
+#
+# Measured (2026-08-13): the winning score at the false lock this fixes
+# -- a real, deliberately mis-tuned mode C recording, found ~25 s into
+# its own data, nowhere near its actual preamble, decoding a plausible
+# but wrong mode C header -- was 0.338. Across ~1400 synthetic trials
+# at the sensitivity floor (modes A and C, -4 to -6 dB, no/mpp/mpd
+# fading, 0/300/600 Hz offset) the lowest winning score for a candidate
+# whose header *did* go on to decode correctly was 0.430. 0.40 sits
+# between the two, biased toward the false-lock side rather than the
+# midpoint: a rejected weak-but-genuine preamble only costs a fallback
+# to blind sync (see docs/todo.md's "safety net" paragraph), while an
+# accepted false lock reports a wrong, misleading picture as a
+# completed reception -- the worse failure of the two, so the gate
+# leans toward rejecting rather than accepting when unsure. One
+# concrete false-lock measurement and a synthetic floor are what this
+# rests on; revisit if a second real false lock is ever found scoring
+# above it.
+TEMPLATE_SCORE_THRESHOLD = 0.40
+
 HEADER_SYMS = 2  # identical Golay-coded BPSK symbols
 HEADER_SAMPLES = HEADER_SYMS * NSYM  # 384
 
 LEADIN_SAMPLES = 800  # 100 ms of silence before the preamble
 LEADOUT_SAMPLES = 800
+
+# --- blind (preamble-free) acquisition -------------------------------------
+# Receiver parameters, like the two above.
+#
+# BLIND_BIN_STEP_HZ is the CFO *search grid*, and it is deliberately far
+# coarser than it looks like it should be. For a fixed lag the pilot
+# matched filter as a function of CFO is a DTFT of a 160-sample (M)
+# sequence, so |matched filter|**2 is exactly band-limited in CFO with
+# dual support 2M-1, and is fully determined by samples every
+# FS/(2*M) = 25 Hz. The old 1.7 Hz grid was ~15x finer than the signal
+# can support -- interpolation done the expensive way. 12.5 Hz is half
+# the sampling limit, which measured costs no detection at all down to
+# -10 dB (50 Hz, past the limit, collapses); the sub-bin peak is
+# recovered by sync.refine_cfo, which is *more* accurate than the old
+# grid's raw argmax (0.14-0.62 Hz against 0.56 Hz).
+BLIND_BIN_STEP_HZ = 12.5
+
+# What the accumulator's *block* must resolve, which is a different
+# question from the search grid and must not be tied to it: the block is
+# sized for overlap-save efficiency (a 160-sample kernel against a
+# ~4700-sample block), and the shift quantization it buys, FS/block, is
+# the finest the grid could ever be. Deriving the block from
+# BLIND_BIN_STEP_HZ instead would shrink it to 640 samples and give back
+# most of the coarse grid's saving -- measured, 106 ms against 33 ms.
+# Kept at the value the pre-2026-08-11 receiver used, so the block, and
+# with it the accumulator's overlap-save structure, is unchanged.
+BLIND_BLOCK_RES_HZ = 1.7
+
+# Search range. The narrow one is the default and covers ordinary
+# mis-tuning; the wide one covers a counterpart whose dial is off by
+# hundreds of Hz and is opt-in because, unlike the preamble path, this
+# one really does cost CPU -- it searches CFO directly, so the cost is
+# linear in the number of bins.
+BLIND_MAX_OFFSET_HZ = 55.0
+BLIND_WIDE_MAX_OFFSET_HZ = 625.0
+
+# --- drift tracking --------------------------------------------------------
+# Gains for the optional second-order loop that tracks residual carrier
+# frequency across a transmission (modem.demodulate's drift_track).
+# Off by default: on HF with modern radios the receiver's ~+-2 Hz
+# budget is not usually threatened, and a loop that is not needed can
+# only cost. See docs/todo.md for why there are two settings rather than
+# one -- the loop bandwidth has to sit above the drift's own spectrum
+# and below the channel's Doppler spread, and measured, those two can
+# overlap: "fast" tracks rapid wander that "slow" cannot follow, and
+# "slow" leaves fading alone that "fast" chases for 2.3 dB under mpd.
+DRIFT_SLOW_ALPHA = 0.1
+DRIFT_SLOW_BETA = 0.01
+DRIFT_FAST_ALPHA = 0.3
+DRIFT_FAST_BETA = 0.05
+DRIFT_TRACK_MODES = ("off", "slow", "fast")
+
+
+def drift_gains(mode: str) -> tuple[float, float]:
+    """(alpha, beta) for a drift_track setting; (0, 0) means no loop."""
+    if mode == "off":
+        return 0.0, 0.0
+    if mode == "slow":
+        return DRIFT_SLOW_ALPHA, DRIFT_SLOW_BETA
+    if mode == "fast":
+        return DRIFT_FAST_ALPHA, DRIFT_FAST_BETA
+    raise ValueError(f"drift_track must be one of {DRIFT_TRACK_MODES}, got {mode!r}")
+
 
 # --- latent layout ---------------------------------------------------------
 LATENT_H = 30  # spatial grid for a 240-high image, x8 downsample

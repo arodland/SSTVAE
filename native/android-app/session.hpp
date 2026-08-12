@@ -35,6 +35,7 @@
 #include "audio/android/androidaudio.hpp"
 #include "codec/codec.hpp"
 #include "images/types.hpp"
+#include "modem/modem.hpp"
 #include "rx/engine.hpp"
 #include "rx/ringbuffer.hpp"
 #include "tx/engine.hpp"
@@ -133,6 +134,29 @@ public:
     void set_save_to_gallery(bool on) { save_to_gallery_.store(on); }
     bool save_to_gallery() const { return save_to_gallery_.load(); }
 
+    // Widen the preamble-free search to +-625 Hz, for a counterpart
+    // whose dial is far off. Read once, at `start()`, into the
+    // RxConfig each session builds -- unlike `show_technical`/
+    // `save_to_gallery` above this isn't something a running session's
+    // poller reads continuously, so there is nothing to make atomic
+    // *for*, but it still is: written from the GUI thread, read from
+    // whichever thread calls `start()`, same as everything else here.
+    // See CLAUDE.md / docs/todo.md, "Wider acquisition search" -- the
+    // preamble search itself is always this wide, for free; this is
+    // the blind (already-in-progress) path, which searches CFO
+    // directly and so isn't.
+    void set_blind_wide(bool on) { blind_wide_.store(on); }
+    bool blind_wide() const { return blind_wide_.load(); }
+
+    // off | slow | fast: follow a carrier that drifts during the
+    // transmission. Off suits HF with a modern radio; the phone's own
+    // use cases (VHF FM satellites, EME) are exactly the ones the "fast"
+    // setting exists for, so this is more likely to matter here than on
+    // the desktop app. Same read-once-at-start() reasoning as
+    // `blind_wide` above.
+    void set_drift_track(modem::DriftTrack track) { drift_track_.store(track); }
+    modem::DriftTrack drift_track() const { return drift_track_.load(); }
+
     // The last gallery export's outcome: empty when the last one worked
     // or none has run. Reported from Java, shown by the Settings screen
     // — an export is the only part of saving a reception that happens
@@ -218,6 +242,8 @@ private:
 
     std::atomic<bool> show_technical_{false};
     std::atomic<bool> save_to_gallery_{false};
+    std::atomic<bool> blind_wide_{false};
+    std::atomic<modem::DriftTrack> drift_track_{modem::DriftTrack::Off};
 
     // Its own lock rather than `mu_`: it is written by a Java export
     // thread and read by the UI, and neither has any business waiting

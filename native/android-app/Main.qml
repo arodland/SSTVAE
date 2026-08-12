@@ -549,6 +549,73 @@ ApplicationWindow {
             }
 
             Label {
+                text: "Receive"
+                font.bold: true
+                Layout.margins: 12
+                Layout.bottomMargin: 0
+            }
+            // Both take effect on the *next* Start, not mid-session --
+            // same as the device picker above, and disabled the same
+            // way, so there is nothing here that looks live while
+            // listening and silently isn't.
+            Switch {
+                text: "Wide frequency search"
+                Layout.leftMargin: 4
+                enabled: !listener.listening
+                checked: listener.blindWide
+                onToggled: listener.blindWide = checked
+            }
+            Label {
+                text: "Picks up a station whose dial is off by up to 625 Hz, at "
+                      + "some extra CPU cost. Only affects picking up a "
+                      + "transmission already in progress — finding the *start* "
+                      + "of one is always this wide, because there it's free."
+                font.pixelSize: 11
+                color: "#666"
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                wrapMode: Text.Wrap
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                Label { text: "Track drift" }
+                ComboBox {
+                    id: driftTrackBox
+                    Layout.fillWidth: true
+                    enabled: !listener.listening
+                    textRole: "text"
+                    valueRole: "value"
+                    model: [
+                        { text: "Off", value: "off" },
+                        { text: "Slow (drifting radio)", value: "slow" },
+                        { text: "Fast (VHF, satellite)", value: "fast" }
+                    ]
+                    Component.onCompleted: currentIndex = indexOfValue(listener.driftTrack)
+                    onActivated: listener.driftTrack = currentValue
+                }
+            }
+            Label {
+                // Off/slow/fast, not a gain: the two settings are not
+                // more and less of one thing, so "fast" is not simply
+                // better at everything "slow" does — see the desktop
+                // dialog's identical note.
+                text: "Follows a carrier that moves during a transmission. Off "
+                      + "suits HF with a modern radio, which usually doesn't "
+                      + "drift far enough to matter. Fast is for VHF, satellite "
+                      + "and EME use, where it costs more if the signal is "
+                      + "fading heavily rather than drifting."
+                font.pixelSize: 11
+                color: "#666"
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                wrapMode: Text.Wrap
+            }
+
+            Label {
                 text: "Received pictures"
                 font.bold: true
                 Layout.margins: 12

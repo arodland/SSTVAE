@@ -39,16 +39,22 @@ def _transmission(mode: str, seed: int) -> np.ndarray:
     return Modem().modulate(lat, mode, callsign="TEST")
 
 
-class _Args:
-    """Stand-in for the argparse namespace decode_loop consumes."""
-
-    def __init__(self, out_dir, poll_interval=0.05, end_grace=0.3):
-        self.out_dir = str(out_dir)
-        self.poll_interval = poll_interval
-        self.end_grace = end_grace
-        self.size = None
-        self.once = False
-        self.blind_search_seconds = 25.0
+def _Args(out_dir, poll_interval=0.05, end_grace=0.3):
+    """The loops' config, built as the real `RxConfig` rather than as a
+    duck-typed stand-in. It used to be a hand-written class mimicking the
+    argparse namespace `decode_loop` once took, and that shape breaks
+    silently and confusingly the moment a field is added to RxConfig: the
+    loop raises AttributeError inside its worker thread, the thread dies,
+    and every test here fails as "saved 0 images" with no hint that a
+    field is missing rather than that decoding regressed."""
+    return sstvae_listen.RxConfig(
+        out_dir=str(out_dir),
+        poll_interval=poll_interval,
+        end_grace=end_grace,
+        size=None,
+        once=False,
+        blind_search_seconds=25.0,
+    )
 
 
 def _run_decode_loop(loop_fn, audio, tmp_path, timeout_s=180.0, expect_saves=2):

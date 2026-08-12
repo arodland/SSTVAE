@@ -23,7 +23,7 @@ from sstvae.codec import (  # noqa: F401  (re-exported)
     pad_to_full,
     reconstruct,
 )
-from sstvae.config import FS, LATENTS_PER_FRAME
+from sstvae.config import DRIFT_TRACK_MODES, FS, LATENTS_PER_FRAME
 from sstvae.modem import Modem, framing
 
 
@@ -47,6 +47,12 @@ def main() -> None:
         "--size", type=str, default=None,
         help="resize output image, e.g. 320x240 (classic SSTV size)",
     )
+    ap.add_argument(
+        "--drift-track", choices=DRIFT_TRACK_MODES, default="off",
+        help="follow a carrier that drifts during the transmission: 'slow' for a "
+        "drifting rig, 'fast' for rapid wander (VHF/satellite). Off by default -- "
+        "the untracked receiver absorbs about +-2 Hz of residual on its own.",
+    )
     args = ap.parse_args()
     out_size = None
     if args.size:
@@ -58,7 +64,7 @@ def main() -> None:
     if args.search_start is not None or args.search_end is not None:
         search = (args.search_start or 0.0, args.search_end or len(x) / FS)
     model = load_codec(args.model, precision=args.precision)
-    r = Modem().demodulate(x, search_s=search)
+    r = Modem().demodulate(x, search_s=search, drift_track=args.drift_track)
     print(
         f"mode {r.mode.name}, {r.frames_received}/{r.mode.n_frames} frames, "
         f"freq offset {r.freq_offset:+.1f} Hz, sync metric {r.sync_metric:.2f}, "

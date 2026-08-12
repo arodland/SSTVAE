@@ -623,6 +623,69 @@ def test_sync_acquire_blind_across_conditions(native):
             assert abs(got[1] - ref.freq_offset) < SYNC_TOL, where
 
 
+def test_refine_cfo_matches(native):
+    """The sub-bin interpolation is what makes the coarse CFO grid safe,
+    so a port that dropped or mis-signed it would show up as a few Hz of
+    frequency error rather than as a crash. Deliberately non-uniform
+    abscissae -- the real grid is."""
+    from sstvae.modem import sync as sync_ref
+
+    rng = np.random.default_rng(21)
+    for _ in range(20):
+        freqs = np.sort(rng.uniform(-30, 30, size=3))
+        scores = rng.uniform(0.0, 50.0, size=3)
+        ref = sync_ref.refine_cfo(freqs, scores, 1)
+        got = native.sync.refine_cfo(freqs, scores, 1)
+        assert abs(got - ref) < 1e-12, f"{freqs} {scores}: {got} vs {ref}"
+    # Edge bins have no bracket and must report themselves, not
+    # extrapolate off the end of the grid.
+    freqs = np.array([-12.5, 0.0, 12.5])
+    scores = np.array([1.0, 5.0, 2.0])
+    for i in (0, 2):
+        assert native.sync.refine_cfo(freqs, scores, i) == freqs[i]
+
+
+def test_drift_tracking_matches(native):
+    """The loop runs per frame and integrates, so an error in it
+    accumulates rather than staying local -- which makes a whole-picture
+    comparison the right check. Both settings, and a drift big enough
+    that the untracked path visibly fails, so this cannot pass by both
+    implementations doing nothing."""
+    from sstvae import hfchannel
+    from sstvae.modem import dsp as dsp_ref
+    from sstvae.modem.modem import Modem
+    from scipy import signal as _sig
+
+    wave = _mode_a_wave(seed=4)
+    t = np.arange(len(wave)) / 8000.0
+    drifted = np.real(
+        _sig.hilbert(wave) * np.exp(2j * np.pi * dsp_ref.wrap_cycles(0.5 * 0.5 * t**2)))
+    rx = hfchannel.awgn(drifted, 6.0, seed=9)
+
+    ref_modem = Modem()
+    for setting in ("off", "slow", "fast"):
+        ref = ref_modem.demodulate(rx, drift_track=setting)
+        got = native.modem.demodulate(rx, None, setting)
+        assert got["frames_received"] == ref.frames_received, setting
+        assert np.allclose(got["latents"], ref.latents, atol=1e-9), setting
+        assert np.allclose(got["weights"], ref.weights, atol=1e-9), setting
+
+    # And the tracking actually did something, on both sides.
+    off = native.modem.demodulate(rx, None, "off")
+    slow = native.modem.demodulate(rx, None, "slow")
+    assert not np.allclose(off["latents"], slow["latents"])
+
+
+def test_drift_track_names_round_trip(native):
+    """An unknown setting must be reported, not silently treated as off:
+    a typo in a config file would otherwise turn the feature off while
+    the dialog still showed it on."""
+    for name in ("off", "slow", "fast"):
+        assert native.modem.drift_track_name(native.modem.drift_track_from_name(name)) == name
+    with pytest.raises(Exception):
+        native.modem.drift_track_from_name("medium")
+
+
 def test_sync_refuses_noise_on_both_sides(native):
     """Locking onto noise would produce a picture and report success."""
     from sstvae.modem import sync as sync_ref
@@ -632,6 +695,38 @@ def test_sync_refuses_noise_on_both_sides(native):
         sync_ref.acquire(z)
     with pytest.raises(Exception):
         native.sync.acquire(z)
+
+
+def test_sync_template_score_gate_matches(native):
+    """The second acquisition gate (2026-08-13, TEMPLATE_SCORE_THRESHOLD):
+    a candidate can clear the lag-M metric (real signal content does,
+    not just noise) yet still be a bad match for the preamble template.
+    A steady tone is the deterministic trigger already on record in
+    docs/todo.md's "steady-carrier interferer" item -- metric ~1.0,
+    wins the argmax outright, but resembles the 24-carrier template at
+    no frequency. Both implementations must reject it, and must still
+    accept the same clean signal right after it."""
+    from sstvae.modem import sync as sync_ref
+
+    fs = 8000
+    lead_n = int(2.0 * fs)
+    t = np.arange(lead_n) / fs
+    tone = 3.0 * np.sin(2 * np.pi * 1400 * t)
+    wave = _mode_a_wave(seed=6)
+    y = np.concatenate([tone, wave[800:]])  # config.LEADIN_SAMPLES == 800
+    z = to_baseband(y)
+
+    with pytest.raises(sync_ref.SyncError):
+        sync_ref.acquire(z)
+    with pytest.raises(Exception):
+        native.sync.acquire(z)
+
+    clean = np.concatenate([np.zeros(lead_n), wave[800:]])
+    zc = to_baseband(clean)
+    ref = sync_ref.acquire(zc)
+    got = native.sync.acquire(zc)
+    assert got[0] == ref.preamble_start == lead_n
+    assert abs(got[1] - ref.freq_offset) < SYNC_TOL
 
 
 def test_sync_search_window_is_honoured(native):

@@ -506,6 +506,35 @@ like a widget — an offset pink rectangle — which is how it survived a
 commit. The meter only draws while listening, so no idle screenshot
 shows it.
 
+## Wide search and drift tracking (2026-08-11)
+
+`RxConfig::blind_wide` and `RxConfig::drift_track` (see docs/todo.md,
+"Wider acquisition search" and "Frequency drift during a transmission")
+reach the Android app through `Settings > Receive`: a "Wide frequency
+search" switch and an off/slow/fast "Track drift" combo, both persisted
+in `QSettings` (`receive/blindWide`, `receive/driftTrack`) the same way
+`showTechnical` and `saveToGallery` are.
+
+Two things worth not re-deriving. **Both are read once, into the
+`RxConfig` `Session::start()` builds**, not consulted continuously the
+way `show_technical`/`save_to_gallery` are — there is no running
+poller for them to reach, so a change takes effect on the *next* Start,
+same as the input device picker, and both controls are disabled while
+listening for the same reason. And **`drift_track` is validated through
+`modem::drift_track_from_name` rather than trusted as the raw QSettings
+string**, on both the read at startup and the write from QML: a stored
+value from a different app version is a real possibility here in a way
+it mostly isn't on the desktop (Settings dialogs there round-trip a
+whole `Config` object with its own version and unknown-key handling),
+and an invalid string falling through to the C++ side would either
+throw where nothing expects it or silently mean something other than
+what the switch shows.
+
+The phone's own use cases are why `drift_track` matters more here than
+on the desktop app: VHF FM satellites and EME are exactly where "fast"
+earns its cost, while HF with a fixed station is the case the default
+(off) is tuned for.
+
 ## Two device-measured behaviours worth knowing
 
 Both from Andrew's 2026-08-08 run, and both now handled rather than

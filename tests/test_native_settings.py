@@ -94,6 +94,8 @@ NON_DEFAULT = {
         "buffer_seconds": 95.5,
         "poll_interval": 11.0,
         "blind_search_seconds": 30.0,
+        "blind_wide": True,
+        "drift_track": "fast",
         "end_grace": 6.5,
         "save_size": "320x240",
         "save_audio": True,

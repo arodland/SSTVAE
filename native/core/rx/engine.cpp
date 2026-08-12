@@ -128,7 +128,7 @@ std::optional<FoundReception> find_new_reception(
     const modem::Modem& modem, std::span<const double> samples,
     std::span<const std::complex<double>> z, std::int64_t buf_start,
     const std::deque<std::int64_t>& finished, std::int64_t epsilon,
-    int max_tries = 4) {
+    modem::DriftTrack drift_track = modem::DriftTrack::Off, int max_tries = 4) {
     const auto n = static_cast<std::int64_t>(samples.size());
     int tries = 0;
     for (const auto& [span_lo, span_hi] : free_spans(n, buf_start, finished, epsilon)) {
@@ -136,14 +136,16 @@ std::optional<FoundReception> find_new_reception(
         while (lo < span_hi && tries < max_tries) {
             sync::Acquisition acq{};
             try {
-                acq = sync::acquire(z, config::PREAMBLE_THRESHOLD, 2,
+                acq = sync::acquire(z, config::PREAMBLE_THRESHOLD,
+                                    config::ACQUIRE_MAX_BINS,
                                     sync::SearchWindow{lo, span_hi});
             } catch (const sync::SyncError&) {
                 break;
             }
             ++tries;
             try {
-                modem::DemodResult r = modem.demodulate(samples, window_s(lo, span_hi));
+                modem::DemodResult r =
+                    modem.demodulate(samples, window_s(lo, span_hi), drift_track);
                 const std::int64_t start = buf_start + r.preamble_start;
                 return FoundReception{std::move(r), start};
             } catch (const sync::SyncError&) {
@@ -359,7 +361,7 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
         try {
             const std::vector<std::complex<double>> z = dsp::to_baseband(samples);
             found = find_new_reception(modem, samples, z, buf_start, finished_starts,
-                                       epsilon);
+                                       epsilon, config.drift_track);
         } catch (const std::exception&) {
             // One bad poll must not end the session.
             found = std::nullopt;
@@ -391,7 +393,10 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
                 for (const auto& mode : config::MODES)
                     timescales.push_back(
                         std::min(mode.duration_s, config.blind_search_seconds));
-                blind_acc.emplace(55.0, 1.7, 8, 4.0, std::nullopt, std::move(timescales));
+                blind_acc.emplace(config.blind_wide ? config::BLIND_WIDE_MAX_OFFSET_HZ
+                                                    : config::BLIND_MAX_OFFSET_HZ,
+                                  config::BLIND_BIN_STEP_HZ, 8, 4.0, std::nullopt,
+                                  std::move(timescales));
                 blind_acc_pushed = buf_start;
             }
             const auto new_lo = *blind_acc_pushed - buf_start;
@@ -414,7 +419,8 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
             std::optional<modem::BlindDemodResult> rb;
             if (ba) {
                 try {
-                    rb = modem.demodulate_blind(samples, std::nullopt, ba);
+                    rb = modem.demodulate_blind(samples, std::nullopt, ba,
+                                                config.drift_track);
                 } catch (const sync::SyncError&) {
                     rb = std::nullopt;
                 } catch (const std::exception&) {
@@ -579,7 +585,8 @@ void decode_loop_low_cpu(RingBuffer& ring, const Decoder& decode, SharedState& s
 
         sync::Acquisition acq{};
         try {
-            acq = sync::acquire(dsp::to_baseband(samples), config::PREAMBLE_THRESHOLD, 2,
+            acq = sync::acquire(dsp::to_baseband(samples), config::PREAMBLE_THRESHOLD,
+                                config::ACQUIRE_MAX_BINS,
                                 sync::SearchWindow{search_lo, search_hi});
         } catch (const std::exception&) {
             last_search_pos = static_cast<std::int64_t>(total);
@@ -591,7 +598,8 @@ void decode_loop_low_cpu(RingBuffer& ring, const Decoder& decode, SharedState& s
             // The same window the hit came from, so demodulate cannot
             // lock a different (older, already-saved) preamble than the
             // one just found -- see find_new_reception above.
-            r = modem.demodulate(samples, window_s(search_lo, search_hi));
+            r = modem.demodulate(samples, window_s(search_lo, search_hi),
+                                 config.drift_track);
         } catch (const std::exception&) {
             last_search_pos = static_cast<std::int64_t>(total);
             continue;  // a spurious preamble-shaped hit; keep listening
@@ -641,7 +649,8 @@ void decode_loop_low_cpu(RingBuffer& ring, const Decoder& decode, SharedState& s
         const std::int64_t lo = std::max<std::int64_t>(0, reception_start - buf_start);
         try {
             r = modem.demodulate(samples,
-                                 window_s(lo, static_cast<std::int64_t>(samples.size())));
+                                 window_s(lo, static_cast<std::int64_t>(samples.size())),
+                                 config.drift_track);
         } catch (const std::exception&) {
             // The transmission was cut short or corrupted after all; go
             // back to listening rather than end the loop.

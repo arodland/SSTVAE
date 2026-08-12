@@ -5,6 +5,23 @@ gives detection plus a fractional CFO estimate that is unambiguous over
 +/- FS/(2M) = +/-25 Hz. The remaining offset is a multiple of the 50 Hz
 carrier spacing, resolved by trying integer-bin candidates against the
 known preamble template. Net tolerance comfortably exceeds +/-50 Hz.
+
+`max_bins` is that tolerance and is the *only* thing setting it out to
+about +/-700 Hz, where the sync lowpass finally takes over: detection
+itself is CFO-blind (an offset multiplies every lag-M product by one
+constant phasor, which |.| removes), so a mis-tuned signal fails here
+with "header decode failed" rather than "no preamble found". Raising it
+costs ~0.14 ms per extra candidate and, measured, returns bit-identical
+answers for every signal the narrow search already acquires -- see
+docs/todo.md, "Wider acquisition search, for a mis-tuned counterpart".
+
+That measurement covered the true preamble's own location, not every
+*other* location a real transmission's own data might produce a decent
+lag-M metric peak at. A genuinely off-frequency signal has real
+spectral content near its true offset even away from the preamble, so
+more candidates means more chances one of them resonates with that
+content instead of noise -- `TEMPLATE_SCORE_THRESHOLD` is the gate on
+that (config.py has the measurement).
 """
 
 from collections.abc import Sequence
@@ -15,6 +32,10 @@ from scipy import signal
 from scipy.fft import next_fast_len, fft, ifft
 
 from ..config import (
+    ACQUIRE_MAX_BINS,
+    BLIND_BIN_STEP_HZ,
+    BLIND_BLOCK_RES_HZ,
+    BLIND_MAX_OFFSET_HZ,
     FS,
     M,
     FRAME_SAMPLES,
@@ -23,6 +44,7 @@ from ..config import (
     PREAMBLE_REPEATS,
     PREAMBLE_SAMPLES,
     PREAMBLE_THRESHOLD,
+    TEMPLATE_SCORE_THRESHOLD,
 )
 from .dsp import freq_correct, sync_lowpass
 from .ofdm import preamble_template, pilot_template
@@ -63,13 +85,20 @@ def _autocorr_metric(z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 def acquire(
     z: np.ndarray,
     threshold: float = PREAMBLE_THRESHOLD,
-    max_bins: int = 2,
+    max_bins: int = ACQUIRE_MAX_BINS,
     search: tuple[int, int] | None = None,
 ) -> Acquisition:
     """Find the preamble in baseband signal z.
 
     `search` optionally restricts the preamble hunt to a [start, end)
     sample range (the rest of the signal is still used for frames).
+
+    `max_bins` covers +-(25 + 50*max_bins) Hz and is not an opt-in wide
+    mode: see config.ACQUIRE_MAX_BINS for why the wide search is free in
+    both sensitivity and false alarms, and nearly free in CPU -- at the
+    true preamble's own location. Away from it, `TEMPLATE_SCORE_THRESHOLD`
+    is what keeps a wider search from occasionally finding a plausible
+    but wrong header somewhere in a real transmission's own data.
     """
     if len(z) < PREAMBLE_SAMPLES + 2 * M:
         raise SyncError("signal too short")
@@ -112,7 +141,18 @@ def acquire(
         if best is None or score > best[0]:
             best = (score, lo + peak, f_cand)
 
-    _, p0, f_hat = best
+    best_score, p0, f_hat = best
+    if best_score < TEMPLATE_SCORE_THRESHOLD:
+        # The winning candidate is the *best available* one, not
+        # necessarily a *good* one -- the lag-M metric above only rules
+        # out pure noise, and real transmission data elsewhere in the
+        # buffer can pass it too (see config.TEMPLATE_SCORE_THRESHOLD).
+        # This is the second gate: no candidate here explains enough of
+        # the template's energy to trust as an actual preamble.
+        raise SyncError(
+            f"no preamble found (best candidate score {best_score:.2f} at "
+            f"{f_hat:+.1f} Hz)"
+        )
 
     # Refine CFO from the phase between successive preamble periods at
     # the now-known timing (same lag-M estimate, but noise-averaged at
@@ -135,10 +175,46 @@ class BlindAcquisition:
     metric: float  # relative confidence, not directly comparable to Acquisition.metric
 
 
+def refine_cfo(freqs: np.ndarray, scores: np.ndarray, i: int) -> float:
+    """Sub-bin CFO from the winning bin `i` and its two neighbours.
+
+    This is what lets the search grid be coarse, and it is not a
+    refinement in the "nice to have" sense -- without it a
+    `BLIND_BIN_STEP_HZ` grid hands the demodulator several Hz of
+    residual CFO, which is enough to cost the picture on its own (see
+    docs/todo.md on drift: the budget is ~±2 Hz).
+
+    Legitimate because the folded score is band-limited in CFO (again
+    see config.BLIND_BIN_STEP_HZ): the peak between two samples is
+    recoverable rather than lost. A parabola through three points is the
+    cheapest version of that, and measured it beats the old 15x-finer
+    grid's raw argmax -- 0.14-0.62 Hz of error against 0.56 Hz.
+
+    Written for *non-uniform* abscissae rather than assuming a constant
+    step, because the grid is not uniform: a shift has to be a whole
+    number of block-FFT bins, so a 12.5 Hz request against a 1.69 Hz
+    quantum lands on alternating 11.85/13.54 Hz spacings. Assuming a
+    constant step there would bias every estimate by up to half a bin,
+    silently.
+    """
+    if not 0 < i < len(freqs) - 1:
+        return float(freqs[i])
+    x0, x1, x2 = (float(freqs[j]) for j in (i - 1, i, i + 1))
+    y0, y1, y2 = (float(scores[j]) for j in (i - 1, i, i + 1))
+    d1, d2 = x1 - x0, x1 - x2
+    denom = d1 * (y1 - y2) - d2 * (y1 - y0)
+    if denom == 0:
+        return x1
+    vertex = x1 - 0.5 * (d1 * d1 * (y1 - y2) - d2 * d2 * (y1 - y0)) / denom
+    # A parabola through three noisy points can put its vertex anywhere;
+    # outside the bracketing bins it is an extrapolation, not a peak.
+    return float(np.clip(vertex, min(x0, x2), max(x0, x2)))
+
+
 def acquire_blind(
     z: np.ndarray,
-    max_offset_hz: float = 55.0,
-    bin_step_hz: float = 1.7,
+    max_offset_hz: float = BLIND_MAX_OFFSET_HZ,
+    bin_step_hz: float = BLIND_BIN_STEP_HZ,
     min_periods: int = 8,
     threshold: float = 4.0,
     search: tuple[int, int] | None = None,
@@ -190,29 +266,34 @@ def acquire_blind(
     Sf = fft(seg, n_fft)
     Tf = fft(kernel, n_fft)
 
-    best = None
-    for k in range(-n_bins, n_bins + 1):
+    # Every bin's score is kept, not just the running best, because the
+    # winner's neighbours are what refine_cfo needs; it is one float per
+    # bin next to an FFT each, so this costs nothing.
+    freqs = np.full(2 * n_bins + 1, np.nan)
+    scores = np.full(2 * n_bins + 1, -np.inf)
+    phases = np.zeros(2 * n_bins + 1, dtype=int)
+    for j, k in enumerate(range(-n_bins, n_bins + 1)):
         shift_bins = int(round(k * bin_step_hz / bin_hz))
-        f_cand = shift_bins * bin_hz
+        freqs[j] = shift_bins * bin_hz
         mf = ifft(np.roll(Sf, -shift_bins) * Tf)[lo : lo + valid_len]
         p2 = np.abs(mf) ** 2
         n_periods = len(p2) // FRAME_SAMPLES
         if n_periods < min_periods:
             continue
         folded = p2[: n_periods * FRAME_SAMPLES].reshape(n_periods, FRAME_SAMPLES).sum(axis=0)
-        phase = int(np.argmax(folded))
-        score = folded[phase] / (np.median(folded) + 1e-12)
-        if best is None or score > best[0]:
-            best = (score, phase, f_cand)
+        phases[j] = int(np.argmax(folded))
+        scores[j] = folded[phases[j]] / (np.median(folded) + 1e-12)
 
-    if best is None:
+    if not np.isfinite(scores).any():
         raise SyncError("signal too short for blind acquisition at any CFO bin")
-    score, phase, f_hat = best
+    i = int(np.argmax(scores))
+    score = float(scores[i])
     if score < threshold:
         raise SyncError(f"no periodic pilot found (peak prominence {score:.3g})")
+    f_hat = refine_cfo(freqs, scores, i)
 
-    off = (search[0] if search is not None else 0) + phase
-    return BlindAcquisition(frame_start=off, freq_offset=f_hat, metric=float(score))
+    off = (search[0] if search is not None else 0) + int(phases[i])
+    return BlindAcquisition(frame_start=off, freq_offset=f_hat, metric=score)
 
 
 class BlindAccumulator:
@@ -308,12 +389,14 @@ class BlindAccumulator:
 
     def __init__(
         self,
-        max_offset_hz: float = 55.0,
-        bin_step_hz: float = 1.7,
+        max_offset_hz: float = BLIND_MAX_OFFSET_HZ,
+        bin_step_hz: float = BLIND_BIN_STEP_HZ,
         min_periods: int = 8,
         threshold: float = 4.0,
         block_samples: int | None = None,
         window_s: float | None | Sequence[float | None] = 25.0,
+        bin_chunk: int = 128,
+        workers: int = -1,
     ) -> None:
         template = pilot_template()
         kernel = np.conj(template[::-1])
@@ -321,13 +404,19 @@ class BlindAccumulator:
         self._m = m
         self._min_periods = min_periods
         self._threshold = threshold
+        self._bin_chunk = bin_chunk
+        self._workers = workers
 
-        # Large enough that a block's own FFT still resolves
-        # bin_step_hz, and well above the kernel so overlap-save stays
-        # efficient (a 160-sample kernel against an ~8k block, not
-        # against the whole window as acquire_blind's single big FFT
-        # does).
-        min_block = int(np.ceil(FS / bin_step_hz))
+        # Sized from BLIND_BLOCK_RES_HZ, **not** from bin_step_hz: the
+        # block is chosen so overlap-save is efficient (a 160-sample
+        # kernel against a ~4700-sample block, not against the whole
+        # window as acquire_blind's single big FFT does), and the shift
+        # quantization FS/block that it buys is the finest the search
+        # grid could ever be. Tying it to the grid instead -- which is
+        # what this did while the two were the same number -- collapses
+        # the block to 640 samples the moment the grid is coarsened, and
+        # hands back most of the saving: measured, 106 ms against 33 ms.
+        min_block = int(np.ceil(FS / BLIND_BLOCK_RES_HZ))
         self._block = next_fast_len(max(min_block, 4 * m))
         self._step = self._block - (m - 1)
         if self._step <= 0:
@@ -344,6 +433,17 @@ class BlindAccumulator:
         self._shift_bins = shift_bins
         self._freqs = shift_bins * self._bin_hz
         self._kernel_f = fft(np.concatenate([kernel, np.zeros(self._block - m, dtype=complex)]))
+        # np.roll(v, -s)[j] == v[(j + s) % B], precomputed so a whole
+        # chunk of bins is one gather feeding one batched IFFT.
+        self._take = (
+            (np.arange(self._block)[None, :] + shift_bins[:, None]) % self._block
+        ).astype(np.int32)
+        # Fold geometry: pad a block's valid output up to a whole number
+        # of frame periods so the wrap is a reshape-and-sum rather than a
+        # scatter-add. np.add.at is the unbuffered ufunc.at path and is
+        # very slow; this is the same arithmetic.
+        self._fold_periods = int(np.ceil(self._step / FRAME_SAMPLES))
+        self._fold_pad = self._fold_periods * FRAME_SAMPLES - self._step
 
         # One or several decay timescales, run in parallel off the same
         # per-block matched-filter result -- see the class docstring for
@@ -384,10 +484,11 @@ class BlindAccumulator:
             )
         buf = np.concatenate([self._buf, z]) if self._buf.size else np.asarray(z, dtype=complex)
 
-        B, m, step = self._block, self._m, self._step
+        B, m, step, F = self._block, self._m, self._step, FRAME_SAMPLES
+        n_bins = len(self._shift_bins)
         pos = 0
         while pos + B <= buf.size:
-            block_f = fft(buf[pos : pos + B])
+            block_f = fft(buf[pos : pos + B], workers=self._workers)
             # mf[i] (0-indexed within the valid slice) is the matched
             # filter's response for a pilot window starting at block-
             # local index i -- the same convention acquire_blind's p2[j]
@@ -395,27 +496,32 @@ class BlindAccumulator:
             # space exactly cancels against the "-(m-1)" in a matched
             # filter's window-start-from-output-index formula, so no
             # (m - 1) belongs here).
-            abs0 = self._buf_start + pos
-            phase0 = abs0 % FRAME_SAMPLES
-            idx = (phase0 + np.arange(step)) % FRAME_SAMPLES
-            # Decay every timescale's whole array first -- cheap
+            phase0 = (self._buf_start + pos) % F
+            # One batched, threaded IFFT per chunk of CFO bins rather
+            # than one call per bin. Identical arithmetic -- the shift is
+            # still a circular shift of the block spectrum, expressed as
+            # a gather -- and chunked only to bound peak memory, since
+            # the shifted spectra are (bins x block) complex.
+            local = np.empty((n_bins, F))
+            for lo in range(0, n_bins, self._bin_chunk):
+                hi = min(lo + self._bin_chunk, n_bins)
+                mf = ifft(
+                    block_f[self._take[lo:hi]] * self._kernel_f,
+                    axis=1,
+                    workers=self._workers,
+                )
+                p2 = np.abs(mf[:, m - 1 : B]) ** 2
+                if self._fold_pad:
+                    p2 = np.concatenate([p2, np.zeros((hi - lo, self._fold_pad))], axis=1)
+                local[lo:hi] = p2.reshape(hi - lo, self._fold_periods, F).sum(axis=1)
+            # Every timescale folds in the *same* per-block matched-
+            # filter power -- only the decay each one already applied to
+            # its own history differs. Decay first, cheap
             # (n_timescales x n_bins x FRAME_SAMPLES scalars) next to the
-            # per-bin FFT below, which is why adding timescales barely
-            # moves push()'s cost.
+            # FFTs above, which is why adding timescales barely moves
+            # push()'s cost.
             self._folded *= self._decay_per_block[:, None, None]
-            for i, shift in enumerate(self._shift_bins):
-                mf = ifft(np.roll(block_f, -shift) * self._kernel_f)[m - 1 : B]
-                p2 = np.abs(mf) ** 2
-                # Every timescale folds in the *same* per-block matched-
-                # filter power -- only the decay each one already applied
-                # to its own history differs. Looped rather than
-                # vectorized across timescales: np.add.at must run once
-                # per target array to handle idx's repeats (step exceeds
-                # FRAME_SAMPLES, so each block wraps the phase several
-                # times) correctly, and n_timescales is small enough
-                # (2-3) that the loop costs nothing next to the FFT.
-                for t in range(len(self._decay_per_block)):
-                    np.add.at(self._folded[t, i], idx, p2)
+            self._folded += np.roll(local, phase0, axis=1)[None, :, :]
             self._n_valid += step
             pos += step
 
@@ -444,4 +550,8 @@ class BlindAccumulator:
             raise SyncError(f"no periodic pilot found (peak prominence {score:.3g})")
 
         phase = int(np.argmax(self._folded[t, i]))
-        return BlindAcquisition(frame_start=phase, freq_offset=float(self._freqs[i]), metric=score)
+        # Sub-bin, against the winning timescale's own scores -- the
+        # grid is coarse by design and the raw bin centre is several Hz
+        # out, which the demodulator cannot absorb. See refine_cfo.
+        f_hat = refine_cfo(self._freqs, scores[t], i)
+        return BlindAcquisition(frame_start=phase, freq_offset=f_hat, metric=score)

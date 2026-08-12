@@ -245,13 +245,23 @@ void read_receive(const Reader& r, ReceiveConfig& c) {
     r.get("buffer_seconds", c.buffer_seconds);
     r.get("poll_interval", c.poll_interval);
     r.get("blind_search_seconds", c.blind_search_seconds);
+    r.get("blind_wide", c.blind_wide);
+    r.get("drift_track", c.drift_track);
     r.get("end_grace", c.end_grace);
     r.get("save_size", c.save_size);
     r.get("save_audio", c.save_audio);
     r.get("filename_template", c.filename_template);
+    if (c.drift_track != "off" && c.drift_track != "slow" && c.drift_track != "fast") {
+        // Fall back rather than error, like `layout` above: an
+        // unrecognized value is more likely an older or newer config
+        // than a request to stop working.
+        r.notes.add(r.path("drift_track"), "unknown drift_track '" + c.drift_track +
+                                               "'; using off");
+        c.drift_track = "off";
+    }
     r.report_unknown({"autosave", "low_cpu", "buffer_seconds", "poll_interval",
-                      "blind_search_seconds", "end_grace", "save_size", "save_audio",
-                      "filename_template"});
+                      "blind_search_seconds", "blind_wide", "drift_track", "end_grace",
+                      "save_size", "save_audio", "filename_template"});
 }
 
 void read_transmit(const Reader& r, TransmitConfig& c) {
@@ -433,6 +443,8 @@ std::string to_json(const Config& c) {
           {"buffer_seconds", c.receive.buffer_seconds},
           {"poll_interval", c.receive.poll_interval},
           {"blind_search_seconds", c.receive.blind_search_seconds},
+          {"blind_wide", c.receive.blind_wide},
+          {"drift_track", c.receive.drift_track},
           {"end_grace", c.receive.end_grace},
           {"save_size", or_null(c.receive.save_size)},
           {"save_audio", c.receive.save_audio},

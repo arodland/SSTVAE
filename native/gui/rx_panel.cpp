@@ -268,6 +268,8 @@ bool ReceivePanel::start() {
     rx_config.size = rx::parse_size(config.receive.save_size);
     rx_config.once = false;
     rx_config.blind_search_seconds = config.receive.blind_search_seconds;
+    rx_config.blind_wide = config.receive.blind_wide;
+    rx_config.drift_track = modem::drift_track_from_name(config.receive.drift_track);
 
     // The decoder seam: the loop lives in sstvae_core and never links
     // onnxruntime, so the codec arrives as a function.

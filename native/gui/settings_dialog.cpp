@@ -841,6 +841,43 @@ QWidget* SettingsDialog::receive_tab() {
                                page));
     add_gap(form);
 
+    blind_wide_ = new QCheckBox(tr("Wide frequency search"), page);
+    blind_wide_->setChecked(receive.blind_wide);
+    form->addRow(blind_wide_);
+    add_check_note(form, page,
+                   style::note(tr("Picks up a station whose dial is off by up to "
+                                  "625 Hz, at some CPU cost. Only affects picking "
+                                  "up a transmission already in progress: the "
+                                  "search for the start of one is always this "
+                                  "wide, because there it is free."),
+                               page));
+    add_gap(form);
+
+    // Off/slow/fast rather than a gain: the two settings are not more
+    // and less of one thing. The loop bandwidth has to sit above the
+    // drift's own spectrum and below the channel's Doppler spread, and
+    // measured those can overlap -- so "fast" is not simply better at
+    // everything "slow" does, and neither is a safe always-on default.
+    drift_track_ = new QComboBox(page);
+    drift_track_->addItem(tr("Off"), "off");
+    drift_track_->addItem(tr("Slow (drifting radio)"), "slow");
+    drift_track_->addItem(tr("Fast (VHF, satellite)"), "fast");
+    {
+        const int i = drift_track_->findData(
+            QString::fromStdString(receive.drift_track));
+        drift_track_->setCurrentIndex(i >= 0 ? i : 0);
+    }
+    form->addRow(tr("Track drift"), drift_track_);
+    form->addRow(QString(),
+                 style::note(tr("Follows a carrier that moves during a "
+                                "transmission. Off is right for HF with a modern "
+                                "radio, which does not usually drift far enough "
+                                "to matter. Fast follows more, but disturbs a "
+                                "signal that is fading heavily rather than "
+                                "drifting."),
+                             page));
+    add_gap(form);
+
     filename_template_ =
         new QLineEdit(QString::fromStdString(receive.filename_template), page);
     form->addRow(tr("Filename"), filename_template_);
@@ -1022,6 +1059,9 @@ void SettingsDialog::apply_to(settings::Config& config) const {
     config.receive.autosave = autosave_->isChecked();
     config.receive.save_audio = save_audio_->isChecked();
     config.receive.low_cpu = low_cpu_->isChecked();
+    config.receive.blind_wide = blind_wide_->isChecked();
+    config.receive.drift_track =
+        drift_track_->currentData().toString().toStdString();
     config.receive.filename_template = filename_template_->text().toStdString();
     config.receive.save_size = save_size_->text().trimmed().toStdString();
     config.receive.buffer_seconds = buffer_seconds_->value();

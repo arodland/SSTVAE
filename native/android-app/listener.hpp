@@ -63,6 +63,13 @@ class Listener : public QObject {
     Q_PROPERTY(bool saveToGallery READ saveToGallery WRITE setSaveToGallery
                    NOTIFY changed)
     Q_PROPERTY(QString galleryError READ galleryError NOTIFY changed)
+    // Widen the search for a transmission already in progress to
+    // +-625 Hz. Off by default -- see Session::set_blind_wide.
+    Q_PROPERTY(bool blindWide READ blindWide WRITE setBlindWide NOTIFY changed)
+    // "off" | "slow" | "fast", matching the desktop's and the CLIs'
+    // spelling (config.DRIFT_TRACK_MODES) so a screenshot or a support
+    // question about one names the same three words as the other.
+    Q_PROPERTY(QString driftTrack READ driftTrack WRITE setDriftTrack NOTIFY changed)
 
 public:
     explicit Listener(QObject* parent = nullptr);
@@ -86,6 +93,10 @@ public:
     bool saveToGallery() const { return gallery_; }
     void setSaveToGallery(bool on);
     QString galleryError() const;
+    bool blindWide() const { return blind_wide_; }
+    void setBlindWide(bool on);
+    QString driftTrack() const { return drift_track_; }
+    void setDriftTrack(const QString& mode);
 
     // Send the task to the background, as Back does on a home screen.
     // What Back has to mean while a session is running -- see
@@ -114,6 +125,8 @@ private:
     bool screen_held_ = false;
     bool technical_ = false;
     bool gallery_ = false;
+    bool blind_wide_ = false;
+    QString drift_track_ = QStringLiteral("off");
     const void* last_image_ = nullptr;
 };
 

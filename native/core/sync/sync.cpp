@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numbers>
 #include <numeric>
 #include <string>
@@ -175,6 +176,18 @@ Acquisition acquire(std::span<const cdouble> z_in, double threshold, int max_bin
         }
     }
 
+    if (best_score < config::TEMPLATE_SCORE_THRESHOLD) {
+        // The winning candidate is the *best available* one, not
+        // necessarily a *good* one -- the lag-M metric above only rules
+        // out pure noise, and real transmission data elsewhere in the
+        // buffer can pass it too. This is the second gate: no candidate
+        // here explains enough of the template's energy to trust as an
+        // actual preamble.
+        throw SyncError("no preamble found (best candidate score " +
+                        std::to_string(best_score) + " at " + std::to_string(best_f) +
+                        " Hz)");
+    }
+
     std::int64_t p0 = best_p0;
     double f_hat = best_f;
 
@@ -195,6 +208,21 @@ Acquisition acquire(std::span<const cdouble> z_in, double threshold, int max_bin
     }
 
     return Acquisition{p0, f_hat, metric[n_star]};
+}
+
+double refine_cfo(std::span<const double> freqs, std::span<const double> scores,
+                  std::size_t i) {
+    if (i == 0 || i + 1 >= freqs.size()) return freqs[i];
+    const double x0 = freqs[i - 1], x1 = freqs[i], x2 = freqs[i + 1];
+    const double y0 = scores[i - 1], y1 = scores[i], y2 = scores[i + 1];
+    const double d1 = x1 - x0, d2 = x1 - x2;
+    const double denom = d1 * (y1 - y2) - d2 * (y1 - y0);
+    if (denom == 0.0) return x1;
+    const double vertex = x1 - 0.5 * (d1 * d1 * (y1 - y2) - d2 * d2 * (y1 - y0)) / denom;
+    // A parabola through three noisy points can put its vertex anywhere;
+    // outside the bracketing bins it is an extrapolation, not a peak.
+    const double lo_x = std::min(x0, x2), hi_x = std::max(x0, x2);
+    return std::min(std::max(vertex, lo_x), hi_x);
 }
 
 BlindAcquisition acquire_blind(std::span<const cdouble> z, double max_offset_hz,
@@ -236,16 +264,22 @@ BlindAcquisition acquire_blind(std::span<const cdouble> z, double max_offset_hz,
     const std::vector<cdouble> Sf = dsp::fft(pad_seg, true);
     const std::vector<cdouble> Tf = dsp::fft(pad_kernel, true);
 
+    // Every bin's score is kept, not just the running best, because the
+    // winner's neighbours are what refine_cfo needs; one double per bin
+    // next to an FFT each costs nothing.
+    const std::size_t n_cand = static_cast<std::size_t>(2 * n_bins + 1);
+    std::vector<double> cand_freqs(n_cand, 0.0);
+    std::vector<double> cand_scores(n_cand, -std::numeric_limits<double>::infinity());
+    std::vector<std::size_t> cand_phases(n_cand, 0);
     bool have_best = false;
-    double best_score = 0.0;
-    std::size_t best_phase = 0;
-    double best_f = 0.0;
     std::vector<cdouble> shifted(n_fft);
 
     for (int k = -n_bins; k <= n_bins; ++k) {
+        const std::size_t ci = static_cast<std::size_t>(k + n_bins);
         const long shift_bins = static_cast<long>(
             std::nearbyint(static_cast<double>(k) * bin_step_hz / bin_hz));
         const double f_cand = static_cast<double>(shift_bins) * bin_hz;
+        cand_freqs[ci] = f_cand;
 
         // np.roll(Sf, -shift_bins): out[i] = Sf[(i + shift_bins) mod n]
         for (std::size_t i = 0; i < n_fft; ++i) {
@@ -265,24 +299,21 @@ BlindAcquisition acquire_blind(std::span<const cdouble> z, double max_offset_hz,
                 folded[static_cast<std::size_t>(i)] +=
                     std::norm(mf[lo + p * FRAME_SAMPLES + static_cast<std::size_t>(i)]);
 
-        const std::size_t phase = argmax(folded);
-        const double score = folded[phase] / (median(folded) + 1e-12);
-        if (!have_best || score > best_score) {
-            have_best = true;
-            best_score = score;
-            best_phase = phase;
-            best_f = f_cand;
-        }
+        cand_phases[ci] = argmax(folded);
+        cand_scores[ci] = folded[cand_phases[ci]] / (median(folded) + 1e-12);
+        have_best = true;
     }
 
     if (!have_best)
         throw SyncError("signal too short for blind acquisition at any CFO bin");
+    const std::size_t best = argmax(cand_scores);
+    const double best_score = cand_scores[best];
     if (best_score < threshold)
         throw SyncError("no periodic pilot found (peak prominence " +
                         std::to_string(best_score) + ")");
 
-    return BlindAcquisition{static_cast<std::int64_t>(seg_off + best_phase), best_f,
-                            best_score};
+    return BlindAcquisition{static_cast<std::int64_t>(seg_off + cand_phases[best]),
+                            refine_cfo(cand_freqs, cand_scores, best), best_score};
 }
 
 BlindAccumulator::BlindAccumulator(double max_offset_hz, double bin_step_hz, int min_periods,
@@ -296,7 +327,14 @@ BlindAccumulator::BlindAccumulator(double max_offset_hz, double bin_step_hz, int
         kernel[i] = std::conj(templ[templ.size() - 1 - i]);
     m_ = static_cast<int>(kernel.size());
 
-    const int min_block = static_cast<int>(std::ceil(static_cast<double>(FS) / bin_step_hz));
+    // Sized from BLIND_BLOCK_RES_HZ, **not** from bin_step_hz: the block
+    // is chosen so overlap-save is efficient, and the shift quantization
+    // FS/block that it buys is the finest the search grid could ever be.
+    // Tying it to the grid -- which is what this did while the two were
+    // the same number -- collapses the block the moment the grid is
+    // coarsened and hands back most of the saving.
+    const int min_block =
+        static_cast<int>(std::ceil(static_cast<double>(FS) / config::BLIND_BLOCK_RES_HZ));
     block_ = static_cast<int>(dsp::next_fast_len(
         static_cast<std::size_t>(std::max(min_block, 4 * m_)), /*real=*/false));
     step_ = block_ - (m_ - 1);
@@ -419,6 +457,10 @@ BlindAcquisition BlindAccumulator::result() const {
     // depends on which mode (if any) is actually transmitting.
     const std::size_t scale_stride =
         shift_bins_.size() * static_cast<std::size_t>(FRAME_SAMPLES);
+    // Every (timescale, bin) score is kept rather than a running best,
+    // because refine_cfo needs the winner's two neighbours within its
+    // own timescale.
+    std::vector<double> scores(static_cast<std::size_t>(n_scales_) * shift_bins_.size(), 0.0);
     bool have_best = false;
     double best_score = 0.0;
     std::size_t best_bin = 0;
@@ -432,6 +474,7 @@ BlindAcquisition BlindAccumulator::result() const {
             const std::size_t peak = argmax(row);
             const double score =
                 row[peak] / (median(std::vector<double>(row.begin(), row.end())) + 1e-12);
+            scores[static_cast<std::size_t>(t) * shift_bins_.size() + bi] = score;
             if (!have_best || score > best_score) {
                 have_best = true;
                 best_score = score;
@@ -449,7 +492,14 @@ BlindAcquisition BlindAccumulator::result() const {
                                       static_cast<std::size_t>(FRAME_SAMPLES));
     const std::size_t phase = argmax(row);
 
-    return BlindAcquisition{static_cast<std::int64_t>(phase), freqs_[best_bin], best_score};
+    // Sub-bin, against the winning timescale's own per-bin scores -- the
+    // grid is coarse by design and the raw bin centre is several Hz out,
+    // which the demodulator cannot absorb. See refine_cfo.
+    const std::span<const double> scale_scores(
+        scores.data() + static_cast<std::size_t>(best_scale) * shift_bins_.size(),
+        shift_bins_.size());
+    return BlindAcquisition{static_cast<std::int64_t>(phase),
+                            refine_cfo(freqs_, scale_scores, best_bin), best_score};
 }
 
 }  // namespace sstvae::sync

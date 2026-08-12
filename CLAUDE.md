@@ -1425,7 +1425,26 @@ need when `--native` fails and you want to know *where*.
   ragged comb from point-sampling being the worst available lie on a
   display whose whole job is "are you tuned right".
 - `docs/todo.md` — open work items with the reasoning behind them.
-  Two on the acquisition side. **A steady carrier is a perfect-looking
+  Two acquisition items are now **implemented** (2026-08-11) and their
+  sections record the reasoning rather than outstanding work:
+  `config.ACQUIRE_MAX_BINS` is 12 (+-625 Hz) unconditionally,
+  `config.BLIND_BIN_STEP_HZ` is 12.5 with `sync.refine_cfo` recovering
+  the sub-bin peak, and the +-625 Hz *blind* range plus the off/slow/fast
+  drift loop are settings (`RxConfig.blind_wide` / `drift_track`,
+  `--blind-wide` / `--drift-track`, Settings > Receive). **The three
+  acquisition/blind defaults now live in `config.py` for the reason the
+  parity shims already document** -- porting the change turned up four
+  hardcoded copies in `native/` (`sync::acquire(z, PREAMBLE_THRESHOLD,
+  2, ...)` and `acquire_blind(z, 55.0, 1.7, ...)`), any of which would
+  have left the live receive loop on the old range with every test still
+  passing. One item remains open on the drift side and is pinned as a
+  test: the loop's pull-in is +-`CFO_PULL_HZ` of *initial* residual, and
+  on the blind path `acquire_blind` estimates the middle of its window,
+  so past ~7 Hz of drift across the window the measurement aliases and
+  the loop is worse than off. Anchoring it mid-window and running
+  outward is the fix; not implemented.
+  Two other items were open; one of them is now mostly closed as a side
+  effect of a fix below. **A steady carrier is a perfect-looking
   preamble** (2026-08-09): `_autocorr_metric` is normalized by the
   window's own energy, so any pure tone reads exactly **1.000** — above
   what a real preamble reaches in noise — and `acquire` takes a hard
@@ -1439,7 +1458,69 @@ need when `--native` fails and you want to know *where*.
   chirp. And a wider acquisition search so a mis-tuned counterpart
   still decodes — measured, the demod path is entirely independent of
   absolute centre frequency (8.73 dB latent SNR from 900 to 2100 Hz), so
-  this is acquisition-side only. A third item, "acquisition costs
+  this is acquisition-side only. **Measured end to end 2026-08-11, and
+  the answer is one constant**: `sync.acquire`'s `max_bins` is the whole
+  limit out to ±700 Hz, where the sync lowpass finally binds — the claim
+  that `sync_lowpass` binds *first* was wrong, and the stock 850 Hz
+  filter carries acquisition to ±600 Hz at 0 dB unchanged. Detection is
+  CFO-blind by construction, so widening cannot move the false-alarm
+  rate *at the true preamble's own location*, and `max_bins` 2 vs 12
+  returned the identical preamble start and CFO in 160/160 trials from
+  0 to −7 dB there. **That measurement did not cover a different
+  location — found 2026-08-13, against a real mis-tuned recording, not
+  a synthetic one**: real transmission data elsewhere in the same
+  buffer can clear `PREAMBLE_THRESHOLD` too (that threshold was
+  calibrated against pure noise), and a genuinely off-frequency signal
+  has real spectral content near its own true offset even away from
+  the preamble — so widening the bin search is more likely to resonate
+  with *that* than with unrelated noise, and can win a false lock deep
+  in a transmission's own frame data that Golay-decodes a plausible
+  header. `config.TEMPLATE_SCORE_THRESHOLD` (0.40) is the fix: a second
+  gate on the winning candidate's template-match quality, calibrated
+  against the measured false lock (score 0.338) and ~1400 synthetic
+  trials at the sensitivity floor (lowest score for a real acquisition:
+  0.430). See docs/todo.md's "A false lock this widening opened up" —
+  it also mostly closes the steady-carrier-tone item two paragraphs up,
+  as a side effect. It costs 0.14 ms per candidate
+  (3.4 ms total, ~5% of one acquisition), so it is not the opt-in this
+  file once implied. **The blind path is the opposite case**:
+  `acquire_blind`/`BlindAccumulator` search CFO directly, so widening it
+  naively is ~linear in the range — but **the 1.7 Hz grid is ~15× finer
+  than the signal supports**: for a fixed lag the matched filter is a
+  DTFT of a *160-sample* sequence, so `|mf|²` is band-limited in CFO and
+  determined by samples every FS/(2·160) = 25 Hz. At a 12.5 Hz step
+  detection is unchanged to −10 dB, and a parabola through the winning
+  bin and its neighbours returns a *better* frequency estimate than
+  today's raw 1.7 Hz argmax (0.14–0.62 Hz against 0.56 Hz). Net: ±625 Hz
+  costs 516 ms against today's ±55 Hz at 273 ms — 11× the range for
+  under 2× the CPU — or, at today's range, 131 ms, which is the Android
+  battery item. Batched threaded IFFTs and a reshape-fold instead of
+  `np.add.at` are bit-identical but only ~1.6× together: the IFFTs are
+  the work. No sensitivity or false-alarm cost either way (noise-floor
+  score 1.34 → 1.38 against a threshold of 4.0). A fourth item is
+  **frequency drift during a transmission**, where the receiver corrects
+  once from the preamble and never looks again: the budget is ~±2 Hz of
+  *total excursion* whatever the mode (0.06 Hz/s for mode A, 0.02 for
+  mode C), it fails with every frame received and the beacon decoding,
+  and the cause is pilot-rate aliasing rather than ICI — pilots are
+  6.94 Hz apart and at 3.2 Hz of residual the phase advances 166° per
+  frame, so the interpolated channel estimate is simply wrong. A
+  second-order loop on the pilot *common* phase (the slope across
+  carriers is timing and is orthogonal) reaches the oracle at every rate
+  to 2 Hz/s and costs nothing at zero drift, but its gains are squeezed
+  from both sides: α=0.3 chases `mpd` fading for 2.3 dB, and α=0.1 is
+  the setting that fails on fast Ornstein-Uhlenbeck wander — the loop
+  bandwidth must sit above the drift's spectrum and below the channel's
+  Doppler spread, and those can overlap, so **no compiled-in pair of
+  gains serves both**. An oracle handed the true frequency path holds
+  3.8 dB in every cell where every causal loop fails, so the ceiling is
+  the estimator and a non-causal smoother over the whole frame sequence
+  has that gap available (nothing here is real-time). Two traps: the
+  correction must be a continuous ramp *within* the frame, not one
+  constant phase per frame (a constant only redoes what the pilot EQ
+  already does), and an oracle must remove the true path **minus
+  `acq.freq_offset`** — removing the raw path double-corrects, which is
+  invisible for a ramp starting at zero and ruinous for wander. A third item, "acquisition costs
   ~1 dB of threshold at large frequency offset", was **withdrawn
   2026-07-26**: it did not reproduce at 25 seeds per point and was an
   artifact of 6-seed sampling. Acquisition near threshold succeeds
