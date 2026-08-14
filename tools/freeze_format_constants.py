@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""Freeze the RNG-derived parts of the on-air format, and audit them.
+"""Freeze the RNG-derived part of the on-air format, and audit it.
 
     tools/freeze_format_constants.py            # write the frozen data
     tools/freeze_format_constants.py --verify   # does numpy still agree?
 
 ## What this is for
 
-Two parts of the waveform were originally produced by seeding numpy: the
-pilot symbol's QPSK quadrants (`PILOT_SEED`) and the per-group
-interleaver permutations (`INTERLEAVER_SEED + g`). Both are **part of
-the on-air format** -- two stations must agree on them exactly or the
-picture is noise.
+The per-group interleaver permutations (`INTERLEAVER_SEED + g`) were
+produced by seeding numpy, and they are **part of the on-air format** --
+two stations must agree on them exactly or the picture is noise.
+
+(The pilot sequence used to be here too, as a seeded QPSK draw. As of
+PROTOCOL_VERSION 3 it is Zadoff-Chu -- a closed form over exact
+integers, `config.PILOT_PHASE_NUM` -- so there is no generator whose
+behaviour it could depend on and nothing here to audit. That is a
+strictly better place to be than freezing a draw, and where any future
+format constant should aim.)
 
 Deriving them at import time makes numpy's PCG64, its bounded-integer
 draw and its shuffle loop part of that format. numpy commits to stream
@@ -21,13 +26,12 @@ numpy versions unable to decode each other.
 So the values are written down, and the program reads what is written
 down:
 
-* `config.PILOT_QUADRANTS` -- 24 integers, a literal in the source.
 * `sstvae/modem/interleaver_perms.npy` -- 3 x 50,600 uint16, too large
   for a literal, committed beside the module that uses it.
 
 ## `--verify` is information, not a gate
 
-It re-derives both from the seeds with the *current* numpy and reports
+It re-derives them from the seed with the *current* numpy and reports
 whether they still match. **A mismatch does not mean the frozen data is
 wrong.** It means numpy changed, and the correct response is to change
 nothing: the format is what is frozen. Record the finding, and note that
@@ -53,11 +57,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 PERMS_PATH = ROOT / "sstvae" / "modem" / "interleaver_perms.npy"
-
-
-def derive_pilot_quadrants(seed: int, nc: int) -> np.ndarray:
-    """How config.PILOT_QUADRANTS was originally produced."""
-    return np.random.default_rng(seed).integers(0, 4, nc)
 
 
 def derive_interleaver_perms(seed: int, group_latents: int, groups: int,
@@ -92,9 +91,6 @@ def main() -> int:
         GROUP_LATENTS,
         INTERLEAVER_SEED,
         LATENT_GROUPS,
-        NC,
-        PILOT_QUADRANTS,
-        PILOT_SEED,
         TRANSMIT_LATENTS_PER_GROUP,
     )
 
@@ -102,21 +98,11 @@ def main() -> int:
         raise SystemExit("GROUP_LATENTS no longer fits in uint16; widen the "
                          "frozen permutation dtype and regenerate")
 
-    derived_pilot = derive_pilot_quadrants(PILOT_SEED, NC)
     derived_perms = derive_interleaver_perms(
         INTERLEAVER_SEED, GROUP_LATENTS, LATENT_GROUPS, TRANSMIT_LATENTS_PER_GROUP)
 
     if args.verify:
         ok = True
-        frozen_pilot = np.asarray(PILOT_QUADRANTS)
-        if np.array_equal(frozen_pilot, derived_pilot):
-            print(f"pilot quadrants:  numpy {np.__version__} still agrees")
-        else:
-            ok = False
-            print(f"pilot quadrants:  DIFFER under numpy {np.__version__}")
-            print(f"   frozen:  {list(map(int, frozen_pilot))}")
-            print(f"   derived: {list(map(int, derived_pilot))}")
-
         if not PERMS_PATH.exists():
             ok = False
             print(f"interleaver:      {PERMS_PATH} is missing")
@@ -161,7 +147,6 @@ def main() -> int:
     np.save(PERMS_PATH, derived_perms, allow_pickle=False)
     print(f"wrote {PERMS_PATH} {derived_perms.shape} "
           f"({PERMS_PATH.stat().st_size / 1024:.0f} KiB)")
-    print(f"pilot quadrants for config.py: {list(map(int, derived_pilot))}")
     return 0
 
 

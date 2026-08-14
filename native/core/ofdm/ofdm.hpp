@@ -35,9 +35,9 @@ std::span<const cdouble> mod_matrix();
 // (NC, M) baseband demodulation matrix over one useful window, row-major.
 std::span<const cdouble> demod_matrix();
 
-// The fixed unit-magnitude QPSK sequence used for the preamble and the
-// frame pilots. Built from config::PILOT_QUADRANTS, which is generated
-// from the Python reference -- see the note in config.hpp.
+// The fixed unit-magnitude Zadoff-Chu sequence used for the preamble and
+// the frame pilots. Built from config::PILOT_PHASE_NUM, which is
+// generated from the Python reference -- see the note in config.hpp.
 const std::array<cdouble, NC>& pilot_sequence();
 
 // (n_sym, NC) complex symbols, row-major -> real waveform of

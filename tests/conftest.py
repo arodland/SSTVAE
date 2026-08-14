@@ -114,6 +114,7 @@ def _native_adapters(native):
         ACQUIRE_MAX_BINS,
         BLIND_BIN_STEP_HZ,
         BLIND_MAX_OFFSET_HZ,
+    BLIND_SCORE_THRESHOLD,
         MODES_BY_INDEX,
         PREAMBLE_THRESHOLD,
     )
@@ -159,7 +160,7 @@ def _native_adapters(native):
 
     def acquire_blind(z, max_offset_hz=BLIND_MAX_OFFSET_HZ,
                       bin_step_hz=BLIND_BIN_STEP_HZ, min_periods=8,
-                      threshold=4.0, search=None):
+                      threshold=BLIND_SCORE_THRESHOLD, search=None):
         from sstvae.modem.sync import BlindAcquisition
 
         return _sync_call(native.sync.acquire_blind, BlindAcquisition, z,
@@ -174,7 +175,8 @@ def _native_adapters(native):
     class BlindAccumulator:
         def __init__(self, max_offset_hz=BLIND_MAX_OFFSET_HZ,
                      bin_step_hz=BLIND_BIN_STEP_HZ, min_periods=8,
-                     threshold=4.0, block_samples=None, window_s=25.0,
+                     threshold=BLIND_SCORE_THRESHOLD, block_samples=None,
+                     window_s=25.0,
                      bin_chunk=128, workers=-1):
             # The reference accepts a bare float/None as shorthand for one
             # timescale; the binding always takes a list.

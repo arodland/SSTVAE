@@ -6,6 +6,44 @@ reasoning doesn't have to be rediscovered.
 Completed items are summarized below; the full measurements and
 reasoning behind each live in `docs/todo-done.md`.
 
+## Completed: pilot crest factor
+
+**Implemented 2026-08-14, `PROTOCOL_VERSION` 3.** The frozen QPSK pilot
+had 7.9 dB envelope PAPR against a clip threshold ~1 dB above the mean,
+making it the most heavily clipped symbol in the waveform *and* the
+channel-estimate reference, the preamble and the blind template.
+Replaced with a minimized crest-factor phase set at 0.99 dB
+(`PILOT_PHASE_NUM`, exact integer numerators of a rational turn):
+**~+2.5 dB of latent SNR**, acquisition improved, with
+`CLIP_HEADROOM_DB` 0.5 → 0.0 and `BLIND_SCORE_THRESHOLD` 4.0 → 9.0 as
+part of the same change. **Zadoff-Chu is disqualified** — its
+delay-Doppler equivalence makes CFO and timing confusable and this
+sequence is the acquisition template — and the 0.794 latent gain the
+change introduces is deliberate and must not be corrected. **Still
+open:** a stage-2 fine-tune through the new modem (running), and the
+image-PSNR confirmation, which needs far more trials than a pilot
+comparison first suggests.
+
+## Rejected: tone reservation for PAPR
+
+**Measured 2026-08-14, both sides of the clipper: −0.180 ± 0.024 dB
+PSNR** end to end at mode B, full PEP credit given. Structural, not an
+implementation limit — the clipper is a compressor at this operating
+point (28.7% of samples above threshold), so peak reduction is the wrong
+tool, and post-clip reservation is pilot-limited to +0.13 dB. Do not
+fine-tune around the dead latents to rescue it: the ceiling with a
+decoder that pays nothing for them is +0.10 dB PSNR. Two numbers worth
+keeping: **~0.48 dB PSNR per dB of channel SNR** at the 8 dB operating
+point, and **clipping self-noise at 10.15 dB** — first-order, and what
+made the pilot work above worth doing.
+
+## Rejected: explicit Wiener shrinkage on the received latents
+
+The per-latent confidence weights already are that shrinkage. On
+`latents × weights` — the quantity the decoder actually consumes — the
+oracle headroom is 0.04 dB at mpp 8. The phantom "+1.5 dB" came from
+measuring bare `latents`.
+
 ## Completed: preamble detection against a steady-carrier interferer
 
 **Mostly closed 2026-08-13**, as a side effect of the wide-acquisition

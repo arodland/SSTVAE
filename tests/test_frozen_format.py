@@ -1,9 +1,9 @@
-"""The RNG-derived parts of the on-air format are frozen data.
+"""The derived parts of the on-air format are frozen data.
 
-Two constants were originally produced by seeding numpy: the pilot
-symbol's QPSK quadrants and the per-group interleaver permutations. Both
-are part of the waveform — two stations must agree on them exactly or
-the picture is noise, with no error to say why.
+The per-group interleaver permutations were produced by seeding numpy,
+and the pilot phases by a numerical crest-factor search. Both are part
+of the waveform — two stations must agree on them exactly or the picture
+is noise, with no error to say why.
 
 **The direction of authority is what these tests protect.** If a future
 numpy changed its generator stream, the correct behaviour is to keep
@@ -12,8 +12,8 @@ numpy. That is only possible if the values are written down rather than
 re-derived at import, so these tests assert they are written down and
 that nothing reaches for the RNG.
 
-`tools/freeze_format_constants.py --verify` re-derives both from the
-seeds and reports whether numpy still agrees. It is deliberately a
+`tools/freeze_format_constants.py --verify` re-derives the interleaver
+from its seed and reports whether numpy still agrees. It is deliberately a
 script rather than a test: wiring it into CI would make numpy's current
 behaviour authoritative over the format, and the obvious way to fix a
 red build would be to regenerate the frozen data — silently changing
@@ -26,18 +26,52 @@ from sstvae import config
 from sstvae.modem import framing, ofdm
 
 
-def test_pilot_quadrants_are_a_literal():
+def test_pilot_phases_are_a_literal():
     """Not an array, not computed — something a person can read in a diff."""
-    assert isinstance(config.PILOT_QUADRANTS, tuple)
-    assert len(config.PILOT_QUADRANTS) == config.NC
-    assert all(isinstance(k, int) and 0 <= k < 4 for k in config.PILOT_QUADRANTS)
+    assert isinstance(config.PILOT_PHASE_NUM, tuple)
+    assert len(config.PILOT_PHASE_NUM) == config.NC
+    assert all(isinstance(k, int) and 0 <= k < config.PILOT_PHASE_DEN
+               for k in config.PILOT_PHASE_NUM)
 
 
-def test_pilot_sequence_comes_from_the_frozen_quadrants():
-    expected = np.exp(1j * (np.pi / 4 + np.pi / 2 * np.asarray(config.PILOT_QUADRANTS)))
+def test_pilot_sequence_comes_from_the_frozen_phases():
+    expected = np.exp(2j * np.pi * np.asarray(config.PILOT_PHASE_NUM)
+                      / config.PILOT_PHASE_DEN)
     assert np.array_equal(ofdm.pilot_sequence(), expected)
     # Unit magnitude is the on-air contract, independent of the values.
     assert np.max(np.abs(np.abs(ofdm.pilot_sequence()) - 1.0)) < 1e-15
+
+
+def test_pilot_phases_are_stated_as_an_integer_fraction_of_a_turn():
+    """Radians would make the pilot a property of the libm.
+
+    The values are phases, and the obvious way to write a phase is a
+    float in radians. That is exactly what must not happen here: sin/cos
+    of the same decimal differ across libms and architectures, so two
+    correct implementations would transmit measurably different pilots.
+    An integer numerator over an integer denominator has one value
+    everywhere. See ofdm._phasor for the same argument about the carrier
+    tables.
+    """
+    assert isinstance(config.PILOT_PHASE_DEN, int)
+    assert all(isinstance(k, int) for k in config.PILOT_PHASE_NUM)
+
+
+def test_the_pilot_is_low_crest_factor():
+    """The point of the sequence, asserted rather than assumed.
+
+    A pilot with a high crest factor is the most heavily clipped symbol
+    in the waveform *and* the channel-estimate reference, which cost
+    ~2.5 dB of latent SNR before this was measured. Bound is loose --
+    the frozen set is 0.99 dB and the old QPSK draw was 7.9 — so this
+    catches a replacement that abandons the property, not drift.
+    """
+    os_ = 64
+    t = np.arange(config.NC * os_) / (config.NC * os_)
+    e = np.exp(2j * np.pi * np.outer(t, np.arange(config.NC)))
+    a = np.abs(e @ ofdm.pilot_sequence())
+    papr_db = 10 * np.log10(np.max(a ** 2) / np.mean(a ** 2))
+    assert papr_db < 2.0, f"pilot envelope PAPR {papr_db:.2f} dB"
 
 
 def test_interleaver_perms_are_loaded_not_derived():

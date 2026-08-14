@@ -36,6 +36,7 @@ from ..config import (
     BLIND_BIN_STEP_HZ,
     BLIND_BLOCK_RES_HZ,
     BLIND_MAX_OFFSET_HZ,
+    BLIND_SCORE_THRESHOLD,
     FS,
     M,
     FRAME_SAMPLES,
@@ -216,7 +217,7 @@ def acquire_blind(
     max_offset_hz: float = BLIND_MAX_OFFSET_HZ,
     bin_step_hz: float = BLIND_BIN_STEP_HZ,
     min_periods: int = 8,
-    threshold: float = 4.0,
+    threshold: float = BLIND_SCORE_THRESHOLD,
     search: tuple[int, int] | None = None,
 ) -> BlindAcquisition:
     """Recover frame-boundary timing and carrier frequency purely from the
@@ -392,7 +393,7 @@ class BlindAccumulator:
         max_offset_hz: float = BLIND_MAX_OFFSET_HZ,
         bin_step_hz: float = BLIND_BIN_STEP_HZ,
         min_periods: int = 8,
-        threshold: float = 4.0,
+        threshold: float = BLIND_SCORE_THRESHOLD,
         block_samples: int | None = None,
         window_s: float | None | Sequence[float | None] = 25.0,
         bin_chunk: int = 128,

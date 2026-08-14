@@ -8,7 +8,8 @@ dsp.to_baseband, where carrier k sits at bin (k - 11) * RS Hz.
 import numpy as np
 
 from ..config import (
-    FS, RS, NC, M, NCP, NSYM, CARRIER0, FCENTER, PILOT_QUADRANTS,
+    FS, RS, NC, M, NCP, NSYM, CARRIER0, FCENTER,
+    PILOT_PHASE_NUM, PILOT_PHASE_DEN,
 )
 
 CARRIER_FREQS = CARRIER0 + RS * np.arange(NC)  # passband, Hz
@@ -68,16 +69,17 @@ def demod_window(z: np.ndarray, start: int, backoff: int = 0) -> np.ndarray:
 
 
 def pilot_sequence() -> np.ndarray:
-    """Fixed unit-magnitude QPSK sequence used for preamble and frame pilots.
+    """Fixed unit-magnitude sequence used for preamble and frame pilots.
 
-    Built from the frozen `config.PILOT_QUADRANTS` rather than re-drawn
-    from `np.random.default_rng(PILOT_SEED)`. This sequence is part of
-    the on-air format: if a future numpy changed its generator stream,
-    the right behaviour is to keep transmitting the same pilots, not to
-    follow numpy. See the note in config.py.
+    Zadoff-Chu, built from `config.PILOT_PHASE_NUM` as an exact rational
+    turn rather than from the raw `-pi*u*k^2/NC`, for the same reason
+    `_phasor` reduces first: the raw argument reaches -69 rad, where
+    sin/cos are a property of the libm rather than of the signal. Unit
+    magnitude is not negotiable -- it is what makes the channel estimate
+    equally good on every carrier.
     """
-    phases = np.pi / 4 + np.pi / 2 * np.asarray(PILOT_QUADRANTS)
-    return np.exp(1j * phases)
+    num = np.asarray(PILOT_PHASE_NUM) % PILOT_PHASE_DEN
+    return np.exp(2j * np.pi * num / PILOT_PHASE_DEN)
 
 
 def preamble_waveform() -> np.ndarray:

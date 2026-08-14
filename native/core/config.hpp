@@ -57,12 +57,11 @@ inline constexpr int TRANSMIT_LATENTS_PER_GROUP = 50600;
 inline constexpr int DROPPED_LATENTS_PER_GROUP = 2200;
 inline constexpr int DEMOD_BACKOFF = 6;
 inline constexpr int INTERLEAVER_SEED = 1000;
-inline constexpr int PILOT_SEED = 42;
-inline constexpr int PROTOCOL_VERSION = 2;
+inline constexpr int PROTOCOL_VERSION = 3;
 inline constexpr int ACQUIRE_MAX_BINS = 12;
 
 inline constexpr double PREAMBLE_THRESHOLD = 0x1.ae147ae147ae1p-2;  // 0.42
-inline constexpr double CLIP_HEADROOM_DB = 0x1.0000000000000p-1;  // 0.5
+inline constexpr double CLIP_HEADROOM_DB = 0x0.0p+0;  // 0.0
 inline constexpr double SNR_REF_BW_HZ = 0x1.3880000000000p+11;  // 2500.0
 inline constexpr double BLIND_BIN_STEP_HZ = 0x1.9000000000000p+3;  // 12.5
 inline constexpr double BLIND_BLOCK_RES_HZ = 0x1.b333333333333p+0;  // 1.7
@@ -73,6 +72,7 @@ inline constexpr double DRIFT_SLOW_BETA = 0x1.47ae147ae147bp-7;  // 0.01
 inline constexpr double DRIFT_FAST_ALPHA = 0x1.3333333333333p-2;  // 0.3
 inline constexpr double DRIFT_FAST_BETA = 0x1.999999999999ap-5;  // 0.05
 inline constexpr double TEMPLATE_SCORE_THRESHOLD = 0x1.999999999999ap-2;  // 0.4
+inline constexpr double BLIND_SCORE_THRESHOLD = 0x1.2000000000000p+3;  // 9.0
 
 // Post-clip transmit filter, Hz.
 inline constexpr double TX_BANDPASS_LO = 0x1.a900000000000p+9;  // 850.0
@@ -85,22 +85,22 @@ inline constexpr int BEACON_SYNC_LEN = 13;
 inline constexpr std::array<int, BEACON_SYNC_LEN> BEACON_SYNC = {1, 1, 1, 1, 1, -1, -1, 1, 1, -1, 1, -1, 1};
 
 // --- pilot sequence --------------------------------------------------
-// Copied from config.PILOT_QUADRANTS, which is a frozen literal -- not
-// re-derived here, and not re-derived by Python either.
+// Copied from config.PILOT_PHASE_NUM -- not re-derived here.
 //
-// These 24 QPSK symbols are part of the on-air format. They were
-// originally drawn from np.random.default_rng(PILOT_SEED), but nothing
-// draws them any more: doing so would make numpy's PCG64 and its
-// bounded-integer draw part of the format, so a future numpy that
-// changed either would change what this program transmits. If that
-// ever happens the right answer is to keep sending these, which is
-// only possible because they are written down.
+// A minimized crest-factor phase set, carried as an exact rational
+// turn: phi_k = 2*pi * NUM[k] / DEN. Integers rather than radians
+// because sin/cos disagree between libms and between x86-64 and Apple
+// silicon, which would make the pilot a property of the machine rather
+// than of the format -- and this file exists so C++ evaluates the
+// *same expression* on the *same values* Python does.
 //
-// Quadrant indices rather than phases or complex values, so C++
-// evaluates the *same expression* Python does: pi/4 + pi/2 * k.
-inline constexpr std::array<int, NC> PILOT_QUADRANTS = {
-    0, 3, 2, 1, 1, 3, 0, 2, 0, 0, 2, 3,
-    2, 3, 2, 3, 2, 0, 3, 1, 2, 1, 0, 3,
+// Not Zadoff-Chu, deliberately: see the note in config.py. Its
+// delay-Doppler equivalence makes CFO and timing confusable, and this
+// sequence is also the acquisition template.
+inline constexpr int PILOT_PHASE_DEN = 1024;
+inline constexpr std::array<int, NC> PILOT_PHASE_NUM = {
+    725, 497, 359, 322, 193, 849, 710, 345, 960, 628, 347, 570,
+    551, 678, 448, 713, 839, 90, 236, 545, 1020, 403, 985, 304,
 };
 
 // --- modes -----------------------------------------------------------

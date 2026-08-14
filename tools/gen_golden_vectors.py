@@ -269,7 +269,7 @@ def build_ofdm(c: Corpus) -> None:
           "(NC, M) baseband demodulation matrix", tol=PLATFORM_TOL)
 
     c.add("ofdm/pilot_sequence", ofdm.pilot_sequence().astype(np.complex128),
-          "the on-air pilot constant; see config.hpp PILOT_QUADRANTS",
+          "the on-air pilot constant; see config.hpp PILOT_PHASE_NUM",
           tol=PLATFORM_TOL)
     # The three replicas are `e @ p` -- a BLAS matvec, so not bitwise.
     c.add("ofdm/preamble_waveform", ofdm.preamble_waveform().astype(np.float64),
@@ -320,7 +320,7 @@ def build_ofdm(c: Corpus) -> None:
 def build_dsp(c: Corpus) -> None:
     from scipy import signal
 
-    from sstvae.config import FS, TX_BANDPASS
+    from sstvae.config import CLIP_HEADROOM_DB, FS, TX_BANDPASS
     from sstvae.modem import dsp
 
     # FIR designs. These are part of the waveform (the transmit bandpass
@@ -371,7 +371,10 @@ def build_dsp(c: Corpus) -> None:
     c.add("dsp/sync_lowpass", dsp.sync_lowpass(dsp.to_baseband(x)),
           tol=PLATFORM_TOL)
     c.add("dsp/papr_db", np.array([dsp.papr_db(x)]), tol=PLATFORM_TOL)
-    c.add("dsp/tx_condition", dsp.tx_condition(x, 0.5),
+    # The configured headroom, not a literal: test_golden.cpp reads the
+    # generated constant, so a literal here agrees only by coincidence and
+    # silently stops agreeing the moment the constant moves (it did).
+    c.add("dsp/tx_condition", dsp.tx_condition(x, CLIP_HEADROOM_DB),
           "clip-and-filter at the configured headroom", tol=PLATFORM_TOL)
     c.add("dsp/to_int16", dsp.to_int16(x).astype(np.int64),
           "np.round is half-to-even; std::round would differ")

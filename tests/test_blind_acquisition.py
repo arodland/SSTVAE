@@ -9,6 +9,7 @@ from sstvae.config import (
     PREAMBLE_SAMPLES,
     HEADER_SAMPLES,
     FRAME_SAMPLES,
+    BLIND_SCORE_THRESHOLD,
 )
 from sstvae.modem import Modem, beacon
 from sstvae.modem.dsp import to_baseband
@@ -263,7 +264,7 @@ def test_blind_accumulator_matches_acquire_blind_one_shot():
 
     assert streamed.frame_start == one_shot.frame_start
     assert abs(streamed.freq_offset - one_shot.freq_offset) < 2.0
-    assert streamed.metric > 4.0
+    assert streamed.metric > BLIND_SCORE_THRESHOLD
 
 
 def test_blind_accumulator_decay_forgets_stale_history():
@@ -272,10 +273,11 @@ def test_blind_accumulator_decay_forgets_stale_history():
     matched-filter power over *every* period pushed, real signal or not,
     so the score (peak / median) drifts toward 1 as the irrelevant
     fraction of history grows -- measured (not asserted here, to keep
-    this test fast): 30 s of noise prefix barely dents it (9.3 vs. an
-    undiluted ~18), 90 s roughly halves it to right at the default
-    threshold (4.6), and 180 s pushes it below threshold entirely (3.0,
-    a SyncError) even though the same signal alone locks cleanly. A
+    this test fast, and re-measured for the PROTOCOL_VERSION 3 pilot):
+    against an undiluted 38.8, a 30 s noise prefix gives 14.1, 90 s
+    gives 6.7 and 180 s gives 4.1 -- the last two below
+    BLIND_SCORE_THRESHOLD, i.e. a SyncError, even though the same signal
+    alone locks cleanly. A
     bounded-window search of just the recent audio wouldn't see any of
     that dilution, which is the whole reason acquire_blind's caller
     bounds its search window in the first place.
@@ -291,12 +293,15 @@ def test_blind_accumulator_decay_forgets_stale_history():
     noise_s = 90.0
     z_noise = rng.normal(size=int(noise_s * FS)) + 1j * rng.normal(size=int(noise_s * FS))
 
-    undecayed = BlindAccumulator(window_s=None)
+    # threshold=0 on both: this compares score *magnitudes*, and at 90 s
+    # the undecayed score is legitimately below the gate -- which is the
+    # dilution being demonstrated, not a failure to reproduce it.
+    undecayed = BlindAccumulator(window_s=None, threshold=0.0)
     undecayed.push(z_noise, 0)
     undecayed.push(z_signal, z_noise.size)
     undiluted_metric = undecayed.result().metric
 
-    decayed = BlindAccumulator(window_s=10.0)
+    decayed = BlindAccumulator(window_s=10.0, threshold=0.0)
     decayed.push(z_noise, 0)
     decayed.push(z_signal, z_noise.size)
     decayed_metric = decayed.result().metric
@@ -342,16 +347,19 @@ def test_blind_accumulator_multi_timescale_picks_the_better_one():
     assert short_metric > long_metric  # the dilution effect this case is built to show
     assert multi_metric == pytest.approx(short_metric, rel=1e-9)
 
-    # Case 2: a long, continuous, genuinely marginal signal -- right at
-    # the SNR where a short window misses it but integrating over more
-    # of the transmission's own real duration catches it (this is the
-    # *reliability near the ceiling* benefit the class docstring
-    # describes, not a lower noise floor -- found by sweeping seeds at
-    # -7 dB mpp fading until a short-window miss / long-window catch
-    # turned up; most seeds pass at both window lengths, matching the
-    # docstring's "score barely moves once comfortably above the floor"
-    # measurement). Multi-scale should still catch it, not get stuck
-    # with the short timescale that lost this case.
+    # Case 2: a long, continuous, genuinely marginal signal, where the
+    # long timescale gets more of the transmission's own duration folded
+    # in and catches what the short one misses.
+    #
+    # **Slow fading, not fast.** This case used to be an `mpp` seed hunt,
+    # and after the PROTOCOL_VERSION 3 pilot it stopped reproducing there
+    # at any SNR from -1 to -18 dB -- with a pilot that survives the
+    # clipper, 10 s already builds a strong enough peak that mpp's 1 Hz
+    # Doppler decorrelates the signal faster than 90 s of integration can
+    # accumulate it, so the short window ties or wins everywhere. The
+    # long-window advantage lives in *slow* fading (mpg, 0.1 Hz), where
+    # the signal stays coherent long enough for the extra duration to be
+    # worth folding in -- which is a mechanism rather than a lucky seed.
     from sstvae import hfchannel
     from sstvae.config import MODES
 
@@ -360,7 +368,7 @@ def test_blind_accumulator_multi_timescale_picks_the_better_one():
     lat /= np.sqrt(np.mean(lat**2))
     tx_wave = modem.modulate(lat, "C", callsign="N0CALL")
     clean = tx_wave[frames_start:]  # the whole mode C frame region, ~95 s
-    noisy = hfchannel.apply_channel(clean, snr_db=-7.0, fading_preset="mpp", seed=54)
+    noisy = hfchannel.apply_channel(clean, snr_db=-5.0, fading_preset="mpg", seed=2)
     z_long_signal = to_baseband(noisy)
 
     short_only2 = BlindAccumulator(window_s=10.0)
@@ -371,5 +379,5 @@ def test_blind_accumulator_multi_timescale_picks_the_better_one():
 
     with pytest.raises(SyncError):
         short_only2.result()
-    assert long_only2.result().metric > 4.0
-    assert multi2.result().metric > 4.0
+    assert long_only2.result().metric > BLIND_SCORE_THRESHOLD
+    assert multi2.result().metric > BLIND_SCORE_THRESHOLD
