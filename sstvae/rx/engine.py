@@ -50,7 +50,7 @@ from ..config import (
     MODES,
     PREAMBLE_SAMPLES,
 )
-from ..modem import Modem, SyncError
+from ..modem import Modem, SyncError, framing
 from ..modem.dsp import to_baseband, to_baseband_at
 from ..modem.sync import acquire as sync_acquire
 from ..modem.sync import BlindAccumulator
@@ -74,6 +74,46 @@ SAME_RECEPTION_EPSILON_S = 1.0
 # received" for the stall-detection progress metric -- see its use
 # below. Matches the "good" cutoff tests already judge latents by.
 PROGRESS_WEIGHT_THRESHOLD = 0.5
+
+
+def _blind_progress(weights_full: np.ndarray) -> tuple[int, float]:
+    """(stall metric, progress fraction) for one blind decode.
+
+    Two different questions, deliberately answered by two different
+    numbers.
+
+    The **metric** is the count of confidently-received latents, and
+    confidence is what makes it usable: demodulate_blind assigns *some*
+    nonzero weight to essentially every legal abs_frame slot its
+    ever-growing search range touches, real signal or not (just small
+    for noise, after the med_h fix in modem.py), so a nonzero count
+    keeps climbing every poll purely from the buffer growing --
+    independent of whether any new real data has arrived -- until buffer
+    growth has mapped the *entire* legal abs_frame range, which can take
+    a whole mode's duration after the real transmission already ended.
+    That read as "stuck receiving forever": the stall detector never saw
+    a stable value to end_grace against. PROGRESS_WEIGHT_THRESHOLD
+    matches the "good" cutoff already used to judge latents elsewhere
+    (see tests/test_blind_acquisition.py); only real frames clear it, so
+    the count stops climbing exactly when the real data does.
+
+    The **fraction** is how far *into* the transmission we have got --
+    the last frame that decoded, over the frames expected -- and is not
+    that count over the total. A count reads as a completion percentage
+    and is not one: the erasures this path lives with (a fade, or simply
+    not having heard the start) hold it down permanently, so a reception
+    already at the transmission's last frame still shows 70%, and the
+    bar never fills. The interleaver is why the two differ at all --
+    each frame's latents are scattered across the whole picture, so only
+    the frame index says "how far".
+
+    The denominator is mode C's frame count, the longest: the blind path
+    has no header, so the real mode is unknown.
+    """
+    good = weights_full > PROGRESS_WEIGHT_THRESHOLD
+    frames = framing.frame_of_latent()[good]
+    last_frame = int(frames.max()) + 1 if frames.size else 0
+    return int(np.count_nonzero(good)), last_frame / MODES["C"].n_frames
 
 
 @dataclass
@@ -265,7 +305,6 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
     if sink is None:
         sink = SaveToDirSink(config.out_dir, config.size)
     modem = Modem()
-    total_c_latents = MODES["C"].n_latents
     epsilon_samples = SAME_RECEPTION_EPSILON_S * FS
     # Absolute (ring-buffer-coordinate) transmission-start sample position
     # of every reception already saved this run. The ring buffer keeps
@@ -390,25 +429,7 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
                 weights_full = rb.weights
                 callsign = rb.callsign
                 snr_db = rb.snr_db
-                # Confidently-received latents only, not a bare nonzero
-                # count: demodulate_blind assigns *some* nonzero weight
-                # to essentially every legal abs_frame slot its ever-
-                # growing search range touches, real signal or not (just
-                # small for noise, after the med_h fix above), so a
-                # nonzero count keeps climbing every poll purely from
-                # the buffer growing -- independent of whether any new
-                # real data has arrived -- until buffer growth has
-                # mapped the *entire* legal abs_frame range, which can
-                # take up to a whole mode's duration after the real
-                # transmission already ended. That read as "stuck
-                # receiving forever": the stall detector below never saw
-                # a stable metric to end_grace against. PROGRESS_WEIGHT_
-                # THRESHOLD matches the "good" cutoff already used to
-                # judge latents elsewhere (see tests/test_blind_
-                # acquisition.py); only real frames clear it, so the
-                # count stops climbing exactly when the real data does.
-                progress_metric = int(np.count_nonzero(weights_full > PROGRESS_WEIGHT_THRESHOLD))
-                progress_frac = progress_metric / total_c_latents
+                progress_metric, progress_frac = _blind_progress(weights_full)
             else:
                 reception_start = None
 

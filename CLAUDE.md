@@ -199,6 +199,26 @@ rule is enforced by `tools/check_layering.py`.
   a Save button instead of writing it. `ringbuffer.py`
   adds `tail()` (cheap slice for the ~20 fps waterfall; `snapshot()`
   copies all 130 s) and `clear()`.
+
+  **The progress bar is position, not fill**: the last frame
+  successfully received over the frames expected, never latents
+  received over latents expected. Only the blind path can tell the two
+  apart — the preamble path decodes a contiguous prefix, so its
+  `frames_received` count *is* its reach — and there a fill fraction is
+  a completion percentage that is not one: the erasures that path lives
+  with (a fade, or simply not having heard the start) hold it down
+  permanently, so a reception already at the transmission's last frame
+  reported 70% and the bar never filled. `_blind_progress` returns both
+  numbers because they answer different questions — the confident
+  *count* is still what the `--end-grace` stall detector watches, since
+  retrospective decoding filling in frames behind the furthest one is
+  real progress that the reach deliberately does not move.
+  `framing.frame_of_latent()` is what makes the reach computable at all
+  (the inverse of `slot_range_for_frame`, as one cached table): the
+  interleaver scatters each frame across the whole picture, so a latent
+  count answers "how much" and only the frame index answers "how far".
+  Mirrored in `native/core/`, where `rx::blind_progress` is public for
+  the same reason `poll_wait` is.
 - `sstvae/tx/engine.py` — encode → modulate → PTT → play → unkey.
   **The invariant is that PTT always comes back down**: try/finally
   around the keyed region *plus* an independent `_PttWatchdog` thread

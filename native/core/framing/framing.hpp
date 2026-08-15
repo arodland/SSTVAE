@@ -41,6 +41,18 @@ struct FrameSlots {
 };
 FrameSlots slot_range_for_frame(int abs_frame);
 
+// Canonical latent index -> the absolute frame index that carries it,
+// over mode C's full range; -1 for the latents each group permanently
+// drops (never given a slot).
+//
+// The inverse of slot_range_for_frame, as one table (built once, on
+// first call). A receiver that knows only *which latents* arrived --
+// the blind path, which has no header and so no mode -- needs this to
+// say how far into the transmission it has got: a latent count answers
+// "how much", and the interleaver scatters each frame across the whole
+// picture, so only the frame index answers "how far".
+std::span<const std::int32_t> frame_of_latent();
+
 // Canonical latent vector -> on-air slot order (mode.n_tx_latents).
 std::vector<double> interleave(std::span<const double> latents,
                                const ModeSpec& mode);

@@ -124,6 +124,31 @@ struct RxConfig {
 // asserting on latency instead of on the decision.
 double poll_wait(const RxConfig& config, double last_cost_s);
 
+// (stall metric, progress fraction) for one blind decode. Exposed for
+// the same reason `poll_wait` is: it is arithmetic, and the alternative
+// is inferring it from a whole decode run.
+//
+// Two different questions, deliberately answered by two different
+// numbers. The metric is the count of confidently-received latents (see
+// count_confident in the .cpp for why confidence is what makes it
+// usable as a stall detector). The fraction is how far *into* the
+// transmission we have got -- the last frame that decoded, over the
+// frames expected -- and is not that count over the total. A count
+// reads as a completion percentage and is not one: the erasures this
+// path lives with (a fade, or simply not having heard the start) hold
+// it down permanently, so a reception already at the transmission's
+// last frame reports 70% and the bar never fills. The interleaver is
+// why the two differ at all -- each frame's latents are scattered
+// across the whole picture, so only the frame index says "how far".
+//
+// The denominator is mode C's frame count, the longest: the blind path
+// has no header, so the real mode is unknown.
+struct BlindProgress {
+    int metric = 0;
+    double frac = 0.0;
+};
+BlindProgress blind_progress(std::span<const double> weights_full);
+
 // The `threading.Event` the reference stops on. Shared with the
 // transmitter, which needs the same primitive for its cancel flag and
 // its watchdog; the name stays because "stop flag" is what it is here.

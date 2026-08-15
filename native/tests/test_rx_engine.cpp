@@ -34,6 +34,7 @@
 
 #include "check.hpp"
 #include "config.hpp"
+#include "framing/framing.hpp"
 #include "modem/modem.hpp"
 #include "rx/engine.hpp"
 
@@ -473,11 +474,98 @@ void test_poll_backoff() {
                  "rx/backoff: the duty floor bounds the wait");
 }
 
+// The progress bar is position, not fill: the last frame successfully
+// received over the frames expected, never latents-received over
+// latents-expected. Only the blind path can tell the two apart -- it
+// decodes whatever frames it can place, with holes where the signal
+// faded or where the transmission started before the buffer did -- and
+// a fill fraction there is a completion percentage that is not one.
+//
+// Arithmetic, so it is checked as arithmetic (see `blind_progress`'s
+// header comment), rather than inferred from a whole decode run.
+void test_blind_progress_is_the_last_frame_reached() {
+    const int total = config::MODES[config::N_MODES - 1].n_frames;
+    const auto n_latents =
+        static_cast<std::size_t>(config::MODES[config::N_MODES - 1].n_latents);
+
+    auto weights_for = [&](const std::vector<int>& frames, double w) {
+        std::vector<double> out(n_latents, 0.0);
+        for (const int f : frames)
+            for (const std::int64_t i : framing::slot_range_for_frame(f).indices)
+                out[static_cast<std::size_t>(i)] = w;
+        return out;
+    };
+
+    const rx::BlindProgress none = rx::blind_progress(std::vector<double>(n_latents, 0.0));
+    check::is_true(none.metric == 0 && none.frac == 0.0,
+                   "rx/progress: nothing received is zero progress");
+
+    // At the threshold, not over it: a latent that only ties does not
+    // count, the same cutoff the stall metric has always used.
+    const rx::BlindProgress tied = rx::blind_progress(weights_for({0}, 0.5));
+    check::is_true(tied.metric == 0 && tied.frac == 0.0,
+                   "rx/progress: a weight at the threshold does not count");
+
+    // Every other frame of mode B's range plus its last: half the
+    // latents, but the transmission has been followed all the way to its
+    // end. The old count-based fraction reported ~50% here.
+    const int reach = config::MODES[1].n_frames;
+    std::vector<int> sparse;
+    for (int f = 0; f < reach; f += 2) sparse.push_back(f);
+    sparse.push_back(reach - 1);
+    const rx::BlindProgress half = rx::blind_progress(weights_for(sparse, 1.0));
+    check::is_true(std::abs(half.frac - static_cast<double>(reach) / total) < 1e-12,
+                   "rx/progress: half the latents, all the way to mode B's last frame");
+    check::is_true(half.metric == static_cast<int>(sparse.size()) * config::LATENTS_PER_FRAME,
+                   "rx/progress: the stall metric is still the confident count");
+
+    // Tuned in at frame 400 of mode C and heard the rest: two thirds of
+    // the latents are gone for good and the bar must still read full.
+    std::vector<int> late;
+    for (int f = 400; f < total; ++f) late.push_back(f);
+    check::is_true(std::abs(rx::blind_progress(weights_for(late, 1.0)).frac - 1.0) < 1e-12,
+                   "rx/progress: a late join reports where it is, not how much it has");
+
+    // Retrospective decoding filling in frames *behind* the furthest one
+    // is progress in quality but not in position; the bar must not move.
+    const double reached = rx::blind_progress(weights_for({0, 300}, 1.0)).frac;
+    check::is_true(std::abs(reached - 301.0 / total) < 1e-12,
+                   "rx/progress: the furthest frame sets the bar");
+    std::vector<int> filled;
+    for (int f = 0; f <= 300; ++f) filled.push_back(f);
+    check::is_true(
+        std::abs(rx::blind_progress(weights_for(filled, 1.0)).frac - reached) < 1e-12,
+        "rx/progress: backfill behind the furthest frame does not move it");
+}
+
+// `frame_of_latent` is the inverse of `slot_range_for_frame`, and the
+// latents that never get a slot belong to no frame at all -- defaulting
+// those to 0 rather than -1 would hand frame 0 thousands of latents
+// that are never transmitted.
+void test_frame_of_latent_inverts_slot_range_for_frame() {
+    const std::span<const std::int32_t> table = framing::frame_of_latent();
+    check::is_true(table.size() == static_cast<std::size_t>(
+                                       config::MODES[config::N_MODES - 1].n_latents),
+                   "framing/frame_of_latent: covers mode C's canonical range");
+    for (const int f : {0, 1, 219, 220, 437, 659})
+        for (const std::int64_t i : framing::slot_range_for_frame(f).indices)
+            check::is_true(table[static_cast<std::size_t>(i)] == f,
+                           "framing/frame_of_latent: inverts slot_range_for_frame");
+    const auto dropped = std::count_if(table.begin(), table.end(),
+                                       [](std::int32_t f) { return f < 0; });
+    check::is_true(dropped == static_cast<std::ptrdiff_t>(config::LATENT_GROUPS) *
+                                  config::DROPPED_LATENTS_PER_GROUP,
+                   "framing/frame_of_latent: exactly the never-transmitted latents "
+                   "belong to no frame");
+}
+
 }  // namespace
 
 int main() {
     try {
         test_poll_backoff();
+        test_frame_of_latent_inverts_slot_range_for_frame();
+        test_blind_progress_is_the_last_frame_reached();
         test_stop_interrupts_a_wait_in_progress();
         test_a_clean_transmission_is_received_once();
         test_noise_produces_nothing();

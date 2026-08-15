@@ -74,7 +74,7 @@ def _status_line(state: SharedState) -> str:
                 f"{frames_received}/{n_frames_expected} ({100 * progress_frac:.0f}%)"
             )
         else:
-            line = f"receiving (blind sync): {100 * progress_frac:.0f}% of latents"
+            line = f"receiving (blind sync): {100 * progress_frac:.0f}%"
         line += fmt_snr(snr_db)
         if callsign:
             line += f"  de {callsign}"

@@ -44,6 +44,18 @@ FrameSlots slot_range_for_frame(int abs_frame) {
     return out;
 }
 
+std::span<const std::int32_t> frame_of_latent() {
+    static const std::vector<std::int32_t> table = [] {
+        std::vector<std::int32_t> out(
+            static_cast<std::size_t>(config::LATENT_GROUPS) * GROUP_LATENTS, -1);
+        for (int f = 0; f < config::LATENT_GROUPS * FRAMES_PER_GROUP; ++f)
+            for (std::int64_t i : slot_range_for_frame(f).indices)
+                out[static_cast<std::size_t>(i)] = f;
+        return out;
+    }();
+    return table;
+}
+
 std::vector<double> interleave(std::span<const double> latents,
                                const ModeSpec& mode) {
     if (latents.size() != static_cast<std::size_t>(mode.n_latents))
