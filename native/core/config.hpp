@@ -59,6 +59,7 @@ inline constexpr int DEMOD_BACKOFF = 6;
 inline constexpr int INTERLEAVER_SEED = 1000;
 inline constexpr int PROTOCOL_VERSION = 3;
 inline constexpr int ACQUIRE_MAX_BINS = 12;
+inline constexpr int FIRST_PATH_SEARCH = 32;
 
 inline constexpr double PREAMBLE_THRESHOLD = 0x1.ae147ae147ae1p-2;  // 0.42
 inline constexpr double CLIP_HEADROOM_DB = 0x0.0p+0;  // 0.0
@@ -73,6 +74,7 @@ inline constexpr double DRIFT_FAST_ALPHA = 0x1.3333333333333p-2;  // 0.3
 inline constexpr double DRIFT_FAST_BETA = 0x1.999999999999ap-5;  // 0.05
 inline constexpr double TEMPLATE_SCORE_THRESHOLD = 0x1.999999999999ap-2;  // 0.4
 inline constexpr double BLIND_SCORE_THRESHOLD = 0x1.2000000000000p+3;  // 9.0
+inline constexpr double FIRST_PATH_FRAC = 0x1.0000000000000p-1;  // 0.5
 
 // Post-clip transmit filter, Hz.
 inline constexpr double TX_BANDPASS_LO = 0x1.a900000000000p+9;  // 850.0

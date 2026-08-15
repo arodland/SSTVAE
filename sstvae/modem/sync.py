@@ -37,6 +37,8 @@ from ..config import (
     BLIND_BLOCK_RES_HZ,
     BLIND_MAX_OFFSET_HZ,
     BLIND_SCORE_THRESHOLD,
+    FIRST_PATH_FRAC,
+    FIRST_PATH_SEARCH,
     FS,
     M,
     FRAME_SAMPLES,
@@ -81,6 +83,53 @@ def _autocorr_metric(z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     floor = 1e-3 * W * np.mean(power)
     energy = np.sqrt(np.maximum(e1, floor) * np.maximum(e2, floor)) + 1e-12
     return np.abs(a) / energy, a
+
+
+def first_path(
+    power: np.ndarray,
+    peak: int,
+    search: int = FIRST_PATH_SEARCH,
+    frac: float = FIRST_PATH_FRAC,
+    cyclic: bool = False,
+) -> int:
+    """The earliest local maximum within `search` samples *ahead* of
+    `peak` that still holds `frac` of its power. `peak` itself if there
+    is none.
+
+    `power` is a correlation power profile against a known reference --
+    the pilot fold for the blind path, |template correlation|**2 for the
+    preamble path -- and `peak` its argmax.
+
+    Why this exists rather than the argmax: on a multipath channel the
+    argmax is the *strongest* path, which is not the *first* one, and
+    which of the two is stronger changes as the channel fades. Syncing
+    to a late path pushes the early path's energy in front of the
+    demodulation window, where the cyclic prefix cannot cover it. See
+    config.FIRST_PATH_SEARCH for the measurements and for why the caller
+    must keep scoring at the argmax rather than here.
+
+    The local-maximum requirement is load-bearing and not tidiness. A
+    plain "earliest bin above the threshold" walks down the argmax's own
+    correlation skirt and returns a position a few samples early on
+    *every* channel, single-path ones included -- measured, that costs
+    0.27 dB at mpd while still fixing the two-path case. Requiring a
+    local maximum makes the single-path answer exactly the argmax again,
+    which is what leaves awgn and mpg bit-identical.
+    """
+    n = len(power)
+    thr = frac * power[peak]
+    for d in range(search, 0, -1):
+        i = peak - d
+        if cyclic:
+            i %= n
+        elif i < 1:
+            continue
+        lo, hi = (i - 1) % n, (i + 1) % n
+        if not cyclic and (i - 1 < 0 or i + 1 >= n):
+            continue
+        if power[i] >= thr and power[i] >= power[lo] and power[i] >= power[hi]:
+            return int(i)
+    return int(peak)
 
 
 def acquire(
@@ -134,13 +183,18 @@ def acquire(
         f_cand = f_frac + m_bin * FS / M
         seg_c = freq_correct(seg, f_cand)
         corr = signal.fftconvolve(seg_c, np.conj(template[::-1]), mode="valid")
-        peak = int(np.argmax(np.abs(corr)))
+        cpow = np.abs(corr) ** 2
+        peak = int(np.argmax(cpow))
         seg_energy = np.sqrt(
             np.sum(np.abs(seg_c[peak : peak + PREAMBLE_SAMPLES]) ** 2)
         )
+        # Scored at the argmax, timed at the first path -- see
+        # config.FIRST_PATH_SEARCH for why the two must not be the same
+        # position. TEMPLATE_SCORE_THRESHOLD below is calibrated against
+        # this score, so it must stay the argmax's.
         score = np.abs(corr[peak]) / (t_norm * seg_energy + 1e-12)
         if best is None or score > best[0]:
-            best = (score, lo + peak, f_cand)
+            best = (score, lo + first_path(cpow, peak), f_cand)
 
     best_score, p0, f_hat = best
     if best_score < TEMPLATE_SCORE_THRESHOLD:
@@ -282,8 +336,11 @@ def acquire_blind(
         if n_periods < min_periods:
             continue
         folded = p2[: n_periods * FRAME_SAMPLES].reshape(n_periods, FRAME_SAMPLES).sum(axis=0)
-        phases[j] = int(np.argmax(folded))
-        scores[j] = folded[phases[j]] / (np.median(folded) + 1e-12)
+        pk = int(np.argmax(folded))
+        # Score at the argmax (BLIND_SCORE_THRESHOLD is calibrated
+        # against that), report the first path's timing.
+        scores[j] = folded[pk] / (np.median(folded) + 1e-12)
+        phases[j] = first_path(folded, pk, cyclic=True)
 
     if not np.isfinite(scores).any():
         raise SyncError("signal too short for blind acquisition at any CFO bin")
@@ -550,7 +607,10 @@ class BlindAccumulator:
         if score < self._threshold:
             raise SyncError(f"no periodic pilot found (peak prominence {score:.3g})")
 
-        phase = int(np.argmax(self._folded[t, i]))
+        row = self._folded[t, i]
+        # Score at the argmax (the threshold above is calibrated against
+        # it), timing at the first path -- see config.FIRST_PATH_SEARCH.
+        phase = first_path(row, int(np.argmax(row)), cyclic=True)
         # Sub-bin, against the winning timescale's own scores -- the
         # grid is coarse by design and the raw bin centre is several Hz
         # out, which the demodulator cannot absorb. See refine_cfo.
