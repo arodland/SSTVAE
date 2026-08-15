@@ -4,8 +4,9 @@
 #
 #   tools/bump_version.sh <x.y.z> [--dry-run] [--force] [--no-commit]
 #
-# The version is written down in four places -- native/CMakeLists.txt,
-# pyproject.toml, sstvae/__init__.py and uv.lock -- and
+# The version is written down in five places -- native/CMakeLists.txt,
+# pyproject.toml, sstvae/__init__.py, native/android-app/CMakeLists.txt
+# and uv.lock -- and
 # `.github/workflows/release.yml` checks the first two against the tag
 # before it will build anything, so a release with a mismatch fails
 # early rather than shipping a download called 0.2.0 whose About box
@@ -22,11 +23,21 @@
 # way. A bump that edits a line the gate does not match is exactly as
 # broken as no bump at all, and would be found a tag later.
 #
-# **The two copies nothing checks are the ones that drift**, which is
+# **The copies nothing checks are the ones that drift**, which is
 # why they are here rather than left to a habit: `sstvae/__init__.py` is
 # what `sstvae.__version__` reports to anyone debugging a Python-side
-# station, and `uv.lock` records the project's own version in its
-# `[[package]]` entry. v0.1.1 shipped with the lock left at 0.1.0.
+# station, `uv.lock` records the project's own version in its
+# `[[package]]` entry, and the Android app's `project()` version becomes
+# `QT_ANDROID_VERSION_NAME`, i.e. the version string Play and the
+# phone's app info screen show. v0.1.1 shipped with the lock left at
+# 0.1.0.
+#
+# **`SSTVAE_ANDROID_VERSION_CODE` is deliberately not touched.** Play
+# requires it to increase forever and no build can infer it, so it is an
+# explicit input to `tools/build_android.sh --version-code N` -- see
+# "The Play upload" in native/android-app/README.md. Bumping it from a
+# version bump would guess, and a guess that collides is rejected in a
+# browser minutes after the upload.
 #
 # Linux/bash only, by request: it is a developer's pre-release step, not
 # something CI or an operator runs.
@@ -80,9 +91,10 @@ cd "$repo"
 cmake_file="native/CMakeLists.txt"
 pyproject_file="pyproject.toml"
 init_file="sstvae/__init__.py"
+android_file="native/android-app/CMakeLists.txt"
 lock_file="uv.lock"
 
-for f in "$cmake_file" "$pyproject_file" "$init_file" "$lock_file"; do
+for f in "$cmake_file" "$pyproject_file" "$init_file" "$android_file" "$lock_file"; do
     [ -f "$f" ] || { echo "missing $f -- is $repo the right tree?" >&2; exit 1; }
 done
 
@@ -133,7 +145,8 @@ fi
 # `git add`, because that edit would be swept into the release commit
 # just as invisibly as a staged one.
 if [ "$commit" -eq 1 ]; then
-    dirty="$(git diff --name-only -- "$cmake_file" "$pyproject_file" "$init_file" "$lock_file")"
+    dirty="$(git diff --name-only -- "$cmake_file" "$pyproject_file" "$init_file" \
+                                     "$android_file" "$lock_file")"
     if [ -n "$dirty" ]; then
         echo "uncommitted changes in files this script commits:" >&2
         printf '  %s\n' $dirty >&2
@@ -146,6 +159,7 @@ fi
 read_cmake()     { sed -n 's/^project(sstvae_native VERSION \([0-9.]*\).*/\1/p' "$cmake_file" | head -1; }
 read_pyproject() { sed -n 's/^version = "\([0-9.]*\)".*/\1/p' "$pyproject_file" | head -1; }
 read_init()      { sed -n 's/^__version__ = "\([0-9.]*\)".*/\1/p' "$init_file" | head -1; }
+read_android()   { sed -n 's/^project(sstvae_android VERSION \([0-9.]*\).*/\1/p' "$android_file" | head -1; }
 
 # uv.lock carries the project's own version in its `[[package]]` entry,
 # so it needs the *entry's* version and not the file's first `version =`
@@ -160,10 +174,12 @@ read_lock() {
 cmake_now="$(read_cmake)"
 pyproject_now="$(read_pyproject)"
 init_now="$(read_init)"
+android_now="$(read_android)"
 lock_now="$(read_lock)"
 
 for pair in "$cmake_file:$cmake_now" "$pyproject_file:$pyproject_now" \
-            "$init_file:$init_now" "$lock_file:$lock_now"; do
+            "$init_file:$init_now" "$android_file:$android_now" \
+            "$lock_file:$lock_now"; do
     if [ -z "${pair#*:}" ]; then
         echo "could not read a version from ${pair%%:*} -- has the line moved?" >&2
         exit 1
@@ -171,19 +187,20 @@ for pair in "$cmake_file:$cmake_now" "$pyproject_file:$pyproject_now" \
 done
 
 echo "current: $cmake_file=$cmake_now  $pyproject_file=$pyproject_now"
-echo "         $init_file=$init_now  $lock_file=$lock_now"
+echo "         $init_file=$init_now  $android_file=$android_now"
+echo "         $lock_file=$lock_now"
 echo "new:     $version"
 
 if [ "$cmake_now" != "$pyproject_now" ] || [ "$cmake_now" != "$init_now" ] \
-   || [ "$cmake_now" != "$lock_now" ]; then
+   || [ "$cmake_now" != "$android_now" ] || [ "$cmake_now" != "$lock_now" ]; then
     echo "note: the files disagree today; this run makes them agree." >&2
 fi
 
-# Ordering check against the highest of the three, so a half-finished
+# Ordering check against the highest of them, so a half-finished
 # previous bump cannot make a real increase look like a decrease. `sort
 # -V` rather than a hand-rolled field compare: 0.10.0 > 0.9.0.
-highest="$(printf '%s\n' "$cmake_now" "$pyproject_now" "$init_now" "$lock_now" \
-           | sort -V | tail -1)"
+highest="$(printf '%s\n' "$cmake_now" "$pyproject_now" "$init_now" \
+                         "$android_now" "$lock_now" | sort -V | tail -1)"
 if [ "$version" = "$highest" ]; then
     if [ "$force" -eq 0 ]; then
         echo "already at $version (use --force to rewrite anyway)" >&2
@@ -234,6 +251,9 @@ bump "$pyproject_file" \
 bump "$init_file" \
      '^__version__ = "[0-9]+\.[0-9]+\.[0-9]+"' \
      "__version__ = \"$version\""
+bump "$android_file" \
+     '^project\(sstvae_android VERSION [0-9]+\.[0-9]+\.[0-9]+' \
+     "project(sstvae_android VERSION $version"
 
 if [ "$dry_run" -eq 1 ]; then
     echo "  would run  uv lock                 ($lock_file: $lock_now -> $version)"
@@ -242,7 +262,7 @@ if [ "$dry_run" -eq 1 ]; then
 fi
 
 # uv.lock records the project's own version, so it goes stale on every
-# bump. **Regenerated with `uv lock`, never sed'd**: the three files
+# bump. **Regenerated with `uv lock`, never sed'd**: the four files
 # above are hand-written and their version is a line a human put there,
 # whereas this one is a generated artifact whose format is uv's to
 # change. Measured on this project it is a 0.26 s resolve from cache
@@ -258,6 +278,7 @@ ok=1
 for pair in "$cmake_file:$(read_cmake)" \
             "$pyproject_file:$(read_pyproject)" \
             "$init_file:$(read_init)" \
+            "$android_file:$(read_android)" \
             "$lock_file:$(read_lock)"; do
     got="${pair#*:}"
     if [ "$got" != "$version" ]; then
@@ -268,21 +289,21 @@ done
 [ "$ok" -eq 1 ] || exit 1
 
 echo "bumped to $version in:"
-printf '  %s\n' "$cmake_file" "$pyproject_file" "$init_file" "$lock_file"
+printf '  %s\n' "$cmake_file" "$pyproject_file" "$init_file" "$android_file" "$lock_file"
 
 if [ "$commit" -eq 0 ]; then
     cat <<EOF
 
 Left in the working tree (--no-commit). Next:
 
-  git diff -- $cmake_file $pyproject_file $init_file $lock_file
+  git diff -- $cmake_file $pyproject_file $init_file $android_file $lock_file
 EOF
     exit 0
 fi
 
 # The index was empty at the top and these files had no unstaged edits,
 # so what is staged here is exactly what this script wrote.
-git add -- "$cmake_file" "$pyproject_file" "$init_file" "$lock_file"
+git add -- "$cmake_file" "$pyproject_file" "$init_file" "$android_file" "$lock_file"
 git commit -q -m "Release v$version"
 echo
 git --no-pager show --stat --oneline HEAD
