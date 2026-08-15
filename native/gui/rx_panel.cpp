@@ -499,7 +499,7 @@ void ReceivePanel::refresh_status() {
                        .arg(*progress.n_frames_expected)
                        .arg(100.0 * progress.progress_frac, 0, 'f', 0);
         } else {
-            text = tr("Receiving (blind sync): %1% of latents")
+            text = tr("Receiving (blind sync): %1%")
                        .arg(100.0 * progress.progress_frac, 0, 'f', 0);
         }
         text += SEP + style::fmt_snr_db(progress.snr_db);

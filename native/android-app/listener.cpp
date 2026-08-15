@@ -339,8 +339,8 @@ QString Listener::plain_status() const {
     }
     // A percentage rather than a frame count. Frames are the unit the
     // modem thinks in and mean nothing to the operator; the fraction is
-    // already computed for both the header and the blind path, which
-    // are counted differently and would need two branches here.
+    // already computed for both the header and the blind path, and the
+    // blind one has no total to quote a count against anyway.
     if (p.progress_frac > 0.0) {
         out += QStringLiteral("  %1%").arg(100.0 * p.progress_frac, 0, 'f', 0);
     }

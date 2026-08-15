@@ -13,6 +13,7 @@ TRANSMIT_LATENTS_PER_GROUP entries of each group's permutation get a
 slot; the rest are permanently erased (weight 0), never transmitted.
 """
 
+import functools
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,7 @@ from ..config import (
     NC,
     NC_LATENT,
     DATA_SYMS_PER_FRAME,
+    LATENT_GROUPS,
     LATENTS_PER_FRAME,
     GROUP_LATENTS,
     TRANSMIT_LATENTS_PER_GROUP,
@@ -86,6 +88,26 @@ def slot_range_for_frame(abs_frame: int) -> tuple[int, np.ndarray]:
     slo = fg * LATENTS_PER_FRAME
     shi = slo + LATENTS_PER_FRAME
     return g, g * GROUP_LATENTS + _TX_PERMS[g][slo:shi]
+
+
+@functools.lru_cache(maxsize=1)
+def frame_of_latent() -> np.ndarray:
+    """Canonical latent index -> the absolute frame index that carries
+    it, over mode C's full range; -1 for the latents each group
+    permanently drops (never given a slot, see the module docstring).
+
+    The inverse of `slot_range_for_frame`, as one array. A receiver that
+    knows only *which latents* arrived -- the blind path, which has no
+    header and so no mode -- needs this to say how far into the
+    transmission it has got: a latent count answers "how much", and the
+    interleaver scatters each frame across the whole picture, so only
+    the frame index answers "how far"."""
+    out = np.full(LATENT_GROUPS * GROUP_LATENTS, -1, dtype=np.int32)
+    for f in range(LATENT_GROUPS * FRAMES_PER_GROUP):
+        _, idx = slot_range_for_frame(f)
+        out[idx] = f
+    out.setflags(write=False)
+    return out
 
 
 def interleave(latents: np.ndarray, mode: ModeSpec) -> np.ndarray:

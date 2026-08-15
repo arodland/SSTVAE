@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -15,6 +16,7 @@
 #include <vector>
 
 #include "dsp/dsp.hpp"
+#include "framing/framing.hpp"
 #include "images/images.hpp"
 #include "latents/latents.hpp"
 #include "modem/modem.hpp"
@@ -47,7 +49,6 @@ private:
 
 // Mode C, the longest -- the denominator for blind progress, where the
 // real mode is unknown.
-constexpr int kTotalCLatents = config::MODES[config::N_MODES - 1].n_latents;
 constexpr int kMaxModeFrames = config::MODES[config::N_MODES - 1].n_frames;
 
 // Weight a blind-path latent must clear to count as "confidently
@@ -161,20 +162,6 @@ int count_nonzero(const std::vector<double>& v) {
                                           [](double w) { return w != 0.0; }));
 }
 
-// Confidently-received latents only, not a bare nonzero count:
-// demodulate_blind assigns *some* nonzero weight to essentially every
-// legal abs_frame slot its ever-growing search range touches, real
-// signal or not (just small for noise, after the med_h fix in
-// modem.cpp), so a nonzero count keeps climbing every poll purely from
-// the buffer growing -- independent of whether any new real data has
-// arrived -- until buffer growth has mapped the *entire* legal
-// abs_frame range. That read as "stuck receiving forever": the stall
-// detector below never saw a stable metric to end_grace against.
-int count_confident(const std::vector<double>& v) {
-    return static_cast<int>(std::count_if(
-        v.begin(), v.end(), [](double w) { return w > kProgressWeightThreshold; }));
-}
-
 void remember_finished(std::deque<std::int64_t>& finished, std::int64_t pos) {
     finished.push_back(pos);
     while (finished.size() > kFinishedHistory) finished.pop_front();
@@ -194,6 +181,35 @@ void reset_to_listening(SharedState& state) {
 }
 
 }  // namespace
+
+BlindProgress blind_progress(std::span<const double> weights_full) {
+    // The metric counts confidently-received latents only, not bare
+    // nonzero ones: demodulate_blind assigns *some* nonzero weight to
+    // essentially every legal abs_frame slot its ever-growing search
+    // range touches, real signal or not (just small for noise, after
+    // the med_h fix in modem.cpp), so a nonzero count keeps climbing
+    // every poll purely from the buffer growing -- independent of
+    // whether any new real data has arrived -- until buffer growth has
+    // mapped the *entire* legal abs_frame range. That read as "stuck
+    // receiving forever": the stall detector never saw a stable metric
+    // to end_grace against.
+    //
+    // One past the highest absolute frame index any confidently-received
+    // latent belongs to, or 0 if none does. See the header for why that,
+    // and not the count, is the bar.
+    const std::span<const std::int32_t> frame_of = framing::frame_of_latent();
+    const std::size_t n = std::min(weights_full.size(), frame_of.size());
+    BlindProgress out;
+    int last = -1;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (weights_full[i] > kProgressWeightThreshold) {
+            ++out.metric;
+            last = std::max(last, frame_of[i]);
+        }
+    }
+    out.frac = static_cast<double>(last + 1) / kMaxModeFrames;
+    return out;
+}
 
 double poll_wait(const RxConfig& config, double last_cost_s) {
     if (config.max_decode_duty >= 1.0 || last_cost_s <= 0.0) {
@@ -443,8 +459,9 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
                 have_latents = true;
                 callsign = rb->callsign;
                 snr_db = rb->snr_db;
-                progress_metric = count_confident(weights_full);
-                progress_frac = static_cast<double>(progress_metric) / kTotalCLatents;
+                const BlindProgress bp = blind_progress(weights_full);
+                progress_metric = bp.metric;
+                progress_frac = bp.frac;
             }
         }
 
