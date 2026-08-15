@@ -149,6 +149,69 @@ ACQUIRE_MAX_BINS = 12
 # above it.
 TEMPLATE_SCORE_THRESHOLD = 0.40
 
+# --- first-path timing selection -------------------------------------------
+# Both acquisition paths locate timing by taking the *argmax* of a
+# correlation against a known reference. On a two-path channel that is
+# the wrong pick whenever the late path is momentarily the stronger one,
+# and on Watterson fading it is momentarily the stronger one quite
+# often: the argmax then lands exactly `delay_ms` late, which puts the
+# *early* path ahead of the demodulation window rather than inside the
+# cyclic prefix it was supposed to sit in. DEMOD_BACKOFF is the only
+# margin there (6 samples), so anything beyond that is pre-cursor ISI
+# the CP cannot absorb.
+#
+# It is not subtle and it is not new. Measured on the blind path, mode
+# B, 4 seeds x 3 SNRs, the argmax lands on the late path for whole runs
+# at a time and costs, in mean latent SNR:
+#
+#     channel   4 dB     8 dB    12 dB
+#     awgn     +0.00    +0.00    +0.00
+#     mpg      +0.00    +0.00    +0.00
+#     mpp      +0.36    +0.59    +0.87
+#     mpd      +0.63    +1.02    +1.35
+#
+# (gains from selecting the first path instead). The two top rows cost
+# nothing because there is nothing there to find: on awgn the pick is
+# *bit-identical* to the argmax in 156 of 156 polls, and on mpg -- whose
+# second path is 0.5 ms, four samples, inside the correlation mainlobe
+# rather than a separate local maximum -- it moves in 6 of 156 and the
+# mean is unchanged to 0.01 dB. Where the argmax is right this returns
+# it. On mpp and mpd it differs in roughly half of all polls, which is
+# the same thing as saying the live picture was flipping in half of
+# them. The
+# same A/B against the pre-v3 frozen-QPSK pilot behaves identically
+# (deterministic 2-path echo, second path at 1.4x: both pilots put the
+# argmax on the late path), so this is a property of taking an argmax on
+# a multipath channel, not of the PROTOCOL_VERSION 3 pilot.
+#
+# What made it *visible* is the blind path specifically: it re-acquires
+# from scratch every poll, so as the fading evolves the pick flips
+# between the two paths and the live picture alternates between a clean
+# decode and a mushy one -- with whichever the last poll chose being
+# what gets saved.
+#
+# Neither threshold's calibration is touched by this. The score that
+# BLIND_SCORE_THRESHOLD and TEMPLATE_SCORE_THRESHOLD gate is still
+# computed at the argmax; only the *timing that gets reported* moves to
+# the first path. That is deliberate -- both gates were calibrated
+# against measured false locks (see their own notes) and re-scoring at a
+# deliberately lower-correlation position would invalidate both at once.
+#
+# FIRST_PATH_SEARCH is how far ahead of the argmax to look, and NCP is
+# the principled value rather than a tuned one: a path further ahead
+# than the cyclic prefix cannot be equalized whichever one we sync to,
+# so there is nothing to win past it. It must also stay well under M
+# (160) on the preamble path, where the template is periodic with M and
+# a wider window would happily walk back a whole period.
+#
+# FIRST_PATH_FRAC is the fraction of the argmax's *power* an earlier
+# local maximum must hold to be taken instead. Measured flat from 0.3 to
+# 0.6 (identical results at every cell in the table above); 0.7 starts
+# giving cells back as it begins refusing genuine first paths that the
+# fading has dipped. 0.5 sits in the middle of the plateau.
+FIRST_PATH_SEARCH = NCP
+FIRST_PATH_FRAC = 0.5
+
 HEADER_SYMS = 2  # identical Golay-coded BPSK symbols
 HEADER_SAMPLES = HEADER_SYMS * NSYM  # 384
 

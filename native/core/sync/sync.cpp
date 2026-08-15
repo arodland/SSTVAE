@@ -77,6 +77,37 @@ std::size_t argmax(std::span<const double> v) {
     return best;
 }
 
+// The earliest local maximum within FIRST_PATH_SEARCH samples *ahead* of
+// `peak` that still holds FIRST_PATH_FRAC of its power; `peak` itself if
+// there is none. Mirrors sync.first_path -- see config.FIRST_PATH_SEARCH
+// on the Python side for why the argmax is the wrong pick on a two-path
+// channel, and why the caller must keep *scoring* at the argmax.
+//
+// `cyclic` distinguishes the blind path's fold, which wraps modulo
+// FRAME_SAMPLES, from the preamble path's plain correlation, which does
+// not and simply declines to look past its own edges.
+std::size_t first_path(std::span<const double> power, std::size_t peak,
+                       bool cyclic) {
+    const std::size_t n = power.size();
+    if (n < 3) return peak;
+    const double thr = config::FIRST_PATH_FRAC * power[peak];
+    for (int d = config::FIRST_PATH_SEARCH; d >= 1; --d) {
+        std::int64_t i = static_cast<std::int64_t>(peak) - d;
+        if (cyclic) {
+            i %= static_cast<std::int64_t>(n);
+            if (i < 0) i += static_cast<std::int64_t>(n);
+        } else if (i < 1 || i + 1 >= static_cast<std::int64_t>(n)) {
+            continue;
+        }
+        const auto u = static_cast<std::size_t>(i);
+        const std::size_t lo = (u + n - 1) % n;
+        const std::size_t hi = (u + 1) % n;
+        if (power[u] >= thr && power[u] >= power[lo] && power[u] >= power[hi])
+            return u;
+    }
+    return peak;
+}
+
 // np.median, including the even-length average of the two middle values.
 double median(std::vector<double> v) {
     if (v.empty()) return 0.0;
@@ -158,8 +189,12 @@ Acquisition acquire(std::span<const cdouble> z_in, double threshold, int max_bin
         const std::vector<cdouble> corr = dsp::fftconvolve_valid(seg_c, kernel);
 
         std::vector<double> mag(corr.size());
-        for (std::size_t i = 0; i < corr.size(); ++i) mag[i] = std::abs(corr[i]);
-        const std::size_t peak = argmax(mag);
+        std::vector<double> cpow(corr.size());
+        for (std::size_t i = 0; i < corr.size(); ++i) {
+            mag[i] = std::abs(corr[i]);
+            cpow[i] = mag[i] * mag[i];
+        }
+        const std::size_t peak = argmax(cpow);
 
         double seg_energy = 0.0;
         for (std::size_t i = peak;
@@ -167,11 +202,13 @@ Acquisition acquire(std::span<const cdouble> z_in, double threshold, int max_bin
             seg_energy += std::norm(seg_c[i]);
         seg_energy = std::sqrt(seg_energy);
 
+        // Scored at the argmax (TEMPLATE_SCORE_THRESHOLD is calibrated
+        // against that), timed at the first path.
         const double score = mag[peak] / (t_norm * seg_energy + 1e-12);
         if (!have_best || score > best_score) {
             have_best = true;
             best_score = score;
-            best_p0 = lo + static_cast<std::int64_t>(peak);
+            best_p0 = lo + static_cast<std::int64_t>(first_path(cpow, peak, false));
             best_f = f_cand;
         }
     }
@@ -299,8 +336,11 @@ BlindAcquisition acquire_blind(std::span<const cdouble> z, double max_offset_hz,
                 folded[static_cast<std::size_t>(i)] +=
                     std::norm(mf[lo + p * FRAME_SAMPLES + static_cast<std::size_t>(i)]);
 
-        cand_phases[ci] = argmax(folded);
-        cand_scores[ci] = folded[cand_phases[ci]] / (median(folded) + 1e-12);
+        // Score at the argmax (BLIND_SCORE_THRESHOLD is calibrated
+        // against that), report the first path's timing.
+        const std::size_t pk = argmax(folded);
+        cand_scores[ci] = folded[pk] / (median(folded) + 1e-12);
+        cand_phases[ci] = first_path(folded, pk, true);
         have_best = true;
     }
 
@@ -490,7 +530,9 @@ BlindAcquisition BlindAccumulator::result() const {
     const double* scale_base = &folded_[static_cast<std::size_t>(best_scale) * scale_stride];
     const std::span<const double> row(scale_base + best_bin * static_cast<std::size_t>(FRAME_SAMPLES),
                                       static_cast<std::size_t>(FRAME_SAMPLES));
-    const std::size_t phase = argmax(row);
+    // Score at the argmax (the threshold above is calibrated against it),
+    // timing at the first path -- see config.FIRST_PATH_SEARCH.
+    const std::size_t phase = first_path(row, argmax(row), true);
 
     // Sub-bin, against the winning timescale's own per-bin scores -- the
     // grid is coarse by design and the raw bin centre is several Hz out,
