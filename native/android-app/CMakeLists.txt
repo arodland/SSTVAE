@@ -48,7 +48,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         "single-stepping the C++.")
 endif()
 
-project(sstvae_android VERSION 0.3.1 LANGUAGES CXX)
+project(sstvae_android VERSION 0.4.0 LANGUAGES CXX)
 
 set(SSTVAE_ANDROID_VERSION_CODE 1 CACHE STRING
     "Play upload version code; must increase on every upload")
@@ -165,8 +165,8 @@ if(SSTVAE_ANDROID_BUNDLE_MODELS)
     # splits on semicolons, so a list of "a;b" pairs arrives flattened
     # into single items and the hash silently goes missing.
     foreach(_m IN ITEMS
-        "v3-decoder-fp16.onnx|82935521e69bd1687cdf318ced26d1b469c1c61428f26022a955ffad9d6a0561"
-        "v3-encoder-fp16.onnx|18a3805b80a3137d6a1544545fc24c13dd51dc8a2b983e391df5a3b72a5b4548")
+        "v4-decoder-fp16.onnx|e82404514c822d394c3315c0a4d4ce3df05654e7c90d7e18296f34c52f44a006"
+        "v4-encoder-fp16.onnx|15b0e072f9fe52282f2721209c2846f4d0f0b14474b7a399934bb3448b2a933d")
         string(REPLACE "|" ";" _pair "${_m}")
         list(GET _pair 0 _name)
         list(GET _pair 1 _sha)
