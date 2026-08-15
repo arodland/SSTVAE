@@ -421,10 +421,17 @@ def _find_branch_reception(modem, samples, buf_start, finished_starts,
 def _progress_frac(r) -> float:
     """Comparable progress fraction across a header-locked or
     blind-locked result, for picking "whichever branch is furthest
-    along" when only one is usable this poll."""
+    along" when only one is usable this poll.
+
+    Both sides are "how far into the transmission", in frames -- which
+    is what makes them comparable at all. A latent *count* over the
+    blind path's mode-C total is not the same quantity as the header
+    path's frames_received/n_frames: erasures hold the count down
+    permanently, so a blind branch at the last frame would lose to a
+    header branch halfway through. See `_blind_progress`."""
     if isinstance(r, DemodResult):
         return r.frames_received / r.mode.n_frames
-    return int(np.count_nonzero(r.weights)) / MODES["C"].n_latents
+    return _blind_progress(r.weights)[1]
 
 
 def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
@@ -914,7 +921,6 @@ def decode_loop_diversity(rings, model, state: SharedState, config: RxConfig,
     if sink is None:
         sink = SaveToDirSink(config.out_dir, config.size)
     modem = Modem()
-    total_c_latents = MODES["C"].n_latents
     epsilon_samples = SAME_RECEPTION_EPSILON_S * FS
     finished_starts = deque(maxlen=50)
     last_progress_metric = -1
@@ -997,8 +1003,7 @@ def decode_loop_diversity(rings, model, state: SharedState, config: RxConfig,
             mode_name = None
             n_frames_expected = None
             frames_received = None
-            progress_metric = int(np.count_nonzero(weights_full))
-            progress_frac = progress_metric / total_c_latents
+            progress_metric, progress_frac = _blind_progress(weights_full)
         callsign = combined.callsign
         snr_db = combined.snr_db
 

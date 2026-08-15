@@ -161,11 +161,6 @@ std::optional<FoundReception> find_new_reception(
     return std::nullopt;
 }
 
-int count_nonzero(const std::vector<double>& v) {
-    return static_cast<int>(std::count_if(v.begin(), v.end(),
-                                          [](double w) { return w != 0.0; }));
-}
-
 void remember_finished(std::deque<std::int64_t>& finished, std::int64_t pos) {
     finished.push_back(pos);
     while (finished.size() > kFinishedHistory) finished.pop_front();
@@ -256,16 +251,6 @@ std::optional<std::pair<modem::diversity::Branch, std::int64_t>> find_branch_rec
     return std::make_pair(modem::diversity::Branch(std::move(*rb)), reception_start);
 }
 
-// Comparable progress fraction across a header-locked or blind-locked
-// branch, for picking "whichever branch is furthest along" when only
-// one is usable this poll.
-double branch_progress_frac(const modem::diversity::Branch& b) {
-    if (const auto* d = std::get_if<modem::DemodResult>(&b))
-        return static_cast<double>(d->frames_received) / d->mode.n_frames;
-    return static_cast<double>(count_nonzero(std::get<modem::BlindDemodResult>(b).weights)) /
-           kTotalCLatents;
-}
-
 // Back to "listening", with the per-reception fields cleared.
 void reset_to_listening(SharedState& state) {
     state.update([](Progress& s) {
@@ -280,6 +265,12 @@ void reset_to_listening(SharedState& state) {
 }
 
 }  // namespace
+
+double branch_progress_frac(const modem::diversity::Branch& b) {
+    if (const auto* d = std::get_if<modem::DemodResult>(&b))
+        return static_cast<double>(d->frames_received) / d->mode.n_frames;
+    return blind_progress(std::get<modem::BlindDemodResult>(b).weights).frac;
+}
 
 BlindProgress blind_progress(std::span<const double> weights_full) {
     // The metric counts confidently-received latents only, not bare
@@ -994,8 +985,9 @@ void decode_loop_diversity(std::span<RingBuffer* const> rings, const Decoder& de
             const auto& bd = std::get<modem::BlindDemodResult>(*combined);
             latents_full = bd.latents;
             weights_full = bd.weights;
-            progress_metric = count_nonzero(weights_full);
-            progress_frac = static_cast<double>(progress_metric) / kTotalCLatents;
+            const BlindProgress bp = blind_progress(weights_full);
+            progress_metric = bp.metric;
+            progress_frac = bp.frac;
             callsign = bd.callsign;
             snr_db = bd.snr_db;
         }

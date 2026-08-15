@@ -241,6 +241,18 @@ blind-locked, completion falls back to the progress-stall detection
 header-locked mode's frame count if there is one, else mode C's full
 range.
 
+The *reported* progress is a frame position on both paths, not a fill
+fraction (`_blind_progress` / `rx::blind_progress`, shared with
+`decode_loop`). That matters twice here, and the second one is
+diversity-only. A blind branch's latent count is not comparable to a
+header branch's `frames_received / n_frames` -- the erasures the blind
+path lives with hold the count down permanently -- so when only one
+branch is usable this poll and the loop picks "whichever is furthest
+along" (`_progress_frac` / `rx::branch_progress_frac`), a count-based
+comparison would hand a header branch half way in the win over a blind
+branch already at the transmission's last frame, and the operator would
+be shown the shorter reception.
+
 ## API
 
 ```python

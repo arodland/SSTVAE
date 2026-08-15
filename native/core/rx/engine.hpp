@@ -59,6 +59,7 @@
 
 #include "config.hpp"
 #include "images/types.hpp"
+#include "modem/diversity.hpp"
 #include "modem/modem.hpp"
 #include "rx/ringbuffer.hpp"
 #include "util/event.hpp"
@@ -337,6 +338,21 @@ void decode_loop_diversity(std::span<RingBuffer* const> rings, const Decoder& de
                            SharedState& state, const RxConfig& config,
                            StopFlag& stop, const Sink& sink,
                            const DebugImageSink* debug_sink = nullptr);
+
+// Comparable progress fraction across a header-locked or blind-locked
+// branch, for `decode_loop_diversity`'s "whichever branch is furthest
+// along" pick when only one of the two is usable this poll. Exposed for
+// the same reason `blind_progress` is: it is arithmetic, and the
+// alternative is inferring it from a whole decode run.
+//
+// Both sides are "how far into the transmission", in frames -- which is
+// what makes them comparable at all. A latent *count* over the blind
+// path's mode-C total is not the same quantity as the header path's
+// frames_received/n_frames: the erasures the blind path lives with hold
+// the count down permanently, so a blind branch at the transmission's
+// last frame would lose to a header branch half way in. See
+// `blind_progress`.
+double branch_progress_frac(const modem::diversity::Branch& branch);
 
 }  // namespace sstvae::rx
 
