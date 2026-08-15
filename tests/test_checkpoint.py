@@ -185,3 +185,17 @@ def test_a_revision_without_a_gradient_artifact_says_so(monkeypatch):
         checkpoint.resolve_onnx(checkpoint.GRAD_PART, None)
     msg = str(e.value)
     assert "v2" in msg and "v3" in msg and checkpoint.GRAD_PART in msg
+
+
+def test_the_current_revision_ships_a_gradient_artifact():
+    """`GRAD_REVISIONS` must contain `DEFAULT_REVISION`.
+
+    These are two hand-maintained lists that have to be bumped together,
+    and the failure when they aren't is silent in the worst direction:
+    the optimizer's gradient fetch is refused on the *current* codec, so
+    a station that never optimizes sees nothing wrong and one that does
+    gets a message about an unpublished artifact that was in fact
+    published. Caught for real when v4 was published — the Python side
+    was updated and the C++ copy in `native/core/checkpoint/` was not.
+    """
+    assert checkpoint.DEFAULT_REVISION in checkpoint.GRAD_REVISIONS

@@ -385,6 +385,20 @@ void test_the_gradient_sibling_uses_its_own_precision() {
                  "ckpt/grad: sibling is rebuilt at fp32, not substituted");
 }
 
+// GRAD_REVISIONS must contain DEFAULT_REVISION. Two hand-maintained
+// lists that have to be bumped together, and when they are not the
+// failure is silent in the worst direction: the gradient fetch is
+// refused on the *current* codec, so it reads as an unpublished
+// artifact rather than a stale list. This is not hypothetical -- it is
+// exactly what happened to this file when v4 was published.
+void test_the_current_revision_ships_a_gradient_artifact() {
+    const bool present =
+        std::find(checkpoint::GRAD_REVISIONS.begin(), checkpoint::GRAD_REVISIONS.end(),
+                  checkpoint::DEFAULT_REVISION) != checkpoint::GRAD_REVISIONS.end();
+    check::is_true(present, "GRAD_REVISIONS contains DEFAULT_REVISION (" +
+                                std::string(checkpoint::DEFAULT_REVISION) + ")");
+}
+
 int main() {
     try {
         test_filenames();
@@ -407,6 +421,7 @@ int main() {
         test_the_gradient_artifact_is_always_fp32();
         test_the_gradient_artifact_is_not_mistaken_for_the_decoder();
         test_the_gradient_sibling_uses_its_own_precision();
+        test_the_current_revision_ships_a_gradient_artifact();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;

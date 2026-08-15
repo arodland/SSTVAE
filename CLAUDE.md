@@ -1751,11 +1751,26 @@ not implemented, but the document format is built for them (see
 
 ONNX runtime path complete: the codec is onnxruntime, torch is
 training-only, and `cli`/`listen` install ~263 MB instead of
-~555 MB. The published codec is **v3** (cc12), and `DEFAULT_FILE` /
-`DEFAULT_REVISION` point at it in both implementations: six codec
-artifacts plus `v3-decoder-grad-fp32.onnx` for the optimizer. The app
+~555 MB. The published codec is **v4** (2026-08-14), and `DEFAULT_FILE`
+/ `DEFAULT_REVISION` point at it in both implementations: six codec
+artifacts plus `v4-decoder-grad-fp32.onnx` for the optimizer. The app
 fetches what it needs on first run, per part — and a station that never
 optimizes never fetches the gradient graph.
+
+**v4 is the cc12 lineage fine-tuned through the `PROTOCOL_VERSION` 3
+modem** (epoch 536), and the codec revision and the protocol version are
+**different numbers that happen to be adjacent** — do not conflate them.
+Measured against v3 through the same channel, mode B: **+0.43 dB AWGN
+and +0.42 dB mpp on photographs, +1.14 / +1.27 on non-photo**, and
++0.64 / +0.65 on a real certificate. Roughly a quarter of that is the
+pilot and headroom change and three quarters the fine-tune. Bumping the
+revision is a **three-place change** — `sstvae/checkpoint.py`'s
+`DEFAULT_FILE`, `native/core/checkpoint/checkpoint.hpp`'s
+`DEFAULT_REVISION`, and **`GRAD_REVISIONS` in both**, which is the one
+that gets missed: omitting the new revision there refuses the
+optimizer's gradient fetch on the current codec and reads as an
+unpublished artifact rather than a stale list. Both suites now assert
+`DEFAULT_REVISION` is in `GRAD_REVISIONS`.
 
 Remaining: run stage-2 fine-tune (start from a good stage-1
 checkpoint, `--lr 1e-4`) — note pre-beacon checkpoints remain
@@ -1833,8 +1848,8 @@ checkpoints improve — re-measure on every codec revision rather than
 trusting "it used to be worth 2 dB". The native app can run it on the
 pinned inference onnxruntime via an exported gradient graph rather than
 torch. **Measurement, publishing and the Python side are done**
-(2026-07-31): `v3-decoder-grad-fp32.onnx` ships beside the v3/cc12
-codec, `sstvae/latent_optim.py` runs it torch-free, and
+(2026-07-31): a `-decoder-grad-fp32.onnx` ships beside each codec
+revision from v3 on, `sstvae/latent_optim.py` runs it torch-free, and
 `sstvae_encode.py --optimize [SECONDS]` is the flag. The gradient
 artifact is **fp32 whatever `--precision` says** — the only precision
 published, since the fp16 converter emits a graph ORT will not load and
