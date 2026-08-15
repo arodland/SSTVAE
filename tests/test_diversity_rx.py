@@ -17,7 +17,8 @@ from PIL import Image
 
 from sstvae import hfchannel
 from sstvae.config import FS, HEADER_SAMPLES, LEADIN_SAMPLES, MODES, NC_LATENT, PREAMBLE_SAMPLES
-from sstvae.modem import Modem
+from sstvae.modem import Modem, framing
+from sstvae.modem.modem import BlindDemodResult, DemodResult
 from sstvae.rx import (
     RingBuffer,
     RxConfig,
@@ -261,3 +262,46 @@ def test_diversity_completes_when_both_branches_are_blind_only(tmp_path):
         assert state.branch_b_locked
     with state.lock:
         assert state.status == "done"
+
+
+def test_single_branch_pick_compares_frames_not_latent_counts():
+    """When only one branch is usable this poll, `_progress_frac` picks
+    the one furthest into the transmission -- and "furthest" has to mean
+    the same thing on both sides.
+
+    A blind branch's latent *count* is not comparable to a header
+    branch's frames_received/n_frames: the erasures the blind path lives
+    with (a fade, or simply not having heard the start) hold the count
+    down permanently. Under a count-based comparison the blind branch
+    below -- which has reached the transmission's *last* frame, but
+    holds only a third of its latents -- would lose to a header branch
+    barely half way in, and the loop would show the operator the shorter
+    reception. See `_blind_progress`.
+    """
+    n_latents = MODES["C"].n_latents
+    frame_of = framing.frame_of_latent()
+
+    # Blind: at the last frame, but only every third latent survived.
+    blind_w = np.zeros(n_latents)
+    got = np.flatnonzero(frame_of[:n_latents] >= 0)[::3]
+    blind_w[got] = 1.0
+    blind = BlindDemodResult(
+        latents=np.zeros(n_latents), weights=blind_w,
+        freq_offset=0.0, beacon=None, callsign="",
+        frame_offset=0, n_frames=MODES["C"].n_frames,
+    )
+
+    # Header: an unambiguously earlier point in the same transmission.
+    mode = MODES["C"]
+    headered = DemodResult(
+        latents=np.zeros(mode.n_latents), weights=np.ones(mode.n_latents),
+        mode=mode, freq_offset=0.0, sync_metric=1.0,
+        frames_received=mode.n_frames // 2,
+    )
+
+    assert rx_engine._progress_frac(blind) > rx_engine._progress_frac(headered), (
+        "a blind branch at the last frame must beat a header branch half way in"
+    )
+    # And the quantity really is a frame position, not a latent count:
+    # a third of the latents would read as ~0.33 on the old measure.
+    assert rx_engine._progress_frac(blind) == pytest.approx(1.0)

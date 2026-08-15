@@ -908,6 +908,51 @@ void test_blind_progress_is_the_last_frame_reached() {
         "rx/progress: backfill behind the furthest frame does not move it");
 }
 
+// When only one diversity branch is usable this poll,
+// decode_loop_diversity picks "whichever branch is furthest along" --
+// and "furthest" has to mean the same thing on both sides of that
+// comparison.
+//
+// A blind branch's latent count is not comparable to a header branch's
+// frames_received/n_frames: the erasures the blind path lives with (a
+// fade, or simply not having heard the start) hold the count down
+// permanently. Under a count-based comparison the blind branch below --
+// at the transmission's last frame, but holding only a third of its
+// latents -- would lose to a header branch barely half way in, and the
+// operator would be shown the shorter reception.
+void test_branch_progress_compares_frames_not_latent_counts() {
+    const auto& mode_c = config::MODES[config::N_MODES - 1];
+    const auto n_latents = static_cast<std::size_t>(mode_c.n_latents);
+
+    // Blind: reaches the last frame, but only every third one is there.
+    modem::BlindDemodResult blind{};
+    blind.latents.assign(n_latents, 0.0);
+    blind.weights.assign(n_latents, 0.0);
+    for (int f = 0; f < mode_c.n_frames; f += 3)
+        for (const std::int64_t i : framing::slot_range_for_frame(f).indices)
+            blind.weights[static_cast<std::size_t>(i)] = 1.0;
+    for (const std::int64_t i : framing::slot_range_for_frame(mode_c.n_frames - 1).indices)
+        blind.weights[static_cast<std::size_t>(i)] = 1.0;
+    blind.n_frames = mode_c.n_frames;
+
+    // Header: an unambiguously earlier point in the same transmission.
+    modem::DemodResult headered{};
+    headered.latents.assign(n_latents, 0.0);
+    headered.weights.assign(n_latents, 1.0);
+    headered.mode = mode_c;
+    headered.frames_received = mode_c.n_frames / 2;
+
+    const double blind_frac = rx::branch_progress_frac(modem::diversity::Branch(blind));
+    const double header_frac = rx::branch_progress_frac(modem::diversity::Branch(headered));
+    check::is_true(blind_frac > header_frac,
+                   "rx/diversity: a blind branch at the last frame beats a header "
+                   "branch half way in");
+    // And the quantity really is a frame position: a third of the
+    // latents would read ~0.33 on the old count-based measure.
+    check::is_true(std::abs(blind_frac - 1.0) < 1e-12,
+                   "rx/diversity: the blind branch's fraction is its frame position");
+}
+
 // `frame_of_latent` is the inverse of `slot_range_for_frame`, and the
 // latents that never get a slot belong to no frame at all -- defaulting
 // those to 0 rather than -1 would hand frame 0 thousands of latents
@@ -936,6 +981,7 @@ int main() {
         test_poll_backoff();
         test_frame_of_latent_inverts_slot_range_for_frame();
         test_blind_progress_is_the_last_frame_reached();
+        test_branch_progress_compares_frames_not_latent_counts();
         test_stop_interrupts_a_wait_in_progress();
         test_a_clean_transmission_is_received_once();
         test_noise_produces_nothing();
