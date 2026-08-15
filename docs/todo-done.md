@@ -7,6 +7,237 @@ precisely so a result doesn't get re-derived (or a false positive
 re-discovered) later. `docs/todo.md` keeps a short summary of each,
 plus any residual open ends.
 
+## Pilot crest factor — the largest single modem win found
+
+**Implemented 2026-08-14, `PROTOCOL_VERSION` 3.** The frozen QPSK pilot
+(`PILOT_QUADRANTS`, a seeded random draw) had **7.9 dB envelope PAPR
+against a clip threshold ~1 dB above the mean**, making it the most
+heavily clipped symbol in the waveform — while also being the frame
+channel-estimate reference, the preamble (four repeats of it) and the
+blind-acquisition template. It lost power *and* gained distortion
+exactly where the receiver could least afford either.
+
+Achievable pilot PAPR, 24 unit-magnitude carriers with free phases (the
+classic minimum-crest-factor multitone; unit magnitude is not
+negotiable, it is what equalizes the channel estimate across carriers):
+
+| sequence | PAPR |
+|---|---|
+| old frozen QPSK | 7.62 dB |
+| Newman / Schroeder / Zadoff-Chu u=1 | 2.70 dB |
+| best QPSK-constrained (keeps the alphabet) | 3.06 dB |
+| free-phase optimized (**chosen**, quantized) | 0.98 dB |
+
+Latent SNR under a real channel, mode A, **no PEP credit applied** so
+conservative:
+
+| pilot | awgn 4 | awgn 8 | awgn 12 | mpp 8 |
+|---|---|---|---|---|
+| old | 1.64 | 5.55 | 7.85 | −0.51 |
+| Zadoff-Chu | +3.02 | +2.35 | +1.99 | +1.99 |
+| chosen | +3.29 | +2.39 | +1.84 | +2.04 |
+
+Acquisition **improves** rather than paying for it: 0.96 → 1.00 at
+−2 dB, metric 0.513 → 0.591, timing error 0, noise-floor peak 0.176
+against a 0.42 threshold.
+
+### Zadoff-Chu is disqualified — do not retry it
+
+At 2.70 dB with a one-line closed form and ideal periodic
+autocorrelation, ZC is the obvious engineering choice, and its defining
+property is what kills it here: an exact delay-Doppler equivalence, so a
+frequency shift *is* a time shift. This pilot is also the acquisition
+template, which makes CFO and timing confusable.
+
+| pilot | median \|Δf\| | max \|Δf\| | max Δframe | true metric | false metric | separation |
+|---|---|---|---|---|---|---|
+| old | 0.19 | 0.69 | 0 | 18.89 | 4.55 | 14.35 |
+| **Zadoff-Chu** | 0.98 | **55.70** | **7** | 31.63 | 29.56 | **2.07** |
+| qpsk-opt | 0.24 | 0.55 | 0 | 26.42 | 5.20 | 21.23 |
+| chosen | 0.43 | 1.25 | 0 | 31.32 | 6.83 | 24.48 |
+
+Locking 55.7 Hz off *inside* a ±55 Hz search range, with the true/false
+metric gap collapsed to 2.07, is not recoverable by any threshold. **The
+existing test suite caught this and the screen that cleared the pilot
+did not** — because that screen ran at zero frequency offset, which is
+precisely where the coupling is invisible. Any future pilot candidate
+must be swept over CFO.
+
+**Pilot PAPR is a proxy, not the mechanism.** The candidate ordering by
+PAPR is not the ordering by latent SNR: the free-phase set has the
+lowest PAPR of all and was *worst* of the three new candidates on a
+noiseless clipping measurement, while beating them under noise. Anything
+that pushes this further should optimize against latent SNR and
+acquisition directly.
+
+**The frozen form is exact integers, not radians.**
+`PILOT_PHASE_NUM`/`PILOT_PHASE_DEN` give φ_k = 2π·NUM[k]/1024, because
+`sin`/`cos` of a decimal differ across libms and between x86-64 and
+Apple silicon — the same argument as `ofdm._phasor`, and the reason the
+generated `config.hpp` can claim C++ evaluates the same expression on
+the same values. Quantizing the continuous optimum to DEN=1024 costs
+0.009 dB of PAPR (0.977 → 0.986) and buys exact reproducibility.
+
+### `CLIP_HEADROOM_DB` 0.5 → 0.0, and it is one change, not two
+
+Most of what a wider headroom used to buy was relief for a pilot the
+clipper was destroying. Re-swept PEP-fair on latent SNR, mode A:
+
+| | old pilot | new pilot |
+|---|---|---|
+| AWGN 8 optimum | hd ≈ 3.0 (5.76) | hd ≈ 1.0 (7.96) |
+| mpp 8 optimum | flat 0.5–3.0 (−0.48) | hd ≈ 0.0 (1.68) |
+| at shipping 0.5 | 5.25 / −0.53 | 7.88 / 1.61 |
+
+The optimum moves down onto the value already shipping, and the case
+against *raising* it strengthens (hd 4.0 now costs 1.3 dB where it cost
+0.2). 0.0 was chosen over 0.5 as a −0.12 dB AWGN / +0.07 mpp trade
+buying 0.14 dB of PAPR, consistent with the standing position that a dB
+of PAPR is worth more than these models credit (amplifier
+non-linearity, receiver AGC — neither modelled anywhere here).
+
+**Do not lower the headroom without the new pilot**: at the old one, 0.0
+is 0.2 dB *worse* than 0.5, i.e. a step away from that arm's optimum.
+
+### `BLIND_SCORE_THRESHOLD` 4.0 → 9.0, also one change
+
+The blind score is a peak/median prominence — scale invariant in signal
+level, but *not* in how much of the pilot survives the clipper. A
+stronger pilot lifts true and false scores together, so the old gate
+admits locks it used to refuse. Two negative-control tests caught this.
+
+Calibrated like `TEMPLATE_SCORE_THRESHOLD`: between the highest measured
+false score and the lowest true one worth keeping. The binding
+constraint is **not noise** (25 trials of pure noise peaked at 1.43) but
+a real transmission *outside* the search range, at 7.33; the lowest true
+score kept is 10.19 (mpp, −2 dB). Measured against the old pilot at 4.0,
+25 trials per cell:
+
+| arm | awgn +2/−2/−6 | mpp +2 | mpp −2 | mpp −6 | out-of-range false lock |
+|---|---|---|---|---|---|
+| old @ 4.0 | 1.00 / 1.00 / 1.00 | 0.64 | 0.56 | 0.52 | **0.60** |
+| new @ 8–10 | 1.00 / 1.00 / 1.00 | **0.72** | **0.68** | 0.00 | **0.00** |
+
+It gives up mpp at −6 dB, and that is not a tuning choice: those true
+locks score 6.4 while out-of-range signals reach 7.3, so no threshold
+separates them. The old setting bought that cell by accepting garbage
+60% of the time. **Four hardcoded copies of the old 4.0 existed** — two
+Python, two C++, plus a stale one in the `BlindAccumulator` parity shim,
+which is verbatim the hazard recorded for the `acquire` shim's stale
+`threshold=0.5`.
+
+A side effect worth knowing: with the new pilot, `mpp` no longer has any
+region where a long blind-accumulator window beats a short one — 10 s
+already builds a strong enough peak that 1 Hz Doppler decorrelates the
+signal faster than 90 s can integrate it. The long-window advantage
+lives in **slow** fading (`mpg`), which is a mechanism rather than the
+seed hunt the old test used.
+
+### The 0.794 latent gain is deliberate — do not "fix" it
+
+The clipper compresses high-crest data symbols and leaves the flat pilot
+alone, so the pilot-derived channel estimate describes a slightly
+different gain than the data actually saw, and latents return 21% small
+(old pilot: 1.008). Identical in Python and C++, so a real format
+effect. `native/tests/test_modem_roundtrip` checks it; the Python suite
+structurally cannot, as its own comment says ("an amplitude error is
+invisible to the SNR check").
+
+It reads like a defect and is not, for two independent reasons.
+
+**With a noisy reference the MSE-optimal scale is below unity** —
+measured 1.05 at AWGN 8, 0.72 at mpp 12, **0.57 at mpp 8** — so the
+shrinkage sits closer to right than unity does. On bare latents,
+correcting to 1.0 costs 0.7 dB on AWGN and 1.9–2.3 dB under fading.
+
+**And the decoder consumes `latents × weights`, not `latents`.** On that
+quantity the per-latent confidence weights already perform the
+shrinkage: optimal rescale 0.91–1.20 everywhere, oracle headroom 0.04 dB
+at mpp 8, 0.23 at mpp 12, 0.43 at AWGN 8. Both candidate fixes were
+therefore wrong — TX pre-scaling gives back the pilot-power half of the
+win, an RX constant is the harmful correction above.
+
+It is safe to let a stage-2 fine-tune train against: **0.7933 ± 0.0008
+across data, identical across modes A/B/C, unmoved by AWGN, flat across
+carriers to ±1.9%.** It does track `CLIP_HEADROOM_DB` (0.81 at −1 dB,
+0.94 at +4), so re-measure if that constant moves.
+
+Two measurement rules came out of this section. **Score the quantity the
+decoder consumes** — measuring bare `latents` invented a phantom "+1.5 dB
+from adding Wiener shrinkage" that does not exist. And **image PSNR
+cannot resolve a pilot change**: swapping the pilot changes the whole
+waveform's fine structure, so a fading realization stops affecting the
+two arms alike and paired SEM blows up to ±0.2 dB on 8 images; latent
+SNR averages ~10^5 values and sees it cleanly.
+
+## Tone reservation for PAPR — rejected
+
+Measured 2026-08-14, both sides of the clipper. **−0.180 ± 0.024 dB
+PSNR** end to end at mode B with one reserved carrier, full PEP credit
+given (each configuration transmitted at the same peak envelope power,
+so its average-power SNR is the reference shifted by its own PAPR
+advantage). The reason is structural rather than an implementation
+limit, which is why this is a rejection and not a backlog item.
+
+**The clipper is not a peak clipper at this operating point.** At the
+then-shipping headroom, **28.7% of data samples sat above the threshold
+and 28.5% of the energy was removed** — that is a compressor. Tone
+reservation is a peak-reduction technique: the Tellado
+clipping-and-projection loop converged (24 vs 100 iterations agree) and
+delivered its textbook ~1.3 dB of per-symbol peak reduction at R=2
+(8.7% of carriers reserved), and that barely dents a 28%-duty clip.
+
+| R | dead latents | channel gain | erasure cost | net (measured) |
+|---|---|---|---|---|
+| 0 | 4.17% | — | — | — |
+| 1 | 8.33% | +0.21 dB SNR | −0.32 dB PSNR | **−0.180 ± 0.024** |
+| 2 | 12.50% | +0.25 dB SNR | −0.64 dB PSNR | ~−0.52 |
+
+**Post-clip reservation is pilot-limited.** Adding the cancelling signal
+*after* the clipper touches no data carrier, so clipping distortion is
+unchanged by construction and the whole benefit is transmitted PAPR. It
+caps at **+0.13 dB of PEP credit**: data-symbol peaks fall 4.39 → 4.03 dB
+at R=2, but the pilot peak holds at 4.25–4.28 regardless of R (pilots are
+1/6 of symbols, occupy every carrier and need a channel estimate on all
+of them), so global PAPR floors at ~4.22 and R>1 buys nothing at all. It
+also degraded clipSNR ~0.26 dB per reserved carrier, landing worse than
+pre-clip. With the clipper delivering 4.36 dB and the pilot floor at
+4.25, there was ~0.1 dB of peak in the entire waveform to compete for.
+Measured with the *old* pilot; v3 lowers that floor, but nowhere near
+enough to change the arithmetic against 4.17 points of erasure per
+reserved carrier.
+
+**Do not fine-tune around the dead latents to rescue it.** The channel
+gain is the entire ceiling: a decoder paying nothing whatsoever for the
+erasures earns +0.10 dB PSNR at mode B, below the 0.139 dB spread across
+four very different checkpoints — i.e. below the resolution at which
+model decisions are being made.
+
+Two things worth keeping. The conversion factor between channel dB and
+erasure dB is **~0.48 dB PSNR per dB of channel SNR** at the 8 dB
+operating point (0.35–0.40 at 10 dB — the curve is compressive); nothing
+that pays in channel dB can be weighed against a capacity cost without
+it. And **clipping self-noise is a first-order impairment** that had
+never been measured: through the real modem on a noiseless channel,
+transmitted latents only, unclipped 74.8 dB against **10.15 dB** at the
+old headroom — comparable to the channel itself at 8 dB. That
+measurement is what made the pilot work above worth doing.
+
+Trap for anyone re-measuring: **latent SNR must exclude the dropped
+latents.** `DROPPED_LATENTS_PER_GROUP` alone puts a 13.8 dB floor on it,
+which reads exactly like a modem impairment. Use
+`framing.interleave(arange(n), spec)` for the transmitted index set.
+
+## Explicit Wiener shrinkage on the received latents — rejected
+
+The MMSE-optimal rescale of the equalized latents varies with channel
+quality (0.57 at mpp 8 dB) and the receiver already estimates SNR, so an
+explicit shrinkage looked worth +1.5 dB. It is not: the per-latent
+confidence weights already are that shrinkage. Full numbers in the
+0.794-gain subsection above. `latents × weights` beats bare `latents` by
+3.6 dB at mpp 8 and 4.4 dB at mpd 8, and the residual oracle headroom on
+top is 0.04–0.43 dB before any oracle-to-causal haircut.
+
 ## Preamble detection against a steady-carrier interferer
 
 **Mostly closed 2026-08-13, as a side effect of an unrelated fix — see

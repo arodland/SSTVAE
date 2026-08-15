@@ -13,16 +13,16 @@ generated one, and CI regenerates it and asserts the diff is empty.
 
 Two things here are less obvious than the scalar copying:
 
-**The pilot sequence is generated, not ported.** `ofdm.pilot_sequence()`
-draws from `np.random.default_rng(PILOT_SEED)`, so reproducing it in C++
-means reimplementing PCG64 *and* numpy's bounded-integer algorithm, and
-then owning that forever as a compatibility surface. But the sequence is
-a *format constant* -- 24 fixed QPSK phases that both ends must agree
-on -- not an algorithm anyone needs to run. Emitting the values makes the
-contract explicit and deletes the dependency on numpy's RNG internals.
-The same argument applies to the interleaver permutations later, which
-are far larger; those get their own generated artifact rather than
-bloating this header.
+**The pilot sequence is generated, not ported.** It is a *format
+constant* -- 24 fixed phases both ends must agree on -- rather than an
+algorithm anyone needs to run, so emitting the values makes the contract
+explicit. It is carried as exact integer numerators of a rational turn,
+not as radians: the closed form's raw argument reaches -69 rad, where
+sin/cos are a property of the libm, and this header's whole purpose is
+that C++ evaluates the same expression on the same values. The same
+argument applies to the interleaver permutations, which are far larger
+and still *are* an RNG draw; those get their own generated artifact
+rather than bloating this header.
 
 **Derived values are emitted, not recomputed.** `M = FS // RS` could be
 written as an expression in C++, but then a future edit to config.py that
@@ -56,7 +56,7 @@ INT_NAMES = [
     "LATENT_H", "LATENT_W", "LATENT_GROUPS", "CHANNELS_PER_GROUP",
     "LATENT_CHANNELS", "GROUP_LATENTS", "FRAMES_PER_GROUP",
     "TRANSMIT_LATENTS_PER_GROUP", "DROPPED_LATENTS_PER_GROUP",
-    "DEMOD_BACKOFF", "INTERLEAVER_SEED", "PILOT_SEED", "PROTOCOL_VERSION",
+    "DEMOD_BACKOFF", "INTERLEAVER_SEED", "PROTOCOL_VERSION",
     "ACQUIRE_MAX_BINS",
 ]
 DOUBLE_NAMES = [
@@ -64,7 +64,7 @@ DOUBLE_NAMES = [
     "BLIND_BIN_STEP_HZ", "BLIND_BLOCK_RES_HZ", "BLIND_MAX_OFFSET_HZ",
     "BLIND_WIDE_MAX_OFFSET_HZ",
     "DRIFT_SLOW_ALPHA", "DRIFT_SLOW_BETA", "DRIFT_FAST_ALPHA", "DRIFT_FAST_BETA",
-    "TEMPLATE_SCORE_THRESHOLD",
+    "TEMPLATE_SCORE_THRESHOLD", "BLIND_SCORE_THRESHOLD",
 ]
 
 
@@ -140,37 +140,38 @@ def render() -> str:
     w("\n")
 
     w("// --- pilot sequence --------------------------------------------------\n")
-    w("// Copied from config.PILOT_QUADRANTS, which is a frozen literal -- not\n")
-    w("// re-derived here, and not re-derived by Python either.\n")
+    w("// Copied from config.PILOT_PHASE_NUM -- not re-derived here.\n")
     w("//\n")
-    w("// These 24 QPSK symbols are part of the on-air format. They were\n")
-    w("// originally drawn from np.random.default_rng(PILOT_SEED), but nothing\n")
-    w("// draws them any more: doing so would make numpy's PCG64 and its\n")
-    w("// bounded-integer draw part of the format, so a future numpy that\n")
-    w("// changed either would change what this program transmits. If that\n")
-    w("// ever happens the right answer is to keep sending these, which is\n")
-    w("// only possible because they are written down.\n")
+    w("// A minimized crest-factor phase set, carried as an exact rational\n")
+    w("// turn: phi_k = 2*pi * NUM[k] / DEN. Integers rather than radians\n")
+    w("// because sin/cos disagree between libms and between x86-64 and Apple\n")
+    w("// silicon, which would make the pilot a property of the machine rather\n")
+    w("// than of the format -- and this file exists so C++ evaluates the\n")
+    w("// *same expression* on the *same values* Python does.\n")
     w("//\n")
-    w("// Quadrant indices rather than phases or complex values, so C++\n")
-    w("// evaluates the *same expression* Python does: pi/4 + pi/2 * k.\n")
-    quadrants = list(cfg.PILOT_QUADRANTS)
-    if len(quadrants) != cfg.NC or any(k not in (0, 1, 2, 3) for k in quadrants):
+    w("// Not Zadoff-Chu, deliberately: see the note in config.py. Its\n")
+    w("// delay-Doppler equivalence makes CFO and timing confusable, and this\n")
+    w("// sequence is also the acquisition template.\n")
+    num = list(cfg.PILOT_PHASE_NUM)
+    den = int(cfg.PILOT_PHASE_DEN)
+    if len(num) != cfg.NC or any(not (0 <= v < den) for v in num):
         raise SystemExit(
-            f"config.PILOT_QUADRANTS must be {cfg.NC} values in 0..3, "
-            f"got {len(quadrants)}"
+            f"config.PILOT_PHASE_NUM must be {cfg.NC} values in 0..{den - 1}, "
+            f"got {len(num)}"
         )
-    # Cross-check that the frozen literal is what ofdm actually builds, so
-    # the header cannot describe a waveform the Python side does not send.
-    rebuilt = np.exp(1j * (np.pi / 4 + np.pi / 2 * np.asarray(quadrants)))
+    # Cross-check that the literal is what ofdm actually builds, so the
+    # header cannot describe a waveform the Python side does not send.
+    rebuilt = np.exp(2j * np.pi * np.asarray(num) / den)
     err = np.max(np.abs(rebuilt - ofdm.pilot_sequence()))
     if err != 0.0:
         raise SystemExit(
-            f"config.PILOT_QUADRANTS does not reproduce ofdm.pilot_sequence() "
+            f"config.PILOT_PHASE_NUM does not reproduce ofdm.pilot_sequence() "
             f"(max error {err:.3g}); they must not disagree"
         )
-    w(f"inline constexpr std::array<int, NC> PILOT_QUADRANTS = {{\n")
-    for i in range(0, len(quadrants), 12):
-        w("    " + ", ".join(str(k) for k in quadrants[i:i + 12]) + ",\n")
+    w(f"inline constexpr int PILOT_PHASE_DEN = {den};\n")
+    w(f"inline constexpr std::array<int, NC> PILOT_PHASE_NUM = {{\n")
+    for i in range(0, len(num), 12):
+        w("    " + ", ".join(str(v) for v in num[i:i + 12]) + ",\n")
     w("};\n")
     w("\n")
 

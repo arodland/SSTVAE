@@ -61,6 +61,26 @@ std::vector<double> test_latents(int n, std::uint64_t seed) {
 // loopback (~10 dB) leaves room for. Verified by perturbing exactly
 // that and watching the SNR check pass. The gain is checked separately
 // because it is the quantity that is actually wrong.
+//
+// The expected value is NOT 1.0, as of PROTOCOL_VERSION 3. The transmit
+// clipper compresses high-crest data symbols while leaving the new
+// low-crest pilot untouched, so the pilot-derived channel estimate
+// describes a slightly different gain than the data actually saw, and
+// the latents come back scaled. That is deliberate and benign: with a
+// noisy reference the MSE-optimal scale is *below* unity anyway (0.57
+// at mpp 8 dB), so correcting this to 1.0 costs 0.7 dB on AWGN and
+// 1.9-2.3 dB under fading -- measured. It is a property of the clipper,
+// not of the channel: 0.7933 +- 0.0008 across data, identical across
+// modes A/B/C, unmoved by AWGN, flat across carriers to +-1.9%. It does
+// track CLIP_HEADROOM_DB (0.81 at -1 dB, 0.94 at +4), so re-measure if
+// that constant moves.
+//
+// The band still catches what this check exists for: a dropped
+// 1/sqrt(2) lands at 0.707, well outside it.
+// Measured; see the note above for what sets it and when to re-measure.
+constexpr double EXPECTED_LATENT_GAIN = 0.7933;
+constexpr double LATENT_GAIN_TOL = 0.03;
+
 double latent_gain(const std::vector<double>& sent, const std::vector<double>& got,
                    const std::vector<double>& weights) {
     double num = 0.0, den = 0.0;
@@ -120,12 +140,13 @@ void test_roundtrip(const config::ModeSpec& mode, const std::string& callsign) {
 
     const double snr = latent_snr_db(latents, r.latents, r.weights);
     // The clean-loopback floor is set by clip-and-filter distortion at
-    // the configured headroom, not by the modem. ~10 dB at 0.5 dB
-    // headroom; 8 dB leaves room without being meaningless.
+    // the configured headroom, not by the modem. ~11 dB at the 0.0 dB
+    // headroom of PROTOCOL_VERSION 3; 8 dB leaves room without being
+    // meaningless.
     check::is_true(snr > 8.0, what + ": latent SNR " + std::to_string(snr) +
                                   " dB through a clean loopback");
     const double gain = latent_gain(latents, r.latents, r.weights);
-    check::is_true(std::abs(gain - 1.0) < 0.05,
+    check::is_true(std::abs(gain - EXPECTED_LATENT_GAIN) < LATENT_GAIN_TOL,
                    what + ": latent gain " + std::to_string(gain) +
                        " (an amplitude error is invisible to the SNR check)");
 
@@ -162,7 +183,7 @@ void test_blind_roundtrip() {
     const double snr = latent_snr_db(latents, r.latents, r.weights);
     check::is_true(snr > 8.0, "modem/blind: latent SNR " + std::to_string(snr) + " dB");
     const double gain = latent_gain(latents, r.latents, r.weights);
-    check::is_true(std::abs(gain - 1.0) < 0.05,
+    check::is_true(std::abs(gain - EXPECTED_LATENT_GAIN) < LATENT_GAIN_TOL,
                    "modem/blind: latent gain " + std::to_string(gain));
 }
 

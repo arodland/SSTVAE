@@ -82,7 +82,7 @@ BlindAcquisition acquire_blind(std::span<const cdouble> z,
                                double max_offset_hz = config::BLIND_MAX_OFFSET_HZ,
                                double bin_step_hz = config::BLIND_BIN_STEP_HZ,
                                int min_periods = 8,
-                               double threshold = 4.0,
+                               double threshold = config::BLIND_SCORE_THRESHOLD,
                                std::optional<SearchWindow> search = std::nullopt);
 
 // Sub-bin CFO from the winning bin and its two neighbours. The search
@@ -116,7 +116,7 @@ class BlindAccumulator {
    public:
     explicit BlindAccumulator(double max_offset_hz = config::BLIND_MAX_OFFSET_HZ,
                               double bin_step_hz = config::BLIND_BIN_STEP_HZ,
-                              int min_periods = 8, double threshold = 4.0,
+                              int min_periods = 8, double threshold = config::BLIND_SCORE_THRESHOLD,
                               std::optional<int> block_samples = std::nullopt,
                               std::vector<std::optional<double>> window_s = {25.0});
 

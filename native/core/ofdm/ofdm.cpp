@@ -87,11 +87,15 @@ struct Matrices {
                     carrier_phasor(-n, baseband_hz[static_cast<std::size_t>(k)]);
         }
 
-        // phase = pi/4 + pi/2 * quadrant, grouped as the reference groups it.
+        // Zadoff-Chu as an exact rational turn: phase = 2*pi * NUM[k] / DEN.
+        // Not the closed form -pi*u*k^2/NC -- that argument reaches -69 rad,
+        // where sin/cos differ between libms, and the reference reduces for
+        // exactly that reason. Same expression, same values, both sides.
         for (int k = 0; k < NC; ++k) {
             const double phase =
-                PI / 4 + PI / 2 * static_cast<double>(
-                                      config::PILOT_QUADRANTS[static_cast<std::size_t>(k)]);
+                2.0 * PI *
+                static_cast<double>(config::PILOT_PHASE_NUM[static_cast<std::size_t>(k)]) /
+                static_cast<double>(config::PILOT_PHASE_DEN);
             pilot[static_cast<std::size_t>(k)] = std::polar(1.0, phase);
         }
     }

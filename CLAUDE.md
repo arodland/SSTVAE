@@ -60,6 +60,10 @@ audio and rig bugs found so far were all invisible to unit tests.
 - `sstvae/modem/` — NumPy DSP, no torch:
   - `ofdm.py` DFT-matrix mod/demod (24 carriers × 50 Hz at 950–2100 Hz;
     carriers on integer multiples of 50 Hz so the CP is truly cyclic).
+    **The pilot is a minimized-crest-factor phase set, 0.99 dB envelope
+    PAPR (`PROTOCOL_VERSION` 3, 2026-08-14)** — see "The pilot is three
+    things at once" below. It replaced a frozen random QPSK draw at
+    7.9 dB, and `CLIP_HEADROOM_DB` moved 0.5 → 0.0 in the same change.
   - `sync.py` preamble detect (lag-160 autocorrelation over a
     480-sample window, energy-floored metric), fractional + integer-bin
     CFO, template timing.
@@ -958,13 +962,74 @@ happened to be one that locked. The invariant that does hold, and what
 `test_rx_engine.cpp` checks instead, is that noise never *finishes* a
 reception: a spurious lock reports a few frames and stops advancing.
 
-**Format constants are frozen data, not computations.** The pilot
-quadrants (`config.PILOT_QUADRANTS`) and the interleaver permutations
-(`sstvae/modem/interleaver_perms.npy`) were originally drawn from
+**The pilot is three things at once, and it was the most-clipped symbol
+in the waveform** (`PROTOCOL_VERSION` 3, 2026-08-14). It is the frame
+channel-estimate reference, the preamble (four repeats of it) and the
+blind-acquisition template — and the old frozen QPSK draw had **7.9 dB
+envelope PAPR against a clip threshold ~1 dB above the mean**, so it
+lost power *and* gained distortion exactly where the receiver could
+least afford either. `config.PILOT_PHASE_NUM` is now a numerically
+minimized crest-factor set at 0.99 dB, worth **~+2.5 dB of latent SNR**
+(+3.3 at 4 dB AWGN, +2.5 at multipath 8 dB), with acquisition improving
+rather than paying for it. Five things this settled, none of them
+obvious:
+
+- **Zadoff-Chu was tried first and must not be tried again.** At 2.70 dB
+  with a one-line closed form and ideal periodic autocorrelation it is
+  the obvious choice, and its defining property kills it: a ZC frequency
+  shift *is* a time shift, and this sequence is the acquisition
+  template, so CFO and timing become confusable. Blind acquisition
+  locked **55.7 Hz off inside its own ±55 Hz search range**, slipped 7
+  frames of timing, and the true-vs-false metric gap collapsed from 14.4
+  to **2.07** (the chosen set: 24.5). No threshold survives that. The
+  existing suite caught it; the screen that cleared the pilot did not,
+  because it ran at **zero frequency offset** — which is precisely where
+  the coupling is invisible.
+- **Pilot PAPR is a proxy, not the mechanism.** Candidate ordering by
+  PAPR is not the ordering by latent SNR. Anything pushing this further
+  should optimize against latent SNR and acquisition directly.
+- **`CLIP_HEADROOM_DB` and the pilot are one change.** Most of what a
+  wider headroom used to buy was relief for a pilot being destroyed by
+  the clipper; with a clean pilot the AWGN optimum moves ~3.0 → ~1.0 and
+  the multipath optimum to ~0.0. **Do not lower the headroom without the
+  new pilot** — at the old one, 0.0 is 0.2 dB *worse* than 0.5.
+- **`BLIND_SCORE_THRESHOLD` moved 4.0 → 9.0 with it, also one change.**
+  The blind score is scale-invariant in signal level but not in how much
+  pilot survives the clipper, so a stronger pilot lifts true and false
+  scores together. Calibrated like `TEMPLATE_SCORE_THRESHOLD`, between
+  the highest false score (7.33 — an out-of-range *real* transmission,
+  not noise, which peaked at 1.43) and the lowest true one kept (10.19).
+  Out-of-range false locks went **0.60 → 0.00** and mpp got *better* at
+  useful SNRs; it gives up mpp at −6 dB, which no threshold could keep
+  (true 6.4 against false 7.3). Four hardcoded copies of the old 4.0
+  existed — two Python, two C++, plus a stale one in the parity shim.
+- **The 0.794 latent gain is deliberate; do not "fix" it.** The clipper
+  compresses high-crest data symbols and leaves the flat pilot alone, so
+  the pilot-derived estimate describes a slightly different gain than
+  the data saw and latents return 21% small (old pilot: 1.008).
+  `native/tests/test_modem_roundtrip` checks it and the Python suite
+  structurally cannot. It is benign because the decoder consumes
+  `latents × weights`, and the confidence weights **already are** a
+  Wiener shrinkage: on that quantity the MMSE-optimal rescale is
+  0.91–1.20 and the remaining oracle headroom is 0.04 dB at mpp 8. It is
+  stable enough to train against — 0.7933 ± 0.0008 across data,
+  identical across modes, unmoved by AWGN, flat across carriers to
+  ±1.9% — but it tracks `CLIP_HEADROOM_DB`, so re-measure if that moves.
+  **Score `latents × weights`, never bare `latents`**: measuring the
+  latter invented a phantom "+1.5 dB from adding Wiener shrinkage".
+
+**Format constants are frozen data, not computations.** The interleaver
+permutations (`sstvae/modem/interleaver_perms.npy`) were drawn from
 seeded numpy, but nothing re-derives them: doing so would make numpy's
 PCG64 part of the waveform, so a future numpy that changed its stream
 would silently change what the radio transmits. If numpy ever does
 change, the right response is to keep sending the frozen values.
+(The pilot used to be in this category and is now strictly better off:
+a closed form over exact integers has no generator to depend on. It is
+carried as `PILOT_PHASE_NUM`/`PILOT_PHASE_DEN`, an exact rational turn
+rather than radians, because `sin`/`cos` of a decimal differ across
+libms and architectures — the same argument as `ofdm._phasor`. That is
+where any future format constant should aim.)
 `tools/freeze_format_constants.py --verify` reports whether numpy still
 agrees and **exits 0 either way** — it is deliberately not a CI gate,
 because a red build whose obvious fix is "regenerate" would invert the
@@ -1686,11 +1751,26 @@ not implemented, but the document format is built for them (see
 
 ONNX runtime path complete: the codec is onnxruntime, torch is
 training-only, and `cli`/`listen` install ~263 MB instead of
-~555 MB. The published codec is **v3** (cc12), and `DEFAULT_FILE` /
-`DEFAULT_REVISION` point at it in both implementations: six codec
-artifacts plus `v3-decoder-grad-fp32.onnx` for the optimizer. The app
+~555 MB. The published codec is **v4** (2026-08-14), and `DEFAULT_FILE`
+/ `DEFAULT_REVISION` point at it in both implementations: six codec
+artifacts plus `v4-decoder-grad-fp32.onnx` for the optimizer. The app
 fetches what it needs on first run, per part — and a station that never
 optimizes never fetches the gradient graph.
+
+**v4 is the cc12 lineage fine-tuned through the `PROTOCOL_VERSION` 3
+modem** (epoch 536), and the codec revision and the protocol version are
+**different numbers that happen to be adjacent** — do not conflate them.
+Measured against v3 through the same channel, mode B: **+0.43 dB AWGN
+and +0.42 dB mpp on photographs, +1.14 / +1.27 on non-photo**, and
++0.64 / +0.65 on a real certificate. Roughly a quarter of that is the
+pilot and headroom change and three quarters the fine-tune. Bumping the
+revision is a **three-place change** — `sstvae/checkpoint.py`'s
+`DEFAULT_FILE`, `native/core/checkpoint/checkpoint.hpp`'s
+`DEFAULT_REVISION`, and **`GRAD_REVISIONS` in both**, which is the one
+that gets missed: omitting the new revision there refuses the
+optimizer's gradient fetch on the current codec and reads as an
+unpublished artifact rather than a stale list. Both suites now assert
+`DEFAULT_REVISION` is in `GRAD_REVISIONS`.
 
 Remaining: run stage-2 fine-tune (start from a good stage-1
 checkpoint, `--lr 1e-4`) — note pre-beacon checkpoints remain
@@ -1768,8 +1848,8 @@ checkpoints improve — re-measure on every codec revision rather than
 trusting "it used to be worth 2 dB". The native app can run it on the
 pinned inference onnxruntime via an exported gradient graph rather than
 torch. **Measurement, publishing and the Python side are done**
-(2026-07-31): `v3-decoder-grad-fp32.onnx` ships beside the v3/cc12
-codec, `sstvae/latent_optim.py` runs it torch-free, and
+(2026-07-31): a `-decoder-grad-fp32.onnx` ships beside each codec
+revision from v3 on, `sstvae/latent_optim.py` runs it torch-free, and
 `sstvae_encode.py --optimize [SECONDS]` is the flag. The gradient
 artifact is **fp32 whatever `--precision` says** — the only precision
 published, since the fp16 converter emits a graph ORT will not load and

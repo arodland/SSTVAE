@@ -239,8 +239,16 @@ DROPPED_LATENTS_PER_GROUP = GROUP_LATENTS - TRANSMIT_LATENTS_PER_GROUP  # 2200 (
 assert 0 <= DROPPED_LATENTS_PER_GROUP < GROUP_LATENTS
 
 # --- TX conditioning -------------------------------------------------------
-CLIP_HEADROOM_DB = 0.5  # envelope clip threshold above mean envelope power;
-#                         gives ~4.2 dB envelope PAPR
+CLIP_HEADROOM_DB = 0.0  # envelope clip threshold above mean envelope power;
+#                         gives ~4.0 dB envelope PAPR
+# Lowered from 0.5 with the Zadoff-Chu pilot (PROTOCOL_VERSION 3), and
+# the two are one change rather than two. Most of what a wider headroom
+# used to buy was relief for a pilot that was itself being clipped to
+# pieces; with a pilot that no longer clips, the optimum moves down --
+# measured PEP-fair on latent SNR, the AWGN optimum went from ~3.0 dB to
+# ~1.0 and the multipath optimum to ~0.0, and 0.0 sits within 0.08 dB of
+# both. Do not lower this without the ZC pilot: at the old pilot 0.0 is
+# 0.2 dB *worse* than 0.5, i.e. a step away from that arm's optimum.
 TX_BANDPASS = (850.0, 2200.0)  # Hz, post-clip filter
 DEMOD_BACKOFF = 6  # samples: demod window starts this early inside the CP
 
@@ -268,28 +276,92 @@ SNR_REF_BW_HZ = 2500.0
 # changing is to keep transmitting the old sequence, which is only
 # possible if the old sequence is written down.
 #
-# So they are frozen: the quadrants below as a literal, and the far
-# larger interleaver permutations as a committed array next to
-# `framing.py`. `tools/freeze_format_constants.py --verify` re-derives
-# both from the seeds and reports whether numpy still agrees, which is
-# information rather than a gate -- see that script.
+# So the interleaver permutations are frozen as a committed array next
+# to `framing.py`. `tools/freeze_format_constants.py --verify`
+# re-derives them from the seed and reports whether numpy still agrees,
+# which is information rather than a gate -- see that script.
+#
+# The pilot below is no longer in that category at all: it is a closed
+# form over exact integers, so there is no generator whose behaviour it
+# could depend on.
 INTERLEAVER_SEED = 1000  # + group index; provenance only
-PILOT_SEED = 42  # provenance only
 
-# The pilot symbol's QPSK quadrants, one per carrier: phase =
-# pi/4 + pi/2 * k. Originally np.random.default_rng(PILOT_SEED)
-# .integers(0, 4, NC).
-PILOT_QUADRANTS = (
-    0, 3, 2, 1, 1, 3, 0, 2, 0, 0, 2, 3,
-    2, 3, 2, 3, 2, 0, 3, 1, 2, 1, 0, 3,
+# --- pilot sequence --------------------------------------------------------
+# A numerically minimized crest-factor phase set: 0.99 dB envelope PAPR.
+#
+# Replaces a frozen random QPSK draw as of PROTOCOL_VERSION 3. That draw
+# had 7.9 dB envelope PAPR against a clip threshold ~1 dB above the mean,
+# which made the pilot the most heavily clipped symbol in the waveform --
+# while also being the frame channel-estimate reference, the preamble
+# (four repeats of it) and the blind-acquisition template. It lost power
+# and gained distortion exactly where the receiver could least afford
+# either. This set is worth ~+2.5 dB of latent SNR end to end (+3.3 at
+# 4 dB AWGN, +2.5 at multipath 8 dB).
+#
+# **Zadoff-Chu was tried here first and must not be tried again.** At
+# 2.70 dB it looked like the better engineering choice -- a one-line
+# closed form with ideal periodic autocorrelation, far nicer to freeze
+# into a waveform than an opaque vector. But ZC's defining property is an
+# exact delay-Doppler equivalence: shifting it in frequency is the same
+# as shifting it in time. This pilot *is* the acquisition template, so
+# that makes CFO and timing confusable, and it is not a small effect --
+# blind acquisition locked 55.7 Hz off inside its own +-55 Hz search
+# range, slipped up to 7 frames of timing, and the metric gap between a
+# true and a false lock collapsed from 14.4 (old pilot) to 2.07. No
+# threshold recalibration survives that. The property that makes ZC
+# elegant is the one that breaks it here.
+#
+# Note also that pilot PAPR is a proxy rather than the mechanism: the
+# candidate ordering by PAPR is not the ordering by latent SNR (ZC at
+# 2.70 dB beat a 2.85 dB QPSK set on multipath and lost to it on a
+# noiseless clipping measurement). Anything that pushes this further
+# should optimize against latent SNR and acquisition directly.
+
+# The phase as an exact rational turn: phi_k = 2*pi * NUM[k] / DEN.
+#
+# Integers rather than radians so C++ evaluates the same expression on
+# the same values -- see ofdm._phasor for why a phase that is a property
+# of the libm rather than of the format is a real hazard here. DEN=1024
+# quantizes the continuous optimum at a cost of 0.009 dB of PAPR (0.977
+# -> 0.986), which buys exact cross-platform reproducibility.
+PILOT_PHASE_DEN = 1024
+PILOT_PHASE_NUM = (
+    725, 497, 359, 322, 193, 849,
+    710, 345, 960, 628, 347, 570,
+    551, 678, 448, 713, 839, 90,
+    236, 545, 1020, 403, 985, 304,
 )
 
-# Bumped to 2 with the 4-repeat preamble. The two formats cannot sync
-# to each other anyway (the acquisition template is a different
-# length), so this is belt and braces: it stops a v1 header that
-# happens to survive a v2 correlation peak from decoding to a plausible
-# mode.
-PROTOCOL_VERSION = 2
+# --- blind acquisition gate ------------------------------------------------
+# `sync.acquire_blind` / `BlindAccumulator` accept a lock when the winning
+# phase bin's prominence (peak / median over the other 1151 bins) clears
+# this. Raised from 4.0 with the new pilot, and the two are one change:
+# the score is scale invariant in signal level but *not* in how much of
+# the pilot survives the clipper, so a pilot that no longer clips lifts
+# true and false scores together and the old gate admits locks it used
+# to refuse.
+#
+# Calibrated like TEMPLATE_SCORE_THRESHOLD -- between the highest
+# measured false score and the lowest real one worth keeping. The binding
+# constraint is not noise (25 trials of pure noise peaked at 1.43) but a
+# real transmission *outside* the search range, which reached 7.33; the
+# lowest true score kept is 10.19 (mode A/C, mpp, -2 dB). Measured
+# against the old pilot at 4.0, 25 trials per cell: AWGN unchanged at
+# 1.00 down to -6 dB, mpp *better* (+2 dB 0.64 -> 0.72, -2 dB 0.56 ->
+# 0.68), and the out-of-range false-lock rate 0.60 -> 0.00.
+#
+# What it gives up is mpp at -6 dB (0.52 -> 0.00), and that is not a
+# tuning choice: those true locks score 6.4 while out-of-range signals
+# reach 7.3, so no threshold separates them. The old setting bought that
+# cell by accepting garbage 60% of the time.
+BLIND_SCORE_THRESHOLD = 9.0
+
+# Bumped to 2 with the 4-repeat preamble, and to 3 with the new pilot. The formats cannot sync to each other anyway (v1's acquisition
+# template is a different length; v2's is a different sequence, so its
+# correlation peak does not survive), so this is belt and braces: it
+# stops an older header that happens to survive a correlation peak from
+# decoding to a plausible mode.
+PROTOCOL_VERSION = 3
 
 
 @dataclass(frozen=True)

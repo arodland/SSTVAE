@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sstvae.config import CLIP_HEADROOM_DB
+from sstvae.config import CHANNELS_PER_GROUP, CLIP_HEADROOM_DB
 from sstvae.data import (
     FolderDataset,
     HFHubDataset,
@@ -81,6 +81,97 @@ def evaluate(model, loader, device, max_batches=16):
         mse["text"] += F.mse_loss(trecon, timg).item() * img.shape[0]
         n += img.shape[0]
     model.train()
+    return {k: -10 * torch.tensor(v / n).log10().item() for k, v in mse.items()}
+
+
+@torch.no_grad()
+def evaluate_waveform(model, loader, device, channels, max_batches=8):
+    """Val PSNR *through the waveform channel* — the one stage 2 trains for.
+
+    `evaluate()` above measures on the stage-1 latent channel whatever
+    `--stage2` says, and that channel contains no clipper, so it cannot
+    see the thing stage 2 is optimizing against. A stage-2 run judged on
+    it alone is being scored by a channel it stopped training for.
+
+    Fixed conditions and a per-batch seed, so the fading draws and the
+    noise are identical across epochs and across runs: the point is a
+    paired comparison, not an unbiased estimate of on-air PSNR. For that
+    use scripts/ab_checkpoint_sweep.py, which runs the real modem.
+    """
+    model.eval()
+    mse = {k: 0.0 for k in channels}
+    n = 0
+    # WaveformChannel.forward draws from the *global* RNG (unlike
+    # apply_latent_channel, which takes a generator), so seeding it for a
+    # repeatable channel would otherwise reach into the training stream
+    # and change what the next epoch sees. Save and put back.
+    cpu_state = torch.get_rng_state()
+    cuda_state = (torch.cuda.get_rng_state_all()
+                  if torch.cuda.is_available() else None)
+    try:
+        for bi, img in enumerate(loader):
+            if bi >= max_batches:
+                break
+            img = img.to(device)
+            z = model.encoder(img).float()
+            flat = model.latents_to_flat(z)
+            for k, ch in channels.items():
+                torch.manual_seed(bi)
+                noisy_flat, w_flat, _pre, _post, _conf = ch(flat)
+                recon = model.decoder(
+                    model.flat_to_latents(noisy_flat),
+                    model.flat_to_latents(w_flat),
+                )
+                mse[k] += F.mse_loss(recon, img).item() * img.shape[0]
+            n += img.shape[0]
+    finally:
+        torch.set_rng_state(cpu_state)
+        if cuda_state is not None:
+            torch.cuda.set_rng_state_all(cuda_state)
+        model.train()
+    return {k: -10 * torch.tensor(v / n).log10().item() for k, v in mse.items()}
+
+
+@torch.no_grad()
+def evaluate_modes(model, loader, device, channel, max_batches=8):
+    """Waveform-channel PSNR per transmitted mode: A/B/C = 1/2/3 groups.
+
+    Every other metric in this file evaluates at full depth — the eval
+    configs all set p_truncate=0.0 — so until this existed, *nothing*
+    logged by this project had ever scored mode A or B, while training
+    ran at p_truncate=0.5 and optimized all three. Mode B is expected to
+    be the most-used on air (Andrew, 2026-08-14), so the mode the metrics
+    covered was the one operators reach for least.
+
+    Truncation is deterministic here, not sampled: mode k is exactly the
+    trailing-group weight mask the channel applies at `keep=k`, which is
+    what makes A/B/C comparable across epochs rather than a lottery.
+    """
+    model.eval()
+    mse = {m: 0.0 for m in ("A", "B", "C")}
+    n = 0
+    cpu_state = torch.get_rng_state()
+    cuda_state = (torch.cuda.get_rng_state_all()
+                  if torch.cuda.is_available() else None)
+    try:
+        for bi, img in enumerate(loader):
+            if bi >= max_batches:
+                break
+            img = img.to(device)
+            z = model.encoder(img).float()
+            torch.manual_seed(bi)
+            noisy_flat, w_flat, _pre, _post, _conf = channel(model.latents_to_flat(z))
+            noisy, w = model.flat_to_latents(noisy_flat), model.flat_to_latents(w_flat)
+            gidx = torch.arange(w.shape[1], device=device) // CHANNELS_PER_GROUP
+            for keep, name in enumerate(("A", "B", "C"), start=1):
+                wk = w * (gidx[None, :, None, None] < keep)
+                mse[name] += F.mse_loss(model.decoder(noisy, wk), img).item() * img.shape[0]
+            n += img.shape[0]
+    finally:
+        torch.set_rng_state(cpu_state)
+        if cuda_state is not None:
+            torch.cuda.set_rng_state_all(cuda_state)
+        model.train()
     return {k: -10 * torch.tensor(v / n).log10().item() for k, v in mse.items()}
 
 
@@ -248,6 +339,23 @@ def main() -> None:
         "counters RGB-MSE's blind spot for desaturation (higher = "
         "more resistant to washing out saturated colors)",
     )
+    ap.add_argument(
+        "--optimizer",
+        choices=["adamw", "muon"],
+        default="adamw",
+        help="muon = orthogonalized momentum on the conv weights, AdamW "
+        "on biases and GroupNorm gains (sstvae/muon.py). Uses the "
+        "match_rms_adamw lr scaling, so --lr keeps its AdamW meaning "
+        "and a muon run is directly comparable to an adamw one at the "
+        "same flags",
+    )
+    ap.add_argument(
+        "--muon-adjust-lr-fn",
+        choices=["match_rms_adamw", "original", "none"],
+        default="match_rms_adamw",
+        help="'original' puts the lr back on Muon's native ~0.02 scale; "
+        "only useful with a matching --lr",
+    )
     ap.add_argument("--resume", type=str, default=None)
     ap.add_argument(
         "--seed",
@@ -319,7 +427,17 @@ def main() -> None:
         except Exception:
             pass  # no prior history on the hub target — fine, start fresh
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    if args.optimizer == "muon":
+        from sstvae.muon import Muon, build_param_groups
+
+        opt = Muon(build_param_groups(model, lr=args.lr),
+                   lr=args.lr, adjust_lr_fn=args.muon_adjust_lr_fn)
+        n_muon = len(opt.param_groups[0]["params"])
+        print(f"optimizer=muon ({n_muon} matrices, "
+              f"adjust_lr_fn={args.muon_adjust_lr_fn}) + AdamW on "
+              f"{len(opt.param_groups[1]['params'])} 1D params")
+    else:
+        opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
     # T_max is this invocation's epoch count, not a global target, so the
     # cosine schedule restarts fresh on every resume rather than
     # continuing the decay from before.
@@ -352,18 +470,42 @@ def main() -> None:
         print("lpips unavailable; training with MSE only")
     ch_cfg = ChannelConfig()
     wave_ch = None
+    wave_val = {}
     if args.stage2:
         from sstvae.waveform_channel import Stage2Config, WaveformChannel
 
         wave_ch = WaveformChannel(
             Stage2Config(clip_headroom_db=args.clip_headroom_db)
         ).to(device)
+        # Two fixed operating points rather than the training config's
+        # ranges: an epoch-to-epoch comparison wants the same channel
+        # every time, and the training range would resample SNR, fading
+        # and truncation on every call.
+        _val_common = dict(
+            clip_headroom_db=args.clip_headroom_db,
+            snr_db_range=(8.0, 8.0),
+            p_truncate=0.0,
+            erasure_bursts_mean=0.0,
+        )
+        wave_val = {
+            "wave_awgn8": WaveformChannel(
+                Stage2Config(p_fading=0.0, **_val_common)
+            ).to(device),
+            "wave_mp8": WaveformChannel(
+                Stage2Config(
+                    p_fading=1.0,
+                    doppler_range_hz=(1.0, 1.0),
+                    delay_range_ms=(2.0, 2.0),
+                    **_val_common,
+                )
+            ).to(device),
+        }
 
     step = 0
     for epoch in range(start_epoch, start_epoch + args.epochs):
         model.train()
         t0, ep_loss, n_batches = time.time(), 0.0, 0
-        ep_papr_post, ep_papr_pre = 0.0, 0.0
+        ep_papr_post, ep_papr_pre, ep_papr_loss = 0.0, 0.0, 0.0
         for img in loader:
             img = img.to(device, non_blocking=True)
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.amp):
@@ -390,11 +532,12 @@ def main() -> None:
                 # is our own addition — see WaveformChannel._clip_filter
                 # for why post-clip alone gives weak gradient once
                 # clipping is active).
-                papr_pre_ratio = 10 ** (papr_pre_db / 10)
-                papr_post_ratio = 10 ** (papr_post_db / 10)
-                papr_loss = args.papr_weight * (
-                    papr_pre_ratio.mean() + papr_post_ratio.mean()
-                )
+                if args.papr_weight:
+                    papr_pre_ratio = 10 ** (papr_pre_db / 10)
+                    papr_post_ratio = 10 ** (papr_post_db / 10)
+                    papr_loss = args.papr_weight * (
+                        papr_pre_ratio.mean() + papr_post_ratio.mean()
+                    )
             else:
                 noisy, w, conf = apply_latent_channel(z, ch_cfg)
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.amp):
@@ -435,6 +578,12 @@ def main() -> None:
             if wave_ch is not None:
                 ep_papr_post += papr_post_db.mean().item()
                 ep_papr_pre += papr_pre_db.mean().item()
+                # Tracked separately so train_loss stays comparable
+                # against runs with a different --papr-weight: the PAPR
+                # term moves the total for a reason that has nothing to
+                # do with reconstruction quality.
+                ep_papr_loss += (papr_loss.detach().item()
+                                 if torch.is_tensor(papr_loss) else papr_loss)
             n_batches += 1
             step += 1
         sched.step()
@@ -443,16 +592,29 @@ def main() -> None:
         if wave_ch is not None:
             record["papr_db"] = ep_papr_post / max(n_batches, 1)
             record["papr_pre_db"] = ep_papr_pre / max(n_batches, 1)
+            record["recon_loss"] = avg - ep_papr_loss / max(n_batches, 1)
         if val_loader is not None:
             record.update({f"val_psnr_{k}": v for k, v in
                            evaluate(model, val_loader, device).items()})
+            if wave_val:
+                record.update({f"val_psnr_{k}": v for k, v in
+                               evaluate_waveform(model, val_loader, device,
+                                                 wave_val).items()})
+                # Per-mode, on the fading channel only: A/B/C differ by
+                # how much data arrived, which the AWGN cell would show
+                # identically for twice the compute.
+                record.update({f"val_psnr_mode{k}": v for k, v in
+                               evaluate_modes(model, val_loader, device,
+                                              wave_val["wave_mp8"]).items()})
         if nonphoto_val is not None:
             record.update({f"val_psnr_{k}": v for k, v in
                            evaluate_nonphoto(model, nonphoto_val, device).items()})
         print(
             f"epoch {epoch}: loss={avg:.5f}"
             + "".join(f" {k}={v:.2f}" for k, v in record.items()
-                      if k.startswith("val_psnr") or k.startswith("papr"))
+                      if k.startswith("val_psnr") or k.endswith("_db"))
+            # not in the loop above: the weight is O(1e-3), so the .2f
+            # the dB figures want would print every value as 0.00.
             + f" [{record['seconds']:.1f}s]"
         )
         with metrics_path.open("a") as fh:
