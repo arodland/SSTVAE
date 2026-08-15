@@ -1,6 +1,6 @@
 [project]
 name = "sstvae"
-version = "0.4.0"
+version = "0.4.1"
 description = "Hybrid-digital SSTV: image transmission over HF via radio-autoencoder latents on OFDM"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

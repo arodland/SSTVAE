@@ -48,7 +48,7 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         "single-stepping the C++.")
 endif()
 
-project(sstvae_android VERSION 0.4.0 LANGUAGES CXX)
+project(sstvae_android VERSION 0.4.1 LANGUAGES CXX)
 
 set(SSTVAE_ANDROID_VERSION_CODE 1 CACHE STRING
     "Play upload version code; must increase on every upload")
