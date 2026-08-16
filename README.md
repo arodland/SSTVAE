@@ -204,6 +204,8 @@ takes the best result so far. See
 
 ## For more information
 
+Visit us on Discord: https://discord.gg/za4eYraFdX
+
 There are also command-line tools — encode, decode, listen live, and a
 channel simulator that tests the whole path with no radio — plus the
 training pipeline. Those live in
