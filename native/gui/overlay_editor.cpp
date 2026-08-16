@@ -73,10 +73,42 @@ void OverlayEditor::set_base_image(const images::Picture& image) {
     emit documentChanged();
 }
 
+bool OverlayEditor::uses_last_rx() const {
+    for (const overlay::Item& item : doc_.items) {
+        const auto* image = std::get_if<overlay::ImageItem>(&item);
+        if (image != nullptr && image->source == overlay::SOURCE_LAST_RX) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void OverlayEditor::set_last_rx(const images::Picture& image) {
+    // Always stored, whether or not anything refers to it yet: the
+    // reference is late-bound, so an inset added *later* must show the
+    // newest reception rather than the one that happened to arrive
+    // while the item existed.
     last_rx_ = image;
-    // A "last_rx" item is resolved at render time, so a new reception
-    // changes what an existing item shows -- which is the point.
+
+    // **But `documentChanged` only when the composition actually
+    // depends on it.** A "last_rx" item is resolved at render time, so
+    // a new reception genuinely changes what an existing item shows --
+    // and that is worth re-rendering and re-optimizing for. With no
+    // such item, nothing about what would be transmitted has moved, and
+    // saying otherwise is expensive rather than merely untidy:
+    // `TransmitPanel` connects this signal to `schedule_optimization`,
+    // which abandons any speculative run in flight and starts a fresh
+    // one on a 120 s budget across four onnxruntime threads.
+    //
+    // Measured on the panel, fifteen receptions arriving over 65 s:
+    // **205 s of CPU with this emitted unconditionally against 0.30 s
+    // with refinement off**, on a composition no item of which used the
+    // received picture. Runs plateau at 40-100 s and pictures on a net
+    // arrive every 32-95 s, so each arrival discarded the previous
+    // run's work and restarted -- the optimizer never reached idle and
+    // the only way back was to restart the application, which is
+    // exactly what operators reported.
+    if (!uses_last_rx()) return;
     composed_valid_ = false;
     update();
     emit documentChanged();

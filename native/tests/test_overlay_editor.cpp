@@ -299,6 +299,87 @@ void test_an_added_item_can_be_nudged_without_clicking_first() {
                    "nudge: the editor is reachable by keyboard after an add");
 }
 
+// A reception is a document change only when the document uses it.
+//
+// **This is the guard for a runaway, not a tidiness rule.**
+// `set_last_rx` used to invalidate and emit `documentChanged`
+// unconditionally, and `TransmitPanel` connects that signal to
+// `schedule_optimization`, which abandons any speculative refinement in
+// flight and starts a fresh one on a 120 s budget across four
+// onnxruntime threads. So every picture that arrived restarted a full
+// optimization of the transmit composition -- on stations whose
+// composition did not contain a "last received" inset at all, and which
+// were not about to transmit.
+//
+// Measured on the panel, fifteen receptions over 65 s: **205 s of CPU
+// against 0.30 s with refinement off.** Runs plateau at 40-100 s and
+// pictures on a net arrive every 32-95 s, so each arrival discarded the
+// previous run's work and the optimizer never reached idle. Operators
+// reported it as CPU that climbed until the application had to be
+// restarted, which is exactly what it was: nothing leaked, and nothing
+// could bring it down again either.
+//
+// Counted rather than asserted-once, because the failure is "it fires
+// when it should not" and a boolean cannot tell one emission from
+// twenty.
+void test_a_reception_is_a_change_only_if_an_item_uses_it() {
+    std::unique_ptr<gui::OverlayEditor> editor(make_editor());
+    int changes = 0;
+    QObject::connect(editor.get(), &gui::OverlayEditor::documentChanged,
+                     [&changes] { ++changes; });
+
+    // Nothing in the document at all.
+    editor->set_last_rx(grey(64, 48));
+    check::equal(changes, 0, "an empty composition ignores a reception");
+
+    // Items, but none of them referring to the reception. The file
+    // inset matters: an `ImageItem` is not automatically a `last_rx`
+    // one, and a check on the item's *type* rather than its `source`
+    // would pass every other test in this file and still fire here.
+    editor->add_text("N0CALL");
+    editor->add_image_inset("/nonexistent/inset.png");
+    changes = 0;
+    editor->set_last_rx(grey(64, 48));
+    check::equal(changes, 0,
+                 "a composition with no last_rx item ignores a reception");
+    check::is_true(!editor->uses_last_rx(), "and says it does not use one");
+
+    // And now one that does.
+    editor->add_last_rx_inset();
+    changes = 0;
+    editor->set_last_rx(grey(64, 48));
+    check::equal(changes, 1, "a composition with a last_rx item follows it");
+    check::is_true(editor->uses_last_rx(), "and says it uses one");
+}
+
+// The reception is still *stored* when nothing refers to it yet.
+//
+// The late-binding guarantee is what a "last_rx" item means: it resolves
+// at render time, so an inset added after a reception must show that
+// reception rather than nothing. Skipping the *emit* must not become
+// skipping the assignment -- which is the obvious way to write this fix
+// and is wrong.
+void test_a_reception_is_kept_even_with_nothing_to_show_it() {
+    std::unique_ptr<gui::OverlayEditor> editor(make_editor());
+
+    images::Picture received(64, 48);
+    std::fill(received.rgb.begin(), received.rgb.end(), std::uint8_t{255});
+    editor->set_last_rx(received);
+    check::is_true(editor->has_last_rx(),
+                   "the reception is kept though nothing showed it");
+
+    // Added afterwards: the composite must be the renderer's output for
+    // *that* picture, which it cannot be if the assignment was skipped.
+    editor->add_last_rx_inset();
+    const std::optional<images::Picture> composed = editor->composed_image();
+    check::is_true(composed.has_value(), "there is a composite");
+    if (!composed) return;
+    const images::Picture expected = overlay::render(
+        grey(overlay::CANVAS_W, overlay::CANVAS_H), editor->doc(), &received);
+    check::is_true(composed->rgb == expected.rgb,
+                   "an inset added later shows the reception that preceded it");
+}
+
 // The editor must not pin a window height to its own width.
 //
 // It used to: `setFixedHeight(width * 3/4)` in `resizeEvent`, which is
@@ -368,6 +449,8 @@ int main(int argc, char** argv) {
     test_arrows_nudge_by_a_fixed_fraction();
     test_delete_removes_the_selection();
     test_an_added_item_can_be_nudged_without_clicking_first();
+    test_a_reception_is_a_change_only_if_an_item_uses_it();
+    test_a_reception_is_kept_even_with_nothing_to_show_it();
     test_it_pins_no_window_height();
 
     return check::report("overlay editor");

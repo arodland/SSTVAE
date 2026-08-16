@@ -70,6 +70,10 @@ public:
     void set_last_rx(const images::Picture& image);
     bool has_last_rx() const { return last_rx_.has_value(); }
 
+    // Whether anything in the document resolves to the last reception.
+    // Public so a test can state the condition `set_last_rx` turns on.
+    bool uses_last_rx() const;
+
     void add_text(const std::string& text);
     void add_image_inset(const std::string& path);
     void add_last_rx_inset();

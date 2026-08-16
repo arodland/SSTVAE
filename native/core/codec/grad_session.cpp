@@ -54,8 +54,10 @@ struct GradSession::Impl {
     }
 };
 
-GradSession::GradSession(const std::string& artifact, const images::ImageArray& target)
-    : impl_(std::make_unique<Impl>(artifact)) {
+GradSession::GradSession(const std::string& artifact)
+    : impl_(std::make_unique<Impl>(artifact)) {}
+
+void GradSession::set_target(const images::ImageArray& target) {
     if (target.width != images::IMG_W || target.height != images::IMG_H) {
         throw std::runtime_error("latent optimization wants a full-size target picture");
     }
@@ -68,6 +70,12 @@ GradSession& GradSession::operator=(GradSession&&) noexcept = default;
 
 optimize::GradFn GradSession::fn() {
     Impl* impl = impl_.get();
+    // Refused here rather than at the first `Run()`: with no target the
+    // graph would be handed a zero-length tensor and fail somewhere
+    // inside onnxruntime, a long way from the missing call.
+    if (impl->target.empty()) {
+        throw std::runtime_error("GradSession::fn() before set_target()");
+    }
     return [impl](const std::vector<float>& latents, const std::vector<float>& weights,
                   std::vector<float>& grad, double& mse) {
         const std::size_t n = static_cast<std::size_t>(latents::N_LATENTS);

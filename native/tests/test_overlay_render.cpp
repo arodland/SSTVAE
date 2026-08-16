@@ -10,7 +10,11 @@
 // the editor positions its selection handles with the former and the
 // operator judges them against the latter.
 
+#include <QFile>
 #include <QGuiApplication>
+#include <QImage>
+#include <QString>
+#include <QTemporaryDir>
 
 #include <algorithm>
 #include <cstdlib>
@@ -293,6 +297,74 @@ void test_items_draw_back_to_front() {
                    "render/order: and does not erase the rest of it");
 }
 
+// A file-backed inset is decoded once per path.
+//
+// `item_bbox` is called by `OverlayEditor::hit_test` on every mouse
+// move over the canvas and again by every paint, and it used to run
+// `QImage::load()` on the item's path each time -- so moving the
+// pointer across the composer re-read and re-decoded every inset from
+// disk.
+//
+// **Deleting the file is how "cached" is made observable.** There is no
+// counter to assert on, and adding one would be a test-only hook on a
+// hot path; but a decode that does not happen cannot notice that its
+// source is gone. The stale answer this pins is the documented
+// contract, not an accident: an inset is identified by its path, and
+// content changes behind that path are deliberately not watched (a stat
+// per mouse move to catch a case an operator fixes by re-adding the
+// item).
+void test_a_file_inset_is_decoded_once() {
+    // **`QTemporaryDir`, not `$TMPDIR` and not a fixed name.** The first
+    // version of this reached for `getenv("TMPDIR")` with `/tmp` as the
+    // fallback, which on Windows is neither set nor a directory -- so
+    // `save()` failed, the item fell back to the 0.75 aspect a missing
+    // source gets, and the test failed on one platform and nowhere
+    // else. A unique directory also keeps the cache honest: it is keyed
+    // on the path and lives for the process, so a fixed name shared
+    // with another test would serve one test's pixels to another.
+    QTemporaryDir dir;
+    check::is_true(dir.isValid(), "cache: a temporary directory was made");
+    if (!dir.isValid()) return;
+    const QString qpath = dir.filePath(QStringLiteral("inset.png"));
+    const std::string path = qpath.toStdString();
+
+    // Deliberately not 4:3, so the aspect it reports could only have
+    // come from this file.
+    {
+        QImage source(80, 20, QImage::Format_RGB888);
+        source.fill(Qt::magenta);
+        check::is_true(source.save(qpath), "cache: the fixture file was written");
+    }
+
+    overlay::ImageItem item;
+    item.source = path;
+    item.width = 0.25;
+    item.border = 0.0;
+    item.anchor = "la";
+    const overlay::Item boxed = item;
+
+    const overlay::Bbox first = overlay::item_bbox(200, 150, boxed, nullptr);
+    // 50 px wide at 80x20 -> 12 or 13 px tall; whatever it is, it is
+    // this file's aspect and not the 0.75 fallback a failed load gives.
+    check::is_true(first.h < first.w / 2,
+                   "cache: the source's own aspect was used");
+
+    check::is_true(QFile::remove(qpath), "cache: the fixture file was removed");
+
+    const overlay::Bbox second = overlay::item_bbox(200, 150, boxed, nullptr);
+    check::equal(second.w, first.w, "cache: width unchanged after the file went");
+    check::equal(second.h, first.h,
+                 "cache: and height -- so it was not re-read from disk");
+
+    // And the drawing path shares the cache, not just the measuring one.
+    const images::Picture base = solid(200, 150, 0, 0, 0);
+    overlay::Doc doc;
+    doc.items.push_back(item);
+    const images::Picture out = overlay::render(base, doc, nullptr);
+    check::is_true(painted(out, base) > 0,
+                   "cache: render still draws it after the file went");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -313,6 +385,7 @@ int main(int argc, char** argv) {
     test_text_is_drawn_and_bounded_where_predicted();
     test_empty_text_still_has_a_handle();
     test_items_draw_back_to_front();
+    test_a_file_inset_is_decoded_once();
 
     return check::report("overlay rendering");
 }
