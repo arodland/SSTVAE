@@ -811,6 +811,11 @@ QWidget* SettingsDialog::receive_tab() {
     QFormLayout* form = make_form(page);
     const settings::ReceiveConfig& receive = config_.receive;
 
+    auto_start_ = new QCheckBox(tr("Start listening when the app opens"), page);
+    auto_start_->setChecked(receive.auto_start);
+    form->addRow(auto_start_);
+    add_gap(form);
+
     autosave_ = new QCheckBox(tr("Save every completed reception automatically"),
                               page);
     autosave_->setChecked(receive.autosave);
@@ -1056,6 +1061,7 @@ void SettingsDialog::apply_to(settings::Config& config) const {
     config.transmit.cw_id = cw_id_->isChecked();
     config.transmit.cw_message = cw_message_->text().toStdString();
     config.transmit.vox_lead_s = vox_lead_->isChecked() ? dsp::VOX_LEAD_DEFAULT_S : 0.0;
+    config.receive.auto_start = auto_start_->isChecked();
     config.receive.autosave = autosave_->isChecked();
     config.receive.save_audio = save_audio_->isChecked();
     config.receive.low_cpu = low_cpu_->isChecked();
