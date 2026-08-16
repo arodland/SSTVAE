@@ -814,16 +814,6 @@ QWidget* SettingsDialog::receive_tab() {
     auto_start_ = new QCheckBox(tr("Start listening when the app opens"), page);
     auto_start_->setChecked(receive.auto_start);
     form->addRow(auto_start_);
-    add_check_note(
-        form, page,
-        style::note_with_detail(
-            tr("For a station that is left monitoring — the app comes up "
-               "already receiving."),
-            tr("Listening begins once the codec has finished loading, which "
-               "on a first run includes downloading it. Stopping afterwards "
-               "does what it always did: this only decides how the app "
-               "starts, so it will not restart a session you have ended."),
-            page));
     add_gap(form);
 
     autosave_ = new QCheckBox(tr("Save every completed reception automatically"),
