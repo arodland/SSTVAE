@@ -7,6 +7,7 @@
 #include <QImage>
 #include <QPainter>
 #include <QPainterPath>
+#include <QSize>
 #include <QString>
 #include <QStringList>
 #include <QTransform>
@@ -16,6 +17,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace sstvae::overlay {
@@ -201,14 +203,79 @@ void draw_text(QPainter& painter, const TextItem& item, int canvas_w,
 // ---------------------------------------------------------------------
 // Image insets
 
+// A file-backed inset, decoded once.
+//
+// **Keyed on the path and never invalidated**, which is the whole
+// contract: a document names an inset by path, so the only thing that
+// changes which pixels an item shows is the path changing. Watching the
+// file for content changes is deliberately not attempted -- it would
+// mean a stat on every call, on a path that runs on every mouse move,
+// to catch a case (the operator overwriting a file the composition
+// already refers to, in place, mid-session) that costs nothing to fix
+// by re-adding the inset.
+//
+// The decode used to happen on every call, and `item_bbox` is a caller:
+// `OverlayEditor::hit_test` runs it per item on **every mouse move over
+// the canvas**, and `paintEvent` runs it again. So merely moving the
+// pointer across the composer re-read and re-decoded every inset from
+// disk.
+//
+// A failed load is cached too. The alternative is retrying a missing
+// file at mouse-move rate, which is the same pathology with syscalls
+// instead of a decode.
+//
+// Returned by value: `QImage` is copy-on-write, so this is a refcount
+// bump, and it means no caller holds a reference into a cache another
+// thread could evict.
+QImage cached_file_image(const std::string& path) {
+    // Small and FIFO-bounded rather than unbounded. A source photograph
+    // is not small -- 4000x3000 is 48 MB as ARGB32 -- and this is a
+    // process-lifetime cache in an application that runs for days, so
+    // an operator cycling through a folder of pictures must not be able
+    // to grow it without limit. Eight is far more than any composition
+    // uses at once.
+    constexpr std::size_t CAPACITY = 8;
+    static std::mutex mutex;
+    static std::vector<std::pair<std::string, QImage>> cache;
+
+    const std::lock_guard<std::mutex> lock(mutex);
+    for (const auto& entry : cache) {
+        if (entry.first == path) return entry.second;
+    }
+
+    QImage loaded;
+    if (loaded.load(QString::fromStdString(path))) {
+        loaded = loaded.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    } else {
+        loaded = QImage();
+    }
+    if (cache.size() >= CAPACITY) cache.erase(cache.begin());
+    cache.emplace_back(path, loaded);
+    return loaded;
+}
+
 QImage resolve_source(const ImageItem& item, const images::Picture* last_rx) {
     if (item.source == SOURCE_LAST_RX) {
         return last_rx != nullptr ? to_qimage(*last_rx) : QImage();
     }
     if (item.source.empty()) return QImage();
-    QImage loaded;
-    if (!loaded.load(QString::fromStdString(item.source))) return QImage();
-    return loaded.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    return cached_file_image(item.source);
+}
+
+// The source's dimensions, without materializing it.
+//
+// `item_bbox` wants nothing from the source but its aspect ratio, and
+// it is the call that runs on every mouse move. For a "last_rx" item
+// the answer is already on the `Picture`, so going through
+// `resolve_source` converted a 640x480 reception into a 1.2 MB ARGB32
+// `QImage` in order to read two integers back off it.
+QSize source_size(const ImageItem& item, const images::Picture* last_rx) {
+    if (item.source == SOURCE_LAST_RX) {
+        if (last_rx == nullptr || last_rx->empty()) return QSize();
+        return QSize(last_rx->width, last_rx->height);
+    }
+    if (item.source.empty()) return QSize();
+    return cached_file_image(item.source).size();
 }
 
 // The inset at its drawn size, border included; the anchor is applied
@@ -295,10 +362,11 @@ Bbox item_bbox(int canvas_w, int canvas_h, const Item& item,
     }
 
     const ImageItem& image = std::get<ImageItem>(item);
-    const QImage src = resolve_source(image, last_rx);
+    // Dimensions only -- see `source_size`. This is the mouse-move path.
+    const QSize src = source_size(image, last_rx);
     const double aspect =
-        src.isNull() ? 0.75
-                     : static_cast<double>(src.height()) / src.width();
+        src.isEmpty() ? 0.75
+                      : static_cast<double>(src.height()) / src.width();
     const QSize size = inset_size(image, canvas_w, aspect);
     int x = static_cast<int>(std::lround(image.x * canvas_w));
     int y = static_cast<int>(std::lround(image.y * canvas_h));

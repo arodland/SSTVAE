@@ -52,6 +52,23 @@ inline constexpr double LEVEL_STEP_DB = 0.5;
 // once the operator settles.
 inline constexpr int LEVEL_SAVE_DELAY_MS = 500;
 
+// How long to let edits settle before rebuilding the composite for the
+// optimizer.
+//
+// **Not the same debounce as `SpeculativeConfig::debounce_s`, and not a
+// duplicate of it.** That one keeps the *worker* from starting a run
+// per edit; it cannot help the GUI thread, which had already done the
+// expensive part by the time it was consulted --
+// `schedule_optimization` renders the whole 640x480 composite and
+// converts it to float before handing it over. Measured at **6.37 ms**
+// for a three-item composition, and `OverlayEditor::documentChanged` is
+// emitted on every mouse move of a drag.
+//
+// Short enough to be imperceptible against the second of debounce that
+// follows it downstream, long enough that a drag produces one rebuild
+// rather than one per mouse move.
+inline constexpr int EDIT_DEBOUNCE_MS = 200;
+
 double level_to_db(double level);
 double db_to_level(double db);
 
@@ -76,9 +93,16 @@ public slots:
     // take effect at once rather than at the next edit.
     void sync_from_config();
     // Re-arm speculative optimization for the current composition.
-    // Cheap and idempotent: the debounce inside `Speculative` is what
-    // keeps a drag from starting a run per mouse move.
+    // **Not cheap**: it renders the composite and converts it to float
+    // on the calling thread, which is the GUI thread. Call it from
+    // discrete events (a mode change, settings, the end of a send).
+    // Anything that can repeat at mouse-move rate must go through
+    // `schedule_optimization_debounced` instead.
     void schedule_optimization();
+
+    // The coalescing form, connected to `OverlayEditor::documentChanged`.
+    // Restarts a short timer; the real work happens once it settles.
+    void schedule_optimization_debounced();
     void cancel();
     void choose_image();
     void load_image(const QString& path);
@@ -197,6 +221,9 @@ private:
     // `wait_timer_`, which is the only thing that may start the
     // transmission in that window.
     QTimer* wait_timer_ = nullptr;
+    // Coalesces `documentChanged` -- see `EDIT_DEBOUNCE_MS`. Named so a
+    // test can find it among this panel's other timers.
+    QTimer* edit_timer_ = nullptr;
     bool awaiting_optimizer_ = false;
     // The composition as it was when Send was pressed. Send commits to
     // that picture: editing during the wait (or during transmission)

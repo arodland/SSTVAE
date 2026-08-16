@@ -33,6 +33,7 @@
 #include <QPushButton>
 #include <QSize>
 #include <QSlider>
+#include <QTimer>
 #include <QWidget>
 
 #include <string>
@@ -157,6 +158,89 @@ void test_the_level_controls_are_one_flow_item() {
                    "their container does not wrap between them");
 }
 
+// Editing defers the composite rebuild instead of doing it inline.
+//
+// `schedule_optimization` renders the whole 640x480 composite and
+// converts it to float **on the GUI thread** -- measured at 6.37 ms for
+// a three-item composition -- and `OverlayEditor::documentChanged` is
+// emitted on every mouse move of a drag. The debounce inside
+// `Speculative` does not help with that: it keeps the *worker* from
+// starting a run per edit, and by the time it is consulted the
+// expensive part has already happened.
+//
+// Asserted on the timer rather than on elapsed time: what is being
+// checked is that the work was deferred and coalesced, which is a
+// structural property. A stopwatch here would be a latency test
+// pretending to be a correctness one.
+void test_an_edit_defers_the_rebuild() {
+    AppState state;
+    QWidget host;
+    host.resize(900, 700);
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* debounce = panel->findChild<QTimer*>(QStringLiteral("edit_debounce"));
+    check::is_true(debounce != nullptr, "the panel has an edit debounce");
+    if (debounce == nullptr) return;
+    check::is_true(debounce->isSingleShot(),
+                   "the debounce is single-shot, so a burst is one rebuild");
+    check::is_true(debounce->interval() > 0,
+                   "and has an interval, so it actually defers");
+
+    auto* editor = panel->findChild<OverlayEditor*>();
+    check::is_true(editor != nullptr, "the panel has an overlay editor");
+    if (editor == nullptr) return;
+
+    // A burst, as a drag produces. Every one of these restarts the same
+    // timer; none of them may rebuild.
+    for (int i = 0; i < 20; ++i) editor->refresh_item();
+    check::is_true(debounce->isActive(),
+                   "a burst of edits leaves one deferred rebuild, not none");
+}
+
+// A rebuild consumes the pending edit rather than leaving it queued.
+//
+// This is the primitive `send()` uses to flush, and the reason it must
+// exist. The generation counter in `Speculative` is what guarantees the
+// latents on the air describe the picture on the air, and it can only
+// know about an edit that reached it. An edit made within the debounce
+// window of a Send click has not -- so unless Send rebuilds first,
+// `request_send()` waits on the *previous* generation, finds a result
+// already ready for it, and transmits the current composition with
+// latents refined for the one before it. That failure is invisible by
+// construction: refined latents for the wrong picture still decode to a
+// picture.
+//
+// **What this does not cover, deliberately: that `send()` calls it.**
+// Driving `send()` here would open a modal message box -- no picture
+// chosen, and no codec loaded -- and a modal in a headless test is a
+// hang, which this suite treats as worse than a gap. The call is the
+// first statement of `send()` and carries the reasoning above beside
+// it. A test for it belongs wherever a panel is driven with a real
+// codec, which this file is not.
+void test_a_rebuild_consumes_the_pending_edit() {
+    AppState state;
+    QWidget host;
+    host.resize(900, 700);
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* debounce = panel->findChild<QTimer*>(QStringLiteral("edit_debounce"));
+    auto* editor = panel->findChild<OverlayEditor*>();
+    check::is_true(debounce != nullptr && editor != nullptr,
+                   "the panel has a debounce and an editor");
+    if (debounce == nullptr || editor == nullptr) return;
+
+    editor->refresh_item();
+    check::is_true(debounce->isActive(), "an edit is pending");
+
+    panel->schedule_optimization();
+    check::is_true(!debounce->isActive(),
+                   "a rebuild clears the pending edit rather than repeating it");
+}
+
 // The colour button's size never moves.
 //
 // **This is the platform-independent form of a Windows-only CI
@@ -217,5 +301,7 @@ int main(int argc, char** argv) {
     test_the_strip_height_survives_a_selection();
     test_the_level_controls_are_one_flow_item();
     test_the_colour_button_does_not_change_size();
+    test_an_edit_defers_the_rebuild();
+    test_a_rebuild_consumes_the_pending_edit();
     return check::report("transmit panel");
 }

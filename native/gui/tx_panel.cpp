@@ -97,6 +97,15 @@ TransmitPanel::TransmitPanel(AppState* state, QWidget* parent)
         begin_transmit(picture, optimizer_->take_result());
     });
 
+    // Coalesces edits before the composite is rebuilt. See
+    // `EDIT_DEBOUNCE_MS`, and `send()` for why it has to be flushable.
+    edit_timer_ = new QTimer(this);
+    edit_timer_->setObjectName(QStringLiteral("edit_debounce"));
+    edit_timer_->setSingleShot(true);
+    edit_timer_->setInterval(EDIT_DEBOUNCE_MS);
+    connect(edit_timer_, &QTimer::timeout, this,
+            &TransmitPanel::schedule_optimization);
+
     rebuild_optimizer();
 }
 
@@ -149,15 +158,37 @@ void TransmitPanel::rebuild_optimizer() {
 
     optimize::SpeculativeConfig cfg;
     const std::string model_path = app_->config().model_path;
+    // **One session for the life of this optimizer, not one per run.**
+    // Building a `GradSession` loads a ~9 MB artifact from disk and
+    // stands up an `Ort::Env` and an `Ort::Session`; only the target
+    // changes between runs, and the factory is asked for one on every
+    // edit -- per mouse-move burst, after the debounce -- and on every
+    // reception if the composition carries a "last received" inset.
+    //
+    // Held through a shared slot rather than a mutable capture:
+    // `Speculative` *copies* the factory before calling it, so anything
+    // assigned to a by-value capture would be written into the copy and
+    // thrown away, and the cache would silently never hit. A fresh slot
+    // per optimizer is also what makes a checkpoint change take effect
+    // -- `rebuild_optimizer` is what runs on one.
+    //
+    // Not a data race despite being shared: the factory is called only
+    // from `Speculative`'s single worker, and `optimizer_.reset()`
+    // above joined the previous one before this line could run.
+    auto session_slot = std::make_shared<std::shared_ptr<codec::GradSession>>();
     optimizer_ = std::make_unique<optimize::Speculative>(
-        [model_path](const images::ImageArray& target) {
-            // Resolved per run rather than cached: the artifact is only
-            // fetched when the feature is actually used, and
-            // `resolve_onnx` pins it to fp32 whatever the codec's
-            // precision is.
-            const std::string path = checkpoint::resolve_onnx(
-                std::string(checkpoint::GRAD_PART), model_path);
-            auto session = std::make_shared<codec::GradSession>(path, target);
+        [model_path, session_slot](const images::ImageArray& target) {
+            if (!*session_slot) {
+                // Resolved on first use rather than at startup: the
+                // artifact is only fetched when the feature is actually
+                // used, and `resolve_onnx` pins it to fp32 whatever the
+                // codec's precision is.
+                const std::string path = checkpoint::resolve_onnx(
+                    std::string(checkpoint::GRAD_PART), model_path);
+                *session_slot = std::make_shared<codec::GradSession>(path);
+            }
+            std::shared_ptr<codec::GradSession> session = *session_slot;
+            session->set_target(target);
             optimize::GradFn fn = session->fn();
             // Keep the session alive for as long as the gradient
             // function that borrows it.
@@ -171,7 +202,18 @@ void TransmitPanel::rebuild_optimizer() {
     schedule_optimization();
 }
 
+void TransmitPanel::schedule_optimization_debounced() {
+    // `start()` on a running single-shot timer restarts it, so a drag
+    // rebuilds the composite once after the pointer stops rather than
+    // once per mouse move.
+    edit_timer_->start();
+}
+
 void TransmitPanel::schedule_optimization() {
+    // Whatever brought us here, the pending edit is now being handled.
+    // Leaving the timer armed would rebuild the same composite again a
+    // fraction of a second later.
+    edit_timer_->stop();
     if (optimizer_ == nullptr) {
         // The model may have finished loading since the last attempt.
         if (app_->config().transmit.optimize && app_->model() != nullptr) {
@@ -301,8 +343,10 @@ void TransmitPanel::build_ui() {
     editor_ = new OverlayEditor(this);
     connect(editor_, &OverlayEditor::selectionChanged, this,
             &TransmitPanel::on_selection);
+    // The debounced form: this signal is emitted per mouse move during
+    // a drag, and the slot behind it renders the whole composite.
     connect(editor_, &OverlayEditor::documentChanged, this,
-            &TransmitPanel::schedule_optimization);
+            &TransmitPanel::schedule_optimization_debounced);
     // Tools *under* the canvas, not beside it. Beside it they cost the
     // composer ~195 px of width that the receive preview does not pay,
     // so the two pictures could never be the same size however the
@@ -1005,6 +1049,22 @@ bool TransmitPanel::transmitting() const { return running_.load(); }
 
 void TransmitPanel::send() {
     if (transmitting()) return;
+
+    // **Flush any edit still sitting in the debounce, first.** The
+    // generation counter inside `Speculative` is what guarantees the
+    // latents that go on the air describe the picture that goes on the
+    // air, and it can only know about an edit that reached it. An edit
+    // made within `EDIT_DEBOUNCE_MS` of the click has not: without this,
+    // `request_send()` below would wait on the *previous* generation,
+    // find a result ready for it, and transmit the current composition
+    // with latents refined for the one before it -- which is precisely
+    // the failure the whole speculative design exists to prevent, and
+    // it would look like nothing at all, because refined latents for
+    // the wrong picture still decode to a picture.
+    //
+    // Synchronous on purpose: it is one composite render, and Send is
+    // already a moment where a few milliseconds are invisible.
+    if (edit_timer_->isActive()) schedule_optimization();
 
     const std::optional<images::Picture> image = editor_->composed_image();
     if (!image) {
