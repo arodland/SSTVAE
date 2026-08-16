@@ -217,6 +217,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // After the layout is chosen, since the chosen one decides the size.
     fit_to_screen();
 
+    // Read before the load starts, and acted on in `on_model_loaded` --
+    // `ReceivePanel::start` refuses without a codec, so starting here
+    // would only produce a "still loading" box on the way up.
+    auto_start_pending_ = state_->config().receive.auto_start;
+
     state_->load_model_async();
     state_->connect_rig();
     update_station_label();
@@ -606,6 +611,17 @@ void MainWindow::on_model_loaded() {
     // be armed at startup (or after a checkpoint change) is armed here
     // rather than waiting for the operator to edit something.
     tx_panel_->sync_from_config();
+
+    // The other thing that was waiting on the codec. Cleared before the
+    // attempt rather than after it: a device that will not open reports
+    // itself once, through `start()`'s own message box, and a later
+    // checkpoint change is not the place to try again.
+    if (auto_start_pending_) {
+        auto_start_pending_ = false;
+        state_->log_event("rx", log::Severity::Info,
+                          tr("starting to listen (set to start with the app)"));
+        rx_panel_->start();
+    }
 }
 
 void MainWindow::on_rig_status(const QString& text, bool error) {

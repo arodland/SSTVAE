@@ -59,6 +59,7 @@ settings::Config populated() {
     c.folders.template_dir = "/srv/sstv/tpl";
 
     c.receive.autosave = false;
+    c.receive.auto_start = true;
     c.receive.save_audio = true;
     c.receive.low_cpu = true;
     c.receive.blind_wide = true;

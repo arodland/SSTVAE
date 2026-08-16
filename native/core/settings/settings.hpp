@@ -140,6 +140,18 @@ struct FolderConfig {
 
 struct ReceiveConfig {
     bool autosave = true;
+    // Begin listening as soon as the app is ready, without waiting for
+    // the Start button. Off by default: opening a soundcard and keying
+    // a decode thread is the sort of thing an operator should ask for
+    // once rather than discover.
+    //
+    // "Ready" means the codec has loaded, not "the window appeared" --
+    // `ReceivePanel::start` refuses without a model, so firing at
+    // construction would greet a station that asked for this with a
+    // modal telling it to try again. It is a *startup* action, so it
+    // happens once per run: a later checkpoint change reloads the model
+    // and must not restart a session the operator has since stopped.
+    bool auto_start = false;
     bool low_cpu = false;
     double buffer_seconds = 130.0;
     double poll_interval = 5.0;

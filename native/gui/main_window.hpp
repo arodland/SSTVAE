@@ -114,6 +114,13 @@ private:
     // Set only while an error is forcing the log dock open, so the
     // toggle that causes is not mistaken for the operator's own.
     bool auto_opening_log_ = false;
+    // `receive.auto_start`, still owed. Set once at construction and
+    // cleared the first time it is acted on, because it describes how
+    // the app *starts* -- the model also loads when the operator changes
+    // the checkpoint, and that must not restart a session they stopped.
+    // It survives a failed load, so fixing a bad model path in Settings
+    // still gets the listening station it asked for.
+    bool auto_start_pending_ = false;
     LogPane* log_pane_ = nullptr;
     QMenu* view_menu_ = nullptr;
     QAction* split_action_ = nullptr;

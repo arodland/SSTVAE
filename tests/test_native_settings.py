@@ -90,6 +90,7 @@ NON_DEFAULT = {
     },
     "receive": {
         "autosave": False,
+        "auto_start": True,
         "low_cpu": True,
         "buffer_seconds": 95.5,
         "poll_interval": 11.0,
