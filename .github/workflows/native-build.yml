@@ -140,13 +140,21 @@ jobs:
       # label. Windows 10 is still supported (6.12 LTS is announced as
       # the last release that will be), so decision 2 is unaffected.
       #
-      # qtmultimedia is the only extra module: Widgets, Gui and Network
-      # are in the base package.
+      # Two extra modules; Widgets, Gui and Network are in the base
+      # package. qtmultimedia is the soundcard layer. **qtimageformats is
+      # what makes the app's format list more than PNG and JPEG**: the
+      # app loads pictures through Qt's decoders
+      # (`core/images/qt/`), and TIFF, WEBP, ICNS, TGA and WBMP are
+      # plugins that live in this module rather than in qtbase. Without
+      # it every job here is green, the app builds, and an operator's
+      # TIFF is refused by the file dialog it was offered in -- there is
+      # nothing to fail, which is why the module is named here next to
+      # the reason for it.
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
           version: "6.11.1"
-          modules: qtmultimedia
+          modules: qtmultimedia qtimageformats
           cache: true
           # The action works out `host` from the runner (it knows about
           # linux_arm64), but it only fills in `arch` for Android and

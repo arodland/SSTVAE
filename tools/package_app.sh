@@ -242,8 +242,19 @@ Darwin)
         fi
         # Distro Qt: name-matched instead, including the media backend's
         # codec libraries, which are the ones the tree rule exists for.
+        #
+        # The image codecs are here for the same reason: the app loads
+        # pictures through Qt's decoders, and the tiff and webp plugins
+        # are what make that more than PNG and JPEG. Qt's own binary
+        # builds compile those libraries into the plugin, so on the tree
+        # rule above there is nothing to copy; a distro's plugins link
+        # them, and a missing one is a plugin that silently fails to
+        # load -- no error, just a format the file dialog offers and the
+        # loader refuses. Leaf codecs with no display, driver or desktop
+        # coupling, which is the line the paragraph above draws.
         case "$1" in
             libQt6*|libicu*|libav*|libsw*) return 0 ;;
+            libwebp*|libsharpyuv*|libtiff*|libjpeg*|libjbig*|libmng*) return 0 ;;
             *) return 1 ;;
         esac
     }

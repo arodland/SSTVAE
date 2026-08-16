@@ -12,16 +12,29 @@ The rules mirror the Python package's, for the same reasons:
   a GUI, which is what makes headless tests and CLI tools possible at
   all, and `sstvae/rx/`, `sstvae/tx/` and `sstvae/overlay/` are still
   Qt-free for exactly that reason.
-* **`core/overlay/` may include QtGui, but not QtWidgets.** Overlay
-  rendering has to work under QGuiApplication with an offscreen
-  platform, so an overlay stays renderable from the command line. This
-  is the C++ restatement of "nothing in sstvae/overlay/ may import Qt".
+* **Only four directories under `core/` may include Qt at all**:
+  `core/overlay/` (rendering, QtGui), `core/images/qt/` (loading a
+  picture through Qt's decoders, QtGui), `core/audio/qt/` (soundcard
+  I/O, Qt Multimedia) and `core/checkpoint/` (the Hub download, Qt
+  Network). Each is a separate library, so the modem, the codec and both
+  engines still build and test on a machine with no Qt -- which is what
+  keeps the headless tools and the golden-vector tests possible.
+
+  Note *how* this is checked. Qt is included by class name in this tree
+  (`#include <QImage>`, not `#include <QtGui/QImage>`), so a rule
+  written against the module-directory spelling matches nothing anyone
+  here writes; the pattern below therefore catches any `<QFoo>`. What it
+  cannot do is tell QtGui from QtWidgets by header name -- but CMake
+  can, and does: a library given only `Qt6::Gui` has no QtWidgets
+  include directory, so `#include <QWidget>` in `core/overlay/` fails to
+  compile. The module-form rules are kept as well, for the case where
+  someone writes the other spelling.
 * **Only `core/audio/android/` may include `<jni.h>`.** Same rule and
   same reason as Qt Multimedia's below: the engines stay drivable with no
   platform audio at all, which is what keeps the headless tests and the
   CLI tools possible. A JNI include elsewhere under `core/` would quietly
   make the core un-buildable off Android.
-* **Only `core/audio/qt/` may include Qt Multimedia.** Soundcard I/O is
+* **`core/audio/qt/` is the only place Qt Multimedia may appear.** Soundcard I/O is
   the one place in `core/` that needs a Qt module, and it is a separate
   library (`SSTVAE_BUILD_QTAUDIO`) so the modem, the codec and both
   engines still build and test on a machine with no Qt at all. The
@@ -51,16 +64,40 @@ NATIVE = ROOT / "native"
 
 SOURCE_SUFFIXES = {".cpp", ".hpp", ".h", ".cc", ".cxx"}
 
+# The directories under core/ that are allowed to see Qt at all, each one
+# a separate library. Everything else in core/ is Qt-free.
+QT_ALLOWED = (
+    ("core", "overlay"),
+    ("core", "images", "qt"),
+    ("core", "audio", "qt"),
+    ("core", "checkpoint"),
+)
+
+# A Qt include in either spelling: the module form `<QtGui/QImage>` and
+# the class form `<QImage>` this tree actually uses. The class form is
+# recognised by shape -- a capital Q, a second capital, no dot -- which
+# no header in this project or its vendored code matches.
+QT_INCLUDE = re.compile(
+    r'^\s*#\s*include\s*[<"](?:Qt[A-Z][A-Za-z]*/|Q[A-Z][A-Za-z0-9_]*[>"])', re.M)
+
 # (description, path predicate, forbidden #include regex)
 RULES = [
+    (
+        "core/ is Qt-free outside overlay/, images/qt/, audio/qt/ and checkpoint/",
+        lambda p: p.parts[0] == "core"
+        and not any(p.parts[: len(a)] == a for a in QT_ALLOWED),
+        QT_INCLUDE,
+    ),
     (
         "core/ must not depend on QtWidgets (it has to stay headless)",
         lambda p: p.parts[0] == "core",
         re.compile(r'^\s*#\s*include\s*[<"]QtWidgets', re.M),
     ),
     (
-        "core/ outside overlay/ must not depend on QtGui either",
-        lambda p: p.parts[0] == "core" and (len(p.parts) < 2 or p.parts[1] != "overlay"),
+        "core/ outside overlay/ and images/qt/ must not depend on QtGui either",
+        lambda p: p.parts[0] == "core"
+        and p.parts[:2] != ("core", "overlay")
+        and p.parts[:3] != ("core", "images", "qt"),
         re.compile(r'^\s*#\s*include\s*[<"]QtGui', re.M),
     ),
     (

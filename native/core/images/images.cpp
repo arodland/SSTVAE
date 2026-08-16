@@ -23,12 +23,11 @@
 #include "stb_image_resize2.h"
 
 namespace sstvae::images {
-namespace {
 
 // Whole file into memory. Both consumers -- the stb decoder and the
 // EXIF parser -- want the bytes rather than a path, and a picture is
 // already being held decoded at several times this size.
-std::vector<std::uint8_t> read_file(const std::string& path) {
+std::vector<std::uint8_t> read_picture_bytes(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) throw std::runtime_error("cannot read " + path);
     std::vector<std::uint8_t> bytes;
@@ -52,8 +51,6 @@ std::vector<std::uint8_t> read_file(const std::string& path) {
     }
     return bytes;
 }
-
-}  // namespace
 
 Picture resize(const Picture& img, int width, int height) {
     if (img.width == width && img.height == height) return img;
@@ -288,7 +285,7 @@ Picture load(const std::string& path) {
     // tag and the pixels come from the same bytes: stb ignores EXIF, and
     // easyexif wants the whole file. `stbi_load(path, ...)` would mean
     // opening it twice.
-    std::vector<std::uint8_t> bytes = read_file(path);
+    std::vector<std::uint8_t> bytes = read_picture_bytes(path);
 
     int w = 0, h = 0, channels = 0;
     // Forced to 3 channels: an RGBA or greyscale source is converted the

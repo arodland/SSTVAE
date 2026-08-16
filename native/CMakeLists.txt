@@ -230,6 +230,29 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
   message(STATUS "Android audio: ${ANDROID_ABI}")
 endif()
 
+# --- Qt image loading -------------------------------------------------------
+# Loading a picture through Qt's decoders, so the app accepts what the
+# platform can read (TIFF, WEBP, ICO, whatever the imageformats plugins
+# offer) rather than the fixed list stb happens to implement.
+#
+# Gated on Qt6 Gui being available and nothing else, the same shape as
+# sstvae_fetch below: there is no user-facing switch because there is
+# nothing to decide -- the stb loader in sstvae_core is still there and
+# is still what the headless tools and the parity suite use, so a build
+# without Qt loses no capability it had.
+#
+# Before the overlay block, which links this: an if() on a variable or a
+# target defined later is silently false, and that has already left a
+# test built-and-not-run here once.
+find_package(Qt6 6.2 COMPONENTS Core Gui QUIET)
+if(Qt6Gui_FOUND)
+  add_library(sstvae_images_qt STATIC core/images/qt/qtimages.cpp)
+  set_target_properties(sstvae_images_qt PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(sstvae_images_qt PUBLIC core)
+  target_link_libraries(sstvae_images_qt PUBLIC sstvae_core Qt6::Core Qt6::Gui)
+  message(STATUS "Qt image loading: Qt ${Qt6_VERSION}")
+endif()
+
 # --- Overlay rendering ------------------------------------------------------
 # Separate from sstvae_core for the same reason Qt audio is: the modem,
 # the golden vectors and the parity module have no business needing a
@@ -241,7 +264,10 @@ if(SSTVAE_BUILD_OVERLAY STREQUAL "OFF")
   set(_want_overlay OFF)
 else()
   find_package(Qt6 6.2 COMPONENTS Core Gui QUIET)
-  if(Qt6_FOUND)
+  # TARGET rather than the find_package result alone: an inset image is
+  # loaded through sstvae_images_qt, so that is a real requirement and
+  # not a coincidence of both being gated on Qt6 Gui.
+  if(Qt6_FOUND AND TARGET sstvae_images_qt)
     set(_want_overlay ON)
   elseif(SSTVAE_BUILD_OVERLAY STREQUAL "ON")
     message(FATAL_ERROR
@@ -258,7 +284,7 @@ if(_want_overlay)
   set_target_properties(sstvae_overlay_render PROPERTIES
                         POSITION_INDEPENDENT_CODE ON)
   target_include_directories(sstvae_overlay_render PUBLIC core)
-  target_link_libraries(sstvae_overlay_render PUBLIC sstvae_core
+  target_link_libraries(sstvae_overlay_render PUBLIC sstvae_core sstvae_images_qt
                         PRIVATE Qt6::Core Qt6::Gui)
   message(STATUS "Overlay rendering: Qt ${Qt6_VERSION}")
 endif()
@@ -338,7 +364,8 @@ else()
   if(NOT Qt6_FOUND)
     list(APPEND _gui_missing "Qt6 Widgets")
   endif()
-  foreach(_dep sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render)
+  foreach(_dep sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render
+               sstvae_images_qt)
     if(NOT TARGET ${_dep})
       list(APPEND _gui_missing ${_dep})
     endif()
@@ -397,7 +424,7 @@ if(_want_gui)
   target_include_directories(sstvae_gui PUBLIC core gui)
   target_link_libraries(sstvae_gui PUBLIC
     sstvae_core sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render
-    sstvae_fetch
+    sstvae_images_qt sstvae_fetch
     Qt6::Core Qt6::Gui Qt6::Widgets)
 
   add_executable(sstvae-gui WIN32 MACOSX_BUNDLE gui/main.cpp)

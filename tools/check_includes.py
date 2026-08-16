@@ -150,7 +150,12 @@ def main() -> int:
         if p.suffix in {".cpp", ".hpp", ".h"}
         and "third_party" not in p.parts
         and not any(part.startswith(".") for part in p.relative_to(NATIVE).parts)
-        and "build" not in p.parts
+        # `build-asan`, `build-gui`, `build-android` and friends as well as
+        # plain `build`: a FetchContent tree lands *inside* the build
+        # directory, so a name this misses turns onnxruntime's and
+        # Hamlib's headers into seven failures in code nobody here wrote.
+        # check_layering.py has always excluded the prefix; this did not.
+        and not any(part == "build" or part.startswith("build-") for part in p.parts)
     ]
 
     failures = 0

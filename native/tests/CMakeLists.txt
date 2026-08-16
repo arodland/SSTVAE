@@ -172,6 +172,18 @@ if(TARGET sstvae_rig)
   set_tests_properties(rig_hamlib PROPERTIES TIMEOUT 120)
 endif()
 
+# Loading a picture through Qt's decoders. Follows its library for the
+# same reason the overlay test below does, and gets a directory to write
+# probe files into rather than dropping them in the runner's cwd.
+if(TARGET sstvae_images_qt)
+  add_executable(test_images_qt test_images_qt.cpp)
+  target_link_libraries(test_images_qt PRIVATE sstvae_core sstvae_images_qt
+                        Qt6::Core Qt6::Gui)
+  target_include_directories(test_images_qt PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME images_qt COMMAND test_images_qt ${CMAKE_CURRENT_BINARY_DIR})
+  set_tests_properties(images_qt PROPERTIES TIMEOUT 300)
+endif()
+
 # Overlay rendering needs QtGui; the library is optional, so the test
 # follows it. TARGET rather than a variable, for the reason the Hamlib
 # block above records: an if() on an unset variable is silently false.

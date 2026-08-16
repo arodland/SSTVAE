@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "images/qt/qtimages.hpp"
+
 namespace sstvae::androidapp {
 
 Composition& Composition::instance() {
@@ -12,7 +14,11 @@ Composition& Composition::instance() {
 bool Composition::set_source(const std::string& path, std::string* error) {
     images::Picture loaded;
     try {
-        loaded = images::load(path);
+        // Qt's decoders, with the stb loader as the fallback: a phone's
+        // gallery holds whatever its camera and its apps wrote, so the
+        // format list should be the platform's rather than the fixed one
+        // stb implements.
+        loaded = images::qt::load(path);
     } catch (const std::exception& e) {
         if (error) *error = e.what();
         return false;

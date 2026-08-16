@@ -602,6 +602,50 @@ audio device, so its `qtaudio` job compiles the layer and runs
 enumeration only — with `SSTVAE_BUILD_QTAUDIO=ON`, not AUTO, because a
 job whose purpose is to compile that file must fail if it did not.
 
+**Pictures are loaded twice over, and the second loader is the apps'**
+(`core/images/qt/`, 2026-08-16). `images::load` is stb: Qt-free, a
+format list fixed at compile time, and the implementation the golden
+vectors, `pytest --native` and `sstvae-decode` are written against — it
+does not move. What moved is what the *applications* call, because
+stb's list has no TIFF, WEBP or ICO in it while Qt's is the platform's
+and grows with an installed plugin, and the transmit dialog had drifted
+into offering `*.webp` that the loader behind it could not read.
+`sstvae_images_qt` is therefore an added layer, gated on Qt6 Gui alone
+(no switch — like `sstvae_fetch`, there is nothing to decide, since a
+build without Qt loses no capability it had). Four things are
+deliberate. **Qt first, stb as the fallback**, so no format is *lost*
+by gaining Qt's — Qt has no PSD, HDR or PIC handler at all. **Content
+sniffing before the extension hint**, the opposite of Qt's own order: a
+misnamed file is common and a headerless TGA is not. **The orientation
+tag is applied exactly once and by preference from our own reader**,
+which is the one held to Pillow's answers, with
+`QImageReader::transformation()` consulted only for a format ours
+cannot parse (leaving `setAutoTransform` on *and* applying our tag
+rotates every phone photograph twice; `test_images_qt.cpp` catches that
+on a tagged PNG, where both loaders must agree byte for byte). And
+**the overlay renderer's file insets go through it too**, so "can this
+file be opened" has one answer in the app — `QImage::load` ignores EXIF
+orientation, so the base picture used to rotate and an inset of the
+same file did not. The one bit of arithmetic with no oracle in
+`sstvae_core` is the Qt-transformation → EXIF-value table, which is
+public so the test can pin it against the *installed* Qt rather than
+against a copy of itself.
+
+Two things this exposed that were not about images. `tools/check_layering.py`'s
+QtGui rule was **written against a spelling nothing in this tree uses**
+(`#include <QtGui/QImage>`; the code says `<QImage>`), so it had been
+matching nothing for as long as it had existed — it now catches any
+`<QFoo>` under `core/` outside the four directories allowed one, and
+the module split *within* those is left to CMake, which enforces it for
+real by giving a Gui-only library no QtWidgets include path.
+`tools/check_includes.py` skipped `build` but not `build-*`, so a build
+tree under any other name turned onnxruntime's and Hamlib's headers into
+seven failures in code nobody here wrote. And **`qtimageformats` is now
+in the CI Qt install**: without it every job is green, the app builds,
+and the operator's TIFF is refused by the dialog that offered it — TIFF,
+WEBP, ICNS, TGA and WBMP are plugins in that module rather than in
+qtbase.
+
 **The engines are the port's only concurrent code**, so CI runs a
 **ThreadSanitizer** job over `rx_engine`, `tx_engine` and `ringbuffer`
 (a separate job: TSan and ASan cannot be combined). They make claims

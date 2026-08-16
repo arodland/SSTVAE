@@ -682,6 +682,24 @@ Qt-free for the whole phase, so the headless CLI links no GUI toolkit
 and CI still installs Qt only in Phase 3 — which is what the workflow's
 comments already promise.
 
+**Amended 2026-08-16: the *applications* load through Qt, and the stb
+loader stays exactly where it is.** The reasoning above is about
+`core/`, and it still holds there; what it does not justify is the app
+inheriting stb's format list. That list is fixed at compile time and
+does not contain TIFF, WEBP or ICO, while Qt's is the platform's and
+grows with a plugin — and the transmit panel's file dialog had drifted
+into offering `*.webp`, which the loader behind it could not read at
+all. So `core/images/qt/` is a second loader, an added layer rather than
+a replacement: `sstvae_images_qt`, gated on Qt6 Gui alone, and Qt first
+with `images::load` as the fallback, so no format is *lost* by gaining
+Qt's. `images::load` remains the implementation the golden vectors,
+`pytest --native` and the headless CLI use, which is the property the
+Qt-free argument was really protecting. What the amendment costs is one
+new place orientation can be applied — see
+`native/core/images/qt/qtimages.hpp` for why the tag is read by our own
+parser first and Qt's answer consulted only for a format ours cannot
+parse.
+
 **The exit criterion is met for the receive path.**
 `native/apps/sstvae_decode.cpp` produces a picture **byte-identical** to
 `sstvae_decode.py`'s on the same WAV, over a 12 dB AWGN channel — so
