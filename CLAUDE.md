@@ -631,6 +631,65 @@ same file did not. The one bit of arithmetic with no oracle in
 public so the test can pin it against the *installed* Qt rather than
 against a copy of itself.
 
+**Formats beyond Qt's own arrive as Qt plugins, never as another
+`images` path** (2026-08-16). `native/third_party/qt-heif-plugin/` is
+vendored plugin source built into `plugins/imageformats/`, and **nothing
+in this project refers to it** — `core/images/qt/` goes through
+`QImageReader`, so a plugin widens `readable_extensions()`, the transmit
+dialog's filter and what `images::qt::load` opens with no code change at
+all. That is the property that makes the plugin route right and a second
+loader wrong: one answer in the app to "can this file be opened".
+Verified end to end — a HEIC that both stb and bare Qt refuse decodes
+through the staged package with the build tree deleted and no
+`LD_LIBRARY_PATH` set. Six things are settled:
+
+- **The AppImage never searches the system plugin directory**, so a
+  distro's `qt6-heic-image-plugin` is invisible to it — this was
+  diagnosed as an ABI mismatch and is not one. Qt scans `QT_PLUGIN_PATH`
+  plus the plugin path *compiled into libQt6Core*, which for aqt's Qt is
+  the build machine's prefix. Bundling is the only route for a packaged
+  app; "let the operator install their own" only works for someone
+  building against their distro Qt.
+- **`libheif.cmake` is decode only, and that is a licence boundary, not
+  a size saving.** HEVC decode is libde265 (LGPL-3.0+); HEVC encode is
+  x265 (**GPL-2.0+**), which this project cannot ship — `NOTICE` records
+  the icon as licensed artwork that cannot be relicensed under the GPL,
+  and it is compiled into the executable. `-DWITH_X265=OFF` is only as
+  good as its spelling, so the module greps libheif's own configuration
+  summary and fails the build if an encoder was compiled in.
+- **A vendored plugin's `.json` is a claim about what it can decode.**
+  Upstream's listed `hej2` and `avci`, which need OpenJPEG and openh264
+  — both off here — so left alone the plugin would advertise two formats
+  into the file dialog and refuse to open them. That is the exact bug
+  this change set exists to retire, so the two keys are removed, and the
+  removal is recorded because the LGPL requires modifications to be
+  marked.
+- **KDE's kimageformats was the tidier dependency and was declined.**
+  Same author, one pinned source for JXL/HEIF/AVIF — but its master
+  needs ECM 6.29 and **Qt 6.9**, which would make "which image formats
+  the app supports" a function of the builder's Qt version. That is
+  what `hamlib.cmake` exists to prevent. Three self-contained files have
+  no framework behind them.
+- **JPEG XL cannot come from `novomesk/qt-jpegxl-image-plugin`**: it is
+  **GPL-3.0**, and the icon blocks that the same way. KDE's `jxl.cpp` is
+  **BSD-2-Clause** and is the copy to take; libjxl itself is BSD-3 and
+  royalty-free. Not implemented yet — it needs libjxl plus highway and
+  brotli, since GitHub source archives carry no submodules.
+- **The plugin's *build* rpath is what ships**, because packaging copies
+  it out of the build tree rather than `install()`ing it, so it carries
+  `$ORIGIN/../../lib` (`@loader_path/../../Frameworks` in a bundle). It
+  worked without that only because the launcher's `LD_LIBRARY_PATH` is
+  searched before a stale RUNPATH — i.e. it worked by accident.
+
+**And HEVC patents are the part no licence addresses.** Several pools
+assert claims; browsers ship no HEVC decoder and some distributions keep
+libde265 out of main. `-DSSTVAE_BUILD_HEIF=OFF` declines the whole
+question and costs nothing else. CI passes `=ON` so a silent skip fails,
+and `SSTVAE_REQUIRE_HEIF` — set by CMake, which knows what it built, not
+by CI remembering to — turns "the plugin did not load" into a failure
+rather than one format quietly untested. Same hazard and same answer as
+`SSTVAE_REQUIRE_CODEC`.
+
 Two things this exposed that were not about images. `tools/check_layering.py`'s
 QtGui rule was **written against a spelling nothing in this tree uses**
 (`#include <QtGui/QImage>`; the code says `<QImage>`), so it had been

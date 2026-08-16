@@ -180,8 +180,35 @@ if(TARGET sstvae_images_qt)
   target_link_libraries(test_images_qt PRIVATE sstvae_core sstvae_images_qt
                         Qt6::Core Qt6::Gui)
   target_include_directories(test_images_qt PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-  add_test(NAME images_qt COMMAND test_images_qt ${CMAKE_CURRENT_BINARY_DIR})
+  add_test(NAME images_qt COMMAND test_images_qt ${CMAKE_CURRENT_BINARY_DIR}
+                                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures)
   set_tests_properties(images_qt PROPERTIES TIMEOUT 300)
+  # Where the bundled format plugins were built. Qt appends the category
+  # directory itself, so this names the plugin *root* and not
+  # `.../imageformats`. path_list_prepend rather than a plain assignment
+  # for the reason the Hamlib block above records: CMake would treat a
+  # Windows PATH's semicolons as list separators, and the same applies to
+  # any path list.
+  if(TARGET sstvae_plugin_heif)
+    set_property(TEST images_qt APPEND PROPERTY ENVIRONMENT_MODIFICATION
+      "QT_PLUGIN_PATH=path_list_prepend:${SSTVAE_PLUGIN_DIR}")
+    # The build knows it built the plugin, so the test is not allowed to
+    # skip HEIC. Without this the plugin could fail to load -- wrong
+    # directory, missing libheif, a metadata mismatch -- and the suite
+    # would pass having quietly tested one format less. Same hazard as
+    # SSTVAE_REQUIRE_CODEC, except here CMake can assert it rather than
+    # CI having to remember to.
+    set_property(TEST images_qt APPEND PROPERTY ENVIRONMENT_MODIFICATION
+      "SSTVAE_REQUIRE_HEIF=set:1")
+    # The plugin is dlopen'd, so its own dependency on libheif is
+    # resolved at that moment rather than at link time -- a build rpath
+    # covers it on Linux and macOS, and Windows needs the DLLs beside the
+    # executable, which is what this copies.
+    if(WIN32 AND SSTVAE_LIBHEIF_RUNTIME_DIR)
+      set_property(TEST images_qt APPEND PROPERTY ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${SSTVAE_LIBHEIF_RUNTIME_DIR}")
+    endif()
+  endif()
 endif()
 
 # Overlay rendering needs QtGui; the library is optional, so the test

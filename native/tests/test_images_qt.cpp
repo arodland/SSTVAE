@@ -29,6 +29,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -439,6 +440,78 @@ void test_the_extension_list_is_usable_as_a_filter() {
     }
 }
 
+void test_a_bundled_plugin_adds_its_format(const std::string& fixtures) {
+    // The bundled HEIF plugin, which is the point of building one at all:
+    // a format neither Qt nor stb carries, reached through the same
+    // `images::qt::load` with no code in this project referring to the
+    // plugin.
+    //
+    // Not part of the "formats Qt adds" loop above, because that loop
+    // needs a *writer* to make its probe file and this plugin registers
+    // none -- writing HEIC needs a GPL encoder we deliberately do not
+    // ship. Hence a committed fixture; see fixtures/README.md.
+    const std::string path = fixtures + "/heif_ramp.heic";
+    const bool heic_offered =
+        QImageReader::supportedImageFormats().contains(QByteArray("heic"));
+    if (!heic_offered) {
+        // **The build system says whether this may skip.** A plugin that
+        // failed to land on the search path looks exactly like
+        // `-DSSTVAE_BUILD_HEIF=OFF` from in here, and the difference is
+        // the whole question -- so CMake, which knows which it built,
+        // sets SSTVAE_REQUIRE_HEIF and turns the skip into a failure.
+        // Same hazard and same answer as SSTVAE_REQUIRE_CODEC: these are
+        // the checks with a build-time prerequisite, which is exactly the
+        // combination that rots into testing nothing.
+        const char* required = std::getenv("SSTVAE_REQUIRE_HEIF");
+        check::is_true(required == nullptr || std::string(required) != "1",
+                       "images/qt: the HEIF plugin was built, so Qt must offer "
+                       "heic -- it does not, so the plugin did not load (check "
+                       "QT_PLUGIN_PATH and the plugin's own dependencies)");
+        return;
+    }
+
+    const std::vector<std::string> readable = images::qt::readable_extensions();
+    for (const char* extension : {"heic", "heif"}) {
+        check::is_true(std::find(readable.begin(), readable.end(),
+                                 std::string(extension)) != readable.end(),
+                       "images/qt: readable_extensions offers " +
+                           std::string(extension));
+    }
+
+    Picture got;
+    std::string error;
+    try {
+        got = images::qt::load(path);
+    } catch (const std::exception& e) {
+        error = e.what();
+    }
+    check::is_true(error.empty(), "images/qt: the HEIC fixture opens (error: " +
+                                      error + ")");
+    if (!error.empty()) return;
+    check::equal(got.width, 48, "images/qt: HEIC width");
+    check::equal(got.height, 36, "images/qt: HEIC height");
+
+    // Lossy, and through subsampled chroma, so comparative rather than
+    // toleranced -- the same reasoning as the WEBP case above.
+    const Picture src = ramp(48, 36);
+    const double err = mean_abs_diff(got, src);
+    const double wrong = mean_abs_diff(got, images::apply_orientation(src, 3));
+    check::is_true(err < wrong * 0.5,
+                   "images/qt: the HEIC fixture decoded to the right picture "
+                   "(mae " + std::to_string(err) + " against " +
+                       std::to_string(wrong) + " for it inverted)");
+
+    // And stb must still be the one that cannot, or this proves nothing
+    // about the plugin.
+    bool stb_read = true;
+    try {
+        images::load(path);
+    } catch (const std::exception&) {
+        stb_read = false;
+    }
+    check::is_true(!stb_read, "images/qt: stb still cannot read HEIC");
+}
+
 void test_an_inset_keeps_its_alpha(const std::string& tmpdir) {
     // `load_qimage` exists so the overlay renderer gets a QImage rather
     // than a `Picture`, and the reason is in a comment there: going
@@ -541,6 +614,7 @@ int main(int argc, char** argv) {
     const QGuiApplication app(argc, argv);
 
     const std::string tmpdir = argc > 1 ? argv[1] : ".";
+    const std::string fixtures = argc > 2 ? argv[2] : "fixtures";
 
     test_the_qt_transformation_table_matches_qt();
     test_a_tagged_png_matches_the_stb_loader_exactly(tmpdir);
@@ -548,6 +622,7 @@ int main(int argc, char** argv) {
     test_a_format_qt_cannot_read_still_opens(tmpdir);
     test_formats_qt_adds_are_readable(tmpdir);
     test_the_extension_list_is_usable_as_a_filter();
+    test_a_bundled_plugin_adds_its_format(fixtures);
     test_an_inset_keeps_its_alpha(tmpdir);
     test_an_unreadable_file_reports_the_file(tmpdir);
     test_the_file_size_limit_still_applies(tmpdir);

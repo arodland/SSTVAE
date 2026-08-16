@@ -217,7 +217,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: native/.deps
-          key: deps-${{ matrix.label }}-${{ hashFiles('native/cmake/onnxruntime.cmake', 'native/cmake/hamlib.cmake') }}
+          key: deps-${{ matrix.label }}-${{ hashFiles('native/cmake/onnxruntime.cmake', 'native/cmake/hamlib.cmake', 'native/cmake/libheif.cmake') }}
       # The codec's parity tests compare two runtimes on the *same*
       # model file, so they need that file. Fetching it here rather than
       # inside a test keeps a network failure reported as a network
@@ -256,7 +256,7 @@ jobs:
             ${OSX_ARCH:+-DCMAKE_OSX_ARCHITECTURES=$OSX_ARCH} \
             ${OSX_ARCH:+-DSSTVAE_BUILD_PYMODULE=OFF} \
             -DSSTVAE_BUILD_GUI=ON -DSSTVAE_BUILD_QTAUDIO=ON \
-            -DSSTVAE_BUILD_OVERLAY=ON \
+            -DSSTVAE_BUILD_OVERLAY=ON -DSSTVAE_BUILD_HEIF=ON \
             -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps" \
             -DPython3_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')" \
             -Dpybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')"

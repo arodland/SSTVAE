@@ -700,6 +700,27 @@ new place orientation can be applied — see
 parser first and Qt's answer consulted only for a format ours cannot
 parse.
 
+**Amended again, same day: formats Qt itself lacks come as Qt plugins.**
+HEIC is the format a phone actually produces and neither stb nor Qt
+carries it, so `native/third_party/qt-heif-plugin/` is built into
+`plugins/imageformats/` against a pinned, decode-only libheif. The
+mechanism is the payoff of the loader above rather than an addition to
+it: nothing in this project references the plugin, so it widens
+`readable_extensions()`, the transmit dialog's filter and
+`images::qt::load` at once and by construction. A second loader path
+would have forked the "one answer to can-this-be-opened" property
+immediately.
+
+Two boundaries this puts in the build system rather than in a comment.
+HEVC *encoding* is x265, GPL-2.0-or-later, which this project cannot
+distribute — `NOTICE` records the icon as licensed artwork that cannot be
+relicensed under the GPL and it is compiled into the executable — so
+`native/cmake/libheif.cmake` builds decode-only and greps libheif's own
+configuration summary to prove it, a misspelled `-DWITH_X265=OFF` being
+otherwise silent. And HEVC *patents* are not a copyright question at all:
+several pools assert claims, which is why browsers ship no HEVC decoder.
+`-DSSTVAE_BUILD_HEIF=OFF` declines that and removes nothing else.
+
 **The exit criterion is met for the receive path.**
 `native/apps/sstvae_decode.cpp` produces a picture **byte-identical** to
 `sstvae_decode.py`'s on the same WAV, over a 12 dB AWGN channel — so

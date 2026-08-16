@@ -253,6 +253,87 @@ if(Qt6Gui_FOUND)
   message(STATUS "Qt image loading: Qt ${Qt6_VERSION}")
 endif()
 
+# --- extra image format plugins ---------------------------------------------
+# Formats Qt's own imageformats plugins do not carry, added the way Qt
+# intends: a plugin in the loader's search path. **Nothing in our code
+# refers to these** -- `core/images/qt/` goes through QImageReader, so a
+# plugin here widens `readable_extensions()`, the transmit dialog's
+# filter and what `images::qt::load` opens, with no change to any of
+# them. That is the whole reason this is a plugin rather than a fourth
+# branch in the loader.
+#
+# HEIC is behind its own switch, and not because of the build: libheif
+# and libde265 are LGPL-3.0-or-later and fine to bundle, but HEVC is
+# patent-encumbered, and whether to ship a decoder for it is a
+# publisher's decision rather than a technical one. OFF removes the
+# format and nothing else. See native/cmake/libheif.cmake.
+set(SSTVAE_BUILD_HEIF "AUTO" CACHE STRING
+    "Build the HEIF/HEIC image plugin (ON/OFF/AUTO)")
+set_property(CACHE SSTVAE_BUILD_HEIF PROPERTY STRINGS ON OFF AUTO)
+
+# One directory for every bundled plugin, laid out the way Qt expects
+# (`<root>/imageformats/`), so a single QT_PLUGIN_PATH entry serves the
+# tests, a developer running the app out of the build tree, and the
+# packaging script.
+set(SSTVAE_PLUGIN_DIR "${CMAKE_BINARY_DIR}/plugins" CACHE INTERNAL "")
+
+if(SSTVAE_BUILD_HEIF STREQUAL "OFF")
+  set(_want_heif OFF)
+else()
+  find_package(Qt6 6.2 COMPONENTS Core Gui QUIET)
+  if(Qt6Gui_FOUND)
+    set(_want_heif ON)
+  elseif(SSTVAE_BUILD_HEIF STREQUAL "ON")
+    message(FATAL_ERROR
+      "SSTVAE_BUILD_HEIF=ON but Qt6 Gui was not found; a Qt image format "
+      "plugin needs it. Pass -DSSTVAE_BUILD_HEIF=OFF to build without HEIC.")
+  else()
+    set(_want_heif OFF)
+  endif()
+endif()
+
+if(_want_heif)
+  list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+  include(libheif)
+  # MODULE, not SHARED: a Qt plugin is dlopen'd and never linked against.
+  add_library(sstvae_plugin_heif MODULE
+    third_party/qt-heif-plugin/heif.cpp)
+  set_target_properties(sstvae_plugin_heif PROPERTIES
+    AUTOMOC ON
+    OUTPUT_NAME "sstvae_qheif"
+    # Qt looks for `<library path>/imageformats/`, so the subdirectory is
+    # part of the contract and not tidiness.
+    LIBRARY_OUTPUT_DIRECTORY "${SSTVAE_PLUGIN_DIR}/imageformats"
+    RUNTIME_OUTPUT_DIRECTORY "${SSTVAE_PLUGIN_DIR}/imageformats")
+  target_link_libraries(sstvae_plugin_heif PRIVATE Qt6::Gui sstvae::libheif)
+  # Vendored and not warning-clean under -Wall -Wextra; its warnings are
+  # not signal here, the same treatment stb gets.
+  target_include_directories(sstvae_plugin_heif SYSTEM PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qt-heif-plugin)
+  if(NOT MSVC)
+    target_compile_options(sstvae_plugin_heif PRIVATE -w)
+  endif()
+  # **A relative rpath, because the binary that ships is the one built
+  # here.** Nothing `install()`s this plugin -- `package_app.sh` copies it
+  # out of the build tree -- so its *build* rpath is what a user gets, and
+  # that contains an absolute path into `_deps` which will not exist on
+  # their machine. It happens to work anyway, because the AppImage's
+  # launcher sets LD_LIBRARY_PATH and that is searched first; relying on
+  # that would mean the plugin only works when launched through the
+  # wrapper. These entries make the staged layout self-sufficient:
+  # plugins/imageformats -> lib on Linux, PlugIns/imageformats ->
+  # Frameworks in a bundle. Windows searches the .exe's own directory and
+  # needs no rpath at all.
+  if(APPLE)
+    set_property(TARGET sstvae_plugin_heif APPEND PROPERTY
+      BUILD_RPATH "@loader_path/../../Frameworks")
+  elseif(NOT WIN32)
+    set_property(TARGET sstvae_plugin_heif APPEND PROPERTY
+      BUILD_RPATH "$ORIGIN/../../lib")
+  endif()
+  message(STATUS "HEIF/HEIC image plugin: on, decode only")
+endif()
+
 # --- Overlay rendering ------------------------------------------------------
 # Separate from sstvae_core for the same reason Qt audio is: the modem,
 # the golden vectors and the parity module have no business needing a

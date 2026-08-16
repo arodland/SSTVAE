@@ -79,6 +79,61 @@ place is the way to do it; nothing reads them by any other path.
 Binaries published from this repository by the project itself do include
 the licensed artwork, which the license permits.
 
+Bundled third-party components
+------------------------------
+
+The published packages contain more than this repository's code. None of
+it is covered by LICENSE either, and all of it is free software. Listed
+here because a package's NOTICE is where a recipient looks, and because
+two of these carry obligations that only bite on redistribution.
+
+Copied into the packages, built from pinned upstream sources by
+native/cmake/:
+
+    Qt 6                LGPL-3.0-only          https://www.qt.io/
+    Hamlib              LGPL-2.1-or-later      https://hamlib.github.io/
+    libheif             LGPL-3.0-or-later      https://github.com/strukturag/libheif
+    libde265            LGPL-3.0-or-later      https://github.com/strukturag/libde265
+    onnxruntime         MIT                    https://onnxruntime.ai/
+
+**Every one of the copyleft libraries above is a separate shared library,
+deliberately.** Nothing in this application statically links Qt, Hamlib,
+libheif or libde265, so an operator can replace any of them with their
+own build without relinking anything of ours -- which is what the LGPL
+asks for and the cheapest way to give it. libheif and libde265 are
+reached only through the image format plugin below, which Qt loads at run
+time; the application contains no reference to them at all.
+
+The exact upstream version and a sha256 for each is in
+native/cmake/onnxruntime.cmake, native/cmake/hamlib.cmake and
+native/cmake/libheif.cmake, which is where to look to obtain the
+corresponding source for any published build.
+
+Compiled into the application from sources vendored in this repository:
+
+    native/third_party/qt-heif-plugin   LGPL-2.0-or-later  (a Qt plugin, built
+                                        as a separate loadable module; see its
+                                        README for provenance and for the one
+                                        modification made to it)
+    native/third_party/stb              MIT or public domain (dual)
+    native/third_party/dr_libs          MIT-0 or public domain (dual)
+    native/third_party/easyexif         BSD-2-Clause
+    native/third_party/pocketfft        BSD-3-Clause
+    native/third_party/nlohmann         MIT
+    native/third_party/msvc-pthread     Artistic-2.0 (ours; two type
+                                        definitions, written here)
+
+Each vendored directory carries its upstream LICENSE and a README saying
+which version it came from and why it is vendored rather than fetched.
+
+**HEVC patents are not a licensing matter and are not addressed by any of
+the above.** The HEIF/HEIC support decodes HEVC, which several patent
+pools assert claims over; that is why web browsers do not ship an HEVC
+decoder and why some distributions keep libde265 out of their main
+archives. Anyone publishing builds from this repository is making that
+call for themselves. `-DSSTVAE_BUILD_HEIF=OFF` declines it, costs nothing
+else, and the application then simply reports no HEIC support.
+
 Trademark
 ---------
 
