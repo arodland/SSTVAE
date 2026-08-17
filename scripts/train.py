@@ -30,6 +30,7 @@ from sstvae.data import (
 )
 from sstvae.latent_channel import ChannelConfig, apply_latent_channel
 from sstvae.models import SSTVAE
+from sstvae.pe_loss import pe_loss
 
 _LUMA_WEIGHTS = torch.tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1)
 
@@ -340,6 +341,31 @@ def main() -> None:
         "more resistant to washing out saturated colors)",
     )
     ap.add_argument(
+        "--pe-alpha",
+        type=float,
+        default=0.0,
+        help="penalty factor of the PE loss (sstvae/pe_loss.py, "
+        "doi:10.26599/CVM.2025.9450475), which replaces the flat MSE "
+        "reconstruction term with one that amplifies error on pixels "
+        "sitting on the blurred side of an edge. 0 disables (exactly, "
+        "not approximately). The paper's 2.0 came from L1 backbones on "
+        "an unstated intensity scale and does not transfer -- our p=2 "
+        "squares the weight -- so sweep it, don't guess it, and watch "
+        "PSNR, which this trades away for perceptual quality by design",
+    )
+    ap.add_argument(
+        "--pe-conf-scale",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="scale --pe-alpha by the per-sample channel confidence, the "
+        "same treatment --chroma-weight gets and for the same reason: "
+        "the paper's premise is that blur is regression-to-the-mean on "
+        "an ill-posed inverse, but here it is *also* correct MMSE "
+        "hedging when the channel destroyed the information. Amplifying "
+        "edge error on a badly-faded sample asks the decoder to invent "
+        "edges. --no-pe-conf-scale gives the paper's loss unmodified",
+    )
+    ap.add_argument(
         "--optimizer",
         choices=["adamw", "muon"],
         default="adamw",
@@ -543,7 +569,19 @@ def main() -> None:
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.amp):
                 recon = model.decoder(noisy.to(z.dtype), w.to(z.dtype))
                 recon = recon.float()
-                loss = F.mse_loss(recon, img) + papr_loss
+                if args.pe_alpha:
+                    # PE loss (sstvae/pe_loss.py) replaces the flat MSE
+                    # rather than adding a term: it *is* the distortion
+                    # loss, reweighted per pixel. alpha=0 gives back
+                    # F.mse_loss exactly, so this branch is the only
+                    # difference between a PE run and a baseline one.
+                    alpha = args.pe_alpha
+                    if args.pe_conf_scale:
+                        alpha = alpha * conf.to(recon.dtype).view(-1, 1, 1, 1)
+                    recon_loss = pe_loss(recon, img, alpha)
+                else:
+                    recon_loss = F.mse_loss(recon, img)
+                loss = recon_loss + papr_loss
                 if args.chroma_weight:
                     # Scaled by per-sample channel confidence (SNR/erasure/
                     # fading — NOT truncation): a clean mode-A-only sample

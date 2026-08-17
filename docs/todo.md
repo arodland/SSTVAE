@@ -291,6 +291,74 @@ show +1.2–1.7 dB in modes A/B but from a 40 dB base — quantisation
 noise on a near-perfect smooth field, invisible and irrelevant under
 any real channel.)
 
+## PE loss: implemented, unmeasured
+
+**Implemented 2026-08-17, default off** (`--pe-alpha 0`), on Andrew's
+suggestion. `sstvae/pe_loss.py` is the loss from Li et al., "PE loss:
+Perception-enhanced distortion-oriented loss for image restoration",
+*Computational Visual Media* 12(3):825–839, 2026
+(doi:10.26599/CVM.2025.9450475). It replaces the flat MSE term with a
+per-pixel reweighting: the target's Laplacian says where the edges are,
+the *sign* of the error says whether this pixel landed on the blurred
+side of one, and `W = 1 + alpha·|∇²target|` amplifies it there. Cheap
+(one Laplacian, no network), plug-and-play, and **training-only** — no
+on-air format change, no receiver change, no artifact compatibility
+tier, so the whole cost of being wrong is a training run.
+
+**Nothing here is measured.** The paper's numbers are on
+super-resolution, denoising and deblurring; this is neither the task
+nor the degradation. What follows is what a sweep has to establish and
+the traps it should not have to rediscover.
+
+- **It buys perceptual quality and pays in PSNR** — their Table 1 at
+  alpha=2.0: SR LPIPS 0.2479→0.2357 for PSNR 29.14→28.81, deblur LPIPS
+  0.0754→0.0684 for 31.19→30.77. That currency matters here because
+  PSNR is what `scripts/snr_sweep.py`, `scripts/ab_checkpoint_sweep.py`
+  and the wiki's Performance tables all report, and what the v4
+  headline (+0.43 dB) was stated in. **LPIPS in the evaluation sweeps
+  is a prerequisite for judging this, not a nice-to-have** — see item 1
+  of the non-photographic section above, which wants the same thing.
+  Pick the decision metric before running it; without one, "looks
+  sharper" is unfalsifiable.
+- **The encouraging trend is the heavy end.** Their PSNR cost *shrinks*
+  as the degradation deepens: denoising at σ=75 gives up 0.07 dB for a
+  10% LPIPS gain, against 0.37 dB at σ=25. Our operating points are the
+  heavy end. Whether that trend continues into a channel that destroys
+  information rather than adding noise to it is the open question.
+- **Blur here is partly correct, which it is not in their tasks.** SR,
+  denoising and deblurring all hand the network the full spatial field;
+  the information is present and blur is regression-to-the-mean. A
+  faded, erasure-hit mode-A reception genuinely does not contain the
+  edge, and hedging toward soft is MMSE-right — the same argument that
+  made `--chroma-weight` confidence-scaled ("allowed to hedge toward
+  gray instead of hallucinating color speckle"). So `--pe-conf-scale`
+  is **on by default** and scales alpha by the per-sample channel
+  confidence; `--no-pe-conf-scale` gives the paper's loss unmodified.
+  Which of the two is better is itself unmeasured, and the failure mode
+  to look for is invented edge structure on the `mpp`/`mpd` cells — a
+  crisper picture that is less true.
+- **alpha does not transfer from the paper and 2.0 is not a default.**
+  The paper never states its intensity scale, and `|∇²|` is in whatever
+  units the images carry (ours are [0, 1], where a hard edge reaches
+  ~2–4). Their backbones were L1; ours is `p=2`, and W multiplies the
+  difference *inside* the norm, so the effective weight on a squared
+  error is `W²`. Sweep it — start below 2.0, not at it.
+- **Non-photographic content is where this could go either way, and it
+  has to be in the sweep** (`scripts/eval_nonphoto.py`). Test cards,
+  line art and text are nearly all edge, so the blur factor map is
+  close to saturated there and the effective loss is a different loss
+  than the photographs get. Text and line art are also the two classes
+  still below COCO after the `--nonphoto-frac 0.1` work, and "dense
+  fine strokes, a capacity story" is exactly the case a sharpening
+  pressure might help — or might turn into halos.
+
+**How to screen it cheaply:** a short stage-2 fine-tune off the current
+lineage rather than a from-scratch run, then `ab_checkpoint_sweep.py`
+against the unmodified checkpoint — paired per-image deltas on the same
+channel seeds, so the difference is attributable to the loss alone —
+plus `eval_nonphoto.py` and an LPIPS column. The `--nonphoto-frac`
+sweep above is the template.
+
 ## `SSTVAE_BRANDING` switch, so a redistributor can build lawfully
 
 **Goal.** One build option that substitutes a freely-licensed placeholder
