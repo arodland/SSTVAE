@@ -114,6 +114,31 @@ void close(const std::vector<T>& got, const std::vector<T>& want, double tol,
 // read from another thread while this one is wedged inside a library.
 inline std::atomic<const char*> current_step{"(not started)"};
 
+// Publish the step *and* leave a trail on stderr.
+//
+// The trail is for the third failure mode, which neither the watchdog
+// nor a FAIL line covers: the test that **crashes**. A segfault prints
+// nothing of its own, so the log shows a test that produced no output at
+// all and died, which says only "somewhere in a few hundred lines".
+//
+// CLAUDE.md records that a printf is not a diagnostic for a *hang*, and
+// that is still true -- ctest holds a test's output until the test
+// finishes, and a wedged process never does. A crash is the opposite
+// case: the process dies, its pipe closes, and ctest reports everything
+// written before that point. So per-step output is worth nothing for a
+// hang and is the whole answer for a crash. Both mechanisms are kept
+// because they cover different things.
+//
+// Unbuffered on purpose (`fflush`): a crash gives no chance to drain a
+// buffer, and stderr's buffering is not the same on the three platforms.
+// Costs nothing in the normal case, because ctest discards a passing
+// test's output entirely -- the same argument SSTVAE_HAMLIB_DEBUG makes.
+inline void step(const char* name) {
+    current_step.store(name);
+    std::fprintf(stderr, "-- %s\n", name);
+    std::fflush(stderr);
+}
+
 // Windows: fail loudly rather than waiting on a dialog nobody can see.
 //
 // An unhandled exception on a headless runner raises Windows Error

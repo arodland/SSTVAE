@@ -190,7 +190,13 @@ std::vector<std::uint8_t> png_with_orientation(const Picture& p, int orientation
     }
 
     // Before IEND, which is the final 12 bytes of any PNG.
+    //
+    // Returned early rather than merely recorded: `check::is_true` notes a
+    // failure and carries on, and `png.end() - 12` on a short vector is
+    // undefined behaviour -- so a missing scratch file would have become a
+    // segfault, which says less in a CI log than a named failure does.
     check::is_true(png.size() > 12, "images/qt: the source PNG was written");
+    if (png.size() <= 12) return {};
     png.insert(png.end() - 12, chunk.begin(), chunk.end());
     return png;
 }
@@ -220,6 +226,7 @@ std::vector<std::uint8_t> radiance_hdr(int width, int height) {
 // --- the tests --------------------------------------------------------
 
 void test_the_qt_transformation_table_matches_qt() {
+    check::step("qt transformation table");
     // The one piece of arithmetic here with no oracle in `sstvae_core`:
     // the map from Qt's transformation flags back to an EXIF value, used
     // for the formats our own tag reader does not parse. Pinned against
@@ -247,6 +254,7 @@ void test_the_qt_transformation_table_matches_qt() {
 }
 
 void test_a_tagged_png_matches_the_stb_loader_exactly(const std::string& tmpdir) {
+    check::step("tagged png vs stb");
     // PNG is lossless and both loaders see the same eXIf chunk, so this
     // is an equality rather than a tolerance -- and it is the test that
     // catches the orientation being applied *twice*, which no
@@ -255,7 +263,9 @@ void test_a_tagged_png_matches_the_stb_loader_exactly(const std::string& tmpdir)
     const Picture src = ramp(37, 22);
     for (int o = 1; o <= 8; ++o) {
         const std::string path = tmpdir + "/tagged_" + std::to_string(o) + ".png";
-        write_bytes(path, png_with_orientation(src, o, tmpdir));
+        const std::vector<std::uint8_t> tagged = png_with_orientation(src, o, tmpdir);
+        if (tagged.empty()) return;  // already reported above
+        write_bytes(path, tagged);
         const std::string label = "orientation " + std::to_string(o);
 
         const Picture want = images::load(path);
@@ -274,6 +284,7 @@ void test_a_tagged_png_matches_the_stb_loader_exactly(const std::string& tmpdir)
 }
 
 void test_a_tagged_jpeg_is_oriented(const std::string& tmpdir) {
+    check::step("tagged jpeg");
     // JPEG is lossy, so this is geometry plus a margin: the intended
     // transform must beat every other one, which is what makes it a test
     // of the transform rather than of blurriness.
@@ -303,6 +314,7 @@ void test_a_tagged_jpeg_is_oriented(const std::string& tmpdir) {
 }
 
 void test_a_format_qt_cannot_read_still_opens(const std::string& tmpdir) {
+    check::step("stb fallback (hdr)");
     // The fallback. Radiance HDR: stb reads it, no Qt build has a
     // handler for it, and an app that gained Qt's formats must not have
     // lost stb's.
@@ -340,6 +352,7 @@ void test_a_format_qt_cannot_read_still_opens(const std::string& tmpdir) {
 }
 
 void test_formats_qt_adds_are_readable(const std::string& tmpdir) {
+    check::step("formats qt adds");
     // The point of the whole layer: a format stb has no handler for
     // opens because Qt does. Which ones exist depends on the machine --
     // TIFF and WEBP arrive in the `qtimageformats` module -- so every
@@ -364,6 +377,10 @@ void test_formats_qt_adds_are_readable(const std::string& tmpdir) {
         if (!QImageWriter::supportedImageFormats().contains(format)) continue;
         if (!QImageReader::supportedImageFormats().contains(format)) continue;
         const std::string extension = candidate.format;
+        // Per candidate, because "formats qt adds" covers four of them
+        // and a crash inside one is otherwise indistinguishable.
+        const std::string phase = "formats qt adds: " + extension;
+        check::step(phase.c_str());
         check::is_true(std::find(readable.begin(), readable.end(), extension) !=
                            readable.end(),
                        "images/qt: readable_extensions offers " + extension);
@@ -414,6 +431,7 @@ void test_formats_qt_adds_are_readable(const std::string& tmpdir) {
 }
 
 void test_the_extension_list_is_usable_as_a_filter() {
+    check::step("extension list");
     const std::vector<std::string> extensions = images::qt::readable_extensions();
     check::is_true(!extensions.empty(), "images/qt: the extension list is not empty");
     check::is_true(std::is_sorted(extensions.begin(), extensions.end()),
@@ -441,6 +459,7 @@ void test_the_extension_list_is_usable_as_a_filter() {
 }
 
 void test_a_bundled_plugin_adds_its_format(const std::string& fixtures) {
+    check::step("bundled heif plugin");
     // The bundled HEIF plugin, which is the point of building one at all:
     // a format neither Qt nor stb carries, reached through the same
     // `images::qt::load` with no code in this project referring to the
@@ -513,6 +532,7 @@ void test_a_bundled_plugin_adds_its_format(const std::string& fixtures) {
 }
 
 void test_an_inset_keeps_its_alpha(const std::string& tmpdir) {
+    check::step("inset alpha");
     // `load_qimage` exists so the overlay renderer gets a QImage rather
     // than a `Picture`, and the reason is in a comment there: going
     // through `Picture` to reuse `images::apply_orientation` would
@@ -531,8 +551,10 @@ void test_an_inset_keeps_its_alpha(const std::string& tmpdir) {
         rgba[i * 4 + 3] = static_cast<std::uint8_t>(i < w * h / 2 ? 0 : 255);
     }
     const std::string path = tmpdir + "/transparent.png";
-    check::is_true(stbi_write_png(path.c_str(), w, h, 4, rgba.data(), w * 4) != 0,
-                   "images/qt: the transparent PNG was written");
+    if (stbi_write_png(path.c_str(), w, h, 4, rgba.data(), w * 4) == 0) {
+        check::is_true(false, "images/qt: the transparent PNG was written");
+        return;
+    }
 
     const QImage got = images::qt::load_qimage(path);
     check::is_true(!got.isNull(), "images/qt: load_qimage reads a transparent PNG");
@@ -545,6 +567,7 @@ void test_an_inset_keeps_its_alpha(const std::string& tmpdir) {
 }
 
 void test_an_unreadable_file_reports_the_file(const std::string& tmpdir) {
+    check::step("unreadable file");
     const std::string missing = tmpdir + "/does_not_exist.png";
     std::string message;
     try {
@@ -573,6 +596,7 @@ void test_an_unreadable_file_reports_the_file(const std::string& tmpdir) {
 }
 
 void test_the_file_size_limit_still_applies(const std::string& tmpdir) {
+    check::step("file size limit");
     // The guard lives in `read_picture_bytes`, which this layer shares
     // with the stb loader -- so it applies here too, and a second copy
     // of the limit was the thing worth avoiding. A *sparse* file, so it
