@@ -11,8 +11,13 @@
 // from-here-on.
 //
 // A reception is finished when a fully-synced decode reports all its
-// frames, or -- blind, where neither mode nor duration is known -- when
-// decoded progress stops advancing for `end_grace` seconds.
+// frames, when decoded progress stops advancing for `end_grace`
+// seconds, or when the buffer holds audio past the point where the last
+// frame of that transmission could still be arriving -- whichever comes
+// first. All three run against the tracked reception retained *across*
+// polls (`Pending`, in the .cpp), so none of them depends on the current
+// poll having produced a decode at all; see `Pending` for why that is
+// the whole ballgame.
 //
 // Headless, and knows nothing about audio devices or any UI: it reads a
 // `RingBuffer` somebody else is filling, publishes live status into a
