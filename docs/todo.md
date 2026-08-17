@@ -363,6 +363,44 @@ channel seeds, so the difference is attributable to the loss alone —
 plus `eval_nonphoto.py` and an LPIPS column. The `--nonphoto-frac`
 sweep above is the template.
 
+### The `--pe-alpha 0` baseline (2026-08-17)
+
+`arodland/sstvae-v3-cc12-pe0`: 20 epochs resumed from v4 (epoch 536),
+PE off, so it is the null run every PE run is measured against. Means
+over epochs 554–556:
+
+| metric | value | metric | value |
+|---|---|---|---|
+| `val_psnr_wave_mp8` | 25.0995 | `val_lpips_wave_mp8` | 0.1436 |
+| `val_psnr_wave_awgn8` | 26.2136 | `val_lpips_wave_awgn8` | 0.1202 |
+| `val_psnr_modeB` | 24.2377 | `val_lpips_clean` | 0.0882 |
+| `val_psnr_clean` | 27.4705 | `val_lpips_text` | 0.0873 |
+
+Three things it establishes, all of which change how the PE runs must
+be read:
+
+- **The training budget itself buys nothing on the channel metrics.**
+  20 more epochs of the *same* loss moved `val_psnr_wave_mp8` +0.009 dB
+  and `val_psnr_modeB` −0.000. So a PE run's delta is the loss and not
+  the extra epochs, which is the whole reason to spend a run on this.
+  The clean-channel metrics are *not* equally converged (+0.08 dB), so
+  only read those against the paired baseline, never against v4.
+- **The window is a full cosine cycle, not a plateau.** `T_max` is this
+  invocation's `--epochs`, so a resume restarts the schedule at full
+  `--lr`: epoch 537 drops 0.04 dB, wanders ±0.07, and re-converges by
+  ~554. **Compare the tail (last ~3 epochs), not the window mean**, and
+  give the PE runs an identical `--epochs`, `--lr` and resume point or
+  the comparison is between two different schedules.
+- **The tail's tightness is within-run, and is not a confidence
+  interval.** At LR≈0 the last three epochs agree to ±0.0001 LPIPS and
+  ±0.008 dB, which will make a 0.001 LPIPS difference look like 10
+  sigma. It is one seed. The spread *across* the cycle (±0.04 dB,
+  ±0.0013 LPIPS) is the honest proxy for what a re-run would differ by,
+  and `ab_checkpoint_sweep.py`'s paired per-image SEM is the real test.
+
+`train_lpips` at the tail is 0.1275, on the training term's 256 px crop
+scale — not comparable to any `val_lpips_*` above, by construction.
+
 ## `SSTVAE_BRANDING` switch, so a redistributor can build lawfully
 
 **Goal.** One build option that substitutes a freely-licensed placeholder
