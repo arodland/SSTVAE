@@ -43,15 +43,42 @@ def chroma(img: torch.Tensor) -> torch.Tensor:
     return img - luma
 
 
+def lpips_sum(lpips_fn, recon, img, chunk=4):
+    """Summed **full-frame** LPIPS over a batch, scored in chunks.
+
+    Full frames, unlike the training term's random 256 px crop: a
+    validation metric wants determinism and whole-picture coverage, and a
+    random crop would put sampling noise into a number whose job is to be
+    compared epoch to epoch. It is also the choice
+    `scripts/ab_checkpoint_sweep.py` makes, so the two are comparable.
+
+    Chunked because VGG activations at 640x480 are ~9x a 256 px crop's,
+    and the val batch size was chosen for the autoencoder rather than
+    for this.
+    """
+    total = 0.0
+    for i in range(0, recon.shape[0], chunk):
+        total += lpips_fn(
+            recon[i : i + chunk] * 2 - 1, img[i : i + chunk] * 2 - 1
+        ).sum().item()
+    return total
+
+
 @torch.no_grad()
-def evaluate(model, loader, device, max_batches=16):
+def evaluate(model, loader, device, max_batches=16, lpips_fn=None):
     """Val PSNR at fixed channel settings: clean, 8 dB + 20% erasures, and
-    clean-channel with burned-in text.
+    clean-channel with burned-in text. Plus LPIPS on the same pictures if
+    `lpips_fn` is given.
 
     The `text` variant deliberately uses the *unmodified* validation
     images plus a seeded overlay, so it tracks how well burned-in text
     survives without perturbing `clean` — whose value carries a long
     run-to-run history worth keeping comparable.
+
+    Returns `(psnr, lpips)`; `lpips` is empty when no scorer was passed.
+    Two dicts rather than one because the caller prefixes them
+    differently, and a PSNR and an LPIPS under one key set would be
+    telling the reader that higher is better for both.
     """
     model.eval()
     cfgs = {
@@ -62,6 +89,7 @@ def evaluate(model, loader, device, max_batches=16):
     }
     mse = {k: 0.0 for k in cfgs}
     mse["text"] = 0.0
+    lp = {k: 0.0 for k in mse}
     n = 0
     for bi, img in enumerate(loader):
         if bi >= max_batches:
@@ -76,17 +104,25 @@ def evaluate(model, loader, device, max_batches=16):
                 noisy, w, _conf = apply_latent_channel(z, cfg, generator=g)
             recon = model.decoder(noisy, w)
             mse[k] += F.mse_loss(recon, img).item() * img.shape[0]
+            if lpips_fn is not None:
+                lp[k] += lpips_sum(lpips_fn, recon, img)
         timg = overlay_text_batch(img, seed=bi)
         tz = model.encoder(timg)
         trecon = model.decoder(tz, torch.ones_like(tz))
         mse["text"] += F.mse_loss(trecon, timg).item() * img.shape[0]
+        if lpips_fn is not None:
+            lp["text"] += lpips_sum(lpips_fn, trecon, timg)
         n += img.shape[0]
     model.train()
-    return {k: -10 * torch.tensor(v / n).log10().item() for k, v in mse.items()}
+    return (
+        {k: -10 * torch.tensor(v / n).log10().item() for k, v in mse.items()},
+        {k: v / n for k, v in lp.items()} if lpips_fn is not None else {},
+    )
 
 
 @torch.no_grad()
-def evaluate_waveform(model, loader, device, channels, max_batches=8):
+def evaluate_waveform(model, loader, device, channels, max_batches=8,
+                      lpips_fn=None):
     """Val PSNR *through the waveform channel* — the one stage 2 trains for.
 
     `evaluate()` above measures on the stage-1 latent channel whatever
@@ -98,9 +134,15 @@ def evaluate_waveform(model, loader, device, channels, max_batches=8):
     noise are identical across epochs and across runs: the point is a
     paired comparison, not an unbiased estimate of on-air PSNR. For that
     use scripts/ab_checkpoint_sweep.py, which runs the real modem.
+
+    Returns `(psnr, lpips)` like `evaluate()`. This is the pair that
+    matters for anything trading distortion against perceptual quality:
+    `val_psnr_wave_mp8` is already how a stage-2 run is ranked, and
+    `val_lpips_wave_mp8` is the other half of that judgement.
     """
     model.eval()
     mse = {k: 0.0 for k in channels}
+    lp = {k: 0.0 for k in channels}
     n = 0
     # WaveformChannel.forward draws from the *global* RNG (unlike
     # apply_latent_channel, which takes a generator), so seeding it for a
@@ -124,13 +166,18 @@ def evaluate_waveform(model, loader, device, channels, max_batches=8):
                     model.flat_to_latents(w_flat),
                 )
                 mse[k] += F.mse_loss(recon, img).item() * img.shape[0]
+                if lpips_fn is not None:
+                    lp[k] += lpips_sum(lpips_fn, recon, img)
             n += img.shape[0]
     finally:
         torch.set_rng_state(cpu_state)
         if cuda_state is not None:
             torch.cuda.set_rng_state_all(cuda_state)
         model.train()
-    return {k: -10 * torch.tensor(v / n).log10().item() for k, v in mse.items()}
+    return (
+        {k: -10 * torch.tensor(v / n).log10().item() for k, v in mse.items()},
+        {k: v / n for k, v in lp.items()} if lpips_fn is not None else {},
+    )
 
 
 @torch.no_grad()
@@ -532,6 +579,7 @@ def main() -> None:
         model.train()
         t0, ep_loss, n_batches = time.time(), 0.0, 0
         ep_papr_post, ep_papr_pre, ep_papr_loss = 0.0, 0.0, 0.0
+        ep_lpips = 0.0
         for img in loader:
             img = img.to(device, non_blocking=True)
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.amp):
@@ -605,9 +653,12 @@ def main() -> None:
                     left = int(torch.randint(0, img.shape[-1] - cw + 1, (1,)))
                     rc = recon[..., top : top + ch, left : left + cw]
                     ic = img[..., top : top + ch, left : left + cw]
-                    loss = loss + args.lpips_weight * lpips_fn(
-                        rc * 2 - 1, ic * 2 - 1
-                    ).mean()
+                    lp = lpips_fn(rc * 2 - 1, ic * 2 - 1).mean()
+                    # Logged *unweighted*, so train_lpips stays comparable
+                    # across runs with a different --lpips-weight -- the
+                    # same reason ep_papr_loss is tracked separately.
+                    ep_lpips += lp.detach().item()
+                    loss = loss + args.lpips_weight * lp
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -630,14 +681,25 @@ def main() -> None:
         if wave_ch is not None:
             record["papr_db"] = ep_papr_post / max(n_batches, 1)
             record["papr_pre_db"] = ep_papr_pre / max(n_batches, 1)
+            # Deliberately still just the PAPR term: this field has
+            # run-to-run history, and subtracting the LPIPS and chroma
+            # terms too would silently change what old numbers meant.
             record["recon_loss"] = avg - ep_papr_loss / max(n_batches, 1)
+        if lpips_fn is not None:
+            # The training term's random-crop LPIPS, so it is *not* on the
+            # same scale as the whole-frame val_lpips_* below. Compare it
+            # against itself across epochs, never against those.
+            record["train_lpips"] = ep_lpips / max(n_batches, 1)
         if val_loader is not None:
-            record.update({f"val_psnr_{k}": v for k, v in
-                           evaluate(model, val_loader, device).items()})
+            psnr_v, lpips_v = evaluate(model, val_loader, device,
+                                       lpips_fn=lpips_fn)
+            record.update({f"val_psnr_{k}": v for k, v in psnr_v.items()})
+            record.update({f"val_lpips_{k}": v for k, v in lpips_v.items()})
             if wave_val:
-                record.update({f"val_psnr_{k}": v for k, v in
-                               evaluate_waveform(model, val_loader, device,
-                                                 wave_val).items()})
+                psnr_w, lpips_w = evaluate_waveform(model, val_loader, device,
+                                                    wave_val, lpips_fn=lpips_fn)
+                record.update({f"val_psnr_{k}": v for k, v in psnr_w.items()})
+                record.update({f"val_lpips_{k}": v for k, v in lpips_w.items()})
                 # Per-mode, on the fading channel only: A/B/C differ by
                 # how much data arrived, which the AWGN cell would show
                 # identically for twice the compute.
@@ -651,6 +713,11 @@ def main() -> None:
             f"epoch {epoch}: loss={avg:.5f}"
             + "".join(f" {k}={v:.2f}" for k, v in record.items()
                       if k.startswith("val_psnr") or k.endswith("_db"))
+            # LPIPS gets its own pass at .4f: the values run 0.05-0.3 and
+            # the difference being looked for is in the third decimal, so
+            # the .2f the dB figures want would print most of them equal.
+            + "".join(f" {k}={v:.4f}" for k, v in record.items()
+                      if "lpips" in k)
             # not in the loop above: the weight is O(1e-3), so the .2f
             # the dB figures want would print every value as 0.00.
             + f" [{record['seconds']:.1f}s]"

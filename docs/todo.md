@@ -319,7 +319,11 @@ the traps it should not have to rediscover.
   is a prerequisite for judging this, not a nice-to-have** — see item 1
   of the non-photographic section above, which wants the same thing.
   Pick the decision metric before running it; without one, "looks
-  sharper" is unfalsifiable.
+  sharper" is unfalsifiable. **`ab_checkpoint_sweep.py` has it as of
+  2026-08-17** (VGG to match the training objective's net, whole frames
+  rather than train.py's random crop, on by default because a table
+  missing the metric looks like one where the metric came out even).
+  `snr_sweep.py` and `eval_nonphoto.py` are still PSNR-only.
 - **The encouraging trend is the heavy end.** Their PSNR cost *shrinks*
   as the degradation deepens: denoising at σ=75 gives up 0.07 dB for a
   10% LPIPS gain, against 0.37 dB at σ=25. Our operating points are the
