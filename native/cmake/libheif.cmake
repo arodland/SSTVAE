@@ -369,29 +369,3 @@ add_library(sstvae::libheif ALIAS sstvae_libheif)
 get_target_property(_heif_loc sstvae_libheif IMPORTED_LOCATION)
 message(STATUS "libheif: ${_heif_loc} (decode only)")
 
-# The DLLs beside the *executable*, on Windows, for the same reason
-# `sstvae_hamlib_copy_runtime` exists -- but with a different failure to
-# retire. Windows resolves a dlopen'd module's imports against the search
-# order of the *process*, which starts with the directory of the .exe and
-# not the directory of the plugin. So `heif.dll` next to
-# `plugins/imageformats/` is no use; it has to be next to `sstvae-gui.exe`.
-#
-# Missing, the process still starts and everything works except that HEIC
-# is quietly absent -- no error, no exit code, just a format the file
-# dialog offers and the loader refuses. Hamlib's version of this stops the
-# process before `main`, which is louder and easier.
-function(sstvae_libheif_copy_runtime target)
-  if(NOT WIN32 OR NOT SSTVAE_LIBHEIF_RUNTIME_DIR)
-    return()
-  endif()
-  file(GLOB _heif_dlls "${SSTVAE_LIBHEIF_RUNTIME_DIR}/*.dll")
-  if(NOT _heif_dlls)
-    message(FATAL_ERROR
-      "No DLLs found in ${SSTVAE_LIBHEIF_RUNTIME_DIR}; the HEIF plugin would "
-      "load nowhere and the format would be silently missing from ${target}.")
-  endif()
-  add_custom_command(TARGET ${target} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_heif_dlls}
-            "$<TARGET_FILE_DIR:${target}>"
-    COMMENT "Copying the libheif runtime beside ${target}")
-endfunction()

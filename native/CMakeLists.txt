@@ -353,6 +353,39 @@ if(_want_heif)
   message(STATUS "HEIF/HEIC image plugin: on, decode only")
 endif()
 
+# The libheif DLLs beside the *executable*, on Windows.
+#
+# Defined here rather than in cmake/libheif.cmake, and **unconditionally**,
+# for the reason `sstvae_onnxruntime_copy_runtime` above is: that module is
+# only included when the plugin is being built, so a call site would have
+# to know whether the function exists. It did not, and
+# `-DSSTVAE_BUILD_HEIF=OFF` therefore failed at configure time with
+# "Unknown CMake command" -- a switch added and never once configured with
+# it off. An early return keeps every call site unconditional.
+#
+# The failure this retires when it *is* built: Windows resolves a dlopen'd
+# module's imports against the search order of the *process*, which starts
+# at the .exe's directory and not the plugin's. So heif.dll next to
+# plugins/imageformats/ is no use; it has to be next to the executable.
+# Missing, the process still starts and everything works except that HEIC
+# is quietly absent -- no error, no exit code. Hamlib's equivalent stops
+# the process before `main`, which is louder and easier.
+function(sstvae_libheif_copy_runtime target)
+  if(NOT TARGET sstvae_plugin_heif OR NOT WIN32 OR NOT SSTVAE_LIBHEIF_RUNTIME_DIR)
+    return()
+  endif()
+  file(GLOB _heif_dlls "${SSTVAE_LIBHEIF_RUNTIME_DIR}/*.dll")
+  if(NOT _heif_dlls)
+    message(FATAL_ERROR
+      "No DLLs found in ${SSTVAE_LIBHEIF_RUNTIME_DIR}; the HEIF plugin would "
+      "load nowhere and the format would be silently missing from ${target}.")
+  endif()
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_heif_dlls}
+            "$<TARGET_FILE_DIR:${target}>"
+    COMMENT "Copying the libheif runtime beside ${target}")
+endfunction()
+
 # --- Overlay rendering ------------------------------------------------------
 # Separate from sstvae_core for the same reason Qt audio is: the modem,
 # the golden vectors and the parity module have no business needing a
