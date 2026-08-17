@@ -111,6 +111,35 @@ jobs:
       # The dev extra pins CPU torch, which several tests use as the
       # *reference* implementation for the numpy/ONNX paths.
       - run: uv pip install --system -e ".[dev,cli]"
+      # **Cap oneDNN's kernel selection on Windows**, or `test_muon.py`
+      # intermittently dies with `0xC000001D` (STATUS_ILLEGAL_INSTRUCTION)
+      # inside `newton_schulz`'s first bfloat16 matmul.
+      #
+      # Not flakiness in the test: the input is `manual_seed(0)` and a
+      # fixed 64x128, so it is bit-identical every run, and the fault
+      # lands on the *first* matmul rather than after any accumulation.
+      # Same commit, same wheel, five passes and one failure inside an
+      # hour -- so the variable is the host, not the code. torch's CPU
+      # bf16 matmul dispatches through oneDNN by runtime CPU detection,
+      # and `windows-latest` is a mixed-generation fleet.
+      #
+      # `AVX512_CORE` caps below both AVX512_CORE_BF16 and
+      # AVX512_CORE_AMX, so it covers either candidate. The likeliest is
+      # AMX, which needs the OS to grant tile state on top of advertising
+      # itself in CPUID -- a host can pass the CPUID check and still fault.
+      # That is a hypothesis, and this is how it gets tested: if the
+      # failures stop recurring, it was the ISA dispatch.
+      #
+      # Safe for what this suite asserts. It changes which kernel computes
+      # the matmul, not what the code asks for, and the affected test
+      # checks singular values land in 0.4..1.6 -- a range no kernel
+      # choice moves. Windows only, because Linux and macOS have never
+      # shown it; and only here, because the native Windows job installs
+      # no torch, so it cannot reach this path at all.
+      - name: Cap oneDNN's CPU ISA (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: echo "ONEDNN_MAX_CPU_ISA=AVX512_CORE" >> "$GITHUB_ENV"
       - name: Fast suite
         run: pytest -q
       - name: Slow suite
