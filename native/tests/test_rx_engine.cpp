@@ -279,6 +279,17 @@ struct DiversityHarness {
         return ok;
     }
 
+    // As Harness::poll_watcher: a predicate reading the shared state
+    // rather than this mutex has nothing to notify the waiters, so nudge
+    // them on a timer.
+    void poll_watcher() {
+        while (!stop.is_set()) {
+            cv.notify_all();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        cv.notify_all();
+    }
+
     std::size_t count() {
         std::lock_guard<std::mutex> lock(m);
         return received.size();
@@ -688,6 +699,67 @@ void test_a_reception_whose_decodes_stop_is_still_delivered() {
                    "rx/watchdog: and the loop goes back to listening");
 }
 
+void test_a_diversity_reception_whose_decodes_stop_is_still_delivered() {
+    // The same watchdog regression, against the two-branch loop. It is
+    // deliberately a separate state machine -- so that decode_loop stays
+    // byte-for-byte what the slow tests were written against -- which
+    // means it can regress on its own and needs its own pin. Every other
+    // diversity test here hands the loop a complete transmission, so
+    // none of them can reach a reception whose decodes stop.
+    //
+    // Both branches decode the fragment and then neither does, which is
+    // how a two-receiver reception ordinarily ends: the two antennas
+    // hear one transmission, so its audio ages out of both rings
+    // together. As in the single-branch case nothing else can finish it
+    // -- the combine never reports all its frames, and 18 s of buffer
+    // never reaches a mode-A reception's own deadline.
+    DiversityHarness h(12.0);
+    const std::vector<double> frag = truncated("KC2G", 61, 3.0);
+    write_all(h.ring_a, frag);
+    write_all(h.ring_b, frag);
+
+    std::thread loop([&] {
+        rx::decode_loop_diversity(h.rings(), h.decoder(), h.state, h.config, h.stop,
+                                  h.sink());
+    });
+    std::thread watcher([&] { h.poll_watcher(); });
+
+    // Waited on the status rather than a decode count, for the reason
+    // the single-branch test records: the loop decodes before it
+    // publishes.
+    h.until([&] { return h.state.get().status == rx::Status::Receiving; },
+            "rx/div-watchdog: the fragment puts the loop in receiving");
+    check::equal(h.count(), std::size_t{0},
+                 "rx/div-watchdog: a fragment is not a finished reception yet");
+
+    // Past the rings' whole length, so nothing of the transmission is
+    // left for either branch to decode.
+    const std::vector<double> silence(static_cast<std::size_t>(15.0 * config::FS));
+    write_all(h.ring_a, silence);
+    write_all(h.ring_b, silence);
+
+    h.until([&] { return h.received.size() >= 1; },
+            "rx/div-watchdog: a diversity reception whose branches both stopped "
+            "decoding is still delivered -- otherwise it sits in receiving with "
+            "its picture undelivered");
+    h.stop.set();
+    loop.join();
+    watcher.join();
+
+    check::equal(h.count(), std::size_t{1}, "rx/div-watchdog: delivered exactly once");
+    if (h.count() != 1) return;
+    const rx::Reception& r = h.received[0];
+    check::is_true(r.mode_name.has_value() && *r.mode_name == "A",
+                   "rx/div-watchdog: the header's mode survived into the delivery");
+    check::is_true(r.frames_received.has_value() && *r.frames_received > 0 &&
+                       *r.frames_received < mode_a().n_frames,
+                   "rx/div-watchdog: delivered as the partial reception it is");
+    check::is_true(!r.image.empty() && r.image.rgb[0] == kDecoderMark,
+                   "rx/div-watchdog: the last good decode's picture, not an empty one");
+    check::is_true(h.state.get().status == rx::Status::Listening,
+                   "rx/div-watchdog: and the loop goes back to listening");
+}
+
 void test_low_cpu_does_not_wait_forever_for_audio_that_stops() {
     // decode_loop_low_cpu locks on the preamble and then stops doing any
     // DSP at all until the buffer holds the whole transmission. That is
@@ -997,6 +1069,7 @@ int main() {
         test_diversity_debug_image_written_only_when_both_branches_lock();
         test_diversity_combines_a_header_branch_with_a_blind_only_branch();
         test_diversity_completes_when_both_branches_are_blind_only();
+        test_a_diversity_reception_whose_decodes_stop_is_still_delivered();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;
