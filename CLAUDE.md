@@ -200,6 +200,40 @@ rule is enforced by `tools/check_layering.py`.
   adds `tail()` (cheap slice for the ~20 fps waterfall; `snapshot()`
   copies all 130 s) and `clear()`.
 
+  **Every completion test runs against a reception retained *across*
+  polls** (`_Pending`, and `Pending` in `native/core/rx/engine.cpp`),
+  and that is the whole point of the record rather than an
+  implementation detail. A reception stops *decoding* long before it
+  stops being real: its audio scrolls out of the ring buffer, or its
+  blind acquisition score falls back under `BLIND_SCORE_THRESHOLD` as
+  the accumulator's evidence decays once the transmission is over.
+  Every test used to be evaluated inside the branch that ran only when
+  the current poll had produced a decode, so from that moment "is this
+  finished?" was never asked again — the loop sat in "receiving"
+  indefinitely and the picture it had already decoded was never handed
+  to the sink. **The reported hang and "autosave never fires" are one
+  bug seen from two ends**, since the sink is the only thing that
+  saves. A poll that decodes nothing must therefore *count against* a
+  reception, not be skipped over. Three things ended up load-bearing.
+  The header path needs a **deadline of its own** (its known mode's
+  duration past its start, where blind uses mode C's) — it had none at
+  all, `frames_received >= n_frames_expected` and nothing else. The
+  stall test **must not be extended to the header path** while it is
+  still decoding: a spurious preamble lock in noise goes on decoding
+  the same handful of frames for as long as it is looked at, and
+  ending *that* on a stall turns a false lock into a saved picture of
+  noise (`test_noise_produces_nothing` is what catches it) — so the
+  stall clock runs on polls where the reception did not decode, plus,
+  blind only, where it decoded and did not advance. And
+  `decode_loop_low_cpu`'s "wait until the transmission should have
+  arrived" is a wait on **something outside the loop's control**, so it
+  is bounded by the audio still missing plus `end_grace`; unbounded, a
+  capture that dies mid-reception hangs it forever.
+  `tests/test_rx_watchdog.py` is the fast, stubbed-modem pin for all of
+  this — the failure under test is *decodes stopping*, and there is no
+  way to ask the real modem to stop decoding on cue, which is why the
+  slow suite cannot cover it.
+
   **The progress bar is position, not fill**: the last frame
   successfully received over the frames expected, never latents
   received over latents expected. Only the blind path can tell the two

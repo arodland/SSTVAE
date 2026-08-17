@@ -10,14 +10,15 @@ history from before sync was acquired, a mid-stream lock still decodes
 the frames that arrived before it -- retrospective decoding, not just
 from-here-on.
 
-Reception is considered finished either when a fully-synced decode
-reports all its frames received, or (blind case, true mode/duration
-unknown) when decoded progress stops advancing for --end-grace seconds
--- backstopped by a hard deadline, mode C's own duration (the longest
-mode) past the transmission's start as the beacon already reported it,
-so a reception can't sit in "receiving" indefinitely if the stall
-detector's metric never settles (see PROGRESS_WEIGHT_THRESHOLD and the
-deadline computation in decode_loop's blind branch).
+Reception is considered finished when a fully-synced decode reports all
+its frames received, when decoded progress stops advancing for
+--end-grace seconds, or when the buffer holds audio past the point where
+the last frame of that transmission could possibly still be arriving --
+whichever comes first. All three tests run against `_Pending`, the
+tracked reception retained *across* polls, so that none of them depends
+on the current poll having produced a decode at all; see `_Pending` for
+why that is the whole ballgame, and PROGRESS_WEIGHT_THRESHOLD for what
+"progress" counts as on the blind path.
 
 `decode_loop_low_cpu` is a cheaper variant that drops the blind fallback
 (and with it retrospective mid-stream decoding); see its docstring.
@@ -149,6 +150,44 @@ class RxConfig:
     # gains suit different things -- see config.drift_gains and
     # docs/todo.md.
     drift_track: str = "off"
+
+
+@dataclass
+class _Pending:
+    """The reception `decode_loop` is currently tracking, retained from
+    one poll to the next.
+
+    This exists so the three "is it finished?" tests can fire on a poll
+    that decoded *nothing*, which is the whole reason it is a record
+    rather than a handful of locals recomputed per poll. A reception
+    stops producing a decode long before it stops being real: its audio
+    scrolls out of the ring buffer, or -- much sooner -- its blind
+    acquisition score falls back under BLIND_SCORE_THRESHOLD as the
+    accumulator's evidence decays once the transmission is over. If the
+    completion tests are only asked on polls that produced a decode,
+    then in exactly the case that matters they are never asked again:
+    the loop sits in "receiving" forever, the sink is never called, and
+    the picture that *was* decoded is never delivered or saved. Both
+    reported symptoms -- an indefinite hang, and autosave never firing
+    -- are that one bug, so a poll that decodes nothing must go on
+    counting against the reception rather than being skipped over.
+
+    `image` and the fields beside it are the last good decode, held so
+    the reception can still be delivered after its decodes have stopped.
+    `deadline_abs` is a buffer position, not a time: past it, no real
+    frame of this transmission can still be arriving (see decode_loop).
+    """
+
+    start: int  # absolute (ring-buffer-coordinate) preamble-start position
+    deadline_abs: int
+    metric: int = 0  # best progress metric seen; see _blind_progress
+    stable_since: float | None = None  # when the metric last stopped advancing
+    image: object = None
+    mode_name: str | None = None
+    frames_received: int | None = None
+    n_frames_expected: int | None = None
+    callsign: str = ""
+    snr_db: float = float("nan")
 
 
 @dataclass
@@ -312,14 +351,12 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
     # afterward, so without this a still-buffered transmission would be
     # rediscovered and re-decoded/re-saved on every following poll.
     finished_starts = deque(maxlen=50)
-    last_progress_metric = -1
-    stable_since = None
-    current_reception_start = None
-    # Which reception the progress counters above describe. Progress is
+    # The reception being tracked, or None while listening. Progress is
     # per-reception: carrying a previous transmission's metric across to
     # the next one can make a brand-new reception look like it has
-    # already stalled and end it early.
-    tracked_reception_start = None
+    # already stalled and end it early, so a different reception gets a
+    # fresh record rather than an updated one.
+    pending: _Pending | None = None
     # Blind acquisition's persistent search state: a BlindAccumulator
     # folds in only the audio that's new since the last poll (see
     # sync.BlindAccumulator), so unlike the preamble path it carries
@@ -423,13 +460,18 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
                 reception_start = (
                     buf_start + rb.frame0_start - PREAMBLE_SAMPLES - HEADER_SAMPLES
                 )
+                # Already handled: treat it as nothing decoded rather
+                # than skipping the rest of the poll, so that whatever
+                # reception is *currently* pending still gets its
+                # completion tests run this time round.
                 if _already_finished(reception_start, finished_starts, epsilon_samples):
-                    continue
-                latents_full = rb.latents
-                weights_full = rb.weights
-                callsign = rb.callsign
-                snr_db = rb.snr_db
-                progress_metric, progress_frac = _blind_progress(weights_full)
+                    reception_start = None
+                else:
+                    latents_full = rb.latents
+                    weights_full = rb.weights
+                    callsign = rb.callsign
+                    snr_db = rb.snr_db
+                    progress_metric, progress_frac = _blind_progress(weights_full)
             else:
                 reception_start = None
 
@@ -438,108 +480,151 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
         with state.lock:
             state.last_decode_s = decode_s
 
-        if latents_full is None:
+        advanced = False
+        decoded = latents_full is not None and reception_start is not None
+        if decoded:
+            # A different reception than the one being tracked: it takes
+            # over, with a fresh record. Its very first poll must not
+            # inherit the previous one's stall clock, or it can be
+            # mistaken for a reception that has already stopped
+            # advancing and be ended immediately.
+            if pending is None or abs(reception_start - pending.start) > epsilon_samples:
+                # The deterministic backstop. The transmission's start is
+                # known exactly -- from the header path's own acquisition,
+                # or from the beacon on the blind path, both in the same
+                # "preamble start" coordinate -- so the latest a real
+                # frame of it can possibly still be arriving is its own
+                # duration after that point, fixed the moment the start
+                # is. The blind path has no header and so no mode, and
+                # uses mode C's duration, the longest. That is unlike
+                # "progress stopped advancing" below, which rides on the
+                # decoder's own noise floor and is not guaranteed to ever
+                # settle. Once the buffer holds audio past this deadline
+                # there is provably no more real signal left to arrive
+                # for this reception, done or not.
+                n_deadline_frames = (
+                    n_frames_expected if n_frames_expected is not None
+                    else MODES["C"].n_frames
+                )
+                pending = _Pending(
+                    start=reception_start,
+                    deadline_abs=(
+                        reception_start + PREAMBLE_SAMPLES + HEADER_SAMPLES
+                        + n_deadline_frames * FRAME_SAMPLES
+                    ),
+                )
+            if progress_metric > pending.metric:
+                pending.metric = progress_metric
+                advanced = True
+            pending.image = reconstruct(model, latents_full, weights_full)
+            pending.mode_name = mode_name
+            pending.frames_received = frames_received
+            pending.n_frames_expected = n_frames_expected
+            pending.callsign = callsign
+            pending.snr_db = snr_db
             with state.lock:
-                if state.status != "receiving":
-                    state.status = "listening"
-            last_progress_metric = -1
-            stable_since = None
-            current_reception_start = None
+                state.status = "receiving"
+                state.mode_name = mode_name
+                state.frames_received = frames_received
+                state.n_frames_expected = n_frames_expected
+                state.progress_frac = min(progress_frac, 1.0)
+                state.callsign = callsign
+                state.snr_db = snr_db
+                state.image = pending.image
+
+        if pending is None:
+            with state.lock:
+                state.status = "listening"
             continue
 
-        # A different reception than the one the progress counters
-        # describe: start its progress history fresh, or its very first
-        # poll can be mistaken for a stalled (and so finished) one.
-        if (
-            tracked_reception_start is None
-            or reception_start is None
-            or abs(reception_start - tracked_reception_start) > epsilon_samples
-        ):
-            tracked_reception_start = reception_start
-            last_progress_metric = -1
-            stable_since = None
-
-        current_reception_start = reception_start
-        img = reconstruct(model, latents_full, weights_full)
-        with state.lock:
-            state.status = "receiving"
-            state.mode_name = mode_name
-            state.frames_received = frames_received
-            state.n_frames_expected = n_frames_expected
-            state.progress_frac = min(progress_frac, 1.0)
-            state.callsign = callsign
-            state.snr_db = snr_db
-            state.image = img
-
-        if n_frames_expected is not None:
-            done = frames_received >= n_frames_expected
+        # Two things end a reception short of its own frame count, and
+        # both are timed against end_grace.
+        #
+        # It stopped decoding. That is how a reception actually ends in
+        # the field: its audio scrolls out of the ring buffer, or its
+        # blind acquisition score falls back under
+        # BLIND_SCORE_THRESHOLD as the accumulator's evidence decays
+        # once the transmission is over. A poll that decoded nothing is
+        # not a neutral event -- it is the absence of progress, and is
+        # timed as such. Resetting the clock there instead, which is
+        # what the loop used to do from the branch that skipped the rest
+        # of the poll entirely, is why a reception in that state could
+        # never satisfy any completion test however long it sat.
+        #
+        # Or -- blind only, where there is no frame count to finish on
+        # -- its decoded progress stopped advancing. Deliberately *not*
+        # extended to the header path: a spurious preamble-shaped lock
+        # in noise goes on decoding the same handful of frames for as
+        # long as it is looked at, and ending that on a stall would turn
+        # a false lock into a reported, and autosaved, picture of noise.
+        # The header path does not need it anyway -- frames_received
+        # climbs as the buffer grows, so a real transmission reaches its
+        # count, and the deadline below is the backstop for one that
+        # does not.
+        no_progress = not decoded or (
+            pending.n_frames_expected is None and not advanced
+        )
+        if no_progress:
+            if pending.stable_since is None:
+                pending.stable_since = time.time()
         else:
-            # Deterministic backstop: the beacon already told us exactly
-            # where this transmission's frame 0 sits (reception_start,
-            # in the same "preamble start" coordinate the header path
-            # uses), so the latest a real frame of it can possibly still
-            # be arriving is mode C's own duration -- the longest mode --
-            # after that point, fixed the moment reception_start is
-            # known. That is unlike "progress stopped changing" below,
-            # which rides on demodulate_blind's own noise floor and is
-            # not guaranteed to ever settle: a stuck reception was
-            # observed sitting in "receiving" for many minutes, far past
-            # any mode's duration, because the buffer kept growing and
-            # touching more of the blind search's legal frame range
-            # (see PROGRESS_WEIGHT_THRESHOLD above) or some other reason
-            # the metric kept moving. Once the buffer holds audio past
-            # this deadline there is provably no more real signal left
-            # to arrive for this reception, done or not.
-            deadline_abs = (
-                current_reception_start + PREAMBLE_SAMPLES + HEADER_SAMPLES
-                + MODES["C"].n_frames * FRAME_SAMPLES
-            )
-            if progress_metric > 0 and progress_metric == last_progress_metric:
-                stable_since = stable_since or time.time()
-                done = (time.time() - stable_since) >= config.end_grace
-            else:
-                stable_since = None
-                done = False
-            done = done or total >= deadline_abs
-        last_progress_metric = progress_metric
+            pending.stable_since = None
 
-        if done and progress_metric > 0:
+        complete = (
+            pending.n_frames_expected is not None
+            and pending.frames_received is not None
+            and pending.frames_received >= pending.n_frames_expected
+        )
+        stalled = (
+            pending.stable_since is not None
+            and (time.time() - pending.stable_since) >= config.end_grace
+        )
+        if not (complete or stalled or total >= pending.deadline_abs):
+            continue
+
+        # Deliver only what has something in it. A reception that ended
+        # with no confidently-received latent at all is not a picture,
+        # and is deliberately *not* recorded in finished_starts either:
+        # there is nothing to protect against re-saving, and a real
+        # transmission that was merely weak on its first polls must stay
+        # findable rather than be blocked out for as long as its audio
+        # is in the buffer.
+        delivered = pending.metric > 0 and pending.image is not None
+        if delivered:
             saved_path = sink.on_reception(
                 Reception(
-                    image=img,
-                    mode_name=mode_name,
-                    callsign=callsign,
-                    snr_db=snr_db,
-                    frames_received=frames_received,
-                    n_frames_expected=n_frames_expected,
+                    image=pending.image,
+                    mode_name=pending.mode_name,
+                    callsign=pending.callsign,
+                    snr_db=pending.snr_db,
+                    frames_received=pending.frames_received,
+                    n_frames_expected=pending.n_frames_expected,
                 )
             )
             # Bookkeeping, not disk: this reception has been *handled*,
             # so it must never be rediscovered while its audio is still
             # in the buffer -- whether or not the sink chose to save it.
-            if current_reception_start is not None:
-                finished_starts.append(current_reception_start)
+            finished_starts.append(pending.start)
             with state.lock:
                 state.status = "done"
                 state.saved_path = saved_path
 
-            if config.once:
-                stop_event.set()
-                break
+        pending = None
 
-            last_progress_metric = -1
-            stable_since = None
-            current_reception_start = None
-            tracked_reception_start = None
+        if delivered and config.once:
+            stop_event.set()
+            break
+
+        if delivered:
             stop_event.wait(2.0)
-            with state.lock:
-                state.status = "listening"
-                state.mode_name = None
-                state.frames_received = None
-                state.n_frames_expected = None
-                state.progress_frac = 0.0
-                state.callsign = ""
-                state.snr_db = float("nan")
+        with state.lock:
+            state.status = "listening"
+            state.mode_name = None
+            state.frames_received = None
+            state.n_frames_expected = None
+            state.progress_frac = 0.0
+            state.callsign = ""
+            state.snr_db = float("nan")
 
 
 def decode_loop_low_cpu(ring: RingBuffer, model, state: SharedState, config: RxConfig,
@@ -609,9 +694,19 @@ def decode_loop_low_cpu(ring: RingBuffer, model, state: SharedState, config: RxC
 
         # No further DSP until the whole transmission should have
         # arrived -- just wait, updating the status text cheaply.
+        #
+        # Bounded, because this waits on something outside the loop's
+        # control: if capture stops -- the device is unplugged, the
+        # stream dies, the host stops delivering callbacks -- total_now
+        # stops advancing, and an unbounded wait here holds the receiver
+        # in "receiving" forever waiting for audio that will never come,
+        # with no picture ever handed to the sink. The bound is how long
+        # the audio still missing should take to arrive, plus end_grace;
+        # past it, decode whatever did arrive.
+        wait_deadline = time.time() + (frames_end_abs - total) / FS + config.end_grace
         while not stop_event.is_set():
             _, total_now = ring.snapshot()
-            if total_now >= frames_end_abs:
+            if total_now >= frames_end_abs or time.time() >= wait_deadline:
                 break
             with state.lock:
                 state.seconds_captured = total_now / FS

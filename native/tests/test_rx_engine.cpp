@@ -350,6 +350,111 @@ void test_low_cpu_loop_receives() {
                    "rx/lowcpu: the decoder's picture");
 }
 
+// A transmission whose tail never arrived: everything up to `keep_s`
+// seconds of it, and no more. What a reception looks like when the
+// operator unkeys early, when the band takes the signal away, or when
+// the recording simply stops.
+std::vector<double> truncated(const std::string& callsign, std::uint64_t seed,
+                              double keep_s) {
+    std::vector<double> full = transmission(callsign, seed);
+    const auto keep = static_cast<std::size_t>(keep_s * config::FS);
+    if (keep < full.size()) full.resize(keep);
+    return full;
+}
+
+void test_a_reception_whose_decodes_stop_is_still_delivered() {
+    // The watchdog regression. A partial reception is decoded, and then
+    // its decodes stop -- here because its audio ages out of the ring
+    // buffer, which is one of the two ways it happens in the field (the
+    // other is a blind lock decaying under BLIND_SCORE_THRESHOLD once
+    // the transmission is over). Nothing else can finish it: it never
+    // reports all its frames, and with only a few seconds of it in a
+    // buffer that never reaches the end of a mode-A transmission, the
+    // sample-position deadline cannot fire either.
+    //
+    // Every completion test used to be evaluated inside the branch that
+    // ran only when the current poll had produced a decode, so from the
+    // moment the decodes stopped, "is this finished?" was never asked
+    // again: the loop sat in Receiving indefinitely and the picture it
+    // had already decoded was never handed to the sink. A hang and
+    // autosave never firing are that one bug from two ends.
+    Harness h(12.0);
+    write_all(h.ring, truncated("KC2G", 61, 3.0));
+
+    std::thread loop([&] {
+        rx::decode_loop(h.ring, h.decoder(), h.state, h.config, h.stop, h.sink());
+    });
+    std::thread watcher([&] { h.poll_watcher(); });
+
+    // Let it lock and decode the fragment at least once, so what
+    // follows is a reception being abandoned rather than never found.
+    // Waited on the *status*, not on the decode count: the loop decodes
+    // before it publishes, so a decoder-side counter can be observed one
+    // step ahead of the state it is standing in for.
+    h.until([&] { return h.state.get().status == rx::Status::Receiving; },
+            "rx/watchdog: the fragment puts the loop in receiving");
+    check::equal(h.count(), std::size_t{0},
+                 "rx/watchdog: a fragment is not a finished reception yet");
+
+    // Past the ring buffer's whole length, so nothing of the
+    // transmission is left to decode.
+    write_all(h.ring, std::vector<double>(static_cast<std::size_t>(15.0 * config::FS)));
+
+    h.until([&] { return h.received.size() >= 1; },
+            "rx/watchdog: a reception whose decodes stopped is still delivered -- "
+            "otherwise it is still sitting in receiving with its picture "
+            "undelivered, which is both the hang and the autosave-never-fires "
+            "report");
+    h.stop.set();
+    loop.join();
+    watcher.join();
+
+    check::equal(h.count(), std::size_t{1}, "rx/watchdog: delivered exactly once");
+    if (h.count() != 1) return;
+    const rx::Reception& r = h.received[0];
+    check::is_true(r.mode_name.has_value() && *r.mode_name == "A",
+                   "rx/watchdog: the header's mode survived into the delivery");
+    check::is_true(r.frames_received.has_value() && *r.frames_received > 0 &&
+                       *r.frames_received < mode_a().n_frames,
+                   "rx/watchdog: delivered as the partial reception it is");
+    check::is_true(!r.image.empty() && r.image.rgb[0] == kDecoderMark,
+                   "rx/watchdog: the last good decode's picture, not an empty one");
+    check::is_true(h.state.get().status == rx::Status::Listening,
+                   "rx/watchdog: and the loop goes back to listening");
+}
+
+void test_low_cpu_does_not_wait_forever_for_audio_that_stops() {
+    // decode_loop_low_cpu locks on the preamble and then stops doing any
+    // DSP at all until the buffer holds the whole transmission. That is
+    // a wait on something outside the loop's control -- if capture stops
+    // (the device is unplugged, the stream dies, the host stops
+    // delivering callbacks) the audio it is waiting for never arrives,
+    // and unbounded it holds the receiver in Receiving forever with no
+    // picture ever handed to the sink.
+    //
+    // A second of the transmission is missing, so the bound under test
+    // is about a second plus end_grace rather than a whole mode's
+    // duration -- this is not asserting on how long that takes, only
+    // that it is finite. `once` makes the call synchronous: before the
+    // fix it simply never returned.
+    Harness h(60.0);
+    h.config.once = true;
+    const std::vector<double> full = transmission("W1AW", 62);
+    const double short_by_s = 1.0;
+    write_all(h.ring, truncated("W1AW", 62,
+                                static_cast<double>(full.size()) / config::FS - short_by_s));
+
+    rx::decode_loop_low_cpu(h.ring, h.decoder(), h.state, h.config, h.stop, h.sink());
+
+    check::equal(h.received.size(), std::size_t{1},
+                 "rx/lowcpu-watchdog: audio that stops arriving still ends the "
+                 "reception rather than waiting for it forever");
+    if (h.received.empty()) return;
+    check::is_true(h.received[0].frames_received.has_value() &&
+                       *h.received[0].frames_received < mode_a().n_frames,
+                   "rx/lowcpu-watchdog: delivered as the partial reception it is");
+}
+
 void test_fresh_session_does_not_inherit_blind_evidence_from_a_prior_one() {
     // The app's "start receiving" button and ReceivePanel::resume_after_
     // transmit both work by discarding the whole RingBuffer and calling
@@ -571,6 +676,8 @@ int main() {
         test_noise_produces_nothing();
         test_low_cpu_loop_receives();
         test_a_finished_reception_is_not_rediscovered();
+        test_a_reception_whose_decodes_stop_is_still_delivered();
+        test_low_cpu_does_not_wait_forever_for_audio_that_stops();
         test_two_transmissions_are_both_received();
         test_fresh_session_does_not_inherit_blind_evidence_from_a_prior_one();
     } catch (const std::exception& e) {
