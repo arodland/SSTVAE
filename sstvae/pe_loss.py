@@ -26,13 +26,27 @@ overshoots instead pushes the same pixel further down, so the signs
 differ and the pixel gets weight 1. `tests/test_pe_loss.py` asserts both
 directions on a synthetic step edge rather than trusting the algebra.
 
-**alpha is not transferable from the paper.** Two things it depends on
-that the paper does not state: the intensity scale (`M` is `|laplacian|`
-in whatever units the images carry -- these are floats in [0, 1], where a
-hard edge reaches |g| ~ 2-4, so W ~ 1 + 4*alpha at worst), and `p`,
-because W multiplies the difference *inside* the norm and the effective
-weight on a squared error is therefore `W**2`. The paper's alpha = 2.0
-was chosen with L1 backbones. Sweep it.
+**alpha is not transferable from the paper**, which never states its
+intensity scale -- `M` is `|laplacian|` in whatever units the images
+carry, and ours are floats in [0, 1]. It also interacts with `p`: W
+multiplies the difference *inside* the norm, so the effective weight on
+a squared error is `W**2`.
+
+**Do not calibrate alpha on a synthetic step edge.** That reaches
+|g| ~ 2-4 and suggests alpha = 2 is a huge weight; on real photographs
+(measured, 12 coco640 val images) |g| is median 0.031, p99 0.74, max
+2.78, so alpha = 2 gives mean W 1.14 and max 6.6. The number that
+actually says how hard the loss is pulling is the **amplification
+ratio** `mean(W^2 d^2) / mean(d^2)` -- PE loss *is* MSE at 1.0 -- and it
+is far above what mean W suggests, because reconstruction error lives
+exactly where the Laplacian is large. Measured against v4 through the
+stage-2 channel, with the `--pe-conf-scale` factor (conf averages 0.52)
+in parentheses:
+
+    alpha  0.5 -> 1.36x (1.17x)      alpha  5 ->  9.1x (3.98x)
+    alpha  2.0 -> 3.03x (1.86x)      alpha 10 -> 27.5x (9.74x)
+
+Quote a dose in those terms, not in alpha.
 
 **What it buys, in the paper's own numbers, is perceptual quality paid
 for in PSNR** (their Table 1, alpha = 2.0): super-resolution LPIPS

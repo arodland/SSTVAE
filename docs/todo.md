@@ -401,6 +401,50 @@ be read:
 `train_lpips` at the tail is 0.1275, on the training term's 256 px crop
 scale — not comparable to any `val_lpips_*` above, by construction.
 
+### `--pe-alpha 0.5`: no effect, at a dose that was real (2026-08-17)
+
+`arodland/sstvae-v3-cc12-pe0p5`, same 20 epochs from the same
+checkpoint, `--pe-conf-scale` on. Tail deltas against the baseline
+above, with the across-cycle sd for scale:
+
+| metric | delta | cycle sd |
+|---|---|---|
+| `val_psnr_wave_mp8` | +0.011 | 0.041 |
+| `val_psnr_modeB` | +0.017 | 0.038 |
+| `val_psnr_clean` | −0.017 | 0.080 |
+| `val_lpips_wave_mp8` | +0.0000 | 0.0013 |
+| `val_lpips_clean` | +0.0002 | 0.0016 |
+
+Everything is inside the noise, and LPIPS — the metric this loss exists
+to move — is identical to four decimals. **No effect detected.**
+
+**The dose was real, which is the part worth not re-deriving.** The
+first instinct is that alpha 0.5 was simply too small to test anything;
+it is not. `mean(W^2 d^2)/mean(d^2)` was **1.17x** at the training
+channel with conf scaling — 17% more loss mass, redistributed onto
+edges — and *the model demonstrably responded to it*: had it not
+changed at all, the weighted `recon_loss` would have read 0.0798 against
+the baseline's 0.0682, and it came back at 0.0687, recovering ~93% of
+the imposed penalty. So the term entered the optimization, the network
+moved to satisfy it, and neither PSNR nor LPIPS noticed. That is a more
+informative null than "the knob was off".
+
+**Two calibration traps this settled.** The amplification ratio, not
+`mean W`, is the measure of dose (mean W at alpha 0.5 is 1.03, which
+badly understates it, because the error is concentrated exactly where
+`M` is). And **alpha must not be calibrated on a synthetic step edge** —
+the guidance originally in `pe_loss.py` said alpha 2 would be an ~80x
+weight, from a hard edge's |g| ~ 2-4; on real photographs |g| is median
+0.031 and alpha 2 is a 1.9x dose. The paper's own alpha 2.0 is
+*moderate* here, not aggressive.
+
+**Next, if this is worth another run:** `--pe-alpha 2 --no-pe-conf-scale`
+is the paper's loss exactly and a 3.0x dose, 2.6x stronger than what was
+tested. If that is null too the answer is solid and this should be
+closed as rejected — and the likelier explanation would be that what
+limits this codec is capacity through a 132-channel analog bottleneck
+rather than how its pixel error is weighted.
+
 ## `SSTVAE_BRANDING` switch, so a redistributor can build lawfully
 
 **Goal.** One build option that substitutes a freely-licensed placeholder
