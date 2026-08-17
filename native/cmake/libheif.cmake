@@ -139,7 +139,29 @@ if(NOT _heif_root)
     -DWITH_JPEG_DECODER=OFF
     -DWITH_OpenJPEG_ENCODER=OFF
     -DWITH_OpenJPEG_DECODER=OFF
-    -DWITH_OPENJPH_ENCODER=OFF)
+    -DWITH_OPENJPH_ENCODER=OFF
+    # libsharpyuv is an RGB->YUV helper used when *writing* YUV, so a
+    # decode-only build has no use for it -- and leaving it to
+    # autodetection is actively harmful rather than merely wasteful.
+    # libheif enables it if it finds one anywhere, which on a macOS runner
+    # means Homebrew's: that broke the x86_64 cross build outright
+    # (`_SharpYuvConvert` undefined for architecture x86_64, from a host
+    # arm64 dylib) and, worse, silently *succeeded* on the arm64 slice --
+    # linking an unpinned Homebrew library into something we ship, which
+    # is the thing pinning exists to prevent. Off everywhere, so no
+    # platform can differ from another.
+    -DWITH_LIBSHARPYUV=OFF)
+
+  # **Nothing from the host's package manager, on either macOS slice.**
+  # The point of a pinned build is that its inputs are the pinned ones, and
+  # a Homebrew prefix on the search path quietly undoes that -- for the
+  # cross slice it is a link error, and for the native one it is a
+  # dependency that leaves the machine it was built on. The `\;` keeps
+  # this one argument rather than two.
+  if(APPLE)
+    list(APPEND _de265_args "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew\;/usr/local")
+    list(APPEND _heif_args "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew\;/usr/local")
+  endif()
 
   # libheif needs libde265 at run time, and the two travel together into
   # `lib/`. A relative rpath means that works without LD_LIBRARY_PATH --
@@ -278,41 +300,92 @@ set(SSTVAE_LIBHEIF_INCLUDE "${_heif_root}/include" CACHE INTERNAL "")
 # libde265 at run time -- and the packaging script has to ship both. A
 # missing transitive dependency fails exactly as invisibly as a direct
 # one, which is the lesson `sstvae_hamlib_copy_runtime` records.
-function(_sstvae_heif_import name basename)
+#
+# `stem` is the library name *without* any platform prefix -- "heif", not
+# "libheif". **MSVC emits no `lib` prefix**, so a glob for `libheif*.dll`
+# matches nothing while the file sits there called `heif.dll`; the
+# patterns below therefore allow the prefix rather than requiring it, and
+# they are reported verbatim on failure. The first draft did neither, and
+# the result was the worst kind of CI failure: `list GET given empty
+# list` from inside the error path, so the message explaining what was
+# wrong never ran.
+function(_sstvae_heif_import name stem)
   add_library(${name} SHARED IMPORTED GLOBAL)
   if(WIN32)
-    file(GLOB _dll "${_heif_root}/bin/${basename}*.dll")
-    file(GLOB _implib "${_heif_root}/lib/${basename}*.lib")
-    list(GET _dll 0 _dll0)
-    list(GET _implib 0 _implib0)
-    set_target_properties(${name} PROPERTIES
-      IMPORTED_LOCATION "${_dll0}" IMPORTED_IMPLIB "${_implib0}")
+    # bin/ is where CMake installs a RUNTIME artifact, but glob lib/ too
+    # rather than depend on upstream having said so.
+    set(_patterns "${_heif_root}/bin/*${stem}*.dll" "${_heif_root}/lib/*${stem}*.dll")
+    set(_implib_patterns "${_heif_root}/lib/*${stem}*.lib")
+    file(GLOB _found ${_patterns})
+    file(GLOB _implib ${_implib_patterns})
+    list(APPEND _patterns ${_implib_patterns})
+    if(_found AND _implib)
+      list(GET _found 0 _loc)
+      list(GET _implib 0 _implib0)
+      set_target_properties(${name} PROPERTIES
+        IMPORTED_LOCATION "${_loc}" IMPORTED_IMPLIB "${_implib0}")
+    endif()
     set(SSTVAE_LIBHEIF_RUNTIME_DIR "${_heif_root}/bin" CACHE INTERNAL "")
   elseif(APPLE)
-    file(GLOB _dylib "${_heif_root}/lib/${basename}.*.dylib"
-                     "${_heif_root}/lib/${basename}.dylib")
-    list(GET _dylib 0 _dylib0)
-    set_target_properties(${name} PROPERTIES IMPORTED_LOCATION "${_dylib0}")
+    set(_patterns "${_heif_root}/lib/lib${stem}.*.dylib"
+                  "${_heif_root}/lib/lib${stem}.dylib")
+    file(GLOB _found ${_patterns})
+    if(_found)
+      list(GET _found 0 _loc)
+      set_target_properties(${name} PROPERTIES IMPORTED_LOCATION "${_loc}")
+    endif()
     set(SSTVAE_LIBHEIF_RUNTIME_DIR "${_heif_root}/lib" CACHE INTERNAL "")
   else()
-    file(GLOB _so "${_heif_root}/lib/${basename}.so.*")
-    list(GET _so 0 _so0)
-    set_target_properties(${name} PROPERTIES IMPORTED_LOCATION "${_so0}")
+    set(_patterns "${_heif_root}/lib/lib${stem}.so.*")
+    file(GLOB _found ${_patterns})
+    if(_found)
+      list(GET _found 0 _loc)
+      set_target_properties(${name} PROPERTIES IMPORTED_LOCATION "${_loc}")
+    endif()
     set(SSTVAE_LIBHEIF_RUNTIME_DIR "${_heif_root}/lib" CACHE INTERNAL "")
   endif()
   get_target_property(_loc ${name} IMPORTED_LOCATION)
   if(NOT _loc OR NOT EXISTS "${_loc}")
+    string(REPLACE ";" "\n    " _shown "${_patterns}")
     message(FATAL_ERROR
-      "${basename} was built or supplied but its shared library was not found "
-      "under ${_heif_root}.")
+      "${stem} was built or supplied but no shared library was found for it. "
+      "Looked for:\n    ${_shown}\n"
+      "If the build produced a differently-named file, that is the bug.")
   endif()
   target_include_directories(${name} INTERFACE "${_heif_root}/include")
 endfunction()
 
-_sstvae_heif_import(sstvae_libde265 libde265)
-_sstvae_heif_import(sstvae_libheif libheif)
+_sstvae_heif_import(sstvae_libde265 de265)
+_sstvae_heif_import(sstvae_libheif heif)
 target_link_libraries(sstvae_libheif INTERFACE sstvae_libde265)
 add_library(sstvae::libheif ALIAS sstvae_libheif)
 
 get_target_property(_heif_loc sstvae_libheif IMPORTED_LOCATION)
 message(STATUS "libheif: ${_heif_loc} (decode only)")
+
+# The DLLs beside the *executable*, on Windows, for the same reason
+# `sstvae_hamlib_copy_runtime` exists -- but with a different failure to
+# retire. Windows resolves a dlopen'd module's imports against the search
+# order of the *process*, which starts with the directory of the .exe and
+# not the directory of the plugin. So `heif.dll` next to
+# `plugins/imageformats/` is no use; it has to be next to `sstvae-gui.exe`.
+#
+# Missing, the process still starts and everything works except that HEIC
+# is quietly absent -- no error, no exit code, just a format the file
+# dialog offers and the loader refuses. Hamlib's version of this stops the
+# process before `main`, which is louder and easier.
+function(sstvae_libheif_copy_runtime target)
+  if(NOT WIN32 OR NOT SSTVAE_LIBHEIF_RUNTIME_DIR)
+    return()
+  endif()
+  file(GLOB _heif_dlls "${SSTVAE_LIBHEIF_RUNTIME_DIR}/*.dll")
+  if(NOT _heif_dlls)
+    message(FATAL_ERROR
+      "No DLLs found in ${SSTVAE_LIBHEIF_RUNTIME_DIR}; the HEIF plugin would "
+      "load nowhere and the format would be silently missing from ${target}.")
+  endif()
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_heif_dlls}
+            "$<TARGET_FILE_DIR:${target}>"
+    COMMENT "Copying the libheif runtime beside ${target}")
+endfunction()
