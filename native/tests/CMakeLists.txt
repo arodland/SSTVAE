@@ -160,10 +160,14 @@ endif()
 # Sized against the sanitizer build, which is the slowest thing that
 # runs these: tx_engine measures ~26 s there, so its bound is roughly
 # 2.5x headroom. rx_engine's own ~150 s/360 s pair predates diversity
-# reception, which added six scenarios that each demodulate two
+# reception, which added seven scenarios that each demodulate two
 # branches independently per poll (`decode_loop_diversity`). Five of
 # those got a header lock quickly like every other scenario here; the
-# sixth (both branches blind-only) needed ~3 confirmatory stall-
+# seventh (the watchdog pin) decodes a fragment and then delivers on
+# the stall clock within a poll or two, measuring under a second
+# natively -- not separately measured under the sanitizer, but it is
+# bounded by end_grace rather than by a search, which is what makes it
+# unlike the one below. The sixth (both branches blind-only) needed ~3 confirmatory stall-
 # detection polls of a full, uncached blind search on *both*
 # branches and measured 185 s alone under the sanitizer build --
 # skipped there (see test_rx_engine.cpp's SSTVAE_SANITIZE_BUILD guard)

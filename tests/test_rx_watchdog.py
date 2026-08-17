@@ -17,6 +17,15 @@ this finished?" was simply never asked again. The loop stayed in
 "receiving" indefinitely, the sink was never called, and the picture
 that had already been decoded was never delivered. The reported hang and
 "autosave never fires" are the same bug seen from two ends.
+
+`decode_loop_diversity` is pinned here as well, and for the same reason
+these tests exist at all rather than living in the slow suite: it is a
+separate state machine (deliberately, so the single-receiver one stays
+byte-for-byte what the slow tests were written against), so it can
+regress on its own, and every existing diversity test does real DSP and
+therefore cannot ask decodes to stop. It has two independent ways to
+stop decoding rather than one, since a poll produces nothing whenever
+*neither* branch locks.
 """
 
 import threading
@@ -31,7 +40,13 @@ from sstvae.modem import SyncError
 from sstvae.modem.modem import DemodResult
 from sstvae.modem.sync import Acquisition
 from sstvae.rx import engine as rx_engine
-from sstvae.rx.engine import Reception, RxConfig, SharedState, decode_loop
+from sstvae.rx.engine import (
+    Reception,
+    RxConfig,
+    SharedState,
+    decode_loop,
+    decode_loop_diversity,
+)
 
 MODE_A = MODES["A"]
 
@@ -139,6 +154,36 @@ def _run(config, sink, seconds_of_audio=6.0, timeout_s=20.0, feed_more=None):
     return state
 
 
+def _run_diversity(config, sink, seconds_of_audio=6.0, timeout_s=20.0, feed_more=None):
+    """`_run`'s two-branch counterpart, for `decode_loop_diversity`.
+
+    Both rings are fed identically: the branches are two receivers
+    hearing one transmission, and the stub modem ignores the samples
+    anyway, so what this exercises is the loop's own bookkeeping."""
+    rings = [rx_engine.RingBuffer(200.0), rx_engine.RingBuffer(200.0)]
+    for ring in rings:
+        ring.write(np.zeros(int(seconds_of_audio * FS)))
+
+    state = SharedState()
+    stop = threading.Event()
+    th = threading.Thread(
+        target=decode_loop_diversity,
+        args=(rings, None, state, config, stop, sink),
+        daemon=True,
+    )
+    th.start()
+    try:
+        if feed_more is not None:
+            feed_more(rings)
+        deadline = time.time() + timeout_s
+        while time.time() < deadline and not sink.receptions and th.is_alive():
+            time.sleep(0.02)
+    finally:
+        stop.set()
+        th.join(timeout=10.0)
+    return state
+
+
 def test_a_reception_whose_decodes_stop_is_still_delivered(stub_modem):
     """The core regression. A partial reception is decoded, then the
     decodes stop. Nothing else can finish it: it never reports all its
@@ -233,3 +278,71 @@ def test_nothing_is_delivered_when_nothing_ever_decoded(stub_modem):
 
     assert sink.receptions == []
     assert state.status == "listening"
+
+
+def test_a_diversity_reception_whose_decodes_stop_is_still_delivered(stub_modem):
+    """The core regression again, against the two-branch loop.
+
+    Both branches decode for a while and then neither does — which is
+    how a two-receiver reception ordinarily ends, both antennas hearing
+    the same transmission stop at the same time. Nothing else can finish
+    it: the combine never reports all its frames, and the buffer never
+    reaches the reception's sample-position deadline."""
+    # Each poll decodes once per branch, so four good calls is two full
+    # polls with both branches locked — enough to establish the
+    # reception, after which no branch acquires on any poll.
+    modem = stub_modem(_StubModem(good_polls=4, frames_received=MODE_A.n_frames // 2))
+    sink = _CollectingSink()
+    config = RxConfig(poll_interval=0.05, end_grace=0.5)
+
+    state = _run_diversity(config, sink, timeout_s=20.0)
+
+    assert modem.calls_after_stop > 0, (
+        "the stub never got past its good polls — the test isn't exercising "
+        "the failure at all"
+    )
+    assert len(sink.receptions) == 1, (
+        "a diversity reception whose branches both stopped decoding was never "
+        "handed to the sink: the loop is still in 'receiving' with its picture "
+        "undelivered"
+    )
+    rec = sink.receptions[0]
+    assert rec.frames_received == MODE_A.n_frames // 2
+    assert rec.mode_name == "A"
+    assert rec.callsign == "TEST"
+    assert state.status == "listening", (
+        f"status stuck at {state.status!r} after the reception ended"
+    )
+
+
+def test_the_diversity_path_has_a_deadline_too(stub_modem):
+    """And the deadline, against the two-branch loop: a combine that
+    goes on decoding the same partial result must still end once the
+    buffer holds audio past the last point one of its frames could have
+    arrived.
+
+    end_grace is out of reach so this isolates the sample-position
+    deadline from the stall test above."""
+    stub_modem(_StubModem(good_polls=10**9, frames_received=3))
+    sink = _CollectingSink()
+    config = RxConfig(poll_interval=0.05, end_grace=1e9)
+
+    need = PREAMBLE_SAMPLES + HEADER_SAMPLES + MODE_A.n_frames * rx_engine.FRAME_SAMPLES
+
+    def feed_more(rings):
+        time.sleep(0.5)
+        assert not sink.receptions, (
+            "finished before its deadline could be reached — end_grace=1e9 was "
+            "supposed to make that impossible, so this isn't isolated"
+        )
+        for ring in rings:
+            ring.write(np.zeros(need))
+
+    _run_diversity(config, sink, seconds_of_audio=6.0, timeout_s=20.0,
+                   feed_more=feed_more)
+
+    assert len(sink.receptions) == 1, (
+        "a partial two-branch reception never ended: past its own mode's "
+        "duration there is provably no more of it left to arrive"
+    )
+    assert sink.receptions[0].frames_received == 3

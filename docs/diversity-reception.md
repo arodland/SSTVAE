@@ -241,6 +241,30 @@ blind-locked, completion falls back to the progress-stall detection
 header-locked mode's frame count if there is one, else mode C's full
 range.
 
+Those tests run against the reception retained *across* polls
+(`_Pending` / `Pending`), the same record and the same three tests
+`decode_loop` uses -- so they are asked on every poll, including one
+that produced no combine at all, and a third test ends a reception once
+the buffer holds audio past its own deadline. That is not a refinement
+here but the difference between delivering a picture and not: a
+two-branch reception stops decoding whenever *neither* branch locks,
+which is how it ordinarily ends, since both antennas hear one
+transmission and its audio ages out of both rings together. Evaluated
+only on polls that decoded, the loop would sit in "receiving"
+indefinitely with a decoded picture it never handed to the sink.
+
+Two details are specific to two branches. The deadline is measured
+against whichever ring has heard **furthest** (`max`, while the
+reported `seconds_captured` stays on `min`): both rings capture the
+same air from the same moment, so once either is past the reception's
+end the transmission is over, whereas `min` would make the test hostage
+to a branch whose capture died -- exactly what a deadline exists to
+survive. And the branches behind `contribution_image` are held beside
+the pending image rather than read from the current poll, since the
+poll that delivers a reception is usually not the one that last decoded
+it, and a heatmap of some other poll's branches would not describe the
+picture it is saved next to.
+
 The *reported* progress is a frame position on both paths, not a fill
 fraction (`_blind_progress` / `rx::blind_progress`, shared with
 `decode_loop`). That matters twice here, and the second one is

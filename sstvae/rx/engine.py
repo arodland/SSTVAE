@@ -903,18 +903,24 @@ def decode_loop_diversity(rings, model, state: SharedState, config: RxConfig,
     that branch is used alone, same erasure/weight semantics as
     `combine_diversity_results` given a single branch.
 
-    Progress/completion tracking mirrors `decode_loop`'s own preference:
-    a header-locked combine (the common case) reports an exact frame
-    count and finishes when it is reached; an all-blind combine (true
-    duration unknown) finishes when progress stops advancing for
-    `config.end_grace` seconds, the same stall detection `decode_loop`
-    uses for its own blind path.
+    Progress/completion tracking is `decode_loop`'s, against the same
+    `_Pending` record retained across polls and the same three tests: a
+    header-locked combine (the common case) finishes on its exact frame
+    count, either kind finishes when decoded progress stalls for
+    `config.end_grace` seconds, and either kind finishes once the buffer
+    holds audio past the reception's own deadline. As there, the tests
+    run whether or not *this* poll produced a combine -- which matters
+    more here rather than less, since a poll decodes nothing when
+    *neither* branch locks, and two branches give two independent ways
+    to stop decoding while the reception is still real.
 
     `debug_sink`, if given (a `SaveDebugImageToDirSink`), is handed
     `sstvae.modem.diversity.contribution_image([branch_a, branch_b])`
     for every finished reception where both branches actually
     contributed -- skipped when only one branch locked, since there is
-    nothing to compare.
+    nothing to compare. It describes the decode being delivered, so it
+    is held beside `_Pending.image` and comes from the same poll,
+    rather than from whichever poll happened to be the last one.
     """
     if len(rings) != 2:
         raise ValueError("decode_loop_diversity needs exactly two ring buffers")
@@ -923,13 +929,15 @@ def decode_loop_diversity(rings, model, state: SharedState, config: RxConfig,
     modem = Modem()
     epsilon_samples = SAME_RECEPTION_EPSILON_S * FS
     finished_starts = deque(maxlen=50)
-    last_progress_metric = -1
-    stable_since = None
-    current_reception_start = None
-    # Which reception the progress counters above describe -- see
-    # decode_loop's identical field for why this is tracked separately
-    # from current_reception_start.
-    tracked_reception_start = None
+    # The reception being tracked, or None while listening -- see
+    # decode_loop, whose record and completion tests this shares.
+    pending: _Pending | None = None
+    # The branch results behind `pending.image`, for the debug sink.
+    # Held beside it rather than read from the current poll for the same
+    # reason the image is: the poll that delivers a reception is often
+    # not the poll that last decoded it, and a heatmap of some other
+    # poll's branches would not describe the picture it is saved next to.
+    pending_branches = []
 
     while not stop_event.is_set():
         stop_event.wait(config.poll_interval)
@@ -938,6 +946,16 @@ def decode_loop_diversity(rings, model, state: SharedState, config: RxConfig,
 
         snaps = [ring.snapshot() for ring in rings]
         seconds_captured = min(total for _, total in snaps) / FS
+        # The deadline test below asks "can any more of this
+        # transmission still be arriving?", which is answered by
+        # whichever branch has heard the furthest: both rings capture
+        # the same air from the same moment, so once *either* holds
+        # audio past the reception's end, the transmission is over. min
+        # would make that test hostage to a branch whose capture died --
+        # the very thing a deadline exists to survive -- while
+        # seconds_captured stays on min as the honest floor of what has
+        # been heard on both.
+        total_max = max(total for _, total in snaps)
         with state.lock:
             state.seconds_captured = seconds_captured
         if any(len(samples) < MIN_SECONDS_BEFORE_ATTEMPT * FS for samples, _ in snaps):
@@ -979,95 +997,138 @@ def decode_loop_diversity(rings, model, state: SharedState, config: RxConfig,
             state.branch_a_locked = branch_a_locked
             state.branch_b_locked = branch_b_locked
 
-        if combined is None:
-            with state.lock:
-                if state.status != "receiving":
-                    state.status = "listening"
-            last_progress_metric = -1
-            stable_since = None
-            current_reception_start = None
-            continue
-
-        headered = isinstance(combined, DemodResult)
-        if headered:
-            latents_full = pad_to_full(combined.latents)
-            weights_full = pad_to_full(combined.weights)
-            mode_name = combined.mode.name
-            n_frames_expected = combined.mode.n_frames
-            frames_received = combined.frames_received
-            progress_frac = frames_received / n_frames_expected
-            progress_metric = frames_received
-        else:
-            latents_full = combined.latents
-            weights_full = combined.weights
-            mode_name = None
-            n_frames_expected = None
-            frames_received = None
-            progress_metric, progress_frac = _blind_progress(weights_full)
-        callsign = combined.callsign
-        snr_db = combined.snr_db
-
-        if (tracked_reception_start is None or reception_start is None
-                or abs(reception_start - tracked_reception_start) > epsilon_samples):
-            tracked_reception_start = reception_start
-            last_progress_metric = -1
-            stable_since = None
-
-        current_reception_start = reception_start
-        img = reconstruct(model, latents_full, weights_full)
-        with state.lock:
-            state.status = "receiving"
-            state.mode_name = mode_name
-            state.frames_received = frames_received
-            state.n_frames_expected = n_frames_expected
-            state.progress_frac = min(progress_frac, 1.0)
-            state.callsign = callsign
-            state.snr_db = snr_db
-            state.image = img
-
-        if n_frames_expected is not None:
-            done = frames_received >= n_frames_expected
-        else:
-            if progress_metric > 0 and progress_metric == last_progress_metric:
-                stable_since = stable_since or time.time()
-                done = (time.time() - stable_since) >= config.end_grace
+        mode_name = n_frames_expected = frames_received = None
+        callsign = ""
+        snr_db = float("nan")
+        progress_frac = 0.0
+        progress_metric = 0
+        latents_full = weights_full = None
+        if combined is not None:
+            if isinstance(combined, DemodResult):
+                latents_full = pad_to_full(combined.latents)
+                weights_full = pad_to_full(combined.weights)
+                mode_name = combined.mode.name
+                n_frames_expected = combined.mode.n_frames
+                frames_received = combined.frames_received
+                progress_frac = frames_received / n_frames_expected
+                progress_metric = frames_received
             else:
-                stable_since = None
-                done = False
-        last_progress_metric = progress_metric
+                latents_full = combined.latents
+                weights_full = combined.weights
+                progress_metric, progress_frac = _blind_progress(weights_full)
+            callsign = combined.callsign
+            snr_db = combined.snr_db
 
-        if not (done and progress_metric > 0):
+        advanced = False
+        decoded = latents_full is not None and reception_start is not None
+        if decoded:
+            # A different reception than the one being tracked takes
+            # over with a fresh record, so that its first poll cannot
+            # inherit the previous one's stall clock and be ended
+            # immediately -- see decode_loop, including why the deadline
+            # is fixed the moment the start is known and why the blind
+            # path's is mode C's.
+            if pending is None or abs(reception_start - pending.start) > epsilon_samples:
+                n_deadline_frames = (
+                    n_frames_expected if n_frames_expected is not None
+                    else MODES["C"].n_frames
+                )
+                pending = _Pending(
+                    start=reception_start,
+                    deadline_abs=(
+                        reception_start + PREAMBLE_SAMPLES + HEADER_SAMPLES
+                        + n_deadline_frames * FRAME_SAMPLES
+                    ),
+                )
+            if progress_metric > pending.metric:
+                pending.metric = progress_metric
+                advanced = True
+            pending.image = reconstruct(model, latents_full, weights_full)
+            pending.mode_name = mode_name
+            pending.frames_received = frames_received
+            pending.n_frames_expected = n_frames_expected
+            pending.callsign = callsign
+            pending.snr_db = snr_db
+            pending_branches = branch_results
+            with state.lock:
+                state.status = "receiving"
+                state.mode_name = mode_name
+                state.frames_received = frames_received
+                state.n_frames_expected = n_frames_expected
+                state.progress_frac = min(progress_frac, 1.0)
+                state.callsign = callsign
+                state.snr_db = snr_db
+                state.image = pending.image
+
+        if pending is None:
+            with state.lock:
+                state.status = "listening"
             continue
 
-        saved_path = sink.on_reception(
-            Reception(
-                image=img,
-                mode_name=mode_name,
-                callsign=callsign,
-                snr_db=snr_db,
-                frames_received=frames_received,
-                n_frames_expected=n_frames_expected,
-            )
+        # The completion tests, run on every poll rather than only on
+        # one that decoded -- see decode_loop and `_Pending` for why
+        # that is the whole point, and why the stall clock deliberately
+        # does not run on a header-locked reception that is still
+        # decoding (a spurious lock re-decodes the same frames forever,
+        # and ending *that* on a stall would autosave a picture of
+        # noise). Here a poll decodes nothing whenever neither branch
+        # locks, which is the ordinary way a two-branch reception ends.
+        no_progress = not decoded or (
+            pending.n_frames_expected is None and not advanced
         )
-        if debug_sink is not None and len(branch_results) == 2:
-            debug_sink.on_contribution_image(
-                contribution_image(branch_results), saved_path
-            )
-        if current_reception_start is not None:
-            finished_starts.append(current_reception_start)
-        with state.lock:
-            state.status = "done"
-            state.saved_path = saved_path
+        if no_progress:
+            if pending.stable_since is None:
+                pending.stable_since = time.time()
+        else:
+            pending.stable_since = None
 
-        if config.once:
+        complete = (
+            pending.n_frames_expected is not None
+            and pending.frames_received is not None
+            and pending.frames_received >= pending.n_frames_expected
+        )
+        stalled = (
+            pending.stable_since is not None
+            and (time.time() - pending.stable_since) >= config.end_grace
+        )
+        if not (complete or stalled or total_max >= pending.deadline_abs):
+            continue
+
+        # Deliver only what has something in it, and record only what
+        # was delivered -- a reception that ended with no confidently
+        # received latent is not a picture, and blocking its position
+        # out would keep a merely-weak transmission from being found
+        # again while its audio is still in the buffer.
+        delivered = pending.metric > 0 and pending.image is not None
+        if delivered:
+            saved_path = sink.on_reception(
+                Reception(
+                    image=pending.image,
+                    mode_name=pending.mode_name,
+                    callsign=pending.callsign,
+                    snr_db=pending.snr_db,
+                    frames_received=pending.frames_received,
+                    n_frames_expected=pending.n_frames_expected,
+                )
+            )
+            if debug_sink is not None and len(pending_branches) == 2:
+                debug_sink.on_contribution_image(
+                    contribution_image(pending_branches), saved_path
+                )
+            finished_starts.append(pending.start)
+            with state.lock:
+                state.status = "done"
+                state.saved_path = saved_path
+
+        pending = None
+        pending_branches = []
+
+        if delivered and config.once:
             stop_event.set()
             break
 
-        last_progress_metric = -1
-        stable_since = None
-        current_reception_start = None
-        tracked_reception_start = None
-        stop_event.wait(2.0)
+        if delivered:
+            stop_event.wait(2.0)
         with state.lock:
             state.status = "listening"
             state.mode_name = None

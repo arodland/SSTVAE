@@ -884,13 +884,15 @@ void decode_loop_diversity(std::span<RingBuffer* const> rings, const Decoder& de
     const auto epsilon = static_cast<std::int64_t>(SAME_RECEPTION_EPSILON_S * FS);
     std::deque<std::int64_t> finished_starts;
 
-    int last_progress_metric = -1;
-    std::optional<Clock::time_point> stable_since;
-    std::optional<std::int64_t> current_reception_start;
-    // Which reception the progress counters above describe -- see
-    // decode_loop's identical field for why this is tracked separately
-    // from current_reception_start.
-    std::optional<std::int64_t> tracked_reception_start;
+    // The reception being tracked, or unset while listening -- see
+    // decode_loop, whose record and completion tests this shares.
+    std::optional<Pending> pending;
+    // The branch results behind `pending->image`, for the debug sink.
+    // Held beside it rather than read from the current poll for the same
+    // reason the image is: the poll that delivers a reception is often
+    // not the poll that last decoded it, and a heatmap of some other
+    // poll's branches would not describe the picture it is saved next to.
+    std::vector<modem::diversity::Branch> pending_branches;
 
     while (!stop.is_set()) {
         if (stop.wait(config.poll_interval)) break;
@@ -900,6 +902,16 @@ void decode_loop_diversity(std::span<RingBuffer* const> rings, const Decoder& de
         for (int i = 0; i < 2; ++i) samples[i] = rings[i]->snapshot(&totals[i]);
         const double seconds_captured =
             static_cast<double>(std::min(totals[0], totals[1])) / FS;
+        // The deadline test below asks "can any more of this
+        // transmission still be arriving?", which is answered by
+        // whichever branch has heard the furthest: both rings capture
+        // the same air from the same moment, so once *either* holds
+        // audio past the reception's end, the transmission is over. min
+        // would make that test hostage to a branch whose capture died --
+        // the very thing a deadline exists to survive -- while
+        // seconds_captured stays on min as the honest floor of what has
+        // been heard on both.
+        const auto total_max = static_cast<std::int64_t>(std::max(totals[0], totals[1]));
         state.update([&](Progress& s) { s.seconds_captured = seconds_captured; });
         if (samples[0].size() < MIN_SECONDS_BEFORE_ATTEMPT * FS ||
             samples[1].size() < MIN_SECONDS_BEFORE_ATTEMPT * FS)
@@ -953,16 +965,6 @@ void decode_loop_diversity(std::span<RingBuffer* const> rings, const Decoder& de
             s.branch_b_locked = branch_b_locked;
         });
 
-        if (!combined) {
-            state.update([](Progress& s) {
-                if (s.status != Status::Receiving) s.status = Status::Listening;
-            });
-            last_progress_metric = -1;
-            stable_since.reset();
-            current_reception_start.reset();
-            continue;
-        }
-
         std::vector<double> latents_full, weights_full;
         std::optional<std::string> mode_name;
         std::optional<int> n_frames_expected, frames_received;
@@ -971,92 +973,135 @@ void decode_loop_diversity(std::span<RingBuffer* const> rings, const Decoder& de
         double progress_frac = 0.0;
         int progress_metric = 0;
 
-        if (const auto* d = std::get_if<modem::DemodResult>(&*combined)) {
-            latents_full = latents::pad_to_full(d->latents);
-            weights_full = latents::pad_to_full(d->weights);
-            mode_name = std::string(d->mode.name);
-            n_frames_expected = d->mode.n_frames;
-            frames_received = d->frames_received;
-            progress_frac = static_cast<double>(d->frames_received) / d->mode.n_frames;
-            progress_metric = d->frames_received;
-            callsign = d->callsign;
-            snr_db = d->snr_db;
+        if (combined) {
+            if (const auto* d = std::get_if<modem::DemodResult>(&*combined)) {
+                latents_full = latents::pad_to_full(d->latents);
+                weights_full = latents::pad_to_full(d->weights);
+                mode_name = std::string(d->mode.name);
+                n_frames_expected = d->mode.n_frames;
+                frames_received = d->frames_received;
+                progress_frac = static_cast<double>(d->frames_received) / d->mode.n_frames;
+                progress_metric = d->frames_received;
+                callsign = d->callsign;
+                snr_db = d->snr_db;
+            } else {
+                const auto& bd = std::get<modem::BlindDemodResult>(*combined);
+                latents_full = bd.latents;
+                weights_full = bd.weights;
+                const BlindProgress bp = blind_progress(weights_full);
+                progress_metric = bp.metric;
+                progress_frac = bp.frac;
+                callsign = bd.callsign;
+                snr_db = bd.snr_db;
+            }
+        }
+
+        bool advanced = false;
+        const bool decoded = combined.has_value() && reception_start.has_value();
+        if (decoded) {
+            // A different reception than the one being tracked takes
+            // over with a fresh record, so that its first poll cannot
+            // inherit the previous one's stall clock and be ended
+            // immediately -- see decode_loop, including why the deadline
+            // is fixed the moment the start is known and why a combine
+            // with no header uses mode C's duration.
+            if (!pending || std::llabs(*reception_start - pending->start) > epsilon) {
+                const auto deadline_frames =
+                    static_cast<std::int64_t>(n_frames_expected ? *n_frames_expected
+                                                                : kMaxModeFrames);
+                Pending p;
+                p.start = *reception_start;
+                p.deadline_abs = *reception_start + PREAMBLE_SAMPLES + HEADER_SAMPLES +
+                                 deadline_frames * FRAME_SAMPLES;
+                pending = std::move(p);
+            }
+            if (progress_metric > pending->metric) {
+                pending->metric = progress_metric;
+                advanced = true;
+            }
+            pending->image = std::make_shared<const images::Picture>(
+                decode(latents_full, weights_full));
+            pending->mode_name = mode_name;
+            pending->frames_received = frames_received;
+            pending->n_frames_expected = n_frames_expected;
+            pending->callsign = callsign;
+            pending->snr_db = snr_db;
+            pending_branches = branch_results;
+            state.update([&](Progress& s) {
+                s.status = Status::Receiving;
+                s.mode_name = mode_name;
+                s.frames_received = frames_received;
+                s.n_frames_expected = n_frames_expected;
+                s.progress_frac = std::min(progress_frac, 1.0);
+                s.callsign = callsign;
+                s.snr_db = snr_db;
+                s.image = pending->image;
+            });
+        }
+
+        if (!pending) {
+            state.update([](Progress& s) { s.status = Status::Listening; });
+            continue;
+        }
+
+        // The completion tests, run on every poll rather than only on
+        // one that decoded -- see decode_loop and `Pending` for why that
+        // is the whole point, and why the stall clock deliberately does
+        // not run on a header-locked reception that is still decoding (a
+        // spurious lock re-decodes the same frames forever, and ending
+        // *that* on a stall would autosave a picture of noise). Here a
+        // poll decodes nothing whenever neither branch locks, which is
+        // the ordinary way a two-branch reception ends.
+        const bool no_progress =
+            !decoded || (!pending->n_frames_expected && !advanced);
+        if (no_progress) {
+            if (!pending->stable_since) pending->stable_since = Clock::now();
         } else {
-            const auto& bd = std::get<modem::BlindDemodResult>(*combined);
-            latents_full = bd.latents;
-            weights_full = bd.weights;
-            const BlindProgress bp = blind_progress(weights_full);
-            progress_metric = bp.metric;
-            progress_frac = bp.frac;
-            callsign = bd.callsign;
-            snr_db = bd.snr_db;
+            pending->stable_since.reset();
         }
 
-        // A different reception than the one the progress counters
-        // describe: start its history fresh, or its very first poll can
-        // be mistaken for a stalled (and so finished) one.
-        if (!tracked_reception_start || !reception_start ||
-            std::llabs(*reception_start - *tracked_reception_start) > epsilon) {
-            tracked_reception_start = reception_start;
-            last_progress_metric = -1;
-            stable_since.reset();
+        const bool complete = pending->n_frames_expected && pending->frames_received &&
+                              *pending->frames_received >= *pending->n_frames_expected;
+        const bool stalled = pending->stable_since &&
+                             seconds_since(*pending->stable_since) >= config.end_grace;
+        if (!complete && !stalled && total_max < pending->deadline_abs) continue;
+
+        // Deliver only what has something in it, and record only what
+        // was delivered -- a reception that ended with no confidently
+        // received latent is not a picture, and blocking its position
+        // out would keep a merely-weak transmission from being found
+        // again while its audio is still in the buffer.
+        const bool delivered = pending->metric > 0 && pending->image;
+        if (delivered) {
+            Reception rec;
+            rec.image = *pending->image;
+            rec.mode_name = pending->mode_name;
+            rec.callsign = pending->callsign;
+            rec.snr_db = pending->snr_db;
+            rec.frames_received = pending->frames_received;
+            rec.n_frames_expected = pending->n_frames_expected;
+            const std::optional<std::string> saved_path = sink(rec);
+
+            if (debug_sink && pending_branches.size() == 2) {
+                (*debug_sink)(modem::diversity::contribution_image(pending_branches),
+                              saved_path);
+            }
+
+            remember_finished(finished_starts, pending->start);
+            state.update([&](Progress& s) {
+                s.status = Status::Done;
+                s.saved_path = saved_path;
+            });
         }
+        pending.reset();
+        pending_branches.clear();
 
-        current_reception_start = reception_start;
-        auto img = std::make_shared<const images::Picture>(decode(latents_full, weights_full));
-        state.update([&](Progress& s) {
-            s.status = Status::Receiving;
-            s.mode_name = mode_name;
-            s.frames_received = frames_received;
-            s.n_frames_expected = n_frames_expected;
-            s.progress_frac = std::min(progress_frac, 1.0);
-            s.callsign = callsign;
-            s.snr_db = snr_db;
-            s.image = img;
-        });
-
-        bool done = false;
-        if (n_frames_expected) {
-            done = *frames_received >= *n_frames_expected;
-        } else if (progress_metric > 0 && progress_metric == last_progress_metric) {
-            if (!stable_since) stable_since = Clock::now();
-            done = seconds_since(*stable_since) >= config.end_grace;
-        } else {
-            stable_since.reset();
-        }
-        last_progress_metric = progress_metric;
-
-        if (!(done && progress_metric > 0)) continue;
-
-        Reception rec;
-        rec.image = *img;
-        rec.mode_name = mode_name;
-        rec.callsign = callsign;
-        rec.snr_db = snr_db;
-        rec.frames_received = frames_received;
-        rec.n_frames_expected = n_frames_expected;
-        const std::optional<std::string> saved_path = sink(rec);
-
-        if (debug_sink && branch_results.size() == 2) {
-            (*debug_sink)(modem::diversity::contribution_image(branch_results), saved_path);
-        }
-
-        if (current_reception_start) remember_finished(finished_starts, *current_reception_start);
-        state.update([&](Progress& s) {
-            s.status = Status::Done;
-            s.saved_path = saved_path;
-        });
-
-        if (config.once) {
+        if (delivered && config.once) {
             stop.set();
             break;
         }
 
-        last_progress_metric = -1;
-        stable_since.reset();
-        current_reception_start.reset();
-        tracked_reception_start.reset();
-        stop.wait(2.0);
+        if (delivered) stop.wait(2.0);
         reset_to_listening(state);
     }
 }

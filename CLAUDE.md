@@ -234,6 +234,29 @@ rule is enforced by `tools/check_layering.py`.
   way to ask the real modem to stop decoding on cue, which is why the
   slow suite cannot cover it.
 
+  **`decode_loop_diversity` carries the same record and the same three
+  tests, and has to be kept in step by hand** — it is a separate
+  function on both sides (deliberately, so this loop stays what the
+  slow tests were written against), so it regresses on its own and was
+  written against the *pre*-`_Pending` state machine. Two branches make
+  the bug easier to hit rather than harder: a poll decodes nothing
+  whenever *neither* branch locks, so there are two independent ways
+  for a still-real reception to go quiet. Two details are specific to
+  it. The deadline is measured against the ring that has heard
+  **furthest** (`max`, where `seconds_captured` stays on `min`) — both
+  rings capture the same air from the same moment, so once either is
+  past the end the transmission is over, and `min` would hand the test
+  back to a branch whose capture died, which is the thing a deadline
+  exists to survive. And the debug heatmap's branches are held beside
+  `_Pending.image` rather than read from the current poll, because the
+  poll that *delivers* a reception is usually not the one that last
+  decoded it. Pinned by the two diversity cases in
+  `tests/test_rx_watchdog.py` and by
+  `test_a_diversity_reception_whose_decodes_stop_is_still_delivered` in
+  `native/tests/test_rx_engine.cpp`; all three fail against the
+  pre-fix loop, and every other diversity test hands the loop a
+  complete transmission, so none of them can reach this.
+
   **The progress bar is position, not fill**: the last frame
   successfully received over the frames expected, never latents
   received over latents expected. Only the blind path can tell the two

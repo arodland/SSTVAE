@@ -323,17 +323,23 @@ void decode_loop_low_cpu(RingBuffer& ring, const Decoder& decode,
 // branch is used alone, same erasure/weight semantics as
 // `combine_diversity_results` given a single branch.
 //
-// Progress/completion tracking mirrors `decode_loop`'s own preference: a
-// header-locked combine (the common case) reports an exact frame count
-// and finishes when it is reached; an all-blind combine (true duration
-// unknown) finishes when progress stops advancing for `config.end_grace`
-// seconds, the same stall detection `decode_loop` uses for its own
-// blind path.
+// Progress/completion tracking is `decode_loop`'s, against the same
+// across-polls record and the same three tests: a header-locked combine
+// (the common case) finishes on its exact frame count, either kind
+// finishes when decoded progress stalls for `config.end_grace` seconds,
+// and either kind finishes once the buffer holds audio past the
+// reception's own deadline. As there, the tests run whether or not
+// *this* poll produced a combine -- which matters more here rather than
+// less, since a poll decodes nothing when *neither* branch locks, and
+// two branches give two independent ways to stop decoding while the
+// reception is still real.
 //
 // `debug_sink`, if non-null, is handed `contribution_image` for every
 // finished reception where both branches actually contributed --
 // skipped when only one branch locked, since there is nothing to
-// compare. `rings` must have exactly two elements.
+// compare. It describes the decode being delivered, so it comes from
+// the poll that produced it rather than from whichever poll happened to
+// be the last one. `rings` must have exactly two elements.
 void decode_loop_diversity(std::span<RingBuffer* const> rings, const Decoder& decode,
                            SharedState& state, const RxConfig& config,
                            StopFlag& stop, const Sink& sink,
