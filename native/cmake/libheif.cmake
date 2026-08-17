@@ -325,7 +325,6 @@ function(_sstvae_heif_import name stem)
       set_target_properties(${name} PROPERTIES
         IMPORTED_LOCATION "${_loc}" IMPORTED_IMPLIB "${_implib0}")
     endif()
-    set(SSTVAE_LIBHEIF_RUNTIME_DIR "${_heif_root}/bin" CACHE INTERNAL "")
   elseif(APPLE)
     set(_patterns "${_heif_root}/lib/lib${stem}.*.dylib"
                   "${_heif_root}/lib/lib${stem}.dylib")
@@ -334,7 +333,6 @@ function(_sstvae_heif_import name stem)
       list(GET _found 0 _loc)
       set_target_properties(${name} PROPERTIES IMPORTED_LOCATION "${_loc}")
     endif()
-    set(SSTVAE_LIBHEIF_RUNTIME_DIR "${_heif_root}/lib" CACHE INTERNAL "")
   else()
     set(_patterns "${_heif_root}/lib/lib${stem}.so.*")
     file(GLOB _found ${_patterns})
@@ -342,7 +340,6 @@ function(_sstvae_heif_import name stem)
       list(GET _found 0 _loc)
       set_target_properties(${name} PROPERTIES IMPORTED_LOCATION "${_loc}")
     endif()
-    set(SSTVAE_LIBHEIF_RUNTIME_DIR "${_heif_root}/lib" CACHE INTERNAL "")
   endif()
   get_target_property(_loc ${name} IMPORTED_LOCATION)
   if(NOT _loc OR NOT EXISTS "${_loc}")
@@ -352,6 +349,15 @@ function(_sstvae_heif_import name stem)
       "Looked for:\n    ${_shown}\n"
       "If the build produced a differently-named file, that is the bug.")
   endif()
+  # **The directory the library was actually found in, not an assumption
+  # about where it should be.** This was hardcoded to `bin` on Windows
+  # while the glob above deliberately searches `bin` *and* `lib`, so a
+  # build that installed its DLLs anywhere else would leave this pointing
+  # at nothing -- and `package_app.sh` copies `$LIBHEIF_RUNTIME_DIR/*.dll`
+  # from it, so the packaged app would silently ship without libheif and
+  # lose HEIC with no error anywhere. Derived, so the two cannot disagree.
+  get_filename_component(_dir "${_loc}" DIRECTORY)
+  set(SSTVAE_LIBHEIF_RUNTIME_DIR "${_dir}" CACHE INTERNAL "" FORCE)
   target_include_directories(${name} INTERFACE "${_heif_root}/include")
 endfunction()
 

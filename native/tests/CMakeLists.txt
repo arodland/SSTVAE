@@ -204,6 +204,18 @@ if(TARGET sstvae_images_qt)
     # resolved at that moment rather than at link time -- a build rpath
     # covers it on Linux and macOS, and Windows needs the DLLs beside the
     # executable, which is what this copies.
+    # **Beside the executable, which is the rule this project already
+    # follows for Hamlib.** Windows searches the .exe's own directory
+    # first, with no environment involved; PATH is searched later and this
+    # runner has ImageMagick, LLVM and mingw on it, at least one of which
+    # ships its own libheif. Binding to a foreign `heif.dll` whose exports
+    # happen to match would load cleanly, register the plugin's formats
+    # from its own .json, and then crash on the first real call -- which is
+    # a decode-time segfault with no diagnostic, the exact shape of what
+    # this test does on Windows.
+    sstvae_libheif_copy_runtime(test_images_qt)
+    # Kept as well, harmlessly: the copy above is what should resolve it,
+    # and this covers a layout where it does not.
     if(WIN32 AND SSTVAE_LIBHEIF_RUNTIME_DIR)
       set_property(TEST images_qt APPEND PROPERTY ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:${SSTVAE_LIBHEIF_RUNTIME_DIR}")

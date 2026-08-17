@@ -278,6 +278,34 @@ jobs:
       # dumpbin dump is what makes a failure immediately readable -- a
       # dependency listed as `(null)`, or libhamlib-4.dll missing from
       # the list entirely, is the malformed-import-directory signature.
+      # Which libheif the plugin will actually bind to, printed before
+      # ctest so the answer arrives with the failure rather than a round
+      # later -- the same reasoning as the dumpbin dump below.
+      #
+      # This runner carries ImageMagick, LLVM and mingw on PATH, and at
+      # least one of those ships its own libheif. Windows searches the
+      # .exe's directory first (which is why the DLLs are copied there),
+      # but a foreign heif.dll whose exports happen to match would load
+      # cleanly, let the plugin register its formats from its own .json,
+      # and then crash on the first real call. `where` is what tells that
+      # apart from a bug in the decoder.
+      - name: Which libheif is on the path (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Write-Host "== beside the test executable =="
+          Get-ChildItem native/build/tests -Filter *.dll -ErrorAction SilentlyContinue |
+            Format-Table Name, Length
+          Write-Host "== what the loader would find on PATH =="
+          foreach ($dll in @("heif.dll", "libheif.dll", "de265.dll", "libde265.dll")) {
+            $found = (& where.exe $dll) 2>$null
+            if ($found) { Write-Host "$dll ->"; $found | ForEach-Object { Write-Host "   $_" } }
+            else { Write-Host "$dll -> not on PATH" }
+          }
+          Write-Host "== what we built =="
+          Get-ChildItem native/.deps -Recurse -Include heif.dll,de265.dll,libheif*.dll,libde265*.dll -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host $_.FullName }
       - name: Rig test starts outside ctest
         if: runner.os == 'Windows'
         shell: pwsh

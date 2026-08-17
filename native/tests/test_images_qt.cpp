@@ -499,11 +499,13 @@ void test_a_bundled_plugin_adds_its_format(const std::string& fixtures) {
 
     Picture got;
     std::string error;
+    check::step("bundled heif plugin: decode");
     try {
         got = images::qt::load(path);
     } catch (const std::exception& e) {
         error = e.what();
     }
+    check::step("bundled heif plugin: compare");
     check::is_true(error.empty(), "images/qt: the HEIC fixture opens (error: " +
                                       error + ")");
     if (!error.empty()) return;
