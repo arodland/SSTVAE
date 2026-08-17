@@ -438,12 +438,58 @@ weight, from a hard edge's |g| ~ 2-4; on real photographs |g| is median
 0.031 and alpha 2 is a 1.9x dose. The paper's own alpha 2.0 is
 *moderate* here, not aggressive.
 
-**Next, if this is worth another run:** `--pe-alpha 2 --no-pe-conf-scale`
-is the paper's loss exactly and a 3.0x dose, 2.6x stronger than what was
-tested. If that is null too the answer is solid and this should be
-closed as rejected — and the likelier explanation would be that what
-limits this codec is capacity through a 132-channel analog bottleneck
-rather than how its pixel error is weighted.
+### `--pe-alpha 2 --no-pe-conf-scale`: a real gain, backwards (2026-08-17)
+
+`arodland/sstvae-v3-cc12-pe2p0nc`, the paper's loss exactly, a 3.0x
+dose. Same 20 epochs from the same checkpoint. Tail deltas against the
+baseline, in units of the across-cycle sd:
+
+| metric | delta | sd | |
+|---|---|---|---|
+| `val_psnr_wave_mp8` | **+0.178** | 0.041 | 4.3 sd |
+| `val_psnr_wave_awgn8` | **+0.180** | 0.050 | 3.6 sd |
+| `val_psnr_modeB` | **+0.173** | 0.038 | 4.6 sd |
+| `val_psnr_clean` | **+0.150** | 0.080 | 1.9 sd |
+| `val_psnr_np_clean` | +0.524 | 0.294 | 1.8 sd |
+| `val_lpips_wave_mp8` | +0.0003 | 0.0013 | 0.2 sd |
+| `val_lpips_clean` | −0.0000 | 0.0016 | 0.0 sd |
+
+**+0.17 dB of PSNR and nothing at all on LPIPS** — which is the opposite
+trade from the one the paper reports, and the opposite of what the Mach
+band argument predicts. A loss designed to buy perceptual quality with
+distortion bought distortion and no perceptual quality.
+
+**Do not bank this as a PE loss result. The likelier reading is that it
+rebalanced the objective**, and there is direct evidence for that rather
+than only suspicion. Multiplying the MSE term by ~3x is arithmetically
+close to dividing `--lpips-weight`, `--chroma-weight` and
+`--papr-weight` by 3 — and **both of the other terms moved in exactly
+the direction that predicts**: `papr_db` rose +0.0006 against a cycle sd
+of 0.0001 (**4.4 sd**, on a metric otherwise stable to the fourth
+decimal), and `train_lpips` rose. The PAPR tell is the sharp one, since
+the Mach band mechanism has no route to the crest factor at all. The
+model meanwhile absorbed 96% of the imposed penalty (recon_loss 0.0682 →
+0.0738 where an unchanged model would read 0.2068), so it did engage
+with the reweighting; the question is only whether the *shape* of the
+reweighting mattered or just its scale.
+
+**The control that separates them needs no code change**, one run,
+identical everything else:
+
+    --pe-alpha 0 --lpips-weight 0.165 --chroma-weight 0.66 \
+        --papr-weight 0.00066
+
+That is the same 3.03x relative up-weighting of the reconstruction term
+with a *flat* weight map. If it also lands ~+0.17 dB with flat LPIPS,
+PE's edge weighting contributed nothing and what this actually found is
+that **the loss balance is miscalibrated** — which would be a more
+valuable finding than the paper's, and reachable by one scalar instead
+of a weight map. If it lands materially short, the edge structure is
+carrying the gain and PE loss is worth keeping.
+
+Either way `--papr-weight` must be restored before anything from this
+line goes on air: the PAPR term is what holds the crest factor, and this
+run moved it measurably.
 
 ## `SSTVAE_BRANDING` switch, so a redistributor can build lawfully
 
