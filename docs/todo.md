@@ -6,6 +6,62 @@ reasoning doesn't have to be rediscovered.
 Completed items are summarized below; the full measurements and
 reasoning behind each live in `docs/todo-done.md`.
 
+## The HEIF plugin does not load on Windows
+
+**Open, and it needs a Windows machine rather than another CI round.**
+`-DSSTVAE_BUILD_HEIF` is `AUTO` everywhere and AUTO declines on Windows;
+the other four platforms carry HEIC and are verified. Windows still gains
+every format Qt's own imageformats plugins bring (TIFF, WEBP, ICO, ICNS,
+TGA), which is the larger part of what that change set was for.
+`-DSSTVAE_BUILD_HEIF=ON` builds it there anyway, which is what anyone
+debugging this should do.
+
+What is established, so none of it needs redoing:
+
+- **libheif 1.23.1 and libde265 1.0.19 build cleanly under MSVC** from
+  the pinned tarballs, decode only, and install as `heif.dll` /
+  `de265.dll` — no `lib` prefix, which is what
+  `_sstvae_heif_import`'s globs allow for. Both go to `bin/`; their
+  `install(TARGETS)` rules were checked, so they are not in separate
+  directories.
+- **The plugin builds and the target exists** — `test_images_qt` fails
+  with the `SSTVAE_REQUIRE_HEIF` message, which is only reachable when
+  CMake built the plugin.
+- **Qt does not load it.** `heic` never appears in
+  `supportedImageFormats()`. Everything else in that test passes: 199 of
+  200 checks, including TIFF, WEBP, XPM and ICO through the same
+  `QImageReader`, so plugin *enumeration* on that machine is working.
+- **It behaved differently before the DLLs were placed beside the
+  executable.** Then, the plugin loaded and **crashed inside the decode**
+  (a SegFault located to the step by `check::step`). Now it does not load.
+  The only change between those two states is that our `heif.dll` and
+  `de265.dll` are in the `.exe`'s own directory, which Windows searches
+  first — so the earlier state is consistent with the plugin having bound
+  a *different* libheif present on the runner (ImageMagick is on its
+  PATH and ships one) and crashing on an ABI mismatch. That is a
+  hypothesis, not a finding.
+- **A Windows-only CI step prints the resolution** — what is beside the
+  test executable, what `where.exe` finds for `heif.dll`/`de265.dll`, and
+  what we built. Read it first; it was added for exactly this and its
+  output has not yet been examined.
+
+Where to look next, cheapest first:
+
+1. `QT_DEBUG_PLUGINS=1` on the test. Qt prints why it rejected a plugin,
+   and that single line probably ends this. It is one env var in
+   `native/tests/CMakeLists.txt`.
+2. `dumpbin /dependents` on `plugins/imageformats/sstvae_qheif.dll` — the
+   same tool that diagnosed the Hamlib import-library trap, and it names
+   an unresolved import directly. Note that vcpkg is present on the
+   runner, so libheif may have linked a host library the way it linked
+   Homebrew's libsharpyuv on macOS; that one was found by reading a
+   configure summary rather than by guessing.
+3. Only then suspect the decoder itself.
+
+**Do not fix this by turning off libde265's SIMD or bumping a version on
+spec.** Both were considered and are guesses; the first two steps above
+are observations.
+
 ## Completed: pilot crest factor
 
 **Implemented 2026-08-14, `PROTOCOL_VERSION` 3.** The frozen QPSK pilot

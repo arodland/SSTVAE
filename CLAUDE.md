@@ -681,6 +681,22 @@ through the staged package with the build tree deleted and no
   worked without that only because the launcher's `LD_LIBRARY_PATH` is
   searched before a stale RUNPATH — i.e. it worked by accident.
 
+**HEIC is off on Windows, and that is an open gap** (docs/todo.md). The
+plugin builds there and so do libheif and libde265, but Qt will not load
+it -- `heic` never reaches `supportedImageFormats()` -- while TIFF, WEBP,
+XPM and ICO all work through the same `QImageReader` in the same test, so
+enumeration itself is fine. Before the DLLs were placed beside the
+executable it *loaded and crashed inside the decode* instead, which fits
+it having bound a different libheif on the runner (ImageMagick is on that
+PATH and ships one), but that is a hypothesis. Four platforms carry HEIC
+and `-DSSTVAE_BUILD_HEIF=ON` builds it on Windows for whoever debugs it;
+the todo entry lists what is already established and the two
+observations to make first, so nobody repeats four CI rounds of
+inference. The general lesson worth keeping: **a Windows-only fault in a
+bundled third-party library is not diagnosable from CI**, and the point
+to stop guessing is when the cheap observations have run out, not when
+the ideas have.
+
 **And HEVC patents are the part no licence addresses.** Several pools
 assert claims; browsers ship no HEVC decoder and some distributions keep
 libde265 out of main. `-DSSTVAE_BUILD_HEIF=OFF` declines the whole

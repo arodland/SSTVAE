@@ -279,6 +279,25 @@ set(SSTVAE_PLUGIN_DIR "${CMAKE_BINARY_DIR}/plugins" CACHE INTERNAL "")
 
 if(SSTVAE_BUILD_HEIF STREQUAL "OFF")
   set(_want_heif OFF)
+elseif(WIN32 AND NOT SSTVAE_BUILD_HEIF STREQUAL "ON")
+  # **AUTO declines on Windows, and this is a known gap rather than a
+  # judgement about the platform.** The plugin builds there and libheif
+  # and libde265 build there, but Qt will not load the plugin: the format
+  # never appears in `supportedImageFormats()`, so HEIC is simply absent.
+  # Before the DLLs were placed beside the executable it *did* load and
+  # then crashed inside the decode, which is consistent with it having
+  # bound some other libheif on that machine -- but the current state is
+  # a plugin that does not load, and the cause is not established.
+  #
+  # Four platforms carry HEIC; Windows still gains everything Qt's own
+  # imageformats plugins bring (TIFF, WEBP, ICO, ICNS, TGA), which is the
+  # larger part of what this change set is for. `-DSSTVAE_BUILD_HEIF=ON`
+  # forces it on for anyone with a Windows machine to debug on -- which is
+  # what this needs and what CI cannot provide. The evidence so far is
+  # written up in docs/todo.md; do not start from scratch.
+  set(_want_heif OFF)
+  message(STATUS "HEIF/HEIC image plugin: off on Windows (known gap, see "
+                 "docs/todo.md); pass -DSSTVAE_BUILD_HEIF=ON to build it anyway")
 else()
   find_package(Qt6 6.2 COMPONENTS Core Gui QUIET)
   if(Qt6Gui_FOUND)
