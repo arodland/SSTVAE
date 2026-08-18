@@ -6,6 +6,7 @@ was acquired (see engine.py).
 """
 
 import threading
+import time
 
 import numpy as np
 
@@ -17,9 +18,13 @@ class RingBuffer:
 
     def __init__(self, seconds: float, fs: int = FS):
         self.n = int(seconds * fs)
+        self.fs = fs
         self.buf = np.zeros(self.n, dtype=np.float64)
         self.write_pos = 0
         self.total_written = 0
+        # Wall-clock anchor for the sample counter, re-established on
+        # every write -- see `utc_at`.
+        self.last_wall = time.time()
         self.lock = threading.Lock()
 
     def write(self, chunk: np.ndarray) -> None:
@@ -28,12 +33,15 @@ class RingBuffer:
 
         There is exactly one writer, so where the data goes depends only
         on state this thread owns. The lock is therefore held just long
-        enough to publish two integers, not for the array copy.
+        enough to publish two integers and a float, not for the array
+        copy. The timestamp is read *before* the lock for the same
+        reason: nothing that could take time may happen inside it.
         """
         chunk = np.asarray(chunk, dtype=np.float64).reshape(-1)
         n = len(chunk)
         if n == 0:
             return
+        now = time.time()
         pos = self.write_pos
         if n >= self.n:
             self.buf[:] = chunk[-self.n :]
@@ -51,6 +59,38 @@ class RingBuffer:
         with self.lock:
             self.write_pos = new_pos
             self.total_written += n
+            self.last_wall = now
+
+    def utc_at(self, sample_pos: int) -> float:
+        """Wall-clock time (unix epoch, UTC) at absolute sample position
+        `sample_pos`, measured *back* from the most recent write.
+
+        **Not `epoch + sample_pos / FS`.** That form assumes the capture
+        device runs at exactly `FS`, and it does not: a routine 100 ppm
+        soundcard error is ~1.1 s of accumulated error after three hours
+        and ~3.6 s after ten, and a skimmer runs for days. Anchoring at
+        construction therefore makes the error a function of *uptime*,
+        which is unbounded.
+
+        Measuring back from the newest sample instead bounds it by the
+        lookback distance, which the ring itself bounds at its own depth
+        -- ~13 ms at 100 ppm over the default 130 s. That is what lets a
+        reception's start time be quoted to the ~1 s that the aggregation
+        server's transmission matching depends on (see
+        docs/reception-aggregation.md).
+
+        Two offsets are knowingly left in, both far inside that budget:
+        the audio callback timestamps when the buffer was *delivered*,
+        so it lags true capture by the device latency plus one buffer
+        (tens of ms, and constant), and PortAudio's
+        `time_info.input_buffer_adc_time` is deliberately not used to
+        correct it, because that clock is in PortAudio's own timebase
+        rather than wall clock.
+        """
+        with self.lock:
+            total = self.total_written
+            wall = self.last_wall
+        return wall - (total - sample_pos) / self.fs
 
     def snapshot(self) -> tuple[np.ndarray, int]:
         """Chronological copy of everything currently held (oldest

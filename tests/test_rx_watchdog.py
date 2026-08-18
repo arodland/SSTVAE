@@ -346,3 +346,37 @@ def test_the_diversity_path_has_a_deadline_too(stub_modem):
         "duration there is provably no more of it left to arrive"
     )
     assert sink.receptions[0].frames_received == 3
+
+
+def test_a_delivered_reception_carries_its_latents_and_start_time(stub_modem):
+    """The sink gets the demodulator output itself, not only the picture.
+
+    Decoding is lossy and throws the per-latent confidence away, so a
+    station that wants its reception *combined* with another station's
+    needs `result`. `utc_start` is what lets the two be recognized as
+    the same transmission at all -- see docs/reception-aggregation.md.
+    """
+    modem = stub_modem(_StubModem(good_polls=2, frames_received=MODE_A.n_frames // 2))
+    sink = _CollectingSink()
+    config = RxConfig(poll_interval=0.05, end_grace=0.5)
+
+    before = time.time()
+    _run(config, sink, timeout_s=20.0)
+    after = time.time()
+
+    assert len(sink.receptions) == 1
+    rec = sink.receptions[0]
+    assert isinstance(rec.result, DemodResult), (
+        "the sink was handed a picture with no demodulator output behind it, "
+        "so the latents and their confidence weights are unrecoverable"
+    )
+    assert rec.result.frames_received == MODE_A.n_frames // 2
+    assert len(rec.result.latents) == MODE_A.n_latents, (
+        "the *unpadded* result is wanted: its arrays are the mode's own size"
+    )
+    # The audio was written just before the loop started, so the
+    # reception's start dates to around then -- and inside the window
+    # this test itself ran in, which a construction-time epoch on a
+    # long-lived ring would not guarantee.
+    assert rec.utc_start is not None
+    assert before - 30.0 <= rec.utc_start <= after

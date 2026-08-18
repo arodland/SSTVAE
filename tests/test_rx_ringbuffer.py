@@ -1,6 +1,7 @@
 """RingBuffer, in particular the accessors the display added."""
 
 import numpy as np
+import pytest
 
 from sstvae.rx import RingBuffer
 
@@ -166,3 +167,50 @@ def test_concurrent_snapshots_still_return_consistent_audio():
     snap, total = ring.snapshot()
     assert total == 500 * 200
     assert len(snap) == ring.n
+
+
+def test_utc_at_dates_a_sample_from_the_most_recent_write():
+    r = RingBuffer(1.0, fs=100)
+    r.write(np.arange(50, dtype=float))
+    now = r.last_wall
+    # 20 samples back from the newest is 0.2 s ago at fs=100.
+    assert r.utc_at(30) == pytest.approx(now - 0.2, abs=1e-9)
+    assert r.utc_at(50) == pytest.approx(now, abs=1e-9)
+
+
+def test_utc_at_does_not_accumulate_soundcard_drift(monkeypatch):
+    """The reason `utc_at` measures back from the newest sample instead
+    of forward from a construction-time epoch.
+
+    A capture device does not run at exactly `fs`. Here the wall clock
+    advances 1% faster than the sample count implies -- a gross stand-in
+    for a real soundcard's ~100 ppm -- and the buffer is fed for the
+    equivalent of a long session. Dating a *recent* sample must stay
+    accurate regardless, because the error can only accumulate over the
+    lookback distance, which the ring's own depth bounds.
+
+    `epoch + pos/fs` fails this: its error grows without limit as the
+    session goes on, which is what would put a station's reported start
+    time outside the aggregation server's matching window after a few
+    hours of uptime.
+    """
+    fs = 100
+    clock = {"t": 1_000_000.0}
+    monkeypatch.setattr("sstvae.rx.ringbuffer.time.time", lambda: clock["t"])
+
+    r = RingBuffer(1.0, fs=fs)
+    epoch = r.last_wall
+    chunk = np.zeros(fs, dtype=float)  # one second's worth of samples
+    n_chunks = 3600  # an hour of audio
+    for _ in range(n_chunks):
+        clock["t"] += 1.01  # the device is 1% slow against the wall clock
+        r.write(chunk)
+
+    newest = r.total_written
+    # A sample half the ring back is 0.5 s before the last write.
+    assert r.utc_at(newest - fs // 2) == pytest.approx(clock["t"] - 0.5, abs=1e-6)
+
+    # The construction-time form would be off by the whole accumulated
+    # drift -- 36 seconds here -- which is what this design avoids.
+    naive = epoch + (newest - fs // 2) / fs
+    assert abs(naive - r.utc_at(newest - fs // 2)) > 30.0

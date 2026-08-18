@@ -187,6 +187,10 @@ class _Pending:
     metric: int = 0  # best progress metric seen; see _blind_progress
     stable_since: float | None = None  # when the metric last stopped advancing
     image: object = None
+    # The DemodResult / BlindDemodResult that produced `image`, kept so
+    # a sink can have the latents and weights themselves rather than
+    # only the picture they were decoded into (see Reception.result).
+    result: object = None
     mode_name: str | None = None
     frames_received: int | None = None
     n_frames_expected: int | None = None
@@ -204,6 +208,16 @@ class Reception:
     snr_db: float
     frames_received: int | None
     n_frames_expected: int | None
+    # The demodulator output behind `image`: a DemodResult on the header
+    # path, a BlindDemodResult on the blind one. Carried because the
+    # latents and weights are worth more than the picture to anything
+    # that wants to *combine* this reception with another station's --
+    # decoding is lossy and combining after it throws the per-latent
+    # confidence away. Optional so existing sinks are unaffected.
+    result: object | None = None
+    # Unix epoch (UTC) of this reception's preamble start, from
+    # RingBuffer.utc_at. None when the loop had no ring to ask.
+    utc_start: float | None = None
 
 
 @dataclass
@@ -481,6 +495,7 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
 
         t0 = time.time()
         latents_full = weights_full = None
+        result_obj = None
         mode_name = n_frames_expected = frames_received = None
         callsign = ""
         snr_db = float("nan")
@@ -501,6 +516,9 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
         if full_ok:
             latents_full = pad_to_full(r.latents)
             weights_full = pad_to_full(r.weights)
+            # The *unpadded* result: its arrays are the mode's own size,
+            # which is what a consumer wants to serialize.
+            result_obj = r
             mode_name = r.mode.name
             n_frames_expected = r.mode.n_frames
             frames_received = r.frames_received
@@ -564,6 +582,7 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
                 else:
                     latents_full = rb.latents
                     weights_full = rb.weights
+                    result_obj = rb
                     callsign = rb.callsign
                     snr_db = rb.snr_db
                     progress_metric, progress_frac = _blind_progress(weights_full)
@@ -612,6 +631,7 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
                 pending.metric = progress_metric
                 advanced = True
             pending.image = reconstruct(model, latents_full, weights_full)
+            pending.result = result_obj
             pending.mode_name = mode_name
             pending.frames_received = frames_received
             pending.n_frames_expected = n_frames_expected
@@ -694,6 +714,8 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
                     snr_db=pending.snr_db,
                     frames_received=pending.frames_received,
                     n_frames_expected=pending.n_frames_expected,
+                    result=pending.result,
+                    utc_start=ring.utc_at(pending.start),
                 )
             )
             # Bookkeeping, not disk: this reception has been *handled*,
@@ -839,6 +861,8 @@ def decode_loop_low_cpu(ring: RingBuffer, model, state: SharedState, config: RxC
                 snr_db=r.snr_db,
                 frames_received=r.frames_received,
                 n_frames_expected=r.mode.n_frames,
+                result=r,
+                utc_start=ring.utc_at(reception_start),
             )
         )
         with state.lock:
@@ -1044,6 +1068,7 @@ def decode_loop_diversity(rings, model, state: SharedState, config: RxConfig,
                 pending.metric = progress_metric
                 advanced = True
             pending.image = reconstruct(model, latents_full, weights_full)
+            pending.result = combined
             pending.mode_name = mode_name
             pending.frames_received = frames_received
             pending.n_frames_expected = n_frames_expected
@@ -1109,6 +1134,13 @@ def decode_loop_diversity(rings, model, state: SharedState, config: RxConfig,
                     snr_db=pending.snr_db,
                     frames_received=pending.frames_received,
                     n_frames_expected=pending.n_frames_expected,
+                    result=pending.result,
+                    # Both rings are filled by streams the caller opened
+                    # together -- the same assumption that lets branch
+                    # positions be compared at all (see
+                    # SAME_RECEPTION_EPSILON_S) -- so either one dates
+                    # the reception.
+                    utc_start=rings[0].utc_at(pending.start),
                 )
             )
             if debug_sink is not None and len(pending_branches) == 2:
