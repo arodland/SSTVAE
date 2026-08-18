@@ -143,6 +143,57 @@ block — every frame gets slightly softer — rather than some frames
 dying. The per-latent Wiener-style confidence weights carry over
 unchanged and are what makes this graceful.
 
+Note the latency accounting here, because it is easy to misattribute:
+**the block interleaver adds no latency on top of the GOP codec.** The
+receiver cannot decode until the whole GOP has arrived regardless — the
+3D decoder consumes the block — so interleave depth and codec block
+length are matched, and deepening one to the length of the other is
+free. The latency owner is the *block structure itself*: a frame waits
+up to one GOP for its block to close at the encoder, then the block
+takes one GOP-duration of air time. That is what the low-latency
+profile below changes.
+
+### Low-latency profile
+
+The GOP modes' glass-to-glass latency (~1.2–2.3 s, §7) is fine for
+one-way viewing and marginal for conversation. A genuinely low-latency
+variant changes the codec from blockwise to **causal**: temporal
+context is a bounded window of *past* frames only (causal convolutions
+over the last few frames — the bounded form of the recurrent
+experiment above, with the same discipline: the decoder's history is
+its own channel-corrupted output, and training runs through that), and
+each video frame's latents are emitted, transmitted, and decodable as
+soon as that frame's air time ends.
+
+Once the codec is causal, interleave depth detaches from the codec and
+becomes a pure latency↔smearing knob, from one video frame (72–144 ms;
+carriers-only interleaving is free at any depth) up through a
+convolutional interleaver over a few hundred ms — the classic broadcast
+structure, half the end-to-end delay of a block interleaver at equal
+depth, and it decodes continuously rather than in blocks.
+
+What replaces deep interleaving is **concealment, which video has and
+stills do not**: a fade that would have been smeared into a whole GOP
+instead hits a contiguous run of frames whose confidence weights
+collapse, and a causal decoder trained on burst erasures learns to
+coast — hold and softly re-converge — through them. Stage-1/2 training
+for this profile therefore uses *contiguous* burst erasures matching
+un-interleaved fade statistics, not the scattered erasures the
+interleaved modes train on. Whether viewers prefer localized 0.3 s
+glitches (this profile) to uniform once-a-second quality breathing (the
+GOP modes) is a genuinely open subjective question (§12); the guess
+recorded here is that for conversation they do.
+
+Latency estimate for the profile (causal codec, one-frame interleave,
+13.9 fps): 72 ms frame capture + 72 ms air time + codec ~20 ms + audio
+buffering ~100–200 ms ≈ **0.3–0.5 s glass-to-glass** — against ~1.7 s
+mean for the GOP modes. The cost is compression efficiency (one-sided,
+bounded context; expect worse than the symmetric GOP codec by an amount
+stage 1 must measure) and the localized fade artifacts above. On-air,
+nothing changes but the interleaver tables and the mode ID: pilot
+cadence, acquisition, beacon, and the latent rate are identical, so
+this is a codec/profile choice, not a second waveform.
+
 ### Ordered latents / graceful truncation
 
 Order latent channels by importance within the GOP (coarse-to-fine,
@@ -259,6 +310,7 @@ only.
 | **V2 "Motion"** | W | 96×72 color | 13.9 fps | 220 | 31:1 | Conversation/"presence"; smoothness over detail |
 | **V3 "Detail"** | W | 160×120 color | 6.94 fps | 440 | 44:1 | Good conditions, quiet bands |
 | **V4 "Still+"** | W | 320×240 color | 0.87 fps | 3,520 | 22:1 | Slideshow / SSTV-replacement niche; one GOP per frame |
+| **V5 "Convo"** | W | 96×72 color | 13.9 fps | 220 | 31:1 | Two-way conversation: causal codec + shallow interleave (§4 low-latency profile), ~0.3–0.5 s glass-to-glass |
 
 Mode ID travels in the beacon (and header), so a receiver needs no
 prior arrangement. V0–V3 share one waveform per band variant; a mode is
@@ -282,10 +334,14 @@ compression working well under channel noise.
 
 ## 7. Latency, duplex, and the shape of a "chat"
 
-One-way latency ≈ GOP (1.15 s) + interleave/decode (~0.2 s) + audio
-buffering ≈ **1.5 s**. Fine for what this is: HF video chat is
-alternating overs or two stations watching each other's continuous
-streams, not a zoom call. Half duplex is assumed (same rule as SSTVAE:
+For the GOP modes, glass-to-glass latency is **~1.2–2.3 s** depending
+on where a frame falls in its block (mean ~1.7 s): a frame waits up to
+one GOP (1.15 s) for its block to close at the encoder, the block takes
+one GOP of air time, and decode/audio buffering add ~0.2 s. Fine for
+what those modes are: HF video chat is alternating overs or two
+stations watching each other's continuous streams, not a zoom call.
+Where latency matters, V5's causal profile (§4) targets **0.3–0.5 s**
+by trading compression efficiency and fade-smearing for it. Half duplex is assumed (same rule as SSTVAE:
 transmitting suspends receive, fresh ring buffer on resume). True
 full-duplex "videophone" = split frequencies or cross-band, out of
 scope for the waveform.
@@ -345,7 +401,9 @@ future latent-domain metric is an objective value, not a result
    5/10 dB latent SNR). Look at the output. This is a few GPU-days and
    answers the only real go/no-go: is 16–44:1 spatiotemporal
    compression through an analog channel watchable? Include the
-   frame-independent ablation to price the temporal machinery.
+   frame-independent ablation to price the temporal machinery, and a
+   causal-context variant to price the low-latency profile's one-sided
+   window against the symmetric GOP codec.
 2. **45-carrier waveform variant in simulation.** Parameterize carrier
    count/base frequency in a fork of `config.py`, re-run the pilot
    crest minimizer, sweep latent SNR vs. the 24-carrier waveform over
@@ -390,6 +448,13 @@ has already catalogued.
 - Is decoder-side temporal conditioning across GOPs (trained on noisy
   state) worth its risk? Potentially large quality win for static
   scenes; the failure mode is exactly NBTV's stripes in modern dress.
+  V5's bounded causal context is the contained version of this bet, and
+  V5 stands or falls with it.
+- Interleaving versus concealment, subjectively: do viewers prefer the
+  GOP modes' uniform quality breathing under fades or the causal
+  profile's localized glitches? Decides whether a mid-depth
+  convolutional interleaver (~0.5 s, ~1 s glass-to-glass) earns a slot
+  between them.
 - Nested-bandwidth (W stream decodable by N receiver): worth the
   interleaver constraint?
 - Does mpd need a denser-pilot variant (1-in-4, −10% capacity), or does
