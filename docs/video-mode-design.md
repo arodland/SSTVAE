@@ -235,6 +235,60 @@ nothing changes but the interleaver tables and the mode ID: pilot
 cadence, acquisition, beacon, and the latent rate are identical, so
 this is a codec/profile choice, not a second waveform.
 
+### Bounded lookahead — the B-frame analogue (Andrew's suggestion)
+
+Strict causality and the full GOP are not a binary. Conventional codecs
+sit between them with bounded frame reordering (present [1,2,3],
+transmit/decode [1,3,2], frame 2 referencing both neighbours), and the
+right way to see it here is that **the full-GOP codec already is
+bidirectional reference at maximum depth** — a 3D conv over the block
+is symmetric in time — while the causal profile is depth 0. Bounded
+lookahead (depth 1–2) is the knob between the two profiles, not a third
+mechanism.
+
+Two things change in the analog-latent setting:
+
+- **The transmission reorder evaporates.** Digital codecs physically
+  reorder the bitstream because frames are variable-size atomic units
+  and a reference must decode first. This latent stream is
+  constant-rate with fixed slots, so "frame n references n+1" just
+  means n's latents are *computed* after n+1 is captured (shifting n's
+  air slot by the depth) and *interpreted* once n+1's slot has
+  arrived. The stream stays in natural order; only the schedule
+  shifts, uniformly, by about the lookahead depth on each end. At
+  12 fps a depth-1 alternating anchor/B structure adds ~2 frame
+  periods ≈ 170 ms: **~0.5 s glass-to-glass**, still 3× better than
+  the GOP modes. The latency ladder is then: causal 0.3–0.4 s →
+  depth-1 hierarchy ~0.5 s → convolutional interleave ~1 s → full GOP
+  1.2–2.2 s.
+- **The VBR half of the B-frame win does not transfer; its analog
+  substitute is static unequal allocation.** A digital B-frame can
+  cost near-zero bits; a latent frame occupies its slot regardless.
+  What the fixed-rate channel does support is a static *non-uniform*
+  latent layout — big slots for anchor frames, small ones for
+  bracketed frames (e.g. 350/120 instead of uniform 235 at 12 fps) —
+  chosen at design time as part of the frozen layout, not adapted
+  per-content.
+
+The robustness story arguably *improves* rather than degrades, which is
+the opposite of the digital case (where a corrupted reference is
+catastrophic): nothing here is lost, only noisy; the hierarchy
+concentrates importance in the anchors exactly the way the
+confidence-weight machinery likes; a fade on a bracketed frame's slot
+costs almost nothing visible (the frame is mostly re-synthesizable from
+its anchors), and a fade on an anchor softens its whole bracket rather
+than killing any frame. Shallow interleaving over one anchor period
+(2–4 frames) aligns naturally.
+
+Whether the autoencoder cashes the cheque is the open question:
+bidirectional learned codecs beat low-delay causal ones by roughly
+15–30% in rate at equal quality in the bit-rate world, and talking
+heads are interpolation's best case — but some of that gain may already
+be captured by a modest causal context, and here it must survive
+channel noise on the anchors it leans on. Nobody has measured this
+regime, so V5's spec (strictly causal vs. depth-1 hierarchy) is
+deliberately left open until the §10 lookahead sweep exists.
+
 ### Ordered latents / graceful truncation
 
 Order latent channels by importance within the GOP (coarse-to-fine,
@@ -356,7 +410,7 @@ only.
 | **V2 "Motion"** | W | 96×72 color | 12 fps | 235 | 29:1 | Conversation/"presence"; smoothness over detail |
 | **V3 "Detail"** | W | 160×120 color | 6 fps | 469 | 41:1 | Good conditions, quiet bands |
 | **V4 "Still+"** | W | 320×240 color | 1 fps | 2,816 | 27:1 | Slideshow / SSTV-replacement niche; one GOP per frame — NBTV BW48's exact cadence at 33× the pixels, in color |
-| **V5 "Convo"** | W | 96×72 color | 12 fps | 235 | 29:1 | Two-way conversation: causal codec + shallow interleave (§4 low-latency profile), ~0.3–0.4 s glass-to-glass |
+| **V5 "Convo"** | W | 96×72 color | 12 fps | 235 | 29:1 | Two-way conversation: causal or depth-1 lookahead codec + shallow interleave (§4 low-latency profile), ~0.3–0.5 s glass-to-glass |
 
 Mode ID travels in the beacon (and header), so a receiver needs no
 prior arrangement. V0–V3 share one waveform per band variant; a mode is
@@ -448,8 +502,12 @@ future latent-domain metric is an objective value, not a result
    answers the only real go/no-go: is 15–41:1 spatiotemporal
    compression through an analog channel watchable? Include the
    frame-independent ablation to price the temporal machinery, and a
-   causal-context variant to price the low-latency profile's one-sided
-   window against the symmetric GOP codec.
+   **lookahead-depth sweep** — {0 (causal), 1, 2, full-GOP} at equal
+   latent rate, plus a static unequal per-frame allocation variant at
+   depth 1 — which is nearly free (same architecture, different
+   temporal masking) and whose curve decides V5's spec instead of
+   guessing it: if depth 1 recovers most of the causal-vs-GOP gap for
+   ~170 ms, V5 is a depth-1 hierarchy, not strictly causal.
 2. **45-carrier waveform variant in simulation.** Parameterize carrier
    count/base frequency and the video numerology (CP 40, 5-symbol
    frames) in a fork of `config.py`, re-run the pilot crest minimizer,
@@ -498,6 +556,10 @@ has already catalogued.
   scenes; the failure mode is exactly NBTV's stripes in modern dress.
   V5's bounded causal context is the contained version of this bet, and
   V5 stands or falls with it.
+- Where on the lookahead curve does V5 sit — strictly causal, or a
+  depth-1 anchor/B hierarchy (§4), and does static unequal per-frame
+  latent allocation earn its layout complexity? The §10 sweep decides
+  this by measurement.
 - Interleaving versus concealment, subjectively: do viewers prefer the
   GOP modes' uniform quality breathing under fades or the causal
   profile's localized glitches? Decides whether a mid-depth
