@@ -1,0 +1,103 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>SSTVAE reception aggregator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --ink: #14171a; --dim: #5b6470;
+    --line: #dfe3e8; --accent: #1f6feb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171a; --card: #1d2126; --ink: #e8eaed; --dim: #9aa4b0;
+      --line: #2d333b; --accent: #589bff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 1.5rem; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap;
+           margin-bottom: 1.25rem; }
+  h1 { font-size: 1.25rem; margin: 0; }
+  .sub { color: var(--dim); font-size: .875rem; }
+  #grid { display: grid; gap: 1rem;
+          grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line);
+          border-radius: 10px; overflow: hidden; }
+  .card img { display: block; width: 100%; aspect-ratio: 4/3;
+              object-fit: cover; background: var(--bg); }
+  .none { display: grid; place-items: center; aspect-ratio: 4/3;
+          color: var(--dim); font-size: .875rem; background: var(--bg); }
+  .body { padding: .75rem .9rem .9rem; }
+  .call { font-weight: 650; font-size: 1.05rem; }
+  .meta { color: var(--dim); font-size: .8125rem; margin-top: .15rem; }
+  table { width: 100%; border-collapse: collapse; margin-top: .6rem;
+          font-size: .8125rem; }
+  th { text-align: left; font-weight: 600; color: var(--dim);
+       border-bottom: 1px solid var(--line); padding: .25rem .35rem; }
+  td { padding: .25rem .35rem; border-bottom: 1px solid var(--line); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .blind { color: var(--dim); }
+  .empty { color: var(--dim); padding: 2rem 0; }
+</style>
+
+<header>
+  <h1>SSTVAE reception aggregator</h1>
+  <span class="sub" id="status">loading…</span>
+</header>
+<div id="grid"></div>
+<p class="empty" id="empty" hidden>Nothing received yet.</p>
+
+<script>
+const fmt = (n, d = 1) => (n === null || n === undefined) ? "—" : Number(n).toFixed(d);
+const when = t => new Date(t * 1000).toISOString().replace("T", " ").slice(0, 19) + "Z";
+
+function card(tx) {
+  const el = document.createElement("article");
+  el.className = "card";
+  const pic = tx.picture_url
+    ? `<img src="${tx.picture_url}" alt="Picture from ${tx.callsign}">`
+    : `<div class="none">no picture yet</div>`;
+  const mode = tx.mode ? `mode ${tx.mode}` : `<span class="blind">mode unknown (blind)</span>`;
+  const freq = tx.dial_freq_hz ? ` · ${(tx.dial_freq_hz / 1e6).toFixed(3)} MHz` : "";
+  const rows = tx.stations.map(s => `
+    <tr>
+      <td>${s.callsign}</td>
+      <td class="num">${fmt(s.snr_db)} dB</td>
+      <td class="num">${s.contrib_frac === null ? "—" : (s.contrib_frac * 100).toFixed(0) + "%"}</td>
+      <td class="blind">${s.path === "blind" ? "blind" : ""}</td>
+    </tr>`).join("");
+  el.innerHTML = `
+    ${pic}
+    <div class="body">
+      <div class="call">${tx.callsign}</div>
+      <div class="meta">${when(tx.utc_start)} · ${mode}${freq}</div>
+      <div class="meta">${tx.n_receptions} station${tx.n_receptions === 1 ? "" : "s"}
+        · combined ${fmt(tx.combined_snr_db)} dB</div>
+      <table>
+        <thead><tr><th>station</th><th class="num">SNR</th><th class="num">share</th><th></th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+  return el;
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/v1/transmissions?limit=60");
+    const { transmissions } = await r.json();
+    const grid = document.getElementById("grid");
+    grid.replaceChildren(...transmissions.map(card));
+    document.getElementById("empty").hidden = transmissions.length > 0;
+    document.getElementById("status").textContent =
+      `${transmissions.length} transmission${transmissions.length === 1 ? "" : "s"}` +
+      ` · updated ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    document.getElementById("status").textContent = "server unreachable";
+  }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
