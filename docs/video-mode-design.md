@@ -45,41 +45,82 @@ pilots there is no equalization, so multipath paints stripes.
 
 Apply the RADE/SSTVAE recipe to video: a learned **spatiotemporal
 autoencoder** turns short blocks of video frames into unit-RMS analog
-latents at a fixed rate; the latents ride as analog I/Q values on the
-**existing SSTVAE OFDM waveform** (pilot-anchored coherent demod,
-per-GOP interleaving, per-latent confidence weights, beacon
+latents at a fixed rate; the latents ride as analog I/Q values on a
+**close variant of the SSTVAE OFDM waveform** (pilot-anchored coherent
+demod, per-GOP interleaving, per-latent confidence weights, beacon
 side-channel); training runs **through a differentiable replica of the
 channel** (SSTVAE's stage-1/stage-2 split, with the fading correlated in
 time across the block). The modem, sync, and training machinery already
 exist and are measured; the new work is the video codec and the
 streaming receive loop. Compression is what moves the needle: at a
-conservative ~16–30:1 pixels-per-latent (against NBTV's 1:1), the same
+conservative ~15–30:1 pixels-per-latent (against NBTV's 1:1), the same
 2 kHz that carried 48×48 at 1 fps carries ~96×72 to 160×120, in color,
-at ~7–14 fps — and tuning tolerance is set by acquisition DSP (±625 Hz
+at 6–12 fps — and tuning tolerance is set by acquisition DSP (±625 Hz
 pull-in in SSTVAE today), not by the operator's dial.
 
-## 3. Channel budget arithmetic
+## 3. Waveform numerology and channel budget
 
-All of this reuses SSTVAE's waveform constants (FS 8000 Hz, 50 Hz
-carrier spacing, 160+32-sample symbols = 24 ms, frames of 1 pilot + 5
-data symbols = 144 ms, one carrier reserved for the beacon). Each data
-carrier then delivers 5 syms × 2 (I,Q) per 144 ms = **69.4 real analog
-values/s**; equivalently ~1.39 values/s/Hz after CP and pilot overhead.
+### Display-friendly timing
+
+SSTVAE's numerology (192-sample symbols, 1152-sample frames) puts the
+OFDM frame rate at 6.94 Hz — fine for stills, awkward for video: a
+6.94/13.9 fps video cadence meshes with no camera or display on earth,
+and exact 6.000 fps cannot be reconciled with 1152-sample frames on any
+GOP shorter than 18 s. So this waveform makes one deliberate timing
+change: **the cyclic prefix grows from 32 to 40 samples**, making the
+symbol 200 samples (25 ms, 40 sym/s), and frames are **5 symbols
+(1 pilot + 4 data) = 1000 samples = 125 ms, exactly 8 frames/s**.
+
+Everything sacred is untouched: FS 8000, RS 50 Hz, M 160, carriers on
+integer multiples of 50 Hz (the CP stays truly cyclic), so the pilot
+phase sets, matched filters, and acquisition machinery carry over as-is.
+What it buys:
+
+- **Video rates of 6, 12, 24, and 1 fps land exactly** on round GOPs
+  (below). 6 fps is every 10th frame of a 60 fps camera, every 4th of
+  24 fps; a 60/72/120/144 Hz display shows each video frame for an
+  integer number of refreshes. No pulldown judder, ever.
+- **5 ms CP** (was 4): more delay-spread margin over the Watterson 2 ms
+  presets, cheap insurance for long-delay NVIS paths.
+- **125 ms pilot spacing** (was 144): strictly better Doppler-fade
+  tracking.
+
+What it costs: ~8% of latent rate versus SSTVAE's numerology (CP
+overhead 160/200 vs 160/192; pilots 1-in-5 vs 1-in-6) — roughly a third
+of a dB of quality, partly repaid by the CP and pilot improvements. Two
+alternatives considered and rejected: keeping 6.94 fps and resampling at
+the display (permanent fractional-pulldown judder to save 8%), and
+8-symbol frames at this symbol length (recovers all the capacity and
+more, but 200 ms pilot spacing degrades exactly the fading tracking the
+short-frame comment in SSTVAE's `config.py` exists to protect).
+
+One clock subtlety, so it is written down: "exactly 6 fps" means exact
+*in the soundcard timebase*, like every other number on air. The camera
+runs on its own clock; the encoder consumes frames at the
+soundcard-derived cadence and absorbs the ppm-level skew (and any
+59.94-vs-60 nominal mismatch) by occasional frame repeat/drop — one
+frame every few minutes, invisible.
+
+### Capacity
+
+Each data carrier delivers 4 syms × 2 (I,Q) per 125 ms = **64 real
+analog values/s** (~1.28 values/s/Hz after CP and pilot overhead). One
+carrier is reserved for the beacon, as in SSTVAE (4 chips/frame here).
 
 Two bandwidth variants:
 
 | Variant | Carriers | Band | Occupied | Latent rate |
 |---|---|---|---|---|
-| **N** (narrow) | 24 (23 latent + beacon) | 950–2100 Hz | ~1.2 kHz | **1,597/s** |
-| **W** (wide) | 45 (44 latent + beacon) | 450–2650 Hz | ~2.25 kHz | **3,056/s** |
+| **N** (narrow) | 24 (23 latent + beacon) | 950–2100 Hz | ~1.2 kHz | **1,472/s** |
+| **W** (wide) | 45 (44 latent + beacon) | 450–2650 Hz | ~2.25 kHz | **2,816/s** |
 
-N is byte-compatible with SSTVAE's band plan and passes any filter that
-passes SSTVAE. W fills a standard 2.4 kHz SSB filter (300–2700 Hz) with
-margin at both edges; operators with 2.1 kHz filters use N. At equal
-transmit power W spreads it over ~2.7 dB more carriers, so N buys ~3 dB
-of per-latent SNR — N is the weak-signal/NVIS variant for two reasons at
-once. (SNRs below are in SSTVAE's 2500 Hz reference-bandwidth
-convention.)
+N shares SSTVAE's band plan (and its 24-carrier pilot set verbatim) and
+passes any filter that passes SSTVAE. W fills a standard 2.4 kHz SSB
+filter (300–2700 Hz) with margin at both edges; operators with 2.1 kHz
+filters use N. At equal transmit power W spreads it over ~2.7 dB more
+carriers, so N buys ~3 dB of per-latent SNR — N is the
+weak-signal/NVIS variant for two reasons at once. (SNRs here are in
+SSTVAE's 2500 Hz reference-bandwidth convention.)
 
 Context for feasibility: at 10 dB per-latent SNR an analog value carries
 ≈ ½·log₂(1+SNR) ≈ 1.7 bits equivalent, so W is ~5 kbps-equivalent at
@@ -88,8 +129,8 @@ acceptable talking-head video in the 3–10 kbps range, and NBTV itself
 proves 2,300 *uncompressed* px/s is already watchable. The budget is
 tight but not fanciful.
 
-For comparison, NBTV's raw rate is ~2,300 px/s in 2.1 kHz. At 16–44:1
-compression the W variant carries a ~20–60× higher effective pixel
+For comparison, NBTV's raw rate is ~2,300 px/s in 2.1 kHz. At 15–41:1
+compression the W variant carries a ~18–50× higher effective pixel
 rate — which the mode table below spends on resolution, frame rate,
 color, and SNR margin in different proportions.
 
@@ -97,18 +138,18 @@ color, and SNR margin in different proportions.
 
 ### GOP-based spatiotemporal autoencoder
 
-Encode video in independent **GOPs of 8 OFDM frames = 1.152 s** (8
-video frames at 6.94 fps, 16 at 13.9 fps — the video cadence inside a
-GOP is codec-internal; on-air, a GOP is just a fixed-size block of
-latents). The encoder is a 3D-conv (or 2D + temporal attention) network
-over the GOP producing a latent block with the same contract as SSTVAE:
-unit-RMS tanh latents, decoder consumes `latents × weights` plus weight
-planes, erasures/truncation handled by construction.
+Encode video in independent **GOPs of 8 OFDM frames = 1.000 s** — 6
+video frames at 6 fps, 12 at 12 fps (the video cadence inside a GOP is
+codec-internal; on-air, a GOP is just a fixed-size block of latents).
+The encoder is a 3D-conv (or 2D + temporal attention) network over the
+GOP producing a latent block with the same contract as SSTVAE: unit-RMS
+tanh latents, decoder consumes `latents × weights` plus weight planes,
+erasures/truncation handled by construction.
 
-Sizing sketch, W variant, 96×72 @ 6.94 fps: 3,520 latents/GOP ≈ a
-4×12×9 spatiotemporal grid (×8 spatial downsample, ×2 temporal) × 8
-channels. 160×120: ×8 spatial → 20×15, ×4 temporal → 2×20×15 × 6
-channels ≈ 3,600. Both are ordinary autoencoder shapes.
+Sizing sketch, W variant, 96×72 @ 6 fps: 2,816 latents/GOP ≈ a 3×12×9
+spatiotemporal grid (×8 spatial downsample, ×2 temporal) × ~9 channels.
+160×120: ×8 spatial → 20×15, ×3 temporal → 2×20×15 × ~5 channels. Both
+are ordinary autoencoder shapes.
 
 Why GOPs rather than the two alternatives:
 
@@ -130,12 +171,12 @@ Why GOPs rather than the two alternatives:
 
 Independent GOPs bound every failure: a deep fade costs one or two soft,
 blurry GOPs and the next one starts clean; a late joiner starts at the
-next GOP boundary, ~1 s away. This is SSTVAE's "erasures are a training
+next GOP boundary, ≤1 s away. This is SSTVAE's "erasures are a training
 condition, not an error" philosophy applied in time.
 
 ### Interleaving and fading
 
-Interleave each GOP's latents over its full 1.152 s and across all
+Interleave each GOP's latents over its full 1.0 s and across all
 carriers (same frozen-permutation construction as SSTVAE's per-group
 interleaver). Watterson fading coherence is ~400 ms, so a fade inside a
 GOP turns into a uniform confidence-weight reduction across the whole
@@ -155,7 +196,7 @@ profile below changes.
 
 ### Low-latency profile
 
-The GOP modes' glass-to-glass latency (~1.2–2.3 s, §7) is fine for
+The GOP modes' glass-to-glass latency (~1.2–2.2 s, §7) is fine for
 one-way viewing and marginal for conversation. A genuinely low-latency
 variant changes the codec from blockwise to **causal**: temporal
 context is a bounded window of *past* frames only (causal convolutions
@@ -166,7 +207,7 @@ each video frame's latents are emitted, transmitted, and decodable as
 soon as that frame's air time ends.
 
 Once the codec is causal, interleave depth detaches from the codec and
-becomes a pure latency↔smearing knob, from one video frame (72–144 ms;
+becomes a pure latency↔smearing knob, from one video frame (83–167 ms;
 carriers-only interleaving is free at any depth) up through a
 convolutional interleaver over a few hundred ms — the classic broadcast
 structure, half the end-to-end delay of a block interleaver at equal
@@ -185,8 +226,8 @@ GOP modes) is a genuinely open subjective question (§12); the guess
 recorded here is that for conversation they do.
 
 Latency estimate for the profile (causal codec, one-frame interleave,
-13.9 fps): 72 ms frame capture + 72 ms air time + codec ~20 ms + audio
-buffering ~100–200 ms ≈ **0.3–0.5 s glass-to-glass** — against ~1.7 s
+12 fps): 83 ms frame capture + 83 ms air time + codec ~20 ms + audio
+buffering ~100–200 ms ≈ **0.3–0.4 s glass-to-glass** — against ~1.7 s
 mean for the GOP modes. The cost is compression efficiency (one-sided,
 bounded context; expect worse than the symmetric GOP codec by an amount
 stage 1 must measure) and the localized fade artifacts above. On-air,
@@ -220,7 +261,7 @@ Compression this aggressive on face-heavy training data shades toward
 face-reenactment ("avatar") codecs that *animate* a reference face at
 <1 kbps. That is explicitly out of scope: the receiver should show what
 the camera saw, degraded, not what the prior thinks a face looks like.
-Concretely: keep compression in the 16–44:1 regime rather than 300:1,
+Concretely: keep compression in the 15–41:1 regime rather than 300:1,
 train and **evaluate on off-distribution content** (text cards, charts,
 hands, outdoor scenes — the int8-quantisation lesson from
 `docs/onnx.md`: scoring on photographs alone ships the failure), and
@@ -228,29 +269,34 @@ treat "test card readability" as a release gate, not a nice-to-have.
 
 ## 5. Waveform and sync for continuous streams
 
-### What carries over unchanged
+### What carries over, and the two timing deltas
 
-50 Hz carrier spacing on integer multiples (truly cyclic CP), 4 ms CP
-(~2 ms delay spread — covers Watterson mpp/mpd), 6-symbol frames with
-144 ms pilot spacing (follows ~1 Hz Doppler), envelope clipping at
-`CLIP_HEADROOM_DB`, minimized-crest pilot philosophy, Golay-coded
-header, beacon side-channel, blind acquisition. The modem stack is the
-part of this project that already exists.
+From SSTVAE unchanged: 50 Hz carrier spacing on integer multiples
+(truly cyclic CP), the M=160 symbol core and with it the pilot phase
+sets and matched filters, envelope clipping at `CLIP_HEADROOM_DB`,
+minimized-crest pilot philosophy, Golay-coded header, beacon
+side-channel, blind acquisition. Deliberately different (§3): CP 40
+samples rather than 32, and 5-symbol frames rather than 6 — the
+display-friendly numerology.
 
 Two required adaptations:
 
-- **A new pilot phase set for 45 carriers** (W variant). The 0.99 dB
-  crest-factor set is a per-carrier-count optimization; re-run the
-  numerical minimization for 45 carriers and freeze the result as exact
-  rational turns, same as `PILOT_PHASE_NUM`. The Zadoff-Chu prohibition
-  carries over verbatim: the pilot is still the acquisition template, so
-  ZC's delay–Doppler equivalence is still disqualifying.
+- **A new pilot phase set for 45 carriers** (W variant; the N variant
+  reuses SSTVAE's 24-carrier set as-is, since M and RS are unchanged).
+  The 0.99 dB crest-factor set is a per-carrier-count optimization;
+  re-run the numerical minimization for 45 carriers and freeze the
+  result as exact rational turns, same as `PILOT_PHASE_NUM`. The
+  Zadoff-Chu prohibition carries over verbatim: the pilot is still the
+  acquisition template, so ZC's delay–Doppler equivalence is still
+  disqualifying.
 - **Beacon payload gains a mode field.** A continuous stream has no
   "start" a late joiner can rely on, so the mode ID must repeat: add
   ~4 mode bits to the superframe payload (counter + callsign + CRC as
-  today). The absolute frame counter (mod 1024) gives GOP alignment
-  (GOP = counter mod 8) and interleaver phase; the ~10.5 s worst-case
-  superframe window bounds late-join time-to-first-picture.
+  today, now at 4 chips/frame). The absolute frame counter (mod 1024,
+  wrapping every 128 s at 8 frames/s) gives GOP alignment (GOP =
+  counter mod 8) and interleaver phase; the superframe length bounds
+  late-join time-to-first-picture and needs re-deriving for the 4-chip
+  cadence.
 
 ### Transmission structure
 
@@ -283,7 +329,7 @@ is just CFO to estimate and remove:
   serves both fast wander and slow-fade channels
   (SSTVAE `docs/todo.md`), so the slow/fast setting remains exposed.
 - Sample-clock offset: EMA drift tracking as today, and the GOP
-  structure resets accumulated timing error every 1.152 s anyway.
+  structure resets accumulated timing error every second anyway.
 
 Net: synthesized rigs need no care at all, and even a drifting VFO is
 plausibly usable with `drift_track fast` — the exact rig NBTV
@@ -305,12 +351,12 @@ only.
 
 | Mode | Band | Resolution | Rate | Latents/frame | px:latent | Intended use |
 |---|---|---|---|---|---|---|
-| **V0 "NVIS"** | N (1.2 kHz) | 64×48 color | 6.94 fps | 230 | 13:1 | 80 m at night, weak signal; ~3 dB per-latent advantage over W modes |
-| **V1 "Classic"** | W (2.25 kHz) | 96×72 color | 6.94 fps | 440 | 16:1 | The NBTV tribute: its best resolution, in color, at ~60× its RGB frame rate |
-| **V2 "Motion"** | W | 96×72 color | 13.9 fps | 220 | 31:1 | Conversation/"presence"; smoothness over detail |
-| **V3 "Detail"** | W | 160×120 color | 6.94 fps | 440 | 44:1 | Good conditions, quiet bands |
-| **V4 "Still+"** | W | 320×240 color | 0.87 fps | 3,520 | 22:1 | Slideshow / SSTV-replacement niche; one GOP per frame |
-| **V5 "Convo"** | W | 96×72 color | 13.9 fps | 220 | 31:1 | Two-way conversation: causal codec + shallow interleave (§4 low-latency profile), ~0.3–0.5 s glass-to-glass |
+| **V0 "NVIS"** | N (1.2 kHz) | 64×48 color | 6 fps | 245 | 13:1 | 80 m at night, weak signal; ~3 dB per-latent advantage over W modes |
+| **V1 "Classic"** | W (2.25 kHz) | 96×72 color | 6 fps | 469 | 15:1 | The NBTV tribute: its best resolution, in color, at ~54× its RGB frame rate |
+| **V2 "Motion"** | W | 96×72 color | 12 fps | 235 | 29:1 | Conversation/"presence"; smoothness over detail |
+| **V3 "Detail"** | W | 160×120 color | 6 fps | 469 | 41:1 | Good conditions, quiet bands |
+| **V4 "Still+"** | W | 320×240 color | 1 fps | 2,816 | 27:1 | Slideshow / SSTV-replacement niche; one GOP per frame — NBTV BW48's exact cadence at 33× the pixels, in color |
+| **V5 "Convo"** | W | 96×72 color | 12 fps | 235 | 29:1 | Two-way conversation: causal codec + shallow interleave (§4 low-latency profile), ~0.3–0.4 s glass-to-glass |
 
 Mode ID travels in the beacon (and header), so a receiver needs no
 prior arrangement. V0–V3 share one waveform per band variant; a mode is
@@ -327,24 +373,24 @@ not lock; a >1 s deep fade costs the affected GOPs and nothing after.
 V2's smaller per-frame budget makes it the most fade-tolerant W mode
 (more temporal redundancy per pixel), V3 the least.
 
-An honest uncertainty, flagged as such: the 44:1 cell (V3) is the one
-the stage-1 rehearsal (§10) may kill. V0/V1's 13–16:1 is comfortable
-even for near-frame-independent coding; 44:1 leans on temporal
+An honest uncertainty, flagged as such: the 41:1 cell (V3) is the one
+the stage-1 rehearsal (§10) may kill. V0/V1's 13–15:1 is comfortable
+even for near-frame-independent coding; 41:1 leans on temporal
 compression working well under channel noise.
 
 ## 7. Latency, duplex, and the shape of a "chat"
 
-For the GOP modes, glass-to-glass latency is **~1.2–2.3 s** depending
+For the GOP modes, glass-to-glass latency is **~1.2–2.2 s** depending
 on where a frame falls in its block (mean ~1.7 s): a frame waits up to
-one GOP (1.15 s) for its block to close at the encoder, the block takes
+one GOP (1.0 s) for its block to close at the encoder, the block takes
 one GOP of air time, and decode/audio buffering add ~0.2 s. Fine for
 what those modes are: HF video chat is alternating overs or two
 stations watching each other's continuous streams, not a zoom call.
-Where latency matters, V5's causal profile (§4) targets **0.3–0.5 s**
-by trading compression efficiency and fade-smearing for it. Half duplex is assumed (same rule as SSTVAE:
-transmitting suspends receive, fresh ring buffer on resume). True
-full-duplex "videophone" = split frequencies or cross-band, out of
-scope for the waveform.
+Where latency matters, V5's causal profile (§4) targets **0.3–0.4 s**
+by trading compression efficiency and fade-smearing for it. Half duplex
+is assumed (same rule as SSTVAE: transmitting suspends receive, fresh
+ring buffer on resume). True full-duplex "videophone" = split
+frequencies or cross-band, out of scope for the waveform.
 
 Voice: a natural future extension is partitioning carriers between
 video latents and a RADE-style speech-latent stream (speech is a few
@@ -357,7 +403,7 @@ freezing the interleaver layout.
 
 SSTVAE's measured figures: encoder 31 ms, decoder 50 ms per 640×480
 frame on desktop CPU via onnxruntime. V1 frames have 1/44th the pixels
-of 640×480; even with 3D-conv overhead and 7–14 fps cadence, codec cost
+of 640×480; even with 3D-conv overhead and 6–12 fps cadence, codec cost
 is a few percent of a core. The DSP side is a continuous version of
 SSTVAE's poll loop, which demodulates faster than real time by a wide
 margin on desktop and within duty-cycle budget on phones
@@ -374,10 +420,10 @@ Direct reuse of SSTVAE's two-stage structure:
   i.i.d.). This is where codec architecture search happens, torch-only,
   no DSP.
 - **Stage 2**: the `waveform_channel.py` replica generalized to the
-  carrier count, with symbol-domain Watterson fading **correlated across
-  the GOP** (the existing implementation is already time-correlated
-  within a transmission — verify the coherence structure matches at GOP
-  scale) and the envelope clipper in the loop.
+  carrier count and the video numerology, with symbol-domain Watterson
+  fading **correlated across the GOP** (the existing implementation is
+  already time-correlated within a transmission — verify the coherence
+  structure matches at GOP scale) and the envelope clipper in the loop.
 - **Data**: talking-head/webcam corpora for the primary distribution
   (VoxCeleb2-class), diluted with generic video and synthetic
   off-distribution probes (text, charts, high-motion) for the §4 gate.
@@ -397,17 +443,18 @@ future latent-domain metric is an objective value, not a result
 
 1. **Latent-budget rehearsal (no DSP at all).** Train a small GOP
    autoencoder on webcam video with an AWGN latent channel at exactly
-   the table's budgets (230/440 latents per frame at each resolution,
+   the table's budgets (235/469 latents per frame at each resolution,
    5/10 dB latent SNR). Look at the output. This is a few GPU-days and
-   answers the only real go/no-go: is 16–44:1 spatiotemporal
+   answers the only real go/no-go: is 15–41:1 spatiotemporal
    compression through an analog channel watchable? Include the
    frame-independent ablation to price the temporal machinery, and a
    causal-context variant to price the low-latency profile's one-sided
    window against the symmetric GOP codec.
 2. **45-carrier waveform variant in simulation.** Parameterize carrier
-   count/base frequency in a fork of `config.py`, re-run the pilot
-   crest minimizer, sweep latent SNR vs. the 24-carrier waveform over
-   AWGN/mpg/mpp/mpd. Confirms the ~1.39 values/s/Hz budget and the ~3 dB
+   count/base frequency and the video numerology (CP 40, 5-symbol
+   frames) in a fork of `config.py`, re-run the pilot crest minimizer,
+   sweep latent SNR vs. the 24-carrier SSTVAE waveform over
+   AWGN/mpg/mpp/mpd. Confirms the ~1.28 values/s/Hz budget and the ~3 dB
    N-vs-W per-latent gap before any codec depends on them.
 3. **Streaming sync soak.** 10+ minute continuous transmissions through
    the channel sim with LO drift ramps and wander; verify the drift
@@ -423,10 +470,10 @@ resize the project for a few days' effort, which is the point.
 
 | Piece | Fate |
 |---|---|
-| `modem/ofdm.py`, `dsp`, `golay`, `sync`, pilot machinery | Reused; carrier count parameterized; new 45-carrier pilot set |
-| `modem/beacon.py` | Reused + mode bits in payload |
+| `modem/ofdm.py`, `dsp`, `golay`, `sync`, pilot machinery | Reused; CP/frame-length constants change (§3), carrier count parameterized; N-band pilot set reused verbatim, new 45-carrier set for W |
+| `modem/beacon.py` | Reused + mode bits in payload; 4 chips/frame, superframe length re-derived |
 | `modem/framing.py` | Same construction; per-GOP permutations, new frozen tables |
-| `hfchannel.py`, `waveform_channel.py`, stage-1/2 training harness | Reused; carrier-count generalization; GOP-correlated fading check |
+| `hfchannel.py`, `waveform_channel.py`, stage-1/2 training harness | Reused; carrier-count + numerology generalization; GOP-correlated fading check |
 | `sync.acquire_blind` / beacon join, drift loop | Reused — this *is* the continuous-stream sync story |
 | `rx/engine.py` | New engine (streaming, no completion state machine), reusing ring buffer, audio layers, watchdog lessons |
 | `tx/engine.py`, PTT watchdog, audio stack, `native/core` structure | Reused |
@@ -442,9 +489,10 @@ has already catalogued.
 
 - Does temporal compression survive per-latent noise at 5 dB, or does
   motion smear into mush? (§10 step 1 answers this.)
-- GOP length: 1.152 s balances latency, interleaver depth, and late-join
-  granularity — but it was chosen for arithmetic convenience (8 OFDM
-  frames), not measured. Sweep 0.5–2.5 s in stage 1.
+- GOP length: 1.0 s balances latency, interleaver depth, and late-join
+  granularity — and now also camera cadence — but it has not been
+  measured. Sweep 0.5–2.5 s in stage 1 (the numerology supports any
+  multiple of 0.5 s cleanly).
 - Is decoder-side temporal conditioning across GOPs (trained on noisy
   state) worth its risk? Potentially large quality win for static
   scenes; the failure mode is exactly NBTV's stripes in modern dress.
@@ -457,8 +505,8 @@ has already catalogued.
   between them.
 - Nested-bandwidth (W stream decodable by N receiver): worth the
   interleaver constraint?
-- Does mpd need a denser-pilot variant (1-in-4, −10% capacity), or does
-  the 144 ms cadence hold as it does for SSTVAE?
+- Does mpd need a denser-pilot variant (1-in-4, −6% capacity), or does
+  the 125 ms cadence hold as SSTVAE's 144 ms does?
 - Aspect ratio / portrait orientation for phones — a codec/training
   question with UI consequences, decide before freezing latent grids.
 
@@ -470,10 +518,10 @@ is taken (IRCAM's audio VAE).
 
 If this proceeds it gets its own repository (per Andrew). The pragmatic
 split: fork the modem/`config`/training layers rather than sharing a
-package — the waveform constants diverge immediately (carrier count,
-pilot set, beacon payload), and SSTVAE's config module is deliberately
-a single frozen truth that two waveforms cannot share. Keep the
-methodology, not the dependency: frozen format constants, generated
-config headers, golden vectors, and Python-as-normative-oracle from the
-first commit, because this project has already paid for those lessons
-once.
+package — the waveform constants diverge immediately (CP and frame
+length, carrier count, pilot set, beacon payload), and SSTVAE's config
+module is deliberately a single frozen truth that two waveforms cannot
+share. Keep the methodology, not the dependency: frozen format
+constants, generated config headers, golden vectors, and
+Python-as-normative-oracle from the first commit, because this project
+has already paid for those lessons once.
