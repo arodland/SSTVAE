@@ -202,6 +202,35 @@ takes the best result so far. See
 
 </details>
 
+<details>
+<summary>Pooling receivers: many stations, one picture</summary>
+
+Like the networks that receive high-altitude balloons, several stations
+can listen to the same transmission and send what they heard to a
+server that combines all of it. This works better here than pooling
+picture fragments does, because the payload is analog: every latent
+carries a confidence weight, so two stations that each heard an over
+badly can be combined into one that reads well — weighting each value by
+how much each station's estimate deserves to be trusted, rather than
+picking the better copy.
+
+A headless skimmer joins in with a URL, a callsign and a key:
+
+```sh
+sstvae_listen.py --no-gui --upload-url https://aggregator.example \
+    --station-call N0CALL --upload-key-file ~/.sstvae-key
+```
+
+It still saves everything locally first, and an upload that fails waits
+on disk rather than costing you the reception. Measured with two
+stations of a mode-A transmission at 5 dB, the combined picture came
+out 2.1 dB better than either station managed alone.
+
+The desktop app cannot upload yet. See
+[docs/reception-aggregation.md](docs/reception-aggregation.md).
+
+</details>
+
 ## For more information
 
 Visit us on Discord: https://discord.gg/za4eYraFdX

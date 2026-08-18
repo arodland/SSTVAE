@@ -1635,6 +1635,49 @@ need when `--native` fails and you want to know *where*.
   by `state.branch_a_locked`/`branch_b_locked` checks in
   `tests/test_diversity_rx.py`; the chip widgets themselves are
   unverified GUI, same caveat as the rest of this bullet.
+- `docs/reception-aggregation.md` — **balloon-style aggregation: many
+  stations upload latents, a server combines every copy of a
+  transmission** (2026-08-18). Same MRC arithmetic as the two-receiver
+  case above, unchanged — `sstvae/modem/diversity.py` is pure numpy over
+  `(latents, weights, snr_db)`, so it does not care that the branches
+  arrived over HTTP hours apart rather than from two soundcards at once.
+  That is what makes this an aggregation server rather than a second
+  implementation of anything. Measured end to end through the real
+  receive path: two stations at 5 dB AWGN, 6.75/6.90 dB radio SNR alone
+  against **9.84 combined**, and +5.70/+5.68 dB latent SNR against
+  **+7.78**.
+  Five things worth not re-deriving. **A transmission is (callsign, UTC
+  start within 5 s) and frequency never splits a bucket** — the failure
+  directions are not symmetric, since splitting one transmission
+  forfeits the whole gain *silently* (both stations get a 200, both
+  appear in the gallery, only the better picture is missing) while
+  merging two cannot happen by accident, one transmitter being unable to
+  start two overs inside 32 s. Dial frequency is the least reliable
+  field a payload carries — a skimmer may have no rig control and the
+  operator types it in — so requiring it to agree would cost real
+  receptions; `--freq-split-khz` exists for a multi-band aggregator and
+  is off. **`RingBuffer.utc_at` measures back from the newest write, not
+  forward from a construction epoch**: forward assumes the card runs at
+  exactly `FS`, which is ~1.1 s of error after three hours at a routine
+  100 ppm and ~3.6 s after ten, so the error would be a function of
+  uptime; backward bounds it by the ring's own depth, ~13 ms. **A wrong
+  clock is defended three ways** because it fails silently — the station
+  dates its reception properly, the server refuses a start that has not
+  finished yet (the one direction network delay cannot explain), and
+  every reply carries `server_time` so the station can say so to the one
+  person who can fix it. **A station disagreeing about the mode is
+  dropped, not fatal** — a mode mismatch is a hard error in the combiner
+  and rightly so, but the server cannot ask anyone, and one bad report
+  must not cost every other station their picture; the reason goes back
+  in the reply, so it does not just get a 200 and contribute nothing.
+  And **a re-upload from one station replaces rather than adds**, since
+  two copies of one branch break the independence the weighting assumes.
+  The payload (`sstvae/rx/receptionfile.py`) is numpy+stdlib only,
+  deliberately: the server imports it and has no audio, codec or torch,
+  and the same restraint keeps it writable from C++ when a native
+  uploader is wanted. **`Reception` now carries `result` and
+  `utc_start`, and the native engine does not** — an accepted,
+  additive divergence for this Python-only phase.
 - `docs/todo.md` — open work items with the reasoning behind them.
   Completed items keep only a short summary there; the full measurement
   records moved to `docs/todo-done.md` (2026-08-12).
