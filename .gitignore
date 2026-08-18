@@ -27,6 +27,8 @@ compile_commands.json
 # data & training artifacts
 data/
 runs/
+nonphoto/
+refiner-test/
 
 # audio/image scratch
 *.wav
