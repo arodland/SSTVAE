@@ -27,7 +27,9 @@ Requires sounddevice (PortAudio): pip install -e .[listen]
 """
 
 import argparse
+import os
 import threading
+from pathlib import Path
 
 import numpy as np
 
@@ -53,6 +55,7 @@ from sstvae.rx import (  # noqa: F401
     decode_loop_low_cpu,
     fmt_snr,
 )
+from sstvae.upload import UploadSink
 
 
 def _status_line(state: SharedState) -> str:
@@ -197,6 +200,34 @@ def main() -> None:
         "whole buffer, and decodes once at the end of a locked reception "
         "instead of repeatedly for progress updates.",
     )
+    ap.add_argument(
+        "--upload-url", default=None, metavar="URL",
+        help="upload each finished reception's latents to an aggregation server, "
+        "which combines every station's copy of a transmission into one picture "
+        "(see docs/reception-aggregation.md). Needs --station-call and a key.",
+    )
+    ap.add_argument(
+        "--upload-key-file", default=None, metavar="PATH",
+        help="file holding this station's API key. The SSTVAE_UPLOAD_KEY "
+        "environment variable is read if this is not given -- a key on the "
+        "command line would end up in the shell's history.",
+    )
+    ap.add_argument(
+        "--station-call", default=None, metavar="CALL",
+        help="this receiving station's callsign, sent with each upload "
+        "(distinct from the transmitting station's, which comes off the air)",
+    )
+    ap.add_argument(
+        "--frequency", type=float, default=None, metavar="HZ",
+        help="dial frequency to record with each upload. Recorded and displayed "
+        "only -- receptions are matched to a transmission by callsign and start "
+        "time, never by frequency, so a skimmer with no rig control can omit it.",
+    )
+    ap.add_argument(
+        "--upload-queue-dir", default=None, metavar="DIR",
+        help="where uploads wait when the server is unreachable "
+        "(default: <out-dir>/upload-queue)",
+    )
     args = ap.parse_args()
 
     if args.list_devices:
@@ -210,6 +241,23 @@ def main() -> None:
                  "there is nothing --low-cpu would still be trading away")
     if args.diversity_debug_image and not args.device2:
         ap.error("--diversity-debug-image needs --device2")
+
+    upload_key = None
+    if args.upload_url:
+        if not args.station_call:
+            ap.error("--upload-url needs --station-call (this station's callsign)")
+        if args.upload_key_file:
+            try:
+                upload_key = Path(args.upload_key_file).read_text().strip()
+            except OSError as exc:
+                ap.error(f"--upload-key-file: {exc}")
+        else:
+            upload_key = os.environ.get("SSTVAE_UPLOAD_KEY", "").strip()
+        if not upload_key:
+            ap.error(
+                "--upload-url needs a key: --upload-key-file PATH, or the "
+                "SSTVAE_UPLOAD_KEY environment variable"
+            )
 
     config = RxConfig(
         out_dir=args.out_dir,
@@ -226,6 +274,21 @@ def main() -> None:
     state = SharedState()
     stop_event = threading.Event()
 
+    # Saving is the sink's job, so uploading is too: UploadSink wraps
+    # the ordinary save, runs it first, and never lets a network
+    # problem cost a reception.
+    sink = SaveToDirSink(args.out_dir, args.size)
+    if args.upload_url:
+        sink = UploadSink(
+            sink,
+            url=args.upload_url,
+            key=upload_key,
+            station_callsign=args.station_call,
+            dial_freq_hz=args.frequency,
+            queue_dir=args.upload_queue_dir or Path(args.out_dir) / "upload-queue",
+        )
+        print(f"uploading receptions to {args.upload_url} as {args.station_call.upper()}")
+
     streams = []
     if args.device2:
         ring_a = RingBuffer(args.buffer_seconds)
@@ -238,7 +301,7 @@ def main() -> None:
         debug_sink = SaveDebugImageToDirSink() if args.diversity_debug_image else None
         worker = threading.Thread(
             target=decode_loop_diversity,
-            args=([ring_a, ring_b], model, state, config, stop_event),
+            args=([ring_a, ring_b], model, state, config, stop_event, sink),
             kwargs={"debug_sink": debug_sink},
             daemon=True,
         )
@@ -249,7 +312,9 @@ def main() -> None:
         print(f"listening at {actual_rate} Hz, buffer {args.buffer_seconds:.0f}s -- Ctrl+C to stop")
         target = decode_loop_low_cpu if args.low_cpu else decode_loop
         worker = threading.Thread(
-            target=target, args=(ring, model, state, config, stop_event), daemon=True
+            target=target,
+            args=(ring, model, state, config, stop_event, sink),
+            daemon=True,
         )
     worker.start()
 
