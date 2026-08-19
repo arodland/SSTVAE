@@ -151,9 +151,28 @@ Two cases need care.
 
 **A station that disagrees about the mode.** A mode mismatch is a hard
 error in the combiner, and rightly -- two modes are two transmissions.
-But the server cannot ask anyone, so the majority mode wins and the odd
-one out is dropped, with the reason returned to the station that sent
-it. One bad report must not cost every other station their picture.
+But the server cannot ask anyone, so the plurality mode wins and the
+others sit out of that picture, with the reason returned to the station
+that sent it. One bad report must not cost every other station theirs.
+
+This is a vote taken when the picture is made, not an admission test,
+and the distinction matters: **nothing is ever rejected on arrival.**
+Every reception is stored whatever it claims, and since the whole
+combine re-runs on each upload, the count is over everything received
+so far. A station outvoted at one moment is counted again the instant
+later arrivals agree with it. That is what lets the server decide
+immediately, with no quorum to declare and nothing to undo -- the
+alternative, waiting for some notion of "all the uploads", has no
+stopping condition, because a station can upload a queued reception
+hours later.
+
+The corollary is that every verdict is provisional, so all of them are
+rewritten on each combine rather than just the winners'. A station
+counted a moment ago would otherwise keep the share it was last told
+and go on claiming to have supplied a picture it is no longer in --
+with the shares summing past 1. `excluded_reason` on each reception
+says why it is not in the current picture, which a null share alone
+cannot distinguish from "no combine has run yet".
 
 **Blind-only transmissions.** If no station heard a header, the mode is
 unknown and the picture is a full mode-C decode -- exactly what the

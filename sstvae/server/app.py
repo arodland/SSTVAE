@@ -112,9 +112,12 @@ def create_app(config: ServerConfig | None = None, codec=None, db=None) -> FastA
         rows = database.receptions_for(tx_id)
         # Two different numbers, and the difference matters to the
         # station asking: how many uploaded, and how many went into the
-        # picture. A station whose own reception was left out is told
-        # why -- otherwise it gets a 200 and never learns it contributed
-        # nothing.
+        # picture. A station left out of *this* combine is told why --
+        # otherwise it gets a 200 and never learns it contributed
+        # nothing. Nothing is rejected by it: the reception is stored
+        # either way, and every later upload re-runs the vote, so a
+        # station outvoted now is counted again the moment the arrivals
+        # agree with it.
         skipped = dict(combined.skipped) if combined else {}
         return {
             "transmission_id": tx_id,
@@ -145,7 +148,9 @@ def create_app(config: ServerConfig | None = None, codec=None, db=None) -> FastA
             combined_snr_db=combined.snr_db,
             image_path=str(image_path),
         )
-        database.set_contributions(tx_id, combined.contributions)
+        database.set_combine_outcome(
+            tx_id, combined.contributions, dict(combined.skipped)
+        )
         return combined
 
     # -- read-only ---------------------------------------------------
@@ -159,6 +164,11 @@ def create_app(config: ServerConfig | None = None, codec=None, db=None) -> FastA
                 "frames_received": r["frames_received"],
                 "dial_freq_hz": r["dial_freq_hz"],
                 "contrib_frac": r["contrib_frac"],
+                # Why this reception is not in the current picture, or
+                # None if it is. Distinguishes "outvoted on the mode"
+                # from "no combine has run yet", which a null
+                # contrib_frac alone cannot.
+                "excluded_reason": r["excluded_reason"],
             }
             for r in database.receptions_for(row["id"])
         ]

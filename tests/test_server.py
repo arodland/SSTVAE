@@ -301,10 +301,87 @@ def test_one_station_disagreeing_about_the_mode_does_not_lose_the_picture(server
     ).json()
 
     assert reply["mode"] == "A"
-    assert reply["n_receptions"] == 2, "the disagreeing station should be dropped"
+    assert reply["n_receptions"] == 2, "the disagreeing station should sit out"
     assert reply["n_stations"] == 3, "it is still recorded as having uploaded"
     assert reply["note"] and "mode B" in reply["note"], (
-        "the dropped station got a 200 and no way to know it contributed nothing"
+        "the station got a 200 and no way to know it contributed nothing"
+    )
+
+
+def test_a_later_upload_can_reverse_the_mode_vote(server):
+    """The vote is taken when the picture is made, not at the door.
+
+    Nothing is rejected on arrival, and the whole combine re-runs on
+    every upload, so the count is over everything received so far. A
+    station outvoted at one moment is counted again as soon as later
+    arrivals agree with it -- which is what lets the server decide with
+    no quorum and nothing to undo.
+    """
+    k = {c: server.db.issue_key(c) for c in ("STA1", "STA2", "STA3")}
+
+    first = _upload(
+        server, k["STA1"], _demod(seed=1, mode=MODE_A, snr_db=9.0), station="STA1"
+    ).json()
+    tx = first["transmission_id"]
+    assert first["mode"] == "A"
+
+    # A lone dissenter loses to the incumbent.
+    second = _upload(
+        server, k["STA2"], _demod(seed=2, mode=MODES["B"], snr_db=3.0), station="STA2"
+    ).json()
+    assert second["mode"] == "A"
+    assert second["note"], "the outvoted station should be told it is not counted"
+
+    # Another station agrees with the dissenter, and the picture changes.
+    third = _upload(
+        server, k["STA3"], _demod(seed=3, mode=MODES["B"], snr_db=3.0), station="STA3"
+    ).json()
+    assert third["mode"] == "B", "the later uploads should have carried the vote"
+    assert third["n_receptions"] == 2
+    assert third["note"] is None, "STA3 is in the picture, so it has nothing to explain"
+
+    stations = {
+        s["callsign"]: s
+        for s in server.get(f"/api/v1/transmissions/{tx}").json()["stations"]
+    }
+    assert stations["STA2"]["excluded_reason"] is None, (
+        "a station that was outvoted and then vindicated is still shown as excluded"
+    )
+    assert stations["STA2"]["contrib_frac"] is not None
+
+
+def test_a_station_that_loses_the_vote_stops_claiming_a_share(server):
+    """The contribution of every reception is rewritten on each combine,
+    not only that of the ones which won.
+
+    Otherwise a station counted a moment ago keeps whatever share it was
+    last told, and goes on claiming to have supplied a picture it
+    contributed nothing to -- with the shares summing past 1."""
+    k = {c: server.db.issue_key(c) for c in ("STA1", "STA2", "STA3")}
+
+    first = _upload(
+        server, k["STA1"], _demod(seed=1, mode=MODE_A, snr_db=9.0), station="STA1"
+    ).json()
+    tx = first["transmission_id"]
+    assert (
+        server.get(f"/api/v1/transmissions/{tx}").json()["stations"][0]["contrib_frac"]
+        == 1.0
+    )
+
+    _upload(server, k["STA2"], _demod(seed=2, mode=MODES["B"], snr_db=3.0), station="STA2")
+    _upload(server, k["STA3"], _demod(seed=3, mode=MODES["B"], snr_db=3.0), station="STA3")
+
+    stations = {
+        s["callsign"]: s
+        for s in server.get(f"/api/v1/transmissions/{tx}").json()["stations"]
+    }
+    assert stations["STA1"]["contrib_frac"] is None, (
+        "an outvoted station still claims a share of a picture it is not in"
+    )
+    assert stations["STA1"]["excluded_reason"], "and no reason is given for its absence"
+    counted = [s["contrib_frac"] for s in stations.values() if s["contrib_frac"] is not None]
+    assert sum(counted) == pytest.approx(1.0, abs=0.02), (
+        f"shares over the counted stations should sum to 1, got {sum(counted)}"
     )
 
 

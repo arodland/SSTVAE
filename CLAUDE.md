@@ -1665,11 +1665,20 @@ need when `--native` fails and you want to know *where*.
   dates its reception properly, the server refuses a start that has not
   finished yet (the one direction network delay cannot explain), and
   every reply carries `server_time` so the station can say so to the one
-  person who can fix it. **A station disagreeing about the mode is
-  dropped, not fatal** — a mode mismatch is a hard error in the combiner
-  and rightly so, but the server cannot ask anyone, and one bad report
-  must not cost every other station their picture; the reason goes back
-  in the reply, so it does not just get a 200 and contribute nothing.
+  person who can fix it. **The mode is voted on when the picture
+  is made, never at the door** — a mode mismatch is a hard error in the
+  combiner and rightly so, but the server cannot ask anyone, so the
+  plurality wins and the others sit out, with the reason going back in
+  the reply rather than a bare 200. Nothing is rejected on arrival:
+  every reception is stored whatever it claims and the whole combine
+  re-runs per upload, so the count is over everything received *so far*
+  and an outvoted station is counted again as soon as later arrivals
+  agree with it. That is what avoids declaring a quorum, which has no
+  stopping condition when a queued upload can arrive hours late. The
+  corollary bit once: every verdict is provisional, so **all** of them
+  are rewritten each combine and not just the winners' — writing only
+  the winners left an outvoted station still claiming 100% of a picture
+  it was no longer in, with the shares summing past 1.
   And **a re-upload from one station replaces rather than adds**, since
   two copies of one branch break the independence the weighting assumes.
   The payload (`sstvae/rx/receptionfile.py`) is numpy+stdlib only,

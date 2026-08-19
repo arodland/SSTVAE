@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS receptions (
     frames_received INTEGER,
     dial_freq_hz    REAL,
     contrib_frac    REAL,
+    excluded_reason TEXT,
     received_utc    REAL NOT NULL,
     UNIQUE (transmission_id, station_id)
 );
@@ -102,7 +103,25 @@ class Database:
         self.conn.execute("PRAGMA foreign_keys=ON")
         with self.lock:
             self.conn.executescript(SCHEMA)
+            self._add_missing_columns()
             self.conn.commit()
+
+    def _add_missing_columns(self) -> None:
+        """Bring an older database up to the current schema.
+
+        CREATE TABLE IF NOT EXISTS does nothing to a table that already
+        exists, so a column added later would be missing on any server
+        that has been run before -- and the failure would be a query
+        error at the first upload, long after startup.
+        """
+        wanted = {("receptions", "excluded_reason", "TEXT")}
+        for table, column, decl in wanted:
+            have = {
+                row["name"]
+                for row in self.conn.execute(f"PRAGMA table_info({table})")
+            }
+            if column not in have:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     def close(self) -> None:
         self.conn.close()
@@ -270,13 +289,40 @@ class Database:
             )
             self.conn.commit()
 
-    def set_contributions(self, transmission_id: int, by_station: dict[int, float]) -> None:
+    def set_combine_outcome(
+        self,
+        transmission_id: int,
+        contributions: dict[int, float],
+        excluded: dict[int, str] | None = None,
+    ) -> None:
+        """Record what the latest combine made of each reception.
+
+        Every row is cleared first. The combine is re-run from scratch
+        on each upload and its verdicts can change -- a station counted
+        a moment ago may be outvoted by later arrivals, and one that was
+        outvoted may be reinstated -- so writing only the current
+        winners would leave the losers displaying whatever they were
+        told last time. That is how a station ends up claiming to have
+        supplied a picture it contributed nothing to.
+        """
+        excluded = excluded or {}
         with self.lock:
-            for station_id, frac in by_station.items():
+            self.conn.execute(
+                """UPDATE receptions SET contrib_frac=NULL, excluded_reason=NULL
+                   WHERE transmission_id=?""",
+                (transmission_id,),
+            )
+            for station_id, frac in contributions.items():
                 self.conn.execute(
                     """UPDATE receptions SET contrib_frac=?
                        WHERE transmission_id=? AND station_id=?""",
                     (float(frac), transmission_id, station_id),
+                )
+            for station_id, why in excluded.items():
+                self.conn.execute(
+                    """UPDATE receptions SET excluded_reason=?
+                       WHERE transmission_id=? AND station_id=?""",
+                    (str(why), transmission_id, station_id),
                 )
             self.conn.commit()
 

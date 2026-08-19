@@ -41,6 +41,9 @@
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
   .blind { color: var(--dim); }
   .empty { color: var(--dim); padding: 2rem 0; }
+  /* A station whose reception is not in the current picture -- it is
+     still received and stored, and a later upload may bring it in. */
+  tr.out td { opacity: .55; }
 </style>
 
 <header>
@@ -63,11 +66,11 @@ function card(tx) {
   const mode = tx.mode ? `mode ${tx.mode}` : `<span class="blind">mode unknown (blind)</span>`;
   const freq = tx.dial_freq_hz ? ` · ${(tx.dial_freq_hz / 1e6).toFixed(3)} MHz` : "";
   const rows = tx.stations.map(s => `
-    <tr>
+    <tr${s.excluded_reason ? ' class="out"' : ""} ${s.excluded_reason ? `title="${s.excluded_reason}"` : ""}>
       <td>${s.callsign}</td>
       <td class="num">${fmt(s.snr_db)} dB</td>
       <td class="num">${s.contrib_frac === null ? "—" : (s.contrib_frac * 100).toFixed(0) + "%"}</td>
-      <td class="blind">${s.path === "blind" ? "blind" : ""}</td>
+      <td class="blind">${s.excluded_reason ? "not counted" : (s.path === "blind" ? "blind" : "")}</td>
     </tr>`).join("");
   el.innerHTML = `
     ${pic}

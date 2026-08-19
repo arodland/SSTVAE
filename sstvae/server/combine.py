@@ -56,10 +56,19 @@ def _agree_on_mode(branches, station_ids):
     The combiner treats a mode mismatch as a hard error, and rightly:
     two different modes are two different transmissions. But the server
     has no way to ask, and one station reporting the wrong mode must not
-    take the whole picture down with it, so the majority wins and the
-    odd one out is skipped with a reason. Blind branches have no mode at
-    all and are always kept -- their arrays are full-size and aligned by
-    the beacon.
+    take the whole picture down with it, so the plurality wins and the
+    others sit out.
+
+    This is a vote taken when the picture is made, not an admission
+    test. Every reception is stored whatever it claims, and the whole
+    combine is re-run on each upload, so the count is over everything
+    received *so far* and a station outvoted now is counted again as
+    soon as later arrivals agree with it. Nothing here is a verdict
+    about a station, which is what lets the server decide with no
+    quorum, no waiting, and nothing to undo.
+
+    Blind branches have no mode at all and are always kept -- their
+    arrays are full-size and aligned by the beacon.
     """
     modes = [
         b.mode.name for b in branches if isinstance(b, DemodResult)
@@ -82,7 +91,11 @@ def _agree_on_mode(branches, station_ids):
     keep, keep_ids, skipped = [], [], []
     for branch, sid in zip(branches, station_ids):
         if isinstance(branch, DemodResult) and branch.mode.name != best:
-            skipped.append((sid, f"reported mode {branch.mode.name}, others say {best}"))
+            skipped.append((
+                sid,
+                f"not counted yet: reports mode {branch.mode.name}, "
+                f"most stations so far say {best}",
+            ))
             continue
         keep.append(branch)
         keep_ids.append(sid)
