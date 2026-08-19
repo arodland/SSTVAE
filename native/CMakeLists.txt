@@ -230,6 +230,162 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
   message(STATUS "Android audio: ${ANDROID_ABI}")
 endif()
 
+# --- Qt image loading -------------------------------------------------------
+# Loading a picture through Qt's decoders, so the app accepts what the
+# platform can read (TIFF, WEBP, ICO, whatever the imageformats plugins
+# offer) rather than the fixed list stb happens to implement.
+#
+# Gated on Qt6 Gui being available and nothing else, the same shape as
+# sstvae_fetch below: there is no user-facing switch because there is
+# nothing to decide -- the stb loader in sstvae_core is still there and
+# is still what the headless tools and the parity suite use, so a build
+# without Qt loses no capability it had.
+#
+# Before the overlay block, which links this: an if() on a variable or a
+# target defined later is silently false, and that has already left a
+# test built-and-not-run here once.
+find_package(Qt6 6.2 COMPONENTS Core Gui QUIET)
+if(Qt6Gui_FOUND)
+  add_library(sstvae_images_qt STATIC core/images/qt/qtimages.cpp)
+  set_target_properties(sstvae_images_qt PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(sstvae_images_qt PUBLIC core)
+  target_link_libraries(sstvae_images_qt PUBLIC sstvae_core Qt6::Core Qt6::Gui)
+  message(STATUS "Qt image loading: Qt ${Qt6_VERSION}")
+endif()
+
+# --- extra image format plugins ---------------------------------------------
+# Formats Qt's own imageformats plugins do not carry, added the way Qt
+# intends: a plugin in the loader's search path. **Nothing in our code
+# refers to these** -- `core/images/qt/` goes through QImageReader, so a
+# plugin here widens `readable_extensions()`, the transmit dialog's
+# filter and what `images::qt::load` opens, with no change to any of
+# them. That is the whole reason this is a plugin rather than a fourth
+# branch in the loader.
+#
+# HEIC is behind its own switch, and not because of the build: libheif
+# and libde265 are LGPL-3.0-or-later and fine to bundle, but HEVC is
+# patent-encumbered, and whether to ship a decoder for it is a
+# publisher's decision rather than a technical one. OFF removes the
+# format and nothing else. See native/cmake/libheif.cmake.
+set(SSTVAE_BUILD_HEIF "AUTO" CACHE STRING
+    "Build the HEIF/HEIC image plugin (ON/OFF/AUTO)")
+set_property(CACHE SSTVAE_BUILD_HEIF PROPERTY STRINGS ON OFF AUTO)
+
+# One directory for every bundled plugin, laid out the way Qt expects
+# (`<root>/imageformats/`), so a single QT_PLUGIN_PATH entry serves the
+# tests, a developer running the app out of the build tree, and the
+# packaging script.
+set(SSTVAE_PLUGIN_DIR "${CMAKE_BINARY_DIR}/plugins" CACHE INTERNAL "")
+
+if(SSTVAE_BUILD_HEIF STREQUAL "OFF")
+  set(_want_heif OFF)
+elseif(WIN32 AND NOT SSTVAE_BUILD_HEIF STREQUAL "ON")
+  # **AUTO declines on Windows, and this is a known gap rather than a
+  # judgement about the platform.** The plugin builds there and libheif
+  # and libde265 build there, but Qt will not load the plugin: the format
+  # never appears in `supportedImageFormats()`, so HEIC is simply absent.
+  # Before the DLLs were placed beside the executable it *did* load and
+  # then crashed inside the decode, which is consistent with it having
+  # bound some other libheif on that machine -- but the current state is
+  # a plugin that does not load, and the cause is not established.
+  #
+  # Four platforms carry HEIC; Windows still gains everything Qt's own
+  # imageformats plugins bring (TIFF, WEBP, ICO, ICNS, TGA), which is the
+  # larger part of what this change set is for. `-DSSTVAE_BUILD_HEIF=ON`
+  # forces it on for anyone with a Windows machine to debug on -- which is
+  # what this needs and what CI cannot provide. The evidence so far is
+  # written up in docs/todo.md; do not start from scratch.
+  set(_want_heif OFF)
+  message(STATUS "HEIF/HEIC image plugin: off on Windows (known gap, see "
+                 "docs/todo.md); pass -DSSTVAE_BUILD_HEIF=ON to build it anyway")
+else()
+  find_package(Qt6 6.2 COMPONENTS Core Gui QUIET)
+  if(Qt6Gui_FOUND)
+    set(_want_heif ON)
+  elseif(SSTVAE_BUILD_HEIF STREQUAL "ON")
+    message(FATAL_ERROR
+      "SSTVAE_BUILD_HEIF=ON but Qt6 Gui was not found; a Qt image format "
+      "plugin needs it. Pass -DSSTVAE_BUILD_HEIF=OFF to build without HEIC.")
+  else()
+    set(_want_heif OFF)
+  endif()
+endif()
+
+if(_want_heif)
+  list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+  include(libheif)
+  # MODULE, not SHARED: a Qt plugin is dlopen'd and never linked against.
+  add_library(sstvae_plugin_heif MODULE
+    third_party/qt-heif-plugin/heif.cpp)
+  set_target_properties(sstvae_plugin_heif PROPERTIES
+    AUTOMOC ON
+    OUTPUT_NAME "sstvae_qheif"
+    # Qt looks for `<library path>/imageformats/`, so the subdirectory is
+    # part of the contract and not tidiness.
+    LIBRARY_OUTPUT_DIRECTORY "${SSTVAE_PLUGIN_DIR}/imageformats"
+    RUNTIME_OUTPUT_DIRECTORY "${SSTVAE_PLUGIN_DIR}/imageformats")
+  target_link_libraries(sstvae_plugin_heif PRIVATE Qt6::Gui sstvae::libheif)
+  # Vendored and not warning-clean under -Wall -Wextra; its warnings are
+  # not signal here, the same treatment stb gets.
+  target_include_directories(sstvae_plugin_heif SYSTEM PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qt-heif-plugin)
+  if(NOT MSVC)
+    target_compile_options(sstvae_plugin_heif PRIVATE -w)
+  endif()
+  # **A relative rpath, because the binary that ships is the one built
+  # here.** Nothing `install()`s this plugin -- `package_app.sh` copies it
+  # out of the build tree -- so its *build* rpath is what a user gets, and
+  # that contains an absolute path into `_deps` which will not exist on
+  # their machine. It happens to work anyway, because the AppImage's
+  # launcher sets LD_LIBRARY_PATH and that is searched first; relying on
+  # that would mean the plugin only works when launched through the
+  # wrapper. These entries make the staged layout self-sufficient:
+  # plugins/imageformats -> lib on Linux, PlugIns/imageformats ->
+  # Frameworks in a bundle. Windows searches the .exe's own directory and
+  # needs no rpath at all.
+  if(APPLE)
+    set_property(TARGET sstvae_plugin_heif APPEND PROPERTY
+      BUILD_RPATH "@loader_path/../../Frameworks")
+  elseif(NOT WIN32)
+    set_property(TARGET sstvae_plugin_heif APPEND PROPERTY
+      BUILD_RPATH "$ORIGIN/../../lib")
+  endif()
+  message(STATUS "HEIF/HEIC image plugin: on, decode only")
+endif()
+
+# The libheif DLLs beside the *executable*, on Windows.
+#
+# Defined here rather than in cmake/libheif.cmake, and **unconditionally**,
+# for the reason `sstvae_onnxruntime_copy_runtime` above is: that module is
+# only included when the plugin is being built, so a call site would have
+# to know whether the function exists. It did not, and
+# `-DSSTVAE_BUILD_HEIF=OFF` therefore failed at configure time with
+# "Unknown CMake command" -- a switch added and never once configured with
+# it off. An early return keeps every call site unconditional.
+#
+# The failure this retires when it *is* built: Windows resolves a dlopen'd
+# module's imports against the search order of the *process*, which starts
+# at the .exe's directory and not the plugin's. So heif.dll next to
+# plugins/imageformats/ is no use; it has to be next to the executable.
+# Missing, the process still starts and everything works except that HEIC
+# is quietly absent -- no error, no exit code. Hamlib's equivalent stops
+# the process before `main`, which is louder and easier.
+function(sstvae_libheif_copy_runtime target)
+  if(NOT TARGET sstvae_plugin_heif OR NOT WIN32 OR NOT SSTVAE_LIBHEIF_RUNTIME_DIR)
+    return()
+  endif()
+  file(GLOB _heif_dlls "${SSTVAE_LIBHEIF_RUNTIME_DIR}/*.dll")
+  if(NOT _heif_dlls)
+    message(FATAL_ERROR
+      "No DLLs found in ${SSTVAE_LIBHEIF_RUNTIME_DIR}; the HEIF plugin would "
+      "load nowhere and the format would be silently missing from ${target}.")
+  endif()
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_heif_dlls}
+            "$<TARGET_FILE_DIR:${target}>"
+    COMMENT "Copying the libheif runtime beside ${target}")
+endfunction()
+
 # --- Overlay rendering ------------------------------------------------------
 # Separate from sstvae_core for the same reason Qt audio is: the modem,
 # the golden vectors and the parity module have no business needing a
@@ -241,7 +397,10 @@ if(SSTVAE_BUILD_OVERLAY STREQUAL "OFF")
   set(_want_overlay OFF)
 else()
   find_package(Qt6 6.2 COMPONENTS Core Gui QUIET)
-  if(Qt6_FOUND)
+  # TARGET rather than the find_package result alone: an inset image is
+  # loaded through sstvae_images_qt, so that is a real requirement and
+  # not a coincidence of both being gated on Qt6 Gui.
+  if(Qt6_FOUND AND TARGET sstvae_images_qt)
     set(_want_overlay ON)
   elseif(SSTVAE_BUILD_OVERLAY STREQUAL "ON")
     message(FATAL_ERROR
@@ -258,7 +417,7 @@ if(_want_overlay)
   set_target_properties(sstvae_overlay_render PROPERTIES
                         POSITION_INDEPENDENT_CODE ON)
   target_include_directories(sstvae_overlay_render PUBLIC core)
-  target_link_libraries(sstvae_overlay_render PUBLIC sstvae_core
+  target_link_libraries(sstvae_overlay_render PUBLIC sstvae_core sstvae_images_qt
                         PRIVATE Qt6::Core Qt6::Gui)
   message(STATUS "Overlay rendering: Qt ${Qt6_VERSION}")
 endif()
@@ -338,7 +497,8 @@ else()
   if(NOT Qt6_FOUND)
     list(APPEND _gui_missing "Qt6 Widgets")
   endif()
-  foreach(_dep sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render)
+  foreach(_dep sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render
+               sstvae_images_qt)
     if(NOT TARGET ${_dep})
       list(APPEND _gui_missing ${_dep})
     endif()
@@ -397,7 +557,7 @@ if(_want_gui)
   target_include_directories(sstvae_gui PUBLIC core gui)
   target_link_libraries(sstvae_gui PUBLIC
     sstvae_core sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render
-    sstvae_fetch
+    sstvae_images_qt sstvae_fetch
     Qt6::Core Qt6::Gui Qt6::Widgets)
 
   add_executable(sstvae-gui WIN32 MACOSX_BUNDLE gui/main.cpp)
@@ -456,6 +616,7 @@ if(_want_gui)
   endif()
   target_link_libraries(sstvae-gui PRIVATE sstvae_gui)
   sstvae_hamlib_copy_runtime(sstvae-gui)
+  sstvae_libheif_copy_runtime(sstvae-gui)
   sstvae_onnxruntime_copy_runtime(sstvae-gui)
   message(STATUS "Desktop application: Qt ${Qt6_VERSION}")
 endif()
@@ -505,5 +666,6 @@ if(TARGET sstvae_gui)
   # Hamlib DLL. On Windows an unresolved import stops the process before
   # main with no output at all -- see the note in hamlib.cmake.
   sstvae_hamlib_copy_runtime(sstvae-gui-shot)
+  sstvae_libheif_copy_runtime(sstvae-gui-shot)
   sstvae_onnxruntime_copy_runtime(sstvae-gui-shot)
 endif()

@@ -172,6 +172,57 @@ if(TARGET sstvae_rig)
   set_tests_properties(rig_hamlib PROPERTIES TIMEOUT 120)
 endif()
 
+# Loading a picture through Qt's decoders. Follows its library for the
+# same reason the overlay test below does, and gets a directory to write
+# probe files into rather than dropping them in the runner's cwd.
+if(TARGET sstvae_images_qt)
+  add_executable(test_images_qt test_images_qt.cpp)
+  target_link_libraries(test_images_qt PRIVATE sstvae_core sstvae_images_qt
+                        Qt6::Core Qt6::Gui)
+  target_include_directories(test_images_qt PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME images_qt COMMAND test_images_qt ${CMAKE_CURRENT_BINARY_DIR}
+                                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures)
+  set_tests_properties(images_qt PROPERTIES TIMEOUT 300)
+  # Where the bundled format plugins were built. Qt appends the category
+  # directory itself, so this names the plugin *root* and not
+  # `.../imageformats`. path_list_prepend rather than a plain assignment
+  # for the reason the Hamlib block above records: CMake would treat a
+  # Windows PATH's semicolons as list separators, and the same applies to
+  # any path list.
+  if(TARGET sstvae_plugin_heif)
+    set_property(TEST images_qt APPEND PROPERTY ENVIRONMENT_MODIFICATION
+      "QT_PLUGIN_PATH=path_list_prepend:${SSTVAE_PLUGIN_DIR}")
+    # The build knows it built the plugin, so the test is not allowed to
+    # skip HEIC. Without this the plugin could fail to load -- wrong
+    # directory, missing libheif, a metadata mismatch -- and the suite
+    # would pass having quietly tested one format less. Same hazard as
+    # SSTVAE_REQUIRE_CODEC, except here CMake can assert it rather than
+    # CI having to remember to.
+    set_property(TEST images_qt APPEND PROPERTY ENVIRONMENT_MODIFICATION
+      "SSTVAE_REQUIRE_HEIF=set:1")
+    # The plugin is dlopen'd, so its own dependency on libheif is
+    # resolved at that moment rather than at link time -- a build rpath
+    # covers it on Linux and macOS, and Windows needs the DLLs beside the
+    # executable, which is what this copies.
+    # **Beside the executable, which is the rule this project already
+    # follows for Hamlib.** Windows searches the .exe's own directory
+    # first, with no environment involved; PATH is searched later and this
+    # runner has ImageMagick, LLVM and mingw on it, at least one of which
+    # ships its own libheif. Binding to a foreign `heif.dll` whose exports
+    # happen to match would load cleanly, register the plugin's formats
+    # from its own .json, and then crash on the first real call -- which is
+    # a decode-time segfault with no diagnostic, the exact shape of what
+    # this test does on Windows.
+    sstvae_libheif_copy_runtime(test_images_qt)
+    # Kept as well, harmlessly: the copy above is what should resolve it,
+    # and this covers a layout where it does not.
+    if(WIN32 AND SSTVAE_LIBHEIF_RUNTIME_DIR)
+      set_property(TEST images_qt APPEND PROPERTY ENVIRONMENT_MODIFICATION
+        "PATH=path_list_prepend:${SSTVAE_LIBHEIF_RUNTIME_DIR}")
+    endif()
+  endif()
+endif()
+
 # Overlay rendering needs QtGui; the library is optional, so the test
 # follows it. TARGET rather than a variable, for the reason the Hamlib
 # block above records: an if() on an unset variable is silently false.

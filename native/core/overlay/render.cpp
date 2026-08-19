@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 
+#include "images/qt/qtimages.hpp"
+
 namespace sstvae::overlay {
 
 namespace {
@@ -243,11 +245,16 @@ QImage cached_file_image(const std::string& path) {
         if (entry.first == path) return entry.second;
     }
 
-    QImage loaded;
-    if (loaded.load(QString::fromStdString(path))) {
+    // Through `images::qt::load_qimage` rather than `QImage::load`, so an
+    // inset accepts exactly what the picture being composed accepts --
+    // one answer to "can this file be opened", including the stb
+    // fallback -- and so a photograph straight off a phone arrives
+    // upright. `QImage::load` ignores the EXIF orientation tag, which
+    // meant the base picture rotated and an inset of the same file did
+    // not.
+    QImage loaded = images::qt::load_qimage(path);
+    if (!loaded.isNull()) {
         loaded = loaded.convertToFormat(QImage::Format_ARGB32_Premultiplied);
-    } else {
-        loaded = QImage();
     }
     if (cache.size() >= CAPACITY) cache.erase(cache.begin());
     cache.emplace_back(path, loaded);

@@ -24,6 +24,8 @@
 #include <QResizeEvent>
 #include <QSlider>
 #include <QSplitter>
+#include <QString>
+#include <QStringList>
 #include <QStyle>
 #include <QTimer>
 #include <QUrl>
@@ -33,6 +35,7 @@
 #include <cmath>
 #include <exception>
 #include <map>
+#include <string>
 #include <vector>
 
 #include "app_state.hpp"
@@ -44,6 +47,7 @@
 #include "config.hpp"
 #include "crop_dialog.hpp"
 #include "images/images.hpp"
+#include "images/qt/qtimages.hpp"
 #include "flow_layout.hpp"
 #include "overlay_editor.hpp"
 #include "style.hpp"
@@ -53,8 +57,20 @@ namespace sstvae::gui {
 
 namespace {
 
-const char* IMAGE_FILTER =
-    "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif);;All files (*)";
+// Every extension the loader can actually open, as file-dialog
+// patterns: Qt's decoders on this machine plus the stb-only formats
+// behind the fallback. Built rather than written out, because a
+// hardcoded list is a claim about the loader that nothing checks -- the
+// one this replaced offered `*.webp` while the only decoder underneath
+// it was stb, which has no WEBP handler at all, so choosing the file
+// the dialog had just suggested failed.
+QString image_patterns() {
+    QStringList patterns;
+    for (const std::string& extension : images::qt::readable_extensions()) {
+        patterns << QLatin1String("*.") + QString::fromStdString(extension);
+    }
+    return patterns.join(u' ');
+}
 
 }  // namespace
 
@@ -448,7 +464,7 @@ QWidget* TransmitPanel::build_tool_row() {
         const QString path = QFileDialog::getOpenFileName(
             this, tr("Choose an inset image"),
             QString::fromStdString(app_->config().folders.transmit_dir),
-            QString::fromLatin1(IMAGE_FILTER));
+            tr("Images (%1);;All files (*)").arg(image_patterns()));
         if (!path.isEmpty()) editor_->add_image_inset(path.toStdString());
     });
     // **Remove is not here; it is in the "Selected item" box.** It is
@@ -775,7 +791,7 @@ void TransmitPanel::choose_image() {
     const QString path = QFileDialog::getOpenFileName(
         this, tr("Choose an image"),
         QString::fromStdString(app_->config().folders.transmit_dir),
-        QString::fromLatin1(IMAGE_FILTER));
+        tr("Images (%1);;All files (*)").arg(image_patterns()));
     if (!path.isEmpty()) load_image(path);
 }
 
@@ -783,7 +799,10 @@ void TransmitPanel::load_image(const QString& path) {
     if (picture_locked()) return;
     images::Picture loaded;
     try {
-        loaded = images::load(path.toStdString());
+        // The Qt-backed loader, not `images::load`: the app should open
+        // what the platform's decoders can read, which is a superset of
+        // stb's fixed list and includes the fallback to it.
+        loaded = images::qt::load(path.toStdString());
     } catch (const std::exception& e) {
         app_->log_event("tx", log::Severity::Error,
                         tr("could not open image %1: %2")

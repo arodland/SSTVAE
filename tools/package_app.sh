@@ -34,6 +34,12 @@
 #   libhamlib          pinned and bundled by us, so it is never on the
 #                      target machine.
 #   onnxruntime        likewise.
+#   libheif/libde265   likewise, and only reachable *through* the image
+#                      format plugin below -- nothing links them.
+#   our own Qt plugins plugins/imageformats/, which Qt finds by directory
+#                      rather than by link. Omit them and the app starts
+#                      perfectly and simply refuses HEIC, which is the
+#                      quietest failure in this list.
 #
 # The model artifacts are *not* bundled: they are fetched on first run
 # and cached (see docs/onnx.md), which is what keeps this download small
@@ -55,6 +61,12 @@ cache="$BUILD_DIR/CMakeCache.txt"
 # and that path is a configure-time choice.
 cache_value() { sed -n "s|^$1:[A-Z]*=||p" "$cache" | head -1; }
 HAMLIB_RUNTIME_DIR="$(cache_value SSTVAE_HAMLIB_RUNTIME_DIR || true)"
+LIBHEIF_RUNTIME_DIR="$(cache_value SSTVAE_LIBHEIF_RUNTIME_DIR || true)"
+# Image format plugins we built ourselves (HEIF today). Qt finds them by
+# directory, not by link, so if this is not copied the app starts
+# perfectly and simply refuses the format -- see the note in
+# native/CMakeLists.txt.
+SSTVAE_PLUGIN_DIR="$(cache_value SSTVAE_PLUGIN_DIR || true)"
 ORT_LIBDIR="$(cache_value SSTVAE_ONNXRUNTIME_LIBDIR || true)"
 
 rm -rf "$STAGE_DIR"
@@ -83,7 +95,14 @@ MINGW*|MSYS*|CYGWIN*)
     # Ours first, so windeployqt sees a complete executable and does not
     # report an import it cannot resolve.
     [ -n "$HAMLIB_RUNTIME_DIR" ] && cp "$HAMLIB_RUNTIME_DIR"/*.dll "$app/"
+    [ -n "$LIBHEIF_RUNTIME_DIR" ] && cp "$LIBHEIF_RUNTIME_DIR"/*.dll "$app/"
     [ -n "$ORT_LIBDIR" ] && cp "$ORT_LIBDIR/onnxruntime.dll" "$app/"
+    # Before windeployqt, which then treats our plugin as one more thing
+    # whose imports it has to satisfy.
+    if [ -n "$SSTVAE_PLUGIN_DIR" ] && [ -d "$SSTVAE_PLUGIN_DIR/imageformats" ]; then
+        mkdir -p "$app/imageformats"
+        cp "$SSTVAE_PLUGIN_DIR"/imageformats/*.dll "$app/imageformats/" 2>/dev/null || true
+    fi
     windeployqt --release --no-translations --no-system-d3d-compiler \
         --no-opengl-sw "$app/sstvae-gui.exe"
     copy_legal "$app"
@@ -113,11 +132,23 @@ Darwin)
         "$app/Contents/Frameworks/" 2>/dev/null || true
     [ -n "$ORT_LIBDIR" ] && cp "$ORT_LIBDIR"/libonnxruntime*.dylib \
         "$app/Contents/Frameworks/" 2>/dev/null || true
+    [ -n "$LIBHEIF_RUNTIME_DIR" ] && cp "$LIBHEIF_RUNTIME_DIR"/libheif*.dylib \
+        "$LIBHEIF_RUNTIME_DIR"/libde265*.dylib "$app/Contents/Frameworks/" \
+        2>/dev/null || true
+    # Into the bundle's own PlugIns, which Qt searches; macdeployqt then
+    # rewrites its install names along with everything else's.
+    if [ -n "$SSTVAE_PLUGIN_DIR" ] && [ -d "$SSTVAE_PLUGIN_DIR/imageformats" ]; then
+        mkdir -p "$app/Contents/PlugIns/imageformats"
+        cp "$SSTVAE_PLUGIN_DIR"/imageformats/*.dylib \
+            "$SSTVAE_PLUGIN_DIR"/imageformats/*.so \
+            "$app/Contents/PlugIns/imageformats/" 2>/dev/null || true
+    fi
     copy_legal "$app/Contents/Resources"
     # -libpath so macdeployqt can resolve what it is about to rewrite;
     # it fixes the install names and rpaths for everything it finds.
     macdeployqt "$app" -verbose=1 \
         ${HAMLIB_RUNTIME_DIR:+-libpath="$HAMLIB_RUNTIME_DIR"} \
+        ${LIBHEIF_RUNTIME_DIR:+-libpath="$LIBHEIF_RUNTIME_DIR"} \
         ${ORT_LIBDIR:+-libpath="$ORT_LIBDIR"}
     ;;
 
@@ -155,6 +186,8 @@ Darwin)
     cp "$BUILD_DIR/sstvae-decode" "$app/bin/" 2>/dev/null || true
     cp "$BUILD_DIR/sstvae-audio-check" "$app/bin/" 2>/dev/null || true
     [ -n "$HAMLIB_RUNTIME_DIR" ] && cp -P "$HAMLIB_RUNTIME_DIR"/libhamlib.so* "$app/lib/"
+    [ -n "$LIBHEIF_RUNTIME_DIR" ] && cp -P "$LIBHEIF_RUNTIME_DIR"/libheif.so* \
+        "$LIBHEIF_RUNTIME_DIR"/libde265.so* "$app/lib/" 2>/dev/null || true
     [ -n "$ORT_LIBDIR" ] && cp -P "$ORT_LIBDIR"/libonnxruntime.so* "$app/lib/"
 
     # Qt: seeded from what the executable links, then completed by
@@ -194,6 +227,16 @@ Darwin)
                     wayland-decoration-client wayland-graphics-integration-client; do
             [ -d "$plugins/$kind" ] && cp -R "$plugins/$kind" "$app/plugins/"
         done
+    fi
+    # Ours, after Qt's, so it joins the same imageformats directory rather
+    # than replacing it. Outside the `if` above because it does not depend
+    # on having found Qt's plugin directory at all.
+    if [ -n "$SSTVAE_PLUGIN_DIR" ] && [ -d "$SSTVAE_PLUGIN_DIR/imageformats" ]; then
+        mkdir -p "$app/plugins/imageformats"
+        cp "$SSTVAE_PLUGIN_DIR"/imageformats/*.so "$app/plugins/imageformats/" \
+            2>/dev/null || true
+    fi
+    if [ -n "$qt_lib_dir" ]; then
         # A bundle with no platform plugin cannot start, so refuse to
         # produce one and call it a package.
         if [ ! -d "$app/plugins/platforms" ]; then
@@ -242,8 +285,19 @@ Darwin)
         fi
         # Distro Qt: name-matched instead, including the media backend's
         # codec libraries, which are the ones the tree rule exists for.
+        #
+        # The image codecs are here for the same reason: the app loads
+        # pictures through Qt's decoders, and the tiff and webp plugins
+        # are what make that more than PNG and JPEG. Qt's own binary
+        # builds compile those libraries into the plugin, so on the tree
+        # rule above there is nothing to copy; a distro's plugins link
+        # them, and a missing one is a plugin that silently fails to
+        # load -- no error, just a format the file dialog offers and the
+        # loader refuses. Leaf codecs with no display, driver or desktop
+        # coupling, which is the line the paragraph above draws.
         case "$1" in
             libQt6*|libicu*|libav*|libsw*) return 0 ;;
+            libwebp*|libsharpyuv*|libtiff*|libjpeg*|libjbig*|libmng*) return 0 ;;
             *) return 1 ;;
         esac
     }

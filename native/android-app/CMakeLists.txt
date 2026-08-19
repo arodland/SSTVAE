@@ -81,6 +81,7 @@ qt_add_qml_module(sstvae_android URI SSTVAE VERSION 1.0
     QML_FILES Main.qml LevelMeter.qml CropView.qml TransmitPane.qml)
 target_link_libraries(sstvae_android PRIVATE Qt6::Quick Qt6::Gui sstvae_core
                                              sstvae_audio_android
+                                             sstvae_images_qt
                                              sstvae_codec)
 
 # **androiddeployqt only packages libraries it knows about.** Qt's own

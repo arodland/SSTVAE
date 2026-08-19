@@ -636,6 +636,125 @@ audio device, so its `qtaudio` job compiles the layer and runs
 enumeration only — with `SSTVAE_BUILD_QTAUDIO=ON`, not AUTO, because a
 job whose purpose is to compile that file must fail if it did not.
 
+**Pictures are loaded twice over, and the second loader is the apps'**
+(`core/images/qt/`, 2026-08-16). `images::load` is stb: Qt-free, a
+format list fixed at compile time, and the implementation the golden
+vectors, `pytest --native` and `sstvae-decode` are written against — it
+does not move. What moved is what the *applications* call, because
+stb's list has no TIFF, WEBP or ICO in it while Qt's is the platform's
+and grows with an installed plugin, and the transmit dialog had drifted
+into offering `*.webp` that the loader behind it could not read.
+`sstvae_images_qt` is therefore an added layer, gated on Qt6 Gui alone
+(no switch — like `sstvae_fetch`, there is nothing to decide, since a
+build without Qt loses no capability it had). Four things are
+deliberate. **Qt first, stb as the fallback**, so no format is *lost*
+by gaining Qt's — Qt has no PSD, HDR or PIC handler at all. **Content
+sniffing before the extension hint**, the opposite of Qt's own order: a
+misnamed file is common and a headerless TGA is not. **The orientation
+tag is applied exactly once and by preference from our own reader**,
+which is the one held to Pillow's answers, with
+`QImageReader::transformation()` consulted only for a format ours
+cannot parse (leaving `setAutoTransform` on *and* applying our tag
+rotates every phone photograph twice; `test_images_qt.cpp` catches that
+on a tagged PNG, where both loaders must agree byte for byte). And
+**the overlay renderer's file insets go through it too**, so "can this
+file be opened" has one answer in the app — `QImage::load` ignores EXIF
+orientation, so the base picture used to rotate and an inset of the
+same file did not. The one bit of arithmetic with no oracle in
+`sstvae_core` is the Qt-transformation → EXIF-value table, which is
+public so the test can pin it against the *installed* Qt rather than
+against a copy of itself.
+
+**Formats beyond Qt's own arrive as Qt plugins, never as another
+`images` path** (2026-08-16). `native/third_party/qt-heif-plugin/` is
+vendored plugin source built into `plugins/imageformats/`, and **nothing
+in this project refers to it** — `core/images/qt/` goes through
+`QImageReader`, so a plugin widens `readable_extensions()`, the transmit
+dialog's filter and what `images::qt::load` opens with no code change at
+all. That is the property that makes the plugin route right and a second
+loader wrong: one answer in the app to "can this file be opened".
+Verified end to end — a HEIC that both stb and bare Qt refuse decodes
+through the staged package with the build tree deleted and no
+`LD_LIBRARY_PATH` set. Six things are settled:
+
+- **The AppImage never searches the system plugin directory**, so a
+  distro's `qt6-heic-image-plugin` is invisible to it — this was
+  diagnosed as an ABI mismatch and is not one. Qt scans `QT_PLUGIN_PATH`
+  plus the plugin path *compiled into libQt6Core*, which for aqt's Qt is
+  the build machine's prefix. Bundling is the only route for a packaged
+  app; "let the operator install their own" only works for someone
+  building against their distro Qt.
+- **`libheif.cmake` is decode only, and that is a licence boundary, not
+  a size saving.** HEVC decode is libde265 (LGPL-3.0+); HEVC encode is
+  x265 (**GPL-2.0+**), which this project cannot ship — `NOTICE` records
+  the icon as licensed artwork that cannot be relicensed under the GPL,
+  and it is compiled into the executable. `-DWITH_X265=OFF` is only as
+  good as its spelling, so the module greps libheif's own configuration
+  summary and fails the build if an encoder was compiled in.
+- **A vendored plugin's `.json` is a claim about what it can decode.**
+  Upstream's listed `hej2` and `avci`, which need OpenJPEG and openh264
+  — both off here — so left alone the plugin would advertise two formats
+  into the file dialog and refuse to open them. That is the exact bug
+  this change set exists to retire, so the two keys are removed, and the
+  removal is recorded because the LGPL requires modifications to be
+  marked.
+- **KDE's kimageformats was the tidier dependency and was declined.**
+  Same author, one pinned source for JXL/HEIF/AVIF — but its master
+  needs ECM 6.29 and **Qt 6.9**, which would make "which image formats
+  the app supports" a function of the builder's Qt version. That is
+  what `hamlib.cmake` exists to prevent. Three self-contained files have
+  no framework behind them.
+- **JPEG XL cannot come from `novomesk/qt-jpegxl-image-plugin`**: it is
+  **GPL-3.0**, and the icon blocks that the same way. KDE's `jxl.cpp` is
+  **BSD-2-Clause** and is the copy to take; libjxl itself is BSD-3 and
+  royalty-free. Not implemented yet — it needs libjxl plus highway and
+  brotli, since GitHub source archives carry no submodules.
+- **The plugin's *build* rpath is what ships**, because packaging copies
+  it out of the build tree rather than `install()`ing it, so it carries
+  `$ORIGIN/../../lib` (`@loader_path/../../Frameworks` in a bundle). It
+  worked without that only because the launcher's `LD_LIBRARY_PATH` is
+  searched before a stale RUNPATH — i.e. it worked by accident.
+
+**HEIC is off on Windows, and that is an open gap** (docs/todo.md). The
+plugin builds there and so do libheif and libde265, but Qt will not load
+it -- `heic` never reaches `supportedImageFormats()` -- while TIFF, WEBP,
+XPM and ICO all work through the same `QImageReader` in the same test, so
+enumeration itself is fine. Before the DLLs were placed beside the
+executable it *loaded and crashed inside the decode* instead, which fits
+it having bound a different libheif on the runner (ImageMagick is on that
+PATH and ships one), but that is a hypothesis. Four platforms carry HEIC
+and `-DSSTVAE_BUILD_HEIF=ON` builds it on Windows for whoever debugs it;
+the todo entry lists what is already established and the two
+observations to make first, so nobody repeats four CI rounds of
+inference. The general lesson worth keeping: **a Windows-only fault in a
+bundled third-party library is not diagnosable from CI**, and the point
+to stop guessing is when the cheap observations have run out, not when
+the ideas have.
+
+**And HEVC patents are the part no licence addresses.** Several pools
+assert claims; browsers ship no HEVC decoder and some distributions keep
+libde265 out of main. `-DSSTVAE_BUILD_HEIF=OFF` declines the whole
+question and costs nothing else. CI passes `=ON` so a silent skip fails,
+and `SSTVAE_REQUIRE_HEIF` — set by CMake, which knows what it built, not
+by CI remembering to — turns "the plugin did not load" into a failure
+rather than one format quietly untested. Same hazard and same answer as
+`SSTVAE_REQUIRE_CODEC`.
+
+Two things this exposed that were not about images. `tools/check_layering.py`'s
+QtGui rule was **written against a spelling nothing in this tree uses**
+(`#include <QtGui/QImage>`; the code says `<QImage>`), so it had been
+matching nothing for as long as it had existed — it now catches any
+`<QFoo>` under `core/` outside the four directories allowed one, and
+the module split *within* those is left to CMake, which enforces it for
+real by giving a Gui-only library no QtWidgets include path.
+`tools/check_includes.py` skipped `build` but not `build-*`, so a build
+tree under any other name turned onnxruntime's and Hamlib's headers into
+seven failures in code nobody here wrote. And **`qtimageformats` is now
+in the CI Qt install**: without it every job is green, the app builds,
+and the operator's TIFF is refused by the dialog that offered it — TIFF,
+WEBP, ICNS, TGA and WBMP are plugins in that module rather than in
+qtbase.
+
 **The engines are the port's only concurrent code**, so CI runs a
 **ThreadSanitizer** job over `rx_engine`, `tx_engine` and `ringbuffer`
 (a separate job: TSan and ASan cannot be combined). They make claims

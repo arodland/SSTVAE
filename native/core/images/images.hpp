@@ -96,6 +96,13 @@ ImageArray to_array(const Picture& img);
 // rather than a limit anyone should meet.
 inline constexpr std::size_t MAX_FILE_BYTES = 1024u * 1024u * 1024u;
 
+// The whole file, refused above `MAX_FILE_BYTES` before the allocation
+// rather than after it. Public because `images/qt/` loads through Qt's
+// decoders and still wants the same guard, the same message, and the
+// same single read feeding both the decoder and the EXIF parser -- two
+// copies of a size limit is two limits.
+std::vector<std::uint8_t> read_picture_bytes(const std::string& path);
+
 // The EXIF orientation tag (0x0112), 1..8, as it appears in a JPEG's
 // APP1 segment. 1 is the identity: stored top-left, no transform.
 // Values 5..8 exchange width and height.
