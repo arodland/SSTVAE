@@ -82,6 +82,12 @@ jobs:
       # forgive and MSVC does not.
       - name: Standard-library includes
         run: python tools/check_includes.py
+      # Same shape, different expensive platform: a `--` inside an XML
+      # comment is illegal, and only an Android Gradle build says so --
+      # against a copy of the file under build/intermediates/, which is
+      # not a path anyone can edit.
+      - name: XML comments
+        run: python tools/check_xml_comments.py
       - name: Show the diff if anything is stale
         if: failure()
         run: |

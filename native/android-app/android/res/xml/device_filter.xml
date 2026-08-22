@@ -14,9 +14,13 @@
      Class 2 is CDC-Communications, which covers the ACM adapters built
      into modern radios (an IC-705, a Digirig's serial half); the
      vendor entries are the four chip families every USB-to-serial
-     cable in a shack uses. It is deliberately not exhaustive -- an
+     cable in a shack uses. It is deliberately not exhaustive: an
      unlisted adapter still works, it just asks for permission each
-     time. -->
+     time.
+
+     (No double hyphens in this file: XML forbids them inside a comment,
+     and aapt reports it against a copy of the file in an intermediates
+     directory, which is a long way from here.) -->
 <resources>
     <!-- CDC-ACM, by class rather than by vendor. -->
     <usb-device class="2" />

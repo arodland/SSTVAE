@@ -66,7 +66,9 @@
              the service's whole lifetime rather than re-declared at each
              transition.
              (No double hyphens in here: XML forbids them inside a
-             comment, and aapt reports it as a column number.) -->
+             comment, and aapt reports it as a column number.
+             tools/check_xml_comments.py is the gate; this note was not
+             enough on its own, which is why the gate exists.) -->
         <service
             android:name="org.cleverdomain.sstvae.ListenerService"
             android:exported="false"
