@@ -771,28 +771,40 @@ ApplicationWindow {
         }
 
         // ---- About --------------------------------------------------
+        //
+        // Every row is `fillWidth` with `Text.AlignHCenter` rather than
+        // `Layout.alignment: Qt.AlignHCenter`: the alignment centres a
+        // row inside the column, which centres nothing if the column
+        // itself is only as wide as its widest child. Centring the
+        // *text* inside a full-width row does not depend on that.
         ColumnLayout {
+            Layout.fillWidth: true
             spacing: 12
-
-            Item { Layout.fillHeight: true }
 
             Label {
                 text: "SSTVAE"
                 font.pixelSize: 32
                 font.bold: true
-                Layout.alignment: Qt.AlignHCenter
+                Layout.fillWidth: true
+                Layout.topMargin: 32
+                horizontalAlignment: Text.AlignHCenter
             }
             Label {
                 text: "by Andrew Rodland, KC2G"
-                Layout.alignment: Qt.AlignHCenter
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
             }
             Label {
                 text: "Image transmission over HF radio."
-                Layout.alignment: Qt.AlignHCenter
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.Wrap
             }
             Label {
                 text: "Version " + Application.version
-                Layout.alignment: Qt.AlignHCenter
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
                 opacity: 0.7
             }
 
@@ -809,6 +821,7 @@ ApplicationWindow {
                 onClicked: Qt.openUrlExternally("https://discord.gg/UKUFmMR75")
             }
 
+            // Everything sits at the top; the slack goes here.
             Item { Layout.fillHeight: true }
         }
     }
