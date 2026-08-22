@@ -425,6 +425,28 @@ export QEMU_AUDIO_ADC_FIXED_SETTINGS=1 QEMU_AUDIO_ADC_FIXED_FREQ=48000 \
        QEMU_AUDIO_ADC_FIXED_FMT=S16 QEMU_AUDIO_ADC_FIXED_CHANNELS=1
 ```
 
+**`tools/run_android_emulator.sh` is that whole recipe in one command**,
+and is how to start an AVD for anything involving audio:
+
+```sh
+tools/run_android_emulator.sh sstvae_phone -no-snapshot
+pw-play --target=sstvae-null transmission-48k.wav   # pre-resample!
+```
+
+It builds the null-sink + remapped-source loopback itself, points
+`PULSE_SOURCE` at it so qemu's capture stream opens there rather than on
+the host's real microphone, and unloads both modules again from an EXIT
+trap — which is why it does not `exec` the emulator. Export
+`PULSE_SOURCE` yourself to use an existing source instead, and it leaves
+the audio graph untouched. It sets the four variables, finds the
+session's `DISPLAY`/`XAUTHORITY`, passes everything after the AVD name
+straight to `emulator`, and runs `adb emu avd hostmicon` once the guest
+is up. It also pins
+`ANDROID_HOME`/`ANDROID_SDK_ROOT` to `~/Android/Sdk` rather than
+inheriting them, because a profile pointing at a distro SDK makes the
+emulator hunt for system images under a path nothing asked for and die
+with "Broken AVD system path" (`SSTVAE_ANDROID_SDK` overrides).
+
 `pactl list source-outputs short` is the check — the qemu row must read
 `s16le 1ch 48000Hz`. With it, the emulator reproduces the file's own
 35.7 dB. Set `PULSE_SOURCE=sstvae_loop` in the same environment and the
