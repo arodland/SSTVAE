@@ -998,6 +998,37 @@ first attempt diagnosable rather than mysterious:
   arguments produce a single unversioned `libhamlib.so` whose
   `readelf -d` SONAME is `libhamlib.so`, with the tools still linking.
 
+- **`CC` alone is not enough, and the failure waits until late.**
+  Setting only `CC` leaves configure to find C++ on its own, and it
+  finds the *host* `g++`. Most of Hamlib is C, so the build gets most of
+  the way through before reaching `rotators/androidsensor` — the one C++
+  directory — and dying on `-stdlib=libc++`, which configure adds for
+  every Android host and the host g++ has never heard of. A host
+  compiler quietly standing in for a cross one is the shape of this
+  bug; `CXX` is set now even though, after the next point, there should
+  be no C++ left to compile.
+
+- **The Android sensor rotator is skipped.** It points an antenna using
+  the phone's accelerometer, which this app has no use for, and it is
+  the only C++ in the tree we build. There is no
+  `--without-androidsensor`: upstream gates it on whether
+  `android/sensor.h` exists (`configure.ac:171`), so the lever is
+  autoconf's own cache, pre-seeded with
+  `ac_cv_header_android_sensor_h=no` exactly as the two malloc answers
+  are. `src/rot_reg.c:87` guards the registration with
+  `#if HAVE_ANDROID_SENSOR`, so it drops out of the library rather than
+  leaving a dangling reference. The cache mechanism was checked against
+  this configure with a proxy header: `checking for linux/ppdev.h...
+  (cached) no`, and `/* #undef HAVE_LINUX_PPDEV_H */` in the generated
+  `config.h`.
+
+  Note that `-lc++` still goes into `LDFLAGS` for every Android build,
+  unconditionally, whether or not any C++ is compiled
+  (`configure.ac:178`). The NDK sysroot ships `libc++.so` as an implicit
+  linker script so it resolves, but it does mean `libhamlib.so` carries
+  a `DT_NEEDED` on `libc++_shared.so` — which Qt for Android packages
+  anyway, because Qt itself needs it.
+
 **Testing it without a radio.** Hamlib model 1 is the dummy: it opens,
 keys and reports a frequency with nothing attached, so the whole path
 above the transport can be exercised on a phone with no cable. The

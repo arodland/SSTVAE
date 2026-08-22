@@ -200,6 +200,8 @@ else()
     #   * **The malloc probes have to be answered.** configure cannot run
     #     what it just built, so `AC_FUNC_MALLOC` guesses "no" and
     #     substitutes its own `rpl_malloc`, which does not exist here.
+    #   * **`CC` alone is not enough**, and the Android sensor *rotator*
+    #     is what proves it -- see the configure arguments below.
     #
     # Deliberately still `--enable-shared`: Hamlib is LGPL-2.1+ and the
     # reasoning at the top of this file does not change because the
@@ -319,14 +321,43 @@ else()
         set(_hl_cc "${_ndk_bin}/${_hl_cc_triple}${_hl_api}-clang")
       endif()
 
+      # **`CXX` as well as `CC`, even though nothing C++ should build.**
+      # Setting only `CC` is what produced the third failure here:
+      # configure found the cross compiler for C and then silently fell
+      # back to the *host* `g++` for C++, which got as far as
+      # `rotators/androidsensor` before dying on `-stdlib=libc++` -- a
+      # flag configure adds for every Android host, and one the host
+      # g++ has never heard of. With `ac_cv_header_android_sensor_h`
+      # below there is now no C++ left in the tree to compile, so this
+      # line does nothing today; it is here because a host compiler
+      # quietly standing in for a cross one is the failure mode, and it
+      # would come back the moment upstream adds a C++ file or somebody
+      # passes --with-indi.
+      set(_hl_cxx "${_ndk_bin}/${_hl_cc_triple}${_hl_api}-clang++")
+
       list(APPEND _hl_configure_args
            "--host=${_hl_triple}"
            "CC=${_hl_cc}"
+           "CXX=${_hl_cxx}"
            "AR=${_ndk_bin}/llvm-ar"
            "RANLIB=${_ndk_bin}/llvm-ranlib"
            "STRIP=${_ndk_bin}/llvm-strip"
            "ac_cv_func_malloc_0_nonnull=yes"
-           "ac_cv_func_realloc_0_nonnull=yes")
+           "ac_cv_func_realloc_0_nonnull=yes"
+           # **Skip the Android sensor rotator.** It is the only C++ in
+           # the tree we build, it is a *rotator* backend for pointing an
+           # antenna by the phone's own accelerometer, and this app does
+           # rig control -- so it is pure build time and a libc++
+           # dependency for something that can never be used here.
+           #
+           # There is no --without-androidsensor: upstream gates it on
+           # whether `android/sensor.h` exists (configure.ac:171), so the
+           # lever is autoconf's own cache, pre-seeded the same way the
+           # two malloc answers above are. `rot_reg.c:87` guards the
+           # registration with `#if HAVE_ANDROID_SENSOR`, so the backend
+           # drops out of the library cleanly rather than leaving a
+           # dangling reference.
+           "ac_cv_header_android_sensor_h=no")
       message(STATUS
         "Hamlib: cross-building for Android ${CMAKE_ANDROID_ARCH_ABI} "
         "(API ${_hl_api}, from ${_hl_api_from})")
