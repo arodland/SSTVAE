@@ -32,6 +32,13 @@ demonstrated rather than argued. And the level readout earns its keep:
 and it is distinguishable at a glance from merely quiet, which a mean
 level is not.
 
+**Rig control is in as of 2026-08-22** — CAT and PTT over USB serial,
+Bluetooth RFCOMM, or a network host. `docs/android.md` said that was
+structurally impossible; it is not, because Hamlib takes a socket for
+any backend. See "Rig control" below for what to know before touching
+it, and note that its build and its Java have **never been compiled** —
+they were written in a session with no NDK.
+
 **Three of this port's bugs were bugs in its own instruments**, and
 they are worth reading before trusting a number from here: the drift
 meter charging in-flight audio as lost, the `-O0` build that made the
@@ -909,6 +916,86 @@ app away loses the picked picture and its framing. A rotation does not,
 which is what the process-wide singleton is for. Persisting the source
 path and framing in `QSettings` would fix it and is a few lines; it has
 not been done because nothing has asked for it yet.
+
+## Rig control
+
+CAT and PTT, added 2026-08-22. `docs/android.md` has the design record
+and the reasoning; this is the operational half.
+
+**How it reaches the radio.** Hamlib's `rig_open()` turns any backend
+into a network client when its pathname parses as `host:port`, so a
+`SerialTransport` (USB or Bluetooth, from Java) is presented to it as a
+loopback socket. Nothing is patched and no CAT protocol is
+reimplemented, which is why the radio picker here lists the same several
+hundred rigs the desktop does.
+
+**Three connection kinds, and the kind is what decides the plumbing —
+never the device string.** USB and Bluetooth open a transport and get a
+bridge; Network hands the host straight to Hamlib with no bridge at all,
+covering both a station PC running `rigctld` (model 2) and a
+serial-over-TCP server with a native backend. An earlier draft branched
+on the *shape* of the device string and got it exactly backwards: a USB
+identifier like `usb:1a86:7523` has no slash and does not start with
+`com`, so Hamlib's own `parse_hoststr` rules read it as a hostname, and
+the bridge was skipped for precisely the devices it exists to serve.
+
+**Building it.** `-DSSTVAE_ANDROID_RIG=ON` is the default and pulls in
+an NDK cross-build of Hamlib's autotools tarball, per ABI.
+`-DSSTVAE_ANDROID_RIG=OFF` drops CAT and keeps the app — the rig screen,
+the transport and the settings all still build, so it is one flag rather
+than a second code path. **That cross-build has never been run**: it was
+written from the NDK's documented layout in a session with no NDK and no
+reachable `dl.google.com`. Expect to fix something. Two guards make the
+first attempt diagnosable rather than mysterious:
+
+- The configure step fails naming the exact compiler wrapper it looked
+  for, because the NDK ships one per API level and an unsupported level
+  is *missing* rather than wrong.
+- The install step refuses a versioned SONAME. libtool would produce
+  `libhamlib.so.4.0.7`; Android's packager takes only files named
+  exactly `lib*.so`, so that library is dropped from the APK without
+  comment and the app dies at `dlopen` **before `main`** — no output on
+  any stream, indistinguishable from a deadlock. `-avoid-version` in
+  `LDFLAGS` is what prevents it and the check is what proves it worked.
+
+**Testing it without a radio.** Hamlib model 1 is the dummy: it opens,
+keys and reports a frequency with nothing attached, so the whole path
+above the transport can be exercised on a phone with no cable. The
+transport itself needs hardware; the closest thing to a substitute is
+the desktop suite, where `test_rig_bridge`, `test_rig_bridged` and
+`test_rig_hamlib` cover the bridge, the composition, the PTT routing and
+a real Kenwood backend talking through it to a fake radio.
+
+**USB permission is granted per attach, and Android forgets it on
+detach.** `UsbAttach` plus `res/xml/device_filter.xml` is what makes the
+grant stick: an app that can handle `USB_DEVICE_ATTACHED` is authorised
+automatically when the user answers "always open with this app". It is
+its own no-display activity rather than a filter on `QtActivity`,
+because the filter matches four whole vendor ranges and every CDC-ACM
+device — plugging in an Arduino must not open a radio app.
+
+**Bluetooth lists bonded devices only.** Discovery would need
+`BLUETOOTH_SCAN` and, before API 31, location permission, which is a
+large ask for a picker whose entire content is the radio the operator
+already paired in system Settings. Pairing is the system's job.
+RFCOMM has no modem control lines, so DTR and RTS keying are not offered
+there at all.
+
+**The keying method changes the waveform.** With the rig keyed directly
+the VOX leader is skipped — a swept tone into an already-keyed radio
+only delays the picture — and the airtime estimate on the Send screen
+follows. The Send screen says which one is in force, but only when it is
+rig keying: saying "VOX" every time when VOX is the only option trains
+the eye to skip the line.
+
+**What is not tested on hardware.** Everything in this section. The
+composite-device question in particular is worth settling first with the
+actual radio: most rig USB interfaces present audio and CDC serial
+together, and this app needs both at once. FT8CN does it successfully on
+at least some devices, and mik3y/usb-serial-for-android#477 is an open
+report of a composite device where claiming the CDC interface fails
+while the platform holds the audio interfaces. If that turns out badly
+for a given radio, Bluetooth and the network kind are unaffected.
 
 ## `core/audio/android/`
 
