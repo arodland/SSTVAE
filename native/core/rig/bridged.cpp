@@ -132,6 +132,61 @@ private:
 
 }  // namespace
 
+SerialParams resolve_serial_params(const HamlibConfig& config,
+                                   const SerialDefaults& defaults) {
+    SerialParams params;
+    params.device_id = config.device;
+    params.baud = config.baud > 0 ? config.baud : defaults.baud;
+
+    switch (config.data_bits) {
+        case DataBits::Seven: params.data_bits = 7; break;
+        case DataBits::Eight: params.data_bits = 8; break;
+        case DataBits::Default: params.data_bits = defaults.data_bits; break;
+    }
+    switch (config.stop_bits) {
+        case StopBits::One: params.stop_bits = 1; break;
+        case StopBits::Two: params.stop_bits = 2; break;
+        case StopBits::Default: params.stop_bits = defaults.stop_bits; break;
+    }
+    switch (config.parity) {
+        case Parity::None: params.parity = SerialParams::kNoParity; break;
+        case Parity::Odd: params.parity = SerialParams::kOdd; break;
+        case Parity::Even: params.parity = SerialParams::kEven; break;
+        case Parity::Default: params.parity = defaults.parity; break;
+    }
+    switch (config.handshake) {
+        case Handshake::None: params.flow = SerialParams::kNoFlow; break;
+        case Handshake::XonXoff: params.flow = SerialParams::kXonXoff; break;
+        case Handshake::Hardware: params.flow = SerialParams::kRtsCts; break;
+        case Handshake::Default: params.flow = defaults.flow; break;
+    }
+
+    // Hamlib's three -RIG_ECONF cases, re-derived because its own are
+    // unreachable for a network port. Each one is a setting that cannot
+    // do what it says: the flow-control driver and the PTT code would be
+    // driving the same wire.
+    const bool rts_held = config.rts != LineState::Default;
+    const bool dtr_held = config.dtr != LineState::Default;
+    if (rts_held && params.flow == SerialParams::kRtsCts) {
+        throw RigError("RTS cannot be held at a fixed level while hardware "
+                       "handshaking is using it");
+    }
+    if (config.ptt_method == PttMethod::Rts) {
+        if (params.flow == SerialParams::kRtsCts) {
+            throw RigError("PTT by RTS cannot share the line with hardware "
+                           "handshaking");
+        }
+        if (rts_held) {
+            throw RigError("PTT by RTS cannot share the line with a fixed RTS "
+                           "level");
+        }
+    }
+    if (config.ptt_method == PttMethod::Dtr && dtr_held) {
+        throw RigError("PTT by DTR cannot share the line with a fixed DTR level");
+    }
+    return params;
+}
+
 std::unique_ptr<RigBackend> make_bridged_backend(
     HamlibConfig config, std::shared_ptr<SerialTransport> transport,
     BackendFactory make_inner) {

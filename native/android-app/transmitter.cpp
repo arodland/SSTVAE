@@ -345,12 +345,27 @@ QString Transmitter::airtime() const {
     const config::ModeSpec* m = find_mode(mode_);
     if (m == nullptr) return {};
     double seconds = m->duration_s;
-    if (vox_lead_s_ > 0.0) seconds += vox_lead_s_ + dsp::VOX_LEAD_GAP_S;
+    // Not counted when the rig will be keyed directly: `run_transmit`
+    // zeroes the leader in that case, because a swept tone into an
+    // already-keyed radio only delays the picture.
+    if (vox_lead_s_ > 0.0 && !Session::instance().rig_can_key()) {
+        seconds += vox_lead_s_ + dsp::VOX_LEAD_GAP_S;
+    }
     // The CW ID's length depends on the message, so it is deliberately
     // not counted here rather than guessed at: a figure that is
     // sometimes wrong is worse than one that is consistently the
     // picture's own airtime.
     return QStringLiteral("%1 s").arg(seconds, 0, 'f', 0);
+}
+
+QString Transmitter::keying() const {
+    if (Session::instance().rig_can_key()) {
+        return tr("Rig control keys the radio; the VOX leader is skipped.");
+    }
+    if (vox_lead_s_ > 0.0) {
+        return tr("VOX, with a %1 s leader tone.").arg(vox_lead_s_, 0, 'g', 2);
+    }
+    return tr("VOX, with no leader tone.");
 }
 
 QString Transmitter::lastError() const {
@@ -375,6 +390,12 @@ void Transmitter::send() {
     req.cw_id = cw_id_;
     req.cw_message = cw_message_.toStdString();
     req.vox_lead_s = vox_lead_s_;
+    // **Read here, at the tap, like everything else in this request.**
+    // An operator who switches rig control off mid-over must not leave a
+    // transmitter keyed with nothing arranged to release it; the engine
+    // holds whichever `Ptt` it was handed for the whole transmission,
+    // and its watchdog is sized against that.
+    req.use_ptt = Session::instance().rig_can_key();
     req.output_device = device_ == kSystemDefault ? std::string{} : device_.toStdString();
     Session::instance().stage_transmit(std::move(req));
 

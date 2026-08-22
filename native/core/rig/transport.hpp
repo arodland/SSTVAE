@@ -58,6 +58,43 @@ namespace sstvae::rig {
 // out a read timeout. `set_dtr`/`set_rts` may overlap a read or a
 // write: on USB they are control transfers, on a separate endpoint
 // from the data.
+// The line settings a transport actually has to be given.
+//
+// **Not the same shape as `HamlibConfig`'s, and the difference is the
+// point.** There, `Default` means *do not set the token* and leave the
+// backend's own value -- right for almost every rig, and the reason
+// those are enums with a Default member rather than guesses at 8-N-1.
+// Over a socket that promise cannot be kept by inaction: Hamlib applies
+// its per-rig defaults in `serial_open`, which a network port never
+// reaches, so a transport given nothing would run at whatever the USB
+// chip powered up with. `bridged.hpp`'s `resolve_serial_params` closes
+// that by asking Hamlib what it *would* have used -- so "the backend's
+// own value" keeps meaning the same thing on a phone as on a desktop.
+struct SerialParams {
+    std::string device_id;
+    int baud = 9600;
+    int data_bits = 8;
+    int stop_bits = 1;
+
+    enum Parity { kNoParity = 0, kOdd = 1, kEven = 2 };
+    int parity = kNoParity;
+
+    enum Flow { kNoFlow = 0, kRtsCts = 1, kXonXoff = 2 };
+    int flow = kNoFlow;
+};
+
+// What a given Hamlib backend would have configured a serial port with.
+// Filled by `rig::serial_defaults(model)` in `sstvae_rig`; a plain
+// struct of ints here so `sstvae_core` can carry it with no libhamlib.
+// The `parity` and `flow` encodings are `SerialParams`'s.
+struct SerialDefaults {
+    int baud = 9600;
+    int data_bits = 8;
+    int stop_bits = 1;
+    int parity = SerialParams::kNoParity;
+    int flow = SerialParams::kNoFlow;
+};
+
 class SerialTransport {
 public:
     virtual ~SerialTransport() = default;

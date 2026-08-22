@@ -20,6 +20,14 @@ ApplicationWindow {
     Listener { id: listener }
     Transmitter { id: transmitter }
     PictureList { id: pictures }
+    // Owns nothing: the rig session lives in `Session`, so keying
+    // survives a rotation in the middle of an over.
+    // **`rigControl`, not `rig`.** A `RigPane` declares `required
+    // property var rig`, so inside its binding block the name `rig`
+    // resolves to that property rather than to an outer id -- `rig: rig`
+    // is a binding loop, not a hand-off. Naming the id differently is
+    // what makes the two unambiguous.
+    RigControl { id: rigControl }
 
     // **Back closes the picture viewer instead of the app.**
     //
@@ -121,10 +129,46 @@ ApplicationWindow {
         ColumnLayout {
             spacing: 8
 
-            // The tuning instrument. First, and given room: with no CAT
-            // there is no frequency readout at all, so this is the only
-            // feedback the operator has about where the radio is
-            // pointed.
+            // The dial frequency, when there is a rig session to read it
+            // from.
+            //
+            // **This is new, and the comment below it used to be the
+            // whole story.** "With no CAT there is no frequency readout
+            // at all" was true until Hamlib turned out to take a socket
+            // (core/rig/transport.hpp), and the waterfall was the only
+            // thing telling an operator where the radio was pointed.
+            // It still is when this is absent, which is every session
+            // without a cable — so the waterfall keeps its height and
+            // this is one line above it rather than a panel beside it.
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: 12
+                Layout.rightMargin: 12
+                Layout.topMargin: 4
+                visible: rigControl.running
+                Label {
+                    text: rigControl.frequency !== "" ? rigControl.frequency : "—"
+                    font.pixelSize: 18
+                }
+                Item { Layout.fillWidth: true }
+                Label {
+                    // The status only when it is bad news. A healthy rig
+                    // saying "connected" every second is a line the eye
+                    // learns to skip, which is the last thing a warning
+                    // line should be.
+                    text: rigControl.failed ? rigControl.status : ""
+                    visible: text !== ""
+                    color: "#c62828"
+                    font.pixelSize: 12
+                    elide: Text.ElideRight
+                    Layout.maximumWidth: parent.width * 0.6
+                }
+            }
+
+            // The tuning instrument. First, and given room: without a
+            // rig session there is no frequency readout at all, so this
+            // is the only feedback the operator has about where the
+            // radio is pointed.
             Waterfall {
                 Layout.fillWidth: true
                 // Taller while there is no picture, which is both when
@@ -614,6 +658,11 @@ ApplicationWindow {
                 Layout.leftMargin: 12
                 Layout.rightMargin: 12
                 wrapMode: Text.Wrap
+            }
+
+            RigPane {
+                rig: rigControl
+                Layout.fillWidth: true
             }
 
             Label {

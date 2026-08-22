@@ -17,6 +17,7 @@
 #include "check.hpp"
 #include "rig/bridge.hpp"
 #include "rig/bridged.hpp"
+#include "rig/transport.hpp"
 
 using namespace sstvae;
 
@@ -310,6 +311,109 @@ void test_a_serial_path_with_no_transport_is_refused() {
     check::is_true(!probe->factory_called, "bridged: and no rig is built");
 }
 
+void test_default_line_settings_come_from_the_backend() {
+    // `Default` on the desktop means *do not set the token*, leaving
+    // Hamlib's own per-rig value. Over a socket that promise cannot be
+    // kept by inaction -- Hamlib applies those in `serial_open`, which a
+    // network port never reaches -- so the resolver has to fill them in
+    // from what that backend would have used. Anything else and a
+    // bridged rig runs at a different speed than the same rig on a
+    // desktop, which is exactly the kind of difference that reads as a
+    // flaky cable.
+    rig::SerialDefaults defaults;
+    defaults.baud = 38400;
+    defaults.data_bits = 8;
+    defaults.stop_bits = 2;
+    defaults.parity = rig::SerialParams::kEven;
+    defaults.flow = rig::SerialParams::kRtsCts;
+
+    rig::HamlibConfig config;
+    config.device = "usb:10c4:ea60";
+    const rig::SerialParams p = rig::resolve_serial_params(config, defaults);
+
+    check::equal(p.device_id, std::string("usb:10c4:ea60"),
+                 "resolve: the device is carried through");
+    check::equal(p.baud, 38400, "resolve: Default baud is the backend's");
+    check::equal(p.stop_bits, 2, "resolve: so are the stop bits");
+    check::equal(p.parity, static_cast<int>(rig::SerialParams::kEven),
+                 "resolve: and the parity");
+    check::equal(p.flow, static_cast<int>(rig::SerialParams::kRtsCts),
+                 "resolve: and the handshake");
+}
+
+void test_an_explicit_line_setting_wins() {
+    rig::SerialDefaults defaults;
+    defaults.baud = 38400;
+    defaults.stop_bits = 2;
+    defaults.parity = rig::SerialParams::kEven;
+
+    rig::HamlibConfig config;
+    config.device = "usb:10c4:ea60";
+    config.baud = 9600;
+    config.data_bits = rig::DataBits::Seven;
+    config.stop_bits = rig::StopBits::One;
+    config.parity = rig::Parity::Odd;
+    config.handshake = rig::Handshake::None;
+
+    const rig::SerialParams p = rig::resolve_serial_params(config, defaults);
+    check::equal(p.baud, 9600, "resolve: an explicit rate overrides the default");
+    check::equal(p.data_bits, 7, "resolve: ...and the data bits");
+    check::equal(p.stop_bits, 1, "resolve: ...and the stop bits");
+    check::equal(p.parity, static_cast<int>(rig::SerialParams::kOdd),
+                 "resolve: ...and the parity");
+    check::equal(p.flow, static_cast<int>(rig::SerialParams::kNoFlow),
+                 "resolve: ...and the handshake");
+}
+
+void test_control_line_conflicts_are_refused() {
+    // Hamlib refuses all three of these with -RIG_ECONF -- and every
+    // one of its checks sits inside `if (rp->type.rig ==
+    // RIG_PORT_SERIAL)`, so on this path they never run. Losing them
+    // would mean a configuration a desktop rejects at connect time
+    // silently producing a radio that will not key on a phone.
+    const auto refused = [](const rig::HamlibConfig& config, const char* what) {
+        try {
+            (void)rig::resolve_serial_params(config, rig::SerialDefaults{});
+        } catch (const rig::RigError&) {
+            check::is_true(true, what);
+            return;
+        }
+        check::fail(what, "it was accepted");
+    };
+
+    rig::HamlibConfig rts_and_handshake;
+    rts_and_handshake.rts = rig::LineState::High;
+    rts_and_handshake.handshake = rig::Handshake::Hardware;
+    refused(rts_and_handshake, "resolve: RTS held with hardware handshaking is refused");
+
+    rig::HamlibConfig ptt_and_handshake;
+    ptt_and_handshake.ptt_method = rig::PttMethod::Rts;
+    ptt_and_handshake.handshake = rig::Handshake::Hardware;
+    refused(ptt_and_handshake, "resolve: PTT by RTS with hardware handshaking is refused");
+
+    rig::HamlibConfig ptt_and_held_rts;
+    ptt_and_held_rts.ptt_method = rig::PttMethod::Rts;
+    ptt_and_held_rts.rts = rig::LineState::Low;
+    refused(ptt_and_held_rts, "resolve: PTT by RTS with a fixed RTS level is refused");
+
+    rig::HamlibConfig ptt_and_held_dtr;
+    ptt_and_held_dtr.ptt_method = rig::PttMethod::Dtr;
+    ptt_and_held_dtr.dtr = rig::LineState::High;
+    refused(ptt_and_held_dtr, "resolve: PTT by DTR with a fixed DTR level is refused");
+
+    // ...and the same pairs on the *other* line are fine, so the checks
+    // are not simply refusing anything with two settings in it.
+    rig::HamlibConfig fine;
+    fine.ptt_method = rig::PttMethod::Dtr;
+    fine.rts = rig::LineState::High;
+    try {
+        (void)rig::resolve_serial_params(fine, rig::SerialDefaults{});
+        check::is_true(true, "resolve: DTR keying with RTS parked is allowed");
+    } catch (const rig::RigError&) {
+        check::fail("resolve: DTR keying with RTS parked is allowed", "it was refused");
+    }
+}
+
 void test_a_rig_that_will_not_open_releases_the_device() {
     auto probe = std::make_shared<Probe>();
     rig::BackendFactory failing = [](const rig::HamlibConfig&) -> std::unique_ptr<rig::RigBackend> {
@@ -355,6 +459,12 @@ int main() {
         test_closing_releases_the_rig_before_the_link();
         check::current_step.store("no_transport");
         test_a_serial_path_with_no_transport_is_refused();
+        check::current_step.store("resolve_defaults");
+        test_default_line_settings_come_from_the_backend();
+        check::current_step.store("resolve_explicit");
+        test_an_explicit_line_setting_wins();
+        check::current_step.store("resolve_conflicts");
+        test_control_line_conflicts_are_refused();
         check::current_step.store("rig_open_failure");
         test_a_rig_that_will_not_open_releases_the_device();
     } catch (const std::exception& e) {

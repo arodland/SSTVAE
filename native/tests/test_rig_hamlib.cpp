@@ -418,6 +418,33 @@ void test_a_native_backend_works_over_a_socket() {
     check::is_true(radio->closed, "hamlib/bridge: closing releases the device");
 }
 
+void test_serial_defaults_come_from_the_backend_caps() {
+    // The other half of the bridged path's line settings. `rig_init`
+    // takes a serial port's defaults from `struct rig_caps`, and its own
+    // comment on the rate says "fastest !" -- so this reads
+    // `serial_rate_max`, deliberately, rather than picking something
+    // more conservative. A different choice would make a bridged rig run
+    // at a different speed than the same rig on a desktop.
+    const rig::SerialDefaults ts2000 = rig::serial_defaults(MODEL_TS2000);
+    check::is_true(ts2000.baud > 0,
+                   "hamlib/defaults: a real backend reports a rate (" +
+                       std::to_string(ts2000.baud) + ")");
+    check::is_true(ts2000.data_bits == 7 || ts2000.data_bits == 8,
+                   "hamlib/defaults: and a plausible word length");
+    check::is_true(ts2000.stop_bits == 1 || ts2000.stop_bits == 2,
+                   "hamlib/defaults: and a plausible stop-bit count");
+
+    // A model Hamlib does not know is a configuration the operator has
+    // to fix anyway, and `rig_init` will refuse it a moment later with a
+    // better message. Falling back rather than throwing is what lets a
+    // settings screen still render while it is wrong.
+    const rig::SerialDefaults unknown = rig::serial_defaults(999999);
+    check::equal(unknown.baud, 9600,
+                 "hamlib/defaults: an unknown model falls back to 9600");
+    check::equal(unknown.data_bits, 8, "hamlib/defaults: ...8 data bits");
+    check::equal(unknown.stop_bits, 1, "hamlib/defaults: ...1 stop bit");
+}
+
 void test_dtr_keying_never_reaches_hamlib() {
     // The one thing that cannot go over this transport. `ser_set_dtr`
     // is a TIOCMSET ioctl and Hamlib is holding a socket, so a DTR
@@ -531,6 +558,7 @@ int main() {
         STEP(test_using_a_closed_rig_reports_rather_than_crashes);
         STEP(test_the_controller_drives_a_real_backend);
         STEP(test_a_native_backend_works_over_a_socket);
+        STEP(test_serial_defaults_come_from_the_backend_caps);
         STEP(test_dtr_keying_never_reaches_hamlib);
         STEP(test_the_controller_drives_a_bridged_rig);
         check::current_step = "reporting";

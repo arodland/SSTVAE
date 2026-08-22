@@ -105,10 +105,19 @@ else()
   # directory, so that whatever caches FETCHCONTENT_BASE_DIR caches the
   # *built* Hamlib too. CI throws its build tree away every run; without
   # this, every job on every platform would rebuild Hamlib from source.
+  #
+  # On Android the install tree is per ABI: two ABIs are two builds of
+  # two different libraries, and sharing a prefix would have the second
+  # find the first's headers, skip its own build, and link an arm64
+  # library into an armeabi-v7a APK.
+  set(_hl_suffix "")
+  if(ANDROID)
+    set(_hl_suffix "-${CMAKE_ANDROID_ARCH_ABI}")
+  endif()
   if(FETCHCONTENT_BASE_DIR)
-    set(_hl_root "${FETCHCONTENT_BASE_DIR}/hamlib-install-${_hl_v}")
+    set(_hl_root "${FETCHCONTENT_BASE_DIR}/hamlib-install-${_hl_v}${_hl_suffix}")
   else()
-    set(_hl_root "${CMAKE_CURRENT_BINARY_DIR}/hamlib-install")
+    set(_hl_root "${CMAKE_CURRENT_BINARY_DIR}/hamlib-install${_hl_suffix}")
   endif()
 
   # Built once and stamped. ExternalProject would rebuild on every
@@ -154,6 +163,100 @@ else()
         "--without-cxx-binding"
         "--without-libusb"
         "--disable-silent-rules")
+
+    # Cross-compiling for Android.
+    #
+    # **Unverified as of 2026-08-22**: this session had no NDK and
+    # dl.google.com is unreachable from it, so the recipe below is
+    # written from the NDK's documented layout and has never been run.
+    # Treat a first failure as expected work rather than as a bug, and
+    # see docs/android.md ("Rig control over a socket") for what it is
+    # for. Everything downstream of it -- the bridge, the transport, the
+    # PTT routing -- is covered by tests that run without it.
+    #
+    # Three things here are Android-specific and none of them are
+    # optional:
+    #
+    #   * **`--host` and the compiler triple are not the same string on
+    #     32-bit ARM.** autotools wants `arm-linux-androideabi`, which is
+    #     what its config.sub knows; the NDK's clang wrapper is
+    #     `armv7a-linux-androideabi<api>-clang`. Using either name for
+    #     both fails -- one at configure, one at the first compile.
+    #   * **`-avoid-version`, or the library cannot be packaged.** libtool
+    #     would produce `libhamlib.so.4.0.7` with `libhamlib.so` a
+    #     symlink to it, and Android's packager takes only files named
+    #     exactly `lib*.so` from `libs/<abi>/` -- a versioned SONAME is
+    #     silently not installed, and the app then dies at `dlopen`
+    #     before reaching main. That is checked for below rather than
+    #     trusted, because libtool ignoring a flag it does not like
+    #     would otherwise surface as that same invisible failure.
+    #   * **The malloc probes have to be answered.** configure cannot run
+    #     what it just built, so `AC_FUNC_MALLOC` guesses "no" and
+    #     substitutes its own `rpl_malloc`, which does not exist here.
+    #
+    # Deliberately still `--enable-shared`: Hamlib is LGPL-2.1+ and the
+    # reasoning at the top of this file does not change because the
+    # target is a phone. An APK with a static Hamlib inside would carry
+    # the relinking obligation.
+    if(ANDROID)
+      if(NOT CMAKE_ANDROID_NDK)
+        message(FATAL_ERROR
+          "Hamlib for Android needs CMAKE_ANDROID_NDK. Configure through "
+          "Qt's android toolchain file, or set -DSSTVAE_BUILD_RIG=OFF.")
+      endif()
+      if(CMAKE_HOST_APPLE)
+        set(_ndk_host "darwin-x86_64")
+      elseif(CMAKE_HOST_WIN32)
+        set(_ndk_host "windows-x86_64")
+      else()
+        set(_ndk_host "linux-x86_64")
+      endif()
+      set(_ndk_bin "${CMAKE_ANDROID_NDK}/toolchains/llvm/prebuilt/${_ndk_host}/bin")
+
+      set(_hl_api "${CMAKE_SYSTEM_VERSION}")
+      if(NOT _hl_api)
+        set(_hl_api 29)  # the app's minSdk
+      endif()
+
+      if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+        set(_hl_cc_triple "aarch64-linux-android")
+        set(_hl_triple "aarch64-linux-android")
+      elseif(CMAKE_ANDROID_ARCH_ABI STREQUAL "armeabi-v7a")
+        set(_hl_cc_triple "armv7a-linux-androideabi")
+        set(_hl_triple "arm-linux-androideabi")
+      elseif(CMAKE_ANDROID_ARCH_ABI STREQUAL "x86_64")
+        set(_hl_cc_triple "x86_64-linux-android")
+        set(_hl_triple "x86_64-linux-android")
+      elseif(CMAKE_ANDROID_ARCH_ABI STREQUAL "x86")
+        set(_hl_cc_triple "i686-linux-android")
+        set(_hl_triple "i686-linux-android")
+      else()
+        message(FATAL_ERROR
+          "Hamlib for Android: unknown ABI '${CMAKE_ANDROID_ARCH_ABI}'")
+      endif()
+
+      set(_hl_cc "${_ndk_bin}/${_hl_cc_triple}${_hl_api}-clang")
+      if(NOT EXISTS "${_hl_cc}")
+        message(FATAL_ERROR
+          "No NDK compiler at ${_hl_cc}.\n"
+          "The API level comes from CMAKE_SYSTEM_VERSION (${_hl_api}); the "
+          "NDK ships a wrapper per level, so an unsupported one is missing "
+          "rather than wrong.")
+      endif()
+
+      list(APPEND _hl_configure_args
+           "--host=${_hl_triple}"
+           "CC=${_hl_cc}"
+           "AR=${_ndk_bin}/llvm-ar"
+           "RANLIB=${_ndk_bin}/llvm-ranlib"
+           "STRIP=${_ndk_bin}/llvm-strip"
+           "LDFLAGS=-avoid-version"
+           "ac_cv_func_malloc_0_nonnull=yes"
+           "ac_cv_func_realloc_0_nonnull=yes")
+      message(STATUS
+        "Hamlib: cross-building for Android ${CMAKE_ANDROID_ARCH_ABI} "
+        "(API ${_hl_api})")
+    endif()
 
     # Cross-compiling to the other macOS architecture.
     #
@@ -227,6 +330,31 @@ else()
     endif()
   else()
     message(STATUS "Hamlib: reusing the build in ${_hl_root}")
+  endif()
+
+  # The `-avoid-version` check, asserted rather than assumed.
+  #
+  # A versioned SONAME here is not a cosmetic problem: Android's
+  # packager takes only files named exactly `lib*.so`, so
+  # `libhamlib.so.4` is dropped from the APK without comment and the app
+  # dies at `dlopen` before `main` -- the same shape of pre-main,
+  # no-output failure as the Windows import-library trap this file
+  # already records, and just as hard to tell from a deadlock.
+  if(ANDROID)
+    file(GLOB _hl_versioned "${_hl_root}/lib/libhamlib.so.[0-9]*")
+    if(_hl_versioned)
+      message(FATAL_ERROR
+        "Hamlib built with a versioned SONAME (${_hl_versioned}).\n"
+        "libtool did not honour -avoid-version, so this library cannot go "
+        "into an APK: Android installs only files named lib*.so and would "
+        "drop it silently, leaving a dlopen failure before main. Delete "
+        "${_hl_root} and fix the LDFLAGS before going further.")
+    endif()
+    if(IS_SYMLINK "${_hl_root}/lib/libhamlib.so")
+      message(FATAL_ERROR
+        "${_hl_root}/lib/libhamlib.so is a symlink; an APK needs the real "
+        "file under that name.")
+    endif()
   endif()
 endif()
 

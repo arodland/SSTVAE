@@ -71,17 +71,49 @@ qt_standard_project_setup(REQUIRES 6.8)
 set(SSTVAE_BUILD_GUI OFF CACHE STRING "" FORCE)
 set(SSTVAE_BUILD_QTAUDIO OFF CACHE STRING "" FORCE)
 set(SSTVAE_BUILD_OVERLAY OFF CACHE STRING "" FORCE)
-set(SSTVAE_BUILD_RIG OFF CACHE BOOL "" FORCE)
+# **On since 2026-08-22.** docs/android.md had this off because Hamlib
+# opens a device path and Android gives an app none -- but Hamlib takes a
+# socket for any backend (core/rig/transport.hpp records the mechanism),
+# so the radio list on a phone is the radio list on the desktop.
+#
+# It is still a switch rather than a given: this is the only part of the
+# app that cross-compiles an autotools tarball, so a build environment
+# without a working NDK toolchain can turn it off and lose CAT rather
+# than lose the app.
+option(SSTVAE_ANDROID_RIG "Build CAT/PTT rig control (needs a Hamlib cross-build)" ON)
+if(SSTVAE_ANDROID_RIG)
+    set(SSTVAE_BUILD_RIG ON CACHE BOOL "" FORCE)
+else()
+    set(SSTVAE_BUILD_RIG OFF CACHE BOOL "" FORCE)
+endif()
 set(SSTVAE_BUILD_PYMODULE OFF CACHE BOOL "" FORCE)
 add_subdirectory(.. sstvae_native EXCLUDE_FROM_ALL)
 
 qt_add_executable(sstvae_android main.cpp listener.cpp session.cpp service_jni.cpp java_fetcher.cpp
-    assets.cpp waterfall.cpp pictures.cpp composition.cpp transmitter.cpp)
+    assets.cpp waterfall.cpp pictures.cpp composition.cpp transmitter.cpp rigcontrol.cpp)
 qt_add_qml_module(sstvae_android URI SSTVAE VERSION 1.0
-    QML_FILES Main.qml LevelMeter.qml CropView.qml TransmitPane.qml)
+    QML_FILES Main.qml LevelMeter.qml CropView.qml TransmitPane.qml RigPane.qml)
 target_link_libraries(sstvae_android PRIVATE Qt6::Quick Qt6::Gui sstvae_core
                                              sstvae_audio_android
                                              sstvae_codec)
+# The transport is always linked: it is a byte pipe to a USB or
+# Bluetooth device and knows nothing about Hamlib, so the rig screen,
+# the device pickers and the settings all build even in the one
+# configuration that has no CAT.
+target_link_libraries(sstvae_android PRIVATE sstvae_rig_android)
+
+if(TARGET sstvae_rig)
+    target_link_libraries(sstvae_android PRIVATE sstvae_rig)
+    target_compile_definitions(sstvae_android PRIVATE SSTVAE_ANDROID_HAVE_RIG=1)
+
+    # libhamlib is a SHARED IMPORTED target, so androiddeployqt cannot
+    # find it by walking dependencies -- exactly the onnxruntime case
+    # below, with the same invisible failure: the APK builds, installs,
+    # and dies at `dlopen` before main.
+    get_target_property(_hamlib_so sstvae_hamlib IMPORTED_LOCATION)
+    set_property(TARGET sstvae_android APPEND PROPERTY
+        QT_ANDROID_EXTRA_LIBS "${_hamlib_so}")
+endif()
 
 # **androiddeployqt only packages libraries it knows about.** Qt's own
 # and the app's are found by walking dependencies; a third-party
@@ -119,6 +151,13 @@ function(sstvae_stage_package_dir from into)
 endfunction()
 sstvae_stage_package_dir("${CMAKE_CURRENT_SOURCE_DIR}/android" "${_pkg_dir}")
 sstvae_stage_package_dir("${SSTVAE_ANDROID_AUDIO_JAVA_DIR}" "${_pkg_dir}/src")
+if(TARGET sstvae_rig_android)
+    # The rig layer's Java half, and the vendored USB serial library it
+    # calls. Both go under src/ with the audio layer's, so androiddeployqt
+    # compiles them into the one app.
+    sstvae_stage_package_dir("${SSTVAE_ANDROID_RIG_JAVA_DIR}" "${_pkg_dir}/src")
+    sstvae_stage_package_dir("${SSTVAE_ANDROID_USBSERIAL_JAVA_DIR}" "${_pkg_dir}/src")
+endif()
 
 # **The model artifacts ship inside the APK** (assets.hpp says why: the
 # model is part of the on-air contract, and first run has to work with
@@ -240,3 +279,31 @@ qt_add_android_permission(sstvae_android
 # session, which is why the service never treats it as fatal.
 qt_add_android_permission(sstvae_android
     NAME android.permission.POST_NOTIFICATIONS)
+
+if(TARGET sstvae_rig_android)
+    # Rig control over Bluetooth. `BLUETOOTH_CONNECT` is a runtime
+    # permission from API 31; the two legacy ones below it are
+    # install-time and are what API 29 and 30 use instead -- the app's
+    # minSdk is 29, so dropping them would silently cost Bluetooth CAT
+    # on Android 10 and 11.
+    #
+    # **No `maxSdkVersion 30` on the legacy pair**, which is what they
+    # would carry on a hand-written manifest. `qt_add_android_permission`
+    # only grew `ATTRIBUTES` in Qt 6.9 and this app floors at 6.8, so
+    # using it would trade a tidy manifest for a build that fails on the
+    # minimum supported Qt. An unbounded legacy permission is ignored
+    # from API 31 up; it costs a line in the app's permission list and
+    # nothing else.
+    #
+    # **No BLUETOOTH_SCAN and no location permission**, deliberately:
+    # `SerialBridge` lists only *bonded* devices, so discovery never
+    # happens. Pairing is the system's job. Asking for location access to
+    # show a picker of already-paired radios is the kind of request that
+    # gets an app uninstalled.
+    qt_add_android_permission(sstvae_android
+        NAME android.permission.BLUETOOTH_CONNECT)
+    qt_add_android_permission(sstvae_android
+        NAME android.permission.BLUETOOTH)
+    qt_add_android_permission(sstvae_android
+        NAME android.permission.BLUETOOTH_ADMIN)
+endif()

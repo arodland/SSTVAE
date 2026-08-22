@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Which USB devices are worth offering this app for.
+
+     This exists for a reason that is not convenience. Android forgets a
+     USB permission the moment the device is detached, so without an
+     intent filter an operator re-grants it every single time they plug
+     the radio in. A device matched here and answered with "always open"
+     is granted automatically instead.
+
+     Values are DECIMAL. Android's parser reads these as base 10 and a
+     hex-looking 0x0403 is silently not a match, which is the kind of
+     failure that reads as "my adapter is unsupported".
+
+     Class 2 is CDC-Communications, which covers the ACM adapters built
+     into modern radios (an IC-705, a Digirig's serial half); the
+     vendor entries are the four chip families every USB-to-serial
+     cable in a shack uses. It is deliberately not exhaustive -- an
+     unlisted adapter still works, it just asks for permission each
+     time. -->
+<resources>
+    <!-- CDC-ACM, by class rather than by vendor. -->
+    <usb-device class="2" />
+
+    <!-- FTDI: 0x0403 -->
+    <usb-device vendor-id="1027" />
+    <!-- Silicon Labs (CP210x): 0x10c4 -->
+    <usb-device vendor-id="4292" />
+    <!-- Prolific (PL2303): 0x067b -->
+    <usb-device vendor-id="1659" />
+    <!-- QinHeng (CH340/CH341): 0x1a86 -->
+    <usb-device vendor-id="6790" />
+</resources>

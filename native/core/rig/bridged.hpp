@@ -82,6 +82,21 @@ std::unique_ptr<RigBackend> make_bridged_backend(
     HamlibConfig config, std::shared_ptr<SerialTransport> transport,
     BackendFactory make_inner);
 
+// Turn a `HamlibConfig` into the line settings a transport has to be
+// given, filling every `Default` from what that Hamlib backend would
+// have used (`rig::serial_defaults`, in `sstvae_rig`).
+//
+// **It also carries Hamlib's control-line conflict checks, and it has
+// to.** `rig_open` refuses -RIG_ECONF for RTS held with hardware
+// handshake, for RTS held while PTT keys by RTS, and for DTR held while
+// PTT keys by DTR -- but all three sit inside `if (rp->type.rig ==
+// RIG_PORT_SERIAL)`, so on the bridged path they never run. Losing them
+// would mean a configuration that a desktop refuses at connect time
+// silently producing a radio that will not key on a phone. Throws
+// RigError with the pair named.
+SerialParams resolve_serial_params(const HamlibConfig& config,
+                                   const SerialDefaults& defaults);
+
 // Whether keying this configuration drives a control line rather than
 // sending a CAT command. Exposed because the app has to know: it is the
 // difference between a PTT that works over Bluetooth and one that

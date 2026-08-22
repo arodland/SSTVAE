@@ -16,11 +16,17 @@ The rules mirror the Python package's, for the same reasons:
   rendering has to work under QGuiApplication with an offscreen
   platform, so an overlay stays renderable from the command line. This
   is the C++ restatement of "nothing in sstvae/overlay/ may import Qt".
-* **Only `core/audio/android/` may include `<jni.h>`.** Same rule and
-  same reason as Qt Multimedia's below: the engines stay drivable with no
-  platform audio at all, which is what keeps the headless tests and the
-  CLI tools possible. A JNI include elsewhere under `core/` would quietly
-  make the core un-buildable off Android.
+* **Only `core/audio/android/` and `core/rig/android/` may include
+  `<jni.h>`.** Same rule and same reason as Qt Multimedia's below: the
+  engines stay drivable with no platform audio and no platform serial
+  port at all, which is what keeps the headless tests and the CLI tools
+  possible. A JNI include elsewhere under `core/` would quietly make the
+  core un-buildable off Android.
+
+  Both are `<subsystem>/android/` and both are separate libraries, which
+  is the convention -- but this is an allowlist rather than a pattern on
+  purpose. A third one should be a deliberate edit here, not something
+  that starts passing because of where a directory was put.
 * **Only `core/audio/qt/` may include Qt Multimedia.** Soundcard I/O is
   the one place in `core/` that needs a Qt module, and it is a separate
   library (`SSTVAE_BUILD_QTAUDIO`) so the modem, the codec and both
@@ -69,8 +75,9 @@ RULES = [
         re.compile(r'^\s*#\s*include\s*[<"](QtMultimedia|QAudio|QMediaDevices)', re.M),
     ),
     (
-        "only core/audio/android/ may depend on JNI",
-        lambda p: p.parts[0] == "core" and p.parts[:3] != ("core", "audio", "android"),
+        "only core/audio/android/ and core/rig/android/ may depend on JNI",
+        lambda p: p.parts[0] == "core"
+        and p.parts[:3] not in (("core", "audio", "android"), ("core", "rig", "android")),
         re.compile(r'^\s*#\s*include\s*[<"]jni\.h', re.M),
     ),
     (

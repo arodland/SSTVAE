@@ -238,6 +238,30 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
   set(SSTVAE_ANDROID_AUDIO_JAVA_DIR
       "${CMAKE_CURRENT_SOURCE_DIR}/core/audio/android/java" CACHE INTERNAL "")
   message(STATUS "Android audio: ${ANDROID_ABI}")
+
+  # --- Android serial (USB / Bluetooth) -------------------------------------
+  # The transport a phone can actually open, behind `rig::SerialTransport`.
+  # Separate from sstvae_core for the same reason the audio layer is: the
+  # bridge, the composition and the PTT routing are all in the core and are
+  # tested against fakes on a desktop, and only the code that talks to the
+  # platform is here.
+  #
+  # It does *not* depend on sstvae_rig: a transport is a byte pipe and knows
+  # nothing about Hamlib, which is what lets the whole rig feature be built
+  # and reasoned about in pieces.
+  add_library(sstvae_rig_android STATIC core/rig/android/androidrig.cpp)
+  set_target_properties(sstvae_rig_android PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(sstvae_rig_android PUBLIC core)
+  target_link_libraries(sstvae_rig_android PUBLIC sstvae_core PRIVATE android log)
+
+  # Two Java trees, both staged into the app's package source dir. The
+  # second is vendored rather than a Gradle coordinate -- see
+  # third_party/usb-serial-for-android/README.md for why.
+  set(SSTVAE_ANDROID_RIG_JAVA_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/core/rig/android/java" CACHE INTERNAL "")
+  set(SSTVAE_ANDROID_USBSERIAL_JAVA_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/usb-serial-for-android/java"
+      CACHE INTERNAL "")
 endif()
 
 # --- Overlay rendering ------------------------------------------------------
