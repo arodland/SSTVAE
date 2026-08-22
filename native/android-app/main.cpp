@@ -47,6 +47,8 @@ int main(int argc, char* argv[]) {
     QCoreApplication::setOrganizationName(QStringLiteral("SSTVAE"));
     QCoreApplication::setOrganizationDomain(QStringLiteral("cleverdomain.org"));
     QCoreApplication::setApplicationName(QStringLiteral("SSTVAE"));
+    // Read back in QML as `Application.version` (the About tab).
+    QCoreApplication::setApplicationVersion(QStringLiteral(SSTVAE_VERSION));
     set_model_cache();
 
     using namespace sstvae;

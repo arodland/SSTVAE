@@ -192,6 +192,11 @@ endif()
 set_property(TARGET sstvae_android APPEND PROPERTY
     QT_ANDROID_PACKAGE_SOURCE_DIR "${_pkg_dir}")
 
+# The About tab's version string: one source of truth with the manifest's
+# `QT_ANDROID_VERSION_NAME` below, both `PROJECT_VERSION`.
+target_compile_definitions(sstvae_android PRIVATE
+    SSTVAE_VERSION="${PROJECT_VERSION}")
+
 set_target_properties(sstvae_android PROPERTIES
     QT_ANDROID_PACKAGE_NAME "org.cleverdomain.sstvae"
     QT_ANDROID_APP_NAME "SSTVAE"

@@ -110,6 +110,7 @@ ApplicationWindow {
         TabButton { text: "Send"; onClicked: transmitter.loadEncoder() }
         TabButton { text: "Pictures"; onClicked: pictures.refresh() }
         TabButton { text: "Settings" }
+        TabButton { text: "About" }
     }
 
     StackLayout {
@@ -714,6 +715,48 @@ ApplicationWindow {
             // pressed against the tab bar at the end of the scroll.
             Item { Layout.preferredHeight: 24 }
         }
+        }
+
+        // ---- About --------------------------------------------------
+        ColumnLayout {
+            spacing: 12
+
+            Item { Layout.fillHeight: true }
+
+            Label {
+                text: "SSTVAE"
+                font.pixelSize: 32
+                font.bold: true
+                Layout.alignment: Qt.AlignHCenter
+            }
+            Label {
+                text: "by Andrew Rodland, KC2G"
+                Layout.alignment: Qt.AlignHCenter
+            }
+            Label {
+                text: "Image transmission over HF radio."
+                Layout.alignment: Qt.AlignHCenter
+            }
+            Label {
+                text: "Version " + Application.version
+                Layout.alignment: Qt.AlignHCenter
+                opacity: 0.7
+            }
+
+            // Buttons rather than rich-text links: a link inside a
+            // paragraph is a touch target the width of the words.
+            Button {
+                text: "GitHub"
+                Layout.alignment: Qt.AlignHCenter
+                onClicked: Qt.openUrlExternally("https://github.com/arodland/SSTVAE")
+            }
+            Button {
+                text: "Discord"
+                Layout.alignment: Qt.AlignHCenter
+                onClicked: Qt.openUrlExternally("https://discord.gg/UKUFmMR75")
+            }
+
+            Item { Layout.fillHeight: true }
         }
     }
 

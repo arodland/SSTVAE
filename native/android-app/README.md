@@ -390,6 +390,54 @@ host's real default source, so without the move the app faithfully
 records the room. And **pre-resample the file to 48 kHz**, the same rule
 as the desktop: an on-the-fly 44.1k conversion cost ~4 dB there.
 
+**The GUI toggle has a console equivalent, and it is the one to use.**
+`adb emu avd hostmicon` (`hostmicoff` to undo) flips exactly the same
+switch, so a scripted, windowed-but-unattended run needs no clicking —
+which matters because the extended-controls state is **not persisted per
+AVD**, so every launch starts muted. `-allow-host-audio` alone is not
+enough: with it the guest gets a stream that is 99.9% zeros with
+occasional fragments, which reads on the waterfall as broadband hash and
+on the level meter as `peak -13 dBFS 99.9% near-zero` — a pure 1 kHz
+tone arrives looking like noise. `hostmicon` turns that into a clean
+line at the right frequency.
+
+**Force the qemu capture rate to 48 kHz, or lose ~37 dB.** qemu opens
+its host capture stream at **44100 Hz** by default while the guest's
+audio HAL runs at 48000, and whatever resamples between them is bad
+enough to be the dominant impairment: the same file that decodes at
+**35.7 dB** through the host loopback measured **-1 dB** inside the
+emulator, all frames received, sync fine, picture mush. The spectrum
+looks clean while it happens, because the damage is in-band. Old-style
+qemu environment variables fix it, and the emulator still honours them:
+
+```sh
+export QEMU_AUDIO_ADC_FIXED_SETTINGS=1 QEMU_AUDIO_ADC_FIXED_FREQ=48000 \
+       QEMU_AUDIO_ADC_FIXED_FMT=S16 QEMU_AUDIO_ADC_FIXED_CHANNELS=1
+```
+
+`pactl list source-outputs short` is the check — the qemu row must read
+`s16le 1ch 48000Hz`. With it, the emulator reproduces the file's own
+35.7 dB. Set `PULSE_SOURCE=sstvae_loop` in the same environment and the
+capture stream opens on the loopback directly, which retires the
+move-the-source-output step above.
+
+**Audio only initialises with a window**, so `-no-window` is not an
+option for this: headless the log says `pulseaudio: Failed to
+initialize PA context` and the guest hears nothing. `-gpu host` also
+needs a reachable X display, which on a Wayland desktop means both
+`DISPLAY` and `XAUTHORITY` (`/run/user/<uid>/xauth_*`) — without the
+latter it fails with `Invalid MIT-MAGIC-COOKIE-1 key` and falls back to
+refusing to start.
+
+**And expect run-to-run variance even with all of that right.** Repeats
+of one transmission on one AVD measured anywhere from -1 dB to 35.7 dB
+with nothing changed, and level makes almost no difference across a
+13 dB range — it is the emulator's capture path glitching, not
+something to tune. A **fresh boot is worth more than any setting**: the
+best runs on each AVD came within the first few receptions after
+launch. Take the picture you want and repeat until it is clean rather
+than hunting a parameter.
+
 The **WAV feeder** (see `native/android/`, `WavFeeder.java`) is still
 worth carrying over: it pushes a file through the capture path in ragged
 chunks with no host audio stack involved at all, which is reproducible
