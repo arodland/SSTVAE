@@ -449,7 +449,12 @@ void MainWindow::show_about() {
     // the one number every bug report needs, which was then readable
     // nowhere in the running application.
     QString text = tr("<b>SSTVAE %1</b><br>"
+                      "by Andrew Rodland, KC2G<br>"
                       "Image transmission over HF radio.<br><br>"
+                      "<a href=\"https://github.com/arodland/SSTVAE\">GitHub</a>"
+                      " &middot; "
+                      "<a href=\"https://discord.gg/UKUFmMR75\">Discord</a>"
+                      "<br><br>"
                       "Hamlib %2<br>Qt %3")
                        .arg(QCoreApplication::applicationVersion(),
                             QString::fromStdString(rig::hamlib_version()),
