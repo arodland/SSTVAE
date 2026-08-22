@@ -950,7 +950,24 @@ first attempt diagnosable rather than mysterious:
 
 - The configure step fails naming the exact compiler wrapper it looked
   for, because the NDK ships one per API level and an unsupported level
-  is *missing* rather than wrong.
+  is *missing* rather than wrong. **This is the one that fired on the
+  first real run**, and it fired for the wrong reason: the API level was
+  being read from `CMAKE_SYSTEM_VERSION`, which CMake defaults to `1`
+  when cross-compiling and nothing sets it, so the wrapper it looked for
+  was `x86_64-linux-android1-clang`. The guard written to catch exactly
+  that was `if(NOT _hl_api)` — and `1` is *true* in CMake, so it never
+  ran. A guard whose condition cannot fire is not a guard. The level now
+  comes from whichever of `SSTVAE_ANDROID_API`, `CMAKE_ANDROID_API`,
+  `ANDROID_NATIVE_API_LEVEL`, `ANDROID_PLATFORM_LEVEL`, `ANDROID_PLATFORM`
+  or `CMAKE_SYSTEM_VERSION` first gives a plausible answer, falls back to
+  21, says which source it used, and repairs upward to the lowest wrapper
+  the NDK actually ships if the chosen level has none.
+
+  `-DSSTVAE_ANDROID_API=<level>` overrides all of it. Building Hamlib at
+  a level *below* the app's minSdk is fine and is why 21 is the fallback:
+  a library built against an older libc loads on a newer one, never the
+  reverse, so guessing low fails on nobody's phone and guessing high
+  fails on somebody else's.
 - The install step refuses a versioned SONAME. libtool would produce
   `libhamlib.so.4.0.7`; Android's packager takes only files named
   exactly `lib*.so`, so that library is dropped from the APK without

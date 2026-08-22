@@ -32,6 +32,8 @@ set(SSTVAE_HAMLIB_SYSTEM OFF CACHE BOOL
     "Use the system libhamlib via pkg-config instead of the pinned build")
 set(SSTVAE_HAMLIB_DIR "" CACHE PATH
     "Prebuilt Hamlib tree (containing include/ and lib/); skips the download")
+set(SSTVAE_ANDROID_API "" CACHE STRING
+    "Android API level for the Hamlib cross-build; empty = detect")
 
 # --- the system option ------------------------------------------------------
 if(SSTVAE_HAMLIB_SYSTEM)
@@ -213,9 +215,44 @@ else()
       endif()
       set(_ndk_bin "${CMAKE_ANDROID_NDK}/toolchains/llvm/prebuilt/${_ndk_host}/bin")
 
-      set(_hl_api "${CMAKE_SYSTEM_VERSION}")
-      if(NOT _hl_api)
-        set(_hl_api 29)  # the app's minSdk
+      # **The API level is not reliably in `CMAKE_SYSTEM_VERSION`**, and
+      # believing it was is what made this block's first real run fail.
+      # CMake defaults that variable to `1` when cross-compiling and
+      # nothing sets it, which the NDK toolchain path does not always
+      # do -- so the compiler wrapper came out as
+      # `x86_64-linux-android1-clang`. Worse, the fallback written to
+      # catch exactly that was `if(NOT _hl_api)`, and `1` is *true* in
+      # CMake, so it never ran. A guard whose condition cannot fire is
+      # not a guard.
+      #
+      # Ask everything that might know, in order of how directly it
+      # means "API level", and take the first plausible answer.
+      # `SSTVAE_ANDROID_API` is first so a build with an NDK layout
+      # nobody here anticipated can be unblocked with one -D.
+      set(_hl_api "")
+      set(_hl_api_from "")
+      foreach(_src SSTVAE_ANDROID_API CMAKE_ANDROID_API ANDROID_NATIVE_API_LEVEL
+                   ANDROID_PLATFORM_LEVEL CMAKE_SYSTEM_VERSION)
+        if(DEFINED ${_src} AND "${${_src}}" MATCHES "^[0-9]+$"
+           AND "${${_src}}" GREATER_EQUAL 16)
+          set(_hl_api "${${_src}}")
+          set(_hl_api_from "${_src}")
+          break()
+        endif()
+      endforeach()
+      # The NDK's own spelling, "android-29".
+      if(_hl_api STREQUAL "" AND DEFINED ANDROID_PLATFORM
+         AND "${ANDROID_PLATFORM}" MATCHES "([0-9]+)")
+        set(_hl_api "${CMAKE_MATCH_1}")
+        set(_hl_api_from "ANDROID_PLATFORM")
+      endif()
+      if(_hl_api STREQUAL "")
+        # The floor of every NDK that still exists, and safe against the
+        # app's minSdk of 29: a library built for a *lower* level loads
+        # on a higher one, never the reverse. Guessing high is the
+        # failure that would only show up on somebody else's phone.
+        set(_hl_api 21)
+        set(_hl_api_from "fallback")
       endif()
 
       if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
@@ -235,13 +272,46 @@ else()
           "Hamlib for Android: unknown ABI '${CMAKE_ANDROID_ARCH_ABI}'")
       endif()
 
+      # The NDK ships one wrapper per API level, and which levels exist
+      # depends on the NDK release -- r28 dropped everything below 21.
+      # So a level that is right for the *app* can still have no wrapper
+      # here. Rather than refuse, take the lowest one at or above it:
+      # that is the same library, built against an older libc, and it
+      # runs everywhere the requested one would have.
       set(_hl_cc "${_ndk_bin}/${_hl_cc_triple}${_hl_api}-clang")
       if(NOT EXISTS "${_hl_cc}")
-        message(FATAL_ERROR
-          "No NDK compiler at ${_hl_cc}.\n"
-          "The API level comes from CMAKE_SYSTEM_VERSION (${_hl_api}); the "
-          "NDK ships a wrapper per level, so an unsupported one is missing "
-          "rather than wrong.")
+        file(GLOB _hl_wrappers "${_ndk_bin}/${_hl_cc_triple}[0-9]*-clang")
+        set(_hl_best "")
+        set(_hl_have "")
+        foreach(_w IN LISTS _hl_wrappers)
+          if("${_w}" MATCHES "${_hl_cc_triple}([0-9]+)-clang$")
+            set(_hl_level "${CMAKE_MATCH_1}")
+            list(APPEND _hl_have "${_hl_level}")
+            if(_hl_level GREATER_EQUAL _hl_api
+               AND (_hl_best STREQUAL "" OR _hl_level LESS _hl_best))
+              set(_hl_best "${_hl_level}")
+            endif()
+          endif()
+        endforeach()
+        if(_hl_best STREQUAL "")
+          list(SORT _hl_have COMPARE NATURAL)
+          # Joined, because an unjoined CMake list renders as
+          # `21;22;23` -- which reads like shell syntax in the one
+          # message somebody is reading precisely because they are stuck.
+          string(REPLACE ";" ", " _hl_have "${_hl_have}")
+          message(FATAL_ERROR
+            "No NDK compiler for ${_hl_cc_triple} at API ${_hl_api} or above "
+            "in ${_ndk_bin}.\n"
+            "The level was taken from ${_hl_api_from}. Levels this NDK has: "
+            "${_hl_have}.\n"
+            "Set -DSSTVAE_ANDROID_API=<level> to choose one, or "
+            "-DSSTVAE_ANDROID_RIG=OFF to build without CAT.")
+        endif()
+        message(STATUS
+          "Hamlib: no API ${_hl_api} wrapper for ${_hl_cc_triple}; "
+          "using ${_hl_best}")
+        set(_hl_api "${_hl_best}")
+        set(_hl_cc "${_ndk_bin}/${_hl_cc_triple}${_hl_api}-clang")
       endif()
 
       list(APPEND _hl_configure_args
@@ -255,7 +325,7 @@ else()
            "ac_cv_func_realloc_0_nonnull=yes")
       message(STATUS
         "Hamlib: cross-building for Android ${CMAKE_ANDROID_ARCH_ABI} "
-        "(API ${_hl_api})")
+        "(API ${_hl_api}, from ${_hl_api_from})")
     endif()
 
     # Cross-compiling to the other macOS architecture.
