@@ -23,6 +23,10 @@
 // so turning it off is not a second code path to keep working.
 
 using namespace sstvae;
+// Targeted, alongside the namespace directive, exactly as `listener.cpp`
+// and `transmitter.cpp` do it: `Session` is in `sstvae::androidapp`,
+// which `using namespace sstvae` does not reach into.
+using sstvae::androidapp::Session;
 
 namespace {
 
