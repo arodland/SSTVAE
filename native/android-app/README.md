@@ -972,8 +972,31 @@ first attempt diagnosable rather than mysterious:
   `libhamlib.so.4.0.7`; Android's packager takes only files named
   exactly `lib*.so`, so that library is dropped from the APK without
   comment and the app dies at `dlopen` **before `main`** — no output on
-  any stream, indistinguishable from a deadlock. `-avoid-version` in
-  `LDFLAGS` is what prevents it and the check is what proves it worked.
+  any stream, indistinguishable from a deadlock.
+
+  **`-avoid-version` is a libtool flag, not a linker one**, and putting
+  it in configure's `LDFLAGS` is the second thing that went wrong on a
+  real NDK build. configure's very first link test runs the compiler
+  directly, clang rejects an argument it has never heard of, and the
+  build stops at `C compiler cannot create executables` — with the
+  actual reason two layers down in `config.log`, which is a long way
+  from a flag we chose. It is applied at *make* time now, overriding
+  `libhamlib_la_LDFLAGS` (`src/Makefile.am:24`, the one variable
+  upstream puts `-version-info` in) and carrying `-no-undefined` over
+  from the same line.
+
+  Not plain `LDFLAGS=-avoid-version` at make time, which would also have
+  worked as far as libtool is concerned — it copes with `-version-info`
+  and `-avoid-version` together and strips the version
+  (`build-aux/ltmain.sh:9488`). The reasons are elsewhere: a
+  command-line `LDFLAGS` *replaces* the tree's, discarding whatever
+  configure computed, and it reaches every link in the tree including
+  the fifteen tool executables, where the flag means nothing.
+
+  Verified natively on a desktop, which is possible because the
+  mechanism is libtool's and not the NDK's: the same configure and make
+  arguments produce a single unversioned `libhamlib.so` whose
+  `readelf -d` SONAME is `libhamlib.so`, with the tools still linking.
 
 **Testing it without a radio.** Hamlib model 1 is the dummy: it opens,
 keys and reports a frequency with nothing attached, so the whole path

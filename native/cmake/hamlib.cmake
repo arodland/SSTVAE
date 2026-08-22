@@ -184,14 +184,19 @@ else()
     #     what its config.sub knows; the NDK's clang wrapper is
     #     `armv7a-linux-androideabi<api>-clang`. Using either name for
     #     both fails -- one at configure, one at the first compile.
-    #   * **`-avoid-version`, or the library cannot be packaged.** libtool
-    #     would produce `libhamlib.so.4.0.7` with `libhamlib.so` a
-    #     symlink to it, and Android's packager takes only files named
-    #     exactly `lib*.so` from `libs/<abi>/` -- a versioned SONAME is
-    #     silently not installed, and the app then dies at `dlopen`
-    #     before reaching main. That is checked for below rather than
-    #     trusted, because libtool ignoring a flag it does not like
-    #     would otherwise surface as that same invisible failure.
+    #   * **The library must come out unversioned, and the flag for that
+    #     is libtool's, not the linker's.** Otherwise libtool produces
+    #     `libhamlib.so.4.0.7` with `libhamlib.so` a symlink to it, and
+    #     Android's packager takes only files named exactly `lib*.so`
+    #     from `libs/<abi>/` -- a versioned SONAME is silently not
+    #     installed and the app dies at `dlopen` before reaching main.
+    #     `-avoid-version` is what suppresses it, and putting it in
+    #     `LDFLAGS` here is what the first attempt did: configure's very
+    #     first link test runs the compiler *directly*, clang rejects an
+    #     argument it has never heard of, and the whole thing stops at
+    #     "C compiler cannot create executables". It is applied at make
+    #     time instead, to the one automake variable that carries
+    #     `-version-info` -- see the build step below.
     #   * **The malloc probes have to be answered.** configure cannot run
     #     what it just built, so `AC_FUNC_MALLOC` guesses "no" and
     #     substitutes its own `rpl_malloc`, which does not exist here.
@@ -320,7 +325,6 @@ else()
            "AR=${_ndk_bin}/llvm-ar"
            "RANLIB=${_ndk_bin}/llvm-ranlib"
            "STRIP=${_ndk_bin}/llvm-strip"
-           "LDFLAGS=-avoid-version"
            "ac_cv_func_malloc_0_nonnull=yes"
            "ac_cv_func_realloc_0_nonnull=yes")
       message(STATUS
@@ -388,8 +392,32 @@ else()
     endif()
 
     message(STATUS "Hamlib: building with ${_hl_jobs} jobs")
+
+    # **`-avoid-version` belongs here, not in configure's LDFLAGS.** It
+    # is a libtool flag; configure's link test invokes the compiler
+    # directly, so putting it there stops the build at "C compiler
+    # cannot create executables" with the real reason two layers down in
+    # config.log.
+    #
+    # Overriding `libhamlib_la_LDFLAGS` rather than passing plain
+    # `LDFLAGS=-avoid-version` at make time, for two reasons that are
+    # not about libtool's precedence -- it copes with `-version-info`
+    # and `-avoid-version` together, and strips the version. First, a
+    # command-line `LDFLAGS` *replaces* the tree's, silently discarding
+    # anything configure computed. Second, it would reach every link in
+    # the tree, including the fifteen tool executables, where the flag
+    # means nothing. This names the one variable upstream puts
+    # `-version-info` in (`src/Makefile.am:24`) and substitutes for
+    # exactly that; `-no-undefined` is carried over from the same line
+    # because dropping it is not part of what is wanted here.
+    set(_hl_make_args "-j${_hl_jobs}")
+    if(ANDROID)
+      list(APPEND _hl_make_args
+           "libhamlib_la_LDFLAGS=-no-undefined -avoid-version")
+    endif()
+
     execute_process(
-      COMMAND make -j${_hl_jobs} install
+      COMMAND make ${_hl_make_args} install
       WORKING_DIRECTORY "${hamlib_src_BINARY_DIR}"
       RESULT_VARIABLE _hl_rc
       OUTPUT_FILE "${hamlib_src_BINARY_DIR}/build.log"
