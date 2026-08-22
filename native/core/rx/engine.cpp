@@ -1,6 +1,7 @@
 #include "rx/engine.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -12,13 +13,16 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "dsp/dsp.hpp"
 #include "framing/framing.hpp"
 #include "images/images.hpp"
 #include "latents/latents.hpp"
+#include "modem/diversity.hpp"
 #include "modem/modem.hpp"
 #include "sync/sync.hpp"
 
@@ -157,11 +161,6 @@ std::optional<FoundReception> find_new_reception(
     return std::nullopt;
 }
 
-int count_nonzero(const std::vector<double>& v) {
-    return static_cast<int>(std::count_if(v.begin(), v.end(),
-                                          [](double w) { return w != 0.0; }));
-}
-
 void remember_finished(std::deque<std::int64_t>& finished, std::int64_t pos) {
     finished.push_back(pos);
     while (finished.size() > kFinishedHistory) finished.pop_front();
@@ -202,6 +201,56 @@ struct Pending {
     double snr_db = kNaN;
 };
 
+// One diversity branch's decode_loop-style preference: header path
+// first, falling back to blind. Used only by decode_loop_diversity --
+// decode_loop itself keeps its own inline version of this same
+// preference, since it is explicitly load-bearing (CLAUDE.md) and this
+// keeps it byte-for-byte unchanged.
+//
+// Returns the result and its reception_start, always expressed at the
+// preamble's sample position (ring-buffer coordinates) whichever path
+// found it -- the blind path's frame0_start is one preamble+header
+// later, so it is shifted back by that much, same correction
+// decode_loop's own blind branch applies. That gives every branch,
+// however it locked, one directly comparable position, which is what
+// lets decode_loop_diversity match branches (and dedupe against
+// finished_starts) the same way regardless of acquisition path.
+std::optional<std::pair<modem::diversity::Branch, std::int64_t>> find_branch_reception(
+    const modem::Modem& modem, std::span<const double> samples, std::int64_t buf_start,
+    const std::deque<std::int64_t>& finished, std::int64_t epsilon,
+    double blind_search_seconds, modem::DriftTrack drift_track) {
+    std::optional<FoundReception> found;
+    try {
+        const std::vector<std::complex<double>> z = dsp::to_baseband(samples);
+        found = find_new_reception(modem, samples, z, buf_start, finished, epsilon,
+                                   drift_track);
+    } catch (const std::exception&) {
+        // One bad poll on one branch must not end the session.
+        found = std::nullopt;
+    }
+    if (found) {
+        const std::int64_t start = found->start;
+        return std::make_pair(modem::diversity::Branch(std::move(found->result)), start);
+    }
+
+    const auto n = static_cast<std::int64_t>(samples.size());
+    const auto blind_span = static_cast<std::int64_t>(blind_search_seconds * FS);
+    const auto blind_search = n <= blind_span ? std::nullopt : window_s(n - blind_span, n);
+
+    std::optional<modem::BlindDemodResult> rb;
+    try {
+        rb = modem.demodulate_blind(samples, blind_search, std::nullopt, drift_track);
+    } catch (const std::exception&) {
+        rb = std::nullopt;
+    }
+    if (!rb || !rb->beacon || !rb->frame0_start) return std::nullopt;
+
+    const std::int64_t reception_start =
+        buf_start + *rb->frame0_start - PREAMBLE_SAMPLES - HEADER_SAMPLES;
+    if (already_finished(reception_start, finished, epsilon)) return std::nullopt;
+    return std::make_pair(modem::diversity::Branch(std::move(*rb)), reception_start);
+}
+
 // Back to "listening", with the per-reception fields cleared.
 void reset_to_listening(SharedState& state) {
     state.update([](Progress& s) {
@@ -216,6 +265,12 @@ void reset_to_listening(SharedState& state) {
 }
 
 }  // namespace
+
+double branch_progress_frac(const modem::diversity::Branch& b) {
+    if (const auto* d = std::get_if<modem::DemodResult>(&b))
+        return static_cast<double>(d->frames_received) / d->mode.n_frames;
+    return blind_progress(std::get<modem::BlindDemodResult>(b).weights).frac;
+}
 
 BlindProgress blind_progress(std::span<const double> weights_full) {
     // The metric counts confidently-received latents only, not bare
@@ -339,6 +394,24 @@ Sink save_to_dir_sink(std::string out_dir, std::optional<std::pair<int, int>> si
             std::fflush(stdout);
         }
         return path;
+    };
+}
+
+DebugImageSink save_debug_image_to_dir_sink(bool verbose) {
+    return [verbose](const images::Picture& img,
+                     const std::optional<std::string>& saved_path)
+               -> std::optional<std::string> {
+        if (!saved_path) return std::nullopt;
+        const std::filesystem::path p(*saved_path);
+        const std::filesystem::path out_path =
+            p.parent_path() / (p.stem().string() + "_diversity" + p.extension().string());
+        images::save_png(img, out_path.string());
+        if (verbose) {
+            std::printf("saved %s (diversity branch-contribution map)\n",
+                        out_path.string().c_str());
+            std::fflush(stdout);
+        }
+        return out_path.string();
     };
 }
 
@@ -795,6 +868,240 @@ void decode_loop_low_cpu(RingBuffer& ring, const Decoder& decode, SharedState& s
         }
 
         stop.wait(2.0);
+        reset_to_listening(state);
+    }
+}
+
+// --- the diversity loop ------------------------------------------------------
+
+void decode_loop_diversity(std::span<RingBuffer* const> rings, const Decoder& decode,
+                           SharedState& state, const RxConfig& config,
+                           StopFlag& stop, const Sink& sink,
+                           const DebugImageSink* debug_sink) {
+    if (rings.size() != 2)
+        throw std::invalid_argument("decode_loop_diversity needs exactly two ring buffers");
+    const modem::Modem modem;
+    const auto epsilon = static_cast<std::int64_t>(SAME_RECEPTION_EPSILON_S * FS);
+    std::deque<std::int64_t> finished_starts;
+
+    // The reception being tracked, or unset while listening -- see
+    // decode_loop, whose record and completion tests this shares.
+    std::optional<Pending> pending;
+    // The branch results behind `pending->image`, for the debug sink.
+    // Held beside it rather than read from the current poll for the same
+    // reason the image is: the poll that delivers a reception is often
+    // not the poll that last decoded it, and a heatmap of some other
+    // poll's branches would not describe the picture it is saved next to.
+    std::vector<modem::diversity::Branch> pending_branches;
+
+    while (!stop.is_set()) {
+        if (stop.wait(config.poll_interval)) break;
+
+        std::array<std::uint64_t, 2> totals{};
+        std::array<std::vector<double>, 2> samples;
+        for (int i = 0; i < 2; ++i) samples[i] = rings[i]->snapshot(&totals[i]);
+        const double seconds_captured =
+            static_cast<double>(std::min(totals[0], totals[1])) / FS;
+        // The deadline test below asks "can any more of this
+        // transmission still be arriving?", which is answered by
+        // whichever branch has heard the furthest: both rings capture
+        // the same air from the same moment, so once *either* holds
+        // audio past the reception's end, the transmission is over. min
+        // would make that test hostage to a branch whose capture died --
+        // the very thing a deadline exists to survive -- while
+        // seconds_captured stays on min as the honest floor of what has
+        // been heard on both.
+        const auto total_max = static_cast<std::int64_t>(std::max(totals[0], totals[1]));
+        state.update([&](Progress& s) { s.seconds_captured = seconds_captured; });
+        if (samples[0].size() < MIN_SECONDS_BEFORE_ATTEMPT * FS ||
+            samples[1].size() < MIN_SECONDS_BEFORE_ATTEMPT * FS)
+            continue;
+        state.update([](Progress& s) { ++s.polls; });
+
+        using BranchHit = std::pair<modem::diversity::Branch, std::int64_t>;
+        std::array<std::optional<BranchHit>, 2> found_by_branch;
+        for (int i = 0; i < 2; ++i) {
+            const auto buf_start = static_cast<std::int64_t>(totals[i]) -
+                                   static_cast<std::int64_t>(samples[i].size());
+            found_by_branch[i] = find_branch_reception(modem, samples[i], buf_start,
+                                                        finished_starts, epsilon,
+                                                        config.blind_search_seconds,
+                                                        config.drift_track);
+        }
+
+        std::optional<modem::diversity::Branch> combined;
+        std::optional<std::int64_t> reception_start;
+        std::vector<modem::diversity::Branch> branch_results;
+        bool branch_a_locked = false;
+        bool branch_b_locked = false;
+        if (found_by_branch[0] && found_by_branch[1] &&
+            std::llabs(found_by_branch[0]->second - found_by_branch[1]->second) <= epsilon) {
+            branch_results = {found_by_branch[0]->first, found_by_branch[1]->first};
+            combined = modem::diversity::combine_diversity_results(branch_results);
+            reception_start = found_by_branch[0]->second;
+            branch_a_locked = true;
+            branch_b_locked = true;
+        } else if (found_by_branch[0] || found_by_branch[1]) {
+            // Only one branch locked, or the two locks are further apart
+            // than a same-transmission match tolerates (most likely a
+            // spurious hit on one branch). Use whichever branch is
+            // furthest along, same as an operator picking the stronger
+            // antenna.
+            int best = found_by_branch[0] && found_by_branch[1]
+                           ? (branch_progress_frac(found_by_branch[0]->first) >=
+                                      branch_progress_frac(found_by_branch[1]->first)
+                                  ? 0
+                                  : 1)
+                           : (found_by_branch[0] ? 0 : 1);
+            combined = found_by_branch[best]->first;
+            reception_start = found_by_branch[best]->second;
+            branch_results = {found_by_branch[best]->first};
+            branch_a_locked = (best == 0);
+            branch_b_locked = (best == 1);
+        }
+
+        state.update([&](Progress& s) {
+            s.branch_a_locked = branch_a_locked;
+            s.branch_b_locked = branch_b_locked;
+        });
+
+        std::vector<double> latents_full, weights_full;
+        std::optional<std::string> mode_name;
+        std::optional<int> n_frames_expected, frames_received;
+        std::string callsign;
+        double snr_db = kNaN;
+        double progress_frac = 0.0;
+        int progress_metric = 0;
+
+        if (combined) {
+            if (const auto* d = std::get_if<modem::DemodResult>(&*combined)) {
+                latents_full = latents::pad_to_full(d->latents);
+                weights_full = latents::pad_to_full(d->weights);
+                mode_name = std::string(d->mode.name);
+                n_frames_expected = d->mode.n_frames;
+                frames_received = d->frames_received;
+                progress_frac = static_cast<double>(d->frames_received) / d->mode.n_frames;
+                progress_metric = d->frames_received;
+                callsign = d->callsign;
+                snr_db = d->snr_db;
+            } else {
+                const auto& bd = std::get<modem::BlindDemodResult>(*combined);
+                latents_full = bd.latents;
+                weights_full = bd.weights;
+                const BlindProgress bp = blind_progress(weights_full);
+                progress_metric = bp.metric;
+                progress_frac = bp.frac;
+                callsign = bd.callsign;
+                snr_db = bd.snr_db;
+            }
+        }
+
+        bool advanced = false;
+        const bool decoded = combined.has_value() && reception_start.has_value();
+        if (decoded) {
+            // A different reception than the one being tracked takes
+            // over with a fresh record, so that its first poll cannot
+            // inherit the previous one's stall clock and be ended
+            // immediately -- see decode_loop, including why the deadline
+            // is fixed the moment the start is known and why a combine
+            // with no header uses mode C's duration.
+            if (!pending || std::llabs(*reception_start - pending->start) > epsilon) {
+                const auto deadline_frames =
+                    static_cast<std::int64_t>(n_frames_expected ? *n_frames_expected
+                                                                : kMaxModeFrames);
+                Pending p;
+                p.start = *reception_start;
+                p.deadline_abs = *reception_start + PREAMBLE_SAMPLES + HEADER_SAMPLES +
+                                 deadline_frames * FRAME_SAMPLES;
+                pending = std::move(p);
+            }
+            if (progress_metric > pending->metric) {
+                pending->metric = progress_metric;
+                advanced = true;
+            }
+            pending->image = std::make_shared<const images::Picture>(
+                decode(latents_full, weights_full));
+            pending->mode_name = mode_name;
+            pending->frames_received = frames_received;
+            pending->n_frames_expected = n_frames_expected;
+            pending->callsign = callsign;
+            pending->snr_db = snr_db;
+            pending_branches = branch_results;
+            state.update([&](Progress& s) {
+                s.status = Status::Receiving;
+                s.mode_name = mode_name;
+                s.frames_received = frames_received;
+                s.n_frames_expected = n_frames_expected;
+                s.progress_frac = std::min(progress_frac, 1.0);
+                s.callsign = callsign;
+                s.snr_db = snr_db;
+                s.image = pending->image;
+            });
+        }
+
+        if (!pending) {
+            state.update([](Progress& s) { s.status = Status::Listening; });
+            continue;
+        }
+
+        // The completion tests, run on every poll rather than only on
+        // one that decoded -- see decode_loop and `Pending` for why that
+        // is the whole point, and why the stall clock deliberately does
+        // not run on a header-locked reception that is still decoding (a
+        // spurious lock re-decodes the same frames forever, and ending
+        // *that* on a stall would autosave a picture of noise). Here a
+        // poll decodes nothing whenever neither branch locks, which is
+        // the ordinary way a two-branch reception ends.
+        const bool no_progress =
+            !decoded || (!pending->n_frames_expected && !advanced);
+        if (no_progress) {
+            if (!pending->stable_since) pending->stable_since = Clock::now();
+        } else {
+            pending->stable_since.reset();
+        }
+
+        const bool complete = pending->n_frames_expected && pending->frames_received &&
+                              *pending->frames_received >= *pending->n_frames_expected;
+        const bool stalled = pending->stable_since &&
+                             seconds_since(*pending->stable_since) >= config.end_grace;
+        if (!complete && !stalled && total_max < pending->deadline_abs) continue;
+
+        // Deliver only what has something in it, and record only what
+        // was delivered -- a reception that ended with no confidently
+        // received latent is not a picture, and blocking its position
+        // out would keep a merely-weak transmission from being found
+        // again while its audio is still in the buffer.
+        const bool delivered = pending->metric > 0 && pending->image;
+        if (delivered) {
+            Reception rec;
+            rec.image = *pending->image;
+            rec.mode_name = pending->mode_name;
+            rec.callsign = pending->callsign;
+            rec.snr_db = pending->snr_db;
+            rec.frames_received = pending->frames_received;
+            rec.n_frames_expected = pending->n_frames_expected;
+            const std::optional<std::string> saved_path = sink(rec);
+
+            if (debug_sink && pending_branches.size() == 2) {
+                (*debug_sink)(modem::diversity::contribution_image(pending_branches),
+                              saved_path);
+            }
+
+            remember_finished(finished_starts, pending->start);
+            state.update([&](Progress& s) {
+                s.status = Status::Done;
+                s.saved_path = saved_path;
+            });
+        }
+        pending.reset();
+        pending_branches.clear();
+
+        if (delivered && config.once) {
+            stop.set();
+            break;
+        }
+
+        if (delivered) stop.wait(2.0);
         reset_to_listening(state);
     }
 }

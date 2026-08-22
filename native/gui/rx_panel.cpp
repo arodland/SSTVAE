@@ -1,13 +1,17 @@
 #include "rx_panel.hpp"
 
 #include <QCheckBox>
+#include <QColor>
 #include <QDesktopServices>
 #include <QSignalBlocker>
 #include <QFileDialog>
+#include <QFont>
+#include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
+#include <QPalette>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -19,6 +23,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <exception>
 #include <filesystem>
@@ -61,6 +66,41 @@ fs::path unique_path(fs::path path) {
         if (!fs::exists(candidate)) return candidate;
     }
     return path;
+}
+
+// SNR for display, with a placeholder when there is none.
+//
+// `rx::fmt_snr` returns an empty string for NaN, which is right for it
+// -- it mirrors Python's and feeds the CLI. But on screen an absent
+// field is indistinguishable from a field that was never going to be
+// there: the operator cannot tell "no SNR estimate yet" from "this
+// build does not show SNR". The engine formats; the panel decides how
+// to show absence.
+QString snr_text(double snr_db) {
+    const QString formatted = QString::fromStdString(rx::fmt_snr(snr_db));
+    return formatted.isEmpty() ? QStringLiteral("  SNR --") : formatted;
+}
+
+// A filled chip, not coloured text -- the same argument as the PTT lamp
+// (main_window.cpp): a lock state is exactly the kind of thing that
+// must read at a glance, and coloured text on the panel's own
+// background is a contrast problem waiting for a dark theme. Locked is
+// `style::color::ok()`/`on_ok()`, the same pair the waterfall's level
+// meter already uses for "healthy". Not locked deliberately reuses the
+// palette's own Button/ButtonText pair rather than a second hand-picked
+// grey: every theme already keeps that pairing legible, and it is what
+// makes the chip read as an inactive control without being a disabled
+// one (`style::dim` is for text, not for a filled surface).
+void set_lock_chip(QLabel* chip, bool locked) {
+    QPalette pal = chip->palette();
+    if (locked) {
+        pal.setColor(QPalette::Window, style::color::ok());
+        pal.setColor(QPalette::WindowText, style::color::on_ok());
+    } else {
+        pal.setColor(QPalette::Window, pal.color(QPalette::Button));
+        pal.setColor(QPalette::WindowText, pal.color(QPalette::ButtonText));
+    }
+    chip->setPalette(pal);
 }
 
 }  // namespace
@@ -134,6 +174,43 @@ void ReceivePanel::build_ui() {
     status_ = new style::ElidingLabel(tr("Stopped"), lower);
     status_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     lower_layout->addWidget(status_);
+
+    // The diversity lock chips: which of the two receivers is currently
+    // contributing to the combine. Hidden until a diversity session
+    // starts (set_lock_chip below never runs otherwise, so these stay in
+    // their "not locked" look, which would be misleading to show for an
+    // ordinary single-receiver session).
+    auto* lock_row = new QHBoxLayout();
+    lock_row->setContentsMargins(0, 0, 0, 0);
+    auto make_lock_chip = [this](const QString& text) {
+        auto* chip = new QLabel(text, this);
+        QFont f = chip->font();
+        f.setBold(true);
+        chip->setFont(f);
+        chip->setAutoFillBackground(true);
+        chip->setAlignment(Qt::AlignCenter);
+        chip->setContentsMargins(6, 1, 6, 1);
+        // A boundary, not just a fill: measured against this platform's
+        // own light theme, the "not locked" state's Button colour sits
+        // only ~20 levels from Window -- filled but not obviously a
+        // chip. `ok()`/`on_ok()` is high-contrast by construction and
+        // needs no help; a frame is what keeps the *other* state
+        // reading as a chip rather than as bold text with an
+        // almost-invisible box.
+        chip->setFrameShape(QFrame::Box);
+        chip->setFrameShadow(QFrame::Plain);
+        chip->setLineWidth(1);
+        chip->hide();
+        return chip;
+    };
+    branch_a_chip_ = make_lock_chip(tr("Primary"));
+    branch_b_chip_ = make_lock_chip(tr("Secondary"));
+    set_lock_chip(branch_a_chip_, false);
+    set_lock_chip(branch_b_chip_, false);
+    lock_row->addWidget(branch_a_chip_);
+    lock_row->addWidget(branch_b_chip_);
+    lock_row->addStretch(1);
+    lower_layout->addLayout(lock_row);
 
     progress_ = new QProgressBar(lower);
     progress_->setRange(0, 100);
@@ -261,6 +338,42 @@ bool ReceivePanel::start() {
         return false;
     }
 
+    // Diversity reception's second branch. Failing to open it fails the
+    // whole start, the same as the primary device above -- silently
+    // falling back to single-branch reception would mean the operator's
+    // "diversity reception" setting quietly stopped meaning what it
+    // said, which is worse than a clear error naming the device that
+    // did not open.
+    if (config.receive.diversity_enabled) {
+        ring2_ = std::make_shared<rx::RingBuffer>(config.receive.buffer_seconds);
+        try {
+            stream2_ = std::make_unique<audio::qt::InputStream>(
+                config.receive.diversity_device, *ring2_, config::FS,
+                [this](const std::string& message) {
+                    app_->log_event("rx", log::Severity::Info,
+                                    QString::fromStdString(message));
+                },
+                [this](const std::string& message) {
+                    emit errorOccurred(QString::fromStdString(message));
+                });
+        } catch (const std::exception& e) {
+            ring2_.reset();
+            if (Waterfall* w = fall()) w->set_ring(nullptr);
+            ring_.reset();
+            stream_.reset();
+            app_->log_event(
+                "rx", log::Severity::Error,
+                tr("could not open the diversity input device: %1")
+                    .arg(QString::fromUtf8(e.what())));
+            QMessageBox::critical(
+                this, tr("Could not open the diversity input device"),
+                tr("%1\n\nCheck the second input device in Settings, or turn "
+                   "diversity reception off there.")
+                    .arg(QString::fromUtf8(e.what())));
+            return false;
+        }
+    }
+
     rx::RxConfig rx_config;
     rx_config.out_dir = config.folders.receive_dir;
     rx_config.poll_interval = config.receive.poll_interval;
@@ -283,13 +396,29 @@ bool ReceivePanel::start() {
     };
 
     stop_flag_.clear();
+    const bool diversity = config.receive.diversity_enabled;
     const bool low_cpu = config.receive.low_cpu;
     const int device_rate = stream_->device_rate();
 
+    // Empty (falsy) unless diversity reception's debug image is on --
+    // decode_loop_diversity takes a pointer, so this has to outlive the
+    // call, hence captured by value into the thread lambda below rather
+    // than constructed inside it.
+    rx::DebugImageSink debug_sink;
+    if (diversity && config.receive.diversity_debug_image) {
+        debug_sink = rx::save_debug_image_to_dir_sink();
+    }
+
     running_.store(true);
-    thread_ = std::thread([this, rx_config, decoder, sink, low_cpu] {
+    thread_ = std::thread([this, rx_config, decoder, sink, low_cpu, diversity,
+                           debug_sink] {
         try {
-            if (low_cpu) {
+            if (diversity) {
+                const std::array<rx::RingBuffer*, 2> rings{ring_.get(), ring2_.get()};
+                const rx::DebugImageSink* debug_ptr = debug_sink ? &debug_sink : nullptr;
+                rx::decode_loop_diversity(rings, decoder, *shared_, rx_config,
+                                          stop_flag_, sink, debug_ptr);
+            } else if (low_cpu) {
                 rx::decode_loop_low_cpu(*ring_, decoder, *shared_, rx_config,
                                         stop_flag_, sink);
             } else {
@@ -311,6 +440,11 @@ bool ReceivePanel::start() {
     // keeps the history.
     banner_->clear();
     was_receiving_ = false;
+    diversity_active_ = diversity;
+    branch_a_chip_->setVisible(diversity_active_);
+    branch_b_chip_->setVisible(diversity_active_);
+    set_lock_chip(branch_a_chip_, false);
+    set_lock_chip(branch_b_chip_, false);
     app_->log_event("rx", log::Severity::Info,
                     tr("listening (device at %1 Hz)").arg(device_rate));
     emit listeningChanged(true);
@@ -324,14 +458,17 @@ void ReceivePanel::stop() {
     const bool was_listening = thread_.joinable();
 
     stop_flag_.set();
-    // The stream first: it is what feeds the loop, and stopping it means
+    // The streams first: they feed the loop, and stopping them means
     // the loop's next poll sees no new audio rather than racing us.
     stream_.reset();
+    stream2_.reset();
     if (thread_.joinable()) thread_.join();
     running_.store(false);
 
     if (Waterfall* w = fall()) w->set_ring(nullptr);
     ring_.reset();
+    ring2_.reset();
+    diversity_active_ = false;
 
     if (start_button_ != nullptr) {
         start_button_->setEnabled(true);
@@ -341,6 +478,8 @@ void ReceivePanel::stop() {
         // this the bar keeps whatever fraction the reception had
         // reached: "Stopped" over a bar still reading 63%.
         progress_->setValue(0);
+        branch_a_chip_->hide();
+        branch_b_chip_->hide();
     }
     if (was_listening) {
         app_->log_event("rx", log::Severity::Info, tr("stopped"));
@@ -518,6 +657,11 @@ void ReceivePanel::refresh_status() {
     set_status(text);
     progress_->setValue(static_cast<int>(100.0 * progress.progress_frac));
 
+    if (diversity_active_) {
+        set_lock_chip(branch_a_chip_, progress.branch_a_locked);
+        set_lock_chip(branch_b_chip_, progress.branch_b_locked);
+    }
+
     if (progress.image && progress.image.get() != shown_) {
         shown_ = progress.image.get();
         set_displayed(*progress.image, progress.callsign, progress.mode_name);
@@ -677,6 +821,10 @@ void ReceivePanel::fill_for_screenshot() {
     set_status(
         tr("Receiving mode C: frame 220/220 (100%)  ·  SNR 8.3 dB  ·  de KD8XYZ"));
     progress_->setValue(100);
+    branch_a_chip_->show();
+    branch_b_chip_->show();
+    set_lock_chip(branch_a_chip_, true);
+    set_lock_chip(branch_b_chip_, false);
     last_card_->setText(
         tr("Last: 14:32  ·  mode C  ·  de KD8XYZ  ·  SNR 8.3 dB"
            "  ·  220/220 frames  ·  KD8XYZ-C-14230000.png"));

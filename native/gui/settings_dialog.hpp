@@ -47,6 +47,7 @@ public:
 private slots:
     void sync_precision_enabled();
     void refresh_devices();
+    void sync_diversity_enabled();
     void sync_ptt_enabled();
     // Show what the current filename template would actually produce.
     void sync_filename_preview();
@@ -141,6 +142,16 @@ private:
     QLineEdit* save_size_ = nullptr;
     QDoubleSpinBox* buffer_seconds_ = nullptr;
     QDoubleSpinBox* poll_interval_ = nullptr;
+
+    // Diversity reception (docs/diversity-reception.md). Lives on the
+    // Audio tab, next to the primary input device it is combined with --
+    // built before the Receive tab (see the addTab order in the .cpp),
+    // so low_cpu_'s toggled connection and the initial
+    // sync_diversity_enabled() call, both in receive_tab(), can rely on
+    // these already existing.
+    QCheckBox* diversity_enabled_ = nullptr;
+    QComboBox* diversity_device_ = nullptr;
+    QCheckBox* diversity_debug_image_ = nullptr;
 };
 
 }  // namespace sstvae::gui

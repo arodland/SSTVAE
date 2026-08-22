@@ -125,6 +125,11 @@ QColor on_danger() { return QColor(0xff, 0xf2, 0xf0); }
 QColor danger_bright() { return DANGER.lighter(160); }
 QColor caution() { return QColor(0xff, 0xbe, 0x3c); }
 QColor ok() { return QColor(0x5a, 0xdc, 0x78); }
+// `ok()` is a light, bright green -- measured 11.95:1 against black,
+// 1.76:1 against white -- so its companion text is dark rather than
+// `on_danger()`'s light, and near-black rather than pure black to keep
+// the same "tinted toward the hue" idea `on_danger()` uses.
+QColor on_ok() { return QColor(0x0a, 0x33, 0x16); }
 
 QColor viewport() { return QColor(0x20, 0x20, 0x24); }
 QColor viewport_frame() { return QColor(0x31, 0x31, 0x3a); }
