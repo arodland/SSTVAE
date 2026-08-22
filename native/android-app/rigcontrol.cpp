@@ -161,6 +161,7 @@ void RigControl::setEnabled(bool on) {
 void RigControl::setConnection(const QString& kind) {
     if (kind == connection_) return;
     connection_ = kind;
+    error_.clear();
     // The device belongs to the kind that was showing when it was
     // chosen, so carrying it across would offer a Bluetooth address to
     // the USB opener.
@@ -363,6 +364,8 @@ bool RigControl::connectRig() {
     } else {
         config.device = device_.toStdString();
         if (config.device.empty()) {
+            error_ = tr("Choose a device first.");
+            emit changed();
             return false;
         }
         // The line settings the transport has to be given, with every
@@ -379,16 +382,22 @@ bool RigControl::connectRig() {
         rig::SerialParams params;
         try {
             params = rig::resolve_serial_params(config, defaults);
-        } catch (const std::exception&) {
-            // A control-line conflict. Left to `start_rig`, which runs
-            // the same resolution and publishes the message -- reporting
-            // it from two places would mean two wordings for one fault.
-            params = rig::SerialParams{};
-            params.device_id = config.device;
+        } catch (const std::exception& e) {
+            // A control-line conflict -- PTT by RTS with hardware
+            // handshaking, and the two like it. **Reported here, because
+            // nothing downstream will**: `make_bridged_backend` does not
+            // resolve line settings (the transport is built with them
+            // before it is handed over), so an earlier draft that left
+            // this to `start_rig` swallowed the message and connected
+            // with a silently wrong configuration.
+            error_ = QString::fromStdString(e.what());
+            emit changed();
+            return false;
         }
         transport = rig::android::make_transport(params);
     }
 
+    error_.clear();
     const bool ok = Session::instance().start_rig(config, std::move(transport));
     emit changed();
     return ok;
@@ -402,11 +411,19 @@ void RigControl::disconnectRig() {
 // --- live state -------------------------------------------------------------
 
 bool RigControl::running() const { return Session::instance().rig_running(); }
-bool RigControl::failed() const { return Session::instance().rig_failed(); }
 bool RigControl::canKey() const { return Session::instance().rig_can_key(); }
 
 QString RigControl::status() const {
+    if (!error_.isEmpty()) return error_;
     return QString::fromStdString(Session::instance().rig_status());
+}
+
+bool RigControl::failed() const {
+    return !error_.isEmpty() || Session::instance().rig_failed();
+}
+
+bool RigControl::bluetoothReady() const {
+    return rig::android::has_permission("bt:");
 }
 
 QString RigControl::frequency() const {

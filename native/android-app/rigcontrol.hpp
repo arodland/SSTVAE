@@ -100,6 +100,11 @@ class RigControl : public QObject {
     // screen, which says so rather than leaving the operator to work out
     // whether the VOX leader is still doing the job.
     Q_PROPERTY(bool canKey READ canKey NOTIFY changed)
+    // Whether Bluetooth can be listed at all. Distinct from "no paired
+    // radios", which is what an empty list looks like either way -- and
+    // telling an operator to go and pair a radio they already paired is
+    // the kind of wrong advice that ends in a bug report.
+    Q_PROPERTY(bool bluetoothReady READ bluetoothReady NOTIFY devicesChanged)
 
 public:
     explicit RigControl(QObject* parent = nullptr);
@@ -138,6 +143,7 @@ public:
     QString status() const;
     QString frequency() const;
     bool canKey() const;
+    bool bluetoothReady() const;
 
     // Rows matching `query`, capped -- Hamlib knows several hundred
     // rigs and a phone list view of all of them is not a picker. An
@@ -177,6 +183,10 @@ private:
     QString ptt_ = QStringLiteral("cat");
 
     QVariantList devices_;
+    // Set by a failed `connectRig` and shown in place of the session's
+    // status, which for a configuration that never reached `start_rig`
+    // would be the *previous* session's text or nothing at all.
+    QString error_;
     QTimer poll_;
 };
 

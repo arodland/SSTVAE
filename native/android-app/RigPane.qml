@@ -157,16 +157,24 @@ ColumnLayout {
                 Item { Layout.fillWidth: true }
             }
             Label {
-                text: pane.rig.devices.length === 0
-                      ? (pane.rig.connection === "bluetooth"
-                         ? "No paired radios. Pair the radio in Android's Bluetooth "
-                           + "settings first — this app deliberately does not scan, "
-                           + "so it never asks for location access."
-                         : "Nothing plugged in. Connect the radio or its serial "
-                           + "adapter, then Refresh.")
-                      : (pane.rig.devicePermitted
-                         ? ""
-                         : "Android needs permission before this device can be opened.")
+                // Three different empty lists, and they are not the same
+                // problem: Bluetooth access not granted, nothing paired,
+                // and nothing plugged in. Telling an operator to go and
+                // pair a radio they already paired is the kind of wrong
+                // advice that ends in a bug report.
+                text: pane.rig.connection === "bluetooth" && !pane.rig.bluetoothReady
+                      ? "Android needs Bluetooth access before paired radios can "
+                        + "be listed."
+                      : pane.rig.devices.length === 0
+                        ? (pane.rig.connection === "bluetooth"
+                           ? "No paired radios. Pair the radio in Android's Bluetooth "
+                             + "settings first — this app deliberately does not scan, "
+                             + "so it never asks for location access."
+                           : "Nothing plugged in. Connect the radio or its serial "
+                             + "adapter, then Refresh.")
+                        : (pane.rig.devicePermitted
+                           ? ""
+                           : "Android needs permission before this device can be opened.")
                 visible: text !== ""
                 font.pixelSize: 11
                 color: "#666"
