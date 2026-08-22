@@ -110,6 +110,8 @@ add_library(sstvae_core STATIC
   core/util/event.cpp
   core/rx/ringbuffer.cpp
   core/rig/controller.cpp
+  core/rig/bridge.cpp
+  core/rig/bridged.cpp
   core/rx/engine.cpp
   core/tx/engine.cpp
   core/settings/settings.cpp
@@ -131,6 +133,14 @@ target_include_directories(sstvae_core SYSTEM PUBLIC third_party/stb
 # Position-independent so the static core can be linked into the
 # pybind11 shared module.
 set_target_properties(sstvae_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# `core/rig/bridge.cpp` presents a serial transport to Hamlib as a
+# loopback socket, which is what lets a phone -- where there is no
+# `/dev/ttyUSB0` to give Hamlib -- still drive every radio Hamlib knows.
+# POSIX puts the sockets API in libc; Windows needs Winsock named.
+if(WIN32)
+  target_link_libraries(sstvae_core PUBLIC ws2_32)
+endif()
 
 # --- codec ------------------------------------------------------------------
 if(SSTVAE_BUILD_CODEC)
