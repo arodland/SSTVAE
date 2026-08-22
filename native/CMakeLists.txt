@@ -262,6 +262,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
   set(SSTVAE_ANDROID_USBSERIAL_JAVA_DIR
       "${CMAKE_CURRENT_SOURCE_DIR}/third_party/usb-serial-for-android/java"
       CACHE INTERNAL "")
+  # One class Gradle would have generated for the library's own module and
+  # does not generate when its sources are compiled into an app. Kept out
+  # of `java/` so that tree stays a byte-for-byte drop of the release; see
+  # the shim's own comment for why DEBUG is false.
+  set(SSTVAE_ANDROID_USBSERIAL_SHIM_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/usb-serial-for-android/shim"
+      CACHE INTERNAL "")
 endif()
 
 # --- Overlay rendering ------------------------------------------------------

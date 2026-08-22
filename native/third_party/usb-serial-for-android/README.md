@@ -42,9 +42,42 @@ this file**, not bumping a version string. Do it deliberately, in step
 with checking that `SerialBridge.java` still compiles -- upstream has
 changed the `read` and flow-control signatures within the 3.x series.
 
+## `shim/` — one class Gradle would have generated
+
+Gradle synthesises a `BuildConfig` per Android *module*, in that module's
+own package. Consumed as an `.aar` you get
+`com.hoho.android.usbserial.BuildConfig` for free; compiling the sources
+into an app, Gradle generates one for `org.cleverdomain.sstvae` and none
+at all for the library's package — so `Ch34xSerialDriver` and
+`ProlificSerialDriver` fail to compile on an import, and only during a
+full Gradle run.
+
+`shim/com/hoho/android/usbserial/BuildConfig.java` supplies it. It is in
+`shim/` rather than in `java/` precisely so `java/` stays a byte-for-byte
+drop of the release: an edit in there would have to be diffed back out
+at every update, which is the sort of thing that gets forgotten once and
+then silently reverted.
+
+`DEBUG` is `false`, and that is the correct value rather than a
+convenient one. The single place upstream reads it
+(`Ch34xSerialDriver:206`) is a test-only escape hatch that strips a bit
+from the requested baud rate — upstream's own comment says "for testing
+purpose bypass dedicated baud rate handling". False is what a release
+build of the library compiles to. `ProlificSerialDriver` imports the
+class and never reads it.
+
+It is deliberately *not* wired to the app's own `BuildConfig`: AGP 8
+does not generate one unless `android.buildFeatures.buildConfig` is
+enabled, so that would trade a compile error we understand for one that
+would have to be rediscovered.
+
+Nothing else in `java/` depends on generated code — no `R.` references,
+and the only import outside `java.*`, `android.*` and `com.hoho.*` is
+`androidx.annotation.IntDef`.
+
 ## Build integration
 
-`native/android-app/CMakeLists.txt` stages `java/` into the assembled
+`native/android-app/CMakeLists.txt` stages `java/` and `shim/` into the assembled
 `QT_ANDROID_PACKAGE_SOURCE_DIR`, alongside the app's own Java and the
 audio and rig layers'. It is the only Android-only entry in
 `third_party/`, so nothing else in the tree references it and the

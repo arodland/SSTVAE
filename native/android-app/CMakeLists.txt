@@ -157,6 +157,7 @@ if(TARGET sstvae_rig_android)
     # compiles them into the one app.
     sstvae_stage_package_dir("${SSTVAE_ANDROID_RIG_JAVA_DIR}" "${_pkg_dir}/src")
     sstvae_stage_package_dir("${SSTVAE_ANDROID_USBSERIAL_JAVA_DIR}" "${_pkg_dir}/src")
+    sstvae_stage_package_dir("${SSTVAE_ANDROID_USBSERIAL_SHIM_DIR}" "${_pkg_dir}/src")
 endif()
 
 # **The model artifacts ship inside the APK** (assets.hpp says why: the
