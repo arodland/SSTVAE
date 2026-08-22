@@ -1008,26 +1008,51 @@ first attempt diagnosable rather than mysterious:
   bug; `CXX` is set now even though, after the next point, there should
   be no C++ left to compile.
 
-- **The Android sensor rotator is skipped.** It points an antenna using
-  the phone's accelerometer, which this app has no use for, and it is
-  the only C++ in the tree we build. There is no
-  `--without-androidsensor`: upstream gates it on whether
-  `android/sensor.h` exists (`configure.ac:171`), so the lever is
-  autoconf's own cache, pre-seeded with
-  `ac_cv_header_android_sensor_h=no` exactly as the two malloc answers
-  are. `src/rot_reg.c:87` guards the registration with
-  `#if HAVE_ANDROID_SENSOR`, so it drops out of the library rather than
-  leaving a dangling reference. The cache mechanism was checked against
-  this configure with a proxy header: `checking for linux/ppdev.h...
-  (cached) no`, and `/* #undef HAVE_LINUX_PPDEV_H */` in the generated
-  `config.h`.
+- **The Android sensor rotator cannot be switched off. Do not try
+  again.** It points an antenna using the phone's accelerometer, which
+  this app has no use for, and it is the only C++ in the tree we build,
+  so it looks like free savings. There is no `--without-androidsensor`;
+  upstream gates it on whether `android/sensor.h` exists
+  (`configure.ac:171`), and pre-seeding autoconf's cache with
+  `ac_cv_header_android_sensor_h=no` does correctly drop the directory
+  from `ROT_BACKEND_LIST`.
 
-  Note that `-lc++` still goes into `LDFLAGS` for every Android build,
-  unconditionally, whether or not any C++ is compiled
+  It then fails to build, because `src/rot_reg.c` guards the backend's
+  two halves on **different conditions**:
+
+  ```
+  line  87: #if HAVE_ANDROID_SENSOR                      (the declaration)
+  line 141: #if defined(ANDROID) || defined(__ANDROID__) (the table entry)
+  ```
+
+  `__ANDROID__` is defined by the compiler and cannot be unset, so the
+  table entry is unconditional on Android while the declaration is not.
+  They agree only when `HAVE_ANDROID_SENSOR` is true — which upstream is
+  entitled to assume, since a real NDK always has `android/sensor.h`.
+  Answering "no" leaves the file calling a function nobody declared.
+
+  So it builds, and setting `CXX` is what makes that work rather than a
+  precaution. (The cache mechanism itself is sound and is used for the
+  two malloc answers — verified against this configure with a proxy
+  header: `checking for linux/ppdev.h... (cached) no`, and
+  `/* #undef HAVE_LINUX_PPDEV_H */` in the generated `config.h`. The
+  problem is specific to this backend's guards.)
+
+  `-lc++` goes into `LDFLAGS` for every Android build regardless
   (`configure.ac:178`). The NDK sysroot ships `libc++.so` as an implicit
-  linker script so it resolves, but it does mean `libhamlib.so` carries
-  a `DT_NEEDED` on `libc++_shared.so` — which Qt for Android packages
+  linker script so it resolves, and `libhamlib.so` carries a
+  `DT_NEEDED` on `libc++_shared.so` — which Qt for Android packages
   anyway, because Qt itself needs it.
+
+- **A failed Hamlib build used to cement itself.** The "already built"
+  stamp was the installed `hamlib/rig.h`, and `SUBDIRS` puts `include`
+  second (`Makefile.am:25`) — so `make install` copies the headers long
+  before it reaches `src`, and any failure after that left a tree the
+  check accepted. The next configure skipped the rebuild and failed with
+  "Hamlib library not found", naming a path instead of the compile error
+  that actually stopped it. The stamp requires the library now. If you
+  are recovering from a build that failed before this landed, delete
+  `<build>/_deps/hamlib-install-*` once.
 
 **Testing it without a radio.** Hamlib model 1 is the dummy: it opens,
 keys and reports a frequency with nothing attached, so the whole path

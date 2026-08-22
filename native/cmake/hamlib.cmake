@@ -125,7 +125,25 @@ else()
   # Built once and stamped. ExternalProject would rebuild on every
   # configure of a fresh build directory even when the install tree is
   # already there, which is the common case with a warm CI cache.
-  if(NOT EXISTS "${_hl_root}/include/hamlib/rig.h")
+  #
+  # **The stamp is the library, not just the header.** `SUBDIRS` puts
+  # `include` second (Makefile.am:25), so `make install` copies
+  # `hamlib/rig.h` into the prefix long before it reaches `src` -- which
+  # means a build that fails anywhere after that leaves a tree this
+  # check would accept. The next configure then skips the rebuild
+  # entirely and fails much later with "Hamlib library not found",
+  # naming a path rather than the compile error that actually stopped
+  # it. Requiring both is what makes a failed build retry instead of
+  # cementing itself.
+  set(_hl_built FALSE)
+  if(EXISTS "${_hl_root}/include/hamlib/rig.h")
+    file(GLOB _hl_installed "${_hl_root}/lib/libhamlib*")
+    if(_hl_installed)
+      set(_hl_built TRUE)
+    endif()
+  endif()
+
+  if(NOT _hl_built)
     # Unpacking a tarball gives every file the same mtime, so make
     # cannot tell that `configure` is already newer than `configure.ac`
     # and tries to re-run aclocal -- which fails on any machine without
@@ -201,7 +219,8 @@ else()
     #     what it just built, so `AC_FUNC_MALLOC` guesses "no" and
     #     substitutes its own `rpl_malloc`, which does not exist here.
     #   * **`CC` alone is not enough**, and the Android sensor *rotator*
-    #     is what proves it -- see the configure arguments below.
+    #     is what proves it -- it is C++, it cannot be switched off, and
+    #     with no `CXX` the host g++ gets it. See the arguments below.
     #
     # Deliberately still `--enable-shared`: Hamlib is LGPL-2.1+ and the
     # reasoning at the top of this file does not change because the
@@ -321,18 +340,15 @@ else()
         set(_hl_cc "${_ndk_bin}/${_hl_cc_triple}${_hl_api}-clang")
       endif()
 
-      # **`CXX` as well as `CC`, even though nothing C++ should build.**
-      # Setting only `CC` is what produced the third failure here:
-      # configure found the cross compiler for C and then silently fell
-      # back to the *host* `g++` for C++, which got as far as
-      # `rotators/androidsensor` before dying on `-stdlib=libc++` -- a
-      # flag configure adds for every Android host, and one the host
-      # g++ has never heard of. With `ac_cv_header_android_sensor_h`
-      # below there is now no C++ left in the tree to compile, so this
-      # line does nothing today; it is here because a host compiler
-      # quietly standing in for a cross one is the failure mode, and it
-      # would come back the moment upstream adds a C++ file or somebody
-      # passes --with-indi.
+      # **`CXX` as well as `CC`, and it is load-bearing.** Setting only
+      # `CC` produced a failure late in the build: configure found the
+      # cross compiler for C and then silently fell back to the *host*
+      # `g++` for C++. Most of Hamlib is C, so it got all the way to
+      # `rotators/androidsensor` -- the one C++ directory, and one that
+      # cannot be switched off, see below -- before dying on
+      # `-stdlib=libc++`, a flag configure adds for every Android host
+      # and one the host g++ has never heard of. A host compiler quietly
+      # standing in for a cross one is the shape of this bug.
       set(_hl_cxx "${_ndk_bin}/${_hl_cc_triple}${_hl_api}-clang++")
 
       list(APPEND _hl_configure_args
@@ -343,21 +359,34 @@ else()
            "RANLIB=${_ndk_bin}/llvm-ranlib"
            "STRIP=${_ndk_bin}/llvm-strip"
            "ac_cv_func_malloc_0_nonnull=yes"
-           "ac_cv_func_realloc_0_nonnull=yes"
-           # **Skip the Android sensor rotator.** It is the only C++ in
-           # the tree we build, it is a *rotator* backend for pointing an
-           # antenna by the phone's own accelerometer, and this app does
-           # rig control -- so it is pure build time and a libc++
-           # dependency for something that can never be used here.
-           #
-           # There is no --without-androidsensor: upstream gates it on
-           # whether `android/sensor.h` exists (configure.ac:171), so the
-           # lever is autoconf's own cache, pre-seeded the same way the
-           # two malloc answers above are. `rot_reg.c:87` guards the
-           # registration with `#if HAVE_ANDROID_SENSOR`, so the backend
-           # drops out of the library cleanly rather than leaving a
-           # dangling reference.
-           "ac_cv_header_android_sensor_h=no")
+           "ac_cv_func_realloc_0_nonnull=yes")
+
+      # **The Android sensor rotator cannot be switched off, and it was
+      # tried.** It is a rotator backend that points an antenna by the
+      # phone's accelerometer -- no use whatever to this app, and the
+      # only C++ in the tree we build -- so `-DSSTVAE_ANDROID_API`'s
+      # neighbour here was briefly
+      # `ac_cv_header_android_sensor_h=no`, pre-seeding autoconf's cache
+      # to fail the check upstream gates it on (`configure.ac:171`).
+      #
+      # That does drop the directory from `ROT_BACKEND_LIST`. It also
+      # breaks the build, because `src/rot_reg.c` guards the backend's
+      # two halves on **different conditions**:
+      #
+      #   line  87: `#if HAVE_ANDROID_SENSOR`                 (declaration)
+      #   line 141: `#if defined(ANDROID) || defined(__ANDROID__)` (table entry)
+      #
+      # `__ANDROID__` is defined by the compiler and cannot be unset, so
+      # the table entry is unconditional on Android while the
+      # declaration is not. The two agree only when `HAVE_ANDROID_SENSOR`
+      # is true -- which upstream is entitled to assume, since a real NDK
+      # always has `android/sensor.h`. Answering "no" makes the file
+      # reference a function nobody declared.
+      #
+      # So it builds, and `CXX` above is what makes that work rather
+      # than a precaution. Do not reach for the cache override again
+      # without also solving line 141, which cannot be solved from
+      # outside the source.
       message(STATUS
         "Hamlib: cross-building for Android ${CMAKE_ANDROID_ARCH_ABI} "
         "(API ${_hl_api}, from ${_hl_api_from})")
