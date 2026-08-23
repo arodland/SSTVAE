@@ -1284,6 +1284,15 @@ whole row on a phone. `Label` rather than `Text`: it takes its colour
 from the active style, and hardcoding a colour is how a control ends up
 unreadable in the other theme.
 
+**And both device lists are sorted before they are handed up.**
+`UsbSerialProber.findAllDrivers` walks `getDeviceList().values()` — the
+same `HashMap` — and `getBondedDevices()` returns a `Set`, so the rows
+arrived in whatever order those felt like: "(2 of 2)" could sit above
+"(1 of 2)", and a Bluetooth list could reshuffle between refreshes.
+Sorting the *unit index* was not enough, because that fixed the
+numbering and not the order the numbered rows came out in — the same
+`HashMap` leaking through one layer further up.
+
 **What the measurements said while that was still hidden
 (2026-08-23), and the chip configuration they ruled out.** With the blind `SET_FLOW` write below skipped, this app
 programs the CP2102N exactly as FT8TW does — its `setParameters` is

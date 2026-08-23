@@ -243,8 +243,29 @@ public final class SerialBridge {
         final UsbManager manager = usbManager();
         final List<String> out = new ArrayList<>();
         if (manager == null) return new String[0];
-        for (UsbSerialDriver driver : UsbSerialProber.getDefaultProber()
-                .findAllDrivers(manager)) {
+        // **Sorted, because `findAllDrivers` is not.** It walks
+        // `getDeviceList().values()` -- a `HashMap` -- so without this
+        // the rows come out in whatever order the map felt like, and
+        // "(2 of 2)" can appear above "(1 of 2)". The unit *index* was
+        // already sorted; this is the same `HashMap` leaking through a
+        // second time, one layer up. Ordered by vendor, product, then
+        // device name so that ports of one radio group together and
+        // their order matches the numbering in their own labels.
+        final List<UsbSerialDriver> drivers =
+                new ArrayList<>(UsbSerialProber.getDefaultProber().findAllDrivers(manager));
+        drivers.sort((a, b) -> {
+            final UsbDevice da = a.getDevice();
+            final UsbDevice db = b.getDevice();
+            if (da.getVendorId() != db.getVendorId()) {
+                return Integer.compare(da.getVendorId(), db.getVendorId());
+            }
+            if (da.getProductId() != db.getProductId()) {
+                return Integer.compare(da.getProductId(), db.getProductId());
+            }
+            return deviceName(da).compareTo(deviceName(db));
+        });
+
+        for (UsbSerialDriver driver : drivers) {
             final UsbDevice device = driver.getDevice();
             final boolean permitted = manager.hasPermission(device);
             final int ports = driver.getPorts().size();
@@ -297,12 +318,16 @@ public final class SerialBridge {
             // in system Settings.
             final Collection<BluetoothDevice> bonded = adapter.getBondedDevices();
             if (bonded == null) return new String[0];
-            for (BluetoothDevice device : bonded) {
-                final String name = device.getName();
-                final String label = (name == null || name.isEmpty())
-                        ? device.getAddress()
-                        : name + " (" + device.getAddress() + ")";
-                out.add("bt:" + device.getAddress() + "\t" + clean(label) + "\t1");
+            // Sorted before the rows are built, for the same reason
+            // the USB list is: `getBondedDevices()` returns a Set, so
+            // without this the rows shuffle between refreshes for no
+            // reason the operator can see. By what they are reading --
+            // the name, falling back to the address when there is none.
+            final List<BluetoothDevice> paired = new ArrayList<>(bonded);
+            paired.sort((a, b) -> bluetoothLabel(a).compareToIgnoreCase(bluetoothLabel(b)));
+            for (BluetoothDevice device : paired) {
+                out.add("bt:" + device.getAddress() + "\t"
+                        + clean(bluetoothLabel(device)) + "\t1");
             }
         } catch (SecurityException e) {
             // The permission was revoked between the check and the call.
@@ -372,6 +397,20 @@ public final class SerialBridge {
         }
     }
 
+    /** "Name (AA:BB:CC:DD:EE:FF)", or just the address when unnamed. */
+    private static String bluetoothLabel(BluetoothDevice device) {
+        String name = null;
+        try {
+            name = device.getName();
+        } catch (SecurityException e) {
+            // Revoked between the check and the call; the address still
+            // identifies it.
+        }
+        return (name == null || name.isEmpty())
+                ? device.getAddress()
+                : name + " (" + device.getAddress() + ")";
+    }
+
     private static String describe(UsbDevice device) {
         String product = null;
         String manufacturer = null;
@@ -427,12 +466,14 @@ public final class SerialBridge {
                 units.add(device);
             }
         }
-        units.sort((a, b) -> {
-            final String an = a.getDeviceName() == null ? "" : a.getDeviceName();
-            final String bn = b.getDeviceName() == null ? "" : b.getDeviceName();
-            return an.compareTo(bn);
-        });
+        units.sort((a, b) -> deviceName(a).compareTo(deviceName(b)));
         return units;
+    }
+
+    /** `getDeviceName()`, never null, so it can be compared and sorted. */
+    private static String deviceName(UsbDevice device) {
+        final String name = device.getDeviceName();
+        return name == null ? "" : name;
     }
 
     /** Where `device` sits in {@link #usbUnits}, or 0 if it is not there. */
@@ -440,10 +481,7 @@ public final class SerialBridge {
         final List<UsbDevice> units =
                 usbUnits(manager, device.getVendorId(), device.getProductId());
         for (int i = 0; i < units.size(); i++) {
-            if (units.get(i).getDeviceName() != null
-                    && units.get(i).getDeviceName().equals(device.getDeviceName())) {
-                return i;
-            }
+            if (deviceName(units.get(i)).equals(deviceName(device))) return i;
         }
         return 0;
     }
