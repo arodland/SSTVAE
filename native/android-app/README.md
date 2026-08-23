@@ -1262,7 +1262,24 @@ lines only for PTT, CW and RTTY keying. And every Icom in Hamlib declares
 `RIG_HANDSHAKE_NONE`, so no flow control is being applied that could
 hold the chip's transmitter off.
 
-**The trace narrowed it to one gap and no further (2026-08-23).** The
+**It was a 16-byte `SET_FLOW` write of zeroes (2026-08-23).** Setting a
+CP210x's flow control to *none* is not a no-op: the library sends the
+chip sixteen zero bytes, clobbering `ulControlHandshake`,
+`ulFlowReplace`, `ulXonLimit` and `ulXoffLimit` at once. FT8TW drives
+the same radio on the same phone with a fork of `Cp21xxSerialDriver`
+that has no `SET_FLOW` code in it at all, and the Linux `cp210x`
+driver — which is what the working `rigctl` goes through — does
+`GET_FLOW`/modify/`SET_FLOW` and never zeroes the limits. The kernel
+additionally carries erratum **CP2102N_E104**: firmware ≤ 0x10004 reads
+`ulXonLimit` as `ulFlowReplace`, so a blind write lands one word out of
+alignment and the chip's own `ulXoffLimit` comes from past the end of
+the buffer. The write is now skipped when there is nothing to set —
+in `SerialBridge.applyFlowControl` **and** in the vendored
+`Cp21xxSerialDriver.openInt`, which does it inside `port.open()` before
+any of our code is asked. That is the first patch carried against the
+vendored library; see `third_party/usb-serial-for-android/PATCHES.md`.
+
+**How the trace got there:** The
 app writes a correct frame — `-> rig 6: fe fe a2 e0 03 fd` — to a
 **CP2102N** at 19200 8N1 flow=none, one vendor-class interface, two
 endpoints, `Cp21xxSerialDriver` port 0 of 1, and nothing ever comes

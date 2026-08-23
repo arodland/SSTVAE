@@ -513,14 +513,27 @@ public final class SerialBridge {
             case 2: want = UsbSerialPort.FlowControl.XON_XOFF; break;
             default: want = UsbSerialPort.FlowControl.NONE; break;
         }
+        // **"None" means write nothing, not write zeros.** Setting a
+        // CP210x's flow control to NONE means sending it a 16-byte
+        // structure of zeroes, and an IC-9700's CP2102N stopped
+        // answering CI-V entirely when it got one — every control
+        // transfer succeeded, every bulk write returned its length, and
+        // not one byte ever came back. FT8TW drives the same radio on
+        // the same phone with a copy of this driver that has no
+        // SET_FLOW code in it at all. A chip that was opened fresh is
+        // already in its configured default, which is no flow control,
+        // so there is nothing here to undo. See the matching guard in
+        // the vendored `Cp21xxSerialDriver.openInt`, which does this
+        // write before we are ever asked.
+        if (want == UsbSerialPort.FlowControl.NONE) return;
+
         try {
             // **Not fatal if the chip cannot do it.** Only some drivers
             // implement hardware handshaking, and the alternative to
             // carrying on is refusing to talk to a radio that would have
             // worked — CAT is a few bytes at a time and almost never
             // needs flow control at all.
-            if (want == UsbSerialPort.FlowControl.NONE
-                    || port.getSupportedFlowControl().contains(want)) {
+            if (port.getSupportedFlowControl().contains(want)) {
                 port.setFlowControl(want);
             } else {
                 Log.w(TAG, "flow control " + want + " unsupported; leaving it off");

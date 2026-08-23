@@ -154,7 +154,15 @@ public class Cp21xxSerialDriver implements UsbSerialDriver {
 
             setConfigSingle(SILABSER_IFC_ENABLE_REQUEST_CODE, UART_ENABLE);
             setConfigSingle(SILABSER_SET_MHS_REQUEST_CODE, (dtr ? DTR_ENABLE : DTR_DISABLE) | (rts ? RTS_ENABLE : RTS_DISABLE));
-            setFlowControl(mFlowControl);
+            // SSTVAE PATCH -- see ../../../../../../../../PATCHES.md
+            // Do not write SET_FLOW when no flow control is wanted. An
+            // IC-9700's CP2102N accepted every control transfer and every
+            // bulk write and never answered a CI-V frame until this write
+            // was removed. Guarded rather than deleted so RTS/CTS and
+            // XON/XOFF are unaffected.
+            if (mFlowControl != FlowControl.NONE) {
+                setFlowControl(mFlowControl);
+            }
         }
 
         @Override

@@ -1048,18 +1048,36 @@ the SPP UUID). Six things are settled and worth not re-deriving:
   correct on its own terms; it is **not** thought to be the Icom fix
   (Andrew): CI-V has no flow control and an Icom uses those lines only
   for PTT, CW and RTTY keying.
-- **A K4 works over USB and two Icoms do not** (reported 2026-08-23,
-  **open**). The trace narrowed it to one gap and no further: the app
-  writes a correct frame (`-> rig 6: fe fe a2 e0 03 fd`) to a
-  **CP2102N** at 19200 8N1 flow=none, one vendor-class interface, two
-  endpoints, `Cp21xxSerialDriver` port 0 of 1 -- and nothing ever comes
-  back, while `rigctl -m 3081 -r /dev/ttyUSB0 -s 19200` on the same
-  cable answers instantly. Every control transfer returns 0 and the
-  bulk write returns 6, so the chip is enumerated, configured and
-  accepting bytes. **What no software here can see is whether the UART
-  actually clocked them out**, which is where code reading stops and a
-  hardware A/B has to take over. What was ruled out along the way, so
-  it is not re-derived:
+- **"No flow control" is not the same as writing zeros, and on a
+  CP2102N that difference cost an Icom entirely** (2026-08-23). An
+  IC-9700 would not answer a single CI-V frame from the app while
+  `rigctl -m 3081 -r /dev/ttyUSB0 -s 19200` on the same cable answered
+  instantly. The trace narrowed it to one gap: a correct frame reaching
+  the transport (`-> rig 6: fe fe a2 e0 03 fd`) against a CP2102N at
+  19200 8N1 flow=none, one vendor-class interface, two endpoints,
+  `Cp21xxSerialDriver` port 0 of 1, every control transfer returning 0
+  and every bulk write returning its length -- and nothing ever coming
+  back. Setting a CP210x's flow control to *none* sends it a 16-byte
+  `SET_FLOW` structure of **zeroes**, clobbering `ulControlHandshake`,
+  `ulFlowReplace`, `ulXonLimit` and `ulXoffLimit` in one blind write.
+  Two implementations that work with this chip do not do that:
+  **FT8TW** (which drives the same radio on the same phone -- Andrew's
+  test) carries a fork of `Cp21xxSerialDriver` with no `SET_FLOW`
+  constant and no `setFlowControl` at all, and the **Linux `cp210x`
+  driver**, which is what the working `rigctl` goes through, does
+  `GET_FLOW`/modify/`SET_FLOW` and never zeroes the limits. The kernel
+  also carries erratum **CP2102N_E104** -- firmware <= 0x10004 reads
+  `ulXonLimit` as `ulFlowReplace`, so a blind 16-byte write lands one
+  word out of alignment and the chip's own `ulXoffLimit` comes from
+  past the end of the buffer. So the write is skipped when there is no
+  flow control to set, in `SerialBridge.applyFlowControl` **and** in
+  `openInt` -- both, because `openInt` does it inside `port.open()`
+  before any of our code is asked. That is the **first patch carried
+  against the vendored library**; `third_party/usb-serial-for-android/PATCHES.md`
+  is the exhaustive list and every deviation is marked `// SSTVAE
+  PATCH` in the source, because `java/` was a byte-for-byte drop of the
+  release and is no longer. What was ruled out along the way, so it is
+  not re-derived:
   the byte path is length-counted end to end and cannot truncate a
   binary CI-V frame; Hamlib's POSIX `port_read_generic`/`port_write`
   have no port-type branch (the ones that exist are Win32 serial);
@@ -1074,16 +1092,12 @@ the SPP UUID). Six things are settled and worth not re-deriving:
   CATs with them low -- but that only shows the *transport* works that
   way, not that this *radio* does, and treating one radio's tolerance
   as a general fact is what kept the real difference hidden for a
-  round. Two differences from the Linux `cp210x` driver survive and are
-  the shortlist if the A/B points at the chip: the vendored library
-  writes `SET_FLOW` as **16 blind zero bytes** where Linux does
-  `GET_FLOW`/modify/`SET_FLOW`, preserving `ulXonLimit`/`ulXoffLimit`;
-  and it writes the requested baud raw where Linux applies
-  `cp210x_get_actual_rate()` for a CP2102N (a no-op at 19200, which
-  divides 48 MHz exactly). Linux also carries erratum **CP2102N_E104**
-  -- firmware <= 0x10004 reads `ulXonLimit` as `ulFlowReplace`, so it
-  declares flow control unsupported on those parts. None of this is
-  confirmed to matter here. The two
+  round -- the blind `SET_FLOW` above was found by the same comparison
+  and was the real one. One further difference from the Linux driver
+  survives and is the next place to look if a CP210x still misbehaves:
+  the vendored library writes the requested baud raw where Linux
+  applies `cp210x_get_actual_rate()` for a CP2102N. That is a no-op at
+  19200, which divides 48 MHz exactly, and a 0.16% shift at 115200. The two
   radio-side settings to check first are Icom-specific and invisible
   from here: the **CI-V USB baud rate** (a separate menu item,
   defaulting to an Auto that is not reliable on every model) and
@@ -1990,9 +2004,11 @@ interface — which settles the one question that could have sunk the
 whole approach, since the app needs the audio and the serial half of
 that device at the same time. **Bluetooth is untested for want of a
 device** and goes to beta on the strength of the shared code beneath
-it. **An IC-9700 and an IC-7100 do not work, and that is open** — see
-the rig-control bullets above for what has been ruled out and the two
-radio-side settings to check first. `rig::set_debug_sink` and the "Log
+it. **An IC-9700 and an IC-7100 did not work**, and the cause was a
+16-byte `SET_FLOW` write of zeroes to their CP2102N — see the
+rig-control bullets above; it is the first patch carried against the
+vendored `usb-serial-for-android`. Awaiting Andrew's confirmation on
+hardware. `rig::set_debug_sink` and the "Log
 rig traffic" switch landed for it, because until then Hamlib's trace on
 a phone went to stderr and therefore nowhere.
 Unplug/replug recovery and the "Connected with the cable out"
