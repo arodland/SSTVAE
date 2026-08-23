@@ -88,6 +88,18 @@ jobs:
       # not a path anyone can edit.
       - name: XML comments
         run: python tools/check_xml_comments.py
+      # Third instance of the same pattern: a mistake only one
+      # expensive platform reports. `native/`'s C++ is checked six
+      # ways and its Java was checked by nobody until an APK was
+      # built on a machine with an NDK -- a multi-catch whose
+      # alternatives were related by subclassing is not a syntax
+      # error, so no parser would have found it either. Robolectric's
+      # `android-all` is a real Android API surface on Maven Central,
+      # pinned and checksummed; the script skips itself rather than
+      # failing if the fetch is unavailable, and a cache hit makes it
+      # free.
+      - name: Android Java types
+        run: tools/check_android_java.sh
       - name: Show the diff if anything is stale
         if: failure()
         run: |

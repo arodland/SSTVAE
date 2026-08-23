@@ -42,6 +42,23 @@ this file**, not bumping a version string. Do it deliberately, in step
 with checking that `SerialBridge.java` still compiles -- upstream has
 changed the `read` and flow-control signatures within the 3.x series.
 
+## `PATCHES.md` — deviations from the release
+
+`java/` was a byte-for-byte drop of the release until 2026-08-23 and is
+no longer. **One line is patched**, and `PATCHES.md` is the exhaustive
+list: `Cp21xxSerialDriver.openInt()` no longer writes the CP210x
+`SET_FLOW` structure when no flow control is wanted, because sending
+that chip sixteen zero bytes stopped an IC-9700 answering CI-V at all.
+Read that file before re-vendoring -- every deviation is also marked in
+the source with `// SSTVAE PATCH`, so a replacement drop cannot lose one
+without the marker going with it.
+
+The rule the `shim/` directory exists for still stands and is why there
+is exactly one patch: **anything reachable from outside the library
+belongs in `core/rig/android/java/`**, which is ours. This one is not --
+`openInt` runs inside `port.open()`, before any of our code is asked
+anything.
+
 ## `shim/` — one class Gradle would have generated
 
 Gradle synthesises a `BuildConfig` per Android *module*, in that module's
@@ -53,10 +70,11 @@ at all for the library's package — so `Ch34xSerialDriver` and
 full Gradle run.
 
 `shim/com/hoho/android/usbserial/BuildConfig.java` supplies it. It is in
-`shim/` rather than in `java/` precisely so `java/` stays a byte-for-byte
-drop of the release: an edit in there would have to be diffed back out
-at every update, which is the sort of thing that gets forgotten once and
-then silently reverted.
+`shim/` rather than in `java/` to keep edits out of the upstream drop:
+anything in there has to be diffed back out at every update, which is
+the sort of thing that gets forgotten once and then silently reverted.
+`PATCHES.md` above exists because one such edit turned out to be
+unavoidable; this one was not.
 
 `DEBUG` is `false`, and that is the correct value rather than a
 convenient one. The single place upstream reads it

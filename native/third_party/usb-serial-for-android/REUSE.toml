@@ -19,6 +19,14 @@ SPDX-FileCopyrightText = "Copyright the SSTVAE authors"
 SPDX-License-Identifier = "Artistic-2.0"
 
 [[annotations]]
-path = ["LICENSE", "README.md"]
+path = "LICENSE"
 SPDX-FileCopyrightText = "Copyright 2011-2013 Google Inc., Copyright 2013 Mike Wakerly and contributors"
 SPDX-License-Identifier = "MIT"
+
+# Ours, like `shim/`: `README.md` says why this is vendored and
+# `PATCHES.md` is the exhaustive list of deviations from the release.
+# Neither is upstream's text.
+[[annotations]]
+path = ["README.md", "PATCHES.md"]
+SPDX-FileCopyrightText = "Copyright the SSTVAE authors"
+SPDX-License-Identifier = "Artistic-2.0"

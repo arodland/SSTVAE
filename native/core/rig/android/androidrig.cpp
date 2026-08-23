@@ -1,10 +1,14 @@
 #include "rig/android/androidrig.hpp"
 
+#include "rig/trace.hpp"
+
 #include <jni.h>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -158,6 +162,70 @@ std::vector<SerialDevice> device_list(const char* method) {
 
 // --- the transport ----------------------------------------------------------
 
+// --- trace helpers ----------------------------------------------------
+//
+// Deliberately spelled the way a settings screen spells it (`8N1`,
+// `flow=none`), because the first thing to do with this line is compare
+// it against what the operator set and what the radio's menu says.
+const char* parity_letter(int parity) {
+    switch (parity) {
+        case SerialParams::kOdd: return "O";
+        case SerialParams::kEven: return "E";
+        default: return "N";
+    }
+}
+
+const char* flow_name(int flow) {
+    switch (flow) {
+        case SerialParams::kRtsCts: return "rts/cts";
+        case SerialParams::kXonXoff: return "xon/xoff";
+        default: return "none";
+    }
+}
+
+// Never throws and never leaves an exception pending: this runs inside
+// an open that has already succeeded, and a diagnostic that fails the
+// operation it is diagnosing is worse than no diagnostic.
+std::string describe_link(const Env& env, jclass cls, const std::string& id) {
+    jmethodID m = env->GetStaticMethodID(cls, "describeLink",
+                                         "(Ljava/lang/String;)Ljava/lang/String;");
+    if (m == nullptr) {
+        env->ExceptionClear();
+        return id + " (no describeLink)";
+    }
+    jstring jid = env->NewStringUTF(id.c_str());
+    auto out = static_cast<jstring>(env->CallStaticObjectMethod(cls, m, jid));
+    if (jid != nullptr) env->DeleteLocalRef(jid);
+    if (env->ExceptionCheck() != JNI_FALSE) {
+        env->ExceptionClear();
+        return id + " (describeLink threw)";
+    }
+    if (out == nullptr) return id;
+    std::string text = to_std(env.e, out);
+    env->DeleteLocalRef(out);
+    return text;
+}
+
+// The same contract as `describe_link`: never throws, never leaves an
+// exception pending. Called from the bridge's read thread.
+std::string describe_status(const Env& env, jclass cls, int token) {
+    jmethodID m = env->GetStaticMethodID(cls, "describeStatus", "(I)Ljava/lang/String;");
+    if (m == nullptr) {
+        env->ExceptionClear();
+        return "no describeStatus";
+    }
+    auto out = static_cast<jstring>(
+        env->CallStaticObjectMethod(cls, m, static_cast<jint>(token)));
+    if (env->ExceptionCheck() != JNI_FALSE) {
+        env->ExceptionClear();
+        return "describeStatus threw";
+    }
+    if (out == nullptr) return "";
+    std::string text = to_std(env.e, out);
+    env->DeleteLocalRef(out);
+    return text;
+}
+
 class AndroidTransport : public SerialTransport {
 public:
     explicit AndroidTransport(SerialParams params) : params_(std::move(params)) {}
@@ -167,15 +235,17 @@ public:
         if (token_ >= 0) return;
         Env env;
         jclass cls = env.bridge();
-        jmethodID m = env->GetStaticMethodID(cls, "open", "(Ljava/lang/String;IIIII)I");
+        jmethodID m = env->GetStaticMethodID(cls, "open", "(Ljava/lang/String;IIIIIZZ)I");
         if (m == nullptr) {
             env->ExceptionClear();
             throw RigError("android rig: no SerialBridge.open");
         }
         jstring id = env->NewStringUTF(params_.device_id.c_str());
-        const jint token =
-            env->CallStaticIntMethod(cls, m, id, params_.baud, params_.data_bits,
-                                     params_.stop_bits, params_.parity, params_.flow);
+        const jint token = env->CallStaticIntMethod(
+            cls, m, id, params_.baud, params_.data_bits, params_.stop_bits,
+            params_.parity, params_.flow,
+            static_cast<jboolean>(params_.dtr ? JNI_TRUE : JNI_FALSE),
+            static_cast<jboolean>(params_.rts ? JNI_TRUE : JNI_FALSE));
         env->DeleteLocalRef(id);
         env.rethrow("could not open the serial device");
         if (token < 0) throw RigError("could not open " + params_.device_id);
@@ -192,6 +262,22 @@ public:
         }
         buffer_ = static_cast<jbyteArray>(env->NewGlobalRef(local));
         env->DeleteLocalRef(local);
+
+        // What was opened, and how. This is the half of the picture
+        // that neither Hamlib's trace nor the bridge's byte counts can
+        // supply -- which driver the prober chose and which interface
+        // of how many it claimed. Guarded, because building it is a
+        // handful of JNI calls and the answer is only wanted when
+        // somebody is looking.
+        if (tracing()) {
+            trace("transport: opened " + params_.device_id + " at " +
+                  std::to_string(params_.baud) + " " +
+                  std::to_string(params_.data_bits) + parity_letter(params_.parity) +
+                  std::to_string(params_.stop_bits) + ", flow=" +
+                  flow_name(params_.flow) + ", dtr=" + (params_.dtr ? "1" : "0") +
+                  " rts=" + (params_.rts ? "1" : "0"));
+            trace("transport: " + describe_link(env, cls, params_.device_id));
+        }
     }
 
     void close() noexcept override {
@@ -225,7 +311,22 @@ public:
         }
         const std::size_t cap = static_cast<std::size_t>(kBufferBytes);
         const jint want = static_cast<jint>(n < cap ? n : cap);
+
+        // **Counted and timed here, reported from `write`.** The first
+        // version of this instrument logged from inside this function,
+        // which was the one mistake it could not survive: the question
+        // it exists to answer is whether this loop is running, and a
+        // heartbeat on a thread that is stuck says nothing at all. The
+        // write thread is known to be alive -- its frames are in the
+        // log -- so the numbers are published here and printed there.
+        reads_started_.fetch_add(1, std::memory_order_relaxed);
+        const auto started_at = std::chrono::steady_clock::now();
         const jint got = env->CallStaticIntMethod(cls, m, token, buffer_, want, timeout_ms);
+        last_read_ms_.store(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started_at).count(),
+            std::memory_order_relaxed);
+        reads_returned_.fetch_add(1, std::memory_order_relaxed);
         env.rethrow("the serial device stopped answering");
         // Negative means the link is gone; zero means an idle radio,
         // which is not an error and must not be reported as one.
@@ -240,6 +341,37 @@ public:
         if (token < 0) throw RigError("the serial device is not open");
         Env env;
         jclass cls = env.bridge();
+
+        // Reported before this frame rather than after, so it describes
+        // what the *previous* frame left behind once Hamlib's full
+        // timeout had passed.
+        //
+        // **Two of these fields are weaker than they look, and the
+        // measurement is what taught that.** `outQueue` is read a
+        // second after the write, by which time it is zero whether the
+        // chip sent the bytes or dropped them; `inQueue` is drained
+        // continuously by the read thread, so it is zero even when the
+        // radio does answer. What actually carries information is
+        // `errors` (framing, parity, overrun) and `hold` (why
+        // transmission is being withheld) -- both latched by the chip
+        // rather than sampled -- and `CTS`, since a handshake holding
+        // the transmitter off would show there. Whether the radio
+        // answered at all is already told by `bridge: <- rig`.
+        //
+        // The read counters ride along because this thread is the one
+        // known to be running, and they retired a wrong theory on their
+        // first run: `last` against the bridge's 500 ms timeout shows
+        // the read loop cycling normally, where the silence of an
+        // earlier heartbeat had been read as a blocked `bulkTransfer`.
+        if (tracing() && wrote_once_) {
+            const unsigned long started = reads_started_.load(std::memory_order_relaxed);
+            const unsigned long returned = reads_returned_.load(std::memory_order_relaxed);
+            trace("transport: reads started=" + std::to_string(started) +
+                  " returned=" + std::to_string(returned) + " last=" +
+                  std::to_string(last_read_ms_.load(std::memory_order_relaxed)) +
+                  "ms; " + describe_status(env, cls, token));
+        }
+        wrote_once_ = true;
         jmethodID m = env->GetStaticMethodID(cls, "write", "(I[BI)V");
         if (m == nullptr) {
             env->ExceptionClear();
@@ -296,6 +428,15 @@ private:
     SerialParams params_;
     std::atomic<int> token_{-1};
     jbyteArray buffer_ = nullptr;
+
+    // Written by the read thread, read by the write thread -- which is
+    // why they are atomic and why they are relaxed: nothing is
+    // synchronised through them, they are only ever printed.
+    std::atomic<unsigned long> reads_started_{0};
+    std::atomic<unsigned long> reads_returned_{0};
+    std::atomic<long long> last_read_ms_{-1};
+    // Only touched by the write thread.
+    bool wrote_once_ = false;
 };
 
 }  // namespace

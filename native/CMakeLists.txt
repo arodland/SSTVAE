@@ -110,6 +110,7 @@ add_library(sstvae_core STATIC
   core/util/event.cpp
   core/rx/ringbuffer.cpp
   core/rig/controller.cpp
+  core/rig/trace.cpp
   core/rx/engine.cpp
   core/tx/engine.cpp
   core/settings/settings.cpp

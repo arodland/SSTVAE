@@ -1,5 +1,7 @@
 #include "rig/bridge.hpp"
 
+#include "rig/trace.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -133,6 +135,9 @@ void LoopbackBridge::start() {
         std::lock_guard<std::mutex> lock(mu_);
         endpoint_ = "127.0.0.1:" + std::to_string(port);
     }
+
+    trace("bridge: listening on 127.0.0.1:" + std::to_string(port) +
+          ", transport open");
 
     stopping_.store(false);
     in_ = std::thread([this] { pump_in(); });
@@ -272,6 +277,17 @@ void LoopbackBridge::pump_in() {
         }
         try {
             transport_->write(buf.data(), static_cast<std::size_t>(n));
+            // **After the write, not before.** The whole point of this
+            // line is that it is only reached when the transport
+            // accepted the bytes, which is the fact Hamlib's own trace
+            // cannot report: it sees a successful socket write and has
+            // no idea whether anything left the USB port. Logged on the
+            // way in, it would say "delivered" for a write that threw --
+            // the false reassurance this was added to remove.
+            if (tracing()) {
+                trace("bridge: -> rig " + std::to_string(n) + ": " +
+                      hex_bytes(buf.data(), static_cast<std::size_t>(n)));
+            }
         } catch (const std::exception& e) {
             set_error(std::string("bridge: write to rig: ") + e.what());
             break;
@@ -304,6 +320,10 @@ void LoopbackBridge::pump_out() {
             break;
         }
         if (n == 0) continue;  // An idle radio, not a failure.
+        if (tracing()) {
+            trace("bridge: <- rig " + std::to_string(n) + ": " +
+                  hex_bytes(buf.data(), n));
+        }
 
         const std::intptr_t handle = client_fd_.load();
         if (handle == kNoFd) break;
@@ -323,6 +343,12 @@ void LoopbackBridge::pump_out() {
             }
             sent += static_cast<std::size_t>(wrote);
         }
+    }
+
+    if (tracing()) {
+        const std::string why = last_error();
+        trace("bridge: stopped reading from the rig" +
+              (why.empty() ? std::string(" (session ended)") : ": " + why));
     }
 
     {

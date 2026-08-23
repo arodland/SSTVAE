@@ -45,6 +45,7 @@
 
 #include "check.hpp"
 #include "rig/bridge.hpp"
+#include "rig/trace.hpp"
 
 using namespace sstvae;
 
@@ -283,6 +284,133 @@ void test_binary_bytes_are_not_mangled() {
                  "bridge: a binary answer survives the crossing");
 }
 
+// The trace is the diagnostic this bridge exists to make possible, so
+// it is tested rather than eyeballed.
+//
+// **What it is for**: from above, a radio that ignores a command and a
+// bridge that never delivered one are the same log -- Hamlib writes to
+// a socket, the write succeeds, and nothing comes back. The only line
+// that separates them is one emitted *after* the transport accepted
+// the bytes. Both directions and the hex spelling are checked, because
+// the whole value of the line is that a frame in it can be compared
+// byte for byte against the one in Hamlib's own `dump_hex` output.
+void test_the_trace_reports_both_directions() {
+    std::mutex mu;
+    std::vector<std::string> lines;
+    rig::set_trace_sink([&](const std::string& line) {
+        std::lock_guard<std::mutex> lock(mu);
+        lines.push_back(line);
+    });
+
+    {
+        auto probe = std::make_shared<Probe>();
+        rig::LoopbackBridge bridge(std::make_shared<FakeTransport>(probe));
+        bridge.start();
+
+        Client client(bridge.port());
+        const std::string icom("\xFE\xFE\xA2\xE0\x03\xFD", 6);
+        client.send_text(icom);
+        check::is_true(probe->wait_for_written(icom), "bridge/trace: (setup) command arrived");
+
+        const std::string reply("\xFE\xFE\xE0\xA2\xFB\xFD", 6);
+        probe->deliver(reply);
+        check::equal(client.receive(reply.size()), reply, "bridge/trace: (setup) answer arrived");
+    }
+
+    bool saw_out = false;
+    bool saw_in = false;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        for (const std::string& line : lines) {
+            if (line.find("-> rig 6: fe fe a2 e0 03 fd") != std::string::npos) saw_out = true;
+            if (line.find("<- rig 6: fe fe e0 a2 fb fd") != std::string::npos) saw_in = true;
+        }
+    }
+    check::is_true(saw_out, "bridge/trace: what reached the radio, in Hamlib's hex spelling");
+    check::is_true(saw_in, "bridge/trace: and what came back");
+
+    // Removing the sink must actually stop it: this sits in the byte
+    // pump, and a sink left installed after the view that owns it is
+    // gone is the shape of every use-after-free in a logging path.
+    rig::set_trace_sink({});
+    check::is_true(!rig::tracing(), "bridge/trace: removing the sink turns it off");
+
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        lines.clear();
+    }
+    {
+        auto probe = std::make_shared<Probe>();
+        rig::LoopbackBridge bridge(std::make_shared<FakeTransport>(probe));
+        bridge.start();
+        Client client(bridge.port());
+        client.send_text("FA;");
+        check::is_true(probe->wait_for_written("FA;"), "bridge/trace: (setup) still bridging");
+    }
+    std::size_t after = 0;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        after = lines.size();
+    }
+    check::equal(static_cast<int>(after), 0, "bridge/trace: and nothing is delivered after");
+}
+
+// The placement is the claim: **after** the transport accepted the
+// bytes, never before it. A line logged on the way in would say
+// "delivered" for a write that threw, which is precisely the false
+// reassurance this trace was added to remove.
+void test_a_failed_write_is_never_reported_as_delivered() {
+    std::mutex mu;
+    std::vector<std::string> lines;
+    rig::set_trace_sink([&](const std::string& line) {
+        std::lock_guard<std::mutex> lock(mu);
+        lines.push_back(line);
+    });
+
+    {
+        auto probe = std::make_shared<Probe>();
+        rig::LoopbackBridge bridge(std::make_shared<FakeTransport>(probe));
+        bridge.start();
+        Client client(bridge.port());
+
+        // The transport now refuses every write, the way an unplugged
+        // device does.
+        {
+            std::lock_guard<std::mutex> lock(probe->m);
+            probe->closed = true;
+        }
+        client.send_text("FA;");
+
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (bridge.last_error().empty() &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        check::is_true(!bridge.last_error().empty(),
+                       "bridge/trace: (setup) the write failed");
+    }
+
+    bool claimed = false;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        for (const std::string& line : lines) {
+            if (line.find("-> rig") != std::string::npos) claimed = true;
+        }
+    }
+    check::is_true(!claimed,
+                   "bridge/trace: a write that threw is not logged as delivered");
+    rig::set_trace_sink({});
+}
+
+void test_hex_bytes_truncates_rather_than_floods() {
+    const std::vector<std::uint8_t> big(200, 0xAB);
+    const std::string out = rig::hex_bytes(big.data(), big.size());
+    check::is_true(out.find("(200 bytes)") != std::string::npos,
+                   "bridge/trace: a long block says how long it was");
+    check::is_true(out.size() < 200,
+                   "bridge/trace: ...without printing all of it");
+}
+
 void test_a_client_hanging_up_ends_the_session() {
     auto probe = std::make_shared<Probe>();
     rig::LoopbackBridge bridge(std::make_shared<FakeTransport>(probe));
@@ -417,6 +545,12 @@ int main() {
         test_a_device_that_cannot_be_opened_fails_start();
         check::current_step.store("device_strings");
         test_device_strings_are_read_the_way_hamlib_reads_them();
+        check::current_step.store("trace");
+        test_the_trace_reports_both_directions();
+        check::current_step.store("trace_failed_write");
+        test_a_failed_write_is_never_reported_as_delivered();
+        check::current_step.store("trace_hex");
+        test_hex_bytes_truncates_rather_than_floods();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;

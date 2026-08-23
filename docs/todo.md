@@ -118,42 +118,145 @@ static calibrated quantisation was tried and is *worse* — do not retry
 it without new information. The finding that outlived it — the model
 had never seen non-photographic content — became the item below.
 
-## Android rig control: everything on hardware
+## Android rig control: two USB ports, one device id
 
 Landed 2026-08-22 (`docs/android.md`, "Rig control was said to be
-structurally impossible"). The mechanism is covered by desktop tests --
-the loopback bridge, the composition, the PTT routing, the line-setting
-resolution, and a real Kenwood TS-2000 backend reading frequency and
-keying through the bridge. **None of it has been compiled for Android or
-run against a radio**, because the session that wrote it had no NDK and
-no reachable `dl.google.com`.
+structurally impossible") and taken to hardware 2026-08-23. Most of what
+this section used to list is answered:
 
-In the order that answers the most per attempt:
+- **A composite USB device gives the phone audio and serial at once.**
+  This was the question that could have sunk the approach, and on an
+  Elecraft K4 the answer is yes, with CAT and both control-line keying
+  methods working. mik3y/usb-serial-for-android#477 remains an open
+  report of a composite device where it does not, so it is a per-device
+  answer rather than a general one.
+- The Hamlib NDK cross-build, CAT against a real radio, and DTR/RTS
+  keying are all exercised. Bluetooth is not, for want of a device.
 
-1. **Does the phone hold USB audio and USB serial on one composite
-   device?** Most rig USB interfaces present both, and this app needs
-   both at once. It works for FT8CN on at least some devices, and
-   mik3y/usb-serial-for-android#477 is an open report of it failing on
-   others. If the answer is no for a given radio, that is the radio's
-   answer and not a bug to fix -- Bluetooth and the network kind are
-   unaffected. Settle it before anything else, because a bad answer
-   changes what the rest of the list is worth.
-2. **The Hamlib NDK cross-build.** Expect to fix something. The two
-   guards in `native/cmake/hamlib.cmake` (a named missing compiler
-   wrapper, and a refused versioned SONAME) exist so the first failure
-   is diagnosable in one round.
-3. **CAT against a real radio**, model 1 first -- Hamlib's dummy opens
-   and keys with nothing attached, so it separates "the bridge works"
-   from "this backend works".
-4. **PTT timing against a physical radio**, which is the *same*
-   outstanding item the desktop has and has never had: `ptt_lead_s` is
-   0.3 s of guess. A phone into a radio is now a way to measure it.
-5. **DTR/RTS keying**, which is the path Hamlib cannot take here and
-   ours is the only implementation of.
-6. **Battery over a multi-hour session with a rig session open.** The
-   poll is 10 s rather than the desktop's 5, and the bridge's idle cost
-   is meant to be two wakeups a second on one thread; both are claims,
-   not measurements.
+**What is open is that a K4 works and an IC-9700 and an IC-7100 do
+not.** Everything structural was ruled out by reading, and re-deriving
+it is the waste this paragraph exists to prevent: the byte path is
+length-counted end to end (`SerialBridge.read` → a `jbyteArray` region
+copy → `LoopbackBridge`'s `send`), so nothing truncates a binary CI-V
+frame at a `0x00`; Hamlib's POSIX `port_read_generic` and `port_write`
+have no port-type branch at all, the ones that exist being Win32 serial;
+`network_flush` is a `FIONREAD`-guarded drain that cannot block;
+`rigs/icom/` contains no port-type conditional; and `serial_defaults`
+takes `rig_caps.serial_rate_max`, the same field `rig_init` uses, so a
+bridged rig runs at the speed that rig runs at on a desktop.
+
+Nor is it the control lines: **both** `FtdiSerialDriver` and
+`Cp21xxSerialDriver` deassert DTR and RTS in `openInt()`, so the K4 is
+CAT-ing with them low. That is a difference from a desktop, where the
+OS raises them on open, but demonstrably not a fatal one -- and every
+Icom in Hamlib declares `RIG_HANDSHAKE_NONE`, so nothing is applying
+flow control that could hold the chip's transmitter off.
+
+**Cause found 2026-08-23, awaiting hardware confirmation: an IC-9700
+presents two USB serial devices sharing `10c4:ea60` -- CI-V and the USB
+serial function -- and `usb:VID:PID` named both.** The picker showed two
+identical rows and `findUsbDevice` returned whichever `getDeviceList()`
+yielded first, out of a `HashMap`. Ids now carry `@unit` beside
+`#port`, which is a different axis: `#port` is one driver's several
+UARTs, `@unit` is several devices with one VID:PID. What follows is the
+measurement record from before that was found, and it stands -- it is
+what ruled the chip's configuration out. `fe fe a2 e0 03 fd` -- address A2, the
+IC-9700's default -- written, `read_string_generic(): Timed out 1.001
+seconds after 0 chars`, every time, at 115200. `icom_get_usb_echo_off`
+therefore returns `-RIG_ETIMEOUT` and `icom_rig_open` gives up with
+"is rig on and connected?". What that trace *cannot* say is whether
+those six bytes reached the USB endpoint, because Hamlib only ever saw
+a successful socket write. `core/rig/trace.hpp` closes that gap: the
+bridge now logs each direction's bytes (after the transport accepted
+them, never before) and the transport logs which driver and interface
+the Android USB layer chose. So the next run distinguishes:
+
+The trace showed `-> rig 6: fe fe a2 e0 03 fd` to a **CP2102N** at
+19200 8N1 flow=none, one vendor-class interface, two endpoints,
+`Cp21xxSerialDriver` port 0 of 1, and no `<- rig` line, ever -- every
+control transfer returning 0 and every bulk write returning its length.
+Andrew's A/B settled it: **FT8TW drives the same radio on the same
+phone**, and its fork of `Cp21xxSerialDriver` has no
+`SILABSER_SET_FLOW_REQUEST_CODE` constant and no `setFlowControl`
+method at all. Setting a CP210x's flow control to *none* is not a
+no-op; it writes sixteen zero bytes over `ulControlHandshake`,
+`ulFlowReplace`, `ulXonLimit` and `ulXoffLimit`. The Linux `cp210x`
+driver, which the working `rigctl` goes through, does
+`GET_FLOW`/modify/`SET_FLOW` and never zeroes the limits, and carries
+erratum **CP2102N_E104** -- firmware <= 0x10004 reads `ulXonLimit` as
+`ulFlowReplace`, so a blind write lands one word out of alignment.
+
+That write is now skipped when there is nothing to set, in
+`SerialBridge.applyFlowControl` and in the vendored
+`Cp21xxSerialDriver.openInt` (both: `openInt` runs inside
+`port.open()`) -- the first patch carried against the vendored library,
+`third_party/usb-serial-for-android/PATCHES.md`. **It did not fix it**,
+and that is the useful result: FT8TW's `setParameters` is behaviourally
+identical to ours, so with the write gone the two program the chip the
+same way and the Icom still fails. The register writes are not the
+difference. The guard stays because both reference implementations
+avoid the blind write and the erratum is real.
+
+So the next question is what the chip does with bytes it has accepted,
+which it will answer itself. `SerialBridge.describeStatus` issues
+`GET_COMM_STATUS` (AN571, 19 bytes) and the transport traces it every
+ten consecutive empty reads, with the modem control lines:
+
+**Measured 2026-08-23**: `errors=0x0 hold=0x0 inQueue=0 outQueue=0`,
+all six modem lines reading 1, and `reads started=3 returned=2
+last=512ms` against the bridge's 500 ms timeout. So the read loop
+cycles normally, the chip reports no framing or overrun error and
+nothing withholding transmission, and CTS is high so no handshake is
+holding the transmitter off. `bridge: <- rig` never appears, so the
+radio does not answer.
+
+Two of those fields carry less than they appear to, and it is worth not
+re-deriving: `outQueue` is sampled a second after the write and reads
+zero whether the chip sent the bytes or dropped them, and `inQueue` is
+drained continuously by the read thread. `errors`, `hold` and `CTS` are
+the informative ones.
+
+**That exhausts what code inspection can settle.** The chip is
+programmed identically to a working implementation, reports itself
+healthy, and no software here can see whether the UART put bits on the
+pin. The next step is a hardware A/B that separates the chip from the
+radio -- a CP210x USB adapter into the K4's RS-232 port, driven from
+the same phone and app. If that fails, the fault is in the CP210x path;
+if it works, it is the IC-9700 specifically.
+
+One further difference from the Linux driver survives, as the next
+place to look if a CP210x still misbehaves: the library writes the
+requested baud raw where Linux applies `cp210x_get_actual_rate()` for a
+CP2102N -- a no-op at 19200 and a 0.16% shift at 115200.
+
+Radio-side, still worth eliminating if it is not fixed:
+
+1. **The CI-V USB baud rate**, which on these radios is a menu item
+   separate from the CI-V port's own and defaults to an "Auto" that is
+   not reliable on every model. Set it to a fixed rate and set the same
+   rate in Settings. Note that the trace shows **115200**, which is not
+   this app's default: `serial_defaults` returns `serial_rate_max`,
+   which Hamlib gives as 38400 for the IC-9700 and 19200 for the
+   IC-7100. Worth trying Default (or 19200) as well as whatever the
+   radio's menu says, since Auto has an easier time at the lower rates.
+2. **CI-V USB Echo Back**, which is what `icom_get_usb_echo_off` is
+   probing, and which `rig_open` gives exactly one attempt at -- it
+   sets `retry` to 0 for the duration.
+3. **The CI-V address**, which on these radios is a *separate* setting
+   for the USB port when "CI-V USB Port" is "Unlink from [REMOTE]".
+   The app sends to A2, the IC-9700's factory default; a changed
+   address produces exactly this silence.
+
+Still outstanding, unchanged and unrelated:
+
+- **PTT timing against a physical radio**, which is the *same*
+  outstanding item the desktop has and has never had: `ptt_lead_s` is
+  0.3 s of guess. A phone into a radio is now a way to measure it.
+- **Battery over a multi-hour session with a rig session open.** The
+  poll is 10 s rather than the desktop's 5, and the bridge's idle cost
+  is meant to be two wakeups a second on one thread; both are claims,
+  not measurements.
+- **Bluetooth RFCOMM against a real radio.**
 
 ## Non-photographic content: evaluate, then train on it
 

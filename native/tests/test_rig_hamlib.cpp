@@ -31,6 +31,11 @@
 #include <utility>
 #include <vector>
 
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #include "check.hpp"
 #include "rig/bridged.hpp"
 #include "rig/controller.hpp"
@@ -213,6 +218,120 @@ namespace {
 // test here and by the bridged tests below.
 constexpr int MODEL_TS2000 = 2014;
 }  // namespace
+
+// The trace an operator's bug report needs, routed somewhere an app can
+// show it.
+//
+// **This exists because two Icoms failed where a Kenwood worked and
+// nobody could see a byte of the difference.** `SSTVAE_HAMLIB_DEBUG`
+// answers that question on a desktop, by writing to stderr; on a phone
+// stderr goes nowhere, so on the platform where rig control is newest
+// the one artifact that says how far `rig_open` got was unreachable.
+//
+// Three things are checked, and the third is the one worth having: the
+// sink receives whole lines rather than raw `rig_debug` calls; clearing
+// it stops delivery; and clearing it *restores* whatever the
+// environment asked for, since a callback left registered would swallow
+// the stderr trace for every later test and every desktop run -- silently,
+// because a callback that returns 0 looks exactly like a quiet library.
+void test_the_debug_sink_captures_and_releases() {
+    // Both halves need it: `set_debug_sink({})` restores the level this
+    // asks for, and the stderr check below is a check that it did.
+    // ctest sets it for this test already; setting it here is what makes
+    // running the binary by hand mean the same thing.
+#ifndef _WIN32
+    ::setenv("SSTVAE_HAMLIB_DEBUG", "1", 1);
+#endif
+
+    std::mutex mu;
+    std::vector<std::string> lines;
+
+    rig::set_debug_sink([&](const std::string& line) {
+        std::lock_guard<std::mutex> lock(mu);
+        lines.push_back(line);
+    });
+
+    auto poke_the_dummy = [] {
+        rig::HamlibConfig config;
+        config.model = rig::MODEL_DUMMY;
+        std::unique_ptr<rig::RigBackend> backend = rig::make_hamlib_backend(config);
+        backend->open();
+        (void)backend->frequency_hz();
+        backend->close();
+    };
+
+    poke_the_dummy();
+
+    std::size_t captured = 0;
+    bool has_newline = false;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        captured = lines.size();
+        for (const std::string& line : lines) {
+            if (line.find('\n') != std::string::npos) has_newline = true;
+        }
+    }
+    check::is_true(captured > 0,
+                   "hamlib/debug: a sink sees the trace (" +
+                       std::to_string(captured) + " lines)");
+    check::is_true(!has_newline,
+                   "hamlib/debug: split into lines, not raw rig_debug calls");
+
+    rig::set_debug_sink({});
+
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        lines.clear();
+    }
+    poke_the_dummy();
+    std::size_t after = 0;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        after = lines.size();
+    }
+    check::equal(static_cast<int>(after), 0,
+                 "hamlib/debug: removing the sink stops delivery");
+
+#ifndef _WIN32
+    // **The one that is not obvious.** `rig_debug` writes to stderr
+    // *or* to a registered callback, never both, so a callback left
+    // registered -- even one that returns immediately because it has no
+    // sink -- silently swallows the trace for every later test and
+    // every desktop run with `SSTVAE_HAMLIB_DEBUG` set. Nothing else
+    // here can see that: a swallowed trace and a quiet library produce
+    // the same output. So capture stderr and require it to be non-empty.
+    //
+    // POSIX only because restoring stderr afterwards is `dup`/`dup2`
+    // and the Windows spelling buys nothing -- the behaviour under test
+    // is `rig_vprintf_cb`, which has no platform in it.
+    const char* path = "hamlib_trace_check.txt";
+    std::remove(path);
+    const int saved = ::dup(STDERR_FILENO);
+    check::is_true(saved >= 0, "hamlib/debug: stderr can be saved");
+    std::fflush(stderr);
+    const int capture = ::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    check::is_true(capture >= 0, "hamlib/debug: a capture file opens");
+    ::dup2(capture, STDERR_FILENO);
+    ::close(capture);
+
+    poke_the_dummy();
+
+    std::fflush(stderr);
+    ::dup2(saved, STDERR_FILENO);
+    ::close(saved);
+
+    long size = -1;
+    if (std::FILE* f = std::fopen(path, "rb")) {
+        std::fseek(f, 0, SEEK_END);
+        size = std::ftell(f);
+        std::fclose(f);
+    }
+    std::remove(path);
+    check::is_true(size > 0,
+                   "hamlib/debug: the stderr trace is restored, not swallowed (" +
+                       std::to_string(size) + " bytes)");
+#endif
+}
 
 void test_serial_defaults_come_from_the_backend_caps() {
     // The other half of the bridged path's line settings. `rig_init`
@@ -572,6 +691,7 @@ int main() {
         STEP(test_using_a_closed_rig_reports_rather_than_crashes);
         STEP(test_the_controller_drives_a_real_backend);
         STEP(test_serial_defaults_come_from_the_backend_caps);
+        STEP(test_the_debug_sink_captures_and_releases);
 #ifndef _WIN32
         STEP(test_a_native_backend_works_over_a_socket);
         STEP(test_dtr_keying_never_reaches_hamlib);

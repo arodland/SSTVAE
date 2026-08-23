@@ -14,10 +14,12 @@ import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
+import android.hardware.usb.UsbInterface;
 import android.hardware.usb.UsbManager;
 import android.os.Build;
 import android.util.Log;
 
+import com.hoho.android.usbserial.driver.Cp21xxSerialDriver;
 import com.hoho.android.usbserial.driver.UsbSerialDriver;
 import com.hoho.android.usbserial.driver.UsbSerialPort;
 import com.hoho.android.usbserial.driver.UsbSerialProber;
@@ -50,10 +52,28 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p><b>Device identifiers are vendor and product, never the device node.</b>
  * {@code UsbDevice.getDeviceName()} is {@code /dev/bus/usb/001/007} and changes
  * on every replug, so a setting keyed on it stops working the first time the
- * operator unplugs the radio. {@code usb:10c4:ea60} survives, with {@code #N}
- * for the second and later ports of a multi-port adapter. Two identical
+ * operator unplugs the radio. {@code usb:10c4:ea60} survives.
+ *
+ * <p><b>But a vendor and product pair names a *kind* of device, and a radio can
+ * present two of the same kind.</b> This paragraph used to end "two identical
  * adapters are indistinguishable and the first wins — the same accepted
- * ambiguity the audio layer takes on device names.
+ * ambiguity the audio layer takes on device names", and that was wrong in a way
+ * that cost days: an IC-9700 exposes its CI-V port and its USB serial function
+ * as two separate USB devices sharing {@code 10c4:ea60}, so the id named both,
+ * the picker showed two identical rows, and the lookup returned whichever
+ * {@code getDeviceList()} — a {@code HashMap} — happened to yield first. The
+ * app talked to a healthy chip that is not wired to the radio's CI-V engine,
+ * which from the outside is indistinguishable from a radio that ignores it.
+ *
+ * <p>So an id carries two independent suffixes, and they are <em>not</em> the
+ * same axis: {@code #p} is the p'th port of one multi-port driver (a CP2105),
+ * and {@code @u} is the u'th device sharing a vendor and product pair. Both are
+ * omitted at zero, so an id saved before they existed still means the first
+ * port of the first device. Units are ordered by {@code getDeviceName()},
+ * which is the only ordering available before permission is granted and is not
+ * promised across a replug — hence the row label says which is which and the
+ * operator chooses, because nothing readable tells an Icom's CI-V port from
+ * its data port.
  *
  * <p>Call {@link #init} once with an application context before anything else.
  */
@@ -100,7 +120,10 @@ public final class SerialBridge {
                 final boolean granted =
                         intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
                 final UsbDevice device = usbExtra(intent);
-                nativePermissionResult(device == null ? "" : usbId(device, 0), granted);
+                nativePermissionResult(
+                        device == null ? ""
+                                : usbId(device, usbUnitOf(usbManager(), device), 0),
+                        granted);
             }
         };
         final IntentFilter filter = new IntentFilter(ACTION_GRANT_USB);
@@ -220,15 +243,63 @@ public final class SerialBridge {
         final UsbManager manager = usbManager();
         final List<String> out = new ArrayList<>();
         if (manager == null) return new String[0];
-        for (UsbSerialDriver driver : UsbSerialProber.getDefaultProber()
-                .findAllDrivers(manager)) {
+        // **Sorted, because `findAllDrivers` is not.** It walks
+        // `getDeviceList().values()` -- a `HashMap` -- so without this
+        // the rows come out in whatever order the map felt like, and
+        // "(2 of 2)" can appear above "(1 of 2)". The unit *index* was
+        // already sorted; this is the same `HashMap` leaking through a
+        // second time, one layer up. Ordered by vendor, product, then
+        // device name so that ports of one radio group together and
+        // their order matches the numbering in their own labels.
+        final List<UsbSerialDriver> drivers =
+                new ArrayList<>(UsbSerialProber.getDefaultProber().findAllDrivers(manager));
+        drivers.sort((a, b) -> {
+            final UsbDevice da = a.getDevice();
+            final UsbDevice db = b.getDevice();
+            if (da.getVendorId() != db.getVendorId()) {
+                return Integer.compare(da.getVendorId(), db.getVendorId());
+            }
+            if (da.getProductId() != db.getProductId()) {
+                return Integer.compare(da.getProductId(), db.getProductId());
+            }
+            return deviceName(da).compareTo(deviceName(db));
+        });
+
+        for (UsbSerialDriver driver : drivers) {
             final UsbDevice device = driver.getDevice();
             final boolean permitted = manager.hasPermission(device);
             final int ports = driver.getPorts().size();
+            // **Two things can multiply a row, and they are not the
+            // same thing.** `ports` is one driver's several UARTs (a
+            // CP2105); `units` is several devices that happen to share
+            // a VID:PID, which is how an IC-9700 presents its CI-V port
+            // and its USB serial function. Conflating them is what made
+            // the picker show two identical rows that both addressed
+            // the same chip.
+            final int unit = usbUnitOf(manager, device);
+            final int units =
+                    usbUnits(manager, device.getVendorId(), device.getProductId()).size();
             for (int i = 0; i < ports; i++) {
-                final StringBuilder label = new StringBuilder(describe(device));
-                if (ports > 1) label.append(" port ").append(i + 1);
-                out.add(usbId(device, i) + "\t" + clean(label.toString()) + "\t"
+                // **The marker goes in front of the name, not after
+                // it.** Said plainly because the operator is the only
+                // one who can tell these apart -- nothing readable
+                // distinguishes an Icom's CI-V port from its data port,
+                // so the answer is to try the other one. Put after the
+                // name it is the first thing a narrow combo elides, and
+                // eliding the only distinguishing text leaves two rows
+                // that read identically: "Silicon Labs CP2102N USB to
+                // UART Bridge Contr...". In front it survives both the
+                // closed control and the open list.
+                final StringBuilder marker = new StringBuilder();
+                if (units > 1) marker.append(unit + 1).append(" of ").append(units);
+                if (ports > 1) {
+                    if (marker.length() > 0) marker.append(", ");
+                    marker.append("port ").append(i + 1);
+                }
+                final String label = marker.length() > 0
+                        ? "(" + marker + ") " + describe(device)
+                        : describe(device);
+                out.add(usbId(device, unit, i) + "\t" + clean(label) + "\t"
                         + (permitted ? "1" : "0"));
             }
         }
@@ -247,18 +318,97 @@ public final class SerialBridge {
             // in system Settings.
             final Collection<BluetoothDevice> bonded = adapter.getBondedDevices();
             if (bonded == null) return new String[0];
-            for (BluetoothDevice device : bonded) {
-                final String name = device.getName();
-                final String label = (name == null || name.isEmpty())
-                        ? device.getAddress()
-                        : name + " (" + device.getAddress() + ")";
-                out.add("bt:" + device.getAddress() + "\t" + clean(label) + "\t1");
+            // Sorted before the rows are built, for the same reason
+            // the USB list is: `getBondedDevices()` returns a Set, so
+            // without this the rows shuffle between refreshes for no
+            // reason the operator can see. By what they are reading --
+            // the name, falling back to the address when there is none.
+            final List<BluetoothDevice> paired = new ArrayList<>(bonded);
+            paired.sort((a, b) -> bluetoothLabel(a).compareToIgnoreCase(bluetoothLabel(b)));
+            for (BluetoothDevice device : paired) {
+                out.add("bt:" + device.getAddress() + "\t"
+                        + clean(bluetoothLabel(device)) + "\t1");
             }
         } catch (SecurityException e) {
             // The permission was revoked between the check and the call.
             return new String[0];
         }
         return out.toArray(new String[0]);
+    }
+
+    /**
+     * What was actually opened, for the rig trace.
+     *
+     * <p><b>Written because a failing radio and a mis-driven chip look
+     * identical from above.</b> An Elecraft K4 works over this path and
+     * two Icoms do not, and everything above the USB layer -- Hamlib's
+     * trace, the bridge, the byte counts -- says exactly the same thing
+     * in both cases. What it cannot say is which driver
+     * {@code UsbSerialProber} picked, which USB interface that driver
+     * claimed, or how many interfaces the device has to choose from,
+     * and those are the parts that differ between an FTDI on its own
+     * and a vendor bridge inside a composite device.
+     *
+     * <p>Never throws: this runs on the rig worker thread inside an
+     * open that is already in progress, and a diagnostic that can fail
+     * the operation it is diagnosing is worse than none.
+     */
+    static String describeLink(String id) {
+        if (id == null) return "";
+        try {
+            if (id.startsWith("bt:")) return "bluetooth " + id.substring(3);
+            if (!id.startsWith("usb:")) return id;
+            final UsbManager manager = usbManager();
+            final UsbDevice device = findUsbDevice(id);
+            if (manager == null || device == null) return id + " (not present)";
+            final StringBuilder out = new StringBuilder();
+            out.append(String.format(Locale.US, "%04x:%04x", device.getVendorId(),
+                    device.getProductId()));
+            out.append(" \"").append(describe(device)).append('"');
+            // Which of the same-VID:PID devices this is, and how many
+            // there are. The fact that answers "are we even talking to
+            // the CI-V port".
+            final int units =
+                    usbUnits(manager, device.getVendorId(), device.getProductId()).size();
+            out.append(", unit ").append(usbUnitOf(manager, device) + 1)
+               .append(" of ").append(units);
+            final int interfaces = device.getInterfaceCount();
+            out.append(", ").append(interfaces).append(" interface(s) [");
+            for (int i = 0; i < interfaces; i++) {
+                if (i != 0) out.append(' ');
+                final UsbInterface iface = device.getInterface(i);
+                out.append(i).append(":cls").append(iface.getInterfaceClass())
+                   .append('/').append(iface.getEndpointCount()).append("ep");
+            }
+            out.append(']');
+            final UsbSerialDriver driver =
+                    UsbSerialProber.getDefaultProber().probeDevice(device);
+            if (driver == null) {
+                out.append(", no driver");
+            } else {
+                out.append(", driver ")
+                   .append(driver.getClass().getSimpleName())
+                   .append(", port ").append(usbPortIndex(id))
+                   .append(" of ").append(driver.getPorts().size());
+            }
+            return out.toString();
+        } catch (RuntimeException e) {
+            return id + " (could not describe: " + e + ")";
+        }
+    }
+
+    /** "Name (AA:BB:CC:DD:EE:FF)", or just the address when unnamed. */
+    private static String bluetoothLabel(BluetoothDevice device) {
+        String name = null;
+        try {
+            name = device.getName();
+        } catch (SecurityException e) {
+            // Revoked between the check and the call; the address still
+            // identifies it.
+        }
+        return (name == null || name.isEmpty())
+                ? device.getAddress()
+                : name + " (" + device.getAddress() + ")";
     }
 
     private static String describe(UsbDevice device) {
@@ -286,29 +436,109 @@ public final class SerialBridge {
         return s.replace('\t', ' ').replace('\n', ' ');
     }
 
-    private static String usbId(UsbDevice device, int port) {
-        final String base = String.format(Locale.US, "usb:%04x:%04x",
-                device.getVendorId(), device.getProductId());
-        return port == 0 ? base : base + "#" + port;
+    /**
+     * Every attached device with this one's vendor and product ids, in a
+     * stable order.
+     *
+     * <p><b>There can be more than one, and assuming otherwise cost an
+     * Icom.</b> An IC-9700 presents its CI-V port and its USB serial
+     * function as two separate USB devices that share a VID:PID — so
+     * `usb:10c4:ea60` named both, the picker showed two identical rows,
+     * and the lookup returned whichever one {@code getDeviceList()}
+     * happened to yield first. Out of a {@code HashMap}, so not even the
+     * same one twice. Bytes went out of a chip that was never wired to
+     * the radio's CI-V engine, which is exactly what "the chip
+     * transmitted and the radio said nothing" looks like from above.
+     *
+     * <p>Sorted by {@code getDeviceName()} — the {@code
+     * /dev/bus/usb/BBB/DDD} path — because it is the only ordering
+     * available before permission is granted, and a fixed cable on a
+     * fixed hub enumerates in a fixed order. It is not promised across a
+     * replug, which is why the *label* says which is which and the
+     * operator picks; guessing which port is CI-V is not something this
+     * layer can do.
+     */
+    private static List<UsbDevice> usbUnits(UsbManager manager, int vendor, int product) {
+        final List<UsbDevice> units = new ArrayList<>();
+        if (manager == null) return units;
+        for (UsbDevice device : manager.getDeviceList().values()) {
+            if (device.getVendorId() == vendor && device.getProductId() == product) {
+                units.add(device);
+            }
+        }
+        units.sort((a, b) -> deviceName(a).compareTo(deviceName(b)));
+        return units;
     }
 
-    private static int usbPortIndex(String id) {
-        final int hash = id.indexOf('#');
-        if (hash < 0) return 0;
+    /** `getDeviceName()`, never null, so it can be compared and sorted. */
+    private static String deviceName(UsbDevice device) {
+        final String name = device.getDeviceName();
+        return name == null ? "" : name;
+    }
+
+    /** Where `device` sits in {@link #usbUnits}, or 0 if it is not there. */
+    private static int usbUnitOf(UsbManager manager, UsbDevice device) {
+        final List<UsbDevice> units =
+                usbUnits(manager, device.getVendorId(), device.getProductId());
+        for (int i = 0; i < units.size(); i++) {
+            if (deviceName(units.get(i)).equals(deviceName(device))) return i;
+        }
+        return 0;
+    }
+
+    /**
+     * `usb:VVVV:PPPP`, plus `@u` for the u'th device sharing those ids and
+     * `#p` for the p'th port of a multi-port driver. Both suffixes are
+     * omitted at zero, so an id saved before they existed still means
+     * the first port of the first device.
+     */
+    private static String usbId(UsbDevice device, int unit, int port) {
+        final StringBuilder id = new StringBuilder(String.format(Locale.US, "usb:%04x:%04x",
+                device.getVendorId(), device.getProductId()));
+        if (unit > 0) id.append('@').append(unit);
+        if (port > 0) id.append('#').append(port);
+        return id.toString();
+    }
+
+    private static int usbSuffix(String id, char marker) {
+        final int at = id.indexOf(marker);
+        if (at < 0) return 0;
+        int end = at + 1;
+        while (end < id.length() && Character.isDigit(id.charAt(end))) end++;
         try {
-            return Integer.parseInt(id.substring(hash + 1));
-        } catch (NumberFormatException e) {
+            return Integer.parseInt(id.substring(at + 1, end));
+        } catch (NumberFormatException | StringIndexOutOfBoundsException e) {
             return 0;
         }
+    }
+
+    private static int usbPortIndex(String id) { return usbSuffix(id, '#'); }
+
+    private static int usbUnitIndex(String id) { return usbSuffix(id, '@'); }
+
+    /** `usb:VVVV:PPPP` with both suffixes stripped. */
+    private static String usbBase(String id) {
+        int end = id.length();
+        final int at = id.indexOf('@');
+        if (at >= 0) end = Math.min(end, at);
+        final int hash = id.indexOf('#');
+        if (hash >= 0) end = Math.min(end, hash);
+        return id.substring(0, end);
     }
 
     private static UsbDevice findUsbDevice(String id) {
         final UsbManager manager = usbManager();
         if (manager == null || id == null || !id.startsWith("usb:")) return null;
-        final int hash = id.indexOf('#');
-        final String base = hash < 0 ? id : id.substring(0, hash);
+        final String base = usbBase(id);
         for (UsbDevice device : manager.getDeviceList().values()) {
-            if (usbId(device, 0).equals(base)) return device;
+            if (!usbId(device, 0, 0).equals(base)) continue;
+            // **The unit index, not the first match.** Two devices can
+            // share a VID:PID and only one of them may be the radio's
+            // CI-V port.
+            final List<UsbDevice> units =
+                    usbUnits(manager, device.getVendorId(), device.getProductId());
+            final int unit = usbUnitIndex(id);
+            return unit < units.size() ? units.get(unit) : null;
         }
         return null;
     }
@@ -341,15 +571,25 @@ public final class SerialBridge {
         void close();
     }
 
-    static int open(String id, int baud, int dataBits, int stopBits, int parity, int flow)
-            throws IOException {
+    static int open(String id, int baud, int dataBits, int stopBits, int parity, int flow,
+                    boolean dtr, boolean rts) throws IOException {
         if (context == null) throw new IOException("SerialBridge.init was never called");
+        // RFCOMM has no modem control lines at all, so `dtr` and `rts`
+        // are simply not offered to it -- rather than silently ignored
+        // in a place that reads as if they applied.
         final Link link = id != null && id.startsWith("bt:")
                 ? openBluetooth(id)
-                : openUsb(id, baud, dataBits, stopBits, parity, flow);
+                : openUsb(id, baud, dataBits, stopBits, parity, flow, dtr, rts);
         final int token = nextToken.getAndIncrement();
         links.put(token, link);
         return token;
+    }
+
+    /** The chip's own account of itself, or "" for a link that has none. */
+    static String describeStatus(int token) {
+        final Link link = links.get(token);
+        if (!(link instanceof UsbLink)) return "";
+        return ((UsbLink) link).status();
     }
 
     static void close(int token) {
@@ -384,7 +624,7 @@ public final class SerialBridge {
     // --- USB --------------------------------------------------------------
 
     private static Link openUsb(String id, int baud, int dataBits, int stopBits, int parity,
-                                int flow) throws IOException {
+                                int flow, boolean dtr, boolean rts) throws IOException {
         final UsbManager manager = usbManager();
         if (manager == null) throw new IOException("no USB service");
         final UsbDevice device = findUsbDevice(id);
@@ -415,12 +655,29 @@ public final class SerialBridge {
         port.open(connection);
         try {
             port.setParameters(baud, dataBits, stopBits, toParity(parity));
+            // **Before the flow control, deliberately.** The CP210x
+            // SET_FLOW structure encodes whether each line is held
+            // active, held inactive or driven by handshaking, and this
+            // library builds it from the driver's current `dtr`/`rts`
+            // fields — so setting the lines afterwards would leave the
+            // chip's flow configuration describing the old state.
+            //
+            // And they are asserted by default because that is what a
+            // serial port looks like everywhere else: the OS raises
+            // both on open and Hamlib relies on it (`src/rig.c`, "Needed
+            // on Linux because the serial port driver sets RTS/DTR on
+            // open"). A bridged transport reaches none of that, and an
+            // IC-9700 handed two low lines never answered a single CAT
+            // command that the same cable answered instantly from a
+            // desktop.
+            port.setDTR(dtr);
+            port.setRTS(rts);
             applyFlowControl(port, flow);
         } catch (IOException | UnsupportedOperationException e) {
             port.close();
             throw new IOException("could not configure " + id + ": " + e.getMessage());
         }
-        return new UsbLink(port);
+        return new UsbLink(port, connection);
     }
 
     private static int toParity(int parity) {
@@ -438,14 +695,27 @@ public final class SerialBridge {
             case 2: want = UsbSerialPort.FlowControl.XON_XOFF; break;
             default: want = UsbSerialPort.FlowControl.NONE; break;
         }
+        // **"None" means write nothing, not write zeros.** Setting a
+        // CP210x's flow control to NONE means sending it a 16-byte
+        // structure of zeroes, and an IC-9700's CP2102N stopped
+        // answering CI-V entirely when it got one — every control
+        // transfer succeeded, every bulk write returned its length, and
+        // not one byte ever came back. FT8TW drives the same radio on
+        // the same phone with a copy of this driver that has no
+        // SET_FLOW code in it at all. A chip that was opened fresh is
+        // already in its configured default, which is no flow control,
+        // so there is nothing here to undo. See the matching guard in
+        // the vendored `Cp21xxSerialDriver.openInt`, which does this
+        // write before we are ever asked.
+        if (want == UsbSerialPort.FlowControl.NONE) return;
+
         try {
             // **Not fatal if the chip cannot do it.** Only some drivers
             // implement hardware handshaking, and the alternative to
             // carrying on is refusing to talk to a radio that would have
             // worked — CAT is a few bytes at a time and almost never
             // needs flow control at all.
-            if (want == UsbSerialPort.FlowControl.NONE
-                    || port.getSupportedFlowControl().contains(want)) {
+            if (port.getSupportedFlowControl().contains(want)) {
                 port.setFlowControl(want);
             } else {
                 Log.w(TAG, "flow control " + want + " unsupported; leaving it off");
@@ -457,10 +727,80 @@ public final class SerialBridge {
 
     private static final class UsbLink implements Link {
         private final UsbSerialPort port;
+        private final UsbDeviceConnection connection;
         private volatile boolean closed;
 
-        UsbLink(UsbSerialPort port) {
+        UsbLink(UsbSerialPort port, UsbDeviceConnection connection) {
             this.port = port;
+            this.connection = connection;
+        }
+
+        /**
+         * What the chip says about itself, for the rig trace.
+         *
+         * <p>A bulk write returning its length means the bytes reached
+         * the chip over USB — not that the UART clocked them out.
+         * {@code GET_COMM_STATUS} is the chip's own account: an error
+         * mask, a bitmask of reasons transmission is being held, and the
+         * two queue depths.
+         *
+         * <p><b>The queue depths turned out to be the weak half.</b>
+         * The caller reads this a second after the previous frame, by
+         * which time {@code outQueue} is zero whether the chip sent the
+         * bytes or dropped them, and {@code inQueue} is drained
+         * continuously by the read thread, so it is zero even when the
+         * radio does answer. {@code errors} and {@code hold} are latched
+         * by the chip rather than sampled, and those are what carry
+         * information — along with CTS, since a handshake holding the
+         * transmitter off would show up there.
+         *
+         * <p>Never throws: it runs on the bridge's read thread inside a
+         * session that is otherwise working.
+         */
+        String status() {
+            final StringBuilder out = new StringBuilder();
+            try {
+                out.append("lines");
+                for (UsbSerialPort.ControlLine line : port.getSupportedControlLines()) {
+                    out.append(' ').append(line).append('=');
+                    switch (line) {
+                        case RTS: out.append(port.getRTS() ? 1 : 0); break;
+                        case CTS: out.append(port.getCTS() ? 1 : 0); break;
+                        case DTR: out.append(port.getDTR() ? 1 : 0); break;
+                        case DSR: out.append(port.getDSR() ? 1 : 0); break;
+                        case CD: out.append(port.getCD() ? 1 : 0); break;
+                        case RI: out.append(port.getRI() ? 1 : 0); break;
+                        default: out.append('?'); break;
+                    }
+                }
+            } catch (IOException | RuntimeException e) {
+                out.append(" (unavailable: ").append(e).append(')');
+            }
+
+            // CP210x GET_COMM_STATUS. Silicon Labs AN571: 19 bytes, four
+            // little-endian u32 followed by three bytes.
+            if (!(port.getDriver() instanceof Cp21xxSerialDriver)) return out.toString();
+            try {
+                final byte[] buf = new byte[19];
+                final int n = connection.controlTransfer(0xc1, 0x10, 0, port.getPortNumber(),
+                        buf, buf.length, 500);
+                if (n != buf.length) {
+                    out.append("; comm status unavailable (").append(n).append(')');
+                    return out.toString();
+                }
+                out.append("; errors=0x").append(Integer.toHexString(le32(buf, 0)))
+                   .append(" hold=0x").append(Integer.toHexString(le32(buf, 4)))
+                   .append(" inQueue=").append(le32(buf, 8))
+                   .append(" outQueue=").append(le32(buf, 12));
+            } catch (RuntimeException e) {
+                out.append("; comm status threw ").append(e);
+            }
+            return out.toString();
+        }
+
+        private static int le32(byte[] b, int at) {
+            return (b[at] & 0xff) | ((b[at + 1] & 0xff) << 8)
+                    | ((b[at + 2] & 0xff) << 16) | ((b[at + 3] & 0xff) << 24);
         }
 
         @Override

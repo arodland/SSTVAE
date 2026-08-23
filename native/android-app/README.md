@@ -1229,14 +1229,222 @@ of its watchdog in CI. Linux and macOS still build and test it, using
 the same POSIX calls Android does, so `test_rig_hamlib`'s
 real-Kenwood-through-a-real-bridge proof is untouched.
 
-**What is not tested on hardware.** Everything in this section. The
-composite-device question in particular is worth settling first with the
-actual radio: most rig USB interfaces present audio and CDC serial
-together, and this app needs both at once. FT8CN does it successfully on
-at least some devices, and mik3y/usb-serial-for-android#477 is an open
-report of a composite device where claiming the CDC interface fails
-while the platform holds the audio interfaces. If that turns out badly
-for a given radio, Bluetooth and the network kind are unaffected.
+**The composite-device question is settled, and it was the one that
+could have sunk the approach.** Most rig USB interfaces present audio
+and CDC serial together and this app needs both at once;
+mik3y/usb-serial-for-android#477 is an open report of a composite device
+where claiming the serial interface fails while the platform holds the
+audio ones. On an Elecraft K4 over one composite interface it works:
+CAT, DTR keying and RTS keying, with the audio path live (Andrew,
+2026-08-23). **Bluetooth is still untested for want of a device** and
+goes to beta on the strength of the shared code beneath it.
+
+**Not every radio works, and the trace is how to find out why.** A K4
+works over USB; an IC-9700 and an IC-7100 do not (reported 2026-08-23,
+unresolved). Everything structural was ruled out by reading before the
+logging below was written, and it is worth not re-deriving: the byte
+path is length-counted end to end (`SerialBridge.read` → a `jbyteArray`
+region copy → `LoopbackBridge`'s `send`), so nothing truncates a binary
+CI-V frame at a `0x00` the way a string would; Hamlib's POSIX
+`port_read_generic` and `port_write` have no port-type branch at all
+(the ones that exist are Win32 serial); `network_flush` is a
+`FIONREAD`-guarded drain and cannot block; the port-type conditionals in
+`rigs/icom/` are none; and the baud our `serial_defaults` picks is
+`rig_caps.serial_rate_max`, which is the same field `rig_init` uses, so
+a bridged rig runs at the speed the same rig runs at on a desktop. Nor
+is it the control lines: **both** `FtdiSerialDriver` and
+`Cp21xxSerialDriver` explicitly deassert DTR and RTS in `openInt()`, so
+the K4 is CAT-ing over this transport with them low. That is a
+difference from a desktop, where the OS raises them on open, and the
+transport now matches the desktop — but it is **not** thought to be the
+Icom fix (Andrew): CI-V has no flow control and an Icom uses those
+lines only for PTT, CW and RTTY keying. And every Icom in Hamlib declares
+`RIG_HANDSHAKE_NONE`, so no flow control is being applied that could
+hold the chip's transmitter off.
+
+**Cause found 2026-08-23: the device id could not tell two ports
+apart.** An IC-9700 presents its CI-V port and its USB serial function
+as two separate USB devices sharing `10c4:ea60`, each with one
+interface and one port. `usb:VID:PID` named both, so the picker showed
+two identical rows and the lookup returned whichever `getDeviceList()`
+— a `HashMap` — yielded first. The app was talking to a real, healthy
+CP2102N that is not wired to the radio's CI-V engine, which explains
+why every chip-level measurement below came back clean. Ids now carry
+`@unit` alongside `#port`; the two are different axes and conflating
+them was the bug. **Not yet confirmed on hardware.**
+
+Two presentation details go with it, and both are about the one piece
+of text that matters. The unit marker is a **prefix** — `(1 of 2)
+Silicon Labs CP2102N…` — because put after the name it is the first
+thing a narrow combo elides, which leaves two rows reading identically.
+And the device picker and the radio picker both use a **wrapping
+delegate** (`contentItem: Label { wrapMode: Text.Wrap }`, not the
+default `ItemDelegate` text, which elides), so the open list shows the
+whole row on a phone. `Label` rather than `Text`: it takes its colour
+from the active style, and hardcoding a colour is how a control ends up
+unreadable in the other theme.
+
+**And both device lists are sorted before they are handed up.**
+`UsbSerialProber.findAllDrivers` walks `getDeviceList().values()` — the
+same `HashMap` — and `getBondedDevices()` returns a `Set`, so the rows
+arrived in whatever order those felt like: "(2 of 2)" could sit above
+"(1 of 2)", and a Bluetooth list could reshuffle between refreshes.
+Sorting the *unit index* was not enough, because that fixed the
+numbering and not the order the numbered rows came out in — the same
+`HashMap` leaking through one layer further up.
+
+**What the measurements said while that was still hidden
+(2026-08-23), and the chip configuration they ruled out.** With the blind `SET_FLOW` write below skipped, this app
+programs the CP2102N exactly as FT8TW does — its `setParameters` is
+behaviourally identical and its older copy of the driver has no flow
+control code at all — and FT8TW drives the same radio on the same
+phone. So the register writes are not the difference.
+
+What no software above the chip can see is whether the UART clocked the
+bytes out: a bulk write returning its length means they reached the
+chip. A CP210x will say. `SerialBridge.describeStatus` issues
+`GET_COMM_STATUS` (Silicon Labs AN571, 19 bytes) and puts the transmit
+queue depth, the receive queue depth, the error mask and the hold
+reasons into the trace alongside the modem control lines. Bytes stuck
+in `outQueue` mean the chip is holding them and `hold` says why; an
+empty `outQueue` with an empty `inQueue` means they went out and the
+radio said nothing.
+
+**It is reported from the write path, and where it is reported was a
+mistake worth recording.** The first version logged it from the read
+loop, every ten consecutive empty reads — and printed nothing at all,
+which turned out to be the finding: the read loop was not cycling. A
+liveness probe on the thread whose liveness is in question cannot
+report. `bulkTransfer` on a CP2102N that has nothing to say blocks for
+as long as it likes, where an FTDI returns every ~16 ms because the
+chip sends a status packet whether or not there is data — so the K4
+never exercised this and the Icom never got past the first read. That
+is not itself a fault (a blocked read still delivers data the moment
+any arrives) but it is why the instrument was silent.
+
+So the read thread now only *counts* — reads started, reads returned,
+and how long the last one took, in relaxed atomics that nothing
+synchronises through — and the **write** thread prints them, because
+its frames are in the log and it is therefore known to be running. The
+probe fires *before* each frame rather than after, so what it describes
+is the state the previous frame left behind after Hamlib's full
+timeout; probed immediately after a write it would only ever catch a
+UART mid-transmission and prove nothing.
+
+**The write that was skipped, and why it stays (2026-08-23).** Setting a
+CP210x's flow control to *none* is not a no-op: the library sends the
+chip sixteen zero bytes, clobbering `ulControlHandshake`,
+`ulFlowReplace`, `ulXonLimit` and `ulXoffLimit` at once. FT8TW drives
+the same radio on the same phone with a fork of `Cp21xxSerialDriver`
+that has no `SET_FLOW` code in it at all, and the Linux `cp210x`
+driver — which is what the working `rigctl` goes through — does
+`GET_FLOW`/modify/`SET_FLOW` and never zeroes the limits. The kernel
+additionally carries erratum **CP2102N_E104**: firmware ≤ 0x10004 reads
+`ulXonLimit` as `ulFlowReplace`, so a blind write lands one word out of
+alignment and the chip's own `ulXoffLimit` comes from past the end of
+the buffer. The write is now skipped when there is nothing to set —
+in `SerialBridge.applyFlowControl` **and** in the vendored
+`Cp21xxSerialDriver.openInt`, which does it inside `port.open()` before
+any of our code is asked. That is the first patch carried against the
+vendored library; see `third_party/usb-serial-for-android/PATCHES.md`.
+
+**How the trace got there:** The
+app writes a correct frame — `-> rig 6: fe fe a2 e0 03 fd` — to a
+**CP2102N** at 19200 8N1 flow=none, one vendor-class interface, two
+endpoints, `Cp21xxSerialDriver` port 0 of 1, and nothing ever comes
+back; `rigctl -m 3081 -r /dev/ttyUSB0 -s 19200` on the same cable
+answers instantly. Every control transfer the driver makes returns 0
+and the bulk write returns 6, so the chip is enumerated, configured and
+accepting bytes. **What no software here can see is whether the UART
+clocked them out**, which is where reading code stops and a hardware
+A/B has to take over — the two worth running are whether FT8CN drives
+the same radio on the same phone (it uses the same USB library, so a
+pass there means our usage differs and a failure means it is not our
+code), and whether a CP210x adapter into the K4's RS-232 port fails the
+same way (which would separate the chip from the radio).
+
+Two differences from the Linux `cp210x` driver survive as the shortlist
+if the A/B points at the chip: the vendored library writes `SET_FLOW`
+as 16 blind zero bytes where Linux does `GET_FLOW`/modify/`SET_FLOW`,
+preserving `ulXonLimit`/`ulXoffLimit`; and it writes the requested baud
+raw where Linux applies `cp210x_get_actual_rate()` for a CP2102N (a
+no-op at 19200, which divides 48 MHz exactly). Linux also carries
+erratum **CP2102N_E104** — firmware ≤ 0x10004 reads `ulXonLimit` as
+`ulFlowReplace`, so it declares flow control unsupported on those
+parts. None of it is confirmed to matter.
+
+**The earlier reading of that trace was:** `fe fe a2 e0 03 fd` — address A2, the IC-9700's
+default — written, then `read_string_generic(): Timed out 1.001 seconds
+after 0 chars`, every time, at 115200. So `icom_get_usb_echo_off`
+returns `-RIG_ETIMEOUT` and `icom_rig_open` gives up with "is rig on and
+connected?". What that trace cannot say is whether the six bytes reached
+the USB endpoint — Hamlib only ever saw a successful *socket* write —
+which is what the second sink below was added to answer.
+
+Three things to check on the radio, all Icom-specific and none visible
+from here: **the CI-V USB baud rate** (a menu item separate from the
+CI-V port's own, defaulting to an Auto that is not reliable on every
+model — note 115200 is not this app's default either, since
+`serial_defaults` gives 38400 for an IC-9700 and 19200 for an IC-7100);
+**CI-V USB Echo Back**, which is exactly what `icom_get_usb_echo_off`
+probes at open and gets one attempt at, `rig_open` having set `retry` to
+0 for the duration; and **the CI-V address**, which is a separate
+setting for the USB port when "CI-V USB Port" is "Unlink from
+[REMOTE]" — the app sends to the factory-default A2, and a changed
+address produces exactly this silence.
+
+## Reading the rig trace on a phone
+
+`SSTVAE_HAMLIB_DEBUG` raises Hamlib's level and Hamlib writes to
+**stderr**, which a desktop operator can capture and a phone discards.
+So on the one platform where rig control is newest, the single artifact
+that answers "how far did `rig_open` get, and what did the radio say"
+was unreachable. (Hamlib's own `debug.c` has an `#ifdef ANDROID` branch
+that would log to logcat — it is dead in any build of ours and probably
+in most: `configure.ac` uses `ANDROID` only as an automake conditional,
+never as a preprocessor define, and never links `-llog`.)
+
+`rig::set_debug_sink` (`core/rig/hamlib.hpp`) registers a
+`vprintf_cb_t` and turns the trace into a stream of whole lines.
+**Settings → Rig control → Log rig traffic** installs a sink that keeps
+the last 600 lines and mirrors each to logcat; Refresh, Copy and Clear
+are under the switch. Off by default — at `RIG_DEBUG_TRACE` it is a line
+per CAT frame.
+
+**Hamlib's trace is only half of it, and the missing half is ours.**
+For a radio that never answers, Hamlib's view is "I wrote six bytes and
+read nothing", repeated — which is byte for byte what a bug in our own
+bridge would produce. So `core/rig/trace.hpp` is a second sink, Qt-free
+and Hamlib-free in `sstvae_core`, that the loopback bridge and the
+Android transport write to; the switch installs both, into one ring, so
+the two interleave. It reports what actually reached the transport
+(after the write, never before — a line logged on the way in would say
+"delivered" for a write that threw), what came back from it, the
+resolved line settings, and — from `SerialBridge.describeLink` — the
+device's ids, its interface count and classes, which driver
+`UsbSerialProber` chose and which of its ports was opened. That last
+part is the one nothing else can supply, and it is where an FTDI on its
+own and a vendor bridge inside a composite device stop looking alike.
+Tracing off costs one relaxed atomic load, which is why the calls sit
+in the byte pump unconditionally.
+
+Three things about it are load-bearing rather than incidental:
+
+- **The callback is registered only while a sink exists.** `rig_debug`
+  writes to stderr *or* to the callback, never both, so one left
+  registered swallows the trace for every later run — silently, since a
+  swallowed trace and a quiet library are the same output.
+  `test_rig_hamlib.cpp` captures stderr and requires it back, and that
+  assertion was mutation-tested: registering unconditionally fails it
+  and nothing else.
+- **The ring is a process-wide singleton, not a member of `RigControl`.**
+  QML destroys and rebuilds that view on every rotation while the rig
+  session outlives both, so a per-view buffer would discard the trace of
+  the open being diagnosed. It also keeps the sink's captures free of
+  `this`, which matters because it is called from the rig worker thread.
+- **The text area is refreshed by hand.** The rig screen republishes at
+  1 Hz and a bound `text:` would reset the scroll position every second,
+  which is unreadable in exactly the situation it is for.
 
 ## `core/audio/android/`
 

@@ -1,5 +1,6 @@
 #include "rigcontrol.hpp"
 
+#include <QDebug>
 #include <QJniEnvironment>
 #include <QJniObject>
 #include <QLatin1String>
@@ -10,12 +11,16 @@
 #include <QtCore/qcoreapplication_platform.h>
 
 #include <algorithm>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <string>
 
 #include "rig/android/androidrig.hpp"
 #include "rig/bridged.hpp"
 #include "rig/hamlib.hpp"
+#include "rig/trace.hpp"
 #include "session.hpp"
 
 // `SSTVAE_ANDROID_RIG=OFF` is a supported configuration -- the one
@@ -77,6 +82,54 @@ constexpr auto kDeviceKey = "rig/device";
 constexpr auto kHostKey = "rig/host";
 constexpr auto kBaudKey = "rig/baud";
 constexpr auto kPttKey = "rig/ptt";
+constexpr auto kDebugLogKey = "rig/debuglog";
+
+// Hamlib's trace, ring-buffered for the settings screen.
+//
+// **A process-wide singleton, not a member.** `RigControl` is created
+// and destroyed by QML on every rotation while the rig session outlives
+// both, so a per-view buffer would throw away the trace of the open
+// that is being diagnosed. It also keeps the sink's captures free of
+// `this`, which matters because the sink is called from the rig worker
+// thread and a view can go away underneath it.
+//
+// 600 lines is a few opens' worth at `RIG_DEBUG_TRACE` -- enough to
+// carry the whole of a failing `rig_open` and its retry, which is the
+// span that answers the question.
+constexpr std::size_t kMaxTraceLines = 600;
+
+class RigTrace {
+public:
+    void add(std::string line) {
+        std::lock_guard<std::mutex> lock(mu_);
+        lines_.push_back(std::move(line));
+        while (lines_.size() > kMaxTraceLines) lines_.pop_front();
+    }
+
+    QString text() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        QString out;
+        for (const std::string& line : lines_) {
+            out += QString::fromStdString(line);
+            out += QLatin1Char('\n');
+        }
+        return out;
+    }
+
+    void clear() {
+        std::lock_guard<std::mutex> lock(mu_);
+        lines_.clear();
+    }
+
+private:
+    mutable std::mutex mu_;
+    std::deque<std::string> lines_;
+};
+
+RigTrace& rig_trace() {
+    static RigTrace trace;
+    return trace;
+}
 
 // How many rows a model search returns. Hamlib knows several hundred
 // rigs; a phone list view of all of them is a scroll, not a picker.
@@ -133,6 +186,11 @@ RigControl::RigControl(QObject* parent) : QObject(parent) {
         enabled_ = false;
     }
 
+    // Before `connectRig()` below, so that a station whose radio fails
+    // to open at launch has that open in the log rather than only the
+    // reconnection attempts that follow it.
+    apply_debug_log();
+
     // A guarded pointer, not a raw capture: the callback is queued, so
     // an event can still be in flight when a rotation destroys this
     // view. Clearing the callback in the destructor closes the window
@@ -186,6 +244,7 @@ void RigControl::load() {
     host_ = s.value(QLatin1String(kHostKey), QString()).toString();
     baud_ = s.value(QLatin1String(kBaudKey), 0).toInt();
     ptt_ = s.value(QLatin1String(kPttKey), ptt_).toString();
+    debug_log_ = s.value(QLatin1String(kDebugLogKey), false).toBool();
 }
 
 void RigControl::save() {
@@ -197,6 +256,7 @@ void RigControl::save() {
     s.setValue(QLatin1String(kHostKey), host_);
     s.setValue(QLatin1String(kBaudKey), baud_);
     s.setValue(QLatin1String(kPttKey), ptt_);
+    s.setValue(QLatin1String(kDebugLogKey), debug_log_);
 }
 
 void RigControl::setEnabled(bool on) {
@@ -474,6 +534,59 @@ void RigControl::disconnectRig() {
 }
 
 // --- staying connected ------------------------------------------------------
+
+void RigControl::setDebugLog(bool on) {
+    if (on == debug_log_) return;
+    debug_log_ = on;
+    save();
+    apply_debug_log();
+    emit changed();
+}
+
+QString RigControl::logText() const { return rig_trace().text(); }
+
+void RigControl::clearLog() {
+    rig_trace().clear();
+    emit changed();
+}
+
+void RigControl::apply_debug_log() {
+    if (!debug_log_) {
+        rig::set_trace_sink({});
+#ifdef SSTVAE_ANDROID_HAVE_RIG
+        rig::set_debug_sink({});
+#endif
+        return;
+    }
+
+    // **Two sinks, one log, and that is the point.** Hamlib's trace
+    // ends at "I wrote six bytes and read nothing"; ours says whether
+    // those bytes reached the USB endpoint, whether anything came back
+    // from it, and which driver and interface the Android USB layer
+    // chose. Interleaved in one buffer they answer together the
+    // question neither answers alone -- is the radio ignoring us, or
+    // are we not reaching the radio.
+    //
+    // Both capture nothing but a reference to the singleton,
+    // deliberately: they are called from the rig worker and the
+    // bridge's two pump threads, and the view that installed them can
+    // be destroyed by a rotation at any point.
+    //
+    // Also to logcat, because the two audiences differ. The ring is
+    // what an operator in the field can read and send; `adb logcat` is
+    // what whoever reads the report wants when they can plug the phone
+    // in, and it carries lines from before the screen was opened.
+    rig::set_trace_sink([](const std::string& line) {
+        rig_trace().add(line);
+        qInfo("rig: %s", line.c_str());
+    });
+#ifdef SSTVAE_ANDROID_HAVE_RIG
+    rig::set_debug_sink([](const std::string& line) {
+        rig_trace().add(line);
+        qInfo("hamlib: %s", line.c_str());
+    });
+#endif
+}
 
 void RigControl::maybe_reconnect() {
     if (!enabled_ || !layer_ok_) return;
