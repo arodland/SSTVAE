@@ -750,6 +750,28 @@ refused, rather than that needing another CI round to find out. When the
 library owns the serial port, "quiet" and "unfalsifiable" are close
 together.
 
+**`tools/check_android_java.sh` is the same idea for the app's Java.**
+`native/`'s C++ is checked six ways -- ctest, the golden vectors,
+`pytest --native`, `check_includes.py`, `check_layering.py`, a mingw
+cross-compile -- and its Java was checked by nobody until an APK was
+built on a machine with an NDK. `catch (IOException |
+UnsupportedOperationException | RuntimeException e)` is not a syntax
+error, so no parser would have caught it either; javac catches it in
+two seconds and the only thing missing was an `android.jar`.
+Robolectric's `android-all` is one, on Maven Central, pinned with a
+sha256 like onnxruntime and Hamlib, and it is the **real API surface
+rather than a stub set**, so it cannot quietly drift from what the app
+compiles against. Three classes are stubbed because they are neither
+`android.*` nor ours -- `androidx.annotation.IntDef` (SOURCE
+retention, no runtime meaning), `FileProvider.getUriForFile` and Qt's
+`QtActivity`, whose jar is not on Maven Central at all -- and the trade
+is that a stub pins the signature *we use* but cannot notice upstream
+changing it. The script's own first run found two bugs in itself, one
+of them worth knowing: **piping javac into `grep` and testing that is
+wrong under `pipefail`**, which reports the pipeline's first failure,
+so a failing javac made the `if` false and the check passed while
+printing its own errors.
+
 **`tools/check_includes.py` catches on Linux what would otherwise only
 fail on MSVC**: a `std::` name used without its header. libstdc++ and
 libc++ pull in far more than they promise (`<vector>` happens to give

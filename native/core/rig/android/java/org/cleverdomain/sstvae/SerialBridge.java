@@ -593,7 +593,7 @@ public final class SerialBridge {
                         default: out.append('?'); break;
                     }
                 }
-            } catch (IOException | UnsupportedOperationException | RuntimeException e) {
+            } catch (IOException | RuntimeException e) {
                 out.append(" (unavailable: ").append(e).append(')');
             }
 
