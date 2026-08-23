@@ -155,7 +155,10 @@ RigControl::RigControl(QObject* parent) : QObject(parent) {
     // that moves quickly: the rig itself is polled every 10 s, so a
     // faster refresh would redraw the same frequency several times.
     poll_.setInterval(1000);
-    connect(&poll_, &QTimer::timeout, this, &RigControl::changed);
+    connect(&poll_, &QTimer::timeout, this, [this] {
+        maybe_reconnect();
+        emit changed();
+    });
     poll_.start();
 
     // A rig session survives this object, so a screen rotation must not
@@ -470,9 +473,75 @@ void RigControl::disconnectRig() {
     emit changed();
 }
 
+// --- staying connected ------------------------------------------------------
+
+void RigControl::maybe_reconnect() {
+    if (!enabled_ || !layer_ok_) return;
+
+    Session& session = Session::instance();
+    if (!session.rig_running()) return;
+
+    // **A published frequency is the only proof the radio is
+    // answering.** `failed` alone cannot tell "still opening the port"
+    // from "the cable is out", and `running` says neither -- it means a
+    // session is configured, which stayed true with the plug on the
+    // bench. This is the one signal that comes from the radio itself.
+    if (session.rig_frequency_hz().has_value()) {
+        reconnect_wait_ = 0;
+        reconnect_step_ = 0;
+        device_present_ = true;
+        return;
+    }
+    if (!session.rig_failed()) return;  // still connecting; leave it alone
+
+    // **Never while transmitting.** Reconnecting re-starts the
+    // controller, and although `ptt_function()` is bound to the
+    // controller rather than the backend and survives that, an over is
+    // committed airtime with the radio held on -- swapping the link
+    // underneath it buys nothing and risks the one operation that must
+    // not fail.
+    if (session.transmitting()) return;
+
+    if (connection_ != QLatin1String("network")) {
+        // `has_permission` is false for a device that is not there, so
+        // this is one cheap call that answers both "is it back" and
+        // "may we open it". A device that is simply absent does not
+        // spend the backoff: the next tick after it is plugged in
+        // reconnects.
+        device_present_ = rig::android::has_permission(device_.toStdString());
+        if (!device_present_) return;
+    } else {
+        device_present_ = true;
+    }
+
+    if (reconnect_wait_ > 0) {
+        --reconnect_wait_;
+        return;
+    }
+
+    // 2, 4, 8, 16, 32 s. Spent only on attempts that reached the radio
+    // and failed, which is the case where trying harder is the wrong
+    // answer -- a host that is not there, or a rig that will not open.
+    reconnect_step_ = std::min(reconnect_step_ + 1, 5);
+    reconnect_wait_ = 1 << reconnect_step_;
+    connectRig();
+}
+
 // --- live state -------------------------------------------------------------
 
 bool RigControl::running() const { return Session::instance().rig_running(); }
+
+QString RigControl::connectionState() const {
+    if (!layer_ok_) return tr("Unavailable");
+    if (!enabled_) return {};
+
+    Session& session = Session::instance();
+    if (!session.rig_running()) return tr("Not connected");
+    if (session.rig_frequency_hz().has_value()) return tr("Connected");
+    if (!session.rig_failed()) return tr("Connecting…");
+    if (!device_present_) return tr("Device disconnected — plug it back in");
+    return tr("Not responding — reconnecting");
+}
 bool RigControl::canKey() const { return Session::instance().rig_can_key(); }
 
 QString RigControl::status() const {

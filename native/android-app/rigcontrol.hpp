@@ -90,6 +90,15 @@ class RigControl : public QObject {
 
     // --- live state --------------------------------------------------
     Q_PROPERTY(bool running READ running NOTIFY changed)
+    // One line an operator can act on, which `running` cannot be.
+    //
+    // **`running` means a session is configured, not that the radio is
+    // answering** -- the desktop's distinction, kept for the desktop's
+    // reason. On hardware that read as "Connected" with the cable
+    // pulled out, which is the most misleading thing this screen could
+    // say. This separates them: "Connecting", "Connected", "Device
+    // disconnected", "Not responding".
+    Q_PROPERTY(QString connectionState READ connectionState NOTIFY changed)
     Q_PROPERTY(bool failed READ failed NOTIFY changed)
     Q_PROPERTY(QString status READ status NOTIFY changed)
     // The dial frequency as text, empty when unknown. Text rather than a
@@ -139,6 +148,7 @@ public:
     QStringList pttMethods() const;
 
     bool running() const;
+    QString connectionState() const;
     bool failed() const;
     QString status() const;
     QString frequency() const;
@@ -174,6 +184,10 @@ private:
     void load();
     void publish_permission(const QString& id, bool granted);
 
+    // Called once per poll tick. Rebuilds the rig session when the radio
+    // has stopped answering and the device is reachable again.
+    void maybe_reconnect();
+
     bool enabled_ = false;
     QString connection_ = QStringLiteral("usb");
     int model_ = 1;  // Hamlib's dummy: connects with no radio attached
@@ -187,6 +201,20 @@ private:
     // that says the build has Hamlib, this says the platform side came
     // up. Either way the switch will not turn on, and `status` says why.
     bool layer_ok_ = true;
+
+    // Reconnection state, in whole poll ticks (the timer is 1 Hz) so
+    // there is no clock to reason about.
+    //
+    // `reconnect_wait_` is only spent on attempts that actually ran: a
+    // device that is simply absent costs nothing and is retried on the
+    // very next tick, which is what makes replugging feel immediate
+    // rather than "somewhere in the next 30 seconds".
+    int reconnect_wait_ = 0;
+    int reconnect_step_ = 0;
+    // Cached by `maybe_reconnect` so `connectionState` can distinguish
+    // "unplugged" from "not answering" without a JNI call of its own on
+    // every property read.
+    bool device_present_ = true;
 
     QVariantList devices_;
     // Set by a failed `connectRig` and shown in place of the session's

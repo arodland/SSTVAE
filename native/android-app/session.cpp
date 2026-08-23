@@ -541,16 +541,42 @@ bool Session::start_rig(const rig::HamlibConfig& config,
         return false;
     }
 
-    auto controller = std::make_unique<rig::RigController>(
-        [this](std::optional<double> hz) {
-            std::lock_guard<std::mutex> lk(rig_mu_);
-            rig_frequency_ = hz;
-        },
-        [this](const std::string& text, bool error) {
-            std::lock_guard<std::mutex> lk(rig_mu_);
-            rig_status_ = text;
-            rig_failed_ = error;
-        });
+    // **The controller is created once and never destroyed.** Two
+    // reasons, and the second is a bug this replaced.
+    //
+    // `ptt_function()` returns a lambda capturing the *controller*, and
+    // `TxEngine` holds that for the length of an over. Destroying the
+    // controller while a transmission is in flight -- which is what
+    // turning rig control off mid-over used to do -- left the engine
+    // calling into freed memory to bring PTT back down, at the one
+    // moment it matters most.
+    //
+    // And `start()` supersedes a session in place, so re-starting the
+    // same controller with a freshly built backend is exactly what a
+    // reconnect needs: the `Ptt` already handed out stays valid across
+    // it. `Session` is immortal for its own reasons; this rides along
+    // with them.
+    rig::RigController* controller = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(rig_mu_);
+        if (!rig_) {
+            rig_ = std::make_unique<rig::RigController>(
+                [this](std::optional<double> hz) {
+                    std::lock_guard<std::mutex> lock(rig_mu_);
+                    rig_frequency_ = hz;
+                },
+                [this](const std::string& text, bool error) {
+                    std::lock_guard<std::mutex> lock(rig_mu_);
+                    rig_status_ = text;
+                    rig_failed_ = error;
+                });
+        }
+        controller = rig_.get();
+        rig_frequency_.reset();
+        rig_status_ = "connecting";
+        rig_failed_ = false;
+        rig_can_key_ = config.ptt_method != rig::PttMethod::Vox;
+    }
 
     rig::RigConfig rig_config;
     // Slower than the desktop's 5 s. A frequency readout is a comfort
@@ -559,38 +585,31 @@ bool Session::start_rig(const rig::HamlibConfig& config,
     // a wakeup on a device whose battery is the whole reason
     // `decode_loop_low_cpu` exists.
     rig_config.poll_interval_s = 10.0;
-    controller->start(std::move(backend), rig_config);
 
-    std::unique_ptr<rig::RigController> old;
-    {
-        std::lock_guard<std::mutex> lk(rig_mu_);
-        old = std::move(rig_);
-        rig_ = std::move(controller);
-        rig_frequency_.reset();
-        rig_status_ = "connecting";
-        rig_failed_ = false;
-        rig_can_key_ = config.ptt_method != rig::PttMethod::Vox;
-    }
-    // Outside the lock, and after the new one is in place: `stop()`
-    // detaches rather than joining, so this returns immediately, but the
-    // destructor still runs a teardown that must not be holding a lock
-    // the UI is about to take.
-    if (old) old->stop();
+    // **Outside the lock, and that is not incidental.** `start()`
+    // publishes "connecting" through the status callback, which takes
+    // `rig_mu_`; calling it with the lock held would deadlock on the
+    // first line of every connection attempt.
+    controller->start(std::move(backend), rig_config);
     return true;
 #endif
 }
 
 void Session::stop_rig() {
-    std::unique_ptr<rig::RigController> old;
+    rig::RigController* controller = nullptr;
     {
         std::lock_guard<std::mutex> lk(rig_mu_);
-        old = std::move(rig_);
+        controller = rig_.get();
         rig_frequency_.reset();
         rig_status_.clear();
         rig_failed_ = false;
         rig_can_key_ = false;
     }
-    if (old) old->stop();
+    // Stopped, never destroyed -- see `start_rig`. `stop()` detaches
+    // rather than joining, so this returns immediately even against a
+    // rig that has stopped answering, which is the whole point of the
+    // controller's design.
+    if (controller) controller->stop();
 }
 
 bool Session::rig_running() const {
@@ -666,13 +685,15 @@ void Session::run_transmit(const TxRequest& request) {
         std::lock_guard<std::mutex> lk(rig_mu_);
         if (rig_ && rig_can_key_) ptt = rig_->ptt_function();
     }
-    if (ptt) {
-        // The VOX leader exists to trip an audio-detecting transmitter
-        // that is not being told anything. With PTT it is a swept tone
-        // sent into an already-keyed radio for no reason, and it delays
-        // the picture by its own length.
-        cfg.vox_lead_s = 0.0;
-    }
+    // **The leader is not suppressed when the rig is keyed directly**
+    // (Andrew, on hardware). An earlier version zeroed it here, on the
+    // theory that a swept tone into an already-keyed radio only delays
+    // the picture. That is the app second-guessing a setting the
+    // operator made: the leader is also a settling period for an
+    // interface that wants audio flowing before the radio is properly
+    // in transmit, and `ptt_lead_s` is a different quantity doing a
+    // different job. If it is not wanted with CAT keying, the operator
+    // sets it to zero.
 
     auto engine = std::make_unique<tx::TxEngine>(
         std::move(ptt),

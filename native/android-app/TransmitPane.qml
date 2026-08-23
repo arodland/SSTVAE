@@ -91,7 +91,7 @@ ColumnLayout {
         // session VOX is the only thing there is, and saying so every
         // time trains the eye to skip the line.
         text: pane.transmitter.keying
-        visible: pane.transmitter.keying.indexOf("Rig control") === 0
+        visible: pane.transmitter.rigKeyed
         font.pixelSize: 11
         color: "#666"
         Layout.fillWidth: true

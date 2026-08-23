@@ -146,23 +146,27 @@ ApplicationWindow {
                 Layout.rightMargin: 12
                 Layout.topMargin: 4
                 visible: rigControl.running
+                // The dial, when the radio is actually answering.
                 Label {
-                    text: rigControl.frequency !== "" ? rigControl.frequency : "—"
+                    text: rigControl.frequency
+                    visible: rigControl.frequency !== ""
                     font.pixelSize: 18
                 }
-                Item { Layout.fillWidth: true }
+                // ...and what is wrong when it is not. This replaced a
+                // bare "—" beside a screen that still said Connected:
+                // with the cable pulled out the operator got a dash and
+                // no account of it. A healthy rig says nothing here,
+                // because a line that is present every second is one
+                // the eye learns to skip.
                 Label {
-                    // The status only when it is bad news. A healthy rig
-                    // saying "connected" every second is a line the eye
-                    // learns to skip, which is the last thing a warning
-                    // line should be.
-                    text: rigControl.failed ? rigControl.status : ""
-                    visible: text !== ""
+                    text: rigControl.connectionState
+                    visible: rigControl.frequency === ""
                     color: "#c62828"
-                    font.pixelSize: 12
+                    font.pixelSize: 13
                     elide: Text.ElideRight
-                    Layout.maximumWidth: parent.width * 0.6
+                    Layout.fillWidth: true
                 }
+                Item { Layout.fillWidth: true; visible: rigControl.frequency !== "" }
             }
 
             // The tuning instrument. First, and given room: without a

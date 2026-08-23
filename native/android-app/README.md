@@ -32,12 +32,15 @@ demonstrated rather than argued. And the level readout earns its keep:
 and it is distinguishable at a glance from merely quiet, which a mean
 level is not.
 
-**Rig control is in as of 2026-08-22** — CAT and PTT over USB serial,
-Bluetooth RFCOMM, or a network host. `docs/android.md` said that was
-structurally impossible; it is not, because Hamlib takes a socket for
-any backend. See "Rig control" below for what to know before touching
-it, and note that its build and its Java have **never been compiled** —
-they were written in a session with no NDK.
+**Rig control is in as of 2026-08-22, and USB works on hardware**
+(2026-08-23): CAT and both control-line keying methods, on a phone,
+over a composite USB interface — which is the question that could have
+sunk the approach, since the app needs the audio and the serial half of
+that device at once. `docs/android.md` said this was structurally
+impossible; it is not, because Hamlib takes a socket for any backend.
+**Bluetooth is untested for want of a device.** See "Rig control" below
+before touching any of it: the build-level traps and the runtime ones
+are written up there, and every one of them cost a round.
 
 **Three of this port's bugs were bugs in its own instruments**, and
 they are worth reading before trusting a number from here: the drift
@@ -1113,6 +1116,51 @@ query answers, an action reports.** `has_permission` returns false when
 it cannot ask — the truthful answer to "may the app open this right
 now" — while the enumerators throw, because their caller catches and has
 somewhere to show it.
+
+**Unplugging the USB cable, and getting back.** Verified on hardware
+2026-08-23: CAT and both control-line keying methods work; pulling the
+cable used to leave the screen saying "Connected" with no way back.
+
+Three things were wrong and they are worth separating. `running()` means
+*a session is configured*, not that the radio is answering — the
+desktop's distinction, correct there, but on a phone it was the only
+thing the UI showed. `connectionState` is the property to display now,
+and the signal it rests on is that **a published frequency is the only
+proof the radio answered**: `failed` alone cannot tell "still opening
+the port" from "the cable is out".
+
+Reconnection is app-level (`RigControl::maybe_reconnect`, once per 1 Hz
+tick) rather than in `RigController`, because the question it has to
+answer — *is the device back?* — is a platform one. For USB and
+Bluetooth that is `has_permission(device)`, which is false for a device
+that is not there, so one cheap call covers both "is it back" and "may
+we open it". **A device that is simply absent does not spend the
+backoff**, so replugging reconnects on the next tick rather than
+somewhere in the next 30 seconds; the 2/4/8/16/32 s backoff is only for
+attempts that reached the radio and failed. Never while transmitting: an
+over is committed airtime and swapping the link underneath it buys
+nothing.
+
+**The rig controller is immortal, and that fixed a bug rather than
+tidying one.** `ptt_function()` captures the *controller*, and
+`TxEngine` holds that for a whole over — so `stop_rig()` destroying the
+controller left the engine calling into freed memory to bring PTT back
+down, which is what turning rig control off mid-over used to do. It is
+created once and `stop()`ped, never destroyed. The same property makes
+reconnection safe: `RigController::start()` supersedes a session in
+place, so a `Ptt` handed out before a reconnect still keys the new
+backend. `test_rig.cpp` pins it, mutation-tested — binding the lambda to
+the session instead of the controller sends the key to the *superseded*
+backend and none to the new one, a failure with no symptom until
+somebody transmits.
+
+**The VOX leader is sent whatever keys the radio** (Andrew, on
+hardware). An earlier version zeroed it whenever PTT was not VOX, on the
+theory that a swept tone into an already-keyed radio only delays the
+picture. That is the app second-guessing the operator: the leader is
+also a settling period for an interface that wants audio flowing before
+the radio is properly in transmit, and `ptt_lead_s` is a different
+quantity doing a different job. Set it to zero if it is not wanted.
 
 **What is not tested on hardware.** Everything in this section. The
 composite-device question in particular is worth settling first with the

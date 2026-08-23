@@ -302,8 +302,9 @@ ColumnLayout {
         Label {
             text: "VOX means this app does not key the radio at all — the "
                   + "transmit audio does, and the leader tone on the Send screen "
-                  + "is what trips it. Anything else keys the radio directly, and "
-                  + "the leader is skipped."
+                  + "is what trips it. Anything else keys the radio directly. The "
+                  + "leader is sent either way; set it to zero on the Send screen "
+                  + "if you don't want it."
             font.pixelSize: 11
             color: "#666"
             Layout.fillWidth: true
@@ -324,15 +325,28 @@ ColumnLayout {
             }
             Label {
                 Layout.fillWidth: true
-                // The status text, and whether it was a failure, come
-                // from two properties rather than one: a failure message
-                // is whatever the backend's exception said and has no
-                // shape to recognise it by.
-                text: pane.rig.status
+                // **State first, the rig's own words second.** `running`
+                // means a session is configured, not that the radio is
+                // answering -- on hardware that read as "Connected" with
+                // the cable out. `connectionState` is the one an
+                // operator can act on; `status` below is the backend's
+                // message, which is what you want when the answer is
+                // "it will not open" rather than "it is unplugged".
+                text: pane.rig.connectionState
                 color: pane.rig.failed ? "#c62828" : "#666"
-                font.pixelSize: 12
+                font.pixelSize: 13
                 wrapMode: Text.Wrap
             }
+        }
+        Label {
+            text: pane.rig.status
+            visible: text !== "" && text !== pane.rig.connectionState
+            color: "#666"
+            font.pixelSize: 11
+            wrapMode: Text.Wrap
+            Layout.fillWidth: true
+            Layout.leftMargin: 12
+            Layout.rightMargin: 12
         }
         Label {
             text: pane.rig.frequency

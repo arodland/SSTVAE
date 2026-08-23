@@ -345,12 +345,7 @@ QString Transmitter::airtime() const {
     const config::ModeSpec* m = find_mode(mode_);
     if (m == nullptr) return {};
     double seconds = m->duration_s;
-    // Not counted when the rig will be keyed directly: `run_transmit`
-    // zeroes the leader in that case, because a swept tone into an
-    // already-keyed radio only delays the picture.
-    if (vox_lead_s_ > 0.0 && !Session::instance().rig_can_key()) {
-        seconds += vox_lead_s_ + dsp::VOX_LEAD_GAP_S;
-    }
+    if (vox_lead_s_ > 0.0) seconds += vox_lead_s_ + dsp::VOX_LEAD_GAP_S;
     // The CW ID's length depends on the message, so it is deliberately
     // not counted here rather than guessed at: a figure that is
     // sometimes wrong is worse than one that is consistently the
@@ -358,14 +353,18 @@ QString Transmitter::airtime() const {
     return QStringLiteral("%1 s").arg(seconds, 0, 'f', 0);
 }
 
+bool Transmitter::rigKeyed() const { return Session::instance().rig_can_key(); }
+
 QString Transmitter::keying() const {
+    // The leader is reported the same way either way: it is the
+    // operator's setting and it is sent whatever keys the radio.
+    const QString leader = vox_lead_s_ > 0.0
+                               ? tr("a %1 s leader tone").arg(vox_lead_s_, 0, 'g', 2)
+                               : tr("no leader tone");
     if (Session::instance().rig_can_key()) {
-        return tr("Rig control keys the radio; the VOX leader is skipped.");
+        return tr("Rig control keys the radio, with %1.").arg(leader);
     }
-    if (vox_lead_s_ > 0.0) {
-        return tr("VOX, with a %1 s leader tone.").arg(vox_lead_s_, 0, 'g', 2);
-    }
-    return tr("VOX, with no leader tone.");
+    return tr("VOX, with %1.").arg(leader);
 }
 
 QString Transmitter::lastError() const {

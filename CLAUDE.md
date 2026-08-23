@@ -996,11 +996,27 @@ the SPP UUID). Six things are settled and worth not re-deriving:
   unauthenticated path to a transmitter; the bind is `127.0.0.1` and the
   port is ephemeral. One thread per direction, so an idle link costs no
   wakeups.
-- **`Session` owns the `RigController`, not the UI.** An over is 32-95 s
-  of committed airtime and the thing that brings PTT back down cannot be
-  destroyed by a rotation. `TxEngine` needed no change: it takes a
-  `Ptt`, which is the shape `docs/android.md` predicted CAT would arrive
+- **`Session` owns the `RigController`, and never destroys it.** An
+  over is 32-95 s of committed airtime and the thing that brings PTT
+  back down cannot be destroyed by a rotation -- nor by the operator
+  switching rig control off mid-over, which is what `stop_rig()`
+  destroying the controller used to do: `ptt_function()` captures the
+  *controller*, so the engine was left calling into freed memory at
+  unkey. Created once, `stop()`ped, never destroyed. That is also what
+  makes reconnection safe, since `start()` supersedes a session in place
+  and a `Ptt` handed out earlier keys the new backend
+  (`test_rig.cpp`, mutation-tested). `TxEngine` needed no change: it
+  takes a `Ptt`, the shape `docs/android.md` predicted CAT would arrive
   in.
+- **Reconnection is app-level, and "is the device back?" is why.**
+  `RigControl::maybe_reconnect` rebuilds the session when the radio
+  stops answering and `has_permission(device)` says it is reachable
+  again -- false for a device that is not there, so one call answers
+  both halves. An absent device does not spend the backoff, so
+  replugging is immediate; the backoff is for attempts that reached the
+  radio and failed. **A published frequency is the only proof the radio
+  answered**: `RigController::running()` means a session is configured
+  and said "Connected" with the cable out.
 
 **The Hamlib NDK cross-build and the Android Java have never been
 compiled** (`native/cmake/hamlib.cmake`, `SerialBridge.java`) -- written
@@ -1860,15 +1876,18 @@ on its USB input).
 cost a transport and a socket rather than a fork of Hamlib. Three
 connection kinds — USB serial, Bluetooth RFCOMM, and a network host
 handed straight to Hamlib (which covers both `rigctld` and a
-ser2net-style server, one code path in Hamlib and one here). The whole
-mechanism is tested on a desktop against fakes plus one real Kenwood
-backend; **nothing about it has been compiled for Android or run on a
-phone**, because the session that wrote it had no NDK. The first thing
-to settle on hardware is not the software: most rig USB interfaces
-present audio and CDC serial on one composite device and this app needs
-both at once. That works for FT8CN on at least some devices and there
-is an open report of it failing on others; Bluetooth and the network
-kind are unaffected either way.
+ser2net-style server, one code path in Hamlib and one here).
+
+**USB works on hardware** (Andrew, 2026-08-23): CAT and both
+control-line keying methods, on a phone, over a composite USB
+interface — which settles the one question that could have sunk the
+whole approach, since the app needs the audio and the serial half of
+that device at the same time. **Bluetooth is untested for want of a
+device** and goes to beta on the strength of the shared code beneath
+it. Unplug/replug recovery and the "Connected with the cable out"
+reading were found the same day and fixed;
+`native/android-app/README.md` has the three separate mistakes behind
+that one symptom.
 
 Next, in whatever order: further UI work, the rest of Tier 2, or
 the Play internal test. **A signed upload bundle exists** as of

@@ -82,6 +82,10 @@ class Transmitter : public QObject {
     // that was doing the job yesterday is silently not in the waveform
     // today.
     Q_PROPERTY(QString keying READ keying NOTIFY changed)
+    // Whether the rig will key the radio, as a fact rather than as a
+    // substring of `keying` -- that text is translatable, so testing its
+    // prefix works until somebody ships a translation.
+    Q_PROPERTY(bool rigKeyed READ rigKeyed NOTIFY changed)
     Q_PROPERTY(QString lastError READ lastError NOTIFY changed)
     // Empty unless the CW ID settings would key a partial
     // identification; see `tx::cw_id_problem`. Non-empty blocks Send,
@@ -132,6 +136,7 @@ public:
     double txProgress() const;
     QString airtime() const;
     QString keying() const;
+    bool rigKeyed() const;
     QString lastError() const;
     QString cwIdProblem() const;
     bool needsFirstTransmitPrompt() const { return !acknowledged_; }
