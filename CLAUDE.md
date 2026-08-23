@@ -1070,8 +1070,28 @@ the SPP UUID). Six things are settled and worth not re-deriving:
   correct on its own terms; it is **not** thought to be the Icom fix
   (Andrew): CI-V has no flow control and an Icom uses those lines only
   for PTT, CW and RTTY keying.
-- **A K4 works over USB and two Icoms do not, and it is still open**
-  (2026-08-23). An
+- **A device id of VID:PID names a *kind* of device, not a device, and
+  an IC-9700 has two of the same kind** (2026-08-23). That radio
+  presents its CI-V port and its USB serial function as **two separate
+  USB devices sharing `10c4:ea60`**, each with one interface and one
+  port -- so `usb:10c4:ea60` named both, the picker showed two
+  identical rows, and `findUsbDevice` returned whichever
+  `getDeviceList()` yielded first. Out of a `HashMap`, so not reliably
+  the same one twice. The app was writing to a real, healthy CP2102N
+  that is not wired to the radio's CI-V engine, which from above is
+  indistinguishable from a radio that ignores us -- and is why every
+  chip-level measurement came back clean. The id now carries `@unit`
+  beside the existing `#port`, and the two are **not the same axis**:
+  `#port` is one driver's several UARTs (a CP2105), `@unit` is several
+  devices with one VID:PID. Units are ordered by `getDeviceName()`, the
+  only ordering available before permission is granted; that is not
+  promised across a replug, so the *label* says "(1 of 2)" and the
+  operator picks, because nothing readable distinguishes an Icom's CI-V
+  port from its data port. Both suffixes are omitted at zero, so an id
+  saved before they existed still means the first port of the first
+  device.
+- **A K4 worked over USB and two Icoms did not** (2026-08-23; the unit
+  index above is the cause found, not yet confirmed on hardware). An
   IC-9700 would not answer a single CI-V frame from the app while
   `rigctl -m 3081 -r /dev/ttyUSB0 -s 19200` on the same cable answered
   instantly. The trace narrowed it to one gap: a correct frame reaching

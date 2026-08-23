@@ -118,7 +118,7 @@ static calibrated quantisation was tried and is *worse* — do not retry
 it without new information. The finding that outlived it — the model
 had never seen non-photographic content — became the item below.
 
-## Android rig control: an Icom that will not answer a phone
+## Android rig control: two USB ports, one device id
 
 Landed 2026-08-22 (`docs/android.md`, "Rig control was said to be
 structurally impossible") and taken to hardware 2026-08-23. Most of what
@@ -152,7 +152,15 @@ OS raises them on open, but demonstrably not a fatal one -- and every
 Icom in Hamlib declares `RIG_HANDSHAKE_NONE`, so nothing is applying
 flow control that could hold the chip's transmitter off.
 
-**Open. The chip's configuration is ruled out (2026-08-23).** `fe fe a2 e0 03 fd` -- address A2, the
+**Cause found 2026-08-23, awaiting hardware confirmation: an IC-9700
+presents two USB serial devices sharing `10c4:ea60` -- CI-V and the USB
+serial function -- and `usb:VID:PID` named both.** The picker showed two
+identical rows and `findUsbDevice` returned whichever `getDeviceList()`
+yielded first, out of a `HashMap`. Ids now carry `@unit` beside
+`#port`, which is a different axis: `#port` is one driver's several
+UARTs, `@unit` is several devices with one VID:PID. What follows is the
+measurement record from before that was found, and it stands -- it is
+what ruled the chip's configuration out. `fe fe a2 e0 03 fd` -- address A2, the
 IC-9700's default -- written, `read_string_generic(): Timed out 1.001
 seconds after 0 chars`, every time, at 115200. `icom_get_usb_echo_off`
 therefore returns `-RIG_ETIMEOUT` and `icom_rig_open` gives up with

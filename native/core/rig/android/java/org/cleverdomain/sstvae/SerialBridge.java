@@ -102,7 +102,10 @@ public final class SerialBridge {
                 final boolean granted =
                         intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
                 final UsbDevice device = usbExtra(intent);
-                nativePermissionResult(device == null ? "" : usbId(device, 0), granted);
+                nativePermissionResult(
+                        device == null ? ""
+                                : usbId(device, usbUnitOf(usbManager(), device), 0),
+                        granted);
             }
         };
         final IntentFilter filter = new IntentFilter(ACTION_GRANT_USB);
@@ -227,10 +230,27 @@ public final class SerialBridge {
             final UsbDevice device = driver.getDevice();
             final boolean permitted = manager.hasPermission(device);
             final int ports = driver.getPorts().size();
+            // **Two things can multiply a row, and they are not the
+            // same thing.** `ports` is one driver's several UARTs (a
+            // CP2105); `units` is several devices that happen to share
+            // a VID:PID, which is how an IC-9700 presents its CI-V port
+            // and its USB serial function. Conflating them is what made
+            // the picker show two identical rows that both addressed
+            // the same chip.
+            final int unit = usbUnitOf(manager, device);
+            final int units =
+                    usbUnits(manager, device.getVendorId(), device.getProductId()).size();
             for (int i = 0; i < ports; i++) {
                 final StringBuilder label = new StringBuilder(describe(device));
                 if (ports > 1) label.append(" port ").append(i + 1);
-                out.add(usbId(device, i) + "\t" + clean(label.toString()) + "\t"
+                // Said plainly, because the operator is the only one who
+                // can tell these apart: nothing readable distinguishes
+                // an Icom's CI-V port from its data port, so the answer
+                // is to try the other one.
+                if (units > 1) {
+                    label.append(" (").append(unit + 1).append(" of ").append(units).append(')');
+                }
+                out.add(usbId(device, unit, i) + "\t" + clean(label.toString()) + "\t"
                         + (permitted ? "1" : "0"));
             }
         }
@@ -292,6 +312,13 @@ public final class SerialBridge {
             out.append(String.format(Locale.US, "%04x:%04x", device.getVendorId(),
                     device.getProductId()));
             out.append(" \"").append(describe(device)).append('"');
+            // Which of the same-VID:PID devices this is, and how many
+            // there are. The fact that answers "are we even talking to
+            // the CI-V port".
+            final int units =
+                    usbUnits(manager, device.getVendorId(), device.getProductId()).size();
+            out.append(", unit ").append(usbUnitOf(manager, device) + 1)
+               .append(" of ").append(units);
             final int interfaces = device.getInterfaceCount();
             out.append(", ").append(interfaces).append(" interface(s) [");
             for (int i = 0; i < interfaces; i++) {
@@ -342,29 +369,110 @@ public final class SerialBridge {
         return s.replace('\t', ' ').replace('\n', ' ');
     }
 
-    private static String usbId(UsbDevice device, int port) {
-        final String base = String.format(Locale.US, "usb:%04x:%04x",
-                device.getVendorId(), device.getProductId());
-        return port == 0 ? base : base + "#" + port;
+    /**
+     * Every attached device with this one's vendor and product ids, in a
+     * stable order.
+     *
+     * <p><b>There can be more than one, and assuming otherwise cost an
+     * Icom.</b> An IC-9700 presents its CI-V port and its USB serial
+     * function as two separate USB devices that share a VID:PID — so
+     * `usb:10c4:ea60` named both, the picker showed two identical rows,
+     * and the lookup returned whichever one {@code getDeviceList()}
+     * happened to yield first. Out of a {@code HashMap}, so not even the
+     * same one twice. Bytes went out of a chip that was never wired to
+     * the radio's CI-V engine, which is exactly what "the chip
+     * transmitted and the radio said nothing" looks like from above.
+     *
+     * <p>Sorted by {@code getDeviceName()} — the {@code
+     * /dev/bus/usb/BBB/DDD} path — because it is the only ordering
+     * available before permission is granted, and a fixed cable on a
+     * fixed hub enumerates in a fixed order. It is not promised across a
+     * replug, which is why the *label* says which is which and the
+     * operator picks; guessing which port is CI-V is not something this
+     * layer can do.
+     */
+    private static List<UsbDevice> usbUnits(UsbManager manager, int vendor, int product) {
+        final List<UsbDevice> units = new ArrayList<>();
+        if (manager == null) return units;
+        for (UsbDevice device : manager.getDeviceList().values()) {
+            if (device.getVendorId() == vendor && device.getProductId() == product) {
+                units.add(device);
+            }
+        }
+        units.sort((a, b) -> {
+            final String an = a.getDeviceName() == null ? "" : a.getDeviceName();
+            final String bn = b.getDeviceName() == null ? "" : b.getDeviceName();
+            return an.compareTo(bn);
+        });
+        return units;
     }
 
-    private static int usbPortIndex(String id) {
-        final int hash = id.indexOf('#');
-        if (hash < 0) return 0;
+    /** Where `device` sits in {@link #usbUnits}, or 0 if it is not there. */
+    private static int usbUnitOf(UsbManager manager, UsbDevice device) {
+        final List<UsbDevice> units =
+                usbUnits(manager, device.getVendorId(), device.getProductId());
+        for (int i = 0; i < units.size(); i++) {
+            if (units.get(i).getDeviceName() != null
+                    && units.get(i).getDeviceName().equals(device.getDeviceName())) {
+                return i;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * `usb:VVVV:PPPP`, plus `@u` for the u'th device sharing those ids and
+     * `#p` for the p'th port of a multi-port driver. Both suffixes are
+     * omitted at zero, so an id saved before they existed still means
+     * the first port of the first device.
+     */
+    private static String usbId(UsbDevice device, int unit, int port) {
+        final StringBuilder id = new StringBuilder(String.format(Locale.US, "usb:%04x:%04x",
+                device.getVendorId(), device.getProductId()));
+        if (unit > 0) id.append('@').append(unit);
+        if (port > 0) id.append('#').append(port);
+        return id.toString();
+    }
+
+    private static int usbSuffix(String id, char marker) {
+        final int at = id.indexOf(marker);
+        if (at < 0) return 0;
+        int end = at + 1;
+        while (end < id.length() && Character.isDigit(id.charAt(end))) end++;
         try {
-            return Integer.parseInt(id.substring(hash + 1));
-        } catch (NumberFormatException e) {
+            return Integer.parseInt(id.substring(at + 1, end));
+        } catch (NumberFormatException | StringIndexOutOfBoundsException e) {
             return 0;
         }
+    }
+
+    private static int usbPortIndex(String id) { return usbSuffix(id, '#'); }
+
+    private static int usbUnitIndex(String id) { return usbSuffix(id, '@'); }
+
+    /** `usb:VVVV:PPPP` with both suffixes stripped. */
+    private static String usbBase(String id) {
+        int end = id.length();
+        final int at = id.indexOf('@');
+        if (at >= 0) end = Math.min(end, at);
+        final int hash = id.indexOf('#');
+        if (hash >= 0) end = Math.min(end, hash);
+        return id.substring(0, end);
     }
 
     private static UsbDevice findUsbDevice(String id) {
         final UsbManager manager = usbManager();
         if (manager == null || id == null || !id.startsWith("usb:")) return null;
-        final int hash = id.indexOf('#');
-        final String base = hash < 0 ? id : id.substring(0, hash);
+        final String base = usbBase(id);
         for (UsbDevice device : manager.getDeviceList().values()) {
-            if (usbId(device, 0).equals(base)) return device;
+            if (!usbId(device, 0, 0).equals(base)) continue;
+            // **The unit index, not the first match.** Two devices can
+            // share a VID:PID and only one of them may be the radio's
+            // CI-V port.
+            final List<UsbDevice> units =
+                    usbUnits(manager, device.getVendorId(), device.getProductId());
+            final int unit = usbUnitIndex(id);
+            return unit < units.size() ? units.get(unit) : null;
         }
         return null;
     }

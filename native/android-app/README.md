@@ -1262,8 +1262,19 @@ lines only for PTT, CW and RTTY keying. And every Icom in Hamlib declares
 `RIG_HANDSHAKE_NONE`, so no flow control is being applied that could
 hold the chip's transmitter off.
 
-**Still open, and the chip's configuration is now ruled out
-(2026-08-23).** With the blind `SET_FLOW` write below skipped, this app
+**Cause found 2026-08-23: the device id could not tell two ports
+apart.** An IC-9700 presents its CI-V port and its USB serial function
+as two separate USB devices sharing `10c4:ea60`, each with one
+interface and one port. `usb:VID:PID` named both, so the picker showed
+two identical rows and the lookup returned whichever `getDeviceList()`
+— a `HashMap` — yielded first. The app was talking to a real, healthy
+CP2102N that is not wired to the radio's CI-V engine, which explains
+why every chip-level measurement below came back clean. Ids now carry
+`@unit` alongside `#port`; the two are different axes and conflating
+them was the bug. **Not yet confirmed on hardware.**
+
+**What the measurements said while that was still hidden
+(2026-08-23), and the chip configuration they ruled out.** With the blind `SET_FLOW` write below skipped, this app
 programs the CP2102N exactly as FT8TW does — its `setParameters` is
 behaviourally identical and its older copy of the driver has no flow
 control code at all — and FT8TW drives the same radio on the same
