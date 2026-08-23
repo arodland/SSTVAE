@@ -345,7 +345,11 @@ void LoopbackBridge::pump_out() {
         }
     }
 
-    trace("bridge: stopped reading from the rig");
+    if (tracing()) {
+        const std::string why = last_error();
+        trace("bridge: stopped reading from the rig" +
+              (why.empty() ? std::string(" (session ended)") : ": " + why));
+    }
 
     {
         std::lock_guard<std::mutex> lock(mu_);

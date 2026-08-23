@@ -24,6 +24,16 @@ setFlowControl(mFlowControl);
 **Here:** the last call is guarded by `if (mFlowControl !=
 FlowControl.NONE)`.
 
+**This did not fix the bug it was written for, and is kept anyway.** An
+IC-9700 still does not answer, so the CP2102N's flow configuration was
+not what was stopping it. It stays because both reference
+implementations avoid this write and one of them is the kernel, and
+because Silicon Labs' own erratum says the structure is misread on some
+parts — a blind write of zeroes over four registers is wrong on its own
+terms whether or not it was Andrew's fault. Treat it as a candidate for
+removal at the next re-vendor if upstream has adopted a
+read-modify-write.
+
 **Why.** An Icom IC-9700 would not answer a single CI-V frame from this
 app on a phone, while `rigctl -m 3081 -r /dev/ttyUSB0 -s 19200` on the
 same cable answered instantly. The app's own trace showed a correct
@@ -38,10 +48,16 @@ chip a 16-byte `SET_FLOW` structure of zeroes, clobbering
 one blind write. Two independent implementations that work with this
 chip do not do that:
 
-* **FT8TW** drives the same radio on the same phone. Its fork of this
+* **FT8TW** drives the same radio on the same phone. Its copy of this
   file has no `SILABSER_SET_FLOW_REQUEST_CODE` constant and no
   `setFlowControl` method at all — `openInt` is `IFC_ENABLE` plus
-  `SET_MHS` and stops.
+  `SET_MHS` and stops. (It is an *older snapshot*, from before upstream
+  added flow control, rather than a deliberate removal: its
+  `openInt(UsbDeviceConnection)` signature and two-argument `read` both
+  predate 3.11. Its `setParameters` is behaviourally identical to
+  this one, so with this guard in place the two now program the chip
+  the same way — and the Icom still fails, which is what rules the
+  chip's *configuration* out entirely.)
 * **The Linux `cp210x` kernel driver**, which is what the working
   `rigctl` run goes through, never writes the structure blind: it does
   `GET_FLOW`, modifies the handshake bits, and writes it back,

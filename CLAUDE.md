@@ -1048,8 +1048,8 @@ the SPP UUID). Six things are settled and worth not re-deriving:
   correct on its own terms; it is **not** thought to be the Icom fix
   (Andrew): CI-V has no flow control and an Icom uses those lines only
   for PTT, CW and RTTY keying.
-- **"No flow control" is not the same as writing zeros, and on a
-  CP2102N that difference cost an Icom entirely** (2026-08-23). An
+- **A K4 works over USB and two Icoms do not, and it is still open**
+  (2026-08-23). An
   IC-9700 would not answer a single CI-V frame from the app while
   `rigctl -m 3081 -r /dev/ttyUSB0 -s 19200` on the same cable answered
   instantly. The trace narrowed it to one gap: a correct frame reaching
@@ -1062,18 +1062,24 @@ the SPP UUID). Six things are settled and worth not re-deriving:
   `ulFlowReplace`, `ulXonLimit` and `ulXoffLimit` in one blind write.
   Two implementations that work with this chip do not do that:
   **FT8TW** (which drives the same radio on the same phone -- Andrew's
-  test) carries a fork of `Cp21xxSerialDriver` with no `SET_FLOW`
-  constant and no `setFlowControl` at all, and the **Linux `cp210x`
-  driver**, which is what the working `rigctl` goes through, does
-  `GET_FLOW`/modify/`SET_FLOW` and never zeroes the limits. The kernel
+  test) carries an older copy of `Cp21xxSerialDriver` with no
+  `SET_FLOW` constant and no `setFlowControl` at all, and the **Linux
+  `cp210x` driver**, which is what the working `rigctl` goes through,
+  does `GET_FLOW`/modify/`SET_FLOW` and never zeroes the limits.
+  **Skipping the write did not fix it**, and that is the useful part:
+  FT8TW's `setParameters` is behaviourally identical to ours, so with
+  the write gone the two program the chip the same way and the Icom
+  still fails -- which rules the chip's *configuration* out entirely
+  and leaves only what the chip does with the bytes. The kernel
   also carries erratum **CP2102N_E104** -- firmware <= 0x10004 reads
   `ulXonLimit` as `ulFlowReplace`, so a blind 16-byte write lands one
   word out of alignment and the chip's own `ulXoffLimit` comes from
   past the end of the buffer. So the write is skipped when there is no
   flow control to set, in `SerialBridge.applyFlowControl` **and** in
   `openInt` -- both, because `openInt` does it inside `port.open()`
-  before any of our code is asked. That is the **first patch carried
-  against the vendored library**; `third_party/usb-serial-for-android/PATCHES.md`
+  before any of our code is asked. The guard stays anyway -- both
+  reference implementations avoid the blind write and the erratum is
+  real -- as the **first patch carried against the vendored library**; `third_party/usb-serial-for-android/PATCHES.md`
   is the exhaustive list and every deviation is marked `// SSTVAE
   PATCH` in the source, because `java/` was a byte-for-byte drop of the
   release and is no longer. What was ruled out along the way, so it is
@@ -2004,11 +2010,15 @@ interface — which settles the one question that could have sunk the
 whole approach, since the app needs the audio and the serial half of
 that device at the same time. **Bluetooth is untested for want of a
 device** and goes to beta on the strength of the shared code beneath
-it. **An IC-9700 and an IC-7100 did not work**, and the cause was a
-16-byte `SET_FLOW` write of zeroes to their CP2102N — see the
-rig-control bullets above; it is the first patch carried against the
-vendored `usb-serial-for-android`. Awaiting Andrew's confirmation on
-hardware. `rig::set_debug_sink` and the "Log
+it. **An IC-9700 and an IC-7100 do not work and that is open** — see
+the rig-control bullets above for what is ruled out. The chip's
+*configuration* is eliminated: with the blind `SET_FLOW` write skipped,
+this app programs the CP2102N exactly as FT8TW does, and FT8TW drives
+the same radio on the same phone. `SerialBridge.describeStatus` reads
+the chip's own `GET_COMM_STATUS` into the trace — transmit queue depth,
+receive queue depth and hold reasons — because a bulk write returning
+its length says the bytes reached the chip and nothing about whether
+the UART clocked them out. `rig::set_debug_sink` and the "Log
 rig traffic" switch landed for it, because until then Hamlib's trace on
 a phone went to stderr and therefore nowhere.
 Unplug/replug recovery and the "Connected with the cable out"

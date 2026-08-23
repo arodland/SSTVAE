@@ -118,7 +118,7 @@ static calibrated quantisation was tried and is *worse* — do not retry
 it without new information. The finding that outlived it — the model
 had never seen non-photographic content — became the item below.
 
-## Android rig control: the CP2102N SET_FLOW write
+## Android rig control: an Icom that will not answer a phone
 
 Landed 2026-08-22 (`docs/android.md`, "Rig control was said to be
 structurally impossible") and taken to hardware 2026-08-23. Most of what
@@ -152,7 +152,7 @@ OS raises them on open, but demonstrably not a fatal one -- and every
 Icom in Hamlib declares `RIG_HANDSHAKE_NONE`, so nothing is applying
 flow control that could hold the chip's transmitter off.
 
-**Cause found 2026-08-23: a 16-byte `SET_FLOW` write of zeroes.** `fe fe a2 e0 03 fd` -- address A2, the
+**Open. The chip's configuration is ruled out (2026-08-23).** `fe fe a2 e0 03 fd` -- address A2, the
 IC-9700's default -- written, `read_string_generic(): Timed out 1.001
 seconds after 0 chars`, every time, at 115200. `icom_get_usb_echo_off`
 therefore returns `-RIG_ETIMEOUT` and `icom_rig_open` gives up with
@@ -178,12 +178,30 @@ driver, which the working `rigctl` goes through, does
 erratum **CP2102N_E104** -- firmware <= 0x10004 reads `ulXonLimit` as
 `ulFlowReplace`, so a blind write lands one word out of alignment.
 
-Fixed by skipping the write when there is no flow control to set, in
+That write is now skipped when there is nothing to set, in
 `SerialBridge.applyFlowControl` and in the vendored
 `Cp21xxSerialDriver.openInt` (both: `openInt` runs inside
-`port.open()`). First patch carried against the vendored library --
-`third_party/usb-serial-for-android/PATCHES.md`. **Not yet confirmed on
-hardware.**
+`port.open()`) -- the first patch carried against the vendored library,
+`third_party/usb-serial-for-android/PATCHES.md`. **It did not fix it**,
+and that is the useful result: FT8TW's `setParameters` is behaviourally
+identical to ours, so with the write gone the two program the chip the
+same way and the Icom still fails. The register writes are not the
+difference. The guard stays because both reference implementations
+avoid the blind write and the erratum is real.
+
+So the next question is what the chip does with bytes it has accepted,
+which it will answer itself. `SerialBridge.describeStatus` issues
+`GET_COMM_STATUS` (AN571, 19 bytes) and the transport traces it every
+ten consecutive empty reads, with the modem control lines:
+
+* bytes sitting in `outQueue` -> the chip is holding our frame, and
+  `hold` says why;
+* `outQueue` empty and `inQueue` empty -> the frame went out on the
+  wire and the radio did not answer;
+* `errors` non-zero -> framing or overrun, i.e. a rate or line problem.
+
+The heartbeat also proves the bridge's read loop is running at all,
+which nothing in the log did before.
 
 One further difference from the Linux driver survives, as the next
 place to look if a CP210x still misbehaves: the library writes the

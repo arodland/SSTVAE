@@ -182,6 +182,12 @@ const char* flow_name(int flow) {
     }
 }
 
+// How many consecutive empty reads between heartbeat lines. The bridge
+// reads with a 500 ms timeout, so this is about five seconds -- often
+// enough to show a stuck transmit queue promptly, rare enough that a
+// working session does not fill its own log.
+constexpr unsigned long kIdleReadsPerReport = 10;
+
 // Never throws and never leaves an exception pending: this runs inside
 // an open that has already succeeded, and a diagnostic that fails the
 // operation it is diagnosing is worse than no diagnostic.
@@ -200,6 +206,26 @@ std::string describe_link(const Env& env, jclass cls, const std::string& id) {
         return id + " (describeLink threw)";
     }
     if (out == nullptr) return id;
+    std::string text = to_std(env.e, out);
+    env->DeleteLocalRef(out);
+    return text;
+}
+
+// The same contract as `describe_link`: never throws, never leaves an
+// exception pending. Called from the bridge's read thread.
+std::string describe_status(const Env& env, jclass cls, int token) {
+    jmethodID m = env->GetStaticMethodID(cls, "describeStatus", "(I)Ljava/lang/String;");
+    if (m == nullptr) {
+        env->ExceptionClear();
+        return "no describeStatus";
+    }
+    auto out = static_cast<jstring>(
+        env->CallStaticObjectMethod(cls, m, static_cast<jint>(token)));
+    if (env->ExceptionCheck() != JNI_FALSE) {
+        env->ExceptionClear();
+        return "describeStatus threw";
+    }
+    if (out == nullptr) return "";
     std::string text = to_std(env.e, out);
     env->DeleteLocalRef(out);
     return text;
@@ -295,7 +321,23 @@ public:
         // Negative means the link is gone; zero means an idle radio,
         // which is not an error and must not be reported as one.
         if (got < 0) throw RigError("the serial device went away");
-        if (got == 0) return 0;
+        if (got == 0) {
+            // **A heartbeat, and the chip's own account with it.** A bulk
+            // write returning its length means the bytes reached the
+            // chip, not that the UART clocked them out -- and from above,
+            // "the radio is ignoring us" and "the chip is holding our
+            // bytes" are the same silence. A CP210x will say which:
+            // `GET_COMM_STATUS` reports how many bytes are still queued
+            // for transmit, how many arrived from the UART, and why
+            // transmission is being held. It also proves this read loop
+            // is running at all, which nothing else in the log does.
+            if (tracing() && ++idle_reads_ % kIdleReadsPerReport == 0) {
+                trace("transport: idle, " + std::to_string(idle_reads_) +
+                      " empty reads; " + describe_status(env, cls, token));
+            }
+            return 0;
+        }
+        idle_reads_ = 0;
         env->GetByteArrayRegion(buffer_, 0, got, reinterpret_cast<jbyte*>(dst));
         return static_cast<std::size_t>(got);
     }
@@ -361,6 +403,9 @@ private:
     SerialParams params_;
     std::atomic<int> token_{-1};
     jbyteArray buffer_ = nullptr;
+    // Consecutive reads that returned nothing. Only read and written by
+    // the bridge's single read thread.
+    unsigned long idle_reads_ = 0;
 };
 
 }  // namespace

@@ -19,6 +19,7 @@ import android.hardware.usb.UsbManager;
 import android.os.Build;
 import android.util.Log;
 
+import com.hoho.android.usbserial.driver.Cp21xxSerialDriver;
 import com.hoho.android.usbserial.driver.UsbSerialDriver;
 import com.hoho.android.usbserial.driver.UsbSerialPort;
 import com.hoho.android.usbserial.driver.UsbSerialProber;
@@ -410,6 +411,13 @@ public final class SerialBridge {
         return token;
     }
 
+    /** The chip's own account of itself, or "" for a link that has none. */
+    static String describeStatus(int token) {
+        final Link link = links.get(token);
+        if (!(link instanceof UsbLink)) return "";
+        return ((UsbLink) link).status();
+    }
+
     static void close(int token) {
         final Link link = links.remove(token);
         if (link != null) link.close();
@@ -495,7 +503,7 @@ public final class SerialBridge {
             port.close();
             throw new IOException("could not configure " + id + ": " + e.getMessage());
         }
-        return new UsbLink(port);
+        return new UsbLink(port, connection);
     }
 
     private static int toParity(int parity) {
@@ -545,10 +553,74 @@ public final class SerialBridge {
 
     private static final class UsbLink implements Link {
         private final UsbSerialPort port;
+        private final UsbDeviceConnection connection;
         private volatile boolean closed;
 
-        UsbLink(UsbSerialPort port) {
+        UsbLink(UsbSerialPort port, UsbDeviceConnection connection) {
             this.port = port;
+            this.connection = connection;
+        }
+
+        /**
+         * What the chip says about itself, for the rig trace.
+         *
+         * <p><b>This is the fact nothing else in the stack can supply.</b>
+         * A bulk write returning its length means the bytes reached the
+         * chip over USB — not that the UART clocked them out. A CP210x
+         * will say: {@code GET_COMM_STATUS} returns how many bytes are
+         * still queued for transmit, how many arrived from the UART, and
+         * a bitmask of the reasons transmission is being held. An Icom
+         * that answers a desktop and not a phone is either being held
+         * off, or being transmitted to and not replying, and those two
+         * look identical from above.
+         *
+         * <p>Never throws: it runs on the bridge's read thread inside a
+         * session that is otherwise working.
+         */
+        String status() {
+            final StringBuilder out = new StringBuilder();
+            try {
+                out.append("lines");
+                for (UsbSerialPort.ControlLine line : port.getSupportedControlLines()) {
+                    out.append(' ').append(line).append('=');
+                    switch (line) {
+                        case RTS: out.append(port.getRTS() ? 1 : 0); break;
+                        case CTS: out.append(port.getCTS() ? 1 : 0); break;
+                        case DTR: out.append(port.getDTR() ? 1 : 0); break;
+                        case DSR: out.append(port.getDSR() ? 1 : 0); break;
+                        case CD: out.append(port.getCD() ? 1 : 0); break;
+                        case RI: out.append(port.getRI() ? 1 : 0); break;
+                        default: out.append('?'); break;
+                    }
+                }
+            } catch (IOException | UnsupportedOperationException | RuntimeException e) {
+                out.append(" (unavailable: ").append(e).append(')');
+            }
+
+            // CP210x GET_COMM_STATUS. Silicon Labs AN571: 19 bytes, four
+            // little-endian u32 followed by three bytes.
+            if (!(port.getDriver() instanceof Cp21xxSerialDriver)) return out.toString();
+            try {
+                final byte[] buf = new byte[19];
+                final int n = connection.controlTransfer(0xc1, 0x10, 0, port.getPortNumber(),
+                        buf, buf.length, 500);
+                if (n != buf.length) {
+                    out.append("; comm status unavailable (").append(n).append(')');
+                    return out.toString();
+                }
+                out.append("; errors=0x").append(Integer.toHexString(le32(buf, 0)))
+                   .append(" hold=0x").append(Integer.toHexString(le32(buf, 4)))
+                   .append(" inQueue=").append(le32(buf, 8))
+                   .append(" outQueue=").append(le32(buf, 12));
+            } catch (RuntimeException e) {
+                out.append("; comm status threw ").append(e);
+            }
+            return out.toString();
+        }
+
+        private static int le32(byte[] b, int at) {
+            return (b[at] & 0xff) | ((b[at + 1] & 0xff) << 8)
+                    | ((b[at + 2] & 0xff) << 16) | ((b[at + 3] & 0xff) << 24);
         }
 
         @Override

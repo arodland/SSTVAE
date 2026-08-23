@@ -1262,7 +1262,25 @@ lines only for PTT, CW and RTTY keying. And every Icom in Hamlib declares
 `RIG_HANDSHAKE_NONE`, so no flow control is being applied that could
 hold the chip's transmitter off.
 
-**It was a 16-byte `SET_FLOW` write of zeroes (2026-08-23).** Setting a
+**Still open, and the chip's configuration is now ruled out
+(2026-08-23).** With the blind `SET_FLOW` write below skipped, this app
+programs the CP2102N exactly as FT8TW does — its `setParameters` is
+behaviourally identical and its older copy of the driver has no flow
+control code at all — and FT8TW drives the same radio on the same
+phone. So the register writes are not the difference.
+
+What no software above the chip can see is whether the UART clocked the
+bytes out: a bulk write returning its length means they reached the
+chip. A CP210x will say. `SerialBridge.describeStatus` issues
+`GET_COMM_STATUS` (Silicon Labs AN571, 19 bytes) and puts the transmit
+queue depth, the receive queue depth, the error mask and the hold
+reasons into the trace, alongside the modem control lines, every ten
+consecutive empty reads — which also proves the read loop is running,
+something nothing else in the log did. Bytes stuck in `outQueue` mean
+the chip is holding them and `hold` says why; an empty `outQueue` with
+an empty `inQueue` means they went out and the radio said nothing.
+
+**The write that was skipped, and why it stays (2026-08-23).** Setting a
 CP210x's flow control to *none* is not a no-op: the library sends the
 chip sixteen zero bytes, clobbering `ulControlHandshake`,
 `ulFlowReplace`, `ulXonLimit` and `ulXoffLimit` at once. FT8TW drives
