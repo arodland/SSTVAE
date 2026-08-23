@@ -16,6 +16,7 @@
 // TIMEOUT reports, and which is a far better signal than a threshold
 // someone has to keep tuning.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -308,6 +309,49 @@ void test_keying_is_not_stuck_behind_status_chatter() {
     controller.stop();
 }
 
+void test_a_ptt_function_survives_a_reconnect() {
+    // **The property the Android reconnect rests on.** When a USB cable
+    // is pulled and replugged, the app rebuilds the backend and calls
+    // `start()` again on the *same* controller. A `TxEngine` may already
+    // be holding the `Ptt` from before -- so if that lambda were bound
+    // to the session or the backend rather than to the controller, a
+    // reconnect would silently disarm the one operation that must never
+    // fail, and only mid-over would anyone find out.
+    auto first = std::make_shared<Probe>();
+    first->open_gate();
+    auto second = std::make_shared<Probe>();
+    second->open_gate();
+
+    rig::RigController controller;
+    controller.start(make(first));
+
+    // Taken before the reconnect, exactly as the transmit engine takes
+    // it before an over.
+    const std::function<void(bool)> ptt = controller.ptt_function();
+    ptt(true);
+    ptt(false);
+
+    controller.start(make(second));  // the reconnect
+
+    bool threw = false;
+    try {
+        ptt(true);
+        ptt(false);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    check::is_true(!threw, "rig/reconnect: an old Ptt still keys after a restart");
+
+    const auto keyed = [](const std::vector<std::string>& calls) {
+        return std::count(calls.begin(), calls.end(), std::string("ptt-on"));
+    };
+    check::equal(keyed(second->call_log()), 1L,
+                 "rig/reconnect: ...and keys the *new* backend");
+    check::equal(keyed(first->call_log()), 1L,
+                 "rig/reconnect: ...not the superseded one");
+    controller.stop();
+}
+
 void test_keying_without_a_session_is_an_error_not_a_hang() {
     // TxEngine turns this into "PTT on failed", which is exactly right
     // for a transmission that cannot key the radio -- and much better
@@ -431,6 +475,7 @@ int main() {
     try {
         test_backoff_arithmetic();
         test_keying_without_a_session_is_an_error_not_a_hang();
+        test_a_ptt_function_survives_a_reconnect();
         test_polling_publishes_frequency_and_status();
         test_a_rig_that_cannot_be_opened_reports_and_stops();
         test_stop_does_not_wait_for_a_wedged_rig();

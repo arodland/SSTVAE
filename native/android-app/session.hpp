@@ -36,6 +36,10 @@
 #include "codec/codec.hpp"
 #include "images/types.hpp"
 #include "modem/modem.hpp"
+#include "rig/bridged.hpp"
+#include "rig/controller.hpp"
+#include "rig/hamlib.hpp"
+#include "rig/transport.hpp"
 #include "rx/engine.hpp"
 #include "rx/ringbuffer.hpp"
 #include "tx/engine.hpp"
@@ -170,6 +174,56 @@ public:
     // holes in its own audio.
     std::vector<double> audio_tail(std::size_t n) const;
 
+    // --- rig control -------------------------------------------------
+    //
+    // **Owned here rather than by the UI, for the transmit reason and
+    // not the receive one.** A frequency readout is a view's business
+    // and could live with the view; keying is not. An over is 32-95 s
+    // of committed airtime with the radio held on, and the thing that
+    // has to bring PTT back down at the end of it cannot be something
+    // the operator can destroy by rotating the screen.
+    //
+    // `RigController` itself is unchanged from the desktop's -- one
+    // worker, PTT as priority work, `stop()` that detaches rather than
+    // joining. What is new is only what sits under it: on Android the
+    // backend reaches the radio through a `SerialTransport` and a
+    // loopback socket instead of a device path. See
+    // `core/rig/transport.hpp`.
+
+    // Open the radio, or reconfigure an already-open one. `transport`
+    // null means `config.device` is a host and Hamlib dials it itself;
+    // non-null means USB or Bluetooth. Returns false and sets
+    // `rig_error()` if the configuration cannot work at all -- a failure
+    // to *reach* the radio is reported asynchronously through
+    // `rig_status()`, because it can take the rig's full timeout and
+    // nothing may wait on that.
+    bool start_rig(const rig::HamlibConfig& config,
+                   std::shared_ptr<rig::SerialTransport> transport);
+    void stop_rig();
+
+    // Whether a session is configured -- **not** whether the radio is
+    // answering, which is what `rig_status()` reports. The desktop's
+    // distinction, kept for the desktop's reason: a worker whose open()
+    // failed has already exited while this still says true, and only the
+    // status text can tell "connecting" from "no such device".
+    bool rig_running() const;
+
+    // The last frequency the worker published. Cached, never a request,
+    // so reading it cannot block.
+    std::optional<double> rig_frequency_hz() const;
+
+    // The most recent status line, and whether it was a failure. Both,
+    // because the text alone cannot carry it: a failure message is
+    // whatever the backend's exception said and has no reliable shape.
+    std::string rig_status() const;
+    bool rig_failed() const;
+
+    // Whether keying the radio is possible right now: a rig session is
+    // open and its PTT method is something other than "let the audio do
+    // it". The transmit screen reads this to decide whether an over is
+    // keyed by CAT or by VOX.
+    bool rig_can_key() const;
+
     // --- transmit ----------------------------------------------------
     //
     // **Owned here for the same reason receiving is**, and it is not the
@@ -192,6 +246,11 @@ public:
     // configuration, because the transmitting thread must keep sending
     // what the operator committed to at the moment they pressed Send.
     struct TxRequest {
+        // Key the radio through the rig session rather than letting the
+        // audio do it. Read once at staging, like everything else here:
+        // an operator who turns rig control off mid-over must not leave
+        // the transmitter keyed with nothing arranged to release it.
+        bool use_ptt = false;
         images::Picture picture;  // already framed to IMG_W x IMG_H
         std::string mode = "B";
         std::string callsign;
@@ -250,6 +309,19 @@ private:
     // on a session that is starting or stopping.
     mutable std::mutex gallery_mu_;
     std::string gallery_error_;
+
+    // Its own lock, like the gallery's and for the same reason: the rig
+    // worker publishes a frequency every poll and the UI reads it
+    // several times a second, and neither has any business waiting on a
+    // capture start or a model load. `rig_` is a pointer rather than a
+    // value because `RigController` is not movable and a session is
+    // torn down and rebuilt on every reconfigure.
+    mutable std::mutex rig_mu_;
+    std::unique_ptr<rig::RigController> rig_;
+    std::optional<double> rig_frequency_;
+    std::string rig_status_;
+    bool rig_failed_ = false;
+    bool rig_can_key_ = false;
 
     // Guards the members below against a view thread reading while the
     // UI thread starts or stops. It is never held across a decode: the

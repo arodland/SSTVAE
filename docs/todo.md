@@ -118,6 +118,43 @@ static calibrated quantisation was tried and is *worse* — do not retry
 it without new information. The finding that outlived it — the model
 had never seen non-photographic content — became the item below.
 
+## Android rig control: everything on hardware
+
+Landed 2026-08-22 (`docs/android.md`, "Rig control was said to be
+structurally impossible"). The mechanism is covered by desktop tests --
+the loopback bridge, the composition, the PTT routing, the line-setting
+resolution, and a real Kenwood TS-2000 backend reading frequency and
+keying through the bridge. **None of it has been compiled for Android or
+run against a radio**, because the session that wrote it had no NDK and
+no reachable `dl.google.com`.
+
+In the order that answers the most per attempt:
+
+1. **Does the phone hold USB audio and USB serial on one composite
+   device?** Most rig USB interfaces present both, and this app needs
+   both at once. It works for FT8CN on at least some devices, and
+   mik3y/usb-serial-for-android#477 is an open report of it failing on
+   others. If the answer is no for a given radio, that is the radio's
+   answer and not a bug to fix -- Bluetooth and the network kind are
+   unaffected. Settle it before anything else, because a bad answer
+   changes what the rest of the list is worth.
+2. **The Hamlib NDK cross-build.** Expect to fix something. The two
+   guards in `native/cmake/hamlib.cmake` (a named missing compiler
+   wrapper, and a refused versioned SONAME) exist so the first failure
+   is diagnosable in one round.
+3. **CAT against a real radio**, model 1 first -- Hamlib's dummy opens
+   and keys with nothing attached, so it separates "the bridge works"
+   from "this backend works".
+4. **PTT timing against a physical radio**, which is the *same*
+   outstanding item the desktop has and has never had: `ptt_lead_s` is
+   0.3 s of guess. A phone into a radio is now a way to measure it.
+5. **DTR/RTS keying**, which is the path Hamlib cannot take here and
+   ours is the only implementation of.
+6. **Battery over a multi-hour session with a rig session open.** The
+   poll is 10 s rather than the desktop's 5, and the bridge's idle cost
+   is meant to be two wakeups a second on one thread; both are claims,
+   not measurements.
+
 ## Non-photographic content: evaluate, then train on it
 
 **Andrew, 2026-07-28.** Two related pieces of work, promoted out of the

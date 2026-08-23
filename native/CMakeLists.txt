@@ -110,6 +110,8 @@ add_library(sstvae_core STATIC
   core/util/event.cpp
   core/rx/ringbuffer.cpp
   core/rig/controller.cpp
+  core/rig/bridge.cpp
+  core/rig/bridged.cpp
   core/rx/engine.cpp
   core/tx/engine.cpp
   core/settings/settings.cpp
@@ -131,6 +133,14 @@ target_include_directories(sstvae_core SYSTEM PUBLIC third_party/stb
 # Position-independent so the static core can be linked into the
 # pybind11 shared module.
 set_target_properties(sstvae_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# `core/rig/bridge.cpp` presents a serial transport to Hamlib as a
+# loopback socket, which is what lets a phone -- where there is no
+# `/dev/ttyUSB0` to give Hamlib -- still drive every radio Hamlib knows.
+# POSIX puts the sockets API in libc; Windows needs Winsock named.
+if(WIN32)
+  target_link_libraries(sstvae_core PUBLIC ws2_32)
+endif()
 
 # --- codec ------------------------------------------------------------------
 if(SSTVAE_BUILD_CODEC)
@@ -228,6 +238,37 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android")
   set(SSTVAE_ANDROID_AUDIO_JAVA_DIR
       "${CMAKE_CURRENT_SOURCE_DIR}/core/audio/android/java" CACHE INTERNAL "")
   message(STATUS "Android audio: ${ANDROID_ABI}")
+
+  # --- Android serial (USB / Bluetooth) -------------------------------------
+  # The transport a phone can actually open, behind `rig::SerialTransport`.
+  # Separate from sstvae_core for the same reason the audio layer is: the
+  # bridge, the composition and the PTT routing are all in the core and are
+  # tested against fakes on a desktop, and only the code that talks to the
+  # platform is here.
+  #
+  # It does *not* depend on sstvae_rig: a transport is a byte pipe and knows
+  # nothing about Hamlib, which is what lets the whole rig feature be built
+  # and reasoned about in pieces.
+  add_library(sstvae_rig_android STATIC core/rig/android/androidrig.cpp)
+  set_target_properties(sstvae_rig_android PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(sstvae_rig_android PUBLIC core)
+  target_link_libraries(sstvae_rig_android PUBLIC sstvae_core PRIVATE android log)
+
+  # Two Java trees, both staged into the app's package source dir. The
+  # second is vendored rather than a Gradle coordinate -- see
+  # third_party/usb-serial-for-android/README.md for why.
+  set(SSTVAE_ANDROID_RIG_JAVA_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/core/rig/android/java" CACHE INTERNAL "")
+  set(SSTVAE_ANDROID_USBSERIAL_JAVA_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/usb-serial-for-android/java"
+      CACHE INTERNAL "")
+  # One class Gradle would have generated for the library's own module and
+  # does not generate when its sources are compiled into an app. Kept out
+  # of `java/` so that tree stays a byte-for-byte drop of the release; see
+  # the shim's own comment for why DEBUG is false.
+  set(SSTVAE_ANDROID_USBSERIAL_SHIM_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/third_party/usb-serial-for-android/shim"
+      CACHE INTERNAL "")
 endif()
 
 # --- Overlay rendering ------------------------------------------------------

@@ -963,6 +963,73 @@ through is `struct rig_caps` — which has no pthread members. The result
 is that no struct layout is relied on at all, which is what makes the
 shim safe rather than a gamble.
 
+**Rig control on Android: Hamlib over a loopback socket** (2026-08-22).
+`core/rig/transport.hpp` is the byte pipe a phone can open, `bridge.*`
+presents it to Hamlib as `127.0.0.1:<ephemeral>`, and `bridged.*`
+composes the two behind a `BackendFactory` seam -- all three in
+`sstvae_core`, so the mechanism is tested with fakes in a `--no-rig`
+build. `core/rig/android/` is the JNI half over `SerialBridge.java`
+(USB host API + vendored `usb-serial-for-android`; Bluetooth RFCOMM on
+the SPP UUID). Six things are settled and worth not re-deriving:
+
+- **The presence of a transport selects a bridge, never the device
+  string.** A USB id like `usb:1a86:7523` has no slash and does not
+  start with `com`, so Hamlib's own rules read it as a *hostname* -- the
+  first draft branched on that and skipped the bridge for exactly the
+  devices it exists for. `is_network_device` survives as validation of a
+  typed host and matches `parse_hoststr` case for case.
+- **DTR/RTS keying cannot go through Hamlib here.** `ser_set_dtr` is a
+  `TIOCMSET` ioctl on what is now a socket, so it fails at the moment
+  somebody presses transmit. The line is driven on the transport and
+  Hamlib is set to `ptt_type` "None" (`PttMethod::Vox`). RFCOMM has no
+  modem lines at all, so those methods are not offered over Bluetooth.
+- **`Default` line settings stop meaning anything by themselves.**
+  Hamlib applies per-rig defaults in `serial_open`, which a network port
+  never reaches, so `rig::serial_defaults(model)` reads them out of
+  `struct rig_caps` -- `serial_rate_max` included, whose own `rig_init`
+  comment says "fastest !" -- and `resolve_serial_params` fills them in.
+- **Hamlib's three control-line conflict checks are unreachable** (they
+  sit inside `if (rp->type.rig == RIG_PORT_SERIAL)`) and are re-derived,
+  or a config a desktop refuses at connect time becomes a radio that
+  will not key on a phone.
+- **Loopback only, as a security property.** The far end is an
+  unauthenticated path to a transmitter; the bind is `127.0.0.1` and the
+  port is ephemeral. One thread per direction, so an idle link costs no
+  wakeups.
+- **`Session` owns the `RigController`, and never destroys it.** An
+  over is 32-95 s of committed airtime and the thing that brings PTT
+  back down cannot be destroyed by a rotation -- nor by the operator
+  switching rig control off mid-over, which is what `stop_rig()`
+  destroying the controller used to do: `ptt_function()` captures the
+  *controller*, so the engine was left calling into freed memory at
+  unkey. Created once, `stop()`ped, never destroyed. That is also what
+  makes reconnection safe, since `start()` supersedes a session in place
+  and a `Ptt` handed out earlier keys the new backend
+  (`test_rig.cpp`, mutation-tested). `TxEngine` needed no change: it
+  takes a `Ptt`, the shape `docs/android.md` predicted CAT would arrive
+  in.
+- **Reconnection is app-level, and "is the device back?" is why.**
+  `RigControl::maybe_reconnect` rebuilds the session when the radio
+  stops answering and `has_permission(device)` says it is reachable
+  again -- false for a device that is not there, so one call answers
+  both halves. An absent device does not spend the backoff, so
+  replugging is immediate; the backoff is for attempts that reached the
+  radio and failed. **A published frequency is the only proof the radio
+  answered**: `RigController::running()` means a session is configured
+  and said "Connected" with the cable out.
+
+**The Hamlib NDK cross-build and the Android Java have never been
+compiled** (`native/cmake/hamlib.cmake`, `SerialBridge.java`) -- written
+in a session with no NDK and no reachable `dl.google.com`. Two guards
+make a first failure diagnosable: the configure step names the missing
+compiler wrapper, and the install step **refuses a versioned SONAME**,
+because Android's packager takes only files named exactly `lib*.so` and
+would drop `libhamlib.so.4` from the APK without comment, leaving a
+`dlopen` failure before `main` -- no output on any stream, and
+indistinguishable from a deadlock. `-DSSTVAE_ANDROID_RIG=OFF` drops CAT
+and keeps the app; the transport, the rig screen and the settings still
+build, so it is one flag rather than a fork.
+
 **Hamlib's own poll thread is turned off** (`poll_interval` = 0).
 `rig_open` otherwise starts one, defaulting to 1000 ms, that issues CAT
 commands for transceive emulation — which directly contradicts what
@@ -1387,7 +1454,11 @@ need when `--native` fails and you want to know *where*.
   uncommon, plenty of radios do offer VOX on the USB input, and a USB
   soundcard into a radio's *microphone* input keys on VOX regardless —
   so "RX+TX without rig control" remains the right shape for Android
-  and this is not an argument for pulling CAT forward. Four other
+  and this is not an argument for pulling CAT forward. (CAT was pulled
+  forward anyway, 2026-08-22, for an unrelated reason — it turned out to
+  cost a socket rather than a Hamlib fork. This judgement stands on its
+  own terms: VOX is still the shape for a station with no cable to the
+  radio.) Four other
   things it
   settled that are not obvious from the design. **No overlay, not even
   an automatic callsign caption** (Andrew): the beacon carrier
@@ -1521,11 +1592,21 @@ need when `--native` fails and you want to know *where*.
   glitch reports — and enumeration needs Java either way. That design is
   also the blocking-read architecture the desktop app wanted and could
   not have, since PortAudio's blocking API corrupts the heap on JACK.
-  And rig control drops for a **structural** reason, not a scoping one:
-  Hamlib's serial layer opens a path and Android gives an unprivileged
-  app no `/dev/ttyUSB`, which is what makes "RX+TX without rig control"
-  the natural shape rather than a compromise. `rig::Backend` is still a
-  seam, so NET rigctl over wifi is ~200 lines whenever it is wanted.
+  **Rig control was written up as dropping for a structural reason and
+  that was wrong** (corrected 2026-08-22, and the doc keeps the error
+  rather than deleting it). The premise held -- Hamlib's serial layer
+  opens a path and Android gives an unprivileged app no `/dev/ttyUSB` --
+  but the conclusion did not, because **Hamlib does not require a serial
+  port**: `rig_open()` puts the pathname through `parse_hoststr()`,
+  which rejects `/dev/...` and `COM*` and accepts `host:port`, and on a
+  match sets `RIG_PORT_NETWORK` for *any* model. That is the mechanism
+  behind `rigctld -m <native model> -r <ser2net host>:4001`, so a socket
+  is a first-class transport for every backend Hamlib has. CAT and PTT
+  are therefore in (see "Rig control on Android" under "The native
+  port"), the radio list
+  on a phone is the desktop's, and the two hedges the old section ended
+  on both held: `rig::Backend` was a seam and `RigController` ported
+  unchanged.
   **The UI is explicitly not a port of the desktop's** (Andrew,
   2026-08-08) — the desktop layout history in this file is a record of
   QtWidgets on a desktop, and reaching for it there would be inheriting
@@ -1542,7 +1623,10 @@ need when `--native` fails and you want to know *where*.
   diagnostic, since with no CAT there is no frequency readout at all —
   which is also why `spectrum.cpp`'s peak-hold matters more there, a
   ragged comb from point-sampling being the worst available lie on a
-  display whose whole job is "are you tuned right".
+  display whose whole job is "are you tuned right". **CAT since
+  2026-08-22 adds a dial readout, and changes none of this**: every
+  session without a cable still has only the waterfall, so it keeps its
+  height and the readout is one line above it.
 - `docs/todo.md` — open work items with the reasoning behind them.
   Completed items keep only a short summary there; the full measurement
   records moved to `docs/todo-done.md` (2026-08-12).
@@ -1786,7 +1870,26 @@ found the `FindClass` bug above.
 in both directions, which retires the caveat this section used to
 carry. What is still unmeasured: battery over a multi-hour session,
 and the VOX leader against a real VOX circuit (the test radio has none
-on its USB input). Next, in whatever order: further UI work, Tier 2, or
+on its USB input).
+
+**CAT and PTT landed 2026-08-22** and are not Tier 2 after all: they
+cost a transport and a socket rather than a fork of Hamlib. Three
+connection kinds — USB serial, Bluetooth RFCOMM, and a network host
+handed straight to Hamlib (which covers both `rigctld` and a
+ser2net-style server, one code path in Hamlib and one here).
+
+**USB works on hardware** (Andrew, 2026-08-23): CAT and both
+control-line keying methods, on a phone, over a composite USB
+interface — which settles the one question that could have sunk the
+whole approach, since the app needs the audio and the serial half of
+that device at the same time. **Bluetooth is untested for want of a
+device** and goes to beta on the strength of the shared code beneath
+it. Unplug/replug recovery and the "Connected with the cable out"
+reading were found the same day and fixed;
+`native/android-app/README.md` has the three separate mistakes behind
+that one symptom.
+
+Next, in whatever order: further UI work, the rest of Tier 2, or
 the Play internal test. **A signed upload bundle exists** as of
 2026-08-10 — `tools/build_android.sh --aab`, version code 1, both
 ABIs — so the Android half of "store signing" is no longer waiting on

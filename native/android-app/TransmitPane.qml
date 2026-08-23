@@ -86,6 +86,21 @@ ColumnLayout {
     }
 
     Label {
+        // Which of the two keying stories this over will use. Only worth
+        // a line when there is a choice to have got wrong -- with no rig
+        // session VOX is the only thing there is, and saying so every
+        // time trains the eye to skip the line.
+        text: pane.transmitter.keying
+        visible: pane.transmitter.rigKeyed
+        font.pixelSize: 11
+        color: "#666"
+        Layout.fillWidth: true
+        Layout.leftMargin: 12
+        Layout.rightMargin: 12
+        wrapMode: Text.Wrap
+    }
+
+    Label {
         text: pane.transmitter.txStatus
         visible: text.length > 0
         Layout.fillWidth: true

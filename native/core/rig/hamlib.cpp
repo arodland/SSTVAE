@@ -297,6 +297,55 @@ std::vector<RigModel> list_models() {
     return models;
 }
 
+SerialDefaults serial_defaults(int model) {
+    load_backends_once();
+
+    struct Search {
+        int model;
+        SerialDefaults out;
+        bool found = false;
+    } search{model, SerialDefaults{}, false};
+
+    // `rig_list_foreach` rather than a `RIG*`: there is no
+    // `rig_get_caps_int` token for the serial fields, and reading them
+    // out of an initialised RIG would mean dereferencing a pointer whose
+    // struct carries pthread members -- the thing CLAUDE.md forbids on
+    // Windows. `struct rig_caps` has none, which is why it is the one
+    // Hamlib struct this file reads through.
+    rig_list_foreach(
+        [](const struct rig_caps* caps, rig_ptr_t data) -> int {
+            auto* s = static_cast<Search*>(data);
+            if (static_cast<int>(caps->rig_model) != s->model) return 1;
+            s->found = true;
+            // `serial_rate_max`, not a mean or a minimum: `rig_init`
+            // takes the default from that field and its own comment
+            // says "fastest !". Matching it is the whole point -- a
+            // different choice here would make a bridged rig run at a
+            // different speed than the same rig on a desktop.
+            if (caps->serial_rate_max > 0) s->out.baud = caps->serial_rate_max;
+            if (caps->serial_data_bits > 0) s->out.data_bits = caps->serial_data_bits;
+            if (caps->serial_stop_bits > 0) s->out.stop_bits = caps->serial_stop_bits;
+            switch (caps->serial_parity) {
+                case RIG_PARITY_ODD: s->out.parity = SerialParams::kOdd; break;
+                case RIG_PARITY_EVEN: s->out.parity = SerialParams::kEven; break;
+                default: s->out.parity = SerialParams::kNoParity; break;
+            }
+            switch (caps->serial_handshake) {
+                case RIG_HANDSHAKE_HARDWARE: s->out.flow = SerialParams::kRtsCts; break;
+                case RIG_HANDSHAKE_XONXOFF: s->out.flow = SerialParams::kXonXoff; break;
+                default: s->out.flow = SerialParams::kNoFlow; break;
+            }
+            return 0;  // stop
+        },
+        &search);
+
+    // A model Hamlib does not know is a configuration the operator has
+    // to fix anyway, and `rig_init` will refuse it a moment later with a
+    // better message than this function could give. 9600 8-N-1 rather
+    // than throwing, so a settings screen can still render.
+    return search.out;
+}
+
 std::unique_ptr<RigBackend> make_hamlib_backend(const HamlibConfig& config) {
     return std::make_unique<HamlibBackend>(config);
 }

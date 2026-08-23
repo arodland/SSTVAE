@@ -353,6 +353,20 @@ QString Transmitter::airtime() const {
     return QStringLiteral("%1 s").arg(seconds, 0, 'f', 0);
 }
 
+bool Transmitter::rigKeyed() const { return Session::instance().rig_can_key(); }
+
+QString Transmitter::keying() const {
+    // The leader is reported the same way either way: it is the
+    // operator's setting and it is sent whatever keys the radio.
+    const QString leader = vox_lead_s_ > 0.0
+                               ? tr("a %1 s leader tone").arg(vox_lead_s_, 0, 'g', 2)
+                               : tr("no leader tone");
+    if (Session::instance().rig_can_key()) {
+        return tr("Rig control keys the radio, with %1.").arg(leader);
+    }
+    return tr("VOX, with %1.").arg(leader);
+}
+
 QString Transmitter::lastError() const {
     const std::string e = Session::instance().last_error();
     return e.empty() ? error_ : QString::fromStdString(e);
@@ -375,6 +389,12 @@ void Transmitter::send() {
     req.cw_id = cw_id_;
     req.cw_message = cw_message_.toStdString();
     req.vox_lead_s = vox_lead_s_;
+    // **Read here, at the tap, like everything else in this request.**
+    // An operator who switches rig control off mid-over must not leave a
+    // transmitter keyed with nothing arranged to release it; the engine
+    // holds whichever `Ptt` it was handed for the whole transmission,
+    // and its watchdog is sized against that.
+    req.use_ptt = Session::instance().rig_can_key();
     req.output_device = device_ == kSystemDefault ? std::string{} : device_.toStdString();
     Session::instance().stage_transmit(std::move(req));
 

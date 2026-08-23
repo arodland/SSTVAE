@@ -1,0 +1,24 @@
+version = 1
+
+# Upstream's own MIT terms, recorded here rather than in the root
+# NOTICE: that file is exhaustively about the branding artwork, which is
+# licensed and *not* sublicensed onward. This is the opposite case -- a
+# redistributor may ship these files freely, provided the MIT notice in
+# LICENSE goes with them.
+[[annotations]]
+path = "java/**"
+SPDX-FileCopyrightText = "Copyright 2011-2013 Google Inc., Copyright 2013 Mike Wakerly and contributors"
+SPDX-License-Identifier = "MIT"
+
+# `shim/` is ours, sitting in their package namespace because Java
+# requires it to. Annotated rather than left to the root LICENSE so a
+# scanner does not read a third_party/ path as third-party code.
+[[annotations]]
+path = "shim/**"
+SPDX-FileCopyrightText = "Copyright the SSTVAE authors"
+SPDX-License-Identifier = "Artistic-2.0"
+
+[[annotations]]
+path = ["LICENSE", "README.md"]
+SPDX-FileCopyrightText = "Copyright 2011-2013 Google Inc., Copyright 2013 Mike Wakerly and contributors"
+SPDX-License-Identifier = "MIT"

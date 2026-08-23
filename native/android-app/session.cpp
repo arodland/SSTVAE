@@ -164,6 +164,11 @@ Session::~Session() {
     cancel_transmit();
     join_tx();
     stop();
+    // Before the threads below, and deliberately: `stop_rig` detaches
+    // rather than joining, so a wedged rig cannot hold up teardown --
+    // but a *keyed* rig must be released, and the departing worker's
+    // destructor is what does it.
+    stop_rig();
     if (model_thread_.joinable()) model_thread_.join();
     if (encoder_thread_.joinable()) encoder_thread_.join();
 }
@@ -506,6 +511,132 @@ bool Session::start_transmit(TxRequest request) {
     return true;
 }
 
+// --- rig control ------------------------------------------------------------
+
+bool Session::start_rig(const rig::HamlibConfig& config,
+                        std::shared_ptr<rig::SerialTransport> transport) {
+#ifndef SSTVAE_ANDROID_HAVE_RIG
+    (void)config;
+    (void)transport;
+    std::lock_guard<std::mutex> lk(rig_mu_);
+    rig_status_ = "this build has no rig control";
+    rig_failed_ = true;
+    return false;
+#else
+    std::unique_ptr<rig::RigBackend> backend;
+    try {
+        // Everything that can be rejected on the spot is rejected here,
+        // on the caller's thread, so a settings screen gets an answer
+        // rather than a status line arriving later: an impossible
+        // control-line combination, a device with nothing to open it, a
+        // typed host that Hamlib will not dial.
+        backend = rig::make_bridged_backend(
+            config, std::move(transport),
+            [](const rig::HamlibConfig& c) { return rig::make_hamlib_backend(c); });
+    } catch (const std::exception& e) {
+        std::lock_guard<std::mutex> lk(rig_mu_);
+        rig_status_ = e.what();
+        rig_failed_ = true;
+        rig_can_key_ = false;
+        return false;
+    }
+
+    // **The controller is created once and never destroyed.** Two
+    // reasons, and the second is a bug this replaced.
+    //
+    // `ptt_function()` returns a lambda capturing the *controller*, and
+    // `TxEngine` holds that for the length of an over. Destroying the
+    // controller while a transmission is in flight -- which is what
+    // turning rig control off mid-over used to do -- left the engine
+    // calling into freed memory to bring PTT back down, at the one
+    // moment it matters most.
+    //
+    // And `start()` supersedes a session in place, so re-starting the
+    // same controller with a freshly built backend is exactly what a
+    // reconnect needs: the `Ptt` already handed out stays valid across
+    // it. `Session` is immortal for its own reasons; this rides along
+    // with them.
+    rig::RigController* controller = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(rig_mu_);
+        if (!rig_) {
+            rig_ = std::make_unique<rig::RigController>(
+                [this](std::optional<double> hz) {
+                    std::lock_guard<std::mutex> lock(rig_mu_);
+                    rig_frequency_ = hz;
+                },
+                [this](const std::string& text, bool error) {
+                    std::lock_guard<std::mutex> lock(rig_mu_);
+                    rig_status_ = text;
+                    rig_failed_ = error;
+                });
+        }
+        controller = rig_.get();
+        rig_frequency_.reset();
+        rig_status_ = "connecting";
+        rig_failed_ = false;
+        rig_can_key_ = config.ptt_method != rig::PttMethod::Vox;
+    }
+
+    rig::RigConfig rig_config;
+    // Slower than the desktop's 5 s. A frequency readout is a comfort
+    // on a phone rather than a working instrument -- there is no rig
+    // panel competing for it -- and every poll is a CAT round trip plus
+    // a wakeup on a device whose battery is the whole reason
+    // `decode_loop_low_cpu` exists.
+    rig_config.poll_interval_s = 10.0;
+
+    // **Outside the lock, and that is not incidental.** `start()`
+    // publishes "connecting" through the status callback, which takes
+    // `rig_mu_`; calling it with the lock held would deadlock on the
+    // first line of every connection attempt.
+    controller->start(std::move(backend), rig_config);
+    return true;
+#endif
+}
+
+void Session::stop_rig() {
+    rig::RigController* controller = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(rig_mu_);
+        controller = rig_.get();
+        rig_frequency_.reset();
+        rig_status_.clear();
+        rig_failed_ = false;
+        rig_can_key_ = false;
+    }
+    // Stopped, never destroyed -- see `start_rig`. `stop()` detaches
+    // rather than joining, so this returns immediately even against a
+    // rig that has stopped answering, which is the whole point of the
+    // controller's design.
+    if (controller) controller->stop();
+}
+
+bool Session::rig_running() const {
+    std::lock_guard<std::mutex> lk(rig_mu_);
+    return rig_ != nullptr && rig_->running();
+}
+
+std::optional<double> Session::rig_frequency_hz() const {
+    std::lock_guard<std::mutex> lk(rig_mu_);
+    return rig_frequency_;
+}
+
+std::string Session::rig_status() const {
+    std::lock_guard<std::mutex> lk(rig_mu_);
+    return rig_status_;
+}
+
+bool Session::rig_failed() const {
+    std::lock_guard<std::mutex> lk(rig_mu_);
+    return rig_failed_;
+}
+
+bool Session::rig_can_key() const {
+    std::lock_guard<std::mutex> lk(rig_mu_);
+    return rig_ != nullptr && rig_can_key_;
+}
+
 void Session::run_transmit(const TxRequest& request) {
     // **Capture stops before anything else happens**, including the
     // encode -- not because the encode would disturb it, but because a
@@ -536,15 +667,36 @@ void Session::run_transmit(const TxRequest& request) {
     cfg.cw_id = request.cw_id;
     if (!request.cw_message.empty()) cfg.cw_message = request.cw_message;
     cfg.vox_lead_s = request.vox_lead_s;
-    // **No PTT, and that is the whole keying story on this platform.**
-    // Android gives an unprivileged app no serial node, so rig control
-    // is structurally absent (docs/android.md) and the transmitter is
-    // keyed by its own audio. The state machine is kept exactly as it
-    // is anyway: `PttWatchdog` with a null `Ptt` stands itself down and
-    // does nothing, so there is no special case here, and CAT over
-    // NET rigctl later is a `Ptt` to pass rather than a restructure.
+
+    // **Keying, which this platform does have now.** `docs/android.md`
+    // said it could not: Hamlib opens a device path and Android gives an
+    // app none. It takes a socket for any backend instead (see
+    // `core/rig/transport.hpp`), so what reaches `TxEngine` here is an
+    // ordinary `Ptt` -- exactly the shape that file predicted CAT would
+    // arrive in, and the prediction held: nothing above this line
+    // changed to accept it.
+    //
+    // Null when the operator has no rig session, or has it set to VOX.
+    // That is still a supported configuration and not a degraded one:
+    // `PttWatchdog` with a null `Ptt` stands itself down, so there is no
+    // special case below either way.
+    tx::Ptt ptt;
+    if (request.use_ptt) {
+        std::lock_guard<std::mutex> lk(rig_mu_);
+        if (rig_ && rig_can_key_) ptt = rig_->ptt_function();
+    }
+    // **The leader is not suppressed when the rig is keyed directly**
+    // (Andrew, on hardware). An earlier version zeroed it here, on the
+    // theory that a swept tone into an already-keyed radio only delays
+    // the picture. That is the app second-guessing a setting the
+    // operator made: the leader is also a settling period for an
+    // interface that wants audio flowing before the radio is properly
+    // in transmit, and `ptt_lead_s` is a different quantity doing a
+    // different job. If it is not wanted with CAT keying, the operator
+    // sets it to zero.
+
     auto engine = std::make_unique<tx::TxEngine>(
-        nullptr,
+        std::move(ptt),
         [](const std::string& device, std::span<const double> wave, int samplerate,
            const std::function<void(double)>& on_progress,
            const std::function<bool()>& should_stop,

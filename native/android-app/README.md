@@ -32,6 +32,16 @@ demonstrated rather than argued. And the level readout earns its keep:
 and it is distinguishable at a glance from merely quiet, which a mean
 level is not.
 
+**Rig control is in as of 2026-08-22, and USB works on hardware**
+(2026-08-23): CAT and both control-line keying methods, on a phone,
+over a composite USB interface — which is the question that could have
+sunk the approach, since the app needs the audio and the serial half of
+that device at once. `docs/android.md` said this was structurally
+impossible; it is not, because Hamlib takes a socket for any backend.
+**Bluetooth is untested for want of a device.** See "Rig control" below
+before touching any of it: the build-level traps and the runtime ones
+are written up there, and every one of them cost a round.
+
 **Three of this port's bugs were bugs in its own instruments**, and
 they are worth reading before trusting a number from here: the drift
 meter charging in-flight audio as lost, the `-O0` build that made the
@@ -909,6 +919,257 @@ app away loses the picked picture and its framing. A rotation does not,
 which is what the process-wide singleton is for. Persisting the source
 path and framing in `QSettings` would fix it and is a few lines; it has
 not been done because nothing has asked for it yet.
+
+## Rig control
+
+CAT and PTT, added 2026-08-22. `docs/android.md` has the design record
+and the reasoning; this is the operational half.
+
+**How it reaches the radio.** Hamlib's `rig_open()` turns any backend
+into a network client when its pathname parses as `host:port`, so a
+`SerialTransport` (USB or Bluetooth, from Java) is presented to it as a
+loopback socket. Nothing is patched and no CAT protocol is
+reimplemented, which is why the radio picker here lists the same several
+hundred rigs the desktop does.
+
+**Three connection kinds, and the kind is what decides the plumbing —
+never the device string.** USB and Bluetooth open a transport and get a
+bridge; Network hands the host straight to Hamlib with no bridge at all,
+covering both a station PC running `rigctld` (model 2) and a
+serial-over-TCP server with a native backend. An earlier draft branched
+on the *shape* of the device string and got it exactly backwards: a USB
+identifier like `usb:1a86:7523` has no slash and does not start with
+`com`, so Hamlib's own `parse_hoststr` rules read it as a hostname, and
+the bridge was skipped for precisely the devices it exists to serve.
+
+**Building it.** `-DSSTVAE_ANDROID_RIG=ON` is the default and pulls in
+an NDK cross-build of Hamlib's autotools tarball, per ABI.
+`-DSSTVAE_ANDROID_RIG=OFF` drops CAT and keeps the app — the rig screen,
+the transport and the settings all still build, so it is one flag rather
+than a second code path. **That cross-build has never been run**: it was
+written from the NDK's documented layout in a session with no NDK and no
+reachable `dl.google.com`. Expect to fix something. Two guards make the
+first attempt diagnosable rather than mysterious:
+
+- The configure step fails naming the exact compiler wrapper it looked
+  for, because the NDK ships one per API level and an unsupported level
+  is *missing* rather than wrong. **This is the one that fired on the
+  first real run**, and it fired for the wrong reason: the API level was
+  being read from `CMAKE_SYSTEM_VERSION`, which CMake defaults to `1`
+  when cross-compiling and nothing sets it, so the wrapper it looked for
+  was `x86_64-linux-android1-clang`. The guard written to catch exactly
+  that was `if(NOT _hl_api)` — and `1` is *true* in CMake, so it never
+  ran. A guard whose condition cannot fire is not a guard. The level now
+  comes from whichever of `SSTVAE_ANDROID_API`, `CMAKE_ANDROID_API`,
+  `ANDROID_NATIVE_API_LEVEL`, `ANDROID_PLATFORM_LEVEL`, `ANDROID_PLATFORM`
+  or `CMAKE_SYSTEM_VERSION` first gives a plausible answer, falls back to
+  21, says which source it used, and repairs upward to the lowest wrapper
+  the NDK actually ships if the chosen level has none.
+
+  `-DSSTVAE_ANDROID_API=<level>` overrides all of it. Building Hamlib at
+  a level *below* the app's minSdk is fine and is why 21 is the fallback:
+  a library built against an older libc loads on a newer one, never the
+  reverse, so guessing low fails on nobody's phone and guessing high
+  fails on somebody else's.
+- The install step refuses a versioned SONAME. libtool would produce
+  `libhamlib.so.4.0.7`; Android's packager takes only files named
+  exactly `lib*.so`, so that library is dropped from the APK without
+  comment and the app dies at `dlopen` **before `main`** — no output on
+  any stream, indistinguishable from a deadlock.
+
+  **`-avoid-version` is a libtool flag, not a linker one**, and putting
+  it in configure's `LDFLAGS` is the second thing that went wrong on a
+  real NDK build. configure's very first link test runs the compiler
+  directly, clang rejects an argument it has never heard of, and the
+  build stops at `C compiler cannot create executables` — with the
+  actual reason two layers down in `config.log`, which is a long way
+  from a flag we chose. It is applied at *make* time now, overriding
+  `libhamlib_la_LDFLAGS` (`src/Makefile.am:24`, the one variable
+  upstream puts `-version-info` in) and carrying `-no-undefined` over
+  from the same line.
+
+  Not plain `LDFLAGS=-avoid-version` at make time, which would also have
+  worked as far as libtool is concerned — it copes with `-version-info`
+  and `-avoid-version` together and strips the version
+  (`build-aux/ltmain.sh:9488`). The reasons are elsewhere: a
+  command-line `LDFLAGS` *replaces* the tree's, discarding whatever
+  configure computed, and it reaches every link in the tree including
+  the fifteen tool executables, where the flag means nothing.
+
+  Verified natively on a desktop, which is possible because the
+  mechanism is libtool's and not the NDK's: the same configure and make
+  arguments produce a single unversioned `libhamlib.so` whose
+  `readelf -d` SONAME is `libhamlib.so`, with the tools still linking.
+
+- **`CC` alone is not enough, and the failure waits until late.**
+  Setting only `CC` leaves configure to find C++ on its own, and it
+  finds the *host* `g++`. Most of Hamlib is C, so the build gets most of
+  the way through before reaching `rotators/androidsensor` — the one C++
+  directory — and dying on `-stdlib=libc++`, which configure adds for
+  every Android host and the host g++ has never heard of. A host
+  compiler quietly standing in for a cross one is the shape of this
+  bug; `CXX` is set now even though, after the next point, there should
+  be no C++ left to compile.
+
+- **The Android sensor rotator cannot be switched off. Do not try
+  again.** It points an antenna using the phone's accelerometer, which
+  this app has no use for, and it is the only C++ in the tree we build,
+  so it looks like free savings. There is no `--without-androidsensor`;
+  upstream gates it on whether `android/sensor.h` exists
+  (`configure.ac:171`), and pre-seeding autoconf's cache with
+  `ac_cv_header_android_sensor_h=no` does correctly drop the directory
+  from `ROT_BACKEND_LIST`.
+
+  It then fails to build, because `src/rot_reg.c` guards the backend's
+  two halves on **different conditions**:
+
+  ```
+  line  87: #if HAVE_ANDROID_SENSOR                      (the declaration)
+  line 141: #if defined(ANDROID) || defined(__ANDROID__) (the table entry)
+  ```
+
+  `__ANDROID__` is defined by the compiler and cannot be unset, so the
+  table entry is unconditional on Android while the declaration is not.
+  They agree only when `HAVE_ANDROID_SENSOR` is true — which upstream is
+  entitled to assume, since a real NDK always has `android/sensor.h`.
+  Answering "no" leaves the file calling a function nobody declared.
+
+  So it builds, and setting `CXX` is what makes that work rather than a
+  precaution. (The cache mechanism itself is sound and is used for the
+  two malloc answers — verified against this configure with a proxy
+  header: `checking for linux/ppdev.h... (cached) no`, and
+  `/* #undef HAVE_LINUX_PPDEV_H */` in the generated `config.h`. The
+  problem is specific to this backend's guards.)
+
+  `-lc++` goes into `LDFLAGS` for every Android build regardless
+  (`configure.ac:178`). The NDK sysroot ships `libc++.so` as an implicit
+  linker script so it resolves, and `libhamlib.so` carries a
+  `DT_NEEDED` on `libc++_shared.so` — which Qt for Android packages
+  anyway, because Qt itself needs it.
+
+- **A failed Hamlib build used to cement itself.** The "already built"
+  stamp was the installed `hamlib/rig.h`, and `SUBDIRS` puts `include`
+  second (`Makefile.am:25`) — so `make install` copies the headers long
+  before it reaches `src`, and any failure after that left a tree the
+  check accepted. The next configure skipped the rebuild and failed with
+  "Hamlib library not found", naming a path instead of the compile error
+  that actually stopped it. The stamp requires the library now. If you
+  are recovering from a build that failed before this landed, delete
+  `<build>/_deps/hamlib-install-*` once.
+
+**Testing it without a radio.** Hamlib model 1 is the dummy: it opens,
+keys and reports a frequency with nothing attached, so the whole path
+above the transport can be exercised on a phone with no cable. The
+transport itself needs hardware; the closest thing to a substitute is
+the desktop suite, where `test_rig_bridge`, `test_rig_bridged` and
+`test_rig_hamlib` cover the bridge, the composition, the PTT routing and
+a real Kenwood backend talking through it to a fake radio.
+
+**USB permission is granted per attach, and Android forgets it on
+detach.** `UsbAttach` plus `res/xml/device_filter.xml` is what makes the
+grant stick: an app that can handle `USB_DEVICE_ATTACHED` is authorised
+automatically when the user answers "always open with this app". It is
+its own no-display activity rather than a filter on `QtActivity`,
+because the filter matches four whole vendor ranges and every CDC-ACM
+device — plugging in an Arduino must not open a radio app.
+
+**Bluetooth lists bonded devices only.** Discovery would need
+`BLUETOOTH_SCAN` and, before API 31, location permission, which is a
+large ask for a picker whose entire content is the radio the operator
+already paired in system Settings. Pairing is the system's job.
+RFCOMM has no modem control lines, so DTR and RTS keying are not offered
+there at all.
+
+**The keying method changes the waveform.** With the rig keyed directly
+the VOX leader is skipped — a swept tone into an already-keyed radio
+only delays the picture — and the airtime estimate on the Send screen
+follows. The Send screen says which one is in force, but only when it is
+rig keying: saying "VOX" every time when VOX is the only option trains
+the eye to skip the line.
+
+**The platform layer needs an explicit init, and forgetting it looked
+like two unrelated bugs.** `rig::android::set_java_vm` and
+`SerialBridge.init(Context)` were never called — `init_rig_bridge` in
+`rigcontrol.cpp` does it now, from `RigControl`'s constructor, which is
+on the UI thread for the `FindClass` reason `core/audio/android/`
+records. `listener.cpp`'s `init_audio_bridge` is the same four lines for
+the audio layer.
+
+What made it cost a round was not the missing call. The layer threw a
+perfectly good message — "set_java_vm() was never called" — and two
+things ate it:
+
+- `refreshDevices()` caught every exception and cleared the list, so the
+  screen said "Nothing plugged in. Connect the radio…", which was a
+  confident lie with a radio attached. **An enumeration that threw is
+  not one that came back empty**, and it shows the message now.
+  "Nothing connected" and "Bluetooth not granted" are still ordinary
+  empty lists with no error.
+- `bluetoothReady()` did *not* catch, and it is read from a QML property
+  binding — where an exception terminates the process. It crashed on
+  switching to Bluetooth, then at every launch, because the connection
+  kind is persisted and the binding is evaluated on load. **Nothing
+  reaching JNI may throw from a getter.**
+
+The rule that came out of it, now written into `androidrig.cpp`: **a
+query answers, an action reports.** `has_permission` returns false when
+it cannot ask — the truthful answer to "may the app open this right
+now" — while the enumerators throw, because their caller catches and has
+somewhere to show it.
+
+**Unplugging the USB cable, and getting back.** Verified on hardware
+2026-08-23: CAT and both control-line keying methods work; pulling the
+cable used to leave the screen saying "Connected" with no way back.
+
+Three things were wrong and they are worth separating. `running()` means
+*a session is configured*, not that the radio is answering — the
+desktop's distinction, correct there, but on a phone it was the only
+thing the UI showed. `connectionState` is the property to display now,
+and the signal it rests on is that **a published frequency is the only
+proof the radio answered**: `failed` alone cannot tell "still opening
+the port" from "the cable is out".
+
+Reconnection is app-level (`RigControl::maybe_reconnect`, once per 1 Hz
+tick) rather than in `RigController`, because the question it has to
+answer — *is the device back?* — is a platform one. For USB and
+Bluetooth that is `has_permission(device)`, which is false for a device
+that is not there, so one cheap call covers both "is it back" and "may
+we open it". **A device that is simply absent does not spend the
+backoff**, so replugging reconnects on the next tick rather than
+somewhere in the next 30 seconds; the 2/4/8/16/32 s backoff is only for
+attempts that reached the radio and failed. Never while transmitting: an
+over is committed airtime and swapping the link underneath it buys
+nothing.
+
+**The rig controller is immortal, and that fixed a bug rather than
+tidying one.** `ptt_function()` captures the *controller*, and
+`TxEngine` holds that for a whole over — so `stop_rig()` destroying the
+controller left the engine calling into freed memory to bring PTT back
+down, which is what turning rig control off mid-over used to do. It is
+created once and `stop()`ped, never destroyed. The same property makes
+reconnection safe: `RigController::start()` supersedes a session in
+place, so a `Ptt` handed out before a reconnect still keys the new
+backend. `test_rig.cpp` pins it, mutation-tested — binding the lambda to
+the session instead of the controller sends the key to the *superseded*
+backend and none to the new one, a failure with no symptom until
+somebody transmits.
+
+**The VOX leader is sent whatever keys the radio** (Andrew, on
+hardware). An earlier version zeroed it whenever PTT was not VOX, on the
+theory that a swept tone into an already-keyed radio only delays the
+picture. That is the app second-guessing the operator: the leader is
+also a settling period for an interface that wants audio flowing before
+the radio is properly in transmit, and `ptt_lead_s` is a different
+quantity doing a different job. Set it to zero if it is not wanted.
+
+**What is not tested on hardware.** Everything in this section. The
+composite-device question in particular is worth settling first with the
+actual radio: most rig USB interfaces present audio and CDC serial
+together, and this app needs both at once. FT8CN does it successfully on
+at least some devices, and mik3y/usb-serial-for-android#477 is an open
+report of a composite device where claiming the CDC interface fails
+while the platform holds the audio interfaces. If that turns out badly
+for a given radio, Bluetooth and the network kind are unaffected.
 
 ## `core/audio/android/`
 

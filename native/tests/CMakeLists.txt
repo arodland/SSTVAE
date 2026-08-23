@@ -111,6 +111,21 @@ target_link_libraries(test_rig PRIVATE sstvae_core)
 target_include_directories(test_rig PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME rig COMMAND test_rig)
 
+# The loopback bridge and the backend that composes it -- the mechanism
+# that gives a phone CAT control without patching Hamlib. Both link
+# sstvae_core only, so they run in a --no-rig build: the composition,
+# the PTT routing and the byte pumping are all covered with no
+# libhamlib present, exactly as the controller's threading already is.
+add_executable(test_rig_bridge test_rig_bridge.cpp)
+target_link_libraries(test_rig_bridge PRIVATE sstvae_core)
+target_include_directories(test_rig_bridge PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME rig_bridge COMMAND test_rig_bridge)
+
+add_executable(test_rig_bridged test_rig_bridged.cpp)
+target_link_libraries(test_rig_bridged PRIVATE sstvae_core)
+target_include_directories(test_rig_bridged PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME rig_bridged COMMAND test_rig_bridged)
+
 # The libhamlib backend itself, exercised against Hamlib's own dummy
 # rig (model 1) -- the same trick CLAUDE.md uses for the Python side,
 # and the only way to run open/PTT/frequency with no radio attached.
@@ -163,13 +178,17 @@ set_tests_properties(tx_engine PROPERTIES TIMEOUT 180)
 set_tests_properties(golden npy modem_roundtrip ringbuffer audio rig
                      checkpoint
                      PROPERTIES TIMEOUT 300)
+# These two carry their own watchdogs, which name the wedged step. The
+# ctest bound is the backstop for a wedge before main or after it
+# returns, where an in-process watchdog cannot fire at all.
+set_tests_properties(rig_bridge rig_bridged PROPERTIES TIMEOUT 180)
 if(TARGET sstvae_rig)
-  # Shorter than the rest on purpose: this one carries its own 60 s
+  # Shorter than the rest on purpose: this one carries its own 120 s
   # watchdog, so reaching the ctest bound at all already means the
   # watchdog never got to run -- the process was wedged before main or
-  # after it returned. 120 s is enough to establish that without
+  # after it returned. 240 s is enough to establish that without
   # spending the job on it.
-  set_tests_properties(rig_hamlib PROPERTIES TIMEOUT 120)
+  set_tests_properties(rig_hamlib PROPERTIES TIMEOUT 240)
 endif()
 
 # Overlay rendering needs QtGui; the library is optional, so the test

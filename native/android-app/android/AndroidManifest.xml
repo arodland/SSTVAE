@@ -6,6 +6,16 @@
     android:versionName="-- %%INSERT_VERSION_NAME%% --">
     <!-- %%INSERT_PERMISSIONS -->
     <!-- %%INSERT_FEATURES -->
+
+    <!-- USB host, for CAT and PTT over a serial adapter.
+
+         required="false" is load-bearing: Play uses uses-feature to
+         decide which devices may install an app, and a required USB host
+         would hide this one from anything without an OTG port. Receiving
+         over acoustic coupling needs no USB at all, so most of what the
+         app does would be withheld from most phones to declare a feature
+         some of them use. -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
     <supports-screens
         android:anyDensity="true"
         android:largeScreens="true"
@@ -56,7 +66,9 @@
              the service's whole lifetime rather than re-declared at each
              transition.
              (No double hyphens in here: XML forbids them inside a
-             comment, and aapt reports it as a column number.) -->
+             comment, and aapt reports it as a column number.
+             tools/check_xml_comments.py is the gate; this note was not
+             enough on its own, which is why the gate exists.) -->
         <service
             android:name="org.cleverdomain.sstvae.ListenerService"
             android:exported="false"
@@ -75,6 +87,28 @@
             android:exported="false"
             android:excludeFromRecents="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- Collects a persistent USB permission and disappears. See
+             UsbAttach.java: without it Android drops the grant on every
+             detach, so the operator re-authorises the radio at the start
+             of every session. Its own activity rather than a filter on
+             QtActivity, because device_filter.xml matches whole vendor
+             ranges and plugging in an Arduino must not open a radio app.
+             (No double hyphens in here: XML forbids them inside a
+             comment, and aapt reports it as a column number.) -->
+        <activity
+            android:name="org.cleverdomain.sstvae.UsbAttach"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.NoDisplay">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter" />
+        </activity>
 
         <provider
             android:name="androidx.core.content.FileProvider"

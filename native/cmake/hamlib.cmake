@@ -32,6 +32,8 @@ set(SSTVAE_HAMLIB_SYSTEM OFF CACHE BOOL
     "Use the system libhamlib via pkg-config instead of the pinned build")
 set(SSTVAE_HAMLIB_DIR "" CACHE PATH
     "Prebuilt Hamlib tree (containing include/ and lib/); skips the download")
+set(SSTVAE_ANDROID_API "" CACHE STRING
+    "Android API level for the Hamlib cross-build; empty = detect")
 
 # --- the system option ------------------------------------------------------
 if(SSTVAE_HAMLIB_SYSTEM)
@@ -105,16 +107,43 @@ else()
   # directory, so that whatever caches FETCHCONTENT_BASE_DIR caches the
   # *built* Hamlib too. CI throws its build tree away every run; without
   # this, every job on every platform would rebuild Hamlib from source.
+  #
+  # On Android the install tree is per ABI: two ABIs are two builds of
+  # two different libraries, and sharing a prefix would have the second
+  # find the first's headers, skip its own build, and link an arm64
+  # library into an armeabi-v7a APK.
+  set(_hl_suffix "")
+  if(ANDROID)
+    set(_hl_suffix "-${CMAKE_ANDROID_ARCH_ABI}")
+  endif()
   if(FETCHCONTENT_BASE_DIR)
-    set(_hl_root "${FETCHCONTENT_BASE_DIR}/hamlib-install-${_hl_v}")
+    set(_hl_root "${FETCHCONTENT_BASE_DIR}/hamlib-install-${_hl_v}${_hl_suffix}")
   else()
-    set(_hl_root "${CMAKE_CURRENT_BINARY_DIR}/hamlib-install")
+    set(_hl_root "${CMAKE_CURRENT_BINARY_DIR}/hamlib-install${_hl_suffix}")
   endif()
 
   # Built once and stamped. ExternalProject would rebuild on every
   # configure of a fresh build directory even when the install tree is
   # already there, which is the common case with a warm CI cache.
-  if(NOT EXISTS "${_hl_root}/include/hamlib/rig.h")
+  #
+  # **The stamp is the library, not just the header.** `SUBDIRS` puts
+  # `include` second (Makefile.am:25), so `make install` copies
+  # `hamlib/rig.h` into the prefix long before it reaches `src` -- which
+  # means a build that fails anywhere after that leaves a tree this
+  # check would accept. The next configure then skips the rebuild
+  # entirely and fails much later with "Hamlib library not found",
+  # naming a path rather than the compile error that actually stopped
+  # it. Requiring both is what makes a failed build retry instead of
+  # cementing itself.
+  set(_hl_built FALSE)
+  if(EXISTS "${_hl_root}/include/hamlib/rig.h")
+    file(GLOB _hl_installed "${_hl_root}/lib/libhamlib*")
+    if(_hl_installed)
+      set(_hl_built TRUE)
+    endif()
+  endif()
+
+  if(NOT _hl_built)
     # Unpacking a tarball gives every file the same mtime, so make
     # cannot tell that `configure` is already newer than `configure.ac`
     # and tries to re-run aclocal -- which fails on any machine without
@@ -154,6 +183,214 @@ else()
         "--without-cxx-binding"
         "--without-libusb"
         "--disable-silent-rules")
+
+    # Cross-compiling for Android.
+    #
+    # **Unverified as of 2026-08-22**: this session had no NDK and
+    # dl.google.com is unreachable from it, so the recipe below is
+    # written from the NDK's documented layout and has never been run.
+    # Treat a first failure as expected work rather than as a bug, and
+    # see docs/android.md ("Rig control over a socket") for what it is
+    # for. Everything downstream of it -- the bridge, the transport, the
+    # PTT routing -- is covered by tests that run without it.
+    #
+    # Three things here are Android-specific and none of them are
+    # optional:
+    #
+    #   * **`--host` and the compiler triple are not the same string on
+    #     32-bit ARM.** autotools wants `arm-linux-androideabi`, which is
+    #     what its config.sub knows; the NDK's clang wrapper is
+    #     `armv7a-linux-androideabi<api>-clang`. Using either name for
+    #     both fails -- one at configure, one at the first compile.
+    #   * **The library must come out unversioned, and the flag for that
+    #     is libtool's, not the linker's.** Otherwise libtool produces
+    #     `libhamlib.so.4.0.7` with `libhamlib.so` a symlink to it, and
+    #     Android's packager takes only files named exactly `lib*.so`
+    #     from `libs/<abi>/` -- a versioned SONAME is silently not
+    #     installed and the app dies at `dlopen` before reaching main.
+    #     `-avoid-version` is what suppresses it, and putting it in
+    #     `LDFLAGS` here is what the first attempt did: configure's very
+    #     first link test runs the compiler *directly*, clang rejects an
+    #     argument it has never heard of, and the whole thing stops at
+    #     "C compiler cannot create executables". It is applied at make
+    #     time instead, to the one automake variable that carries
+    #     `-version-info` -- see the build step below.
+    #   * **The malloc probes have to be answered.** configure cannot run
+    #     what it just built, so `AC_FUNC_MALLOC` guesses "no" and
+    #     substitutes its own `rpl_malloc`, which does not exist here.
+    #   * **`CC` alone is not enough**, and the Android sensor *rotator*
+    #     is what proves it -- it is C++, it cannot be switched off, and
+    #     with no `CXX` the host g++ gets it. See the arguments below.
+    #
+    # Deliberately still `--enable-shared`: Hamlib is LGPL-2.1+ and the
+    # reasoning at the top of this file does not change because the
+    # target is a phone. An APK with a static Hamlib inside would carry
+    # the relinking obligation.
+    if(ANDROID)
+      if(NOT CMAKE_ANDROID_NDK)
+        message(FATAL_ERROR
+          "Hamlib for Android needs CMAKE_ANDROID_NDK. Configure through "
+          "Qt's android toolchain file, or set -DSSTVAE_BUILD_RIG=OFF.")
+      endif()
+      if(CMAKE_HOST_APPLE)
+        set(_ndk_host "darwin-x86_64")
+      elseif(CMAKE_HOST_WIN32)
+        set(_ndk_host "windows-x86_64")
+      else()
+        set(_ndk_host "linux-x86_64")
+      endif()
+      set(_ndk_bin "${CMAKE_ANDROID_NDK}/toolchains/llvm/prebuilt/${_ndk_host}/bin")
+
+      # **The API level is not reliably in `CMAKE_SYSTEM_VERSION`**, and
+      # believing it was is what made this block's first real run fail.
+      # CMake defaults that variable to `1` when cross-compiling and
+      # nothing sets it, which the NDK toolchain path does not always
+      # do -- so the compiler wrapper came out as
+      # `x86_64-linux-android1-clang`. Worse, the fallback written to
+      # catch exactly that was `if(NOT _hl_api)`, and `1` is *true* in
+      # CMake, so it never ran. A guard whose condition cannot fire is
+      # not a guard.
+      #
+      # Ask everything that might know, in order of how directly it
+      # means "API level", and take the first plausible answer.
+      # `SSTVAE_ANDROID_API` is first so a build with an NDK layout
+      # nobody here anticipated can be unblocked with one -D.
+      set(_hl_api "")
+      set(_hl_api_from "")
+      foreach(_src SSTVAE_ANDROID_API CMAKE_ANDROID_API ANDROID_NATIVE_API_LEVEL
+                   ANDROID_PLATFORM_LEVEL CMAKE_SYSTEM_VERSION)
+        if(DEFINED ${_src} AND "${${_src}}" MATCHES "^[0-9]+$"
+           AND "${${_src}}" GREATER_EQUAL 16)
+          set(_hl_api "${${_src}}")
+          set(_hl_api_from "${_src}")
+          break()
+        endif()
+      endforeach()
+      # The NDK's own spelling, "android-29".
+      if(_hl_api STREQUAL "" AND DEFINED ANDROID_PLATFORM
+         AND "${ANDROID_PLATFORM}" MATCHES "([0-9]+)")
+        set(_hl_api "${CMAKE_MATCH_1}")
+        set(_hl_api_from "ANDROID_PLATFORM")
+      endif()
+      if(_hl_api STREQUAL "")
+        # The floor of every NDK that still exists, and safe against the
+        # app's minSdk of 29: a library built for a *lower* level loads
+        # on a higher one, never the reverse. Guessing high is the
+        # failure that would only show up on somebody else's phone.
+        set(_hl_api 21)
+        set(_hl_api_from "fallback")
+      endif()
+
+      if(CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+        set(_hl_cc_triple "aarch64-linux-android")
+        set(_hl_triple "aarch64-linux-android")
+      elseif(CMAKE_ANDROID_ARCH_ABI STREQUAL "armeabi-v7a")
+        set(_hl_cc_triple "armv7a-linux-androideabi")
+        set(_hl_triple "arm-linux-androideabi")
+      elseif(CMAKE_ANDROID_ARCH_ABI STREQUAL "x86_64")
+        set(_hl_cc_triple "x86_64-linux-android")
+        set(_hl_triple "x86_64-linux-android")
+      elseif(CMAKE_ANDROID_ARCH_ABI STREQUAL "x86")
+        set(_hl_cc_triple "i686-linux-android")
+        set(_hl_triple "i686-linux-android")
+      else()
+        message(FATAL_ERROR
+          "Hamlib for Android: unknown ABI '${CMAKE_ANDROID_ARCH_ABI}'")
+      endif()
+
+      # The NDK ships one wrapper per API level, and which levels exist
+      # depends on the NDK release -- r28 dropped everything below 21.
+      # So a level that is right for the *app* can still have no wrapper
+      # here. Rather than refuse, take the lowest one at or above it:
+      # that is the same library, built against an older libc, and it
+      # runs everywhere the requested one would have.
+      set(_hl_cc "${_ndk_bin}/${_hl_cc_triple}${_hl_api}-clang")
+      if(NOT EXISTS "${_hl_cc}")
+        file(GLOB _hl_wrappers "${_ndk_bin}/${_hl_cc_triple}[0-9]*-clang")
+        set(_hl_best "")
+        set(_hl_have "")
+        foreach(_w IN LISTS _hl_wrappers)
+          if("${_w}" MATCHES "${_hl_cc_triple}([0-9]+)-clang$")
+            set(_hl_level "${CMAKE_MATCH_1}")
+            list(APPEND _hl_have "${_hl_level}")
+            if(_hl_level GREATER_EQUAL _hl_api
+               AND (_hl_best STREQUAL "" OR _hl_level LESS _hl_best))
+              set(_hl_best "${_hl_level}")
+            endif()
+          endif()
+        endforeach()
+        if(_hl_best STREQUAL "")
+          list(SORT _hl_have COMPARE NATURAL)
+          # Joined, because an unjoined CMake list renders as
+          # `21;22;23` -- which reads like shell syntax in the one
+          # message somebody is reading precisely because they are stuck.
+          string(REPLACE ";" ", " _hl_have "${_hl_have}")
+          message(FATAL_ERROR
+            "No NDK compiler for ${_hl_cc_triple} at API ${_hl_api} or above "
+            "in ${_ndk_bin}.\n"
+            "The level was taken from ${_hl_api_from}. Levels this NDK has: "
+            "${_hl_have}.\n"
+            "Set -DSSTVAE_ANDROID_API=<level> to choose one, or "
+            "-DSSTVAE_ANDROID_RIG=OFF to build without CAT.")
+        endif()
+        message(STATUS
+          "Hamlib: no API ${_hl_api} wrapper for ${_hl_cc_triple}; "
+          "using ${_hl_best}")
+        set(_hl_api "${_hl_best}")
+        set(_hl_cc "${_ndk_bin}/${_hl_cc_triple}${_hl_api}-clang")
+      endif()
+
+      # **`CXX` as well as `CC`, and it is load-bearing.** Setting only
+      # `CC` produced a failure late in the build: configure found the
+      # cross compiler for C and then silently fell back to the *host*
+      # `g++` for C++. Most of Hamlib is C, so it got all the way to
+      # `rotators/androidsensor` -- the one C++ directory, and one that
+      # cannot be switched off, see below -- before dying on
+      # `-stdlib=libc++`, a flag configure adds for every Android host
+      # and one the host g++ has never heard of. A host compiler quietly
+      # standing in for a cross one is the shape of this bug.
+      set(_hl_cxx "${_ndk_bin}/${_hl_cc_triple}${_hl_api}-clang++")
+
+      list(APPEND _hl_configure_args
+           "--host=${_hl_triple}"
+           "CC=${_hl_cc}"
+           "CXX=${_hl_cxx}"
+           "AR=${_ndk_bin}/llvm-ar"
+           "RANLIB=${_ndk_bin}/llvm-ranlib"
+           "STRIP=${_ndk_bin}/llvm-strip"
+           "ac_cv_func_malloc_0_nonnull=yes"
+           "ac_cv_func_realloc_0_nonnull=yes")
+
+      # **The Android sensor rotator cannot be switched off, and it was
+      # tried.** It is a rotator backend that points an antenna by the
+      # phone's accelerometer -- no use whatever to this app, and the
+      # only C++ in the tree we build -- so `-DSSTVAE_ANDROID_API`'s
+      # neighbour here was briefly
+      # `ac_cv_header_android_sensor_h=no`, pre-seeding autoconf's cache
+      # to fail the check upstream gates it on (`configure.ac:171`).
+      #
+      # That does drop the directory from `ROT_BACKEND_LIST`. It also
+      # breaks the build, because `src/rot_reg.c` guards the backend's
+      # two halves on **different conditions**:
+      #
+      #   line  87: `#if HAVE_ANDROID_SENSOR`                 (declaration)
+      #   line 141: `#if defined(ANDROID) || defined(__ANDROID__)` (table entry)
+      #
+      # `__ANDROID__` is defined by the compiler and cannot be unset, so
+      # the table entry is unconditional on Android while the
+      # declaration is not. The two agree only when `HAVE_ANDROID_SENSOR`
+      # is true -- which upstream is entitled to assume, since a real NDK
+      # always has `android/sensor.h`. Answering "no" makes the file
+      # reference a function nobody declared.
+      #
+      # So it builds, and `CXX` above is what makes that work rather
+      # than a precaution. Do not reach for the cache override again
+      # without also solving line 141, which cannot be solved from
+      # outside the source.
+      message(STATUS
+        "Hamlib: cross-building for Android ${CMAKE_ANDROID_ARCH_ABI} "
+        "(API ${_hl_api}, from ${_hl_api_from})")
+    endif()
 
     # Cross-compiling to the other macOS architecture.
     #
@@ -215,8 +452,32 @@ else()
     endif()
 
     message(STATUS "Hamlib: building with ${_hl_jobs} jobs")
+
+    # **`-avoid-version` belongs here, not in configure's LDFLAGS.** It
+    # is a libtool flag; configure's link test invokes the compiler
+    # directly, so putting it there stops the build at "C compiler
+    # cannot create executables" with the real reason two layers down in
+    # config.log.
+    #
+    # Overriding `libhamlib_la_LDFLAGS` rather than passing plain
+    # `LDFLAGS=-avoid-version` at make time, for two reasons that are
+    # not about libtool's precedence -- it copes with `-version-info`
+    # and `-avoid-version` together, and strips the version. First, a
+    # command-line `LDFLAGS` *replaces* the tree's, silently discarding
+    # anything configure computed. Second, it would reach every link in
+    # the tree, including the fifteen tool executables, where the flag
+    # means nothing. This names the one variable upstream puts
+    # `-version-info` in (`src/Makefile.am:24`) and substitutes for
+    # exactly that; `-no-undefined` is carried over from the same line
+    # because dropping it is not part of what is wanted here.
+    set(_hl_make_args "-j${_hl_jobs}")
+    if(ANDROID)
+      list(APPEND _hl_make_args
+           "libhamlib_la_LDFLAGS=-no-undefined -avoid-version")
+    endif()
+
     execute_process(
-      COMMAND make -j${_hl_jobs} install
+      COMMAND make ${_hl_make_args} install
       WORKING_DIRECTORY "${hamlib_src_BINARY_DIR}"
       RESULT_VARIABLE _hl_rc
       OUTPUT_FILE "${hamlib_src_BINARY_DIR}/build.log"
@@ -227,6 +488,31 @@ else()
     endif()
   else()
     message(STATUS "Hamlib: reusing the build in ${_hl_root}")
+  endif()
+
+  # The `-avoid-version` check, asserted rather than assumed.
+  #
+  # A versioned SONAME here is not a cosmetic problem: Android's
+  # packager takes only files named exactly `lib*.so`, so
+  # `libhamlib.so.4` is dropped from the APK without comment and the app
+  # dies at `dlopen` before `main` -- the same shape of pre-main,
+  # no-output failure as the Windows import-library trap this file
+  # already records, and just as hard to tell from a deadlock.
+  if(ANDROID)
+    file(GLOB _hl_versioned "${_hl_root}/lib/libhamlib.so.[0-9]*")
+    if(_hl_versioned)
+      message(FATAL_ERROR
+        "Hamlib built with a versioned SONAME (${_hl_versioned}).\n"
+        "libtool did not honour -avoid-version, so this library cannot go "
+        "into an APK: Android installs only files named lib*.so and would "
+        "drop it silently, leaving a dlopen failure before main. Delete "
+        "${_hl_root} and fix the LDFLAGS before going further.")
+    endif()
+    if(IS_SYMLINK "${_hl_root}/lib/libhamlib.so")
+      message(FATAL_ERROR
+        "${_hl_root}/lib/libhamlib.so is a symlink; an APK needs the real "
+        "file under that name.")
+    endif()
   endif()
 endif()
 

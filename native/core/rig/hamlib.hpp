@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "rig/backend.hpp"
+#include "rig/transport.hpp"
 
 namespace sstvae::rig {
 
@@ -122,6 +123,21 @@ struct HamlibConfig {
 };
 
 std::unique_ptr<RigBackend> make_hamlib_backend(const HamlibConfig& config);
+
+// What this backend would have set a serial port to, had it been given
+// one.
+//
+// Read straight out of `struct rig_caps`, which is where `rig_init`
+// takes them from -- including the deliberate choice of
+// `serial_rate_max` ("fastest!") as the default rate. It exists for the
+// bridged path, where Hamlib never touches the hardware and so cannot
+// apply them itself; see `SerialParams` in `rig/transport.hpp`.
+//
+// `rig_caps` is the one Hamlib struct this project reads through, for
+// the reason `description()` records: it has no pthread members, so the
+// Windows shim's type sizes cannot silently misplace its fields.
+// Falls back to 9600 8-N-1 for a model Hamlib does not know.
+SerialDefaults serial_defaults(int model);
 
 // Hamlib's version string, for an about box or a bug report.
 std::string hamlib_version();
