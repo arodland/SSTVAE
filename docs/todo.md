@@ -194,14 +194,27 @@ which it will answer itself. `SerialBridge.describeStatus` issues
 `GET_COMM_STATUS` (AN571, 19 bytes) and the transport traces it every
 ten consecutive empty reads, with the modem control lines:
 
-* bytes sitting in `outQueue` -> the chip is holding our frame, and
-  `hold` says why;
-* `outQueue` empty and `inQueue` empty -> the frame went out on the
-  wire and the radio did not answer;
-* `errors` non-zero -> framing or overrun, i.e. a rate or line problem.
+**Measured 2026-08-23**: `errors=0x0 hold=0x0 inQueue=0 outQueue=0`,
+all six modem lines reading 1, and `reads started=3 returned=2
+last=512ms` against the bridge's 500 ms timeout. So the read loop
+cycles normally, the chip reports no framing or overrun error and
+nothing withholding transmission, and CTS is high so no handshake is
+holding the transmitter off. `bridge: <- rig` never appears, so the
+radio does not answer.
 
-The heartbeat also proves the bridge's read loop is running at all,
-which nothing in the log did before.
+Two of those fields carry less than they appear to, and it is worth not
+re-deriving: `outQueue` is sampled a second after the write and reads
+zero whether the chip sent the bytes or dropped them, and `inQueue` is
+drained continuously by the read thread. `errors`, `hold` and `CTS` are
+the informative ones.
+
+**That exhausts what code inspection can settle.** The chip is
+programmed identically to a working implementation, reports itself
+healthy, and no software here can see whether the UART put bits on the
+pin. The next step is a hardware A/B that separates the chip from the
+radio -- a CP210x USB adapter into the K4's RS-232 port, driven from
+the same phone and app. If that fails, the fault is in the CP210x path;
+if it works, it is the IC-9700 specifically.
 
 One further difference from the Linux driver survives, as the next
 place to look if a CP210x still misbehaves: the library writes the

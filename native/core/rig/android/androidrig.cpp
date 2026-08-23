@@ -342,17 +342,27 @@ public:
         Env env;
         jclass cls = env.bridge();
 
-        // **Before this frame, not after it, and that is the whole
-        // point.** Reported here it describes the state left behind by
-        // the *previous* frame, which has by then had Hamlib's full
-        // timeout to drain -- so bytes still in `outQueue` mean the
-        // chip never put them on the wire, and an empty `outQueue` with
-        // an empty `inQueue` means it did and the radio said nothing.
-        // Probed immediately after a write it would only ever catch a
-        // UART mid-transmission and prove nothing.
+        // Reported before this frame rather than after, so it describes
+        // what the *previous* frame left behind once Hamlib's full
+        // timeout had passed.
+        //
+        // **Two of these fields are weaker than they look, and the
+        // measurement is what taught that.** `outQueue` is read a
+        // second after the write, by which time it is zero whether the
+        // chip sent the bytes or dropped them; `inQueue` is drained
+        // continuously by the read thread, so it is zero even when the
+        // radio does answer. What actually carries information is
+        // `errors` (framing, parity, overrun) and `hold` (why
+        // transmission is being withheld) -- both latched by the chip
+        // rather than sampled -- and `CTS`, since a handshake holding
+        // the transmitter off would show there. Whether the radio
+        // answered at all is already told by `bridge: <- rig`.
         //
         // The read counters ride along because this thread is the one
-        // known to be running.
+        // known to be running, and they retired a wrong theory on their
+        // first run: `last` against the bridge's 500 ms timeout shows
+        // the read loop cycling normally, where the silence of an
+        // earlier heartbeat had been read as a blocked `bulkTransfer`.
         if (tracing() && wrote_once_) {
             const unsigned long started = reads_started_.load(std::memory_order_relaxed);
             const unsigned long returned = reads_returned_.load(std::memory_order_relaxed);

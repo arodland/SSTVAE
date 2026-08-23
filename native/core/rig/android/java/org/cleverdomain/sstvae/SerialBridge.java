@@ -564,15 +564,21 @@ public final class SerialBridge {
         /**
          * What the chip says about itself, for the rig trace.
          *
-         * <p><b>This is the fact nothing else in the stack can supply.</b>
-         * A bulk write returning its length means the bytes reached the
-         * chip over USB — not that the UART clocked them out. A CP210x
-         * will say: {@code GET_COMM_STATUS} returns how many bytes are
-         * still queued for transmit, how many arrived from the UART, and
-         * a bitmask of the reasons transmission is being held. An Icom
-         * that answers a desktop and not a phone is either being held
-         * off, or being transmitted to and not replying, and those two
-         * look identical from above.
+         * <p>A bulk write returning its length means the bytes reached
+         * the chip over USB — not that the UART clocked them out.
+         * {@code GET_COMM_STATUS} is the chip's own account: an error
+         * mask, a bitmask of reasons transmission is being held, and the
+         * two queue depths.
+         *
+         * <p><b>The queue depths turned out to be the weak half.</b>
+         * The caller reads this a second after the previous frame, by
+         * which time {@code outQueue} is zero whether the chip sent the
+         * bytes or dropped them, and {@code inQueue} is drained
+         * continuously by the read thread, so it is zero even when the
+         * radio does answer. {@code errors} and {@code hold} are latched
+         * by the chip rather than sampled, and those are what carry
+         * information — along with CTS, since a handshake holding the
+         * transmitter off would show up there.
          *
          * <p>Never throws: it runs on the bridge's read thread inside a
          * session that is otherwise working.
