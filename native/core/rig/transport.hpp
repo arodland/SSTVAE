@@ -81,6 +81,27 @@ struct SerialParams {
 
     enum Flow { kNoFlow = 0, kRtsCts = 1, kXonXoff = 2 };
     int flow = kNoFlow;
+
+    // The state to leave DTR and RTS in once the link is open.
+    //
+    // **These are not a nicety, and they default to true for a reason
+    // Hamlib states outright.** `src/rig.c`, opening a PTT-by-line
+    // port: *"Needed on Linux because the serial port driver sets
+    // RTS/DTR on open - only need to address the PTT line as we offer
+    // config parameters to control the other (dtr_state &
+    // rts_state)"*. Hamlib never raises them itself; it relies on the
+    // OS having done so, and only ever explicitly drops the line that
+    // is doing PTT. A serial port opened by `rigctl` therefore presents
+    // a radio with both lines high.
+    //
+    // A bridged transport reaches none of that -- `serial_open` is not
+    // in its path -- and `usb-serial-for-android` deasserts both in
+    // `openInt()`. So an Icom that was silent on a phone and answered
+    // instantly on a desktop, same cable, same chip, same baud, was
+    // being handed a different pair of control lines. This is the same
+    // omission `resolve_serial_params` exists to fix, one field later.
+    bool dtr = true;
+    bool rts = true;
 };
 
 // What a given Hamlib backend would have configured a serial port with.

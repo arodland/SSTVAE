@@ -396,12 +396,15 @@ public final class SerialBridge {
         void close();
     }
 
-    static int open(String id, int baud, int dataBits, int stopBits, int parity, int flow)
-            throws IOException {
+    static int open(String id, int baud, int dataBits, int stopBits, int parity, int flow,
+                    boolean dtr, boolean rts) throws IOException {
         if (context == null) throw new IOException("SerialBridge.init was never called");
+        // RFCOMM has no modem control lines at all, so `dtr` and `rts`
+        // are simply not offered to it -- rather than silently ignored
+        // in a place that reads as if they applied.
         final Link link = id != null && id.startsWith("bt:")
                 ? openBluetooth(id)
-                : openUsb(id, baud, dataBits, stopBits, parity, flow);
+                : openUsb(id, baud, dataBits, stopBits, parity, flow, dtr, rts);
         final int token = nextToken.getAndIncrement();
         links.put(token, link);
         return token;
@@ -439,7 +442,7 @@ public final class SerialBridge {
     // --- USB --------------------------------------------------------------
 
     private static Link openUsb(String id, int baud, int dataBits, int stopBits, int parity,
-                                int flow) throws IOException {
+                                int flow, boolean dtr, boolean rts) throws IOException {
         final UsbManager manager = usbManager();
         if (manager == null) throw new IOException("no USB service");
         final UsbDevice device = findUsbDevice(id);
@@ -470,6 +473,23 @@ public final class SerialBridge {
         port.open(connection);
         try {
             port.setParameters(baud, dataBits, stopBits, toParity(parity));
+            // **Before the flow control, deliberately.** The CP210x
+            // SET_FLOW structure encodes whether each line is held
+            // active, held inactive or driven by handshaking, and this
+            // library builds it from the driver's current `dtr`/`rts`
+            // fields — so setting the lines afterwards would leave the
+            // chip's flow configuration describing the old state.
+            //
+            // And they are asserted by default because that is what a
+            // serial port looks like everywhere else: the OS raises
+            // both on open and Hamlib relies on it (`src/rig.c`, "Needed
+            // on Linux because the serial port driver sets RTS/DTR on
+            // open"). A bridged transport reaches none of that, and an
+            // IC-9700 handed two low lines never answered a single CAT
+            // command that the same cable answered instantly from a
+            // desktop.
+            port.setDTR(dtr);
+            port.setRTS(rts);
             applyFlowControl(port, flow);
         } catch (IOException | UnsupportedOperationException e) {
             port.close();

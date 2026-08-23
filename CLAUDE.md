@@ -1029,20 +1029,61 @@ the SPP UUID). Six things are settled and worth not re-deriving:
   which driver `UsbSerialProber` picked and which interface of how many
   it claimed. Off costs one relaxed atomic load, which is why the calls
   live in the byte pump unconditionally.
+- **`Default` line states mean *asserted*** (2026-08-23). **Hamlib
+  never raises DTR or RTS** -- `src/rig.c` says so outright: *"Needed on Linux
+  because the serial port driver sets RTS/DTR on open - only need to
+  address the PTT line as we offer config parameters to control the
+  other (dtr_state & rts_state)"* -- so it relies on the OS, drops only
+  the PTT line, and a desktop presents a radio with both lines high. A
+  bridged transport reaches no `serial_open`, and
+  `usb-serial-for-android` deasserts both in `openInt()`. So
+  `resolve_serial_params` now resolves them too (Default = high;
+  explicit `dtr_state`/`rts_state` honoured; the PTT line always low,
+  which is `rig_open`'s own single exception), and `openUsb` applies
+  them **before** `setFlowControl` -- the CP210x SET_FLOW structure
+  encodes each line's mode and the library builds it from the driver's
+  current fields, so setting the lines afterwards leaves the chip's
+  flow configuration describing the old state. RFCOMM is not offered
+  them at all, having no modem lines. This is desktop parity and
+  correct on its own terms; it is **not** thought to be the Icom fix
+  (Andrew): CI-V has no flow control and an Icom uses those lines only
+  for PTT, CW and RTTY keying.
 - **A K4 works over USB and two Icoms do not** (reported 2026-08-23,
-  open). What has been ruled out by reading, so it is not re-derived:
+  **open**). The trace narrowed it to one gap and no further: the app
+  writes a correct frame (`-> rig 6: fe fe a2 e0 03 fd`) to a
+  **CP2102N** at 19200 8N1 flow=none, one vendor-class interface, two
+  endpoints, `Cp21xxSerialDriver` port 0 of 1 -- and nothing ever comes
+  back, while `rigctl -m 3081 -r /dev/ttyUSB0 -s 19200` on the same
+  cable answers instantly. Every control transfer returns 0 and the
+  bulk write returns 6, so the chip is enumerated, configured and
+  accepting bytes. **What no software here can see is whether the UART
+  actually clocked them out**, which is where code reading stops and a
+  hardware A/B has to take over. What was ruled out along the way, so
+  it is not re-derived:
   the byte path is length-counted end to end and cannot truncate a
   binary CI-V frame; Hamlib's POSIX `port_read_generic`/`port_write`
   have no port-type branch (the ones that exist are Win32 serial);
   `network_flush` is a `FIONREAD`-guarded drain; `rigs/icom/` has no
   port-type conditional; and `serial_defaults` picks
   `rig_caps.serial_rate_max`, the same field `rig_init` uses, so a
-  bridged rig runs at the speed that rig runs at on a desktop; and it
-  is not the control lines, since **both** `FtdiSerialDriver` and
-  `Cp21xxSerialDriver` deassert DTR and RTS in `openInt()`, so the K4
-  works with them low (a difference from a desktop, where the OS raises
-  them, but not a fatal one), while every Icom declares
-  `RIG_HANDSHAKE_NONE` so no flow control is holding the chip off. The two
+  bridged rig runs at the speed that rig runs at on a desktop; and
+  every Icom declares `RIG_HANDSHAKE_NONE`, so no flow control is
+  holding the chip's transmitter off. **The one that looked ruled out
+  and was not** is the control lines: both `FtdiSerialDriver` and
+  `Cp21xxSerialDriver` deassert DTR and RTS, so the K4 demonstrably
+  CATs with them low -- but that only shows the *transport* works that
+  way, not that this *radio* does, and treating one radio's tolerance
+  as a general fact is what kept the real difference hidden for a
+  round. Two differences from the Linux `cp210x` driver survive and are
+  the shortlist if the A/B points at the chip: the vendored library
+  writes `SET_FLOW` as **16 blind zero bytes** where Linux does
+  `GET_FLOW`/modify/`SET_FLOW`, preserving `ulXonLimit`/`ulXoffLimit`;
+  and it writes the requested baud raw where Linux applies
+  `cp210x_get_actual_rate()` for a CP2102N (a no-op at 19200, which
+  divides 48 MHz exactly). Linux also carries erratum **CP2102N_E104**
+  -- firmware <= 0x10004 reads `ulXonLimit` as `ulFlowReplace`, so it
+  declares flow control unsupported on those parts. None of this is
+  confirmed to matter here. The two
   radio-side settings to check first are Icom-specific and invisible
   from here: the **CI-V USB baud rate** (a separate menu item,
   defaulting to an Auto that is not reliable on every model) and

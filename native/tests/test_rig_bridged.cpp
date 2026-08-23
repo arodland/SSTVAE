@@ -365,6 +365,61 @@ void test_an_explicit_line_setting_wins() {
                  "resolve: ...and the handshake");
 }
 
+// The initial state of DTR and RTS, which is the one serial-port
+// property that does not come from Hamlib at all.
+//
+// **This was a real bug and the trace that found it is worth keeping.**
+// An IC-9700 on a phone was handed a correct CI-V frame at the correct
+// baud (`-> rig 6: fe fe a2 e0 03 fd`, 19200 8N1, CP2102N, flow=none)
+// and never answered a byte; the same cable, chip, baud and Hamlib
+// backend answered instantly from `rigctl -r /dev/ttyUSB0`. The
+// difference was two wires. Hamlib never raises them -- it relies on
+// the OS having done so, and says as much in `src/rig.c`: *"Needed on
+// Linux because the serial port driver sets RTS/DTR on open - only
+// need to address the PTT line as we offer config parameters to
+// control the other"*. A bridged transport reaches no `serial_open`,
+// and `usb-serial-for-android` deasserts both.
+//
+// So `Default` here means **asserted**, matching a desktop, and the
+// only line deliberately left low is the one doing PTT -- which is the
+// single exception `rig_open` itself makes, for the same reason:
+// opening a radio must not key it.
+void test_the_control_lines_open_the_way_a_desktop_leaves_them() {
+    const rig::SerialDefaults defaults;
+
+    rig::HamlibConfig config;
+    config.device = "usb:10c4:ea60";
+    rig::SerialParams p = rig::resolve_serial_params(config, defaults);
+    check::is_true(p.dtr, "resolve: DTR is asserted on open, as the OS would");
+    check::is_true(p.rts, "resolve: and so is RTS");
+
+    // PTT by a line: that one stays low, or connecting transmits.
+    config.ptt_method = rig::PttMethod::Dtr;
+    p = rig::resolve_serial_params(config, defaults);
+    check::is_true(!p.dtr, "resolve: except the line doing PTT...");
+    check::is_true(p.rts, "resolve: ...which is only that line");
+
+    config.ptt_method = rig::PttMethod::Rts;
+    p = rig::resolve_serial_params(config, defaults);
+    check::is_true(p.dtr, "resolve: the same the other way round...");
+    check::is_true(!p.rts, "resolve: ...for RTS keying");
+
+    // And an operator who pins a line still gets what they asked for:
+    // `dtr_state`/`rts_state` are the config parameters Hamlib's own
+    // comment says exist for the non-PTT line.
+    config.ptt_method = rig::PttMethod::Cat;
+    config.dtr = rig::LineState::Low;
+    config.rts = rig::LineState::Low;
+    p = rig::resolve_serial_params(config, defaults);
+    check::is_true(!p.dtr, "resolve: an explicit low DTR is honoured");
+    check::is_true(!p.rts, "resolve: and an explicit low RTS");
+
+    config.dtr = rig::LineState::High;
+    config.rts = rig::LineState::High;
+    p = rig::resolve_serial_params(config, defaults);
+    check::is_true(p.dtr && p.rts, "resolve: as is an explicit high");
+}
+
 void test_control_line_conflicts_are_refused() {
     // Hamlib refuses all three of these with -RIG_ECONF -- and every
     // one of its checks sits inside `if (rp->type.rig ==
@@ -463,6 +518,8 @@ int main() {
         test_default_line_settings_come_from_the_backend();
         check::current_step.store("resolve_explicit");
         test_an_explicit_line_setting_wins();
+        check::current_step.store("resolve_lines");
+        test_the_control_lines_open_the_way_a_desktop_leaves_them();
         check::current_step.store("resolve_conflicts");
         test_control_line_conflicts_are_refused();
         check::current_step.store("rig_open_failure");

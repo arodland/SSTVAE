@@ -1254,14 +1254,40 @@ CI-V frame at a `0x00` the way a string would; Hamlib's POSIX
 a bridged rig runs at the speed the same rig runs at on a desktop. Nor
 is it the control lines: **both** `FtdiSerialDriver` and
 `Cp21xxSerialDriver` explicitly deassert DTR and RTS in `openInt()`, so
-the K4 is CAT-ing over this transport with them low — which is a
-difference from a desktop, where the OS raises them on open, but
-demonstrably not a fatal one. And every Icom in Hamlib declares
+the K4 is CAT-ing over this transport with them low. That is a
+difference from a desktop, where the OS raises them on open, and the
+transport now matches the desktop — but it is **not** thought to be the
+Icom fix (Andrew): CI-V has no flow control and an Icom uses those
+lines only for PTT, CW and RTTY keying. And every Icom in Hamlib declares
 `RIG_HANDSHAKE_NONE`, so no flow control is being applied that could
 hold the chip's transmitter off.
 
-**The first trace (2026-08-23) shows correct frames going out and zero
-bytes coming back.** `fe fe a2 e0 03 fd` — address A2, the IC-9700's
+**The trace narrowed it to one gap and no further (2026-08-23).** The
+app writes a correct frame — `-> rig 6: fe fe a2 e0 03 fd` — to a
+**CP2102N** at 19200 8N1 flow=none, one vendor-class interface, two
+endpoints, `Cp21xxSerialDriver` port 0 of 1, and nothing ever comes
+back; `rigctl -m 3081 -r /dev/ttyUSB0 -s 19200` on the same cable
+answers instantly. Every control transfer the driver makes returns 0
+and the bulk write returns 6, so the chip is enumerated, configured and
+accepting bytes. **What no software here can see is whether the UART
+clocked them out**, which is where reading code stops and a hardware
+A/B has to take over — the two worth running are whether FT8CN drives
+the same radio on the same phone (it uses the same USB library, so a
+pass there means our usage differs and a failure means it is not our
+code), and whether a CP210x adapter into the K4's RS-232 port fails the
+same way (which would separate the chip from the radio).
+
+Two differences from the Linux `cp210x` driver survive as the shortlist
+if the A/B points at the chip: the vendored library writes `SET_FLOW`
+as 16 blind zero bytes where Linux does `GET_FLOW`/modify/`SET_FLOW`,
+preserving `ulXonLimit`/`ulXoffLimit`; and it writes the requested baud
+raw where Linux applies `cp210x_get_actual_rate()` for a CP2102N (a
+no-op at 19200, which divides 48 MHz exactly). Linux also carries
+erratum **CP2102N_E104** — firmware ≤ 0x10004 reads `ulXonLimit` as
+`ulFlowReplace`, so it declares flow control unsupported on those
+parts. None of it is confirmed to matter.
+
+**The earlier reading of that trace was:** `fe fe a2 e0 03 fd` — address A2, the IC-9700's
 default — written, then `read_string_generic(): Timed out 1.001 seconds
 after 0 chars`, every time, at 115200. So `icom_get_usb_echo_off`
 returns `-RIG_ETIMEOUT` and `icom_rig_open` gives up with "is rig on and

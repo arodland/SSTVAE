@@ -152,8 +152,7 @@ OS raises them on open, but demonstrably not a fatal one -- and every
 Icom in Hamlib declares `RIG_HANDSHAKE_NONE`, so nothing is applying
 flow control that could hold the chip's transmitter off.
 
-**The first trace (2026-08-23) shows correct frames going out and zero
-bytes ever coming back.** `fe fe a2 e0 03 fd` -- address A2, the
+**The trace answered its own question and stopped there (2026-08-23).** `fe fe a2 e0 03 fd` -- address A2, the
 IC-9700's default -- written, `read_string_generic(): Timed out 1.001
 seconds after 0 chars`, every time, at 115200. `icom_get_usb_echo_off`
 therefore returns `-RIG_ETIMEOUT` and `icom_rig_open` gives up with
@@ -164,13 +163,35 @@ bridge now logs each direction's bytes (after the transport accepted
 them, never before) and the transport logs which driver and interface
 the Android USB layer chose. So the next run distinguishes:
 
-* `-> rig 6: fe fe a2 e0 03 fd` with no `<- rig` line -- the bytes left
-  and the radio said nothing. Radio-side; see below.
-* no `-> rig` line at all -- our write never reached the chip, which
-  would be the first evidence of a bug on this side.
-* a `<- rig` line that Hamlib did not see -- a fault in the socket half.
+It is the first case: `-> rig 6: fe fe a2 e0 03 fd` to a **CP2102N**
+at 19200 8N1 flow=none, one vendor-class interface, two endpoints,
+`Cp21xxSerialDriver` port 0 of 1, and no `<- rig` line, ever. Every
+control transfer returns 0 and the bulk write returns 6, so the chip is
+enumerated, configured and accepting bytes. **Nothing in software can
+see whether the UART clocked them out.** That is where reading code
+stops.
 
-Assuming the first, what to check, in order:
+The next two moves are a hardware A/B, in this order because the first
+needs nothing but the phone already in hand:
+
+1. **Does FT8CN drive the same radio on the same phone?** It uses the
+   same `usb-serial-for-android`. A pass means the chip is drivable
+   from Android and our usage differs; a failure means this is not our
+   code at all.
+2. **Does a CP210x USB adapter into the K4's RS-232 port fail the same
+   way?** That separates the chip from the radio in one test, using a
+   radio already known to work over this transport.
+
+Two differences from the Linux `cp210x` driver survive as the shortlist
+if the A/B points at the chip: the vendored library writes `SET_FLOW`
+as 16 blind zero bytes where Linux does `GET_FLOW`/modify/`SET_FLOW`,
+preserving `ulXonLimit`/`ulXoffLimit`; and it writes the requested baud
+raw where Linux applies `cp210x_get_actual_rate()` for a CP2102N (a
+no-op at 19200, which divides 48 MHz exactly). Linux also carries
+erratum **CP2102N_E104** -- firmware <= 0x10004 reads `ulXonLimit` as
+`ulFlowReplace`, so it declares flow control unsupported there.
+
+Radio-side, still worth eliminating:
 
 1. **The CI-V USB baud rate**, which on these radios is a menu item
    separate from the CI-V port's own and defaults to an "Auto" that is

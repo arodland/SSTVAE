@@ -214,15 +214,17 @@ public:
         if (token_ >= 0) return;
         Env env;
         jclass cls = env.bridge();
-        jmethodID m = env->GetStaticMethodID(cls, "open", "(Ljava/lang/String;IIIII)I");
+        jmethodID m = env->GetStaticMethodID(cls, "open", "(Ljava/lang/String;IIIIIZZ)I");
         if (m == nullptr) {
             env->ExceptionClear();
             throw RigError("android rig: no SerialBridge.open");
         }
         jstring id = env->NewStringUTF(params_.device_id.c_str());
-        const jint token =
-            env->CallStaticIntMethod(cls, m, id, params_.baud, params_.data_bits,
-                                     params_.stop_bits, params_.parity, params_.flow);
+        const jint token = env->CallStaticIntMethod(
+            cls, m, id, params_.baud, params_.data_bits, params_.stop_bits,
+            params_.parity, params_.flow,
+            static_cast<jboolean>(params_.dtr ? JNI_TRUE : JNI_FALSE),
+            static_cast<jboolean>(params_.rts ? JNI_TRUE : JNI_FALSE));
         env->DeleteLocalRef(id);
         env.rethrow("could not open the serial device");
         if (token < 0) throw RigError("could not open " + params_.device_id);
@@ -251,7 +253,8 @@ public:
                   std::to_string(params_.baud) + " " +
                   std::to_string(params_.data_bits) + parity_letter(params_.parity) +
                   std::to_string(params_.stop_bits) + ", flow=" +
-                  flow_name(params_.flow));
+                  flow_name(params_.flow) + ", dtr=" + (params_.dtr ? "1" : "0") +
+                  " rts=" + (params_.rts ? "1" : "0"));
             trace("transport: " + describe_link(env, cls, params_.device_id));
         }
     }

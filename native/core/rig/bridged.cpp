@@ -161,6 +161,21 @@ SerialParams resolve_serial_params(const HamlibConfig& config,
         case Handshake::Default: params.flow = defaults.flow; break;
     }
 
+    // The initial line states, which on a real serial port come from
+    // the *operating system* rather than from Hamlib -- see
+    // `SerialParams::dtr`. Default therefore means asserted, not
+    // "leave it alone": leaving it alone is what a desktop never does.
+    params.dtr = config.dtr != LineState::Low;
+    params.rts = config.rts != LineState::Low;
+
+    // ...except the line doing PTT, which `rig_open` explicitly drops
+    // so that opening the radio does not key it. Same rule, same
+    // reason, and the reason it is safe to raise the *other* line: a
+    // desktop already does, so no working station depends on it being
+    // low.
+    if (config.ptt_method == PttMethod::Dtr) params.dtr = false;
+    if (config.ptt_method == PttMethod::Rts) params.rts = false;
+
     // Hamlib's three -RIG_ECONF cases, re-derived because its own are
     // unreachable for a network port. Each one is a setting that cannot
     // do what it says: the flow-control driver and the PTT code would be
