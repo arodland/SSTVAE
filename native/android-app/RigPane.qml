@@ -203,7 +203,23 @@ ColumnLayout {
                 placeholderText: "192.168.1.10:4532"
                 text: pane.rig.host
                 inputMethodHints: Qt.ImhNoAutoUppercase | Qt.ImhNoPredictiveText
-                onEditingFinished: pane.rig.host = text
+                // **Per keystroke, not on editingFinished**, which is
+                // the convention the Send screen's callsign field
+                // already records — and there are now two reasons for
+                // it rather than one.
+                //
+                // The back gesture dismisses the keyboard without ever
+                // firing `editingFinished`, so a committed-at-the-end
+                // field silently loses what was typed. And `text:` here
+                // is a live binding: a C++ write does not break a QML
+                // binding the way a JS assignment does, so every
+                // `changed()` re-evaluates it. With the value committed
+                // only at the end, the 1 Hz poll tick put the *stored*
+                // host back into the field about a second after typing
+                // started — which looks like the box deleting itself.
+                // Committing per keystroke keeps the two in step, so
+                // the re-evaluation is a no-op.
+                onTextEdited: pane.rig.host = text
             }
             Label {
                 text: "With the radio set to \"Hamlib NET rigctl\" this is a "
@@ -293,10 +309,12 @@ ColumnLayout {
             }
             function sync() { currentIndex = Math.max(0, model.indexOf(pane.rig.pttMethod)) }
             Component.onCompleted: sync()
-            Connections {
-                target: pane.rig
-                function onChanged() { if (!pttBox.pressed) pttBox.sync() }
-            }
+            // The reason to re-sync is that the *list* narrows on
+            // Bluetooth, which can invalidate the current index — so
+            // watch the model, not the catch-all `changed()`. Hanging
+            // this off `changed()` re-ran it at the poll rate, for a
+            // control the operator might have open at the time.
+            onModelChanged: sync()
             onActivated: pane.rig.pttMethod = currentValue
         }
         Label {
