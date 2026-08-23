@@ -9,53 +9,31 @@
 #include <mutex>
 #include <utility>
 
-#ifdef _WIN32
-// Confined to this file on purpose. <winsock2.h> pulls in <windows.h>,
-// whose `min`/`max` macros turn every later `std::max` into a syntax
-// error -- the trap CLAUDE.md records from `check.hpp`. Nothing here is
-// exposed through bridge.hpp.
-#  ifndef WIN32_LEAN_AND_MEAN
-#    define WIN32_LEAN_AND_MEAN
-#  endif
-#  ifndef NOMINMAX
-#    define NOMINMAX
-#  endif
-#  include <winsock2.h>
-#  include <ws2tcpip.h>
-#else
-#  include <arpa/inet.h>
-#  include <netinet/in.h>
-#  include <netinet/tcp.h>
-#  include <poll.h>
-#  include <sys/socket.h>
-#  include <unistd.h>
-#endif
+// **POSIX sockets, and this file is not built on Windows.** See
+// `native/CMakeLists.txt` for the decision; the short version is that
+// the bridge exists because Android hands an app no serial device, and
+// Windows has COM ports, so nothing there ever constructs one.
+//
+// A Winsock port is not a matter of swapping the headers, which is why
+// the shim that used to be here was removed rather than left as a
+// starting point. `stop()` relies on `shutdown()` waking a thread
+// blocked in `recv()` -- guaranteed on POSIX, and **not** how Winsock
+// behaves: a blocked `recv` there does not return, and Microsoft warns
+// against `closesocket` concurrently with a blocking call. So a Windows
+// implementation has to make the data path non-blocking and poll it,
+// the way `pump_in`'s accept loop already does, rather than translating
+// call for call. It hung for two minutes in CI before that was
+// understood.
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 namespace sstvae::rig {
 namespace {
 
-#ifdef _WIN32
-using socket_t = SOCKET;
-using poll_fd = WSAPOLLFD;
-
-int poll_sockets(poll_fd* fds, unsigned n, int timeout_ms) {
-    return ::WSAPoll(fds, n, timeout_ms);
-}
-void close_socket(socket_t s) { ::closesocket(s); }
-int socket_errno() { return ::WSAGetLastError(); }
-constexpr int kShutBoth = SD_BOTH;
-
-// Winsock has to be started before any of it works, and nothing else in
-// this process does it -- Qt's networking is not linked here and the
-// Android build never reaches this branch.
-void init_sockets() {
-    static std::once_flag once;
-    std::call_once(once, [] {
-        WSADATA data;
-        ::WSAStartup(MAKEWORD(2, 2), &data);
-    });
-}
-#else
 using socket_t = int;
 using poll_fd = struct pollfd;
 
@@ -65,8 +43,6 @@ int poll_sockets(poll_fd* fds, unsigned n, int timeout_ms) {
 void close_socket(socket_t s) { ::close(s); }
 int socket_errno() { return errno; }
 constexpr int kShutBoth = SHUT_RDWR;
-void init_sockets() {}
-#endif
 
 constexpr std::intptr_t kNoFd = -1;
 
@@ -113,8 +89,6 @@ LoopbackBridge::LoopbackBridge(std::shared_ptr<SerialTransport> transport)
 LoopbackBridge::~LoopbackBridge() { stop(); }
 
 void LoopbackBridge::start() {
-    init_sockets();
-
     // The transport first: if the cable is gone there is no point
     // holding a port open, and this is the failure an operator most
     // needs named.
@@ -147,11 +121,7 @@ void LoopbackBridge::start() {
     if (::listen(listener, 1) != 0) give_up("bridge: listen");
 
     sockaddr_in bound{};
-#ifdef _WIN32
-    int len = static_cast<int>(sizeof(bound));
-#else
     socklen_t len = sizeof(bound);
-#endif
     if (::getsockname(listener, reinterpret_cast<sockaddr*>(&bound), &len) != 0) {
         give_up("bridge: getsockname");
     }

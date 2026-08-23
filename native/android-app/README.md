@@ -1218,6 +1218,17 @@ also a settling period for an interface that wants audio flowing before
 the radio is properly in transmit, and `ptt_lead_s` is a different
 quantity doing a different job. Set it to zero if it is not wanted.
 
+**The bridge is not built on Windows, and the tests follow it.** Windows
+has COM ports and never constructs one, so a Windows build was compiling
+a Winsock translation of a file only POSIX runs — a second
+implementation exercised by nobody, whose green test would have said
+nothing about the one a phone runs. It was also broken: `stop()` relies
+on `shutdown()` waking a thread blocked in `recv()`, which POSIX
+guarantees and Winsock does not, so `rig_bridge` hung for the full 120 s
+of its watchdog in CI. Linux and macOS still build and test it, using
+the same POSIX calls Android does, so `test_rig_hamlib`'s
+real-Kenwood-through-a-real-bridge proof is untouched.
+
 **What is not tested on hardware.** Everything in this section. The
 composite-device question in particular is worth settling first with the
 actual radio: most rig USB interfaces present audio and CDC serial

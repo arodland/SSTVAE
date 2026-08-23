@@ -110,8 +110,6 @@ add_library(sstvae_core STATIC
   core/util/event.cpp
   core/rx/ringbuffer.cpp
   core/rig/controller.cpp
-  core/rig/bridge.cpp
-  core/rig/bridged.cpp
   core/rx/engine.cpp
   core/tx/engine.cpp
   core/settings/settings.cpp
@@ -134,12 +132,33 @@ target_include_directories(sstvae_core SYSTEM PUBLIC third_party/stb
 # pybind11 shared module.
 set_target_properties(sstvae_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
+# --- the rig bridge, everywhere but Windows ---------------------------------
+#
 # `core/rig/bridge.cpp` presents a serial transport to Hamlib as a
 # loopback socket, which is what lets a phone -- where there is no
-# `/dev/ttyUSB0` to give Hamlib -- still drive every radio Hamlib knows.
-# POSIX puts the sockets API in libc; Windows needs Winsock named.
-if(WIN32)
-  target_link_libraries(sstvae_core PUBLIC ws2_32)
+# `/dev/ttyUSB0` to give Hamlib -- drive every radio Hamlib knows.
+#
+# **Not built on Windows, and that is not a workaround.** Windows has
+# COM ports, so nothing there ever constructs a bridge: `native/gui/`,
+# `native/apps/` and `native/bindings/` do not mention it, and the only
+# consumer is `native/android-app/`. What a Windows build would compile
+# is therefore a *Winsock translation* of a file that only ever runs on
+# POSIX -- a second implementation, exercised by nobody, whose green
+# test would say nothing about the one Android runs.
+#
+# It also does not work, which is how this was noticed: `stop()` relies
+# on `shutdown()` waking a thread blocked in `recv()`, guaranteed on
+# POSIX and not how Winsock behaves, so `rig_bridge` hung for the full
+# 120 s of its own watchdog in CI. Fixing that means making the data
+# path non-blocking and polling it, which is real work in service of
+# nothing.
+#
+# Linux and macOS keep building and testing it, and they use the same
+# POSIX calls Android does -- so the coverage that matters, including
+# `test_rig_hamlib`'s real Kenwood backend talking through a real
+# bridge, is intact.
+if(NOT WIN32)
+  target_sources(sstvae_core PRIVATE core/rig/bridge.cpp core/rig/bridged.cpp)
 endif()
 
 # --- codec ------------------------------------------------------------------

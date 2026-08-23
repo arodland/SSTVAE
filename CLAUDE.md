@@ -996,6 +996,19 @@ the SPP UUID). Six things are settled and worth not re-deriving:
   unauthenticated path to a transmitter; the bind is `127.0.0.1` and the
   port is ephemeral. One thread per direction, so an idle link costs no
   wakeups.
+- **`bridge.cpp`/`bridged.cpp` are not built on Windows** (2026-08-23),
+  and the tests follow the source rather than being skipped. Windows has
+  COM ports, so nothing there constructs a bridge -- what a Windows
+  build compiled was a Winsock translation of a file only POSIX runs,
+  whose green test said nothing about the one Android runs. It was also
+  wrong: `stop()` depends on `shutdown()` waking a thread blocked in
+  `recv()`, which POSIX guarantees and **Winsock does not** -- a blocked
+  `recv` there simply does not return, and Microsoft warns against
+  `closesocket` concurrently with a blocking call, so a correct port
+  means making the data path non-blocking and polling it. `rig_bridge`
+  hung for the full 120 s of its own watchdog in CI before that was
+  understood. Linux and macOS still build and test it, on the same POSIX
+  calls Android uses.
 - **`Session` owns the `RigController`, and never destroys it.** An
   over is 32-95 s of committed airtime and the thing that brings PTT
   back down cannot be destroyed by a rotation -- nor by the operator
