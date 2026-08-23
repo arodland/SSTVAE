@@ -116,15 +116,21 @@ add_test(NAME rig COMMAND test_rig)
 # sstvae_core only, so they run in a --no-rig build: the composition,
 # the PTT routing and the byte pumping are all covered with no
 # libhamlib present, exactly as the controller's threading already is.
-add_executable(test_rig_bridge test_rig_bridge.cpp)
-target_link_libraries(test_rig_bridge PRIVATE sstvae_core)
-target_include_directories(test_rig_bridge PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-add_test(NAME rig_bridge COMMAND test_rig_bridge)
+#
+# Not on Windows, because the code under test is not built there; see
+# the block in ../CMakeLists.txt for why. Following the source rather
+# than skipping a test on one platform -- there is nothing to test.
+if(NOT WIN32)
+  add_executable(test_rig_bridge test_rig_bridge.cpp)
+  target_link_libraries(test_rig_bridge PRIVATE sstvae_core)
+  target_include_directories(test_rig_bridge PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME rig_bridge COMMAND test_rig_bridge)
 
-add_executable(test_rig_bridged test_rig_bridged.cpp)
-target_link_libraries(test_rig_bridged PRIVATE sstvae_core)
-target_include_directories(test_rig_bridged PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-add_test(NAME rig_bridged COMMAND test_rig_bridged)
+  add_executable(test_rig_bridged test_rig_bridged.cpp)
+  target_link_libraries(test_rig_bridged PRIVATE sstvae_core)
+  target_include_directories(test_rig_bridged PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME rig_bridged COMMAND test_rig_bridged)
+endif()
 
 # The libhamlib backend itself, exercised against Hamlib's own dummy
 # rig (model 1) -- the same trick CLAUDE.md uses for the Python side,
@@ -181,7 +187,9 @@ set_tests_properties(golden npy modem_roundtrip ringbuffer audio rig
 # These two carry their own watchdogs, which name the wedged step. The
 # ctest bound is the backstop for a wedge before main or after it
 # returns, where an in-process watchdog cannot fire at all.
-set_tests_properties(rig_bridge rig_bridged PROPERTIES TIMEOUT 180)
+if(NOT WIN32)
+  set_tests_properties(rig_bridge rig_bridged PROPERTIES TIMEOUT 180)
+endif()
 if(TARGET sstvae_rig)
   # Shorter than the rest on purpose: this one carries its own 120 s
   # watchdog, so reaching the ctest bound at all already means the
