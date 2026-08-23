@@ -942,6 +942,40 @@ which is what the process-wide singleton is for. Persisting the source
 path and framing in `QSettings` would fix it and is a few lines; it has
 not been done because nothing has asked for it yet.
 
+## Editable fields commit per keystroke
+
+Every view object here (`Listener`, `Transmitter`, `RigControl`) has a
+single `changed()` signal that a timer emits a few times a second, so
+live state redraws without anything having to push it. That is fine
+until an editable control is bound to one of those properties, and then
+it is a trap with a delay on it:
+
+**A QML binding is not broken by a C++ write.** Only a JavaScript
+assignment removes one. So `text: view.someProperty` stays live for the
+life of the field, and every tick re-evaluates it. Commit the value on
+`editingFinished` and the property sits at its old value while the
+operator types — until a tick puts that old value back into the field,
+about a second in. It looks exactly like the box deleting itself, which
+is how it was reported.
+
+So: **`onTextEdited`, `onValueModified`, `onMoved`, `onToggled`** — the
+per-change handlers, never the commit-at-the-end ones. Then the property
+tracks the control and the re-evaluation is a no-op. The Send screen's
+callsign field already carried this rule as a comment, for the *other*
+reason it matters: the back gesture dismisses the keyboard without ever
+firing `editingFinished`, so a field committed at the end silently loses
+what was typed.
+
+Splitting `changed()` into settings and live halves would also fix it,
+and was not done: all three view objects share this design, and one of
+them diverging is worse than a convention all of them follow.
+
+The same applies to anything hung off `changed()` that writes to a
+control — a `Connections { function onChanged() }` that re-syncs a
+`ComboBox` runs at the poll rate, including while the operator has its
+popup open. Watch the specific thing that can invalidate it
+(`onModelChanged`) instead.
+
 ## Rig control
 
 CAT and PTT, added 2026-08-22. `docs/android.md` has the design record
