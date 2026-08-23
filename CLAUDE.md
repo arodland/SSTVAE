@@ -2040,7 +2040,15 @@ the same radio on the same phone. `SerialBridge.describeStatus` reads
 the chip's own `GET_COMM_STATUS` into the trace — transmit queue depth,
 receive queue depth and hold reasons — because a bulk write returning
 its length says the bytes reached the chip and nothing about whether
-the UART clocked them out. `rig::set_debug_sink` and the "Log
+the UART clocked them out. **It is printed from the write thread, and
+that is not arbitrary**: the first version printed it from the read
+loop and printed nothing, which was itself the finding —
+`bulkTransfer` on a CP2102N with nothing to say blocks indefinitely,
+where an FTDI returns every ~16 ms because the chip sends a status
+packet regardless, so the K4 never exercised it. A liveness probe on
+the thread whose liveness is in question cannot report. The read
+thread now only counts, in relaxed atomics, and the write thread
+prints. `rig::set_debug_sink` and the "Log
 rig traffic" switch landed for it, because until then Hamlib's trace on
 a phone went to stderr and therefore nowhere.
 Unplug/replug recovery and the "Connected with the cable out"
