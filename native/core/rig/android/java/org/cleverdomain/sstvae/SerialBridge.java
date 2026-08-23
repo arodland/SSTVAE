@@ -52,10 +52,28 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p><b>Device identifiers are vendor and product, never the device node.</b>
  * {@code UsbDevice.getDeviceName()} is {@code /dev/bus/usb/001/007} and changes
  * on every replug, so a setting keyed on it stops working the first time the
- * operator unplugs the radio. {@code usb:10c4:ea60} survives, with {@code #N}
- * for the second and later ports of a multi-port adapter. Two identical
+ * operator unplugs the radio. {@code usb:10c4:ea60} survives.
+ *
+ * <p><b>But a vendor and product pair names a *kind* of device, and a radio can
+ * present two of the same kind.</b> This paragraph used to end "two identical
  * adapters are indistinguishable and the first wins — the same accepted
- * ambiguity the audio layer takes on device names.
+ * ambiguity the audio layer takes on device names", and that was wrong in a way
+ * that cost days: an IC-9700 exposes its CI-V port and its USB serial function
+ * as two separate USB devices sharing {@code 10c4:ea60}, so the id named both,
+ * the picker showed two identical rows, and the lookup returned whichever
+ * {@code getDeviceList()} — a {@code HashMap} — happened to yield first. The
+ * app talked to a healthy chip that is not wired to the radio's CI-V engine,
+ * which from the outside is indistinguishable from a radio that ignores it.
+ *
+ * <p>So an id carries two independent suffixes, and they are <em>not</em> the
+ * same axis: {@code #p} is the p'th port of one multi-port driver (a CP2105),
+ * and {@code @u} is the u'th device sharing a vendor and product pair. Both are
+ * omitted at zero, so an id saved before they existed still means the first
+ * port of the first device. Units are ordered by {@code getDeviceName()},
+ * which is the only ordering available before permission is granted and is not
+ * promised across a replug — hence the row label says which is which and the
+ * operator chooses, because nothing readable tells an Icom's CI-V port from
+ * its data port.
  *
  * <p>Call {@link #init} once with an application context before anything else.
  */
@@ -241,16 +259,26 @@ public final class SerialBridge {
             final int units =
                     usbUnits(manager, device.getVendorId(), device.getProductId()).size();
             for (int i = 0; i < ports; i++) {
-                final StringBuilder label = new StringBuilder(describe(device));
-                if (ports > 1) label.append(" port ").append(i + 1);
-                // Said plainly, because the operator is the only one who
-                // can tell these apart: nothing readable distinguishes
-                // an Icom's CI-V port from its data port, so the answer
-                // is to try the other one.
-                if (units > 1) {
-                    label.append(" (").append(unit + 1).append(" of ").append(units).append(')');
+                // **The marker goes in front of the name, not after
+                // it.** Said plainly because the operator is the only
+                // one who can tell these apart -- nothing readable
+                // distinguishes an Icom's CI-V port from its data port,
+                // so the answer is to try the other one. Put after the
+                // name it is the first thing a narrow combo elides, and
+                // eliding the only distinguishing text leaves two rows
+                // that read identically: "Silicon Labs CP2102N USB to
+                // UART Bridge Contr...". In front it survives both the
+                // closed control and the open list.
+                final StringBuilder marker = new StringBuilder();
+                if (units > 1) marker.append(unit + 1).append(" of ").append(units);
+                if (ports > 1) {
+                    if (marker.length() > 0) marker.append(", ");
+                    marker.append("port ").append(i + 1);
                 }
-                out.add(usbId(device, unit, i) + "\t" + clean(label.toString()) + "\t"
+                final String label = marker.length() > 0
+                        ? "(" + marker + ") " + describe(device)
+                        : describe(device);
+                out.add(usbId(device, unit, i) + "\t" + clean(label) + "\t"
                         + (permitted ? "1" : "0"));
             }
         }

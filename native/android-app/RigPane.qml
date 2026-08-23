@@ -134,6 +134,32 @@ ColumnLayout {
                     function onDevicesChanged() { deviceCombo.sync() }
                 }
                 onActivated: pane.rig.device = currentValue
+
+                // **A wrapping delegate, because these labels are long
+                // and the phone is narrow.** A device row can carry a
+                // manufacturer, a product name and a "(1 of 2)" unit
+                // marker, and the default `ItemDelegate` elides — which
+                // on an Icom hides exactly the part that says which of
+                // its two ports this is. The closed combo still shows
+                // one elided line, as it must; the open list wraps.
+                delegate: ItemDelegate {
+                    id: deviceItem
+                    required property var modelData
+                    required property int index
+
+                    width: deviceCombo.width
+                    highlighted: deviceCombo.highlightedIndex === deviceItem.index
+
+                    // `Label` rather than `Text`: it takes its colour
+                    // from the active style, which a bare `Text` would
+                    // have to hardcode — and hardcoding it is how a
+                    // control ends up unreadable in the other theme.
+                    contentItem: Label {
+                        text: deviceItem.modelData.label
+                        wrapMode: Text.Wrap
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                }
             }
             RowLayout {
                 Layout.fillWidth: true
@@ -488,11 +514,20 @@ ColumnLayout {
                 clip: true
                 ScrollBar.vertical: ScrollBar {}
                 delegate: ItemDelegate {
+                    id: modelItem
                     required property var modelData
                     width: results.width
-                    text: modelData.label
+                    // Wrapped for the same reason as the device list:
+                    // "Manufacturer Model (Status)" does not fit a phone
+                    // in one line, and the status is the part that gets
+                    // cut off.
+                    contentItem: Label {
+                        text: modelItem.modelData.label
+                        wrapMode: Text.Wrap
+                        verticalAlignment: Text.AlignVCenter
+                    }
                     onClicked: {
-                        pane.rig.model = modelData.number
+                        pane.rig.model = modelItem.modelData.number
                         modelDialog.close()
                     }
                 }

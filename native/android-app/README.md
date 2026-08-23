@@ -1273,6 +1273,17 @@ why every chip-level measurement below came back clean. Ids now carry
 `@unit` alongside `#port`; the two are different axes and conflating
 them was the bug. **Not yet confirmed on hardware.**
 
+Two presentation details go with it, and both are about the one piece
+of text that matters. The unit marker is a **prefix** — `(1 of 2)
+Silicon Labs CP2102N…` — because put after the name it is the first
+thing a narrow combo elides, which leaves two rows reading identically.
+And the device picker and the radio picker both use a **wrapping
+delegate** (`contentItem: Label { wrapMode: Text.Wrap }`, not the
+default `ItemDelegate` text, which elides), so the open list shows the
+whole row on a phone. `Label` rather than `Text`: it takes its colour
+from the active style, and hardcoding a colour is how a control ends up
+unreadable in the other theme.
+
 **What the measurements said while that was still hidden
 (2026-08-23), and the chip configuration they ruled out.** With the blind `SET_FLOW` write below skipped, this app
 programs the CP2102N exactly as FT8TW does — its `setParameters` is
