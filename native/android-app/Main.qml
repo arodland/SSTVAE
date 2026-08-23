@@ -804,6 +804,93 @@ ApplicationWindow {
                     Layout.rightMargin: 12
                     wrapMode: Text.Wrap
                 }
+
+                // Rig traffic logging -- Hamlib's own CAT trace. It moved
+                // out of the Rig control section (where it sat in the
+                // middle of the connection controls) to here beside the
+                // other debug toggle. Shown only when rig control is on,
+                // so an operator with no cable never sees a rig knob in
+                // Advanced; there is nothing to log otherwise.
+                Label {
+                    text: "Rig traffic"
+                    font.bold: true
+                    font.pixelSize: 12
+                    color: "#888"
+                    visible: rigControl.enabled
+                    Layout.leftMargin: 12
+                    Layout.topMargin: 8
+                }
+                Switch {
+                    text: "Log rig traffic"
+                    visible: rigControl.enabled
+                    Layout.leftMargin: 4
+                    checked: rigControl.debugLog
+                    onToggled: rigControl.debugLog = checked
+                }
+                Label {
+                    text: "For bug reports. Records every CAT command and reply, "
+                          + "which slows things down and fills the log quickly — "
+                          + "leave it off unless a radio will not work."
+                    font.pixelSize: 11
+                    color: "#666"
+                    visible: rigControl.enabled
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    wrapMode: Text.Wrap
+                }
+                ColumnLayout {
+                    visible: rigControl.enabled && rigControl.debugLog
+                    spacing: 4
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+
+                    RowLayout {
+                        // **Refreshed by hand, not bound to the
+                        // property.** The rig republishes at 1 Hz, and a
+                        // bound text property would reset this view's
+                        // scroll position every second — unreadable in
+                        // exactly the situation it is for. A trace is
+                        // read after the failure anyway.
+                        Button {
+                            text: "Refresh"
+                            onClicked: logArea.text = rigControl.logText
+                        }
+                        Button {
+                            text: "Copy"
+                            onClicked: {
+                                logArea.selectAll();
+                                logArea.copy();
+                                logArea.deselect();
+                            }
+                        }
+                        Button {
+                            text: "Clear"
+                            onClicked: {
+                                rigControl.clearLog();
+                                logArea.text = "";
+                            }
+                        }
+                    }
+
+                    ScrollView {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 260
+                        clip: true
+
+                        TextArea {
+                            id: logArea
+                            readOnly: true
+                            // No wrapping: a CI-V frame dump read across
+                            // wrapped lines is worse than one read sideways.
+                            wrapMode: Text.NoWrap
+                            font.family: "monospace"
+                            font.pixelSize: 10
+                            placeholderText: "Press Refresh after the radio fails to connect."
+                        }
+                    }
+                }
             }
 
             // Breathing room under the last section, so it is not

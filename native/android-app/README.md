@@ -937,10 +937,14 @@ framing, process-wide, so a rotation mid-crop loses nothing.
   one-line `summary` of current state (rig on/off, model ready), the way
   Android's own settings show a preference's value under its title, so
   the common questions are answerable without expanding anything. The
-  debug switch (`Show technical details`) now lives alone in its own
-  `Advanced` section, last — which is what "kept out of the way" meant.
-  `RigPane` lost its internal "Rig control" title label when it moved
-  in, since the section supplies the heading.
+  debug controls collect in their own `Advanced` section, last — which
+  is what "kept out of the way" meant: `Show technical details`, and the
+  rig CAT trace (`Log rig traffic`), which moved out of the middle of
+  `RigPane`'s connection controls to sit beside it. That rig subgroup is
+  shown only when rig control is on, so an operator with no cable never
+  meets a rig knob in Advanced. `RigPane` lost its internal "Rig
+  control" title label when it moved in, since the section supplies the
+  heading.
 
 ### Picking a picture
 

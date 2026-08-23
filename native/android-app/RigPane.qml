@@ -397,79 +397,12 @@ ColumnLayout {
             Layout.rightMargin: 12
         }
 
-        // ---- diagnostics ----------------------------------------------
-        //
-        // Hamlib's own trace, which is the only thing that answers "how
-        // far did open get, and what did the radio say" -- the library
-        // writes it to stderr, which on a phone is nowhere.
-        Switch {
-            text: "Log rig traffic"
-            Layout.leftMargin: 4
-            checked: pane.rig.debugLog
-            onToggled: pane.rig.debugLog = checked
-        }
-        Label {
-            text: "For bug reports. Records every CAT command and reply, "
-                  + "which slows things down and fills the log quickly — "
-                  + "leave it off unless a radio will not work."
-            font.pixelSize: 11
-            color: "#666"
-            Layout.fillWidth: true
-            Layout.leftMargin: 12
-            Layout.rightMargin: 12
-            wrapMode: Text.Wrap
-        }
-        ColumnLayout {
-            visible: pane.rig.debugLog
-            spacing: 4
-            Layout.fillWidth: true
-            Layout.leftMargin: 12
-            Layout.rightMargin: 12
-
-            RowLayout {
-                // **Refreshed by hand, not bound to the property.** The
-                // rig screen republishes at 1 Hz, and a bound text
-                // property would reset this view's scroll position
-                // every second — unreadable in exactly the situation it
-                // is for. A trace is read after the failure anyway.
-                Button {
-                    text: "Refresh"
-                    onClicked: logArea.text = pane.rig.logText
-                }
-                Button {
-                    text: "Copy"
-                    onClicked: {
-                        logArea.selectAll();
-                        logArea.copy();
-                        logArea.deselect();
-                    }
-                }
-                Button {
-                    text: "Clear"
-                    onClicked: {
-                        pane.rig.clearLog();
-                        logArea.text = "";
-                    }
-                }
-            }
-
-            ScrollView {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 260
-                clip: true
-
-                TextArea {
-                    id: logArea
-                    readOnly: true
-                    // No wrapping: a CI-V frame dump read across
-                    // wrapped lines is worse than one read sideways.
-                    wrapMode: Text.NoWrap
-                    font.family: "monospace"
-                    font.pixelSize: 10
-                    placeholderText: "Press Refresh after the radio fails to connect."
-                }
-            }
-        }
+        // Hamlib's own trace -- the one thing that answers "how far did
+        // open get, and what did the radio say" -- is the "Log rig
+        // traffic" switch, and it lives in Settings > Advanced rather
+        // than here: it is a debug tool an operator reaches for once in
+        // the life of a radio, so it belongs with the other debug
+        // toggle, not in the middle of the connection controls.
     }
 
     // ---- the radio picker ---------------------------------------------
