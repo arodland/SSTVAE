@@ -5,6 +5,7 @@
 #include <jni.h>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -182,12 +183,6 @@ const char* flow_name(int flow) {
     }
 }
 
-// How many consecutive empty reads between heartbeat lines. The bridge
-// reads with a 500 ms timeout, so this is about five seconds -- often
-// enough to show a stuck transmit queue promptly, rare enough that a
-// working session does not fill its own log.
-constexpr unsigned long kIdleReadsPerReport = 10;
-
 // Never throws and never leaves an exception pending: this runs inside
 // an open that has already succeeded, and a diagnostic that fails the
 // operation it is diagnosing is worse than no diagnostic.
@@ -316,28 +311,27 @@ public:
         }
         const std::size_t cap = static_cast<std::size_t>(kBufferBytes);
         const jint want = static_cast<jint>(n < cap ? n : cap);
+
+        // **Counted and timed here, reported from `write`.** The first
+        // version of this instrument logged from inside this function,
+        // which was the one mistake it could not survive: the question
+        // it exists to answer is whether this loop is running, and a
+        // heartbeat on a thread that is stuck says nothing at all. The
+        // write thread is known to be alive -- its frames are in the
+        // log -- so the numbers are published here and printed there.
+        reads_started_.fetch_add(1, std::memory_order_relaxed);
+        const auto started_at = std::chrono::steady_clock::now();
         const jint got = env->CallStaticIntMethod(cls, m, token, buffer_, want, timeout_ms);
+        last_read_ms_.store(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started_at).count(),
+            std::memory_order_relaxed);
+        reads_returned_.fetch_add(1, std::memory_order_relaxed);
         env.rethrow("the serial device stopped answering");
         // Negative means the link is gone; zero means an idle radio,
         // which is not an error and must not be reported as one.
         if (got < 0) throw RigError("the serial device went away");
-        if (got == 0) {
-            // **A heartbeat, and the chip's own account with it.** A bulk
-            // write returning its length means the bytes reached the
-            // chip, not that the UART clocked them out -- and from above,
-            // "the radio is ignoring us" and "the chip is holding our
-            // bytes" are the same silence. A CP210x will say which:
-            // `GET_COMM_STATUS` reports how many bytes are still queued
-            // for transmit, how many arrived from the UART, and why
-            // transmission is being held. It also proves this read loop
-            // is running at all, which nothing else in the log does.
-            if (tracing() && ++idle_reads_ % kIdleReadsPerReport == 0) {
-                trace("transport: idle, " + std::to_string(idle_reads_) +
-                      " empty reads; " + describe_status(env, cls, token));
-            }
-            return 0;
-        }
-        idle_reads_ = 0;
+        if (got == 0) return 0;
         env->GetByteArrayRegion(buffer_, 0, got, reinterpret_cast<jbyte*>(dst));
         return static_cast<std::size_t>(got);
     }
@@ -347,6 +341,27 @@ public:
         if (token < 0) throw RigError("the serial device is not open");
         Env env;
         jclass cls = env.bridge();
+
+        // **Before this frame, not after it, and that is the whole
+        // point.** Reported here it describes the state left behind by
+        // the *previous* frame, which has by then had Hamlib's full
+        // timeout to drain -- so bytes still in `outQueue` mean the
+        // chip never put them on the wire, and an empty `outQueue` with
+        // an empty `inQueue` means it did and the radio said nothing.
+        // Probed immediately after a write it would only ever catch a
+        // UART mid-transmission and prove nothing.
+        //
+        // The read counters ride along because this thread is the one
+        // known to be running.
+        if (tracing() && wrote_once_) {
+            const unsigned long started = reads_started_.load(std::memory_order_relaxed);
+            const unsigned long returned = reads_returned_.load(std::memory_order_relaxed);
+            trace("transport: reads started=" + std::to_string(started) +
+                  " returned=" + std::to_string(returned) + " last=" +
+                  std::to_string(last_read_ms_.load(std::memory_order_relaxed)) +
+                  "ms; " + describe_status(env, cls, token));
+        }
+        wrote_once_ = true;
         jmethodID m = env->GetStaticMethodID(cls, "write", "(I[BI)V");
         if (m == nullptr) {
             env->ExceptionClear();
@@ -403,9 +418,15 @@ private:
     SerialParams params_;
     std::atomic<int> token_{-1};
     jbyteArray buffer_ = nullptr;
-    // Consecutive reads that returned nothing. Only read and written by
-    // the bridge's single read thread.
-    unsigned long idle_reads_ = 0;
+
+    // Written by the read thread, read by the write thread -- which is
+    // why they are atomic and why they are relaxed: nothing is
+    // synchronised through them, they are only ever printed.
+    std::atomic<unsigned long> reads_started_{0};
+    std::atomic<unsigned long> reads_returned_{0};
+    std::atomic<long long> last_read_ms_{-1};
+    // Only touched by the write thread.
+    bool wrote_once_ = false;
 };
 
 }  // namespace

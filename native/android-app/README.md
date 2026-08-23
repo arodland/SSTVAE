@@ -1274,11 +1274,31 @@ bytes out: a bulk write returning its length means they reached the
 chip. A CP210x will say. `SerialBridge.describeStatus` issues
 `GET_COMM_STATUS` (Silicon Labs AN571, 19 bytes) and puts the transmit
 queue depth, the receive queue depth, the error mask and the hold
-reasons into the trace, alongside the modem control lines, every ten
-consecutive empty reads — which also proves the read loop is running,
-something nothing else in the log did. Bytes stuck in `outQueue` mean
-the chip is holding them and `hold` says why; an empty `outQueue` with
-an empty `inQueue` means they went out and the radio said nothing.
+reasons into the trace alongside the modem control lines. Bytes stuck
+in `outQueue` mean the chip is holding them and `hold` says why; an
+empty `outQueue` with an empty `inQueue` means they went out and the
+radio said nothing.
+
+**It is reported from the write path, and where it is reported was a
+mistake worth recording.** The first version logged it from the read
+loop, every ten consecutive empty reads — and printed nothing at all,
+which turned out to be the finding: the read loop was not cycling. A
+liveness probe on the thread whose liveness is in question cannot
+report. `bulkTransfer` on a CP2102N that has nothing to say blocks for
+as long as it likes, where an FTDI returns every ~16 ms because the
+chip sends a status packet whether or not there is data — so the K4
+never exercised this and the Icom never got past the first read. That
+is not itself a fault (a blocked read still delivers data the moment
+any arrives) but it is why the instrument was silent.
+
+So the read thread now only *counts* — reads started, reads returned,
+and how long the last one took, in relaxed atomics that nothing
+synchronises through — and the **write** thread prints them, because
+its frames are in the log and it is therefore known to be running. The
+probe fires *before* each frame rather than after, so what it describes
+is the state the previous frame left behind after Hamlib's full
+timeout; probed immediately after a write it would only ever catch a
+UART mid-transmission and prove nothing.
 
 **The write that was skipped, and why it stays (2026-08-23).** Setting a
 CP210x's flow control to *none* is not a no-op: the library sends the
