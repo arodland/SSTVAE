@@ -14,6 +14,7 @@ import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
+import android.hardware.usb.UsbInterface;
 import android.hardware.usb.UsbManager;
 import android.os.Build;
 import android.util.Log;
@@ -259,6 +260,60 @@ public final class SerialBridge {
             return new String[0];
         }
         return out.toArray(new String[0]);
+    }
+
+    /**
+     * What was actually opened, for the rig trace.
+     *
+     * <p><b>Written because a failing radio and a mis-driven chip look
+     * identical from above.</b> An Elecraft K4 works over this path and
+     * two Icoms do not, and everything above the USB layer -- Hamlib's
+     * trace, the bridge, the byte counts -- says exactly the same thing
+     * in both cases. What it cannot say is which driver
+     * {@code UsbSerialProber} picked, which USB interface that driver
+     * claimed, or how many interfaces the device has to choose from,
+     * and those are the parts that differ between an FTDI on its own
+     * and a vendor bridge inside a composite device.
+     *
+     * <p>Never throws: this runs on the rig worker thread inside an
+     * open that is already in progress, and a diagnostic that can fail
+     * the operation it is diagnosing is worse than none.
+     */
+    static String describeLink(String id) {
+        if (id == null) return "";
+        try {
+            if (id.startsWith("bt:")) return "bluetooth " + id.substring(3);
+            if (!id.startsWith("usb:")) return id;
+            final UsbManager manager = usbManager();
+            final UsbDevice device = findUsbDevice(id);
+            if (manager == null || device == null) return id + " (not present)";
+            final StringBuilder out = new StringBuilder();
+            out.append(String.format(Locale.US, "%04x:%04x", device.getVendorId(),
+                    device.getProductId()));
+            out.append(" \"").append(describe(device)).append('"');
+            final int interfaces = device.getInterfaceCount();
+            out.append(", ").append(interfaces).append(" interface(s) [");
+            for (int i = 0; i < interfaces; i++) {
+                if (i != 0) out.append(' ');
+                final UsbInterface iface = device.getInterface(i);
+                out.append(i).append(":cls").append(iface.getInterfaceClass())
+                   .append('/').append(iface.getEndpointCount()).append("ep");
+            }
+            out.append(']');
+            final UsbSerialDriver driver =
+                    UsbSerialProber.getDefaultProber().probeDevice(device);
+            if (driver == null) {
+                out.append(", no driver");
+            } else {
+                out.append(", driver ")
+                   .append(driver.getClass().getSimpleName())
+                   .append(", port ").append(usbPortIndex(id))
+                   .append(" of ").append(driver.getPorts().size());
+            }
+            return out.toString();
+        } catch (RuntimeException e) {
+            return id + " (could not describe: " + e + ")";
+        }
     }
 
     private static String describe(UsbDevice device) {

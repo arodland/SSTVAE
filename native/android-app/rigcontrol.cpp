@@ -20,6 +20,7 @@
 #include "rig/android/androidrig.hpp"
 #include "rig/bridged.hpp"
 #include "rig/hamlib.hpp"
+#include "rig/trace.hpp"
 #include "session.hpp"
 
 // `SSTVAE_ANDROID_RIG=OFF` is a supported configuration -- the one
@@ -550,20 +551,36 @@ void RigControl::clearLog() {
 }
 
 void RigControl::apply_debug_log() {
-#ifdef SSTVAE_ANDROID_HAVE_RIG
     if (!debug_log_) {
+        rig::set_trace_sink({});
+#ifdef SSTVAE_ANDROID_HAVE_RIG
         rig::set_debug_sink({});
+#endif
         return;
     }
-    // Captures nothing but a reference to the singleton, deliberately:
-    // this is called from the rig worker thread, and the view that
-    // installed it can be destroyed by a rotation at any point.
+
+    // **Two sinks, one log, and that is the point.** Hamlib's trace
+    // ends at "I wrote six bytes and read nothing"; ours says whether
+    // those bytes reached the USB endpoint, whether anything came back
+    // from it, and which driver and interface the Android USB layer
+    // chose. Interleaved in one buffer they answer together the
+    // question neither answers alone -- is the radio ignoring us, or
+    // are we not reaching the radio.
     //
-    // Also to logcat, because the two audiences are different. The ring
-    // is what an operator in the field can read and send; `adb logcat`
-    // is what whoever is reading the report wants when they can plug
-    // the phone in, and it carries lines from before the screen was
-    // opened.
+    // Both capture nothing but a reference to the singleton,
+    // deliberately: they are called from the rig worker and the
+    // bridge's two pump threads, and the view that installed them can
+    // be destroyed by a rotation at any point.
+    //
+    // Also to logcat, because the two audiences differ. The ring is
+    // what an operator in the field can read and send; `adb logcat` is
+    // what whoever reads the report wants when they can plug the phone
+    // in, and it carries lines from before the screen was opened.
+    rig::set_trace_sink([](const std::string& line) {
+        rig_trace().add(line);
+        qInfo("rig: %s", line.c_str());
+    });
+#ifdef SSTVAE_ANDROID_HAVE_RIG
     rig::set_debug_sink([](const std::string& line) {
         rig_trace().add(line);
         qInfo("hamlib: %s", line.c_str());

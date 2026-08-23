@@ -1251,18 +1251,37 @@ CI-V frame at a `0x00` the way a string would; Hamlib's POSIX
 `FIONREAD`-guarded drain and cannot block; the port-type conditionals in
 `rigs/icom/` are none; and the baud our `serial_defaults` picks is
 `rig_caps.serial_rate_max`, which is the same field `rig_init` uses, so
-a bridged rig runs at the speed the same rig runs at on a desktop.
+a bridged rig runs at the speed the same rig runs at on a desktop. Nor
+is it the control lines: **both** `FtdiSerialDriver` and
+`Cp21xxSerialDriver` explicitly deassert DTR and RTS in `openInt()`, so
+the K4 is CAT-ing over this transport with them low — which is a
+difference from a desktop, where the OS raises them on open, but
+demonstrably not a fatal one. And every Icom in Hamlib declares
+`RIG_HANDSHAKE_NONE`, so no flow control is being applied that could
+hold the chip's transmitter off.
 
-Two things worth trying on the radio before suspecting this app, since
-both are Icom-specific and neither is visible from here: **the CI-V USB
-baud rate** (a menu item separate from the CI-V port's own, defaulting
-to Auto, which is not reliable on every model — set it to a fixed rate
-and set the same rate in Settings rather than leaving Baud on Default),
-and **CI-V USB Echo Back**, which is what `icom_get_usb_echo_off`
-probes for at open and gets exactly one attempt at, `rig_open` having
-set `retry` to 0 for the duration.
+**The first trace (2026-08-23) shows correct frames going out and zero
+bytes coming back.** `fe fe a2 e0 03 fd` — address A2, the IC-9700's
+default — written, then `read_string_generic(): Timed out 1.001 seconds
+after 0 chars`, every time, at 115200. So `icom_get_usb_echo_off`
+returns `-RIG_ETIMEOUT` and `icom_rig_open` gives up with "is rig on and
+connected?". What that trace cannot say is whether the six bytes reached
+the USB endpoint — Hamlib only ever saw a successful *socket* write —
+which is what the second sink below was added to answer.
 
-## Reading Hamlib's trace on a phone
+Three things to check on the radio, all Icom-specific and none visible
+from here: **the CI-V USB baud rate** (a menu item separate from the
+CI-V port's own, defaulting to an Auto that is not reliable on every
+model — note 115200 is not this app's default either, since
+`serial_defaults` gives 38400 for an IC-9700 and 19200 for an IC-7100);
+**CI-V USB Echo Back**, which is exactly what `icom_get_usb_echo_off`
+probes at open and gets one attempt at, `rig_open` having set `retry` to
+0 for the duration; and **the CI-V address**, which is a separate
+setting for the USB port when "CI-V USB Port" is "Unlink from
+[REMOTE]" — the app sends to the factory-default A2, and a changed
+address produces exactly this silence.
+
+## Reading the rig trace on a phone
 
 `SSTVAE_HAMLIB_DEBUG` raises Hamlib's level and Hamlib writes to
 **stderr**, which a desktop operator can capture and a phone discards.
@@ -1279,6 +1298,23 @@ never as a preprocessor define, and never links `-llog`.)
 the last 600 lines and mirrors each to logcat; Refresh, Copy and Clear
 are under the switch. Off by default — at `RIG_DEBUG_TRACE` it is a line
 per CAT frame.
+
+**Hamlib's trace is only half of it, and the missing half is ours.**
+For a radio that never answers, Hamlib's view is "I wrote six bytes and
+read nothing", repeated — which is byte for byte what a bug in our own
+bridge would produce. So `core/rig/trace.hpp` is a second sink, Qt-free
+and Hamlib-free in `sstvae_core`, that the loopback bridge and the
+Android transport write to; the switch installs both, into one ring, so
+the two interleave. It reports what actually reached the transport
+(after the write, never before — a line logged on the way in would say
+"delivered" for a write that threw), what came back from it, the
+resolved line settings, and — from `SerialBridge.describeLink` — the
+device's ids, its interface count and classes, which driver
+`UsbSerialProber` chose and which of its ports was opened. That last
+part is the one nothing else can supply, and it is where an FTDI on its
+own and a vendor bridge inside a composite device stop looking alike.
+Tracing off costs one relaxed atomic load, which is why the calls sit
+in the byte pump unconditionally.
 
 Three things about it are load-bearing rather than incidental:
 

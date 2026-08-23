@@ -1015,6 +1015,20 @@ the SPP UUID). Six things are settled and worth not re-deriving:
   logcat branch is not an alternative: `configure.ac` uses `ANDROID`
   only as an automake conditional, never as a define, and never links
   `-llog`.
+- **`core/rig/trace.hpp` is the other half of that trace, and it is
+  the half that says whether the bytes left.** Hamlib's view of a
+  radio that never answers is "wrote six bytes, read nothing" --
+  identical to what a bug in our own bridge would produce. So the
+  loopback bridge and the Android transport write to a second,
+  Hamlib-free sink in `sstvae_core` (so a `--no-rig` build still tests
+  every line of it), and the app installs both into one ring. It logs
+  what reached the transport **after** the write and never before (on
+  the way in it would say "delivered" for a write that threw --
+  `test_rig_bridge.cpp` pins that placement), what came back, the
+  resolved line settings, and `SerialBridge.describeLink`'s account of
+  which driver `UsbSerialProber` picked and which interface of how many
+  it claimed. Off costs one relaxed atomic load, which is why the calls
+  live in the byte pump unconditionally.
 - **A K4 works over USB and two Icoms do not** (reported 2026-08-23,
   open). What has been ruled out by reading, so it is not re-derived:
   the byte path is length-counted end to end and cannot truncate a
@@ -1023,7 +1037,12 @@ the SPP UUID). Six things are settled and worth not re-deriving:
   `network_flush` is a `FIONREAD`-guarded drain; `rigs/icom/` has no
   port-type conditional; and `serial_defaults` picks
   `rig_caps.serial_rate_max`, the same field `rig_init` uses, so a
-  bridged rig runs at the speed that rig runs at on a desktop. The two
+  bridged rig runs at the speed that rig runs at on a desktop; and it
+  is not the control lines, since **both** `FtdiSerialDriver` and
+  `Cp21xxSerialDriver` deassert DTR and RTS in `openInt()`, so the K4
+  works with them low (a difference from a desktop, where the OS raises
+  them, but not a fatal one), while every Icom declares
+  `RIG_HANDSHAKE_NONE` so no flow control is holding the chip off. The two
   radio-side settings to check first are Icom-specific and invisible
   from here: the **CI-V USB baud rate** (a separate menu item,
   defaulting to an Auto that is not reliable on every model) and

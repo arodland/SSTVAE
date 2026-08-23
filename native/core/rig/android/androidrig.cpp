@@ -1,10 +1,13 @@
 #include "rig/android/androidrig.hpp"
 
+#include "rig/trace.hpp"
+
 #include <jni.h>
 
 #include <atomic>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -158,6 +161,50 @@ std::vector<SerialDevice> device_list(const char* method) {
 
 // --- the transport ----------------------------------------------------------
 
+// --- trace helpers ----------------------------------------------------
+//
+// Deliberately spelled the way a settings screen spells it (`8N1`,
+// `flow=none`), because the first thing to do with this line is compare
+// it against what the operator set and what the radio's menu says.
+const char* parity_letter(int parity) {
+    switch (parity) {
+        case SerialParams::kOdd: return "O";
+        case SerialParams::kEven: return "E";
+        default: return "N";
+    }
+}
+
+const char* flow_name(int flow) {
+    switch (flow) {
+        case SerialParams::kRtsCts: return "rts/cts";
+        case SerialParams::kXonXoff: return "xon/xoff";
+        default: return "none";
+    }
+}
+
+// Never throws and never leaves an exception pending: this runs inside
+// an open that has already succeeded, and a diagnostic that fails the
+// operation it is diagnosing is worse than no diagnostic.
+std::string describe_link(const Env& env, jclass cls, const std::string& id) {
+    jmethodID m = env->GetStaticMethodID(cls, "describeLink",
+                                         "(Ljava/lang/String;)Ljava/lang/String;");
+    if (m == nullptr) {
+        env->ExceptionClear();
+        return id + " (no describeLink)";
+    }
+    jstring jid = env->NewStringUTF(id.c_str());
+    auto out = static_cast<jstring>(env->CallStaticObjectMethod(cls, m, jid));
+    if (jid != nullptr) env->DeleteLocalRef(jid);
+    if (env->ExceptionCheck() != JNI_FALSE) {
+        env->ExceptionClear();
+        return id + " (describeLink threw)";
+    }
+    if (out == nullptr) return id;
+    std::string text = to_std(env.e, out);
+    env->DeleteLocalRef(out);
+    return text;
+}
+
 class AndroidTransport : public SerialTransport {
 public:
     explicit AndroidTransport(SerialParams params) : params_(std::move(params)) {}
@@ -192,6 +239,21 @@ public:
         }
         buffer_ = static_cast<jbyteArray>(env->NewGlobalRef(local));
         env->DeleteLocalRef(local);
+
+        // What was opened, and how. This is the half of the picture
+        // that neither Hamlib's trace nor the bridge's byte counts can
+        // supply -- which driver the prober chose and which interface
+        // of how many it claimed. Guarded, because building it is a
+        // handful of JNI calls and the answer is only wanted when
+        // somebody is looking.
+        if (tracing()) {
+            trace("transport: opened " + params_.device_id + " at " +
+                  std::to_string(params_.baud) + " " +
+                  std::to_string(params_.data_bits) + parity_letter(params_.parity) +
+                  std::to_string(params_.stop_bits) + ", flow=" +
+                  flow_name(params_.flow));
+            trace("transport: " + describe_link(env, cls, params_.device_id));
+        }
     }
 
     void close() noexcept override {

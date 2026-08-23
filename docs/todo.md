@@ -145,25 +145,48 @@ have no port-type branch at all, the ones that exist being Win32 serial;
 takes `rig_caps.serial_rate_max`, the same field `rig_init` uses, so a
 bridged rig runs at the speed that rig runs at on a desktop.
 
-So the next move is evidence, not another hypothesis.
-`rig::set_debug_sink` and **Settings > Rig control > Log rig traffic**
-exist for this: Hamlib's own trace was going to stderr, which on a phone
-is nowhere, and it is the only thing that says how far `rig_open` got
-and what the radio answered. What to look for in it, in order:
+Nor is it the control lines: **both** `FtdiSerialDriver` and
+`Cp21xxSerialDriver` deassert DTR and RTS in `openInt()`, so the K4 is
+CAT-ing with them low. That is a difference from a desktop, where the
+OS raises them on open, but demonstrably not a fatal one -- and every
+Icom in Hamlib declares `RIG_HANDSHAKE_NONE`, so nothing is applying
+flow control that could hold the chip's transmitter off.
 
-1. Does `icom_get_usb_echo_off` time out, or return an echo status? A
-   timeout at that point means nothing came back at all -- a wrong port,
-   a wrong baud, or a radio not answering on that address. An echo
-   status followed by a failed `rig_get_freq` means the link works and
-   the problem is above it.
-2. **The CI-V USB baud rate**, which on these radios is a menu item
+**The first trace (2026-08-23) shows correct frames going out and zero
+bytes ever coming back.** `fe fe a2 e0 03 fd` -- address A2, the
+IC-9700's default -- written, `read_string_generic(): Timed out 1.001
+seconds after 0 chars`, every time, at 115200. `icom_get_usb_echo_off`
+therefore returns `-RIG_ETIMEOUT` and `icom_rig_open` gives up with
+"is rig on and connected?". What that trace *cannot* say is whether
+those six bytes reached the USB endpoint, because Hamlib only ever saw
+a successful socket write. `core/rig/trace.hpp` closes that gap: the
+bridge now logs each direction's bytes (after the transport accepted
+them, never before) and the transport logs which driver and interface
+the Android USB layer chose. So the next run distinguishes:
+
+* `-> rig 6: fe fe a2 e0 03 fd` with no `<- rig` line -- the bytes left
+  and the radio said nothing. Radio-side; see below.
+* no `-> rig` line at all -- our write never reached the chip, which
+  would be the first evidence of a bug on this side.
+* a `<- rig` line that Hamlib did not see -- a fault in the socket half.
+
+Assuming the first, what to check, in order:
+
+1. **The CI-V USB baud rate**, which on these radios is a menu item
    separate from the CI-V port's own and defaults to an "Auto" that is
    not reliable on every model. Set it to a fixed rate and set the same
-   rate in Settings rather than leaving Baud on Default, which resolves
-   to `serial_rate_max` (115200 for the IC-9700, 19200 for the IC-7100).
-3. **CI-V USB Echo Back**, which is what step 1 is probing, and which
-   `rig_open` gives exactly one attempt at -- it sets `retry` to 0 for
-   the duration.
+   rate in Settings. Note that the trace shows **115200**, which is not
+   this app's default: `serial_defaults` returns `serial_rate_max`,
+   which Hamlib gives as 38400 for the IC-9700 and 19200 for the
+   IC-7100. Worth trying Default (or 19200) as well as whatever the
+   radio's menu says, since Auto has an easier time at the lower rates.
+2. **CI-V USB Echo Back**, which is what `icom_get_usb_echo_off` is
+   probing, and which `rig_open` gives exactly one attempt at -- it
+   sets `retry` to 0 for the duration.
+3. **The CI-V address**, which on these radios is a *separate* setting
+   for the USB port when "CI-V USB Port" is "Unlink from [REMOTE]".
+   The app sends to A2, the IC-9700's factory default; a changed
+   address produces exactly this silence.
 
 Still outstanding, unchanged and unrelated:
 
