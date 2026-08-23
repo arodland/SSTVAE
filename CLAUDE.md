@@ -996,6 +996,39 @@ the SPP UUID). Six things are settled and worth not re-deriving:
   unauthenticated path to a transmitter; the bind is `127.0.0.1` and the
   port is ephemeral. One thread per direction, so an idle link costs no
   wakeups.
+- **Hamlib's trace needs a sink, and Android is why**
+  (`rig::set_debug_sink`, 2026-08-23). `SSTVAE_HAMLIB_DEBUG` raises the
+  level and the library writes to *stderr*, which a phone discards, so
+  the one artifact that answers "how far did `rig_open` get and what
+  did the radio refuse" was unreachable on the platform where rig
+  control is newest. A `vprintf_cb_t` trampoline formats and splits
+  into whole lines (a line is not a call -- `dump_hex` emits one line
+  in several); Settings > Rig control > Log rig traffic keeps 600 of
+  them and mirrors to logcat, off by default. **The callback is
+  registered only while a sink exists**: `rig_debug` writes to stderr
+  *or* to a callback, never both, so one left permanently registered
+  swallows the trace for every desktop run and every test -- silently,
+  a swallowed trace and a quiet library being the same output.
+  `test_rig_hamlib.cpp` captures stderr and requires it back, and that
+  is the assertion with teeth (mutation-tested; the other two survive
+  registering unconditionally). Hamlib's own `#ifdef ANDROID`
+  logcat branch is not an alternative: `configure.ac` uses `ANDROID`
+  only as an automake conditional, never as a define, and never links
+  `-llog`.
+- **A K4 works over USB and two Icoms do not** (reported 2026-08-23,
+  open). What has been ruled out by reading, so it is not re-derived:
+  the byte path is length-counted end to end and cannot truncate a
+  binary CI-V frame; Hamlib's POSIX `port_read_generic`/`port_write`
+  have no port-type branch (the ones that exist are Win32 serial);
+  `network_flush` is a `FIONREAD`-guarded drain; `rigs/icom/` has no
+  port-type conditional; and `serial_defaults` picks
+  `rig_caps.serial_rate_max`, the same field `rig_init` uses, so a
+  bridged rig runs at the speed that rig runs at on a desktop. The two
+  radio-side settings to check first are Icom-specific and invisible
+  from here: the **CI-V USB baud rate** (a separate menu item,
+  defaulting to an Auto that is not reliable on every model) and
+  **CI-V USB Echo Back**, which `icom_get_usb_echo_off` probes at open
+  and gets exactly one attempt at, `rig_open` having set `retry` to 0.
 - **`bridge.cpp`/`bridged.cpp` are not built on Windows** (2026-08-23),
   and the tests follow the source rather than being skipped. Windows has
   COM ports, so nothing there constructs a bridge -- what a Windows
@@ -1897,7 +1930,12 @@ interface — which settles the one question that could have sunk the
 whole approach, since the app needs the audio and the serial half of
 that device at the same time. **Bluetooth is untested for want of a
 device** and goes to beta on the strength of the shared code beneath
-it. Unplug/replug recovery and the "Connected with the cable out"
+it. **An IC-9700 and an IC-7100 do not work, and that is open** — see
+the rig-control bullets above for what has been ruled out and the two
+radio-side settings to check first. `rig::set_debug_sink` and the "Log
+rig traffic" switch landed for it, because until then Hamlib's trace on
+a phone went to stderr and therefore nowhere.
+Unplug/replug recovery and the "Connected with the cable out"
 reading were found the same day and fixed;
 `native/android-app/README.md` has the three separate mistakes behind
 that one symptom.

@@ -109,6 +109,18 @@ class RigControl : public QObject {
     // screen, which says so rather than leaving the operator to work out
     // whether the VOX leader is still doing the job.
     Q_PROPERTY(bool canKey READ canKey NOTIFY changed)
+    // Hamlib's own trace, kept where an operator can read and send it.
+    //
+    // **This is a diagnostic, and it exists because of a bug this
+    // screen could not explain.** A Kenwood worked over USB and two
+    // Icoms did not, and the artifact that answers "how far did open
+    // get, and which CAT command did the radio refuse" is Hamlib's
+    // trace -- which the library writes to stderr, i.e. nowhere on a
+    // phone. Off by default: at `RIG_DEBUG_TRACE` it is a line per
+    // frame and there is nothing here a working station needs.
+    Q_PROPERTY(bool debugLog READ debugLog WRITE setDebugLog NOTIFY changed)
+    Q_PROPERTY(QString logText READ logText NOTIFY changed)
+
     // Whether Bluetooth can be listed at all. Distinct from "no paired
     // radios", which is what an empty list looks like either way -- and
     // telling an operator to go and pair a radio they already paired is
@@ -155,6 +167,11 @@ public:
     bool canKey() const;
     bool bluetoothReady() const;
 
+    bool debugLog() const { return debug_log_; }
+    void setDebugLog(bool on);
+    QString logText() const;
+    Q_INVOKABLE void clearLog();
+
     // Rows matching `query`, capped -- Hamlib knows several hundred
     // rigs and a phone list view of all of them is not a picker. An
     // empty query returns the most useful few rather than nothing, so
@@ -188,6 +205,9 @@ private:
     // has stopped answering and the device is reachable again.
     void maybe_reconnect();
 
+    // Install or remove the Hamlib debug sink to match `debug_log_`.
+    void apply_debug_log();
+
     bool enabled_ = false;
     QString connection_ = QStringLiteral("usb");
     int model_ = 1;  // Hamlib's dummy: connects with no radio attached
@@ -195,6 +215,7 @@ private:
     QString host_;
     int baud_ = 0;  // 0 = whatever the chosen backend would have used
     QString ptt_ = QStringLiteral("cat");
+    bool debug_log_ = false;
 
     // False when `init_rig_bridge` could not hand the layer a VM and a
     // Context. Distinct from the compile-time `SSTVAE_ANDROID_HAVE_RIG`:

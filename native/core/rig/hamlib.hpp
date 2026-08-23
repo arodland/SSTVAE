@@ -28,6 +28,7 @@
 #ifndef SSTVAE_RIG_HAMLIB_HPP
 #define SSTVAE_RIG_HAMLIB_HPP
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -141,6 +142,23 @@ SerialDefaults serial_defaults(int model);
 
 // Hamlib's version string, for an about box or a bug report.
 std::string hamlib_version();
+
+// Route Hamlib's own trace somewhere this app can show it. An empty
+// sink turns it off, which is the default.
+//
+// **`SSTVAE_HAMLIB_DEBUG` was not enough, and Android is why.** That
+// variable raises the level and Hamlib writes to *stderr* -- which a
+// desktop operator can capture and a phone discards, so the one
+// artifact that answers "how far did open get, and which CAT command
+// did the rig refuse" was unreachable on the platform where rig control
+// is newest. A Kenwood worked and two Icoms did not, and neither of us
+// could see a single byte of the difference.
+//
+// The sink is called from the rig worker thread, once per trace line
+// with the trailing newline removed. It must not block and must not
+// call back into Hamlib.
+using DebugSink = std::function<void(const std::string& line)>;
+void set_debug_sink(DebugSink sink);
 
 }  // namespace sstvae::rig
 

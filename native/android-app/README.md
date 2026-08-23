@@ -1229,14 +1229,74 @@ of its watchdog in CI. Linux and macOS still build and test it, using
 the same POSIX calls Android does, so `test_rig_hamlib`'s
 real-Kenwood-through-a-real-bridge proof is untouched.
 
-**What is not tested on hardware.** Everything in this section. The
-composite-device question in particular is worth settling first with the
-actual radio: most rig USB interfaces present audio and CDC serial
-together, and this app needs both at once. FT8CN does it successfully on
-at least some devices, and mik3y/usb-serial-for-android#477 is an open
-report of a composite device where claiming the CDC interface fails
-while the platform holds the audio interfaces. If that turns out badly
-for a given radio, Bluetooth and the network kind are unaffected.
+**The composite-device question is settled, and it was the one that
+could have sunk the approach.** Most rig USB interfaces present audio
+and CDC serial together and this app needs both at once;
+mik3y/usb-serial-for-android#477 is an open report of a composite device
+where claiming the serial interface fails while the platform holds the
+audio ones. On an Elecraft K4 over one composite interface it works:
+CAT, DTR keying and RTS keying, with the audio path live (Andrew,
+2026-08-23). **Bluetooth is still untested for want of a device** and
+goes to beta on the strength of the shared code beneath it.
+
+**Not every radio works, and the trace is how to find out why.** A K4
+works over USB; an IC-9700 and an IC-7100 do not (reported 2026-08-23,
+unresolved). Everything structural was ruled out by reading before the
+logging below was written, and it is worth not re-deriving: the byte
+path is length-counted end to end (`SerialBridge.read` → a `jbyteArray`
+region copy → `LoopbackBridge`'s `send`), so nothing truncates a binary
+CI-V frame at a `0x00` the way a string would; Hamlib's POSIX
+`port_read_generic` and `port_write` have no port-type branch at all
+(the ones that exist are Win32 serial); `network_flush` is a
+`FIONREAD`-guarded drain and cannot block; the port-type conditionals in
+`rigs/icom/` are none; and the baud our `serial_defaults` picks is
+`rig_caps.serial_rate_max`, which is the same field `rig_init` uses, so
+a bridged rig runs at the speed the same rig runs at on a desktop.
+
+Two things worth trying on the radio before suspecting this app, since
+both are Icom-specific and neither is visible from here: **the CI-V USB
+baud rate** (a menu item separate from the CI-V port's own, defaulting
+to Auto, which is not reliable on every model — set it to a fixed rate
+and set the same rate in Settings rather than leaving Baud on Default),
+and **CI-V USB Echo Back**, which is what `icom_get_usb_echo_off`
+probes for at open and gets exactly one attempt at, `rig_open` having
+set `retry` to 0 for the duration.
+
+## Reading Hamlib's trace on a phone
+
+`SSTVAE_HAMLIB_DEBUG` raises Hamlib's level and Hamlib writes to
+**stderr**, which a desktop operator can capture and a phone discards.
+So on the one platform where rig control is newest, the single artifact
+that answers "how far did `rig_open` get, and what did the radio say"
+was unreachable. (Hamlib's own `debug.c` has an `#ifdef ANDROID` branch
+that would log to logcat — it is dead in any build of ours and probably
+in most: `configure.ac` uses `ANDROID` only as an automake conditional,
+never as a preprocessor define, and never links `-llog`.)
+
+`rig::set_debug_sink` (`core/rig/hamlib.hpp`) registers a
+`vprintf_cb_t` and turns the trace into a stream of whole lines.
+**Settings → Rig control → Log rig traffic** installs a sink that keeps
+the last 600 lines and mirrors each to logcat; Refresh, Copy and Clear
+are under the switch. Off by default — at `RIG_DEBUG_TRACE` it is a line
+per CAT frame.
+
+Three things about it are load-bearing rather than incidental:
+
+- **The callback is registered only while a sink exists.** `rig_debug`
+  writes to stderr *or* to the callback, never both, so one left
+  registered swallows the trace for every later run — silently, since a
+  swallowed trace and a quiet library are the same output.
+  `test_rig_hamlib.cpp` captures stderr and requires it back, and that
+  assertion was mutation-tested: registering unconditionally fails it
+  and nothing else.
+- **The ring is a process-wide singleton, not a member of `RigControl`.**
+  QML destroys and rebuilds that view on every rotation while the rig
+  session outlives both, so a per-view buffer would discard the trace of
+  the open being diagnosed. It also keeps the sink's captures free of
+  `this`, which matters because it is called from the rig worker thread.
+- **The text area is refreshed by hand.** The rig screen republishes at
+  1 Hz and a bound `text:` would reset the scroll position every second,
+  which is unreadable in exactly the situation it is for.
 
 ## `core/audio/android/`
 

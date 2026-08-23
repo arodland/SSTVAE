@@ -118,42 +118,63 @@ static calibrated quantisation was tried and is *worse* — do not retry
 it without new information. The finding that outlived it — the model
 had never seen non-photographic content — became the item below.
 
-## Android rig control: everything on hardware
+## Android rig control: two Icoms do not work
 
 Landed 2026-08-22 (`docs/android.md`, "Rig control was said to be
-structurally impossible"). The mechanism is covered by desktop tests --
-the loopback bridge, the composition, the PTT routing, the line-setting
-resolution, and a real Kenwood TS-2000 backend reading frequency and
-keying through the bridge. **None of it has been compiled for Android or
-run against a radio**, because the session that wrote it had no NDK and
-no reachable `dl.google.com`.
+structurally impossible") and taken to hardware 2026-08-23. Most of what
+this section used to list is answered:
 
-In the order that answers the most per attempt:
+- **A composite USB device gives the phone audio and serial at once.**
+  This was the question that could have sunk the approach, and on an
+  Elecraft K4 the answer is yes, with CAT and both control-line keying
+  methods working. mik3y/usb-serial-for-android#477 remains an open
+  report of a composite device where it does not, so it is a per-device
+  answer rather than a general one.
+- The Hamlib NDK cross-build, CAT against a real radio, and DTR/RTS
+  keying are all exercised. Bluetooth is not, for want of a device.
 
-1. **Does the phone hold USB audio and USB serial on one composite
-   device?** Most rig USB interfaces present both, and this app needs
-   both at once. It works for FT8CN on at least some devices, and
-   mik3y/usb-serial-for-android#477 is an open report of it failing on
-   others. If the answer is no for a given radio, that is the radio's
-   answer and not a bug to fix -- Bluetooth and the network kind are
-   unaffected. Settle it before anything else, because a bad answer
-   changes what the rest of the list is worth.
-2. **The Hamlib NDK cross-build.** Expect to fix something. The two
-   guards in `native/cmake/hamlib.cmake` (a named missing compiler
-   wrapper, and a refused versioned SONAME) exist so the first failure
-   is diagnosable in one round.
-3. **CAT against a real radio**, model 1 first -- Hamlib's dummy opens
-   and keys with nothing attached, so it separates "the bridge works"
-   from "this backend works".
-4. **PTT timing against a physical radio**, which is the *same*
-   outstanding item the desktop has and has never had: `ptt_lead_s` is
-   0.3 s of guess. A phone into a radio is now a way to measure it.
-5. **DTR/RTS keying**, which is the path Hamlib cannot take here and
-   ours is the only implementation of.
-6. **Battery over a multi-hour session with a rig session open.** The
-   poll is 10 s rather than the desktop's 5, and the bridge's idle cost
-   is meant to be two wakeups a second on one thread; both are claims,
-   not measurements.
+**What is open is that a K4 works and an IC-9700 and an IC-7100 do
+not.** Everything structural was ruled out by reading, and re-deriving
+it is the waste this paragraph exists to prevent: the byte path is
+length-counted end to end (`SerialBridge.read` → a `jbyteArray` region
+copy → `LoopbackBridge`'s `send`), so nothing truncates a binary CI-V
+frame at a `0x00`; Hamlib's POSIX `port_read_generic` and `port_write`
+have no port-type branch at all, the ones that exist being Win32 serial;
+`network_flush` is a `FIONREAD`-guarded drain that cannot block;
+`rigs/icom/` contains no port-type conditional; and `serial_defaults`
+takes `rig_caps.serial_rate_max`, the same field `rig_init` uses, so a
+bridged rig runs at the speed that rig runs at on a desktop.
+
+So the next move is evidence, not another hypothesis.
+`rig::set_debug_sink` and **Settings > Rig control > Log rig traffic**
+exist for this: Hamlib's own trace was going to stderr, which on a phone
+is nowhere, and it is the only thing that says how far `rig_open` got
+and what the radio answered. What to look for in it, in order:
+
+1. Does `icom_get_usb_echo_off` time out, or return an echo status? A
+   timeout at that point means nothing came back at all -- a wrong port,
+   a wrong baud, or a radio not answering on that address. An echo
+   status followed by a failed `rig_get_freq` means the link works and
+   the problem is above it.
+2. **The CI-V USB baud rate**, which on these radios is a menu item
+   separate from the CI-V port's own and defaults to an "Auto" that is
+   not reliable on every model. Set it to a fixed rate and set the same
+   rate in Settings rather than leaving Baud on Default, which resolves
+   to `serial_rate_max` (115200 for the IC-9700, 19200 for the IC-7100).
+3. **CI-V USB Echo Back**, which is what step 1 is probing, and which
+   `rig_open` gives exactly one attempt at -- it sets `retry` to 0 for
+   the duration.
+
+Still outstanding, unchanged and unrelated:
+
+- **PTT timing against a physical radio**, which is the *same*
+  outstanding item the desktop has and has never had: `ptt_lead_s` is
+  0.3 s of guess. A phone into a radio is now a way to measure it.
+- **Battery over a multi-hour session with a rig session open.** The
+  poll is 10 s rather than the desktop's 5, and the bridge's idle cost
+  is meant to be two wakeups a second on one thread; both are claims,
+  not measurements.
+- **Bluetooth RFCOMM against a real radio.**
 
 ## Non-photographic content: evaluate, then train on it
 

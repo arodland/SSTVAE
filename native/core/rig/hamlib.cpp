@@ -2,6 +2,8 @@
 
 
 #include <algorithm>
+#include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <hamlib/rig.h>
@@ -15,6 +17,17 @@
 namespace sstvae::rig {
 
 namespace {
+
+// The level `SSTVAE_HAMLIB_DEBUG` asks for, which is also the level to
+// go back to when a debug sink is removed. Read every time rather than
+// cached: it is two getenv calls in a lifetime, and a cached copy is one
+// more thing that can be stale.
+enum rig_debug_level_e env_debug_level() {
+    const char* debug = std::getenv("SSTVAE_HAMLIB_DEBUG");
+    const bool verbose =
+        debug != nullptr && *debug != '\0' && std::strcmp(debug, "0") != 0;
+    return verbose ? RIG_DEBUG_TRACE : RIG_DEBUG_NONE;
+}
 
 // Hamlib's backend registry is global and loading it is not reentrant,
 // so it is done once. `list_models` and `rig_init` both need it -- a
@@ -33,10 +46,7 @@ void load_backends_once() {
         // open get -- are answerable only from Hamlib's own trace. The
         // rig tests set it so a failure arrives with that trace already
         // attached rather than needing the run repeated.
-        const char* debug = std::getenv("SSTVAE_HAMLIB_DEBUG");
-        const bool verbose = debug != nullptr && *debug != '\0' &&
-                             std::strcmp(debug, "0") != 0;
-        rig_set_debug(verbose ? RIG_DEBUG_TRACE : RIG_DEBUG_NONE);
+        rig_set_debug(env_debug_level());
         rig_load_all_backends();
     });
 }
@@ -45,6 +55,107 @@ std::string hamlib_error(const char* what, int code) {
     const char* text = rigerror(code);
     return std::string(what) + ": " + (text != nullptr ? text : "unknown error") +
            " (" + std::to_string(code) + ")";
+}
+
+// --- Hamlib's own trace, routed somewhere an app can show it ---------
+//
+// Hamlib formats trace lines with `rig_debug(level, fmt, ...)` and hands
+// a registered callback the *unformatted* fmt plus a `va_list`, so the
+// formatting is ours to do. Three details are load-bearing:
+//
+//   * **A line is not a call.** `dump_hex` and the frame tracers emit a
+//     line in several calls and sometimes several lines in one, so the
+//     text is accumulated and split on newlines. A sink handed raw calls
+//     would show a CI-V frame smeared across a dozen entries.
+//   * **The `va_list` is the caller's.** `vsnprintf` consumes it, so
+//     both the sizing pass and the real one take a `va_copy`.
+//   * **Nothing may escape.** This is called from C, through a function
+//     pointer, while Hamlib holds its own debug mutex -- an exception
+//     crossing that boundary is a terminate, and a call back into
+//     `rig_debug` from the sink is a deadlock. Hence the try/catch and
+//     the contract in the header.
+std::mutex& debug_mu() {
+    static std::mutex m;
+    return m;
+}
+
+DebugSink& debug_sink() {
+    static DebugSink sink;
+    return sink;
+}
+
+std::string& debug_partial() {
+    static std::string partial;
+    return partial;
+}
+
+// A frame trace at 115200 is verbose but bounded; this is only here so a
+// sink that has stopped consuming, or a format with no newline in it at
+// all, cannot grow the buffer without limit.
+constexpr std::size_t kMaxPartialBytes = 8192;
+
+std::string format_debug(const char* fmt, va_list ap) {
+    va_list sizing;
+    va_copy(sizing, ap);
+    char stack[512];
+    const int n = std::vsnprintf(stack, sizeof(stack), fmt, sizing);
+    va_end(sizing);
+    if (n < 0) return {};
+    if (static_cast<std::size_t>(n) < sizeof(stack)) {
+        return std::string(stack, static_cast<std::size_t>(n));
+    }
+    std::string big(static_cast<std::size_t>(n), '\0');
+    va_list again;
+    va_copy(again, ap);
+    // `&big[0]` has n+1 writable chars, the last of which holds the
+    // terminator vsnprintf is going to write there anyway.
+    std::vsnprintf(&big[0], static_cast<std::size_t>(n) + 1, fmt, again);
+    va_end(again);
+    return big;
+}
+
+int debug_trampoline(enum rig_debug_level_e, rig_ptr_t, const char* fmt, va_list ap) {
+    try {
+        if (fmt == nullptr) return 0;
+        const std::string text = format_debug(fmt, ap);
+        if (text.empty()) return 0;
+
+        std::vector<std::string> lines;
+        DebugSink sink;
+        {
+            std::lock_guard<std::mutex> lock(debug_mu());
+            sink = debug_sink();
+            if (!sink) return 0;
+            std::string& partial = debug_partial();
+            partial += text;
+            std::size_t start = 0;
+            for (;;) {
+                const std::size_t nl = partial.find('\n', start);
+                if (nl == std::string::npos) break;
+                lines.emplace_back(partial, start, nl - start);
+                start = nl + 1;
+            }
+            partial.erase(0, start);
+            if (partial.size() > kMaxPartialBytes) {
+                lines.push_back(partial);
+                partial.clear();
+            }
+        }
+
+        // Outside the lock: the sink is the app's, may take a lock of
+        // its own, and holding ours across it would make the ordering
+        // between the two a property of whoever wrote the sink.
+        for (const std::string& line : lines) {
+            if (!line.empty() && line.back() == '\r') {
+                sink(line.substr(0, line.size() - 1));
+            } else {
+                sink(line);
+            }
+        }
+    } catch (...) {
+        // Nowhere to report to, and this is a C boundary.
+    }
+    return 0;
 }
 
 class HamlibBackend final : public RigBackend {
@@ -361,6 +472,28 @@ std::string hamlib_version() {
     // failed only on Windows, with exactly one unresolved symbol.
     const char* v = rig_version();
     return v != nullptr ? v : "";
+}
+
+void set_debug_sink(DebugSink sink) {
+    // Not for the registry, which this does not need, but because it is
+    // where the env-driven level is established -- installing a sink
+    // before it would have that call overwrite the level a moment later.
+    load_backends_once();
+
+    const bool active = static_cast<bool>(sink);
+    {
+        std::lock_guard<std::mutex> lock(debug_mu());
+        debug_sink() = std::move(sink);
+        debug_partial().clear();
+    }
+
+    // **Registered only while a sink exists.** A callback that is
+    // installed permanently and returns early swallows the trace rather
+    // than passing it on: `rig_debug` writes to stderr *or* to the
+    // callback, never both, so leaving ours in place would silently
+    // break `SSTVAE_HAMLIB_DEBUG` for every desktop and test run.
+    rig_set_debug_callback(active ? &debug_trampoline : nullptr, nullptr);
+    rig_set_debug(active ? RIG_DEBUG_TRACE : env_debug_level());
 }
 
 }  // namespace sstvae::rig
