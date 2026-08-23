@@ -4,11 +4,13 @@ import QtQuick.Layouts
 
 // Rig control settings: CAT and PTT over USB, Bluetooth or a network.
 //
-// A section of the Settings tab rather than a tab of its own. The tab
-// bar already carries five and a sixth is a crowded row on a phone --
-// and this is a screen an operator visits once per radio, not once per
-// session. What *is* worth seeing every session, the dial frequency,
-// goes on the Listen screen where the waterfall is.
+// A collapsible section of the Settings tab (`SettingsSection.qml`)
+// rather than a tab of its own. The tab bar already carries five and a
+// sixth is a crowded row on a phone -- and this is a screen an operator
+// visits once per radio, not once per session. What *is* worth seeing
+// every session, the dial frequency, goes on the Listen screen where the
+// waterfall is. The section supplies the "Rig control" heading and the
+// on/off summary, so there is no title label here.
 //
 // **Why any of this exists**: `docs/android.md` recorded rig control as
 // structurally impossible here, because Hamlib's serial layer opens a
@@ -25,15 +27,10 @@ ColumnLayout {
 
     // Re-enumerate whenever this becomes visible: USB devices come and
     // go with the cable, and a picker showing a radio that was
-    // unplugged five minutes ago is worse than an empty one.
+    // unplugged five minutes ago is worse than an empty one. The
+    // enclosing section is collapsed by default, so this now fires when
+    // the operator opens Rig control rather than on every Settings visit.
     onVisibleChanged: if (visible) rig.refreshDevices()
-
-    Label {
-        text: "Rig control"
-        font.bold: true
-        Layout.margins: 12
-        Layout.bottomMargin: 0
-    }
 
     Switch {
         text: "Control the radio"

@@ -374,19 +374,23 @@ ApplicationWindow {
 
         // ---- Settings -----------------------------------------------
         //
-        // **Scrolled, because a settings page that does not fit does not
-        // compress -- it truncates**, and what goes first is the
-        // explanatory text at the bottom of the last section. The
-        // desktop has the identical construct for the identical reason
-        // (`QScrollArea` per settings tab): there is no default size
-        // that is right on every panel, and a reader cannot tell
-        // clipped text from text that simply ends. It became true here
-        // the moment the transmit settings landed -- before them the
-        // page fitted, and "Model" was the first thing to disappear
-        // behind the tab bar.
+        // Grouped into collapsible sections (`SettingsSection.qml`)
+        // rather than one flat scroll of every control. The page opens
+        // as a short list of headings an operator can scan -- Receive,
+        // Transmit, Rig control, Model, Advanced -- with the debug
+        // toggle and the multi-sentence help text folded away until a
+        // section is tapped open. See that file for why sub-sections
+        // rather than a second tab bar, and why folding keeps the back
+        // gesture simple.
         //
-        // Horizontal scrolling off: the width is the window's, so a
-        // horizontal bar could only ever mean a label refusing to wrap.
+        // **Still scrolled, because a settings page that does not fit
+        // does not compress -- it truncates**, and what goes first is
+        // the explanatory text at the bottom. Even collapsed the list of
+        // headings can outrun a short phone once every section is open,
+        // and the desktop has the identical construct for the identical
+        // reason (`QScrollArea` per settings tab). Horizontal scrolling
+        // off: the width is the window's, so a horizontal bar could only
+        // ever mean a label refusing to wrap.
         ScrollView {
             id: settingsScroll
             contentWidth: availableWidth
@@ -402,369 +406,407 @@ ApplicationWindow {
             // symptom is not a missing scrollbar but text running off the
             // right edge with nothing to scroll it back.
             width: settingsScroll.availableWidth
-            spacing: 12
+            spacing: 0
 
-            Label {
-                text: "Audio input"
-                font.bold: true
-                Layout.margins: 12
-                Layout.bottomMargin: 0
-            }
-            ComboBox {
-                id: deviceBox
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                model: listener.inputDevices
-                enabled: !listener.listening
-            }
-            Label {
-                text: listener.listening ? listener.audioRoute
-                                         : "Choose before starting; the device cannot change mid-session."
-                font.family: "monospace"
-                font.pixelSize: 11
-                color: "#666"
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                wrapMode: Text.Wrap
-            }
-            // **One button, both directions.** It sits under "Audio
-            // input" because that is where the first device picker is,
-            // but plugging in a USB interface adds a capture *and* a
-            // playback device at the same instant, and a rescan that
-            // refreshed only the list you happened to be looking at is
-            // a button that appears not to work. Two buttons would be
-            // worse: two lists that can disagree about when they were
-            // last looked at.
-            Button {
-                text: "Rescan audio devices"
-                Layout.leftMargin: 12
-                enabled: !listener.listening && !transmitter.transmitting
-                onClicked: {
-                    listener.refreshDevices()
-                    transmitter.refreshDevices()
+            // ---- Receive --------------------------------------------
+            SettingsSection {
+                title: "Receive"
+
+                Label {
+                    text: "Audio input"
+                    font.bold: true
+                    font.pixelSize: 12
+                    color: "#888"
+                    Layout.leftMargin: 12
                 }
-            }
-            Label {
-                text: "Refreshes both the input and output lists."
-                font.pixelSize: 11
-                color: "#666"
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                wrapMode: Text.Wrap
-            }
-
-            Label {
-                text: "Station"
-                font.bold: true
-                Layout.margins: 12
-                Layout.bottomMargin: 0
-            }
-            TextField {
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                placeholderText: "Callsign"
-                text: transmitter.callsign
-                // Written on every keystroke rather than on editing
-                // finished: a phone keyboard is dismissed by the back
-                // gesture as often as by a done key, and that path fires
-                // no editingFinished at all — so the callsign would be
-                // silently lost by the most ordinary way of leaving the
-                // field.
-                onTextEdited: transmitter.callsign = text
-                inputMethodHints: Qt.ImhUppercaseOnly | Qt.ImhNoPredictiveText
-            }
-            Label {
-                text: "Sent on the beacon carrier with every transmission, and "
-                      + "used by the CW ID. Every receiver decodes it, so nothing "
-                      + "is written into the picture."
-                font.pixelSize: 11
-                color: "#666"
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                wrapMode: Text.Wrap
-            }
-
-            Label {
-                text: "Transmit"
-                font.bold: true
-                Layout.margins: 12
-                Layout.bottomMargin: 0
-            }
-            ComboBox {
-                id: outputBox
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                model: transmitter.outputDevices
-                enabled: !transmitter.transmitting
-                currentIndex: Math.max(0, model.indexOf(transmitter.outputDevice))
-                onActivated: transmitter.outputDevice = currentValue
-            }
-            RowLayout {
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                Label { text: "Level" }
-                Slider {
+                ComboBox {
+                    id: deviceBox
                     Layout.fillWidth: true
-                    from: 0.1
-                    to: 1.0
-                    value: transmitter.level
-                    enabled: !transmitter.transmitting
-                    onMoved: transmitter.level = value
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    model: listener.inputDevices
+                    enabled: !listener.listening
                 }
                 Label {
-                    text: Math.round(transmitter.level * 100) + "%"
+                    text: listener.listening ? listener.audioRoute
+                                             : "Choose before starting; the device cannot change mid-session."
+                    font.family: "monospace"
+                    font.pixelSize: 11
                     color: "#666"
-                }
-            }
-            Label {
-                text: "Set this so the radio's ALC barely moves. The waveform is "
-                      + "already clipped to its designed 4.2 dB peak-to-average; "
-                      + "driving it harder splatters rather than getting out further."
-                font.pixelSize: 11
-                color: "#666"
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                wrapMode: Text.Wrap
-            }
-
-            Switch {
-                text: "VOX leader tone"
-                Layout.leftMargin: 4
-                checked: transmitter.voxLead > 0
-                enabled: !transmitter.transmitting
-                onToggled: transmitter.voxLead = checked ? 0.5 : 0.0
-            }
-            Label {
-                text: "Half a second of swept tone before each transmission, to "
-                      + "bring a VOX-keyed radio up before the signal starts. "
-                      + "Leave it off if the radio is keyed any other way — it is "
-                      + "airtime."
-                font.pixelSize: 11
-                color: "#666"
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                wrapMode: Text.Wrap
-            }
-
-            Switch {
-                text: "CW identification"
-                Layout.leftMargin: 4
-                checked: transmitter.cwId
-                enabled: !transmitter.transmitting
-                onToggled: transmitter.cwId = checked
-            }
-            TextField {
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                visible: transmitter.cwId
-                text: transmitter.cwMessage
-                onTextEdited: transmitter.cwMessage = text
-            }
-            Label {
-                text: "Morse at 18 wpm after the picture, under the same key-up. "
-                      + "{callsign} is replaced. The default also advertises the "
-                      + "mode, so someone who hears the signal and does not know "
-                      + "what it is can find out."
-                font.pixelSize: 11
-                color: "#666"
-                visible: transmitter.cwId
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                wrapMode: Text.Wrap
-            }
-            // Shown here as well as on the transmit screen, because this
-            // is the screen the fix is on. Send is disabled while this
-            // has anything to say.
-            Label {
-                text: transmitter.cwIdProblem
-                font.pixelSize: 11
-                color: "#c00"
-                visible: text.length > 0
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                wrapMode: Text.Wrap
-            }
-
-            Label {
-                text: "Receive"
-                font.bold: true
-                Layout.margins: 12
-                Layout.bottomMargin: 0
-            }
-            // Both take effect on the *next* Start, not mid-session --
-            // same as the device picker above, and disabled the same
-            // way, so there is nothing here that looks live while
-            // listening and silently isn't.
-            Switch {
-                text: "Wide frequency search"
-                Layout.leftMargin: 4
-                enabled: !listener.listening
-                checked: listener.blindWide
-                onToggled: listener.blindWide = checked
-            }
-            Label {
-                text: "Picks up a station whose dial is off by up to 625 Hz, at "
-                      + "some extra CPU cost. Only affects picking up a "
-                      + "transmission already in progress — finding the *start* "
-                      + "of one is always this wide, because there it's free."
-                font.pixelSize: 11
-                color: "#666"
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                wrapMode: Text.Wrap
-            }
-            RowLayout {
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                Label { text: "Track drift" }
-                ComboBox {
-                    id: driftTrackBox
                     Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    wrapMode: Text.Wrap
+                }
+                // **One button, both directions.** It sits under "Audio
+                // input" because that is where the first device picker
+                // is, but plugging in a USB interface adds a capture
+                // *and* a playback device at the same instant, and a
+                // rescan that refreshed only the list you happened to be
+                // looking at is a button that appears not to work. Two
+                // buttons would be worse: two lists that can disagree
+                // about when they were last looked at.
+                Button {
+                    text: "Rescan audio devices"
+                    Layout.leftMargin: 12
+                    enabled: !listener.listening && !transmitter.transmitting
+                    onClicked: {
+                        listener.refreshDevices()
+                        transmitter.refreshDevices()
+                    }
+                }
+                Label {
+                    text: "Refreshes both the input and output lists."
+                    font.pixelSize: 11
+                    color: "#666"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    wrapMode: Text.Wrap
+                }
+
+                Label {
+                    text: "Tuning"
+                    font.bold: true
+                    font.pixelSize: 12
+                    color: "#888"
+                    Layout.leftMargin: 12
+                    Layout.topMargin: 8
+                }
+                // Both take effect on the *next* Start, not mid-session
+                // -- same as the device picker above, and disabled the
+                // same way, so there is nothing here that looks live
+                // while listening and silently isn't.
+                Switch {
+                    text: "Wide frequency search"
+                    Layout.leftMargin: 4
                     enabled: !listener.listening
-                    textRole: "text"
-                    valueRole: "value"
-                    model: [
-                        { text: "Off", value: "off" },
-                        { text: "Slow (drifting radio)", value: "slow" },
-                        { text: "Fast (VHF, satellite)", value: "fast" }
-                    ]
-                    Component.onCompleted: currentIndex = indexOfValue(listener.driftTrack)
-                    onActivated: listener.driftTrack = currentValue
+                    checked: listener.blindWide
+                    onToggled: listener.blindWide = checked
+                }
+                Label {
+                    text: "Picks up a station whose dial is off by up to 625 Hz, at "
+                          + "some extra CPU cost. Only affects picking up a "
+                          + "transmission already in progress — finding the *start* "
+                          + "of one is always this wide, because there it's free."
+                    font.pixelSize: 11
+                    color: "#666"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    wrapMode: Text.Wrap
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    Label { text: "Track drift" }
+                    ComboBox {
+                        id: driftTrackBox
+                        Layout.fillWidth: true
+                        enabled: !listener.listening
+                        textRole: "text"
+                        valueRole: "value"
+                        model: [
+                            { text: "Off", value: "off" },
+                            { text: "Slow (drifting radio)", value: "slow" },
+                            { text: "Fast (VHF, satellite)", value: "fast" }
+                        ]
+                        Component.onCompleted: currentIndex = indexOfValue(listener.driftTrack)
+                        onActivated: listener.driftTrack = currentValue
+                    }
+                }
+                Label {
+                    // Off/slow/fast, not a gain: the two settings are
+                    // not more and less of one thing, so "fast" is not
+                    // simply better at everything "slow" does — see the
+                    // desktop dialog's identical note.
+                    text: "Follows a carrier that moves during a transmission. Off "
+                          + "suits HF with a modern radio, which usually doesn't "
+                          + "drift far enough to matter. Fast is for VHF, satellite "
+                          + "and EME use, where it costs more if the signal is "
+                          + "fading heavily rather than drifting."
+                    font.pixelSize: 11
+                    color: "#666"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    wrapMode: Text.Wrap
+                }
+
+                Label {
+                    text: "Received pictures"
+                    font.bold: true
+                    font.pixelSize: 12
+                    color: "#888"
+                    Layout.leftMargin: 12
+                    Layout.topMargin: 8
+                }
+                Switch {
+                    text: "Save to gallery"
+                    Layout.leftMargin: 4
+                    checked: listener.saveToGallery
+                    onToggled: listener.saveToGallery = checked
+                }
+                Label {
+                    // Says what it does *and* what follows from it. The
+                    // consequence is the part an operator cannot guess:
+                    // "save to gallery" sounds local, and on a phone
+                    // with photo backup switched on it is not.
+                    text: "Copies each reception into Pictures/SSTVAE, where the "
+                          + "gallery and Google Photos will show it as a device "
+                          + "folder. Whatever arrives on the band goes into your "
+                          + "camera roll — and into your photo backup, if you have "
+                          + "one. Receptions are always kept in the app either way."
+                    font.pixelSize: 11
+                    color: "#666"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    wrapMode: Text.Wrap
+                }
+                Label {
+                    // The export runs in the service, after the operator
+                    // has stopped looking, so this is the only place a
+                    // failure can surface at all. Cleared by the next
+                    // success.
+                    text: "Last export failed: " + listener.galleryError
+                    visible: listener.saveToGallery && listener.galleryError !== ""
+                    font.pixelSize: 11
+                    color: "#a60"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    wrapMode: Text.Wrap
                 }
             }
-            Label {
-                // Off/slow/fast, not a gain: the two settings are not
-                // more and less of one thing, so "fast" is not simply
-                // better at everything "slow" does — see the desktop
-                // dialog's identical note.
-                text: "Follows a carrier that moves during a transmission. Off "
-                      + "suits HF with a modern radio, which usually doesn't "
-                      + "drift far enough to matter. Fast is for VHF, satellite "
-                      + "and EME use, where it costs more if the signal is "
-                      + "fading heavily rather than drifting."
-                font.pixelSize: 11
-                color: "#666"
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                wrapMode: Text.Wrap
+
+            // ---- Transmit -------------------------------------------
+            SettingsSection {
+                title: "Transmit"
+                summary: transmitter.callsign !== "" ? transmitter.callsign
+                                                     : "No callsign set"
+
+                Label {
+                    text: "Callsign"
+                    font.bold: true
+                    font.pixelSize: 12
+                    color: "#888"
+                    Layout.leftMargin: 12
+                }
+                TextField {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    placeholderText: "Callsign"
+                    text: transmitter.callsign
+                    // Written on every keystroke rather than on editing
+                    // finished: a phone keyboard is dismissed by the
+                    // back gesture as often as by a done key, and that
+                    // path fires no editingFinished at all — so the
+                    // callsign would be silently lost by the most
+                    // ordinary way of leaving the field.
+                    onTextEdited: transmitter.callsign = text
+                    inputMethodHints: Qt.ImhUppercaseOnly | Qt.ImhNoPredictiveText
+                }
+                Label {
+                    text: "Sent on the beacon carrier with every transmission, and "
+                          + "used by the CW ID. Every receiver decodes it, so nothing "
+                          + "is written into the picture."
+                    font.pixelSize: 11
+                    color: "#666"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    wrapMode: Text.Wrap
+                }
+
+                Label {
+                    text: "Output"
+                    font.bold: true
+                    font.pixelSize: 12
+                    color: "#888"
+                    Layout.leftMargin: 12
+                    Layout.topMargin: 8
+                }
+                ComboBox {
+                    id: outputBox
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    model: transmitter.outputDevices
+                    enabled: !transmitter.transmitting
+                    currentIndex: Math.max(0, model.indexOf(transmitter.outputDevice))
+                    onActivated: transmitter.outputDevice = currentValue
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    Label { text: "Level" }
+                    Slider {
+                        Layout.fillWidth: true
+                        from: 0.1
+                        to: 1.0
+                        value: transmitter.level
+                        enabled: !transmitter.transmitting
+                        onMoved: transmitter.level = value
+                    }
+                    Label {
+                        text: Math.round(transmitter.level * 100) + "%"
+                        color: "#666"
+                    }
+                }
+                Label {
+                    text: "Set this so the radio's ALC barely moves. The waveform is "
+                          + "already clipped to its designed 4.2 dB peak-to-average; "
+                          + "driving it harder splatters rather than getting out further."
+                    font.pixelSize: 11
+                    color: "#666"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    wrapMode: Text.Wrap
+                }
+
+                Switch {
+                    text: "VOX leader tone"
+                    Layout.leftMargin: 4
+                    Layout.topMargin: 8
+                    checked: transmitter.voxLead > 0
+                    enabled: !transmitter.transmitting
+                    onToggled: transmitter.voxLead = checked ? 0.5 : 0.0
+                }
+                Label {
+                    text: "Half a second of swept tone before each transmission, to "
+                          + "bring a VOX-keyed radio up before the signal starts. "
+                          + "Leave it off if the radio is keyed any other way — it is "
+                          + "airtime."
+                    font.pixelSize: 11
+                    color: "#666"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    wrapMode: Text.Wrap
+                }
+
+                Switch {
+                    text: "CW identification"
+                    Layout.leftMargin: 4
+                    checked: transmitter.cwId
+                    enabled: !transmitter.transmitting
+                    onToggled: transmitter.cwId = checked
+                }
+                TextField {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    visible: transmitter.cwId
+                    text: transmitter.cwMessage
+                    onTextEdited: transmitter.cwMessage = text
+                }
+                Label {
+                    text: "Morse at 18 wpm after the picture, under the same key-up. "
+                          + "{callsign} is replaced. The default also advertises the "
+                          + "mode, so someone who hears the signal and does not know "
+                          + "what it is can find out."
+                    font.pixelSize: 11
+                    color: "#666"
+                    visible: transmitter.cwId
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    wrapMode: Text.Wrap
+                }
+                // Shown here as well as on the transmit screen, because
+                // this is the screen the fix is on. Send is disabled
+                // while this has anything to say.
+                Label {
+                    text: transmitter.cwIdProblem
+                    font.pixelSize: 11
+                    color: "#c00"
+                    visible: text.length > 0
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    wrapMode: Text.Wrap
+                }
             }
 
-            RigPane {
-                rig: rigControl
-                Layout.fillWidth: true
+            // ---- Rig control ----------------------------------------
+            //
+            // RigPane draws its own body; the section supplies the
+            // heading and the on/off summary, so its internal title
+            // label was dropped when it moved in here.
+            SettingsSection {
+                title: "Rig control"
+                summary: rigControl.enabled
+                         ? (rigControl.running ? "Connected" : "On")
+                         : "Off"
+
+                RigPane {
+                    rig: rigControl
+                    Layout.fillWidth: true
+                }
             }
 
-            Label {
-                text: "Received pictures"
-                font.bold: true
-                Layout.margins: 12
-                Layout.bottomMargin: 0
-            }
-            Switch {
-                text: "Save to gallery"
-                Layout.leftMargin: 4
-                checked: listener.saveToGallery
-                onToggled: listener.saveToGallery = checked
-            }
-            Label {
-                // Says what it does *and* what follows from it. The
-                // consequence is the part an operator cannot guess:
-                // "save to gallery" sounds local, and on a phone with
-                // photo backup switched on it is not.
-                text: "Copies each reception into Pictures/SSTVAE, where the "
-                      + "gallery and Google Photos will show it as a device "
-                      + "folder. Whatever arrives on the band goes into your "
-                      + "camera roll — and into your photo backup, if you have "
-                      + "one. Receptions are always kept in the app either way."
-                font.pixelSize: 11
-                color: "#666"
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                wrapMode: Text.Wrap
-            }
-            Label {
-                // The export runs in the service, after the operator has
-                // stopped looking, so this is the only place a failure
-                // can surface at all. Cleared by the next success.
-                text: "Last export failed: " + listener.galleryError
-                visible: listener.saveToGallery && listener.galleryError !== ""
-                font.pixelSize: 11
-                color: "#a60"
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                wrapMode: Text.Wrap
+            // ---- Model ----------------------------------------------
+            SettingsSection {
+                title: "Model"
+                summary: listener.modelReady ? "Ready" : "Not ready"
+
+                Label {
+                    text: listener.modelStatus
+                    font.family: "monospace"
+                    font.pixelSize: 11
+                    color: listener.modelReady ? "#3a3" : "#a60"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    wrapMode: Text.Wrap
+                }
+                Button {
+                    text: "Retry model download"
+                    Layout.leftMargin: 12
+                    visible: !listener.modelReady
+                    onClicked: listener.loadModel()
+                }
             }
 
-            Label {
-                text: "Model"
-                font.bold: true
-                Layout.margins: 12
-                Layout.bottomMargin: 0
-            }
-            Label {
-                text: listener.modelStatus
-                font.family: "monospace"
-                font.pixelSize: 11
-                color: listener.modelReady ? "#3a3" : "#a60"
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                wrapMode: Text.Wrap
-            }
-            Button {
-                text: "Retry model download"
-                Layout.leftMargin: 12
-                visible: !listener.modelReady
-                onClicked: listener.loadModel()
+            // ---- Advanced -------------------------------------------
+            //
+            // The debug toggle, on its own and last: an operator never
+            // reaches for it, and folding it here is what keeps it out
+            // of the column the callsign and the device picker are in.
+            SettingsSection {
+                title: "Advanced"
+                summary: listener.showTechnical ? "Technical details on" : ""
+
+                Switch {
+                    text: "Show technical details"
+                    Layout.leftMargin: 4
+                    checked: listener.showTechnical
+                    onToggled: listener.showTechnical = checked
+                }
+                Label {
+                    // Says what it is *for*, not what it shows. Someone
+                    // reading this is either curious or being walked
+                    // through a problem by whoever wrote the app, and
+                    // the second reader is the one who needs to know the
+                    // switch exists.
+                    text: "Signal levels, capture timing, decode cost and poll counts, "
+                          + "on the Listen screen and in the notification. Useful when "
+                          + "something is not decoding and worth reporting with a bug."
+                    font.pixelSize: 11
+                    color: "#666"
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 12
+                    Layout.rightMargin: 12
+                    wrapMode: Text.Wrap
+                }
             }
 
-            Label {
-                text: "Advanced"
-                font.bold: true
-                Layout.margins: 12
-                Layout.bottomMargin: 0
-            }
-            Switch {
-                text: "Show technical details"
-                Layout.leftMargin: 4
-                checked: listener.showTechnical
-                onToggled: listener.showTechnical = checked
-            }
-            Label {
-                // Says what it is *for*, not what it shows. Someone
-                // reading this is either curious or being walked
-                // through a problem by whoever wrote the app, and the
-                // second reader is the one who needs to know the
-                // switch exists.
-                text: "Signal levels, capture timing, decode cost and poll counts, "
-                      + "on the Listen screen and in the notification. Useful when "
-                      + "something is not decoding and worth reporting with a bug."
-                font.pixelSize: 11
-                color: "#666"
-                Layout.fillWidth: true
-                Layout.leftMargin: 12
-                Layout.rightMargin: 12
-                wrapMode: Text.Wrap
-            }
-
-            // Breathing room under the last control, so it is not
+            // Breathing room under the last section, so it is not
             // pressed against the tab bar at the end of the scroll.
             Item { Layout.preferredHeight: 24 }
         }
