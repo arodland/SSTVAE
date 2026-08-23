@@ -324,21 +324,36 @@ std::vector<SerialDevice> usb_devices() { return device_list("usbDevices"); }
 std::vector<SerialDevice> bluetooth_devices() { return device_list("bluetoothDevices"); }
 
 bool has_permission(const std::string& id) {
-    Env env;
-    jclass cls = env.bridge();
-    jmethodID m = env->GetStaticMethodID(cls, "hasPermission", "(Ljava/lang/String;)Z");
-    if (m == nullptr) {
-        env->ExceptionClear();
+    // **A query answers; an action reports.** This is read from a QML
+    // property binding, where a thrown exception terminates the
+    // process -- so "the layer is not initialised" and "the JNI call
+    // failed" both become false, which is the truthful answer to "may
+    // the app open this device right now" in either case. The
+    // enumerators below are the other half of the rule: they are called
+    // from an explicit refresh that catches and shows the message, so
+    // there they throw rather than return an empty list that reads as
+    // "nothing is plugged in".
+    if (!ready()) return false;
+    try {
+        Env env;
+        jclass cls = env.bridge();
+        jmethodID m = env->GetStaticMethodID(cls, "hasPermission",
+                                             "(Ljava/lang/String;)Z");
+        if (m == nullptr) {
+            env->ExceptionClear();
+            return false;
+        }
+        jstring s = env->NewStringUTF(id.c_str());
+        const jboolean ok = env->CallStaticBooleanMethod(cls, m, s);
+        env->DeleteLocalRef(s);
+        if (env->ExceptionCheck() != JNI_FALSE) {
+            env->ExceptionClear();
+            return false;
+        }
+        return ok != JNI_FALSE;
+    } catch (const std::exception&) {
         return false;
     }
-    jstring s = env->NewStringUTF(id.c_str());
-    const jboolean ok = env->CallStaticBooleanMethod(cls, m, s);
-    env->DeleteLocalRef(s);
-    if (env->ExceptionCheck() != JNI_FALSE) {
-        env->ExceptionClear();
-        return false;
-    }
-    return ok != JNI_FALSE;
 }
 
 void request_permission(const std::string& id) {

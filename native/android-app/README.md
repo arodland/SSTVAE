@@ -1084,6 +1084,36 @@ follows. The Send screen says which one is in force, but only when it is
 rig keying: saying "VOX" every time when VOX is the only option trains
 the eye to skip the line.
 
+**The platform layer needs an explicit init, and forgetting it looked
+like two unrelated bugs.** `rig::android::set_java_vm` and
+`SerialBridge.init(Context)` were never called — `init_rig_bridge` in
+`rigcontrol.cpp` does it now, from `RigControl`'s constructor, which is
+on the UI thread for the `FindClass` reason `core/audio/android/`
+records. `listener.cpp`'s `init_audio_bridge` is the same four lines for
+the audio layer.
+
+What made it cost a round was not the missing call. The layer threw a
+perfectly good message — "set_java_vm() was never called" — and two
+things ate it:
+
+- `refreshDevices()` caught every exception and cleared the list, so the
+  screen said "Nothing plugged in. Connect the radio…", which was a
+  confident lie with a radio attached. **An enumeration that threw is
+  not one that came back empty**, and it shows the message now.
+  "Nothing connected" and "Bluetooth not granted" are still ordinary
+  empty lists with no error.
+- `bluetoothReady()` did *not* catch, and it is read from a QML property
+  binding — where an exception terminates the process. It crashed on
+  switching to Bluetooth, then at every launch, because the connection
+  kind is persisted and the binding is evaluated on load. **Nothing
+  reaching JNI may throw from a getter.**
+
+The rule that came out of it, now written into `androidrig.cpp`: **a
+query answers, an action reports.** `has_permission` returns false when
+it cannot ask — the truthful answer to "may the app open this right
+now" — while the enumerators throw, because their caller catches and has
+somewhere to show it.
+
 **What is not tested on hardware.** Everything in this section. The
 composite-device question in particular is worth settling first with the
 actual radio: most rig USB interfaces present audio and CDC serial

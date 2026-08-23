@@ -1,10 +1,13 @@
 #include "rigcontrol.hpp"
 
+#include <QJniEnvironment>
+#include <QJniObject>
 #include <QLatin1String>
 #include <QPointer>
 #include <QSettings>
 #include <QGuiApplication>
 #include <QVariantMap>
+#include <QtCore/qcoreapplication_platform.h>
 
 #include <algorithm>
 #include <memory>
@@ -29,6 +32,40 @@ using namespace sstvae;
 using sstvae::androidapp::Session;
 
 namespace {
+
+// Hand the rig layer the VM and an application Context.
+//
+// **This was missing, and both of the rig screen's first two bugs on
+// hardware were it.** Without the VM the layer cannot resolve
+// `SerialBridge` at all, so `usb_devices()` threw and the device list
+// came back silently empty; and `has_permission()` threw from inside a
+// QML property getter, which is not a place an exception can go -- it
+// took the process down, and did it again at every launch, because the
+// connection kind is persisted.
+//
+// Called from `RigControl`'s constructor rather than from `main`, for
+// the reason `core/audio/android/` records about `FindClass`: the class
+// reference has to be taken on a thread with the app's class loader on
+// its stack, and this object is constructed by QML on exactly that
+// thread. `listener.cpp`'s `init_audio_bridge` is the same four lines
+// for the same reason.
+bool init_rig_bridge(QString* error) {
+    rig::android::set_java_vm(
+        reinterpret_cast<rig::android::JavaVM_*>(QJniEnvironment::javaVM()));
+
+    QJniObject ctx = QNativeInterface::QAndroidApplication::context();
+    if (!ctx.isValid()) {
+        *error = QObject::tr("no Android context; rig control is unavailable");
+        return false;
+    }
+    QJniObject::callStaticMethod<void>("org/cleverdomain/sstvae/SerialBridge", "init",
+                                       "(Landroid/content/Context;)V", ctx.object());
+    if (QJniEnvironment().checkAndClearExceptions()) {
+        *error = QObject::tr("SerialBridge.init failed; rig control is unavailable");
+        return false;
+    }
+    return true;
+}
 
 // Spelled once each, per the discipline `transmitter.hpp` records: a
 // setting displayed and written back through two different spellings is
@@ -85,6 +122,16 @@ bool have_rig_support() {
 
 RigControl::RigControl(QObject* parent) : QObject(parent) {
     load();
+
+    // Before anything else here touches the rig layer -- including the
+    // `connectRig()` at the end of this constructor.
+    if (!init_rig_bridge(&error_)) {
+        // Not fatal: the screen still renders and says why. Everything
+        // below is written to cope with the layer being unavailable,
+        // which is also what makes this recoverable rather than a crash.
+        layer_ok_ = false;
+        enabled_ = false;
+    }
 
     // A guarded pointer, not a raw capture: the callback is queued, so
     // an event can still be in flight when a rotation destroys this
@@ -150,7 +197,12 @@ void RigControl::save() {
 }
 
 void RigControl::setEnabled(bool on) {
-    if (on && !have_rig_support()) return;
+    // Two different reasons to refuse, and the message already on
+    // `error_` distinguishes them: the build has no Hamlib, or the
+    // platform layer did not come up. Refusing silently would leave a
+    // switch that springs back with no explanation, so neither clears
+    // the status text.
+    if (on && (!have_rig_support() || !layer_ok_)) return;
     if (on == enabled_) return;
     enabled_ = on;
     save();
@@ -312,12 +364,18 @@ void RigControl::refreshDevices() {
             found = connection_ == QLatin1String("bluetooth")
                         ? rig::android::bluetooth_devices()
                         : rig::android::usb_devices();
-        } catch (const std::exception&) {
-            // An empty list, not an error banner: "no radio plugged in"
-            // and "the Bluetooth permission has not been granted" are
-            // both ordinary states of this screen, and the screen says
-            // so in its own words.
+        } catch (const std::exception& e) {
+            // An enumeration that *threw* is not the same as one that
+            // came back empty, and conflating them is what made the
+            // first hardware failure invisible: with the JNI layer
+            // uninitialised the list was empty and the screen said "no
+            // radio plugged in", which was a confident lie.
+            //
+            // "Nothing connected" and "Bluetooth not granted" are
+            // ordinary states and still produce an empty list with no
+            // error; this is only for the ones that raised.
             found.clear();
+            error_ = QString::fromStdString(e.what());
         }
         for (const rig::android::SerialDevice& d : found) {
             QVariantMap row;
@@ -427,7 +485,16 @@ bool RigControl::failed() const {
 }
 
 bool RigControl::bluetoothReady() const {
-    return rig::android::has_permission("bt:");
+    // **Nothing that reaches JNI may throw from here.** This is read by
+    // a QML binding, and an exception crossing that boundary terminates
+    // the process -- which is exactly what it did when the layer was
+    // uninitialised, at every launch, because the connection kind is
+    // persisted and the binding is evaluated on load.
+    try {
+        return rig::android::has_permission("bt:");
+    } catch (const std::exception&) {
+        return false;
+    }
 }
 
 QString RigControl::frequency() const {

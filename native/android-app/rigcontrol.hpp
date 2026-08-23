@@ -182,6 +182,12 @@ private:
     int baud_ = 0;  // 0 = whatever the chosen backend would have used
     QString ptt_ = QStringLiteral("cat");
 
+    // False when `init_rig_bridge` could not hand the layer a VM and a
+    // Context. Distinct from the compile-time `SSTVAE_ANDROID_HAVE_RIG`:
+    // that says the build has Hamlib, this says the platform side came
+    // up. Either way the switch will not turn on, and `status` says why.
+    bool layer_ok_ = true;
+
     QVariantList devices_;
     // Set by a failed `connectRig` and shown in place of the session's
     // status, which for a configuration that never reached `start_rig`
