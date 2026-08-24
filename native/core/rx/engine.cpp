@@ -299,7 +299,7 @@ const char* status_name(Status s) {
     return "listening";
 }
 
-Progress::Progress() : snr_db(kNaN) {}
+Progress::Progress() : snr_db(kNaN), blind_score(kNaN) {}
 
 Progress SharedState::get() const {
     std::lock_guard<std::mutex> lock(m_);
@@ -410,6 +410,8 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
         double progress_frac = 0.0;
         int progress_metric = 0;
         std::optional<std::int64_t> reception_start;
+        double blind_score = kNaN;
+        bool blind_locked = false;
 
         // Preamble path first: find and decode the strongest reception
         // that has not already been handled. Falls through to the blind
@@ -474,12 +476,14 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
                 blind_acc_pushed = static_cast<std::int64_t>(total);
             }
 
+            blind_score = blind_acc->best_score();
             std::optional<sync::BlindAcquisition> ba;
             try {
                 ba = blind_acc->result();
             } catch (const sync::SyncError&) {
                 ba = std::nullopt;
             }
+            blind_locked = ba.has_value();
 
             std::optional<modem::BlindDemodResult> rb;
             if (ba) {
@@ -542,7 +546,11 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
         }
 
         const double decode_s = seconds_since(t0);
-        state.update([&](Progress& s) { s.last_decode_s = decode_s; });
+        state.update([&](Progress& s) {
+            s.last_decode_s = decode_s;
+            s.blind_score = blind_score;
+            s.blind_locked = blind_locked;
+        });
 
         bool advanced = false;
         const bool decoded = have_latents && reception_start.has_value();

@@ -488,6 +488,31 @@ void BlindAccumulator::push(std::span<const cdouble> z, std::int64_t start_sampl
     buf_start_ += static_cast<std::int64_t>(pos);
 }
 
+double BlindAccumulator::best_score() const {
+    // Observability, not decision-making: result() below is the only
+    // lock gate. A below-threshold score is otherwise invisible in live
+    // operation -- the loop's blind branch silently does nothing -- and
+    // a receiver that fails to acquire on real hardware then gives no
+    // number to compare against the threshold's calibration.
+    if (n_valid_ < static_cast<std::int64_t>(FRAME_SAMPLES) * min_periods_) return 0.0;
+    const std::size_t scale_stride =
+        shift_bins_.size() * static_cast<std::size_t>(FRAME_SAMPLES);
+    double best = 0.0;
+    for (int t = 0; t < n_scales_; ++t) {
+        const double* scale_base = &folded_[static_cast<std::size_t>(t) * scale_stride];
+        for (std::size_t bi = 0; bi < shift_bins_.size(); ++bi) {
+            const std::span<const double> row(
+                scale_base + bi * static_cast<std::size_t>(FRAME_SAMPLES),
+                static_cast<std::size_t>(FRAME_SAMPLES));
+            const std::size_t peak = argmax(row);
+            const double score =
+                row[peak] / (median(std::vector<double>(row.begin(), row.end())) + 1e-12);
+            best = std::max(best, score);
+        }
+    }
+    return best;
+}
+
 BlindAcquisition BlindAccumulator::result() const {
     if (n_valid_ < static_cast<std::int64_t>(FRAME_SAMPLES) * min_periods_)
         throw SyncError("window too short for blind acquisition");

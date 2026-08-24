@@ -213,6 +213,19 @@ struct Progress {
     // it is what lets the tests assert on the state machine's decisions
     // without asserting on how fast it makes them.
     std::uint64_t polls = 0;
+    // Blind-path observability, refreshed every poll the blind branch
+    // runs (NaN / false when it didn't). The score is the accumulator's
+    // best prominence whether or not it clears BLIND_SCORE_THRESHOLD --
+    // a below-threshold score is otherwise invisible in live operation,
+    // and a receiver that fails to acquire on real hardware gives no
+    // number to compare against the threshold's calibration.
+    // blind_locked distinguishes the two ways the blind path can be
+    // silently stuck: score below threshold, and locked with the beacon
+    // not decoding -- which mean opposite things (the second is a
+    // payload/format problem, e.g. a pre-PROTOCOL_VERSION-4 sender, not
+    // a weak signal).
+    double blind_score = 0.0;  // NaN when the blind branch didn't run
+    bool blind_locked = false;
 
     Progress();
 };

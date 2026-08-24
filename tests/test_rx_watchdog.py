@@ -263,6 +263,9 @@ def test_blind_reach_at_the_last_frame_does_not_complete_the_reception(stub_mode
         def push(self, z, start_sample):
             pass
 
+        def best_score(self):
+            return 12.0  # anything; the loop only reports it
+
         def result(self):
             return object()  # non-None: the loop only forwards it
 

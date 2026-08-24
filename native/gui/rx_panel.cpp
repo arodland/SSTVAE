@@ -490,6 +490,18 @@ void ReceivePanel::refresh_status() {
     if (progress.status == rx::Status::Listening) {
         text = tr("Listening... (%1 s captured)")
                    .arg(progress.seconds_captured, 0, 'f', 0);
+        // The blind path's live diagnostic: without it, "score below
+        // threshold" and "locked but the beacon isn't decoding" are
+        // both just silence, and they mean opposite things -- the
+        // first a weak (or interfered-with) signal, the second a
+        // payload/format problem such as a sender on an older
+        // PROTOCOL_VERSION.
+        if (progress.blind_locked) {
+            text += SEP + tr("blind locked (%1) -- no beacon decoded yet")
+                              .arg(progress.blind_score, 0, 'f', 1);
+        } else if (!std::isnan(progress.blind_score) && progress.blind_score > 0.0) {
+            text += SEP + tr("blind score %1").arg(progress.blind_score, 0, 'f', 1);
+        }
     } else if (progress.status == rx::Status::Receiving) {
         if (progress.n_frames_expected) {
             text = tr("Receiving mode %1: frame %2/%3 (%4%)")

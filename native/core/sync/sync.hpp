@@ -122,6 +122,11 @@ class BlindAccumulator {
 
     void push(std::span<const cdouble> z, std::int64_t start_sample);
     BlindAcquisition result() const;
+    // The current best prominence whether or not it clears the
+    // threshold; 0.0 while too little has been pushed. Observability
+    // for the live loop's status surfaces -- result() stays the only
+    // lock gate. See the .cpp.
+    double best_score() const;
 
    private:
     int m_;
