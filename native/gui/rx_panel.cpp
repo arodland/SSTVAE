@@ -490,18 +490,14 @@ void ReceivePanel::refresh_status() {
     if (progress.status == rx::Status::Listening) {
         text = tr("Listening... (%1 s captured)")
                    .arg(progress.seconds_captured, 0, 'f', 0);
-        // The blind path's live diagnostic: without it, "score below
-        // threshold" and "locked but the beacon isn't decoding" are
-        // both just silence, and they mean opposite things -- the
-        // first a weak (or interfered-with) signal, the second a
-        // payload/format problem such as a sender on an older
-        // PROTOCOL_VERSION.
-        if (progress.blind_locked) {
-            text += SEP + tr("blind locked (%1) -- no beacon decoded yet")
-                              .arg(progress.blind_score, 0, 'f', 1);
-        } else if (!std::isnan(progress.blind_score) && progress.blind_score > 0.0) {
-            text += SEP + tr("blind score %1").arg(progress.blind_score, 0, 'f', 1);
-        }
+        // Progress.blind_score / blind_locked are deliberately NOT
+        // shown here: the raw prominence number needs interpretation
+        // (what threshold, what the two stuck states mean) that a
+        // status line can't carry, so surfacing it to the operator is
+        // a design question still open (Andrew, 2026-08-24). The
+        // machinery stays -- the engine refreshes both fields every
+        // poll, and the CLI listener and Android technical view still
+        // display them as diagnostics.
     } else if (progress.status == rx::Status::Receiving) {
         if (progress.n_frames_expected) {
             text = tr("Receiving mode %1: frame %2/%3 (%4%)")
