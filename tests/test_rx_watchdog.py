@@ -221,6 +221,77 @@ def test_a_complete_reception_still_finishes_on_its_frame_count(stub_modem):
     assert sink.receptions[0].frames_received == MODE_A.n_frames
 
 
+def test_blind_reach_at_the_last_frame_does_not_complete_the_reception(stub_modem, monkeypatch):
+    """The blind path's frames_received is a *reach* (the furthest frame
+    decoded), reported so the status line's frame counter advances in
+    step with its percentage -- not a contiguous count. A reach at the
+    transmission's last frame is exactly when retrospective backfill is
+    still filling erasures behind it, so the header path's
+    "frames_received >= n_frames_expected ends it now" test must not
+    apply: the reception here reaches mode A's last frame on its very
+    first decode and must still be ended by the stall clock (end_grace),
+    not on the spot."""
+    from sstvae.modem import framing
+    from sstvae.modem.beacon import BeaconResult
+    from sstvae.modem.modem import BlindDemodResult
+
+    n = MODES["C"].n_latents
+    weights = np.zeros(n)
+    for f in range(MODE_A.n_frames):  # full reach, half the weights left 0
+        _, idx = framing.slot_range_for_frame(f)
+        weights[idx[::2]] = 0.9
+    result = BlindDemodResult(
+        latents=np.zeros(n), weights=weights, freq_offset=0.0,
+        beacon=BeaconResult(chip_offset=0, frame_index=0, callsign="TEST",
+                            mode_index=MODE_A.index),
+        callsign="TEST", frame_offset=0, n_frames=MODE_A.n_frames,
+        frame0_start=0, snr_db=10.0,
+    )
+
+    class _BlindOnlyModem:
+        def demodulate(self, samples, search_s=None, drift_track="off"):
+            raise SyncError("no preamble")
+
+        def demodulate_blind(self, x, search_s=None, acquisition=None,
+                             drift_track="off"):
+            return result
+
+    class _FakeAccumulator:
+        def __init__(self, *a, **kw):
+            pass
+
+        def push(self, z, start_sample):
+            pass
+
+        def result(self):
+            return object()  # non-None: the loop only forwards it
+
+    modem = stub_modem(_BlindOnlyModem())
+    # The preamble vet must fail too, or _find_new_reception decodes.
+    monkeypatch.setattr(
+        rx_engine, "sync_acquire",
+        lambda z, **kw: (_ for _ in ()).throw(SyncError("no preamble")),
+    )
+    monkeypatch.setattr(rx_engine, "BlindAccumulator", _FakeAccumulator)
+
+    sink = _CollectingSink()
+    config = RxConfig(poll_interval=0.05, end_grace=1.5)
+
+    t0 = time.time()
+    _run(config, sink, timeout_s=20.0)
+    elapsed = time.time() - t0
+
+    assert len(sink.receptions) == 1, "the stall clock should still end it"
+    rec = sink.receptions[0]
+    assert rec.mode_name == "A"
+    assert rec.frames_received == MODE_A.n_frames  # the reach, on display
+    assert rec.n_frames_expected == MODE_A.n_frames
+    assert elapsed >= config.end_grace, (
+        f"delivered after {elapsed:.2f}s < end_grace={config.end_grace}s: the "
+        "reception was completed on its reach, cutting off retrospective backfill"
+    )
+
+
 def test_nothing_is_delivered_when_nothing_ever_decoded(stub_modem):
     """The watchdog must not invent receptions. A loop that never
     decodes anything has nothing pending, so no deadline is running and

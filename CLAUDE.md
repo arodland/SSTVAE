@@ -264,11 +264,19 @@ rule is enforced by `tools/check_layering.py`.
   a completion percentage that is not one: the erasures that path lives
   with (a fade, or simply not having heard the start) hold it down
   permanently, so a reception already at the transmission's last frame
-  reported 70% and the bar never filled. `_blind_progress` returns both
-  numbers because they answer different questions — the confident
+  reported 70% and the bar never filled. `_blind_progress` returns the
+  numbers separately because they answer different questions — the
+  confident
   *count* is still what the `--end-grace` stall detector watches, since
   retrospective decoding filling in frames behind the furthest one is
-  real progress that the reach deliberately does not move.
+  real progress that the reach deliberately does not move. **The reach
+  is also what the blind path reports as `frames_received`** (since the
+  beacon's mode field supplied `n_frames_expected`, every status line
+  formats the frames pair and the percentage together — leaving it
+  unset froze one indicator next to the other), and that is why
+  `complete` is gated on `not pending.blind`: a reach at the last frame
+  is a position with erasures behind it, exactly when backfill is still
+  improving the picture, not a finished count.
   `framing.frame_of_latent()` is what makes the reach computable at all
   (the inverse of `slot_range_for_frame`, as one cached table): the
   interleaver scatters each frame across the whole picture, so a latent

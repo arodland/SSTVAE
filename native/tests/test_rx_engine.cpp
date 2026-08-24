@@ -603,7 +603,7 @@ void test_blind_progress_is_the_last_frame_reached() {
 
     const rx::BlindProgress none =
         rx::blind_progress(std::vector<double>(n_latents, 0.0), total);
-    check::is_true(none.metric == 0 && none.frac == 0.0,
+    check::is_true(none.metric == 0 && none.frac == 0.0 && none.reach == 0,
                    "rx/progress: nothing received is zero progress");
 
     // At the threshold, not over it: a latent that only ties does not
@@ -624,6 +624,11 @@ void test_blind_progress_is_the_last_frame_reached() {
                    "rx/progress: half the latents, all the way to mode B's last frame");
     check::is_true(half.metric == static_cast<int>(sparse.size()) * config::LATENTS_PER_FRAME,
                    "rx/progress: the stall metric is still the confident count");
+    // The reach is the fraction's numerator, reported as the blind
+    // path's frames_received so the status line's frame counter and its
+    // percentage advance together instead of one freezing.
+    check::equal(half.reach, reach,
+                 "rx/progress: the reach is the fraction's own numerator");
 
     // The beacon's mode field (PROTOCOL_VERSION 4) gives the blind path
     // the real frame count: a complete mode B reception reads 100%, not

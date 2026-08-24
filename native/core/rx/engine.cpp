@@ -250,7 +250,8 @@ BlindProgress blind_progress(std::span<const double> weights_full,
             last = std::max(last, frame_of[i]);
         }
     }
-    out.frac = static_cast<double>(last + 1) / n_frames_expected;
+    out.reach = last + 1;
+    out.frac = static_cast<double>(out.reach) / n_frames_expected;
     return out;
 }
 
@@ -531,6 +532,11 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
                         n_frames_expected ? *n_frames_expected : kMaxModeFrames);
                     progress_metric = bp.metric;
                     progress_frac = bp.frac;
+                    // The reach doubles as the reported frame counter --
+                    // see BlindProgress for why leaving this unset froze
+                    // half of every status line once the beacon's mode
+                    // field supplied the other half.
+                    frames_received = bp.reach;
                 }
             }
         }
@@ -637,7 +643,16 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
             pending->stable_since.reset();
         }
 
-        const bool complete = pending->n_frames_expected && pending->frames_received &&
+        // Header path only: its frames_received is a contiguous decoded
+        // count, so reaching the total genuinely means everything
+        // arrived. The blind path's frames_received is a *reach* -- the
+        // furthest frame decoded, with erasures routinely behind it --
+        // and a reach at the last frame is exactly when retrospective
+        // backfill is still improving the picture, so ending on it
+        // would trade picture quality for nothing (the deadline already
+        // bounds the wait).
+        const bool complete = !pending->blind && pending->n_frames_expected &&
+                              pending->frames_received &&
                               *pending->frames_received >= *pending->n_frames_expected;
         const bool stalled = pending->stable_since &&
                              seconds_since(*pending->stable_since) >= config.end_grace;
