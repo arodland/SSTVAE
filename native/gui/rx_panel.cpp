@@ -490,14 +490,10 @@ void ReceivePanel::refresh_status() {
     if (progress.status == rx::Status::Listening) {
         text = tr("Listening... (%1 s captured)")
                    .arg(progress.seconds_captured, 0, 'f', 0);
-        // Progress.blind_score / blind_locked are deliberately NOT
-        // shown here: the raw prominence number needs interpretation
-        // (what threshold, what the two stuck states mean) that a
-        // status line can't carry, so surfacing it to the operator is
-        // a design question still open (Andrew, 2026-08-24). The
-        // machinery stays -- the engine refreshes both fields every
-        // poll, and the CLI listener and Android technical view still
-        // display them as diagnostics.
+        // Progress.blind_score / blind_locked are deliberately not
+        // shown -- how to present them is an open design question. The
+        // engine still refreshes them every poll; the CLI listener
+        // displays them.
     } else if (progress.status == rx::Status::Receiving) {
         if (progress.n_frames_expected) {
             text = tr("Receiving mode %1: frame %2/%3 (%4%)")
