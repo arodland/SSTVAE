@@ -452,20 +452,25 @@ void test_beacon() {
     }
     check::is_true(crc_ok, "beacon/crc16 over every case");
 
-    // Superframes, at the counter's edges as well as ordinary values.
+    // Superframes, at the counter's edges as well as ordinary values,
+    // with the mode field cycling through all four values (the unassigned
+    // index 3 included -- it must encode, for forward compat).
     // Chips are +/-1 exactly, so no tolerance is defensible.
     const std::vector<std::int64_t> frames = load_i8(g("beacon/encode_frames"));
+    const std::vector<std::int64_t> enc_modes = load_i8(g("beacon/encode_modes"));
     const std::vector<double> want_chips = load_f8(g("beacon/encode_chips"));
     std::vector<double> got_chips;
-    for (std::int64_t f : frames) {
-        const auto sf = beacon::encode_chips(static_cast<int>(f), "KC2G");
+    for (std::size_t i = 0; i < frames.size(); ++i) {
+        const auto sf = beacon::encode_chips(static_cast<int>(frames[i]), "KC2G",
+                                             static_cast<int>(enc_modes[i]));
         got_chips.insert(got_chips.end(), sf.begin(), sf.end());
     }
     check::close(got_chips, want_chips, 0.0,
                  "beacon/encode_chips is exact (+/-1 chips)");
 
+    // Mode index 1 (B) -- the generator hardcodes the same value.
     const std::vector<double> stream = load_f8(g("beacon/chip_stream"));
-    check::close(beacon::chip_stream(0, 120, "N6MTS"), stream, 0.0,
+    check::close(beacon::chip_stream(0, 120, "N6MTS", 1), stream, 0.0,
                  "beacon/chip_stream is exact");
 
     // find_sync's ranking, which depends on the normalization as much as
@@ -496,9 +501,12 @@ void test_beacon() {
             const auto r = beacon::decode(window);
             const std::int64_t got_off = r ? r->chip_offset : -1;
             const std::int64_t got_idx = r ? r->frame_index : -1;
-            if (got_off != want[2 * i] || got_idx != want[2 * i + 1]) ++wrong;
-            if (want[2 * i] == -1) ++failures;
-            if (r && want[2 * i] != -1 && r->callsign.empty()) ++wrong;
+            const std::int64_t got_mode = r ? r->mode_index : -1;
+            if (got_off != want[3 * i] || got_idx != want[3 * i + 1] ||
+                got_mode != want[3 * i + 2])
+                ++wrong;
+            if (want[3 * i] == -1) ++failures;
+            if (r && want[3 * i] != -1 && r->callsign.empty()) ++wrong;
         }
         check::equal(wrong, std::size_t{0}, what);
         check::is_true(failures > 0,

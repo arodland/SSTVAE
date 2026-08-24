@@ -204,7 +204,8 @@ def _native_adapters(native):
     # Python object layout -- it is the same core the application links.
     def _beacon_from_tuple(t):
         return None if t is None else BeaconResult(chip_offset=t[0],
-                                                   frame_index=t[1], callsign=t[2])
+                                                   frame_index=t[1], callsign=t[2],
+                                                   mode_index=t[3])
 
     def modem_modulate(self, latents, mode, normalize=True, callsign=""):
         import sstvae.modem.modem as modem_mod
@@ -261,9 +262,9 @@ def _native_adapters(native):
         r = bc.decode(chips, threshold)
         if r is None:
             return None
-        chip_offset, frame_index, callsign = r
+        chip_offset, frame_index, callsign, mode_index = r
         return BeaconResult(chip_offset=chip_offset, frame_index=frame_index,
-                            callsign=callsign)
+                            callsign=callsign, mode_index=mode_index)
 
     return {
         # Methods, so these take `self`; patched onto the class.

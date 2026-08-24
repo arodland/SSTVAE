@@ -49,6 +49,7 @@ from ..config import (
     FRAME_SAMPLES,
     HEADER_SAMPLES,
     MODES,
+    MODES_BY_INDEX,
     PREAMBLE_SAMPLES,
 )
 from ..modem import Modem, SyncError, framing
@@ -77,7 +78,7 @@ SAME_RECEPTION_EPSILON_S = 1.0
 PROGRESS_WEIGHT_THRESHOLD = 0.5
 
 
-def _blind_progress(weights_full: np.ndarray) -> tuple[int, float]:
+def _blind_progress(weights_full: np.ndarray, n_frames_expected: int) -> tuple[int, float]:
     """(stall metric, progress fraction) for one blind decode.
 
     Two different questions, deliberately answered by two different
@@ -108,13 +109,16 @@ def _blind_progress(weights_full: np.ndarray) -> tuple[int, float]:
     each frame's latents are scattered across the whole picture, so only
     the frame index says "how far".
 
-    The denominator is mode C's frame count, the longest: the blind path
-    has no header, so the real mode is unknown.
+    `n_frames_expected` is the denominator: the beacon's mode field
+    (PROTOCOL_VERSION 4) names the transmission's real frame count, so
+    the caller passes that when the beacon's mode index is one it knows,
+    and mode C's count -- the longest, the pre-mode-field assumption --
+    when it isn't.
     """
     good = weights_full > PROGRESS_WEIGHT_THRESHOLD
     frames = framing.frame_of_latent()[good]
     last_frame = int(frames.max()) + 1 if frames.size else 0
-    return int(np.count_nonzero(good)), last_frame / MODES["C"].n_frames
+    return int(np.count_nonzero(good)), last_frame / n_frames_expected
 
 
 @dataclass
@@ -180,6 +184,14 @@ class _Pending:
 
     start: int  # absolute (ring-buffer-coordinate) preamble-start position
     deadline_abs: int
+    # Whether the *most recent* decode of this reception came from the
+    # blind path. Per-poll, not per-reception: a reception first found
+    # blind can later decode over the preamble path (or vice versa), and
+    # the stall-on-no-advance test below must follow the path currently
+    # driving the record -- it exists for the blind path's
+    # retrospective-fill progress and must not fire while the header
+    # path's frames_received is what's advancing.
+    blind: bool = False
     metric: int = 0  # best progress metric seen; see _blind_progress
     stable_since: float | None = None  # when the metric last stopped advancing
     image: object = None
@@ -195,7 +207,11 @@ class Reception:
     """A reception the loop considers finished."""
 
     image: Image.Image
-    mode_name: str | None  # None when the mode is unknown (blind sync)
+    # None only when the mode is unknown: a blind reception whose beacon
+    # carried a mode index this receiver doesn't recognize (a future
+    # mode). Ordinarily the blind path knows the mode too, from the
+    # beacon's mode field.
+    mode_name: str | None
     callsign: str
     snr_db: float
     frames_received: int | None
@@ -471,7 +487,21 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
                     weights_full = rb.weights
                     callsign = rb.callsign
                     snr_db = rb.snr_db
-                    progress_metric, progress_frac = _blind_progress(weights_full)
+                    # The beacon's mode field (PROTOCOL_VERSION 4) names
+                    # the transmission's real mode, so the blind path no
+                    # longer has to assume mode C: the deadline, the
+                    # progress denominator and the reported mode are all
+                    # exact. An unknown index (a future mode) keeps the
+                    # old assume-mode-C behaviour.
+                    blind_spec = MODES_BY_INDEX.get(rb.beacon.mode_index)
+                    if blind_spec is not None:
+                        mode_name = blind_spec.name
+                        n_frames_expected = blind_spec.n_frames
+                    progress_metric, progress_frac = _blind_progress(
+                        weights_full,
+                        n_frames_expected if n_frames_expected is not None
+                        else MODES["C"].n_frames,
+                    )
             else:
                 reception_start = None
 
@@ -489,30 +519,33 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
             # mistaken for a reception that has already stopped
             # advancing and be ended immediately.
             if pending is None or abs(reception_start - pending.start) > epsilon_samples:
-                # The deterministic backstop. The transmission's start is
-                # known exactly -- from the header path's own acquisition,
-                # or from the beacon on the blind path, both in the same
-                # "preamble start" coordinate -- so the latest a real
-                # frame of it can possibly still be arriving is its own
-                # duration after that point, fixed the moment the start
-                # is. The blind path has no header and so no mode, and
-                # uses mode C's duration, the longest. That is unlike
-                # "progress stopped advancing" below, which rides on the
-                # decoder's own noise floor and is not guaranteed to ever
-                # settle. Once the buffer holds audio past this deadline
-                # there is provably no more real signal left to arrive
-                # for this reception, done or not.
-                n_deadline_frames = (
-                    n_frames_expected if n_frames_expected is not None
-                    else MODES["C"].n_frames
-                )
-                pending = _Pending(
-                    start=reception_start,
-                    deadline_abs=(
-                        reception_start + PREAMBLE_SAMPLES + HEADER_SAMPLES
-                        + n_deadline_frames * FRAME_SAMPLES
-                    ),
-                )
+                pending = _Pending(start=reception_start, deadline_abs=0)
+            # The deterministic backstop. The transmission's start is
+            # known exactly -- from the header path's own acquisition,
+            # or from the beacon on the blind path, both in the same
+            # "preamble start" coordinate -- so the latest a real
+            # frame of it can possibly still be arriving is its own
+            # duration after that point, fixed the moment the start
+            # is. The mode comes from the header, or from the beacon's
+            # mode field on the blind path; only a beacon whose mode
+            # index this receiver doesn't know (a future mode) falls
+            # back to mode C's duration, the longest. That is unlike
+            # "progress stopped advancing" below, which rides on the
+            # decoder's own noise floor and is not guaranteed to ever
+            # settle. Once the buffer holds audio past this deadline
+            # there is provably no more real signal left to arrive
+            # for this reception, done or not. Recomputed every decoded
+            # poll (from pending.start, which is stable across polls)
+            # so a mode learned on a later poll tightens it.
+            n_deadline_frames = (
+                n_frames_expected if n_frames_expected is not None
+                else MODES["C"].n_frames
+            )
+            pending.deadline_abs = (
+                pending.start + PREAMBLE_SAMPLES + HEADER_SAMPLES
+                + n_deadline_frames * FRAME_SAMPLES
+            )
+            pending.blind = not full_ok
             if progress_metric > pending.metric:
                 pending.metric = progress_metric
                 advanced = True
@@ -560,10 +593,10 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
         # The header path does not need it anyway -- frames_received
         # climbs as the buffer grows, so a real transmission reaches its
         # count, and the deadline below is the backstop for one that
-        # does not.
-        no_progress = not decoded or (
-            pending.n_frames_expected is None and not advanced
-        )
+        # does not. Keyed on pending.blind rather than "mode unknown":
+        # since the beacon's mode field, the blind path knows the mode
+        # too, so n_frames_expected no longer distinguishes the paths.
+        no_progress = not decoded or (pending.blind and not advanced)
         if no_progress:
             if pending.stable_since is None:
                 pending.stable_since = time.time()

@@ -601,13 +601,14 @@ void test_blind_progress_is_the_last_frame_reached() {
         return out;
     };
 
-    const rx::BlindProgress none = rx::blind_progress(std::vector<double>(n_latents, 0.0));
+    const rx::BlindProgress none =
+        rx::blind_progress(std::vector<double>(n_latents, 0.0), total);
     check::is_true(none.metric == 0 && none.frac == 0.0,
                    "rx/progress: nothing received is zero progress");
 
     // At the threshold, not over it: a latent that only ties does not
     // count, the same cutoff the stall metric has always used.
-    const rx::BlindProgress tied = rx::blind_progress(weights_for({0}, 0.5));
+    const rx::BlindProgress tied = rx::blind_progress(weights_for({0}, 0.5), total);
     check::is_true(tied.metric == 0 && tied.frac == 0.0,
                    "rx/progress: a weight at the threshold does not count");
 
@@ -618,28 +619,36 @@ void test_blind_progress_is_the_last_frame_reached() {
     std::vector<int> sparse;
     for (int f = 0; f < reach; f += 2) sparse.push_back(f);
     sparse.push_back(reach - 1);
-    const rx::BlindProgress half = rx::blind_progress(weights_for(sparse, 1.0));
+    const rx::BlindProgress half = rx::blind_progress(weights_for(sparse, 1.0), total);
     check::is_true(std::abs(half.frac - static_cast<double>(reach) / total) < 1e-12,
                    "rx/progress: half the latents, all the way to mode B's last frame");
     check::is_true(half.metric == static_cast<int>(sparse.size()) * config::LATENTS_PER_FRAME,
                    "rx/progress: the stall metric is still the confident count");
 
+    // The beacon's mode field (PROTOCOL_VERSION 4) gives the blind path
+    // the real frame count: a complete mode B reception reads 100%, not
+    // the 2/3 that dividing by mode C's count reported before.
+    const rx::BlindProgress known =
+        rx::blind_progress(weights_for(sparse, 1.0), reach);
+    check::is_true(std::abs(known.frac - 1.0) < 1e-12,
+                   "rx/progress: a known mode makes the bar fill at that mode's end");
+
     // Tuned in at frame 400 of mode C and heard the rest: two thirds of
     // the latents are gone for good and the bar must still read full.
     std::vector<int> late;
     for (int f = 400; f < total; ++f) late.push_back(f);
-    check::is_true(std::abs(rx::blind_progress(weights_for(late, 1.0)).frac - 1.0) < 1e-12,
+    check::is_true(std::abs(rx::blind_progress(weights_for(late, 1.0), total).frac - 1.0) < 1e-12,
                    "rx/progress: a late join reports where it is, not how much it has");
 
     // Retrospective decoding filling in frames *behind* the furthest one
     // is progress in quality but not in position; the bar must not move.
-    const double reached = rx::blind_progress(weights_for({0, 300}, 1.0)).frac;
+    const double reached = rx::blind_progress(weights_for({0, 300}, 1.0), total).frac;
     check::is_true(std::abs(reached - 301.0 / total) < 1e-12,
                    "rx/progress: the furthest frame sets the bar");
     std::vector<int> filled;
     for (int f = 0; f <= 300; ++f) filled.push_back(f);
     check::is_true(
-        std::abs(rx::blind_progress(weights_for(filled, 1.0)).frac - reached) < 1e-12,
+        std::abs(rx::blind_progress(weights_for(filled, 1.0), total).frac - reached) < 1e-12,
         "rx/progress: backfill behind the furthest frame does not move it");
 }
 
