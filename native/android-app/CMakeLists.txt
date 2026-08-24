@@ -79,9 +79,14 @@ qt_add_executable(sstvae_android main.cpp listener.cpp session.cpp service_jni.c
     assets.cpp waterfall.cpp pictures.cpp composition.cpp transmitter.cpp)
 qt_add_qml_module(sstvae_android URI SSTVAE VERSION 1.0
     QML_FILES Main.qml LevelMeter.qml CropView.qml TransmitPane.qml)
+# liblog for the per-poll blind telemetry in service_jni.cpp
+# (`adb logcat -s sstvae.rx`) -- the NDK always provides it, but it is
+# not linked implicitly.
+find_library(ANDROID_LOG_LIB log REQUIRED)
 target_link_libraries(sstvae_android PRIVATE Qt6::Quick Qt6::Gui sstvae_core
                                              sstvae_audio_android
-                                             sstvae_codec)
+                                             sstvae_codec
+                                             ${ANDROID_LOG_LIB})
 
 # **androiddeployqt only packages libraries it knows about.** Qt's own
 # and the app's are found by walking dependencies; a third-party

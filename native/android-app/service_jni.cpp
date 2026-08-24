@@ -9,9 +9,12 @@
 // belong to something the system may destroy while a reception is in
 // progress.
 
+#include <android/log.h>
 #include <jni.h>
 
+#include <atomic>
 #include <cstdio>
+#include <cstdint>
 #include <string>
 
 #include "rx/engine.hpp"
@@ -73,6 +76,29 @@ Java_org_cleverdomain_sstvae_ListenerService_nativeStatusLine(JNIEnv* env, jclas
     }
 
     const sstvae::rx::Progress p = Session::instance().progress();
+
+    // Blind-path telemetry, once per *engine* poll (this JNI poller runs
+    // far more often), to logcat rather than any UI surface -- how it is
+    // presented to the operator is an open design question, but the
+    // bench needs the number now: a phone-side score trajectory compared
+    // against scripts/blind_diag.py on a recording of the same over is
+    // what separates "the capture chain is corrupting the accumulator's
+    // phase coherence" (score never builds here while the recording
+    // scores ~35 offline) from "the lock is fine and the failure is
+    // after it" (healthy score and locked=1 here, no reception forms).
+    //   adb logcat -s sstvae.rx
+    static std::atomic<std::uint64_t> last_polls{0};
+    if (p.polls != last_polls.exchange(p.polls)) {
+        __android_log_print(
+            ANDROID_LOG_INFO, "sstvae.rx",
+            "poll %llu  ring %.1fs  decode %.2fs  blind %.2f  locked %d  "
+            "status %s  frames %d/%d",
+            static_cast<unsigned long long>(p.polls), p.seconds_captured,
+            p.last_decode_s, p.blind_score, p.blind_locked ? 1 : 0,
+            sstvae::rx::status_name(p.status), p.frames_received.value_or(-1),
+            p.n_frames_expected.value_or(-1));
+    }
+
     std::string s;
     switch (p.status) {
         case sstvae::rx::Status::Receiving: {
