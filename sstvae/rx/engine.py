@@ -78,8 +78,10 @@ SAME_RECEPTION_EPSILON_S = 1.0
 PROGRESS_WEIGHT_THRESHOLD = 0.5
 
 
-def _blind_progress(weights_full: np.ndarray, n_frames_expected: int) -> tuple[int, float]:
-    """(stall metric, progress fraction) for one blind decode.
+def _blind_progress(
+    weights_full: np.ndarray, n_frames_expected: int
+) -> tuple[int, float, int]:
+    """(stall metric, progress fraction, frame reach) for one blind decode.
 
     Two different questions, deliberately answered by two different
     numbers.
@@ -114,11 +116,27 @@ def _blind_progress(weights_full: np.ndarray, n_frames_expected: int) -> tuple[i
     the caller passes that when the beacon's mode index is one it knows,
     and mode C's count -- the longest, the pre-mode-field assumption --
     when it isn't.
+
+    The **reach** is the fraction's own numerator, returned separately
+    because it is what the blind path reports as `frames_received`. The
+    beacon mode gave the blind path an `n_frames_expected`, and every
+    status line formats the pair together -- so leaving
+    `frames_received` unset put a frozen "frame None/440" (or 0/440)
+    next to a moving percentage, one indicator advancing while the
+    other never did. It is a *position*, not a count of frames
+    actually held: erasures behind the reach are the normal state of
+    this path, which is also why a blind reception must never be
+    treated as complete just because its reach hit the last frame (see
+    the `complete` test in decode_loop).
     """
     good = weights_full > PROGRESS_WEIGHT_THRESHOLD
     frames = framing.frame_of_latent()[good]
     last_frame = int(frames.max()) + 1 if frames.size else 0
-    return int(np.count_nonzero(good)), last_frame / n_frames_expected
+    return (
+        int(np.count_nonzero(good)),
+        last_frame / n_frames_expected,
+        last_frame,
+    )
 
 
 @dataclass
@@ -497,11 +515,16 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
                     if blind_spec is not None:
                         mode_name = blind_spec.name
                         n_frames_expected = blind_spec.n_frames
-                    progress_metric, progress_frac = _blind_progress(
+                    progress_metric, progress_frac, reach = _blind_progress(
                         weights_full,
                         n_frames_expected if n_frames_expected is not None
                         else MODES["C"].n_frames,
                     )
+                    # The reach doubles as the reported frame counter --
+                    # see _blind_progress for why leaving this None froze
+                    # half of every status line once the beacon's mode
+                    # field supplied the other half.
+                    frames_received = reach
             else:
                 reception_start = None
 
@@ -603,8 +626,17 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
         else:
             pending.stable_since = None
 
+        # Header path only: its frames_received is a contiguous decoded
+        # count, so reaching the total genuinely means everything
+        # arrived. The blind path's frames_received is a *reach* -- the
+        # furthest frame decoded, with erasures routinely behind it --
+        # and a reach at the last frame is exactly when retrospective
+        # backfill is still improving the picture, so ending on it would
+        # trade picture quality for nothing (the deadline already bounds
+        # the wait).
         complete = (
-            pending.n_frames_expected is not None
+            not pending.blind
+            and pending.n_frames_expected is not None
             and pending.frames_received is not None
             and pending.frames_received >= pending.n_frames_expected
         )

@@ -151,9 +151,19 @@ double poll_wait(const RxConfig& config, double last_cost_s);
 // the caller passes that when the beacon's mode index is one it knows,
 // and mode C's count -- the longest, the pre-mode-field assumption --
 // when it isn't.
+// `reach` is the fraction's own numerator -- one past the furthest
+// frame confidently decoded -- returned separately because it is what
+// the blind path reports as frames_received: every status line formats
+// the frames pair and the percentage together, so leaving
+// frames_received unset froze one indicator next to the other once the
+// beacon's mode field supplied n_frames_expected. It is a *position*,
+// not a count of frames actually held, which is why a blind reception
+// must never be treated as complete just because its reach hit the
+// last frame (see decode_loop's `complete` test).
 struct BlindProgress {
     int metric = 0;
     double frac = 0.0;
+    int reach = 0;
 };
 BlindProgress blind_progress(std::span<const double> weights_full,
                              int n_frames_expected);
