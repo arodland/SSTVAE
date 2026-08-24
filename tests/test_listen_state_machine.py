@@ -263,21 +263,35 @@ def test_blind_reception_has_a_hard_deadline_even_if_progress_never_settles(tmp_
     """Even if the stall detector's "progress stopped changing" never
     fires -- end_grace set absurdly high here, to isolate this from the
     prompt-completion behavior tested above -- a blind reception must
-    still finish once the buffer holds audio past mode C's own duration
-    from the transmission's known start (from the beacon). Before this
-    backstop existed, a reception stuck for any reason simply never
-    ended -- observed sitting in "receiving" for many minutes.
+    still finish once the buffer holds audio past the transmission's own
+    duration from its known start. Before this backstop existed, a
+    reception stuck for any reason simply never ended -- observed
+    sitting in "receiving" for many minutes.
+
+    Since the beacon's mode field (PROTOCOL_VERSION 4), "its own
+    duration" is the *real* mode's, not mode C's: this feeds a mode A
+    transmission cut off partway (so the deadline cannot already be in
+    the buffer when it locks), asserts nothing finishes early, then
+    feeds silence past mode A's deadline -- far short of mode C's, which
+    is what the pre-mode-field receiver would still be waiting on.
     """
     from sstvae.config import MODES, FRAME_SAMPLES
 
     sig = _frames_only("A", seed=12)
+    # Cut mid-transmission, past MIN_FRAMES_FOR_SYNC (~10.5 s) so the
+    # beacon still decodes, well short of the end so the deadline is not
+    # already reached by the audio itself.
+    sig = sig[: int(0.6 * len(sig))]
     pre = np.random.default_rng(3).normal(scale=0.01, size=int(5.0 * FS))
     # Enough trailing silence after this to lock and sit in "receiving",
-    # but nowhere near mode C's duration past the transmission's start.
-    short_trailing = np.random.default_rng(4).normal(scale=0.01, size=int(10.0 * FS))
+    # but short of mode A's duration past the transmission's start.
+    short_trailing = np.random.default_rng(4).normal(scale=0.01, size=int(5.0 * FS))
 
     args = _Args(tmp_path, poll_interval=0.1, end_grace=1e9)
-    needed_total_s = len(pre) / FS + MODES["C"].n_frames * FRAME_SAMPLES / FS
+    # The transmission's frame 0 sits near len(pre); its deadline is mode
+    # A's frame range past that (plus the preamble+header allowance the
+    # engine folds in).
+    needed_total_s = len(pre) / FS + MODES["A"].n_frames * FRAME_SAMPLES / FS
 
     saves, state, h = _run_decode_loop_incremental(
         sstvae_listen.decode_loop,
@@ -296,10 +310,9 @@ def test_blind_reception_has_a_hard_deadline_even_if_progress_never_settles(tmp_
         )
         assert state.status != "done"
 
-        # Push the buffer well past frame 0's position + mode C's duration.
-        # reception_start lands close to len(pre) (see decode_loop's blind
-        # branch); pad generously past exactness rather than reproduce its
-        # arithmetic here.
+        # Push the buffer well past frame 0's position + mode A's
+        # duration -- and no further: a save now can only be the
+        # mode-A deadline firing, mode C's being another minute away.
         have_s = (len(pre) + len(sig) + len(short_trailing)) / FS
         more = np.random.default_rng(5).normal(
             scale=0.01, size=int((needed_total_s - have_s + 5.0) * FS)
@@ -307,7 +320,7 @@ def test_blind_reception_has_a_hard_deadline_even_if_progress_never_settles(tmp_
         h.feed(more)
         saves = h.wait_for_saves(1, timeout_s=60.0)
         assert len(saves) == 1, (
-            f"expected 1 saved image past the deadline, got {len(saves)}: {saves}"
+            f"expected 1 saved image past the mode-A deadline, got {len(saves)}: {saves}"
         )
     finally:
         h.stop()

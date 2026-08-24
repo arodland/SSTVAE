@@ -251,17 +251,20 @@ PYBIND11_MODULE(sstvae_native, m) {
                },
                py::arg("bits"));
     beacon.def("encode_chips",
-               [](int frame_index, const std::string& callsign) {
-                   return to_numpy(
-                       sstvae::beacon::encode_chips(frame_index, callsign));
+               [](int frame_index, const std::string& callsign, int mode_index) {
+                   return to_numpy(sstvae::beacon::encode_chips(
+                       frame_index, callsign, mode_index));
                },
-               py::arg("frame_index"), py::arg("callsign"));
+               py::arg("frame_index"), py::arg("callsign"),
+               py::arg("mode_index"));
     beacon.def("chip_stream",
-               [](int start_frame, int n_frames, const std::string& callsign) {
+               [](int start_frame, int n_frames, const std::string& callsign,
+                  int mode_index) {
                    return to_numpy(sstvae::beacon::chip_stream(
-                       start_frame, n_frames, callsign));
+                       start_frame, n_frames, callsign, mode_index));
                },
-               py::arg("start_frame"), py::arg("n_frames"), py::arg("callsign"));
+               py::arg("start_frame"), py::arg("n_frames"), py::arg("callsign"),
+               py::arg("mode_index"));
     beacon.def("find_sync",
                [](DArray chips, double threshold, int max_candidates) {
                    std::span<const double> in(
@@ -286,7 +289,7 @@ PYBIND11_MODULE(sstvae_native, m) {
                    // core the application links.
                    if (!r) return py::none();
                    return py::make_tuple(r->chip_offset, r->frame_index,
-                                         r->callsign);
+                                         r->callsign, r->mode_index);
                },
                py::arg("chips"), py::arg("threshold") = 0.6);
 
@@ -329,7 +332,8 @@ PYBIND11_MODULE(sstvae_native, m) {
                   if (r.beacon)
                       out["beacon"] = py::make_tuple(r.beacon->chip_offset,
                                                      r.beacon->frame_index,
-                                                     r.beacon->callsign);
+                                                     r.beacon->callsign,
+                                                     r.beacon->mode_index);
                   else
                       out["beacon"] = py::none();
                   return out;
@@ -382,7 +386,8 @@ PYBIND11_MODULE(sstvae_native, m) {
                   if (r.beacon)
                       out["beacon"] = py::make_tuple(r.beacon->chip_offset,
                                                      r.beacon->frame_index,
-                                                     r.beacon->callsign);
+                                                     r.beacon->callsign,
+                                                     r.beacon->mode_index);
                   else
                       out["beacon"] = py::none();
                   return out;

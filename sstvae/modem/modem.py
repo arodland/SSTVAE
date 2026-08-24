@@ -43,6 +43,7 @@ from ..config import (
     DEMOD_BACKOFF,
     LATENT_GROUPS,
     MODES,
+    MODES_BY_INDEX,
     ModeSpec,
 )
 from . import beacon, framing, ofdm
@@ -69,11 +70,15 @@ class DemodResult:
 
 @dataclass
 class BlindDemodResult:
-    """Result of demodulate_blind: no preamble/header was needed, so
-    unlike DemodResult there's no known `mode` — latents/weights are
-    always sized for mode C's full canonical range (every mode is a
-    prefix of it) and only populated where a demodulated frame actually
-    landed, via the beacon's recovered absolute frame index."""
+    """Result of demodulate_blind: no preamble/header was needed.
+    latents/weights are always sized for mode C's full canonical range
+    (every mode is a prefix of it, so it is the one container that fits
+    whatever the beacon turns out to say) and only populated where a
+    demodulated frame actually landed, via the beacon's recovered
+    absolute frame index. The transmission's real mode is
+    `beacon.mode_index` (PROTOCOL_VERSION 4) — look it up via
+    config.MODES_BY_INDEX, falling back to mode C's range when the
+    index is one this receiver doesn't know."""
 
     latents: np.ndarray
     weights: np.ndarray
@@ -254,7 +259,7 @@ class Modem:
 
         slots = framing.interleave(latents, spec)
         n_f = spec.n_frames
-        beacon_chips = beacon.chip_stream(0, n_f, callsign)
+        beacon_chips = beacon.chip_stream(0, n_f, callsign, spec.index)
         symbols = np.empty((n_f * SYMS_PER_FRAME, NC), dtype=np.complex128)
         for f in range(n_f):
             sl = slots[f * LATENTS_PER_FRAME : (f + 1) * LATENTS_PER_FRAME]
@@ -574,9 +579,22 @@ class Modem:
             frame_offset = (
                 beacon_result.frame_index - beacon_result.chip_offset // CHIPS_PER_FRAME
             )
+            # The beacon's mode field bounds which absolute frames can be
+            # real: everything the buffer holds past the transmission's
+            # actual last frame is post-transmission noise, and placing it
+            # would hand reconstruct() garbage latents at nonzero weight
+            # where a true erasure (weight 0) is what the decoder was
+            # trained for. An unknown mode index (a future mode) falls
+            # back to mode C's full range -- the pre-mode-field behaviour
+            # -- rather than rejecting the reception.
+            tx_spec = MODES_BY_INDEX.get(beacon_result.mode_index)
+            n_frames_limit = (
+                tx_spec.n_frames if tx_spec is not None
+                else LATENT_GROUPS * FRAMES_PER_GROUP
+            )
             for f in range(n_f):
                 abs_frame = frame_offset + f
-                if 0 <= abs_frame < LATENT_GROUPS * FRAMES_PER_GROUP:
+                if 0 <= abs_frame < n_frames_limit:
                     _, idx = framing.slot_range_for_frame(abs_frame)
                     latents_full[idx] = np.clip(slot_values[f], -10, 10)
                     weights_full[idx] = slot_weights[f]

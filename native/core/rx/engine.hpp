@@ -146,13 +146,17 @@ double poll_wait(const RxConfig& config, double last_cost_s);
 // why the two differ at all -- each frame's latents are scattered
 // across the whole picture, so only the frame index says "how far".
 //
-// The denominator is mode C's frame count, the longest: the blind path
-// has no header, so the real mode is unknown.
+// `n_frames_expected` is the denominator: the beacon's mode field
+// (PROTOCOL_VERSION 4) names the transmission's real frame count, so
+// the caller passes that when the beacon's mode index is one it knows,
+// and mode C's count -- the longest, the pre-mode-field assumption --
+// when it isn't.
 struct BlindProgress {
     int metric = 0;
     double frac = 0.0;
 };
-BlindProgress blind_progress(std::span<const double> weights_full);
+BlindProgress blind_progress(std::span<const double> weights_full,
+                             int n_frames_expected);
 
 // The `threading.Event` the reference stops on. Shared with the
 // transmitter, which needs the same primitive for its cancel flag and

@@ -58,7 +58,9 @@ void test_combining_decodes_where_no_single_repetition_can() {
     // duplicated as a literal rather than pulled in via the modem
     // headers, which this file otherwise has no reason to depend on.
     constexpr int kModeCFrames = 660;
-    const std::vector<double> chips = beacon::chip_stream(0, kModeCFrames, "TEST");
+    constexpr int kModeCIndex = 2;
+    const std::vector<double> chips =
+        beacon::chip_stream(0, kModeCFrames, "TEST", kModeCIndex);
 
     Rng rng(6);
     std::vector<double> noisy(chips.size());
@@ -94,6 +96,10 @@ void test_combining_decodes_where_no_single_repetition_can() {
         check::is_true(result->callsign == "TEST",
                        "beacon/combining: recovered callsign is 'TEST', got '" +
                            result->callsign + "'");
+        // The mode field rides in the coherently-combined chunks, so it
+        // must survive exactly the noise the combining exists for.
+        check::equal(result->mode_index, kModeCIndex,
+                     "beacon/combining: recovered mode index");
     }
 }
 

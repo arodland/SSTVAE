@@ -7,24 +7,25 @@ from sstvae.modem import Modem, beacon
 
 
 def test_encode_decode_roundtrip():
-    chips = beacon.encode_chips(0, "K6ABC/P")
+    chips = beacon.encode_chips(0, "K6ABC/P", MODES["B"].index)
     r = beacon.decode(chips)
     assert r is not None
     assert r.chip_offset == 0
     assert r.frame_index == 0
     assert r.callsign == "K6ABC/P"
+    assert r.mode_index == MODES["B"].index
 
 
 def test_frame_counter_range():
     for f in [0, 1, 500, beacon.MAX_FRAME_COUNTER]:
-        r = beacon.decode(beacon.encode_chips(f, "W1AW"))
+        r = beacon.decode(beacon.encode_chips(f, "W1AW", 0))
         assert r.frame_index == f
     with pytest.raises(ValueError):
-        beacon.encode_chips(beacon.MAX_FRAME_COUNTER + 1, "W1AW")
+        beacon.encode_chips(beacon.MAX_FRAME_COUNTER + 1, "W1AW", 0)
 
 
 def test_callsign_charset_and_padding():
-    r = beacon.decode(beacon.encode_chips(3, "n0call"))  # lowercase, short
+    r = beacon.decode(beacon.encode_chips(3, "n0call", 0))  # lowercase, short
     assert r.callsign == "N0CALL"
 
 
@@ -39,7 +40,7 @@ def test_crc_rejects_garbage_no_false_lock():
 
 
 def test_decode_finds_sync_anywhere_in_a_longer_stream():
-    chips = beacon.encode_chips(42, "N0CALL")
+    chips = beacon.encode_chips(42, "N0CALL", MODES["C"].index)
     rng = np.random.default_rng(1)
     pad_a = rng.choice([-1.0, 1.0], size=37)
     pad_b = rng.choice([-1.0, 1.0], size=61)
@@ -55,7 +56,7 @@ def test_chip_stream_recovers_absolute_frame_index_from_mid_stream_window():
     """The core resync property: a window that starts mid-transmission
     (not superframe-aligned) still recovers the true absolute frame
     index of wherever the sync word happens to land inside it."""
-    cs = beacon.chip_stream(0, 400, "W1AW")
+    cs = beacon.chip_stream(0, 400, "W1AW", MODES["C"].index)
     start_frame = 137
     win = cs[start_frame * CHIPS_PER_FRAME : start_frame * CHIPS_PER_FRAME + 4 * beacon.SUPERFRAME_LEN]
     r = beacon.decode(win)
@@ -67,7 +68,7 @@ def test_chip_stream_recovers_absolute_frame_index_from_mid_stream_window():
 
 def test_noise_tolerant_decode():
     rng = np.random.default_rng(2)
-    chips = beacon.encode_chips(9, "KJ7ABC")
+    chips = beacon.encode_chips(9, "KJ7ABC", MODES["A"].index)
     noisy = chips + rng.normal(scale=0.5, size=chips.shape)
     r = beacon.decode(noisy)
     assert r is not None
@@ -97,7 +98,7 @@ def test_combining_decodes_where_no_single_repetition_can():
     the native binding under --native.
     """
     n_frames = MODES["C"].n_frames
-    chips = beacon.chip_stream(0, n_frames, "TEST")
+    chips = beacon.chip_stream(0, n_frames, "TEST", MODES["C"].index)
     rng = np.random.default_rng(6)
     # Calibrated so most *individual* repetitions fail on their own --
     # asserted below -- while the combined decode still succeeds.
@@ -119,6 +120,69 @@ def test_combining_decodes_where_no_single_repetition_can():
     assert r is not None, "combining should have rescued this from noise too heavy for any single repetition"
     assert r.frame_index == r.chip_offset // CHIPS_PER_FRAME
     assert r.callsign == "TEST"
+    # The mode field rides in the coherently-combined chunks, so it must
+    # survive exactly the noise the combining exists for.
+    assert r.mode_index == MODES["C"].index
+
+
+# --- mode field / reserved bits (PROTOCOL_VERSION 4) --------------------------
+
+
+def test_mode_field_round_trips_for_every_mode():
+    for spec in MODES.values():
+        r = beacon.decode(beacon.encode_chips(7, "W1AW", spec.index))
+        assert r is not None
+        assert r.mode_index == spec.index
+
+
+def test_unassigned_mode_index_still_decodes():
+    """A future mode (index 3) must decode on today's receivers -- the
+    consumer falls back to assume-mode-C, but the packet itself (counter,
+    callsign) must not be rejected."""
+    r = beacon.decode(beacon.encode_chips(7, "W1AW", beacon.MAX_MODE_INDEX))
+    assert r is not None
+    assert r.mode_index == beacon.MAX_MODE_INDEX
+    assert r.callsign == "W1AW"
+    with pytest.raises(ValueError):
+        beacon.encode_chips(7, "W1AW", beacon.MAX_MODE_INDEX + 1)
+
+
+def test_reserved_bits_are_transmitted_but_not_checked():
+    """The reserved field is CRC-covered (the CRC covers what was sent)
+    but its *value* must not gate the decode: a future sender that
+    assigns those bits still decodes on today's receivers. Flipping the
+    reserved bits and re-deriving the CRC by hand must therefore still
+    decode -- while flipping them *without* fixing the CRC must not."""
+    from sstvae.config import (
+        BEACON_COUNTER_BITS,
+        BEACON_CALLSIGN_BITS,
+        BEACON_MODE_BITS,
+        BEACON_RESERVED_BITS,
+    )
+
+    payload = beacon._payload_bits(5, "W1AW", 1)
+    lo = BEACON_COUNTER_BITS + BEACON_CALLSIGN_BITS + BEACON_MODE_BITS
+    hi = lo + BEACON_RESERVED_BITS
+    tampered = payload.copy()
+    tampered[lo:hi] = 1 - tampered[lo:hi]
+    body = tampered[: -beacon.BEACON_CRC_BITS]
+
+    def chips_for(payload_bits):
+        coded = np.concatenate([
+            beacon.golay.codeword_bits(beacon._bits_to_int(payload_bits[i : i + 12]))
+            for i in range(0, beacon.PADDED_PAYLOAD_BITS, 12)
+        ])
+        return np.concatenate([beacon.SYNC, 1.0 - 2.0 * coded.astype(np.float64)])
+
+    # Wrong CRC for the tampered body: must be rejected.
+    assert beacon.decode(chips_for(tampered)) is None
+    # Consistent CRC over the tampered reserved bits: must decode.
+    consistent = np.concatenate([body, beacon._crc16(body)])
+    r = beacon.decode(chips_for(consistent))
+    assert r is not None
+    assert r.frame_index == 5
+    assert r.callsign == "W1AW"
+    assert r.mode_index == 1
 
 
 # --- integration with the real modem ----------------------------------------

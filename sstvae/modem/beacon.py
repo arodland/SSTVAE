@@ -5,12 +5,21 @@ CHIPS_PER_FRAME chips per frame, for the entire transmission.
 Each repetition ("superframe") is:
 
     sync word (Barker-13, unmodulated marker)
-    | Golay(24,12)-coded payload (7 codewords = 84 padded payload bits)
+    | Golay(24,12)-coded payload (7 codewords = 84 payload bits)
 
 Payload = 10-bit absolute frame counter (index of the frame whose data
 symbols carry the sync word's first chip) + 48-bit callsign (8 chars x
-6 bits) + 16-bit CRC over counter+callsign, zero-padded to 84 bits for
-clean 12-bit Golay chunking.
+6 bits) + 2-bit mode index + 8 reserved bits (transmitted as
+config.BEACON_RESERVED_VALUE, ignored on decode) + 16-bit CRC over
+everything before it. Exactly 84 bits -- the same 7 Golay chunks the
+pre-mode-field format padded out to, so the superframe length and chip
+cadence are unchanged from PROTOCOL_VERSION 3.
+
+The mode field is what lets a late joiner -- who has no header and
+never will -- know the transmission's real frame count: without it the
+blind path had to assume mode C's range, and every frame demodulated
+past the real transmission's end was post-transmission noise entering
+the reconstruction at nonzero weight (see Modem.demodulate_blind).
 
 Because the counter is absolute (not modulo the superframe period), a
 receiver needs no prior knowledge of where the transmission started: any
@@ -32,6 +41,9 @@ from ..config import (
     BEACON_CALLSIGN_CHARS,
     BEACON_CALLSIGN_CHAR_BITS,
     BEACON_CALLSIGN_BITS,
+    BEACON_MODE_BITS,
+    BEACON_RESERVED_BITS,
+    BEACON_RESERVED_VALUE,
     BEACON_CRC_BITS,
     CHIPS_PER_FRAME,
 )
@@ -48,12 +60,16 @@ _ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/-. " + "?!@#$%^&*()_+=~[]{}<>:
 assert len(_ALPHABET) == 64
 _CHAR_TO_CODE = {c: i for i, c in enumerate(_ALPHABET)}
 
-_PAYLOAD_BITS = BEACON_COUNTER_BITS + BEACON_CALLSIGN_BITS + BEACON_CRC_BITS  # 74
+_PAYLOAD_BITS = (
+    BEACON_COUNTER_BITS + BEACON_CALLSIGN_BITS + BEACON_MODE_BITS
+    + BEACON_RESERVED_BITS + BEACON_CRC_BITS
+)  # 84
 N_CHUNKS = -(-_PAYLOAD_BITS // 12)  # 7
-PADDED_PAYLOAD_BITS = N_CHUNKS * 12  # 84
+PADDED_PAYLOAD_BITS = N_CHUNKS * 12  # 84: the payload fills every chunk exactly
 CODED_LEN = N_CHUNKS * 24  # 168 chips
 SUPERFRAME_LEN = SYNC_LEN + CODED_LEN  # 181 chips
 MAX_FRAME_COUNTER = (1 << BEACON_COUNTER_BITS) - 1
+MAX_MODE_INDEX = (1 << BEACON_MODE_BITS) - 1
 
 # A window needs at least 2*SUPERFRAME_LEN-1 chips to *guarantee* a full,
 # uncut superframe repetition regardless of phase (worst case: the one
@@ -68,6 +84,15 @@ class BeaconResult:
     chip_offset: int  # index into the input chip array where sync starts
     frame_index: int  # absolute frame index of that chip (from the counter)
     callsign: str
+    # Transmitted mode index, raw, and deliberately without a default: a
+    # constructor that forgot it would otherwise silently claim mode A
+    # and truncate every blind reception to one group. Look it up via
+    # config.MODES_BY_INDEX; a value with no entry there (3 today) is a
+    # mode this receiver does not know, and consumers must fall back to
+    # the old "assume mode C" behaviour rather than reject the packet --
+    # that is what lets a future mode be added without breaking fielded
+    # receivers.
+    mode_index: int
 
 
 # --- callsign <-> 6-bit codes -----------------------------------------------
@@ -109,18 +134,28 @@ def _crc16(bits: np.ndarray) -> np.ndarray:
     return _int_to_bits(reg, 16)
 
 
-def _payload_bits(frame_index: int, callsign: str) -> np.ndarray:
+def _payload_bits(frame_index: int, callsign: str, mode_index: int) -> np.ndarray:
     if not (0 <= frame_index <= MAX_FRAME_COUNTER):
         raise ValueError(
             f"frame_index {frame_index} exceeds {BEACON_COUNTER_BITS}-bit counter "
             f"range (max {MAX_FRAME_COUNTER})"
+        )
+    if not (0 <= mode_index <= MAX_MODE_INDEX):
+        raise ValueError(
+            f"mode_index {mode_index} exceeds {BEACON_MODE_BITS}-bit mode field "
+            f"range (max {MAX_MODE_INDEX})"
         )
     counter_bits = _int_to_bits(frame_index, BEACON_COUNTER_BITS)
     codes = callsign_to_codes(callsign)
     callsign_bits = np.concatenate(
         [_int_to_bits(int(c), BEACON_CALLSIGN_CHAR_BITS) for c in codes]
     )
-    body = np.concatenate([counter_bits, callsign_bits])
+    body = np.concatenate([
+        counter_bits,
+        callsign_bits,
+        _int_to_bits(mode_index, BEACON_MODE_BITS),
+        _int_to_bits(BEACON_RESERVED_VALUE, BEACON_RESERVED_BITS),
+    ])
     crc_bits = _crc16(body)
     return np.concatenate([body, crc_bits])
 
@@ -128,18 +163,18 @@ def _payload_bits(frame_index: int, callsign: str) -> np.ndarray:
 # --- superframe encode/decode ------------------------------------------------
 
 
-def encode_chips(frame_index: int, callsign: str) -> np.ndarray:
+def encode_chips(frame_index: int, callsign: str, mode_index: int) -> np.ndarray:
     """One superframe repetition -> SUPERFRAME_LEN chips in {-1, +1}."""
-    payload = _payload_bits(frame_index, callsign)
-    padded = np.concatenate([payload, np.zeros(PADDED_PAYLOAD_BITS - len(payload), dtype=np.int64)])
+    payload = _payload_bits(frame_index, callsign, mode_index)
+    assert len(payload) == PADDED_PAYLOAD_BITS  # exactly fills the chunks
     coded_bits = np.concatenate(
-        [golay.codeword_bits(_bits_to_int(padded[i : i + 12])) for i in range(0, PADDED_PAYLOAD_BITS, 12)]
+        [golay.codeword_bits(_bits_to_int(payload[i : i + 12])) for i in range(0, PADDED_PAYLOAD_BITS, 12)]
     )
     coded_chips = 1.0 - 2.0 * coded_bits.astype(np.float64)
     return np.concatenate([SYNC, coded_chips])
 
 
-def chip_stream(start_frame: int, n_frames: int, callsign: str) -> np.ndarray:
+def chip_stream(start_frame: int, n_frames: int, callsign: str, mode_index: int) -> np.ndarray:
     """Continuous beacon chip stream, CHIPS_PER_FRAME chips per frame,
     covering frames [start_frame, start_frame + n_frames): superframes
     back-to-back (truncating the last one if it doesn't fit exactly),
@@ -150,32 +185,40 @@ def chip_stream(start_frame: int, n_frames: int, callsign: str) -> np.ndarray:
     pos = 0
     while pos < n_chips:
         frame_index = start_frame + pos // CHIPS_PER_FRAME
-        sf = encode_chips(frame_index, callsign)
+        sf = encode_chips(frame_index, callsign, mode_index)
         take = min(len(sf), n_chips - pos)
         out[pos : pos + take] = sf[:take]
         pos += take
     return out
 
 
-def _decode_payload(coded_chips: np.ndarray) -> tuple[int, str] | None:
-    """Soft chip values (168,) -> (frame_index, callsign), or None on CRC fail."""
+def _decode_payload(coded_chips: np.ndarray) -> tuple[int, str, int] | None:
+    """Soft chip values (168,) -> (frame_index, callsign, mode_index), or
+    None on CRC fail. The reserved bits are CRC-covered but their *value*
+    is deliberately not checked: a future sender that assigns them still
+    decodes here (the CRC covers whatever was actually sent), which is
+    what "reserved" has to mean for fielded receivers."""
     bits = []
     for i in range(N_CHUNKS):
         soft = coded_chips[i * 24 : (i + 1) * 24]
         data = golay.decode_soft(soft)
         bits.append(_int_to_bits(data, 12))
-    padded = np.concatenate(bits)
-    payload = padded[:_PAYLOAD_BITS]
+    payload = np.concatenate(bits)[:_PAYLOAD_BITS]
     body, crc_bits = payload[:-BEACON_CRC_BITS], payload[-BEACON_CRC_BITS:]
     if not np.array_equal(_crc16(body), crc_bits):
         return None
-    counter_bits, callsign_bits = body[:BEACON_COUNTER_BITS], body[BEACON_COUNTER_BITS:]
+    counter_bits = body[:BEACON_COUNTER_BITS]
+    callsign_bits = body[BEACON_COUNTER_BITS : BEACON_COUNTER_BITS + BEACON_CALLSIGN_BITS]
+    mode_bits = body[
+        BEACON_COUNTER_BITS + BEACON_CALLSIGN_BITS :
+        BEACON_COUNTER_BITS + BEACON_CALLSIGN_BITS + BEACON_MODE_BITS
+    ]
     frame_index = _bits_to_int(counter_bits)
     codes = [
         _bits_to_int(callsign_bits[i : i + BEACON_CALLSIGN_CHAR_BITS])
         for i in range(0, BEACON_CALLSIGN_BITS, BEACON_CALLSIGN_CHAR_BITS)
     ]
-    return frame_index, codes_to_callsign(np.array(codes))
+    return frame_index, codes_to_callsign(np.array(codes)), _bits_to_int(mode_bits)
 
 
 def find_sync(chips: np.ndarray, threshold: float = 0.6, max_candidates: int = 8) -> list[int]:
@@ -227,8 +270,9 @@ def decode(chips: np.ndarray, threshold: float = 0.6) -> BeaconResult | None:
             continue
         result = _decode_payload(chips[off + SYNC_LEN : end])
         if result is not None:
-            frame_index, callsign = result
-            return BeaconResult(chip_offset=off, frame_index=frame_index, callsign=callsign)
+            frame_index, callsign, mode_index = result
+            return BeaconResult(chip_offset=off, frame_index=frame_index,
+                                callsign=callsign, mode_index=mode_index)
     for off in candidates:
         result = _decode_combined(chips, off)
         if result is not None:
@@ -259,12 +303,15 @@ def decode(chips: np.ndarray, threshold: float = 0.6) -> BeaconResult | None:
 #   just `(chip_delta // CHIPS_PER_FRAME)` arithmetic.
 #
 # `_decode_combined` is a limited (not fully maximum-likelihood) way to
-# use that, in three tiers of decreasing simplicity:
+# use that, in two tiers of decreasing simplicity:
 #
-# - Chunks that fall entirely inside the callsign field are identical,
-#   chip for chip, in every repetition, so their *signs* (see below) can
-#   simply be summed across repetitions before Golay-decoding once --
-#   genuine coherent combining, and the cheap case.
+# - Chunks that fall entirely inside the invariant callsign+mode fields
+#   are identical, chip for chip, in every repetition, so their *signs*
+#   (see below) can simply be summed across repetitions before
+#   Golay-decoding once -- genuine coherent combining, and the cheap
+#   case. The PROTOCOL_VERSION 4 layout (counter | callsign | mode |
+#   reserved | CRC, 84 bits exactly) was chosen so the mode field lands
+#   here: chunks 1-4 are pure callsign+mode.
 # - The chunk carrying the counter's own low bit varies by design (a
 #   different value is genuinely correct at every repetition), so it
 #   can't be summed the same way -- but the exact value at every
@@ -277,13 +324,15 @@ def decode(chips: np.ndarray, threshold: float = 0.6) -> BeaconResult | None:
 #   18 different guesses, no repeat at all, because at the SNRs this is
 #   meant to help with individual repetitions rarely decode correctly
 #   on their own.
-# - The chunk mixing leftover callsign bits with the per-repetition CRC
-#   has the same voting problem (CRC depends on the whole payload, not
-#   just a shift), but no simple arithmetic predicts it -- so
-#   `_search_crc_mixed_chunk` brute-forces its free bits and asks
-#   `_payload_bits` what the CRC-inclusive chunk *should* look like for
-#   each hypothesis at each repetition's own counter, same combine-
-#   before-choose principle applied through the actual encoder.
+#
+# The pre-v4 layout had a third tier -- a chunk mixing leftover callsign
+# bits with the per-repetition CRC, which needed its own brute-force
+# search (`_search_crc_mixed_chunk`). The v4 layout retired it: with the
+# reserved field pinned to a known constant and the CRC pushed to the
+# very end, no chunk mixes unknown bits with CRC bits, so there is
+# nothing left to search -- chunks 5-6 (reserved+CRC, CRC) are fully
+# *predictable* from a (counter, callsign, mode) hypothesis instead,
+# which is exactly what makes them usable as verification below.
 #
 # Summing/correlating by *sign*, not raw chip value, throughout: under
 # fading, the per-frame channel estimate the equalizer divides by can
@@ -405,73 +454,6 @@ def _search_counter_chunk(
     return best
 
 
-def _search_crc_mixed_chunk(
-    chips: np.ndarray,
-    grid: list[int],
-    anchor_off: int,
-    chunk_idx: int,
-    frame_index: int,
-    known_callsign_bits: np.ndarray,
-) -> np.ndarray | None:
-    """Joint search for a chunk mixing still-unknown callsign bits with
-    the per-repetition CRC (chunk 4 in the current layout) -- unlike
-    the counter chunk, the part that varies per repetition here isn't a
-    simple shift, since CRC depends on the *whole* payload. So this
-    can't reuse _search_counter_chunk's trick directly: instead it
-    brute-forces only this chunk's free (non-CRC) bits, and for each
-    hypothesis derives the exact expected per-repetition chunk content
-    from `_payload_bits` itself (which already knows how to fold in a
-    candidate callsign and a repetition's own counter and compute the
-    CRC that goes with them) rather than voting on independent
-    per-repetition guesses -- which, like the counter, routinely don't
-    agree at the SNRs this is meant to help with. Returns the chunk's
-    free-bit fragment (aligned to its position within the chunk), or
-    None if the chunk isn't shaped as assumed (free callsign bits
-    followed by CRC bits, no counter overlap)."""
-    blo, bhi = _chunk_bit_range(chunk_idx)
-    callsign_lo = BEACON_COUNTER_BITS
-    callsign_hi = callsign_lo + BEACON_CALLSIGN_BITS
-    free_lo, free_hi = max(blo, callsign_lo), min(bhi, callsign_hi)
-    n_free = free_hi - free_lo
-    if free_lo != blo or n_free + (bhi - callsign_hi) != 12:
-        return None  # not "free callsign bits then CRC bits" -- bail rather than guess wrong
-
-    anchor_frame = anchor_off // CHIPS_PER_FRAME
-    clo, chi = chunk_idx * 24, (chunk_idx + 1) * 24
-    received = np.array(
-        [np.sign(chips[pos + SYNC_LEN + clo : pos + SYNC_LEN + chi]) for pos in grid]
-    )
-    frame_deltas = [pos // CHIPS_PER_FRAME - anchor_frame for pos in grid]
-
-    best_score, best_frag = -np.inf, None
-    for free_val in range(1 << n_free):
-        frag_bits = _int_to_bits(free_val, n_free)
-        trial = known_callsign_bits.copy()
-        trial[free_lo - callsign_lo : free_hi - callsign_lo] = frag_bits
-        codes = [
-            _bits_to_int(trial[i : i + BEACON_CALLSIGN_CHAR_BITS])
-            for i in range(0, BEACON_CALLSIGN_BITS, BEACON_CALLSIGN_CHAR_BITS)
-        ]
-        callsign = codes_to_callsign(np.array(codes))
-        score = 0.0
-        for k, pos in enumerate(grid):
-            fi = frame_index + frame_deltas[k]
-            if not (0 <= fi <= MAX_FRAME_COUNTER):
-                continue
-            payload = _payload_bits(fi, callsign)
-            chunk_bits = payload[blo:bhi]
-            if len(chunk_bits) < 12:  # padding-only tail, zeros
-                chunk_bits = np.concatenate(
-                    [chunk_bits, np.zeros(12 - len(chunk_bits), dtype=np.int64)]
-                )
-            data12 = _bits_to_int(chunk_bits)
-            score += float(golay._SIGNS[data12] @ received[k])
-        if score > best_score:
-            best_score = score
-            best_frag = frag_bits
-    return best_frag
-
-
 def _decode_combined(chips: np.ndarray, anchor_off: int) -> BeaconResult | None:
     n = len(chips)
     grid = _repetition_grid(n, anchor_off)
@@ -479,19 +461,25 @@ def _decode_combined(chips: np.ndarray, anchor_off: int) -> BeaconResult | None:
         return None
 
     counter_lo = 0
-    callsign_lo = BEACON_COUNTER_BITS
-    callsign_hi = BEACON_COUNTER_BITS + BEACON_CALLSIGN_BITS
+    # The invariant region: every payload bit that is identical in every
+    # repetition *and* unknown a priori -- callsign plus mode. (The
+    # reserved field is invariant too, but its value is a protocol
+    # constant, so it belongs to the verify chunks below rather than to
+    # anything that needs recovering.)
+    inv_lo = BEACON_COUNTER_BITS
+    inv_hi = inv_lo + BEACON_CALLSIGN_BITS + BEACON_MODE_BITS
 
     invariant_chunks = [
         c for c in range(N_CHUNKS)
-        if callsign_lo <= _chunk_bit_range(c)[0] and _chunk_bit_range(c)[1] <= callsign_hi
+        if inv_lo <= _chunk_bit_range(c)[0] and _chunk_bit_range(c)[1] <= inv_hi
     ]
     variant_chunks = [
         c for c in range(N_CHUNKS)
-        if c not in invariant_chunks and _chunk_bit_range(c)[0] < callsign_hi
+        if c not in invariant_chunks and _chunk_bit_range(c)[0] < inv_hi
     ]
 
-    callsign_bits = np.full(BEACON_CALLSIGN_BITS, -1, dtype=np.int64)
+    # Recovered callsign+mode bits, indexed relative to inv_lo.
+    inv_bits = np.full(inv_hi - inv_lo, -1, dtype=np.int64)
 
     # Coherent case: sum this chunk's coded chips across every
     # repetition (identical by construction), decode once. Sums the
@@ -513,10 +501,10 @@ def _decode_combined(chips: np.ndarray, anchor_off: int) -> BeaconResult | None:
             summed += np.sign(chips[pos + SYNC_LEN + clo : pos + SYNC_LEN + chi])
         bits = _decode_chunk_bits(summed)
         blo, bhi = _chunk_bit_range(c)
-        callsign_bits[blo - callsign_lo : bhi - callsign_lo] = bits
+        inv_bits[blo - inv_lo : bhi - inv_lo] = bits
 
-    # The chunk carrying the counter's own low bit 0 can't be voted on
-    # like the others below -- a genuinely *different* 12-bit value is
+    # The chunk carrying the counter's own low bit 0 can't be summed
+    # like the others -- a genuinely *different* 12-bit value is
     # correct at every repetition, not the same one imperfectly
     # received, so joint-search it instead (see _search_counter_chunk).
     counter_chunk = next(c for c in variant_chunks if _chunk_bit_range(c)[0] <= counter_lo)
@@ -528,31 +516,17 @@ def _decode_combined(chips: np.ndarray, anchor_off: int) -> BeaconResult | None:
         return None
     n_extra = 12 - BEACON_COUNTER_BITS
     blo, bhi = _chunk_bit_range(counter_chunk)
-    lo, hi = max(blo, callsign_lo), min(bhi, callsign_hi)
+    lo, hi = max(blo, inv_lo), min(bhi, inv_hi)
     if lo < hi:  # the counter chunk's tail bits are callsign, not counter
-        callsign_bits[lo - callsign_lo : hi - callsign_lo] = _int_to_bits(
+        inv_bits[lo - inv_lo : hi - inv_lo] = _int_to_bits(
             extra_bits_value, n_extra
         )[lo - (bhi - n_extra) :]
 
-    # Remaining variant chunks (here: the one mixing still-unknown
-    # callsign bits with the per-repetition CRC) can't be voted on
-    # either, for the same reason as the counter chunk above: the CRC
-    # bits riding along with the callsign differ every repetition
-    # (CRC depends on that repetition's own counter), so a "vote on
-    # independent per-repetition decodes" measured zero consensus at
-    # all -- 18 repetitions, 18 different guesses. Joint-search it too.
-    other_variant_chunks = [c for c in variant_chunks if c != counter_chunk]
-    for c in other_variant_chunks:
-        blo, bhi = _chunk_bit_range(c)
-        frag = _search_crc_mixed_chunk(chips, grid, anchor_off, c, frame_index, callsign_bits)
-        if frag is None:
-            return None
-        lo, hi = max(blo, callsign_lo), min(bhi, callsign_hi)
-        callsign_bits[lo - callsign_lo : hi - callsign_lo] = frag
-
-    if np.any(callsign_bits < 0):
+    if np.any(inv_bits < 0):
         return None  # a fragment nobody resolved (shouldn't happen given the layout)
 
+    callsign_bits = inv_bits[:BEACON_CALLSIGN_BITS]
+    mode_index = _bits_to_int(inv_bits[BEACON_CALLSIGN_BITS:])
     codes = [
         _bits_to_int(callsign_bits[i : i + BEACON_CALLSIGN_CHAR_BITS])
         for i in range(0, BEACON_CALLSIGN_BITS, BEACON_CALLSIGN_CHAR_BITS)
@@ -564,7 +538,7 @@ def _decode_combined(chips: np.ndarray, anchor_off: int) -> BeaconResult | None:
     # correlation against the whole superframe, which is the wrong
     # thing to check against.
     #
-    # Chunks 0-4 were *used* to build (frame_index, callsign): both
+    # Chunks 0-4 were *used* to build (frame_index, callsign, mode): the
     # searches above pick whichever hypothesis best matches the noisy
     # chips there, so a wrong hypothesis can still score deceptively
     # well on them -- it's not really testing anything independent, and
@@ -578,7 +552,7 @@ def _decode_combined(chips: np.ndarray, anchor_off: int) -> BeaconResult | None:
     # hypotheses and keeping the best one produces exactly the inflated,
     # not-actually-3-sigma correlations extreme-value statistics predict.
     # Restricting the correlation to just the chunks nothing was
-    # searched against (the two pure CRC/padding chunks) fixed the false
+    # searched against (the two reserved/CRC chunks) fixed the false
     # locks, but a correlation *threshold* over so few chips (48, next
     # to the whole superframe's 181) turned out to cost most of the
     # measured gain: fading routinely knocks a real repetition's own
@@ -598,8 +572,14 @@ def _decode_combined(chips: np.ndarray, anchor_off: int) -> BeaconResult | None:
     # superframe CRC check itself already relies on (1/65536 per
     # attempt), and unlike a correlation threshold it doesn't get
     # weaker just because fading make the chips noisier.
-    callsign_hi = BEACON_COUNTER_BITS + BEACON_CALLSIGN_BITS
-    verify_chunks = [c for c in range(N_CHUNKS) if _chunk_bit_range(c)[0] >= callsign_hi]
+    #
+    # In the v4 layout the verify chunks are 5 and 6: reserved+CRC and
+    # pure CRC. The reserved field is predicted at its protocol constant
+    # (BEACON_RESERVED_VALUE, via _payload_bits) -- which means a future
+    # sender that assigns those bits loses only this combining fallback
+    # on today's receivers, never the single-shot CRC path, exactly the
+    # graceful-degradation trade recorded in config.py.
+    verify_chunks = [c for c in range(N_CHUNKS) if _chunk_bit_range(c)[0] >= inv_hi]
     if not verify_chunks:
         return None  # layout has no untouched chunk to verify against -- refuse rather than guess
     verified = False
@@ -607,16 +587,11 @@ def _decode_combined(chips: np.ndarray, anchor_off: int) -> BeaconResult | None:
         fi = frame_index + (pos // CHIPS_PER_FRAME - anchor_off // CHIPS_PER_FRAME)
         if not (0 <= fi <= MAX_FRAME_COUNTER):
             continue
-        payload = _payload_bits(fi, callsign)
+        payload = _payload_bits(fi, callsign, mode_index)
         if all(
             np.array_equal(
                 _decode_chunk_bits(chips[pos + SYNC_LEN + c * 24 : pos + SYNC_LEN + (c + 1) * 24]),
-                payload[_chunk_bit_range(c)[0] : _chunk_bit_range(c)[1]]
-                if _chunk_bit_range(c)[1] <= len(payload)
-                else np.concatenate([
-                    payload[_chunk_bit_range(c)[0] :],
-                    np.zeros(_chunk_bit_range(c)[1] - len(payload), dtype=np.int64),
-                ]),
+                payload[_chunk_bit_range(c)[0] : _chunk_bit_range(c)[1]],
             )
             for c in verify_chunks
         ):
@@ -625,4 +600,5 @@ def _decode_combined(chips: np.ndarray, anchor_off: int) -> BeaconResult | None:
     if not verified:
         return None
 
-    return BeaconResult(chip_offset=anchor_off, frame_index=frame_index, callsign=callsign)
+    return BeaconResult(chip_offset=anchor_off, frame_index=frame_index,
+                        callsign=callsign, mode_index=mode_index)

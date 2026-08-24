@@ -47,8 +47,9 @@ private:
     Clock::time_point t0_;
 };
 
-// Mode C, the longest -- the denominator for blind progress, where the
-// real mode is unknown.
+// Mode C, the longest -- the fallback frame count wherever the real
+// mode is unknown (a beacon carrying a mode index this receiver doesn't
+// recognize; ordinarily the beacon's mode field names it).
 constexpr int kMaxModeFrames = config::MODES[config::N_MODES - 1].n_frames;
 
 // Weight a blind-path latent must clear to count as "confidently
@@ -192,6 +193,12 @@ void remember_finished(std::deque<std::int64_t>& finished, std::int64_t pos) {
 struct Pending {
     std::int64_t start = 0;         // absolute preamble-start position
     std::int64_t deadline_abs = 0;  // absolute buffer position
+    // Whether the *most recent* decode of this reception came from the
+    // blind path. Per-poll, not per-reception: a reception first found
+    // blind can later decode over the preamble path (or vice versa),
+    // and the stall-on-no-advance test below must follow the path
+    // currently driving the record.
+    bool blind = false;
     int metric = 0;                 // best progress metric seen
     // When the metric last stopped advancing; unset while it still is.
     std::optional<Clock::time_point> stable_since;
@@ -217,7 +224,8 @@ void reset_to_listening(SharedState& state) {
 
 }  // namespace
 
-BlindProgress blind_progress(std::span<const double> weights_full) {
+BlindProgress blind_progress(std::span<const double> weights_full,
+                             int n_frames_expected) {
     // The metric counts confidently-received latents only, not bare
     // nonzero ones: demodulate_blind assigns *some* nonzero weight to
     // essentially every legal abs_frame slot its ever-growing search
@@ -242,7 +250,7 @@ BlindProgress blind_progress(std::span<const double> weights_full) {
             last = std::max(last, frame_of[i]);
         }
     }
-    out.frac = static_cast<double>(last + 1) / kMaxModeFrames;
+    out.frac = static_cast<double>(last + 1) / n_frames_expected;
     return out;
 }
 
@@ -442,9 +450,16 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
                 for (const auto& mode : config::MODES)
                     timescales.push_back(
                         std::min(mode.duration_s, config.blind_search_seconds));
+                // BLIND_SCORE_THRESHOLD from config, not a literal: a
+                // hardcoded 4.0 survived here after the threshold moved
+                // to 9.0 with the v3 pilot -- the fifth copy of exactly
+                // the constant-drift hazard docs/todo-done.md records
+                // four of -- leaving this loop accepting blind locks the
+                // Python engine refuses.
                 blind_acc.emplace(config.blind_wide ? config::BLIND_WIDE_MAX_OFFSET_HZ
                                                     : config::BLIND_MAX_OFFSET_HZ,
-                                  config::BLIND_BIN_STEP_HZ, 8, 4.0, std::nullopt,
+                                  config::BLIND_BIN_STEP_HZ, 8,
+                                  config::BLIND_SCORE_THRESHOLD, std::nullopt,
                                   std::move(timescales));
                 blind_acc_pushed = buf_start;
             }
@@ -498,7 +513,22 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
                     have_latents = true;
                     callsign = rb->callsign;
                     snr_db = rb->snr_db;
-                    const BlindProgress bp = blind_progress(weights_full);
+                    // The beacon's mode field (PROTOCOL_VERSION 4) names
+                    // the transmission's real mode, so the blind path no
+                    // longer assumes mode C: the deadline, the progress
+                    // denominator and the reported mode are all exact.
+                    // An unknown index (a future mode) keeps the old
+                    // assume-mode-C behaviour.
+                    const int mi = rb->beacon->mode_index;
+                    if (mi >= 0 && mi < config::N_MODES) {
+                        const auto& spec =
+                            config::MODES[static_cast<std::size_t>(mi)];
+                        mode_name = std::string(spec.name);
+                        n_frames_expected = spec.n_frames;
+                    }
+                    const BlindProgress bp = blind_progress(
+                        weights_full,
+                        n_frames_expected ? *n_frames_expected : kMaxModeFrames);
                     progress_metric = bp.metric;
                     progress_frac = bp.frac;
                 }
@@ -517,28 +547,33 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
             // mistaken for a reception that has already stopped
             // advancing and be ended immediately.
             if (!pending || std::llabs(*reception_start - pending->start) > epsilon) {
-                // The deterministic backstop. The transmission's start is
-                // known exactly -- from the header path's own acquisition,
-                // or from the beacon on the blind path, both in the same
-                // "preamble start" coordinate -- so the latest a real
-                // frame of it can possibly still be arriving is its own
-                // duration after that point, fixed the moment the start
-                // is. The blind path has no header and so no mode, and
-                // uses mode C's duration, the longest. That is unlike
-                // "progress stopped advancing" below, which rides on the
-                // decoder's own noise floor and is not guaranteed to ever
-                // settle. Once the buffer holds audio past this deadline
-                // there is provably no more real signal left to arrive
-                // for this reception, done or not.
-                const auto deadline_frames =
-                    static_cast<std::int64_t>(n_frames_expected ? *n_frames_expected
-                                                                : kMaxModeFrames);
                 Pending p;
                 p.start = *reception_start;
-                p.deadline_abs = *reception_start + PREAMBLE_SAMPLES + HEADER_SAMPLES +
-                                 deadline_frames * FRAME_SAMPLES;
                 pending = std::move(p);
             }
+            // The deterministic backstop. The transmission's start is
+            // known exactly -- from the header path's own acquisition,
+            // or from the beacon on the blind path, both in the same
+            // "preamble start" coordinate -- so the latest a real
+            // frame of it can possibly still be arriving is its own
+            // duration after that point, fixed the moment the start
+            // is. The mode comes from the header, or from the beacon's
+            // mode field on the blind path; only a beacon whose mode
+            // index this receiver doesn't know (a future mode) falls
+            // back to mode C's duration, the longest. That is unlike
+            // "progress stopped advancing" below, which rides on the
+            // decoder's own noise floor and is not guaranteed to ever
+            // settle. Once the buffer holds audio past this deadline
+            // there is provably no more real signal left to arrive
+            // for this reception, done or not. Recomputed every decoded
+            // poll (from pending->start, stable across polls) so a mode
+            // learned on a later poll tightens it.
+            const auto deadline_frames =
+                static_cast<std::int64_t>(n_frames_expected ? *n_frames_expected
+                                                            : kMaxModeFrames);
+            pending->deadline_abs = pending->start + PREAMBLE_SAMPLES + HEADER_SAMPLES +
+                                    deadline_frames * FRAME_SAMPLES;
+            pending->blind = !found;
             if (progress_metric > pending->metric) {
                 pending->metric = progress_metric;
                 advanced = true;
@@ -581,8 +616,9 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
         // of the poll entirely, is why a reception in that state could
         // never satisfy any completion test however long it sat.
         //
-        // Or -- blind only, where there is no frame count to finish on
-        // -- its decoded progress stopped advancing. Deliberately *not*
+        // Or -- blind only, where there is no frames_received count to
+        // finish on -- its decoded progress stopped advancing.
+        // Deliberately *not*
         // extended to the header path: a spurious preamble-shaped lock
         // in noise goes on decoding the same handful of frames for as
         // long as it is looked at, and ending that on a stall would turn
@@ -590,9 +626,11 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
         // (see test_noise_produces_nothing). The header path does not
         // need it anyway -- frames_received climbs as the buffer grows,
         // so a real transmission reaches its count, and the deadline
-        // below is the backstop for one that does not.
-        const bool no_progress =
-            !decoded || (!pending->n_frames_expected && !advanced);
+        // below is the backstop for one that does not. Keyed on
+        // pending->blind rather than "mode unknown": since the beacon's
+        // mode field, the blind path knows the mode too, so
+        // n_frames_expected no longer distinguishes the paths.
+        const bool no_progress = !decoded || (pending->blind && !advanced);
         if (no_progress) {
             if (!pending->stable_since) pending->stable_since = Clock::now();
         } else {

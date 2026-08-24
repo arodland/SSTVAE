@@ -55,8 +55,8 @@
     },
     "beacon/chip_stream": {
       "dtype": "<f8",
-      "note": "frames 0..119, callsign N6MTS",
-      "sha256": "e3ad31e4a18a750a98f4d89102e891d6ce669da37dab4a6c3b73da9f003439b2",
+      "note": "frames 0..119, callsign N6MTS, mode B",
+      "sha256": "d2747abb57b8a1f1d0063e639f739bfa595ce4fe108ed1aa43b2d4c7a9817991",
       "shape": [
         600
       ]
@@ -87,11 +87,11 @@
     },
     "beacon/decode_expected": {
       "dtype": "<i8",
-      "note": "(chip_offset, frame_index) per offset; (-1,-1) where decode fails",
-      "sha256": "a40be36733dd790dcf7f52c6afaf4a5378c6b6f686e08ba43b7b668d2c6c60c7",
+      "note": "(chip_offset, frame_index, mode_index) per offset; (-1,-1,-1) where decode fails",
+      "sha256": "9c75e59a814866d614888588b81f6f4933627438f99b86e88d1da030682a671c",
       "shape": [
         7,
-        2
+        3
       ]
     },
     "beacon/decode_offsets": {
@@ -104,7 +104,7 @@
     "beacon/encode_chips": {
       "dtype": "<f8",
       "note": "one superframe per frame index, callsign KC2G",
-      "sha256": "a78a3e99724a766c2a05b310fbbb5cdcd32df0cba0d586ae3f17dfa14b12d855",
+      "sha256": "9e6223847df609a1b0a1278133ad0b55bfc2ccd90525e947e51d80856bab58f8",
       "shape": [
         8,
         181
@@ -117,10 +117,18 @@
         8
       ]
     },
+    "beacon/encode_modes": {
+      "dtype": "<i8",
+      "note": "mode_index paired with encode_frames",
+      "sha256": "3e17097e33c4c47124a8f03fb5e48009f714ec855b0b2c9f87d00fd468d21ad6",
+      "shape": [
+        8
+      ]
+    },
     "beacon/find_sync_offsets": {
       "dtype": "<i8",
       "note": "best-correlation first",
-      "sha256": "0619b96bbfd483f1e4ee53b5cfc73d6d35245a9d40150b1ab00b90e7b7639638",
+      "sha256": "b701e37eb1da020e21997e59612073eb1debfcd73ebdcf83cef2443e8640e025",
       "shape": [
         8
       ]
@@ -130,18 +138,18 @@
     },
     "beacon/noisy_decode_expected": {
       "dtype": "<i8",
-      "sha256": "515c67e3dad43765eef9df83dbf15e17e8474a83da5c60c2cada250a2f683e01",
+      "sha256": "c4b749e7f31b58008c6ae51c3a0c8cb7d8f03e3bf0804d2b0dc38647d37b6b89",
       "shape": [
         7,
-        2
+        3
       ]
     },
     "beacon/noisy_stream": {
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "3.6137089878e+00",
-        "mean_abs": "1.1026492321e+00",
-        "rms": "1.3008831152e+00"
+        "mean_abs": "1.1149247663e+00",
+        "rms": "1.3176734919e+00"
       },
       "shape": [
         600
@@ -341,21 +349,21 @@
     },
     "framing/header_bits_A": {
       "dtype": "<i8",
-      "sha256": "735e8fb0e15d4fd737bfd6e3459fc0f5b835f4ae9097de31fc785850f99e6f94",
+      "sha256": "67c6d9d3b4e70c4cffc304e06036e539c19e1c19a784543e7bbd78ebb157c76b",
       "shape": [
         24
       ]
     },
     "framing/header_bits_B": {
       "dtype": "<i8",
-      "sha256": "bab8a82ae3d6f500156166594b7573efac303f021bb0eff12db6ef0c330be0bf",
+      "sha256": "1e0f798409499c002e6b42bd4772f91f995903e9140c19397a4bd41b6a25c1e4",
       "shape": [
         24
       ]
     },
     "framing/header_bits_C": {
       "dtype": "<i8",
-      "sha256": "82f69de31ed7f7e906efb14d07ff988ee42df87c2ca99003f4bb6c6dbd613439",
+      "sha256": "9cb225fc292cc10b3fcd158ff18b85b0a746bb4b62288522724d6bcce3fc08cf",
       "shape": [
         24
       ]
@@ -370,7 +378,7 @@
     },
     "framing/header_soft_inputs": {
       "dtype": "<f8",
-      "sha256": "dd2b03a941a5101933b7511bda0dc285c661ff2d0cebbdfc4271c7997902e4fa",
+      "sha256": "3b07cb8335a04b5ea4e63d0ab8f96303e084cc2d66001bff5f22bc39b9656a85",
       "shape": [
         26,
         24
@@ -378,21 +386,21 @@
     },
     "framing/header_symbol_A": {
       "dtype": "<c16",
-      "sha256": "7ed4a07ccf2e2cf9759ff9c114320094047819037d4aab7196e23c913cb4c63b",
+      "sha256": "5f89b640dd887b9f27a4086d20398b890ffef24276b4483e3e4624a9a1cd40ab",
       "shape": [
         24
       ]
     },
     "framing/header_symbol_B": {
       "dtype": "<c16",
-      "sha256": "72ed812766344d4d0a125833dc1641d5ad02e14c2e787a515ecb6d67fd6333e5",
+      "sha256": "26a0bd16ed36483610c2512fe2c46cf40fbeb1c2333f4e8123d352c0684e3ef4",
       "shape": [
         24
       ]
     },
     "framing/header_symbol_C": {
       "dtype": "<c16",
-      "sha256": "79313268edda9c6db52e127002b5d694a8c4afea2cc7d1116b763d5cf70318f3",
+      "sha256": "19660be228cd2c88d2b820745e08915980ad1cc8aa65a43916532fc44e2d2309",
       "shape": [
         24
       ]
@@ -640,8 +648,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "8.0000000000e+02",
-        "mean_abs": "2.6700027304e+02",
-        "rms": "4.6188057618e+02"
+        "mean_abs": "2.6700047222e+02",
+        "rms": "4.6188057619e+02"
       },
       "note": "(preamble_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -666,8 +674,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "8.0000000000e+02",
-        "mean_abs": "2.7943695189e+02",
-        "rms": "4.6238374373e+02"
+        "mean_abs": "2.7943535743e+02",
+        "rms": "4.6238361250e+02"
       },
       "note": "(preamble_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -679,8 +687,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "8.0000000000e+02",
-        "mean_abs": "2.6701520382e+02",
-        "rms": "4.6188042535e+02"
+        "mean_abs": "2.6701489212e+02",
+        "rms": "4.6188042554e+02"
       },
       "note": "(preamble_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -692,8 +700,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "8.0000000000e+02",
-        "mean_abs": "2.6703155089e+02",
-        "rms": "4.6188051968e+02"
+        "mean_abs": "2.6703155366e+02",
+        "rms": "4.6188051980e+02"
       },
       "note": "(preamble_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -705,8 +713,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "7.6800000000e+02",
-        "mean_abs": "2.6977107243e+02",
-        "rms": "4.4403659826e+02"
+        "mean_abs": "2.6988872137e+02",
+        "rms": "4.4405052363e+02"
       },
       "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -718,8 +726,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "7.6800000000e+02",
-        "mean_abs": "2.8112753824e+02",
-        "rms": "4.4447182975e+02"
+        "mean_abs": "2.8107957322e+02",
+        "rms": "4.4446773843e+02"
       },
       "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -731,8 +739,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "7.6800000000e+02",
-        "mean_abs": "2.6437494306e+02",
-        "rms": "4.4363164934e+02"
+        "mean_abs": "2.6439329131e+02",
+        "rms": "4.4363110936e+02"
       },
       "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -744,8 +752,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "7.6800000000e+02",
-        "mean_abs": "2.6780506782e+02",
-        "rms": "4.4386368383e+02"
+        "mean_abs": "2.6784125653e+02",
+        "rms": "4.4387591608e+02"
       },
       "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -756,9 +764,9 @@
     "sync/wave_clean": {
       "dtype": "<f8",
       "fingerprint": {
-        "max_abs": "2.1513042758e+00",
-        "mean_abs": "8.1677988201e-01",
-        "rms": "9.8918702442e-01"
+        "max_abs": "2.1514975080e+00",
+        "mean_abs": "8.1602634340e-01",
+        "rms": "9.8794660734e-01"
       },
       "shape": [
         16000
@@ -780,9 +788,9 @@
     "sync/wave_offset": {
       "dtype": "<f8",
       "fingerprint": {
-        "max_abs": "3.1421945731e+00",
-        "mean_abs": "8.8313817883e-01",
-        "rms": "1.0697915620e+00"
+        "max_abs": "3.1404670206e+00",
+        "mean_abs": "8.8158110466e-01",
+        "rms": "1.0682166390e+00"
       },
       "shape": [
         16000
@@ -792,9 +800,9 @@
     "sync/wave_snr0": {
       "dtype": "<f8",
       "fingerprint": {
-        "max_abs": "6.5268533365e+00",
-        "mean_abs": "1.2903141912e+00",
-        "rms": "1.6104885140e+00"
+        "max_abs": "6.5206710511e+00",
+        "mean_abs": "1.2886609838e+00",
+        "rms": "1.6080308183e+00"
       },
       "shape": [
         16000
@@ -804,9 +812,9 @@
     "sync/wave_snr6": {
       "dtype": "<f8",
       "fingerprint": {
-        "max_abs": "3.9861384059e+00",
-        "mean_abs": "9.6006421906e-01",
-        "rms": "1.1779279240e+00"
+        "max_abs": "3.9835450012e+00",
+        "mean_abs": "9.6007575303e-01",
+        "rms": "1.1777305003e+00"
       },
       "shape": [
         16000

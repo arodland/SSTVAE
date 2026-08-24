@@ -159,7 +159,16 @@ int main(int argc, char** argv) {
         }
 
         if (pkt) {
-            std::printf("beacon: frame %d, callsign %s\n", pkt->frame_index,
+            const bool mode_known =
+                pkt->mode_index >= 0 && pkt->mode_index < config::N_MODES;
+            const std::string mode_str =
+                mode_known
+                    ? std::string(
+                          config::MODES[static_cast<std::size_t>(pkt->mode_index)]
+                              .name)
+                    : "unknown (future format?)";
+            std::printf("beacon: frame %d, mode %s, callsign %s\n",
+                        pkt->frame_index, mode_str.c_str(),
                         callsign.empty() ? "(none sent)" : ("'" + callsign + "'").c_str());
         } else {
             std::printf("beacon: no superframe decoded (short/noisy reception)\n");

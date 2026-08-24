@@ -519,17 +519,23 @@ def build_beacon(c: Corpus) -> None:
           np.array([beacon._crc16(b) for b in crc_cases], dtype=np.int64),
           "one 16-bit row per input")
 
-    # Superframes at the counter's edges as well as ordinary values.
+    # Superframes at the counter's edges as well as ordinary values, with
+    # the mode field cycling through all four values -- including the
+    # unassigned index 3, which must encode and decode (forward compat).
     frames = [0, 1, 219, 220, 439, 440, 659, beacon.MAX_FRAME_COUNTER]
+    modes = [(i % (beacon.MAX_MODE_INDEX + 1)) for i in range(len(frames))]
     c.add("beacon/encode_frames", np.array(frames, dtype=np.int64))
+    c.add("beacon/encode_modes", np.array(modes, dtype=np.int64),
+          "mode_index paired with encode_frames")
     c.add("beacon/encode_chips",
-          np.array([beacon.encode_chips(f, "KC2G") for f in frames]),
+          np.array([beacon.encode_chips(f, "KC2G", m) for f, m in zip(frames, modes)]),
           "one superframe per frame index, callsign KC2G")
 
     # A continuous stream, which is what the modem actually transmits:
-    # superframes back to back, truncated at the end.
-    stream = beacon.chip_stream(0, 120, "N6MTS")
-    c.add("beacon/chip_stream", stream, "frames 0..119, callsign N6MTS")
+    # superframes back to back, truncated at the end. Mode index 1 (B) --
+    # test_golden.cpp hardcodes the same value.
+    stream = beacon.chip_stream(0, 120, "N6MTS", 1)
+    c.add("beacon/chip_stream", stream, "frames 0..119, callsign N6MTS, mode B")
 
     # decode() over the stream at several offsets, including windows too
     # short to guarantee a hit. The expected values record what the
@@ -540,9 +546,11 @@ def build_beacon(c: Corpus) -> None:
     for off in offsets:
         window = stream[off:off + 2 * beacon.SUPERFRAME_LEN]
         r = beacon.decode(window)
-        rows.append([-1, -1] if r is None else [r.chip_offset, r.frame_index])
+        rows.append([-1, -1, -1] if r is None
+                    else [r.chip_offset, r.frame_index, r.mode_index])
     c.add("beacon/decode_expected", np.array(rows, dtype=np.int64),
-          "(chip_offset, frame_index) per offset; (-1,-1) where decode fails")
+          "(chip_offset, frame_index, mode_index) per offset; "
+          "(-1,-1,-1) where decode fails")
 
     # And with noise, where some decodes must fail. A port that
     # succeeded where the reference gives up would be a different
@@ -553,7 +561,8 @@ def build_beacon(c: Corpus) -> None:
     for off in offsets:
         window = noisy[off:off + 2 * beacon.SUPERFRAME_LEN]
         r = beacon.decode(window)
-        noisy_rows.append([-1, -1] if r is None else [r.chip_offset, r.frame_index])
+        noisy_rows.append([-1, -1, -1] if r is None
+                          else [r.chip_offset, r.frame_index, r.mode_index])
     c.add("beacon/noisy_decode_expected", np.array(noisy_rows, dtype=np.int64))
 
     # find_sync scoring on a clean stream: the offsets it ranks, in
