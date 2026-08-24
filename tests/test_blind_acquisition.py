@@ -267,6 +267,31 @@ def test_blind_accumulator_matches_acquire_blind_one_shot():
     assert streamed.metric > BLIND_SCORE_THRESHOLD
 
 
+def test_blind_accumulator_best_score_is_observable_below_threshold():
+    """best_score() is the live loop's diagnostic: the same prominence
+    result() gates on, visible whether or not it clears the threshold.
+    Above threshold the two must agree exactly (same statistic, same
+    fold); below it, where result() raises and the loop used to go
+    silent, best_score() must still report the number -- that silence
+    is what made a field receiver's failed acquisitions unfalsifiable."""
+    _, _, x, frames_start = _tx(seed=8)
+    win = _frames_slice(x, frames_start, 300, beacon.MIN_FRAMES_FOR_SYNC + 5)
+
+    acc = BlindAccumulator()
+    acc.push(to_baseband(win), 0)
+    assert acc.best_score() == pytest.approx(acc.result().metric, rel=1e-9)
+
+    noise = BlindAccumulator()
+    noise.push(to_baseband(np.random.default_rng(0).normal(size=len(win))), 0)
+    with pytest.raises(SyncError):
+        noise.result()
+    score = noise.best_score()
+    assert 0.0 < score < BLIND_SCORE_THRESHOLD
+
+    # Too little pushed to say anything at all: 0.0, not an exception.
+    assert BlindAccumulator().best_score() == 0.0
+
+
 def test_blind_accumulator_decay_forgets_stale_history():
     """Without decay, a real (but short) transmission preceded by a long
     stretch of unrelated noise gets diluted: the peak bin's fold sums

@@ -586,6 +586,24 @@ class BlindAccumulator:
         self._buf = buf[pos:]
         self._buf_start += pos
 
+    def best_score(self) -> float:
+        """The current best peak/median prominence across every
+        (timescale, CFO bin), whether or not it clears the threshold;
+        0.0 while too little data has been pushed to say anything.
+
+        Observability, not decision-making: `result()` below is the only
+        lock gate. This exists because a below-threshold score is
+        otherwise invisible in live operation -- the loop's blind branch
+        silently does nothing -- and a receiver that fails to acquire on
+        real hardware then gives no number to compare against the
+        threshold's calibration. When the library owns the decision,
+        "quiet" and "unfalsifiable" are close together (the same reason
+        SSTVAE_HAMLIB_DEBUG exists)."""
+        if self._n_valid < FRAME_SAMPLES * self._min_periods:
+            return 0.0
+        scores = self._folded.max(axis=2) / (np.median(self._folded, axis=2) + 1e-12)
+        return float(scores.max())
+
     def result(self) -> BlindAcquisition:
         """The best (timescale, bin, phase) so far, in the same shape as
         `acquire_blind`'s return value -- reports whichever timescale's

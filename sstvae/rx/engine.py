@@ -249,6 +249,20 @@ class SharedState:
     saved_path: str | None = None
     seconds_captured: float = 0.0
     last_decode_s: float = 0.0
+    # Blind-path observability, refreshed every poll the blind branch
+    # runs (NaN / False when it didn't). The score is the accumulator's
+    # best prominence whether or not it clears BLIND_SCORE_THRESHOLD,
+    # because a below-threshold score is otherwise invisible in live
+    # operation and a receiver that fails to acquire on real hardware
+    # gives no number to compare against the threshold's calibration.
+    # blind_locked distinguishes the two ways the blind path can be
+    # silently stuck: score below threshold (not locked), and locked
+    # with the beacon not decoding -- which the UI otherwise cannot
+    # tell apart, and which mean opposite things (the second is a
+    # payload/format problem, e.g. a pre-PROTOCOL_VERSION-4 sender,
+    # not a weak signal).
+    blind_score: float = float("nan")
+    blind_locked: bool = False
 
     def __post_init__(self):
         self.lock = threading.Lock()
@@ -426,6 +440,8 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
         progress_frac = 0.0
         progress_metric = 0
         reception_start = None
+        blind_score = float("nan")
+        blind_locked = False
 
         # Preamble path first: find and decode the strongest reception
         # that hasn't already been saved. Falls through to the blind path
@@ -470,10 +486,12 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
                 blind_acc.push(new_chunk, blind_acc_pushed)
                 blind_acc_pushed = total
 
+            blind_score = blind_acc.best_score()
             try:
                 ba = blind_acc.result()
             except SyncError:
                 ba = None
+            blind_locked = ba is not None
             try:
                 rb = (
                     modem.demodulate_blind(
@@ -532,6 +550,8 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
 
         with state.lock:
             state.last_decode_s = decode_s
+            state.blind_score = blind_score
+            state.blind_locked = blind_locked
 
         advanced = False
         decoded = latents_full is not None and reception_start is not None

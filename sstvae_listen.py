@@ -64,9 +64,21 @@ def _status_line(state: SharedState) -> str:
         snr_db = state.snr_db
         seconds_captured = state.seconds_captured
         saved_path = state.saved_path
+        blind_score = state.blind_score
+        blind_locked = state.blind_locked
 
     if status == "listening":
-        return f"listening... ({seconds_captured:.0f}s captured)"
+        line = f"listening... ({seconds_captured:.0f}s captured)"
+        # The blind path's live diagnostic: without it, "score below
+        # threshold" and "locked but the beacon isn't decoding" are both
+        # just silence, and they mean opposite things -- the first is a
+        # weak (or interfered-with) signal, the second a payload/format
+        # problem such as a sender on an older PROTOCOL_VERSION.
+        if blind_locked:
+            line += f"  blind locked ({blind_score:.1f}) -- no beacon decoded yet"
+        elif blind_score == blind_score and blind_score > 0:  # not NaN
+            line += f"  blind score {blind_score:.1f}"
+        return line
     if status == "receiving":
         if n_frames_expected is not None:
             line = (

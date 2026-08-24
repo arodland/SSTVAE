@@ -194,6 +194,9 @@ def _native_adapters(native):
         def push(self, z, start_sample):
             self._native.push(z, start_sample)
 
+        def best_score(self):
+            return self._native.best_score()
+
         def result(self):
             from sstvae.modem.sync import BlindAcquisition
 
