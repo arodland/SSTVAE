@@ -96,6 +96,19 @@ audio and rig bugs found so far were all invisible to unit tests.
     into 1152 phase bins across many periods, and searches CFO bins
     directly (no preamble to give phase-slope CFO) — works on a
     recording that never contains the transmission-start preamble.
+    **`BlindAccumulator` folds in absolute (push start_sample)
+    coordinates and `result(origin=...)` rebases the phase into the
+    caller's buffer coordinate — pass the buffer's absolute start,
+    always.** The two coordinates agree only while the buffer starts at
+    0 mod FRAME_SAMPLES, which held in every test (sessions shorter
+    than the ring buffer, `buf_start` pinned at 0) and silently stopped
+    holding on hardware once a listening session outlived the ring:
+    blind acquisition then locked with a healthy score while the demod
+    grid sat a uniformly random 0..1151 samples off, so the pilot — and
+    with it the beacon — read garbage and blind RX "worked for the
+    first couple of minutes of a session, then almost never" (found
+    2026-08-24 in the field; reproduced
+    end-to-end with a ring that wraps before the transmission starts).
   - `framing.py` per-group interleaver, Golay-coded header.
     `_TX_PERMS` truncates each group's permutation to the transmittable
     budget (dropping the beacon carrier's capacity cost); `interleave`/

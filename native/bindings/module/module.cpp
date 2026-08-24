@@ -465,10 +465,12 @@ PYBIND11_MODULE(sstvae_native, m) {
                  self.push(in, start_sample);
              },
              py::arg("z"), py::arg("start_sample"))
-        .def("result", [](const sstvae::sync::BlindAccumulator& self) {
-            const auto a = self.result();
-            return py::make_tuple(a.frame_start, a.freq_offset, a.metric);
-        });
+        .def("result",
+             [](const sstvae::sync::BlindAccumulator& self, std::int64_t origin) {
+                 const auto a = self.result(origin);
+                 return py::make_tuple(a.frame_start, a.freq_offset, a.metric);
+             },
+             py::arg("origin") = 0);
 
     py::module_ dsp = m.def_submodule("dsp");
     dsp.def("to_baseband",

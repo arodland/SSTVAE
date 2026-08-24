@@ -437,7 +437,14 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
                 blind_acc_pushed = total
 
             try:
-                ba = blind_acc.result()
+                # origin=buf_start: the accumulator folds in absolute
+                # (ring-coordinate) phase, but the phase is about to be
+                # used against `samples`, which starts at buf_start.
+                # Without this the two coordinates agree only while the
+                # session is younger than the ring buffer -- see
+                # BlindAccumulator.result for the field failure that
+                # found it.
+                ba = blind_acc.result(origin=buf_start)
             except SyncError:
                 ba = None
             try:

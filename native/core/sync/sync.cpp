@@ -488,7 +488,7 @@ void BlindAccumulator::push(std::span<const cdouble> z, std::int64_t start_sampl
     buf_start_ += static_cast<std::int64_t>(pos);
 }
 
-BlindAcquisition BlindAccumulator::result() const {
+BlindAcquisition BlindAccumulator::result(std::int64_t origin) const {
     if (n_valid_ < static_cast<std::int64_t>(FRAME_SAMPLES) * min_periods_)
         throw SyncError("window too short for blind acquisition");
 
@@ -540,8 +540,13 @@ BlindAcquisition BlindAccumulator::result() const {
     const std::span<const double> scale_scores(
         scores.data() + static_cast<std::size_t>(best_scale) * shift_bins_.size(),
         shift_bins_.size());
-    return BlindAcquisition{static_cast<std::int64_t>(phase),
-                            refine_cfo(freqs_, scale_scores, best_bin), best_score};
+    // Rebase from the fold's absolute coordinate to the caller's --
+    // see the header comment on `origin`.
+    const std::int64_t f = FRAME_SAMPLES;
+    const std::int64_t rebased =
+        ((static_cast<std::int64_t>(phase) - origin) % f + f) % f;
+    return BlindAcquisition{rebased, refine_cfo(freqs_, scale_scores, best_bin),
+                            best_score};
 }
 
 }  // namespace sstvae::sync
