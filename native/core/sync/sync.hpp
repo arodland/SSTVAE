@@ -121,7 +121,19 @@ class BlindAccumulator {
                               std::vector<std::optional<double>> window_s = {25.0});
 
     void push(std::span<const cdouble> z, std::int64_t start_sample);
-    BlindAcquisition result() const;
+    // `origin` is the coordinate the returned frame_start phase is
+    // expressed in, as an absolute sample index -- pass the first
+    // sample position of whatever buffer the phase will be used
+    // against. The fold lives in *absolute* (push start_sample)
+    // coordinates; the two agree only while that buffer starts at a
+    // position that is 0 mod FRAME_SAMPLES, which held in every test
+    // (sessions shorter than the ring buffer) and silently stopped
+    // holding on hardware once a listening session outlived the ring:
+    // the demod grid was then off by buf_start mod FRAME_SAMPLES, so
+    // the lock score stayed healthy while the pilot -- and with it the
+    // beacon -- read garbage. See the Python docstring for the full
+    // account.
+    BlindAcquisition result(std::int64_t origin = 0) const;
     // The current best prominence whether or not it clears the
     // threshold; 0.0 while too little has been pushed. Observability
     // for the live loop's status surfaces -- result() stays the only

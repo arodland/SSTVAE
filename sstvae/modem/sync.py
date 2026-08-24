@@ -604,14 +604,33 @@ class BlindAccumulator:
         scores = self._folded.max(axis=2) / (np.median(self._folded, axis=2) + 1e-12)
         return float(scores.max())
 
-    def result(self) -> BlindAcquisition:
+    def result(self, origin: int = 0) -> BlindAcquisition:
         """The best (timescale, bin, phase) so far, in the same shape as
         `acquire_blind`'s return value -- reports whichever timescale's
         peak score is highest, not a fixed one, since which timescale
         that is depends on which mode (if any) is actually transmitting.
         Raises `SyncError` exactly as the one-shot function does: too
         little data pushed yet, or no timescale's peak clears
-        `threshold`."""
+        `threshold`.
+
+        `origin` is the coordinate the returned `frame_start` phase is
+        expressed in, as an absolute sample index -- pass the first
+        sample position of whatever buffer the phase will be used
+        against. The fold lives in *absolute* (push start_sample)
+        coordinates, while `acquire_blind` -- whose return shape this
+        mimics -- reports a phase relative to the window it was handed;
+        those two agree only while the buffer happens to start at an
+        absolute position that is 0 mod FRAME_SAMPLES. That held in
+        every test and simulation (sessions shorter than the ring
+        buffer, so buf_start stayed 0) and silently stopped holding on
+        real hardware the moment a listening session outlived the ring:
+        from then on the demod grid handed to demodulate_blind was off
+        by (buf_start mod FRAME_SAMPLES) samples -- a uniformly random
+        offset that lands inside the cyclic prefix only ~5% of the time
+        -- so the lock score stayed healthy (it is computed in absolute
+        coordinates) while the pilot, and with it the beacon, read
+        garbage. Blind reception "working for the first couple of
+        minutes of a session, then almost never" was this."""
         if self._n_valid < FRAME_SAMPLES * self._min_periods:
             raise SyncError("window too short for blind acquisition")
 
@@ -633,4 +652,8 @@ class BlindAccumulator:
         # grid is coarse by design and the raw bin centre is several Hz
         # out, which the demodulator cannot absorb. See refine_cfo.
         f_hat = refine_cfo(self._freqs, scores[t], i)
-        return BlindAcquisition(frame_start=phase, freq_offset=f_hat, metric=score)
+        return BlindAcquisition(
+            frame_start=int((phase - origin) % FRAME_SAMPLES),
+            freq_offset=f_hat,
+            metric=score,
+        )
