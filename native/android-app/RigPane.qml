@@ -4,11 +4,13 @@ import QtQuick.Layouts
 
 // Rig control settings: CAT and PTT over USB, Bluetooth or a network.
 //
-// A section of the Settings tab rather than a tab of its own. The tab
-// bar already carries five and a sixth is a crowded row on a phone --
-// and this is a screen an operator visits once per radio, not once per
-// session. What *is* worth seeing every session, the dial frequency,
-// goes on the Listen screen where the waterfall is.
+// A collapsible section of the Settings tab (`SettingsSection.qml`)
+// rather than a tab of its own. The tab bar already carries five and a
+// sixth is a crowded row on a phone -- and this is a screen an operator
+// visits once per radio, not once per session. What *is* worth seeing
+// every session, the dial frequency, goes on the Listen screen where the
+// waterfall is. The section supplies the "Rig control" heading and the
+// on/off summary, so there is no title label here.
 //
 // **Why any of this exists**: `docs/android.md` recorded rig control as
 // structurally impossible here, because Hamlib's serial layer opens a
@@ -25,15 +27,10 @@ ColumnLayout {
 
     // Re-enumerate whenever this becomes visible: USB devices come and
     // go with the cable, and a picker showing a radio that was
-    // unplugged five minutes ago is worse than an empty one.
+    // unplugged five minutes ago is worse than an empty one. The
+    // enclosing section is collapsed by default, so this now fires when
+    // the operator opens Rig control rather than on every Settings visit.
     onVisibleChanged: if (visible) rig.refreshDevices()
-
-    Label {
-        text: "Rig control"
-        font.bold: true
-        Layout.margins: 12
-        Layout.bottomMargin: 0
-    }
 
     Switch {
         text: "Control the radio"
@@ -400,79 +397,12 @@ ColumnLayout {
             Layout.rightMargin: 12
         }
 
-        // ---- diagnostics ----------------------------------------------
-        //
-        // Hamlib's own trace, which is the only thing that answers "how
-        // far did open get, and what did the radio say" -- the library
-        // writes it to stderr, which on a phone is nowhere.
-        Switch {
-            text: "Log rig traffic"
-            Layout.leftMargin: 4
-            checked: pane.rig.debugLog
-            onToggled: pane.rig.debugLog = checked
-        }
-        Label {
-            text: "For bug reports. Records every CAT command and reply, "
-                  + "which slows things down and fills the log quickly — "
-                  + "leave it off unless a radio will not work."
-            font.pixelSize: 11
-            color: "#666"
-            Layout.fillWidth: true
-            Layout.leftMargin: 12
-            Layout.rightMargin: 12
-            wrapMode: Text.Wrap
-        }
-        ColumnLayout {
-            visible: pane.rig.debugLog
-            spacing: 4
-            Layout.fillWidth: true
-            Layout.leftMargin: 12
-            Layout.rightMargin: 12
-
-            RowLayout {
-                // **Refreshed by hand, not bound to the property.** The
-                // rig screen republishes at 1 Hz, and a bound text
-                // property would reset this view's scroll position
-                // every second — unreadable in exactly the situation it
-                // is for. A trace is read after the failure anyway.
-                Button {
-                    text: "Refresh"
-                    onClicked: logArea.text = pane.rig.logText
-                }
-                Button {
-                    text: "Copy"
-                    onClicked: {
-                        logArea.selectAll();
-                        logArea.copy();
-                        logArea.deselect();
-                    }
-                }
-                Button {
-                    text: "Clear"
-                    onClicked: {
-                        pane.rig.clearLog();
-                        logArea.text = "";
-                    }
-                }
-            }
-
-            ScrollView {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 260
-                clip: true
-
-                TextArea {
-                    id: logArea
-                    readOnly: true
-                    // No wrapping: a CI-V frame dump read across
-                    // wrapped lines is worse than one read sideways.
-                    wrapMode: Text.NoWrap
-                    font.family: "monospace"
-                    font.pixelSize: 10
-                    placeholderText: "Press Refresh after the radio fails to connect."
-                }
-            }
-        }
+        // Hamlib's own trace -- the one thing that answers "how far did
+        // open get, and what did the radio say" -- is the "Log rig
+        // traffic" switch, and it lives in Settings > Advanced rather
+        // than here: it is a debug tool an operator reaches for once in
+        // the life of a radio, so it belongs with the other debug
+        // toggle, not in the middle of the connection controls.
     }
 
     // ---- the radio picker ---------------------------------------------

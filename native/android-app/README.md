@@ -915,6 +915,36 @@ framing, process-wide, so a rotation mid-crop loses nothing.
   `contentItem`, so `parent` is neither the ScrollView nor anything with
   its width. The symptom is not a missing scrollbar but text running off
   the right edge with nothing to scroll it back.
+- **Settings is grouped into collapsible sections**
+  (`SettingsSection.qml`). Even scrolled, the page had grown into one
+  flat run of every control the app has — the debug toggle in the same
+  column as the callsign, and a multi-sentence help label under each
+  switch — so finding one setting meant reading past all the others.
+  Each group (Receive, Transmit, Rig control, Model, Advanced) is now a
+  section that **starts collapsed**: the page opens as a short list of
+  headings, and the descriptive text and the rarely-touched controls
+  fold away until one is tapped open. Three things made this the right
+  shape rather than a second tab bar. The bottom tab bar already carries
+  five and `RigPane.qml` records why a sixth was refused on a phone —
+  a second strip inside the page is the same crowding one level down.
+  Folding costs no navigation stack, so `Main.qml`'s deliberately
+  careful `onClosing` back handling is untouched (a drill-down would
+  have added a fourth case to it). And a `ColumnLayout` with
+  `visible: false` is excluded from its parent layout entirely, so a
+  collapsed section costs only its header, while `Component.onCompleted`
+  on the controls inside still runs — a ComboBox that reads its stored
+  index once is correct on first expand. Each header carries an optional
+  one-line `summary` of current state (rig on/off, model ready), the way
+  Android's own settings show a preference's value under its title, so
+  the common questions are answerable without expanding anything. The
+  debug controls collect in their own `Advanced` section, last — which
+  is what "kept out of the way" meant: `Show technical details`, and the
+  rig CAT trace (`Log rig traffic`), which moved out of the middle of
+  `RigPane`'s connection controls to sit beside it. That rig subgroup is
+  shown only when rig control is on, so an operator with no cable never
+  meets a rig knob in Advanced. `RigPane` lost its internal "Rig
+  control" title label when it moved in, since the section supplies the
+  heading.
 
 ### Picking a picture
 
