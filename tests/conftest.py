@@ -197,10 +197,10 @@ def _native_adapters(native):
         def best_score(self):
             return self._native.best_score()
 
-        def result(self):
+        def result(self, origin=0):
             from sstvae.modem.sync import BlindAcquisition
 
-            return _sync_call(self._native.result, BlindAcquisition)
+            return _sync_call(self._native.result, BlindAcquisition, origin)
 
     # Modem's methods, rebuilt into the reference's dataclasses. The
     # binding returns plain dicts so the C++ core carries no knowledge of
