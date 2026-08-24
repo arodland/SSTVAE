@@ -43,10 +43,25 @@ ColumnLayout {
         Layout.fillWidth: true
         padding: 12
         onClicked: section.expanded = !section.expanded
-        contentItem: RowLayout {
-            spacing: 8
-            ColumnLayout {
-                Layout.fillWidth: true
+
+        // **Anchored, not a RowLayout.** The chevron must sit on the
+        // content's right edge on every row, and a fill-width layout
+        // child pushing it there proved unreliable inside a Control's
+        // contentItem -- rows with a summary and rows without ended up
+        // with the chevron at different x. Anchoring the chevron to
+        // `parent.right` and the text column between the left edge and
+        // the chevron pins it regardless of what the row contains. The
+        // Control resizes this Item to the full content width, so
+        // `parent` is the right thing to anchor to.
+        contentItem: Item {
+            implicitHeight: Math.max(titleCol.implicitHeight, chevron.implicitHeight)
+
+            Column {
+                id: titleCol
+                anchors.left: parent.left
+                anchors.right: chevron.left
+                anchors.rightMargin: 8
+                anchors.verticalCenter: parent.verticalCenter
                 spacing: 0
                 Label {
                     text: section.title
@@ -54,18 +69,21 @@ ColumnLayout {
                     font.pixelSize: 15
                 }
                 Label {
+                    width: parent.width
                     text: section.summary
                     visible: text.length > 0
                     font.pixelSize: 11
                     color: "#888"
                     elide: Text.ElideRight
-                    Layout.fillWidth: true
                 }
             }
             // Rotated rather than swapped for a different glyph, so the
             // change reads as one control turning rather than two
             // characters trading places.
             Label {
+                id: chevron
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
                 text: "▼"
                 color: "#888"
                 rotation: section.expanded ? 180 : 0
