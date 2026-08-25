@@ -136,7 +136,61 @@ def main() -> int:
     except SyncError:
         print("header path: no preamble in this capture (expected for a "
               "blind-only recording)")
+
+    _native_cross_check(x, args, timescales, chunk)
     return 0
+
+
+def _native_cross_check(x, args, timescales, chunk) -> None:
+    """Everything above again, through the C++ implementations, if the
+    extension module is built (tools/build_native.sh) -- for the field
+    case where the Python listener decodes a capture the native app
+    fails on: same file, both implementations, side by side. The suite's
+    parity tests all pass on synthetic audio, so if the two disagree
+    here, the disagreement is a property of this real capture and this
+    file IS the reproduction -- keep it."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent /
+                           "native" / "build" / "python"))
+    try:
+        import sstvae_native as native
+    except ImportError:
+        print("\n[no native cross-check: extension module not built -- "
+              "tools/build_native.sh]")
+        return
+
+    print("\n--- native (C++) cross-check ---")
+    acc = native.sync.BlindAccumulator(
+        max_offset_hz=BLIND_WIDE_MAX_OFFSET_HZ if args.wide else BLIND_MAX_OFFSET_HZ,
+        window_s=[float(t) for t in timescales],
+    )
+    pos = 0
+    while pos < len(x):
+        acc.push(to_baseband_at(x[pos : pos + chunk], pos), pos)
+        pos += chunk
+        score = acc.best_score()
+        try:
+            frame_start, freq_offset, metric = acc.result()
+            lock = f"LOCK  cfo {freq_offset:+6.1f} Hz  phase {frame_start}"
+        except Exception:
+            lock = ""
+        print(f"  t={pos / FS:6.1f}s  score {score:6.2f}  {lock}")
+
+    try:
+        acq = acc.result()
+    except Exception as e:
+        print(f"native: no lock: {e}")
+        return
+    d = native.modem.demodulate_blind(
+        np.asarray(x, dtype=np.float64), None,
+        (int(acq[0]), float(acq[1]), float(acq[2])), "off")
+    if d["beacon"] is None:
+        print("native: locked, but the beacon did not decode from this window")
+    else:
+        chip_offset, frame_index, callsign, mode_index = d["beacon"]
+        spec = MODES_BY_INDEX.get(mode_index)
+        print(f"native beacon: frame {frame_index}, "
+              f"mode {spec.name if spec else '?'}, callsign '{callsign}', "
+              f"snr {d['snr_db']:.1f} dB")
 
 
 if __name__ == "__main__":
