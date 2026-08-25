@@ -46,7 +46,7 @@ TRIALS = 25
 MIN_DECODES = 18  # shipped ~0.90 (22.5/25); equalized ~0.42 (10.5/25)
 
 
-def _blind_window(mode, preset, snr_db, seed):
+def _blind_window(mode, preset, snr_db, seed, frames=MIN_FRAMES_FOR_SYNC + 4):
     """A short mid-transmission window, the case where the beacon is
     actually load-bearing: one superframe copy, no preamble. Over a whole
     transmission six repetitions decode 100% either way."""
@@ -58,7 +58,7 @@ def _blind_window(mode, preset, snr_db, seed):
 
     start_frame = mode.n_frames // 3
     lo = LEADIN_SAMPLES + PREAMBLE_SAMPLES + HEADER_SAMPLES + start_frame * FRAME_SAMPLES
-    win = rx[lo : lo + (MIN_FRAMES_FOR_SYNC + 4) * FRAME_SAMPLES]
+    win = rx[lo : lo + frames * FRAME_SAMPLES]
     return win, start_frame
 
 
@@ -76,3 +76,33 @@ def test_beacon_decodes_through_fading_on_a_short_window():
             and b.frame_index - b.chip_offset // CHIPS_PER_FRAME == start_frame
         )
     assert ok >= MIN_DECODES, f"{ok}/{TRIALS} beacon decodes, expected >= {MIN_DECODES}"
+
+
+def test_multi_repetition_combining_is_coherent():
+    """`_decode_combined` sums raw chips, not their signs.
+
+    Only reachable with >= 3 superframe repetitions and only when no
+    single repetition decodes alone, so this needs a window long enough
+    for the grid (SUPERFRAME_LEN is 36.2 frames) and a channel harsh
+    enough that single-shot fails -- 150 frames at mpd 0 dB. A whole
+    transmission carries ~12 repetitions, where every variant is 1.00.
+
+    Measured (`scripts/beacon_combine_sweep.py`, 40 trials/cell), mpd
+    0 dB: equalized chips + sign 0.40, equalized + raw 0.15, MRC + sign
+    0.53, MRC + raw 0.90. The two changes compound and neither is safe
+    without the other, which is why this test and the one above are a
+    pair.
+    """
+    mode = MODES["B"]
+    m = Modem()
+    ok = 0
+    for t in range(TRIALS):
+        win, start_frame = _blind_window(mode, "mpd", 0.0, 500 + 1000 * t, frames=150)
+        b = m.demodulate_blind(win).beacon
+        ok += bool(
+            b is not None
+            and b.callsign == CALLSIGN
+            and b.mode_index == mode.index
+            and b.frame_index - b.chip_offset // CHIPS_PER_FRAME == start_frame
+        )
+    assert ok >= 18, f"{ok}/{TRIALS} beacon decodes, expected >= 18"
