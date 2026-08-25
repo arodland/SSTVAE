@@ -330,6 +330,23 @@ void ReceivePanel::stop() {
     if (thread_.joinable()) thread_.join();
     running_.store(false);
 
+    // With save_audio on, a manual Stop also dumps the ring -- the whole
+    // point of that diagnostic is re-running the decoder over exactly
+    // what the capture chain delivered, and the sessions that need it
+    // most are the ones where no reception ever completed, so the
+    // per-reception dump in save_reception never ran. Not on the
+    // half-duplex suspend, which stops the panel on every over.
+    if (was_listening && !suspended_for_tx_ && app_->config().receive.save_audio) {
+        const fs::path out_dir(app_->config().folders.receive_dir);
+        std::error_code ec;
+        fs::create_directories(out_dir, ec);
+        const fs::path path = unique_path(out_dir / "capture.wav");
+        dump_ring_to(path);
+        app_->log_event("rx", log::Severity::Info,
+                        tr("captured audio saved: %1")
+                            .arg(QString::fromStdString(path.string())));
+    }
+
     if (Waterfall* w = fall()) w->set_ring(nullptr);
     ring_.reset();
 
@@ -432,6 +449,10 @@ std::optional<std::string> ReceivePanel::save_reception(
 }
 
 void ReceivePanel::save_audio_beside(const std::string& image_path) {
+    dump_ring_to(fs::path(image_path).replace_extension(".wav"));
+}
+
+void ReceivePanel::dump_ring_to(const fs::path& wav_path) {
     // Deliberately the *whole* ring rather than a trimmed reception: the
     // point is to be able to re-run the real decoder over exactly what
     // the sound card delivered, and a trim would beg the question by
@@ -443,8 +464,7 @@ void ReceivePanel::save_audio_beside(const std::string& image_path) {
         std::vector<double> samples = ring->snapshot(&total);
         if (total == 0) return;
         if (total < samples.size()) samples.resize(total);
-        audio::write_wav_float(fs::path(image_path).replace_extension(".wav").string(),
-                               samples);
+        audio::write_wav_float(wav_path.string(), samples);
     } catch (const std::exception& e) {
         // A diagnostic must never break receiving.
         emit errorOccurred(

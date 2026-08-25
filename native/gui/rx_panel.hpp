@@ -25,6 +25,7 @@
 #include <QWidget>
 
 #include <atomic>
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
@@ -150,6 +151,7 @@ private:
     std::optional<std::string> handle_reception(const rx::Reception& reception);
     std::optional<std::string> save_reception(const rx::Reception& reception);
     void save_audio_beside(const std::string& image_path);
+    void dump_ring_to(const std::filesystem::path& wav_path);
 
     AppState* app_ = nullptr;
 
