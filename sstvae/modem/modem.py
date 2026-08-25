@@ -414,7 +414,17 @@ class Modem:
                 sl = framing.symbols_to_slots(y[:NC_LATENT][None, :])
                 frame_slots[i0 : i0 + NC_LATENT * 2] = sl
                 frame_w[i0 : i0 + NC_LATENT * 2] = np.repeat(w[:NC_LATENT], 2)
-                beacon_soft[f * CHIPS_PER_FRAME + (s - 1)] = np.real(y[BEACON_CARRIER])
+                # Maximal-ratio, not the equalized value: `y` divides by
+                # the channel estimate, so a beacon carrier in a fade
+                # null returns amplified noise with a large magnitude,
+                # and Golay's soft ML decode reads magnitude as
+                # confidence -- one nulled chip then outvotes the four
+                # good ones in the same codeword. Weighting by |h|^2
+                # (equivalently, skipping the equalization) is the
+                # correct soft metric for BPSK and needs no `floor`.
+                beacon_soft[f * CHIPS_PER_FRAME + (s - 1)] = np.real(
+                    raw[f, s, BEACON_CARRIER] * np.conj(h[BEACON_CARRIER])
+                )
             lo = f * LATENTS_PER_FRAME
             latents[lo : lo + LATENTS_PER_FRAME] = frame_slots
             weights[lo : lo + LATENTS_PER_FRAME] = frame_w
@@ -569,7 +579,9 @@ class Modem:
                 sl = framing.symbols_to_slots(y[:NC_LATENT][None, :])
                 slot_values[f, i0 : i0 + NC_LATENT * 2] = sl
                 slot_weights[f, i0 : i0 + NC_LATENT * 2] = np.repeat(w[:NC_LATENT], 2)
-                beacon_soft[f * CHIPS_PER_FRAME + (s - 1)] = np.real(y[BEACON_CARRIER])
+                beacon_soft[f * CHIPS_PER_FRAME + (s - 1)] = np.real(
+                    raw[f, s, BEACON_CARRIER] * np.conj(h[BEACON_CARRIER])
+                )
 
         beacon_result = beacon.decode(beacon_soft)
         latents_full = np.zeros(MODES["C"].n_latents)

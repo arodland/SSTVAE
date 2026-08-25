@@ -191,9 +191,15 @@ EqualizedSymbol equalize(std::span<const cdouble> raw_sym,
         out.weights[2 * i] = w;
         out.weights[2 * i + 1] = w;
     }
+    // Maximal-ratio, not the equalized value: dividing by the channel
+    // estimate turns a beacon carrier in a fade null into amplified
+    // noise with a large magnitude, and Golay's soft ML decode reads
+    // magnitude as confidence -- one nulled chip then outvotes the four
+    // good ones in the same codeword. Weighting by |h|^2 (equivalently,
+    // skipping the equalization) is the correct soft metric for BPSK
+    // and needs no `floor`.
     const std::size_t b = static_cast<std::size_t>(BEACON_CARRIER);
-    const double mag_b = std::max(std::abs(h[b]), floor);
-    out.beacon_chip = (raw_sym[b] * std::conj(h[b]) / (mag_b * mag_b)).real();
+    out.beacon_chip = (raw_sym[b] * std::conj(h[b])).real();
     return out;
 }
 
