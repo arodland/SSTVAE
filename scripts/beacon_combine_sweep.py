@@ -1,29 +1,48 @@
 #!/usr/bin/env python3
-"""Equal-gain (sign) vs coherent combining in the beacon's multi-repetition
-fallback, now that the soft chips are maximal-ratio.
+"""Beacon multi-repetition combining: a regression instrument.
 
     python scripts/beacon_combine_sweep.py --trials 40
 
-`_decode_combined` sums the *sign* of each repetition's chips because
-the old equalized soft values could be enormous and random when a
-repetition's channel estimate sat near a fade null -- one such
-repetition dominated a raw sum and wrecked it. The chips are now
-`real(raw * conj(h))`, so a faded repetition arrives *small* instead,
-which is exactly what coherent combining wants. This asks whether the
-workaround is still earning its keep.
+`_decode_combined` sums each repetition's raw chip values -- coherent
+(maximal-ratio) combining. It summed *signs* until 2026-08-25, correctly
+for what it was given: the chips then came off the zero-forcing
+equalizer, so a repetition near a fade null contributed an enormous,
+essentially random magnitude and dominated a raw sum. The chips are
+`real(raw * conj(h))` now, so a faded repetition arrives small instead,
+and the ordering inverts.
+
+Measured 2026-08-25, mode B, 40 trials/cell, forced fallback:
+
+    chips           equalized  equalized      MRC      MRC
+    combining            sign        raw     sign      raw
+    awgn -4.0            0.45       0.20     0.50     0.65
+    mpg   0.0            0.72       0.30     0.75     0.82
+    mpp   0.0            0.57       0.23     0.72     0.93
+    mpd   0.0            0.40       0.15     0.53     0.90
+
+That comparison is settled, so this now measures the shipped path only.
+To re-run it, swap the two lines in `beacon._decode_combined` /
+`_search_counter_chunk` back to `np.sign(...)` and/or revert
+`modem.py`'s beacon chip to `np.real(y[BEACON_CARRIER])`; a knob in
+product code for a one-off comparison would be the wrong trade.
 
 Two measurements, because they answer different questions:
 
   forced   the fallback in isolation: single-shot decoding is disabled,
-           so every trial exercises the combining path. This is the
-           discriminating one -- good statistics, no confound.
-  end2end  real `beacon.decode()`, harsh cells only. Confirms whether
-           any difference survives single-shot decoding usually winning
-           first, which is what actually ships.
+           so every trial exercises the combining path. Good statistics,
+           no confound.
+  end2end  real `beacon.decode()`. Confirms whether any difference
+           survives single-shot decoding usually winning first.
+
+The window matters and is not a detail. `_decode_combined` is dead code
+below 3 repetitions (`_repetition_grid`) and saturated above ~6, and
+SUPERFRAME_LEN is 36.2 frames -- so a whole mode-B transmission (~12
+repetitions) scores 1.00 for every variant in every cell. It runs on
+the blind path because going harsh enough to move that number breaks
+preamble acquisition long before it breaks the beacon.
 
 Success is bit-exact: callsign, mode and absolute frame index.
 """
-
 import argparse
 import sys
 from pathlib import Path
@@ -47,7 +66,6 @@ from sstvae.modem import modem as modem_mod  # noqa: E402
 CALLSIGN = "K1ABC"
 FRAME0 = LEADIN_SAMPLES + PREAMBLE_SAMPLES + HEADER_SAMPLES
 CHIPS_PER_FRAME = 5
-MODES_TO_COMBINE = ["sign", "raw", "norm"]
 
 
 def soft_chips(mode, preset, snr_db, seed, window_frames):
@@ -109,10 +127,9 @@ def _ok(b, mode, expect_frame0=0):
 def run(mode, cells, trials, seed0, forced, window_frames):
     print(f"\n{'forced fallback' if forced else 'end to end'}: mode {mode.name}, "
           f"{window_frames}-frame window, {trials} trials/cell, bit-exact beacon decode")
-    print(f"{'channel':>10} {'SNR':>5}  "
-          + "  ".join(f"{c:>6}" for c in MODES_TO_COMBINE) + "       n")
+    print(f"{'channel':>10} {'SNR':>5}  {'rate':>6}       n")
     for preset, snr in cells:
-        tally = {c: 0 for c in MODES_TO_COMBINE}
+        ok = 0
         n = 0
         for t in range(trials):
             got = soft_chips(mode, preset, snr, seed0 + 1000 * t, window_frames)
@@ -120,17 +137,10 @@ def run(mode, cells, trials, seed0, forced, window_frames):
                 continue
             chips, start_frame = got
             n += 1
-            for c in MODES_TO_COMBINE:
-                beacon.COMBINE_MODE = c
-                if forced:
-                    b = _combined_only(chips)
-                else:
-                    b = beacon.decode(chips)
-                tally[c] += _ok(b, mode, start_frame)
-        rates = "  ".join(
-            f"{tally[c] / n:6.2f}" if n else "     -" for c in MODES_TO_COMBINE
-        )
-        print(f"{preset or 'awgn':>10} {snr:5.1f}  {rates}  {n:>3}/{trials}")
+            b = _combined_only(chips) if forced else beacon.decode(chips)
+            ok += _ok(b, mode, start_frame)
+        rate = f"{ok / n:6.2f}" if n else "     -"
+        print(f"{preset or 'awgn':>10} {snr:5.1f}  {rate}  {n:>3}/{trials}")
 
 
 def _combined_only(chips):
