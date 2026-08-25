@@ -262,9 +262,9 @@ def decode(chips: np.ndarray, threshold: float = 0.6) -> BeaconResult | None:
 # use that, in three tiers of decreasing simplicity:
 #
 # - Chunks that fall entirely inside the callsign field are identical,
-#   chip for chip, in every repetition, so their *signs* (see below) can
-#   simply be summed across repetitions before Golay-decoding once --
-#   genuine coherent combining, and the cheap case.
+#   chip for chip, in every repetition, so they can simply be summed
+#   across repetitions before Golay-decoding once -- genuine coherent
+#   combining, and the cheap case.
 # - The chunk carrying the counter's own low bit varies by design (a
 #   different value is genuinely correct at every repetition), so it
 #   can't be summed the same way -- but the exact value at every
@@ -285,17 +285,37 @@ def decode(chips: np.ndarray, threshold: float = 0.6) -> BeaconResult | None:
 #   each hypothesis at each repetition's own counter, same combine-
 #   before-choose principle applied through the actual encoder.
 #
-# Summing/correlating by *sign*, not raw chip value, throughout: under
-# fading, the per-frame channel estimate the equalizer divides by can
-# itself sit near a fade null, amplifying that frame's noise into an
-# enormous, essentially random magnitude rather than a merely noisy
-# one. A single such repetition then dominates a raw sum or a raw
-# dot-product and wrecks it (measured on one case: raw summing
-# recovered 6/12 bits -- chance -- where every individual repetition
-# also decoded at only ~7/12; summing signs instead recovered 12/12).
-# Equal-gain (sign) combining gives up some of coherent combining's
-# theoretical SNR gain in exchange for not being destroyed by exactly
-# the outliers fading produces routinely.
+# Summing/correlating raw chip values, throughout -- coherent
+# (maximal-ratio) combining, so a repetition heard well counts for more
+# than one heard badly.
+#
+# This summed *signs* until 2026-08-25, and that was correct for what
+# it was given: the chips then came off the zero-forcing equalizer, so
+# a repetition whose channel estimate sat near a fade null contributed
+# an enormous, essentially random magnitude rather than a merely noisy
+# one, and a single such repetition dominated a raw sum and wrecked
+# it. Equal-gain combining bought immunity to that at the cost of
+# throwing away every repetition's reliability.
+#
+# The chips are now `real(raw * conj(h))` (see modem.py), so a faded
+# repetition arrives *small* instead of huge, which is exactly what
+# coherent combining wants -- and the ordering inverts. Measured with
+# scripts/beacon_combine_sweep.py, mode B, 150-frame window (3-4
+# repetitions -- the regime where this code decides anything), 40
+# trials/cell, bit-exact beacon decode:
+#
+#     chips           equalized  equalized      MRC      MRC
+#     combining            sign        raw     sign      raw
+#     awgn -4.0            0.40       0.17     0.40     0.50
+#     mpg   0.0            0.70       0.30     0.70     0.80
+#     mpp   0.0            0.57       0.25     0.75     0.97
+#     mpd   0.0            0.47       0.17     0.57     0.85
+#
+# Note the two middle columns: raw summing really was ruinous on the
+# old chips, in every cell, not just the one case originally measured.
+# The two changes compound -- mpd at 0 dB goes 0.47 to 0.85 -- and
+# neither is safe without the other. **Do not revert the chip metric
+# without reverting this too.**
 #
 # A final correlation check against every repetition's full superframe
 # (sync word included) guards against returning a wrong assembly as if
@@ -375,7 +395,7 @@ def _search_counter_chunk(
     12-bit value and Golay codeword would be for that hypothesis (the
     counter delta between repetitions is exact, see the module
     docstring), and scores each hypothesis by summing its predicted
-    codeword's sign-correlation against every repetition's actual
+    codeword's correlation against every repetition's actual
     chips -- combining evidence across repetitions *before* choosing,
     the same principle as the coherent chunk combining above, just
     applied to a field that varies (predictably) instead of one that
@@ -385,7 +405,7 @@ def _search_counter_chunk(
     clo, chi = chunk_idx * 24, (chunk_idx + 1) * 24
     anchor_frame = anchor_off // CHIPS_PER_FRAME
     received = np.array(
-        [np.sign(chips[pos + SYNC_LEN + clo : pos + SYNC_LEN + chi]) for pos in grid]
+        [chips[pos + SYNC_LEN + clo : pos + SYNC_LEN + chi] for pos in grid]
     )  # (n_grid, 24)
     frame_deltas = np.array([pos // CHIPS_PER_FRAME - anchor_frame for pos in grid])
 
@@ -439,7 +459,7 @@ def _search_crc_mixed_chunk(
     anchor_frame = anchor_off // CHIPS_PER_FRAME
     clo, chi = chunk_idx * 24, (chunk_idx + 1) * 24
     received = np.array(
-        [np.sign(chips[pos + SYNC_LEN + clo : pos + SYNC_LEN + chi]) for pos in grid]
+        [chips[pos + SYNC_LEN + clo : pos + SYNC_LEN + chi] for pos in grid]
     )
     frame_deltas = [pos // CHIPS_PER_FRAME - anchor_frame for pos in grid]
 
@@ -494,23 +514,15 @@ def _decode_combined(chips: np.ndarray, anchor_off: int) -> BeaconResult | None:
     callsign_bits = np.full(BEACON_CALLSIGN_BITS, -1, dtype=np.int64)
 
     # Coherent case: sum this chunk's coded chips across every
-    # repetition (identical by construction), decode once. Sums the
-    # *sign* of each repetition's chips, not the raw values: under
-    # fading, the per-frame channel estimate the equalizer divides by
-    # can itself be near a fade null, which amplifies that frame's
-    # noise into an enormous, essentially random magnitude rather than
-    # a merely noisy one -- a single such repetition then dominates a
-    # raw sum and wrecks it (measured: raw summing recovered 6/12 bits,
-    # i.e. chance, on a case where every individual repetition also
-    # decoded at only ~7/12; summing signs instead recovered 12/12).
-    # Equal-gain (sign) combining gives up some of coherent combining's
-    # theoretical SNR gain in exchange for not being destroyed by
-    # exactly the outliers fading produces routinely.
+    # repetition (identical by construction), decode once. Sums the raw
+    # chip values -- coherent combining, valid because the chips are
+    # maximal-ratio rather than equalized; see the module docstring for
+    # why this summed signs until 2026-08-25 and what changed.
     for c in invariant_chunks:
         clo, chi = c * 24, (c + 1) * 24
         summed = np.zeros(24)
         for pos in grid:
-            summed += np.sign(chips[pos + SYNC_LEN + clo : pos + SYNC_LEN + chi])
+            summed += chips[pos + SYNC_LEN + clo : pos + SYNC_LEN + chi]
         bits = _decode_chunk_bits(summed)
         blo, bhi = _chunk_bit_range(c)
         callsign_bits[blo - callsign_lo : bhi - callsign_lo] = bits

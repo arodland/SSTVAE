@@ -233,20 +233,24 @@ std::optional<BeaconResult> decode_single_repetition(
 // decode_combined below uses both, in three tiers:
 //
 // - Chunks entirely inside the callsign field are identical, chip for
-//   chip, in every repetition, so their *signs* can simply be summed
-//   across repetitions before a single Golay decode -- genuine coherent
-//   combining, the cheap case. Sign, not raw magnitude: under fading,
-//   the per-frame channel estimate the equalizer divides by can itself
-//   sit near a fade null, amplifying that frame's noise into an
-//   enormous, essentially random magnitude, so a single such repetition
-//   dominates a raw sum and wrecks it (measured in the Python
-//   reference: raw summing recovered 6/12 bits -- chance -- where sign
-//   summing recovered 12/12).
+//   chip, in every repetition, so they can simply be summed across
+//   repetitions before a single Golay decode -- coherent
+//   (maximal-ratio) combining, the cheap case.
+//
+//   This summed *signs* until 2026-08-25, correctly for what it was
+//   given: the chips then came off the zero-forcing equalizer, so a
+//   repetition whose channel estimate sat near a fade null contributed
+//   an enormous, essentially random magnitude and dominated a raw sum.
+//   The chips are maximal-ratio now, so a faded repetition arrives
+//   *small* instead, and the ordering inverts -- measured in the Python
+//   reference, mpd at 0 dB: equalized+sign 0.47, equalized+raw 0.17,
+//   MRC+sign 0.57, MRC+raw 0.85. The two changes compound and neither
+//   is safe without the other.
 // - The chunk carrying the counter can't be summed that way (a
 //   genuinely different value is correct at every repetition), so
 //   search_counter_chunk instead evaluates every hypothesis by
 //   regenerating each repetition's expected codeword and summing its
-//   sign-correlation, combining evidence across repetitions before
+//   correlation, combining evidence across repetitions before
 //   choosing -- voting on independent per-repetition decodes was tried
 //   first and measured useless at the SNRs this needs to help with (18
 //   repetitions, 18 different guesses, no repeat at all).
@@ -270,14 +274,6 @@ namespace {
 std::pair<int, int> chunk_bit_range(int chunk_idx) {
     return {chunk_idx * 12, (chunk_idx + 1) * 12};
 }
-
-// np.sign: 0.0 at exactly zero, not +1 -- matters here because summed
-// signs feed straight into a Golay decode via golay::signs_table()
-// lookups, so a stray +1 bias at an exact-zero chip (vanishingly likely
-// on real noise, but reachable from a deliberately constructed test
-// vector) would be a real, if tiny, divergence from the Python
-// reference rather than a harmless rounding difference.
-double sign(double x) { return x > 0.0 ? 1.0 : (x < 0.0 ? -1.0 : 0.0); }
 
 std::vector<int> decode_chunk_bits(std::span<const double> chip_slice) {
     std::vector<int> out;
@@ -342,7 +338,7 @@ std::vector<std::int64_t> repetition_grid(std::int64_t n_chips, std::int64_t anc
 // `12 - n_counter_bits` bits at the anchor, regenerates what each
 // repetition's own counter-shifted 12-bit value and Golay codeword
 // would be for that hypothesis, and scores each hypothesis by summing
-// its predicted codeword's sign-correlation against every repetition's
+// its predicted codeword's correlation against every repetition's
 // actual chips. Returns (counter_at_anchor, extra_bits_value).
 std::optional<std::pair<int, int>> search_counter_chunk(
     std::span<const double> chips, const std::vector<std::int64_t>& grid,
@@ -358,7 +354,7 @@ std::optional<std::pair<int, int>> search_counter_chunk(
         frame_deltas[g] = pos / CHIPS_PER_FRAME - anchor_frame;
         for (int c = 0; c < 24; ++c)
             received[g * 24 + static_cast<std::size_t>(c)] =
-                sign(chips[static_cast<std::size_t>(pos + SYNC_LEN + clo + c)]);
+                chips[static_cast<std::size_t>(pos + SYNC_LEN + clo + c)];
     }
 
     const int n_extra = 12 - n_counter_bits;
@@ -419,7 +415,7 @@ std::optional<std::vector<int>> search_crc_mixed_chunk(
         frame_deltas[g] = pos / CHIPS_PER_FRAME - anchor_frame;
         for (int c = 0; c < 24; ++c)
             received[g * 24 + static_cast<std::size_t>(c)] =
-                sign(chips[static_cast<std::size_t>(pos + SYNC_LEN + clo + c)]);
+                chips[static_cast<std::size_t>(pos + SYNC_LEN + clo + c)];
     }
     const std::span<const double> signs = golay::signs_table();
 
@@ -488,7 +484,7 @@ std::optional<BeaconResult> decode_combined(std::span<const double> chips,
         for (std::int64_t pos : grid)
             for (int j = 0; j < 24; ++j)
                 summed[static_cast<std::size_t>(j)] +=
-                    sign(chips[static_cast<std::size_t>(pos + SYNC_LEN + clo + j)]);
+                    chips[static_cast<std::size_t>(pos + SYNC_LEN + clo + j)];
         const std::vector<int> bits = decode_chunk_bits(summed);
         const auto [blo, bhi] = chunk_bit_range(c);
         std::copy(bits.begin(), bits.end(), callsign_bits.begin() + (blo - callsign_lo));
