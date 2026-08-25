@@ -146,13 +146,27 @@ double poll_wait(const RxConfig& config, double last_cost_s);
 // why the two differ at all -- each frame's latents are scattered
 // across the whole picture, so only the frame index says "how far".
 //
-// The denominator is mode C's frame count, the longest: the blind path
-// has no header, so the real mode is unknown.
+// `n_frames_expected` is the denominator: the beacon's mode field
+// (PROTOCOL_VERSION 4) names the transmission's real frame count, so
+// the caller passes that when the beacon's mode index is one it knows,
+// and mode C's count -- the longest, the pre-mode-field assumption --
+// when it isn't.
+// `reach` is the fraction's own numerator -- one past the furthest
+// frame confidently decoded -- returned separately because it is what
+// the blind path reports as frames_received: every status line formats
+// the frames pair and the percentage together, so leaving
+// frames_received unset froze one indicator next to the other once the
+// beacon's mode field supplied n_frames_expected. It is a *position*,
+// not a count of frames actually held, which is why a blind reception
+// must never be treated as complete just because its reach hit the
+// last frame (see decode_loop's `complete` test).
 struct BlindProgress {
     int metric = 0;
     double frac = 0.0;
+    int reach = 0;
 };
-BlindProgress blind_progress(std::span<const double> weights_full);
+BlindProgress blind_progress(std::span<const double> weights_full,
+                             int n_frames_expected);
 
 // The `threading.Event` the reference stops on. Shared with the
 // transmitter, which needs the same primitive for its cancel flag and
@@ -199,6 +213,19 @@ struct Progress {
     // it is what lets the tests assert on the state machine's decisions
     // without asserting on how fast it makes them.
     std::uint64_t polls = 0;
+    // Blind-path observability, refreshed every poll the blind branch
+    // runs (NaN / false when it didn't). The score is the accumulator's
+    // best prominence whether or not it clears BLIND_SCORE_THRESHOLD --
+    // a below-threshold score is otherwise invisible in live operation,
+    // and a receiver that fails to acquire on real hardware gives no
+    // number to compare against the threshold's calibration.
+    // blind_locked distinguishes the two ways the blind path can be
+    // silently stuck: score below threshold, and locked with the beacon
+    // not decoding -- which mean opposite things (the second is a
+    // payload/format problem, e.g. a pre-PROTOCOL_VERSION-4 sender, not
+    // a weak signal).
+    double blind_score = 0.0;  // NaN when the blind branch didn't run
+    bool blind_locked = false;
 
     Progress();
 };

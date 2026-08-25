@@ -96,6 +96,20 @@ audio and rig bugs found so far were all invisible to unit tests.
     into 1152 phase bins across many periods, and searches CFO bins
     directly (no preamble to give phase-slope CFO) — works on a
     recording that never contains the transmission-start preamble.
+    **`BlindAccumulator` folds in absolute (push start_sample)
+    coordinates and `result(origin=...)` rebases the phase into the
+    caller's buffer coordinate — pass the buffer's absolute start,
+    always.** The two coordinates agree only while the buffer starts at
+    0 mod FRAME_SAMPLES, which held in every test (sessions shorter
+    than the ring buffer, `buf_start` pinned at 0) and silently stopped
+    holding on hardware once a listening session outlived the ring:
+    blind acquisition then locked with a healthy score while the demod
+    grid sat a uniformly random 0..1151 samples off, so the pilot — and
+    with it the beacon — read garbage and blind RX "worked for the
+    first couple of minutes of a session, then almost never" (found
+    2026-08-24 in the field, via the `blind_locked`/`blind_score`
+    status instrumentation added for exactly that hunt; reproduced
+    end-to-end with a ring that wraps before the transmission starts).
   - `framing.py` per-group interleaver, Golay-coded header.
     `_TX_PERMS` truncates each group's permutation to the transmittable
     budget (dropping the beacon carrier's capacity cost); `interleave`/
@@ -106,18 +120,40 @@ audio and rig bugs found so far were all invisible to unit tests.
   - `modem.py` `Modem.modulate/demodulate`; pilot EQ with Catmull-Rom
     interpolation, EMA-smoothed sample-clock drift tracking, per-latent
     confidence weights. `demodulate_blind()` is the preamble-free
-    counterpart (via `acquire_blind`): no header, so mode is unknown and
-    output is always sized for mode C's full range; frame placement and
-    the mode-agnostic image reconstruction both depend on the beacon
+    counterpart (via `acquire_blind`): no header, so output is always
+    sized for mode C's full range (the one container every mode is a
+    prefix of); frame placement and
+    the image reconstruction both depend on the beacon
     packet decoding (frame position comes from its absolute counter, not
     from where acquisition happened) — no clock-drift tracking (needs a
     preamble phase reference), fine for the bounded windows it targets.
+    Since `PROTOCOL_VERSION` 4 the beacon's mode field tells this path
+    the real mode: frames past the transmission's actual end are
+    **clipped instead of placed** (they are post-transmission noise that
+    used to enter `reconstruct()` at nonzero weight and dilute the
+    picture), and `rx/engine`'s blind deadline, stall bookkeeping and
+    progress denominator use the real mode's frame count rather than
+    assuming mode C; an unknown mode index falls back to the old
+    assume-mode-C behaviour.
   - `beacon.py` the resync/callsign side-channel carried on
     `BEACON_CARRIER`: a continuously repeating Golay(24,12)-coded
     superframe (Barker-13 sync word + absolute frame counter + 8-char
-    callsign + CRC-16). The counter is absolute, not modulo the
+    callsign + 2-bit mode index + 8 reserved bits + CRC-16). The counter
+    is absolute, not modulo the
     superframe period, so decoding one full copy anywhere gives exact
     position with no dependence on where the transmission started.
+    **The mode field is `PROTOCOL_VERSION` 4 (2026-08-24)** and was free
+    on the air: the payload grew 74 → 84 bits, the same 7 Golay chunks
+    the old zero-padding occupied. The layout (CRC at the very end,
+    reserved pinned to `BEACON_RESERVED_VALUE` = 0xAA) is load-bearing
+    for `_decode_combined`: the mode rides in the coherently-summed
+    chunks, the old CRC-mixed-chunk brute force is retired outright, and
+    the last two chunks stay fully predictable, preserving the ~6e-8
+    bit-exact verification. Reserved bits are transmitted but *ignored*
+    on single-shot decode (forward compat); only the combining fallback
+    predicts their value, so assigning them later degrades that fallback
+    alone on fielded receivers. An unknown mode index (3) must fall back
+    to assume-mode-C, never reject the packet.
     `MIN_FRAMES_FOR_SYNC` (~73 frames, ~10.5 s) is the window size that
     *guarantees* a full copy regardless of phase; shorter windows may
     still get lucky but aren't guaranteed to.
@@ -242,11 +278,19 @@ rule is enforced by `tools/check_layering.py`.
   a completion percentage that is not one: the erasures that path lives
   with (a fade, or simply not having heard the start) hold it down
   permanently, so a reception already at the transmission's last frame
-  reported 70% and the bar never filled. `_blind_progress` returns both
-  numbers because they answer different questions — the confident
+  reported 70% and the bar never filled. `_blind_progress` returns the
+  numbers separately because they answer different questions — the
+  confident
   *count* is still what the `--end-grace` stall detector watches, since
   retrospective decoding filling in frames behind the furthest one is
-  real progress that the reach deliberately does not move.
+  real progress that the reach deliberately does not move. **The reach
+  is also what the blind path reports as `frames_received`** (since the
+  beacon's mode field supplied `n_frames_expected`, every status line
+  formats the frames pair and the percentage together — leaving it
+  unset froze one indicator next to the other), and that is why
+  `complete` is gated on `not pending.blind`: a reach at the last frame
+  is a position with erasures behind it, exactly when backfill is still
+  improving the picture, not a finished count.
   `framing.frame_of_latent()` is what makes the reach computable at all
   (the inverse of `slot_range_for_frame`, as one cached table): the
   interleaver scatters each frame across the whole picture, so a latent
@@ -1999,6 +2043,10 @@ and tested.
 Beacon carrier (mid-stream resync + callsign) implemented: one reserved
 carrier, absolute-frame-counter superframe, and a preamble-free blind
 acquisition path (`sync.acquire_blind` / `Modem.demodulate_blind`).
+The superframe carries the transmission's mode since `PROTOCOL_VERSION`
+4 (2026-08-24, see the beacon bullet under Architecture), so a late
+joiner knows the real frame count and end time instead of assuming
+mode C.
 `waveform_channel.py` (stage-2 differentiable replica) mirrors the same
 23-carrier capacity/erasure accounting so training stays consistent
 with the real modem, but does not simulate/train through beacon content

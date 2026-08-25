@@ -75,7 +75,7 @@ def build_waveform(latents: np.ndarray, spec, precoder: np.ndarray) -> np.ndarra
         latents = latents / rms
     slots = framing.interleave(latents, spec)
     n_f = spec.n_frames
-    chips = beacon.chip_stream(0, n_f, "PROBE")
+    chips = beacon.chip_stream(0, n_f, "PROBE", spec.index)
     symbols = np.empty((n_f * SYMS_PER_FRAME, NC), dtype=np.complex128)
     for f in range(n_f):
         sl = slots[f * LATENTS_PER_FRAME : (f + 1) * LATENTS_PER_FRAME]

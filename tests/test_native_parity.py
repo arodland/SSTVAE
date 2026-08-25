@@ -460,11 +460,12 @@ def test_beacon_crc16(native):
 def test_beacon_encode_and_stream(native):
     from sstvae.modem import beacon as bc
 
-    for frame in (0, 1, 219, 220, 659, bc.MAX_FRAME_COUNTER):
-        assert np.array_equal(bc.encode_chips(frame, "KC2G"),
-                              native.beacon.encode_chips(frame, "KC2G")), frame
-    assert np.array_equal(bc.chip_stream(0, 120, "N6MTS"),
-                          native.beacon.chip_stream(0, 120, "N6MTS"))
+    for i, frame in enumerate((0, 1, 219, 220, 659, bc.MAX_FRAME_COUNTER)):
+        mode = i % (bc.MAX_MODE_INDEX + 1)  # all four values, index 3 included
+        assert np.array_equal(bc.encode_chips(frame, "KC2G", mode),
+                              native.beacon.encode_chips(frame, "KC2G", mode)), frame
+    assert np.array_equal(bc.chip_stream(0, 120, "N6MTS", 1),
+                          native.beacon.chip_stream(0, 120, "N6MTS", 1))
 
 
 def test_beacon_find_sync_ordering_is_deterministic(native):
@@ -478,7 +479,7 @@ def test_beacon_find_sync_ordering_is_deterministic(native):
     """
     from sstvae.modem import beacon as bc
 
-    stream = bc.chip_stream(0, 120, "N6MTS")[:600]
+    stream = bc.chip_stream(0, 120, "N6MTS", 1)[:600]
     assert bc.find_sync(stream) == native.beacon.find_sync(stream)
 
     # The ties are real, not hypothetical -- if this stops being true the
@@ -497,7 +498,7 @@ def test_beacon_decode_clean_and_noisy(native):
     from sstvae.modem import beacon as bc
 
     rng = np.random.default_rng(37)
-    stream = bc.chip_stream(0, 200, "W1AW/4")
+    stream = bc.chip_stream(0, 200, "W1AW/4", 2)
     failures = 0
     for scale in (0.0, 0.4, 0.8, 1.5):
         noisy = stream + (rng.normal(scale=scale, size=len(stream)) if scale else 0)
@@ -513,8 +514,8 @@ def test_beacon_decode_clean_and_noisy(native):
                 failures += 1
             else:
                 assert got is not None, (scale, off)
-                assert (ref.chip_offset, ref.frame_index, ref.callsign) == got, \
-                    (scale, off)
+                assert (ref.chip_offset, ref.frame_index, ref.callsign,
+                        ref.mode_index) == got, (scale, off)
     assert failures > 0, "no decode failed; the agreement-on-failure check is vacuous"
 
 

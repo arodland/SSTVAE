@@ -15,6 +15,9 @@ using config::BEACON_CALLSIGN_CHAR_BITS;
 using config::BEACON_CALLSIGN_CHARS;
 using config::BEACON_COUNTER_BITS;
 using config::BEACON_CRC_BITS;
+using config::BEACON_MODE_BITS;
+using config::BEACON_RESERVED_BITS;
+using config::BEACON_RESERVED_VALUE;
 using config::CHIPS_PER_FRAME;
 
 void append_int_bits(std::vector<int>& out, int value, int width) {
@@ -36,14 +39,20 @@ int code_for_char(char c) {
                : static_cast<int>(pos);
 }
 
-std::vector<int> payload_bits(int frame_index, std::string_view callsign) {
+std::vector<int> payload_bits(int frame_index, std::string_view callsign,
+                              int mode_index) {
     if (frame_index < 0 || frame_index > MAX_FRAME_COUNTER)
         throw std::invalid_argument(
             "beacon: frame_index exceeds the counter range");
+    if (mode_index < 0 || mode_index > MAX_MODE_INDEX)
+        throw std::invalid_argument(
+            "beacon: mode_index exceeds the mode field range");
     std::vector<int> body;
     append_int_bits(body, frame_index, BEACON_COUNTER_BITS);
     for (int code : callsign_to_codes(callsign))
         append_int_bits(body, code, BEACON_CALLSIGN_CHAR_BITS);
+    append_int_bits(body, mode_index, BEACON_MODE_BITS);
+    append_int_bits(body, BEACON_RESERVED_VALUE, BEACON_RESERVED_BITS);
 
     std::vector<int> out = body;
     const std::vector<int> crc = crc16(body);
@@ -91,8 +100,11 @@ std::vector<int> crc16(std::span<const int> bits) {
     return out;
 }
 
-std::vector<double> encode_chips(int frame_index, std::string_view callsign) {
-    std::vector<int> padded = payload_bits(frame_index, callsign);
+std::vector<double> encode_chips(int frame_index, std::string_view callsign,
+                                 int mode_index) {
+    // The v4 payload fills its chunks exactly (see the static_assert in
+    // the header), so the resize is a no-op kept only as belt and braces.
+    std::vector<int> padded = payload_bits(frame_index, callsign, mode_index);
     padded.resize(PADDED_PAYLOAD_BITS, 0);
 
     std::vector<double> out;
@@ -109,7 +121,7 @@ std::vector<double> encode_chips(int frame_index, std::string_view callsign) {
 }
 
 std::vector<double> chip_stream(int start_frame, int n_frames,
-                                std::string_view callsign) {
+                                std::string_view callsign, int mode_index) {
     const std::size_t n_chips =
         static_cast<std::size_t>(n_frames) * CHIPS_PER_FRAME;
     std::vector<double> out(n_chips);
@@ -117,7 +129,8 @@ std::vector<double> chip_stream(int start_frame, int n_frames,
     while (pos < n_chips) {
         const int frame_index =
             start_frame + static_cast<int>(pos / CHIPS_PER_FRAME);
-        const std::vector<double> sf = encode_chips(frame_index, callsign);
+        const std::vector<double> sf =
+            encode_chips(frame_index, callsign, mode_index);
         const std::size_t take = std::min(sf.size(), n_chips - pos);
         std::copy_n(sf.begin(), take, out.begin() + static_cast<std::ptrdiff_t>(pos));
         pos += take;
@@ -176,7 +189,17 @@ std::vector<std::int64_t> find_sync(std::span<const double> chips,
 
 namespace {
 
-std::optional<std::pair<int, std::string>> decode_payload(
+struct DecodedPayload {
+    int frame_index;
+    std::string callsign;
+    int mode_index;
+};
+
+// The reserved bits are CRC-covered but their *value* is deliberately
+// not checked: a future sender that assigns them still decodes here
+// (the CRC covers whatever was actually sent), which is what "reserved"
+// has to mean for fielded receivers.
+std::optional<DecodedPayload> decode_payload(
     std::span<const double> coded_chips) {
     std::vector<int> padded;
     padded.reserve(PADDED_PAYLOAD_BITS);
@@ -201,7 +224,11 @@ std::optional<std::pair<int, std::string>> decode_payload(
         codes.push_back(bits_to_int(body.subspan(
             static_cast<std::size_t>(BEACON_COUNTER_BITS + i),
             BEACON_CALLSIGN_CHAR_BITS)));
-    return std::make_pair(frame_index, codes_to_callsign(codes));
+    const int mode_index = bits_to_int(body.subspan(
+        static_cast<std::size_t>(BEACON_COUNTER_BITS +
+                                 config::BEACON_CALLSIGN_BITS),
+        BEACON_MODE_BITS));
+    return DecodedPayload{frame_index, codes_to_callsign(codes), mode_index};
 }
 
 }  // namespace
@@ -210,7 +237,8 @@ std::optional<BeaconResult> decode_single_repetition(
     std::int64_t chip_offset, std::span<const double> coded_chips) {
     const auto result = decode_payload(coded_chips);
     if (!result) return std::nullopt;
-    return BeaconResult{chip_offset, result->first, result->second};
+    return BeaconResult{chip_offset, result->frame_index, result->callsign,
+                        result->mode_index};
 }
 
 // --- multi-repetition combining ----------------------------------------------
@@ -230,12 +258,15 @@ std::optional<BeaconResult> decode_single_repetition(
 // superframes back to back with no gaps, and the decoder's own chip
 // array indexes frames uniformly).
 //
-// decode_combined below uses both, in three tiers:
+// decode_combined below uses both, in two tiers:
 //
-// - Chunks entirely inside the callsign field are identical, chip for
-//   chip, in every repetition, so their *signs* can simply be summed
-//   across repetitions before a single Golay decode -- genuine coherent
-//   combining, the cheap case. Sign, not raw magnitude: under fading,
+// - Chunks entirely inside the invariant callsign+mode fields are
+//   identical, chip for chip, in every repetition, so their *signs* can
+//   simply be summed across repetitions before a single Golay decode --
+//   genuine coherent combining, the cheap case. The v4 layout (counter |
+//   callsign | mode | reserved | CRC, 84 bits exactly) was chosen so the
+//   mode field lands here: chunks 1-4 are pure callsign+mode. Sign, not
+//   raw magnitude: under fading,
 //   the per-frame channel estimate the equalizer divides by can itself
 //   sit near a fade null, amplifying that frame's noise into an
 //   enormous, essentially random magnitude, so a single such repetition
@@ -250,11 +281,15 @@ std::optional<BeaconResult> decode_single_repetition(
 //   choosing -- voting on independent per-repetition decodes was tried
 //   first and measured useless at the SNRs this needs to help with (18
 //   repetitions, 18 different guesses, no repeat at all).
-// - The chunk mixing leftover callsign bits with the per-repetition CRC
-//   has the same problem but no simple shift predicts it (CRC depends
-//   on the whole payload) -- search_crc_mixed_chunk brute-forces its
-//   free bits and asks payload_bits what the CRC-inclusive chunk should
-//   look like for each hypothesis at each repetition's own counter.
+//
+// The pre-v4 layout had a third tier -- a chunk mixing leftover callsign
+// bits with the per-repetition CRC, brute-forced by a
+// search_crc_mixed_chunk. The v4 layout retired it: with the reserved
+// field pinned to a known constant and the CRC pushed to the very end,
+// no chunk mixes unknown bits with CRC bits, so chunks 5-6
+// (reserved+CRC, CRC) are fully *predictable* from a (counter, callsign,
+// mode) hypothesis -- which is exactly what makes them usable as
+// verification.
 //
 // The final verification is the part that is easy to get wrong: it
 // must check only chunks that were never used to build the hypothesis
@@ -389,76 +424,6 @@ std::optional<std::pair<int, int>> search_counter_chunk(
     return best;
 }
 
-// Joint search for a chunk mixing still-unknown callsign bits with the
-// per-repetition CRC (chunk 4 in the current layout) -- see the
-// file-level comment above. Brute-forces only this chunk's free
-// (non-CRC) bits and, for each hypothesis, derives the exact expected
-// per-repetition chunk content from payload_bits itself. Returns the
-// chunk's free-bit fragment (`n_free` bits, MSB first), or nullopt if
-// the chunk isn't shaped as assumed (free callsign bits followed by CRC
-// bits, no counter overlap).
-std::optional<std::vector<int>> search_crc_mixed_chunk(
-    std::span<const double> chips, const std::vector<std::int64_t>& grid,
-    std::int64_t anchor_off, int chunk_idx, int frame_index,
-    const std::vector<int>& known_callsign_bits) {
-    const auto [blo, bhi] = chunk_bit_range(chunk_idx);
-    const int callsign_lo = BEACON_COUNTER_BITS;
-    const int callsign_hi = callsign_lo + config::BEACON_CALLSIGN_BITS;
-    const int free_lo = std::max(blo, callsign_lo);
-    const int free_hi = std::min(bhi, callsign_hi);
-    const int n_free = free_hi - free_lo;
-    if (free_lo != blo || n_free + (bhi - callsign_hi) != 12) return std::nullopt;
-
-    const std::int64_t anchor_frame = anchor_off / CHIPS_PER_FRAME;
-    const int clo = chunk_idx * 24;
-    const std::size_t n_grid = grid.size();
-    std::vector<double> received(n_grid * 24);
-    std::vector<std::int64_t> frame_deltas(n_grid);
-    for (std::size_t g = 0; g < n_grid; ++g) {
-        const std::int64_t pos = grid[g];
-        frame_deltas[g] = pos / CHIPS_PER_FRAME - anchor_frame;
-        for (int c = 0; c < 24; ++c)
-            received[g * 24 + static_cast<std::size_t>(c)] =
-                sign(chips[static_cast<std::size_t>(pos + SYNC_LEN + clo + c)]);
-    }
-    const std::span<const double> signs = golay::signs_table();
-
-    double best_score = -1e300;
-    std::optional<std::vector<int>> best_frag;
-    for (int free_val = 0; free_val < (1 << n_free); ++free_val) {
-        std::vector<int> frag;
-        append_int_bits(frag, free_val, n_free);
-        std::vector<int> trial = known_callsign_bits;
-        std::copy(frag.begin(), frag.end(), trial.begin() + (free_lo - callsign_lo));
-        std::vector<int> codes;
-        for (int i = 0; i < config::BEACON_CALLSIGN_BITS; i += BEACON_CALLSIGN_CHAR_BITS)
-            codes.push_back(bits_to_int(std::span<const int>(trial).subspan(
-                static_cast<std::size_t>(i), BEACON_CALLSIGN_CHAR_BITS)));
-        const std::string callsign = codes_to_callsign(codes);
-
-        double score = 0.0;
-        for (std::size_t g = 0; g < n_grid; ++g) {
-            const std::int64_t fi = frame_index + frame_deltas[g];
-            if (fi < 0 || fi > MAX_FRAME_COUNTER) continue;
-            std::vector<int> payload = payload_bits(static_cast<int>(fi), callsign);
-            std::vector<int> chunk_bits(payload.begin() +
-                                            std::min<std::ptrdiff_t>(blo, static_cast<std::ptrdiff_t>(payload.size())),
-                                        payload.begin() +
-                                            std::min<std::ptrdiff_t>(bhi, static_cast<std::ptrdiff_t>(payload.size())));
-            chunk_bits.resize(12, 0);
-            const int data12 = bits_to_int(chunk_bits);
-            const double* row = signs.data() + static_cast<std::size_t>(data12) * golay::N_BITS;
-            for (int c = 0; c < 24; ++c)
-                score += row[c] * received[g * 24 + static_cast<std::size_t>(c)];
-        }
-        if (score > best_score) {
-            best_score = score;
-            best_frag = frag;
-        }
-    }
-    return best_frag;
-}
-
 std::optional<BeaconResult> decode_combined(std::span<const double> chips,
                                             std::int64_t anchor_off) {
     const std::int64_t n = static_cast<std::int64_t>(chips.size());
@@ -466,19 +431,26 @@ std::optional<BeaconResult> decode_combined(std::span<const double> chips,
     if (grid.size() < 3) return std::nullopt;  // too few repetitions for this to mean anything
 
     const int counter_lo = 0;
-    const int callsign_lo = BEACON_COUNTER_BITS;
-    const int callsign_hi = BEACON_COUNTER_BITS + config::BEACON_CALLSIGN_BITS;
+    // The invariant region: every payload bit that is identical in every
+    // repetition *and* unknown a priori -- callsign plus mode. (The
+    // reserved field is invariant too, but its value is a protocol
+    // constant, so it belongs to the verify chunks below rather than to
+    // anything that needs recovering.)
+    const int inv_lo = BEACON_COUNTER_BITS;
+    const int inv_hi = inv_lo + config::BEACON_CALLSIGN_BITS + BEACON_MODE_BITS;
+    const int n_inv = inv_hi - inv_lo;
 
     std::vector<int> invariant_chunks, variant_chunks;
     for (int c = 0; c < N_CHUNKS; ++c) {
         const auto [clo_bit, chi_bit] = chunk_bit_range(c);
-        if (callsign_lo <= clo_bit && chi_bit <= callsign_hi)
+        if (inv_lo <= clo_bit && chi_bit <= inv_hi)
             invariant_chunks.push_back(c);
-        else if (clo_bit < callsign_hi)
+        else if (clo_bit < inv_hi)
             variant_chunks.push_back(c);
     }
 
-    std::vector<int> callsign_bits(static_cast<std::size_t>(config::BEACON_CALLSIGN_BITS), -1);
+    // Recovered callsign+mode bits, indexed relative to inv_lo.
+    std::vector<int> inv_bits(static_cast<std::size_t>(n_inv), -1);
 
     // Coherent case: sum this chunk's coded chips (by sign) across every
     // repetition (identical by construction), decode once.
@@ -491,10 +463,10 @@ std::optional<BeaconResult> decode_combined(std::span<const double> chips,
                     sign(chips[static_cast<std::size_t>(pos + SYNC_LEN + clo + j)]);
         const std::vector<int> bits = decode_chunk_bits(summed);
         const auto [blo, bhi] = chunk_bit_range(c);
-        std::copy(bits.begin(), bits.end(), callsign_bits.begin() + (blo - callsign_lo));
+        std::copy(bits.begin(), bits.end(), inv_bits.begin() + (blo - inv_lo));
     }
 
-    // The chunk carrying the counter's own low bit can't be voted on --
+    // The chunk carrying the counter's own low bit can't be summed --
     // joint-search it.
     const int counter_chunk = *std::find_if(
         variant_chunks.begin(), variant_chunks.end(),
@@ -507,47 +479,41 @@ std::optional<BeaconResult> decode_combined(std::span<const double> chips,
     const int n_extra = 12 - BEACON_COUNTER_BITS;
     {
         const auto [blo, bhi] = chunk_bit_range(counter_chunk);
-        const int lo = std::max(blo, callsign_lo);
-        const int hi = std::min(bhi, callsign_hi);
+        const int lo = std::max(blo, inv_lo);
+        const int hi = std::min(bhi, inv_hi);
         if (lo < hi) {
             std::vector<int> extra_bits;
             append_int_bits(extra_bits, extra_bits_value, n_extra);
             std::copy(extra_bits.begin() + (lo - (bhi - n_extra)), extra_bits.end(),
-                     callsign_bits.begin() + (lo - callsign_lo));
+                     inv_bits.begin() + (lo - inv_lo));
         }
     }
 
-    // Remaining variant chunks (the one mixing leftover callsign bits
-    // with the per-repetition CRC) can't be voted on either -- joint-
-    // search them too.
-    for (int c : variant_chunks) {
-        if (c == counter_chunk) continue;
-        const auto frag =
-            search_crc_mixed_chunk(chips, grid, anchor_off, c, frame_index, callsign_bits);
-        if (!frag) return std::nullopt;
-        const int lo = std::max(chunk_bit_range(c).first, callsign_lo);
-        std::copy(frag->begin(), frag->end(), callsign_bits.begin() + (lo - callsign_lo));
-    }
-
-    if (std::any_of(callsign_bits.begin(), callsign_bits.end(), [](int b) { return b < 0; }))
+    if (std::any_of(inv_bits.begin(), inv_bits.end(), [](int b) { return b < 0; }))
         return std::nullopt;  // a fragment nobody resolved (shouldn't happen given the layout)
 
     std::vector<int> codes;
     for (int i = 0; i < config::BEACON_CALLSIGN_BITS; i += BEACON_CALLSIGN_CHAR_BITS)
-        codes.push_back(bits_to_int(std::span<const int>(callsign_bits)
+        codes.push_back(bits_to_int(std::span<const int>(inv_bits)
                                         .subspan(static_cast<std::size_t>(i),
                                                 BEACON_CALLSIGN_CHAR_BITS)));
     const std::string callsign = codes_to_callsign(codes);
+    const int mode_index = bits_to_int(std::span<const int>(inv_bits).subspan(
+        static_cast<std::size_t>(config::BEACON_CALLSIGN_BITS), BEACON_MODE_BITS));
 
     // Verification: only against chunks nothing above was searched
-    // against (the CRC/padding-only ones), and by bit-exact independent
-    // decode rather than a correlation threshold -- see the file-level
-    // comment for why either shortcut is wrong. If even one repetition's
-    // own plain Golay decode of every verify chunk matches exactly what
-    // payload_bits says it should be, accept.
+    // against, and by bit-exact independent decode rather than a
+    // correlation threshold -- see the file-level comment for why either
+    // shortcut is wrong. In the v4 layout the verify chunks are 5 and 6:
+    // reserved+CRC and pure CRC, both fully predicted by payload_bits
+    // from the (counter, callsign, mode) hypothesis (the reserved field
+    // at its protocol constant -- so a future sender that assigns those
+    // bits loses only this combining fallback on today's receivers,
+    // never the single-shot CRC path). If even one repetition's own
+    // plain Golay decode of every verify chunk matches exactly, accept.
     std::vector<int> verify_chunks;
     for (int c = 0; c < N_CHUNKS; ++c)
-        if (chunk_bit_range(c).first >= callsign_hi) verify_chunks.push_back(c);
+        if (chunk_bit_range(c).first >= inv_hi) verify_chunks.push_back(c);
     if (verify_chunks.empty()) return std::nullopt;
 
     bool verified = false;
@@ -555,14 +521,12 @@ std::optional<BeaconResult> decode_combined(std::span<const double> chips,
         const std::int64_t fi =
             frame_index + (pos / CHIPS_PER_FRAME - anchor_off / CHIPS_PER_FRAME);
         if (fi < 0 || fi > MAX_FRAME_COUNTER) continue;
-        const std::vector<int> payload = payload_bits(static_cast<int>(fi), callsign);
+        const std::vector<int> payload =
+            payload_bits(static_cast<int>(fi), callsign, mode_index);
         bool all_match = true;
         for (int c : verify_chunks) {
             const auto [blo, bhi] = chunk_bit_range(c);
-            std::vector<int> want(
-                payload.begin() + std::min<std::ptrdiff_t>(blo, static_cast<std::ptrdiff_t>(payload.size())),
-                payload.begin() + std::min<std::ptrdiff_t>(bhi, static_cast<std::ptrdiff_t>(payload.size())));
-            want.resize(12, 0);
+            const std::vector<int> want(payload.begin() + blo, payload.begin() + bhi);
             const std::vector<int> got = decode_chunk_bits(
                 chips.subspan(static_cast<std::size_t>(pos + SYNC_LEN + c * 24), 24));
             if (!std::equal(want.begin(), want.end(), got.begin())) {
@@ -577,7 +541,7 @@ std::optional<BeaconResult> decode_combined(std::span<const double> chips,
     }
     if (!verified) return std::nullopt;
 
-    return BeaconResult{anchor_off, frame_index, callsign};
+    return BeaconResult{anchor_off, frame_index, callsign, mode_index};
 }
 
 }  // namespace

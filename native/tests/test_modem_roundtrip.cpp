@@ -173,6 +173,8 @@ void test_blind_roundtrip() {
     // absolute position from the beacon alone.
     const modem::BlindDemodResult r = md.demodulate_blind(wave);
     check::is_true(r.beacon.has_value(), "modem/blind: beacon decoded");
+    check::equal(r.beacon->mode_index, mode.index,
+                 "modem/blind: beacon reports the transmitted mode");
     check::equal(r.callsign, std::string("N6MTS"), "modem/blind: callsign");
     check::is_true(r.frame_offset.has_value(), "modem/blind: absolute frame offset");
     check::is_true(r.frame0_start.has_value(), "modem/blind: frame 0 located");

@@ -490,6 +490,10 @@ void ReceivePanel::refresh_status() {
     if (progress.status == rx::Status::Listening) {
         text = tr("Listening... (%1 s captured)")
                    .arg(progress.seconds_captured, 0, 'f', 0);
+        // Progress.blind_score / blind_locked are deliberately not
+        // shown -- how to present them is an open design question. The
+        // engine still refreshes them every poll; the CLI listener
+        // displays them.
     } else if (progress.status == rx::Status::Receiving) {
         if (progress.n_frames_expected) {
             text = tr("Receiving mode %1: frame %2/%3 (%4%)")

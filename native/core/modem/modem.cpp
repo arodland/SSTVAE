@@ -272,7 +272,8 @@ std::vector<double> Modem::modulate(std::span<const double> latents,
 
     const std::vector<double> slots = framing::interleave(lat, mode);
     const int n_f = mode.n_frames;
-    const std::vector<double> chips = beacon::chip_stream(0, n_f, callsign);
+    const std::vector<double> chips =
+        beacon::chip_stream(0, n_f, callsign, mode.index);
 
     std::vector<cdouble> symbols(static_cast<std::size_t>(n_f) * SYMS_PER_FRAME * NC,
                                  cdouble{});
@@ -669,9 +670,21 @@ BlindDemodResult Modem::demodulate_blind(
     if (beacon_result) {
         frame_offset = beacon_result->frame_index -
                        static_cast<int>(beacon_result->chip_offset / CHIPS_PER_FRAME);
+        // The beacon's mode field bounds which absolute frames can be
+        // real: everything past the transmission's actual last frame is
+        // post-transmission noise, and placing it would hand the decoder
+        // garbage latents at nonzero weight where a true erasure
+        // (weight 0) is what it was trained for. An unknown mode index
+        // (a future mode) falls back to mode C's full range.
+        int n_frames_limit = LATENT_GROUPS * FRAMES_PER_GROUP;
+        if (beacon_result->mode_index >= 0 &&
+            beacon_result->mode_index < config::N_MODES)
+            n_frames_limit =
+                config::MODES[static_cast<std::size_t>(beacon_result->mode_index)]
+                    .n_frames;
         for (int f = 0; f < n_f; ++f) {
             const int abs_frame = *frame_offset + f;
-            if (abs_frame < 0 || abs_frame >= LATENT_GROUPS * FRAMES_PER_GROUP) continue;
+            if (abs_frame < 0 || abs_frame >= n_frames_limit) continue;
             const auto fs = framing::slot_range_for_frame(abs_frame);
             for (int i = 0; i < LATENTS_PER_FRAME; ++i) {
                 const std::size_t dst =

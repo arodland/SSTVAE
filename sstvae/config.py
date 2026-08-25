@@ -51,7 +51,43 @@ BEACON_COUNTER_BITS = 10
 BEACON_CALLSIGN_CHARS = 8
 BEACON_CALLSIGN_CHAR_BITS = 6  # 64-symbol alphabet, see beacon.py
 BEACON_CALLSIGN_BITS = BEACON_CALLSIGN_CHARS * BEACON_CALLSIGN_CHAR_BITS  # 48
-BEACON_CRC_BITS = 16
+# Mode field (PROTOCOL_VERSION 4): the transmission's mode index, so a
+# late joiner -- who has no header and never will -- knows the real frame
+# count instead of assuming mode C's. Costs nothing on the air: the
+# payload grows 74 -> 84 bits, which is the same 7 Golay chunks the old
+# zero-padding already occupied. What it buys the blind path: frames
+# demodulated past the real transmission's end are post-transmission
+# noise, and without a known mode they entered the reconstruction at
+# nonzero weight instead of staying erased (see Modem.demodulate_blind);
+# the deadline and progress denominator become exact for the same reason.
+BEACON_MODE_BITS = 2  # mode index; value 3 is unassigned (future mode)
+# Reserved for future use; transmitted as BEACON_RESERVED_VALUE and
+# *ignored* on single-superframe decode, so a future sender that assigns
+# these bits still decodes on today's receivers (the CRC covers whatever
+# was actually sent). The multi-repetition combiner does predict this
+# value when reconstructing chunks (see beacon._decode_combined), so
+# assigning these bits later degrades only that fallback on old
+# receivers, never the single-shot path.
+#
+# 0xAA rather than 0: the Golay code is systematic, so these bits go on
+# the air verbatim as chips, and an alternating pattern avoids putting a
+# constant same-sign run at a fixed superframe phase (the closest thing
+# to a mini steady carrier, and mildly Barker-correlated). It also makes
+# a sender that forgot to fill the field *visibly* nonconformant instead
+# of accidentally valid -- all-zeros is what an unwritten buffer
+# transmits.
+BEACON_RESERVED_BITS = 8
+BEACON_RESERVED_VALUE = 0xAA
+BEACON_CRC_BITS = 16  # CRC-16/CCITT-FALSE over everything before it
+# counter + callsign + mode + reserved + CRC = 84 bits = exactly 7 Golay
+# chunks, with the CRC at the very end. The layout is load-bearing for
+# the combining decoder: callsign+mode fill whole chunks (coherently
+# summable across repetitions), and the last two chunks hold only the
+# reserved constant and the CRC -- nothing any search touches -- which is
+# what preserves the bit-exact two-chunk verification (~6e-8 false
+# accept) that kills wrong assemblies. See beacon._decode_combined.
+assert (BEACON_COUNTER_BITS + BEACON_CALLSIGN_BITS + BEACON_MODE_BITS
+        + BEACON_RESERVED_BITS + BEACON_CRC_BITS) == 84
 
 # Preamble: one OFDM symbol repeated PREAMBLE_REPEATS times with a
 # double-length cyclic prefix, so the waveform is periodic with M over
@@ -424,7 +460,17 @@ BLIND_SCORE_THRESHOLD = 9.0
 # correlation peak does not survive), so this is belt and braces: it
 # stops an older header that happens to survive a correlation peak from
 # decoding to a plausible mode.
-PROTOCOL_VERSION = 3
+#
+# Bumped to 4 with the beacon mode field (2026-08-24). Unlike the
+# earlier bumps this one *does* sever an interop that would otherwise
+# survive -- v3 and v4 share the pilot and preamble, and only the beacon
+# payload layout changed -- and that is deliberate: a v3 receiver would
+# decode a v4 transmission's pictures fine over the preamble path while
+# its beacon silently failed CRC on every superframe, killing blind
+# resync and the callsign display with nothing to say why. The version
+# field exists precisely to turn that silent partial failure into an
+# explicit format mismatch.
+PROTOCOL_VERSION = 4
 
 
 @dataclass(frozen=True)

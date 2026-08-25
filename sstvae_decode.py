@@ -23,7 +23,7 @@ from sstvae.codec import (  # noqa: F401  (re-exported)
     pad_to_full,
     reconstruct,
 )
-from sstvae.config import DRIFT_TRACK_MODES, FS, LATENTS_PER_FRAME
+from sstvae.config import DRIFT_TRACK_MODES, FS, LATENTS_PER_FRAME, MODES_BY_INDEX
 from sstvae.modem import Modem, framing
 
 
@@ -72,7 +72,9 @@ def main() -> None:
     )
     if r.beacon is not None:
         cs = f"'{r.callsign}'" if r.callsign else "(none sent)"
-        print(f"beacon: frame {r.beacon.frame_index}, callsign {cs}")
+        bspec = MODES_BY_INDEX.get(r.beacon.mode_index)
+        bmode = bspec.name if bspec is not None else "unknown (future format?)"
+        print(f"beacon: frame {r.beacon.frame_index}, mode {bmode}, callsign {cs}")
     else:
         print("beacon: no superframe decoded (short/noisy reception)")
 

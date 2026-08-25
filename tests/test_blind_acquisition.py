@@ -267,6 +267,73 @@ def test_blind_accumulator_matches_acquire_blind_one_shot():
     assert streamed.metric > BLIND_SCORE_THRESHOLD
 
 
+def test_blind_accumulator_result_origin_rebases_the_phase():
+    """The fold lives in absolute (push start_sample) coordinates, but
+    the caller uses the phase against its own buffer -- result(origin)
+    is the bridge. The two coordinates agree only while the buffer
+    starts at 0 mod FRAME_SAMPLES, which held in every test (sessions
+    shorter than the ring buffer, buf_start pinned at 0) and silently
+    stopped holding on real hardware once a listening session outlived
+    the ring: the demod grid was then off by buf_start mod
+    FRAME_SAMPLES, so blind acquisition locked with a healthy score
+    while the pilot -- and with it the beacon -- read garbage. "Blind
+    RX works for the first couple of minutes of a session, then almost
+    never" was this."""
+    from sstvae.config import FRAME_SAMPLES
+    from sstvae.modem.dsp import to_baseband_at
+
+    _, _, x, frames_start = _tx(seed=9)
+    win = _frames_slice(x, frames_start, 300, beacon.MIN_FRAMES_FOR_SYNC + 5)
+
+    # The engine's situation after the ring wraps: the buffer's first
+    # sample sits at an absolute position that is NOT 0 mod
+    # FRAME_SAMPLES.
+    buf_start = 7 * FRAME_SAMPLES + 500
+
+    ref = BlindAccumulator()
+    ref.push(to_baseband(win), 0)
+    r_ref = ref.result()
+
+    acc = BlindAccumulator()
+    acc.push(to_baseband_at(win, buf_start), buf_start)
+    r_abs = acc.result()                  # absolute-coordinate phase
+    r_rel = acc.result(origin=buf_start)  # what the engine must use
+
+    # Rebased, the phase points at the same pilot the zero-based
+    # reference found; unrebased it is off by exactly buf_start's
+    # residue -- the bug's magnitude, pinned so a silent revert to the
+    # old behaviour cannot look like a harmless refactor.
+    assert r_rel.frame_start == r_ref.frame_start
+    assert (r_abs.frame_start - r_rel.frame_start) % FRAME_SAMPLES == \
+        buf_start % FRAME_SAMPLES
+    assert r_rel.metric == pytest.approx(r_ref.metric, rel=1e-6)
+
+
+def test_blind_accumulator_best_score_is_observable_below_threshold():
+    """best_score() is the live loop's diagnostic: the same prominence
+    result() gates on, visible whether or not it clears the threshold.
+    Above threshold the two must agree exactly (same statistic, same
+    fold); below it, where result() raises and the loop used to go
+    silent, best_score() must still report the number -- that silence
+    is what made a field receiver's failed acquisitions unfalsifiable."""
+    _, _, x, frames_start = _tx(seed=8)
+    win = _frames_slice(x, frames_start, 300, beacon.MIN_FRAMES_FOR_SYNC + 5)
+
+    acc = BlindAccumulator()
+    acc.push(to_baseband(win), 0)
+    assert acc.best_score() == pytest.approx(acc.result().metric, rel=1e-9)
+
+    noise = BlindAccumulator()
+    noise.push(to_baseband(np.random.default_rng(0).normal(size=len(win))), 0)
+    with pytest.raises(SyncError):
+        noise.result()
+    score = noise.best_score()
+    assert 0.0 < score < BLIND_SCORE_THRESHOLD
+
+    # Too little pushed to say anything at all: 0.0, not an exception.
+    assert BlindAccumulator().best_score() == 0.0
+
+
 def test_blind_accumulator_decay_forgets_stale_history():
     """Without decay, a real (but short) transmission preceded by a long
     stretch of unrelated noise gets diluted: the peak bin's fold sums

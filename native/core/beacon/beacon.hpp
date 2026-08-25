@@ -6,12 +6,15 @@
 // Port of sstvae/modem/beacon.py. Each repetition ("superframe") is:
 //
 //     sync word (Barker-13, unmodulated marker)
-//     | Golay(24,12)-coded payload (7 codewords = 84 padded payload bits)
+//     | Golay(24,12)-coded payload (7 codewords = 84 payload bits)
 //
 // Payload = 10-bit absolute frame counter (index of the frame whose data
 // symbols carry the sync word's first chip) + 48-bit callsign
-// (8 chars x 6 bits) + 16-bit CRC over counter+callsign, zero-padded to
-// 84 bits for clean 12-bit Golay chunking.
+// (8 chars x 6 bits) + 2-bit mode index + 8 reserved bits (transmitted
+// as config::BEACON_RESERVED_VALUE, ignored on decode) + 16-bit CRC over
+// everything before it. Exactly 84 bits -- the same 7 Golay chunks the
+// pre-mode-field format padded out to (PROTOCOL_VERSION 4; see
+// sstvae/modem/beacon.py for the full rationale).
 //
 // Because the counter is absolute (not modulo the superframe period), a
 // receiver needs no prior knowledge of where the transmission started:
@@ -33,16 +36,21 @@ namespace sstvae::beacon {
 
 inline constexpr int SYNC_LEN = config::BEACON_SYNC_LEN;
 
-// 10 + 48 + 16 = 74 payload bits, padded to a whole number of 12-bit
-// Golay chunks.
+// 10 + 48 + 2 + 8 + 16 = 84 payload bits: exactly a whole number of
+// 12-bit Golay chunks, no padding.
 inline constexpr int PAYLOAD_BITS = config::BEACON_COUNTER_BITS +
                                     config::BEACON_CALLSIGN_BITS +
+                                    config::BEACON_MODE_BITS +
+                                    config::BEACON_RESERVED_BITS +
                                     config::BEACON_CRC_BITS;
 inline constexpr int N_CHUNKS = (PAYLOAD_BITS + 11) / 12;         // 7
 inline constexpr int PADDED_PAYLOAD_BITS = N_CHUNKS * 12;          // 84
+static_assert(PAYLOAD_BITS == PADDED_PAYLOAD_BITS,
+              "the v4 payload fills its Golay chunks exactly");
 inline constexpr int CODED_LEN = N_CHUNKS * 24;                    // 168
 inline constexpr int SUPERFRAME_LEN = SYNC_LEN + CODED_LEN;        // 181
 inline constexpr int MAX_FRAME_COUNTER = (1 << config::BEACON_COUNTER_BITS) - 1;
+inline constexpr int MAX_MODE_INDEX = (1 << config::BEACON_MODE_BITS) - 1;
 
 // A window needs at least 2*SUPERFRAME_LEN-1 chips to *guarantee* a
 // full, uncut superframe regardless of phase. Below this, decode() may
@@ -67,6 +75,10 @@ struct BeaconResult {
     std::int64_t chip_offset;  // index into the input where sync starts
     int frame_index;           // absolute frame index (from the counter)
     std::string callsign;
+    // Transmitted mode index, raw. A value with no config::MODES entry
+    // (3 today) is a mode this receiver does not know; consumers fall
+    // back to assume-mode-C rather than rejecting the packet.
+    int mode_index;
 };
 
 // String -> BEACON_CALLSIGN_CHARS 6-bit codes, space-padded/truncated.
@@ -77,14 +89,15 @@ std::string codes_to_callsign(std::span<const int> codes);
 std::vector<int> crc16(std::span<const int> bits);
 
 // One superframe repetition -> SUPERFRAME_LEN chips in {-1, +1}.
-std::vector<double> encode_chips(int frame_index, std::string_view callsign);
+std::vector<double> encode_chips(int frame_index, std::string_view callsign,
+                                 int mode_index);
 
 // Continuous beacon chip stream, CHIPS_PER_FRAME chips per frame,
 // covering frames [start_frame, start_frame + n_frames): superframes
 // back to back (truncating the last if it does not fit), each labelled
 // with the absolute frame index its sync word lands on.
 std::vector<double> chip_stream(int start_frame, int n_frames,
-                                std::string_view callsign);
+                                std::string_view callsign, int mode_index);
 
 // Offsets where the Barker-13 sync word plausibly starts, best
 // correlation first, normalized so results are comparable across signal

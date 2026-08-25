@@ -251,17 +251,20 @@ PYBIND11_MODULE(sstvae_native, m) {
                },
                py::arg("bits"));
     beacon.def("encode_chips",
-               [](int frame_index, const std::string& callsign) {
-                   return to_numpy(
-                       sstvae::beacon::encode_chips(frame_index, callsign));
+               [](int frame_index, const std::string& callsign, int mode_index) {
+                   return to_numpy(sstvae::beacon::encode_chips(
+                       frame_index, callsign, mode_index));
                },
-               py::arg("frame_index"), py::arg("callsign"));
+               py::arg("frame_index"), py::arg("callsign"),
+               py::arg("mode_index"));
     beacon.def("chip_stream",
-               [](int start_frame, int n_frames, const std::string& callsign) {
+               [](int start_frame, int n_frames, const std::string& callsign,
+                  int mode_index) {
                    return to_numpy(sstvae::beacon::chip_stream(
-                       start_frame, n_frames, callsign));
+                       start_frame, n_frames, callsign, mode_index));
                },
-               py::arg("start_frame"), py::arg("n_frames"), py::arg("callsign"));
+               py::arg("start_frame"), py::arg("n_frames"), py::arg("callsign"),
+               py::arg("mode_index"));
     beacon.def("find_sync",
                [](DArray chips, double threshold, int max_candidates) {
                    std::span<const double> in(
@@ -286,7 +289,7 @@ PYBIND11_MODULE(sstvae_native, m) {
                    // core the application links.
                    if (!r) return py::none();
                    return py::make_tuple(r->chip_offset, r->frame_index,
-                                         r->callsign);
+                                         r->callsign, r->mode_index);
                },
                py::arg("chips"), py::arg("threshold") = 0.6);
 
@@ -329,7 +332,8 @@ PYBIND11_MODULE(sstvae_native, m) {
                   if (r.beacon)
                       out["beacon"] = py::make_tuple(r.beacon->chip_offset,
                                                      r.beacon->frame_index,
-                                                     r.beacon->callsign);
+                                                     r.beacon->callsign,
+                                                     r.beacon->mode_index);
                   else
                       out["beacon"] = py::none();
                   return out;
@@ -382,7 +386,8 @@ PYBIND11_MODULE(sstvae_native, m) {
                   if (r.beacon)
                       out["beacon"] = py::make_tuple(r.beacon->chip_offset,
                                                      r.beacon->frame_index,
-                                                     r.beacon->callsign);
+                                                     r.beacon->callsign,
+                                                     r.beacon->mode_index);
                   else
                       out["beacon"] = py::none();
                   return out;
@@ -455,7 +460,15 @@ PYBIND11_MODULE(sstvae_native, m) {
                       std::vector<std::optional<double>>>(),
              py::arg("max_offset_hz") = sstvae::config::BLIND_MAX_OFFSET_HZ,
              py::arg("bin_step_hz") = sstvae::config::BLIND_BIN_STEP_HZ,
-             py::arg("min_periods") = 8, py::arg("threshold") = 4.0,
+             py::arg("min_periods") = 8,
+             // From config, not a literal: a stale 4.0 sat here after
+             // the threshold moved to 9.0 -- the sixth copy of the
+             // constant-drift hazard docs/todo-done.md records four of
+             // (the fifth was rx/engine.cpp's live loop). Unreachable
+             // through the conftest shim, which passes threshold
+             // explicitly, but a direct construction would have gated
+             // at the pre-v3-pilot value.
+             py::arg("threshold") = sstvae::config::BLIND_SCORE_THRESHOLD,
              py::arg("block_samples") = py::none(),
              py::arg("window_s") = std::vector<std::optional<double>>{25.0})
         .def("push",
@@ -465,10 +478,13 @@ PYBIND11_MODULE(sstvae_native, m) {
                  self.push(in, start_sample);
              },
              py::arg("z"), py::arg("start_sample"))
-        .def("result", [](const sstvae::sync::BlindAccumulator& self) {
-            const auto a = self.result();
-            return py::make_tuple(a.frame_start, a.freq_offset, a.metric);
-        });
+        .def("result",
+             [](const sstvae::sync::BlindAccumulator& self, std::int64_t origin) {
+                 const auto a = self.result(origin);
+                 return py::make_tuple(a.frame_start, a.freq_offset, a.metric);
+             },
+             py::arg("origin") = 0)
+        .def("best_score", &sstvae::sync::BlindAccumulator::best_score);
 
     py::module_ dsp = m.def_submodule("dsp");
     dsp.def("to_baseband",

@@ -355,6 +355,9 @@ QString Listener::status() const {
     QString out = QString::fromLatin1(rx::status_name(p.status));
     out += QStringLiteral("   polls %1").arg(p.polls);
     out += QStringLiteral("   ring %1 s").arg(p.seconds_captured, 0, 'f', 1);
+    // Progress.blind_score / blind_locked are deliberately not shown --
+    // how to present them is an open design question. The engine still
+    // refreshes them every poll; the CLI listener displays them.
     if (p.frames_received.value_or(0) > 0) {
         out += QStringLiteral("\nframes %1").arg(*p.frames_received);
         if (p.n_frames_expected.value_or(0) > 0) {
