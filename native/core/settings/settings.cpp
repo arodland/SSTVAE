@@ -215,6 +215,7 @@ void read_rig(const Reader& r, RigConfig& c) {
     r.get("rts", c.rts);
     r.get("ptt_method", c.ptt_method);
     r.get("ptt_device", c.ptt_device);
+    r.get("ptt_audio", c.ptt_audio);
     r.get("mode", c.mode);
     // The v1 keys are listed as known so that a config written by the
     // Python app is *quietly* migrated rather than reported as four
@@ -227,7 +228,7 @@ void read_rig(const Reader& r, RigConfig& c) {
     r.report_unknown({"enabled", "model", "poll_interval_s", "ptt_lead_s",
                       "ptt_tail_s", "device", "baud", "data_bits", "stop_bits",
                       "parity", "handshake", "dtr", "rts", "ptt_method",
-                      "ptt_device", "mode",
+                      "ptt_device", "ptt_audio", "mode",
                       // v1, ignored:
                       "host", "port", "spawn_local"});
 }
@@ -434,6 +435,7 @@ std::string to_json(const Config& c) {
           {"rts", c.rig.rts},
           {"ptt_method", c.rig.ptt_method},
           {"ptt_device", c.rig.ptt_device},
+          {"ptt_audio", c.rig.ptt_audio},
           {"mode", c.rig.mode}}},
         {"folders",
          {{"receive_dir", c.folders.receive_dir},

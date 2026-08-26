@@ -110,6 +110,7 @@ private:
     QComboBox* rts_ = nullptr;
     QComboBox* ptt_method_ = nullptr;
     QLineEdit* ptt_device_ = nullptr;
+    QComboBox* ptt_audio_ = nullptr;
     QComboBox* rig_mode_ = nullptr;
     QDoubleSpinBox* poll_interval_s_ = nullptr;
     QDoubleSpinBox* ptt_lead_ = nullptr;

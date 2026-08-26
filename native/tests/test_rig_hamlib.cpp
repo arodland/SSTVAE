@@ -217,6 +217,9 @@ namespace {
 // Kenwood TS-2000: a real serial backend, used both by the caps
 // test here and by the bridged tests below.
 constexpr int MODEL_TS2000 = 2014;
+// A TS-480, which is one of the radios whose mic and rear data inputs
+// key with *different* CAT commands (`RIG_PTT_RIG_MICDATA`).
+constexpr int MODEL_TS480 = 2028;
 }  // namespace
 
 // The trace an operator's bug report needs, routed somewhere an app can
@@ -393,6 +396,10 @@ struct Kenwood {
     std::condition_variable cv;
     bool closed = false;
 
+    // The TS-2000's identifier by default; a MICDATA radio answers with
+    // its own, and the Kenwood backend refuses to open on a mismatch.
+    std::string id = "ID019;";
+
     long long freq = 14'074'000;
     std::vector<std::string> commands;   // every command, in order
     std::deque<char> pending;            // bytes waiting to go back
@@ -408,7 +415,7 @@ struct Kenwood {
     void handle(const std::string& command) {
         commands.push_back(command);
         if (command == "ID") {
-            reply("ID019;");  // the TS-2000's identifier
+            reply(id);
         } else if (command == "FA") {
             char buf[32];
             std::snprintf(buf, sizeof(buf), "FA%011lld;", freq);
@@ -604,6 +611,57 @@ void test_dtr_keying_never_reaches_hamlib() {
     check::equal(radio->dtr, 0, "hamlib/bridge: unkeying releases it");
 }
 
+// Issue #49: a TS-480 keys its mic with `TX0` and its rear data input
+// with `TX1`, and this app sent a plain `TX` -- the mic -- whatever the
+// operator had wired up. Two halves have to be right at once, which is
+// why this is one test: `ptt_type` must be left as RIGMICDATA (setting
+// it to "RIG" overwrites the rig's caps and makes Hamlib fold the
+// request back into a mic key, silently), *and* the keying call has to
+// ask for the data input.
+void test_the_data_input_can_be_keyed_instead_of_the_mic() {
+    auto radio = std::make_shared<Kenwood>();
+    radio->id = "ID020;";  // the TS-480's
+    rig::HamlibConfig config;
+    config.model = MODEL_TS480;
+    config.ptt_method = rig::PttMethod::Cat;
+    config.ptt_audio = rig::PttAudio::Data;
+    config.device = "usb:10c4:ea60";
+
+    check::is_true(rig::supports_ptt_audio_source(MODEL_TS480),
+                   "hamlib: the TS-480 is known to key mic and data apart");
+    check::is_true(!rig::supports_ptt_audio_source(MODEL_TS2000),
+                   "hamlib: ...and a rig without the pair is not");
+
+    auto backend = bridged(config, radio);
+    backend->open();
+    backend->set_ptt(true);
+    check::is_true(radio->wait_for("TX1"),
+                   "hamlib: data keying reaches the radio as TX1");
+    backend->set_ptt(false);
+    check::is_true(radio->wait_for("RX"), "hamlib: and unkeying is unchanged");
+    backend->close();
+}
+
+// The default keys the radio exactly as it did before the setting
+// existed -- a bare `TX`, not `TX0`. They differ on this radio, and
+// only the first is what every previous version sent.
+void test_mic_keying_is_the_command_it_always_was() {
+    auto radio = std::make_shared<Kenwood>();
+    radio->id = "ID020;";
+    rig::HamlibConfig config;
+    config.model = MODEL_TS480;
+    config.ptt_method = rig::PttMethod::Cat;
+    config.device = "usb:10c4:ea60";
+
+    auto backend = bridged(config, radio);
+    backend->open();
+    backend->set_ptt(true);
+    check::is_true(radio->wait_for("TX"),
+                   "hamlib: the default keys the radio with a plain TX");
+    backend->set_ptt(false);
+    backend->close();
+}
+
 void test_the_controller_drives_a_bridged_rig() {
     // The same threading design, over the new transport: nothing about
     // RigController changed to make this work, which is the property
@@ -695,6 +753,8 @@ int main() {
 #ifndef _WIN32
         STEP(test_a_native_backend_works_over_a_socket);
         STEP(test_dtr_keying_never_reaches_hamlib);
+        STEP(test_the_data_input_can_be_keyed_instead_of_the_mic);
+        STEP(test_mic_keying_is_the_command_it_always_was);
         STEP(test_the_controller_drives_a_bridged_rig);
 #endif
         check::current_step = "reporting";

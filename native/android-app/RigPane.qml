@@ -340,6 +340,33 @@ ColumnLayout {
             onModelChanged: sync()
             onActivated: pane.rig.pttMethod = currentValue
         }
+        // Only a handful of radios key the mic and the rear data input
+        // with different CAT commands, so this appears only when the
+        // chosen model is one of them -- on a phone a permanently
+        // disabled row is a row worth scrolling past.
+        ComboBox {
+            id: pttAudioBox
+            Layout.fillWidth: true
+            Layout.leftMargin: 12
+            Layout.rightMargin: 12
+            visible: pane.rig.pttAudioSupported && pane.rig.pttMethod === "cat"
+            enabled: !pane.rig.running
+            model: ["mic", "data"]
+            function label(v) {
+                return v === "data" ? "Transmit audio: data / rear input"
+                                    : "Transmit audio: mic / front input"
+            }
+            displayText: label(currentValue !== undefined ? currentValue : pane.rig.pttAudio)
+            delegate: ItemDelegate {
+                width: pttAudioBox.width
+                text: pttAudioBox.label(modelData)
+                highlighted: pttAudioBox.highlightedIndex === index
+            }
+            function sync() { currentIndex = Math.max(0, model.indexOf(pane.rig.pttAudio)) }
+            Component.onCompleted: sync()
+            onVisibleChanged: sync()
+            onActivated: pane.rig.pttAudio = currentValue
+        }
         Label {
             text: "VOX means this app does not key the radio at all — the "
                   + "transmit audio does, and the leader tone on the Send screen "

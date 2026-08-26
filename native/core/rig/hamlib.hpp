@@ -75,6 +75,15 @@ std::vector<RigModel> list_models();
 // that fails.
 enum class PttMethod { Vox, Cat, Dtr, Rts };
 
+// Which audio input the rig should key, on the radios that have two of
+// them (Hamlib's `RIG_PTT_RIG_MICDATA`: a TS-480 keys the mic with
+// `TX0` and the rear data input with `TX1`). `Mic` is what a plain
+// `RIG_PTT_ON` has always done, so it is the default and changes
+// nothing; `Data` is the one this exists for, and is only offered for
+// CAT keying on a model whose caps declare the pair --
+// `supports_ptt_audio_source()` below.
+enum class PttAudio { Mic, Data };
+
 // Serial line settings. `Default` means do not set the token, leaving
 // the backend's own value -- which is right for almost every rig, and
 // is why it is a distinct choice rather than a guess at 8-N-1.
@@ -105,6 +114,7 @@ struct HamlibConfig {
     LineState rts = LineState::Default;
 
     PttMethod ptt_method = PttMethod::Cat;
+    PttAudio ptt_audio = PttAudio::Mic;
     // Empty means the CAT device. Often different: a serial adapter
     // whose control lines key the rig while CAT runs elsewhere.
     std::string ptt_device;
@@ -139,6 +149,11 @@ std::unique_ptr<RigBackend> make_hamlib_backend(const HamlibConfig& config);
 // Windows shim's type sizes cannot silently misplace its fields.
 // Falls back to 9600 8-N-1 for a model Hamlib does not know.
 SerialDefaults serial_defaults(int model);
+
+// Whether this model keys its mic and data inputs with different CAT
+// commands, i.e. whether `HamlibConfig::ptt_audio` means anything to
+// it. False for every other rig, including one Hamlib does not know.
+bool supports_ptt_audio_source(int model);
 
 // Hamlib's version string, for an about box or a bug report.
 std::string hamlib_version();

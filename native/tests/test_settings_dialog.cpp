@@ -49,6 +49,7 @@ settings::Config populated() {
     c.rig.rts = "low";
     c.rig.ptt_method = "rts";
     c.rig.ptt_device = "/dev/ttyUSB9";
+    c.rig.ptt_audio = "data";
     c.rig.mode = "pkt_usb";
 
     c.folders.receive_dir = "/srv/sstv/in";

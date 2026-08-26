@@ -69,6 +69,9 @@ std::unique_ptr<rig::RigBackend> make_backend(const settings::RigConfig& config)
                                                 {"rts", rig::PttMethod::Rts}},
                                                rig::PttMethod::Cat);
     hamlib.ptt_device = config.ptt_device;
+    hamlib.ptt_audio = lookup<rig::PttAudio>(config.ptt_audio,
+                                             {{"data", rig::PttAudio::Data}},
+                                             rig::PttAudio::Mic);
     hamlib.mode = lookup<rig::RigMode>(
         config.mode, {{"usb", rig::RigMode::Usb}, {"pkt_usb", rig::RigMode::PktUsb}},
         rig::RigMode::None);
