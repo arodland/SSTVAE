@@ -190,6 +190,19 @@ void remember_finished(std::deque<std::int64_t>& finished, std::int64_t pos) {
 // reception can still be delivered after its decodes have stopped.
 // `deadline_abs` is a buffer position, not a time: past it, no real
 // frame of this transmission can still be arriving (see decode_loop).
+//
+// The record also outlives its own delivery. Delivering and retiring are
+// separate events: a stall hands the picture to the sink straight away
+// (so autosave is never delayed) but leaves the reception *dormant* --
+// still tracked, still able to take contributions -- until its scheduled
+// end. That is what makes a fade survivable. A fade longer than
+// end_grace is indistinguishable from a transmitter that stopped, and
+// the old behaviour retired the reception on the spot and recorded its
+// start as finished, so the blind path's re-acquisition a few seconds
+// later was dropped as already-handled and the rest of a picture still
+// being heard was refused. Since PROTOCOL_VERSION 4 the beacon names the
+// mode, so `deadline_abs` is exact on the blind path too, and the
+// scheduled end -- not the stall -- is what ends a reception.
 struct Pending {
     std::int64_t start = 0;         // absolute preamble-start position
     std::int64_t deadline_abs = 0;  // absolute buffer position
@@ -204,10 +217,60 @@ struct Pending {
     std::optional<Clock::time_point> stable_since;
     std::shared_ptr<const images::Picture> image;
     std::optional<std::string> mode_name;
-    std::optional<int> frames_received, n_frames_expected;
+    std::optional<int> frames_received, frames_decoded, n_frames_expected;
     std::string callsign;
     double snr_db = kNaN;
+    // `metric` as of the last delivery, and where that delivery went.
+    // Together they are the whole dormancy bookkeeping: a delivery only
+    // happens when the reception has improved on what the sink already
+    // has, and a second one replaces the first in place rather than
+    // producing a second picture of one transmission.
+    int delivered_metric = 0;
+    std::optional<std::string> saved_path;
 };
+
+// Hand `pending` to the sink if it has improved on what the sink
+// already has. Returns whether anything was delivered.
+//
+// Called both when a reception stalls and when it retires, which is the
+// whole point: the stall delivers so autosave is prompt, retirement
+// delivers whatever arrived afterwards. `delivered_metric` is what keeps
+// that from turning into a delivery per poll, and `saved_path` is what
+// makes the second delivery a replacement rather than a second picture
+// of the same transmission.
+//
+// The first delivery is also what records the start in `finished`: from
+// then on the preamble search steps over it, so a transmission that was
+// cut off early cannot go on hiding a later one for the rest of its own
+// scheduled duration. The reception stays resumable anyway -- the blind
+// path checks the tracked reception before that list (see decode_loop).
+bool deliver(Pending& pending, const Sink& sink, SharedState& state,
+             std::deque<std::int64_t>& finished) {
+    if (pending.metric <= pending.delivered_metric || !pending.image) return false;
+    const bool first = pending.delivered_metric == 0;
+
+    Reception rec;
+    rec.image = *pending.image;
+    rec.mode_name = pending.mode_name;
+    rec.callsign = pending.callsign;
+    rec.snr_db = pending.snr_db;
+    rec.frames_received = pending.frames_received;
+    rec.frames_decoded = pending.frames_decoded;
+    rec.n_frames_expected = pending.n_frames_expected;
+    rec.saved_path = pending.saved_path;
+    const std::optional<std::string> saved_path = sink(rec);
+
+    pending.delivered_metric = pending.metric;
+    if (saved_path) pending.saved_path = saved_path;
+    if (first) {
+        // Bookkeeping, not disk: this reception has been *handled*, so
+        // it must never be rediscovered as a new one while its audio is
+        // still in the buffer -- whether or not the sink chose to save.
+        remember_finished(finished, pending.start);
+    }
+    state.update([&](Progress& s) { s.saved_path = saved_path; });
+    return true;
+}
 
 // Back to "listening", with the per-reception fields cleared.
 void reset_to_listening(SharedState& state) {
@@ -215,6 +278,7 @@ void reset_to_listening(SharedState& state) {
         s.status = Status::Listening;
         s.mode_name.reset();
         s.frames_received.reset();
+        s.frames_decoded.reset();
         s.n_frames_expected.reset();
         s.progress_frac = 0.0;
         s.callsign.clear();
@@ -224,8 +288,7 @@ void reset_to_listening(SharedState& state) {
 
 }  // namespace
 
-BlindProgress blind_progress(std::span<const double> weights_full,
-                             int n_frames_expected) {
+DecodeProgress decode_progress(std::span<const double> weights_full) {
     // The metric counts confidently-received latents only, not bare
     // nonzero ones: demodulate_blind assigns *some* nonzero weight to
     // essentially every legal abs_frame slot its ever-growing search
@@ -235,24 +298,43 @@ BlindProgress blind_progress(std::span<const double> weights_full,
     // whether any new real data has arrived -- until buffer growth has
     // mapped the *entire* legal abs_frame range. That read as "stuck
     // receiving forever": the stall detector never saw a stable metric
-    // to end_grace against.
+    // to end_grace against. **This is what the stall clock watches, and
+    // nothing else may be substituted for it** -- see the header.
     //
-    // One past the highest absolute frame index any confidently-received
-    // latent belongs to, or 0 if none does. See the header for why that,
-    // and not the count, is the bar.
+    // frames_decoded is the same mask counted the other way: how many
+    // of the transmission's frames carried confident data at all.
     const std::span<const std::int32_t> frame_of = framing::frame_of_latent();
     const std::size_t n = std::min(weights_full.size(), frame_of.size());
-    BlindProgress out;
-    int last = -1;
+    std::vector<bool> seen(static_cast<std::size_t>(kMaxModeFrames), false);
+    DecodeProgress out;
     for (std::size_t i = 0; i < n; ++i) {
         if (weights_full[i] > kProgressWeightThreshold) {
             ++out.metric;
-            last = std::max(last, frame_of[i]);
+            const std::int32_t f = frame_of[i];
+            if (f >= 0 && f < kMaxModeFrames) seen[static_cast<std::size_t>(f)] = true;
         }
     }
-    out.reach = last + 1;
-    out.frac = static_cast<double>(out.reach) / n_frames_expected;
+    out.frames_decoded = static_cast<int>(std::count(seen.begin(), seen.end(), true));
     return out;
+}
+
+int frames_in_buffer(std::int64_t start, std::int64_t buf_start, std::int64_t total,
+                     int n_frames) {
+    const std::int64_t frames_start = start + PREAMBLE_SAMPLES + HEADER_SAMPLES;
+    // The first frame still in the buffer (ceil: a frame counts once
+    // its whole span is there) and the last one that has arrived. Both
+    // clamp into [0, n_frames], which is also what makes the negative
+    // cases -- audio older than the transmission, or none of it yet --
+    // come out as the 0 they should be.
+    const std::int64_t before = buf_start - frames_start;
+    const std::int64_t elapsed = total - frames_start;
+    const std::int64_t first =
+        before <= 0 ? 0 : (before + FRAME_SAMPLES - 1) / FRAME_SAMPLES;
+    const std::int64_t last = elapsed <= 0 ? 0 : elapsed / FRAME_SAMPLES;
+    const std::int64_t n = n_frames;
+    const std::int64_t lo = std::min(first, n);
+    const std::int64_t hi = std::min(last, n);
+    return static_cast<int>(std::max(std::int64_t{0}, hi - lo));
 }
 
 double poll_wait(const RxConfig& config, double last_cost_s) {
@@ -294,6 +376,7 @@ const char* status_name(Status s) {
     switch (s) {
         case Status::Listening: return "listening";
         case Status::Receiving: return "receiving";
+        case Status::Waiting: return "waiting";
         case Status::Done: return "done";
     }
     return "listening";
@@ -335,13 +418,18 @@ Sink save_to_dir_sink(std::string out_dir, std::optional<std::pair<int, int>> si
                       bool verbose) {
     return [out_dir = std::move(out_dir), size,
             verbose](const Reception& rec) -> std::optional<std::string> {
-        const std::string path = timestamped_path(out_dir);
+        // A reception that recovered after a fade comes back with the
+        // path its first delivery went to: overwrite that, so one
+        // transmission stays one file.
+        const std::string path =
+            rec.saved_path ? *rec.saved_path : timestamped_path(out_dir);
         std::filesystem::create_directories(std::filesystem::path(path).parent_path());
         const images::Picture& img =
             size ? images::resize(rec.image, size->first, size->second) : rec.image;
         images::save_png(img, path);
         if (verbose) {
-            std::printf("saved %s (mode=%s, callsign=%s%s)\n", path.c_str(),
+            std::printf("%s %s (mode=%s, callsign=%s%s)\n",
+                        rec.saved_path ? "updated" : "saved", path.c_str(),
                         rec.mode_name ? rec.mode_name->c_str() : "unknown, blind sync",
                         rec.callsign.empty() ? "(none)" : rec.callsign.c_str(),
                         fmt_snr(rec.snr_db).c_str());
@@ -421,7 +509,7 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
         std::vector<double> latents_full, weights_full;
         bool have_latents = false;
         std::optional<std::string> mode_name;
-        std::optional<int> n_frames_expected, frames_received;
+        std::optional<int> n_frames_expected, frames_received, frames_decoded;
         std::string callsign;
         double snr_db = kNaN;
         double progress_frac = 0.0;
@@ -451,7 +539,12 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
             have_latents = true;
             mode_name = std::string(r.mode.name);
             n_frames_expected = r.mode.n_frames;
+            // `received.sum()`: the frames whose samples are in the
+            // buffer, which is the bar's numerator (see
+            // frames_in_buffer) and, unchanged, the header path's stall
+            // metric.
             frames_received = r.frames_received;
+            frames_decoded = decode_progress(weights_full).frames_decoded;
             callsign = r.callsign;
             snr_db = r.snr_db;
             progress_frac = static_cast<double>(r.frames_received) / r.mode.n_frames;
@@ -516,11 +609,23 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
                 // free_spans blocks the wrong region.
                 reception_start =
                     buf_start + *rb->frame0_start - PREAMBLE_SAMPLES - HEADER_SAMPLES;
-                // Already handled: treat it as nothing decoded rather
-                // than skipping the rest of the poll, so that whatever
-                // reception is *currently* pending still gets its
-                // completion tests run this time round.
-                if (already_finished(*reception_start, finished_starts, epsilon)) {
+                // The tracked reception is checked *before* the
+                // finished list, and that is the whole resume
+                // mechanism: a reception delivered early on a stall is
+                // in that list (so the preamble search steps over it)
+                // while still being the one we are tracking, and
+                // dropping its re-acquisition here is exactly what used
+                // to refuse the rest of a picture that was still being
+                // heard.
+                //
+                // Anything else already handled: treat it as nothing
+                // decoded rather than skipping the rest of the poll, so
+                // that whatever reception is *currently* pending still
+                // gets its completion tests run this time round.
+                const bool ours =
+                    pending && std::llabs(*reception_start - pending->start) <= epsilon;
+                if (!ours &&
+                    already_finished(*reception_start, finished_starts, epsilon)) {
                     reception_start.reset();
                 } else {
                     latents_full = std::move(rb->latents);
@@ -541,16 +646,21 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
                         mode_name = std::string(spec.name);
                         n_frames_expected = spec.n_frames;
                     }
-                    const BlindProgress bp = blind_progress(
-                        weights_full,
-                        n_frames_expected ? *n_frames_expected : kMaxModeFrames);
-                    progress_metric = bp.metric;
-                    progress_frac = bp.frac;
-                    // The reach doubles as the reported frame counter --
-                    // see BlindProgress for why leaving this unset froze
-                    // half of every status line once the beacon's mode
-                    // field supplied the other half.
-                    frames_received = bp.reach;
+                    // The stall metric stays the confident-latent count
+                    // -- the amount decoded, which is the only thing
+                    // that stops climbing when the signal does. The bar
+                    // is the positional count instead, so a fade holds
+                    // back the *decoded* figure beside it rather than
+                    // freezing the bar.
+                    const DecodeProgress dp = decode_progress(weights_full);
+                    progress_metric = dp.metric;
+                    frames_decoded = dp.frames_decoded;
+                    const int n_display =
+                        n_frames_expected ? *n_frames_expected : kMaxModeFrames;
+                    frames_received = frames_in_buffer(
+                        *reception_start, buf_start,
+                        static_cast<std::int64_t>(total), n_display);
+                    progress_frac = static_cast<double>(*frames_received) / n_display;
                 }
             }
         }
@@ -570,10 +680,25 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
             // inherit the previous one's stall clock, or it can be
             // mistaken for a reception that has already stopped
             // advancing and be ended immediately.
+            //
+            // The outgoing record is delivered first. Taking over used
+            // to discard it -- picture, metric and all -- which was
+            // survivable only because a stall retired receptions
+            // quickly; now that one is kept until its scheduled end,
+            // the overlap is routine and dropping it would lose a
+            // picture that had already decoded. No Done flash here: the
+            // new reception publishes Receiving a few lines below, and
+            // a status the operator cannot see is not worth a
+            // two-second pause in the loop.
             if (!pending || std::llabs(*reception_start - pending->start) > epsilon) {
+                if (pending) deliver(*pending, sink, state, finished_starts);
                 Pending p;
                 p.start = *reception_start;
                 pending = std::move(p);
+                // Nothing has been saved for *this* reception yet, and
+                // a status line that named the previous one's file
+                // would be attributing it to the picture now on screen.
+                state.update([](Progress& s) { s.saved_path.reset(); });
             }
             // The deterministic backstop. The transmission's start is
             // known exactly -- from the header path's own acquisition,
@@ -602,17 +727,27 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
                 pending->metric = progress_metric;
                 advanced = true;
             }
-            pending->image = std::make_shared<const images::Picture>(
-                decode(latents_full, weights_full));
-            pending->mode_name = mode_name;
-            pending->frames_received = frames_received;
-            pending->n_frames_expected = n_frames_expected;
-            pending->callsign = callsign;
-            pending->snr_db = snr_db;
+            // Only an at-least-as-good decode replaces the held
+            // picture. A reception now lives until its scheduled end,
+            // so it sees decodes taken during a fade -- which are real
+            // decodes with fewer frames in them, and used to overwrite
+            // a better picture wholesale while `metric`, the only
+            // monotone field, went on saying progress had been made.
+            if (progress_metric >= pending->metric) {
+                pending->image = std::make_shared<const images::Picture>(
+                    decode(latents_full, weights_full));
+                pending->mode_name = mode_name;
+                pending->frames_received = frames_received;
+                pending->frames_decoded = frames_decoded;
+                pending->n_frames_expected = n_frames_expected;
+                pending->callsign = callsign;
+                pending->snr_db = snr_db;
+            }
             state.update([&](Progress& s) {
                 s.status = Status::Receiving;
                 s.mode_name = mode_name;
                 s.frames_received = frames_received;
+                s.frames_decoded = frames_decoded;
                 s.n_frames_expected = n_frames_expected;
                 s.progress_frac = std::min(progress_frac, 1.0);
                 s.callsign = callsign;
@@ -626,8 +761,16 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
             continue;
         }
 
-        // Two things end a reception short of its own frame count, and
-        // both are timed against end_grace.
+        // Two things interrupt a reception short of its own frame
+        // count, and both are timed against end_grace. Since the
+        // beacon's mode field made the deadline exact on both paths,
+        // neither of them *ends* a reception any more: they deliver it,
+        // and it stays tracked until its scheduled end. A fade longer
+        // than end_grace looks exactly like a transmitter that stopped,
+        // and only the transmitter's own clock can tell the difference
+        // -- so the picture goes to the sink now (autosave must not
+        // wait on a signal that may never come back) and the reception
+        // stays open for the rest of it (nothing is lost if it does).
         //
         // It stopped decoding. That is how a reception actually ends in
         // the field: its audio scrolls out of the ring buffer, or its
@@ -640,21 +783,35 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
         // of the poll entirely, is why a reception in that state could
         // never satisfy any completion test however long it sat.
         //
-        // Or -- blind only, where there is no frames_received count to
-        // finish on -- its decoded progress stopped advancing.
-        // Deliberately *not*
-        // extended to the header path: a spurious preamble-shaped lock
-        // in noise goes on decoding the same handful of frames for as
-        // long as it is looked at, and ending that on a stall would turn
-        // a false lock into a reported, and autosaved, picture of noise
-        // (see test_noise_produces_nothing). The header path does not
-        // need it anyway -- frames_received climbs as the buffer grows,
-        // so a real transmission reaches its count, and the deadline
-        // below is the backstop for one that does not. Keyed on
-        // pending->blind rather than "mode unknown": since the beacon's
-        // mode field, the blind path knows the mode too, so
-        // n_frames_expected no longer distinguishes the paths.
-        const bool no_progress = !decoded || (pending->blind && !advanced);
+        // Or its decoded progress stopped advancing. This used to be
+        // blind-only, on the grounds that a spurious preamble-shaped
+        // lock in noise goes on decoding the same handful of frames for
+        // as long as it is looked at, and that ending *that* on a stall
+        // turns a false lock into an autosaved picture of noise (see
+        // test_noise_produces_nothing). Neither half of that argument
+        // survives what the two numbers actually measure.
+        //
+        // The header path's frames_received is `received.sum()`, and
+        // `received[f]` is true for every frame whose samples are in
+        // the buffer -- signal or noise, faded or clean (see
+        // modem::Modem::demodulate). It is buffer coverage, not signal.
+        // So it climbs right through a fade, it climbs through the
+        // noise that follows a transmitter cutting off early (which is
+        // why *that* case ends on `complete` at the transmission's
+        // scheduled end rather than needing a stall at all), and a
+        // false lock in noise climbs with it. The one thing that stops
+        // it is the buffer not growing -- capture unplugged, the stream
+        // dead, the host no longer delivering callbacks -- and there
+        // the header path had no test that could ever fire: it goes on
+        // decoding, so `!decoded` is false; it never reaches its frame
+        // count; and `total` has stopped, so the deadline below is
+        // unreachable by construction. It sat in Receiving forever,
+        // which is the hang this whole record exists to close, still
+        // open on one path.
+        //
+        // And a stall no longer ends a reception -- it delivers one and
+        // keeps it -- so the distinction has nothing left to protect.
+        const bool no_progress = !decoded || !advanced;
         if (no_progress) {
             if (!pending->stable_since) pending->stable_since = Clock::now();
         } else {
@@ -674,8 +831,25 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
                               *pending->frames_received >= *pending->n_frames_expected;
         const bool stalled = pending->stable_since &&
                              seconds_since(*pending->stable_since) >= config.end_grace;
-        if (!complete && !stalled &&
-            static_cast<std::int64_t>(total) < pending->deadline_abs) {
+        // Retirement is the transmitter's own clock, not ours: its
+        // frame count is in, or the buffer holds audio past the point
+        // where its last frame could still be arriving. Nothing else
+        // drops the record -- see `Pending`.
+        const bool retire =
+            complete || static_cast<std::int64_t>(total) >= pending->deadline_abs;
+
+        if (!retire) {
+            if (stalled) {
+                // Delivered, but still tracked: dormant. `deliver` is a
+                // no-op unless it improved on what the sink already
+                // has, so a reception that stays quiet is handed over
+                // exactly once however many polls it sits through --
+                // while the status says Waiting throughout, including
+                // for a reception that never had a confident latent to
+                // deliver at all.
+                deliver(*pending, sink, state, finished_starts);
+                state.update([](Progress& s) { s.status = Status::Waiting; });
+            }
             continue;
         }
 
@@ -686,21 +860,9 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
         // transmission that was merely weak on its first polls must stay
         // findable rather than be blocked out for as long as its audio
         // is in the buffer.
-        const bool delivered = pending->metric > 0 && pending->image;
+        deliver(*pending, sink, state, finished_starts);
+        const bool delivered = pending->delivered_metric > 0;
         if (delivered) {
-            Reception rec;
-            rec.image = *pending->image;
-            rec.mode_name = pending->mode_name;
-            rec.callsign = pending->callsign;
-            rec.snr_db = pending->snr_db;
-            rec.frames_received = pending->frames_received;
-            rec.n_frames_expected = pending->n_frames_expected;
-            const std::optional<std::string> saved_path = sink(rec);
-
-            // Bookkeeping, not disk: this reception has been *handled*,
-            // so it must never be rediscovered while its audio is still
-            // in the buffer -- whether or not the sink chose to save it.
-            remember_finished(finished_starts, pending->start);
             // Retire the blind evidence with the reception. The
             // delivered transmission's fold otherwise keeps the
             // accumulator's argmax for a long time -- its peak/median
@@ -727,10 +889,7 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
             // CPU-friendly accumulator cannot do.
             make_blind_acc(blind_acc);
             blind_acc_pushed = static_cast<std::int64_t>(total);
-            state.update([&](Progress& s) {
-                s.status = Status::Done;
-                s.saved_path = saved_path;
-            });
+            state.update([](Progress& s) { s.status = Status::Done; });
         }
         pending.reset();
 
@@ -864,8 +1023,10 @@ void decode_loop_low_cpu(RingBuffer& ring, const Decoder& decode, SharedState& s
             continue;
         }
 
+        const std::vector<double> weights_full = latents::pad_to_full(r.weights);
         auto img = std::make_shared<const images::Picture>(
-            decode(latents::pad_to_full(r.latents), latents::pad_to_full(r.weights)));
+            decode(latents::pad_to_full(r.latents), weights_full));
+        const int frames_decoded = decode_progress(weights_full).frames_decoded;
 
         Reception rec;
         rec.image = *img;
@@ -873,6 +1034,7 @@ void decode_loop_low_cpu(RingBuffer& ring, const Decoder& decode, SharedState& s
         rec.callsign = r.callsign;
         rec.snr_db = r.snr_db;
         rec.frames_received = r.frames_received;
+        rec.frames_decoded = frames_decoded;
         rec.n_frames_expected = r.mode.n_frames;
         const std::optional<std::string> saved_path = sink(rec);
 
@@ -880,6 +1042,7 @@ void decode_loop_low_cpu(RingBuffer& ring, const Decoder& decode, SharedState& s
             s.status = Status::Done;
             s.image = img;
             s.frames_received = r.frames_received;
+            s.frames_decoded = frames_decoded;
             s.progress_frac =
                 std::min(static_cast<double>(r.frames_received) / r.mode.n_frames, 1.0);
             s.snr_db = r.snr_db;
