@@ -248,6 +248,23 @@ def make_lpips(device):
         return None
 
 
+def make_dists(device):
+    """DISTS perceptual metric (Ding et al. 2020, arXiv:2004.07728) via piq.
+
+    A companion to LPIPS with a texture term (global spatial averages of
+    VGG feature maps) alongside the structure term, so it tolerates
+    texture *resampling* where LPIPS penalizes any misalignment. That
+    tolerance is the reason it's opt-in and augment-only: helpful on
+    photographic texture and faces under channel degradation, a risk on
+    text/line-art where texture substitution is exactly wrong. piq.DISTS
+    wants inputs in [0, 1] (it applies ImageNet normalization internally),
+    which the sigmoid-bounded decoder already satisfies.
+    """
+    from piq import DISTS
+
+    return DISTS().to(device).eval()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--data", type=str, default=None, help="image folder")
@@ -294,6 +311,20 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--width", type=int, default=128)
     ap.add_argument("--lpips-weight", type=float, default=0.5)
+    ap.add_argument(
+        "--dists-weight",
+        type=float,
+        default=0.0,
+        help="weight on DISTS (arXiv:2004.07728), an opt-in perceptual "
+        "term alongside LPIPS. Unlike the LPIPS term it is scored on the "
+        "*full frame*, not a 256 crop: DISTS's texture term is a global "
+        "average over VGG feature maps that a crop starves, and the "
+        "structures this is meant to help (overlay-scale text ~10%% of "
+        "frame height, faces) need the whole frame to register as "
+        "structure. 0 disables (default); sweep it, don't guess it, and "
+        "judge text/non-photo by eye — texture tolerance can cut either "
+        "way there. Needs piq (in the train extra)",
+    )
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--smoke", action="store_true", help="tiny run on synthetic data")
     ap.add_argument(
@@ -468,6 +499,16 @@ def main() -> None:
     lpips_fn = None if args.smoke else make_lpips(device)
     if lpips_fn is None and not args.smoke:
         print("lpips unavailable; training with MSE only")
+    # DISTS is opt-in (weight > 0), so a missing piq is a hard error here
+    # rather than a silent MSE-only fallback: dropping a term the operator
+    # asked for would train a different objective than the A/B intends.
+    dists_fn = None
+    if args.dists_weight and not args.smoke:
+        try:
+            dists_fn = make_dists(device)
+        except Exception as e:
+            ap.error(f"--dists-weight set but DISTS is unavailable "
+                     f"(need piq: pip install piq): {e}")
     ch_cfg = ChannelConfig()
     wave_ch = None
     wave_val = {}
@@ -570,6 +611,12 @@ def main() -> None:
                     loss = loss + args.lpips_weight * lpips_fn(
                         rc * 2 - 1, ic * 2 - 1
                     ).mean()
+                if dists_fn is not None:
+                    # Full frame, not a crop (see --dists-weight help and
+                    # make_dists). recon is sigmoid-bounded to (0, 1) and
+                    # piq.DISTS ImageNet-normalizes internally, so it goes
+                    # in as-is — no *2-1, no clamp.
+                    loss = loss + args.dists_weight * dists_fn(recon, img)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
