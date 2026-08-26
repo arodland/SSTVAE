@@ -1,25 +1,41 @@
-"""The reception progress bar: position, not fill.
+"""The two reception numbers: what arrived, and what decoded.
 
-The bar is `last frame successfully received / frames expected`, never
-`latents received / latents expected`. The blind path is the one where
-the two differ -- it decodes whatever frames it can place, with holes
-where the signal faded or where the transmission started before the
-buffer did -- and a fill fraction there is a completion percentage that
-is not one: a reception already at the transmission's last frame reports
-70% and never fills.
+The progress bar is `frames whose audio has arrived / frames expected`
+(`_frames_in_buffer`) -- pure arithmetic on buffer positions, so it
+climbs with the clock whatever the decoder manages. Beside it, and never
+as it, is `frames_decoded`: how many of those frames carried confident
+data. That one is a *fill*, and a fill reads as a completion percentage
+without being one, because the erasures the blind path lives with (a
+fade, or simply not having heard the start) hold it down permanently.
+
+The third number is the one nothing may be substituted for: the
+confident-latent *count* is what the --end-grace stall clock watches.
+It is neither of the two above on purpose -- a position does not move
+when retrospective decoding fills in frames behind it, and anything
+positional climbs on buffer growth alone, so a reception fed either one
+would either never stall or never stop stalling.
 """
 
 import numpy as np
 
 from sstvae.config import (
     DROPPED_LATENTS_PER_GROUP,
+    FRAME_SAMPLES,
+    HEADER_SAMPLES,
     LATENT_GROUPS,
     MODES,
+    PREAMBLE_SAMPLES,
 )
 from sstvae.modem import framing
-from sstvae.rx.engine import PROGRESS_WEIGHT_THRESHOLD, _blind_progress
+from sstvae.rx.engine import (
+    PROGRESS_WEIGHT_THRESHOLD,
+    _decode_progress,
+    _frames_in_buffer,
+)
 
 TOTAL_FRAMES = MODES["C"].n_frames
+# Where a transmission starting at absolute 0 puts its first frame.
+FRAMES_START = PREAMBLE_SAMPLES + HEADER_SAMPLES
 
 
 def _weights_for_frames(frames, weight=1.0):
@@ -48,61 +64,84 @@ def test_frame_of_latent_marks_exactly_the_dropped_latents():
     assert np.count_nonzero(table < 0) == LATENT_GROUPS * DROPPED_LATENTS_PER_GROUP
 
 
-def test_no_confident_latents_is_zero_progress():
-    assert _blind_progress(np.zeros(MODES["C"].n_latents), TOTAL_FRAMES) == (0, 0.0, 0)
+def test_no_confident_latents_is_nothing_decoded():
+    assert _decode_progress(np.zeros(MODES["C"].n_latents)) == (0, 0)
 
 
 def test_weights_at_the_threshold_do_not_count():
     w = _weights_for_frames([0], weight=PROGRESS_WEIGHT_THRESHOLD)
-    assert _blind_progress(w, TOTAL_FRAMES) == (0, 0.0, 0)
+    assert _decode_progress(w) == (0, 0)
 
 
-def test_progress_is_the_last_frame_reached_not_the_count():
-    # Every other frame of mode B's range: half the latents, but the
-    # transmission has been followed all the way to its end. The old
-    # count-based fraction reported ~50% here.
-    reach = MODES["B"].n_frames
-    w = _weights_for_frames([*range(0, reach, 2), reach - 1])
-    metric, frac, got_reach = _blind_progress(w, TOTAL_FRAMES)
-    assert frac == reach / TOTAL_FRAMES
-    # The reach is the fraction's numerator, reported as the blind
-    # path's frames_received so the status line's frame counter and its
-    # percentage advance together instead of one freezing.
-    assert got_reach == reach
-    # The stall metric is still the count -- a different question, and
-    # the one --end-grace watches.
+def test_frames_decoded_counts_frames_not_latents():
+    # Every other frame of mode B's range: half the frames, and a frame
+    # counts once whatever it carries. The interleaver is why the two
+    # answers differ at all -- each frame's latents are scattered across
+    # the whole picture.
+    frames = list(range(0, MODES["B"].n_frames, 2))
+    w = _weights_for_frames(frames)
+    metric, decoded = _decode_progress(w)
+    assert decoded == len(frames)
     assert metric == np.count_nonzero(w > PROGRESS_WEIGHT_THRESHOLD)
+    assert metric > decoded  # latents per frame, not the same question
 
 
-def test_a_known_mode_makes_the_bar_fill_at_that_modes_end():
-    # The beacon's mode field (PROTOCOL_VERSION 4) gives the blind path
-    # the real frame count: a complete mode B reception reads 100%, not
-    # the 2/3 that dividing by mode C's count reported before the field
-    # existed.
-    reach = MODES["B"].n_frames
-    w = _weights_for_frames([*range(0, reach, 2), reach - 1])
-    _, frac, _ = _blind_progress(w, reach)
-    assert frac == 1.0
-
-
-def test_a_late_join_reports_where_it_is_not_how_much_it_has():
-    # Tuned in at frame 400 of mode C and heard the rest: two thirds of
-    # the latents are gone for good, and the bar must still read 100%.
-    w = _weights_for_frames(range(400, TOTAL_FRAMES))
-    _, frac, _ = _blind_progress(w, TOTAL_FRAMES)
-    assert frac == 1.0
-
-
-def test_progress_advances_with_reach_and_ignores_backfill():
+def test_the_stall_metric_is_the_latent_count_and_moves_on_backfill():
+    # The two properties that make the count the only usable stall
+    # signal, and that the display numbers do not have.
     reached = _weights_for_frames([0, 300])
-    _, frac_reached, reach_reached = _blind_progress(reached, TOTAL_FRAMES)
-    assert frac_reached == 301 / TOTAL_FRAMES
-    assert reach_reached == 301
-
-    # Retrospective decoding filling in frames *behind* the furthest one
-    # is real progress in quality but not in position, and the bar must
-    # not jump backwards or forwards for it.
     backfilled = _weights_for_frames(range(0, 301))
-    _, frac_backfilled, reach_backfilled = _blind_progress(backfilled, TOTAL_FRAMES)
-    assert frac_backfilled == frac_reached
-    assert reach_backfilled == reach_reached
+
+    metric_reached, decoded_reached = _decode_progress(reached)
+    metric_backfilled, decoded_backfilled = _decode_progress(backfilled)
+
+    assert metric_reached == np.count_nonzero(reached > PROGRESS_WEIGHT_THRESHOLD)
+    # Retrospective decoding filling in frames *behind* the furthest one
+    # is real progress, and the stall clock has to see it as progress or
+    # it ends a reception that is still improving.
+    assert metric_backfilled > metric_reached
+    assert decoded_backfilled > decoded_reached
+
+
+def test_the_bar_counts_frames_that_have_arrived():
+    n = MODES["A"].n_frames
+    end = FRAMES_START + n * FRAME_SAMPLES
+
+    assert _frames_in_buffer(0, 0, 0, n) == 0
+    assert _frames_in_buffer(0, 0, FRAMES_START, n) == 0
+    assert _frames_in_buffer(0, 0, FRAMES_START + FRAME_SAMPLES, n) == 1
+    assert _frames_in_buffer(0, 0, end, n) == n
+    # Audio past the transmission's end is not more of it.
+    assert _frames_in_buffer(0, 0, end + 100 * FRAME_SAMPLES, n) == n
+
+
+def test_the_bar_climbs_with_the_clock_and_nothing_else():
+    # The property the whole change is for: no weights are involved, so
+    # a fade cannot hold it back the way it holds back frames_decoded.
+    n = MODES["A"].n_frames
+    got = [
+        _frames_in_buffer(0, 0, FRAMES_START + k * FRAME_SAMPLES, n)
+        for k in [*range(0, n, 7), n]
+    ]
+    assert got == sorted(got)
+    assert got[0] == 0 and got[-1] == n
+
+
+def test_a_late_join_starts_part_way_up_rather_than_at_zero():
+    # Tuned in at frame 400 of mode C: those frames' audio is gone for
+    # good, so the bar starts at 400/660 and fills from there. Counting
+    # from zero would promise a picture that cannot arrive.
+    n = TOTAL_FRAMES
+    buf_start = FRAMES_START + 400 * FRAME_SAMPLES
+    assert _frames_in_buffer(0, buf_start, buf_start, n) == 0
+    end = FRAMES_START + n * FRAME_SAMPLES
+    assert _frames_in_buffer(0, buf_start, end, n) == n - 400
+
+
+def test_a_transmission_that_starts_after_the_buffer_does():
+    # The ordinary case: the preamble arrived while we were listening,
+    # so `start` sits inside the buffer and nothing is missing.
+    n = MODES["A"].n_frames
+    start = 5 * FRAME_SAMPLES
+    total = start + FRAMES_START + n * FRAME_SAMPLES
+    assert _frames_in_buffer(start, 0, total, n) == n
