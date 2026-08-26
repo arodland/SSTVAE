@@ -230,8 +230,16 @@ public:
 
     void set_ptt(bool on) override {
         require_open();
-        const int rc =
-            rig_set_ptt(rig_, RIG_VFO_CURR, on ? RIG_PTT_ON : RIG_PTT_OFF);
+        // RIG_PTT_ON for the mic, not RIG_PTT_ON_MIC: they differ on a
+        // MICDATA rig (`TX` against `TX0`) and only the first is what
+        // this app has always sent, so the default keys the radio the
+        // way it did before this setting existed. Hamlib downgrades
+        // ON_DATA to ON on a rig that is not MICDATA, so the branch is
+        // safe even if a config claims otherwise.
+        const ptt_t key = config_.ptt_audio == PttAudio::Data && key_by_cat()
+                              ? RIG_PTT_ON_DATA
+                              : RIG_PTT_ON;
+        const int rc = rig_set_ptt(rig_, RIG_VFO_CURR, on ? key : RIG_PTT_OFF);
         if (rc != RIG_OK) {
             throw RigError(hamlib_error(on ? "PTT on failed" : "PTT off failed", rc));
         }
@@ -324,6 +332,8 @@ private:
         }
     }
 
+    bool key_by_cat() const { return config_.ptt_method == PttMethod::Cat; }
+
     void apply_ptt_settings() {
         switch (config_.ptt_method) {
             // Vox means the rig is keyed by its own audio detector, so
@@ -331,7 +341,13 @@ private:
             // says exactly that. Callers are additionally expected not
             // to hand this backend to the transmit engine as a PTT.
             case PttMethod::Vox: set_conf("ptt_type", "None"); break;
-            case PttMethod::Cat: set_conf("ptt_type", "RIG"); break;
+            // "RIG" would *downgrade* a MICDATA rig: the token
+            // overwrites caps->ptt_type, and RIG_PTT_RIG makes Hamlib
+            // fold ON_DATA back into a plain mic key.
+            case PttMethod::Cat:
+                set_conf("ptt_type",
+                         config_.ptt_audio == PttAudio::Data ? "RIGMICDATA" : "RIG");
+                break;
             case PttMethod::Dtr: set_conf("ptt_type", "DTR"); break;
             case PttMethod::Rts: set_conf("ptt_type", "RTS"); break;
         }
@@ -455,6 +471,12 @@ SerialDefaults serial_defaults(int model) {
     // better message than this function could give. 9600 8-N-1 rather
     // than throwing, so a settings screen can still render.
     return search.out;
+}
+
+bool supports_ptt_audio_source(int model) {
+    load_backends_once();
+    return rig_get_caps_int(static_cast<rig_model_t>(model), RIG_CAPS_PTT_TYPE) ==
+           RIG_PTT_RIG_MICDATA;
 }
 
 std::unique_ptr<RigBackend> make_hamlib_backend(const HamlibConfig& config) {

@@ -82,6 +82,7 @@ constexpr auto kDeviceKey = "rig/device";
 constexpr auto kHostKey = "rig/host";
 constexpr auto kBaudKey = "rig/baud";
 constexpr auto kPttKey = "rig/ptt";
+constexpr auto kPttAudioKey = "rig/pttaudio";
 constexpr auto kDebugLogKey = "rig/debuglog";
 
 // Hamlib's trace, ring-buffered for the settings screen.
@@ -244,6 +245,7 @@ void RigControl::load() {
     host_ = s.value(QLatin1String(kHostKey), QString()).toString();
     baud_ = s.value(QLatin1String(kBaudKey), 0).toInt();
     ptt_ = s.value(QLatin1String(kPttKey), ptt_).toString();
+    ptt_audio_ = s.value(QLatin1String(kPttAudioKey), ptt_audio_).toString();
     debug_log_ = s.value(QLatin1String(kDebugLogKey), false).toBool();
 }
 
@@ -256,6 +258,7 @@ void RigControl::save() {
     s.setValue(QLatin1String(kHostKey), host_);
     s.setValue(QLatin1String(kBaudKey), baud_);
     s.setValue(QLatin1String(kPttKey), ptt_);
+    s.setValue(QLatin1String(kPttAudioKey), ptt_audio_);
     s.setValue(QLatin1String(kDebugLogKey), debug_log_);
 }
 
@@ -373,6 +376,21 @@ void RigControl::setPttMethod(const QString& m) {
     emit changed();
 }
 
+void RigControl::setPttAudio(const QString& a) {
+    if (a == ptt_audio_) return;
+    ptt_audio_ = a;
+    save();
+    emit changed();
+}
+
+bool RigControl::pttAudioSupported() const {
+#ifdef SSTVAE_ANDROID_HAVE_RIG
+    return rig::supports_ptt_audio_source(model_);
+#else
+    return false;
+#endif
+}
+
 QStringList RigControl::pttMethods() const {
     QStringList out{QStringLiteral("vox"), QStringLiteral("cat")};
     // **DTR and RTS are not offered over Bluetooth**, because RFCOMM has
@@ -482,6 +500,8 @@ bool RigControl::connectRig() {
     config.model = model_;
     config.baud = baud_;
     config.ptt_method = ptt_from(ptt_);
+    config.ptt_audio = ptt_audio_ == QLatin1String("data") ? rig::PttAudio::Data
+                                                          : rig::PttAudio::Mic;
 
     std::shared_ptr<rig::SerialTransport> transport;
     if (connection_ == QLatin1String("network")) {

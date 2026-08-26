@@ -610,10 +610,20 @@ QWidget* SettingsDialog::rig_tab() {
     ptt_device_->setPlaceholderText(tr("(the device above)"));
     form->addRow(tr("PTT"),
                  style::row(page, {ptt_method_, new QLabel(tr("Port"), page), ptt_device_}, 2));
+    // Only a few radios key their mic and rear data inputs with
+    // different CAT commands, so the choice is disabled rather than
+    // hidden on the rest: hiding it would read as "this app cannot",
+    // which is the question the operator arrived with.
+    ptt_audio_ = compact(choice(page, {{"mic", "Mic / front"}, {"data", "Data / rear"}},
+                                rig.ptt_audio));
+    connect(rig_model_, &QComboBox::currentTextChanged, this,
+            &SettingsDialog::sync_ptt_enabled);
+    form->addRow(tr("Transmit audio"), style::row(page, {ptt_audio_}));
     form->addRow(QString(),
                  style::note(tr("VOX means do not key at all — the radio is keyed "
                                 "by the audio. DTR and RTS may use a different "
-                                "port from CAT."),
+                                "port from CAT. Transmit audio picks which input "
+                                "CAT keying selects, on the radios that have two."),
                              page));
     sync_ptt_enabled();
     add_gap(form);
@@ -682,6 +692,8 @@ void SettingsDialog::sync_filename_preview() {
 void SettingsDialog::sync_ptt_enabled() {
     const std::string method = chosen(ptt_method_);
     ptt_device_->setEnabled(method == "dtr" || method == "rts");
+    ptt_audio_->setEnabled(method == "cat" &&
+                           rig::supports_ptt_audio_source(rig_model_number()));
 }
 
 int SettingsDialog::rig_model_number() const {
@@ -722,6 +734,9 @@ settings::RigConfig SettingsDialog::pending_rig() const {
     rig.rts = rts_forced_->isChecked() ? chosen(rts_) : std::string("default");
     rig.ptt_method = chosen(ptt_method_);
     rig.ptt_device = ptt_device_->text().trimmed().toStdString();
+    // Written back whether or not the control is enabled: a rig chosen
+    // today does not settle what the operator's saved setting meant.
+    rig.ptt_audio = chosen(ptt_audio_);
     rig.mode = chosen(rig_mode_);
     rig.poll_interval_s = poll_interval_s_->value();
     rig.ptt_lead_s = ptt_lead_->value();

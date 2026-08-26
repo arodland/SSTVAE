@@ -124,6 +124,10 @@ struct RigConfig {
     // whose control lines key the rig while CAT runs elsewhere, or a
     // rig with no CAT keying at all. Empty means "the CAT device".
     std::string ptt_device;
+    // Which audio input CAT keying should select on a radio that has
+    // two (a TS-480 and friends: Hamlib's RIG_PTT_RIG_MICDATA). "mic"
+    // is what every rig did before this key existed.
+    std::string ptt_audio = "mic";  // mic | data
 
     // Set on the rig when the session opens; "none" leaves whatever the
     // operator has dialled in alone.

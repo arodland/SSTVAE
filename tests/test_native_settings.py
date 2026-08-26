@@ -78,6 +78,7 @@ NON_DEFAULT = {
         "rts": "low",
         "ptt_method": "rts",
         "ptt_device": "COM7",
+        "ptt_audio": "data",
         "mode": "pkt_usb",
         "ptt_lead_s": 0.45,
         "ptt_tail_s": 0.25,

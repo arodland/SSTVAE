@@ -88,6 +88,12 @@ class RigControl : public QObject {
     Q_PROPERTY(QString pttMethod READ pttMethod WRITE setPttMethod NOTIFY changed)
     Q_PROPERTY(QStringList pttMethods READ pttMethods NOTIFY changed)
 
+    // "mic" | "data": which audio input CAT keying selects on a radio
+    // that keys the two differently (a TS-480 and friends). Meaningless
+    // on every other rig, which is what `pttAudioSupported` says.
+    Q_PROPERTY(QString pttAudio READ pttAudio WRITE setPttAudio NOTIFY changed)
+    Q_PROPERTY(bool pttAudioSupported READ pttAudioSupported NOTIFY changed)
+
     // --- live state --------------------------------------------------
     Q_PROPERTY(bool running READ running NOTIFY changed)
     // One line an operator can act on, which `running` cannot be.
@@ -159,6 +165,10 @@ public:
     void setPttMethod(const QString& m);
     QStringList pttMethods() const;
 
+    QString pttAudio() const { return ptt_audio_; }
+    void setPttAudio(const QString& a);
+    bool pttAudioSupported() const;
+
     bool running() const;
     QString connectionState() const;
     bool failed() const;
@@ -215,6 +225,7 @@ private:
     QString host_;
     int baud_ = 0;  // 0 = whatever the chosen backend would have used
     QString ptt_ = QStringLiteral("cat");
+    QString ptt_audio_ = QStringLiteral("mic");
     bool debug_log_ = false;
 
     // False when `init_rig_bridge` could not hand the layer a VM and a
