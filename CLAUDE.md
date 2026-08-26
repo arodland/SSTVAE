@@ -250,17 +250,10 @@ rule is enforced by `tools/check_layering.py`.
   to the sink. **The reported hang and "autosave never fires" are one
   bug seen from two ends**, since the sink is the only thing that
   saves. A poll that decodes nothing must therefore *count against* a
-  reception, not be skipped over. Three things ended up load-bearing.
+  reception, not be skipped over. Two things ended up load-bearing.
   The header path needs a **deadline of its own** (its known mode's
   duration past its start, where blind uses mode C's) — it had none at
-  all, `frames_received >= n_frames_expected` and nothing else. The
-  stall test **must not be extended to the header path** while it is
-  still decoding: a spurious preamble lock in noise goes on decoding
-  the same handful of frames for as long as it is looked at, and
-  ending *that* on a stall turns a false lock into a saved picture of
-  noise (`test_noise_produces_nothing` is what catches it) — so the
-  stall clock runs on polls where the reception did not decode, plus,
-  blind only, where it decoded and did not advance. And
+  all, `frames_received >= n_frames_expected` and nothing else. And
   `decode_loop_low_cpu`'s "wait until the transmission should have
   arrived" is a wait on **something outside the loop's control**, so it
   is bounded by the audio still missing plus `end_grace`; unbounded, a
@@ -270,33 +263,100 @@ rule is enforced by `tools/check_layering.py`.
   way to ask the real modem to stop decoding on cue, which is why the
   slow suite cannot cover it.
 
-  **The progress bar is position, not fill**: the last frame
-  successfully received over the frames expected, never latents
-  received over latents expected. Only the blind path can tell the two
-  apart — the preamble path decodes a contiguous prefix, so its
-  `frames_received` count *is* its reach — and there a fill fraction is
-  a completion percentage that is not one: the erasures that path lives
-  with (a fade, or simply not having heard the start) hold it down
-  permanently, so a reception already at the transmission's last frame
-  reported 70% and the bar never filled. `_blind_progress` returns the
-  numbers separately because they answer different questions — the
-  confident
-  *count* is still what the `--end-grace` stall detector watches, since
-  retrospective decoding filling in frames behind the furthest one is
-  real progress that the reach deliberately does not move. **The reach
-  is also what the blind path reports as `frames_received`** (since the
-  beacon's mode field supplied `n_frames_expected`, every status line
-  formats the frames pair and the percentage together — leaving it
-  unset froze one indicator next to the other), and that is why
-  `complete` is gated on `not pending.blind`: a reach at the last frame
-  is a position with erasures behind it, exactly when backfill is still
-  improving the picture, not a finished count.
-  `framing.frame_of_latent()` is what makes the reach computable at all
-  (the inverse of `slot_range_for_frame`, as one cached table): the
-  interleaver scatters each frame across the whole picture, so a latent
-  count answers "how much" and only the frame index answers "how far".
-  Mirrored in `native/core/`, where `rx::blind_progress` is public for
-  the same reason `poll_wait` is.
+  **Delivering a reception and retiring it are separate events**
+  (2026-08-26), and that split is what `end_grace` means now. Once the
+  beacon's mode field made `deadline_abs` exact on the blind path too
+  (`PROTOCOL_VERSION` 4), the stall detector's original job — stopping
+  a blind mode-A/B reception from running to mode C's length and
+  diluting the picture with noise — was gone, and what was left was a
+  misfire: **a fade longer than `end_grace` is indistinguishable from a
+  transmitter that stopped**, and ending the reception recorded its
+  start in `finished_starts`, so the blind path's re-acquisition
+  seconds later was dropped by `_already_finished` and the rest of a
+  picture still being heard was *refused* for the rest of the
+  transmission. So a stall now **delivers** (autosave must not wait on
+  a signal that may never come back) and leaves the reception
+  **dormant** — still tracked, status `waiting`/`Status::Waiting` —
+  until `complete`, its deadline, or a different reception taking the
+  slot. What makes that nearly free is that **the record is not an
+  accumulator**: every decode is retrospective over the whole ring, and
+  the ring (130 s) outlives the longest mode (95 s), so one re-decode
+  after a fade recovers everything and the engine only has to stop
+  refusing to try. Four consequences.
+  `Reception.saved_path` says "this one was already delivered here,
+  **replace** it" — one transmission is one file, one gallery entry,
+  one notification, which is why Android's `save_reception` overwrites
+  in place and deliberately does *not* re-arm the consuming
+  `take_saved_picture()`.
+  A dormant reception is in `finished_starts` (so the preamble search
+  steps over it and a transmission cut off early cannot go on hiding a
+  later one) but is checked **before** that list on the blind path,
+  which is the whole resume mechanism.
+  Taking over the tracked slot now **delivers what it replaces**
+  instead of discarding it, which was survivable only while stalls
+  retired receptions quickly.
+  And only an at-least-as-good decode replaces the held picture:
+  receptions live long enough now to see fade-time decodes, and
+  everything but `metric` was last-write-wins.
+
+  **The stall is no longer blind-only, and the old reasoning for that
+  was about the wrong number.** It said a spurious preamble lock in
+  noise decodes the same handful of frames forever, so stalling the
+  header path would autosave a picture of noise. But the header path's
+  `frames_received` is `received.sum()`, and `received[f]` is true for
+  every frame whose *samples are in the buffer* — signal or noise,
+  faded or clean. It is buffer coverage, not signal: it climbs through
+  a fade, it climbs through the noise after a transmitter cuts off
+  (which is why *that* case ends on `complete` at the scheduled end and
+  never needed a stall), and a false lock climbs with it. The one thing
+  that stops it is **the buffer not growing** — capture unplugged, the
+  stream dead — and there the header path had no test that could ever
+  fire (it keeps decoding, it never reaches its count, and `total` has
+  stopped so the deadline is unreachable by construction): the same
+  indefinite "receiving" this record exists to close, left open on one
+  path. `test_noise_produces_nothing` still holds and still matters.
+
+  **Three numbers, and the bar is the one that climbs with the clock**
+  (2026-08-26). `frames_received` is now `_frames_in_buffer` on both
+  paths — the frames of the transmission whose *audio has arrived*,
+  arithmetic on buffer positions with no weights in it — and that is
+  what the bar shows. Beside it, less prominently, `frames_decoded`:
+  how many of those frames carried confident data. And unchanged
+  underneath, the confident-latent *count*, which is the only thing the
+  `--end-grace` stall clock may ever be fed.
+
+  The bar was previously the blind path's *reach* (the furthest frame
+  decoded), which was itself a fix for a fill fraction that could never
+  reach 100% — the erasures that path lives with (a fade, or simply not
+  having heard the start) hold a fill down permanently. But a reach
+  stalls too: it freezes for the whole of a fade, on the display that
+  is supposed to say whether anything is still happening. Buffer
+  position has neither problem, and the header path had been reporting
+  exactly it all along without anyone noticing — `DemodResult.frames_received`
+  is `received.sum()`, and `received[f]` is set for every frame whose
+  samples are in the buffer. So this is the header path's number
+  generalized rather than a new invention, and the reach is retired.
+  A late join starts the bar part-way up (its early frames are gone for
+  good) rather than at zero, which is why `buf_start` is an argument.
+
+  **The stall metric is load-bearing and none of the display numbers
+  can stand in for it.** Anything positional does not move when
+  retrospective decoding fills in frames *behind* the furthest one,
+  which is real progress and must not read as a stall; and any count
+  over the whole legal frame range climbs on buffer growth alone, so a
+  reception fed that would never stall at all. `_decode_progress`
+  returns the count and `frames_decoded` from one pass over the same
+  mask, and `tests/test_rx_progress.py` pins all three apart.
+  `framing.frame_of_latent()` is what makes the decoded count
+  computable (the inverse of `slot_range_for_frame`, as one cached
+  table): the interleaver scatters each frame across the whole picture,
+  so a latent count answers "how much" and only a frame index answers
+  "how far". `complete` stays gated on `not pending.blind` — on the
+  blind path frames_received reaching the total says the audio arrived,
+  not that it decoded, and retiring on that is the deadline's job (the
+  same instant, by construction). Mirrored in `native/core/`, where
+  `rx::decode_progress` and `rx::frames_in_buffer` are public for the
+  same reason `poll_wait` is.
 - `sstvae/tx/engine.py` — encode → modulate → PTT → play → unkey.
   **The invariant is that PTT always comes back down**: try/finally
   around the keyed region *plus* an independent `_PttWatchdog` thread
