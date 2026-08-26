@@ -98,8 +98,18 @@ std::optional<std::string> Session::save_reception(const rx::Reception& r) {
     char stamp[32];
     std::strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H%M%SZ", &tm);
 
-    const std::string base = dir + "/" + stamp;
-    const std::string png = base + ".png";
+    // A reception that recovered after a fade comes back with the path
+    // its first delivery went to (rx::Reception::saved_path): the PNG
+    // and the sidecar beside it are rewritten in place, so one
+    // transmission stays one picture. The sidecar's timestamp then has
+    // to come from the *existing* name rather than from the clock, or a
+    // replacement would date the reception to when the fade ended while
+    // the filename beside it still said when it started.
+    const bool replaced = r.saved_path.has_value();
+    const std::string png = replaced ? *r.saved_path : dir + "/" + stamp + ".png";
+    const std::string base = png.size() > 4 ? png.substr(0, png.size() - 4) : png;
+    const std::string received =
+        replaced ? std::filesystem::path(base).filename().string() : stamp;
     try {
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
@@ -107,7 +117,7 @@ std::optional<std::string> Session::save_reception(const rx::Reception& r) {
 
         std::ostringstream meta;
         meta << "{\n";
-        meta << "  \"received\": \"" << stamp << "\",\n";
+        meta << "  \"received\": \"" << received << "\",\n";
         meta << "  \"callsign\": \"" << json_escape(r.callsign) << "\",\n";
         meta << "  \"mode\": " << (r.mode_name ? "\"" + json_escape(*r.mode_name) + "\""
                                                : "null")
@@ -115,6 +125,11 @@ std::optional<std::string> Session::save_reception(const rx::Reception& r) {
         meta << "  \"snr_db\": " << r.snr_db << ",\n";
         meta << "  \"frames_received\": "
              << (r.frames_received ? std::to_string(*r.frames_received) : "null") << ",\n";
+        // How much of the transmission arrived against how much of it
+        // decoded: without the second the sidecar cannot say whether a
+        // picture came through or merely went by.
+        meta << "  \"frames_decoded\": "
+             << (r.frames_decoded ? std::to_string(*r.frames_decoded) : "null") << ",\n";
         meta << "  \"frames_expected\": "
              << (r.n_frames_expected ? std::to_string(*r.n_frames_expected) : "null")
              << "\n";
@@ -129,7 +144,15 @@ std::optional<std::string> Session::save_reception(const rx::Reception& r) {
     }
     {
         std::lock_guard<std::mutex> lk(mu_);
-        saved_picture_ = png;
+        // Only a *new* picture is offered to the service.
+        // take_saved_picture() is consuming so that each reception is
+        // posted and exported exactly once; re-arming it for a
+        // replacement would post a second notification and insert a
+        // second MediaStore row for the same transmission, the file
+        // having been overwritten in place. The summary is refreshed
+        // either way -- it is a display of the best decode so far, not
+        // an event.
+        if (!replaced) saved_picture_ = png;
         std::ostringstream sum;
         sum << (r.callsign.empty() ? "unknown" : r.callsign.c_str());
         if (r.mode_name) sum << "  mode " << *r.mode_name;
@@ -137,6 +160,10 @@ std::optional<std::string> Session::save_reception(const rx::Reception& r) {
         if (r.n_frames_expected.value_or(0) > 0) {
             sum << "  " << r.frames_received.value_or(0) << "/"
                 << *r.n_frames_expected;
+            if (r.frames_decoded) {
+                sum << "  " << (100 * *r.frames_decoded / *r.n_frames_expected)
+                    << "% decoded";
+            }
         }
         saved_summary_ = sum.str();
     }

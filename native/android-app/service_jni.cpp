@@ -89,6 +89,12 @@ Java_org_cleverdomain_sstvae_ListenerService_nativeStatusLine(JNIEnv* env, jclas
         case sstvae::rx::Status::Done:
             s = "Reception complete";
             break;
+        case sstvae::rx::Status::Waiting:
+            // Saved already, and still open: if the signal comes back
+            // before the transmission's scheduled end, the rest of it
+            // goes into that same picture.
+            s = "Lost sync - waiting for the rest";
+            break;
         case sstvae::rx::Status::Listening:
         default:
             // The poll count is the difference between "alive and
