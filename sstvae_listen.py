@@ -58,6 +58,7 @@ def _status_line(state: SharedState) -> str:
         status = state.status
         mode_name = state.mode_name
         frames_received = state.frames_received
+        frames_decoded = state.frames_decoded
         n_frames_expected = state.n_frames_expected
         progress_frac = state.progress_frac
         callsign = state.callsign
@@ -87,10 +88,30 @@ def _status_line(state: SharedState) -> str:
             )
         else:
             line = f"receiving (blind sync): {100 * progress_frac:.0f}%"
+        # The frames pair says how much of the transmission has arrived;
+        # this says how much of it actually decoded. They come apart in
+        # a fade, and the difference is the only visible warning that a
+        # picture is filling in with erasures.
+        if frames_decoded is not None and n_frames_expected:
+            line += f"  decoded {100 * frames_decoded / n_frames_expected:.0f}%"
         line += fmt_snr(snr_db)
         if callsign:
             line += f"  de {callsign}"
         return line
+    if status == "waiting":
+        # Saved already, and still open: the picture is on disk, and if
+        # the signal comes back before the transmission's scheduled end
+        # the rest of it goes into that same file. Nothing may have been
+        # saved at all -- a reception with no confidently-received latent
+        # is not a picture, and is still shown as waiting rather than as
+        # listening, because the slot is still held.
+        line = "lost sync"
+        if saved_path:
+            line += f" -- saved {saved_path}"
+        line += ", waiting for the rest"
+        if mode_name is not None:
+            line += f" of mode {mode_name}"
+        return line + fmt_snr(snr_db)
     return f"done -- saved {saved_path}" + fmt_snr(snr_db)
 
 

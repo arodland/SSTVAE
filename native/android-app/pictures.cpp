@@ -89,8 +89,15 @@ QVariant PictureList::data(const QModelIndex& index, int role) const {
             return e.mode;
         case SnrRole:
             return e.snr_db;
-        case FramesRole:
-            return QStringLiteral("%1/%2").arg(e.frames_received).arg(e.frames_expected);
+        case FramesRole: {
+            QString s = QStringLiteral("%1/%2").arg(e.frames_received)
+                            .arg(e.frames_expected);
+            if (e.frames_decoded > 0 && e.frames_expected > 0) {
+                s += QStringLiteral("  (%1% decoded)")
+                         .arg(100.0 * e.frames_decoded / e.frames_expected, 0, 'f', 0);
+            }
+            return s;
+        }
         case SummaryRole: {
             // One line, because a gallery row has room for one. The
             // callsign leads: on a phone the first question about a
@@ -131,6 +138,7 @@ void PictureList::refresh() {
             e.mode = o.value("mode").toString();
             e.snr_db = o.value("snr_db").toDouble();
             e.frames_received = o.value("frames_received").toInt();
+            e.frames_decoded = o.value("frames_decoded").toInt();
             e.frames_expected = o.value("frames_expected").toInt();
         }
         entries_.push_back(e);
