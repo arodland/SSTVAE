@@ -33,6 +33,7 @@ from scipy.fft import next_fast_len, fft, ifft
 
 from ..config import (
     ACQUIRE_MAX_BINS,
+    ACQUIRE_MAX_CANDIDATES,
     BLIND_BIN_STEP_HZ,
     BLIND_BLOCK_RES_HZ,
     BLIND_MAX_OFFSET_HZ,
@@ -163,50 +164,77 @@ def acquire(
         masked = np.full_like(metric, -1.0)
         masked[s0:s1] = metric[s0:s1]
         metric = masked
-    n_star = int(np.argmax(metric))
-    if metric[n_star] < threshold:
-        raise SyncError(f"no preamble found (peak metric {metric[n_star]:.2f})")
 
-    f_frac = np.angle(a[n_star]) / (2 * np.pi * M / FS)
-
-    # Integer-bin CFO search + fine timing via template correlation.
     template = preamble_template()
     t_norm = np.sqrt(np.sum(np.abs(template) ** 2))
-    lo = max(0, n_star - PREAMBLE_CP - 200)
-    hi = min(len(z) - PREAMBLE_SAMPLES, n_star + 200)
-    if hi <= lo:
-        raise SyncError("preamble at signal edge")
-    seg = z[lo : hi + PREAMBLE_SAMPLES]
 
-    best = None
-    for m_bin in range(-max_bins, max_bins + 1):
-        f_cand = f_frac + m_bin * FS / M
-        seg_c = freq_correct(seg, f_cand)
-        corr = signal.fftconvolve(seg_c, np.conj(template[::-1]), mode="valid")
-        cpow = np.abs(corr) ** 2
-        peak = int(np.argmax(cpow))
-        seg_energy = np.sqrt(
-            np.sum(np.abs(seg_c[peak : peak + PREAMBLE_SAMPLES]) ** 2)
-        )
-        # Scored at the argmax, timed at the first path -- see
-        # config.FIRST_PATH_SEARCH for why the two must not be the same
-        # position. TEMPLATE_SCORE_THRESHOLD below is calibrated against
-        # this score, so it must stay the argmax's.
-        score = np.abs(corr[peak]) / (t_norm * seg_energy + 1e-12)
-        if best is None or score > best[0]:
-            best = (score, lo + first_path(cpow, peak), f_cand)
+    # Metric peaks are tried best-first against the template gate, up to
+    # ACQUIRE_MAX_CANDIDATES of them. The gate rejecting a peak means
+    # "this one is not a preamble" -- typically a lag-M artefact inside a
+    # real (often already-received, still-buffered) transmission's own
+    # frame data, which clears PREAMBLE_THRESHOLD where pure noise does
+    # not -- so the right response is to mask it out and look at the next
+    # peak, not to declare the whole window preamble-free. Giving up at
+    # the first rejection did the latter, and hid any genuine
+    # weaker-metric preamble sharing the window with such an artefact.
+    best_rejected = None
+    for _ in range(ACQUIRE_MAX_CANDIDATES):
+        n_star = int(np.argmax(metric))
+        if metric[n_star] < threshold:
+            if best_rejected is not None:
+                break
+            raise SyncError(f"no preamble found (peak metric {metric[n_star]:.2f})")
 
-    best_score, p0, f_hat = best
+        f_frac = np.angle(a[n_star]) / (2 * np.pi * M / FS)
+
+        # Integer-bin CFO search + fine timing via template correlation.
+        lo = max(0, n_star - PREAMBLE_CP - 200)
+        hi = min(len(z) - PREAMBLE_SAMPLES, n_star + 200)
+        if hi <= lo:
+            raise SyncError("preamble at signal edge")
+        seg = z[lo : hi + PREAMBLE_SAMPLES]
+
+        best = None
+        for m_bin in range(-max_bins, max_bins + 1):
+            f_cand = f_frac + m_bin * FS / M
+            seg_c = freq_correct(seg, f_cand)
+            corr = signal.fftconvolve(seg_c, np.conj(template[::-1]), mode="valid")
+            cpow = np.abs(corr) ** 2
+            peak = int(np.argmax(cpow))
+            seg_energy = np.sqrt(
+                np.sum(np.abs(seg_c[peak : peak + PREAMBLE_SAMPLES]) ** 2)
+            )
+            # Scored at the argmax, timed at the first path -- see
+            # config.FIRST_PATH_SEARCH for why the two must not be the same
+            # position. TEMPLATE_SCORE_THRESHOLD below is calibrated against
+            # this score, so it must stay the argmax's.
+            score = np.abs(corr[peak]) / (t_norm * seg_energy + 1e-12)
+            if best is None or score > best[0]:
+                best = (score, lo + first_path(cpow, peak), f_cand)
+
+        best_score, p0, f_hat = best
+        if best_score >= TEMPLATE_SCORE_THRESHOLD:
+            break
+        # Not a preamble; mask this peak's whole neighbourhood (its own
+        # correlation skirt is narrower than PREAMBLE_SAMPLES) and try
+        # the next-best metric peak.
+        if best_rejected is None or best_score > best_rejected[0]:
+            best_rejected = (best_score, f_hat)
+        metric[max(0, n_star - PREAMBLE_SAMPLES) : n_star + PREAMBLE_SAMPLES] = -1.0
+    else:
+        best_score = -1.0  # candidate budget exhausted, none accepted
+
     if best_score < TEMPLATE_SCORE_THRESHOLD:
-        # The winning candidate is the *best available* one, not
-        # necessarily a *good* one -- the lag-M metric above only rules
-        # out pure noise, and real transmission data elsewhere in the
-        # buffer can pass it too (see config.TEMPLATE_SCORE_THRESHOLD).
-        # This is the second gate: no candidate here explains enough of
-        # the template's energy to trust as an actual preamble.
+        # Every candidate tried was the *best available* one somewhere,
+        # not a *good* one -- the lag-M metric only rules out pure noise,
+        # and real transmission data elsewhere in the buffer can pass it
+        # too (see config.TEMPLATE_SCORE_THRESHOLD). This is the second
+        # gate: no candidate explained enough of the template's energy to
+        # trust as an actual preamble.
+        rej_score, rej_f = best_rejected
         raise SyncError(
-            f"no preamble found (best candidate score {best_score:.2f} at "
-            f"{f_hat:+.1f} Hz)"
+            f"no preamble found (best candidate score {rej_score:.2f} at "
+            f"{rej_f:+.1f} Hz)"
         )
 
     # Refine CFO from the phase between successive preamble periods at

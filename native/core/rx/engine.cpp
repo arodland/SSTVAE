@@ -384,6 +384,23 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
     // than guessing at what filled it.
     std::optional<sync::BlindAccumulator> blind_acc;
     std::optional<std::int64_t> blind_acc_pushed;
+    // A fresh accumulator with one decay timescale per mode, each
+    // capped at that mode's own duration (see
+    // RxConfig::blind_search_seconds).
+    const auto make_blind_acc = [&config](std::optional<sync::BlindAccumulator>& acc) {
+        std::vector<std::optional<double>> timescales;
+        for (const auto& mode : config::MODES)
+            timescales.push_back(std::min(mode.duration_s, config.blind_search_seconds));
+        // BLIND_SCORE_THRESHOLD from config, not a literal: a hardcoded
+        // 4.0 survived here after the threshold moved to 9.0 with the
+        // v3 pilot -- the fifth copy of exactly the constant-drift
+        // hazard docs/todo-done.md records four of -- leaving this loop
+        // accepting blind locks the Python engine refuses.
+        acc.emplace(config.blind_wide ? config::BLIND_WIDE_MAX_OFFSET_HZ
+                                      : config::BLIND_MAX_OFFSET_HZ,
+                    config::BLIND_BIN_STEP_HZ, 8, config::BLIND_SCORE_THRESHOLD,
+                    std::nullopt, std::move(timescales));
+    };
     double last_poll_cost_s = 0.0;
 
     while (!stop.is_set()) {
@@ -449,21 +466,7 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
             // still covers the whole current buffer once locked, exactly
             // as before.
             if (!blind_acc || !blind_acc_pushed || *blind_acc_pushed < buf_start) {
-                std::vector<std::optional<double>> timescales;
-                for (const auto& mode : config::MODES)
-                    timescales.push_back(
-                        std::min(mode.duration_s, config.blind_search_seconds));
-                // BLIND_SCORE_THRESHOLD from config, not a literal: a
-                // hardcoded 4.0 survived here after the threshold moved
-                // to 9.0 with the v3 pilot -- the fifth copy of exactly
-                // the constant-drift hazard docs/todo-done.md records
-                // four of -- leaving this loop accepting blind locks the
-                // Python engine refuses.
-                blind_acc.emplace(config.blind_wide ? config::BLIND_WIDE_MAX_OFFSET_HZ
-                                                    : config::BLIND_MAX_OFFSET_HZ,
-                                  config::BLIND_BIN_STEP_HZ, 8,
-                                  config::BLIND_SCORE_THRESHOLD, std::nullopt,
-                                  std::move(timescales));
+                make_blind_acc(blind_acc);
                 blind_acc_pushed = buf_start;
             }
             const auto new_lo = *blind_acc_pushed - buf_start;
@@ -698,6 +701,32 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
             // so it must never be rediscovered while its audio is still
             // in the buffer -- whether or not the sink chose to save it.
             remember_finished(finished_starts, pending->start);
+            // Retire the blind evidence with the reception. The
+            // delivered transmission's fold otherwise keeps the
+            // accumulator's argmax for a long time -- its peak/median
+            // score does not decay on its own (decay scales a
+            // timescale's bins equally; see BlindAccumulator) and its
+            // off-phase energy inflates the median under any new peak
+            // in the same CFO row, so a new transmission could not lock
+            // blind until minutes of noise had diluted the old
+            // evidence, and every poll meanwhile re-ran demodulate_blind
+            // on the finished transmission only to discard it via
+            // finished_starts. That was the "locks after a fresh start,
+            // not after a reception" report. blind_acc_pushed = total,
+            // NOT reset: unset (or left alone) would make the next poll
+            // fold the still-buffered finished transmission straight
+            // back in, rebuilding exactly the evidence being discarded.
+            // The known cost, accepted deliberately: a second
+            // transmission *overlapping* the delivered one loses
+            // whatever blind evidence it had already accumulated and
+            // rebuilds from delivery time -- the same position a
+            // stop/start gives, and its audio is still in the ring, so
+            // a rebuilt lock still decodes it retrospectively. Using
+            // the old evidence for the overlapper while rejecting the
+            // delivered peak would need per-reception subtraction the
+            // CPU-friendly accumulator cannot do.
+            make_blind_acc(blind_acc);
+            blind_acc_pushed = static_cast<std::int64_t>(total);
             state.update([&](Progress& s) {
                 s.status = Status::Done;
                 s.saved_path = saved_path;

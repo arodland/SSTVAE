@@ -345,6 +345,18 @@ def _free_spans(n: int, buf_start: int, finished_starts, epsilon_samples: int):
     return spans
 
 
+def _new_blind_accumulator(config: RxConfig) -> BlindAccumulator:
+    """A fresh accumulator with one decay timescale per mode, each capped
+    at that mode's own duration (see RxConfig.blind_search_seconds)."""
+    timescales = [min(m.duration_s, config.blind_search_seconds) for m in MODES.values()]
+    return BlindAccumulator(
+        max_offset_hz=(
+            BLIND_WIDE_MAX_OFFSET_HZ if config.blind_wide else BLIND_MAX_OFFSET_HZ
+        ),
+        window_s=timescales,
+    )
+
+
 def _find_new_reception(modem, samples, z, buf_start, finished_starts,
                         epsilon_samples, max_tries=4, drift_track="off"):
     """Decode the strongest preamble that is neither already saved nor a
@@ -472,13 +484,7 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
             # still covers the whole current buffer once locked, exactly
             # as before.
             if blind_acc is None or blind_acc_pushed is None or blind_acc_pushed < buf_start:
-                timescales = [min(m.duration_s, config.blind_search_seconds) for m in MODES.values()]
-                blind_acc = BlindAccumulator(
-                    max_offset_hz=(
-                        BLIND_WIDE_MAX_OFFSET_HZ if config.blind_wide else BLIND_MAX_OFFSET_HZ
-                    ),
-                    window_s=timescales,
-                )
+                blind_acc = _new_blind_accumulator(config)
                 blind_acc_pushed = buf_start
             new_lo = blind_acc_pushed - buf_start
             if new_lo < len(samples):
@@ -697,6 +703,31 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
             # so it must never be rediscovered while its audio is still
             # in the buffer -- whether or not the sink chose to save it.
             finished_starts.append(pending.start)
+            # Retire the blind evidence with the reception. The delivered
+            # transmission's fold otherwise keeps the accumulator's
+            # argmax for a long time -- its peak/median score does not
+            # decay on its own (decay scales a timescale's bins equally;
+            # see BlindAccumulator) and its off-phase energy inflates the
+            # median under any new peak in the same CFO row, so a new
+            # transmission could not lock blind until minutes of noise
+            # had diluted the old evidence, and every poll meanwhile
+            # re-ran demodulate_blind on the finished transmission only
+            # to discard it via finished_starts. That was the "locks
+            # after a fresh start, not after a reception" report.
+            # blind_acc_pushed = total, NOT None: None (or leaving it)
+            # would make the next poll fold the still-buffered finished
+            # transmission straight back in, rebuilding exactly the
+            # evidence being discarded. The known cost, accepted
+            # deliberately: a second transmission *overlapping* the
+            # delivered one loses whatever blind evidence it had already
+            # accumulated and rebuilds from delivery time -- the same
+            # position a stop/start gives, and its audio is still in the
+            # ring, so a rebuilt lock still decodes it retrospectively.
+            # Using the old evidence for the overlapper while rejecting
+            # the delivered peak would need per-reception subtraction
+            # the CPU-friendly accumulator cannot do.
+            blind_acc = _new_blind_accumulator(config)
+            blind_acc_pushed = total
             with state.lock:
                 state.status = "done"
                 state.saved_path = saved_path

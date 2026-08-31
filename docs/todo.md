@@ -44,16 +44,63 @@ The per-latent confidence weights already are that shrinkage. On
 oracle headroom is 0.04 dB at mpp 8. The phantom "+1.5 dB" came from
 measuring bare `latents`.
 
+## Completed: acquisition after a previous reception ("locks after a fresh start")
+
+**Fixed 2026-08-31, both implementations.** Operators reported reception
+locking reliably after a fresh start (app launch, stop/start listening,
+the post-transmit buffer reset) and poorly after a completed reception.
+Two mechanisms, both erased by exactly the actions that helped:
+
+- **Stale blind evidence.** `decode_loop` never reset its
+  `BlindAccumulator` when a reception was delivered, and a delivered
+  transmission's fold holds its lock for a long time — the peak/median
+  score does not decay on its own (decay scales a timescale's bins
+  uniformly), and its off-phase energy inflates the median under any new
+  peak in the same CFO row (the common case: the same station sending
+  again). `result()` returns only the single best cell, so every poll
+  re-locked and re-demodulated the finished transmission, discarded it
+  via `finished_starts`, and a new transmission could not surface. The
+  loop now installs a fresh accumulator at delivery with
+  `blind_acc_pushed = total` — `= buf_start` would re-fold the
+  still-buffered finished transmission straight back in. **The accepted
+  cost:** a transmission *overlapping* the delivered one loses its
+  accumulated blind evidence and rebuilds from delivery time; using the
+  old evidence for the overlapper while rejecting the delivered peak
+  would need per-reception subtraction the CPU-friendly accumulator
+  cannot do. Its audio is still in the ring, so a rebuilt lock still
+  decodes it retrospectively. Pinned (with a mutation check — the test
+  times out without the reset) by
+  `tests/test_listen_state_machine.py::test_second_blind_transmission_locks_after_the_first_is_delivered`
+  and its mirror in `native/tests/test_rx_engine.cpp`.
+- **Gate rejections aborted the preamble search.** See the top-K note
+  under the steady-carrier item below: a lag-M artefact in the finished
+  transmission's still-buffered frame data wins the metric argmax, the
+  template gate correctly rejects it, and single-candidate `acquire`
+  declared the whole span preamble-free — hiding a genuine
+  weaker-metric preamble for as long as the old audio stayed in the
+  ring (~130 s).
+
 ## Completed: preamble detection against a steady-carrier interferer
 
 **Mostly closed 2026-08-13**, as a side effect of the wide-acquisition
 false-lock fix: `config.TEMPLATE_SCORE_THRESHOLD` also rejects a steady
 tone at every level the original table named — a pure tone reads
 metric 1.000 but scores only ~0.2–0.3 against the 24-carrier preamble
-template. **Still open:** fix candidate 1 (keep the top-K metric peaks
-and let the Golay header arbitrate) is the more direct answer to the
-interferer problem and is not implemented; it cannot cost sensitivity,
-because its first candidate is exactly today's argmax.
+template. **Top-K candidates landed 2026-08-31** (both
+implementations), arbitrated by the template gate rather than the Golay
+header: `acquire` now masks a gate-rejected metric peak and tries the
+next-best, up to `config.ACQUIRE_MAX_CANDIDATES` (5) — so a tone (or a
+still-buffered previous transmission's lag-M artefact) no longer steals
+the lock from a real preamble sharing the window, and candidate 1 is
+exactly the old argmax, so sensitivity is untouched
+(`tests/test_preamble.py::test_a_gate_rejected_peak_is_stepped_past_not_fatal`).
+The motivating case was post-reception deafness: old frame data in the
+ring wins the argmax, the gate correctly rejects it, and the old
+single-candidate `acquire` then declared the whole window
+preamble-free. **Still open:** header arbitration for a *gate-passing*
+impostor — a periodic segment can score above 0.40 at some CFO bin and
+still carry no decodable header; today that costs one of
+`_find_new_reception`'s demodulate tries rather than the lock.
 
 ## Completed: wider acquisition search, for a mis-tuned counterpart
 

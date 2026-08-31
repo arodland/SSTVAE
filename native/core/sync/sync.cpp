@@ -150,83 +150,122 @@ Acquisition acquire(std::span<const cdouble> z_in, double threshold, int max_bin
         metric = std::move(masked);
     }
 
-    const std::size_t n_star = argmax(metric);
-    if (metric[n_star] < threshold)
-        throw SyncError("no preamble found (peak metric " +
-                        std::to_string(metric[n_star]) + ")");
-
-    const double f_frac =
-        std::arg(am.a[n_star]) / (2 * PI * static_cast<double>(M) / FS);
-
-    // Integer-bin CFO search + fine timing via template correlation.
     const std::vector<cdouble> templ = ofdm::preamble_template();
     double t_norm = 0.0;
     for (const cdouble& t : templ) t_norm += std::norm(t);
     t_norm = std::sqrt(t_norm);
-
-    const std::int64_t lo =
-        std::max<std::int64_t>(0, static_cast<std::int64_t>(n_star) - PREAMBLE_CP - 200);
-    const std::int64_t hi =
-        std::min<std::int64_t>(static_cast<std::int64_t>(z.size()) - PREAMBLE_SAMPLES,
-                               static_cast<std::int64_t>(n_star) + 200);
-    if (hi <= lo) throw SyncError("preamble at signal edge");
-
-    const std::span<const cdouble> seg(
-        z.data() + lo, static_cast<std::size_t>(hi + PREAMBLE_SAMPLES - lo));
 
     // conj(template[::-1]) -- the matched filter.
     std::vector<cdouble> kernel(templ.size());
     for (std::size_t i = 0; i < templ.size(); ++i)
         kernel[i] = std::conj(templ[templ.size() - 1 - i]);
 
-    bool have_best = false;
-    double best_score = 0.0;
-    std::int64_t best_p0 = 0;
-    double best_f = 0.0;
-    for (int m_bin = -max_bins; m_bin <= max_bins; ++m_bin) {
-        const double f_cand = f_frac + static_cast<double>(m_bin) * FS / M;
-        const std::vector<cdouble> seg_c = dsp::freq_correct(seg, f_cand);
-        const std::vector<cdouble> corr = dsp::fftconvolve_valid(seg_c, kernel);
-
-        std::vector<double> mag(corr.size());
-        std::vector<double> cpow(corr.size());
-        for (std::size_t i = 0; i < corr.size(); ++i) {
-            mag[i] = std::abs(corr[i]);
-            cpow[i] = mag[i] * mag[i];
+    // Metric peaks are tried best-first against the template gate, up to
+    // ACQUIRE_MAX_CANDIDATES of them. The gate rejecting a peak means
+    // "this one is not a preamble" -- typically a lag-M artefact inside a
+    // real (often already-received, still-buffered) transmission's own
+    // frame data, which clears PREAMBLE_THRESHOLD where pure noise does
+    // not -- so the right response is to mask it out and look at the next
+    // peak, not to declare the whole window preamble-free. Giving up at
+    // the first rejection did the latter, and hid any genuine
+    // weaker-metric preamble sharing the window with such an artefact.
+    bool have_rejected = false;
+    double rejected_score = 0.0, rejected_f = 0.0;
+    std::size_t n_star = 0;
+    std::int64_t p0 = 0;
+    double f_hat = 0.0;
+    bool accepted = false;
+    for (int cand = 0; cand < config::ACQUIRE_MAX_CANDIDATES && !accepted; ++cand) {
+        n_star = argmax(metric);
+        if (metric[n_star] < threshold) {
+            if (have_rejected) break;
+            throw SyncError("no preamble found (peak metric " +
+                            std::to_string(metric[n_star]) + ")");
         }
-        const std::size_t peak = argmax(cpow);
 
-        double seg_energy = 0.0;
-        for (std::size_t i = peak;
-             i < std::min(peak + PREAMBLE_SAMPLES, seg_c.size()); ++i)
-            seg_energy += std::norm(seg_c[i]);
-        seg_energy = std::sqrt(seg_energy);
+        const double f_frac =
+            std::arg(am.a[n_star]) / (2 * PI * static_cast<double>(M) / FS);
 
-        // Scored at the argmax (TEMPLATE_SCORE_THRESHOLD is calibrated
-        // against that), timed at the first path.
-        const double score = mag[peak] / (t_norm * seg_energy + 1e-12);
-        if (!have_best || score > best_score) {
-            have_best = true;
-            best_score = score;
-            best_p0 = lo + static_cast<std::int64_t>(first_path(cpow, peak, false));
-            best_f = f_cand;
+        // Integer-bin CFO search + fine timing via template correlation.
+        const std::int64_t lo = std::max<std::int64_t>(
+            0, static_cast<std::int64_t>(n_star) - PREAMBLE_CP - 200);
+        const std::int64_t hi =
+            std::min<std::int64_t>(static_cast<std::int64_t>(z.size()) - PREAMBLE_SAMPLES,
+                                   static_cast<std::int64_t>(n_star) + 200);
+        if (hi <= lo) throw SyncError("preamble at signal edge");
+
+        const std::span<const cdouble> seg(
+            z.data() + lo, static_cast<std::size_t>(hi + PREAMBLE_SAMPLES - lo));
+
+        bool have_best = false;
+        double best_score = 0.0;
+        std::int64_t best_p0 = 0;
+        double best_f = 0.0;
+        for (int m_bin = -max_bins; m_bin <= max_bins; ++m_bin) {
+            const double f_cand = f_frac + static_cast<double>(m_bin) * FS / M;
+            const std::vector<cdouble> seg_c = dsp::freq_correct(seg, f_cand);
+            const std::vector<cdouble> corr = dsp::fftconvolve_valid(seg_c, kernel);
+
+            std::vector<double> mag(corr.size());
+            std::vector<double> cpow(corr.size());
+            for (std::size_t i = 0; i < corr.size(); ++i) {
+                mag[i] = std::abs(corr[i]);
+                cpow[i] = mag[i] * mag[i];
+            }
+            const std::size_t peak = argmax(cpow);
+
+            double seg_energy = 0.0;
+            for (std::size_t i = peak;
+                 i < std::min(peak + PREAMBLE_SAMPLES, seg_c.size()); ++i)
+                seg_energy += std::norm(seg_c[i]);
+            seg_energy = std::sqrt(seg_energy);
+
+            // Scored at the argmax (TEMPLATE_SCORE_THRESHOLD is calibrated
+            // against that), timed at the first path.
+            const double score = mag[peak] / (t_norm * seg_energy + 1e-12);
+            if (!have_best || score > best_score) {
+                have_best = true;
+                best_score = score;
+                best_p0 = lo + static_cast<std::int64_t>(first_path(cpow, peak, false));
+                best_f = f_cand;
+            }
+        }
+
+        if (best_score >= config::TEMPLATE_SCORE_THRESHOLD) {
+            p0 = best_p0;
+            f_hat = best_f;
+            accepted = true;
+        } else {
+            // Not a preamble; mask this peak's whole neighbourhood (its
+            // own correlation skirt is narrower than PREAMBLE_SAMPLES)
+            // and try the next-best metric peak.
+            if (!have_rejected || best_score > rejected_score) {
+                have_rejected = true;
+                rejected_score = best_score;
+                rejected_f = best_f;
+            }
+            const std::size_t mask_lo =
+                n_star > static_cast<std::size_t>(PREAMBLE_SAMPLES)
+                    ? n_star - PREAMBLE_SAMPLES
+                    : 0;
+            const std::size_t mask_hi =
+                std::min(metric.size(), n_star + static_cast<std::size_t>(PREAMBLE_SAMPLES));
+            std::fill(metric.begin() + static_cast<std::ptrdiff_t>(mask_lo),
+                      metric.begin() + static_cast<std::ptrdiff_t>(mask_hi), -1.0);
         }
     }
 
-    if (best_score < config::TEMPLATE_SCORE_THRESHOLD) {
-        // The winning candidate is the *best available* one, not
-        // necessarily a *good* one -- the lag-M metric above only rules
-        // out pure noise, and real transmission data elsewhere in the
-        // buffer can pass it too. This is the second gate: no candidate
-        // here explains enough of the template's energy to trust as an
-        // actual preamble.
+    if (!accepted) {
+        // Every candidate tried was the *best available* one somewhere,
+        // not a *good* one -- the lag-M metric only rules out pure
+        // noise, and real transmission data elsewhere in the buffer can
+        // pass it too. This is the second gate: no candidate explained
+        // enough of the template's energy to trust as an actual
+        // preamble.
         throw SyncError("no preamble found (best candidate score " +
-                        std::to_string(best_score) + " at " + std::to_string(best_f) +
-                        " Hz)");
+                        std::to_string(rejected_score) + " at " +
+                        std::to_string(rejected_f) + " Hz)");
     }
-
-    std::int64_t p0 = best_p0;
-    double f_hat = best_f;
 
     // Refine CFO from the phase between successive preamble periods at
     // the now-known timing: the same lag-M estimate, but noise-averaged

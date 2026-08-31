@@ -62,6 +62,7 @@ inline constexpr int DEMOD_BACKOFF = 6;
 inline constexpr int INTERLEAVER_SEED = 1000;
 inline constexpr int PROTOCOL_VERSION = 4;
 inline constexpr int ACQUIRE_MAX_BINS = 12;
+inline constexpr int ACQUIRE_MAX_CANDIDATES = 5;
 inline constexpr int FIRST_PATH_SEARCH = 32;
 
 inline constexpr double PREAMBLE_THRESHOLD = 0x1.ae147ae147ae1p-2;  // 0.42
