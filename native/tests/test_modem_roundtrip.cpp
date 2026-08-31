@@ -70,15 +70,16 @@ std::vector<double> test_latents(int n, std::uint64_t seed) {
 // noisy reference the MSE-optimal scale is *below* unity anyway (0.57
 // at mpp 8 dB), so correcting this to 1.0 costs 0.7 dB on AWGN and
 // 1.9-2.3 dB under fading -- measured. It is a property of the clipper,
-// not of the channel: 0.7933 +- 0.0008 across data, identical across
+// not of the channel: 0.7721 +- 0.0009 across data, identical across
 // modes A/B/C, unmoved by AWGN, flat across carriers to +-1.9%. It does
-// track CLIP_HEADROOM_DB (0.81 at -1 dB, 0.94 at +4), so re-measure if
-// that constant moves.
+// track the clipper's settings -- it was 0.7933 at the two plain passes
+// and 0.0 dB headroom of PROTOCOL_VERSION 3 -- so re-measure whenever
+// CLIP_HEADROOM_DB or CLIP_OVERSHOOT moves.
 //
 // The band still catches what this check exists for: a dropped
 // 1/sqrt(2) lands at 0.707, well outside it.
 // Measured; see the note above for what sets it and when to re-measure.
-constexpr double EXPECTED_LATENT_GAIN = 0.7933;
+constexpr double EXPECTED_LATENT_GAIN = 0.7721;
 constexpr double LATENT_GAIN_TOL = 0.03;
 
 double latent_gain(const std::vector<double>& sent, const std::vector<double>& got,
@@ -140,9 +141,10 @@ void test_roundtrip(const config::ModeSpec& mode, const std::string& callsign) {
 
     const double snr = latent_snr_db(latents, r.latents, r.weights);
     // The clean-loopback floor is set by clip-and-filter distortion at
-    // the configured headroom, not by the modem. ~11 dB at the 0.0 dB
-    // headroom of PROTOCOL_VERSION 3; 8 dB leaves room without being
-    // meaningless.
+    // the configured headroom, not by the modem. ~10.9 dB at the current
+    // CLIP_HEADROOM_DB / CLIP_OVERSHOOT; 8 dB leaves room without being
+    // meaningless. Note this is the *unfitted* error, so the deliberate
+    // sub-unity latent gain above is most of what holds it down.
     check::is_true(snr > 8.0, what + ": latent SNR " + std::to_string(snr) +
                                   " dB through a clean loopback");
     const double gain = latent_gain(latents, r.latents, r.weights);

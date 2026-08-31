@@ -509,13 +509,22 @@ PYBIND11_MODULE(sstvae_native, m) {
             },
             py::arg("z"));
     dsp.def("tx_condition",
-            [](DArray x, double clip_headroom_db, int iterations) {
+            [](DArray x, double clip_headroom_db,
+               std::vector<double> overshoot) {
                 std::span<const double> in(x.data(),
                                            static_cast<std::size_t>(x.size()));
-                return to_numpy(
-                    sstvae::dsp::tx_condition(in, clip_headroom_db, iterations));
+                return to_numpy(sstvae::dsp::tx_condition(
+                    in, clip_headroom_db, std::span<const double>(overshoot)));
             },
-            py::arg("x"), py::arg("clip_headroom_db"), py::arg("iterations") = 2);
+            py::arg("x"), py::arg("clip_headroom_db"),
+            // Default taken from the generated config, never hand-copied:
+            // a stale literal here would ask the C++ a different question
+            // than the parity test asks Python, and read as a real
+            // implementation disagreement. (This is the same trap the
+            // `acquire` shim's stale threshold=0.5 fell into.)
+            py::arg("overshoot") = std::vector<double>(
+                sstvae::config::CLIP_OVERSHOOT.begin(),
+                sstvae::config::CLIP_OVERSHOOT.end()));
     dsp.def("papr_db",
             [](DArray x) {
                 std::span<const double> in(x.data(),

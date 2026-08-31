@@ -305,8 +305,8 @@
     "dsp/tx_condition": {
       "dtype": "<f8",
       "fingerprint": {
-        "max_abs": "1.9046267616e+00",
-        "mean_abs": "8.6520014177e-01",
+        "max_abs": "1.8679500739e+00",
+        "mean_abs": "8.6266124933e-01",
         "rms": "1.0000000000e+00"
       },
       "note": "clip-and-filter at the configured headroom",
@@ -648,7 +648,7 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "8.0000000000e+02",
-        "mean_abs": "2.6700047222e+02",
+        "mean_abs": "2.6700023945e+02",
         "rms": "4.6188057619e+02"
       },
       "note": "(preamble_start, freq_offset, metric); start -1 means SyncError",
@@ -674,8 +674,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "8.0000000000e+02",
-        "mean_abs": "2.7943535743e+02",
-        "rms": "4.6238361250e+02"
+        "mean_abs": "2.7943585939e+02",
+        "rms": "4.6238360643e+02"
       },
       "note": "(preamble_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -687,8 +687,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "8.0000000000e+02",
-        "mean_abs": "2.6701489212e+02",
-        "rms": "4.6188042554e+02"
+        "mean_abs": "2.6701450584e+02",
+        "rms": "4.6188042702e+02"
       },
       "note": "(preamble_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -700,8 +700,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "8.0000000000e+02",
-        "mean_abs": "2.6703155366e+02",
-        "rms": "4.6188051980e+02"
+        "mean_abs": "2.6702926937e+02",
+        "rms": "4.6188052071e+02"
       },
       "note": "(preamble_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -713,8 +713,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "7.6800000000e+02",
-        "mean_abs": "2.6988872137e+02",
-        "rms": "4.4405052363e+02"
+        "mean_abs": "2.7058269952e+02",
+        "rms": "4.4412146094e+02"
       },
       "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -726,8 +726,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "7.6800000000e+02",
-        "mean_abs": "2.8107957322e+02",
-        "rms": "4.4446773843e+02"
+        "mean_abs": "2.8189675096e+02",
+        "rms": "4.4453945281e+02"
       },
       "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -739,8 +739,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "7.6800000000e+02",
-        "mean_abs": "2.6439329131e+02",
-        "rms": "4.4363110936e+02"
+        "mean_abs": "2.6481186681e+02",
+        "rms": "4.4365601127e+02"
       },
       "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -752,8 +752,8 @@
       "dtype": "<f8",
       "fingerprint": {
         "max_abs": "7.6800000000e+02",
-        "mean_abs": "2.6784125653e+02",
-        "rms": "4.4387591608e+02"
+        "mean_abs": "2.6843397605e+02",
+        "rms": "4.4392532575e+02"
       },
       "note": "(frame_start, freq_offset, metric); start -1 means SyncError",
       "shape": [
@@ -764,9 +764,9 @@
     "sync/wave_clean": {
       "dtype": "<f8",
       "fingerprint": {
-        "max_abs": "2.1514975080e+00",
-        "mean_abs": "8.1602634340e-01",
-        "rms": "9.8794660734e-01"
+        "max_abs": "2.0077375707e+00",
+        "mean_abs": "8.1389764726e-01",
+        "rms": "9.9024066744e-01"
       },
       "shape": [
         16000
@@ -788,9 +788,9 @@
     "sync/wave_offset": {
       "dtype": "<f8",
       "fingerprint": {
-        "max_abs": "3.1404670206e+00",
-        "mean_abs": "8.8158110466e-01",
-        "rms": "1.0682166390e+00"
+        "max_abs": "3.1797915526e+00",
+        "mean_abs": "8.8055933493e-01",
+        "rms": "1.0706096692e+00"
       },
       "shape": [
         16000
@@ -800,9 +800,9 @@
     "sync/wave_snr0": {
       "dtype": "<f8",
       "fingerprint": {
-        "max_abs": "6.5206710511e+00",
-        "mean_abs": "1.2886609838e+00",
-        "rms": "1.6080308183e+00"
+        "max_abs": "6.5190114470e+00",
+        "mean_abs": "1.2909673544e+00",
+        "rms": "1.6115312476e+00"
       },
       "shape": [
         16000
@@ -812,9 +812,9 @@
     "sync/wave_snr6": {
       "dtype": "<f8",
       "fingerprint": {
-        "max_abs": "3.9835450012e+00",
-        "mean_abs": "9.6007575303e-01",
-        "rms": "1.1777305003e+00"
+        "max_abs": "3.9370345855e+00",
+        "mean_abs": "9.6030954534e-01",
+        "rms": "1.1804058607e+00"
       },
       "shape": [
         16000

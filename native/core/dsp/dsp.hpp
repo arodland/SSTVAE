@@ -126,8 +126,15 @@ std::size_t next_fast_len(std::size_t n, bool real = false);
 // SSB transmitters are limited by envelope peak power, so clipping acts
 // on the analytic-signal magnitude, not raw samples. Iterated because
 // the bandpass regrows peaks after each clip. Returns unit-RMS.
-std::vector<double> tx_condition(std::span<const double> x,
-                                 double clip_headroom_db, int iterations = 2);
+//
+// `overshoot` is one factor per pass -- its length *is* the pass count,
+// so nothing can disagree about how many passes ran. A factor above 1
+// clips past the threshold so the next filter regrows back toward it
+// rather than above it (CESSB's "more than clipping"), applied as
+// scale**k. See sstvae/config.py's CLIP_OVERSHOOT for the measurements.
+std::vector<double> tx_condition(
+    std::span<const double> x, double clip_headroom_db,
+    std::span<const double> overshoot = config::CLIP_OVERSHOOT);
 
 // Envelope (PEP) peak-to-average power ratio in dB.
 double papr_db(std::span<const double> x);

@@ -33,6 +33,7 @@ from .config import (
     FRAMES_PER_GROUP,
     LATENT_GROUPS,
     CLIP_HEADROOM_DB,
+    CLIP_OVERSHOOT,
     DEMOD_BACKOFF,
     TX_BANDPASS,
     MODES,
@@ -50,6 +51,11 @@ class Stage2Config:
     erasure_bursts_mean: float = 1.0  # Poisson mean per transmission
     erasure_burst_frames: tuple[int, int] = (1, 20)
     clip_headroom_db: float = CLIP_HEADROOM_DB
+    # One overshoot factor per clip-and-filter pass; its length is the
+    # pass count. Must track dsp.tx_condition -- the encoder is adapted
+    # to whatever clipper it trains through, so a mismatch here trains
+    # against a transmitter that does not exist. See config.CLIP_OVERSHOOT.
+    clip_overshoot: tuple[float, ...] = CLIP_OVERSHOOT
 
 
 class WaveformChannel(torch.nn.Module):
@@ -134,7 +140,7 @@ class WaveformChannel(torch.nn.Module):
         )
 
     def _clip_filter(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Envelope clip + bandpass (2 iterations).
+        """Envelope clip + bandpass, one pass per cfg.clip_overshoot entry.
 
         Returns (x, papr_pre_db, papr_post_db). papr_post_db is the real
         transmitted PAPR (what matters physically, comparable to RADE's
@@ -153,10 +159,13 @@ class WaveformChannel(torch.nn.Module):
             torch.sqrt(2 * x.pow(2).mean(dim=1, keepdim=True))
             * 10 ** (self.cfg.clip_headroom_db / 20)
         )
-        for _ in range(2):
+        for k in self.cfg.clip_overshoot:
             z = self._analytic(x)
             mag = z.abs().clamp_min(1e-9)
-            x = (z * torch.clamp(thresh / mag, max=1.0)).real
+            scale = torch.clamp(thresh / mag, max=1.0)
+            if k != 1.0:
+                scale = scale.pow(k)
+            x = (z * scale).real
             x = torch.nn.functional.conv1d(x[:, None, :], self.bp_taps, padding=100)[
                 :, 0, :
             ]

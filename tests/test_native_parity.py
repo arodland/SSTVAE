@@ -288,9 +288,9 @@ def test_dsp_freq_correct(native):
 
 
 def test_dsp_tx_condition(native):
-    """What actually goes on air. Two clip-and-filter iterations over a
-    hilbert each, so the FFT difference compounds -- checked directly
-    rather than trusted to its parts."""
+    """What actually goes on air. One clip-and-filter pass per
+    CLIP_OVERSHOOT entry, each over a hilbert, so the FFT difference
+    compounds -- checked directly rather than trusted to its parts."""
     from sstvae.config import CLIP_HEADROOM_DB
 
     x = _test_signal()
@@ -298,6 +298,34 @@ def test_dsp_tx_condition(native):
     assert max_abs_diff(dsp_ref.tx_condition(x, CLIP_HEADROOM_DB), got) < 1e-10
     # The contract is unit RMS; assert it rather than inferring it.
     assert abs(np.sqrt(np.mean(got ** 2)) - 1.0) < 1e-12
+
+
+def test_dsp_tx_condition_overshoot_is_a_parameter(native):
+    """The overshoot schedule must reach the C++, and its default must be
+    the config's -- both by the same argument the clip-headroom test
+    below makes.
+
+    A binding whose default was hand-copied, or which ignored the
+    argument and used the compiled-in constant, would still pass the
+    parity test above: that call takes the default on both sides, so the
+    two agree about a value neither of them got from `config`. Drive it
+    with a schedule that is *not* the default and require both ends to
+    follow, and require the defaulted call to equal the explicit one.
+    """
+    from sstvae.config import CLIP_HEADROOM_DB, CLIP_OVERSHOOT
+
+    x = _test_signal()
+    other = (1.0, 1.0)  # the pre-2026-08-31 clipper: two plain passes
+    assert tuple(CLIP_OVERSHOOT) != other, "pick a schedule that is not the default"
+
+    got = native.dsp.tx_condition(x, CLIP_HEADROOM_DB, other)
+    assert max_abs_diff(dsp_ref.tx_condition(x, CLIP_HEADROOM_DB, other), got) < 1e-10
+    assert max_abs_diff(native.dsp.tx_condition(x, CLIP_HEADROOM_DB), got) > 1e-3, \
+        "overshoot had no effect; the parameter is not reaching tx_condition"
+    assert max_abs_diff(
+        native.dsp.tx_condition(x, CLIP_HEADROOM_DB),
+        native.dsp.tx_condition(x, CLIP_HEADROOM_DB, tuple(CLIP_OVERSHOOT)),
+    ) == 0.0, "the binding's default is not config.CLIP_OVERSHOOT"
 
 
 def test_dsp_papr_db(native):

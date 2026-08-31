@@ -1345,11 +1345,67 @@ obvious:
   `latents × weights`, and the confidence weights **already are** a
   Wiener shrinkage: on that quantity the MMSE-optimal rescale is
   0.91–1.20 and the remaining oracle headroom is 0.04 dB at mpp 8. It is
-  stable enough to train against — 0.7933 ± 0.0008 across data,
+  stable enough to train against — **0.7721 ± 0.0009** across data,
   identical across modes, unmoved by AWGN, flat across carriers to
-  ±1.9% — but it tracks `CLIP_HEADROOM_DB`, so re-measure if that moves.
+  ±1.9% — but it tracks the clipper's settings (it was 0.7933 at the two
+  plain passes and 0.0 dB headroom of `PROTOCOL_VERSION` 3), so
+  re-measure whenever `CLIP_HEADROOM_DB` or `CLIP_OVERSHOOT` moves.
   **Score `latents × weights`, never bare `latents`**: measuring the
   latter invented a phantom "+1.5 dB from adding Wiener shrinkage".
+
+**The clipper runs three passes with an overshoot schedule, and two
+plain passes was simply under-converged** (`config.CLIP_OVERSHOOT` =
+(1.0, 1.5, 2.0), `CLIP_HEADROOM_DB` 0.0 → 1.0, 2026-08-31). Borrowed
+from CESSB (Hershberger, QEX Nov/Dec 2014): overshoot the clip
+correction so what the *next* filter pass regrows lands back near the
+threshold instead of above it. Measured end to end — 12 COCO val
+images, mode B, PEP-fair, paired seeds, v4 codec — **+0.141 dB PSNR,
+8 of 8 cells positive**, +0.05 at 12 dB rising to +0.26 at 0 dB on both
+AWGN and mpp. It **dominates the old setting on both axes** rather than
+trading between them (PAPR 3.94 → 3.42 dB *and* clip self-noise
+14.67 → 15.19 dB), which is why the gain barely varies with SNR.
+Transmit-side only: no receiver change, no format change, no
+`PROTOCOL_VERSION` bump. Five things this settled:
+
+- **The literal CESSB form must not be used.** Written additively as
+  `out = x + k*(clipped - x)`, the effective envelope scale is
+  `1 - k*(1 - scale)`, which goes **negative** once `scale < 1 - 1/k` —
+  it phase-inverts the sample instead of shrinking it. CESSB survives
+  that because SSB voice peaks are rare excursions; **this clipper is
+  not a peak clipper at its operating point** but a ~40%-duty
+  compressor on its first pass (28% by the second), so a large
+  fraction of the waveform lands in the inverting region. It loses at
+  every headroom tried, up to −1.5 dB. `scale ** k` agrees to first
+  order near the threshold, stays positive everywhere, and is the role
+  Hershberger's nonlinear gain plays in the original.
+- **Most of the gain is the pass count, not the overshoot.** Plain
+  clipping at five passes and headroom 0.5 measures +0.124 dB against
+  the overshoot's +0.141 — a 0.017 dB difference, *below* the 0.139 dB
+  spread across checkpoints, i.e. below the resolution at which
+  decisions here get made. What the overshoot actually buys is
+  convergence in **three passes instead of five**, and iterating alone
+  never reaches the three-pass figure at any count (7 and 10 are no
+  better than 5). Both are free at once per 32–95 s transmission, so
+  this ships for the pass count rather than for the 0.017 dB. Do not
+  quote the overshoot as the mechanism.
+- **The headroom moved with it and the two are one change.** A
+  converged clipper reaches a lower PAPR than the under-converged one
+  did, so the headroom that was optimal at two plain passes is past
+  optimal at three overshot ones. Pairing the new schedule with the old
+  0.0 gives up the flat-across-SNR profile — it trades the high-SNR
+  cells for a little more at 0 dB.
+- **Score this end to end, never on latent SNR.** The proxy
+  (`scripts/overclip_sweep.py`) predicted +0.54 dB of effective SNR,
+  which at the 0.48 dB-PSNR-per-dB-SNR conversion should have been
+  +0.26 dB PSNR; the real answer was +0.11. **The proxy overpredicts by
+  ~2.5×**, the same flattery `docs/latent-optimization.md` records for
+  latent-domain objectives. `scripts/overclip_e2e.py` is the gate.
+- **`waveform_channel._clip_filter` must be kept in step**
+  (`Stage2Config.clip_overshoot`). The encoder is fine-tuned *through*
+  the clipper, so a mismatch trains it against a transmitter that does
+  not exist — and it means the +0.141 dB above is a **lower bound**,
+  measured with a codec adapted to the clipper it was being compared
+  against. A stage-2 fine-tune through the new one has not been run.
 
 **Format constants are frozen data, not computations.** The interleaver
 permutations (`sstvae/modem/interleaver_perms.npy`) were drawn from

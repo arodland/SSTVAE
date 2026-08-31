@@ -131,6 +131,19 @@ def render() -> str:
     w(_emit_double("TX_BANDPASS_HI", tx_hi))
     w("\n")
 
+    w("// --- clip overshoot --------------------------------------------------\n")
+    w("// One factor per clip-and-filter pass; the array's length is the pass\n")
+    w("// count, so there is no separate iteration constant that could\n")
+    w("// disagree with it. 1.0 is a plain clip. Applied as scale**k -- see\n")
+    w("// config.py for why the additive CESSB form inverts the envelope here.\n")
+    over = list(cfg.CLIP_OVERSHOOT)
+    w(f"inline constexpr int CLIP_PASSES = {len(over)};\n")
+    w("inline constexpr std::array<double, CLIP_PASSES> CLIP_OVERSHOOT = {\n")
+    for v in over:
+        w(f"    {_hexfloat(v)},  // {v!r}\n")
+    w("};\n")
+    w("\n")
+
     w("// --- beacon sync word ------------------------------------------------\n")
     w("// Barker-13: a clean, unambiguous chip-level autocorrelation peak, so\n")
     w("// superframe phase is recoverable from any contiguous run of frames.\n")

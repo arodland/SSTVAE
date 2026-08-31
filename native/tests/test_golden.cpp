@@ -211,8 +211,8 @@ void test_dsp() {
     const std::vector<double> papr = load_f8(g("dsp/papr_db"));
     check::close(std::vector<double>{dsp::papr_db(x)}, papr, 1e-11, "dsp/papr_db");
 
-    // tx_condition runs two clip-and-filter iterations over a hilbert
-    // each, so the FFT difference compounds; it is also the function
+    // tx_condition runs config::CLIP_PASSES clip-and-filter passes over a
+    // hilbert each, so the FFT difference compounds; it is also the function
     // whose output goes on air, so it gets its own check rather than
     // being trusted to its parts.
     check::close(dsp::tx_condition(x, config::CLIP_HEADROOM_DB),
