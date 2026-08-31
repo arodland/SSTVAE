@@ -521,6 +521,75 @@ void test_fresh_session_does_not_inherit_blind_evidence_from_a_prior_one() {
                  "boundary");
 }
 
+// Deterministic noise, splitmix64-shaped like the fresh-session test's.
+std::vector<double> noise_vec(std::uint64_t seed, double seconds, double amp) {
+    std::vector<double> out(static_cast<std::size_t>(seconds * config::FS));
+    std::uint64_t s = seed;
+    for (double& v : out) {
+        s += 0x9E3779B97F4A7C15ULL;
+        std::uint64_t z = s;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        z = z ^ (z >> 31);
+        v = amp * (static_cast<double>(z >> 11) / 9007199254740992.0 - 0.5);
+    }
+    return out;
+}
+
+void test_a_second_blind_transmission_locks_after_the_first_is_delivered() {
+    // The within-one-session sequel to the fresh-session test above,
+    // mirroring tests/test_listen_state_machine.py's
+    // test_second_blind_transmission_locks_after_the_first_is_delivered.
+    // The accumulator used to carry a delivered transmission's folded
+    // evidence indefinitely -- its peak/median score does not decay on
+    // its own, so `result()` kept returning the finished lock (discarded
+    // via finished_starts every poll) and a weaker new transmission sat
+    // suppressed under the old evidence. The fix retires the blind
+    // evidence with the reception. The first transmission is 4x the
+    // second's amplitude (16x power) so its stale evidence decisively
+    // out-scores the new one's if it is ever left in place: without the
+    // reset this test times out with one reception.
+    Harness h(100.0);
+    // Timescales long enough that the stale evidence would *not* have
+    // decayed away on its own by the time the second transmission has
+    // fully arrived -- the harness default (6 s) is short enough that
+    // even the unfixed loop would eventually recover, which is exactly
+    // the case this test must not depend on.
+    h.config.blind_search_seconds = 40.0;
+    std::vector<double> tx1 = frames_only("KC2G", 61);
+    for (double& v : tx1) v *= 4.0;
+    write_all(h.ring, tx1);
+    write_all(h.ring, noise_vec(71, 8.0, 0.002));
+
+    std::thread loop([&] {
+        rx::decode_loop(h.ring, h.decoder(), h.state, h.config, h.stop, h.sink());
+    });
+    std::thread watcher([&] { h.poll_watcher(); });
+
+    h.until([&] { return h.received.size() >= 1; },
+            "rx/second-blind: the first (strong) transmission is delivered");
+
+    write_all(h.ring, frames_only("W1AW", 62));
+    write_all(h.ring, noise_vec(72, 12.0, 0.002));
+
+    h.until([&] { return h.received.size() >= 2; },
+            "rx/second-blind: the second transmission locks after the first "
+            "was delivered -- stale blind evidence still holds the "
+            "accumulator?");
+    h.stop.set();
+    loop.join();
+    watcher.join();
+
+    std::lock_guard<std::mutex> lock(h.m);
+    if (h.received.size() >= 2) {
+        check::equal(h.received[0].callsign, std::string("KC2G"),
+                     "rx/second-blind: first reception is the strong one");
+        check::equal(h.received[1].callsign, std::string("W1AW"),
+                     "rx/second-blind: second reception is the new transmission, "
+                     "not a re-report of the first");
+    }
+}
+
 void test_stop_interrupts_a_wait_in_progress() {
     // Shutting the receiver down must not cost a poll interval. If the
     // condition variable were replaced by a polled flag this would sit
@@ -694,6 +763,7 @@ int main() {
         test_low_cpu_does_not_wait_forever_for_audio_that_stops();
         test_two_transmissions_are_both_received();
         test_fresh_session_does_not_inherit_blind_evidence_from_a_prior_one();
+        test_a_second_blind_transmission_locks_after_the_first_is_delivered();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;

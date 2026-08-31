@@ -401,3 +401,56 @@ def test_fresh_session_does_not_inherit_blind_evidence_from_a_prior_one(tmp_path
         )
     finally:
         h2.stop()
+
+
+@pytest.mark.slow
+def test_second_blind_transmission_locks_after_the_first_is_delivered(tmp_path):
+    """Within one session, a blind (preamble-less) transmission arriving
+    after a delivered one must still be received.
+
+    The accumulator used to carry the delivered transmission's folded
+    evidence indefinitely: its peak/median score does not decay on its
+    own (decay scales a timescale's bins uniformly), so `result()` kept
+    returning the finished transmission's lock -- discarded every poll
+    via finished_starts -- and a weaker new transmission's peak sat
+    suppressed under the old evidence's median for as long as the decay
+    took to dilute it. Users saw it as "locks after a fresh start
+    (stop/start, or the post-transmit buffer reset), not after a
+    reception". The fix retires the blind evidence with the reception,
+    which is exactly the state a fresh start produces.
+
+    The first transmission is 4x the second's amplitude (16x power) so
+    its stale evidence decisively out-scores the new one's if it is ever
+    left in place: without the reset this test times out with one save,
+    with it the second lock is immediate.
+    """
+    sig1 = 4.0 * _frames_only("A", seed=21)
+    sig2 = _frames_only("A", seed=22)
+    pre = np.random.default_rng(3).normal(scale=0.01, size=int(3.0 * FS))
+    mid = np.random.default_rng(4).normal(scale=0.01, size=int(8.0 * FS))
+    trailing = np.random.default_rng(5).normal(scale=0.01, size=int(40.0 * FS))
+    total_s = (len(pre) + len(sig1) + len(mid) + len(sig2) + len(trailing)) / FS
+
+    args = _Args(tmp_path, poll_interval=0.3, end_grace=2.0)
+    saves1, _, h = _run_decode_loop_incremental(
+        sstvae_listen.decode_loop,
+        [pre, sig1, mid],
+        tmp_path,
+        args,
+        timeout_s=60.0,
+        expect_saves=1,
+        ring_seconds=total_s + 5.0,
+    )
+    try:
+        assert len(saves1) == 1, (
+            f"the first transmission should have been saved, got {saves1}"
+        )
+        h.feed(sig2)
+        h.feed(trailing)
+        saves2 = h.wait_for_saves(2, timeout_s=90.0)
+        assert len(saves2) == 2, (
+            "the second blind transmission was never saved -- stale blind "
+            "evidence from the delivered one still holds the accumulator?"
+        )
+    finally:
+        h.stop()

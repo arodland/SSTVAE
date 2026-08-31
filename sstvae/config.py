@@ -185,6 +185,20 @@ ACQUIRE_MAX_BINS = 12
 # above it.
 TEMPLATE_SCORE_THRESHOLD = 0.40
 
+# How many lag-M metric peaks `acquire()` will try against the template
+# gate above before giving up. The gate rejecting a candidate says "this
+# one peak is not a preamble", not "there is no preamble in the window"
+# -- and with a still-buffered previous transmission's frame data in the
+# search span, the metric argmax is routinely such a peak while a real
+# (weaker-metric) preamble sits elsewhere in the same span. Stopping at
+# the first rejection made the receiver deaf to a marginal new
+# transmission for as long as old audio stayed in the ring (~130 s),
+# which is the "locks fine after a fresh start, not after a reception"
+# report. Each extra candidate costs one template search (~3.4 ms at
+# ACQUIRE_MAX_BINS 12), so this is a small bound on a cheap retry, and
+# it cannot cost sensitivity: candidate 1 is exactly the old behaviour.
+ACQUIRE_MAX_CANDIDATES = 5
+
 # --- first-path timing selection -------------------------------------------
 # Both acquisition paths locate timing by taking the *argmax* of a
 # correlation against a known reference. On a two-path channel that is

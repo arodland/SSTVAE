@@ -94,3 +94,53 @@ def test_acquire_finds_a_noiseless_preamble_exactly(offset_hz):
     assert abs(acq.preamble_start - lead) <= 1
     assert abs(acq.freq_offset - offset_hz) < 0.5
     assert acq.metric > PREAMBLE_THRESHOLD
+
+
+def _tone_impostor(n_samples=8 * M, freq_hz=1550.0, amp=0.5):
+    """A steady carrier: perfectly periodic at lag M without being a
+    preamble, so the lag-M metric reads ~1.000 on it -- above anything a
+    real preamble reaches in noise -- while the template gate rejects it
+    (measured score ~0.25 against the 0.40 gate)."""
+    from sstvae.config import FS
+
+    n = np.arange(n_samples)
+    return amp * np.cos(2 * np.pi * freq_hz * n / FS)
+
+
+def test_a_gate_rejected_peak_is_stepped_past_not_fatal():
+    """A metric peak the template gate rejects means "this one peak is
+    not a preamble", not "the window is preamble-free": acquire must
+    mask it and try the next peak, or a still-buffered previous
+    transmission's lag-M artefacts (or an interfering carrier) hide any
+    genuine weaker-metric preamble sharing the window -- which is why
+    the live receiver locked after a fresh start but not after a
+    reception. Candidate 1 is exactly the old single-argmax behaviour,
+    so this retry cannot cost sensitivity.
+    """
+    from sstvae.modem.dsp import to_baseband, sync_lowpass
+
+    lead = 500
+    tone = _tone_impostor()
+    gap = np.zeros(2000)
+    x = np.concatenate(
+        [np.zeros(lead), tone, gap, ofdm.preamble_waveform(), np.zeros(2 * M)]
+    )
+
+    # Preconditions, asserted so the test fails loudly if the
+    # construction ever stops exercising the retry path: the tone must
+    # win the metric argmax (else candidate 1 is already the preamble)...
+    metric, _ = sync._autocorr_metric(sync_lowpass(to_baseband(x)))
+    n_star = int(np.argmax(metric))
+    assert lead <= n_star < lead + len(tone)
+    # ...and must fail the template gate when it is the only candidate.
+    alone = np.concatenate(
+        [np.zeros(lead), tone, np.zeros(PREAMBLE_SAMPLES + 2 * M)]
+    )
+    with pytest.raises(sync.SyncError, match="best candidate score"):
+        sync.acquire(to_baseband(alone))
+
+    # The point: the real preamble behind the rejected peak is found.
+    expect = lead + len(tone) + len(gap)
+    acq = sync.acquire(to_baseband(x))
+    assert abs(acq.preamble_start - expect) <= 1
+    assert abs(acq.freq_offset) < 0.5
