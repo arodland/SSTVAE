@@ -387,6 +387,43 @@ def main() -> None:
         "cost; 'full' scores the whole frame (exact, ~5x compute). See "
         "perceptual_pair()"
     )
+    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--smoke", action="store_true", help="tiny run on synthetic data")
+    ap.add_argument(
+        "--amp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="bfloat16 autocast (halves activation VRAM)",
+    )
+    ap.add_argument(
+        "--stage2",
+        action="store_true",
+        help="train through the differentiable OFDM waveform channel "
+        "(clip/PAPR, fading, pilot-EQ residuals) instead of the "
+        "latent-AWGN model; start from a stage-1 checkpoint",
+    )
+    ap.add_argument(
+        "--papr-weight",
+        type=float,
+        default=0.002,
+        help="weight on the continuous linear-ratio PAPR penalty "
+        "(RADE-style: no hinge/target, just peak/mean power kept "
+        "small and always-active so it can't dominate reconstruction "
+        "loss — see radae/radae_base.py's distortion_loss). Default "
+        "chosen so pre+post-clip ratios (~13 early in training) "
+        "contribute roughly 2%% of total loss, not 300%%.",
+    )
+    ap.add_argument(
+        "--clip-headroom-db",
+        type=float,
+        default=CLIP_HEADROOM_DB,
+        help="envelope clip threshold above mean envelope power, fed to "
+        "WaveformChannel's Stage2Config (default matches the on-air "
+        "modem's sstvae.config.CLIP_HEADROOM_DB). Genie-sweep testing "
+        "(scripts/genie_papr_sweep.py) found this knob costs far less "
+        "PSNR per dB of PAPR than pushing pre-clip crest factor down "
+        "via --papr-weight, so prefer lowering this directly.",
+    )
     ap.add_argument(
         "--chroma-weight",
         type=float,
