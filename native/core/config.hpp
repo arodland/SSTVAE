@@ -66,7 +66,7 @@ inline constexpr int ACQUIRE_MAX_CANDIDATES = 5;
 inline constexpr int FIRST_PATH_SEARCH = 32;
 
 inline constexpr double PREAMBLE_THRESHOLD = 0x1.ae147ae147ae1p-2;  // 0.42
-inline constexpr double CLIP_HEADROOM_DB = 0x0.0p+0;  // 0.0
+inline constexpr double CLIP_HEADROOM_DB = 0x1.0000000000000p+0;  // 1.0
 inline constexpr double SNR_REF_BW_HZ = 0x1.3880000000000p+11;  // 2500.0
 inline constexpr double BLIND_BIN_STEP_HZ = 0x1.9000000000000p+3;  // 12.5
 inline constexpr double BLIND_BLOCK_RES_HZ = 0x1.b333333333333p+0;  // 1.7
@@ -83,6 +83,18 @@ inline constexpr double FIRST_PATH_FRAC = 0x1.0000000000000p-1;  // 0.5
 // Post-clip transmit filter, Hz.
 inline constexpr double TX_BANDPASS_LO = 0x1.a900000000000p+9;  // 850.0
 inline constexpr double TX_BANDPASS_HI = 0x1.1300000000000p+11;  // 2200.0
+
+// --- clip overshoot --------------------------------------------------
+// One factor per clip-and-filter pass; the array's length is the pass
+// count, so there is no separate iteration constant that could
+// disagree with it. 1.0 is a plain clip. Applied as scale**k -- see
+// config.py for why the additive CESSB form inverts the envelope here.
+inline constexpr int CLIP_PASSES = 3;
+inline constexpr std::array<double, CLIP_PASSES> CLIP_OVERSHOOT = {
+    0x1.0000000000000p+0,  // 1.0
+    0x1.8000000000000p+0,  // 1.5
+    0x1.0000000000000p+1,  // 2.0
+};
 
 // --- beacon sync word ------------------------------------------------
 // Barker-13: a clean, unambiguous chip-level autocorrelation peak, so

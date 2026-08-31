@@ -435,7 +435,8 @@ std::vector<double> fftconvolve_valid(std::span<const double> a,
 }
 
 std::vector<double> tx_condition(std::span<const double> x,
-                                 double clip_headroom_db, int iterations) {
+                                 double clip_headroom_db,
+                                 std::span<const double> overshoot) {
     double power = 0.0;
     for (double v : x) power += v * v;
     power /= static_cast<double>(x.size());
@@ -448,11 +449,16 @@ std::vector<double> tx_condition(std::span<const double> x,
     static const std::vector<double> taps =
         firwin_bandpass(201, config::TX_BANDPASS_LO, config::TX_BANDPASS_HI);
 
-    for (int it = 0; it < iterations; ++it) {
+    for (const double k : overshoot) {
         const std::vector<cdouble> z = hilbert(out);
         for (std::size_t i = 0; i < out.size(); ++i) {
             const double mag = std::abs(z[i]);
-            const double scale = std::min(1.0, thresh / std::max(mag, 1e-12));
+            double scale = std::min(1.0, thresh / std::max(mag, 1e-12));
+            // Guarded rather than unconditional: std::pow(x, 1.0) is not
+            // required to return x bit-exactly, and the codec-grade parity
+            // this port is held to has no room for a one-ulp difference on
+            // the passes that are supposed to be plain clips.
+            if (k != 1.0) scale = std::pow(scale, k);
             out[i] = (z[i] * scale).real();
         }
         out = convolve_same(std::span<const double>(out),

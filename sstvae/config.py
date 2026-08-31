@@ -352,8 +352,8 @@ DROPPED_LATENTS_PER_GROUP = GROUP_LATENTS - TRANSMIT_LATENTS_PER_GROUP  # 2200 (
 assert 0 <= DROPPED_LATENTS_PER_GROUP < GROUP_LATENTS
 
 # --- TX conditioning -------------------------------------------------------
-CLIP_HEADROOM_DB = 0.0  # envelope clip threshold above mean envelope power;
-#                         gives ~4.0 dB envelope PAPR
+CLIP_HEADROOM_DB = 1.0  # envelope clip threshold above mean envelope power;
+#                         gives ~3.4 dB envelope PAPR
 # Lowered from 0.5 with the Zadoff-Chu pilot (PROTOCOL_VERSION 3), and
 # the two are one change rather than two. Most of what a wider headroom
 # used to buy was relief for a pilot that was itself being clipped to
@@ -362,6 +362,63 @@ CLIP_HEADROOM_DB = 0.0  # envelope clip threshold above mean envelope power;
 # ~1.0 and the multipath optimum to ~0.0, and 0.0 sits within 0.08 dB of
 # both. Do not lower this without the ZC pilot: at the old pilot 0.0 is
 # 0.2 dB *worse* than 0.5, i.e. a step away from that arm's optimum.
+# Raised 0.0 -> 1.0 with CLIP_OVERSHOOT below, and the two are one
+# change rather than two: a converged clipper reaches a *lower* PAPR
+# than the old under-converged one did, so the headroom that was
+# optimal at two plain passes is well past optimal at three
+# overshot ones. Do not restore 0.0 while CLIP_OVERSHOOT is set --
+# measured end to end that pairing gives up the flat-across-SNR
+# profile that motivated this operating point, trading the high-SNR
+# cells away for a little more at 0 dB.
+
+# --- Clip overshoot ("more than clipping") ---------------------------------
+# One factor per clip-and-filter pass; length is the pass count. 1.0 is
+# a plain clip, so the pre-2026-08-31 clipper is exactly (1.0, 1.0).
+#
+# Borrowed from CESSB (Hershberger, QEX Nov/Dec 2014), where the clip
+# correction is deliberately overshot so that what the *next* filter
+# pass regrows lands back near the threshold instead of above it. The
+# mechanism transfers to OFDM, but the literal CESSB form does not, and
+# the difference is not cosmetic. Written additively as
+# `out = x + k*(clipped - x)`, the effective envelope scale is
+# `1 - k*(1 - scale)`, which goes **negative** once `scale < 1 - 1/k` --
+# it phase-inverts the sample rather than shrinking it. CESSB survives
+# that because SSB voice peaks are rare excursions; this clipper is not
+# a peak clipper at its operating point but a ~40%-duty compressor on
+# its first pass, so a large fraction of the waveform lands in the
+# inverting region. Measured, the additive form loses at every headroom
+# tried (up to -1.5 dB). `scale ** k` agrees with it to first order near
+# the threshold, stays positive everywhere, and is the role
+# Hershberger's nonlinear gain plays in the original.
+#
+# The honest accounting for the gain, measured end to end (12 COCO val
+# images, mode B, PEP-fair, paired channel seeds, v4 codec):
+# **+0.141 dB PSNR, 8 of 8 cells positive**, +0.05 at 12 dB rising to
+# +0.26 at 0 dB, on both AWGN and mpp. PAPR 3.94 -> 3.42 dB *and*
+# clipping self-noise 14.67 -> 15.19 dB, i.e. this dominates the old
+# setting on both axes rather than trading between them, which is why
+# the gain barely varies with SNR.
+#
+# **Most of that is not the overshoot.** Two passes was simply under-
+# converged: plain clipping at five passes and headroom 0.5 measures
+# +0.124 dB, so the overshoot's own contribution is ~0.02 dB -- below
+# the 0.139 dB spread across checkpoints, i.e. below the resolution at
+# which decisions here get made. What the overshoot actually buys is
+# *convergence in three passes instead of five*, and iterating alone
+# never reaches the three-pass figure at any pass count (7 and 10 are
+# no better than 5). Both are free at once per 32-95 s transmission, so
+# this ships for the pass count rather than for the 0.02 dB.
+#
+# Anything re-tuning this must re-measure end to end, not on latent SNR:
+# the proxy overpredicted the PSNR gain by ~2.5x, the same flattery
+# docs/latent-optimization.md records for latent-domain objectives.
+# scripts/overclip_sweep.py is the proxy, scripts/overclip_e2e.py the
+# gate. Note also that the encoder is fine-tuned *through* this clipper
+# (waveform_channel._clip_filter, which must be kept in step), so any
+# figure measured with a codec trained on a different clipper is a
+# lower bound on what a retrained one would give.
+CLIP_OVERSHOOT = (1.0, 1.5, 2.0)
+
 TX_BANDPASS = (850.0, 2200.0)  # Hz, post-clip filter
 DEMOD_BACKOFF = 6  # samples: demod window starts this early inside the CP
 
