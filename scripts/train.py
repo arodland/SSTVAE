@@ -239,6 +239,86 @@ def pick_device() -> torch.device:
     return torch.device("cpu")
 
 
+def perceptual_pair(recon, img, mode: str, size: int = 256):
+    """The (recon, reference) pair the LPIPS term scores, per --lpips-crop.
+
+    **'uniform' is badly non-uniform in pixel coverage**, and it is the
+    default only because it is what this file did for its whole history.
+    A `size` crop from WxH has (H-size+1)(W-size+1) legal origins and a
+    pixel is included only when the origin lands in the `size`-wide
+    window before it, so for 256 from 640x480 the centre is included in
+    66.5% of draws and the exact corner in 1 of 86,625 -- a 57,600x
+    ratio, with 75% of the frame under half the centre's coverage.
+
+    That is not merely a shift from perceptual supervision to MSE for
+    the edges. LPIPS is ~94% of the reconstruction loss at these weights
+    (measured: lpips*0.5 = 0.0571 against mse 0.0030 and chroma 0.0005),
+    so a pixel outside the crop is driven by ~6% of the loss a pixel
+    inside gets. In expectation the corner receives ~12x less total
+    gradient than the centre on every step. The visible results are
+    corner softness and the gradient class's mode-C artifacting.
+
+    'even' evens the coverage out at the same compute: the origin runs
+    from -(size-1) to H-1 over a reflect-padded image, so every pixel
+    falls inside exactly `size` of the H+size-1 origin positions.
+    Measured (30k draws, same crop:frame ratio): border-band and
+    interior mean coverage agree to within 1% (0.1532 vs 0.1522), which
+    is the whole point. What is left is a reflection *ripple* rather
+    than any centre-to-edge trend -- std/mean 0.17, max/min 2.3x --
+    because a mirrored copy of a near-edge pixel can land in the same
+    crop as the original. 2.3x against 57,600x.
+
+    Note the trade: 'even' spreads the same one-crop budget over
+    H+size-1 origins instead of H-size+1, so *mean* coverage falls
+    (centre 0.665 -> ~0.11). It equalizes by lowering the centre as well
+    as raising the corner. 'full' instead raises every pixel to 1.0.
+
+    'full' scores the whole frame: exactly uniform in *coverage*, no
+    reflected content, ~5x the compute.
+
+    **'full' is not simply more supervision everywhere, and the weight
+    needs rescaling with it.** LPIPS spatially averages, so scoring 4.7x
+    the area divides each pixel's share of the gradient by 4.7, against
+    a coverage gain of only 1/0.665 at the centre. Measured per-pixel
+    |dL/drecon| at --lpips-weight 0.5: the centre gets 0.308x what
+    'uniform' gave it (3.2x LESS), the corner goes from exactly zero in
+    300 draws to 8.2e-6, and the frame mean rises just 1.22x. So 'full'
+    redistributes rather than adds, and a like-for-like centre needs
+    --lpips-weight ~1.6. This is visible in the first run that used it:
+    every through-channel metric improved (wave_mp8 +0.158 dB over the
+    cropped control) while val_psnr_clean, which the centre bulk
+    dominates, regressed -0.080 dB. Any full-frame perceptual term does
+    this, which is why the DISTS experiment -- scored on the whole frame,
+    and not kept -- also quietly fixed the edge coverage: its A/B against
+    a 'uniform' control confounded the algorithm with the coverage
+    change, and that confound is what this flag separates out.
+
+    Inverse-probability weighting -- the obvious "just normalize it"
+    fix -- is deliberately not offered. It is unbiased but the weights
+    run to 57,600x, so the one step in 86,625 that lands on the corner
+    would dominate its whole batch. The variance is the problem, not the
+    bias, and changing *where the crops land* fixes both.
+    """
+    if mode == "full":
+        return recon, img
+    h, w = img.shape[-2], img.shape[-1]
+    ch, cw = min(size, h), min(size, w)
+    if mode == "uniform":
+        top = int(torch.randint(0, h - ch + 1, (1,)))
+        left = int(torch.randint(0, w - cw + 1, (1,)))
+    elif mode == "even":
+        # Pad by size-1 so an origin of -(size-1) is representable; the
+        # padded index is then the real origin plus that shift.
+        recon = F.pad(recon, (cw - 1,) * 2 + (ch - 1,) * 2, mode="reflect")
+        img = F.pad(img, (cw - 1,) * 2 + (ch - 1,) * 2, mode="reflect")
+        top = int(torch.randint(0, h + ch - 1, (1,)))
+        left = int(torch.randint(0, w + cw - 1, (1,)))
+    else:
+        raise ValueError(f"unknown --lpips-crop {mode!r}")
+    return (recon[..., top: top + ch, left: left + cw],
+            img[..., top: top + ch, left: left + cw])
+
+
 def make_lpips(device):
     try:
         import lpips
@@ -246,23 +326,6 @@ def make_lpips(device):
         return lpips.LPIPS(net="vgg").to(device).eval()
     except Exception:
         return None
-
-
-def make_dists(device):
-    """DISTS perceptual metric (Ding et al. 2020, arXiv:2004.07728) via piq.
-
-    A companion to LPIPS with a texture term (global spatial averages of
-    VGG feature maps) alongside the structure term, so it tolerates
-    texture *resampling* where LPIPS penalizes any misalignment. That
-    tolerance is the reason it's opt-in and augment-only: helpful on
-    photographic texture and faces under channel degradation, a risk on
-    text/line-art where texture substitution is exactly wrong. piq.DISTS
-    wants inputs in [0, 1] (it applies ImageNet normalization internally),
-    which the sigmoid-bounded decoder already satisfies.
-    """
-    from piq import DISTS
-
-    return DISTS().to(device).eval()
 
 
 def main() -> None:
@@ -312,55 +375,17 @@ def main() -> None:
     ap.add_argument("--width", type=int, default=128)
     ap.add_argument("--lpips-weight", type=float, default=0.5)
     ap.add_argument(
-        "--dists-weight",
-        type=float,
-        default=0.0,
-        help="weight on DISTS (arXiv:2004.07728), an opt-in perceptual "
-        "term alongside LPIPS. Unlike the LPIPS term it is scored on the "
-        "*full frame*, not a 256 crop: DISTS's texture term is a global "
-        "average over VGG feature maps that a crop starves, and the "
-        "structures this is meant to help (overlay-scale text ~10%% of "
-        "frame height, faces) need the whole frame to register as "
-        "structure. 0 disables (default); sweep it, don't guess it, and "
-        "judge text/non-photo by eye — texture tolerance can cut either "
-        "way there. Needs piq (in the train extra)",
-    )
-    ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--smoke", action="store_true", help="tiny run on synthetic data")
-    ap.add_argument(
-        "--amp",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="bfloat16 autocast (halves activation VRAM)",
-    )
-    ap.add_argument(
-        "--stage2",
-        action="store_true",
-        help="train through the differentiable OFDM waveform channel "
-        "(clip/PAPR, fading, pilot-EQ residuals) instead of the "
-        "latent-AWGN model; start from a stage-1 checkpoint",
-    )
-    ap.add_argument(
-        "--papr-weight",
-        type=float,
-        default=0.002,
-        help="weight on the continuous linear-ratio PAPR penalty "
-        "(RADE-style: no hinge/target, just peak/mean power kept "
-        "small and always-active so it can't dominate reconstruction "
-        "loss — see radae/radae_base.py's distortion_loss). Default "
-        "chosen so pre+post-clip ratios (~13 early in training) "
-        "contribute roughly 2%% of total loss, not 300%%.",
-    )
-    ap.add_argument(
-        "--clip-headroom-db",
-        type=float,
-        default=CLIP_HEADROOM_DB,
-        help="envelope clip threshold above mean envelope power, fed to "
-        "WaveformChannel's Stage2Config (default matches the on-air "
-        "modem's sstvae.config.CLIP_HEADROOM_DB). Genie-sweep testing "
-        "(scripts/genie_papr_sweep.py) found this knob costs far less "
-        "PSNR per dB of PAPR than pushing pre-clip crest factor down "
-        "via --papr-weight, so prefer lowering this directly.",
+        "--lpips-crop",
+        choices=["uniform", "even", "full"],
+        default="uniform",
+        help="where the LPIPS crop is drawn from. 'uniform' (default, "
+        "and what every run before 2026-08-27 used) samples the origin "
+        "uniformly, which covers the centre 66.5%% of the time and the "
+        "exact corner 1 time in 86,625 -- and since LPIPS is ~94%% of "
+        "the loss, the corner gets ~12x less total gradient than the "
+        "centre. 'even' reflect-pads so coverage is uniform at the same "
+        "cost; 'full' scores the whole frame (exact, ~5x compute). See "
+        "perceptual_pair()"
     )
     ap.add_argument(
         "--chroma-weight",
@@ -499,16 +524,6 @@ def main() -> None:
     lpips_fn = None if args.smoke else make_lpips(device)
     if lpips_fn is None and not args.smoke:
         print("lpips unavailable; training with MSE only")
-    # DISTS is opt-in (weight > 0), so a missing piq is a hard error here
-    # rather than a silent MSE-only fallback: dropping a term the operator
-    # asked for would train a different objective than the A/B intends.
-    dists_fn = None
-    if args.dists_weight and not args.smoke:
-        try:
-            dists_fn = make_dists(device)
-        except Exception as e:
-            ap.error(f"--dists-weight set but DISTS is unavailable "
-                     f"(need piq: pip install piq): {e}")
     ch_cfg = ChannelConfig()
     wave_ch = None
     wave_val = {}
@@ -599,24 +614,15 @@ def main() -> None:
                         conf.to(chroma_mse.dtype) * chroma_mse
                     ).mean()
                 if lpips_fn is not None:
-                    # LPIPS is calibrated on small patches (~64-256 px);
-                    # a random 256x256 crop keeps it at its trained scale
-                    # and saves ~5x compute vs the full 640x480 frame.
-                    ch = min(256, img.shape[-2])
-                    cw = min(256, img.shape[-1])
-                    top = int(torch.randint(0, img.shape[-2] - ch + 1, (1,)))
-                    left = int(torch.randint(0, img.shape[-1] - cw + 1, (1,)))
-                    rc = recon[..., top : top + ch, left : left + cw]
-                    ic = img[..., top : top + ch, left : left + cw]
+                    # LPIPS is calibrated on small patches (~64-256 px), so
+                    # a 256 crop keeps it at its trained scale and saves
+                    # ~5x compute -- but *where* the crop lands decides
+                    # which pixels get supervised at all. See
+                    # perceptual_pair().
+                    rc, ic = perceptual_pair(recon, img, args.lpips_crop)
                     loss = loss + args.lpips_weight * lpips_fn(
                         rc * 2 - 1, ic * 2 - 1
                     ).mean()
-                if dists_fn is not None:
-                    # Full frame, not a crop (see --dists-weight help and
-                    # make_dists). recon is sigmoid-bounded to (0, 1) and
-                    # piq.DISTS ImageNet-normalizes internally, so it goes
-                    # in as-is — no *2-1, no clamp.
-                    loss = loss + args.dists_weight * dists_fn(recon, img)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

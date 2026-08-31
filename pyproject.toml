@@ -33,8 +33,6 @@ train = [
     "torch>=2.13.0",
     "torchvision>=0.28.0",
     "lpips>=0.1.4",
-    # DISTS perceptual loss (scripts/train.py --dists-weight, opt-in).
-    "piq>=0.8.0",
     "datasets>=2.18",
     "trackio",
     # sstvae/nonphoto.py's chart class (training mixture + the fixed

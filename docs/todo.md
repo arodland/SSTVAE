@@ -484,3 +484,540 @@ sidecars mean the position is stated correctly in the meantime. It should
 land before the first release that invites forks — a switch added after
 people have already built from source is one they have to be told about
 twice.
+
+## Frame-count truncation in the training channel
+
+**Goal.** Replace `latent_channel.py`'s group-prefix truncation with a
+truncation to *the latents a contiguous run of frames actually carries*,
+using the interleaver's own frozen permutation. Purely a training
+distribution change: no on-air format change, no model architecture
+change, no receiver change.
+
+**Why the current model is wrong about the commonest case.**
+`apply_latent_channel` samples `keep = randint(1, LATENT_GROUPS+1)` — a
+prefix of *groups*, i.e. exactly three truncation points, all at group
+boundaries — and then applies iid erasure at up to `erasure_rate_max =
+0.3`. But the physical event is "the transmission ended after frame f",
+and inside the boundary group that is a scattered subset of that group's
+latents at *any* fraction from 0 to 1. So every mid-group state is
+modelled only as far as 30% erasure will stretch, and the states past
+that are out of distribution.
+
+**What this is worth, in order.** The primary goal is unchanged and this
+item does not serve it: a correct final decode of a *complete* mode A, B
+or C transmission — which is to say at a group boundary, the case the
+current channel already trains. A good decode of a transmission
+truncated somewhere else is a **nice-to-have**. Better progressive
+decoding in the GUI is a **visual nicety that falls out for free** (on
+every poll `rx/engine` hands the decoder a partially-filled group it was
+never trained on, and this fixes that as a side effect — it is not the
+reason to do the work).
+
+So the honest framing is that this buys the second and third of those,
+and its **risk is to the first**. Widening the truncation distribution
+spends model capacity on states that are not the goal, and the
+on-boundary decode can pay for it. That is the thing to measure, and it
+is why the gate below is a non-regression rather than an improvement.
+
+**The mechanism is one cached table that already exists.**
+`framing.frame_of_latent()` maps canonical latent index → the absolute
+frame carrying it, and returns **−1 for the latents each group
+permanently drops**. Reshaped to `(LATENT_CHANNELS, LATENT_H,
+LATENT_W)` — the same canonical order `flat_to_latents` uses — the mask
+for "frames `f0` up to `f1` were received" is one comparison:
+
+```python
+tbl = frame_of_latent().reshape(LATENT_CHANNELS, LATENT_H, LATENT_W)
+mask = (tbl >= f0) & (tbl < f1)
+```
+
+That single expression covers three things the current channel handles
+separately or not at all: truncation, late join, and the permanent
+`DROPPED_LATENTS_PER_GROUP` (4.2%). The last is worth calling out — those
+2200 slots per group are a *specific, known, frozen* set, and today they
+are modelled as part of a random erasure rate. Training against the real
+set lets the decoder write those exact positions off instead of hedging
+everywhere.
+
+**Sample a window `[f0, f1)`, not a prefix `[0, f)`.** Same cost, and it
+covers late join, which the current channel never samples at all — it
+only ever produces prefixes of groups, so "tuned in after group 0 had
+finished" is out of distribution today. Whether the decoder can make
+real use of groups 1–2 without group 0 is an open question (the groups
+are ordered by construction, so group 1 may be close to meaningless
+alone), but it cannot currently even be asked, and the wiki's "losing
+all of group 0 costs ~6 dB at a stroke" is measured against a model that
+never saw the case.
+
+**The late-join objection does not survive measurement.** The worry is
+that training on frame prefixes biases the model against a late joiner's
+suffix. Within a group it cannot, because the interleaver makes the two
+statistically identical — that is the interleaver's entire purpose.
+Measured on group 0, frames 0..109 against frames 110..219 against a
+random 50% subset:
+
+| mask | coverage | per-channel range | spatial std |
+|---|---|---|---|
+| prefix, frames 0..109 | 0.160 | [0.000, 0.503] | 0.0253 |
+| suffix, frames 110..219 | 0.160 | [0.000, 0.518] | 0.0253 |
+| random 50% of group 0 | 0.159 | [0.000, 0.512] | 0.0244 |
+
+Indistinguishable. The real late-join asymmetry is at *group*
+granularity, not frame granularity, and sampling a window rather than a
+prefix is what addresses it.
+
+**But land the window separately from the prefix.** A prefix `[0, f)`
+already widens the training distribution away from the primary case; a
+window `[f0, f1)` widens it again, and toward a case (no group 0) that
+may be unrecoverable in principle. Two changes in one run means a
+regression in the on-boundary decode cannot be attributed to either.
+
+**Keep the iid erasure, and compose the two.** They model different
+physical events and the decomposition is the honest one: the frame
+window says **what was transmitted**, the iid erasure says **what was
+lost within it** (fades, dropped frames). Composing them also defuses
+the one hazard here — a frame window is drawn from a finite set of 660
+masks, where iid erasure has unbounded variety, so windows alone could
+be overfit to. With erasure layered on top, every mask is still unique.
+
+**`waveform_channel.py` has to follow.** Stage 2 mirrors the same
+capacity and erasure accounting, and a stage-1 model trained on frame
+windows fine-tuned through a stage-2 channel still truncating by group
+would be trained against two different definitions of the same event.
+
+**How to know it worked — and the gate comes first.** The gate is that
+**mode A, B and C decodes do not regress**: the same eval as any codec
+revision, on the same real-material set. That is the primary goal, this
+change puts it at risk, and if it moves down the item is not worth
+having whatever the mid-group numbers say. The boundary *inputs* are
+identical either way, so any movement there is the widened training
+distribution acting on the model, not a different test.
+
+Only then the upside, which a mode A/B/C table cannot show at all: a
+sweep over *frame count*, reconstructing at every 10% of each group and
+comparing against the current checkpoint on the same frames. Both halves
+are needed — one is the gate, the other is the payoff.
+
+## A latent-space denoiser between the channel and the decoder
+
+**Goal.** A small model mapping (received latents, confidence weights) →
+cleaner latents, feeding the **existing** decoder unchanged. Trained
+against the channel. Sized to stay inside the phone's budget, unlike the
+generative decoder below.
+
+**This is the shelved "refiner" again, and the post-mortem is the
+argument.** That attempt failed its real-material gate at +0.08 dB and
+was shelved for want of a design direction (2026-07-31). The most likely
+reason it failed is structural rather than a tuning miss: **a refiner
+trained on a regression objective converges to the conditional mean**,
+and the conditional mean is precisely the smooth, hedged output the
+decoder already produces. Regressing toward it can only recover what the
+decoder was already leaving on the table, which is not much — +0.08 dB
+is what "correctly computed the average" looks like. A flow or diffusion
+objective samples from the posterior instead, which is a different
+target, not a better-tuned version of the same one. That is a
+hypothesis about the old result, not a measurement of it; it is
+falsifiable cheaply, since a regression-objective and a flow-objective
+refiner of the same size can be trained against the same frozen codec.
+
+**What is new and specific to this domain: the timestep is measured, not
+guessed.** The latents arrive with a *known* noise level — the pilot EQ
+reports it per latent, which is where the confidence weights come from.
+A flow over latent space starting at the received latents is therefore a
+denoiser at a **known** t: initialize the schedule at the timestep
+matching the measured SNR rather than at t=1. That is fewer steps, and
+the schedule is grounded in a measurement instead of a hyperparameter.
+No other part of this project gets to hand a diffusion model its own
+noise level.
+
+**Why it is separable, which is the reason to do this one first.** It
+trains against a frozen encoder and a frozen decoder, so it is testable
+against the current published checkpoint without retraining either, it
+changes nothing on the air, and it drops out cleanly if it does not pay.
+It is also the cheapest way to find out whether a generative prior buys
+anything here at all, before committing to the decoder below.
+
+**Traps, all of them previously paid for.**
+
+- **Score `latents × weights`, never bare `latents`** — the same
+  measurement that invented a phantom "+1.5 dB from Wiener shrinkage".
+- **Latent-domain PSNR is an objective value, never a result.** It
+  flattered latent optimization by ~2×.
+- **Gate on real material.** The refiner passed on photographs and died
+  on the real-material gate; anything with a generative prior will fail
+  in the same direction, so the certificate and the text images decide
+  this, not COCO.
+- Confidence weights must be an **input**, not just a loss weighting —
+  they are the map of where the prior is allowed to act.
+
+## A desktop-only generative decoder
+
+**Goal.** Replace only the decoder with a conditional flow-matching
+model, large, GPU-only. Keep the existing encoder, latents, channel,
+interleaver and modem exactly as they are.
+
+**The framing that makes this safe: it is a receiver-side-only
+change.** Same on-air format, same golden vectors, same
+`PROTOCOL_VERSION`, same everything a second station can observe. A
+station running the big decoder and a station running the 4.47M conv
+decoder receive the same transmission and interoperate completely. It
+is the mirror image of transmit-time latent optimization, which was
+sender-side-only for the same kind of reason, and it means this can be
+built and abandoned without touching the format or asking anybody to
+upgrade.
+
+**The conditioning is richer than the tokenizer literature's.** FlexTok
+and its relatives condition a generative decoder on a *clean, small*
+description and the decoder invents everything unspecified. Here the
+conditioning is noisy-but-dense latents **plus a per-latent reliability
+map** that the receiver already computes. The confidence weight becomes
+a spatially varying "how much am I allowed to invent here" dial: under a
+deep fade the conv decoder produces mush, where a conditional flow
+decoder can produce plausible sharp content *and* the weights say
+exactly where to distrust it. That is a better-posed problem than the
+one those papers solve.
+
+**Three things to design in rather than bolt on.**
+
+- **Seed the flow noise from the beacon** (callsign + absolute frame
+  counter — both are decoded before reconstruction). Without it the
+  decode is stochastic, two receivers get different pictures from one
+  transmission, and the whole golden-vector / `pytest --native` /
+  bit-exact-codec regime stops meaning anything. With it, decoding is
+  reproducible and the parity claim survives in the form it already has.
+- **Hallucinated text is the failure mode that matters**, and it is the
+  one photographs cannot show. Callsigns, grid squares, certificates and
+  QSL card text are real traffic here, and a generative decoder renders
+  them confidently wrong. This is the same shape as the int8 result in
+  `docs/onnx.md` — 0.10 dB on COCO against 1.54 dB on synthetic probes —
+  so the off-distribution set decides it.
+- **Decide what the operator is shown.** A picture that is partly
+  received and partly invented, with no marking, is a different claim
+  about what came over the air than this project has made so far. The
+  confidence map is already computed, so rendering the uncertainty is
+  available and costs nothing; whether it should be on by default is a
+  question for Andrew, not a default to pick quietly.
+
+**Measured 2026-08-30, stage 1 (`scripts/train_flow.py`,
+`sstvae/latent_flow.py`).** A latent-space rectified flow against the
+frozen v4 codec, trained on `latent_channel.py`, wins **+1.9 dB at
+-3 dB and +0.95 dB at 0 dB** with no harm at good SNR (-0.04 dB clean).
+The regression twin -- same net, same data, same channel, only the
+objective differs -- gets **-1.0 dB**, and degrades further with
+training as its latent MSE keeps falling. So the shelved refiner's
++0.08 dB really was the conditional mean being computed correctly, and
+a flow objective is a different target rather than a better-tuned one.
+
+**It does not transfer to the real modem**: through the full
+encode/modulate/channel/demodulate path it is *worse* everywhere,
+-0.6 to -3.5 dB at awgn 0 dB and up to -7.4 dB at mpp 0 dB. Three
+mismatches, all in `latent_channel.py` rather than in the flow: the
+clipper's ~0.79 latent gain is not modelled (so a sigma estimated from
+the unit-RMS contract reads 0 at 3 dB and above, and the flow silently
+goes inert), sigma is underestimated when it does fire (true ~1.18 at
+0 dB against 0.715), and the real pilot-EQ weights are continuous
+(min 0.009, mean 0.864) where training used binary masks. Correcting
+the gain at inference makes it *worse*, which indicts the analytic
+timestep itself: it needs a sigma the receiver cannot supply. Hence
+`--channel wave --conditioned` -- train through `waveform_channel.py`,
+with the received latents as conditioning rather than as the flow's
+starting point.
+
+**Two later formulations both failed, and the reason names the fix.**
+Trained through `waveform_channel.py`: conditioning on (received,
+weights) and generating from *noise* sat at -9 to -11 dB for 9000 steps
+-- a 3.8M plain conv stack has a receptive field of about +-9 cells on
+the 30x40 grid, which is enough to denoise locally and nowhere near
+enough to synthesise globally, so generation from noise needs a U-Net or
+DiT, i.e. the item below. A *bridge* (transport received -> clean,
+`--objective bridge`) started near baseline and degraded with training,
+-2.9 dB at 500 steps to -7.6 at 2000, exactly like the regression twin.
+That is not tuning: its source is strongly dependent on its target, so
+given a point on the path the pair is nearly determined and the
+MSE-optimal velocity is the conditional mean -- **the bridge is the
+regression twin in expectation**. It is worse than neutral because
+conditional-mean shrinkage pulls latent RMS under 1, and unit-RMS is the
+contract the decoder was trained against.
+
+**So the +1.9 dB depended on knowing sigma exactly**, which is what let
+the received latents be read as a point on a genuine noise-to-data path
+(the noise is independent, many pairs share an x_t, and integration
+samples). Take sigma away and both fallbacks fail structurally. The
+blocker is an *interface* fact rather than a physical one: the modem
+estimates SNR (`modem._estimate_snr_db`) and the receiver has it, but it
+does not survive `reconstruct(codec, latents, weights)`. An optional
+keyword there -- backward compatible, so `rx/engine.py` needs no edit --
+restores the condition, and the flow can then be retried on the waveform
+channel with a true sigma instead of one estimated from a unit-RMS
+assumption the clipper breaks. Also worth profiling the channel's
+*output distribution* before designing against it next time: latents are
+clamped at +-10 and ~20% arrive with weight < 0.05, which cost two runs.
+
+**Settled 2026-08-30: a latent-space flow is a net negative on this
+channel, and the answer is structural.** After calibrating the modem
+properly (below) and unfreezing the decoder, the three-way comparison on
+the real modem -- base v4, decoder-only fine-tune, and flow+decoder
+jointly -- says the flow costs 1-3 dB *on top of* whatever the decoder
+does. Joint is worse than decoder-only in **20 of 21** PSNR cells and
+HaarPSI (in no objective here, unlike the LPIPS both arms trained
+against) is negative in **all 14** flow cells, -0.012 to -0.116, while
+decoder-only sits at -0.0004 to -0.0117.
+
+**Why, and it explains the one success too.** The decoder already *is*
+the denoiser: it consumes `(latents, weights)` and was trained end to
+end on this channel, so it has the optimal mapping. A flow that first
+collapses the received latents to a point estimate can only discard
+information -- it commits before the decoder gets to weigh the
+reliability map. A denoiser pays only when the decoder is mismatched to
+its input. That is exactly what the original +1.9 dB was: a v4 decoder
+trained through the *waveform* channel being fed *latent_channel*
+inputs, where the flow's real job was bridging two channel models. Train
+and evaluate on one channel and the gain evaporates. (Best explanation
+consistent with every run here, not a separate measurement.)
+
+**The calibration is worth keeping even though the flow is not**
+(`latent_flow.channel_calibration`). The real modem does
+`r ~= g(snr)*z + n` with `n`'s per-latent std `~= sigma0(snr)/w`. `g` is
+Wiener shrinkage the receiver has already applied -- 0.79 at high SNR
+but **0.45 at 0 dB and 0.18 at -6 dB**, so treating the documented 0.794
+as a constant is wrong by 2.5x exactly where it matters. The 1/w law is
+the pilot EQ's and is clean (residual RMS 0.848 at w~1, 2.932 at
+1/w=2.72, 6.198 at 7.14). AWGN and multipath agree to ~10% on both, so
+one curve indexed by the SNR the receiver already estimates serves both.
+Verified on a held-out seed at ratios 0.93-0.99 from -3 to 12 dB.
+**Magnitude only** -- it says nothing about the residual's independence
+from the signal, which is the likely reason everything degrades further
+at `mpd` (delay 4.0 ms against a 4 ms cyclic prefix, so ISI begins, and
+ISI is structured interference this model does not describe).
+`reconstruct(codec, latents, weights, snr_db=)` is the optional keyword
+that carries `DemodResult.snr_db` down to it; `rx/engine.py` needed no
+change.
+
+**Two dead ends recorded so they are not retried.** Re-applying the gain
+to a flow's output (on the theory that a stage-2-trained decoder wants
+its latents shrunk) is **worse in every cell**, by 0.3-2.0 dB -- the
+decoder prefers de-shrunk latents. And `--objective bridge` (transport
+received -> clean) collapses to the regression twin in expectation: its
+source is strongly dependent on its target, so the MSE-optimal velocity
+is the conditional mean. It degraded with training exactly as the
+regression twin did.
+
+**Running 2026-08-31: a DiT attempt on HF Jobs** (`sstvae/dit.py`,
+`scripts/launch_flow_job.sh`). Andrew's call, after the conv results
+above. The reasoning worth keeping: the "a denoiser can only discard
+information" argument applies to the *analytic-timestep* formulation --
+a point estimate handed to a decoder that already weighs reliability --
+and does **not** dispose of the conditioned generative one, which failed
+for a concrete architectural reason (a conv stack sees ~+-9 cells of a
+30x40 grid, enough to denoise locally and nowhere near enough to
+synthesise a coherent latent field). Attention removes exactly that
+limit, and generating rather than denoising is also the only way to fill
+absent groups and beat the mode-A cap.
+
+33.6M params, patch 2 (300 tokens), dim 384 / depth 12 / heads 6, same
+`forward(x, t_map, cond)` signature as `FlowNet` so the sampler and
+losses are unchanged. Two details are deliberate: **adaLN-zero**, so an
+untrained model predicts exactly zero velocity and the sampler is the
+identity; and the timestep enters **twice**, as a scalar through adaLN
+and as an input plane, because this project's timestep is per-latent and
+a scalar cannot say "this group is absent while its neighbour is clean".
+
+**`--decoder-weights` is a confidence floor, `max(received, floor)`**
+(Andrew, 2026-08-31), not a set of cases: 0.0 is the old "received"
+behaviour, 1.0 the old "ones", and 0.8 says the flow has cleaned
+everything while received latents still outrank invented ones. **The
+floor is what makes fill-in possible at all** -- the decoder computes
+`z*w`, so at floor 0 anything synthesised for an absent group is
+multiplied by zero and fill-in cannot beat the mode-A cap however good
+it is. Wiring it turned up a harness bug worth remembering: the codec's
+decode path fed the decoder the raw received map regardless, so a
+decoder *trained* to trust synthesised latents would have been
+*evaluated* with a different policy, and the mismatch would have read as
+"the model does not work". The policy is stored in the checkpoint and
+honoured at inference now.
+
+Two runs in parallel, identical but for the floor (1.0 ->
+`arodland/sstvae-flow`, 0.8 -> `arodland/sstvae-flow-p8`), 40000 steps,
+batch 12, lr 1e-4, cc12m640 with `--nonphoto-frac 0.1`. Both cold-start
+near -3 dB, which is the all-ones penalty the decoder must absorb rather
+than the -9 to -13 the conv attempts began at. **The eval batch is 50/50
+photographs and procedural now**; synthetic-only answered half the
+question and flattered exactly the classes a perceptual objective
+overfits.
+
+**Two traps this cost, both the same shape as the earlier ones.** The
+first launch died at step 1: `waveform_channel` does complex arithmetic
+and `torch.complex` raises on BFloat16, so the channel must run outside
+autocast (`scripts/train.py` documents the same split) -- invisible
+locally because every local run used `--no-amp` for ROCm. And the flow's
+width was saved under `"width"`, the same key `load_torch_model` reads to
+size the `SSTVAE`, so a joint checkpoint would not load at all. The
+general lesson stands: test the path that will actually run, not the one
+that is convenient to run.
+
+**Self-calibrating the channel from the received latents**
+(`latent_flow.estimate_channel`, 2026-08-31). This is reusable whatever
+happens to the flow, and it replaced two broken assumptions:
+
+- **`DemodResult.snr_db` cannot index a channel calibration.** Measured
+  against the nominal SNR it is **+2.9 dB optimistic on AWGN and -8.8 dB
+  pessimistic on mpp at 12 dB**, and the sign flips with a fading state
+  the receiver cannot detect. Anything that needs "how noisy is this
+  reception, really" must not take that number at face value.
+- **`waveform_channel` is not the real modem.** At awgn 0 dB the
+  replica's latent gain is **0.49 against the modem's 0.70** (sigma0
+  0.80 against 0.58), so a table measured on one does not describe the
+  other. It correlates >0.98 on waveforms, which is what it was built
+  for; that does not make its *latent* statistics interchangeable.
+
+The estimator uses only the received latents and their weights, so
+training and inference compute it identically. With `r ~= g*z + n`,
+per-latent noise `sigma0/w`, and `E[z^2] = 1` by the unit-RMS contract,
+take `S = E[r^2]` and `W = E[1/w^2]` over kept latents and look the pair
+up on a 98-point manifold measured offline against the real modem.
+
+Two details are load-bearing. **A free two-parameter fit does not work**:
+`E[r^2|w] = g^2 + sigma0^2/w^2` is a straight line, but under AWGN nearly
+every weight is ~1, so `1/w^2` has no dynamic range, the regression is
+ill-conditioned and the intercept collapses to zero (measured: g
+estimated at 0.001 where the truth is 0.70). Constraining to a measured
+manifold fixes it. And **`W` is what separates AWGN from fading** at
+equal SNR -- `S` alone cannot, since mean weight is pinned near 0.80
+across the whole SNR range under fading while the gain moves 0.28 to
+0.78.
+
+Recovers `sigma0/g` -- the quantity that sets the flow's timestep -- to
+within 1% in 22 of 23 cells including held-out channel seeds. Worth
+**+1.6 dB on average and up to +4.0 dB** on the same checkpoint, and it
+brought the in-training metric into agreement with the real modem (coco
+mpp 0: -1.34 measured against -1.30 reported), which is what makes the
+training numbers trustworthy as a deployment proxy at all. Andrew's read
+of the pictures: the mis-calibrated version was destroying large chunks
+of detail; the corrected one is neutral.
+
+**The apparent "text" side finding is an artifact of the run's recipe,
+not a result** (checked 2026-08-30 after Andrew asked why decoder-only
+training would find a text gain that encoder+decoder training does not).
+Decoder-only fine-tuning through `waveform_channel` measured +1.86 to
++2.44 dB on the `text` class and about -5 dB on `gradient`. Both are
+explained by how that run differed from `scripts/train.py`, and neither
+survives as evidence about generative decoding:
+
+- **`--nonphoto-frac` was 0.25 against a default of 0.0**, so the
+  decoder trained on far more procedural text. That these classes sit
+  3-7 dB behind COCO on a photo-only model is already recorded here and
+  `--nonphoto-frac` already exists to address it -- a known lever being
+  pulled, not a discovery.
+- **No chroma term** (`train.py` carries `--chroma-weight 2.0`, which
+  exists to counter RGB-MSE's blind spot for desaturation). Measured:
+  the `gradient` class comes back **14.2% less saturated** than the base
+  decoder's output while every other class is within +-4%. That is the
+  class that lost 5 dB.
+- **Not PAPR.** The penalty is computed on the transmitted waveform,
+  which is a function of the latents, so with the encoder frozen it has
+  zero gradient with respect to anything a decoder-only run trains.
+  Adding `--papr-weight` there would change nothing.
+
+The general lesson, which cost a wrong claim: diff the run's flags
+against `train.py`'s defaults before reading a per-class table as a
+finding.
+
+**`--kept-only` is a scaffold, not the endpoint** (Andrew,
+2026-08-30). It refuses to touch weight-0 latents, so on a mode-A
+reception it is capped at mode A *by construction*. The measurement
+behind it was *iid* erasure with all three groups present, which the
+decoder interpolates around; mode A is structured truncation and is a
+different question. Revisit fill-in once a flow trains through the real
+modem.
+
+**And fill-in is worth real dB, in the regime that matters.** Oracle
+upper bound, groups 1-2 handed to the decoder exactly on a mode-A
+reception, 24 images: COCO **+0.72 dB at 12 dB rising to +3.26 dB at
+-3 dB**; nonphoto -1.13 at 12 dB rising to +1.55 at -3 dB. The headroom
+*grows as the channel worsens*, and A+fill beats mode C everywhere
+(fill-in supplies groups 1-2 clean; mode C receives them noisy). Read
+the clean column with care: mode B beats mode C clean on both sets
+(COCO 27.85 against 27.35), which is the designed split -- B vs A is
+quality, C vs B is robustness -- so at clean the third group is dead
+weight and a clean-only reading understates fill-in badly. The bound is
+also pessimistic: filled latents enter under all-ones weights, which is
+off-distribution for this decoder (nonphoto PSNR *rises* monotonically
+with erasure, 28.21 at weights exactly 1.0 to 29.19 at 30% erased), and
+that is what makes the nonphoto column negative at high SNR. The frozen
+decoder, not the fill-in, is what caps this -- an argument for the
+generative decoder below. All PSNR, n=24, one checkpoint.
+
+**Not the first of the three to build.** The latent denoiser above
+answers "does a generative prior buy anything on this channel" for far
+less work, against the existing checkpoint, and its answer transfers
+directly. If it comes back at +0.08 dB again, this one is unlikely to be
+worth a GPU-month.
+
+## REPA: align an intermediate decoder representation to a pretrained encoder
+
+**Goal.** An auxiliary training loss that pushes an *early* decoder
+layer's features toward the features a frozen pretrained vision encoder
+(DINOv2 or similar) produces for the **clean** image. A projection head
+plus a cosine loss. Training-only: **zero inference parameters, zero
+on-air change, no format impact, and it drops out completely** once
+training is done.
+
+**Where it comes from.** REPA (Yu et al. 2024, "Representation Alignment
+for Generation") reported large convergence speedups for diffusion
+transformers by aligning one intermediate layer to a self-supervised
+encoder's features. FlexTok carries it — the config exposes
+`intermediate_layers: [1]` and unpacks a `dec_packed_seq_repa_layer`,
+i.e. it aligns layer **1 of 28**, very near the input.
+
+**Why it is a different mechanism from the LPIPS/DISTS work, not a
+duplicate of it.** Those score the decoder's *output image*, after it has
+committed to every pixel. REPA supervises an *internal representation
+before that commitment*, which is the point in the network where this
+problem is actually hard: the decoder's input is degraded — noise,
+erasures, a truncated group — and what it needs is to complete that into
+a semantically coherent representation and only then render. Aligning
+the early layer against features of the **clean** image, while the
+decoder is fed **channel-corrupted** latents, states exactly that as a
+training target. That asymmetry is the design decision here, and it is
+not the setup the paper used (it aligns against the clean image because
+the input is *noise*; here the input is a degraded version of the
+answer).
+
+**Why it is worth trying before anything architectural.** It is a loss
+change on a branch that is already about losses. It cannot affect the
+waveform, the modem, the format, the golden vectors, the ONNX export or
+the app, because nothing survives to inference. Failure costs a training
+run and leaves no residue.
+
+**Honest status: unproven in this setting.** The published gains are for
+diffusion transformers generating from noise. This is a 4.47M
+convolutional decoder reconstructing from a degraded description, and
+there is no result saying the technique transfers. Treat the speedup
+figures in that literature as motivation, not as an expectation.
+
+**Implementation frictions worth knowing before starting.**
+
+- **Resolution mismatch is the main one.** The natural alignment point in
+  the current decoder is after the first `ResBlock` pair, at the 30×40
+  latent grid, while DINOv2 emits patch features on its own stride at its
+  own input size. Something has to interpolate or pool, and picking that
+  badly is the most likely way to get a null result that looks like the
+  method failing.
+- **The frozen encoder forward is the real cost**, paid every training
+  step, and this project's training budget is ~3 concurrent HF Jobs. A
+  small variant, a reduced-resolution forward, or aligning on a subset of
+  steps are all worth pricing before committing to the large one.
+- **Which layer.** FlexTok's choice (1 of 28) is very early. The
+  proportionate point in a 4-stage conv decoder is right after the first
+  stage; it is a hyperparameter and the paper reports sensitivity to it.
+
+**How to measure it, given three pretrained priors are now in play.**
+LPIPS, DISTS and REPA all import a pretrained model's notion of
+similarity, so redundancy is the likely failure rather than harm. The
+test that answers the question is **REPA added to the current
+LPIPS+DISTS baseline**, same data, same schedule, same eval — not REPA
+against a bare-MSE baseline, which would flatter it by measuring
+"perceptual prior helps" a third time. And gate it on real material
+(certificate, rendered text), per the standing rule: a semantic
+alignment loss is exactly the kind of thing that improves photographs
+and does nothing for a page of text.
