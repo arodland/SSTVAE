@@ -50,7 +50,7 @@ inline constexpr std::string_view DEFAULT_REPO = "arodland/sstvae";
 // The stem of the checkpoint the artifacts were exported from. Bumping
 // it is how a new published codec is adopted, and that must happen in
 // the same change as the code needing it.
-inline constexpr std::string_view DEFAULT_REVISION = "v4";
+inline constexpr std::string_view DEFAULT_REVISION = "v5";
 
 inline constexpr std::array<std::string_view, 3> PRECISIONS = {"fp32", "fp16",
                                                                "int8"};
@@ -80,7 +80,7 @@ inline constexpr std::string_view GRAD_PRECISION = "fp32";
 // DEFAULT_REVISION** -- omitting it disables the optimizer's gradient
 // fetch on the current codec, which looks like a network fault rather
 // than a stale list.
-inline constexpr std::array<std::string_view, 2> GRAD_REVISIONS = {"v3", "v4"};
+inline constexpr std::array<std::string_view, 3> GRAD_REVISIONS = {"v3", "v4", "v5"};
 
 // Everything an operator has to fix: a bad `--model`, a missing
 // artifact, an unreachable Hub. The message is the deliverable here --

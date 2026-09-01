@@ -19,7 +19,7 @@ cache hit be trusted outright rather than revalidated — see
 from pathlib import Path
 
 DEFAULT_REPO = "arodland/sstvae"
-DEFAULT_FILE = "v4.pt"
+DEFAULT_FILE = "v5.pt"
 
 # The ONNX artifacts exported from DEFAULT_FILE by scripts/export_onnx.py.
 # `DEFAULT_REVISION` is the stem of the checkpoint they came from, so the
@@ -49,7 +49,7 @@ PARTS = ("encoder", "decoder", GRAD_PART)
 # this is not hypothetical bookkeeping -- it is the difference between a
 # clear message and a 404 for anyone pinning an older revision. Add to
 # it when a revision ships the artifact.
-GRAD_REVISIONS = frozenset({"v3", "v4"})
+GRAD_REVISIONS = frozenset({"v3", "v4", "v5"})
 
 # fp16 is the shipped default: measured identical to fp32 end to end
 # (docs/onnx.md) at half the size. int8 is available but costs ~1 dB of

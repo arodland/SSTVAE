@@ -205,8 +205,8 @@ if(SSTVAE_ANDROID_BUNDLE_MODELS)
     # splits on semicolons, so a list of "a;b" pairs arrives flattened
     # into single items and the hash silently goes missing.
     foreach(_m IN ITEMS
-        "v4-decoder-fp16.onnx|e82404514c822d394c3315c0a4d4ce3df05654e7c90d7e18296f34c52f44a006"
-        "v4-encoder-fp16.onnx|15b0e072f9fe52282f2721209c2846f4d0f0b14474b7a399934bb3448b2a933d")
+        "v5-decoder-fp16.onnx|7ada1b0bac7ad4ff567bee12f0dc9677e91af380d0f47b6263005c40fe2b1808"
+        "v5-encoder-fp16.onnx|8195bb80791b17116204f0c47c510302fafb4697c46529e53371846a80658bcc")
         string(REPLACE "|" ";" _pair "${_m}")
         list(GET _pair 0 _name)
         list(GET _pair 1 _sha)
