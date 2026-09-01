@@ -34,6 +34,20 @@ FADING_PRESETS = {
     "mpg": FadingPreset("mpg", 0.1, 0.5),  # good
     "mpp": FadingPreset("mpp", 1.0, 2.0),  # poor (CCIR)
     "mpd": FadingPreset("mpd", 2.0, 4.0),  # disturbed
+    # NOT a CCIR preset -- measured, 2026-08-28, from four consecutive
+    # mode C receptions over a ~4000 km path (wav-samples/). The CCIR
+    # three tie Doppler to delay spread, and that path does not: its
+    # envelope decorrelation time was 0.86-4.03 s (Doppler 0.05-0.3 Hz
+    # by the same estimator, centred ~0.15) while its frequency
+    # selectivity matched mpp/mpd's ~2 ms. So it fades an order of
+    # magnitude slower than mpp while being just as selective, a
+    # combination none of the three can express -- mpg is slow but
+    # nearly flat. Slow fading is the harder case for the interleaver,
+    # since a fade that outlasts a frame damages latents in correlated
+    # blocks rather than sprinkling them. Fade depth here runs
+    # 6.4-7.0 dB against the measured 4.8-6.3, so it is if anything
+    # slightly pessimistic.
+    "mps": FadingPreset("mps", 0.15, 2.0),  # slow + selective (measured)
 }
 
 
