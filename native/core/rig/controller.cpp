@@ -126,10 +126,21 @@ void run(std::shared_ptr<RigSession> s) {
             std::unique_lock<std::mutex> lock(s->m);
             // Wake for: a stop, a keying request, or the poll deadline.
             // Paused means transmit is in progress, so there is no poll
-            // deadline at all -- only a job or a stop can wake us.
+            // deadline at all -- only a job, a stop, or resume_polling()
+            // clearing `paused` should wake us there. That last one is
+            // its own predicate rather than folded into the general
+            // `wake` below: sharing one predicate between both branches
+            // would make `!s->paused` true from the first instant of the
+            // *unpaused* wait too, firing wait_until immediately on every
+            // poll instead of at next_poll. As written, only the paused
+            // wait watches `paused` -- and it has to, because resume_polling()
+            // only clears the flag and notifies; a predicate that did not
+            // check it would sleep straight through that notify and leave
+            // polling dead until the next over keys the rig, which is what
+            // issue #40 saw as "the frequency stops updating".
             const auto wake = [&] { return s->stopping || s->ptt != nullptr; };
             if (s->paused) {
-                s->cv.wait(lock, wake);
+                s->cv.wait(lock, [&] { return wake() || !s->paused; });
             } else {
                 s->cv.wait_until(lock, next_poll, wake);
             }
