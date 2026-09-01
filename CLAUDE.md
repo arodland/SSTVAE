@@ -1565,6 +1565,18 @@ need when `--native` fails and you want to know *where*.
   enough to matter smears past the 32-sample CP and causes ISI. The
   160-sample demod correlation already nulls the heterodyne image
   exactly. Only sync filters (its own copy).
+- **A CI python job dying with `0xc000001d` in a torch test is the
+  runner, not the test** (`STATUS_ILLEGAL_INSTRUCTION`, seen 2026-09-01
+  on windows-latest inside `muon.newton_schulz`'s bfloat16 matmuls, and
+  at least once before that). The hosted pools are heterogeneous
+  fleets; torch/oneDNN pick AVX-512/AMX kernels by CPUID and some SKUs
+  fault on them, so the same commit passes on re-run by landing on a
+  different machine. `ci.yml`'s python job now pins
+  `ATEN_CPU_CAPABILITY=avx2` and `DNNL_MAX_CPU_ISA=AVX2` to make the
+  choice deterministic — torch there is the reference implementation,
+  so only unmeasured speed is spent. If that signature ever appears
+  *with* the caps in place, it is a different bug: read the faulting
+  frame before blaming the fleet.
 - The timing tracker must be heavily smoothed: raw per-frame pilot
   phase slope sees multipath group delay (± many samples), while real
   clock drift is <0.1 sample/frame. Chasing it raw wrecked MPP fading

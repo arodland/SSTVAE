@@ -116,6 +116,20 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      # Cap torch's CPU dispatch below AVX-512, both ATen's own kernels
+      # and oneDNN's JIT (the bf16 matmul path). The hosted runner pools
+      # are heterogeneous fleets, and on 2026-09-01 a windows-latest
+      # machine died with 0xc000001d (STATUS_ILLEGAL_INSTRUCTION) inside
+      # the bfloat16 matmuls of muon.newton_schulz -- oneDNN picked an
+      # AVX-512/AMX kernel by CPUID and the machine faulted on it; the
+      # re-run passed only because it landed on a different SKU. torch
+      # in this job is the *reference* implementation, so the cap costs
+      # speed nobody measures and makes the kernel choice deterministic.
+      # Set for all three platforms: the die roll is a property of any
+      # mixed fleet, not of Windows.
+      ATEN_CPU_CAPABILITY: avx2
+      DNNL_MAX_CPU_ISA: AVX2
     steps:
       - uses: actions/checkout@v7
       # Exact tag, because setup-uv publishes no moving major alias at
