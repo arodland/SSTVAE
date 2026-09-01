@@ -1404,3 +1404,157 @@ reconstructed by a model that has never seen anything like them, at
 every precision including fp32. Non-photographic content in the training
 mix would improve them across the board, and would also make the
 model less sensitive to the next perturbation nobody thought to test.
+
+## REPA feature alignment — rejected by measurement 2026-08-28
+
+Closed before any training run, by a frozen probe
+(`scripts/repa_probe.py`). The original item follows verbatim; the
+measurement that killed it is at the end, along with three ways the
+probe itself was wrong first — which is the more transferable part.
+
+## REPA: align an intermediate decoder representation to a pretrained encoder
+
+**Goal.** An auxiliary training loss that pushes an *early* decoder
+layer's features toward the features a frozen pretrained vision encoder
+(DINOv2 or similar) produces for the **clean** image. A projection head
+plus a cosine loss. Training-only: **zero inference parameters, zero
+on-air change, no format impact, and it drops out completely** once
+training is done.
+
+**Where it comes from.** REPA (Yu et al. 2024, "Representation Alignment
+for Generation") reported large convergence speedups for diffusion
+transformers by aligning one intermediate layer to a self-supervised
+encoder's features. FlexTok carries it — the config exposes
+`intermediate_layers: [1]` and unpacks a `dec_packed_seq_repa_layer`,
+i.e. it aligns layer **1 of 28**, very near the input.
+
+**Why it is a different mechanism from the LPIPS/DISTS work, not a
+duplicate of it.** Those score the decoder's *output image*, after it has
+committed to every pixel. REPA supervises an *internal representation
+before that commitment*, which is the point in the network where this
+problem is actually hard: the decoder's input is degraded — noise,
+erasures, a truncated group — and what it needs is to complete that into
+a semantically coherent representation and only then render. Aligning
+the early layer against features of the **clean** image, while the
+decoder is fed **channel-corrupted** latents, states exactly that as a
+training target. That asymmetry is the design decision here, and it is
+not the setup the paper used (it aligns against the clean image because
+the input is *noise*; here the input is a degraded version of the
+answer).
+
+**Why it is worth trying before anything architectural.** It is a loss
+change on a branch that is already about losses. It cannot affect the
+waveform, the modem, the format, the golden vectors, the ONNX export or
+the app, because nothing survives to inference. Failure costs a training
+run and leaves no residue.
+
+**Honest status: unproven in this setting.** The published gains are for
+diffusion transformers generating from noise. This is a 4.47M
+convolutional decoder reconstructing from a degraded description, and
+there is no result saying the technique transfers. Treat the speedup
+figures in that literature as motivation, not as an expectation.
+
+**Implementation frictions worth knowing before starting.**
+
+- **Resolution mismatch is the main one.** The natural alignment point in
+  the current decoder is after the first `ResBlock` pair, at the 30×40
+  latent grid, while DINOv2 emits patch features on its own stride at its
+  own input size. Something has to interpolate or pool, and picking that
+  badly is the most likely way to get a null result that looks like the
+  method failing.
+- **The frozen encoder forward is the real cost**, paid every training
+  step, and this project's training budget is ~3 concurrent HF Jobs. A
+  small variant, a reduced-resolution forward, or aligning on a subset of
+  steps are all worth pricing before committing to the large one.
+- **Which layer.** FlexTok's choice (1 of 28) is very early. The
+  proportionate point in a 4-stage conv decoder is right after the first
+  stage; it is a hyperparameter and the paper reports sensitivity to it.
+
+**How to measure it, given three pretrained priors are now in play.**
+LPIPS, DISTS and REPA all import a pretrained model's notion of
+similarity, so redundancy is the likely failure rather than harm. The
+test that answers the question is **REPA added to the current
+LPIPS+DISTS baseline**, same data, same schedule, same eval — not REPA
+against a bare-MSE baseline, which would flatter it by measuring
+"perceptual prior helps" a third time. And gate it on real material
+(certificate, rendered text), per the standing rule: a semantic
+alignment loss is exactly the kind of thing that improves photographs
+and does nothing for a page of text.
+
+### What was measured
+
+`scripts/repa_probe.py` freezes the whole codec, hooks chosen decoder
+layers, and trains *only* a 1x1-conv head (BatchNorm ahead of it) to
+predict DINOv2-S patch features of the clean image. Two conditions in
+one run — decoder fed clean latents, and fed channel-degraded latents —
+each scored against a shuffled-target control, on a held-out split.
+
+At `--snr 0 --erasure 0.3 --truncate 1.0`, a channel that costs
+**6.7 dB** (clean 28.39 dB, degraded 21.72 dB):
+
+| layer | condition | align | control | gap |
+|---|---|---|---|---|
+| 2 | clean | 0.3753 | 0.1552 | 0.2201 |
+| 6 | clean | 0.3603 | 0.1198 | 0.2405 |
+| 9 | clean | 0.3267 | 0.1163 | 0.2104 |
+| 2 | degraded | 0.3549 | 0.1418 | 0.2132 |
+| 6 | degraded | 0.3547 | 0.1175 | 0.2371 |
+| 9 | degraded | 0.3199 | 0.1079 | 0.2120 |
+
+Clean minus degraded: **+0.020, +0.006, +0.007**. The hypothesis
+predicted a collapse; less than 10% of the signal moved while a third of
+the picture quality did.
+
+**Why the conclusion survives the probe's weaknesses.** The probe had
+not converged (held-out loss still falling at step 400), so the absolute
+gaps are lower bounds — but both conditions were trained by the same
+optimizer for the same steps, so the comparison is fair. The eval table
+is one held-out batch, so 0.006 is noise and 0.02 may be — but a
+collapse would be unmissable at that sample size. And DINOv2 patch
+features are coarse and semantic, so "semantics survive, detail does
+not" is partly built into the instrument — but REPA's target *is* those
+coarse features, so if they are intact the conclusion holds whichever
+way that limitation cuts. Not run, deliberately: an MLP probe head and a
+converged run. Neither moves a decision resting on 0.02 against 6.7 dB.
+
+**What it removes.** The warm start was justified *by* the endpoint
+claim — it isolated the quality question and discarded the convergence
+speedup already banked in the checkpoint. With the endpoint claim dead,
+only the convergence benefit remains, a warm start cannot capture it,
+and chasing it means a from-scratch run that buys training time rather
+than picture quality.
+
+### Three ways the instrument was wrong before it could be trusted
+
+The pattern this project already records for the Android port — the bugs
+were in the instruments, not the thing being measured — repeated exactly.
+Each of these produced a plausible, wrong answer.
+
+- **The default channel was too easy.** The first run used `--snr 8
+  --erasure 0.2` with no truncation, matching `train.py`'s eval configs.
+  But 8 dB is near the *good* end for this system (the README's own
+  figure: 20 dB to 3 dB costs 1.4 dB of PSNR), so it asked whether
+  degradation destroys semantics while barely degrading anything. It
+  returned a null. `--truncate` did not exist. The script now prints
+  **reconstruction PSNR per condition**, so a run states how hard its own
+  degraded case was.
+- **The head was unnormalized.** One shared LR across layers with
+  different channel counts (256/128/64) and activation scales
+  handicapped some heads. Adding BatchNorm lifted the gap from 0.13–0.16
+  to 0.21–0.24 and dropped the control from ~0.18 to ~0.12. A
+  handicapped probe reads as a weakly-aligned representation, which is
+  the exact conclusion the script exists to draw.
+- **Layers were compared at different resolutions.** Upsampling the
+  34x45 DINOv2 target to each layer's grid scored deep, high-resolution
+  layers against a smooth target and **reversed the layer ordering**.
+  Activations are now pooled down onto the DINOv2 grid instead. Caught by
+  the smoke check, which asserts the probe can detect a signal that is
+  definitely present rather than merely that it runs — a null result is
+  what this script exists to be able to report, so "it ran" is not a
+  check.
+
+A fourth, milder one: the per-batch training loss was printed and read
+as a convergence curve, when with batch 8 and augmentation on it varies
+by more than the entire training trend (±0.3 on a summed loss against a
+0.05 min-to-end move). A fixed held-out batch is reported alongside it
+now.

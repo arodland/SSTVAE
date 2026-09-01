@@ -647,6 +647,62 @@ are needed — one is the gate, the other is the payoff.
 
 ## A latent-space denoiser between the channel and the decoder
 
+**REJECTED 2026-08-31, after four formulations and a 33.6M DiT.** The
+verdict is Andrew's, on the pictures: on COCO at mpp 0 dB "every place it
+makes a visible change is worse, not better". Do not restart this
+without a new idea; the failure is not a tuning miss.
+
+**Why the metrics did not say so, which is the transferable lesson.**
+The final model measured -0.77 to -1.12 dB mean across classes
+(excluding `gradient`), best cell `text` at awgn 6 on -0.18. That reads
+as "near parity" and it is not: a small mean delta hides "does nothing
+in most places, is worse everywhere it acts". Those are different
+failures and only the second disqualifies. **A mean delta near zero is
+not evidence of harmlessness** -- look at where the model actually
+changed pixels.
+
+**What was tried, so none of it is repeated.**
+
+1. Analytic-timestep flow on `latent_channel` -- won **+1.9 dB at -3 dB**
+   and did not transfer at all. The gain was an artefact of a
+   waveform-trained decoder being fed latent-channel inputs; the flow's
+   real job there was bridging two channel models.
+2. Conditioned generation from noise -- stuck at -9 to -11 dB with a conv
+   backbone (receptive field ~+-9 cells of a 30x40 grid: enough to
+   denoise, not to synthesise).
+3. A *bridge* (received -> clean transport) -- degraded with training
+   exactly like the regression twin, because with a source strongly
+   dependent on its target the MSE-optimal velocity **is** the
+   conditional mean. It is the regression twin in expectation.
+4. A 33.6M DiT with the decoder unfrozen, self-calibrated inference, and
+   a confidence floor -- converged to about -1 dB over 40000 steps,
+   still climbing at +0.5 dB/10k but never near a win.
+
+**The structural reason, which survives all four.** The decoder already
+*is* the denoiser: it consumes `(latents, weights)` and was trained end
+to end on this channel, so it holds the optimal mapping. A flow that
+collapses the received latents to a point estimate first can only
+discard information -- it commits before the decoder weighs the
+reliability map. Unfreezing the decoder helps (about +2 dB) but does not
+remove the bottleneck.
+
+**One prediction that failed and is worth knowing.** Fading was expected
+to be the best case, a generative prior having most to add where the
+channel is worst. It was consistently the *worst*: awgn 6 best, mpp 0
+worst, in every class. Whatever the flow contributed, it was not fade
+repair.
+
+**Kept, and useful independently:** the channel self-calibration
+(`latent_flow.estimate_channel`, +1.6 dB and the thing that made the
+training metric agree with the real modem), the measured fill-in
+headroom (+3.3 dB on a mode-A reception, growing as the channel worsens,
+with the frozen decoder as the binding constraint), and the finding that
+the decoder is sensitive only to the *level* of its confidence map and
+not its per-latent structure -- a 341K learned head scored identically
+to a hand-picked scalar floor of 0.8.
+
+
+
 **Goal.** A small model mapping (received latents, confidence weights) →
 cleaner latents, feeding the **existing** decoder unchanged. Trained
 against the channel. Sized to stay inside the phone's budget, unlike the
@@ -1000,71 +1056,32 @@ less work, against the existing checkpoint, and its answer transfers
 directly. If it comes back at +0.08 dB again, this one is unlikely to be
 worth a GPU-month.
 
-## REPA: align an intermediate decoder representation to a pretrained encoder
+## Rejected: REPA feature alignment
 
-**Goal.** An auxiliary training loss that pushes an *early* decoder
-layer's features toward the features a frozen pretrained vision encoder
-(DINOv2 or similar) produces for the **clean** image. A projection head
-plus a cosine loss. Training-only: **zero inference parameters, zero
-on-air change, no format impact, and it drops out completely** once
-training is done.
+**Measured 2026-08-28 with `scripts/repa_probe.py`, and the premise was
+wrong.** The item rested on channel degradation destroying semantic
+structure in the decoder that an alignment loss would restore. A frozen
+linear probe against DINOv2 says it does not: at a channel costing
+**6.7 dB of reconstruction PSNR** (28.39 -> 21.72), image-specific
+alignment moved by **0.020 / 0.006 / 0.007** at decoder layers 2 / 6 / 9
+against a signal of ~0.22 — under 10% of the semantic content lost, for
+a third of the picture quality. **REPA supervises the one thing the
+channel is not breaking.**
 
-**Where it comes from.** REPA (Yu et al. 2024, "Representation Alignment
-for Generation") reported large convergence speedups for diffusion
-transformers by aligning one intermediate layer to a self-supervised
-encoder's features. FlexTok carries it — the config exposes
-`intermediate_layers: [1]` and unpacks a `dec_packed_seq_repa_layer`,
-i.e. it aligns layer **1 of 28**, very near the input.
+That also removes the warm-start case, which existed precisely to
+isolate the endpoint claim. What remains of REPA is the published
+*convergence* speedup — which a warm start structurally cannot capture,
+and which is not the goal here.
 
-**Why it is a different mechanism from the LPIPS/DISTS work, not a
-duplicate of it.** Those score the decoder's *output image*, after it has
-committed to every pixel. REPA supervises an *internal representation
-before that commitment*, which is the point in the network where this
-problem is actually hard: the decoder's input is degraded — noise,
-erasures, a truncated group — and what it needs is to complete that into
-a semantically coherent representation and only then render. Aligning
-the early layer against features of the **clean** image, while the
-decoder is fed **channel-corrupted** latents, states exactly that as a
-training target. That asymmetry is the design decision here, and it is
-not the setup the paper used (it aligns against the clean image because
-the input is *noise*; here the input is a degraded version of the
-answer).
+**The useful residue is one data point for the other two items.** The
+information survives the channel and the rendering does not: the decoder
+still knows what the picture is and produces a degraded one anyway,
+which is the case a generative prior over appearance is for. That is
+weak, indirect evidence and it is superseded by the direct stage-1 flow
+measurements above (+1.9 dB at -3 dB, and the regression twin at
+-1.0 dB) — recorded here only because it was measured on the way to a
+different question.
 
-**Why it is worth trying before anything architectural.** It is a loss
-change on a branch that is already about losses. It cannot affect the
-waveform, the modem, the format, the golden vectors, the ONNX export or
-the app, because nothing survives to inference. Failure costs a training
-run and leaves no residue.
-
-**Honest status: unproven in this setting.** The published gains are for
-diffusion transformers generating from noise. This is a 4.47M
-convolutional decoder reconstructing from a degraded description, and
-there is no result saying the technique transfers. Treat the speedup
-figures in that literature as motivation, not as an expectation.
-
-**Implementation frictions worth knowing before starting.**
-
-- **Resolution mismatch is the main one.** The natural alignment point in
-  the current decoder is after the first `ResBlock` pair, at the 30×40
-  latent grid, while DINOv2 emits patch features on its own stride at its
-  own input size. Something has to interpolate or pool, and picking that
-  badly is the most likely way to get a null result that looks like the
-  method failing.
-- **The frozen encoder forward is the real cost**, paid every training
-  step, and this project's training budget is ~3 concurrent HF Jobs. A
-  small variant, a reduced-resolution forward, or aligning on a subset of
-  steps are all worth pricing before committing to the large one.
-- **Which layer.** FlexTok's choice (1 of 28) is very early. The
-  proportionate point in a 4-stage conv decoder is right after the first
-  stage; it is a hyperparameter and the paper reports sensitivity to it.
-
-**How to measure it, given three pretrained priors are now in play.**
-LPIPS, DISTS and REPA all import a pretrained model's notion of
-similarity, so redundancy is the likely failure rather than harm. The
-test that answers the question is **REPA added to the current
-LPIPS+DISTS baseline**, same data, same schedule, same eval — not REPA
-against a bare-MSE baseline, which would flatter it by measuring
-"perceptual prior helps" a third time. And gate it on real material
-(certificate, rendered text), per the standing rule: a semantic
-alignment loss is exactly the kind of thing that improves photographs
-and does nothing for a page of text.
+Full measurements, the probe's design, three ways the *instrument* was
+wrong before it was trusted, and what was deliberately not run are in
+`docs/todo-done.md`.
