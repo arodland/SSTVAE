@@ -187,6 +187,11 @@ struct Published {
             return false;
         });
     }
+    bool wait_for_frequency_count(std::size_t n, double timeout_s = 5.0) {
+        std::unique_lock<std::mutex> lock(m);
+        return cv.wait_for(lock, std::chrono::duration<double>(timeout_s),
+                           [&] { return frequencies.size() >= n; });
+    }
 };
 
 // --- backoff ----------------------------------------------------------------
@@ -444,7 +449,18 @@ void test_polling_pauses_while_transmitting() {
     controller.pause_polling();
     controller.set_ptt(true);
     controller.set_ptt(false);
+    const std::size_t polls_before_resume = pub.frequency_count();
     controller.resume_polling();
+
+    // Resuming must actually resume: the worker parks on the session's
+    // condition variable while paused, and a wake predicate that only
+    // looked for a stop or a keying request slept straight through
+    // resume_polling()'s notify -- polling was then dead until the next
+    // over keyed the rig, which on the air read as "the frequency stops
+    // updating after a transmission" (issue #40). The unkey above pushed
+    // the poll deadline one interval out, so this waits across it.
+    check::is_true(pub.wait_for_frequency_count(polls_before_resume + 1),
+                   "rig/pause: polling resumes after the over");
 
     const std::vector<std::string> calls = probe->call_log();
     std::size_t on_idx = calls.size();
