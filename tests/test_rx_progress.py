@@ -1,12 +1,15 @@
-"""The two reception numbers: what arrived, and what decoded.
+"""The two reception numbers: how far the transmission got, and what
+decoded.
 
-The progress bar is `frames whose audio has arrived / frames expected`
-(`_frames_in_buffer`) -- pure arithmetic on buffer positions, so it
-climbs with the clock whatever the decoder manages. Beside it, and never
-as it, is `frames_decoded`: how many of those frames carried confident
-data. That one is a *fill*, and a fill reads as a completion percentage
-without being one, because the erasures the blind path lives with (a
-fade, or simply not having heard the start) hold it down permanently.
+The progress bar is `frames elapsed since the transmission's first
+frame / frames expected` (`_frames_elapsed`) -- pure arithmetic on
+buffer positions, so it climbs with the clock whatever the decoder
+manages, starts part-way up on a late join, and can always reach 100%.
+Beside it, and never as it, is `frames_decoded`: how many frames
+carried confident data. That one is a *fill*, and a fill reads as a
+completion percentage without being one, because the erasures the blind
+path lives with (a fade, or simply not having heard the start) hold it
+down permanently.
 
 The third number is the one nothing may be substituted for: the
 confident-latent *count* is what the --end-grace stall clock watches.
@@ -30,7 +33,7 @@ from sstvae.modem import framing
 from sstvae.rx.engine import (
     PROGRESS_WEIGHT_THRESHOLD,
     _decode_progress,
-    _frames_in_buffer,
+    _frames_elapsed,
 )
 
 TOTAL_FRAMES = MODES["C"].n_frames
@@ -103,16 +106,16 @@ def test_the_stall_metric_is_the_latent_count_and_moves_on_backfill():
     assert decoded_backfilled > decoded_reached
 
 
-def test_the_bar_counts_frames_that_have_arrived():
+def test_the_bar_counts_frames_that_have_gone_by():
     n = MODES["A"].n_frames
     end = FRAMES_START + n * FRAME_SAMPLES
 
-    assert _frames_in_buffer(0, 0, 0, n) == 0
-    assert _frames_in_buffer(0, 0, FRAMES_START, n) == 0
-    assert _frames_in_buffer(0, 0, FRAMES_START + FRAME_SAMPLES, n) == 1
-    assert _frames_in_buffer(0, 0, end, n) == n
+    assert _frames_elapsed(0, 0, n) == 0
+    assert _frames_elapsed(0, FRAMES_START, n) == 0
+    assert _frames_elapsed(0, FRAMES_START + FRAME_SAMPLES, n) == 1
+    assert _frames_elapsed(0, end, n) == n
     # Audio past the transmission's end is not more of it.
-    assert _frames_in_buffer(0, 0, end + 100 * FRAME_SAMPLES, n) == n
+    assert _frames_elapsed(0, end + 100 * FRAME_SAMPLES, n) == n
 
 
 def test_the_bar_climbs_with_the_clock_and_nothing_else():
@@ -120,22 +123,27 @@ def test_the_bar_climbs_with_the_clock_and_nothing_else():
     # a fade cannot hold it back the way it holds back frames_decoded.
     n = MODES["A"].n_frames
     got = [
-        _frames_in_buffer(0, 0, FRAMES_START + k * FRAME_SAMPLES, n)
+        _frames_elapsed(0, FRAMES_START + k * FRAME_SAMPLES, n)
         for k in [*range(0, n, 7), n]
     ]
     assert got == sorted(got)
     assert got[0] == 0 and got[-1] == n
 
 
-def test_a_late_join_starts_part_way_up_rather_than_at_zero():
+def test_a_late_join_starts_part_way_up_and_still_reaches_the_top():
     # Tuned in at frame 400 of mode C: those frames' audio is gone for
-    # good, so the bar starts at 400/660 and fills from there. Counting
-    # from zero would promise a picture that cannot arrive.
+    # good, so the bar starts at 400/660 -- the transmission is 400
+    # frames into its schedule the moment we join -- and fills to
+    # 660/660 as the rest arrives. The frames the join missed appear as
+    # the gap against frames_decoded, exactly like a fade's. Counting
+    # only captured audio instead starts the bar at zero and caps it at
+    # 260/660 forever, on the display whose job is to say how far along
+    # the transmission is.
     n = TOTAL_FRAMES
-    buf_start = FRAMES_START + 400 * FRAME_SAMPLES
-    assert _frames_in_buffer(0, buf_start, buf_start, n) == 0
+    joined = FRAMES_START + 400 * FRAME_SAMPLES
+    assert _frames_elapsed(0, joined, n) == 400
     end = FRAMES_START + n * FRAME_SAMPLES
-    assert _frames_in_buffer(0, buf_start, end, n) == n - 400
+    assert _frames_elapsed(0, end, n) == n
 
 
 def test_a_transmission_that_starts_after_the_buffer_does():
@@ -144,4 +152,20 @@ def test_a_transmission_that_starts_after_the_buffer_does():
     n = MODES["A"].n_frames
     start = 5 * FRAME_SAMPLES
     total = start + FRAMES_START + n * FRAME_SAMPLES
-    assert _frames_in_buffer(start, 0, total, n) == n
+    assert _frames_elapsed(start, total, n) == n
+    # And before that transmission's first frame, nothing of it yet.
+    assert _frames_elapsed(start, start + FRAMES_START, n) == 0
+
+
+def test_dropped_latent_slots_never_count_as_a_decoded_frame():
+    # frame_of_latent() is -1 for the never-transmitted dropped slots,
+    # and numpy indexing would wrap -1 to the *last* frame -- a phantom
+    # "frame 659 decoded" from a latent that never went on the air. The
+    # C++ guards f >= 0; this pins the Python mirror to it. The metric
+    # still counts every confident latent, matching the C++ exactly.
+    table = framing.frame_of_latent()
+    w = np.zeros(MODES["C"].n_latents)
+    w[table < 0] = 0.9
+    metric, decoded = _decode_progress(w)
+    assert decoded == 0
+    assert metric == np.count_nonzero(table < 0)

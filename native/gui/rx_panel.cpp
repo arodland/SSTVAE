@@ -578,7 +578,10 @@ void ReceivePanel::on_reception(const QString& saved_path) {
     // shown only in a 5-second status bar flash before this line existed.
     // A replacement is the same reception delivered again with more of
     // it decoded, so it says so rather than reading as a second picture.
-    const bool replaced = reception->saved_path.has_value();
+    // On `redelivery`, not on saved_path: with autosave off the sink
+    // never returns a path, and a redelivery keyed on the path would
+    // log two "reception complete" lines for one transmission.
+    const bool replaced = reception->redelivery;
     QString line = replaced ? tr("reception updated") : tr("reception complete");
     if (reception->mode_name) {
         line += tr(": mode %1").arg(QString::fromStdString(*reception->mode_name));

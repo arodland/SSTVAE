@@ -158,27 +158,25 @@ struct DecodeProgress {
 };
 DecodeProgress decode_progress(std::span<const double> weights_full);
 
-// How many of a transmission's frames have arrived: the progress bar's
-// numerator, and pure arithmetic on buffer positions.
+// How far through its schedule a transmission has got: the progress
+// bar's numerator, and pure arithmetic on buffer positions.
 //
 // This is what the bar shows, because it is the only one of the
 // available numbers that climbs with the clock rather than with the
-// decoder's luck. The header path already reported exactly this --
+// decoder's luck. The header path already reported nearly this --
 // `DemodResult::frames_received` counts every frame whose samples are
 // in the buffer, signal or noise -- so this is that number generalized
 // to the blind path, which had been showing how far its furthest
 // *decoded* frame reached and so stalled on the erasures that are its
 // normal state.
 //
-// `buf_start` is in it because a blind reception can begin before the
-// audio does: joining a transmission late leaves its early frames
-// permanently unavailable, and a bar that starts at 40% and fills is
-// honest where one that starts at 0 and can never reach 100 is not.
-// Monotone in practice rather than by construction -- it assumes the
-// ring outlives the longest mode (130 s against 95 s), the same
-// assumption the rest of the retrospective decoding rests on.
-int frames_in_buffer(std::int64_t start, std::int64_t buf_start, std::int64_t total,
-                     int n_frames);
+// It counts from the transmission's own first frame, not from the audio
+// we happened to capture: joining a transmission late leaves its early
+// frames permanently unavailable, and a bar that starts at 60% and
+// fills to 100% is honest where one that starts at 0 and can never
+// reach 100 is not. The frames the join missed show up instead as the
+// gap against frames_decoded, exactly like a fade's.
+int frames_elapsed(std::int64_t start, std::int64_t total, int n_frames);
 
 // The `threading.Event` the reference stops on. Shared with the
 // transmitter, which needs the same primitive for its cancel flag and
@@ -201,10 +199,11 @@ struct Reception {
     std::optional<std::string> mode_name;
     std::string callsign;
     double snr_db = 0.0;
-    // How much of the transmission arrived, and how much of it actually
-    // decoded. The first is the progress bar's numerator and climbs
-    // with the clock; the second is a fill, and the gap between them is
-    // what a fade costs. See frames_in_buffer and decode_progress.
+    // How far through its schedule the transmission got, and how much
+    // of it actually decoded. The first is the progress bar's numerator
+    // and climbs with the clock; the second is a fill, and the gap
+    // between them is what a fade -- or joining late -- costs. See
+    // frames_elapsed and decode_progress.
     std::optional<int> frames_received;
     std::optional<int> frames_decoded;
     std::optional<int> n_frames_expected;
@@ -214,6 +213,14 @@ struct Reception {
     // is there rather than adding a second picture** -- one
     // transmission is one file, one gallery entry, one notification.
     std::optional<std::string> saved_path;
+    // True on every delivery after the first, whether or not the sink
+    // chose to save. saved_path cannot carry this by itself: a sink
+    // that declined to save (a GUI with autosave off) returns no path,
+    // and a redelivery would then read as a brand-new reception -- two
+    // "reception complete" records for one transmission. saved_path
+    // says where to write; this says whether it is the same reception
+    // again.
+    bool redelivery = false;
 };
 
 // What the loop publishes for a UI to display.
@@ -225,9 +232,9 @@ struct Reception {
 struct Progress {
     Status status = Status::Listening;
     std::optional<std::string> mode_name;
-    // frames_received is the frames that have arrived (what the bar
-    // shows); frames_decoded is how many of them carried confident data
-    // (shown beside it, never as it). See frames_in_buffer.
+    // frames_received is how far the transmission has got (what the bar
+    // shows); frames_decoded is how many frames carried confident data
+    // (shown beside it, never as it). See frames_elapsed.
     std::optional<int> frames_received;
     std::optional<int> frames_decoded;
     std::optional<int> n_frames_expected;

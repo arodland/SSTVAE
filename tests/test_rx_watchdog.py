@@ -256,10 +256,9 @@ def test_a_header_reception_whose_buffer_stopped_growing_is_delivered(stub_modem
     left open on one path because the no-advance test used to be
     blind-only.
 
-    frames_received is `received.sum()`, which counts frames whose
-    samples are in the buffer rather than frames that carried signal, so
-    on the header path it stops advancing when and only when the buffer
-    does -- which is exactly this."""
+    The stall metric is the confident-latent count on both paths: a
+    frozen buffer decodes the same audio to the same latents forever, so
+    the metric never advances and the stall clock is what fires."""
     modem = stub_modem(_StubModem(good_polls=10**9, frames_received=3))
     sink = _CollectingSink()
     config = RxConfig(poll_interval=0.05, end_grace=0.5)
@@ -497,6 +496,14 @@ def test_a_faded_reception_resumes_and_replaces_its_picture(blind_only):
         "the improved picture was delivered as a new reception rather than as a "
         "replacement for the one already saved"
     )
+    # The engine-side flag, independent of whether the sink saved: a GUI
+    # with autosave off gets no path back and still must not read a
+    # redelivery as a second reception.
+    assert not first.redelivery
+    assert second.redelivery, (
+        "a second delivery of the same reception must say so itself -- "
+        "saved_path cannot, when the sink declined to save"
+    )
     # On frames_decoded, deliberately: frames_received is positional and
     # climbs with the buffer whether or not anything was decoded, so it
     # cannot tell a resumed reception from an abandoned one.
@@ -541,6 +548,178 @@ def test_a_new_reception_does_not_discard_an_undelivered_one(stub_modem):
         "deliver it"
     )
     assert sink.receptions[0].frames_received == 3
+
+
+def test_a_frozen_buffer_still_retires_on_the_wall_clock(stub_modem):
+    """Capture died mid-reception, close to the transmission's end. The
+    stall delivers the picture, but retirement's sample-position
+    deadline is measured against `total`, and `total` has frozen just
+    short of it: unreachable by construction, so the record -- and
+    --once, which only exits on retirement -- sat in "waiting" forever
+    with the picture already delivered. The wall-clock shadow of the
+    deadline is what retires it; while capture is alive it trails the
+    buffer deadline by end_grace and never fires.
+
+    The buffer stops half a second short of the scheduled end so this
+    test's own wait is bounded by about that plus end_grace -- what is
+    asserted is that the wait is finite, not how long it takes."""
+    stub_modem(_StubModem(good_polls=10**9, frames_received=3))
+    sink = _CollectingSink()
+    config = RxConfig(poll_interval=0.05, end_grace=0.4, once=True)
+
+    need_s = (
+        PREAMBLE_SAMPLES + HEADER_SAMPLES + MODE_A.n_frames * rx_engine.FRAME_SAMPLES
+    ) / FS
+    state = _run(
+        config, sink, seconds_of_audio=need_s - 0.5, timeout_s=20.0,
+        until=lambda state, sink: state.status == "done",
+    )
+
+    assert len(sink.receptions) == 1, (
+        "a reception whose buffer froze short of its deadline was never "
+        "retired: the sample-position deadline is unreachable by construction "
+        "there, and only the wall clock can end it"
+    )
+    assert state.status == "done", (
+        f"status {state.status!r}: still waiting on a buffer deadline that a "
+        "frozen buffer can never reach"
+    )
+
+
+def _mode_a_weights_for_frames(frames):
+    """Mode-A-sized weights with exactly `frames` confidently carried."""
+    from sstvae.modem import framing
+
+    w = np.zeros(MODES["C"].n_latents)
+    for f in frames:
+        _, idx = framing.slot_range_for_frame(f)
+        w[idx] = 0.9
+    # Mode A's frames live entirely in the first group, so slicing to the
+    # mode's latent count loses nothing -- assert it, since a silent
+    # truncation here would weaken every test built on this helper.
+    assert not w[MODE_A.n_latents:].any()
+    return w[:MODE_A.n_latents]
+
+
+def _demod_result_for_frames(frames):
+    n = MODE_A.n_latents
+    return DemodResult(
+        latents=np.zeros(n),
+        weights=_mode_a_weights_for_frames(frames),
+        mode=MODE_A,
+        freq_offset=0.0,
+        sync_metric=0.9,
+        frames_received=len(frames),
+        beacon=None,
+        callsign="TEST",
+        preamble_start=0,
+        snr_db=12.0,
+    )
+
+
+def test_a_header_reception_resumes_over_its_own_preamble(stub_modem):
+    """After a stall-delivery the reception's start is in
+    finished_starts, so the preamble search steps over it -- correctly
+    for *new* receptions, but the only other way back in used to be the
+    blind path, which needs the beacon to decode. With the beacon
+    unreadable (narrowband interference on its carrier, a
+    pre-PROTOCOL_VERSION-4 sender), a header reception that faded once
+    was refused for the rest of the transmission with its preamble
+    sitting decodable in the buffer. The engine now aims one demodulate
+    at the tracked reception's own preamble when the search finds
+    nothing new.
+
+    The stub refuses any search window that excludes its preamble at
+    position 0, which is what makes the carve-out visible to it: after
+    the delivery only the targeted resume ever offers a window the stub
+    accepts."""
+    half = _demod_result_for_frames(range(MODE_A.n_frames // 2))
+    full = _demod_result_for_frames(range(MODE_A.n_frames))
+
+    class _ResumingHeaderModem:
+        def __init__(self):
+            self.calls = 0
+
+        def demodulate(self, samples, search_s=None, drift_track="off"):
+            if search_s is not None and search_s[0] > 0:
+                raise SyncError("the preamble is not in this window")
+            self.calls += 1
+            if self.calls <= 2:
+                return half
+            if self.calls <= 12:
+                raise SyncError("faded out")
+            return full
+
+        def demodulate_blind(self, x, search_s=None, acquisition=None,
+                             drift_track="off"):
+            raise SyncError("the beacon never decodes")
+
+    modem = stub_modem(_ResumingHeaderModem())
+    sink = _CollectingSink()
+    config = RxConfig(poll_interval=0.05, end_grace=0.3)
+
+    _run(config, sink, timeout_s=20.0,
+         until=lambda state, sink: len(sink.receptions) >= 2)
+
+    assert modem.calls > 12, (
+        "the modem never got a decodable window again after the stall "
+        "delivery: the header path cannot resume its own reception"
+    )
+    assert len(sink.receptions) == 2, (
+        "a header reception that recovered from a fade, with the beacon "
+        "unreadable, never redelivered: only the blind path could resume it"
+    )
+    first, second = sink.receptions
+    assert first.frames_decoded == MODE_A.n_frames // 2
+    assert second.frames_decoded == MODE_A.n_frames
+    assert second.redelivery and second.saved_path == "/dev/null/fake.png"
+
+
+def test_an_inferior_blind_resume_does_not_replace_a_better_picture(
+        stub_modem, monkeypatch):
+    """The stall/delivery metric is one unit -- the confident-latent
+    count -- on both paths, because a reception can stall on the header
+    path and resume on the blind one. When the header path fed its
+    frame count in instead, a blind resume carrying ~two frames of
+    content outranked a delivered half-transmission (a frame count
+    against a latent count) and overwrote the saved file with the worse
+    decode."""
+    blind_scrap = _blind_result([0, 1])
+
+    class _HeaderThenScrapModem:
+        def __init__(self):
+            self.calls = 0
+            self.blind_calls = 0
+
+        def demodulate(self, samples, search_s=None, drift_track="off"):
+            self.calls += 1
+            if self.calls <= 2:
+                return _demod_result_for_frames(range(MODE_A.n_frames // 2))
+            raise SyncError("gone")
+
+        def demodulate_blind(self, x, search_s=None, acquisition=None,
+                             drift_track="off"):
+            self.blind_calls += 1
+            return blind_scrap
+
+    modem = stub_modem(_HeaderThenScrapModem())
+    monkeypatch.setattr(rx_engine, "BlindAccumulator", _FakeAccumulator)
+    sink = _CollectingSink()
+    config = RxConfig(poll_interval=0.05, end_grace=0.3)
+
+    _run(config, sink, timeout_s=2.5,
+         until=lambda state, sink: len(sink.receptions) >= 2)
+
+    assert modem.blind_calls > 5, (
+        "the blind path never resumed the reception -- not the case under test"
+    )
+    assert len(sink.receptions) == 1, (
+        "a two-frame blind decode was redelivered over a half-transmission "
+        "picture: the paths' metrics are being compared in different units"
+    )
+    assert sink.receptions[0].frames_decoded == MODE_A.n_frames // 2, (
+        "the delivered picture no longer carries the header path's decode"
+    )
 
 
 def test_nothing_is_delivered_when_nothing_ever_decoded(stub_modem):

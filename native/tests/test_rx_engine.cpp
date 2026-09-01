@@ -448,6 +448,47 @@ void test_a_reception_whose_decodes_stop_is_still_delivered() {
                    "rx/watchdog: and the loop goes back to listening");
 }
 
+void test_a_reception_whose_buffer_stopped_growing_still_retires() {
+    // Capture died mid-reception, close to the transmission's end. The
+    // stall delivers the picture (that much already worked), but the
+    // sample-position deadline is measured against `total`, and `total`
+    // has frozen just short of it: unreachable by construction, so the
+    // record -- and `once`, which only exits on retirement -- sat in
+    // Waiting forever with the picture already saved. The wall-clock
+    // shadow of the deadline is what retires it; while capture is alive
+    // it trails the buffer deadline by end_grace and never fires.
+    //
+    // The buffer stops ~0.5 s short of the scheduled end so the test's
+    // own wait is bounded by about that plus end_grace -- this asserts
+    // the wait is finite, not how long it takes.
+    Harness h(60.0);
+    const std::vector<double> full = transmission("W1AW", 63);
+    const double short_by_s = 0.5;
+    write_all(h.ring, truncated("W1AW", 63,
+                                static_cast<double>(full.size()) / config::FS - short_by_s));
+
+    std::thread loop([&] {
+        rx::decode_loop(h.ring, h.decoder(), h.state, h.config, h.stop, h.sink());
+    });
+    std::thread watcher([&] { h.poll_watcher(); });
+
+    h.until([&] { return h.received.size() >= 1; },
+            "rx/frozen-buffer: the stall delivers the partial reception");
+    h.until([&] { return h.state.get().status == rx::Status::Listening; },
+            "rx/frozen-buffer: a frozen buffer holds the deadline out of reach "
+            "forever -- only the wall clock can retire this reception");
+    h.stop.set();
+    loop.join();
+    watcher.join();
+
+    check::equal(h.count(), std::size_t{1},
+                 "rx/frozen-buffer: delivered exactly once");
+    if (h.count() != 1) return;
+    check::is_true(h.received[0].frames_received.has_value() &&
+                       *h.received[0].frames_received < mode_a().n_frames,
+                   "rx/frozen-buffer: delivered as the partial reception it is");
+}
+
 void test_a_faded_reception_resumes_and_replaces_its_picture() {
     // The reason losing sync no longer ends a reception.
     //
@@ -509,6 +550,13 @@ void test_a_faded_reception_resumes_and_replaces_its_picture() {
     check::is_true(second.saved_path.has_value() && *second.saved_path == *h.save_as,
                    "rx/fade: the improved picture was delivered as a new reception "
                    "rather than as a replacement for the one already saved");
+    // The engine-side flag, independent of whether the sink saved: a
+    // GUI with autosave off gets no path back and still must not read
+    // a redelivery as a second reception.
+    check::is_true(!h.received[0].redelivery,
+                   "rx/fade: the first delivery is not marked a redelivery");
+    check::is_true(second.redelivery,
+                   "rx/fade: the second is, whatever the sink returned");
     check::is_true(second.frames_decoded.value_or(0) > first_decoded,
                    "rx/fade: the second delivery carries more of the picture");
 }
@@ -782,15 +830,17 @@ void test_poll_backoff() {
                  "rx/backoff: the duty floor bounds the wait");
 }
 
-// The two reception numbers: what arrived, and what decoded.
+// The two reception numbers: how far the transmission got, and what
+// decoded.
 //
-// The bar is `frames whose audio has arrived / frames expected`
-// (frames_in_buffer), pure arithmetic on buffer positions, so it climbs
-// with the clock whatever the decoder manages. Beside it, and never as
-// it, is frames_decoded -- a *fill*, held down permanently by the
-// erasures the blind path lives with. And the confident-latent count is
-// neither: it is the stall clock's input, and nothing else may be
-// substituted for it.
+// The bar is `frames elapsed since the transmission's first frame /
+// frames expected` (frames_elapsed), pure arithmetic on buffer
+// positions, so it climbs with the clock whatever the decoder manages,
+// starts part-way up on a late join, and can always reach 100%. Beside
+// it, and never as it, is frames_decoded -- a *fill*, held down
+// permanently by the erasures the blind path lives with. And the
+// confident-latent count is neither: it is the stall clock's input on
+// both paths, and nothing else may be substituted for it.
 //
 // Arithmetic, so it is checked as arithmetic (see `decode_progress`'s
 // header comment), rather than inferred from a whole decode run.
@@ -846,34 +896,39 @@ void test_the_two_progress_numbers() {
     const int n = config::MODES[0].n_frames;
     const std::int64_t frames_start = config::PREAMBLE_SAMPLES + config::HEADER_SAMPLES;
     const std::int64_t end = frames_start + std::int64_t{n} * config::FRAME_SAMPLES;
-    check::equal(rx::frames_in_buffer(0, 0, 0, n), 0,
+    check::equal(rx::frames_elapsed(0, 0, n), 0,
                  "rx/bar: nothing has arrived yet");
-    check::equal(rx::frames_in_buffer(0, 0, frames_start + config::FRAME_SAMPLES, n), 1,
+    check::equal(rx::frames_elapsed(0, frames_start + config::FRAME_SAMPLES, n), 1,
                  "rx/bar: one whole frame has arrived");
-    check::equal(rx::frames_in_buffer(0, 0, end, n), n, "rx/bar: all of it");
-    check::equal(rx::frames_in_buffer(0, 0, end + 100 * config::FRAME_SAMPLES, n), n,
+    check::equal(rx::frames_elapsed(0, end, n), n, "rx/bar: all of it");
+    check::equal(rx::frames_elapsed(0, end + 100 * config::FRAME_SAMPLES, n), n,
                  "rx/bar: audio past the end is not more of the transmission");
 
     // Climbing with the clock is the property, so check it as one.
     int prev = -1;
     bool monotone = true;
     for (int k = 0; k <= n; k += 7) {
-        const int got = rx::frames_in_buffer(0, 0, frames_start + std::int64_t{k} * config::FRAME_SAMPLES, n);
+        const int got = rx::frames_elapsed(0, frames_start + std::int64_t{k} * config::FRAME_SAMPLES, n);
         monotone = monotone && got >= prev;
         prev = got;
     }
     check::is_true(monotone, "rx/bar: climbs with the clock and nothing else");
 
     // Tuned in at frame 400 of mode C: those frames' audio is gone for
-    // good, so the bar starts at 400/660 and fills from there. Counting
-    // from zero would promise a picture that cannot arrive.
+    // good, so the bar starts at 400/660 -- the transmission is 400
+    // frames into its schedule the moment we join -- and fills to
+    // 660/660 as the rest arrives. Counting only captured audio would
+    // start it at zero and cap it below 100% forever, on the display
+    // whose job is to say how far along the transmission is; the frames
+    // the join missed show up as the gap against frames_decoded,
+    // exactly like a fade's.
     const std::int64_t joined = frames_start + 400 * config::FRAME_SAMPLES;
-    check::equal(rx::frames_in_buffer(0, joined, joined, total), 0,
-                 "rx/bar: a late join has nothing of it yet");
-    check::equal(rx::frames_in_buffer(0, joined,
-                                      frames_start + std::int64_t{total} * config::FRAME_SAMPLES,
-                                      total),
-                 total - 400, "rx/bar: and fills only with what it can still hear");
+    check::equal(rx::frames_elapsed(0, joined, total), 400,
+                 "rx/bar: a late join starts part-way up");
+    check::equal(rx::frames_elapsed(0,
+                                    frames_start + std::int64_t{total} * config::FRAME_SAMPLES,
+                                    total),
+                 total, "rx/bar: and still reaches the top");
 }
 
 // `frame_of_latent` is the inverse of `slot_range_for_frame`, and the
@@ -910,6 +965,7 @@ int main() {
         test_low_cpu_loop_receives();
         test_a_finished_reception_is_not_rediscovered();
         test_a_reception_whose_decodes_stop_is_still_delivered();
+        test_a_reception_whose_buffer_stopped_growing_still_retires();
         test_a_faded_reception_resumes_and_replaces_its_picture();
         test_a_new_reception_does_not_discard_an_undelivered_one();
         test_low_cpu_does_not_wait_forever_for_audio_that_stops();

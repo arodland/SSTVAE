@@ -206,11 +206,27 @@ void remember_finished(std::deque<std::int64_t>& finished, std::int64_t pos) {
 struct Pending {
     std::int64_t start = 0;         // absolute preamble-start position
     std::int64_t deadline_abs = 0;  // absolute buffer position
+    // `deadline_abs` translated to wall time when it was computed, plus
+    // end_grace. The buffer-position deadline is the transmitter's
+    // clock and is right whenever capture is alive -- but it is
+    // measured against `total`, so if capture dies mid-reception
+    // `total` freezes below it and it becomes unreachable by
+    // construction: the loop would sit in Waiting forever with the
+    // picture already delivered. The wall clock keeps running when the
+    // buffer does not. Anchored when `deadline_abs` is set (or
+    // tightened by a later-learned mode), never re-anchored per poll --
+    // recomputing it from now() every decoded poll would push it
+    // forever into the future in exactly the frozen-buffer case it
+    // exists for.
+    std::optional<Clock::time_point> deadline_wall;
     // Whether the *most recent* decode of this reception came from the
     // blind path. Per-poll, not per-reception: a reception first found
-    // blind can later decode over the preamble path (or vice versa),
-    // and the stall-on-no-advance test below must follow the path
-    // currently driving the record.
+    // blind can later decode over the preamble path (or vice versa).
+    // Only `complete` consults it -- the header path's frames_received
+    // is a contiguous decoded count that genuinely finishes at the
+    // total, where the blind path's is positional with erasures behind
+    // it. The stall clock watches the same confident-latent metric on
+    // both paths.
     bool blind = false;
     int metric = 0;                 // best progress metric seen
     // When the metric last stopped advancing; unset while it still is.
@@ -242,8 +258,10 @@ struct Pending {
 // The first delivery is also what records the start in `finished`: from
 // then on the preamble search steps over it, so a transmission that was
 // cut off early cannot go on hiding a later one for the rest of its own
-// scheduled duration. The reception stays resumable anyway -- the blind
-// path checks the tracked reception before that list (see decode_loop).
+// scheduled duration. The reception stays resumable anyway, on both
+// paths: the blind path checks the tracked reception before that list,
+// and the header path aims one demodulate at its own preamble when the
+// search finds nothing new (see decode_loop).
 bool deliver(Pending& pending, const Sink& sink, SharedState& state,
              std::deque<std::int64_t>& finished) {
     if (pending.metric <= pending.delivered_metric || !pending.image) return false;
@@ -258,6 +276,7 @@ bool deliver(Pending& pending, const Sink& sink, SharedState& state,
     rec.frames_decoded = pending.frames_decoded;
     rec.n_frames_expected = pending.n_frames_expected;
     rec.saved_path = pending.saved_path;
+    rec.redelivery = !first;
     const std::optional<std::string> saved_path = sink(rec);
 
     pending.delivered_metric = pending.metric;
@@ -318,23 +337,14 @@ DecodeProgress decode_progress(std::span<const double> weights_full) {
     return out;
 }
 
-int frames_in_buffer(std::int64_t start, std::int64_t buf_start, std::int64_t total,
-                     int n_frames) {
+int frames_elapsed(std::int64_t start, std::int64_t total, int n_frames) {
     const std::int64_t frames_start = start + PREAMBLE_SAMPLES + HEADER_SAMPLES;
-    // The first frame still in the buffer (ceil: a frame counts once
-    // its whole span is there) and the last one that has arrived. Both
-    // clamp into [0, n_frames], which is also what makes the negative
-    // cases -- audio older than the transmission, or none of it yet --
-    // come out as the 0 they should be.
-    const std::int64_t before = buf_start - frames_start;
+    // Whole frames since the transmission's first one, clamped into
+    // [0, n_frames] -- which is also what makes the negative case
+    // (none of it has arrived yet) come out as the 0 it should be.
     const std::int64_t elapsed = total - frames_start;
-    const std::int64_t first =
-        before <= 0 ? 0 : (before + FRAME_SAMPLES - 1) / FRAME_SAMPLES;
-    const std::int64_t last = elapsed <= 0 ? 0 : elapsed / FRAME_SAMPLES;
-    const std::int64_t n = n_frames;
-    const std::int64_t lo = std::min(first, n);
-    const std::int64_t hi = std::min(last, n);
-    return static_cast<int>(std::max(std::int64_t{0}, hi - lo));
+    const std::int64_t got = elapsed <= 0 ? 0 : elapsed / FRAME_SAMPLES;
+    return static_cast<int>(std::min<std::int64_t>(got, n_frames));
 }
 
 double poll_wait(const RxConfig& config, double last_cost_s) {
@@ -527,6 +537,35 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
             const std::vector<std::complex<double>> z = dsp::to_baseband(samples);
             found = find_new_reception(modem, samples, z, buf_start, finished_starts,
                                        epsilon, config.drift_track);
+            // A delivered-but-still-open reception is in finished_starts,
+            // so the search above steps over its preamble -- correctly,
+            // for new receptions (a transmission cut off early must not
+            // hide a later one), and fatally for resuming *this* one
+            // over the header path: the blind branch has its own resume
+            // (the `ours` check below) but needs the beacon to decode,
+            // and "blind-locked with the beacon not decoding" is a real
+            // field condition. So when nothing new was found, aim one
+            // demodulate at the tracked reception's own preamble; if the
+            // signal came back, this decode is retrospective over the
+            // whole ring and picks up everything.
+            if (!found && pending &&
+                already_finished(pending->start, finished_starts, epsilon)) {
+                const std::int64_t lo =
+                    std::max<std::int64_t>(0, pending->start - buf_start - epsilon);
+                const std::int64_t hi = std::min<std::int64_t>(
+                    static_cast<std::int64_t>(samples.size()),
+                    pending->start - buf_start + PREAMBLE_SAMPLES + epsilon);
+                if (hi - lo >= PREAMBLE_SAMPLES) {
+                    try {
+                        modem::DemodResult r =
+                            modem.demodulate(samples, window_s(lo, hi),
+                                             config.drift_track);
+                        const std::int64_t start = buf_start + r.preamble_start;
+                        found = FoundReception{std::move(r), start};
+                    } catch (const sync::SyncError&) {
+                    }
+                }
+            }
         } catch (const std::exception&) {
             // One bad poll must not end the session.
             found = std::nullopt;
@@ -540,15 +579,28 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
             mode_name = std::string(r.mode.name);
             n_frames_expected = r.mode.n_frames;
             // `received.sum()`: the frames whose samples are in the
-            // buffer, which is the bar's numerator (see
-            // frames_in_buffer) and, unchanged, the header path's stall
-            // metric.
+            // buffer, which is the bar's numerator here (see
+            // frames_elapsed -- on this path the two agree while
+            // capture is alive, since the preamble was heard).
             frames_received = r.frames_received;
-            frames_decoded = decode_progress(weights_full).frames_decoded;
             callsign = r.callsign;
             snr_db = r.snr_db;
             progress_frac = static_cast<double>(r.frames_received) / r.mode.n_frames;
-            progress_metric = r.frames_received;
+            // The stall/delivery metric is the confident-latent count
+            // on *both* paths -- one unit, because pending->metric and
+            // delivered_metric compare across polls and a reception can
+            // switch paths between them (a header reception that stalls
+            // and resumes blind, or the reverse). The header path used
+            // to feed frames_received here, and a frame count against a
+            // latent count let a ~14-frame blind resume outrank a
+            // 300-frame delivered picture. It also gates delivery on
+            // decoded content rather than buffer coverage, which is
+            // what keeps a spurious lock in noise from being
+            // *delivered* as a picture of noise at its stall or
+            // deadline.
+            const DecodeProgress dp = decode_progress(weights_full);
+            progress_metric = dp.metric;
+            frames_decoded = dp.frames_decoded;
             reception_start = found->start;
         } else {
             // Fold whatever is new since the last poll into the running
@@ -657,9 +709,9 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
                     frames_decoded = dp.frames_decoded;
                     const int n_display =
                         n_frames_expected ? *n_frames_expected : kMaxModeFrames;
-                    frames_received = frames_in_buffer(
-                        *reception_start, buf_start,
-                        static_cast<std::int64_t>(total), n_display);
+                    frames_received = frames_elapsed(
+                        *reception_start, static_cast<std::int64_t>(total),
+                        n_display);
                     progress_frac = static_cast<double>(*frames_received) / n_display;
                 }
             }
@@ -720,8 +772,23 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
             const auto deadline_frames =
                 static_cast<std::int64_t>(n_frames_expected ? *n_frames_expected
                                                             : kMaxModeFrames);
-            pending->deadline_abs = pending->start + PREAMBLE_SAMPLES + HEADER_SAMPLES +
-                                    deadline_frames * FRAME_SAMPLES;
+            const std::int64_t deadline_abs = pending->start + PREAMBLE_SAMPLES +
+                                              HEADER_SAMPLES +
+                                              deadline_frames * FRAME_SAMPLES;
+            if (deadline_abs != pending->deadline_abs) {
+                pending->deadline_abs = deadline_abs;
+                // Its wall-clock shadow, anchored here and only here --
+                // see Pending::deadline_wall for why re-anchoring it
+                // every poll would defeat it.
+                const double remaining_s =
+                    static_cast<double>(deadline_abs -
+                                        static_cast<std::int64_t>(total)) / FS +
+                    config.end_grace;
+                pending->deadline_wall =
+                    Clock::now() +
+                    std::chrono::duration_cast<Clock::duration>(
+                        std::chrono::duration<double>(remaining_s));
+            }
             pending->blind = !found;
             if (progress_metric > pending->metric) {
                 pending->metric = progress_metric;
@@ -783,34 +850,25 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
         // of the poll entirely, is why a reception in that state could
         // never satisfy any completion test however long it sat.
         //
-        // Or its decoded progress stopped advancing. This used to be
+        // Or its decoded progress stopped advancing. The metric is the
+        // confident-latent count on both paths (see decode_progress),
+        // so on the header path this fires on a fade -- delivering
+        // promptly, exactly as the blind path does -- and on a capture
+        // that died mid-reception, where the same audio decodes to the
+        // same latents forever, the count never reaches anything, and
+        // `total` has stopped so the buffer deadline is unreachable
+        // (the wall-clock shadow is what retires it). This used to be
         // blind-only, on the grounds that a spurious preamble-shaped
         // lock in noise goes on decoding the same handful of frames for
         // as long as it is looked at, and that ending *that* on a stall
         // turns a false lock into an autosaved picture of noise (see
-        // test_noise_produces_nothing). Neither half of that argument
-        // survives what the two numbers actually measure.
-        //
-        // The header path's frames_received is `received.sum()`, and
-        // `received[f]` is true for every frame whose samples are in
-        // the buffer -- signal or noise, faded or clean (see
-        // modem::Modem::demodulate). It is buffer coverage, not signal.
-        // So it climbs right through a fade, it climbs through the
-        // noise that follows a transmitter cutting off early (which is
-        // why *that* case ends on `complete` at the transmission's
-        // scheduled end rather than needing a stall at all), and a
-        // false lock in noise climbs with it. The one thing that stops
-        // it is the buffer not growing -- capture unplugged, the stream
-        // dead, the host no longer delivering callbacks -- and there
-        // the header path had no test that could ever fire: it goes on
-        // decoding, so `!decoded` is false; it never reaches its frame
-        // count; and `total` has stopped, so the deadline below is
-        // unreachable by construction. It sat in Receiving forever,
-        // which is the hang this whole record exists to close, still
-        // open on one path.
-        //
-        // And a stall no longer ends a reception -- it delivers one and
-        // keeps it -- so the distinction has nothing left to protect.
+        // test_noise_produces_nothing). What protects against that is
+        // not the stall's reach but the delivery gate: a stall (or a
+        // deadline) delivers nothing unless confident latents were
+        // decoded, and a false lock in noise has essentially none --
+        // where the buffer-coverage count the header path used to feed
+        // this clock climbed for noise exactly as for signal, and would
+        // have *delivered* the noise at the deadline.
         const bool no_progress = !decoded || !advanced;
         if (no_progress) {
             if (!pending->stable_since) pending->stable_since = Clock::now();
@@ -833,10 +891,16 @@ void decode_loop(RingBuffer& ring, const Decoder& decode, SharedState& state,
                              seconds_since(*pending->stable_since) >= config.end_grace;
         // Retirement is the transmitter's own clock, not ours: its
         // frame count is in, or the buffer holds audio past the point
-        // where its last frame could still be arriving. Nothing else
-        // drops the record -- see `Pending`.
+        // where its last frame could still be arriving. The wall-clock
+        // shadow is for the one case where the buffer's clock has
+        // stopped -- capture died mid-reception, so `total` froze below
+        // the deadline and would hold the record (and `once`) in
+        // Waiting forever. While capture is alive the buffer deadline
+        // fires first by construction (the shadow trails it by
+        // end_grace). Nothing else drops the record -- see `Pending`.
         const bool retire =
-            complete || static_cast<std::int64_t>(total) >= pending->deadline_abs;
+            complete || static_cast<std::int64_t>(total) >= pending->deadline_abs ||
+            (pending->deadline_wall && Clock::now() >= *pending->deadline_wall);
 
         if (!retire) {
             if (stalled) {

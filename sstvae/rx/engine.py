@@ -21,7 +21,7 @@ against `_Pending`, the tracked reception retained *across* polls, so
 that none of them depends on the current poll having produced a decode
 at all; see `_Pending` for why that is the whole ballgame, and
 `_decode_progress` for what "progress" counts as -- which is not what
-the progress bar shows, deliberately (`_frames_in_buffer`).
+the progress bar shows, deliberately (`_frames_elapsed`).
 
 `decode_loop_low_cpu` is a cheaper variant that drops the blind fallback
 (and with it retrospective mid-stream decoding); see its docstring.
@@ -110,44 +110,45 @@ def _decode_progress(weights_full: np.ndarray) -> tuple[int, int]:
     than as it -- a fill fraction reads as a completion percentage and
     is not one, since the erasures both paths live with (a fade, or
     simply not having heard the start) hold it down permanently. What
-    fills is `_frames_in_buffer`. The interleaver is why the two differ
+    fills is `_frames_elapsed`. The interleaver is why the two differ
     at all: each frame's latents are scattered across the whole picture,
     so a latent count answers "how much" and only a frame index answers
     "how far".
     """
     good = weights_full > PROGRESS_WEIGHT_THRESHOLD
+    frame_of = framing.frame_of_latent()
     seen = np.zeros(MODES["C"].n_frames, dtype=bool)
-    seen[framing.frame_of_latent()[good]] = True
+    # frame_of is -1 for the never-transmitted dropped latents, and numpy
+    # would happily wrap that to the *last* frame. The C++ mirror guards
+    # `f >= 0`; the metric still counts every confident latent, dropped
+    # slot or not, exactly as the C++ does.
+    seen[frame_of[good & (frame_of >= 0)]] = True
     return int(np.count_nonzero(good)), int(np.count_nonzero(seen))
 
 
-def _frames_in_buffer(start: int, buf_start: int, total: int, n_frames: int) -> int:
-    """How many of a transmission's frames have arrived: the progress
+def _frames_elapsed(start: int, total: int, n_frames: int) -> int:
+    """How far through its schedule a transmission has got: the progress
     bar's numerator, and pure arithmetic on buffer positions.
 
     This is what the bar should show, because it is the only one of the
     available numbers that climbs with the clock rather than with the
-    decoder's luck. The header path already reported exactly this --
+    decoder's luck. The header path already reported nearly this --
     `DemodResult.frames_received` is `received.sum()`, and `received[f]`
     is set for every frame whose samples are in the buffer, signal or
     noise -- so this is that number generalized to the blind path, which
     had been showing how far its furthest *decoded* frame reached and so
     stalled on the erasures that are its normal state.
 
-    `buf_start` is in it because a blind reception can begin before the
-    audio does: joining a transmission late leaves its early frames
-    permanently unavailable, and a bar that starts at 40% and fills is
-    honest where one that starts at 0 and can never reach 100 is not.
-    Monotone in practice rather than by construction -- it assumes the
-    ring outlives the longest mode (130 s against 95 s), which is the
-    same assumption the rest of the retrospective decoding rests on.
+    It counts from the transmission's own first frame, not from the
+    audio we happened to capture: joining a transmission late leaves its
+    early frames permanently unavailable, and a bar that starts at 60%
+    and fills to 100% is honest where one that starts at 0 and can never
+    reach 100 is not. The frames the join missed show up instead as the
+    gap against `frames_decoded`, exactly like a fade's.
     """
     frames_start = start + PREAMBLE_SAMPLES + HEADER_SAMPLES
-    first = -(-(buf_start - frames_start) // FRAME_SAMPLES)  # ceil
-    last = (total - frames_start) // FRAME_SAMPLES
-    lo = min(max(first, 0), n_frames)
-    hi = min(max(last, 0), n_frames)
-    return int(max(0, hi - lo))
+    elapsed = (total - frames_start) // FRAME_SAMPLES
+    return int(min(max(elapsed, 0), n_frames))
 
 
 @dataclass
@@ -227,13 +228,27 @@ class _Pending:
 
     start: int  # absolute (ring-buffer-coordinate) preamble-start position
     deadline_abs: int
+    # `deadline_abs` translated to wall time when it was computed, plus
+    # end_grace. The buffer-position deadline is the transmitter's clock
+    # and is right whenever capture is alive -- but it is measured
+    # against `total`, so if capture dies mid-reception `total` freezes
+    # below it and it becomes unreachable by construction: the loop
+    # would sit in "waiting" forever with the picture already delivered,
+    # the same indefinite-hang shape all of this exists to close. The
+    # wall clock keeps running when the buffer does not. Anchored when
+    # `deadline_abs` is set (or tightened by a later-learned mode),
+    # never re-anchored per poll -- recomputing it from `now` every
+    # decoded poll would push it forever into the future in exactly the
+    # frozen-buffer case it exists for.
+    deadline_wall: float | None = None
     # Whether the *most recent* decode of this reception came from the
     # blind path. Per-poll, not per-reception: a reception first found
-    # blind can later decode over the preamble path (or vice versa), and
-    # the stall-on-no-advance test below must follow the path currently
-    # driving the record -- it exists for the blind path's
-    # retrospective-fill progress and must not fire while the header
-    # path's frames_received is what's advancing.
+    # blind can later decode over the preamble path (or vice versa).
+    # Only `complete` consults it -- the header path's frames_received
+    # is a contiguous decoded count that genuinely finishes at the
+    # total, where the blind path's is positional with erasures behind
+    # it. The stall clock watches the same confident-latent metric on
+    # both paths.
     blind: bool = False
     metric: int = 0  # best progress metric seen; see _decode_progress
     stable_since: float | None = None  # when the metric last stopped advancing
@@ -265,10 +280,11 @@ class Reception:
     mode_name: str | None
     callsign: str
     snr_db: float
-    # How much of the transmission arrived, and how much of it actually
-    # decoded. The first is the progress bar's numerator and climbs with
-    # the clock; the second is a fill, and the gap between them is what
-    # a fade costs. See _frames_in_buffer and _decode_progress.
+    # How far through its schedule the transmission got, and how much of
+    # it actually decoded. The first is the progress bar's numerator and
+    # climbs with the clock; the second is a fill, and the gap between
+    # them is what a fade -- or joining late -- costs. See
+    # _frames_elapsed and _decode_progress.
     frames_received: int | None
     frames_decoded: int | None
     n_frames_expected: int | None
@@ -278,6 +294,14 @@ class Reception:
     # there rather than adding a second picture** -- one transmission is
     # one file, one gallery entry, one notification.
     saved_path: str | None = None
+    # True on every delivery after the first, whether or not the sink
+    # chose to save. `saved_path` cannot carry this by itself: a sink
+    # that declined to save (a GUI with autosave off) returns no path,
+    # and a redelivery would then read as a brand-new reception -- two
+    # "reception complete" records for one transmission. `saved_path`
+    # says where to write; this says whether it is the same reception
+    # again.
+    redelivery: bool = False
 
 
 @dataclass
@@ -290,9 +314,9 @@ class SharedState:
     # open for the rest of its frames). See _Pending.
     status: str = "listening"
     mode_name: str | None = None
-    # frames_received is the frames that have arrived (what the bar
-    # shows); frames_decoded is how many of them carried confident data
-    # (shown beside it, never as it). See _frames_in_buffer.
+    # frames_received is how far the transmission has got (what the bar
+    # shows); frames_decoded is how many frames carried confident data
+    # (shown beside it, never as it). See _frames_elapsed.
     frames_received: int | None = None
     frames_decoded: int | None = None
     n_frames_expected: int | None = None
@@ -390,8 +414,10 @@ def _deliver(pending: "_Pending", sink, state: "SharedState", finished_starts) -
     `finished_starts` -- from then on the preamble search steps over it,
     so a transmission that was cut off early cannot go on hiding a later
     one for the rest of its own scheduled duration. The reception stays
-    resumable anyway: the blind path checks the tracked reception before
-    that list (see decode_loop).
+    resumable anyway, on both paths: the blind path checks the tracked
+    reception before that list, and the header path aims one demodulate
+    at its own preamble when the search finds nothing new (see
+    decode_loop).
     """
     if pending.metric <= pending.delivered_metric or pending.image is None:
         return False
@@ -406,6 +432,7 @@ def _deliver(pending: "_Pending", sink, state: "SharedState", finished_starts) -
             frames_decoded=pending.frames_decoded,
             n_frames_expected=pending.n_frames_expected,
             saved_path=pending.saved_path,
+            redelivery=not first,
         )
     )
     pending.delivered_metric = pending.metric
@@ -570,6 +597,33 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
             modem, samples, to_baseband(samples), buf_start,
             finished_starts, epsilon_samples, drift_track=config.drift_track,
         )
+        # A delivered-but-still-open reception is in finished_starts, so
+        # the search above steps over its preamble -- correctly, for new
+        # receptions (a transmission cut off early must not hide a later
+        # one), and fatally for resuming *this* one over the header path:
+        # the blind branch has its own resume (the `ours` check below)
+        # but needs the beacon to decode, and "blind-locked with the
+        # beacon not decoding" is a real field condition. So when nothing
+        # new was found, aim one demodulate at the tracked reception's
+        # own preamble; if the signal came back, this decode is
+        # retrospective over the whole ring and picks up everything.
+        if r is None and pending is not None and _already_finished(
+            pending.start, finished_starts, epsilon_samples
+        ):
+            lo = max(0, int(pending.start - buf_start - epsilon_samples))
+            hi = min(
+                len(samples),
+                int(pending.start - buf_start + PREAMBLE_SAMPLES + epsilon_samples),
+            )
+            if hi - lo >= PREAMBLE_SAMPLES:
+                try:
+                    r = modem.demodulate(
+                        samples, search_s=(lo / FS, hi / FS),
+                        drift_track=config.drift_track,
+                    )
+                    reception_start = buf_start + r.preamble_start
+                except SyncError:
+                    pass
         full_ok = r is not None
 
         if full_ok:
@@ -578,15 +632,25 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
             mode_name = r.mode.name
             n_frames_expected = r.mode.n_frames
             # `received.sum()`: the frames whose samples are in the
-            # buffer, which is the bar's numerator (see
-            # _frames_in_buffer) and, unchanged, the header path's stall
-            # metric.
+            # buffer, which is the bar's numerator here (see
+            # _frames_elapsed -- on this path the two agree while
+            # capture is alive, since the preamble was heard).
             frames_received = r.frames_received
             callsign = r.callsign
             snr_db = r.snr_db
             progress_frac = frames_received / n_frames_expected
-            progress_metric = frames_received
-            _, frames_decoded = _decode_progress(weights_full)
+            # The stall/delivery metric is the confident-latent count on
+            # *both* paths -- one unit, because `pending.metric` and
+            # `delivered_metric` compare across polls and a reception can
+            # switch paths between them (a header reception that stalls
+            # and resumes blind, or the reverse). The header path used to
+            # feed frames_received here, and a frame count against a
+            # latent count let a ~14-frame blind resume outrank a
+            # 300-frame delivered picture. It also gates delivery on
+            # decoded content rather than buffer coverage, which is what
+            # keeps a spurious lock in noise from being *delivered* as a
+            # picture of noise at its stall or deadline.
+            progress_metric, frames_decoded = _decode_progress(weights_full)
         else:
             # Fold whatever's new since the last poll into the running
             # accumulator -- O(new samples), not O(window) -- which is
@@ -683,8 +747,8 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
                         n_frames_expected if n_frames_expected is not None
                         else MODES["C"].n_frames
                     )
-                    frames_received = _frames_in_buffer(
-                        reception_start, buf_start, total, n_display
+                    frames_received = _frames_elapsed(
+                        reception_start, total, n_display
                     )
                     progress_frac = frames_received / n_display
             else:
@@ -744,10 +808,18 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
                 n_frames_expected if n_frames_expected is not None
                 else MODES["C"].n_frames
             )
-            pending.deadline_abs = (
+            deadline_abs = (
                 pending.start + PREAMBLE_SAMPLES + HEADER_SAMPLES
                 + n_deadline_frames * FRAME_SAMPLES
             )
+            if deadline_abs != pending.deadline_abs:
+                pending.deadline_abs = deadline_abs
+                # Its wall-clock shadow, anchored here and only here --
+                # see _Pending.deadline_wall for why re-anchoring it
+                # every poll would defeat it.
+                pending.deadline_wall = (
+                    time.time() + (deadline_abs - total) / FS + config.end_grace
+                )
             pending.blind = not full_ok
             if progress_metric > pending.metric:
                 pending.metric = progress_metric
@@ -804,33 +876,24 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
         # of the poll entirely, is why a reception in that state could
         # never satisfy any completion test however long it sat.
         #
-        # Or its decoded progress stopped advancing. This used to be
+        # Or its decoded progress stopped advancing. The metric is the
+        # confident-latent count on both paths (see _decode_progress),
+        # so on the header path this fires on a fade -- delivering
+        # promptly, exactly as the blind path does -- and on a capture
+        # that died mid-reception, where the same audio decodes to the
+        # same latents forever, the count never reaches anything, and
+        # `total` has stopped so the buffer deadline is unreachable (the
+        # wall-clock shadow is what retires it). This used to be
         # blind-only, on the grounds that a spurious preamble-shaped
         # lock in noise goes on decoding the same handful of frames for
         # as long as it is looked at, and that ending *that* on a stall
-        # turns a false lock into an autosaved picture of noise. Neither
-        # half of that argument survives what the two numbers actually
-        # measure.
-        #
-        # The header path's frames_received is `received.sum()`, and
-        # `received[f]` is true for every frame whose samples are in the
-        # buffer -- signal or noise, faded or clean (modem.demodulate).
-        # It is buffer coverage, not signal. So it climbs right through
-        # a fade, it climbs through the noise that follows a transmitter
-        # cutting off early (which is why *that* case ends on `complete`
-        # at the transmission's scheduled end rather than needing a
-        # stall at all), and a false lock in noise climbs with it. The
-        # one thing that stops it is the buffer not growing -- capture
-        # unplugged, the stream dead, the host no longer delivering
-        # callbacks -- and there the header path had no test that could
-        # ever fire: it goes on decoding, so `not decoded` is false; it
-        # never reaches its frame count; and `total` has stopped, so the
-        # deadline below is unreachable by construction. It sat in
-        # "receiving" forever, which is the hang this whole record
-        # exists to close, still open on one path.
-        #
-        # And a stall no longer ends a reception -- it delivers one and
-        # keeps it -- so the distinction has nothing left to protect.
+        # turns a false lock into an autosaved picture of noise. What
+        # protects against that is not the stall's reach but the
+        # delivery gate: a stall (or a deadline) delivers nothing unless
+        # confident latents were decoded, and a false lock in noise has
+        # essentially none -- where the buffer-coverage count the header
+        # path used to feed this clock climbed for noise exactly as for
+        # signal, and would have *delivered* the noise at the deadline.
         no_progress = not decoded or not advanced
         if no_progress:
             if pending.stable_since is None:
@@ -858,9 +921,19 @@ def decode_loop(ring: RingBuffer, model, state: SharedState, config: RxConfig,
         )
         # Retirement is the transmitter's own clock, not ours: its frame
         # count is in, or the buffer holds audio past the point where
-        # its last frame could still be arriving. Nothing else drops the
-        # record -- see _Pending.
-        retire = complete or total >= pending.deadline_abs
+        # its last frame could still be arriving. The wall-clock shadow
+        # is for the one case where the buffer's clock has stopped --
+        # capture died mid-reception, so `total` froze below the
+        # deadline and would hold the record (and `--once`) in "waiting"
+        # forever. While capture is alive the buffer deadline fires
+        # first by construction (the shadow trails it by end_grace).
+        # Nothing else drops the record -- see _Pending.
+        retire = (
+            complete
+            or total >= pending.deadline_abs
+            or (pending.deadline_wall is not None
+                and time.time() >= pending.deadline_wall)
+        )
 
         if not retire:
             if stalled:
@@ -1073,6 +1146,7 @@ def decode_loop_low_cpu(ring: RingBuffer, model, state: SharedState, config: RxC
             state.status = "listening"
             state.mode_name = None
             state.frames_received = None
+            state.frames_decoded = None
             state.n_frames_expected = None
             state.progress_frac = 0.0
             state.callsign = ""

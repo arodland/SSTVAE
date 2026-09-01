@@ -282,62 +282,80 @@ rule is enforced by `tools/check_layering.py`.
   accumulator**: every decode is retrospective over the whole ring, and
   the ring (130 s) outlives the longest mode (95 s), so one re-decode
   after a fade recovers everything and the engine only has to stop
-  refusing to try. Four consequences.
+  refusing to try. Five consequences.
   `Reception.saved_path` says "this one was already delivered here,
   **replace** it" — one transmission is one file, one gallery entry,
   one notification, which is why Android's `save_reception` overwrites
   in place and deliberately does *not* re-arm the consuming
-  `take_saved_picture()`.
+  `take_saved_picture()`. `Reception.redelivery` carries the "same
+  reception again" fact separately, because a sink that declines to
+  save (the desktop with autosave off) returns no path — keyed on the
+  path alone, a redelivery there logged a second "reception complete"
+  for one transmission.
   A dormant reception is in `finished_starts` (so the preamble search
   steps over it and a transmission cut off early cannot go on hiding a
-  later one) but is checked **before** that list on the blind path,
-  which is the whole resume mechanism.
+  later one) but stays resumable on **both** paths: the blind path
+  checks the tracked reception before that list, and the header path
+  aims one targeted demodulate at its own preamble when the span search
+  finds nothing new — without which a reception whose beacon doesn't
+  decode ("blind-locked with the beacon not decoding" is a real field
+  state) was unreachable after one stall.
   Taking over the tracked slot now **delivers what it replaces**
   instead of discarding it, which was survivable only while stalls
   retired receptions quickly.
-  And only an at-least-as-good decode replaces the held picture:
+  Only an at-least-as-good decode replaces the held picture:
   receptions live long enough now to see fade-time decodes, and
   everything but `metric` was last-write-wins.
+  And `deadline_abs` has a **wall-clock shadow** (`deadline_wall`,
+  anchored when the deadline is computed, never per poll): the buffer
+  deadline is measured against `total`, so a capture that dies
+  mid-reception freezes `total` below it and makes it unreachable by
+  construction — the record (and `--once`) then sat in "waiting"
+  forever. While capture is alive the shadow trails the buffer deadline
+  by `end_grace` and never fires.
 
-  **The stall is no longer blind-only, and the old reasoning for that
-  was about the wrong number.** It said a spurious preamble lock in
-  noise decodes the same handful of frames forever, so stalling the
-  header path would autosave a picture of noise. But the header path's
-  `frames_received` is `received.sum()`, and `received[f]` is true for
-  every frame whose *samples are in the buffer* — signal or noise,
-  faded or clean. It is buffer coverage, not signal: it climbs through
-  a fade, it climbs through the noise after a transmitter cuts off
-  (which is why *that* case ends on `complete` at the scheduled end and
-  never needed a stall), and a false lock climbs with it. The one thing
-  that stops it is **the buffer not growing** — capture unplugged, the
-  stream dead — and there the header path had no test that could ever
-  fire (it keeps decoding, it never reaches its count, and `total` has
-  stopped so the deadline is unreachable by construction): the same
-  indefinite "receiving" this record exists to close, left open on one
-  path. `test_noise_produces_nothing` still holds and still matters.
+  **The stall is no longer blind-only, and the stall clock watches one
+  number on both paths: the confident-latent count.** The old
+  blind-only rule said a spurious preamble lock in noise decodes the
+  same handful of frames forever, so stalling the header path would
+  autosave a picture of noise — but what protects against that is the
+  delivery gate, not the stall's reach: nothing is delivered, at a
+  stall or a deadline, without confident latents, and noise has
+  essentially none. The header path briefly fed `received.sum()` in as
+  its metric instead, and that was wrong twice over: it is buffer
+  coverage, true for every frame whose *samples* are in the buffer, so
+  it climbs for noise exactly as for signal (a false lock would have
+  been *delivered* at its deadline), and it made `metric` a frame count
+  on one path and a latent count on the other — `pending.metric` and
+  `delivered_metric` compare across polls, a reception can stall on the
+  header path and resume blind, and a ~2-frame blind decode (hundreds
+  of latents) then outranked a delivered half-transmission (a frame
+  count) and overwrote the better picture.
+  `test_noise_produces_nothing` still holds and still matters.
 
   **Three numbers, and the bar is the one that climbs with the clock**
-  (2026-08-26). `frames_received` is now `_frames_in_buffer` on both
-  paths — the frames of the transmission whose *audio has arrived*,
-  arithmetic on buffer positions with no weights in it — and that is
-  what the bar shows. Beside it, less prominently, `frames_decoded`:
-  how many of those frames carried confident data. And unchanged
-  underneath, the confident-latent *count*, which is the only thing the
-  `--end-grace` stall clock may ever be fed.
+  (2026-08-26). `frames_received` is the bar: on the blind path
+  `_frames_elapsed` — whole frames since the transmission's own first
+  frame, clamped to the mode's count, arithmetic on buffer positions
+  with no weights in it — and on the header path `received.sum()`,
+  which agrees while capture is alive since that path heard the start.
+  Beside it, less prominently, `frames_decoded`: how many frames
+  carried confident data. And underneath, the confident-latent *count*,
+  the only thing the `--end-grace` stall clock may ever be fed.
 
   The bar was previously the blind path's *reach* (the furthest frame
   decoded), which was itself a fix for a fill fraction that could never
   reach 100% — the erasures that path lives with (a fade, or simply not
   having heard the start) hold a fill down permanently. But a reach
   stalls too: it freezes for the whole of a fade, on the display that
-  is supposed to say whether anything is still happening. Buffer
-  position has neither problem, and the header path had been reporting
-  exactly it all along without anyone noticing — `DemodResult.frames_received`
-  is `received.sum()`, and `received[f]` is set for every frame whose
-  samples are in the buffer. So this is the header path's number
-  generalized rather than a new invention, and the reach is retired.
-  A late join starts the bar part-way up (its early frames are gone for
-  good) rather than at zero, which is why `buf_start` is an argument.
+  is supposed to say whether anything is still happening. Elapsed
+  position has neither problem. It deliberately counts from the
+  transmission's first frame, not from the audio we captured: a late
+  join starts the bar part-way up — the transmission *is* 400 frames
+  into its schedule when we join — and still reaches 100%, where a
+  captured-audio count starts at zero and caps below the top forever.
+  The frames a join missed show up as the gap against `frames_decoded`,
+  exactly like a fade's.
 
   **The stall metric is load-bearing and none of the display numbers
   can stand in for it.** Anything positional does not move when
@@ -346,7 +364,9 @@ rule is enforced by `tools/check_layering.py`.
   over the whole legal frame range climbs on buffer growth alone, so a
   reception fed that would never stall at all. `_decode_progress`
   returns the count and `frames_decoded` from one pass over the same
-  mask, and `tests/test_rx_progress.py` pins all three apart.
+  mask (guarding the `frame_of_latent()` -1 slots, which numpy would
+  otherwise wrap to the last frame), and `tests/test_rx_progress.py`
+  pins all three apart.
   `framing.frame_of_latent()` is what makes the decoded count
   computable (the inverse of `slot_range_for_frame`, as one cached
   table): the interleaver scatters each frame across the whole picture,
@@ -355,7 +375,7 @@ rule is enforced by `tools/check_layering.py`.
   blind path frames_received reaching the total says the audio arrived,
   not that it decoded, and retiring on that is the deadline's job (the
   same instant, by construction). Mirrored in `native/core/`, where
-  `rx::decode_progress` and `rx::frames_in_buffer` are public for the
+  `rx::decode_progress` and `rx::frames_elapsed` are public for the
   same reason `poll_wait` is.
 - `sstvae/tx/engine.py` — encode → modulate → PTT → play → unkey.
   **The invariant is that PTT always comes back down**: try/finally
