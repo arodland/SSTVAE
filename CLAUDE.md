@@ -2202,11 +2202,25 @@ not implemented, but the document format is built for them (see
 
 ONNX runtime path complete: the codec is onnxruntime, torch is
 training-only, and `cli`/`listen` install ~263 MB instead of
-~555 MB. The published codec is **v4** (2026-08-14), and `DEFAULT_FILE`
+~555 MB. The published codec is **v5** (2026-09-01), and `DEFAULT_FILE`
 / `DEFAULT_REVISION` point at it in both implementations: six codec
-artifacts plus `v4-decoder-grad-fp32.onnx` for the optimizer. The app
+artifacts plus `v5-decoder-grad-fp32.onnx` for the optimizer. The app
 fetches what it needs on first run, per part — and a station that never
 optimizes never fetches the gradient graph.
+
+**v5 is v4's lineage fine-tuned through the three-pass overshoot
+clipper** (`dists-0-lf` epoch 568 → epoch 598), i.e. the encoder
+adapting to the transmitter that landed with `CLIP_OVERSHOOT`. Measured
+against its own parent, paired seeds, 16 COCO val images, 30 cells of
+(mode × condition): **+0.096 dB PSNR mean, 30/30 cells positive**, 94%
+of paired images, +0.081 / +0.091 / +0.115 for modes A / B / C. It is
+worth *more the longer the transmission*, and least under `mpd` fading
+(+0.04–0.07), which is the one cell to re-measure before quoting.
+Acquisition is untouched — sync counts identical in all 30 cells.
+**The comparison is confounded and says so**: parent and child differ
+by 30 epochs as well as by the clipper, and no control fine-tuned the
+same 30 epochs through the *old* clipper exists, so this establishes
+"v5 is the better checkpoint to ship" and not the cause.
 
 **v4 is the cc12 lineage fine-tuned through the `PROTOCOL_VERSION` 3
 modem** (epoch 536), and the codec revision and the protocol version are
@@ -2215,13 +2229,22 @@ Measured against v3 through the same channel, mode B: **+0.43 dB AWGN
 and +0.42 dB mpp on photographs, +1.14 / +1.27 on non-photo**, and
 +0.64 / +0.65 on a real certificate. Roughly a quarter of that is the
 pilot and headroom change and three quarters the fine-tune. Bumping the
-revision is a **three-place change** — `sstvae/checkpoint.py`'s
+revision is a **four-place change** — `sstvae/checkpoint.py`'s
 `DEFAULT_FILE`, `native/core/checkpoint/checkpoint.hpp`'s
-`DEFAULT_REVISION`, and **`GRAD_REVISIONS` in both**, which is the one
-that gets missed: omitting the new revision there refuses the
-optimizer's gradient fetch on the current codec and reads as an
-unpublished artifact rather than a stale list. Both suites now assert
-`DEFAULT_REVISION` is in `GRAD_REVISIONS`.
+`DEFAULT_REVISION`, **`GRAD_REVISIONS` in both**, and
+**`native/android-app/CMakeLists.txt`**, which pins the two fp16
+artifacts the APK bundles *by sha256 as well as by name*. This note
+said "three-place" until the v5 bump (2026-09-01) and was wrong: the
+Android bundle post-dates it, and nothing cross-checks the list, so the
+count is only as good as whoever last edited it — grep for the old
+revision string rather than trusting it. `GRAD_REVISIONS` is still the
+one most likely to be *silently* wrong: omitting the new revision there
+refuses the optimizer's gradient fetch on the current codec and reads
+as an unpublished artifact rather than a stale list, and both suites
+assert `DEFAULT_REVISION` is in `GRAD_REVISIONS`. The C++
+`GRAD_REVISIONS` is a fixed-size `std::array`, so *its* size is a
+compile error rather than a silent miss — which is the failure mode the
+others should aspire to.
 
 Remaining: run stage-2 fine-tune (start from a good stage-1
 checkpoint, `--lr 1e-4`) — note pre-beacon checkpoints remain
