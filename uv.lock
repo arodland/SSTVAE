@@ -3373,7 +3373,7 @@ wheels = [
 
 [[package]]
 name = "sstvae"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' or (extra == 'extra-6-sstvae-dev' and extra == 'extra-6-sstvae-train')" },
