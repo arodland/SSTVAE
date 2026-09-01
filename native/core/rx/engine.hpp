@@ -11,13 +11,15 @@
 // from-here-on.
 //
 // A reception is finished when a fully-synced decode reports all its
-// frames, when decoded progress stops advancing for `end_grace`
-// seconds, or when the buffer holds audio past the point where the last
+// frames, or when the buffer holds audio past the point where the last
 // frame of that transmission could still be arriving -- whichever comes
-// first. All three run against the tracked reception retained *across*
-// polls (`Pending`, in the .cpp), so none of them depends on the current
-// poll having produced a decode at all; see `Pending` for why that is
-// the whole ballgame.
+// first. Progress stopping for `end_grace` seconds does not finish it:
+// it *delivers* it, so autosave never waits on a signal that may not
+// come back, and leaves it tracked until its scheduled end so a fade it
+// recovers from still contributes. All of it runs against the tracked
+// reception retained *across* polls (`Pending`, in the .cpp), so none of
+// it depends on the current poll having produced a decode at all; see
+// `Pending` for why that is the whole ballgame.
 //
 // Headless, and knows nothing about audio devices or any UI: it reads a
 // `RingBuffer` somebody else is filling, publishes live status into a
@@ -129,51 +131,63 @@ struct RxConfig {
 // asserting on latency instead of on the decision.
 double poll_wait(const RxConfig& config, double last_cost_s);
 
-// (stall metric, progress fraction) for one blind decode. Exposed for
+// (stall metric, frames decoded) for one decode's weights. Exposed for
 // the same reason `poll_wait` is: it is arithmetic, and the alternative
 // is inferring it from a whole decode run.
 //
-// Two different questions, deliberately answered by two different
-// numbers. The metric is the count of confidently-received latents (see
-// count_confident in the .cpp for why confidence is what makes it
-// usable as a stall detector). The fraction is how far *into* the
-// transmission we have got -- the last frame that decoded, over the
-// frames expected -- and is not that count over the total. A count
-// reads as a completion percentage and is not one: the erasures this
-// path lives with (a fade, or simply not having heard the start) hold
-// it down permanently, so a reception already at the transmission's
-// last frame reports 70% and the bar never fills. The interleaver is
-// why the two differ at all -- each frame's latents are scattered
-// across the whole picture, so only the frame index says "how far".
+// The **metric** is the count of confidently-received latents (see
+// decode_progress in the .cpp for why confidence is what makes it
+// usable). **This is the number the stall clock watches, and nothing
+// else may be substituted for it**: anything positional does not move
+// when retrospective decoding fills in frames behind the furthest one,
+// and any count over the *whole* legal frame range climbs on buffer
+// growth alone, so a reception fed either would never stall or never
+// stop stalling.
 //
-// `n_frames_expected` is the denominator: the beacon's mode field
-// (PROTOCOL_VERSION 4) names the transmission's real frame count, so
-// the caller passes that when the beacon's mode index is one it knows,
-// and mode C's count -- the longest, the pre-mode-field assumption --
-// when it isn't.
-// `reach` is the fraction's own numerator -- one past the furthest
-// frame confidently decoded -- returned separately because it is what
-// the blind path reports as frames_received: every status line formats
-// the frames pair and the percentage together, so leaving
-// frames_received unset froze one indicator next to the other once the
-// beacon's mode field supplied n_frames_expected. It is a *position*,
-// not a count of frames actually held, which is why a blind reception
-// must never be treated as complete just because its reach hit the
-// last frame (see decode_loop's `complete` test).
-struct BlindProgress {
+// **frames_decoded** is how many of the transmission's frames carried
+// confident data. It is a *fill*, and it is what a UI shows beside the
+// progress bar rather than as it: a fill reads as a completion
+// percentage without being one, since the erasures both paths live with
+// (a fade, or simply not having heard the start) hold it down
+// permanently. The interleaver is why the two differ at all -- each
+// frame's latents are scattered across the whole picture, so a latent
+// count answers "how much" and only a frame index answers "how far".
+struct DecodeProgress {
     int metric = 0;
-    double frac = 0.0;
-    int reach = 0;
+    int frames_decoded = 0;
 };
-BlindProgress blind_progress(std::span<const double> weights_full,
-                             int n_frames_expected);
+DecodeProgress decode_progress(std::span<const double> weights_full);
+
+// How far through its schedule a transmission has got: the progress
+// bar's numerator, and pure arithmetic on buffer positions.
+//
+// This is what the bar shows, because it is the only one of the
+// available numbers that climbs with the clock rather than with the
+// decoder's luck. The header path already reported nearly this --
+// `DemodResult::frames_received` counts every frame whose samples are
+// in the buffer, signal or noise -- so this is that number generalized
+// to the blind path, which had been showing how far its furthest
+// *decoded* frame reached and so stalled on the erasures that are its
+// normal state.
+//
+// It counts from the transmission's own first frame, not from the audio
+// we happened to capture: joining a transmission late leaves its early
+// frames permanently unavailable, and a bar that starts at 60% and
+// fills to 100% is honest where one that starts at 0 and can never
+// reach 100 is not. The frames the join missed show up instead as the
+// gap against frames_decoded, exactly like a fade's.
+int frames_elapsed(std::int64_t start, std::int64_t total, int n_frames);
 
 // The `threading.Event` the reference stops on. Shared with the
 // transmitter, which needs the same primitive for its cancel flag and
 // its watchdog; the name stays because "stop flag" is what it is here.
 using StopFlag = util::Event;
 
-enum class Status { Listening, Receiving, Done };
+// Waiting is a reception that lost sync and has already been delivered,
+// but whose scheduled end has not arrived: neither receiving a signal
+// (there isn't one) nor idle (a picture is still open for the rest of
+// its frames). See `Pending` in the .cpp.
+enum class Status { Listening, Receiving, Waiting, Done };
 
 const char* status_name(Status s);
 
@@ -185,8 +199,28 @@ struct Reception {
     std::optional<std::string> mode_name;
     std::string callsign;
     double snr_db = 0.0;
+    // How far through its schedule the transmission got, and how much
+    // of it actually decoded. The first is the progress bar's numerator
+    // and climbs with the clock; the second is a fill, and the gap
+    // between them is what a fade -- or joining late -- costs. See
+    // frames_elapsed and decode_progress.
     std::optional<int> frames_received;
+    std::optional<int> frames_decoded;
     std::optional<int> n_frames_expected;
+    // Set when this same reception has already been delivered once, to
+    // the path named here: a fade ended it early, it recovered before
+    // its scheduled end, and this is the better decode. **Replace what
+    // is there rather than adding a second picture** -- one
+    // transmission is one file, one gallery entry, one notification.
+    std::optional<std::string> saved_path;
+    // True on every delivery after the first, whether or not the sink
+    // chose to save. saved_path cannot carry this by itself: a sink
+    // that declined to save (a GUI with autosave off) returns no path,
+    // and a redelivery would then read as a brand-new reception -- two
+    // "reception complete" records for one transmission. saved_path
+    // says where to write; this says whether it is the same reception
+    // again.
+    bool redelivery = false;
 };
 
 // What the loop publishes for a UI to display.
@@ -198,7 +232,11 @@ struct Reception {
 struct Progress {
     Status status = Status::Listening;
     std::optional<std::string> mode_name;
+    // frames_received is how far the transmission has got (what the bar
+    // shows); frames_decoded is how many frames carried confident data
+    // (shown beside it, never as it). See frames_elapsed.
     std::optional<int> frames_received;
+    std::optional<int> frames_decoded;
     std::optional<int> n_frames_expected;
     double progress_frac = 0.0;
     std::string callsign;

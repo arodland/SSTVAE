@@ -419,7 +419,15 @@ std::optional<std::string> ReceivePanel::save_reception(
     }
     const std::string stem =
         settings::format_filename(config.receive.filename_template, fields);
-    const fs::path path = unique_path(out_dir / (stem + ".png"));
+    // A reception that recovered after a fade comes back with the path
+    // its first delivery went to: overwrite that, so one transmission
+    // stays one file rather than leaving the operator to work out which
+    // of two pictures is the better one. The audio beside it is
+    // rewritten for the same reason -- the ring now holds more of the
+    // transmission than it did.
+    const fs::path path = reception.saved_path
+                              ? fs::path(*reception.saved_path)
+                              : unique_path(out_dir / (stem + ".png"));
 
     images::Picture image = reception.image;
     if (const auto size = rx::parse_size(config.receive.save_size)) {
@@ -506,10 +514,33 @@ void ReceivePanel::refresh_status() {
             text = tr("Receiving (blind sync): %1%")
                        .arg(100.0 * progress.progress_frac, 0, 'f', 0);
         }
+        // The frames pair says how much of the transmission has
+        // arrived; this says how much of it actually decoded. They come
+        // apart in a fade, and the difference is the only visible
+        // warning that a picture is filling in with erasures.
+        if (progress.frames_decoded && progress.n_frames_expected.value_or(0) > 0) {
+            text += SEP + tr("decoded %1%")
+                              .arg(100.0 * *progress.frames_decoded /
+                                       *progress.n_frames_expected,
+                                   0, 'f', 0);
+        }
         text += SEP + style::fmt_snr_db(progress.snr_db);
         if (!progress.callsign.empty()) {
             text += SEP + tr("de %1").arg(QString::fromStdString(progress.callsign));
         }
+    } else if (progress.status == rx::Status::Waiting) {
+        // Saved already, and still open: if the signal comes back
+        // before the transmission's scheduled end, the rest of it goes
+        // into that same picture.
+        text = tr("Lost sync — waiting for the rest");
+        if (progress.mode_name) {
+            text += tr(" of mode %1")
+                        .arg(QString::fromStdString(*progress.mode_name));
+        }
+        // Deliberately no filename: the card and the log already carry
+        // it, and `last_saved_path_` is only updated when something is
+        // delivered -- so a reception with nothing worth delivering yet
+        // would name the *previous* picture here.
     } else {
         text = tr("Complete") + SEP + style::fmt_snr_db(progress.snr_db);
         if (last_saved_path_) {
@@ -545,7 +576,13 @@ void ReceivePanel::on_reception(const QString& saved_path) {
     // The one durable record of a completed reception: mode, callsign,
     // SNR, frame count and the *full* saved path -- which was previously
     // shown only in a 5-second status bar flash before this line existed.
-    QString line = tr("reception complete");
+    // A replacement is the same reception delivered again with more of
+    // it decoded, so it says so rather than reading as a second picture.
+    // On `redelivery`, not on saved_path: with autosave off the sink
+    // never returns a path, and a redelivery keyed on the path would
+    // log two "reception complete" lines for one transmission.
+    const bool replaced = reception->redelivery;
+    QString line = replaced ? tr("reception updated") : tr("reception complete");
     if (reception->mode_name) {
         line += tr(": mode %1").arg(QString::fromStdString(*reception->mode_name));
     }
@@ -556,6 +593,12 @@ void ReceivePanel::on_reception(const QString& saved_path) {
         line += tr(", %1/%2 frames")
                     .arg(reception->frames_received.value_or(0))
                     .arg(*reception->n_frames_expected);
+        if (reception->frames_decoded) {
+            line += tr(", %1% decoded")
+                        .arg(100.0 * *reception->frames_decoded /
+                                 *reception->n_frames_expected,
+                             0, 'f', 0);
+        }
     }
     if (!std::isnan(reception->snr_db)) {
         line += tr(", %1").arg(style::fmt_snr_db(reception->snr_db));
@@ -580,6 +623,12 @@ void ReceivePanel::on_reception(const QString& saved_path) {
         card += SEP + tr("%1/%2 frames")
                           .arg(reception->frames_received.value_or(0))
                           .arg(*reception->n_frames_expected);
+        if (reception->frames_decoded) {
+            card += SEP + tr("%1% decoded")
+                              .arg(100.0 * *reception->frames_decoded /
+                                       *reception->n_frames_expected,
+                                   0, 'f', 0);
+        }
     }
     if (!saved_path.isEmpty()) {
         card += SEP + QString::fromStdString(

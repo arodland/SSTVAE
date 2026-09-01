@@ -331,6 +331,11 @@ void Listener::stop() {
 QString Listener::plain_status() const {
     const rx::Progress p = Session::instance().progress();
     if (p.status == rx::Status::Done) return QStringLiteral("Picture complete");
+    if (p.status == rx::Status::Waiting) {
+        // The picture is already saved; the reception stays open until
+        // the transmission's scheduled end in case the signal returns.
+        return QStringLiteral("Lost sync — waiting for the rest");
+    }
     if (p.status != rx::Status::Receiving) return {};
 
     QString out = QStringLiteral("Receiving a picture");
@@ -362,6 +367,12 @@ QString Listener::status() const {
         out += QStringLiteral("\nframes %1").arg(*p.frames_received);
         if (p.n_frames_expected.value_or(0) > 0) {
             out += QStringLiteral("/%1").arg(*p.n_frames_expected);
+            // Arrived against decoded: the gap is what a fade cost.
+            if (p.frames_decoded) {
+                out += QStringLiteral("   decoded %1%")
+                           .arg(100.0 * *p.frames_decoded / *p.n_frames_expected,
+                                0, 'f', 0);
+            }
         }
     }
     if (p.mode_name) {

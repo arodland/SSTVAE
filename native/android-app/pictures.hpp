@@ -40,6 +40,11 @@ struct PictureEntry {
     QString mode;
     double snr_db = 0.0;
     int frames_received = 0;
+    // Frames that carried confident data, against frames_received's
+    // "frames whose audio arrived". Absent in sidecars written before
+    // the field existed, which read back as 0 and are shown as unknown
+    // rather than as nothing decoded.
+    int frames_decoded = 0;
     int frames_expected = 0;
 };
 
