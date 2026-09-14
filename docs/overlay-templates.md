@@ -2,9 +2,9 @@
 
 > Written 2026-09-14, revised the same day after Andrew's review (the
 > report is the measured SNR rather than a typed RSV, and templates may
-> declare **custom fields**). **Not implemented.** A proposal for the UI
-> flow, the storage format and the sequencing; the decisions marked
-> *open* at the end are Andrew's to make before any of it is built.
+> declare **custom fields**). **Approved and not implemented**: every
+> decision below is settled as of 2026-09-14, so this is the spec to
+> build from, in the order "Sequencing" gives.
 
 ## Why now
 
@@ -341,12 +341,12 @@ counterpart on Android.
   flow above). It costs the tuning instrument nothing because it only
   appears in the layout that has already made space for a picture.
 
-## Open
+- **What persists between overs** (Andrew, 2026-09-14): `theircall`
+  and `{snr}` follow the reply target, so they change only when a
+  different reception is replied to, and survive a rotation but not a
+  relaunch — a stale callsign on a reply is exactly the failure this
+  feature exists to avoid. Custom field values are **cleared on
+  Send**: a comment is written for one over, and the one thing worse
+  than retyping it is transmitting last over's comment again.
 
-- **What persists between overs?** Proposed: `theircall` and `{snr}`
-  follow the reply target, so they change only when a different
-  reception is replied to, and survive a rotation but not a relaunch —
-  a stale callsign on a reply is exactly the failure this feature
-  exists to avoid. Custom field values are **cleared on Send**: a
-  comment is written for one over, and the one thing worse than
-  retyping it is transmitting last over's comment again.
+Nothing is open.

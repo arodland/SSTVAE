@@ -1736,7 +1736,8 @@ need when `--native` fails and you want to know *where*.
   reach PAPR (DFT spreading / learned unitary precoder in slot domain).
   Not implemented.
 - `docs/overlay-templates.md` — design for overlay *templates* and the
-  overlay on Android (2026-09-14, **not implemented**). The idea is
+  overlay on Android (2026-09-14, **approved, not implemented** — build
+  from it in the order its "Sequencing" section gives). The idea is
   qsstv's: a template is an ordinary `OverlayDoc` with `{theircall}`-style
   placeholders in its text, the per-over UI is a form derived from which
   placeholders the chosen template uses, and "Reply" on a reception
