@@ -106,3 +106,144 @@ def test_render_returns_rgb():
     out = render(base(), OverlayDoc(items=[TextItem(text="X")]))
     assert out.mode == "RGB"
     assert out.size == (CANVAS_W, CANVAS_H)
+
+
+# --- templates (docs/overlay-templates.md) ------------------------------
+#
+# The three rules and the placeholder grammar, stated against the spec.
+# The C++ implementation is held to the same outputs in
+# tests/test_native_overlay.py; these are what "the same" is measured
+# against, so a rule wrong in both at once still fails here.
+
+from sstvae.overlay import Fields, builtin_templates, format_snr, placeholders, substitute
+from sstvae.overlay.template import BUILTIN_FIELDS, normalize_label, substitute_text
+
+
+def _sub(text, builtin=None, custom=None):
+    return substitute_text(text, Fields(builtin or {}, custom or {}))
+
+
+def test_builtin_placeholders_are_replaced():
+    assert _sub("de {mycall}", {"mycall": "KC2G"}) == "de KC2G"
+
+
+def test_unknown_placeholders_are_left_literally():
+    """Rule 1: a typo must show in the preview, not vanish on the air."""
+    f = {"mycall": "KC2G"}
+    assert _sub("de {mycal}", f) == "de {mycal}"
+    assert _sub("{MYCALL}", f) == "{MYCALL}"
+    assert _sub("{my call}", f) == "{my call}"
+
+
+def test_doubled_braces_are_literal():
+    assert _sub("{{mycall}}", {"mycall": "KC2G"}) == "{mycall}"
+    assert _sub("a {{ b }} c") == "a { b } c"
+
+
+def test_unclosed_and_stray_braces_are_literal():
+    f = {"mycall": "KC2G"}
+    assert _sub("{mycall", f) == "{mycall"
+    assert _sub("} {mycall}", f) == "} KC2G"
+    assert _sub("{{mycall}", f) == "{mycall}"
+
+
+def test_a_line_whose_placeholders_are_all_empty_is_dropped_whole():
+    """Rule 2, including the literal text on that line: `SNR ` goes with
+    its placeholder, since a label with nothing after it is worse than
+    no line."""
+    f = {"theircall": "W1XYZ", "mycall": "KC2G"}
+    assert _sub("{theircall} de {mycall}\nSNR {snr}\n{field Comment}", f) == "W1XYZ de KC2G"
+
+
+def test_a_line_without_placeholders_is_never_touched():
+    assert _sub("CQ CQ CQ\n\nde {mycall}") == "CQ CQ CQ\n"
+
+
+def test_a_line_with_any_filled_placeholder_is_kept_intact():
+    assert _sub("{theircall} de {mycall}", {"mycall": "KC2G"}) == " de KC2G"
+
+
+def test_whitespace_only_and_missing_values_are_empty():
+    assert _sub("{field Comment}", custom={"Comment": "   "}) == ""
+    assert _sub("x\n{field Comment}", custom={"Comment": "   "}) == "x"
+    assert _sub("SNR {snr}") == ""
+    assert _sub("{theircall}\n{snr}") == ""
+
+
+def test_custom_fields_by_label():
+    assert _sub("{field Comment}", custom={"Comment": "TNX FER PIC"}) == "TNX FER PIC"
+    assert _sub("QTH {field Their QTH}", custom={"Their QTH": "Boston"}) == "QTH Boston"
+    assert _sub("QTH {field  Their   QTH }", custom={"Their QTH": "Boston"}) == "QTH Boston"
+    assert normalize_label("  a \t b  ") == "a b"
+
+
+def test_the_same_label_twice_is_one_field():
+    doc = OverlayDoc(items=[TextItem(text="{field Comment}\n{field Comment} again")])
+    assert placeholders(doc).custom == ["Comment"]
+    out = substitute(doc, Fields(custom={"Comment": "hi"}))
+    assert out.items[0].text == "hi\nhi again"
+
+
+def test_malformed_field_declarations_are_unknown_placeholders():
+    assert _sub("{field}", custom={"": "x"}) == "{field}"
+    assert _sub("{field }", custom={"": "x"}) == "{field }"
+    assert _sub("{fieldx}") == "{fieldx}"
+
+
+def test_builtin_and_custom_namespaces_do_not_collide():
+    out = _sub("{mycall} {field mycall}", {"mycall": "KC2G"}, {"mycall": "custom"})
+    assert out == "KC2G custom"
+
+
+def test_placeholders_in_first_appearance_order_without_repeats():
+    doc = OverlayDoc(items=[
+        TextItem(text="{snr} {mycall}\n{field Comment} {nonsense}"),
+        ImageItem(),
+        TextItem(text="{mycall} {field QTH} {field Comment}"),
+    ])
+    p = placeholders(doc)
+    assert p.builtin == ["snr", "mycall"]
+    assert p.custom == ["Comment", "QTH"]
+    assert all(name in BUILTIN_FIELDS for name in p.builtin)
+
+
+def test_substitute_returns_a_copy_and_leaves_images_alone():
+    """Rule 3."""
+    doc = OverlayDoc(name="Reply", items=[TextItem(text="{theircall} de {mycall}"), ImageItem()])
+    out = substitute(doc, Fields({"theircall": "W1XYZ", "mycall": "KC2G"}))
+    assert doc.items[0].text == "{theircall} de {mycall}"
+    assert out.items[0].text == "W1XYZ de KC2G"
+    assert isinstance(out.items[1], ImageItem)
+    assert out.name == "Reply"
+
+
+def test_name_round_trips_and_is_omitted_when_empty():
+    assert OverlayDoc.from_json(OverlayDoc(name="CQ").to_json()).name == "CQ"
+    assert "name" not in OverlayDoc().to_dict()
+    assert OverlayDoc.from_dict({"version": 1, "items": [], "name": 7}).name == ""
+
+
+def test_format_snr():
+    assert format_snr(12.4) == "12 dB"
+    assert format_snr(12.5) == "12 dB"  # half to even, like numpy and nearbyint
+    assert format_snr(13.5) == "14 dB"
+    assert format_snr(-2.6) == "-3 dB"
+    assert format_snr(-0.3) == "0 dB"
+    assert format_snr(None) == ""
+
+
+def test_shipped_templates():
+    cq, reply, picture = builtin_templates()
+    assert [d.name for d in (cq, reply, picture)] == ["CQ", "Reply", "Reply with picture"]
+    # Every built-in carries a Comment line; only Reply asks for their call.
+    for doc in (cq, reply, picture):
+        assert placeholders(doc).custom == ["Comment"]
+    assert placeholders(cq).builtin == ["mycall", "grid"]
+    assert placeholders(reply).builtin == ["theircall", "mycall", "snr"]
+    assert picture.items[0].text == reply.items[0].text
+    assert len(picture.items) == 2 and picture.items[1].source == "last_rx"
+
+    filled = substitute(reply, Fields({"theircall": "W1XYZ", "mycall": "KC2G", "snr": "12 dB"}))
+    assert filled.items[0].text == "W1XYZ de KC2G\nSNR 12 dB"
+    filled = substitute(cq, Fields({"mycall": "KC2G"}, {"Comment": "QRZ?"}))
+    assert filled.items[0].text == "CQ CQ CQ\nde KC2G\nQRZ?"

@@ -51,6 +51,17 @@ target_include_directories(test_beacon PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME beacon COMMAND test_beacon)
 set_tests_properties(beacon PROPERTIES TIMEOUT 240)
 
+# Template substitution against the reference's rules, and the shipped
+# templates themselves, which are read from the Python package so the
+# apps and the CLI cannot drift apart on what "Reply" says.
+add_executable(test_overlay_template test_overlay_template.cpp)
+target_link_libraries(test_overlay_template PRIVATE sstvae_core)
+target_include_directories(test_overlay_template PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME overlay_template
+         COMMAND test_overlay_template
+                 ${CMAKE_CURRENT_SOURCE_DIR}/../../sstvae/overlay/templates)
+set_tests_properties(overlay_template PROPERTIES TIMEOUT 60)
+
 add_executable(test_log test_log.cpp)
 target_link_libraries(test_log PRIVATE sstvae_core)
 target_include_directories(test_log PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

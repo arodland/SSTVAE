@@ -108,6 +108,11 @@ Doc from_json(const std::string& text, std::vector<Note>* notes) {
             ")");
     }
 
+    if (const auto it = root.find("name"); it != root.end() && !it->is_null()) {
+        if (it->is_string()) doc.name = it->get<std::string>();
+        else if (notes) notes->push_back({"name", "expected a string"});
+    }
+
     const auto items = root.find("items");
     if (items == root.end() || items->is_null()) return doc;
     if (!items->is_array()) throw std::runtime_error("overlay 'items' is not an array");
@@ -167,7 +172,8 @@ std::string to_json(const Doc& doc, int indent) {
                              {"type", "image"}});
         }
     }
-    const json root = {{"version", doc.version}, {"items", items}};
+    json root = {{"version", doc.version}, {"items", items}};
+    if (!doc.name.empty()) root["name"] = doc.name;
     return indent >= 0 ? root.dump(indent) : root.dump();
 }
 

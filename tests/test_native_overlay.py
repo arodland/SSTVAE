@@ -176,3 +176,99 @@ def test_a_bad_field_does_not_discard_the_whole_document(native):
     assert got["text"] == "keep me"
     assert got["x"] == TextItem().x, "the bad value should leave the default"
     assert any("x" in where for where, _ in notes)
+
+
+# --- templates ----------------------------------------------------------
+#
+# The substitution rules are pure string processing with a spec, so the
+# two implementations are held to *identical* output on a corpus that
+# covers every branch of the grammar: escapes, unknown placeholders,
+# custom labels with odd whitespace, the dropped-line rule in each of its
+# cases, and the shipped templates.
+
+TEMPLATE_CORPUS = [
+    "de {mycall}",
+    "de {mycal}",
+    "{MYCALL} {my call} {}",
+    "{{mycall}} a {{ b }} c",
+    "{mycall",
+    "} {mycall}",
+    "{{mycall}",
+    "{theircall} de {mycall}\nSNR {snr}\n{field Comment}",
+    "CQ CQ CQ\n\nde {mycall}",
+    "{theircall} de {mycall}",
+    "{field Comment}",
+    "x\n{field Comment}",
+    "{theircall}\n{snr}",
+    "QTH {field  Their   QTH }",
+    "{field Comment}\n{field Comment} again",
+    "{field}",
+    "{field }",
+    "{fieldx}",
+    "{mycall} {field mycall}",
+    "{snr} {mycall}\n{field Comment} {nonsense}",
+    "{utc} {date} {mode} {grid} {name}",
+    "{ {mycall} }",
+    "{{{mycall}}}",
+    "trailing newline\n",
+    "",
+]
+
+TEMPLATE_FIELD_SETS = [
+    ({}, {}),
+    ({"mycall": "KC2G"}, {}),
+    ({"theircall": "W1XYZ", "mycall": "KC2G", "snr": "12 dB"}, {"Comment": "TNX"}),
+    ({"mycall": "KC2G"}, {"Comment": "   ", "Their QTH": "Boston", "mycall": "custom"}),
+    ({"utc": "12:34", "date": "2026-09-14", "mode": "B", "grid": "FN31", "name": "Andrew"}, {}),
+]
+
+
+def test_template_substitution_agrees_on_the_corpus(native):
+    from sstvae.overlay import Fields
+    from sstvae.overlay.template import substitute_text
+
+    cpp = _cpp(native)
+    for text in TEMPLATE_CORPUS:
+        for builtin, custom in TEMPLATE_FIELD_SETS:
+            want = substitute_text(text, Fields(builtin, custom))
+            got = cpp.substitute_text(text, builtin, custom)
+            assert got == want, (text, builtin, custom)
+
+
+def test_placeholders_agree_on_the_corpus(native):
+    from sstvae.overlay import placeholders
+
+    cpp = _cpp(native)
+    for text in TEMPLATE_CORPUS:
+        doc = OverlayDoc(items=[TextItem(text=text), ImageItem(), TextItem(text="{mycall}")])
+        want = placeholders(doc)
+        got_builtin, got_custom = cpp.placeholders(doc.to_json())
+        assert (list(got_builtin), list(got_custom)) == (want.builtin, want.custom), text
+
+
+def test_whole_document_substitution_agrees(native):
+    from sstvae.overlay import Fields, builtin_templates, substitute
+
+    cpp = _cpp(native)
+    for doc in builtin_templates():
+        for builtin, custom in TEMPLATE_FIELD_SETS:
+            want = substitute(doc, Fields(builtin, custom)).to_dict()
+            got = json.loads(cpp.substitute(doc.to_json(), builtin, custom))
+            assert got == want, (doc.name, builtin, custom)
+
+
+def test_named_documents_round_trip_through_cpp(native):
+    cpp = _cpp(native)
+    doc = OverlayDoc(name="Reply with picture", items=[TextItem(text="{theircall}")])
+    text, notes = cpp.round_trip(doc.to_json())
+    assert not notes
+    assert json.loads(text) == doc.to_dict()
+    assert OverlayDoc.from_json(text).name == "Reply with picture"
+
+
+def test_format_snr_agrees(native):
+    from sstvae.overlay import format_snr
+
+    cpp = _cpp(native)
+    for value in [None, 0.0, 0.5, 1.5, 2.5, 12.4, 12.5, 13.5, -0.3, -2.5, -2.6, 27.49, 99.5]:
+        assert cpp.format_snr(value) == format_snr(value), value

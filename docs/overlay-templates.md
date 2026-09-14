@@ -319,7 +319,17 @@ counterpart on Android.
 ## Sequencing
 
 1. **`template` module, both implementations, plus the four built-ins.**
-   Pure functions and files; fully tested without Qt.
+   Pure functions and files; fully tested without Qt. **Done
+   2026-09-14**: `sstvae/overlay/template.py` (reference),
+   `native/core/overlay/template.{hpp,cpp}` in `sstvae_core`, `name` on
+   the document in both, the three template files in
+   `sstvae/overlay/templates/` (shipped as package data; the C++ test
+   reads the same files), `test_overlay_template.cpp`, the rule tests in
+   `tests/test_overlay.py` and a corpus parity test in
+   `tests/test_native_overlay.py`. Two details the spec left open and
+   the code settled: a whitespace-only value counts as empty, and a
+   label is normalized by trimming and collapsing whitespace, so
+   `{field  Comment }` is `{field Comment}`.
 2. **Desktop: Template combo, Save as, fields row.** Small, and it
    closes the overlay-lost-on-restart gap on its own.
 3. **Android: overlay ON, template chips and fields on Send, Reply from

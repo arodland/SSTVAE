@@ -118,6 +118,7 @@ add_library(sstvae_core STATIC
   core/optimize/optimize.cpp
   core/optimize/speculative.cpp
   core/overlay/model.cpp
+  core/overlay/template.cpp
   core/sync/sync.cpp
   # Vendored, and the only non-header-only one -- see
   # third_party/easyexif/README.md. Read for JPEG orientation alone.

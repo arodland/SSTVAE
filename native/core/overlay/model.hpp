@@ -81,9 +81,16 @@ struct ImageItem {
 using Item = std::variant<TextItem, ImageItem>;
 
 // An ordered list of items, drawn back to front.
+//
+// `name` is what makes a document a *template* (`overlay/template.hpp`):
+// a saved layout the operator picks by name. Written only when set, so
+// an unnamed document serializes exactly as it did before templates
+// existed, and a template opens as a plain document in any build with
+// this model.
 struct Doc {
     std::vector<Item> items;
     int version = DOC_VERSION;
+    std::string name;
 
     bool empty() const { return items.empty(); }
 };

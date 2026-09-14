@@ -34,6 +34,7 @@
 #include "audio/audio.hpp"
 #include "images/images.hpp"
 #include "overlay/model.hpp"
+#include "overlay/template.hpp"
 #include "settings/settings.hpp"
 #include "modem/modem.hpp"
 #include "ofdm/ofdm.hpp"
@@ -682,6 +683,36 @@ PYBIND11_MODULE(sstvae_native, m) {
                     return py::make_tuple(sstvae::overlay::to_json(doc), out);
                 },
                 py::arg("text"));
+    // Templates (docs/overlay-templates.md): the substitution rules, so
+    // the parity suite can hold this implementation to the reference's
+    // output on a corpus rather than trusting two readings of the doc.
+    using StrMap = std::map<std::string, std::string>;
+    overlay.def(
+        "substitute_text",
+        [](const std::string& text, const StrMap& builtin, const StrMap& custom) {
+            return sstvae::overlay::substitute_text(text, {builtin, custom});
+        },
+        py::arg("text"), py::arg("builtin"), py::arg("custom"));
+    overlay.def(
+        "substitute",
+        [](const std::string& doc_json, const StrMap& builtin, const StrMap& custom) {
+            const auto doc = sstvae::overlay::from_json(doc_json);
+            return sstvae::overlay::to_json(
+                sstvae::overlay::substitute(doc, {builtin, custom}));
+        },
+        py::arg("doc_json"), py::arg("builtin"), py::arg("custom"));
+    overlay.def(
+        "placeholders",
+        [](const std::string& doc_json) {
+            const auto p = sstvae::overlay::placeholders(sstvae::overlay::from_json(doc_json));
+            return py::make_tuple(p.builtin, p.custom);
+        },
+        py::arg("doc_json"));
+    overlay.def(
+        "format_snr",
+        [](std::optional<double> snr_db) { return sstvae::overlay::format_snr(snr_db); },
+        py::arg("snr_db").none(true));
+    overlay.def("normalize_label", &sstvae::overlay::normalize_label, py::arg("label"));
     overlay.attr("CANVAS_W") = sstvae::overlay::CANVAS_W;
     overlay.attr("CANVAS_H") = sstvae::overlay::CANVAS_H;
     overlay.attr("DOC_VERSION") = sstvae::overlay::DOC_VERSION;

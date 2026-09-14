@@ -394,7 +394,15 @@ rule is enforced by `tools/check_layering.py`.
   `ImageItem.source` is a late-bound reference (`"last_rx"` or a path)
   rather than a pasted bitmap, so a saved template keeps meaning "the
   most recent received picture". `item_bbox` is shared with the editor
-  so selection handles can't drift from what is drawn.
+  so selection handles can't drift from what is drawn. `template.py`
+  (2026-09-14, step 1 of `docs/overlay-templates.md`) is the pure
+  string processing that makes a document a template: `{mycall}`-style
+  built-ins, `{field Label}` custom fields, an unknown placeholder left
+  literal, and a line whose placeholders are all empty dropped whole.
+  `OverlayDoc.name` is written only when set, so an unnamed document
+  serializes exactly as before. The shipped templates are data in
+  `sstvae/overlay/templates/` and the C++ test reads those same files,
+  so there is one source of what "Reply" says.
 
 Two rules the deleted GUI established, which the native app inherits
 and which are the reason its panels look the way they do: a composition
