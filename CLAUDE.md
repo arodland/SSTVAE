@@ -1735,6 +1735,15 @@ need when `--native` fails and you want to know *where*.
 - `docs/slot-domain-precoder.md` — design for the mechanism that *can*
   reach PAPR (DFT spreading / learned unitary precoder in slot domain).
   Not implemented.
+- `docs/overlay-templates.md` — design for overlay *templates* and the
+  overlay on Android (2026-09-14, **not implemented**). The idea is
+  qsstv's: a template is an ordinary `OverlayDoc` with `{theircall}`-style
+  placeholders in its text, the per-over UI is a form derived from which
+  placeholders the chosen template uses, and "Reply" on a reception
+  prefills their call from the beacon-decoded sidecar and binds
+  `last_rx` to that picture. Exists because the beacon identifies *this*
+  station and nothing can say whom an over is addressed to. Also
+  records that the desktop persists no overlay at all today.
 - `docs/onnx.md` — the ONNX runtime path, **implemented 2026-07-27**:
   onnxruntime is 53 MB installed against torch's 345 MB, fp32 ONNX is
   the same codec to ~2e-06, and both fp16 and int8 are now essentially
