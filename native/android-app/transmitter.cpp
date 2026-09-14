@@ -1,20 +1,28 @@
 #include "transmitter.hpp"
 
+#include <QDateTime>
+#include <QFile>
+#include <QIODevice>
 #include <QJniEnvironment>
 #include <QJniObject>
 #include <QMetaObject>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QtCore/qcoreapplication_platform.h>
 
 #include <jni.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <filesystem>
+#include <optional>
 
 #include "audio/android/androidaudio.hpp"
 #include "composition.hpp"
 #include "config.hpp"
 #include "dsp/leader.hpp"
+#include "overlay/template_catalog.hpp"
 #include "session.hpp"
 #include "tx/engine.hpp"
 
@@ -67,6 +75,46 @@ const sstvae::config::ModeSpec* find_mode(const QString& name) {
     return nullptr;
 }
 
+// --- templates (docs/overlay-templates.md) ---------------------------
+//
+// The built-ins are a Qt resource -- `RESOURCES` on the `sstvae_android`
+// qml module in CMakeLists.txt -- rather than an Android asset, unlike
+// the codec: three JSON files of a few hundred bytes each shipping
+// twice (Qt resources are per-ABI, same as the model would be) is not
+// the problem the model's `assets/` choice exists to avoid. That keeps
+// this a plain `QFile` read rather than a JNI call into AssetManager.
+// `QFile` wants the resource *path* form (a leading `:`), not the
+// `qrc:` URL scheme QML's own `source` properties use -- passing the
+// latter here opens nothing and every built-in silently vanishes.
+QString builtin_templates_path() {
+    return QStringLiteral(":/qt/qml/SSTVAE/templates/");
+}
+
+std::vector<overlay::Doc> load_builtin_templates() {
+    std::vector<overlay::Doc> out;
+    for (const char* stem : {"cq", "reply", "reply-picture"}) {
+        QFile f(builtin_templates_path() + QLatin1String(stem) + QStringLiteral(".json"));
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        try {
+            out.push_back(overlay::from_json(f.readAll().toStdString()));
+        } catch (const std::exception&) {
+            // A bad built-in is a build problem, not a reason to take
+            // the whole picker down for an operator who cannot fix it.
+        }
+    }
+    return out;
+}
+
+// The operator's own, if any have found their way onto the device --
+// there is no way to *save* one yet (step 4), but a file dropped here
+// by hand or synced over from the desktop reads exactly like one of the
+// built-ins.
+std::filesystem::path user_templates_dir() {
+    return QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+        .toStdString() +
+        "/templates";
+}
+
 }  // namespace
 
 Transmitter::Transmitter(QObject* parent) : QObject(parent) {
@@ -85,6 +133,8 @@ Transmitter::Transmitter(QObject* parent) : QObject(parent) {
     if (find_mode(mode_) == nullptr) mode_ = QStringLiteral("B");
 
     refreshDevices();
+    refreshTemplates();
+    refreshFields();
 
     // A display refresh, like the receive side's. The engine publishes
     // progress from the audio callback and this only reads it.
@@ -249,6 +299,174 @@ void Transmitter::refreshDevices() {
     emit changed();
 }
 
+// --- templates (docs/overlay-templates.md) -----------------------------
+
+void Transmitter::refreshTemplates() {
+    const QString previous = templateNames().value(template_index_);
+
+    templates_.clear();
+    // Index 0: not a file, not loaded from anywhere -- an empty
+    // document is exactly today's "no overlay" behaviour, and it is
+    // what `Composition::template_` already defaults to.
+    templates_.push_back(overlay::Doc());
+    for (overlay::Doc& doc : load_builtin_templates()) {
+        templates_.push_back(std::move(doc));
+    }
+    for (overlay::LoadedTemplate& loaded : overlay::load_templates(user_templates_dir())) {
+        templates_.push_back(std::move(loaded.doc));
+    }
+
+    const int keep = templateIndexForName(previous);
+    template_index_ = keep >= 0 ? keep : 0;
+}
+
+QStringList Transmitter::templateNames() const {
+    QStringList out;
+    for (int i = 0; i < static_cast<int>(templates_.size()); ++i) {
+        // Index 0 has no `name` of its own -- it is never loaded from a
+        // file -- so it is spelled out here rather than left blank in
+        // the chip row.
+        out << (i == 0 ? tr("None") : QString::fromStdString(templates_[i].name));
+    }
+    return out;
+}
+
+int Transmitter::templateIndexForName(const QString& name) const {
+    if (name.isEmpty()) return -1;
+    return templateNames().indexOf(name);
+}
+
+void Transmitter::setTemplateIndex(int index) {
+    if (index < 0 || index >= static_cast<int>(templates_.size())) return;
+    if (index == template_index_) return;
+    template_index_ = index;
+    Composition::instance().set_template(templates_[index]);
+    // Remembered so a manual pick of a {theircall} template -- not only
+    // a tap of Reply itself -- is what the next Reply reopens.
+    const overlay::Placeholders used = overlay::placeholders(templates_[index]);
+    if (std::find(used.builtin.begin(), used.builtin.end(),
+                  std::string("theircall")) != used.builtin.end()) {
+        last_reply_template_index_ = index;
+    }
+    refreshFields();
+    bump();
+}
+
+bool Transmitter::wantsTheirCall() const {
+    if (template_index_ < 0 || template_index_ >= static_cast<int>(templates_.size())) {
+        return false;
+    }
+    const overlay::Placeholders used = overlay::placeholders(templates_[template_index_]);
+    return std::find(used.builtin.begin(), used.builtin.end(),
+                     std::string("theircall")) != used.builtin.end();
+}
+
+void Transmitter::setTheirCall(const QString& c) {
+    if (c == theircall_) return;
+    theircall_ = c;
+    refreshFields();
+    bump();
+}
+
+bool Transmitter::hasReplyTarget() const {
+    return Composition::instance().has_reply_target();
+}
+
+bool Transmitter::hasCustomFields() const {
+    if (template_index_ < 0 || template_index_ >= static_cast<int>(templates_.size())) {
+        return false;
+    }
+    return !overlay::placeholders(templates_[template_index_]).custom.empty();
+}
+
+QString Transmitter::customFieldsLabel() const {
+    if (template_index_ < 0 || template_index_ >= static_cast<int>(templates_.size())) {
+        return tr("Custom fields...");
+    }
+    const std::vector<std::string>& custom =
+        overlay::placeholders(templates_[template_index_]).custom;
+    if (custom.empty()) return tr("Custom fields...");
+    return tr("Custom fields (%1)...").arg(static_cast<int>(custom.size()));
+}
+
+QString Transmitter::templateFieldProblem() const {
+    if (wantsTheirCall() && theircall_.trimmed().isEmpty()) {
+        return tr("Template needs their callsign");
+    }
+    return {};
+}
+
+QStringList Transmitter::customFieldLabels() const {
+    QStringList out;
+    if (template_index_ < 0 || template_index_ >= static_cast<int>(templates_.size())) {
+        return out;
+    }
+    for (const std::string& label : overlay::placeholders(templates_[template_index_]).custom) {
+        out << QString::fromStdString(label);
+    }
+    return out;
+}
+
+QString Transmitter::customFieldValue(const QString& label) const {
+    const auto it = custom_field_values_.find(label.toStdString());
+    return it == custom_field_values_.end() ? QString() : QString::fromStdString(it->second);
+}
+
+void Transmitter::setCustomFieldValue(const QString& label, const QString& value) {
+    custom_field_values_[label.toStdString()] = value.toStdString();
+    refreshFields();
+    bump();
+}
+
+void Transmitter::refreshFields() {
+    overlay::Fields fields;
+    fields.builtin["mycall"] = callsign_.toStdString();
+    fields.builtin["theircall"] = theircall_.trimmed().toStdString();
+    // `{grid}`/`{name}` have no station setting on Android yet -- left
+    // empty, which drops a template line that uses only them (rule 2)
+    // rather than failing to build one at all.
+    const Composition& c = Composition::instance();
+    fields.builtin["snr"] = overlay::format_snr(
+        c.has_reply_target() ? std::optional<double>(c.reply_target_snr_db())
+                              : std::nullopt);
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    fields.builtin["utc"] = now.toString(QStringLiteral("HH:mm")).toStdString();
+    fields.builtin["date"] = now.toString(QStringLiteral("yyyy-MM-dd")).toStdString();
+    fields.builtin["mode"] = mode_.toStdString();
+    if (template_index_ >= 0 && template_index_ < static_cast<int>(templates_.size())) {
+        for (const std::string& label :
+            overlay::placeholders(templates_[template_index_]).custom) {
+            const auto it = custom_field_values_.find(label);
+            if (it != custom_field_values_.end()) fields.custom[label] = it->second;
+        }
+    }
+    Composition::instance().set_fields(std::move(fields));
+    // Not `bump()` here -- every caller already bumps once at the end of
+    // whatever it was doing, and this is called from several of them
+    // (a template switch, a keystroke, a fresh reply target); bumping
+    // here too would double-emit `changed` for each.
+}
+
+void Transmitter::replyTo(const QString& path, const QString& callsign, double snrDb) {
+    Composition::instance().set_reply_target(path.toStdString(), callsign.toStdString(),
+                                              snrDb);
+    theircall_ = callsign;
+
+    // The last {theircall} template used, by Reply or by hand -- or
+    // plain "Reply" the first time. "Reply with picture" is never the
+    // default: the inset is an extra choice the operator makes on
+    // purpose.
+    int index = last_reply_template_index_;
+    if (index < 0) index = templateIndexForName(tr("Reply"));
+    if (index >= 0 && index < static_cast<int>(templates_.size())) {
+        template_index_ = index;
+        Composition::instance().set_template(templates_[index]);
+        last_reply_template_index_ = index;
+    }
+    refreshFields();
+    bump();
+}
+
 // --- the over ---------------------------------------------------------
 
 void Transmitter::loadEncoder() {
@@ -310,8 +528,12 @@ bool Transmitter::canSend() const {
     // stays disabled with the reason on screen. The prompt is something
     // to read once, and it is reached *through* Send -- disabling the
     // button would leave nothing to press to get to it.
+    //
+    // `templateFieldProblem` blocks the same way: an empty {theircall}
+    // is a template refusing to render a hole, and "  de KC2G" on the
+    // air is a broken picture.
     return hasPicture() && encoderReady() && !transmitting() &&
-           cwIdProblem().isEmpty();
+           cwIdProblem().isEmpty() && templateFieldProblem().isEmpty();
 }
 
 QString Transmitter::txStatus() const {
@@ -397,6 +619,21 @@ void Transmitter::send() {
     req.use_ptt = Session::instance().rig_can_key();
     req.output_device = device_ == kSystemDefault ? std::string{} : device_.toStdString();
     Session::instance().stage_transmit(std::move(req));
+
+    // A custom field is written for one over -- a comment, typically --
+    // and the one thing worse than retyping it next time is silently
+    // transmitting last over's again. `theircall` and `{snr}` are not
+    // cleared: those follow the reply target and stay correct until a
+    // different reception is replied to (docs/overlay-templates.md).
+    custom_field_values_.clear();
+    refreshFields();
+    // `previewId` is what the crop view's `Image` actually watches (see
+    // CropView.qml) -- the plain `emit changed()` below reaches every
+    // other property this method touches, but not that one, and without
+    // this the composite shown after Send would keep last over's typed
+    // comment baked into it until some unrelated edit happened to bump
+    // it.
+    bump();
 
     QJniObject ctx = QNativeInterface::QAndroidApplication::context();
     QJniObject::callStaticMethod<void>(kServiceClass, "transmit",

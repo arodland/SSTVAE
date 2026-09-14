@@ -71,6 +71,22 @@ class Listener : public QObject {
     // question about one names the same three words as the other.
     Q_PROPERTY(QString driftTrack READ driftTrack WRITE setDriftTrack NOTIFY changed)
 
+    // --- reply (docs/overlay-templates.md) ---------------------------
+    //
+    // Bound to `hasLiveImage`, not to "a reception happened at some
+    // point": the row this sits on only exists while the live preview
+    // does, and `rx/engine` wipes that preview from shared state about
+    // two seconds after a reception -- the same reason the desktop
+    // keeps a last-reception card. What survives that wipe is
+    // `Session::last_reception()`, not the ephemeral progress the
+    // status line reads elsewhere on this screen, which is why the
+    // callsign and SNR below come from there rather than from
+    // `status()`'s own source.
+    Q_PROPERTY(bool hasReplyTarget READ hasReplyTarget NOTIFY changed)
+    Q_PROPERTY(QString replyCallsign READ replyCallsign NOTIFY changed)
+    Q_PROPERTY(QString replyPath READ replyPath NOTIFY changed)
+    Q_PROPERTY(double replySnrDb READ replySnrDb NOTIFY changed)
+
 public:
     explicit Listener(QObject* parent = nullptr);
     ~Listener() override;
@@ -88,6 +104,10 @@ public:
     bool modelReady() const;
     int liveImageId() const { return live_id_; }
     bool hasLiveImage() const;
+    bool hasReplyTarget() const;
+    QString replyCallsign() const;
+    QString replyPath() const;
+    double replySnrDb() const;
     bool showTechnical() const { return technical_; }
     void setShowTechnical(bool on);
     bool saveToGallery() const { return gallery_; }

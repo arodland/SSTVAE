@@ -364,7 +364,59 @@ counterpart on Android.
    risking the panel's existing Send-enablement logic sight unseen.
 3. **Android: overlay ON, template chips and fields on Send, Reply from
    Pictures and Listen, the reply binding in `Composition`.** This is
-   the step that delivers an addressed reply from a phone.
+   the step that delivers an addressed reply from a phone. **Done
+   2026-09-14, with the same caveat every other Android C++/QML change
+   in this project carries: written and reviewed with no NDK toolchain
+   available, so it has not been compiled** (`docs/android.md` records
+   the identical situation for the Hamlib cross-build and the Java).
+   What exists:
+   - `Composition` gained `set_template`/`template_doc`,
+     `set_fields`/`fields`, and `set_reply_target`/`has_reply_target`/
+     `reply_target_callsign`/`reply_target_snr_db`; `preview()` is now
+     `render(fit(source, framing), substitute(template, fields),
+     last_rx)`, with `last_rx` resolving to the reply target's picture
+     when one is set and to `Session`'s newest reception otherwise —
+     cached by path so a drag or a keystroke does not re-decode a PNG
+     every frame.
+   - `Session` gained `LastReception` (path, callsign, SNR) and
+     `last_reception()`, set from the same `save_reception()` call that
+     writes the sidecar — durable, unlike the ~2 s-lived shared state
+     `rx/engine` publishes, which is what the Listen-tab button above
+     needs to still have something to bind to after that state is gone.
+   - `Transmitter` gained the template chip list, `theirCall`, the
+     custom-field map, `templateFieldProblem` (blocks Send exactly like
+     `cwIdProblem`), and `replyTo()`. The built-ins load from a Qt
+     resource (`RESOURCES` on the `sstvae_android` qml module,
+     aliased to `templates/<name>.json` so the runtime path matches
+     what `QFile` needs — a `qrc:` URL, which is what QML's own
+     `source` properties take, opens nothing there); the operator's own
+     saved templates would load from the app's files directory the same
+     way the desktop reads `folders.template_dir`, except nothing writes
+     one there yet (that is step 4). Custom field values are cleared on
+     Send; `theircall` and `{snr}` are not, and change only on the next
+     Reply.
+   - Reply buttons on Pictures' list delegate, the full-screen viewer,
+     and the Listen tab's status row (gated on `hasLiveImage`, per the
+     "if there's room" flow above) all call the same
+     `Transmitter::replyTo(path, callsign, snrDb)`.
+   - `{grid}`/`{name}` have no station setting on Android yet, unlike
+     the desktop's new Settings > Transmit fields — left empty, which
+     drops a template line that uses only them (rule 2) rather than
+     failing to build one at all. CQ still works with no grid set; it
+     just prints one fewer line. Worth adding if the built-in CQ
+     template turns out to be used on the phone in practice.
+   - Caught while re-verifying the desktop build after this step:
+     `sstvae_copy_builtin_templates` (step 2) resolved its template
+     source path from `CMAKE_CURRENT_SOURCE_DIR`, which inside a CMake
+     function is the *caller's* directory, not the defining file's — so
+     the call from `tests/CMakeLists.txt` (added in step 2, for
+     `test_tx_panel`) looked one directory short and failed the
+     function's own existence check outright. Fixed by capturing the
+     path once in `native/CMakeLists.txt`'s own scope instead of
+     recomputing it inside the function; `native/build-gui`'s full
+     `ctest` (33/33) and `pytest --native` (407 passed) were re-run
+     after the fix and are unaffected otherwise, since nothing else in
+     this step touched `native/core/` or `native/gui/`.
 4. **Android: the template editor screen.** Polish; step 3 works with
    the built-ins and desktop-made files before this exists.
 

@@ -213,8 +213,18 @@ endfunction()
 # the apps ship, so an installed build reads the same three files a
 # Python station would. `overlay::load_builtin_templates` looks for a
 # `templates/` directory next to the executable.
+#
+# **The path is captured here, not recomputed inside the function.** A
+# function body runs with the *caller's* `CMAKE_CURRENT_SOURCE_DIR`, not
+# this file's -- so a call from `tests/CMakeLists.txt` resolved one
+# directory short (`native/tests/../sstvae/...` instead of
+# `native/tests/../../sstvae/...`) and failed the check below outright.
+# `SSTVAE_TEMPLATES_SRC` is set once, in this file's own scope, and
+# `add_subdirectory` scopes see their parent's variables -- so every
+# caller, whichever directory it is in, gets the same answer.
+set(SSTVAE_TEMPLATES_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../sstvae/overlay/templates")
 function(sstvae_copy_builtin_templates target)
-  set(_templates_src "${CMAKE_CURRENT_SOURCE_DIR}/../sstvae/overlay/templates")
+  set(_templates_src "${SSTVAE_TEMPLATES_SRC}")
   file(GLOB _templates "${_templates_src}/*.json")
   if(NOT _templates)
     message(FATAL_ERROR

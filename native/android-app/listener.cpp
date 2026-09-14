@@ -488,6 +488,22 @@ bool Listener::hasLiveImage() const {
     return p.image && p.image->width > 0;
 }
 
+// --- reply (docs/overlay-templates.md) ---------------------------------
+
+bool Listener::hasReplyTarget() const {
+    return hasLiveImage() && !Session::instance().last_reception().path.empty();
+}
+
+QString Listener::replyCallsign() const {
+    return QString::fromStdString(Session::instance().last_reception().callsign);
+}
+
+QString Listener::replyPath() const {
+    return QString::fromStdString(Session::instance().last_reception().path);
+}
+
+double Listener::replySnrDb() const { return Session::instance().last_reception().snr_db; }
+
 void Listener::moveToBackground() {
     QJniObject ctx = QNativeInterface::QAndroidApplication::context();
     if (!ctx.isValid()) return;

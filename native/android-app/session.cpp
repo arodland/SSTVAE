@@ -153,6 +153,12 @@ std::optional<std::string> Session::save_reception(const rx::Reception& r) {
         // either way -- it is a display of the best decode so far, not
         // an event.
         if (!replaced) saved_picture_ = png;
+        // Kept regardless of `replaced`: a fade-time re-decode is still
+        // the same transmission's identity, and its SNR may be the
+        // better-informed one.
+        last_reception_.path = png;
+        last_reception_.callsign = r.callsign;
+        last_reception_.snr_db = r.snr_db;
         std::ostringstream sum;
         sum << (r.callsign.empty() ? "unknown" : r.callsign.c_str());
         if (r.mode_name) sum << "  mode " << *r.mode_name;
@@ -180,6 +186,11 @@ std::optional<std::string> Session::take_saved_picture() {
 std::string Session::last_saved_summary() const {
     std::lock_guard<std::mutex> lk(mu_);
     return saved_summary_;
+}
+
+Session::LastReception Session::last_reception() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return last_reception_;
 }
 
 // **Never runs in this application** -- see `instance()`, which leaks

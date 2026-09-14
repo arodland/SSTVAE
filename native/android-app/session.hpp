@@ -102,6 +102,21 @@ public:
     // exists.
     std::string last_saved_summary() const;
 
+    // The identity of the most recently *delivered* reception, kept
+    // past the engine's own two-second wipe -- for the same reason the
+    // sidecar exists, but structured rather than a formatted line, so a
+    // template's `{theircall}`/`{snr}` (docs/overlay-templates.md) can
+    // be prefilled from it. Empty `path` means nothing has been
+    // received this session; unlike `take_saved_picture()` this is
+    // **not consuming**, since a reply target has to survive being read
+    // more than once (a rotation, a second look at the Reply button).
+    struct LastReception {
+        std::string path;
+        std::string callsign;
+        double snr_db = 0.0;
+    };
+    LastReception last_reception() const;
+
     ModelState model_state() const;
     std::string model_error() const;
     // Bytes received / total for the current download, both 0 when not
@@ -340,6 +355,7 @@ private:
     std::string picture_dir_;
     std::optional<std::string> saved_picture_;
     std::string saved_summary_;
+    LastReception last_reception_;
 
     // Separate lock from `mu_`: the engine thread reads `codec_` on
     // every decode and the model thread writes it once, and neither has
