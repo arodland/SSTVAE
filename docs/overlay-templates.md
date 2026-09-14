@@ -1,8 +1,10 @@
 # Design: overlay templates, and the overlay on Android
 
-> Written 2026-09-14. **Not implemented.** A proposal for the UI flow,
-> the storage format and the sequencing; the decisions marked *open* at
-> the end are Andrew's to make before any of it is built.
+> Written 2026-09-14, revised the same day after Andrew's review (the
+> report is the measured SNR rather than a typed RSV, and templates may
+> declare **custom fields**). **Not implemented.** A proposal for the UI
+> flow, the storage format and the sequencing; the decisions marked
+> *open* at the end are Andrew's to make before any of it is built.
 
 ## Why now
 
@@ -50,37 +52,65 @@ schema does not change and `DOC_VERSION` stays 1; both loaders skip keys
 they do not know, so a template opens as a plain document in any build
 that has the model, and a plain document is a template with no name.
 
-**Placeholders are `{field}` inside `TextItem.text`.** The set is
-closed and small:
+**Placeholders are `{name}` inside `TextItem.text`.** The built-in set
+is closed and small, and every one but `{theircall}` is filled in
+without the operator typing anything:
 
-| Placeholder   | Source                                    |
-|---------------|-------------------------------------------|
-| `{mycall}`    | station setting (exists: `station/callsign`) |
-| `{grid}`      | station setting (new, optional)           |
-| `{name}`      | station setting (new, optional)           |
-| `{theircall}` | per-over field                            |
-| `{rsv}`       | per-over field, the SSTV picture report   |
-| `{utc}`       | time at Send, HH:MM                       |
-| `{date}`      | date at Send, ISO                         |
-| `{mode}`      | the transmit mode                         |
+| Placeholder   | Source                                              |
+|---------------|-----------------------------------------------------|
+| `{mycall}`    | station setting (exists: `station/callsign`)        |
+| `{grid}`      | station setting (new, optional)                     |
+| `{name}`      | station setting (new, optional)                     |
+| `{theircall}` | the reply target's beacon callsign; editable        |
+| `{snr}`       | the reply target's measured SNR, from its sidecar   |
+| `{utc}`       | time at Send, HH:MM                                 |
+| `{date}`      | date at Send, ISO                                   |
+| `{mode}`      | the transmit mode                                   |
+
+**`{snr}` is the report, and it is not typed.** An RSV is a judgement
+the operator has to form and enter; the SNR is a number the receiver
+already measured and wrote into the sidecar beside the callsign
+(`snr_db`, which `PictureList` already exposes). It skips the *visual*
+part of a report, deliberately: a reply that says "SNR 12 dB" is more
+useful to the other station than a "5" typed by someone reading a
+phone at arm's length, and it costs nothing to fill in. Rendered as an
+integer with the unit, `12 dB`; empty when there is no reply target or
+the sidecar has none.
+
+**`{field Label}` declares a custom field.** Anything after `field`
+up to the closing brace is the label — `{field Comment}`,
+`{field Their QTH}`, `{field Visual quality}` — and it is presented to
+the operator as a text box with that label. Two uses, and the second is
+why it is not just a comment box: it is the way to drop a line of
+free-form reply text into a transmission **without editing a
+template**, and it is how a more structured template asks for things
+the app cannot derive, such as a visual quality figure for whoever
+still wants one. The same label twice is one field, substituted in
+both places. Custom fields are **never mandatory**: leave one empty
+and the dropped-line rule below removes its line, so a template
+carrying three optional fields costs nothing when none is filled.
 
 Three rules, all in one pure function `substitute(doc, fields) -> doc`:
 
 1. **An unknown placeholder is left literally in the text.** A typo
    must be visible in the preview, not silently deleted from the air.
    `{{` and `}}` are literal braces, for the one person who wants one.
-2. **A line whose only content is empty placeholders is dropped.** This
-   is the single piece of cleverness and it is what lets one "Reply"
-   template serve with and without a report: `{theircall} de {mycall}`
-   newline `RSV {rsv}` loses its second line when no report is typed.
-   *Only* whole lines, never partial text, so the rule cannot produce
-   a half-sentence.
+2. **A line whose placeholders are all empty is dropped, literal text
+   and all.** This is the single piece of cleverness and it is what
+   makes optional fields optional: `{theircall} de {mycall}` newline
+   `SNR {snr}` newline `{field Comment}` loses its second line on a
+   reply with no measured SNR and its third when no comment is typed.
+   The literal `SNR ` goes with its placeholder, since a label with
+   nothing after it is worse than no line. *Only* whole lines, never
+   partial text, so the rule cannot produce a half-sentence; a line
+   with no placeholders at all is never touched.
 3. **The stored template is never mutated.** Substitution runs on a
    copy at preview and again at Send; the file keeps its holes.
 
-Alongside it, `placeholders(doc) -> set` says which fields a template
-uses. That is what derives the form: no schema, no per-template
-metadata, nothing to keep in sync with the text.
+Alongside it, `placeholders(doc)` lists what a template uses: the
+built-ins it names, and the custom fields with their labels in order
+of first appearance. That is what derives the form: no schema, no
+per-template metadata, nothing to keep in sync with the text.
 
 These live in `native/core/overlay/template.{hpp,cpp}` — string
 processing on the model, **Qt-free, in `sstvae_core`**, so it builds
@@ -96,9 +126,15 @@ to get an editable copy. Four is the whole set:
 - **None** — the picture goes out unmodified. Today's behaviour, and the
   default on Android, so nothing changes for anyone who never touches
   this.
-- **CQ** — `CQ CQ CQ` / `de {mycall}` / `{grid}`, top-left, large.
-- **Reply** — `{theircall} de {mycall}` / `RSV {rsv}`, top-left.
+- **CQ** — `CQ CQ CQ` / `de {mycall}` / `{grid}`, top-left, large,
+  with `{field Comment}` beneath.
+- **Reply** — `{theircall} de {mycall}` / `SNR {snr}` /
+  `{field Comment}`, top-left.
 - **Reply with picture** — Reply plus a `last_rx` inset, bottom-right.
+
+Every built-in carries a Comment line, so the free-form path exists
+from the first run without anyone opening an editor, and costs no
+pixels until something is typed.
 
 User templates are JSON files in `config_dir()/templates/` on the
 desktop and the app's files directory on Android. The same bytes work
@@ -115,11 +151,12 @@ beacon put it in the sidecar `.json` beside every saved picture, and
 `PictureList` exposes it as a role. So a reply should never involve
 typing a callsign the app already knows.
 
-`Composition` gains a **reply target**: a reception's path and its
-callsign. While one is set, `last_rx` resolves to that picture and
-`{theircall}` is prefilled from it (editable — the beacon can be
-absent or garbled, in which case the field is empty and the operator
-types it). With none set, `last_rx` is the newest reception, as today.
+`Composition` gains a **reply target**: a reception's path, its
+callsign and its SNR. While one is set, `last_rx` resolves to that
+picture, `{theircall}` is prefilled from it (editable — the beacon can
+be absent or garbled, in which case the field is empty and the operator
+types it) and `{snr}` is its measured figure. With none set, `last_rx`
+is the newest reception, as today, and `{snr}` is empty.
 The target is runtime state and is not stored in the template, which is
 what keeps a template a template.
 
@@ -132,8 +169,9 @@ what keeps a template a template.
    button on its completion line while the reception is recent, for the
    case where the operator is watching it come in.
 2. Reply switches to Send with the last-used reply template selected
-   ("Reply" or "Reply with picture"), *their call filled in*, and the
-   inset bound to that picture. The preview already shows the composite.
+   ("Reply" or "Reply with picture"), *their call and the SNR filled
+   in*, and the inset bound to that picture. The preview already shows
+   the composite.
 3. The operator keeps the picture already loaded, or picks one, and
    taps Send.
 
@@ -147,11 +185,18 @@ Today: crop view, Choose/Camera, Mode, Send. It gains, in this order:
 - **A template row** — horizontally scrolling chips: None, CQ, Reply,
   Reply with picture, then the user's own. One tap selects; the choice
   persists in QSettings as the last-used template.
-- **The fields the template uses**, and only those: a `theircall` field
-  (uppercase keyboard, with the callsigns of recent receptions offered
-  as completions, since those are the stations one is likely answering)
-  and an `rsv` field when the template names them. A CQ template shows
-  no fields at all.
+- **The fields the template uses**, and only those. `theircall` gets
+  its own line under the chips (uppercase keyboard, with the callsigns
+  of recent receptions offered as completions, since those are the
+  stations one is likely answering), because it is the one field that
+  can block Send. The **custom fields live in a pop-up**: a "Fields…"
+  button, labelled with how many are filled ("Fields (1 of 2)"), opens
+  a sheet of labelled text boxes, one per `{field}` in the order they
+  appear, with Done to close it. A pop-up rather than inline because a
+  template may declare several, the screen is already the picture plus
+  a button, and an empty custom field is the normal state rather than
+  something to keep in view. The button is absent when the template
+  declares none; the built-in None shows neither it nor `theircall`.
 - **The preview is the composite.** `Composition::preview()` becomes
   `render(fit(source, framing), substitute(template, fields), last_rx)`,
   and the crop view already displays `preview()` through the image
@@ -165,8 +210,9 @@ tier as `cwIdProblem`: "Template needs their callsign". The whole point
 of a reply template is the address, and "  de KC2G" on the air is a
 broken picture. It is not a callsign requirement in the sense the app
 rejects — pick None or CQ and Send is enabled again — it is the
-template refusing to render a hole. `{rsv}` empty is fine, by the
-dropped-line rule.
+template refusing to render a hole. It is also the **only** field that
+can block: `{snr}` and every custom field are optional by the
+dropped-line rule, and the pop-up never has to be opened.
 
 **Substitution of `{utc}` happens at staging.** `send()` stages
 `Composition::preview()`, which is the moment the operator committed
@@ -204,7 +250,10 @@ wanted, and the model already has the field.
 Less new than it looks, and it fixes a real gap: **the desktop persists
 no overlay at all today** — restart the app and the composition is
 gone. The transmit panel gets a **Template** combo, **Save as
-template…**, and the same derived fields row (their call, RSV). The
+template…**, and the same derived fields: their call, and the custom
+fields as a pane of labelled text boxes rather than a pop-up, since a
+desktop has the room and `FlowLayout` already exists for exactly this
+shape. The
 existing editor edits the *template* — the text box shows the raw
 `{theircall}`, the preview shows it substituted with the current fields,
 which is the same preview-is-output rule with substitution in the
@@ -217,9 +266,10 @@ just a document.
 
 - No automatic caption and no callsign requirement. "None" is the
   default and the first-transmit prompt is unchanged.
-- No macro language beyond the table. Not conditionals, not
-  arithmetic, not a logbook. The one rule with any logic in it is the
-  dropped empty line.
+- No macro language beyond the table and `{field}`. Not conditionals,
+  not arithmetic, not a logbook. The one rule with any logic in it is
+  the dropped empty line, and a custom field is a text box, never a
+  choice list or a number.
 - No template sync or cloud anything. A template is a file; files can
   be shared.
 - The phone editor does not aim at the desktop's feature set. Anything
@@ -240,9 +290,15 @@ previews match too; worth doing later, not needed first.
 
 `template.cpp` goes in `sstvae_core` with `test_overlay_template.cpp`
 covering: each substitution rule, `{{` escaping, unknown placeholders
-kept, the dropped-line rule not firing on a line with any literal text,
-`placeholders()` enumeration, a named template round-tripping through
-`to_json`/`from_json`, and a nameless document loading as a template.
+kept, the dropped-line rule taking a line's literal text with its
+empty placeholders and leaving a placeholder-free line alone, a line
+with one filled and one empty placeholder kept intact, `{field}`
+parsing (a label with spaces, the same label twice being one field,
+`{field}` with no label left literal as an unknown placeholder),
+`placeholders()` enumerating custom fields in first-appearance order,
+`{snr}` formatting and its empty case, a named template round-tripping
+through `to_json`/`from_json`, and a nameless document loading as a
+template.
 The Python mirror gets the same cases in `tests/test_overlay.py`, and
 `tests/test_native_overlay.py` diffs the two on a corpus of documents.
 New settings keys (`grid`, `name`, the last-used template, the field
@@ -262,18 +318,24 @@ counterpart on Android.
 4. **Android: the template editor screen.** Polish; step 3 works with
    the built-ins and desktop-made files before this exists.
 
+## Settled on review (2026-09-14)
+
+- **The report is `{snr}`, not a typed RSV.** Measured, already
+  recorded, and never a chore. Anyone who wants the visual half writes
+  `{field Visual quality}` into their own template.
+- **Custom fields exist, are never mandatory, and are a pop-up on the
+  phone.** They are the free-form path and the structured path at once.
+
 ## Open
 
-- **Is `{rsv}` worth a field?** It is the one thing SSTV operators
-  exchange besides callsigns, and the dropped-line rule makes it free
-  to leave blank. Dropping it makes the form one field on every
-  template.
 - **Does Reply belong on the Listen tab as well as in Pictures?** The
   proposal says yes, for the operator watching a picture arrive, but it
   is one more control on the screen that is supposed to be the tuning
   instrument.
-- **Should the per-over fields persist across launches?** Their call
-  probably should within a session and probably should not overnight;
-  a wrong stale callsign on a reply is exactly the failure this feature
-  exists to avoid. Clearing `theircall` when a *different* reception is
-  replied to, and otherwise keeping it, is the proposed compromise.
+- **What persists between overs?** Proposed: `theircall` and `{snr}`
+  follow the reply target, so they change only when a different
+  reception is replied to, and survive a rotation but not a relaunch —
+  a stale callsign on a reply is exactly the failure this feature
+  exists to avoid. Custom field values are **cleared on Send**: a
+  comment is written for one over, and the one thing worse than
+  retyping it is transmitting last over's comment again.

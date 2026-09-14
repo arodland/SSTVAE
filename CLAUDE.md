@@ -1740,8 +1740,10 @@ need when `--native` fails and you want to know *where*.
   qsstv's: a template is an ordinary `OverlayDoc` with `{theircall}`-style
   placeholders in its text, the per-over UI is a form derived from which
   placeholders the chosen template uses, and "Reply" on a reception
-  prefills their call from the beacon-decoded sidecar and binds
-  `last_rx` to that picture. Exists because the beacon identifies *this*
+  prefills their call *and the measured SNR* from the sidecar and binds
+  `last_rx` to that picture. `{field Label}` declares an optional custom
+  text field (a pop-up on the phone), which is the free-form path
+  without an editor. Exists because the beacon identifies *this*
   station and nothing can say whom an over is addressed to. Also
   records that the desktop persists no overlay at all today.
 - `docs/onnx.md` — the ONNX runtime path, **implemented 2026-07-27**:
