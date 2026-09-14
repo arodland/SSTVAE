@@ -166,8 +166,18 @@ what keeps a template a template.
 
 1. A picture from W1XYZ completes. Its card in Pictures, and the viewer,
    carry a **Reply** button beside Share. The Listen tab shows the same
-   button on its completion line while the reception is recent, for the
-   case where the operator is watching it come in.
+   button while the reception is recent, for the case where the
+   operator is watching it come in (settled, Andrew 2026-09-14). There
+   is room: while a picture is decoding the tab already shrinks the
+   waterfall and shows the live image beneath it, so the button goes on
+   the status row under that image, "Reply to W1XYZ", and is absent
+   otherwise — no new row, nothing taken from the waterfall's height.
+   One thing to get right: `rx/engine` wipes the live image and its
+   metadata from shared state about two seconds after a reception, so
+   `Listener` has to **keep the last delivered reception itself** —
+   path, callsign, SNR, from the same sink call that writes the
+   sidecar — for the button to have something to bind to. That is the
+   desktop's last-reception card again, for the same reason.
 2. Reply switches to Send with the last-used reply template selected
    ("Reply" or "Reply with picture"), *their call and the SNR filled
    in*, and the inset bound to that picture. The preview already shows
@@ -326,12 +336,13 @@ counterpart on Android.
 - **Custom fields exist, are never mandatory, and are a pop-up on the
   phone.** They are the free-form path and the structured path at once.
 
+- **Reply is on the Listen tab too** (Andrew, 2026-09-14: "if there's
+  room" — there is, on the row the live image already opens; see the
+  flow above). It costs the tuning instrument nothing because it only
+  appears in the layout that has already made space for a picture.
+
 ## Open
 
-- **Does Reply belong on the Listen tab as well as in Pictures?** The
-  proposal says yes, for the operator watching a picture arrive, but it
-  is one more control on the screen that is supposed to be the tuning
-  instrument.
 - **What persists between overs?** Proposed: `theircall` and `{snr}`
   follow the reply target, so they change only when a different
   reception is replied to, and survive a rotation but not a relaunch —
