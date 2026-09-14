@@ -3,6 +3,10 @@
 #include <QColor>
 #include <QColorDialog>
 #include <QComboBox>
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QDragEnterEvent>
 #include <QDropEvent>
@@ -12,7 +16,9 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QInputDialog>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPainter>
@@ -32,7 +38,10 @@
 #include <algorithm>
 #include <cmath>
 #include <exception>
+#include <filesystem>
+#include <fstream>
 #include <map>
+#include <system_error>
 #include <vector>
 
 #include "app_state.hpp"
@@ -45,6 +54,8 @@
 #include "crop_dialog.hpp"
 #include "images/images.hpp"
 #include "flow_layout.hpp"
+#include "overlay/template.hpp"
+#include "overlay/template_catalog.hpp"
 #include "overlay_editor.hpp"
 #include "style.hpp"
 #include "settings/settings.hpp"
@@ -107,6 +118,13 @@ TransmitPanel::TransmitPanel(AppState* state, QWidget* parent)
             &TransmitPanel::schedule_optimization);
 
     rebuild_optimizer();
+
+    // Templates (docs/overlay-templates.md). After `rebuild_optimizer`
+    // so the first `refresh_fields` (which `on_template_selected` would
+    // trigger, and which `refresh_templates` does not by itself) has an
+    // optimizer to hand its result to, same as any other edit.
+    refresh_templates();
+    refresh_fields();
 }
 
 TransmitPanel::~TransmitPanel() {
@@ -126,6 +144,9 @@ void TransmitPanel::sync_from_config() {
     // Turning it on starts a run for the current composition rather
     // than waiting for the operator to touch something.
     rebuild_optimizer();
+    // The callsign, grid or name may have just changed, and any of the
+    // three can feed a template.
+    refresh_fields();
 }
 
 void TransmitPanel::rebuild_optimizer() {
@@ -375,6 +396,8 @@ void TransmitPanel::build_ui() {
     // and therefore part of what the receive pane matches.
     properties_->setEnabled(false);
     strip_layout->addWidget(properties_);
+    fields_box_ = build_fields_box(strip_);
+    strip_layout->addWidget(fields_box_);
     // The send bar is built first because it is what constructs
     // `progress_`, but the bar goes in *below* it -- a full-width row
     // of its own, the same shape the receive pane gives its progress.
@@ -462,6 +485,35 @@ QWidget* TransmitPanel::build_tool_row() {
     for (QPushButton* button : {add_text, add_rx_button_, add_image}) {
         overlay_layout->addWidget(button);
     }
+
+    // **Templates (docs/overlay-templates.md).** A third rule, matching
+    // the two above: the label on the vertical rule that follows below
+    // is the group Picture/Overlay already imply.
+    auto* rule2 = new QFrame(panel);
+    rule2->setFrameShape(QFrame::VLine);
+    rule2->setFrameShadow(QFrame::Sunken);
+    rule2->setFixedHeight(choose_button_->sizeHint().height());
+    column->addWidget(rule2);
+
+    template_combo_ = new QComboBox(panel);
+    // findChild<QComboBox*>() in test_tx_panel.cpp needs to tell this
+    // one apart from `mode_combo_` and `align_combo_`.
+    template_combo_->setObjectName(QStringLiteral("template_combo"));
+    template_combo_->setToolTip(
+        tr("Loads that template's layout onto the canvas, replacing "
+           "whatever is there now. \"None\" clears the overlay."));
+    connect(template_combo_, &QComboBox::currentIndexChanged, this,
+            &TransmitPanel::on_template_selected);
+    column->addWidget(template_combo_);
+    save_template_button_ = new QPushButton(tr("&Save as template..."), panel);
+    save_template_button_->setToolTip(
+        tr("Save the current text and layout as a template, with "
+           "{placeholders} in it for whatever should vary per "
+           "transmission -- {theircall}, {mycall}, {snr}, or a custom "
+           "{field Label}."));
+    connect(save_template_button_, &QPushButton::clicked, this,
+            &TransmitPanel::save_as_template);
+    column->addWidget(save_template_button_);
     // **No `column->addWidget(overlay_box)` here.** `overlay_box` is an
     // alias for `panel`, whose layout `column` *is*, so that line asked
     // Qt to add a widget to its own child layout. Qt refuses and prints
@@ -636,6 +688,31 @@ QGroupBox* TransmitPanel::build_properties(QWidget* parent) {
     return box;
 }
 
+QGroupBox* TransmitPanel::build_fields_box(QWidget* parent) {
+    auto* box = new QGroupBox(tr("Reply fields"), parent);
+    auto* form = new FlowLayout(box);
+
+    theircall_edit_ = new QLineEdit(box);
+    theircall_edit_->setObjectName(QStringLiteral("theircall_edit"));
+    theircall_edit_->setPlaceholderText(QStringLiteral("W1XYZ"));
+    theircall_edit_->setMaxLength(16);
+    theircall_edit_->setToolTip(
+        tr("Fills {theircall} in the current template. Disabled when it "
+           "does not use one."));
+    connect(theircall_edit_, &QLineEdit::textChanged, this,
+            [this] { refresh_fields(); });
+    form->addWidget(
+        style::row(box, {new QLabel(tr("Their call"), box), theircall_edit_}));
+
+    // A pop-up, not a pane -- see the declaration's comment for why.
+    custom_fields_button_ = new QPushButton(tr("Custom fields..."), box);
+    connect(custom_fields_button_, &QPushButton::clicked, this,
+            &TransmitPanel::open_custom_fields_dialog);
+    form->addWidget(custom_fields_button_);
+
+    return box;
+}
+
 QWidget* TransmitPanel::build_send_bar() {
     auto* bar = new QWidget(this);
     // Wraps: the mode name, the level slider, Send, Cancel and the
@@ -767,6 +844,169 @@ void TransmitPanel::on_mode_changed() {
     schedule_optimization();
     app_->config().transmit.mode = mode_combo_->currentData().toString().toStdString();
     app_->save_config();
+    // `{mode}` may be in the composition. `schedule_optimization` above
+    // already rebuilds the composite, but from `editor_->composed_image()`
+    // -- which substitutes -- so this must run *before* it would matter
+    // and does no harm running after; ordered here for readability, not
+    // correctness.
+    refresh_fields();
+}
+
+// --- templates (docs/overlay-templates.md) -----------------------------------
+
+std::filesystem::path TransmitPanel::builtin_templates_dir() {
+    // Copied here at build time (`sstvae_copy_builtin_templates` in
+    // native/CMakeLists.txt) from `sstvae/overlay/templates/`, the one
+    // place the three ship from. A build tree and an installed tree
+    // both put it beside the executable, so this is the only path that
+    // has to be right.
+    return (QCoreApplication::applicationDirPath() + QStringLiteral("/templates"))
+        .toStdString();
+}
+
+void TransmitPanel::refresh_templates() {
+    const QString previous = template_combo_->currentText();
+
+    templates_.clear();
+    template_combo_->blockSignals(true);
+    template_combo_->clear();
+
+    // Index 0: not a file, not loaded from anywhere -- an empty
+    // document is exactly today's "no overlay" behaviour.
+    templates_.push_back(overlay::Doc());
+    template_combo_->addItem(tr("None"));
+
+    for (overlay::Doc& doc : overlay::load_builtin_templates(builtin_templates_dir())) {
+        template_combo_->addItem(QString::fromStdString(doc.name));
+        templates_.push_back(std::move(doc));
+    }
+    for (overlay::LoadedTemplate& loaded :
+        overlay::load_templates(app_->config().folders.template_dir)) {
+        const QString label = QString::fromStdString(
+            loaded.doc.name.empty() ? loaded.path.stem().string() : loaded.doc.name);
+        template_combo_->addItem(label);
+        templates_.push_back(std::move(loaded.doc));
+    }
+
+    // Keep the same selection across a refresh (a saved template landed
+    // in the same list it was chosen from) rather than silently
+    // snapping back to "None".
+    const int keep = template_combo_->findText(previous);
+    template_combo_->setCurrentIndex(std::max(0, keep));
+    template_combo_->blockSignals(false);
+}
+
+void TransmitPanel::on_template_selected(int index) {
+    if (index < 0 || index >= static_cast<int>(templates_.size())) return;
+    // Replaces the composition outright -- see the combo's tooltip.
+    // `set_doc` emits `documentChanged`, already connected to the
+    // debounced optimizer, so nothing further is needed for that half.
+    editor_->set_doc(templates_[index]);
+    refresh_fields();
+}
+
+void TransmitPanel::refresh_fields() {
+    const overlay::Placeholders used = overlay::placeholders(editor_->doc());
+    const bool wants_theircall =
+        std::find(used.builtin.begin(), used.builtin.end(), std::string("theircall")) !=
+        used.builtin.end();
+    theircall_edit_->setEnabled(wants_theircall);
+    custom_fields_button_->setEnabled(!used.custom.empty());
+    custom_fields_button_->setText(
+        used.custom.empty()
+            ? tr("Custom fields...")
+            : tr("Custom fields (%1)...").arg(static_cast<int>(used.custom.size())));
+
+    overlay::Fields fields;
+    const settings::Config& cfg = app_->config();
+    fields.builtin["mycall"] = cfg.callsign;
+    fields.builtin["grid"] = cfg.grid;
+    fields.builtin["name"] = cfg.operator_name;
+    fields.builtin["theircall"] = theircall_edit_->text().trimmed().toStdString();
+    fields.builtin["snr"] = overlay::format_snr(last_reception_snr_db_);
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    fields.builtin["utc"] = now.toString(QStringLiteral("HH:mm")).toStdString();
+    fields.builtin["date"] = now.toString(QStringLiteral("yyyy-MM-dd")).toStdString();
+    fields.builtin["mode"] = mode_combo_->currentData().toString().toStdString();
+    for (const std::string& label : used.custom) {
+        const auto it = custom_field_values_.find(label);
+        if (it != custom_field_values_.end()) fields.custom[label] = it->second;
+    }
+    editor_->set_fields(std::move(fields));
+}
+
+void TransmitPanel::open_custom_fields_dialog() {
+    const overlay::Placeholders used = overlay::placeholders(editor_->doc());
+    if (used.custom.empty()) return;
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Custom fields"));
+    auto* form = new QFormLayout(&dialog);
+    form->addRow(style::note(
+        tr("Never mandatory -- leave one blank and its line is left out."),
+        &dialog));
+    std::vector<std::pair<std::string, QLineEdit*>> edits;
+    for (const std::string& label : used.custom) {
+        auto* edit = new QLineEdit(&dialog);
+        const auto it = custom_field_values_.find(label);
+        if (it != custom_field_values_.end()) {
+            edit->setText(QString::fromStdString(it->second));
+        }
+        form->addRow(QString::fromStdString(label), edit);
+        edits.emplace_back(label, edit);
+    }
+    auto* buttons =
+        new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    form->addRow(buttons);
+
+    if (dialog.exec() != QDialog::Accepted) return;
+    for (auto& [label, edit] : edits) {
+        custom_field_values_[label] = edit->text().toStdString();
+    }
+    refresh_fields();
+}
+
+void TransmitPanel::save_as_template() {
+    bool ok = false;
+    const QString name = QInputDialog::getText(
+        this, tr("Save as template"), tr("Template name"), QLineEdit::Normal,
+        QString(), &ok);
+    if (!ok || name.trimmed().isEmpty()) return;
+
+    overlay::Doc doc = editor_->doc();
+    doc.name = name.trimmed().toStdString();
+
+    const std::filesystem::path dir = app_->config().folders.template_dir;
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    const std::filesystem::path path = dir / (overlay::slugify(doc.name) + ".json");
+
+    if (std::filesystem::exists(path)) {
+        const auto reply = QMessageBox::question(
+            this, tr("Replace template?"),
+            tr("A template file named \"%1\" already exists. Replace it?")
+                .arg(QString::fromStdString(path.filename().string())));
+        if (reply != QMessageBox::Yes) return;
+    }
+
+    try {
+        std::ofstream out(path, std::ios::binary);
+        if (!out) throw std::runtime_error("could not open the file for writing");
+        out << overlay::to_json(doc);
+        if (!out) throw std::runtime_error("write failed");
+    } catch (const std::exception& e) {
+        app_->log_event("tx", log::Severity::Error,
+                        tr("could not save template \"%1\": %2")
+                            .arg(name.trimmed(), QString::fromUtf8(e.what())));
+        QMessageBox::critical(this, tr("Could not save template"),
+                              QString::fromUtf8(e.what()));
+        return;
+    }
+    app_->log_event("tx", log::Severity::Info,
+                    tr("saved template \"%1\"").arg(name.trimmed()));
+    refresh_templates();
 }
 
 // --- content ----------------------------------------------------------------
@@ -934,6 +1174,13 @@ void TransmitPanel::dropEvent(QDropEvent* event) {
     // costs nothing and ends the drag properly.
     const QString path = urls.front().toLocalFile();
     QTimer::singleShot(0, this, [this, path] { load_image(path); });
+}
+
+void TransmitPanel::set_last_reception_info(const QString& callsign, double snr_db) {
+    Q_UNUSED(callsign);
+    last_reception_snr_db_ =
+        std::isnan(snr_db) ? std::nullopt : std::optional<double>(snr_db);
+    refresh_fields();
 }
 
 void TransmitPanel::set_last_rx_image(const images::Picture& image) {

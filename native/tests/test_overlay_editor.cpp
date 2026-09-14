@@ -25,6 +25,7 @@
 #include "check.hpp"
 #include "images/types.hpp"
 #include "overlay/render.hpp"
+#include "overlay/template.hpp"
 #include "overlay_editor.hpp"
 
 using namespace sstvae;
@@ -226,6 +227,62 @@ void test_the_composite_is_the_renderer_s_output() {
     check::equal(composed->width, expected.width, "editor: composite width");
     check::is_true(composed->rgb == expected.rgb,
                    "editor: the composite is exactly overlay::render's output");
+    delete editor;
+}
+
+// --- templates (docs/overlay-templates.md) ------------------------------
+
+void test_set_fields_substitutes_the_composite_but_not_the_document() {
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_text("{theircall} de {mycall}");
+    const std::string raw = std::get<overlay::TextItem>(editor->doc().items[0]).text;
+
+    overlay::Fields fields;
+    fields.builtin = {{"theircall", "W1XYZ"}, {"mycall", "KC2G"}};
+    editor->set_fields(fields);
+
+    // The document stays the template: this is what `Save as
+    // template...` writes and what the property panel's text box shows.
+    check::equal(std::get<overlay::TextItem>(editor->doc().items[0]).text, raw,
+                 "editor: set_fields does not touch the stored document");
+
+    const overlay::Doc expected_doc = overlay::substitute(editor->doc(), fields);
+    const images::Picture expected =
+        overlay::render(grey(overlay::CANVAS_W, overlay::CANVAS_H), expected_doc);
+    const std::optional<images::Picture> composed = editor->composed_image();
+    check::is_true(composed.has_value() && composed->rgb == expected.rgb,
+                   "editor: the composite reflects the substituted text");
+    delete editor;
+}
+
+void test_set_fields_with_no_placeholders_changes_nothing() {
+    // The default-construction case: a plain overlay with no template
+    // active must render exactly as it always has.
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_text("KC2G");
+    const images::Picture before = *editor->composed_image();
+
+    editor->set_fields(overlay::Fields{{{"theircall", "W1XYZ"}}, {}});
+    check::is_true(editor->composed_image()->rgb == before.rgb,
+                   "editor: an unused field changes nothing");
+    delete editor;
+}
+
+void test_a_dropped_line_is_not_hit_testable() {
+    // Rule 2: a hole with nothing else on its line vanishes from the
+    // rendered picture, so it must also vanish from what a click can
+    // land on -- a selection handle that floated over empty canvas
+    // would be the WYSIWYG rule broken silently.
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_text("SNR {snr}");  // no {snr} filled in -> empty text
+    editor->set_fields(overlay::Fields{});
+
+    const std::optional<images::Picture> composed = editor->composed_image();
+    check::is_true(composed.has_value(), "editor: still composes");
+    const images::Picture expected =
+        overlay::render(grey(overlay::CANVAS_W, overlay::CANVAS_H), overlay::Doc());
+    check::is_true(composed->rgb == expected.rgb,
+                   "editor: a fully-empty line paints nothing, same as no item");
     delete editor;
 }
 
@@ -446,6 +503,9 @@ int main(int argc, char** argv) {
     test_normalized_coordinates_survive_a_resize();
     test_removing_clears_the_selection();
     test_the_composite_is_the_renderer_s_output();
+    test_set_fields_substitutes_the_composite_but_not_the_document();
+    test_set_fields_with_no_placeholders_changes_nothing();
+    test_a_dropped_line_is_not_hit_testable();
     test_arrows_nudge_by_a_fixed_fraction();
     test_delete_removes_the_selection();
     test_an_added_item_can_be_nudged_without_clicking_first();

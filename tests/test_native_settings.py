@@ -57,6 +57,8 @@ def _cpp(native):
 # for the folders do, which is exactly why they must not be reused here.
 NON_DEFAULT = {
     "callsign": "KC2G",
+    "grid": "FN31pr",
+    "name": "Andrew",
     "model_path": "/opt/models/v3",
     "precision": "int8",
     "audio": {

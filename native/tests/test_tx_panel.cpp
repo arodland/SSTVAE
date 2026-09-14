@@ -27,12 +27,18 @@
 // row by some other means later would break the panes the same way.
 
 #include <QApplication>
+#include <QByteArray>
+#include <QComboBox>
+#include <QFile>
+#include <QIODevice>
 #include <QLabel>
 #include <QLayout>
+#include <QLineEdit>
 #include <QPoint>
 #include <QPushButton>
 #include <QSize>
 #include <QSlider>
+#include <QTemporaryDir>
 #include <QTimer>
 #include <QWidget>
 
@@ -41,6 +47,7 @@
 #include "app_state.hpp"
 #include "check.hpp"
 #include "flow_layout.hpp"
+#include "overlay/model.hpp"
 #include "overlay_editor.hpp"
 #include "tx_panel.hpp"
 
@@ -291,6 +298,146 @@ void test_the_colour_button_does_not_change_size() {
                    "and the same size again with nothing selected");
 }
 
+// --- templates (docs/overlay-templates.md) ------------------------------
+
+QPushButton* custom_fields_button(TransmitPanel* panel) {
+    for (QPushButton* button : panel->findChildren<QPushButton*>()) {
+        if (button->text().startsWith(QLatin1String("Custom fields"))) return button;
+    }
+    return nullptr;
+}
+
+// The built-ins ship as data beside the executable
+// (`sstvae_copy_builtin_templates` in native/CMakeLists.txt, applied to
+// this target too) and are listed in the fixed order the design names:
+// None, then CQ, Reply, Reply with picture.
+void test_the_template_combo_lists_none_then_the_builtins() {
+    AppState state;
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    check::is_true(combo != nullptr, "the panel has a template combo");
+    if (combo == nullptr) return;
+    check::equal(combo->count(), 4, "None plus the three built-ins");
+    if (combo->count() == 4) {
+        check::equal(combo->itemText(0).toStdString(), std::string("None"), "none first");
+        check::equal(combo->itemText(1).toStdString(), std::string("CQ"), "cq second");
+        check::equal(combo->itemText(2).toStdString(), std::string("Reply"), "reply third");
+        check::equal(combo->itemText(3).toStdString(), std::string("Reply with picture"),
+                     "reply-picture fourth");
+    }
+}
+
+// Selecting a template replaces the canvas and only enables the fields
+// it actually uses -- "None"'s two rows stay inert, "Reply"'s do not.
+void test_selecting_a_template_loads_it_and_gates_its_fields() {
+    AppState state;
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    auto* theircall = panel->findChild<QLineEdit*>(QStringLiteral("theircall_edit"));
+    QPushButton* custom = custom_fields_button(panel);
+    auto* editor = panel->findChild<OverlayEditor*>();
+    check::is_true(combo != nullptr && theircall != nullptr && custom != nullptr &&
+                       editor != nullptr,
+                   "the panel has a combo, a theircall field, a custom-fields "
+                   "button and an editor");
+    if (combo == nullptr || theircall == nullptr || custom == nullptr ||
+        editor == nullptr) {
+        return;
+    }
+
+    check::is_true(!theircall->isEnabled(), "their call starts disabled: no template");
+    check::is_true(!custom->isEnabled(), "custom fields starts disabled too");
+
+    combo->setCurrentIndex(2);  // Reply
+    QCoreApplication::processEvents();
+    check::is_true(!editor->doc().items.empty(), "the template's items are on the canvas");
+    check::is_true(theircall->isEnabled(), "reply uses {theircall}: enabled");
+    check::is_true(custom->isEnabled(), "reply's Comment field: enabled");
+    check::is_true(custom->text().contains(QLatin1String("1")),
+                   "the button names how many custom fields there are");
+
+    combo->setCurrentIndex(0);  // None
+    QCoreApplication::processEvents();
+    check::is_true(editor->doc().items.empty(), "\"None\" clears the overlay");
+    check::is_true(!theircall->isEnabled(), "and their call is disabled again");
+    check::is_true(!custom->isEnabled(), "and so are custom fields");
+}
+
+// Typing their call reaches the editor's substitution fields -- the
+// wiring `refresh_fields` exists for. What substitution actually *does*
+// with a filled field is `test_overlay_editor.cpp`'s to check; this is
+// only "does the panel forward what the operator typed".
+void test_typing_their_call_updates_the_editor_s_fields() {
+    AppState state;
+    state.config().callsign = "KC2G";
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    auto* theircall = panel->findChild<QLineEdit*>(QStringLiteral("theircall_edit"));
+    auto* editor = panel->findChild<OverlayEditor*>();
+    check::is_true(combo != nullptr && theircall != nullptr && editor != nullptr,
+                   "the panel has a combo, a theircall field and an editor");
+    if (combo == nullptr || theircall == nullptr || editor == nullptr) return;
+
+    combo->setCurrentIndex(2);  // Reply
+    QCoreApplication::processEvents();
+    check::equal(editor->fields().builtin.at("mycall"), std::string("KC2G"),
+                 "{mycall} came from the configured callsign, unprompted");
+
+    theircall->setText(QStringLiteral("W1XYZ"));
+    QCoreApplication::processEvents();
+    const auto it = editor->fields().builtin.find("theircall");
+    check::is_true(it != editor->fields().builtin.end() && it->second == "W1XYZ",
+                   "their call reaches the editor's fields as typed");
+}
+
+// A template saved in the operator's configured folder is picked up the
+// same way the built-ins are, at construction -- the path
+// `refresh_templates` reads from `config().folders.template_dir`.
+void test_a_template_from_the_configured_folder_is_listed() {
+    QTemporaryDir dir;
+    check::is_true(dir.isValid(), "temp dir created");
+
+    overlay::Doc doc;
+    doc.name = "Mine";
+    overlay::TextItem item;
+    item.text = "hi";
+    doc.items.push_back(item);
+    {
+        QFile file(dir.filePath(QStringLiteral("mine.json")));
+        check::is_true(file.open(QIODevice::WriteOnly), "template file opened for writing");
+        file.write(QByteArray::fromStdString(overlay::to_json(doc)));
+    }
+
+    AppState state;
+    state.config().folders.template_dir = dir.path().toStdString();
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    check::is_true(combo != nullptr, "the panel has a template combo");
+    if (combo == nullptr) return;
+
+    bool found = false;
+    for (int i = 0; i < combo->count(); ++i) {
+        if (combo->itemText(i) == QLatin1String("Mine")) found = true;
+    }
+    check::is_true(found, "a template from the configured folder is listed by name");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -303,5 +450,9 @@ int main(int argc, char** argv) {
     test_the_colour_button_does_not_change_size();
     test_an_edit_defers_the_rebuild();
     test_a_rebuild_consumes_the_pending_edit();
+    test_the_template_combo_lists_none_then_the_builtins();
+    test_selecting_a_template_loads_it_and_gates_its_fields();
+    test_typing_their_call_updates_the_editor_s_fields();
+    test_a_template_from_the_configured_folder_is_listed();
     return check::report("transmit panel");
 }

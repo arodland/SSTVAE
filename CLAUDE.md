@@ -1744,8 +1744,10 @@ need when `--native` fails and you want to know *where*.
   reach PAPR (DFT spreading / learned unitary precoder in slot domain).
   Not implemented.
 - `docs/overlay-templates.md` — design for overlay *templates* and the
-  overlay on Android (2026-09-14, **approved, not implemented** — build
-  from it in the order its "Sequencing" section gives). The idea is
+  overlay on Android (2026-09-14, **step 1 (the template module) and
+  step 2 (the desktop) done the same day; steps 3-4 (Android) not
+  started** — build from it in the order its "Sequencing" section
+  gives). The idea is
   qsstv's: a template is an ordinary `OverlayDoc` with `{theircall}`-style
   placeholders in its text, the per-over UI is a form derived from which
   placeholders the chosen template uses, and "Reply" on a reception
@@ -2308,9 +2310,11 @@ takes their settings and saved receptions with it.
 Desktop app: **one implementation**, `native/` (Phases 0-3), which
 reached parity, passed the loopback shakedown in all three directions
 including both cross-implementation ones, and replaced the PySide6 GUI
-on 2026-08-01 — see "The engines". Overlay *templates* are deliberately
-not implemented, but the document format is built for them (see
-`sstvae/overlay/` and `native/core/overlay/`).
+on 2026-08-01 — see "The engines". **Overlay templates are implemented
+on the desktop** (`docs/overlay-templates.md` step 2, 2026-09-14): a
+Template combo, "Save as template...", and a "Reply fields" box on
+`TransmitPanel`; the Android half (steps 3-4, the addressed reply from
+a phone) is not.
 
 ONNX runtime path complete: the codec is onnxruntime, torch is
 training-only, and `cli`/`listen` install ~263 MB instead of
@@ -2362,8 +2366,9 @@ Remaining: run stage-2 fine-tune (start from a good stage-1
 checkpoint, `--lr 1e-4`) — note pre-beacon checkpoints remain
 architecture-compatible (model channel count unchanged), evaluation
 sweeps (PSNR/LPIPS vs SNR per mode), on-air calibration. On the app
-side: overlay templates, and a real on-air (not loopback) shakedown of
-the PTT timing against a physical radio. For the native app: Phase 4 is
+side: the Android half of overlay templates (`docs/overlay-templates.md`
+steps 3-4), and a real on-air (not loopback) shakedown of the PTT
+timing against a physical radio. For the native app: Phase 4 is
 sequenced in five steps and the first three are done — CI builds five
 packages and five installers (AppImage, `.dmg`, NSIS setup) on every
 push. **Step 4 (signing) is done and green (2026-08-04)**:

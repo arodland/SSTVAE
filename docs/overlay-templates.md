@@ -330,8 +330,38 @@ counterpart on Android.
    the code settled: a whitespace-only value counts as empty, and a
    label is normalized by trimming and collapsing whitespace, so
    `{field  Comment }` is `{field Comment}`.
-2. **Desktop: Template combo, Save as, fields row.** Small, and it
-   closes the overlay-lost-on-restart gap on its own.
+2. **Desktop: Template combo, Save as, fields row.** **Done
+   2026-09-14.** `TransmitPanel` gained a Template combo (None plus the
+   three built-ins plus whatever is in `config().folders.template_dir`,
+   read by the new `overlay::load_templates`/`load_builtin_templates`
+   in `native/core/overlay/template_catalog.{hpp,cpp}`), a "Save as
+   template..." button, a "Reply fields" box (Their call, plus a
+   "Custom fields..." pop-up), and new `grid`/`name` station settings
+   feeding `{grid}`/`{name}`. `OverlayEditor` gained `set_fields`:
+   the *document* it edits stays the raw template (what the text box
+   shows and what Save writes), while paint, hit-testing and the
+   selection handle all substitute first, since that is what is
+   actually on screen — the design's own "what you arrange is what
+   goes on the air" rule, extended to a template's holes.
+   Two departures from the sketch above, both forced by a real
+   constraint rather than chosen freely. **Custom fields are a
+   pop-up on the desktop too**, not the pane described earlier:
+   `PaneContainer::equalise_strips` does not re-run when a strip's
+   content changes *shape* (the exact bug `test_tx_panel.cpp`
+   already guards), so a field count that varied with the template
+   would desync the two panes the way a hidden "Selected item" box
+   once did. The fields box is therefore two rows, always, whatever
+   the template needs — only `setEnabled`, matching that file's own
+   rule. **This does not close the overlay-lost-on-restart gap**
+   as this bullet used to promise: an ad-hoc composition never saved
+   as a template is still gone on restart, exactly as before — what
+   changed is that saving one is now possible. And **there is no
+   hard Send block on an empty `{theircall}`**, unlike the phone
+   flow below: the substituted canvas already shows the gap live (a
+   filled-in line with nothing where the call should be), which is
+   the same "must be visible" property the phone's block exists to
+   guarantee, so the block itself was left for later rather than
+   risking the panel's existing Send-enablement logic sight unseen.
 3. **Android: overlay ON, template chips and fields on Send, Reply from
    Pictures and Listen, the reply binding in `Composition`.** This is
    the step that delivers an addressed reply from a phone.

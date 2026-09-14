@@ -11,15 +11,19 @@
 #include <QWidget>
 
 #include <atomic>
+#include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "images/images.hpp"
 #include "images/types.hpp"
 #include "optimize/speculative.hpp"
 #include "overlay/model.hpp"
+#include "overlay/template.hpp"
 #include "tx/engine.hpp"
 
 class QColor;
@@ -29,6 +33,7 @@ class QDragEnterEvent;
 class QDropEvent;
 class QGroupBox;
 class QLabel;
+class QLineEdit;
 class QPlainTextEdit;
 class QProgressBar;
 class QPushButton;
@@ -112,6 +117,12 @@ public slots:
     void choose_framing();
     // The receive panel's newest complete picture, for a "last_rx" inset.
     void set_last_rx_image(const images::Picture& image);
+    // The same reception's callsign and SNR, for a template's `{snr}`
+    // (docs/overlay-templates.md). `callsign` is accepted for parity
+    // with the signal and is not otherwise used here: unlike Android's
+    // Pictures list, the desktop has no per-reception "reply to this
+    // one" binding, so `{theircall}` stays operator-typed.
+    void set_last_reception_info(const QString& callsign, double snr_db);
 
 signals:
     void transmitStarted();
@@ -143,6 +154,10 @@ private slots:
     void on_selection(overlay::Item* item);
     void on_mode_changed();
     void on_level_changed(int steps);
+    // A different template replaces the composition on the canvas --
+    // see `template_combo_`'s tooltip -- and the fields row is rebuilt
+    // for whichever placeholders it uses.
+    void on_template_selected(int index);
 
 private:
     void build_ui();
@@ -164,7 +179,34 @@ private:
     void rebuild_optimizer();
     QWidget* build_tool_row();
     QGroupBox* build_properties(QWidget* parent);
+    // "Their call" plus the custom-fields button (docs/overlay-
+    // templates.md). **Exactly two rows always**, whatever the current
+    // template needs -- only `setEnabled`, matching `build_properties`'
+    // own rule and for the same reason: `PaneContainer::equalise_strips`
+    // does not re-run when a strip's *content* changes shape
+    // (`on_selection`'s comment has the story), so a box that grew or
+    // shrank with the template would desync the two panes exactly the
+    // way a hidden `properties_` used to. Custom fields are a pop-up
+    // rather than a pane for the same reason, not because a desktop
+    // lacks the room for one -- the pane the design sketched would grow
+    // with the field count.
+    QGroupBox* build_fields_box(QWidget* parent);
     QWidget* build_send_bar();
+    // Recompute what `{mycall}`/`{grid}`/`{name}`/`{theircall}`/`{snr}`/
+    // `{utc}`/`{date}`/`{mode}` resolve to and push them to the editor.
+    // Cheap and called often -- on a template change, an edit to either
+    // field-row control, a mode change, a fresh reception, or the
+    // config changing -- rather than tracked incrementally, since the
+    // whole `Fields` is a handful of short strings.
+    void refresh_fields();
+    // Built-in templates plus the operator's own from
+    // `config().folders.template_dir`, in that order; "None" is index 0
+    // and is not a file. Called once at construction and again after
+    // "Save as template..." writes a new one.
+    void refresh_templates();
+    void open_custom_fields_dialog();
+    void save_as_template();
+    static std::filesystem::path builtin_templates_dir();
     void update_level_label();
     overlay::Item* editing_item();
 
@@ -186,6 +228,22 @@ private:
 
     QWidget* strip_ = nullptr;
     QGroupBox* properties_ = nullptr;
+
+    // --- templates (docs/overlay-templates.md) --------------------------
+    QComboBox* template_combo_ = nullptr;
+    QPushButton* save_template_button_ = nullptr;
+    // Parallel to `template_combo_`'s items: index 0 is the built-in
+    // "None" (an empty document, never read from a file).
+    std::vector<overlay::Doc> templates_;
+    QGroupBox* fields_box_ = nullptr;
+    QLineEdit* theircall_edit_ = nullptr;
+    QPushButton* custom_fields_button_ = nullptr;
+    // Keyed by label, so a "Comment" field carries its value from one
+    // template to the next within a session -- the label is the only
+    // identity a custom field has. Cleared by nothing here; a fresh
+    // session starts empty.
+    std::map<std::string, std::string> custom_field_values_;
+    std::optional<double> last_reception_snr_db_;
     QPlainTextEdit* text_edit_ = nullptr;
     QComboBox* align_combo_ = nullptr;
     QDoubleSpinBox* size_spin_ = nullptr;

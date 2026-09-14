@@ -29,6 +29,7 @@
 #include "images/types.hpp"
 #include "overlay/model.hpp"
 #include "overlay/render.hpp"
+#include "overlay/template.hpp"
 
 namespace sstvae::gui {
 
@@ -88,6 +89,22 @@ public:
     const overlay::Doc& doc() const { return doc_; }
     void set_doc(overlay::Doc doc);
 
+    // Values to fill a template's holes with (docs/overlay-templates.md).
+    // **The document being edited stays the raw template** -- the text
+    // box shows the literal `{theircall}`, and `doc()`/`set_doc()` and
+    // everything the property panel writes into a selected item's
+    // `.text` are untouched by this. What changes is the *painted*
+    // canvas and the geometry derived from it: `composed_image()`,
+    // paint, hit-testing and the selection handle all substitute first,
+    // because that is what is actually drawn -- so a handle still sits
+    // on the thing it selects even though the item's own bbox (in raw
+    // text) may measure a different extent than the substituted text
+    // that is on screen. Defaults to empty fields, which is a no-op for
+    // any document with no placeholders in it, so a plain (non-template)
+    // overlay is unaffected.
+    void set_fields(overlay::Fields fields);
+    const overlay::Fields& fields() const { return fields_; }
+
     // Base plus overlay, or nothing if no picture has been chosen.
     std::optional<images::Picture> composed_image() const;
 
@@ -123,6 +140,9 @@ private:
     enum class Drag { None, Move, Resize };
 
     void rerender();
+    // What is actually painted for `item`: substituted per `fields_`.
+    // See `set_fields`.
+    overlay::Item rendered(const overlay::Item& item) const;
     // Where the canvas is drawn inside the widget, letter-boxed.
     QRect canvas_rect() const;
     // Widget point -> canvas pixel. Outside the canvas is still mapped;
@@ -138,6 +158,7 @@ private:
     void select(int index);
 
     overlay::Doc doc_;
+    overlay::Fields fields_;
     images::Picture base_;
     std::optional<images::Picture> last_rx_;
     // The rendered composite, cached because rendering is not free and a

@@ -258,6 +258,14 @@ struct UiConfig {
 
 struct Config {
     std::string callsign;
+    // Both optional and both purely for `{grid}` / `{name}` in an
+    // overlay template (docs/overlay-templates.md) -- neither is on
+    // the beacon or anywhere else in the on-air format. Empty means
+    // the placeholder resolves to nothing, which the template's
+    // dropped-line rule then removes along with any line that has
+    // nothing else in it.
+    std::string grid;
+    std::string operator_name;
     // Empty = the published ONNX artifacts, fetched and cached on first
     // use. May also be a .onnx artifact or a directory of them.
     std::string model_path;

@@ -386,6 +386,8 @@ Config from_json(const std::string& text, std::vector<Note>* sink) {
 
     const Reader r{root, "", notes};
     r.get("callsign", c.callsign);
+    r.get("grid", c.grid);
+    r.get("name", c.operator_name);
     r.get("model_path", c.model_path);
     r.get("precision", c.precision);
     r.get("version", c.version);
@@ -395,8 +397,8 @@ Config from_json(const std::string& text, std::vector<Note>* sink) {
     if (auto s = r.section("receive")) read_receive(*s, c.receive);
     if (auto s = r.section("transmit")) read_transmit(*s, c.transmit);
     if (auto s = r.section("ui")) read_ui(*s, c.ui);
-    r.report_unknown({"callsign", "model_path", "precision", "version", "audio", "rig",
-                      "folders", "receive", "transmit", "ui"});
+    r.report_unknown({"callsign", "grid", "name", "model_path", "precision", "version",
+                      "audio", "rig", "folders", "receive", "transmit", "ui"});
 
     if (c.version > CONFIG_VERSION) {
         notes.add("version",
@@ -412,6 +414,8 @@ std::string to_json(const Config& c) {
     // config written by either app stays readable.
     const json root = {
         {"callsign", c.callsign},
+        {"grid", c.grid},
+        {"name", c.operator_name},
         {"model_path", or_null(c.model_path)},
         {"precision", c.precision},
         {"audio",

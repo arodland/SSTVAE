@@ -181,6 +181,32 @@ void OverlayEditor::set_doc(overlay::Doc doc) {
     emit documentChanged();
 }
 
+void OverlayEditor::set_fields(overlay::Fields fields) {
+    fields_ = std::move(fields);
+    composed_valid_ = false;
+    update();
+    // A field change is a composition change exactly like a drag: the
+    // picture that would be sent is different now, so the speculative
+    // optimizer must be told, debounced the same way a text edit is
+    // (`TransmitPanel` connects a field box's textChanged to
+    // `set_fields` followed by nothing else -- this signal is the only
+    // notification either needs).
+    emit documentChanged();
+}
+
+// What is actually drawn for `item`: `.text` substituted, everything
+// else (position, size, rotation, anchor, colour, the image source)
+// copied through untouched, since substitution only ever touches
+// TextItem::text. Wrapping a single item in a one-item Doc reuses
+// `overlay::substitute` rather than duplicating its rules here, at the
+// cost of one short-lived vector -- cheap next to the font-metrics work
+// `item_bbox` already does on every one of these call sites.
+overlay::Item OverlayEditor::rendered(const overlay::Item& item) const {
+    overlay::Doc one;
+    one.items.push_back(item);
+    return overlay::substitute(one, fields_).items[0];
+}
+
 void OverlayEditor::select(int index) {
     selected_ = index;
     composed_valid_ = false;
@@ -190,14 +216,16 @@ void OverlayEditor::select(int index) {
 
 std::optional<images::Picture> OverlayEditor::composed_image() const {
     if (base_.empty()) return std::nullopt;
-    return overlay::render(base_, doc_, last_rx_ ? &*last_rx_ : nullptr);
+    return overlay::render(base_, overlay::substitute(doc_, fields_),
+                           last_rx_ ? &*last_rx_ : nullptr);
 }
 
 void OverlayEditor::rerender() {
     if (base_.empty()) {
         composed_ = images::Picture();
     } else {
-        composed_ = overlay::render(base_, doc_, last_rx_ ? &*last_rx_ : nullptr);
+        composed_ = overlay::render(base_, overlay::substitute(doc_, fields_),
+                                    last_rx_ ? &*last_rx_ : nullptr);
     }
     composed_valid_ = true;
 }
@@ -228,10 +256,13 @@ QPointF OverlayEditor::to_canvas(const QPointF& widget_point) const {
 
 int OverlayEditor::hit_test(const QPointF& point) const {
     // Front to back, so the item drawn on top is the one you grab --
-    // the same order the eye resolves an overlap in.
+    // the same order the eye resolves an overlap in. Against the
+    // *rendered* bbox (see `set_fields`), so a hole a template dropped
+    // (rule 2) cannot be clicked, and one substitution lengthened is
+    // grabbable over its whole painted extent.
     for (int i = static_cast<int>(doc_.items.size()) - 1; i >= 0; --i) {
         const overlay::Bbox box =
-            overlay::item_bbox(overlay::CANVAS_W, overlay::CANVAS_H, doc_.items[i],
+            overlay::item_bbox(overlay::CANVAS_W, overlay::CANVAS_H, rendered(doc_.items[i]),
                                last_rx_ ? &*last_rx_ : nullptr);
         if (point.x() >= box.x && point.x() < box.x + box.w &&
             point.y() >= box.y && point.y() < box.y + box.h) {
@@ -297,7 +328,7 @@ void OverlayEditor::paintEvent(QPaintEvent*) {
 
     if (overlay::Item* item = const_cast<OverlayEditor*>(this)->selected_item()) {
         const overlay::Bbox box = overlay::item_bbox(
-            overlay::CANVAS_W, overlay::CANVAS_H, *item,
+            overlay::CANVAS_W, overlay::CANVAS_H, rendered(*item),
             last_rx_ ? &*last_rx_ : nullptr);
         const double sx = static_cast<double>(rect.width()) / overlay::CANVAS_W;
         const double sy = static_cast<double>(rect.height()) / overlay::CANVAS_H;
@@ -327,7 +358,7 @@ void OverlayEditor::mousePressEvent(QMouseEvent* event) {
     // before the handle would make the corner unresizable.
     if (overlay::Item* item = selected_item()) {
         const overlay::Bbox box = overlay::item_bbox(
-            overlay::CANVAS_W, overlay::CANVAS_H, *item,
+            overlay::CANVAS_W, overlay::CANVAS_H, rendered(*item),
             last_rx_ ? &*last_rx_ : nullptr);
         if (handle_rect(box).contains(point.toPoint())) {
             drag_ = Drag::Resize;
@@ -363,7 +394,7 @@ void OverlayEditor::mousePressEvent(QMouseEvent* event) {
 void OverlayEditor::update_hover_cursor(const QPointF& point) {
     if (overlay::Item* item = selected_item()) {
         const overlay::Bbox box = overlay::item_bbox(
-            overlay::CANVAS_W, overlay::CANVAS_H, *item,
+            overlay::CANVAS_W, overlay::CANVAS_H, rendered(*item),
             last_rx_ ? &*last_rx_ : nullptr);
         if (handle_rect(box).contains(point.toPoint())) {
             setCursor(Qt::SizeFDiagCursor);

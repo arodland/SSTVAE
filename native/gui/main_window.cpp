@@ -150,6 +150,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // The most recent picture becomes available as a transmit inset.
     connect(rx_panel_, &ReceivePanel::imageReceived, tx_panel_,
             &TransmitPanel::set_last_rx_image);
+    // And its callsign/SNR feed a template's {snr}
+    // (docs/overlay-templates.md).
+    connect(rx_panel_, &ReceivePanel::receptionInfoAvailable, tx_panel_,
+            &TransmitPanel::set_last_reception_info);
     // **The waterfall's height is the operator's** (decided
     // 2026-08-03). A fixed strip was the alternative and the
     // recommendation; a handle won because 150 px is too much most of
