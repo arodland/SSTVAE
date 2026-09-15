@@ -2438,6 +2438,25 @@ never had.** All fixed 2026-09-15.
   [Save...]"), the same fix `test_the_level_controls_are_one_flow_item`
   already guards for the mode/level/readout trio.
 
+**A "last received" inset with no reception yet is invisible where it
+matters least and was invisible where it mattered too.** `overlay::
+render()` correctly paints nothing for an unresolved `SOURCE_LAST_RX`
+(`draw_image` returns early on a null source) -- it is also what
+encodes the transmission, so a placeholder there could go out over the
+air in place of a picture. But that left the item invisible on the
+*editor's own preview* too, before an operator had clicked anything to
+find it -- a real gap for a template that starts with one already in it
+(the built-in "Reply with picture"). `OverlayEditor::paintEvent` now
+draws its own frame for every such item, over the composed picture
+rather than into it (so nothing about `overlay::render()`'s output or
+what gets transmitted changes) -- same look as the empty-canvas state
+just above it and `PictureBox`'s own "no picture" frame. Drawn for
+*every* unresolved last_rx item, not only the selected one, since
+"findable before it is clicked" is the whole point; `hit_test` and the
+selection handles already worked here (`item_bbox` has always returned
+a real box, defaulting to a 0.75 aspect with nothing to measure), so
+this was purely a missing visual, not a missing interaction.
+
 ONNX runtime path complete: the codec is onnxruntime, torch is
 training-only, and `cli`/`listen` install ~263 MB instead of
 ~555 MB. The published codec is **v5** (2026-09-01), and `DEFAULT_FILE`

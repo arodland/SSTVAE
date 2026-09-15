@@ -510,6 +510,33 @@ void OverlayEditor::paintEvent(QPaintEvent*) {
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     painter.drawImage(rect, style::to_qimage(composed_));
 
+    // **A "last received" inset with nothing received yet paints
+    // nothing at all** -- correctly: `overlay::render` is also what
+    // encodes the transmission, so it must never draw a placeholder
+    // that could go out over the air in place of a picture. But that
+    // leaves the item invisible on this preview too, before the
+    // operator has clicked anything to find it -- a real gap for a
+    // template that starts with one already in it (docs/overlay-
+    // templates.md's "Reply with picture"), unreachable by anything on
+    // screen until a reception arrives. So the *editor* draws its own
+    // frame here, over the composed picture rather than into it, for
+    // every such item -- not only the selected one, so it is findable
+    // before it is clicked. Same look as the empty-canvas state above
+    // and `PictureBox`'s own "no picture" frame.
+    if (!last_rx_) {
+        for (const overlay::Item& doc_item : doc_.items) {
+            const auto* image = std::get_if<overlay::ImageItem>(&doc_item);
+            if (image == nullptr || image->source != overlay::SOURCE_LAST_RX) continue;
+            const QRect box = item_screen_rect(doc_item);
+            painter.fillRect(box, style::color::viewport_frame());
+            painter.setPen(style::color::viewport_edge());
+            painter.drawRect(box.adjusted(0, 0, -1, -1));
+            painter.setPen(style::color::viewport_text());
+            painter.drawText(box, Qt::AlignCenter | Qt::TextWordWrap,
+                             tr("No picture received yet"));
+        }
+    }
+
     if (overlay::Item* item = const_cast<OverlayEditor*>(this)->selected_item()) {
         const overlay::Bbox box = overlay::item_bbox(
             overlay::CANVAS_W, overlay::CANVAS_H, rendered(*item),

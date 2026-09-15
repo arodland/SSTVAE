@@ -29,6 +29,7 @@
 #include "overlay/render.hpp"
 #include "overlay/template.hpp"
 #include "overlay_editor.hpp"
+#include "style.hpp"
 
 using namespace sstvae;
 
@@ -829,6 +830,71 @@ void test_the_rotate_handle_stays_reachable_near_a_canvas_edge() {
     delete editor;
 }
 
+// A "last received" inset paints nothing at all until a reception
+// arrives -- correctly, since this is also what encodes the
+// transmission and a placeholder must never go out over the air in
+// place of a picture. But that used to leave the item invisible and
+// unfindable on the *preview* too, before the operator had clicked
+// anything -- a real gap for a template that starts with one already
+// in it. The editor now draws its own frame there, over the composed
+// picture rather than into it.
+void test_an_unresolved_last_rx_inset_shows_a_placeholder_frame() {
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_last_rx_inset();  // no reception yet
+    QCoreApplication::processEvents();
+
+    const overlay::Item& item = editor->doc().items.front();
+    // A few pixels in from the box's own top-left corner -- not its
+    // centre, which the placeholder's caption paints over and whose
+    // anti-aliased edge just barely misses an exact colour match. No
+    // `last_rx` picture to measure an aspect from yet, so `item_bbox`
+    // falls back to 0.75, which this sample point has to use too, to
+    // land inside the same box the editor computes.
+    const overlay::Bbox box =
+        overlay::item_bbox(overlay::CANVAS_W, overlay::CANVAS_H, item, nullptr);
+    const QPoint at = widget_point(box.x + 5, box.y + 5);
+
+    const QImage before = editor->grab().toImage();
+    check::is_true(before.rect().contains(at), "placeholder: the sample point is on screen");
+    check::equal(before.pixelColor(at).rgb(), gui::style::color::viewport_frame().rgb(),
+                 "placeholder: an unresolved last_rx inset paints its own frame");
+
+    // Once a reception arrives, the placeholder must get out of the way
+    // -- overlay::render is what draws the actual picture there now.
+    editor->set_last_rx(grey(40, 30));
+    QCoreApplication::processEvents();
+    const QImage after = editor->grab().toImage();
+    check::is_true(after.pixelColor(at).rgb() != gui::style::color::viewport_frame().rgb(),
+                   "placeholder: it is gone once a reception arrives");
+    delete editor;
+}
+
+// The placeholder is findable, not just visible once already selected:
+// it has to draw for every unresolved last_rx item, since the whole
+// point is helping the operator locate one they have not clicked yet.
+void test_the_placeholder_draws_even_when_nothing_is_selected() {
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_last_rx_inset();
+    // Deselect by clicking empty canvas -- `remove_selected` would take
+    // the item out of the document entirely, which is not what this
+    // test wants: the item stays, only the selection changes.
+    press(*editor, widget_point(2, 2));
+    QCoreApplication::processEvents();
+    check::is_true(editor->selected_item() == nullptr,
+                   "placeholder: nothing is selected");
+    check::is_true(!editor->doc().items.empty(),
+                   "placeholder: but the item is still in the document");
+
+    const overlay::Item& item = editor->doc().items.front();
+    const overlay::Bbox box =
+        overlay::item_bbox(overlay::CANVAS_W, overlay::CANVAS_H, item, nullptr);
+    const QPoint at = widget_point(box.x + 5, box.y + 5);
+    const QImage frame = editor->grab().toImage();
+    check::equal(frame.pixelColor(at).rgb(), gui::style::color::viewport_frame().rgb(),
+                 "placeholder: still drawn with nothing selected");
+    delete editor;
+}
+
 void test_selection_screen_rect_tracks_the_selection() {
     gui::OverlayEditor* editor = make_editor();
     check::is_true(editor->selection_screen_rect().isEmpty(),
@@ -885,6 +951,8 @@ int main(int argc, char** argv) {
     test_rotate_keys_turn_the_selection();
     test_the_resize_handle_tracks_the_items_rotation();
     test_the_rotate_handle_stays_reachable_near_a_canvas_edge();
+    test_an_unresolved_last_rx_inset_shows_a_placeholder_frame();
+    test_the_placeholder_draws_even_when_nothing_is_selected();
     test_selection_screen_rect_tracks_the_selection();
 
     return check::report("overlay editor");
