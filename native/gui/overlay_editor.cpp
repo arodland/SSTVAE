@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <utility>
 #include <variant>
 
@@ -51,9 +52,10 @@ OverlayEditor::OverlayEditor(QWidget* parent) : QWidget(parent) {
     // explains why -- a widget that moves things under the pointer has
     // to say so before the pointer is pressed.
     setMouseTracking(true);
-    setToolTip(tr("Drag an item to move it, or its corner to resize. Arrow "
-                  "keys nudge the selection (Shift for a coarser step); "
-                  "Delete removes it."));
+    setToolTip(tr("Drag an item to move it, its corner to resize, or the "
+                  "small circle above it to rotate. Arrow keys nudge the "
+                  "selection (Shift for a coarser step); +/- scales it, "
+                  "[ and ] rotate it; Delete removes it."));
     // Strong, not ClickFocus: the arrow keys and Delete are useless to
     // an operator who cannot get focus onto this widget, and ClickFocus
     // keeps it out of the Tab chain entirely.
@@ -258,7 +260,7 @@ void OverlayEditor::set_fields(overlay::Fields fields) {
 }
 
 // What is actually drawn for `item`: `.text` substituted, everything
-// else (position, size, rotation, anchor, colour, the image source)
+// else (position, size, rotation, anchor, color, the image source)
 // copied through untouched, since substitution only ever touches
 // TextItem::text. Wrapping a single item in a one-item Doc reuses
 // `overlay::substitute` rather than duplicating its rules here, at the
@@ -281,6 +283,52 @@ std::optional<images::Picture> OverlayEditor::composed_image() const {
     if (base_.empty()) return std::nullopt;
     return overlay::render(base_, overlay::substitute(doc_, fields_),
                            last_rx_ ? &*last_rx_ : nullptr);
+}
+
+QRect OverlayEditor::item_screen_rect(const overlay::Item& item) const {
+    const overlay::Bbox box = overlay::item_bbox(
+        overlay::CANVAS_W, overlay::CANVAS_H, rendered(item), last_rx_ ? &*last_rx_ : nullptr);
+    const QRect rect = canvas_rect();
+    const double sx = static_cast<double>(rect.width()) / overlay::CANVAS_W;
+    const double sy = static_cast<double>(rect.height()) / overlay::CANVAS_H;
+    return QRect(rect.x() + static_cast<int>(std::lround(box.x * sx)),
+                rect.y() + static_cast<int>(std::lround(box.y * sy)),
+                std::max(1, static_cast<int>(std::lround(box.w * sx))),
+                std::max(1, static_cast<int>(std::lround(box.h * sy))));
+}
+
+QRect OverlayEditor::selection_screen_rect() const {
+    const overlay::Item* item = const_cast<OverlayEditor*>(this)->selected_item();
+    if (item == nullptr) return QRect();
+    return item_screen_rect(*item);
+}
+
+void OverlayEditor::scale_item(overlay::Item& item, double factor) {
+    if (auto* text = std::get_if<overlay::TextItem>(&item)) {
+        text->size = std::clamp(text->size * factor, 0.01, 1.5);
+    } else if (auto* rect = std::get_if<overlay::RectItem>(&item)) {
+        // Both axes together, matching the corner-drag resize -- see
+        // `mouseMoveEvent`'s identical reasoning.
+        rect->width = std::clamp(rect->width * factor, 0.02, 2.0);
+        rect->height = std::clamp(rect->height * factor, 0.02, 2.0);
+    } else if (auto* image = std::get_if<overlay::ImageItem>(&item)) {
+        image->width = std::clamp(image->width * factor, 0.02, 2.0);
+    }
+}
+
+void OverlayEditor::rotate_item(overlay::Item& item, double delta_degrees) {
+    std::visit(
+        [delta_degrees](auto& i) {
+            // Normalized into (-180, 180] rather than left to wind up
+            // past 360 -- the same range the old rotation spin box
+            // offered, and a small negative angle is easier to read
+            // than its 350-odd-degree equivalent.
+            double normalized = std::fmod(i.rotation + delta_degrees, 360.0);
+            if (normalized > 180.0) normalized -= 360.0;
+            if (normalized <= -180.0) normalized += 360.0;
+            i.rotation = normalized;
+        },
+        item);
 }
 
 void OverlayEditor::rerender() {
@@ -357,6 +405,20 @@ QRect OverlayEditor::handle_rect(const overlay::Bbox& box) const {
     return QRect(x - side / 2, y - side / 2, side, side);
 }
 
+QRect OverlayEditor::rotate_handle_rect(const overlay::Bbox& box) const {
+    const QRect rect = canvas_rect();
+    const double sx = static_cast<double>(rect.width()) / overlay::CANVAS_W;
+    const double sy = static_cast<double>(rect.height()) / overlay::CANVAS_H;
+    // The top-right corner, offset further up and out -- opposite the
+    // resize grip at the bottom-right, so the two can never be pressed
+    // ambiguously and dragging one can never be mistaken for the other.
+    const int x = rect.x() + static_cast<int>(std::lround((box.x + box.w) * sx));
+    const int y = rect.y() + static_cast<int>(std::lround(box.y * sy));
+    const int side = handle_px();
+    const int offset = side * 2;
+    return QRect(x - side / 2 + offset, y - side / 2 - offset, side, side);
+}
+
 void OverlayEditor::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     const QRect rect = canvas_rect();
@@ -384,7 +446,7 @@ void OverlayEditor::paintEvent(QPaintEvent*) {
     }
 
     // The same fill as the empty state, so the viewport around the
-    // canvas does not change colour the moment a picture arrives.
+    // canvas does not change color the moment a picture arrives.
     painter.fillRect(this->rect(), style::color::viewport());
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     painter.drawImage(rect, style::to_qimage(composed_));
@@ -393,13 +455,7 @@ void OverlayEditor::paintEvent(QPaintEvent*) {
         const overlay::Bbox box = overlay::item_bbox(
             overlay::CANVAS_W, overlay::CANVAS_H, rendered(*item),
             last_rx_ ? &*last_rx_ : nullptr);
-        const double sx = static_cast<double>(rect.width()) / overlay::CANVAS_W;
-        const double sy = static_cast<double>(rect.height()) / overlay::CANVAS_H;
-        const QRect on_screen(
-            rect.x() + static_cast<int>(std::lround(box.x * sx)),
-            rect.y() + static_cast<int>(std::lround(box.y * sy)),
-            std::max(1, static_cast<int>(std::lround(box.w * sx))),
-            std::max(1, static_cast<int>(std::lround(box.h * sy))));
+        const QRect on_screen = item_screen_rect(*item);
 
         // Two-tone, so the outline is visible over both a bright and a
         // dark picture without knowing which it is.
@@ -407,9 +463,13 @@ void OverlayEditor::paintEvent(QPaintEvent*) {
         painter.drawRect(on_screen);
         painter.setPen(QPen(QColor(255, 255, 255, 230), 1, Qt::DashLine));
         painter.drawRect(on_screen);
-        painter.fillRect(handle_rect(box), QColor(255, 255, 255, 230));
         painter.setPen(QPen(QColor(0, 0, 0, 200), 1));
+        painter.setBrush(QColor(255, 255, 255, 230));
         painter.drawRect(handle_rect(box));
+        // The rotate grip is a circle rather than a square, so the two
+        // read as different kinds of control at a glance rather than as
+        // two identical squares that happen to do different things.
+        painter.drawEllipse(rotate_handle_rect(box));
     }
 }
 
@@ -417,12 +477,26 @@ void OverlayEditor::mousePressEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) return;
     const QPointF point = event->position();
 
-    // The grip first: it sits on the item's corner, so testing the item
-    // before the handle would make the corner unresizable.
+    // The grips first: they sit outside the item's own area, so testing
+    // the item before them would make neither one reachable.
     if (overlay::Item* item = selected_item()) {
         const overlay::Bbox box = overlay::item_bbox(
             overlay::CANVAS_W, overlay::CANVAS_H, rendered(*item),
             last_rx_ ? &*last_rx_ : nullptr);
+        if (rotate_handle_rect(box).contains(point.toPoint())) {
+            drag_ = Drag::Rotate;
+            const QPointF center(box.x + box.w / 2.0, box.y + box.h / 2.0);
+            rotate_center_ = center;
+            rotate_start_rotation_ =
+                std::visit([](const auto& i) { return i.rotation; }, *item);
+            const QPointF canvas = to_canvas(point);
+            // Screen y grows downward, so this negates it: a positive
+            // angle here then means "counter-clockwise as the operator
+            // sees it", matching the document's own rotation sense.
+            rotate_start_pointer_angle_ =
+                std::atan2(-(canvas.y() - center.y()), canvas.x() - center.x());
+            return;
+        }
         if (handle_rect(box).contains(point.toPoint())) {
             drag_ = Drag::Resize;
             resize_origin_ = to_canvas(point);
@@ -465,6 +539,12 @@ void OverlayEditor::update_hover_cursor(const QPointF& point) {
         const overlay::Bbox box = overlay::item_bbox(
             overlay::CANVAS_W, overlay::CANVAS_H, rendered(*item),
             last_rx_ ? &*last_rx_ : nullptr);
+        if (rotate_handle_rect(box).contains(point.toPoint())) {
+            // Qt has no built-in rotate cursor; a cross is at least not
+            // one of the shapes already claimed by move or resize.
+            setCursor(Qt::CrossCursor);
+            return;
+        }
         if (handle_rect(box).contains(point.toPoint())) {
             setCursor(Qt::SizeFDiagCursor);
             return;
@@ -497,7 +577,7 @@ void OverlayEditor::mouseMoveEvent(QMouseEvent* event) {
                 i.y = std::clamp(y, -0.5, 1.5);
             },
             *item);
-    } else {
+    } else if (drag_ == Drag::Resize) {
         // Resize from the grabbed corner: the change in distance from
         // the item's anchor scales the size.
         const double x0 = std::visit([](const auto& i) { return i.x; }, *item) *
@@ -517,6 +597,24 @@ void OverlayEditor::mouseMoveEvent(QMouseEvent* event) {
         } else if (auto* image = std::get_if<overlay::ImageItem>(item)) {
             image->width = std::clamp(resize_start_ * factor, 0.02, 2.0);
         }
+    } else {  // Drag::Rotate
+        const double angle = std::atan2(-(canvas.y() - rotate_center_.y()),
+                                        canvas.x() - rotate_center_.x());
+        const double delta_deg =
+            (angle - rotate_start_pointer_angle_) * 180.0 / std::numbers::pi;
+        // Not `rotate_item` (which adds to the item's *current* value):
+        // a drag reads back the same delta on every move, so it must be
+        // applied against the rotation captured at the press, not
+        // compounded onto whatever the previous move step left behind.
+        std::visit(
+            [this, delta_deg](auto& i) {
+                double normalized =
+                    std::fmod(rotate_start_rotation_ + delta_deg, 360.0);
+                if (normalized > 180.0) normalized -= 360.0;
+                if (normalized <= -180.0) normalized += 360.0;
+                i.rotation = normalized;
+            },
+            *item);
     }
     composed_valid_ = false;
     update();
@@ -558,14 +656,46 @@ void OverlayEditor::keyPressEvent(QKeyEvent* event) {
         return;
     }
 
+    const bool coarse = event->modifiers() & Qt::ShiftModifier;
+
+    // +/- and [/] are the keyboard forms of dragging the resize and
+    // rotate grips -- multiplicative and additive respectively, exactly
+    // what each drag does, and clamped/normalized by the same
+    // `scale_item`/`rotate_item` the grips would end up at.
+    switch (event->key()) {
+        case Qt::Key_Plus:
+        case Qt::Key_Equal:
+            scale_item(*item, coarse ? 1.10 : 1.02);
+            refresh_item();
+            event->accept();
+            return;
+        case Qt::Key_Minus:
+        case Qt::Key_Underscore:
+            scale_item(*item, 1.0 / (coarse ? 1.10 : 1.02));
+            refresh_item();
+            event->accept();
+            return;
+        case Qt::Key_BracketLeft:
+            rotate_item(*item, coarse ? 15.0 : 1.0);
+            refresh_item();
+            event->accept();
+            return;
+        case Qt::Key_BracketRight:
+            rotate_item(*item, coarse ? -15.0 : -1.0);
+            refresh_item();
+            event->accept();
+            return;
+        default:
+            break;
+    }
+
     // A fraction of the canvas, not a pixel: positions are normalized,
     // so a fixed step means the same nudge whatever the window size.
     // Shift is the coarse step, for getting somewhere; the fine one is
     // roughly a canvas pixel at 640 wide.
     constexpr double FINE = 1.0 / 640.0;
     constexpr double COARSE = 1.0 / 64.0;
-    const double step =
-        (event->modifiers() & Qt::ShiftModifier) ? COARSE : FINE;
+    const double step = coarse ? COARSE : FINE;
 
     double dx = 0.0;
     double dy = 0.0;

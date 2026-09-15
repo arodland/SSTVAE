@@ -12,6 +12,7 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QLayout>
+#include <QStyle>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -19,6 +20,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <numbers>
 #include <string>
 #include <variant>
 
@@ -58,6 +60,25 @@ QPoint widget_point(double canvas_x, double canvas_y) {
     const int y0 = (H - h) / 2;
     return QPoint(x0 + static_cast<int>(std::lround(canvas_x * w / overlay::CANVAS_W)),
                   y0 + static_cast<int>(std::lround(canvas_y * h / overlay::CANVAS_H)));
+}
+
+// The inverse of `widget_point`: needed only where a test has to start
+// from a widget pixel it did not choose (the rotate handle's position,
+// which depends on the style's own icon-size metric) and work out what
+// canvas angle that press landed at.
+QPointF canvas_point(QPoint widget_pt) {
+    const double aspect =
+        static_cast<double>(overlay::CANVAS_W) / overlay::CANVAS_H;
+    int w = W;
+    int h = static_cast<int>(std::lround(w / aspect));
+    if (h > H) {
+        h = H;
+        w = static_cast<int>(std::lround(h * aspect));
+    }
+    const int x0 = (W - w) / 2;
+    const int y0 = (H - h) / 2;
+    return QPointF((widget_pt.x() - x0) * overlay::CANVAS_W / static_cast<double>(w),
+                   (widget_pt.y() - y0) * overlay::CANVAS_H / static_cast<double>(h));
 }
 
 void press(gui::OverlayEditor& editor, QPoint at) {
@@ -608,6 +629,149 @@ void test_z_order_changes_which_item_paints_on_top() {
     delete editor;
 }
 
+// --- rotation, scaling and the floating palette's anchor -----------------
+
+void test_dragging_the_rotate_handle_rotates_the_item() {
+    // The rotate grip sits above-and-right of the item, offset from its
+    // top-right corner by `handle_px() * 2` in raw screen pixels -- the
+    // opposite corner and direction from the resize grip, so a press can
+    // never be ambiguous between the two. `handle_px()` is derived from
+    // the style, not a literal, so this mirrors that same query rather
+    // than guessing a pixel count.
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_rect();
+    overlay::Item* item = editor->selected_item();
+    check::is_true(item != nullptr, "rotate: a rect is selected after add_rect");
+
+    const overlay::Bbox box =
+        overlay::item_bbox(overlay::CANVAS_W, overlay::CANVAS_H, *item, nullptr);
+    const QPointF center(box.x + box.w / 2.0, box.y + box.h / 2.0);
+
+    const QRect on_screen = editor->selection_screen_rect();
+    const int side =
+        std::max(10, editor->style()->pixelMetric(QStyle::PM_SmallIconSize) * 2 / 3);
+    const int offset = side * 2;
+    const QPoint handle_center(on_screen.x() + on_screen.width() + offset,
+                               on_screen.y() - offset);
+
+    press(*editor, handle_center);
+    check::is_true(editor->selected_item() != nullptr,
+                   "rotate: pressing the handle keeps the item selected");
+    const double r0 =
+        std::visit([](const auto& i) { return i.rotation; }, *editor->selected_item());
+
+    // Work out the canvas-space angle the press actually landed at (it is
+    // near the handle's centre, not on any axis this test controls), then
+    // ask for a point a precise quarter turn further counter-clockwise --
+    // same formula `mousePressEvent`/`mouseMoveEvent` use: screen-down is
+    // +y, so this negation is what makes a visually CCW sweep read as a
+    // positive angle.
+    const QPointF press_canvas = canvas_point(handle_center);
+    const double angle0 =
+        std::atan2(-(press_canvas.y() - center.y()), press_canvas.x() - center.x());
+    const double radius =
+        std::hypot(press_canvas.x() - center.x(), press_canvas.y() - center.y());
+    const double angle_target = angle0 + std::numbers::pi / 2.0;
+    const QPointF target_canvas(center.x() + radius * std::cos(angle_target),
+                                center.y() - radius * std::sin(angle_target));
+    move_to(*editor, widget_point(target_canvas.x(), target_canvas.y()));
+
+    const double rotation =
+        std::visit([](const auto& i) { return i.rotation; }, *editor->selected_item());
+    check::is_true(std::abs(rotation - (r0 + 90.0)) <= 2.0,
+                   "rotate: a quarter-turn CCW drag adds 90 degrees (" +
+                       std::to_string(r0) + " -> " + std::to_string(rotation) + ")");
+
+    release(*editor, widget_point(target_canvas.x(), target_canvas.y()));
+    delete editor;
+}
+
+void test_scale_keys_grow_and_shrink_the_selection() {
+    std::unique_ptr<gui::OverlayEditor> editor(make_editor());
+    editor->add_text("N0CALL");
+    const overlay::TextItem before =
+        std::get<overlay::TextItem>(*editor->selected_item());
+
+    key(*editor, Qt::Key_Plus);
+    const overlay::TextItem grown =
+        std::get<overlay::TextItem>(*editor->selected_item());
+    check::is_true(grown.size > before.size,
+                   "scale: + grows the selection's size");
+
+    key(*editor, Qt::Key_Minus);
+    const overlay::TextItem back =
+        std::get<overlay::TextItem>(*editor->selected_item());
+    check::is_true(back.size < grown.size,
+                   "scale: - shrinks it back down");
+
+    // Shift is the coarse step, matching the nudge convention -- bigger,
+    // not merely different. Compare the two multiplicative factors from
+    // the same starting size rather than chaining more key presses, so
+    // rounding from an earlier step cannot muddy the comparison.
+    const double base = back.size;
+    key(*editor, Qt::Key_Plus);
+    const double fine_size =
+        std::get<overlay::TextItem>(*editor->selected_item()).size;
+    std::get<overlay::TextItem>(*editor->selected_item()).size = base;
+    key(*editor, Qt::Key_Plus, Qt::ShiftModifier);
+    const double coarse_size =
+        std::get<overlay::TextItem>(*editor->selected_item()).size;
+    check::is_true((coarse_size - base) > (fine_size - base),
+                   "scale: shift takes a bigger step than the plain key");
+}
+
+void test_rotate_keys_turn_the_selection() {
+    std::unique_ptr<gui::OverlayEditor> editor(make_editor());
+    editor->add_rect();
+    const double r0 =
+        std::visit([](const auto& i) { return i.rotation; }, *editor->selected_item());
+
+    // `[` rotates counter-clockwise (increasing), `]` clockwise
+    // (decreasing) -- see `keyPressEvent`'s `rotate_item` calls.
+    key(*editor, Qt::Key_BracketLeft);
+    const double r1 =
+        std::visit([](const auto& i) { return i.rotation; }, *editor->selected_item());
+    check::is_true(r1 > r0, "rotate keys: [ increases rotation");
+
+    key(*editor, Qt::Key_BracketRight);
+    const double r2 =
+        std::visit([](const auto& i) { return i.rotation; }, *editor->selected_item());
+    check::is_true(std::abs(r2 - r0) <= 1e-9, "rotate keys: ] undoes it");
+
+    // Shift takes the coarser, 15-degree step.
+    key(*editor, Qt::Key_BracketLeft, Qt::ShiftModifier);
+    const double r3 =
+        std::visit([](const auto& i) { return i.rotation; }, *editor->selected_item());
+    check::is_true(r3 - r0 > r1 - r0,
+                   "rotate keys: shift takes a bigger step than the plain key");
+}
+
+void test_selection_screen_rect_tracks_the_selection() {
+    gui::OverlayEditor* editor = make_editor();
+    check::is_true(editor->selection_screen_rect().isEmpty(),
+                   "selection rect: empty with nothing selected");
+
+    editor->add_last_rx_inset();  // no last_rx set yet, but still an item
+    const images::Picture inset = grey(40, 30);
+    editor->set_last_rx(inset);
+
+    const QRect on_screen = editor->selection_screen_rect();
+    check::is_true(!on_screen.isEmpty(),
+                   "selection rect: non-empty once something is selected");
+
+    const overlay::Bbox box = overlay::item_bbox(
+        overlay::CANVAS_W, overlay::CANVAS_H, editor->doc().items.front(), &inset);
+    const QPoint expected_center =
+        widget_point(box.x + box.w / 2.0, box.y + box.h / 2.0);
+    check::is_true(on_screen.contains(expected_center),
+                   "selection rect: covers the item's own on-screen centre");
+
+    editor->remove_selected();
+    check::is_true(editor->selection_screen_rect().isEmpty(),
+                   "selection rect: empty again once the selection is removed");
+    delete editor;
+}
+
 int main(int argc, char** argv) {
     check::report_crashes_instead_of_prompting();
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -633,6 +797,10 @@ int main(int argc, char** argv) {
     test_raise_and_lower_swap_adjacent_items_and_follow_the_selection();
     test_bring_to_front_and_send_to_back_preserve_the_rest_of_the_order();
     test_z_order_changes_which_item_paints_on_top();
+    test_dragging_the_rotate_handle_rotates_the_item();
+    test_scale_keys_grow_and_shrink_the_selection();
+    test_rotate_keys_turn_the_selection();
+    test_selection_screen_rect_tracks_the_selection();
 
     return check::report("overlay editor");
 }

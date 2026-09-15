@@ -243,7 +243,7 @@ through the system sheet). The editor for one template:
   last received" — with Add text / Add last received / Add image.
 - **A property sheet per item**, deliberately smaller than the
   desktop's: the text, with an **Insert field** menu so nobody types
-  braces on a phone keyboard; size as a slider; a row of colour
+  braces on a phone keyboard; size as a slider; a row of color
   swatches; and **position as a 3x3 anchor grid** — corners, edges,
   centre — which writes the document's existing `anchor` plus an `x`/`y`
   at that corner with a margin. Drag on the preview for fine placement,
@@ -371,7 +371,7 @@ counterpart on Android.
    all documented in CLAUDE.md's `sstvae/overlay/` and desktop-status
    bullets rather than repeated here in full:
    - A third overlay item, `RectItem` — filled and/or stroked, each
-     independently "none"/"solid"/"gradient" (linear only: two colours
+     independently "none"/"solid"/"gradient" (linear only: two colors
      and an angle). Lives in the *core* model/render, both languages,
      not just the desktop, because that is where `TextItem`/`ImageItem`
      live — so it is available to a future Android editor (step 4)
@@ -392,6 +392,22 @@ counterpart on Android.
      thought of the fixed-count version yet.
    - "Save as template..." now defaults its name prompt to the loaded
      template's own name.
+
+   **A second look at the same panel, hours later, same day.** The
+   first pass put scale, rotation, color/fill/stroke and stacking order
+   all in the "Selected item" box — "way too many buttons" (Andrew).
+   Reworked: scale and rotation are a drag handle plus a keyboard
+   shortcut on the item itself now (`OverlayEditor`'s new rotate handle
+   and `+`/`-`/`[`/`]`), and color/gradient/stroke/order/Remove moved
+   into a floating panel that appears next to the selection and only
+   while something is selected (`TransmitPanel::build_selection_palette`,
+   parented to the editor rather than to the fixed-shape control strip,
+   which is what lets its rows actually show and hide by item type
+   instead of merely disabling). The text editor stays where it was,
+   out of line below the canvas — inline is still not solved, because
+   of template field substitution: showing the substituted text while
+   editing the raw `{placeholder}` underneath it needs more thought.
+   See CLAUDE.md's desktop-status bullet for the fuller account.
 3. **Android: overlay ON, template chips and fields on Send, Reply from
    Pictures and Listen, the reply binding in `Composition`.** This is
    the step that delivers an addressed reply from a phone. **Done

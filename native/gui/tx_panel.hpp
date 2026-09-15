@@ -32,6 +32,7 @@ class QComboBox;
 class QDoubleSpinBox;
 class QDragEnterEvent;
 class QDropEvent;
+class QFrame;
 class QGroupBox;
 class QLabel;
 class QLineEdit;
@@ -162,9 +163,9 @@ private slots:
     void on_template_selected(int index);
 
 private:
-    // One button, one colour, drawn once and cached -- see
+    // One button, one color, drawn once and cached -- see
     // `set_swatch`'s comment for why the cache matters. There are five
-    // of these now (the text colour, plus a rect's fill/fill2/stroke/
+    // of these now (the text color, plus a rect's fill/fill2/stroke/
     // stroke2), which is what turned the single `color_button_`/
     // `swatch_color_`/`swatch_set_` trio into this struct instead of
     // four more copies of the same three members.
@@ -178,12 +179,12 @@ private:
     // Keeps the floating error banner across the top of the picture.
     void place_banner();
     // Paint `color` onto `swatch.button`, skipping the repaint if it is
-    // already showing that colour. Guarded because `on_selection` runs
+    // already showing that color. Guarded because `on_selection` runs
     // on every mouse-move of a drag (`OverlayEditor::mouseMoveEvent`
     // re-emits `selectionChanged`), so an unguarded rebuild would
     // reconstruct up to five button icons at drag-frame rate.
     void set_swatch(ColorSwatch& swatch, const QColor& color);
-    // Open a colour picker for one of a `RectItem`'s four colour
+    // Open a color picker for one of a `RectItem`'s four color
     // fields, identified by pointer-to-member so the four "Fill"/
     // "Fill 2"/"Stroke"/"Stroke 2" buttons share one implementation
     // rather than four near-identical lambdas.
@@ -201,7 +202,33 @@ private:
                         std::vector<double> latents);
     void rebuild_optimizer();
     QWidget* build_tool_row();
+    // Text and its alignment only, now -- everything else a selection
+    // used to fill this box with (size, height, rotation, color,
+    // fill/stroke, stacking order) moved to `build_selection_palette`.
+    // Still `control_strip()`'s fixed-shape rule: always present,
+    // disabled rather than hidden with nothing selected, because this
+    // one *is* part of the strip whose height the receive pane is
+    // matched against.
     QGroupBox* build_properties(QWidget* parent);
+    // The floating panel that appears near the selection: color,
+    // gradient, stroke and stacking-order controls, plus Remove. Parented
+    // to `editor_` rather than living in `control_strip()`, which is what
+    // lets it freely show and hide rows per item type -- see the .cpp for
+    // why that would desync the two panes' matched heights anywhere
+    // inside the strip.
+    QFrame* build_selection_palette();
+    // Show/hide the palette's rows for whatever is selected now (a rect's
+    // fill/stroke rows, a gradient's second color and angle), and enable
+    // the order buttons from position. Called from `on_selection` and
+    // from the fill/stroke kind combos, since choosing "Gradient" changes
+    // a row's visibility without a new selection.
+    void update_selection_palette();
+    // Move the palette next to `editor_->selection_screen_rect()`,
+    // flipping to the item's other side if it would run off the canvas.
+    // Cheap geometry only -- called at drag-frame rate alongside
+    // `on_selection` and from `documentChanged` (a keyboard scale/rotate
+    // shortcut moves the item without reselecting it).
+    void position_selection_palette();
     // "Their call" plus up to `MAX_INLINE_CUSTOM_FIELDS` custom-field
     // rows plus an overflow button (docs/overlay-templates.md).
     // **A fixed shape always**, whatever the current template needs --
@@ -238,11 +265,6 @@ private:
     void save_as_template();
     static std::filesystem::path builtin_templates_dir();
     void update_level_label();
-    // Update which of the rect-only property rows are enabled, from
-    // whatever is currently loaded into them -- shared by `on_selection`
-    // and by the fill/stroke kind combos, since choosing "Gradient"
-    // enables the second colour and angle without a new selection.
-    void update_rect_field_enablement();
     overlay::Item* editing_item();
 
     AppState* app_ = nullptr;
@@ -274,6 +296,7 @@ private:
 
     QWidget* strip_ = nullptr;
     QGroupBox* properties_ = nullptr;
+    QFrame* selection_palette_ = nullptr;
 
     // --- templates (docs/overlay-templates.md) --------------------------
     QComboBox* template_combo_ = nullptr;
@@ -305,29 +328,37 @@ private:
     std::optional<double> last_reception_snr_db_;
     QPlainTextEdit* text_edit_ = nullptr;
     QComboBox* align_combo_ = nullptr;
-    // Retitled between "Size" (text) and "Width" (image/rect) rather
-    // than being two rows, since it is one control either way.
-    QLabel* size_label_ = nullptr;
-    QDoubleSpinBox* size_spin_ = nullptr;
-    // Rect only; text and image items have no independent height.
-    QDoubleSpinBox* height_spin_ = nullptr;
-    QDoubleSpinBox* rotation_spin_ = nullptr;
-    ColorSwatch text_swatch_;  // text_swatch_.button is "Colour..."
-    // --- rect fill/stroke (docs item 1: rectangles) ------------------
+
+    // --- the floating selection palette (`build_selection_palette`) -----
+    //
+    // Scaling and rotation are handles-and-keyboard-shortcuts on the item
+    // itself now (see `OverlayEditor`); what is left here is what a
+    // handle cannot express -- color, gradient, stroke and stacking
+    // order -- plus Remove. Unlike `properties_`/`fields_box_`, this
+    // widget is not part of `control_strip()`, so its rows are free to
+    // actually show and hide per item type rather than only disable.
+    ColorSwatch text_swatch_;  // text_swatch_.button is "Color..."
+    QWidget* text_color_row_ = nullptr;
     QComboBox* fill_kind_combo_ = nullptr;
     ColorSwatch fill_swatch_;
+    QWidget* fill_row_ = nullptr;
     ColorSwatch fill_swatch2_;
     QDoubleSpinBox* fill_angle_spin_ = nullptr;
+    QWidget* fill_gradient_row_ = nullptr;
     QComboBox* stroke_kind_combo_ = nullptr;
     ColorSwatch stroke_swatch_;
+    QDoubleSpinBox* stroke_width_spin_ = nullptr;
+    QWidget* stroke_row_ = nullptr;
     ColorSwatch stroke_swatch2_;
     QDoubleSpinBox* stroke_angle_spin_ = nullptr;
-    QDoubleSpinBox* stroke_width_spin_ = nullptr;
-    // --- stacking order (docs item 2) ---------------------------------
+    QWidget* stroke_gradient_row_ = nullptr;
     QPushButton* raise_button_ = nullptr;
     QPushButton* lower_button_ = nullptr;
     QPushButton* front_button_ = nullptr;
     QPushButton* back_button_ = nullptr;
+    QWidget* order_row_ = nullptr;
+    QPushButton* remove_button_ = nullptr;
+
     // Set while the property widgets are being filled from an item, so
     // their change signals do not write straight back into it.
     bool loading_properties_ = false;

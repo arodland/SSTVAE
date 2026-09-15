@@ -404,7 +404,7 @@ rule is enforced by `tools/check_layering.py`.
   `sstvae/overlay/templates/` and the C++ test reads those same files,
   so there is one source of what "Reply" says.
   **`RectItem` (2026-09-15)** is the third item kind: a rectangle,
-  independently fillable and strokable with a solid colour or a linear
+  independently fillable and strokable with a solid color or a linear
   gradient (`fill_kind`/`stroke_kind` each "none"/"solid"/"gradient",
   flat fields rather than a nested gradient struct, matching this
   module's style). The gradient angle is counter-clockwise, the same
@@ -2340,11 +2340,10 @@ started.
 **The desktop overlay editor gained four more things the same week
 (2026-09-15), none of them in the original template design doc.**
 A `RectItem` tool (filled and/or stroked, solid or gradient — see the
-`sstvae/overlay/` bullet above); stacking-order controls (Raise/Lower/
-To front/To back in the "Selected item" box, acting on any item type
-by array position, not just rects); the tool row is now an icon
-palette (`QToolButton`s with hand-drawn glyphs, the same reasoning
-`set_swatch` gives for painting its colour buttons rather than sourcing
+`sstvae/overlay/` bullet above); stacking-order controls, acting on any
+item type by array position, not just rects; the tool row is now an
+icon palette (`QToolButton`s with hand-drawn glyphs, the same reasoning
+`set_swatch` gives for painting its color buttons rather than sourcing
 icon assets) instead of "Add text"/"Add last received"/"Add image..."
 text buttons; and "Save as template..." defaults its name prompt to
 the loaded template's own name (`editor_->doc().name`, which
@@ -2355,13 +2354,42 @@ itself, always present and only ever `setEnabled` — the same fixed-
 shape rule as everything else in that box, now stated once rather than
 per-control — updating the composite on every keystroke via
 `on_custom_field_edited`; a template declaring more spills the rest
-into the pop-up, which is what it is for now. All of it is `TextItem`/
-`ImageItem`/`RectItem` alike: the fill/stroke/order rows exist whatever
-item type is selected, disabled when they don't apply, per the same
-rule. `TransmitPanel::ColorSwatch` replaced the single `color_button_`/
-`swatch_color_`/`swatch_set_` trio once a rect's four independent
-colours needed the identical guard against rebuilding an icon at
-drag-frame rate.
+into the pop-up, which is what it is for now. `TransmitPanel::ColorSwatch`
+replaced the single `color_button_`/`swatch_color_`/`swatch_set_` trio
+once a rect's four independent colors needed the identical guard
+against rebuilding an icon at drag-frame rate.
+
+**That first pass put every one of those controls in the "Selected
+item" box in `control_strip()`, and it was wrong -- "way too many
+buttons" (Andrew, same day), reworked within hours of landing.** Two
+changes, both still 2026-09-15. **Scale and rotation are on-canvas now,
+not spin boxes**: a resize handle (unchanged) plus a new rotate handle
+-- a circle at the bbox's top-right corner, offset outward the opposite
+way from the square resize grip at the bottom-right, so a press can
+never land on the wrong one -- and `+`/`-` (multiplicative, fine/coarse
+via Shift, matching the existing arrow-key nudge) and `[`/`]`
+(additive) as the keyboard form of the same two drags, clamped and
+normalized by the identical `scale_item`/`rotate_item` helpers either
+path calls. `OverlayEditor::selection_screen_rect()` is the new public
+surface this needed: the selection's on-screen rectangle, for whatever
+wants to anchor itself near it. **Color, gradient, stroke and stacking
+order moved to a floating panel** (`TransmitPanel::build_selection_palette`,
+a `QFrame` parented to the editor itself, not to `control_strip()`) that
+appears beside the selection and only while something is selected --
+`position_selection_palette()` anchors it to `selection_screen_rect()`,
+flipping to the item's other side rather than running off the canvas,
+and re-running at drag-frame rate (`on_selection`, and `documentChanged`
+directly for a keyboard shortcut that moves the item without
+reselecting it). Being outside `control_strip()` is what makes this
+panel exempt from that box's fixed-shape rule (see
+`update_selection_palette`): unlike `properties_`/`fields_box_`, its
+rows actually show and hide by item type and by gradient-kind rather
+than only `setEnabled`, because nothing here is matched against the
+receive pane's height. What is left inside `control_strip()`'s
+"Selected item" box (retitled "Text") is exactly the text editor and
+its alignment combo -- still out-of-line, deliberately: inline editing
+would have to show substituted `{placeholder}` text while the operator
+edits the raw template underneath it, which is not solved yet.
 
 ONNX runtime path complete: the codec is onnxruntime, torch is
 training-only, and `cli`/`listen` install ~263 MB instead of

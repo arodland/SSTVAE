@@ -125,6 +125,12 @@ public:
     // Base plus overlay, or nothing if no picture has been chosen.
     std::optional<images::Picture> composed_image() const;
 
+    // The current selection's on-screen rectangle, in this widget's own
+    // coordinates -- what a floating panel anchoring itself "near the
+    // selected item" should position against. Empty if nothing is
+    // selected.
+    QRect selection_screen_rect() const;
+
 signals:
     // Null when the selection was cleared.
     void selectionChanged(overlay::Item* item);
@@ -154,7 +160,11 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
-    enum class Drag { None, Move, Resize };
+    // **Rotate is a separate drag mode from Resize**, not a modifier on
+    // it: the two grips sit at different corners (see `rotate_handle_rect`
+    // vs `handle_rect`) precisely so a press can never be ambiguous
+    // between them.
+    enum class Drag { None, Move, Resize, Rotate };
 
     void rerender();
     // What is actually painted for `item`: substituted per `fields_`.
@@ -166,13 +176,26 @@ private:
     // callers check the rect.
     QPointF to_canvas(const QPointF& widget_point) const;
     int hit_test(const QPointF& canvas_point) const;
+    // `item`'s bbox, mapped into this widget's own pixel coordinates --
+    // shared by `paintEvent`'s selection box and `selection_screen_rect`,
+    // which must agree about where the item sits on screen.
+    QRect item_screen_rect(const overlay::Item& item) const;
     QRect handle_rect(const overlay::Bbox& box) const;
+    // Above and outside the top-right corner, offset from `handle_rect`
+    // deliberately (see `Drag::Rotate`).
+    QRect rotate_handle_rect(const overlay::Bbox& box) const;
     // The grip's side, from the style rather than a pixel literal --
     // see the .cpp.
     int handle_px() const;
     // Cursor feedback for the no-drag path of mouseMoveEvent.
     void update_hover_cursor(const QPointF& point);
     void select(int index);
+    // The keyboard-shortcut forms of the two mouse drags: `+`/`-` and
+    // `[`/`]` in `keyPressEvent`. Multiplicative and additive
+    // respectively, matching what dragging the corresponding handle
+    // does, and clamped to the same bounds `mouseMoveEvent` uses.
+    static void scale_item(overlay::Item& item, double factor);
+    static void rotate_item(overlay::Item& item, double delta_degrees);
 
     overlay::Doc doc_;
     overlay::Fields fields_;
@@ -194,6 +217,14 @@ private:
     // and image items leave this at 0 and never read it.
     double resize_start_height_ = 0.0;
     QPointF resize_origin_;
+    // Rotate drag state: the item's own rotation and the pointer's
+    // angle around the pivot (radians, screen sense already flipped --
+    // see the .cpp), both captured the moment the grip was grabbed. The
+    // live rotation is `rotate_start_rotation_` plus however far the
+    // pointer's angle has moved since, around `rotate_center_`.
+    double rotate_start_rotation_ = 0.0;
+    double rotate_start_pointer_angle_ = 0.0;
+    QPointF rotate_center_;
 };
 
 }  // namespace sstvae::gui
