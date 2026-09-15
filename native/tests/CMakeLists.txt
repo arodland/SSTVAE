@@ -51,6 +51,27 @@ target_include_directories(test_beacon PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 add_test(NAME beacon COMMAND test_beacon)
 set_tests_properties(beacon PROPERTIES TIMEOUT 240)
 
+# The catalog: reading a folder of templates, never failing on a bad
+# file, and the "Save as" filename helper.
+add_executable(test_template_catalog test_template_catalog.cpp)
+target_link_libraries(test_template_catalog PRIVATE sstvae_core)
+target_include_directories(test_template_catalog PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME template_catalog
+         COMMAND test_template_catalog
+                 ${CMAKE_CURRENT_SOURCE_DIR}/../../sstvae/overlay/templates)
+set_tests_properties(template_catalog PROPERTIES TIMEOUT 60)
+
+# Template substitution against the reference's rules, and the shipped
+# templates themselves, which are read from the Python package so the
+# apps and the CLI cannot drift apart on what "Reply" says.
+add_executable(test_overlay_template test_overlay_template.cpp)
+target_link_libraries(test_overlay_template PRIVATE sstvae_core)
+target_include_directories(test_overlay_template PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME overlay_template
+         COMMAND test_overlay_template
+                 ${CMAKE_CURRENT_SOURCE_DIR}/../../sstvae/overlay/templates)
+set_tests_properties(overlay_template PROPERTIES TIMEOUT 60)
+
 add_executable(test_log test_log.cpp)
 target_link_libraries(test_log PRIVATE sstvae_core)
 target_include_directories(test_log PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -248,6 +269,10 @@ if(TARGET sstvae_gui)
   target_include_directories(test_tx_panel PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   sstvae_hamlib_copy_runtime(test_tx_panel)
   sstvae_onnxruntime_copy_runtime(test_tx_panel)
+  # `TransmitPanel::builtin_templates_dir()` looks beside the executable
+  # -- see native/CMakeLists.txt -- and this is the one test that
+  # constructs a real `TransmitPanel`.
+  sstvae_copy_builtin_templates(test_tx_panel)
   add_test(NAME tx_panel COMMAND test_tx_panel)
   set_tests_properties(tx_panel PROPERTIES TIMEOUT 300)
 

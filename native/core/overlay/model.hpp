@@ -78,12 +78,49 @@ struct ImageItem {
     std::string anchor = "la";
 };
 
-using Item = std::variant<TextItem, ImageItem>;
+// A filled and/or stroked rectangle.
+//
+// Fill and stroke are independent, each "none" | "solid" | "gradient" --
+// the kind and its colour(s) travel together as flat fields, matching
+// this file's style rather than a nested gradient struct. A gradient is
+// linear only: two colours and an angle. The angle is counter-clockwise,
+// matching `rotation`, and deliberately: the gradient is painted into
+// the item's own unrotated layer and rotated with it
+// (`native/core/overlay/render.cpp`), so a gradient's angle and the
+// item's rotation add exactly as the two numbers suggest they should.
+struct RectItem {
+    double x = 0.1;
+    double y = 0.1;
+    double width = 0.3;   // fraction of canvas width
+    double height = 0.2;  // fraction of canvas height
+    double rotation = 0.0;  // degrees, counter-clockwise
+    std::string anchor = "la";
+
+    std::string fill_kind = "none";  // "none" | "solid" | "gradient"
+    std::string fill_color = "#ffffff";
+    std::string fill_color2 = "#000000";  // the gradient's second stop
+    double fill_angle = 0.0;
+
+    std::string stroke_kind = "none";  // "none" | "solid" | "gradient"
+    std::string stroke_color = "#ffffff";
+    std::string stroke_color2 = "#000000";
+    double stroke_angle = 0.0;
+    double stroke_width = 0.006;  // fraction of canvas width
+};
+
+using Item = std::variant<TextItem, ImageItem, RectItem>;
 
 // An ordered list of items, drawn back to front.
+//
+// `name` is what makes a document a *template* (`overlay/template.hpp`):
+// a saved layout the operator picks by name. Written only when set, so
+// an unnamed document serializes exactly as it did before templates
+// existed, and a template opens as a plain document in any build with
+// this model.
 struct Doc {
     std::vector<Item> items;
     int version = DOC_VERSION;
+    std::string name;
 
     bool empty() const { return items.empty(); }
 };

@@ -118,6 +118,8 @@ add_library(sstvae_core STATIC
   core/optimize/optimize.cpp
   core/optimize/speculative.cpp
   core/overlay/model.cpp
+  core/overlay/template.cpp
+  core/overlay/template_catalog.cpp
   core/sync/sync.cpp
   # Vendored, and the only non-header-only one -- see
   # third_party/easyexif/README.md. Read for JPEG orientation alone.
@@ -203,6 +205,38 @@ function(sstvae_onnxruntime_copy_runtime target)
             "${SSTVAE_ONNXRUNTIME_LIBDIR}/onnxruntime.dll"
             "$<TARGET_FILE_DIR:${target}>"
     VERBATIM)
+endfunction()
+
+# The built-in overlay templates (docs/overlay-templates.md), copied
+# beside a GUI target the same way the Hamlib and onnxruntime runtimes
+# are: `sstvae/overlay/templates/` is the one source both the CLI and
+# the apps ship, so an installed build reads the same three files a
+# Python station would. `overlay::load_builtin_templates` looks for a
+# `templates/` directory next to the executable.
+#
+# **The path is captured here, not recomputed inside the function.** A
+# function body runs with the *caller's* `CMAKE_CURRENT_SOURCE_DIR`, not
+# this file's -- so a call from `tests/CMakeLists.txt` resolved one
+# directory short (`native/tests/../sstvae/...` instead of
+# `native/tests/../../sstvae/...`) and failed the check below outright.
+# `SSTVAE_TEMPLATES_SRC` is set once, in this file's own scope, and
+# `add_subdirectory` scopes see their parent's variables -- so every
+# caller, whichever directory it is in, gets the same answer.
+set(SSTVAE_TEMPLATES_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../sstvae/overlay/templates")
+function(sstvae_copy_builtin_templates target)
+  set(_templates_src "${SSTVAE_TEMPLATES_SRC}")
+  file(GLOB _templates "${_templates_src}/*.json")
+  if(NOT _templates)
+    message(FATAL_ERROR
+      "No built-in templates found in ${_templates_src}; ${target} would "
+      "start with an empty template picker and no diagnostic at all.")
+  endif()
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_FILE_DIR:${target}>/templates"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_templates}
+            "$<TARGET_FILE_DIR:${target}>/templates"
+    COMMENT "Copying the built-in overlay templates beside ${target}")
 endfunction()
 
 # --- Qt audio ---------------------------------------------------------------
@@ -518,6 +552,7 @@ if(_want_gui)
   target_link_libraries(sstvae-gui PRIVATE sstvae_gui)
   sstvae_hamlib_copy_runtime(sstvae-gui)
   sstvae_onnxruntime_copy_runtime(sstvae-gui)
+  sstvae_copy_builtin_templates(sstvae-gui)
   message(STATUS "Desktop application: Qt ${Qt6_VERSION}")
 endif()
 
@@ -567,4 +602,5 @@ if(TARGET sstvae_gui)
   # main with no output at all -- see the note in hamlib.cmake.
   sstvae_hamlib_copy_runtime(sstvae-gui-shot)
   sstvae_onnxruntime_copy_runtime(sstvae-gui-shot)
+  sstvae_copy_builtin_templates(sstvae-gui-shot)
 endif()

@@ -28,6 +28,8 @@ namespace {
 settings::Config populated() {
     settings::Config c;
     c.callsign = "KC2G";
+    c.grid = "FN31pr";
+    c.operator_name = "Andrew";
     c.model_path = "/opt/models/v2";
     c.precision = "int8";
 

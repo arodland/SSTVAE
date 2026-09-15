@@ -1,12 +1,16 @@
 #include "overlay/render.hpp"
 
+#include <QBrush>
 #include <QColor>
 #include <QFont>
 #include <QFontDatabase>
 #include <QFontMetricsF>
 #include <QImage>
+#include <QLinearGradient>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPen>
+#include <QRectF>
 #include <QSize>
 #include <QString>
 #include <QStringList>
@@ -16,6 +20,7 @@
 #include <cmath>
 #include <map>
 #include <mutex>
+#include <numbers>
 #include <string>
 #include <utility>
 #include <vector>
@@ -172,20 +177,28 @@ void draw_text(QPainter& painter, const TextItem& item, int canvas_w,
     const double x = std::lround(item.x * canvas_w);
     const double y = std::lround(item.y * canvas_h);
 
+    // Computed before rotating: the layout does not depend on the
+    // painter's transform, and the block's own centre is what the
+    // rotation below needs.
+    const TextLayout layout = layout_text(item, font, size_px, x, y);
+
     painter.save();
     if (item.rotation != 0.0) {
-        // About the anchor point, which is the point the document
-        // actually pins. (The reference rotates a padded layer and
-        // composites it at the anchor, which is close but not the same;
-        // this is the version an editor can show a handle for.) Negated
+        // About the text block's own centre, matching `draw_rect`/
+        // `draw_image` -- not the raw anchor point this used to pivot
+        // on, which for the common "top-left" anchor swung the whole
+        // block out from under the selection box instead of turning it
+        // in place (found via the editor's own rotate handle, which
+        // made the mismatch obvious for the first time). Negated
         // because the document's angle is counter-clockwise, as PIL's
         // is, and QTransform::rotate turns the other way.
-        painter.translate(x, y);
+        const QPointF centre(layout.left + layout.width / 2.0,
+                             layout.top + layout.height / 2.0);
+        painter.translate(centre);
         painter.rotate(-item.rotation);
-        painter.translate(-x, -y);
+        painter.translate(-centre);
     }
 
-    const TextLayout layout = layout_text(item, font, size_px, x, y);
     const QPainterPath path = text_path(item, font, layout);
     if (stroke > 0.0) {
         QPen pen(color_of(item.stroke_color, Qt::black));
@@ -297,6 +310,87 @@ void apply_anchor(const std::string& anchor, int w, int h, int& x, int& y) {
     else if (vertical == 'b' || vertical == 'd') y -= h;
 }
 
+// ---------------------------------------------------------------------
+// Rectangles
+
+// A linear gradient spanning `w` x `h`, along `angle_deg` (counter-
+// clockwise, matching `RectItem::rotation`): 0 runs left to right, 90
+// bottom to top. The extent formula matches `sstvae/overlay/render.py`'s
+// `_gradient_layer` so the two implementations agree on where each
+// colour lands, even though Qt interpolates continuously where PIL's
+// numpy version is per-pixel.
+QLinearGradient rect_gradient(double w, double h, const std::string& c1,
+                              const std::string& c2, double angle_deg) {
+    const double theta = angle_deg * std::numbers::pi / 180.0;
+    const double ux = std::cos(theta);
+    const double uy = -std::sin(theta);
+    const double cx = w / 2.0;
+    const double cy = h / 2.0;
+    const double extent = (std::abs(ux) * w + std::abs(uy) * h) / 2.0;
+    const double ext = extent > 0.0 ? extent : 1.0;
+    QLinearGradient grad(QPointF(cx - ux * ext, cy - uy * ext),
+                         QPointF(cx + ux * ext, cy + uy * ext));
+    grad.setColorAt(0.0, color_of(c1, Qt::white));
+    grad.setColorAt(1.0, color_of(c2, Qt::black));
+    return grad;
+}
+
+QBrush rect_brush(const std::string& kind, const std::string& color,
+                  const std::string& color2, double angle, double w, double h) {
+    if (kind == "solid") return QBrush(color_of(color, Qt::white));
+    if (kind == "gradient") return QBrush(rect_gradient(w, h, color, color2, angle));
+    return QBrush(Qt::NoBrush);
+}
+
+void draw_rect(QPainter& painter, const RectItem& item, int canvas_w, int canvas_h) {
+    if (item.fill_kind == "none" && item.stroke_kind == "none") return;
+
+    const int iw = std::max(1, static_cast<int>(std::lround(item.width * canvas_w)));
+    const int ih = std::max(1, static_cast<int>(std::lround(item.height * canvas_h)));
+    const double sw = std::max(0.0, item.stroke_width * canvas_w);
+
+    // Painted into its own unrotated layer and then rotated as a whole
+    // by the painter transform below, exactly as `draw_image` does --
+    // which is also why `item_bbox` below reports the *unrotated*
+    // extent: the two must describe the same thing a handle sits on.
+    QImage layer(iw, ih, QImage::Format_ARGB32_Premultiplied);
+    layer.fill(Qt::transparent);
+    {
+        QPainter lp(&layer);
+        if (item.fill_kind != "none") {
+            lp.fillRect(QRectF(0, 0, iw, ih),
+                        rect_brush(item.fill_kind, item.fill_color, item.fill_color2,
+                                   item.fill_angle, iw, ih));
+        }
+        if (item.stroke_kind != "none" && sw > 0.0) {
+            QPen pen(rect_brush(item.stroke_kind, item.stroke_color, item.stroke_color2,
+                                item.stroke_angle, iw, ih),
+                     sw);
+            pen.setJoinStyle(Qt::MiterJoin);
+            lp.setPen(pen);
+            lp.setBrush(Qt::NoBrush);
+            // A Qt pen straddles the path -- inset by half its width so
+            // the stroke's outer edge lands on the item's own declared
+            // bounds instead of spilling `sw/2` past them.
+            lp.drawRect(QRectF(sw / 2.0, sw / 2.0, iw - sw, ih - sw));
+        }
+    }
+
+    int x = static_cast<int>(std::lround(item.x * canvas_w));
+    int y = static_cast<int>(std::lround(item.y * canvas_h));
+    apply_anchor(item.anchor, layer.width(), layer.height(), x, y);
+
+    painter.save();
+    if (item.rotation != 0.0) {
+        const QPointF centre(x + layer.width() / 2.0, y + layer.height() / 2.0);
+        painter.translate(centre);
+        painter.rotate(-item.rotation);
+        painter.translate(-centre);
+    }
+    painter.drawImage(QPoint(x, y), layer);
+    painter.restore();
+}
+
 void draw_image(QPainter& painter, const ImageItem& item, int canvas_w,
                 int canvas_h, const images::Picture* last_rx) {
     const QImage src = resolve_source(item, last_rx);
@@ -361,6 +455,20 @@ Bbox item_bbox(int canvas_w, int canvas_h, const Item& item,
                                     std::lround(layout.height + 2 * stroke)))};
     }
 
+    if (const RectItem* rect = std::get_if<RectItem>(&item)) {
+        // Unrotated dimensions, like the `ImageItem` branch below -- an
+        // existing simplification kept for consistency, not a gap
+        // specific to rectangles: see `draw_rect`, which paints into an
+        // unrotated layer and rotates it with a painter transform, so
+        // the handle and the paint describe the same unrotated box.
+        const int iw = std::max(1, static_cast<int>(std::lround(rect->width * canvas_w)));
+        const int ih = std::max(1, static_cast<int>(std::lround(rect->height * canvas_h)));
+        int x = static_cast<int>(std::lround(rect->x * canvas_w));
+        int y = static_cast<int>(std::lround(rect->y * canvas_h));
+        apply_anchor(rect->anchor, iw, ih, x, y);
+        return Bbox{x, y, iw, ih};
+    }
+
     const ImageItem& image = std::get<ImageItem>(item);
     // Dimensions only -- see `source_size`. This is the mouse-move path.
     const QSize src = source_size(image, last_rx);
@@ -386,6 +494,8 @@ images::Picture render(const images::Picture& base, const Doc& doc,
         for (const Item& item : doc.items) {
             if (const TextItem* text = std::get_if<TextItem>(&item)) {
                 draw_text(painter, *text, base.width, base.height);
+            } else if (const RectItem* rect = std::get_if<RectItem>(&item)) {
+                draw_rect(painter, *rect, base.width, base.height);
             } else if (const ImageItem* image = std::get_if<ImageItem>(&item)) {
                 draw_image(painter, *image, base.width, base.height, last_rx);
             }

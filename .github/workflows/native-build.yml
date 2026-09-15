@@ -120,6 +120,44 @@ jobs:
       # rather than taken from an extra because this job installs
       # `[cli]`, not `[dev]`.
       - run: pip install -e ".[cli]" pytest pybind11 platformdirs
+      # "Install Qt" below runs its own setup-python (aqtinstall needs
+      # >=3.14) with update-environment: true, which silently overwrites
+      # PATH for the rest of the job. Every later step that invokes bare
+      # `python` -- not just the one right after Qt, any of them -- picks
+      # up that different interpreter, one that never had cli/pybind11
+      # installed into it, rather than the one `pip install` just
+      # populated. Pin the good interpreter's path once, here, before Qt
+      # can shadow it, and use it explicitly everywhere below instead of
+      # trusting PATH order again. `python-path` from setup-python would
+      # do the same thing, but this reads directly from the interpreter
+      # `pip install` just ran against, which is one fewer thing to keep
+      # in sync if the step above ever changes.
+      - name: Pin this job's python
+        shell: bash
+        run: echo "SSTVAE_PYTHON=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+      # The codec's parity tests compare two runtimes on the *same*
+      # model file, so they need that file. Fetching it here rather than
+      # inside a test keeps a network failure reported as a network
+      # failure. SSTVAE_REQUIRE_CODEC below then makes a skip -- for any
+      # reason, including this step silently half-working -- a failure.
+      #
+      # This step (and CMake's Python3_EXECUTABLE/pybind11_DIR below) is
+      # exactly why the python above is pinned rather than trusted to
+      # PATH: this one used to be masked by the model-artifact cache
+      # nearly always hitting before the shadowed python was ever
+      # exercised, and CMake's own `find_package(pybind11)` used to fail
+      # outright with no cache to hide behind -- both on the *same*
+      # shadowed interpreter, the one that never had pybind11 or
+      # huggingface_hub installed.
+      - name: Cache model artifacts
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ hashFiles('sstvae/checkpoint.py') }}
+      - name: Fetch the published ONNX artifacts
+        shell: bash
+        run: |
+          "$SSTVAE_PYTHON" -c "from sstvae import checkpoint; [checkpoint.resolve_onnx(p, None, 'fp16') for p in ('encoder','decoder')]"
       # Pinned to an exact tag, like onnxruntime, Hamlib and Qt. It was
       # @latest, which meant a CMake release could break a build with no
       # change on our side -- and there is no moving `v4` alias tag on
@@ -210,18 +248,6 @@ jobs:
         with:
           path: native/.deps
           key: deps-${{ matrix.label }}-${{ hashFiles('native/cmake/onnxruntime.cmake', 'native/cmake/hamlib.cmake') }}
-      # The codec's parity tests compare two runtimes on the *same*
-      # model file, so they need that file. Fetching it here rather than
-      # inside a test keeps a network failure reported as a network
-      # failure. SSTVAE_REQUIRE_CODEC below then makes a skip -- for any
-      # reason, including this step silently half-working -- a failure.
-      - name: Cache model artifacts
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/huggingface
-          key: hf-${{ hashFiles('sstvae/checkpoint.py') }}
-      - name: Fetch the published ONNX artifacts
-        run: python -c "from sstvae import checkpoint; [checkpoint.resolve_onnx(p, None, 'fp16') for p in ('encoder','decoder')]"
       # Put MSVC on PATH before CMake looks for a compiler. Without
       # this, the Ninja generator finds the runner's MinGW GCC first and
       # builds a perfectly good .pyd that CPython then cannot load --
@@ -250,8 +276,8 @@ jobs:
             -DSSTVAE_BUILD_GUI=ON -DSSTVAE_BUILD_QTAUDIO=ON \
             -DSSTVAE_BUILD_OVERLAY=ON \
             -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps" \
-            -DPython3_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')" \
-            -Dpybind11_DIR="$(python -c 'import pybind11; print(pybind11.get_cmake_dir())')"
+            -DPython3_EXECUTABLE="$SSTVAE_PYTHON" \
+            -Dpybind11_DIR="$("$SSTVAE_PYTHON" -c 'import pybind11; print(pybind11.get_cmake_dir())')"
       - name: Build
         run: cmake --build native/build
       # Windows only, and it runs before ctest because the loader has no

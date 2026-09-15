@@ -2,6 +2,9 @@
 
 #include <algorithm>
 
+#include "overlay/render.hpp"
+#include "session.hpp"
+
 namespace sstvae::androidapp {
 
 Composition& Composition::instance() {
@@ -126,10 +129,104 @@ images::Framing Composition::framing() const {
     return framing_;
 }
 
-images::Picture Composition::preview() const {
+void Composition::set_template(overlay::Doc doc) {
     std::lock_guard<std::mutex> lk(mu_);
-    if (source_.width <= 0 || source_.height <= 0) return {};
-    return images::fit(source_, framing_);
+    template_ = std::move(doc);
+}
+
+overlay::Doc Composition::template_doc() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return template_;
+}
+
+void Composition::set_fields(overlay::Fields fields) {
+    std::lock_guard<std::mutex> lk(mu_);
+    fields_ = std::move(fields);
+}
+
+overlay::Fields Composition::fields() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return fields_;
+}
+
+void Composition::set_reply_target(const std::string& path, const std::string& callsign,
+                                   double snr_db) {
+    std::lock_guard<std::mutex> lk(mu_);
+    reply_target_set_ = true;
+    reply_target_path_ = path;
+    reply_target_callsign_ = callsign;
+    reply_target_snr_db_ = snr_db;
+}
+
+bool Composition::has_reply_target() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return reply_target_set_;
+}
+
+std::string Composition::reply_target_callsign() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return reply_target_callsign_;
+}
+
+double Composition::reply_target_snr_db() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return reply_target_snr_db_;
+}
+
+images::Picture Composition::preview() const {
+    // Read what Session knows *before* taking our own lock, so this
+    // never holds two objects' locks at once -- Session has no call path
+    // back into Composition today, but there is no reason to rely on
+    // that staying true.
+    const Session::LastReception last = Session::instance().last_reception();
+
+    images::Picture base;
+    overlay::Doc doc;
+    overlay::Fields fields;
+    bool has_target = false;
+    std::string target_path;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        if (source_.width <= 0 || source_.height <= 0) return {};
+        base = images::fit(source_, framing_);
+        doc = template_;
+        fields = fields_;
+        has_target = reply_target_set_;
+        target_path = reply_target_path_;
+    }
+    // "None": the picture goes out unmodified, and at no rendering cost
+    // at all -- today's behaviour, byte for byte.
+    if (doc.items.empty()) return base;
+
+    // With no explicit reply target, `last_rx` means the newest
+    // reception -- the same rule the desktop's editor uses when nothing
+    // has been chosen for it either.
+    const std::string last_rx_path = has_target ? target_path : last.path;
+
+    const images::Picture* last_rx = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(last_rx_mu_);
+        if (last_rx_path.empty()) {
+            last_rx_cache_.reset();
+            last_rx_cache_path_.clear();
+        } else if (last_rx_path != last_rx_cache_path_) {
+            try {
+                last_rx_cache_ = images::load(last_rx_path);
+                last_rx_cache_path_ = last_rx_path;
+            } catch (const std::exception&) {
+                // A reception's PNG that cannot be re-read (deleted,
+                // corrupt) draws nothing rather than failing the whole
+                // preview -- the same "a template that insets the most
+                // recent picture is perfectly valid on a session that
+                // has not had one" rule `overlay::render` documents.
+                last_rx_cache_.reset();
+                last_rx_cache_path_.clear();
+            }
+        }
+        if (last_rx_cache_) last_rx = &*last_rx_cache_;
+    }
+
+    return overlay::render(base, overlay::substitute(doc, fields), last_rx);
 }
 
 }  // namespace sstvae::androidapp

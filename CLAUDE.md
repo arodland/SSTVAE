@@ -394,7 +394,28 @@ rule is enforced by `tools/check_layering.py`.
   `ImageItem.source` is a late-bound reference (`"last_rx"` or a path)
   rather than a pasted bitmap, so a saved template keeps meaning "the
   most recent received picture". `item_bbox` is shared with the editor
-  so selection handles can't drift from what is drawn.
+  so selection handles can't drift from what is drawn. `template.py`
+  (2026-09-14, step 1 of `docs/overlay-templates.md`) is the pure
+  string processing that makes a document a template: `{mycall}`-style
+  built-ins, `{field Label}` custom fields, an unknown placeholder left
+  literal, and a line whose placeholders are all empty dropped whole.
+  `OverlayDoc.name` is written only when set, so an unnamed document
+  serializes exactly as before. The shipped templates are data in
+  `sstvae/overlay/templates/` and the C++ test reads those same files,
+  so there is one source of what "Reply" says.
+  **`RectItem` (2026-09-15)** is the third item kind: a rectangle,
+  independently fillable and strokable with a solid color or a linear
+  gradient (`fill_kind`/`stroke_kind` each "none"/"solid"/"gradient",
+  flat fields rather than a nested gradient struct, matching this
+  module's style). The gradient angle is counter-clockwise, the same
+  sense as `rotation`, deliberately: it is painted into the item's own
+  unrotated layer and rotated with it, so the two numbers add exactly
+  as they read. `render.py` builds a gradient with numpy (PIL has no
+  gradient primitive); `native/core/overlay/render.cpp` uses
+  `QLinearGradient` for the identical geometry through Qt's own
+  interpolation. Like `ImageItem`, `item_bbox` reports the *unrotated*
+  extent for a rotated rect — an existing simplification carried over
+  for consistency, not a new gap.
 
 Two rules the deleted GUI established, which the native app inherits
 and which are the reason its panels look the way they do: a composition
@@ -1735,6 +1756,23 @@ need when `--native` fails and you want to know *where*.
 - `docs/slot-domain-precoder.md` — design for the mechanism that *can*
   reach PAPR (DFT spreading / learned unitary precoder in slot domain).
   Not implemented.
+- `docs/overlay-templates.md` — design for overlay *templates* and the
+  overlay on Android (2026-09-14, **steps 1-3 done the same day
+  (module, desktop, Android overlay-on/chips/Reply); step 4, the
+  Android template editor, not started** — build from it in the order
+  its "Sequencing" section gives). Step 3 was written and reviewed with
+  no NDK toolchain available, so unlike steps 1-2 it has not actually
+  been compiled — see the doc's own step-3 entry, which says so rather
+  than claiming more than was verified. The idea is
+  qsstv's: a template is an ordinary `OverlayDoc` with `{theircall}`-style
+  placeholders in its text, the per-over UI is a form derived from which
+  placeholders the chosen template uses, and "Reply" on a reception
+  prefills their call *and the measured SNR* from the sidecar and binds
+  `last_rx` to that picture. `{field Label}` declares an optional custom
+  text field (a pop-up on the phone), which is the free-form path
+  without an editor. Exists because the beacon identifies *this*
+  station and nothing can say whom an over is addressed to. Also
+  records that the desktop persists no overlay at all today.
 - `docs/onnx.md` — the ONNX runtime path, **implemented 2026-07-27**:
   onnxruntime is 53 MB installed against torch's 345 MB, fp32 ONNX is
   the same codec to ~2e-06, and both fp16 and int8 are now essentially
@@ -2288,9 +2326,136 @@ takes their settings and saved receptions with it.
 Desktop app: **one implementation**, `native/` (Phases 0-3), which
 reached parity, passed the loopback shakedown in all three directions
 including both cross-implementation ones, and replaced the PySide6 GUI
-on 2026-08-01 — see "The engines". Overlay *templates* are deliberately
-not implemented, but the document format is built for them (see
-`sstvae/overlay/` and `native/core/overlay/`).
+on 2026-08-01 — see "The engines". **Overlay templates are implemented
+on the desktop** (`docs/overlay-templates.md` step 2, 2026-09-14): a
+Template combo, "Save as template...", and a "Reply fields" box on
+`TransmitPanel`. **The Android half landed the same day (step 3)**:
+template chips and a fields row on Send, and Reply buttons on Pictures,
+the picture viewer and the Listen tab all binding a `last_rx` inset and
+`{theircall}`/`{snr}` to whichever reception was tapped. Written with
+no NDK available in that session, so — unlike the desktop half —
+unbuilt and untested; step 4, an on-phone template editor, is not
+started.
+
+**The desktop overlay editor gained four more things the same week
+(2026-09-15), none of them in the original template design doc.**
+A `RectItem` tool (filled and/or stroked, solid or gradient — see the
+`sstvae/overlay/` bullet above); stacking-order controls, acting on any
+item type by array position, not just rects; the tool row is now an
+icon palette (`QToolButton`s with hand-drawn glyphs, the same reasoning
+`set_swatch` gives for painting its color buttons rather than sourcing
+icon assets) instead of "Add text"/"Add last received"/"Add image..."
+text buttons; and "Save as template..." defaults its name prompt to
+the loaded template's own name (`editor_->doc().name`, which
+`on_template_selected` already carries). **Custom fields also moved
+inline**, superseding step 2's pop-up-only design: up to
+`TransmitPanel::MAX_INLINE_CUSTOM_FIELDS` (4) live in `fields_box_`
+itself, always present and only ever `setEnabled` — the same fixed-
+shape rule as everything else in that box, now stated once rather than
+per-control — updating the composite on every keystroke via
+`on_custom_field_edited`; a template declaring more spills the rest
+into the pop-up, which is what it is for now. `TransmitPanel::ColorSwatch`
+replaced the single `color_button_`/`swatch_color_`/`swatch_set_` trio
+once a rect's four independent colors needed the identical guard
+against rebuilding an icon at drag-frame rate.
+
+**That first pass put every one of those controls in the "Selected
+item" box in `control_strip()`, and it was wrong -- "way too many
+buttons" (Andrew, same day), reworked within hours of landing.** Two
+changes, both still 2026-09-15. **Scale and rotation are on-canvas now,
+not spin boxes**: a resize handle (unchanged) plus a new rotate handle
+-- a circle at the bbox's top-right corner, offset outward the opposite
+way from the square resize grip at the bottom-right, so a press can
+never land on the wrong one -- and `+`/`-` (multiplicative, fine/coarse
+via Shift, matching the existing arrow-key nudge) and `[`/`]`
+(additive) as the keyboard form of the same two drags, clamped and
+normalized by the identical `scale_item`/`rotate_item` helpers either
+path calls. `OverlayEditor::selection_screen_rect()` is the new public
+surface this needed: the selection's on-screen rectangle, for whatever
+wants to anchor itself near it. **Color, gradient, stroke and stacking
+order moved to a floating panel** (`TransmitPanel::build_selection_palette`,
+a `QFrame` parented to the editor itself, not to `control_strip()`) that
+appears beside the selection and only while something is selected --
+`position_selection_palette()` anchors it to `selection_screen_rect()`,
+flipping to the item's other side rather than running off the canvas,
+and re-running at drag-frame rate (`on_selection`, and `documentChanged`
+directly for a keyboard shortcut that moves the item without
+reselecting it). Being outside `control_strip()` is what makes this
+panel exempt from that box's fixed-shape rule (see
+`update_selection_palette`): unlike `properties_`/`fields_box_`, its
+rows actually show and hide by item type and by gradient-kind rather
+than only `setEnabled`, because nothing here is matched against the
+receive pane's height. What is left inside `control_strip()`'s
+"Selected item" box (retitled "Text") is exactly the text editor and
+its alignment combo -- still out-of-line, deliberately: inline editing
+would have to show substituted `{placeholder}` text while the operator
+edits the raw template underneath it, which is not solved yet.
+
+**Five bugs found the same day, using the handles this rework just
+landed -- direct manipulation surfaced them where the old spin boxes
+never had.** All fixed 2026-09-15.
+
+- **The selection outline and both grips did not rotate with the
+  item.** `OverlayEditor::item_screen_polygon` replaces the dashed
+  outline's `drawRect` with a `drawPolygon` of the bbox's four corners,
+  each rotated around the bbox's own centre by a new static helper,
+  `rotate_around` -- the same transform `overlay::render` applies to
+  pixels, worked out algebraically rather than pushed through a
+  `QTransform`, so the outline, `handle_rect` and `rotate_handle_rect`
+  all agree with the picture underneath them at any angle. `handle_rect`
+  and `rotate_handle_rect` both gained a `rotation` parameter for this;
+  every call site already had the item's rotation two lines away.
+- **Text rotated around its own top-left corner while rect/image
+  rotated around their centre.** A real, pre-existing split between
+  `draw_text` (pivoted on the raw anchor point) and `draw_rect`/
+  `draw_image` (pivoted on the anchored box's centre) in both
+  `native/core/overlay/render.cpp` and `sstvae/overlay/render.py` --
+  invisible with a spin box, obvious the moment an operator could drag
+  a corner and watch the block swing out from under the selection box
+  instead of turning in place. Both languages now compute the text
+  block's own bbox centre (the same point `item_bbox` already reported)
+  before rotating and pivot there. Python's fix is the fiddlier one:
+  `Image.rotate(expand=True)` keeps the *pre-rotation* layer's centre
+  fixed and grows the canvas around it, so the old code -- which pasted
+  the bigger, rotated layer at the same offset the small unrotated one
+  used -- let the effective centre drift with the angle; the fix pastes
+  the rotated layer so *its* centre lands on the correct point instead.
+  No golden vector or parity test pinned a rotated `TextItem`'s pixels,
+  so nothing needed updating besides the two render functions.
+- **The rotate handle could land off the canvas** for an item near an
+  edge, since its outward offset (opposite the resize grip, so the two
+  are never ambiguous) was unconditional. `rotate_handle_rect` now
+  clamps the final position to `canvas_rect()`.
+- **Mojibake in the gradient angle suffix ("0.00Â°").**
+  `QStringLiteral("\xC2\xB0")` is two bytes inside a `char16_t` literal,
+  not one -- `QStringLiteral` wraps its argument in `u"..."`, so a raw
+  UTF-8 byte pair for U+00B0 became two separate UTF-16 code units,
+  U+00C2 and U+00B0. `QStringLiteral("°")` names the code point
+  directly and survives the wrapping.
+- **The template dropdown and "Save as template..." could wrap onto
+  separate lines**, reading as two unrelated controls in the `FlowLayout`
+  tool row. Grouped into one `style::row` item ("Template: [combo]
+  [Save...]"), the same fix `test_the_level_controls_are_one_flow_item`
+  already guards for the mode/level/readout trio.
+
+**A "last received" inset with no reception yet is invisible where it
+matters least and was invisible where it mattered too.** `overlay::
+render()` correctly paints nothing for an unresolved `SOURCE_LAST_RX`
+(`draw_image` returns early on a null source) -- it is also what
+encodes the transmission, so a placeholder there could go out over the
+air in place of a picture. But that left the item invisible on the
+*editor's own preview* too, before an operator had clicked anything to
+find it -- a real gap for a template that starts with one already in it
+(the built-in "Reply with picture"). `OverlayEditor::paintEvent` now
+draws its own frame for every such item, over the composed picture
+rather than into it (so nothing about `overlay::render()`'s output or
+what gets transmitted changes) -- same look as the empty-canvas state
+just above it and `PictureBox`'s own "no picture" frame. Drawn for
+*every* unresolved last_rx item, not only the selected one, since
+"findable before it is clicked" is the whole point; `hit_test` and the
+selection handles already worked here (`item_bbox` has always returned
+a real box, defaulting to a 0.75 aspect with nothing to measure), so
+this was purely a missing visual, not a missing interaction.
 
 ONNX runtime path complete: the codec is onnxruntime, torch is
 training-only, and `cli`/`listen` install ~263 MB instead of
@@ -2342,8 +2507,11 @@ Remaining: run stage-2 fine-tune (start from a good stage-1
 checkpoint, `--lr 1e-4`) — note pre-beacon checkpoints remain
 architecture-compatible (model channel count unchanged), evaluation
 sweeps (PSNR/LPIPS vs SNR per mode), on-air calibration. On the app
-side: overlay templates, and a real on-air (not loopback) shakedown of
-the PTT timing against a physical radio. For the native app: Phase 4 is
+side: step 4 of overlay templates (`docs/overlay-templates.md`, an
+on-phone template editor; steps 1-3 are done), building and testing
+step 3's Android changes on a machine with an NDK (unverified so far
+for want of one), and a real on-air (not loopback) shakedown of the PTT
+timing against a physical radio. For the native app: Phase 4 is
 sequenced in five steps and the first three are done — CI builds five
 packages and five installers (AppImage, `.dmg`, NSIS setup) on every
 push. **Step 4 (signing) is done and green (2026-08-04)**:

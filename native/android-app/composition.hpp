@@ -6,31 +6,38 @@
 // So the composition outlives any view, and `Transmitter` is a view over
 // it exactly as `Listener` is a view over `Session`.
 //
-// **There is no overlay here, and that is a decision** (Andrew,
-// 2026-08-09). The desktop composes: insets, captions, a callsign drawn
-// into the picture. This app deliberately does not, not even an
-// automatic callsign -- the station is identified by the beacon carrier,
-// which every receiver decodes whether or not anyone can read text in a
-// picture, and optionally by a CW ID that a human can copy by ear.
-// Burning a callsign into the pixels identifies the station only to
-// someone who already decoded the picture, and spends the codec's
-// bit budget doing it. So the operator picks an image, crops it, and it
-// goes out unmodified.
+// **There was no overlay here, and that was a decision** (Andrew,
+// 2026-08-09) -- reversed 2026-09-14, and the reversal is worth reading
+// rather than skipping. The station is still identified by the beacon
+// carrier and, optionally, a CW ID; neither of those can say **whom**
+// a transmission is addressed to, and a QSO reply is addressed --
+// "W1XYZ de KC2G" is what makes an over a reply rather than a second
+// broadcast. `docs/overlay-templates.md` is the design: a *template* is
+// an ordinary `overlay::Doc` with `{theircall}`-style placeholders, so
+// the operator never free-hand composes on this screen -- there is
+// still no editor here, only a template picker and a small fields row
+// (step 4 is the editor, and is not built). An automatic callsign
+// caption is still not offered: `{mycall}` exists only inside a
+// template the operator chose, on purpose.
 //
-// What survives of the desktop's rule is the part that matters: the
-// preview **is** the output of the same `images::fit` the transmitter
-// will run, not a toolkit-drawn imitation of a crop. There is no second
+// What survived unchanged from the original design: the preview **is**
+// the output of the same pipeline the transmitter runs (`images::fit`,
+// then, with a template active, `overlay::render` over the substituted
+// document), not a toolkit-drawn imitation. There is no second
 // representation that can drift from what goes on the air.
 
 #ifndef SSTVAE_ANDROID_COMPOSITION_HPP
 #define SSTVAE_ANDROID_COMPOSITION_HPP
 
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 
 #include "images/images.hpp"
 #include "images/types.hpp"
+#include "overlay/model.hpp"
+#include "overlay/template.hpp"
 
 namespace sstvae::androidapp {
 
@@ -71,8 +78,46 @@ public:
     void pan(double frac_x, double frac_y);
 
     // Exactly what will be transmitted: IMG_W x IMG_H, through the same
-    // call the transmitter makes. Empty if there is no source.
+    // call the transmitter makes -- `images::fit`, then, with a
+    // template active, `overlay::render` over the substituted document.
+    // Empty if there is no source.
     images::Picture preview() const;
+
+    // --- templates (docs/overlay-templates.md) --------------------------
+    //
+    // Composition owns these too, for the reason it owns the picture
+    // and the framing: `preview()` has to be able to render the whole
+    // composite with nothing else supplied. `Transmitter` is the policy
+    // -- which template is chosen, what the operator typed -- and pushes
+    // the result here, the same division `OverlayEditor::set_fields`
+    // draws on the desktop.
+
+    // The raw template: placeholders intact, exactly as a phone editor
+    // (step 4, not built) would show them. Empty items means "None",
+    // the original unmodified-picture behaviour.
+    void set_template(overlay::Doc doc);
+    overlay::Doc template_doc() const;
+
+    // What fills the current template's holes right now. Recomputed by
+    // `Transmitter` on every relevant change (a keystroke, a template
+    // switch, a fresh reception's SNR) and pushed whole, rather than
+    // tracked incrementally here.
+    void set_fields(overlay::Fields fields);
+    overlay::Fields fields() const;
+
+    // The reception Reply was pressed on, if any. Its callsign and SNR
+    // are what `Transmitter` reads to fill `{theircall}` (once, as a
+    // seed -- the field stays editable after) and `{snr}` (every time,
+    // never typed); a `last_rx` item in the template resolves to *this*
+    // picture rather than whichever reception is newest. Choosing a
+    // different *source* picture (Choose/Camera) does **not** clear
+    // this -- replying with a freshly taken photo as the outgoing
+    // picture is the ordinary case, not an edge one.
+    void set_reply_target(const std::string& path, const std::string& callsign,
+                          double snr_db);
+    bool has_reply_target() const;
+    std::string reply_target_callsign() const;
+    double reply_target_snr_db() const;
 
 private:
     Composition() = default;
@@ -87,6 +132,21 @@ private:
     images::Picture source_;
     std::string path_;
     images::Framing framing_;
+    overlay::Doc template_;
+    overlay::Fields fields_;
+    bool reply_target_set_ = false;
+    std::string reply_target_path_;
+    std::string reply_target_callsign_;
+    double reply_target_snr_db_ = 0.0;
+
+    // The `last_rx` picture, cached and reloaded only when the path it
+    // should show actually changes -- `preview()` may run once per
+    // crop-drag frame or per keystroke in a field, and a render must
+    // not decode a PNG from disk that often. Separate from `mu_` so a
+    // slow decode never blocks a pan or a field edit.
+    mutable std::mutex last_rx_mu_;
+    mutable std::string last_rx_cache_path_;
+    mutable std::optional<images::Picture> last_rx_cache_;
 };
 
 }  // namespace sstvae::androidapp

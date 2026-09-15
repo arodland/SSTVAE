@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "text": "CQ CQ CQ\nde {mycall}\n{grid}\n{field Comment}",
+      "x": 0.03,
+      "y": 0.03,
+      "size": 0.1,
+      "color": "#ffffff",
+      "stroke_color": "#000000",
+      "stroke_width": 0.12,
+      "font": null,
+      "anchor": "la",
+      "align": "left",
+      "line_spacing": 0.15,
+      "rotation": 0.0,
+      "type": "text"
+    }
+  ],
+  "name": "CQ"
+}

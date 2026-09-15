@@ -31,6 +31,13 @@
 #include <QTimer>
 #include <QtQml/qqmlregistration.h>
 
+#include <map>
+#include <string>
+#include <vector>
+
+#include "overlay/model.hpp"
+#include "overlay/template.hpp"
+
 class Transmitter : public QObject {
     Q_OBJECT
     QML_ELEMENT
@@ -64,6 +71,40 @@ class Transmitter : public QObject {
     Q_PROPERTY(double voxLead READ voxLead WRITE setVoxLead NOTIFY changed)
     Q_PROPERTY(QStringList outputDevices READ outputDevices NOTIFY devicesChanged)
     Q_PROPERTY(QString outputDevice READ outputDevice WRITE setOutputDevice NOTIFY changed)
+
+    // --- templates (docs/overlay-templates.md) ------------------------
+    //
+    // No editor here (step 4, not built) -- a template is picked, not
+    // composed, and the only free text the operator ever types is a
+    // custom field's value.
+    Q_PROPERTY(QStringList templateNames READ templateNames NOTIFY changed)
+    // Index 0 is always "None": the picture goes out unmodified, and
+    // choosing it is how a template is left.
+    Q_PROPERTY(int templateIndex READ templateIndex WRITE setTemplateIndex
+                   NOTIFY changed)
+    // Whether the *current* template has a `{theircall}` hole -- the
+    // field below is shown enabled only then, matching the desktop's
+    // "and only those" rule.
+    Q_PROPERTY(bool wantsTheirCall READ wantsTheirCall NOTIFY changed)
+    Q_PROPERTY(QString theirCall READ theirCall WRITE setTheirCall NOTIFY changed)
+    // `{snr}` is never typed -- see `refreshFields()` -- so there is no
+    // corresponding WRITE property; the reply target it comes from is
+    // exposed only as `hasReplyTarget`, for a screen that wants to say
+    // whose picture is bound in.
+    Q_PROPERTY(bool hasReplyTarget READ hasReplyTarget NOTIFY changed)
+    // Button text: "Custom fields..." or "Custom fields (2)...". The
+    // fields themselves are a pop-up (`customFieldLabels()` and
+    // friends below), not a property, for the reason the desktop's are
+    // a pop-up too -- see `docs/overlay-templates.md`.
+    Q_PROPERTY(bool hasCustomFields READ hasCustomFields NOTIFY changed)
+    Q_PROPERTY(QString customFieldsLabel READ customFieldsLabel NOTIFY changed)
+    // Empty unless the current template needs `{theircall}` and it is
+    // blank. Blocks Send, same tier as `cwIdProblem` -- "  de KC2G" on
+    // the air is the whole point of a reply template gone wrong, and
+    // the desktop's screen is large enough that the gap already reads
+    // as a gap; this one is not.
+    Q_PROPERTY(QString templateFieldProblem READ templateFieldProblem
+                   NOTIFY changed)
 
     // --- the over ----------------------------------------------------
     Q_PROPERTY(bool encoderReady READ encoderReady NOTIFY changed)
@@ -141,6 +182,35 @@ public:
     QString cwIdProblem() const;
     bool needsFirstTransmitPrompt() const { return !acknowledged_; }
 
+    QStringList templateNames() const;
+    int templateIndex() const { return template_index_; }
+    void setTemplateIndex(int index);
+    bool wantsTheirCall() const;
+    QString theirCall() const { return theircall_; }
+    void setTheirCall(const QString& c);
+    bool hasReplyTarget() const;
+    bool hasCustomFields() const;
+    QString customFieldsLabel() const;
+    QString templateFieldProblem() const;
+
+    // The current template's custom-field labels, in the order they
+    // first appear -- what the "Custom fields..." pop-up builds its
+    // rows from. `customFieldValue`/`setCustomFieldValue` are keyed by
+    // that same label, which is the only identity a custom field has
+    // (docs/overlay-templates.md), so a value survives a template
+    // switch that reuses the same label.
+    Q_INVOKABLE QStringList customFieldLabels() const;
+    Q_INVOKABLE QString customFieldValue(const QString& label) const;
+    Q_INVOKABLE void setCustomFieldValue(const QString& label, const QString& value);
+
+    // Reply to a reception: binds a `last_rx` item to *this* picture,
+    // seeds {theircall} from `callsign` (still editable after), and
+    // selects the last reply template used (or plain "Reply" the first
+    // time). Called from Pictures, the viewer, and the Listen tab's
+    // completion row -- see docs/overlay-templates.md.
+    Q_INVOKABLE void replyTo(const QString& path, const QString& callsign,
+                             double snrDb);
+
     // Record that the operator has read the first-transmit prompt and
     // accepted responsibility for operating legally. Persisted, so it
     // is asked once per install rather than once per launch.
@@ -176,6 +246,14 @@ signals:
 
 private:
     void bump();
+    void refreshTemplates();
+    // Recomputes the whole `overlay::Fields` from station settings,
+    // `theircall_`, the reply target and the custom-field map, and
+    // pushes it to `Composition` -- the same "recompute the lot, do not
+    // track it incrementally" choice the desktop's `refresh_fields`
+    // makes, since it is a handful of short strings.
+    void refreshFields();
+    int templateIndexForName(const QString& name) const;
 
     QStringList devices_;
     QString error_;
@@ -190,6 +268,23 @@ private:
     bool acknowledged_ = false;
     double vox_lead_s_ = 0.0;
     QString device_;
+
+    // Parallel to `templateNames()`; index 0 is the built-in "None" (an
+    // empty document, not read from any file).
+    std::vector<sstvae::overlay::Doc> templates_;
+    int template_index_ = 0;
+    QString theircall_;
+    // Keyed by label, so a "Comment" field's value survives a switch
+    // between templates that both declare one -- the label is the only
+    // identity a custom field has. In-memory only: it follows the
+    // reply target across a rotation and is gone on relaunch, matching
+    // docs/overlay-templates.md's persistence rule.
+    std::map<std::string, std::string> custom_field_values_;
+    // The template index `replyTo()` reopens, remembered from whichever
+    // {theircall}-using template was selected most recently -- by Reply
+    // or by hand. -1 until the first reply, which falls back to plain
+    // "Reply".
+    int last_reply_template_index_ = -1;
 };
 
 #endif

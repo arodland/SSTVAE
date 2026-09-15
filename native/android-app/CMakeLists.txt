@@ -91,8 +91,29 @@ add_subdirectory(.. sstvae_native EXCLUDE_FROM_ALL)
 
 qt_add_executable(sstvae_android main.cpp listener.cpp session.cpp service_jni.cpp java_fetcher.cpp
     assets.cpp waterfall.cpp pictures.cpp composition.cpp transmitter.cpp rigcontrol.cpp)
+
+# The three built-in templates (docs/overlay-templates.md), shipped as a
+# Qt resource rather than an Android asset -- unlike the codec, three
+# JSON files of a few hundred bytes each shipping twice per ABI is not
+# the problem `assets/` exists to avoid. `QT_RESOURCE_ALIAS` is what
+# keeps the resource path `:/qt/qml/SSTVAE/templates/<name>.json`
+# rather than embedding this file's `../../sstvae/...` relative path
+# into it; `transmitter.cpp`'s `builtin_templates_path()` has to agree
+# with the alias exactly.
+set(SSTVAE_TEMPLATE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../sstvae/overlay/templates")
+set(SSTVAE_TEMPLATE_FILES
+    "${SSTVAE_TEMPLATE_SOURCE_DIR}/cq.json"
+    "${SSTVAE_TEMPLATE_SOURCE_DIR}/reply.json"
+    "${SSTVAE_TEMPLATE_SOURCE_DIR}/reply-picture.json")
+foreach(_sstvae_template_file ${SSTVAE_TEMPLATE_FILES})
+    get_filename_component(_sstvae_template_name "${_sstvae_template_file}" NAME)
+    set_source_files_properties("${_sstvae_template_file}" PROPERTIES
+        QT_RESOURCE_ALIAS "templates/${_sstvae_template_name}")
+endforeach()
+
 qt_add_qml_module(sstvae_android URI SSTVAE VERSION 1.0
-    QML_FILES Main.qml LevelMeter.qml CropView.qml TransmitPane.qml RigPane.qml SettingsSection.qml)
+    QML_FILES Main.qml LevelMeter.qml CropView.qml TransmitPane.qml RigPane.qml SettingsSection.qml
+    RESOURCES ${SSTVAE_TEMPLATE_FILES})
 target_link_libraries(sstvae_android PRIVATE Qt6::Quick Qt6::Gui sstvae_core
                                              sstvae_audio_android
                                              sstvae_codec)

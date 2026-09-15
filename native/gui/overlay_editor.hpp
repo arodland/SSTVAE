@@ -19,6 +19,7 @@
 #ifndef SSTVAE_GUI_OVERLAY_EDITOR_HPP
 #define SSTVAE_GUI_OVERLAY_EDITOR_HPP
 
+#include <QPolygon>
 #include <QRect>
 #include <QWidget>
 
@@ -29,6 +30,7 @@
 #include "images/types.hpp"
 #include "overlay/model.hpp"
 #include "overlay/render.hpp"
+#include "overlay/template.hpp"
 
 namespace sstvae::gui {
 
@@ -77,8 +79,25 @@ public:
     void add_text(const std::string& text);
     void add_image_inset(const std::string& path);
     void add_last_rx_inset();
+    void add_rect();
     void remove_selected();
     void clear_overlay();
+
+    // --- stacking order -------------------------------------------------
+    //
+    // `doc_.items` is drawn back to front, so "raise" means "later in
+    // the vector". These act on whatever is selected and keep the
+    // selection following it -- a reorder that dropped the selection
+    // would be indistinguishable from one that silently failed.
+    void raise_selected();
+    void lower_selected();
+    void bring_selected_to_front();
+    void send_selected_to_back();
+    // Whether raise/lower/front/back would do anything right now, for
+    // the buttons that call them -- there is nothing to raise above the
+    // top item or lower below the bottom one.
+    bool can_raise_selected() const;
+    bool can_lower_selected() const;
 
     // The selected item, or null. A pointer into the document, so the
     // property editor mutates it in place and calls `refresh_item`.
@@ -88,8 +107,30 @@ public:
     const overlay::Doc& doc() const { return doc_; }
     void set_doc(overlay::Doc doc);
 
+    // Values to fill a template's holes with (docs/overlay-templates.md).
+    // **The document being edited stays the raw template** -- the text
+    // box shows the literal `{theircall}`, and `doc()`/`set_doc()` and
+    // everything the property panel writes into a selected item's
+    // `.text` are untouched by this. What changes is the *painted*
+    // canvas and the geometry derived from it: `composed_image()`,
+    // paint, hit-testing and the selection handle all substitute first,
+    // because that is what is actually drawn -- so a handle still sits
+    // on the thing it selects even though the item's own bbox (in raw
+    // text) may measure a different extent than the substituted text
+    // that is on screen. Defaults to empty fields, which is a no-op for
+    // any document with no placeholders in it, so a plain (non-template)
+    // overlay is unaffected.
+    void set_fields(overlay::Fields fields);
+    const overlay::Fields& fields() const { return fields_; }
+
     // Base plus overlay, or nothing if no picture has been chosen.
     std::optional<images::Picture> composed_image() const;
+
+    // The current selection's on-screen rectangle, in this widget's own
+    // coordinates -- what a floating panel anchoring itself "near the
+    // selected item" should position against. Empty if nothing is
+    // selected.
+    QRect selection_screen_rect() const;
 
 signals:
     // Null when the selection was cleared.
@@ -120,24 +161,61 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
-    enum class Drag { None, Move, Resize };
+    // **Rotate is a separate drag mode from Resize**, not a modifier on
+    // it: the two grips sit at different corners (see `rotate_handle_rect`
+    // vs `handle_rect`) precisely so a press can never be ambiguous
+    // between them.
+    enum class Drag { None, Move, Resize, Rotate };
 
     void rerender();
+    // What is actually painted for `item`: substituted per `fields_`.
+    // See `set_fields`.
+    overlay::Item rendered(const overlay::Item& item) const;
     // Where the canvas is drawn inside the widget, letter-boxed.
     QRect canvas_rect() const;
     // Widget point -> canvas pixel. Outside the canvas is still mapped;
     // callers check the rect.
     QPointF to_canvas(const QPointF& widget_point) const;
     int hit_test(const QPointF& canvas_point) const;
-    QRect handle_rect(const overlay::Bbox& box) const;
+    // `item`'s bbox, mapped into this widget's own pixel coordinates --
+    // shared by `paintEvent`'s selection box and `selection_screen_rect`,
+    // which must agree about where the item sits on screen. **Not
+    // rotated** -- an axis-aligned approximation is all
+    // `selection_screen_rect` needs (a floating panel anchoring "near"
+    // the item), and `paintEvent`'s own outline uses
+    // `item_screen_polygon` instead, which is.
+    QRect item_screen_rect(const overlay::Item& item) const;
+    // The dashed selection outline: `box`'s four corners, rotated around
+    // its own centre by `rotation` and mapped to screen pixels -- so the
+    // outline turns with the item instead of staying axis-aligned while
+    // the picture underneath it visibly rotates.
+    QPolygon item_screen_polygon(const overlay::Bbox& box, double rotation) const;
+    QRect handle_rect(const overlay::Bbox& box, double rotation) const;
+    // Above and outside the top-right corner, offset from `handle_rect`
+    // deliberately (see `Drag::Rotate`).
+    QRect rotate_handle_rect(const overlay::Bbox& box, double rotation) const;
     // The grip's side, from the style rather than a pixel literal --
     // see the .cpp.
     int handle_px() const;
+    // `point` (canvas space) rotated by `rotation_degrees` around
+    // `centre` (canvas space), in the same sense `overlay::render`
+    // rotates a painted item -- see the .cpp for the derivation. Shared
+    // by the outline and both grips, so all three always agree about
+    // where the item's corners actually are.
+    static QPointF rotate_around(const QPointF& point, const QPointF& centre,
+                                 double rotation_degrees);
     // Cursor feedback for the no-drag path of mouseMoveEvent.
     void update_hover_cursor(const QPointF& point);
     void select(int index);
+    // The keyboard-shortcut forms of the two mouse drags: `+`/`-` and
+    // `[`/`]` in `keyPressEvent`. Multiplicative and additive
+    // respectively, matching what dragging the corresponding handle
+    // does, and clamped to the same bounds `mouseMoveEvent` uses.
+    static void scale_item(overlay::Item& item, double factor);
+    static void rotate_item(overlay::Item& item, double delta_degrees);
 
     overlay::Doc doc_;
+    overlay::Fields fields_;
     images::Picture base_;
     std::optional<images::Picture> last_rx_;
     // The rendered composite, cached because rendering is not free and a
@@ -151,7 +229,19 @@ private:
     // drag does not snap the item's corner to the cursor.
     QPointF grab_offset_;
     double resize_start_ = 0.0;
+    // A rectangle resizes both axes together (see `mouseMoveEvent`), so
+    // its starting height rides alongside `resize_start_`'s width. Text
+    // and image items leave this at 0 and never read it.
+    double resize_start_height_ = 0.0;
     QPointF resize_origin_;
+    // Rotate drag state: the item's own rotation and the pointer's
+    // angle around the pivot (radians, screen sense already flipped --
+    // see the .cpp), both captured the moment the grip was grabbed. The
+    // live rotation is `rotate_start_rotation_` plus however far the
+    // pointer's angle has moved since, around `rotate_center_`.
+    double rotate_start_rotation_ = 0.0;
+    double rotate_start_pointer_angle_ = 0.0;
+    QPointF rotate_center_;
 };
 
 }  // namespace sstvae::gui

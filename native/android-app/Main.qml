@@ -252,19 +252,41 @@ ApplicationWindow {
                 }
             }
 
-            Label {
-                text: listener.status
-                // Monospace only when it is a table of numbers. Plain
-                // prose in a fixed pitch is the house style of a
-                // diagnostic, and this line is not one with the switch
-                // off.
-                font.family: listener.showTechnical ? "monospace" : Qt.application.font.family
-                font.pixelSize: listener.showTechnical ? 12 : 14
-                visible: text.length > 0
+            // **The Reply button rides on this row, not a row of its
+            // own** (docs/overlay-templates.md, Andrew 2026-09-14: "if
+            // there's room" -- there is, here). It costs the tuning
+            // instrument nothing: it only appears once the status line
+            // does, which is already the layout a picture in progress
+            // gets.
+            RowLayout {
                 Layout.fillWidth: true
                 Layout.leftMargin: 12
-                Layout.maximumHeight: implicitHeight
-                wrapMode: Text.Wrap
+                Layout.rightMargin: 12
+
+                Label {
+                    text: listener.status
+                    // Monospace only when it is a table of numbers. Plain
+                    // prose in a fixed pitch is the house style of a
+                    // diagnostic, and this line is not one with the switch
+                    // off.
+                    font.family: listener.showTechnical ? "monospace" : Qt.application.font.family
+                    font.pixelSize: listener.showTechnical ? 12 : 14
+                    visible: text.length > 0
+                    Layout.fillWidth: true
+                    Layout.maximumHeight: implicitHeight
+                    wrapMode: Text.Wrap
+                }
+                // Bound to `hasReplyTarget`, which only holds while the
+                // live image above is showing -- see Listener::hasReplyTarget.
+                Button {
+                    text: "Reply to " + listener.replyCallsign
+                    visible: listener.hasReplyTarget
+                    onClicked: {
+                        transmitter.replyTo(listener.replyPath, listener.replyCallsign,
+                                            listener.replySnrDb)
+                        tabs.currentIndex = 1
+                    }
+                }
             }
             LevelMeter {
                 Layout.fillWidth: true
@@ -338,7 +360,7 @@ ApplicationWindow {
             delegate: ItemDelegate {
                 width: ListView.view.width
                 height: 96
-                onClicked: viewer.showPicture(model.path, model.summary)
+                onClicked: viewer.showPicture(model.path, model.summary, model.callsign, model.snr)
 
                 RowLayout {
                     anchors.fill: parent
@@ -358,7 +380,8 @@ ApplicationWindow {
                         Label { text: model.received; font.pixelSize: 13 }
                         // The metadata comes from the sidecar, not from
                         // shared state -- which is why it is still here
-                        // days later.
+                        // days later, and why Reply works on a reception
+                        // from a week ago exactly as well as on today's.
                         Label {
                             text: model.summary
                             font.family: "monospace"
@@ -366,6 +389,18 @@ ApplicationWindow {
                             color: "#666"
                             Layout.fillWidth: true
                             elide: Text.ElideRight
+                        }
+                    }
+                    // Absent for a sidecar with no callsign -- an older
+                    // reception predating the field, or a decode that
+                    // never got a beacon lock -- rather than replying to
+                    // a blank address.
+                    Button {
+                        text: "Reply"
+                        visible: model.callsign !== ""
+                        onClicked: {
+                            transmitter.replyTo(model.path, model.callsign, model.snr)
+                            tabs.currentIndex = 1
                         }
                     }
                 }
@@ -967,14 +1002,18 @@ ApplicationWindow {
         property alias source: full.source
         property string caption
         property string path
+        property string callsign
+        property double snrDb
 
         // **Not called `open`.** `Popup` already has an `open()`, and
         // shadowing it with a different signature leaves the type's own
         // machinery calling something that is no longer its method.
-        function showPicture(p, summary) {
+        function showPicture(p, summary, replyCallsign, replySnr) {
             full.source = "image://sstvae/file/" + p
             viewer.path = p
             viewer.caption = summary
+            viewer.callsign = replyCallsign === undefined ? "" : replyCallsign
+            viewer.snrDb = replySnr === undefined ? 0 : replySnr
             open()
         }
 
@@ -995,13 +1034,26 @@ ApplicationWindow {
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.Wrap
             }
-            Button {
-                text: "Share"
+            RowLayout {
                 Layout.fillWidth: true
                 Layout.topMargin: 8
-                // Receptions live in app-private storage, so this is
-                // the only way a picture leaves the app at all.
-                onClicked: listener.sharePicture(viewer.path, viewer.caption)
+                Button {
+                    text: "Share"
+                    Layout.fillWidth: true
+                    // Receptions live in app-private storage, so this is
+                    // the only way a picture leaves the app at all.
+                    onClicked: listener.sharePicture(viewer.path, viewer.caption)
+                }
+                Button {
+                    text: "Reply"
+                    Layout.fillWidth: true
+                    visible: viewer.callsign !== ""
+                    onClicked: {
+                        transmitter.replyTo(viewer.path, viewer.callsign, viewer.snrDb)
+                        viewer.close()
+                        tabs.currentIndex = 1
+                    }
+                }
             }
         }
     }

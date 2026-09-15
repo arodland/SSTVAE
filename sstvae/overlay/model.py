@@ -84,25 +84,75 @@ class ImageItem:
     type: str = field(default="image", init=False)
 
 
-_ITEM_TYPES = {"text": TextItem, "image": ImageItem}
+@dataclass
+class RectItem:
+    """A filled and/or stroked rectangle.
+
+    Fill and stroke are independent and each is "none", "solid" or
+    "gradient" -- a plain toggle would need a second field for "what
+    colour", so the kind and the colour(s) travel together per the
+    project's flat-dataclass style (see `TextItem`). A gradient is
+    linear only: two colours and an angle. The angle uses the same
+    counter-clockwise convention as `rotation` below, and deliberately
+    so -- the gradient is drawn into the item's own unrotated layer and
+    then rotated with it (`render.py`), so a gradient's angle and the
+    item's rotation add exactly as the two numbers suggest they should.
+    """
+
+    x: float = 0.1
+    y: float = 0.1
+    width: float = 0.3   # fraction of canvas width
+    height: float = 0.2  # fraction of canvas height
+    rotation: float = 0.0  # degrees, counter-clockwise
+    anchor: str = "la"
+
+    fill_kind: str = "none"  # "none" | "solid" | "gradient"
+    fill_color: str = "#ffffff"
+    fill_color2: str = "#000000"  # the gradient's second stop
+    fill_angle: float = 0.0
+
+    stroke_kind: str = "none"  # "none" | "solid" | "gradient"
+    stroke_color: str = "#ffffff"
+    stroke_color2: str = "#000000"
+    stroke_angle: float = 0.0
+    stroke_width: float = 0.006  # fraction of canvas width
+
+    type: str = field(default="rect", init=False)
+
+
+_ITEM_TYPES = {"text": TextItem, "image": ImageItem, "rect": RectItem}
 
 
 @dataclass
 class OverlayDoc:
-    """An ordered list of items, drawn back to front."""
+    """An ordered list of items, drawn back to front.
+
+    `name` is what makes a document a *template* (see `template.py`):
+    a saved layout the operator picks by name. It is written only when
+    set, so an unnamed document serializes exactly as it did before
+    templates existed, and a template opens as a plain document in any
+    build that has this model.
+    """
 
     items: list = field(default_factory=list)
     version: int = DOC_VERSION
+    name: str = ""
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "version": self.version,
             "items": [asdict(i) for i in self.items],
         }
+        if self.name:
+            out["name"] = self.name
+        return out
 
     @classmethod
     def from_dict(cls, data: dict) -> "OverlayDoc":
         version = int(data.get("version", DOC_VERSION))
+        name = data.get("name", "")
+        if not isinstance(name, str):
+            name = ""  # a wrong type costs the name, not the document
         if version > DOC_VERSION:
             raise ValueError(
                 f"overlay document version {version} is newer than this "
@@ -119,7 +169,7 @@ class OverlayDoc:
             # written by a later version still mostly renders.
             known = {f for f in item_cls.__dataclass_fields__ if f != "type"}
             items.append(item_cls(**{k: v for k, v in raw.items() if k in known}))
-        return cls(items=items, version=version)
+        return cls(items=items, version=version, name=name)
 
     def to_json(self, indent: int | None = 2) -> str:
         return json.dumps(self.to_dict(), indent=indent)
