@@ -120,6 +120,28 @@ jobs:
       # rather than taken from an extra because this job installs
       # `[cli]`, not `[dev]`.
       - run: pip install -e ".[cli]" pytest pybind11 platformdirs
+      # Fetched here, before "Install Qt" below: that step's own
+      # setup-python (needed for aqtinstall) silently overwrites PATH,
+      # so a python invoked after it is not the one the `pip install`
+      # above just populated. Normally invisible because the cache two
+      # steps down usually hits and this step's own `python -c` is
+      # never reached -- a stale/evicted cache is what exposes the
+      # shadowing, on whichever python happens to be first on PATH at
+      # that point. Keep this pair above "Install Qt", not just above
+      # "Cache native dependencies" -- the ordering is the fix.
+      #
+      # The codec's parity tests compare two runtimes on the *same*
+      # model file, so they need that file. Fetching it here rather than
+      # inside a test keeps a network failure reported as a network
+      # failure. SSTVAE_REQUIRE_CODEC below then makes a skip -- for any
+      # reason, including this step silently half-working -- a failure.
+      - name: Cache model artifacts
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ hashFiles('sstvae/checkpoint.py') }}
+      - name: Fetch the published ONNX artifacts
+        run: python -c "from sstvae import checkpoint; [checkpoint.resolve_onnx(p, None, 'fp16') for p in ('encoder','decoder')]"
       # Pinned to an exact tag, like onnxruntime, Hamlib and Qt. It was
       # @latest, which meant a CMake release could break a build with no
       # change on our side -- and there is no moving `v4` alias tag on
@@ -210,18 +232,6 @@ jobs:
         with:
           path: native/.deps
           key: deps-${{ matrix.label }}-${{ hashFiles('native/cmake/onnxruntime.cmake', 'native/cmake/hamlib.cmake') }}
-      # The codec's parity tests compare two runtimes on the *same*
-      # model file, so they need that file. Fetching it here rather than
-      # inside a test keeps a network failure reported as a network
-      # failure. SSTVAE_REQUIRE_CODEC below then makes a skip -- for any
-      # reason, including this step silently half-working -- a failure.
-      - name: Cache model artifacts
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/huggingface
-          key: hf-${{ hashFiles('sstvae/checkpoint.py') }}
-      - name: Fetch the published ONNX artifacts
-        run: python -c "from sstvae import checkpoint; [checkpoint.resolve_onnx(p, None, 'fp16') for p in ('encoder','decoder')]"
       # Put MSVC on PATH before CMake looks for a compiler. Without
       # this, the Ninja generator finds the runner's MinGW GCC first and
       # builds a perfectly good .pyd that CPython then cannot load --
