@@ -90,6 +90,29 @@ ImageItem read_image(const Reader& r) {
     return i;
 }
 
+RectItem read_rect(const Reader& r) {
+    RectItem i;
+    r.get("x", i.x);
+    r.get("y", i.y);
+    r.get("width", i.width);
+    r.get("height", i.height);
+    r.get("rotation", i.rotation);
+    r.get("anchor", i.anchor);
+    r.get("fill_kind", i.fill_kind);
+    r.get("fill_color", i.fill_color);
+    r.get("fill_color2", i.fill_color2);
+    r.get("fill_angle", i.fill_angle);
+    r.get("stroke_kind", i.stroke_kind);
+    r.get("stroke_color", i.stroke_color);
+    r.get("stroke_color2", i.stroke_color2);
+    r.get("stroke_angle", i.stroke_angle);
+    r.get("stroke_width", i.stroke_width);
+    r.report_unknown({"x", "y", "width", "height", "rotation", "anchor", "fill_kind",
+                      "fill_color", "fill_color2", "fill_angle", "stroke_kind",
+                      "stroke_color", "stroke_color2", "stroke_angle", "stroke_width"});
+    return i;
+}
+
 }  // namespace
 
 Doc from_json(const std::string& text, std::vector<Note>* notes) {
@@ -133,6 +156,8 @@ Doc from_json(const std::string& text, std::vector<Note>* notes) {
             doc.items.emplace_back(read_text(r));
         } else if (kind == "image") {
             doc.items.emplace_back(read_image(r));
+        } else if (kind == "rect") {
+            doc.items.emplace_back(read_rect(r));
         } else if (notes) {
             // Forward compatibility: a later version's item kind.
             notes->push_back({where, "unknown item type '" + kind + "' (ignored)"});
@@ -158,18 +183,35 @@ std::string to_json(const Doc& doc, int indent) {
                              {"line_spacing", t->line_spacing},
                              {"rotation", t->rotation},
                              {"type", "text"}});
-        } else {
-            const auto& i = std::get<ImageItem>(item);
-            items.push_back({{"source", i.source},
-                             {"x", i.x},
-                             {"y", i.y},
-                             {"width", i.width},
-                             {"border", i.border},
-                             {"border_color", i.border_color},
-                             {"opacity", i.opacity},
-                             {"rotation", i.rotation},
-                             {"anchor", i.anchor},
+        } else if (const auto* i = std::get_if<ImageItem>(&item)) {
+            items.push_back({{"source", i->source},
+                             {"x", i->x},
+                             {"y", i->y},
+                             {"width", i->width},
+                             {"border", i->border},
+                             {"border_color", i->border_color},
+                             {"opacity", i->opacity},
+                             {"rotation", i->rotation},
+                             {"anchor", i->anchor},
                              {"type", "image"}});
+        } else {
+            const auto& r = std::get<RectItem>(item);
+            items.push_back({{"x", r.x},
+                             {"y", r.y},
+                             {"width", r.width},
+                             {"height", r.height},
+                             {"rotation", r.rotation},
+                             {"anchor", r.anchor},
+                             {"fill_kind", r.fill_kind},
+                             {"fill_color", r.fill_color},
+                             {"fill_color2", r.fill_color2},
+                             {"fill_angle", r.fill_angle},
+                             {"stroke_kind", r.stroke_kind},
+                             {"stroke_color", r.stroke_color},
+                             {"stroke_color2", r.stroke_color2},
+                             {"stroke_angle", r.stroke_angle},
+                             {"stroke_width", r.stroke_width},
+                             {"type", "rect"}});
         }
     }
     json root = {{"version", doc.version}, {"items", items}};

@@ -149,10 +149,73 @@ void OverlayEditor::add_last_rx_inset() {
     emit documentChanged();
 }
 
+void OverlayEditor::add_rect() {
+    overlay::RectItem item;
+    // A visible default rather than the model's own defaults (fill and
+    // stroke both "none"): every other Add button places something the
+    // operator can immediately see and select, and an invisible
+    // rectangle looks exactly like the button doing nothing.
+    item.fill_kind = "solid";
+    item.fill_color = "#ffffff";
+    doc_.items.push_back(item);
+    select(static_cast<int>(doc_.items.size()) - 1);
+    setFocus(Qt::OtherFocusReason);
+    emit documentChanged();
+}
+
 void OverlayEditor::remove_selected() {
     if (selected_ < 0 || selected_ >= static_cast<int>(doc_.items.size())) return;
     doc_.items.erase(doc_.items.begin() + selected_);
     select(-1);
+    emit documentChanged();
+}
+
+bool OverlayEditor::can_raise_selected() const {
+    return selected_ >= 0 && selected_ + 1 < static_cast<int>(doc_.items.size());
+}
+
+bool OverlayEditor::can_lower_selected() const {
+    return selected_ > 0 && selected_ < static_cast<int>(doc_.items.size());
+}
+
+void OverlayEditor::raise_selected() {
+    if (!can_raise_selected()) return;
+    std::swap(doc_.items[selected_], doc_.items[selected_ + 1]);
+    // The item moved with the swap; the selection index follows it so
+    // the same item stays selected rather than whatever is now sitting
+    // at the old index.
+    select(selected_ + 1);
+    emit documentChanged();
+}
+
+void OverlayEditor::lower_selected() {
+    if (!can_lower_selected()) return;
+    std::swap(doc_.items[selected_], doc_.items[selected_ - 1]);
+    select(selected_ - 1);
+    emit documentChanged();
+}
+
+void OverlayEditor::bring_selected_to_front() {
+    if (!can_raise_selected()) return;
+    // Rotate the range [selected_, end) left by one: the selected item
+    // lands at the back of the vector (drawn last, i.e. on top) and
+    // everything above it shifts down one slot to make room, keeping
+    // their own relative order -- a single `std::swap` against the last
+    // element would instead trade places with whatever was on top,
+    // silently reordering the items in between.
+    std::rotate(doc_.items.begin() + selected_, doc_.items.begin() + selected_ + 1,
+               doc_.items.end());
+    select(static_cast<int>(doc_.items.size()) - 1);
+    emit documentChanged();
+}
+
+void OverlayEditor::send_selected_to_back() {
+    if (!can_lower_selected()) return;
+    // The mirror image: rotate [begin, selected_] right by one, same
+    // reasoning.
+    std::rotate(doc_.items.begin(), doc_.items.begin() + selected_,
+               doc_.items.begin() + selected_ + 1);
+    select(0);
     emit documentChanged();
 }
 
@@ -363,9 +426,15 @@ void OverlayEditor::mousePressEvent(QMouseEvent* event) {
         if (handle_rect(box).contains(point.toPoint())) {
             drag_ = Drag::Resize;
             resize_origin_ = to_canvas(point);
-            resize_start_ = std::holds_alternative<overlay::TextItem>(*item)
-                                ? std::get<overlay::TextItem>(*item).size
-                                : std::get<overlay::ImageItem>(*item).width;
+            resize_start_height_ = 0.0;
+            if (const auto* text = std::get_if<overlay::TextItem>(item)) {
+                resize_start_ = text->size;
+            } else if (const auto* rect = std::get_if<overlay::RectItem>(item)) {
+                resize_start_ = rect->width;
+                resize_start_height_ = rect->height;
+            } else {
+                resize_start_ = std::get<overlay::ImageItem>(*item).width;
+            }
             return;
         }
     }
@@ -438,6 +507,13 @@ void OverlayEditor::mouseMoveEvent(QMouseEvent* event) {
         const double factor = now / start;
         if (auto* text = std::get_if<overlay::TextItem>(item)) {
             text->size = std::clamp(resize_start_ * factor, 0.01, 1.5);
+        } else if (auto* rect = std::get_if<overlay::RectItem>(item)) {
+            // Both axes scale together, from the same horizontal drag
+            // distance every other item type resizes with -- so the
+            // rectangle's own aspect ratio is preserved rather than
+            // stretching only its width.
+            rect->width = std::clamp(resize_start_ * factor, 0.02, 2.0);
+            rect->height = std::clamp(resize_start_height_ * factor, 0.02, 2.0);
         } else if (auto* image = std::get_if<overlay::ImageItem>(item)) {
             image->width = std::clamp(resize_start_ * factor, 0.02, 2.0);
         }

@@ -1,6 +1,6 @@
 """Composing station text and insets onto a picture before transmit."""
 
-from .model import CANVAS_H, CANVAS_W, ImageItem, OverlayDoc, TextItem
+from .model import CANVAS_H, CANVAS_W, ImageItem, OverlayDoc, RectItem, TextItem
 from .render import item_bbox, render
 from .template import (
     BUILTIN_FIELDS,
@@ -21,6 +21,7 @@ __all__ = [
     "ImageItem",
     "OverlayDoc",
     "Placeholders",
+    "RectItem",
     "TextItem",
     "builtin_templates",
     "format_snr",

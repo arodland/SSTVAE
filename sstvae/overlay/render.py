@@ -12,12 +12,14 @@ the training text is deliberately unstructured. Composition happens
 codes, not something laid on afterwards.
 """
 
+import math
 import os
 from functools import lru_cache
 
-from PIL import Image, ImageDraw, ImageFont
+import numpy as np
+from PIL import Image, ImageColor, ImageDraw, ImageFont
 
-from .model import ImageItem, OverlayDoc, SOURCE_LAST_RX, TextItem
+from .model import ImageItem, OverlayDoc, RectItem, SOURCE_LAST_RX, TextItem
 
 # Same font search the training overlays use, so the GUI's default face
 # matches what the model was trained on rather than being an arbitrary
@@ -115,6 +117,83 @@ def _render_text(canvas: Image.Image, item: TextItem) -> None:
     canvas.alpha_composite(layer, (x - pad, y - pad))
 
 
+def _gradient_layer(w: int, h: int, color1: str, color2: str,
+                    angle_deg: float) -> Image.Image:
+    """A linear-gradient RGBA layer, `w` x `h`, between `color1` (at
+    `angle_deg` = 0, the left edge) and `color2` (the right edge).
+
+    Counter-clockwise, matching `RectItem.rotation`: 90 degrees runs
+    bottom-to-top. Computed with numpy rather than PIL, which has no
+    gradient primitive -- a full-layer array is cheap next to the font
+    and image work the rest of this module already does per item.
+    """
+    c1 = np.array(ImageColor.getcolor(color1, "RGBA"), dtype=np.float32)
+    c2 = np.array(ImageColor.getcolor(color2, "RGBA"), dtype=np.float32)
+    theta = math.radians(angle_deg)
+    ux, uy = math.cos(theta), -math.sin(theta)
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+    proj = (xs - cx) * ux + (ys - cy) * uy
+    extent = (abs(ux) * w + abs(uy) * h) / 2.0 or 1.0
+    t = np.clip(proj / extent * 0.5 + 0.5, 0.0, 1.0)[..., None]
+    arr = c1[None, None, :] * (1.0 - t) + c2[None, None, :] * t
+    return Image.fromarray(np.round(arr).astype(np.uint8), "RGBA")
+
+
+def _rect_fill_layer(w: int, h: int, kind: str, color: str, color2: str,
+                     angle: float) -> Image.Image | None:
+    if kind == "solid":
+        layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).rectangle((0, 0, w - 1, h - 1),
+                                        fill=ImageColor.getcolor(color, "RGBA"))
+        return layer
+    if kind == "gradient":
+        return _gradient_layer(w, h, color, color2, angle)
+    return None
+
+
+def _render_rect(canvas: Image.Image, item: RectItem) -> None:
+    w, h = canvas.size
+    iw = max(1, round(item.width * w))
+    ih = max(1, round(item.height * h))
+    sw = max(0, round(item.stroke_width * w))
+
+    layer = Image.new("RGBA", (iw, ih), (0, 0, 0, 0))
+
+    fill = _rect_fill_layer(iw, ih, item.fill_kind, item.fill_color,
+                            item.fill_color2, item.fill_angle)
+    if fill is not None:
+        layer.alpha_composite(fill)
+
+    if item.stroke_kind != "none" and sw > 0:
+        stroke_src = _rect_fill_layer(iw, ih, "solid" if item.stroke_kind == "solid"
+                                      else "gradient", item.stroke_color,
+                                      item.stroke_color2, item.stroke_angle)
+        # An outline band `sw` px thick, centred on the edge -- the same
+        # place `ImageDraw.rectangle(outline=..., width=...)` puts it,
+        # which is what a solid stroke draws with directly.
+        mask = Image.new("L", (iw, ih), 0)
+        ImageDraw.Draw(mask).rectangle((0, 0, iw - 1, ih - 1), outline=255, width=sw)
+        layer.paste(stroke_src, (0, 0), mask)
+
+    if layer.getbbox() is None:
+        return  # every field is "none" -- a legal, invisible rectangle
+
+    if item.rotation:
+        layer = layer.rotate(item.rotation, resample=Image.BICUBIC, expand=True)
+
+    x, y = round(item.x * w), round(item.y * h)
+    if item.anchor.startswith("m"):
+        x -= layer.width // 2
+    elif item.anchor.startswith("r"):
+        x -= layer.width
+    if item.anchor.endswith("m"):
+        y -= layer.height // 2
+    elif item.anchor.endswith(("b", "d")):
+        y -= layer.height
+    canvas.alpha_composite(layer, (x, y))
+
+
 def _render_image(canvas: Image.Image, item: ImageItem,
                   last_rx: Image.Image | None) -> None:
     src = _resolve_source(item.source, last_rx)
@@ -178,6 +257,23 @@ def item_bbox(canvas_size: tuple[int, int], item,
         )
         return box[0], box[1], max(1, box[2] - box[0]), max(1, box[3] - box[1])
 
+    if isinstance(item, RectItem):
+        # Unrotated dimensions, like the `ImageItem` branch below --
+        # neither accounts for `rotation` in the handle it hands the
+        # editor, which is an existing simplification kept here for
+        # consistency rather than a gap specific to rectangles.
+        iw = max(1, round(item.width * w))
+        ih = max(1, round(item.height * h))
+        if item.anchor.startswith("m"):
+            x -= iw // 2
+        elif item.anchor.startswith("r"):
+            x -= iw
+        if item.anchor.endswith("m"):
+            y -= ih // 2
+        elif item.anchor.endswith(("b", "d")):
+            y -= ih
+        return x, y, iw, ih
+
     src = _resolve_source(item.source, last_rx)
     aspect = (src.height / src.width) if src else 0.75
     iw = max(1, round(item.width * w))
@@ -210,6 +306,8 @@ def render(base: Image.Image, doc: OverlayDoc,
     for item in doc.items:
         if isinstance(item, TextItem):
             _render_text(canvas, item)
+        elif isinstance(item, RectItem):
+            _render_rect(canvas, item)
         elif isinstance(item, ImageItem):
             _render_image(canvas, item, last_rx)
     return canvas.convert("RGB")

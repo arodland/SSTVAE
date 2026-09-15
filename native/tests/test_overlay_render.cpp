@@ -365,6 +365,119 @@ void test_a_file_inset_is_decoded_once() {
                    "cache: render still draws it after the file went");
 }
 
+// --- rectangles ---------------------------------------------------------
+
+void test_a_solid_rect_fills_its_bbox_and_nothing_else() {
+    const images::Picture base = solid(200, 150, 0, 0, 0);
+
+    overlay::RectItem item;
+    item.x = 0.1;
+    item.y = 0.1;
+    item.width = 0.3;
+    item.height = 0.2;
+    item.fill_kind = "solid";
+    item.fill_color = "#ff0000";
+
+    overlay::Doc doc;
+    doc.items.push_back(item);
+    const images::Picture out = overlay::render(base, doc);
+    const overlay::Bbox predicted =
+        overlay::item_bbox(base.width, base.height, doc.items.front());
+    const overlay::Bbox drawn = painted_bbox(out, base);
+
+    check::equal(drawn.x, predicted.x, "render/rect: left edge at x*width");
+    check::equal(drawn.y, predicted.y, "render/rect: top edge at y*height");
+    check::equal(drawn.w, predicted.w, "render/rect: width matches item_bbox");
+    check::equal(drawn.h, predicted.h, "render/rect: height matches item_bbox");
+    check::is_true(same(pixel(out, drawn.x + 2, drawn.y + 2), Rgb{255, 0, 0}),
+                   "render/rect: filled with the solid colour");
+    check::is_true(same(pixel(out, 5, 5), Rgb{0, 0, 0}),
+                   "render/rect: nothing painted outside it");
+}
+
+void test_a_rect_with_no_fill_or_stroke_draws_nothing() {
+    const images::Picture base = solid(64, 48, 9, 9, 9);
+    overlay::Doc doc;
+    doc.items.push_back(overlay::RectItem{});  // fill_kind/stroke_kind default "none"
+    check::equal(painted(overlay::render(base, doc), base), 0,
+                 "render/rect: an all-\"none\" rect is a legal no-op");
+}
+
+void test_a_gradient_rect_interpolates_between_its_two_colours() {
+    const images::Picture base = solid(200, 100, 0, 0, 0);
+
+    overlay::RectItem item;
+    item.x = 0.0;
+    item.y = 0.0;
+    item.width = 1.0;
+    item.height = 1.0;
+    item.fill_kind = "gradient";
+    item.fill_color = "#ff0000";
+    item.fill_color2 = "#0000ff";
+    item.fill_angle = 0.0;  // left (colour1) to right (colour2)
+
+    overlay::Doc doc;
+    doc.items.push_back(item);
+    const images::Picture out = overlay::render(base, doc);
+
+    const Rgb left = pixel(out, 2, 50);
+    const Rgb right = pixel(out, 197, 50);
+    check::is_true(left.r > left.b, "render/rect: left edge leans toward colour1");
+    check::is_true(right.b > right.r, "render/rect: right edge leans toward colour2");
+}
+
+void test_a_stroke_only_rect_draws_an_outline_not_a_fill() {
+    const images::Picture base = solid(200, 150, 0, 0, 0);
+
+    overlay::RectItem item;
+    item.x = 0.1;
+    item.y = 0.1;
+    item.width = 0.3;
+    item.height = 0.2;
+    item.stroke_kind = "solid";
+    item.stroke_color = "#00ff00";
+    item.stroke_width = 0.02;  // 4 px
+
+    overlay::Doc doc;
+    doc.items.push_back(item);
+    const images::Picture out = overlay::render(base, doc);
+    const overlay::Bbox box =
+        overlay::item_bbox(base.width, base.height, doc.items.front());
+
+    check::is_true(same(pixel(out, box.x + 1, box.y + box.h / 2), Rgb{0, 255, 0}),
+                   "render/rect: the stroke is on the edge");
+    check::is_true(same(pixel(out, box.x + box.w / 2, box.y + box.h / 2),
+                        Rgb{0, 0, 0}),
+                   "render/rect: the centre is untouched with no fill");
+}
+
+void test_rect_json_roundtrips_through_the_model() {
+    overlay::RectItem item;
+    item.x = 0.2;
+    item.width = 0.4;
+    item.height = 0.25;
+    item.fill_kind = "gradient";
+    item.fill_color = "#112233";
+    item.fill_color2 = "#445566";
+    item.fill_angle = 45.0;
+    item.stroke_kind = "solid";
+    item.stroke_color = "#778899";
+    item.stroke_width = 0.01;
+    item.rotation = 12.0;
+
+    overlay::Doc doc;
+    doc.items.push_back(item);
+    const overlay::Doc back = overlay::from_json(overlay::to_json(doc));
+    check::equal(back.items.size(), std::size_t{1}, "rect/json: one item survives");
+    const overlay::RectItem* r = std::get_if<overlay::RectItem>(&back.items[0]);
+    check::is_true(r != nullptr, "rect/json: item kind is \"rect\"");
+    if (r == nullptr) return;
+    check::equal(r->fill_color, item.fill_color, "rect/json: fill_color round-trips");
+    check::equal(r->fill_kind, item.fill_kind, "rect/json: fill_kind round-trips");
+    check::equal(r->stroke_width, item.stroke_width,
+                 "rect/json: stroke_width round-trips");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -386,6 +499,11 @@ int main(int argc, char** argv) {
     test_empty_text_still_has_a_handle();
     test_items_draw_back_to_front();
     test_a_file_inset_is_decoded_once();
+    test_a_solid_rect_fills_its_bbox_and_nothing_else();
+    test_a_rect_with_no_fill_or_stroke_draws_nothing();
+    test_a_gradient_rect_interpolates_between_its_two_colours();
+    test_a_stroke_only_rect_draws_an_outline_not_a_fill();
+    test_rect_json_roundtrips_through_the_model();
 
     return check::report("overlay rendering");
 }

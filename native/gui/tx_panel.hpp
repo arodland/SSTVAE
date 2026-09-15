@@ -8,8 +8,10 @@
 #ifndef SSTVAE_GUI_TX_PANEL_HPP
 #define SSTVAE_GUI_TX_PANEL_HPP
 
+#include <QColor>
 #include <QWidget>
 
+#include <array>
 #include <atomic>
 #include <filesystem>
 #include <map>
@@ -26,7 +28,6 @@
 #include "overlay/template.hpp"
 #include "tx/engine.hpp"
 
-class QColor;
 class QComboBox;
 class QDoubleSpinBox;
 class QDragEnterEvent;
@@ -39,6 +40,7 @@ class QProgressBar;
 class QPushButton;
 class QSlider;
 class QTimer;
+class QToolButton;
 
 namespace sstvae::gui {
 
@@ -160,11 +162,32 @@ private slots:
     void on_template_selected(int index);
 
 private:
+    // One button, one colour, drawn once and cached -- see
+    // `set_swatch`'s comment for why the cache matters. There are five
+    // of these now (the text colour, plus a rect's fill/fill2/stroke/
+    // stroke2), which is what turned the single `color_button_`/
+    // `swatch_color_`/`swatch_set_` trio into this struct instead of
+    // four more copies of the same three members.
+    struct ColorSwatch {
+        QPushButton* button = nullptr;
+        QColor color;
+        bool set = false;
+    };
+
     void build_ui();
     // Keeps the floating error banner across the top of the picture.
     void place_banner();
-    // Paint the current text colour onto the Colour button.
-    void set_color_swatch(const QColor& color);
+    // Paint `color` onto `swatch.button`, skipping the repaint if it is
+    // already showing that colour. Guarded because `on_selection` runs
+    // on every mouse-move of a drag (`OverlayEditor::mouseMoveEvent`
+    // re-emits `selectionChanged`), so an unguarded rebuild would
+    // reconstruct up to five button icons at drag-frame rate.
+    void set_swatch(ColorSwatch& swatch, const QColor& color);
+    // Open a colour picker for one of a `RectItem`'s four colour
+    // fields, identified by pointer-to-member so the four "Fill"/
+    // "Fill 2"/"Stroke"/"Stroke 2" buttons share one implementation
+    // rather than four near-identical lambdas.
+    void edit_rect_color(std::string overlay::RectItem::* field, ColorSwatch& swatch);
     // True while the picture is committed to a send in progress.
     bool picture_locked() const;
     void set_picture_controls_enabled(bool on);
@@ -179,17 +202,16 @@ private:
     void rebuild_optimizer();
     QWidget* build_tool_row();
     QGroupBox* build_properties(QWidget* parent);
-    // "Their call" plus the custom-fields button (docs/overlay-
-    // templates.md). **Exactly two rows always**, whatever the current
-    // template needs -- only `setEnabled`, matching `build_properties`'
-    // own rule and for the same reason: `PaneContainer::equalise_strips`
-    // does not re-run when a strip's *content* changes shape
-    // (`on_selection`'s comment has the story), so a box that grew or
-    // shrank with the template would desync the two panes exactly the
-    // way a hidden `properties_` used to. Custom fields are a pop-up
-    // rather than a pane for the same reason, not because a desktop
-    // lacks the room for one -- the pane the design sketched would grow
-    // with the field count.
+    // "Their call" plus up to `MAX_INLINE_CUSTOM_FIELDS` custom-field
+    // rows plus an overflow button (docs/overlay-templates.md).
+    // **A fixed shape always**, whatever the current template needs --
+    // every row exists from construction on and only `setEnabled`
+    // (plus the label text and the overflow button's count) changes,
+    // matching `build_properties`' own rule and for the same reason:
+    // `PaneContainer::equalise_strips` does not re-run when a strip's
+    // *content* changes shape (`on_selection`'s comment has the story),
+    // so a box that grew or shrank with the field count would desync
+    // the two panes exactly the way a hidden `properties_` used to.
     QGroupBox* build_fields_box(QWidget* parent);
     QWidget* build_send_bar();
     // Recompute what `{mycall}`/`{grid}`/`{name}`/`{theircall}`/`{snr}`/
@@ -199,6 +221,14 @@ private:
     // config changing -- rather than tracked incrementally, since the
     // whole `Fields` is a handful of short strings.
     void refresh_fields();
+    // Assigns the current template's custom-field labels to the fixed
+    // inline rows (first `MAX_INLINE_CUSTOM_FIELDS`) and routes any
+    // beyond that to the overflow button/pop-up. Called wherever the
+    // *set* of custom fields can have changed -- a template switch --
+    // never on a keystroke, so typing in a row does not fight itself:
+    // see `on_custom_field_edited`.
+    void sync_custom_field_rows();
+    void on_custom_field_edited(int slot);
     // Built-in templates plus the operator's own from
     // `config().folders.template_dir`, in that order; "None" is index 0
     // and is not a file. Called once at construction and again after
@@ -208,6 +238,11 @@ private:
     void save_as_template();
     static std::filesystem::path builtin_templates_dir();
     void update_level_label();
+    // Update which of the rect-only property rows are enabled, from
+    // whatever is currently loaded into them -- shared by `on_selection`
+    // and by the fill/stroke kind combos, since choosing "Gradient"
+    // enables the second colour and angle without a new selection.
+    void update_rect_field_enablement();
     overlay::Item* editing_item();
 
     AppState* app_ = nullptr;
@@ -217,7 +252,18 @@ private:
     QPushButton* choose_button_ = nullptr;
     QPushButton* frame_button_ = nullptr;
     QLabel* image_label_ = nullptr;
-    QPushButton* add_rx_button_ = nullptr;
+    // --- the tool palette -------------------------------------------
+    //
+    // Icon buttons rather than the "Add text"/"Add last received"/
+    // "Add image..."/"Add rectangle" text buttons this row used to be:
+    // a condensed strip reads as a palette rather than a sentence of
+    // controls. Each still adds its item immediately at a default
+    // position and selects it, same as before -- a visual tidy-up, not
+    // a new click-to-place interaction.
+    QToolButton* add_text_button_ = nullptr;
+    QToolButton* add_rx_button_ = nullptr;
+    QToolButton* add_image_button_ = nullptr;
+    QToolButton* add_rect_button_ = nullptr;
 
     // The picture as loaded, at its own size, plus how it is framed
     // into the transmit canvas. Kept apart so re-framing starts from
@@ -237,6 +283,19 @@ private:
     std::vector<overlay::Doc> templates_;
     QGroupBox* fields_box_ = nullptr;
     QLineEdit* theircall_edit_ = nullptr;
+    // Up to this many custom fields are shown inline, live-updating, in
+    // `fields_box_` itself; a template asking for more spills the rest
+    // into `custom_fields_button_`'s pop-up. Four is generous against
+    // the built-ins (one apiece) and against anything a hand-written
+    // template is likely to declare.
+    static constexpr int MAX_INLINE_CUSTOM_FIELDS = 4;
+    std::array<QLabel*, MAX_INLINE_CUSTOM_FIELDS> custom_field_labels_{};
+    std::array<QLineEdit*, MAX_INLINE_CUSTOM_FIELDS> custom_field_edits_{};
+    // Which label (if any) each inline row currently represents --
+    // `on_custom_field_edited` reads this rather than re-deriving it
+    // from the template on every keystroke. Empty means the slot is
+    // unused for the current template.
+    std::array<std::string, MAX_INLINE_CUSTOM_FIELDS> custom_field_slots_;
     QPushButton* custom_fields_button_ = nullptr;
     // Keyed by label, so a "Comment" field carries its value from one
     // template to the next within a session -- the label is the only
@@ -246,16 +305,29 @@ private:
     std::optional<double> last_reception_snr_db_;
     QPlainTextEdit* text_edit_ = nullptr;
     QComboBox* align_combo_ = nullptr;
+    // Retitled between "Size" (text) and "Width" (image/rect) rather
+    // than being two rows, since it is one control either way.
+    QLabel* size_label_ = nullptr;
     QDoubleSpinBox* size_spin_ = nullptr;
+    // Rect only; text and image items have no independent height.
+    QDoubleSpinBox* height_spin_ = nullptr;
     QDoubleSpinBox* rotation_spin_ = nullptr;
-    QPushButton* color_button_ = nullptr;
-    // What the swatch currently shows, so a drag's per-mouse-move
-    // selectionChanged does not rebuild an identical icon.
-    QColor swatch_color_;
-    // Whether the button has ever been given a swatch. Distinct from
-    // `swatch_color_` being invalid, which is also a legal *state* --
-    // an image item has no colour.
-    bool swatch_set_ = false;
+    ColorSwatch text_swatch_;  // text_swatch_.button is "Colour..."
+    // --- rect fill/stroke (docs item 1: rectangles) ------------------
+    QComboBox* fill_kind_combo_ = nullptr;
+    ColorSwatch fill_swatch_;
+    ColorSwatch fill_swatch2_;
+    QDoubleSpinBox* fill_angle_spin_ = nullptr;
+    QComboBox* stroke_kind_combo_ = nullptr;
+    ColorSwatch stroke_swatch_;
+    ColorSwatch stroke_swatch2_;
+    QDoubleSpinBox* stroke_angle_spin_ = nullptr;
+    QDoubleSpinBox* stroke_width_spin_ = nullptr;
+    // --- stacking order (docs item 2) ---------------------------------
+    QPushButton* raise_button_ = nullptr;
+    QPushButton* lower_button_ = nullptr;
+    QPushButton* front_button_ = nullptr;
+    QPushButton* back_button_ = nullptr;
     // Set while the property widgets are being filled from an item, so
     // their change signals do not write straight back into it.
     bool loading_properties_ = false;

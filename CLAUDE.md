@@ -403,6 +403,19 @@ rule is enforced by `tools/check_layering.py`.
   serializes exactly as before. The shipped templates are data in
   `sstvae/overlay/templates/` and the C++ test reads those same files,
   so there is one source of what "Reply" says.
+  **`RectItem` (2026-09-15)** is the third item kind: a rectangle,
+  independently fillable and strokable with a solid colour or a linear
+  gradient (`fill_kind`/`stroke_kind` each "none"/"solid"/"gradient",
+  flat fields rather than a nested gradient struct, matching this
+  module's style). The gradient angle is counter-clockwise, the same
+  sense as `rotation`, deliberately: it is painted into the item's own
+  unrotated layer and rotated with it, so the two numbers add exactly
+  as they read. `render.py` builds a gradient with numpy (PIL has no
+  gradient primitive); `native/core/overlay/render.cpp` uses
+  `QLinearGradient` for the identical geometry through Qt's own
+  interpolation. Like `ImageItem`, `item_bbox` reports the *unrotated*
+  extent for a rotated rect — an existing simplification carried over
+  for consistency, not a new gap.
 
 Two rules the deleted GUI established, which the native app inherits
 and which are the reason its panels look the way they do: a composition
@@ -2323,6 +2336,32 @@ the picture viewer and the Listen tab all binding a `last_rx` inset and
 no NDK available in that session, so — unlike the desktop half —
 unbuilt and untested; step 4, an on-phone template editor, is not
 started.
+
+**The desktop overlay editor gained four more things the same week
+(2026-09-15), none of them in the original template design doc.**
+A `RectItem` tool (filled and/or stroked, solid or gradient — see the
+`sstvae/overlay/` bullet above); stacking-order controls (Raise/Lower/
+To front/To back in the "Selected item" box, acting on any item type
+by array position, not just rects); the tool row is now an icon
+palette (`QToolButton`s with hand-drawn glyphs, the same reasoning
+`set_swatch` gives for painting its colour buttons rather than sourcing
+icon assets) instead of "Add text"/"Add last received"/"Add image..."
+text buttons; and "Save as template..." defaults its name prompt to
+the loaded template's own name (`editor_->doc().name`, which
+`on_template_selected` already carries). **Custom fields also moved
+inline**, superseding step 2's pop-up-only design: up to
+`TransmitPanel::MAX_INLINE_CUSTOM_FIELDS` (4) live in `fields_box_`
+itself, always present and only ever `setEnabled` — the same fixed-
+shape rule as everything else in that box, now stated once rather than
+per-control — updating the composite on every keystroke via
+`on_custom_field_edited`; a template declaring more spills the rest
+into the pop-up, which is what it is for now. All of it is `TextItem`/
+`ImageItem`/`RectItem` alike: the fill/stroke/order rows exist whatever
+item type is selected, disabled when they don't apply, per the same
+rule. `TransmitPanel::ColorSwatch` replaced the single `color_button_`/
+`swatch_color_`/`swatch_set_` trio once a rect's four independent
+colours needed the identical guard against rebuilding an icon at
+drag-frame rate.
 
 ONNX runtime path complete: the codec is onnxruntime, torch is
 training-only, and `cli`/`listen` install ~263 MB instead of

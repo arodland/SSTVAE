@@ -84,7 +84,43 @@ class ImageItem:
     type: str = field(default="image", init=False)
 
 
-_ITEM_TYPES = {"text": TextItem, "image": ImageItem}
+@dataclass
+class RectItem:
+    """A filled and/or stroked rectangle.
+
+    Fill and stroke are independent and each is "none", "solid" or
+    "gradient" -- a plain toggle would need a second field for "what
+    colour", so the kind and the colour(s) travel together per the
+    project's flat-dataclass style (see `TextItem`). A gradient is
+    linear only: two colours and an angle. The angle uses the same
+    counter-clockwise convention as `rotation` below, and deliberately
+    so -- the gradient is drawn into the item's own unrotated layer and
+    then rotated with it (`render.py`), so a gradient's angle and the
+    item's rotation add exactly as the two numbers suggest they should.
+    """
+
+    x: float = 0.1
+    y: float = 0.1
+    width: float = 0.3   # fraction of canvas width
+    height: float = 0.2  # fraction of canvas height
+    rotation: float = 0.0  # degrees, counter-clockwise
+    anchor: str = "la"
+
+    fill_kind: str = "none"  # "none" | "solid" | "gradient"
+    fill_color: str = "#ffffff"
+    fill_color2: str = "#000000"  # the gradient's second stop
+    fill_angle: float = 0.0
+
+    stroke_kind: str = "none"  # "none" | "solid" | "gradient"
+    stroke_color: str = "#ffffff"
+    stroke_color2: str = "#000000"
+    stroke_angle: float = 0.0
+    stroke_width: float = 0.006  # fraction of canvas width
+
+    type: str = field(default="rect", init=False)
+
+
+_ITEM_TYPES = {"text": TextItem, "image": ImageItem, "rect": RectItem}
 
 
 @dataclass

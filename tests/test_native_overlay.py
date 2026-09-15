@@ -16,7 +16,7 @@ import json
 
 import pytest
 
-from sstvae.overlay.model import DOC_VERSION, ImageItem, OverlayDoc, TextItem
+from sstvae.overlay.model import DOC_VERSION, ImageItem, OverlayDoc, RectItem, TextItem
 
 
 def _cpp(native):
@@ -78,6 +78,25 @@ def test_a_fully_specified_document_round_trips(native):
     assert json.loads(text) == doc.to_dict()
 
 
+def test_a_fully_specified_rect_round_trips(native):
+    """Every field non-default, matching the text/image test above --
+    fill and stroke each get a turn at "gradient" so both colours and
+    the angle are exercised, not just the solid defaults."""
+    cpp = _cpp(native)
+    doc = OverlayDoc(items=[
+        RectItem(
+            x=0.15, y=0.62, width=0.4, height=0.22, rotation=33.0, anchor="mm",
+            fill_kind="gradient", fill_color="#112233", fill_color2="#445566",
+            fill_angle=45.0,
+            stroke_kind="solid", stroke_color="#ff00ff", stroke_color2="#00ffff",
+            stroke_angle=90.0, stroke_width=0.015,
+        ),
+    ])
+    text, notes = cpp.round_trip(doc.to_json())
+    assert not notes, notes
+    assert json.loads(text) == doc.to_dict()
+
+
 def test_last_rx_reference_is_preserved_verbatim(native):
     """The late-bound reference is the whole point of a template.
 
@@ -100,8 +119,10 @@ def test_documents_the_python_side_writes_are_readable(native):
         OverlayDoc(),
         OverlayDoc(items=[TextItem()]),
         OverlayDoc(items=[ImageItem()]),
+        OverlayDoc(items=[RectItem()]),
         OverlayDoc(items=[TextItem(text="a"), TextItem(text="b"), ImageItem()]),
         OverlayDoc(items=[TextItem(text="", size=0.0, rotation=360.0)]),
+        OverlayDoc(items=[RectItem(fill_kind="solid"), RectItem(stroke_kind="gradient")]),
     ]
     for doc in docs:
         text, notes = cpp.round_trip(doc.to_json())
@@ -112,7 +133,11 @@ def test_documents_the_python_side_writes_are_readable(native):
 def test_cpp_output_is_readable_by_the_reference(native):
     """The other direction: what C++ writes, Python must accept."""
     cpp = _cpp(native)
-    doc = OverlayDoc(items=[TextItem(text="W1AW", rotation=15.0), ImageItem(opacity=0.5)])
+    doc = OverlayDoc(items=[
+        TextItem(text="W1AW", rotation=15.0),
+        ImageItem(opacity=0.5),
+        RectItem(fill_kind="gradient", fill_angle=60.0),
+    ])
     text, _ = cpp.round_trip(doc.to_json())
     assert OverlayDoc.from_json(text).to_dict() == doc.to_dict()
 

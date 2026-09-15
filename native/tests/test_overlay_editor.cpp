@@ -491,6 +491,123 @@ void test_it_pins_no_window_height() {
     }
 }
 
+// --- rectangles and z-order ----------------------------------------------
+
+void test_add_rect_selects_a_visible_item() {
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_rect();
+    const overlay::Item* item = editor->selected_item();
+    check::is_true(item != nullptr, "editor: adding a rect selects it");
+    const auto* rect = std::get_if<overlay::RectItem>(item);
+    check::is_true(rect != nullptr, "editor: the added item is a rect");
+    if (rect == nullptr) return;
+    // Not the model's own bare defaults -- see `add_rect`'s comment --
+    // the button has to place something a click can actually find.
+    check::is_true(rect->fill_kind != "none",
+                   "editor: a freshly added rect is visible, not blank");
+    delete editor;
+}
+
+void test_raise_and_lower_swap_adjacent_items_and_follow_the_selection() {
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_text("A");  // index 0
+    editor->add_text("B");  // index 1, selected
+    check::is_true(!editor->can_raise_selected(),
+                   "editor: the top item cannot be raised further");
+    check::is_true(editor->can_lower_selected(), "editor: but can be lowered");
+
+    editor->lower_selected();
+    check::equal(std::get<overlay::TextItem>(editor->doc().items[0]).text,
+                 std::string("B"), "editor: lower swaps it down");
+    check::equal(std::get<overlay::TextItem>(*editor->selected_item()).text,
+                 std::string("B"), "editor: the selection follows the item");
+
+    editor->raise_selected();
+    check::equal(std::get<overlay::TextItem>(editor->doc().items[1]).text,
+                 std::string("B"), "editor: raise undoes it");
+    delete editor;
+}
+
+void test_bring_to_front_and_send_to_back_preserve_the_rest_of_the_order() {
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_text("A");  // 0
+    editor->add_text("B");  // 1
+    editor->add_text("C");  // 2
+    const auto label = [&](int i) {
+        return std::get<overlay::TextItem>(editor->doc().items[i]).text;
+    };
+
+    // `add_text` always selects the item it just added, which is the
+    // simplest way to get a known item selected without needing real
+    // click geometry -- add a fourth on top of A..C and pull it to the
+    // back, which must not disturb their own relative order.
+    editor->add_text("D");  // 3, selected
+    check::equal(label(3), std::string("D"), "editor: D starts on top");
+    editor->send_selected_to_back();
+    check::equal(label(0), std::string("D"), "editor: D is now at the back");
+    check::equal(label(1), std::string("A"), "editor: A..C keep their order");
+    check::equal(label(2), std::string("B"), "editor: A..C keep their order");
+    check::equal(label(3), std::string("C"), "editor: A..C keep their order");
+    check::equal(std::get<overlay::TextItem>(*editor->selected_item()).text,
+                 std::string("D"), "editor: the selection follows D to index 0");
+
+    editor->bring_selected_to_front();
+    check::equal(label(3), std::string("D"), "editor: and back to the front");
+    check::equal(label(0), std::string("A"), "editor: A..C keep their order again");
+    check::equal(label(1), std::string("B"), "editor: A..C keep their order again");
+    check::equal(label(2), std::string("C"), "editor: A..C keep their order again");
+    delete editor;
+}
+
+void test_z_order_changes_which_item_paints_on_top() {
+    // The property the buttons exist for, not just the vector
+    // arithmetic: after a reorder, `render()` must actually draw the
+    // raised item over the one it used to sit under.
+    gui::OverlayEditor* editor = make_editor();
+    overlay::RectItem under;
+    under.x = 0.1;
+    under.y = 0.1;
+    under.width = 0.3;
+    under.height = 0.3;
+    under.fill_kind = "solid";
+    under.fill_color = "#ff0000";
+    overlay::RectItem over_item = under;
+    over_item.fill_color = "#0000ff";
+
+    overlay::Doc doc;
+    doc.items.push_back(under);      // red, index 0
+    doc.items.push_back(over_item);  // blue, index 1, drawn on top
+    editor->set_doc(doc);
+
+    // Both rects cover the same area, so a click there hits both --
+    // `hit_test` picks front to back, i.e. the one actually on top
+    // (blue), which is the whole point being pinned here.
+    QMouseEvent select_event(QEvent::MouseButtonPress,
+                             widget_point(0.2 * overlay::CANVAS_W, 0.2 * overlay::CANVAS_H),
+                             widget_point(0.2 * overlay::CANVAS_W, 0.2 * overlay::CANVAS_H),
+                             Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(editor, &select_event);
+    check::equal(editor->doc().items.size(), std::size_t{2}, "editor: still two items");
+
+    const auto* selected_rect = std::get_if<overlay::RectItem>(editor->selected_item());
+    check::is_true(selected_rect != nullptr && selected_rect->fill_color == "#0000ff",
+                   "editor: the click selected the blue (topmost) rect");
+
+    // Lower the selected (blue) item below red -- red should now win
+    // the overlap it used to lose.
+    editor->lower_selected();
+    const std::optional<images::Picture> composed = editor->composed_image();
+    check::is_true(composed.has_value(), "editor: composes after the reorder");
+    const std::size_t idx =
+        (static_cast<std::size_t>(0.2 * overlay::CANVAS_H) * composed->width +
+         static_cast<std::size_t>(0.2 * overlay::CANVAS_W)) * 3;
+    check::equal(static_cast<int>(composed->rgb[idx]), 255,
+                 "editor: red now paints over blue after lower_selected");
+    check::equal(static_cast<int>(composed->rgb[idx + 2]), 0,
+                 "editor: and blue no longer shows through");
+    delete editor;
+}
+
 int main(int argc, char** argv) {
     check::report_crashes_instead_of_prompting();
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -512,6 +629,10 @@ int main(int argc, char** argv) {
     test_a_reception_is_a_change_only_if_an_item_uses_it();
     test_a_reception_is_kept_even_with_nothing_to_show_it();
     test_it_pins_no_window_height();
+    test_add_rect_selects_a_visible_item();
+    test_raise_and_lower_swap_adjacent_items_and_follow_the_selection();
+    test_bring_to_front_and_send_to_back_preserve_the_rest_of_the_order();
+    test_z_order_changes_which_item_paints_on_top();
 
     return check::report("overlay editor");
 }

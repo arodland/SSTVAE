@@ -3,7 +3,7 @@
 import numpy as np
 from PIL import Image
 
-from sstvae.overlay import CANVAS_H, CANVAS_W, ImageItem, OverlayDoc, TextItem, render
+from sstvae.overlay import CANVAS_H, CANVAS_W, ImageItem, OverlayDoc, RectItem, TextItem, render
 
 
 def base(color=(20, 40, 60)):
@@ -106,6 +106,77 @@ def test_render_returns_rgb():
     out = render(base(), OverlayDoc(items=[TextItem(text="X")]))
     assert out.mode == "RGB"
     assert out.size == (CANVAS_W, CANVAS_H)
+
+
+# --- rectangles -----------------------------------------------------------
+
+
+def test_rect_json_roundtrip():
+    doc = OverlayDoc(items=[
+        RectItem(x=0.1, y=0.2, width=0.3, height=0.15, fill_kind="solid",
+                 fill_color="#ff0000", stroke_kind="gradient",
+                 stroke_color="#00ff00", stroke_color2="#0000ff",
+                 stroke_angle=30.0, rotation=10.0),
+    ])
+    back = OverlayDoc.from_json(doc.to_json())
+    assert isinstance(back.items[0], RectItem)
+    assert back.items[0] == doc.items[0]
+
+
+def test_rect_with_every_field_none_draws_nothing():
+    src = base()
+    doc = OverlayDoc(items=[RectItem(x=0.1, y=0.1, width=0.3, height=0.2)])
+    assert np.array_equal(np.asarray(src), np.asarray(render(src, doc)))
+
+
+def test_solid_rect_fills_its_area_and_nothing_else():
+    src = base()
+    doc = OverlayDoc(items=[
+        RectItem(x=0.1, y=0.1, width=0.2, height=0.2, fill_kind="solid", fill_color="#ff0000"),
+    ])
+    out = np.asarray(render(src, doc))
+    inside = out[int(0.15 * CANVAS_H), int(0.15 * CANVAS_W)]
+    outside = out[int(0.5 * CANVAS_H), int(0.5 * CANVAS_W)]
+    assert tuple(inside) == (255, 0, 0)
+    assert tuple(outside) == tuple(np.asarray(src)[int(0.5 * CANVAS_H), int(0.5 * CANVAS_W)])
+
+
+def test_gradient_rect_interpolates_between_its_two_colors():
+    src = base()
+    doc = OverlayDoc(items=[
+        RectItem(x=0.0, y=0.0, width=1.0, height=1.0, fill_kind="gradient",
+                 fill_color="#ff0000", fill_color2="#0000ff", fill_angle=0.0),
+    ])
+    out = np.asarray(render(src, doc))
+    left = out[CANVAS_H // 2, 2]
+    right = out[CANVAS_H // 2, CANVAS_W - 3]
+    # Left edge close to color1 (red), right edge close to color2 (blue).
+    assert left[0] > left[2]
+    assert right[2] > right[0]
+
+
+def test_stroke_only_rect_draws_an_outline_not_a_fill():
+    src = base()
+    doc = OverlayDoc(items=[
+        RectItem(x=0.1, y=0.1, width=0.3, height=0.2, stroke_kind="solid",
+                 stroke_color="#00ff00", stroke_width=0.02),
+    ])
+    out = np.asarray(render(src, doc))
+    before = np.asarray(src)
+    center_y, center_x = int(0.2 * CANVAS_H), int(0.25 * CANVAS_W)
+    edge_y, edge_x = int(0.1 * CANVAS_H), int(0.25 * CANVAS_W)
+    assert np.array_equal(out[center_y, center_x], before[center_y, center_x])
+    assert tuple(out[edge_y, edge_x]) == (0, 255, 0)
+
+
+def test_rect_bbox_ignores_rotation_like_the_image_item_does():
+    """Matches the existing (documented) simplification for ImageItem --
+    the selection handle is sized from the unrotated extent."""
+    from sstvae.overlay import item_bbox
+    item = RectItem(x=0.1, y=0.1, width=0.3, height=0.2, rotation=45.0)
+    assert item_bbox((CANVAS_W, CANVAS_H), item) == (
+        round(0.1 * CANVAS_W), round(0.1 * CANVAS_H),
+        round(0.3 * CANVAS_W), round(0.2 * CANVAS_H))
 
 
 # --- templates (docs/overlay-templates.md) ------------------------------
@@ -215,6 +286,14 @@ def test_substitute_returns_a_copy_and_leaves_images_alone():
     assert out.items[0].text == "W1XYZ de KC2G"
     assert isinstance(out.items[1], ImageItem)
     assert out.name == "Reply"
+
+
+def test_substitute_leaves_rects_alone_and_counts_no_placeholders():
+    doc = OverlayDoc(items=[RectItem(fill_kind="solid", fill_color="#ff0000")])
+    assert placeholders(doc).builtin == []
+    assert placeholders(doc).custom == []
+    out = substitute(doc, Fields({"mycall": "KC2G"}))
+    assert out.items[0] == doc.items[0]
 
 
 def test_name_round_trips_and_is_omitted_when_empty():

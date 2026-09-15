@@ -344,15 +344,18 @@ counterpart on Android.
    actually on screen — the design's own "what you arrange is what
    goes on the air" rule, extended to a template's holes.
    Two departures from the sketch above, both forced by a real
-   constraint rather than chosen freely. **Custom fields are a
-   pop-up on the desktop too**, not the pane described earlier:
-   `PaneContainer::equalise_strips` does not re-run when a strip's
-   content changes *shape* (the exact bug `test_tx_panel.cpp`
-   already guards), so a field count that varied with the template
-   would desync the two panes the way a hidden "Selected item" box
-   once did. The fields box is therefore two rows, always, whatever
-   the template needs — only `setEnabled`, matching that file's own
-   rule. **This does not close the overlay-lost-on-restart gap**
+   constraint rather than chosen freely. **Custom fields were a
+   pop-up on the desktop too, and are not any more** (superseded
+   2026-09-15, see the rectangles/z-order/palette bullet below): the
+   real constraint stands — `PaneContainer::equalise_strips` does not
+   re-run when a strip's content changes *shape* (the exact bug
+   `test_tx_panel.cpp` already guards) — but it turns out to admit a
+   fixed *number* of live rows rather than only a pop-up button. The
+   fields box is a fixed shape, always, whatever the template needs —
+   only `setEnabled` (plus a label's text and a value), matching that
+   file's own rule; a template asking for more than fit inline still
+   gets a pop-up, now for the overflow only. **This does not close the
+   overlay-lost-on-restart gap**
    as this bullet used to promise: an ad-hoc composition never saved
    as a template is still gone on restart, exactly as before — what
    changed is that saving one is now possible. And **there is no
@@ -362,6 +365,33 @@ counterpart on Android.
    the same "must be visible" property the phone's block exists to
    guarantee, so the block itself was left for later rather than
    risking the panel's existing Send-enablement logic sight unseen.
+
+   **Follow-on desktop work, 2026-09-15 — not in the original design,
+   requested afterward.** Four additions to the same panel and editor,
+   all documented in CLAUDE.md's `sstvae/overlay/` and desktop-status
+   bullets rather than repeated here in full:
+   - A third overlay item, `RectItem` — filled and/or stroked, each
+     independently "none"/"solid"/"gradient" (linear only: two colours
+     and an angle). Lives in the *core* model/render, both languages,
+     not just the desktop, because that is where `TextItem`/`ImageItem`
+     live — so it is available to a future Android editor (step 4)
+     without re-deriving it there.
+   - Stacking-order controls (Raise/Lower/To front/To back), acting on
+     whatever is selected regardless of item type.
+   - The Add-item row became an icon palette instead of sentence
+     buttons.
+   - **Custom fields moved inline**, which is the change the
+     departure note above records — up to `MAX_INLINE_CUSTOM_FIELDS`
+     (4) live, always-present, live-updating rows in `fields_box_`
+     itself, with the pop-up demoted to overflow-only. This is a
+     genuine second look at the "pop-up rather than a pane" call step
+     2 made: the constraint that forced it (a strip's shape may not
+     change after construction) turned out to allow a fixed *number*
+     of rows just as well as a fixed *two* rows did — the pop-up was
+     never load-bearing for the constraint, only for not having
+     thought of the fixed-count version yet.
+   - "Save as template..." now defaults its name prompt to the loaded
+     template's own name.
 3. **Android: overlay ON, template chips and fields on Send, Reply from
    Pictures and Listen, the reply binding in `Composition`.** This is
    the step that delivers an addressed reply from a phone. **Done

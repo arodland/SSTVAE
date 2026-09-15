@@ -78,8 +78,25 @@ public:
     void add_text(const std::string& text);
     void add_image_inset(const std::string& path);
     void add_last_rx_inset();
+    void add_rect();
     void remove_selected();
     void clear_overlay();
+
+    // --- stacking order -------------------------------------------------
+    //
+    // `doc_.items` is drawn back to front, so "raise" means "later in
+    // the vector". These act on whatever is selected and keep the
+    // selection following it -- a reorder that dropped the selection
+    // would be indistinguishable from one that silently failed.
+    void raise_selected();
+    void lower_selected();
+    void bring_selected_to_front();
+    void send_selected_to_back();
+    // Whether raise/lower/front/back would do anything right now, for
+    // the buttons that call them -- there is nothing to raise above the
+    // top item or lower below the bottom one.
+    bool can_raise_selected() const;
+    bool can_lower_selected() const;
 
     // The selected item, or null. A pointer into the document, so the
     // property editor mutates it in place and calls `refresh_item`.
@@ -172,6 +189,10 @@ private:
     // drag does not snap the item's corner to the cursor.
     QPointF grab_offset_;
     double resize_start_ = 0.0;
+    // A rectangle resizes both axes together (see `mouseMoveEvent`), so
+    // its starting height rides alongside `resize_start_`'s width. Text
+    // and image items leave this at 0 and never read it.
+    double resize_start_height_ = 0.0;
     QPointF resize_origin_;
 };
 

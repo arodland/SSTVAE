@@ -29,11 +29,14 @@
 #include <QApplication>
 #include <QByteArray>
 #include <QComboBox>
+#include <QDialog>
+#include <QDoubleSpinBox>
 #include <QFile>
 #include <QIODevice>
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
+#include <QPlainTextEdit>
 #include <QPoint>
 #include <QPushButton>
 #include <QSize>
@@ -43,6 +46,7 @@
 #include <QWidget>
 
 #include <string>
+#include <variant>
 
 #include "app_state.hpp"
 #include "check.hpp"
@@ -332,7 +336,11 @@ void test_the_template_combo_lists_none_then_the_builtins() {
 }
 
 // Selecting a template replaces the canvas and only enables the fields
-// it actually uses -- "None"'s two rows stay inert, "Reply"'s do not.
+// it actually uses -- "None"'s rows stay inert, "Reply"'s do not. The
+// one custom field the built-ins ever declare ("Comment") fits inline
+// (docs/overlay-templates.md), so the pop-up stays disabled throughout;
+// its own overflow case is `test_a_template_with_more_custom_fields...`
+// below, since none of the built-ins exercise it.
 void test_selecting_a_template_loads_it_and_gates_its_fields() {
     AppState state;
     QWidget host;
@@ -342,33 +350,125 @@ void test_selecting_a_template_loads_it_and_gates_its_fields() {
 
     auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
     auto* theircall = panel->findChild<QLineEdit*>(QStringLiteral("theircall_edit"));
+    auto* comment = panel->findChild<QLineEdit*>(QStringLiteral("custom_field_edit_0"));
     QPushButton* custom = custom_fields_button(panel);
     auto* editor = panel->findChild<OverlayEditor*>();
-    check::is_true(combo != nullptr && theircall != nullptr && custom != nullptr &&
-                       editor != nullptr,
-                   "the panel has a combo, a theircall field, a custom-fields "
-                   "button and an editor");
-    if (combo == nullptr || theircall == nullptr || custom == nullptr ||
-        editor == nullptr) {
+    check::is_true(combo != nullptr && theircall != nullptr && comment != nullptr &&
+                       custom != nullptr && editor != nullptr,
+                   "the panel has a combo, a theircall field, an inline custom "
+                   "field, a pop-up button and an editor");
+    if (combo == nullptr || theircall == nullptr || comment == nullptr ||
+        custom == nullptr || editor == nullptr) {
         return;
     }
 
     check::is_true(!theircall->isEnabled(), "their call starts disabled: no template");
-    check::is_true(!custom->isEnabled(), "custom fields starts disabled too");
+    check::is_true(!comment->isEnabled(), "the inline Comment row starts disabled too");
+    check::is_true(!custom->isEnabled(), "and the overflow pop-up has nothing to overflow");
 
     combo->setCurrentIndex(2);  // Reply
     QCoreApplication::processEvents();
     check::is_true(!editor->doc().items.empty(), "the template's items are on the canvas");
     check::is_true(theircall->isEnabled(), "reply uses {theircall}: enabled");
-    check::is_true(custom->isEnabled(), "reply's Comment field: enabled");
-    check::is_true(custom->text().contains(QLatin1String("1")),
-                   "the button names how many custom fields there are");
+    check::is_true(comment->isEnabled(), "reply's Comment field: enabled inline");
+    check::is_true(!custom->isEnabled(),
+                   "still nothing for the pop-up: one field fits inline");
 
     combo->setCurrentIndex(0);  // None
     QCoreApplication::processEvents();
     check::is_true(editor->doc().items.empty(), "\"None\" clears the overlay");
     check::is_true(!theircall->isEnabled(), "and their call is disabled again");
-    check::is_true(!custom->isEnabled(), "and so are custom fields");
+    check::is_true(!comment->isEnabled(), "and so is the inline Comment row");
+}
+
+// The point of moving custom fields inline: typing updates the
+// composite without a Done button, because `refresh_fields` runs on
+// every keystroke via `on_custom_field_edited`.
+void test_an_inline_custom_field_updates_live() {
+    AppState state;
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    auto* comment = panel->findChild<QLineEdit*>(QStringLiteral("custom_field_edit_0"));
+    auto* editor = panel->findChild<OverlayEditor*>();
+    check::is_true(combo != nullptr && comment != nullptr && editor != nullptr,
+                   "the panel has a combo, an inline field and an editor");
+    if (combo == nullptr || comment == nullptr || editor == nullptr) return;
+
+    combo->setCurrentIndex(1);  // CQ, which also declares a Comment field
+    QCoreApplication::processEvents();
+    check::is_true(comment->isEnabled(), "CQ's Comment field is enabled inline");
+
+    comment->setText(QStringLiteral("QRZ?"));
+    QCoreApplication::processEvents();
+    const auto it = editor->fields().custom.find("Comment");
+    check::is_true(it != editor->fields().custom.end() && it->second == "QRZ?",
+                   "typing reaches the editor's fields without a Done button");
+
+    // Switching away and back must not leave the stale value behind if
+    // the label changes, and must restore it if the label is the same
+    // -- CQ and Reply both declare "Comment", so the value should carry.
+    combo->setCurrentIndex(2);  // Reply
+    QCoreApplication::processEvents();
+    check::equal(comment->text().toStdString(), std::string("QRZ?"),
+                 "the same label keeps its value across a template switch");
+}
+
+// A template with more custom fields than fit inline
+// (`TransmitPanel::MAX_INLINE_CUSTOM_FIELDS`) is the case the pop-up
+// still exists for.
+void test_a_template_with_more_custom_fields_than_fit_inline_overflows() {
+    QTemporaryDir dir;
+    check::is_true(dir.isValid(), "temp dir created");
+
+    overlay::Doc doc;
+    doc.name = "Many fields";
+    overlay::TextItem item;
+    item.text =
+        "{field A}\n{field B}\n{field C}\n{field D}\n{field E}\n{field F}";
+    doc.items.push_back(item);
+    {
+        QFile file(dir.filePath(QStringLiteral("many.json")));
+        check::is_true(file.open(QIODevice::WriteOnly), "template file opened");
+        file.write(QByteArray::fromStdString(overlay::to_json(doc)));
+    }
+
+    AppState state;
+    state.config().folders.template_dir = dir.path().toStdString();
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    QPushButton* custom = custom_fields_button(panel);
+    check::is_true(combo != nullptr && custom != nullptr,
+                   "the panel has a combo and a pop-up button");
+    if (combo == nullptr || custom == nullptr) return;
+
+    int index = -1;
+    for (int i = 0; i < combo->count(); ++i) {
+        if (combo->itemText(i) == QLatin1String("Many fields")) index = i;
+    }
+    check::is_true(index >= 0, "the six-field template is listed");
+    if (index < 0) return;
+
+    combo->setCurrentIndex(index);
+    QCoreApplication::processEvents();
+    check::is_true(custom->isEnabled(), "the overflow button is enabled");
+    check::is_true(custom->text().contains(QLatin1String("2")),
+                   "it names the two fields (six declared, four inline)");
+
+    // The first four (A..D) each have their own enabled inline row.
+    for (int i = 0; i < 4; ++i) {
+        auto* row = panel->findChild<QLineEdit*>(
+            QStringLiteral("custom_field_edit_%1").arg(i));
+        check::is_true(row != nullptr && row->isEnabled(),
+                       "inline row is present and enabled");
+    }
 }
 
 // Typing their call reaches the editor's substitution fields -- the
@@ -438,6 +538,159 @@ void test_a_template_from_the_configured_folder_is_listed() {
     check::is_true(found, "a template from the configured folder is listed by name");
 }
 
+// --- rectangles (docs item 1) --------------------------------------------
+
+// Adding a rect selects it and enables exactly the rect-only controls,
+// disabling the text-only ones -- the same "always present, only
+// setEnabled" rule `build_properties`' comment documents.
+void test_a_rect_selection_enables_rect_controls_and_disables_text_ones() {
+    AppState state;
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* editor = panel->findChild<OverlayEditor*>();
+    auto* text_edit = panel->findChild<QPlainTextEdit*>();
+    auto* height = panel->findChild<QDoubleSpinBox*>(QStringLiteral("height_spin"));
+    auto* size = panel->findChild<QDoubleSpinBox*>(QStringLiteral("size_spin"));
+    auto* fill_kind = panel->findChild<QComboBox*>(QStringLiteral("fill_kind_combo"));
+    check::is_true(editor != nullptr && text_edit != nullptr && height != nullptr &&
+                       size != nullptr && fill_kind != nullptr,
+                   "the panel has an editor, a text box, height/size spins and "
+                   "a fill-kind combo");
+    if (editor == nullptr || text_edit == nullptr || height == nullptr ||
+        size == nullptr || fill_kind == nullptr) {
+        return;
+    }
+
+    check::is_true(!height->isEnabled(), "height starts disabled: nothing selected");
+
+    editor->add_rect();
+    QCoreApplication::processEvents();
+    check::is_true(!text_edit->isEnabled(), "the text box is disabled for a rect");
+    check::is_true(size->isEnabled(), "size (width) is enabled for a rect");
+    check::is_true(height->isEnabled(), "and so is height, unlike for text/image");
+    check::is_true(fill_kind->isEnabled(), "and the fill-kind combo");
+}
+
+// The width/height spin boxes and the fill-kind combo write straight
+// back into the selected rect -- the same wiring `on_selection` reads
+// them from.
+void test_rect_property_controls_write_back_to_the_item() {
+    AppState state;
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* editor = panel->findChild<OverlayEditor*>();
+    auto* height = panel->findChild<QDoubleSpinBox*>(QStringLiteral("height_spin"));
+    auto* size = panel->findChild<QDoubleSpinBox*>(QStringLiteral("size_spin"));
+    auto* fill_kind = panel->findChild<QComboBox*>(QStringLiteral("fill_kind_combo"));
+    check::is_true(editor != nullptr && height != nullptr && size != nullptr &&
+                       fill_kind != nullptr,
+                   "the panel has the rect controls");
+    if (editor == nullptr || height == nullptr || size == nullptr ||
+        fill_kind == nullptr) {
+        return;
+    }
+
+    editor->add_rect();
+    QCoreApplication::processEvents();
+    const double original_height =
+        std::get<overlay::RectItem>(*editor->selected_item()).height;
+
+    size->setValue(0.42);
+    QCoreApplication::processEvents();
+    check::equal(std::get<overlay::RectItem>(*editor->selected_item()).width, 0.42,
+                 "the size spin writes the rect's width");
+    check::equal(std::get<overlay::RectItem>(*editor->selected_item()).height,
+                 original_height, "and leaves height alone");
+
+    height->setValue(0.31);
+    QCoreApplication::processEvents();
+    check::equal(std::get<overlay::RectItem>(*editor->selected_item()).height, 0.31,
+                 "the height spin writes the rect's height");
+
+    fill_kind->setCurrentIndex(fill_kind->findData(QStringLiteral("gradient")));
+    QCoreApplication::processEvents();
+    check::equal(std::get<overlay::RectItem>(*editor->selected_item()).fill_kind,
+                 std::string("gradient"), "the fill-kind combo writes fill_kind");
+}
+
+// --- stacking order (docs item 2) -----------------------------------------
+
+void test_the_z_order_buttons_reorder_the_selected_item() {
+    AppState state;
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* editor = panel->findChild<OverlayEditor*>();
+    auto* raise = panel->findChild<QPushButton*>(QStringLiteral("raise_button"));
+    auto* lower = panel->findChild<QPushButton*>(QStringLiteral("lower_button"));
+    check::is_true(editor != nullptr && raise != nullptr && lower != nullptr,
+                   "the panel has an editor and raise/lower buttons");
+    if (editor == nullptr || raise == nullptr || lower == nullptr) return;
+
+    check::is_true(!raise->isEnabled(), "raise starts disabled: nothing selected");
+
+    editor->add_text("A");
+    editor->add_text("B");  // selected, already on top
+    QCoreApplication::processEvents();
+    check::is_true(!raise->isEnabled(), "the top item cannot be raised further");
+    check::is_true(lower->isEnabled(), "but it can be lowered");
+
+    lower->click();
+    QCoreApplication::processEvents();
+    check::equal(std::get<overlay::TextItem>(editor->doc().items[0]).text,
+                 std::string("B"), "clicking Lower moves the selection down");
+    check::is_true(raise->isEnabled(), "now it can be raised back");
+}
+
+// --- "Save as template..." defaults to the loaded name --------------------
+
+// `save_as_template` opens a modal `QInputDialog`; the test answers it
+// from a zero-delay timer, which is the standard way to drive a Qt
+// modal without blocking the test itself.
+void test_saving_a_loaded_template_defaults_to_its_own_name() {
+    AppState state;
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    QPushButton* save = nullptr;
+    for (QPushButton* button : panel->findChildren<QPushButton*>()) {
+        if (button->text().contains(QLatin1String("Save as template"))) save = button;
+    }
+    check::is_true(combo != nullptr && save != nullptr,
+                   "the panel has a template combo and a save button");
+    if (combo == nullptr || save == nullptr) return;
+
+    combo->setCurrentIndex(2);  // "Reply"
+    QCoreApplication::processEvents();
+
+    QString seen_default;
+    QTimer::singleShot(0, save, [&seen_default] {
+        QWidget* modal = QApplication::activeModalWidget();
+        if (auto* dialog = qobject_cast<QDialog*>(modal)) {
+            if (auto* edit = dialog->findChild<QLineEdit*>()) {
+                seen_default = edit->text();
+            }
+            dialog->reject();  // decline the save; only the default is under test
+        }
+    });
+    save->click();
+    QCoreApplication::processEvents();
+
+    check::equal(seen_default.toStdString(), std::string("Reply"),
+                 "the dialog opened pre-filled with the loaded template's name");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -452,7 +705,13 @@ int main(int argc, char** argv) {
     test_a_rebuild_consumes_the_pending_edit();
     test_the_template_combo_lists_none_then_the_builtins();
     test_selecting_a_template_loads_it_and_gates_its_fields();
+    test_an_inline_custom_field_updates_live();
+    test_a_template_with_more_custom_fields_than_fit_inline_overflows();
     test_typing_their_call_updates_the_editor_s_fields();
     test_a_template_from_the_configured_folder_is_listed();
+    test_a_rect_selection_enables_rect_controls_and_disables_text_ones();
+    test_rect_property_controls_write_back_to_the_item();
+    test_the_z_order_buttons_reorder_the_selected_item();
+    test_saving_a_loaded_template_defaults_to_its_own_name();
     return check::report("transmit panel");
 }
