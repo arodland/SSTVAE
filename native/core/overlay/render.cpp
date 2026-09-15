@@ -177,20 +177,28 @@ void draw_text(QPainter& painter, const TextItem& item, int canvas_w,
     const double x = std::lround(item.x * canvas_w);
     const double y = std::lround(item.y * canvas_h);
 
+    // Computed before rotating: the layout does not depend on the
+    // painter's transform, and the block's own centre is what the
+    // rotation below needs.
+    const TextLayout layout = layout_text(item, font, size_px, x, y);
+
     painter.save();
     if (item.rotation != 0.0) {
-        // About the anchor point, which is the point the document
-        // actually pins. (The reference rotates a padded layer and
-        // composites it at the anchor, which is close but not the same;
-        // this is the version an editor can show a handle for.) Negated
+        // About the text block's own centre, matching `draw_rect`/
+        // `draw_image` -- not the raw anchor point this used to pivot
+        // on, which for the common "top-left" anchor swung the whole
+        // block out from under the selection box instead of turning it
+        // in place (found via the editor's own rotate handle, which
+        // made the mismatch obvious for the first time). Negated
         // because the document's angle is counter-clockwise, as PIL's
         // is, and QTransform::rotate turns the other way.
-        painter.translate(x, y);
+        const QPointF centre(layout.left + layout.width / 2.0,
+                             layout.top + layout.height / 2.0);
+        painter.translate(centre);
         painter.rotate(-item.rotation);
-        painter.translate(-x, -y);
+        painter.translate(-centre);
     }
 
-    const TextLayout layout = layout_text(item, font, size_px, x, y);
     const QPainterPath path = text_path(item, font, layout);
     if (stroke > 0.0) {
         QPen pen(color_of(item.stroke_color, Qt::black));

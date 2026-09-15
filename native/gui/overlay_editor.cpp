@@ -303,6 +303,42 @@ QRect OverlayEditor::selection_screen_rect() const {
     return item_screen_rect(*item);
 }
 
+// Same transform `overlay::render` applies to a rotated item's pixels
+// (`painter.rotate(-item.rotation)` about the item's own centre): the
+// document's angle is counter-clockwise, as PIL's is, and
+// `QTransform::rotate` turns the other way, hence the sign flip here
+// too. Working this out algebraically rather than pushing points through
+// a `QTransform` keeps the handles and the outline in plain canvas-space
+// arithmetic, matching every other geometry helper in this file.
+QPointF OverlayEditor::rotate_around(const QPointF& point, const QPointF& centre,
+                                     double rotation_degrees) {
+    if (rotation_degrees == 0.0) return point;
+    const double rad = rotation_degrees * std::numbers::pi / 180.0;
+    const double c = std::cos(rad);
+    const double s = std::sin(rad);
+    const double dx = point.x() - centre.x();
+    const double dy = point.y() - centre.y();
+    return QPointF(centre.x() + dx * c + dy * s, centre.y() - dx * s + dy * c);
+}
+
+QPolygon OverlayEditor::item_screen_polygon(const overlay::Bbox& box,
+                                            double rotation) const {
+    const QRect rect = canvas_rect();
+    const double sx = static_cast<double>(rect.width()) / overlay::CANVAS_W;
+    const double sy = static_cast<double>(rect.height()) / overlay::CANVAS_H;
+    const QPointF centre(box.x + box.w / 2.0, box.y + box.h / 2.0);
+    const QPointF corners[4] = {
+        QPointF(box.x, box.y), QPointF(box.x + box.w, box.y),
+        QPointF(box.x + box.w, box.y + box.h), QPointF(box.x, box.y + box.h)};
+    QPolygon polygon;
+    for (const QPointF& corner : corners) {
+        const QPointF rotated = rotate_around(corner, centre, rotation);
+        polygon << QPoint(rect.x() + static_cast<int>(std::lround(rotated.x() * sx)),
+                          rect.y() + static_cast<int>(std::lround(rotated.y() * sy)));
+    }
+    return polygon;
+}
+
 void OverlayEditor::scale_item(overlay::Item& item, double factor) {
     if (auto* text = std::get_if<overlay::TextItem>(&item)) {
         text->size = std::clamp(text->size * factor, 0.01, 1.5);
@@ -395,28 +431,51 @@ int OverlayEditor::handle_px() const {
     return std::max(10, style()->pixelMetric(QStyle::PM_SmallIconSize) * 2 / 3);
 }
 
-QRect OverlayEditor::handle_rect(const overlay::Bbox& box) const {
+QRect OverlayEditor::handle_rect(const overlay::Bbox& box, double rotation) const {
+    // The item's own bottom-right corner, rotated around the box's
+    // centre so the grip stays on that corner as the item turns -- the
+    // same reason the selection outline is a rotated polygon rather than
+    // a static rect. `rotate_around` is a no-op at zero rotation, so this
+    // costs nothing on an unrotated item.
+    const QPointF centre(box.x + box.w / 2.0, box.y + box.h / 2.0);
+    const QPointF corner =
+        rotate_around(QPointF(box.x + box.w, box.y + box.h), centre, rotation);
+
     const QRect rect = canvas_rect();
     const double sx = static_cast<double>(rect.width()) / overlay::CANVAS_W;
     const double sy = static_cast<double>(rect.height()) / overlay::CANVAS_H;
-    const int x = rect.x() + static_cast<int>(std::lround((box.x + box.w) * sx));
-    const int y = rect.y() + static_cast<int>(std::lround((box.y + box.h) * sy));
+    const int x = rect.x() + static_cast<int>(std::lround(corner.x() * sx));
+    const int y = rect.y() + static_cast<int>(std::lround(corner.y() * sy));
     const int side = handle_px();
     return QRect(x - side / 2, y - side / 2, side, side);
 }
 
-QRect OverlayEditor::rotate_handle_rect(const overlay::Bbox& box) const {
+QRect OverlayEditor::rotate_handle_rect(const overlay::Bbox& box, double rotation) const {
+    // The item's own top-right corner, rotated the same way `handle_rect`
+    // rotates the bottom-right one -- the two stay clear of each other
+    // at any angle because they track different corners of the same box,
+    // not because either one's own screen offset (below) rotates with
+    // it. That offset is therefore left fixed (up and to the right, in
+    // screen pixels): its only job is to sit this grip visibly apart
+    // from the resize one, which rotating the corner already guarantees.
+    const QPointF centre(box.x + box.w / 2.0, box.y + box.h / 2.0);
+    const QPointF corner = rotate_around(QPointF(box.x + box.w, box.y), centre, rotation);
+
     const QRect rect = canvas_rect();
     const double sx = static_cast<double>(rect.width()) / overlay::CANVAS_W;
     const double sy = static_cast<double>(rect.height()) / overlay::CANVAS_H;
-    // The top-right corner, offset further up and out -- opposite the
-    // resize grip at the bottom-right, so the two can never be pressed
-    // ambiguously and dragging one can never be mistaken for the other.
-    const int x = rect.x() + static_cast<int>(std::lround((box.x + box.w) * sx));
-    const int y = rect.y() + static_cast<int>(std::lround(box.y * sy));
     const int side = handle_px();
     const int offset = side * 2;
-    return QRect(x - side / 2 + offset, y - side / 2 - offset, side, side);
+    int x = rect.x() + static_cast<int>(std::lround(corner.x() * sx)) + offset;
+    int y = rect.y() + static_cast<int>(std::lround(corner.y() * sy)) - offset;
+
+    // Clamped within the canvas: an item near an edge would otherwise
+    // push this handle past the picture (or the widget) entirely, since
+    // the offset above is added on top of wherever the rotated corner
+    // itself already landed.
+    x = std::clamp(x - side / 2, rect.x(), rect.x() + std::max(0, rect.width() - side));
+    y = std::clamp(y - side / 2, rect.y(), rect.y() + std::max(0, rect.height() - side));
+    return QRect(x, y, side, side);
 }
 
 void OverlayEditor::paintEvent(QPaintEvent*) {
@@ -455,21 +514,23 @@ void OverlayEditor::paintEvent(QPaintEvent*) {
         const overlay::Bbox box = overlay::item_bbox(
             overlay::CANVAS_W, overlay::CANVAS_H, rendered(*item),
             last_rx_ ? &*last_rx_ : nullptr);
-        const QRect on_screen = item_screen_rect(*item);
+        const double rotation =
+            std::visit([](const auto& i) { return i.rotation; }, *item);
+        const QPolygon on_screen = item_screen_polygon(box, rotation);
 
         // Two-tone, so the outline is visible over both a bright and a
         // dark picture without knowing which it is.
         painter.setPen(QPen(QColor(0, 0, 0, 160), 3));
-        painter.drawRect(on_screen);
+        painter.drawPolygon(on_screen);
         painter.setPen(QPen(QColor(255, 255, 255, 230), 1, Qt::DashLine));
-        painter.drawRect(on_screen);
+        painter.drawPolygon(on_screen);
         painter.setPen(QPen(QColor(0, 0, 0, 200), 1));
         painter.setBrush(QColor(255, 255, 255, 230));
-        painter.drawRect(handle_rect(box));
+        painter.drawRect(handle_rect(box, rotation));
         // The rotate grip is a circle rather than a square, so the two
         // read as different kinds of control at a glance rather than as
         // two identical squares that happen to do different things.
-        painter.drawEllipse(rotate_handle_rect(box));
+        painter.drawEllipse(rotate_handle_rect(box, rotation));
     }
 }
 
@@ -483,12 +544,13 @@ void OverlayEditor::mousePressEvent(QMouseEvent* event) {
         const overlay::Bbox box = overlay::item_bbox(
             overlay::CANVAS_W, overlay::CANVAS_H, rendered(*item),
             last_rx_ ? &*last_rx_ : nullptr);
-        if (rotate_handle_rect(box).contains(point.toPoint())) {
+        const double rotation =
+            std::visit([](const auto& i) { return i.rotation; }, *item);
+        if (rotate_handle_rect(box, rotation).contains(point.toPoint())) {
             drag_ = Drag::Rotate;
             const QPointF center(box.x + box.w / 2.0, box.y + box.h / 2.0);
             rotate_center_ = center;
-            rotate_start_rotation_ =
-                std::visit([](const auto& i) { return i.rotation; }, *item);
+            rotate_start_rotation_ = rotation;
             const QPointF canvas = to_canvas(point);
             // Screen y grows downward, so this negates it: a positive
             // angle here then means "counter-clockwise as the operator
@@ -497,7 +559,7 @@ void OverlayEditor::mousePressEvent(QMouseEvent* event) {
                 std::atan2(-(canvas.y() - center.y()), canvas.x() - center.x());
             return;
         }
-        if (handle_rect(box).contains(point.toPoint())) {
+        if (handle_rect(box, rotation).contains(point.toPoint())) {
             drag_ = Drag::Resize;
             resize_origin_ = to_canvas(point);
             resize_start_height_ = 0.0;
@@ -539,13 +601,15 @@ void OverlayEditor::update_hover_cursor(const QPointF& point) {
         const overlay::Bbox box = overlay::item_bbox(
             overlay::CANVAS_W, overlay::CANVAS_H, rendered(*item),
             last_rx_ ? &*last_rx_ : nullptr);
-        if (rotate_handle_rect(box).contains(point.toPoint())) {
+        const double rotation =
+            std::visit([](const auto& i) { return i.rotation; }, *item);
+        if (rotate_handle_rect(box, rotation).contains(point.toPoint())) {
             // Qt has no built-in rotate cursor; a cross is at least not
             // one of the shapes already claimed by move or resize.
             setCursor(Qt::CrossCursor);
             return;
         }
-        if (handle_rect(box).contains(point.toPoint())) {
+        if (handle_rect(box, rotation).contains(point.toPoint())) {
             setCursor(Qt::SizeFDiagCursor);
             return;
         }

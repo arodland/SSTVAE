@@ -19,6 +19,7 @@
 #ifndef SSTVAE_GUI_OVERLAY_EDITOR_HPP
 #define SSTVAE_GUI_OVERLAY_EDITOR_HPP
 
+#include <QPolygon>
 #include <QRect>
 #include <QWidget>
 
@@ -178,15 +179,31 @@ private:
     int hit_test(const QPointF& canvas_point) const;
     // `item`'s bbox, mapped into this widget's own pixel coordinates --
     // shared by `paintEvent`'s selection box and `selection_screen_rect`,
-    // which must agree about where the item sits on screen.
+    // which must agree about where the item sits on screen. **Not
+    // rotated** -- an axis-aligned approximation is all
+    // `selection_screen_rect` needs (a floating panel anchoring "near"
+    // the item), and `paintEvent`'s own outline uses
+    // `item_screen_polygon` instead, which is.
     QRect item_screen_rect(const overlay::Item& item) const;
-    QRect handle_rect(const overlay::Bbox& box) const;
+    // The dashed selection outline: `box`'s four corners, rotated around
+    // its own centre by `rotation` and mapped to screen pixels -- so the
+    // outline turns with the item instead of staying axis-aligned while
+    // the picture underneath it visibly rotates.
+    QPolygon item_screen_polygon(const overlay::Bbox& box, double rotation) const;
+    QRect handle_rect(const overlay::Bbox& box, double rotation) const;
     // Above and outside the top-right corner, offset from `handle_rect`
     // deliberately (see `Drag::Rotate`).
-    QRect rotate_handle_rect(const overlay::Bbox& box) const;
+    QRect rotate_handle_rect(const overlay::Bbox& box, double rotation) const;
     // The grip's side, from the style rather than a pixel literal --
     // see the .cpp.
     int handle_px() const;
+    // `point` (canvas space) rotated by `rotation_degrees` around
+    // `centre` (canvas space), in the same sense `overlay::render`
+    // rotates a painted item -- see the .cpp for the derivation. Shared
+    // by the outline and both grips, so all three always agree about
+    // where the item's corners actually are.
+    static QPointF rotate_around(const QPointF& point, const QPointF& centre,
+                                 double rotation_degrees);
     // Cursor feedback for the no-drag path of mouseMoveEvent.
     void update_hover_cursor(const QPointF& point);
     void select(int index);

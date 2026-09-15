@@ -659,7 +659,6 @@ QWidget* TransmitPanel::build_tool_row() {
            "whatever is there now. \"None\" clears the overlay."));
     connect(template_combo_, &QComboBox::currentIndexChanged, this,
             &TransmitPanel::on_template_selected);
-    column->addWidget(template_combo_);
     save_template_button_ = new QPushButton(tr("&Save as template..."), panel);
     save_template_button_->setToolTip(
         tr("Save the current text and layout as a template, with "
@@ -668,7 +667,13 @@ QWidget* TransmitPanel::build_tool_row() {
            "{field Label}."));
     connect(save_template_button_, &QPushButton::clicked, this,
             &TransmitPanel::save_as_template);
-    column->addWidget(save_template_button_);
+    // One `style::row` item rather than two separate ones: a `FlowLayout`
+    // wraps *between* items, and the combo and the button that saves to
+    // it are one idea -- "Template: [pick one] [Save...]" -- not two
+    // controls that happen to sit near each other. Split across a wrap
+    // they read as unrelated.
+    column->addWidget(style::row(
+        panel, {new QLabel(tr("Template"), panel), template_combo_, save_template_button_}));
     // **No `column->addWidget(overlay_box)` here.** `overlay_box` is an
     // alias for `panel`, whose layout `column` *is*, so that line asked
     // Qt to add a widget to its own child layout. Qt refuses and prints
@@ -850,7 +855,13 @@ QFrame* TransmitPanel::build_selection_palette() {
     fill_angle_spin_->setObjectName(QStringLiteral("fill_angle_spin"));
     fill_angle_spin_->setRange(-180.0, 180.0);
     fill_angle_spin_->setSingleStep(5.0);
-    fill_angle_spin_->setSuffix(QStringLiteral("\xC2\xB0"));  // degree sign
+    // A universal-character-name escape, not a raw UTF-8 byte pair: the
+    // literal's characters are `char16_t` (QStringLiteral is `u"..."`),
+    // so `"\xC2\xB0"` became two separate code units -- U+00C2 (Â) and
+    // U+00B0 (°) -- rather than the one degree sign those two bytes
+    // spell in UTF-8. `°` names the code point directly and is
+    // immune to the literal's own encoding.
+    fill_angle_spin_->setSuffix(QStringLiteral("°"));
     fill_angle_spin_->setToolTip(
         tr("The gradient's direction: 0 runs left to right, 90 bottom to "
            "top -- the same counter-clockwise sense as the item's own "
@@ -910,7 +921,7 @@ QFrame* TransmitPanel::build_selection_palette() {
     stroke_angle_spin_ = new QDoubleSpinBox(box);
     stroke_angle_spin_->setRange(-180.0, 180.0);
     stroke_angle_spin_->setSingleStep(5.0);
-    stroke_angle_spin_->setSuffix(QStringLiteral("\xC2\xB0"));
+    stroke_angle_spin_->setSuffix(QStringLiteral("°"));  // see fill_angle_spin_'s comment
     connect(stroke_angle_spin_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
         if (auto* item = editing_item()) {
             if (auto* rect = std::get_if<overlay::RectItem>(item)) {

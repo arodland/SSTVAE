@@ -113,8 +113,23 @@ def _render_text(canvas: Image.Image, item: TextItem) -> None:
         (pad - box[0], pad - box[1]), item.text, font=font, fill=item.color,
         stroke_width=stroke, stroke_fill=item.stroke_color, **kw,
     )
+
+    # About the text block's own centre, matching `_render_rect`/
+    # `_render_image` -- not the point this used to pivot around
+    # (pasting the *rotated*, bigger layer at the same offset the
+    # unrotated one used), which let the block visibly swing away from
+    # its own anchor as the angle grew, most obviously at 90 degrees.
+    # `rotate(expand=True)` keeps the pre-rotation layer's own centre
+    # fixed and only grows the canvas symmetrically around it, so the
+    # fix is just placing that layer so its centre lands on the centre
+    # of the *unrotated* bbox -- the same point `item_bbox` reports and
+    # the editor's selection box and rotate handle are drawn around.
+    centre_x = x + (box[0] + box[2]) / 2.0
+    centre_y = y + (box[1] + box[3]) / 2.0
     layer = layer.rotate(item.rotation, resample=Image.BICUBIC, expand=True)
-    canvas.alpha_composite(layer, (x - pad, y - pad))
+    paste_x = round(centre_x - layer.width / 2.0)
+    paste_y = round(centre_y - layer.height / 2.0)
+    canvas.alpha_composite(layer, (paste_x, paste_y))
 
 
 def _gradient_layer(w: int, h: int, color1: str, color2: str,

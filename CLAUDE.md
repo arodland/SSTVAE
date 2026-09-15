@@ -2391,6 +2391,53 @@ its alignment combo -- still out-of-line, deliberately: inline editing
 would have to show substituted `{placeholder}` text while the operator
 edits the raw template underneath it, which is not solved yet.
 
+**Five bugs found the same day, using the handles this rework just
+landed -- direct manipulation surfaced them where the old spin boxes
+never had.** All fixed 2026-09-15.
+
+- **The selection outline and both grips did not rotate with the
+  item.** `OverlayEditor::item_screen_polygon` replaces the dashed
+  outline's `drawRect` with a `drawPolygon` of the bbox's four corners,
+  each rotated around the bbox's own centre by a new static helper,
+  `rotate_around` -- the same transform `overlay::render` applies to
+  pixels, worked out algebraically rather than pushed through a
+  `QTransform`, so the outline, `handle_rect` and `rotate_handle_rect`
+  all agree with the picture underneath them at any angle. `handle_rect`
+  and `rotate_handle_rect` both gained a `rotation` parameter for this;
+  every call site already had the item's rotation two lines away.
+- **Text rotated around its own top-left corner while rect/image
+  rotated around their centre.** A real, pre-existing split between
+  `draw_text` (pivoted on the raw anchor point) and `draw_rect`/
+  `draw_image` (pivoted on the anchored box's centre) in both
+  `native/core/overlay/render.cpp` and `sstvae/overlay/render.py` --
+  invisible with a spin box, obvious the moment an operator could drag
+  a corner and watch the block swing out from under the selection box
+  instead of turning in place. Both languages now compute the text
+  block's own bbox centre (the same point `item_bbox` already reported)
+  before rotating and pivot there. Python's fix is the fiddlier one:
+  `Image.rotate(expand=True)` keeps the *pre-rotation* layer's centre
+  fixed and grows the canvas around it, so the old code -- which pasted
+  the bigger, rotated layer at the same offset the small unrotated one
+  used -- let the effective centre drift with the angle; the fix pastes
+  the rotated layer so *its* centre lands on the correct point instead.
+  No golden vector or parity test pinned a rotated `TextItem`'s pixels,
+  so nothing needed updating besides the two render functions.
+- **The rotate handle could land off the canvas** for an item near an
+  edge, since its outward offset (opposite the resize grip, so the two
+  are never ambiguous) was unconditional. `rotate_handle_rect` now
+  clamps the final position to `canvas_rect()`.
+- **Mojibake in the gradient angle suffix ("0.00Â°").**
+  `QStringLiteral("\xC2\xB0")` is two bytes inside a `char16_t` literal,
+  not one -- `QStringLiteral` wraps its argument in `u"..."`, so a raw
+  UTF-8 byte pair for U+00B0 became two separate UTF-16 code units,
+  U+00C2 and U+00B0. `QStringLiteral("°")` names the code point
+  directly and survives the wrapping.
+- **The template dropdown and "Save as template..." could wrap onto
+  separate lines**, reading as two unrelated controls in the `FlowLayout`
+  tool row. Grouped into one `style::row` item ("Template: [combo]
+  [Save...]"), the same fix `test_the_level_controls_are_one_flow_item`
+  already guards for the mode/level/readout trio.
+
 ONNX runtime path complete: the codec is onnxruntime, torch is
 training-only, and `cli`/`listen` install ~263 MB instead of
 ~555 MB. The published codec is **v5** (2026-09-01), and `DEFAULT_FILE`

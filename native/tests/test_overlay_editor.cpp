@@ -746,6 +746,89 @@ void test_rotate_keys_turn_the_selection() {
                    "rotate keys: shift takes a bigger step than the plain key");
 }
 
+void test_the_resize_handle_tracks_the_items_rotation() {
+    // A square, so a clean quarter turn swings its bottom-right corner
+    // to exactly where its top-right corner used to be -- a precise,
+    // easily-checked prediction rather than an approximate one.
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_rect();
+    auto* rect = std::get_if<overlay::RectItem>(editor->selected_item());
+    check::is_true(rect != nullptr, "rotate/resize: a rect is selected");
+    if (rect == nullptr) {
+        delete editor;
+        return;
+    }
+    // Equal in canvas *pixels*, not merely equal fractions -- CANVAS_W
+    // and CANVAS_H are not equal (4:3), so two equal fractions would be
+    // a rectangle, not the square this test's corner-swap prediction
+    // needs.
+    rect->width = 0.2;
+    rect->height =
+        0.2 * overlay::CANVAS_W / static_cast<double>(overlay::CANVAS_H);
+    editor->refresh_item();
+
+    const overlay::Bbox box =
+        overlay::item_bbox(overlay::CANVAS_W, overlay::CANVAS_H, *editor->selected_item(), nullptr);
+    check::equal(box.w, box.h, "rotate/resize: the test rect is square in canvas pixels");
+
+    // Six 15-degree coarse steps make one quarter turn.
+    for (int i = 0; i < 6; ++i) key(*editor, Qt::Key_BracketLeft, Qt::ShiftModifier);
+    check::is_true(
+        std::abs(std::get<overlay::RectItem>(*editor->selected_item()).rotation - 90.0) <=
+            1e-6,
+        "rotate/resize: six coarse steps make a quarter turn");
+
+    // Press where the item's own top-right corner sits (in the item's
+    // *local*, unrotated frame) -- after a 90-degree turn, that is
+    // exactly where the bottom-right corner, and with it the resize
+    // grip, has rotated to.
+    const QPoint at_rotated_corner = widget_point(box.x + box.w, box.y);
+    const double width_before =
+        std::get<overlay::RectItem>(*editor->selected_item()).width;
+    press(*editor, at_rotated_corner);
+    move_to(*editor, at_rotated_corner + QPoint(30, 0));
+    release(*editor, at_rotated_corner + QPoint(30, 0));
+    const double width_after =
+        std::get<overlay::RectItem>(*editor->selected_item()).width;
+    check::is_true(std::abs(width_after - width_before) > 1e-6,
+                   "rotate/resize: dragging the rotated corner still resizes the item");
+    delete editor;
+}
+
+void test_the_rotate_handle_stays_reachable_near_a_canvas_edge() {
+    // Pinned right at the canvas's own top-right corner -- the
+    // unclamped handle position (further up and further right of the
+    // item's own top-right corner, see `rotate_handle_rect`'s outward
+    // offset) would land off the canvas entirely without the clamp.
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_rect();
+    auto* rect = std::get_if<overlay::RectItem>(editor->selected_item());
+    check::is_true(rect != nullptr, "rotate/edge: a rect is selected");
+    if (rect == nullptr) {
+        delete editor;
+        return;
+    }
+    rect->x = 0.92;
+    rect->y = 0.02;
+    rect->width = 0.06;
+    rect->height = 0.06;
+    editor->refresh_item();
+
+    const double r0 = std::get<overlay::RectItem>(*editor->selected_item()).rotation;
+    // A few pixels in from the canvas's literal corner pixel, so the
+    // press is safely inside the clamped handle regardless of rounding
+    // at the exact edge.
+    const QPoint press_at =
+        widget_point(overlay::CANVAS_W, 0) + QPoint(-3, 3);
+    press(*editor, press_at);
+    move_to(*editor, press_at + QPoint(-25, 5));
+    const double r1 = std::get<overlay::RectItem>(*editor->selected_item()).rotation;
+    release(*editor, press_at + QPoint(-25, 5));
+    check::is_true(std::abs(r1 - r0) > 1e-6,
+                   "rotate/edge: the handle is still grabbable at the canvas corner");
+    delete editor;
+}
+
 void test_selection_screen_rect_tracks_the_selection() {
     gui::OverlayEditor* editor = make_editor();
     check::is_true(editor->selection_screen_rect().isEmpty(),
@@ -800,6 +883,8 @@ int main(int argc, char** argv) {
     test_dragging_the_rotate_handle_rotates_the_item();
     test_scale_keys_grow_and_shrink_the_selection();
     test_rotate_keys_turn_the_selection();
+    test_the_resize_handle_tracks_the_items_rotation();
+    test_the_rotate_handle_stays_reachable_near_a_canvas_edge();
     test_selection_screen_rect_tracks_the_selection();
 
     return check::report("overlay editor");
