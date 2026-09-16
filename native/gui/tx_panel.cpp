@@ -1662,7 +1662,17 @@ void TransmitPanel::update_selection_palette() {
 }
 
 void TransmitPanel::position_selection_palette() {
-    if (selection_palette_ == nullptr || !selection_palette_->isVisible()) return;
+    if (selection_palette_ == nullptr) return;
+    // No `isVisible()` guard: this must run and set geometry *before*
+    // `on_selection` calls `show()` for the first time (see there), not
+    // only after. A window manager places a newly-mapped `Qt::Tool`
+    // window by its own policy -- centred over its parent, on several
+    // -- and an app-directed `setGeometry` sent only after `show()` can
+    // lose that race, which is what "always appears in the middle of
+    // the window" was. When there is nothing selected, `item_rect`
+    // below is empty and this falls through to `hide()`, which is a
+    // harmless no-op on an already-hidden palette (`resizeEvent` and
+    // `documentChanged` call this unconditionally on every resize/edit).
     const QRect item_rect = editor_->selection_screen_rect();
     if (item_rect.isEmpty()) {
         selection_palette_->hide();
@@ -1775,10 +1785,16 @@ void TransmitPanel::on_selection(overlay::Item* item) {
     }
     loading_properties_ = false;
 
-    selection_palette_->show();
-    // Sets each row's visibility for this item type and, since that
-    // changes the palette's own size, ends by repositioning it too.
+    // Position *before* `show()`, not after: a `Qt::Tool` window's
+    // first `show()` is what a window manager treats as "place this
+    // window", and several centre a newly-mapped utility window over
+    // its parent regardless of a `setGeometry` call that lands right
+    // after -- the fix is losing that race, not calling `setGeometry`
+    // harder. `update_selection_palette()` sets each row's visibility
+    // for this item type and, since that changes the palette's own
+    // size, ends by computing its geometry from that final size.
     update_selection_palette();
+    selection_palette_->show();
 }
 
 // --- transmitting -----------------------------------------------------------

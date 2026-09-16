@@ -2481,6 +2481,31 @@ palette")` and `isVisible()` still work exactly as before -- window
 flags don't change the widget's place in the `QObject` tree -- so
 `test_tx_panel.cpp` needed no changes.
 
+**That change shipped with its own placement bug, found immediately
+(Andrew, same day): every first selection put the palette in the
+middle of the window instead of near the item.** `on_selection` called
+`selection_palette_->show()` and only *then* `update_selection_palette()`
+(which ends in `position_selection_palette()`), which was invisible on
+a plain child widget -- nothing paints between the two calls, so the
+final `setGeometry` is all a viewer ever sees. A `Qt::Tool` window has
+no such grace: `show()` is the event a window manager treats as "place
+this window", and several place a newly-mapped utility window centred
+over its parent regardless of a `setGeometry` sent moments later --
+the app's own position call was losing a race with the window
+manager's default placement, not being ignored outright. The fix is
+the standard Qt idiom for a positioned top-level: set geometry *before*
+the first `show()`, not after, so `on_selection` now calls
+`update_selection_palette()` first and `show()` last.
+`position_selection_palette` had to lose its `!isVisible()` guard to
+make that legal -- it existed to skip positioning a hidden palette, but
+now it must run and set geometry *while* the palette is still hidden,
+immediately before `on_selection` shows it for the first time. Safe to
+drop: with nothing selected `item_rect` is empty regardless of
+visibility, and the function falls through to a `hide()` that is a
+harmless no-op on an already-hidden window -- `resizeEvent` and
+`documentChanged` already called this unconditionally on every
+resize/edit, visible or not.
+
 ONNX runtime path complete: the codec is onnxruntime, torch is
 training-only, and `cli`/`listen` install ~263 MB instead of
 ~555 MB. The published codec is **v5** (2026-09-01), and `DEFAULT_FILE`
