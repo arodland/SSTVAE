@@ -215,7 +215,9 @@ private:
     // to `editor_` rather than living in `control_strip()`, which is what
     // lets it freely show and hide rows per item type -- see the .cpp for
     // why that would desync the two panes' matched heights anywhere
-    // inside the strip.
+    // inside the strip. A `Qt::Tool` top-level window, not an ordinary
+    // child -- see the .cpp for why an editor-clipped child couldn't
+    // stay clear of the selection on a narrow window.
     QFrame* build_selection_palette();
     // Show/hide the palette's rows for whatever is selected now (a rect's
     // fill/stroke rows, a gradient's second color and angle), and enable
@@ -224,10 +226,12 @@ private:
     // a row's visibility without a new selection.
     void update_selection_palette();
     // Move the palette next to `editor_->selection_screen_rect()`,
-    // flipping to the item's other side if it would run off the canvas.
-    // Cheap geometry only -- called at drag-frame rate alongside
-    // `on_selection` and from `documentChanged` (a keyboard scale/rotate
-    // shortcut moves the item without reselecting it).
+    // flipping to the item's other side if it would run off the
+    // *screen* -- the palette is a top-level window now, so its bounds
+    // are the whole screen, not `editor_`'s. Cheap geometry only --
+    // called at drag-frame rate alongside `on_selection` and from
+    // `documentChanged` (a keyboard scale/rotate shortcut moves the
+    // item without reselecting it).
     void position_selection_palette();
     // "Their call" plus up to `MAX_INLINE_CUSTOM_FIELDS` custom-field
     // rows plus an overflow button (docs/overlay-templates.md).

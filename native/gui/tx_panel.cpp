@@ -30,6 +30,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QScreen>
 #include <QSlider>
 #include <QSplitter>
 #include <QStyle>
@@ -786,7 +787,25 @@ QFrame* TransmitPanel::build_selection_palette() {
     // `editor_` instead, outside the strip entirely, exempts it from
     // that rule -- so unlike `properties_`, it is free to actually show
     // and hide its rows per item type rather than only disable them.
-    auto* box = new QFrame(editor_);
+    //
+    // **`Qt::Tool`, not an ordinary child widget.** A plain child is
+    // clipped to its parent's own rect, so the first version of this
+    // panel -- a `QFrame(editor_)` positioned and clamped in `editor_`'s
+    // local coordinates -- could never place itself anywhere `editor_`
+    // itself doesn't cover. On a narrow window the picture fills nearly
+    // all of that rect, so "beside the selection, clamped to the
+    // canvas" collapses to "on top of the selection" -- there is no
+    // room left to flip to. A tool window has no such clip: it is a
+    // real top-level window (no taskbar entry, stays above its parent,
+    // hidden and restored with it) positioned in *screen* coordinates,
+    // so it can use the space around the canvas, the rest of the
+    // window, or the desktop beyond it -- whatever `position_
+    // selection_palette` finds clear. `WA_ShowWithoutActivating` is
+    // what keeps `show()` from stealing keyboard focus away from
+    // whatever the operator was doing (typing in `text_edit_`,
+    // dragging in `editor_`) the moment a selection appears.
+    auto* box = new QFrame(editor_, Qt::Tool | Qt::FramelessWindowHint);
+    box->setAttribute(Qt::WA_ShowWithoutActivating);
     box->setObjectName(QStringLiteral("selection_palette"));
     // A visible bordered panel via QPalette, never a stylesheet -- see
     // `set_swatch`'s style for why a stylesheet anywhere in this app is
@@ -1650,19 +1669,34 @@ void TransmitPanel::position_selection_palette() {
         return;
     }
 
+    // `item_rect` is in `editor_`'s own local coordinates; the palette
+    // is a top-level window now (see `build_selection_palette`), so
+    // everything from here on has to be in screen coordinates instead
+    // -- there is no shared parent rect left to measure against.
+    const QRect item_screen(editor_->mapToGlobal(item_rect.topLeft()), item_rect.size());
     const QSize hint = selection_palette_->sizeHint();
     constexpr int MARGIN = 8;
-    // To the item's right by default; flipped to its left if the panel
-    // would run off the canvas -- the canvas is what `editor_` itself
-    // is, so this widget's own bounds are the ones that matter, not the
-    // window's.
-    int x = item_rect.right() + MARGIN;
-    if (x + hint.width() > editor_->width()) {
-        x = item_rect.left() - MARGIN - hint.width();
+
+    // The available area of whichever screen the canvas itself is on
+    // -- not `editor_`'s bounds, and not the top-level window's either.
+    // That is the whole point: on a narrow window the picture leaves no
+    // room to flip to *inside* the window, but the desktop around the
+    // window is exactly where a floating tool palette is supposed to
+    // go. Falls back to the item's own rect if a screen can't be
+    // resolved (headless/offscreen tests), which keeps the clamps below
+    // from collapsing to an empty region.
+    const QScreen* screen = editor_->screen();
+    const QRect avail = screen != nullptr ? screen->availableGeometry() : item_screen;
+
+    // To the item's right by default; flipped to its left if that would
+    // run off the screen.
+    int x = item_screen.right() + MARGIN;
+    if (x + hint.width() > avail.right()) {
+        x = item_screen.left() - MARGIN - hint.width();
     }
-    x = std::clamp(x, 0, std::max(0, editor_->width() - hint.width()));
-    const int y =
-        std::clamp(item_rect.top(), 0, std::max(0, editor_->height() - hint.height()));
+    x = std::clamp(x, avail.left(), std::max(avail.left(), avail.right() - hint.width()));
+    const int y = std::clamp(item_screen.top(), avail.top(),
+                              std::max(avail.top(), avail.bottom() - hint.height()));
 
     selection_palette_->setGeometry(x, y, hint.width(), hint.height());
     selection_palette_->raise();

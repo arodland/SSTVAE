@@ -2457,6 +2457,30 @@ selection handles already worked here (`item_bbox` has always returned
 a real box, defaulting to a 0.75 aspect with nothing to measure), so
 this was purely a missing visual, not a missing interaction.
 
+**The selection palette is a `Qt::Tool` top-level window, not a plain
+child widget** (2026-09-16). It was parented to `editor_` and clamped
+to `editor_`'s own local bounds, which is fine on a wide window where
+the canvas has margin to spare -- but on a narrow one the 4:3 picture
+fills nearly all of that rect, so "beside the selection, flipped to
+the other side if it would run off the canvas" collapses to "on top of
+the selection": there was no room left to flip to *inside* the widget
+that was also its own clip region. `build_selection_palette` now
+constructs it with `Qt::Tool | Qt::FramelessWindowHint` (plus
+`WA_ShowWithoutActivating`, so `show()` doesn't steal focus from
+whatever the operator was doing when a selection appeared) -- a real
+top-level window, positioned in screen coordinates rather than clipped
+to any parent's paint area. `position_selection_palette` follows suit:
+`item_screen_rect` is mapped through `editor_->mapToGlobal`, and the
+flip/clamp logic runs against `editor_->screen()->availableGeometry()`
+instead of `editor_->width()`/`height()`, so the desktop space around
+the window -- not just the canvas -- is where it looks for room. Falls
+back to the item's own rect when no screen resolves (headless/offscreen
+tests), which keeps the clamps from collapsing to an empty region
+rather than needing a special case. `findChild<QFrame*>("selection_
+palette")` and `isVisible()` still work exactly as before -- window
+flags don't change the widget's place in the `QObject` tree -- so
+`test_tx_panel.cpp` needed no changes.
+
 ONNX runtime path complete: the codec is onnxruntime, torch is
 training-only, and `cli`/`listen` install ~263 MB instead of
 ~555 MB. The published codec is **v5** (2026-09-01), and `DEFAULT_FILE`
