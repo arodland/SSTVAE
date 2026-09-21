@@ -454,7 +454,15 @@ void ItemMenu::build_rect_style() {
     // Fill and stroke are the same shape of row, so one builder serves
     // both: the mode, the colour, the second stop and the angle, each
     // writing its own four fields.
-    const auto paint_row = [this, rows, column](
+    // One caption width for all three rows, so their controls start in
+    // the same column rather than wherever each caption happens to end.
+    const int caption = rows->fontMetrics().horizontalAdvance(tr("Rotation")) + 4;
+    const auto captioned = [caption](const QString& text, QWidget* parent) {
+        auto* label = new QLabel(text, parent);
+        label->setMinimumWidth(caption);
+        return label;
+    };
+    const auto paint_row = [this, rows, column, captioned](
                                const QString& title, const char* prefix,
                                std::string overlay::RectItem::* kind,
                                std::string overlay::RectItem::* shape,
@@ -464,7 +472,7 @@ void ItemMenu::build_rect_style() {
                                QPushButton*& from, QPushButton*& to, QSpinBox*& degrees) {
         auto* row = new QWidget(rows);
         auto* layout = row_layout(row);
-        layout->addWidget(new QLabel(title, row));
+        layout->addWidget(captioned(title, row));
         const QString p = QLatin1String(prefix);
         mode = mode_button(row, p + QStringLiteral("_mode"),
                            tr("None, solid, or a linear or radial gradient."));
@@ -503,7 +511,7 @@ void ItemMenu::build_rect_style() {
         return layout;
     };
 
-    paint_row(tr("Fill"), "menu_rect_fill", &overlay::RectItem::fill_kind,
+    QHBoxLayout* fill = paint_row(tr("Fill"), "menu_rect_fill", &overlay::RectItem::fill_kind,
               &overlay::RectItem::fill_gradient, &overlay::RectItem::fill_color,
               &overlay::RectItem::fill_color2, &overlay::RectItem::fill_angle,
               rect_fill_mode_, rect_fill_color_, rect_fill_to_, rect_fill_angle_);
@@ -524,10 +532,13 @@ void ItemMenu::build_rect_style() {
         }
     });
     stroke->addWidget(rect_stroke_width_);
+    // The Fill row has no width field, so without this it spreads its
+    // controls across the width the Stroke row's one extra field made.
+    fill->addStretch(1);
 
     auto* turn = new QWidget(rows);
     auto* turn_layout = row_layout(turn);
-    turn_layout->addWidget(new QLabel(tr("Rotation"), turn));
+    turn_layout->addWidget(captioned(tr("Rotation"), turn));
     rect_rotation_ = spin(turn, QStringLiteral("menu_rect_rotation"), -180, 180,
                           QStringLiteral("°"), tr(ROTATION_TIP));
     rect_rotation_->installEventFilter(this);
@@ -722,8 +733,15 @@ void ItemMenu::popup_for(overlay::Item* item, const QPoint& global_pos) {
     const auto* rect = std::get_if<overlay::RectItem>(item);
     format_menu_->menuAction()->setVisible(text != nullptr);
     style_menu_->menuAction()->setVisible(text != nullptr || rect != nullptr);
-    text_style_action_->setVisible(text != nullptr);
-    rect_style_action_->setVisible(rect != nullptr);
+    // The widgets as well as the actions: `QMenu` skips a hidden action
+    // when it lays itself out and never hides its widget, so a row shown
+    // once would stay painted over the other kind's rows.
+    for (auto [action, offered] :
+         {std::pair{text_style_action_, text != nullptr},
+          std::pair{rect_style_action_, rect != nullptr}}) {
+        action->setVisible(offered);
+        action->defaultWidget()->setVisible(offered);
+    }
     if (text != nullptr) load_text(*text);
     if (rect != nullptr) load_rect(*rect);
     update_enabled();

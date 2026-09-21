@@ -450,6 +450,54 @@ void test_each_kind_of_item_gets_its_own_submenus() {
     check::is_true(offered(text_row) && !offered(rect_row), "menu: and the text's rows");
 }
 
+// A style row that is not offered must not be *painted* either.
+//
+// `QMenu` skips a hidden action when it lays itself out and never hides
+// that action's widget, so a row shown once for a text item stays
+// visible -- at the menu's top-left, over the rect's own rows -- the
+// next time Style opens for a rect. Only a menu that has actually been
+// shown shows this, which is why the submenus are popped up here.
+void test_a_hidden_style_row_is_not_painted() {
+    Fixture fix;
+    auto* style = fix.find<QMenu>("menu_style");
+    auto* clear = fix.find<QPushButton>("menu_clear");
+    auto* rect_mode = fix.find<QPushButton>("menu_rect_fill_mode");
+    check::is_true(style != nullptr && clear != nullptr && rect_mode != nullptr,
+                   "menu: the style rows");
+    if (style == nullptr || clear == nullptr || rect_mode == nullptr) return;
+    QWidget* text_row = clear->parentWidget();
+    QWidget* rect_rows = rect_mode->parentWidget()->parentWidget();
+
+    const auto show_style = [&] {
+        fix.menu->popup_for(fix.editor->selected_item(), QPoint(10, 10));
+        style->popup(QPoint(40, 40));
+        QApplication::processEvents();
+    };
+    const auto hide_style = [&] {
+        style->close();
+        fix.menu->close();
+        QApplication::processEvents();
+    };
+
+    fix.editor->add_text("N0CALL");
+    show_style();
+    check::is_true(text_row->isVisible() && !rect_rows->isVisible(),
+                   "menu: text shows the text row alone");
+    hide_style();
+
+    fix.editor->add_rect();
+    show_style();
+    check::is_true(rect_rows->isVisible(), "menu: a rect shows its rows");
+    check::is_true(!text_row->isVisible(), "menu: and not the text row it showed last time");
+    hide_style();
+
+    fix.editor->add_text("N0CALL");
+    show_style();
+    check::is_true(text_row->isVisible() && !rect_rows->isVisible(),
+                   "menu: and back again for text");
+    hide_style();
+}
+
 // The Layers row acts on the editor, and Shift changes both what the
 // buttons say and what they do.
 //
@@ -607,6 +655,7 @@ int main(int argc, char** argv) {
     test_the_stroke_toggle_keeps_the_width();
     test_clear_resets_the_style_fields_only();
     test_each_kind_of_item_gets_its_own_submenus();
+    test_a_hidden_style_row_is_not_painted();
     test_the_layer_row_reorders_and_shift_relabels();
     test_it_refuses_an_item_that_is_not_the_selection();
     test_the_weight_toggles_write_the_document();
