@@ -297,3 +297,85 @@ def test_format_snr_agrees(native):
     cpp = _cpp(native)
     for value in [None, 0.0, 0.5, 1.5, 2.5, 12.4, 12.5, 13.5, -0.3, -2.5, -2.6, 27.49, 99.5]:
         assert cpp.format_snr(value) == format_snr(value), value
+
+
+# --- text style and radial gradients --------------------------------------
+#
+# Fields added after the first release are written only when they differ
+# from their defaults, and that is the whole case for leaving DOC_VERSION
+# at 1: a document that uses none of them must be exactly what an older
+# build writes. So the omission is held as strictly as the round trip --
+# by both writers, and per field rather than as a group.
+
+# What a text item and a rect serialized as before the style fields.
+V1_TEXT_KEYS = {"text", "x", "y", "size", "color", "stroke_color", "stroke_width",
+                "font", "anchor", "align", "line_spacing", "rotation", "type"}
+V1_RECT_KEYS = {"x", "y", "width", "height", "rotation", "anchor", "fill_kind",
+                "fill_color", "fill_color2", "fill_angle", "stroke_kind", "stroke_color",
+                "stroke_color2", "stroke_angle", "stroke_width", "type"}
+
+TEXT_STYLE = {"bold": True, "italic": True, "underline": True, "font_family": "serif",
+              "fill_kind": "gradient", "fill_color2": "#123456", "fill_angle": 30.0,
+              "fill_gradient": "radial"}
+
+
+def _written_by_both(cpp, doc):
+    """The same document as each implementation writes it."""
+    return [("python", doc.to_dict()), ("c++", json.loads(cpp.round_trip(doc.to_json())[0]))]
+
+
+def test_a_fully_styled_document_round_trips(native):
+    """Every new field away from its default, so a reader that dropped one,
+    or a writer that omitted one it should have kept, cannot pass."""
+    cpp = _cpp(native)
+    doc = OverlayDoc(items=[
+        TextItem(text="KC2G", **TEXT_STYLE),
+        TextItem(text="outline only", fill_kind="none"),
+        RectItem(fill_kind="gradient", fill_gradient="radial",
+                 stroke_kind="gradient", stroke_gradient="radial"),
+    ])
+    text, notes = cpp.round_trip(doc.to_json())
+    assert not notes, notes
+    assert json.loads(text) == doc.to_dict()
+    assert OverlayDoc.from_json(text).to_dict() == doc.to_dict()
+
+
+def test_a_document_using_no_new_field_is_written_as_before(native):
+    """Byte-for-byte what an older build writes, which is what lets an
+    older build open it without a single note."""
+    cpp = _cpp(native)
+    doc = OverlayDoc(items=[TextItem(text="W1AW"), RectItem(fill_kind="gradient")])
+    for writer, written in _written_by_both(cpp, doc):
+        text_item, rect_item = written["items"]
+        assert set(text_item) == V1_TEXT_KEYS, writer
+        assert set(rect_item) == V1_RECT_KEYS, writer
+
+
+def test_setting_one_style_field_writes_that_field_alone(native):
+    """Per field, not all-or-nothing: a writer that emitted the whole style
+    group once any of it was set would pass both tests above."""
+    cpp = _cpp(native)
+    for name, value in TEXT_STYLE.items():
+        doc = OverlayDoc(items=[TextItem(text="x", **{name: value})])
+        for writer, written in _written_by_both(cpp, doc):
+            item = written["items"][0]
+            assert set(item) - V1_TEXT_KEYS == {name}, (writer, name)
+            assert item[name] == value, (writer, name)
+    for name in ("fill_gradient", "stroke_gradient"):
+        doc = OverlayDoc(items=[RectItem(**{name: "radial"})])
+        for writer, written in _written_by_both(cpp, doc):
+            assert set(written["items"][0]) - V1_RECT_KEYS == {name}, (writer, name)
+
+
+def test_a_style_field_of_the_wrong_type_keeps_its_default(native):
+    """The flags are the reader's first booleans. An integer 1 must not
+    quietly become true -- it is reported and costs that field only."""
+    cpp = _cpp(native)
+    data = {"version": 1,
+            "items": [{"type": "text", "text": "keep me", "bold": "yes", "italic": 1}]}
+    text, notes = cpp.round_trip(json.dumps(data))
+    got = json.loads(text)["items"][0]
+    assert got["text"] == "keep me"
+    assert "bold" not in got and "italic" not in got, "both stay at their default"
+    where = " ".join(w for w, _ in notes)
+    assert "bold" in where and "italic" in where

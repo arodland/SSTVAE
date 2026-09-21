@@ -32,6 +32,14 @@ namespace sstvae::overlay {
 inline constexpr int CANVAS_W = images::IMG_W;
 inline constexpr int CANVAS_H = images::IMG_H;
 
+// **Still 1 after fields were added, deliberately.** A reader ignores
+// (and reports) fields it does not know, and every field added since
+// the first release is written only when it differs from its default
+// (see `to_json`). So a document that uses no newer feature is
+// byte-identical to what an older build writes, and one that does
+// degrades on an older build -- a styled caption drawn plain, a radial
+// gradient drawn linear -- rather than being refused outright. That is
+// the same trade `RectItem` made when it arrived without a bump.
 inline constexpr int DOC_VERSION = 1;
 
 // Resolved at render time rather than stored, so the reference stays
@@ -62,6 +70,28 @@ struct TextItem {
     std::string align = "left";   // between lines, once there is more than one
     double line_spacing = 0.15;   // extra gap, fraction of size
     double rotation = 0.0;        // degrees, counter-clockwise
+
+    // --- style ----------------------------------------------------------
+    //
+    // Every default reproduces what a text item drew before these fields
+    // existed, and none of them is written at its default.
+    bool bold = false;
+    bool italic = false;
+    bool underline = false;
+    // A family name ("DejaVu Serif") or a generic keyword ("sans-serif",
+    // "serif", "monospace", "cursive"); empty = no request. **`font` wins
+    // when both are set**: a template that ships its own face is naming
+    // the exact file it needs, while a family is a request the system
+    // may answer with something else.
+    std::string font_family;
+    // The glyph fill, in `RectItem`'s terms. `color` is the first stop in
+    // every kind -- it is what "solid" always drew, which is what keeps
+    // an existing document unchanged -- and "none" leaves only the
+    // stroke, for outlined text. The stroke itself stays solid.
+    std::string fill_kind = "solid";      // "none" | "solid" | "gradient"
+    std::string fill_color2 = "#000000";  // the gradient's second stop
+    double fill_angle = 0.0;              // counter-clockwise, like rotation
+    std::string fill_gradient = "linear"; // "linear" | "radial"
 };
 
 // A picture inset -- typically the last received image, so an operator
@@ -82,12 +112,19 @@ struct ImageItem {
 //
 // Fill and stroke are independent, each "none" | "solid" | "gradient" --
 // the kind and its colour(s) travel together as flat fields, matching
-// this file's style rather than a nested gradient struct. A gradient is
-// linear only: two colours and an angle. The angle is counter-clockwise,
-// matching `rotation`, and deliberately: the gradient is painted into
-// the item's own unrotated layer and rotated with it
-// (`native/core/overlay/render.cpp`), so a gradient's angle and the
-// item's rotation add exactly as the two numbers suggest they should.
+// this file's style rather than a nested gradient struct. A gradient has
+// two colours and is linear or radial. A linear one runs along its
+// angle, counter-clockwise to match `rotation`, and deliberately: the
+// gradient is painted into the item's own unrotated layer and rotated
+// with it (`native/core/overlay/render.cpp`), so a gradient's angle and
+// the item's rotation add exactly as the two numbers suggest they
+// should. A radial one is centred on the item and reaches the second
+// colour at its corners; it has no angle.
+//
+// **Radial is a field of its own, not a fourth kind.** An older build
+// ignores a field it does not know, so it still draws this rect's
+// gradient -- as a linear one. An unknown *kind* would have it drop the
+// fill altogether.
 struct RectItem {
     double x = 0.1;
     double y = 0.1;
@@ -100,11 +137,13 @@ struct RectItem {
     std::string fill_color = "#ffffff";
     std::string fill_color2 = "#000000";  // the gradient's second stop
     double fill_angle = 0.0;
+    std::string fill_gradient = "linear";  // "linear" | "radial"
 
     std::string stroke_kind = "none";  // "none" | "solid" | "gradient"
     std::string stroke_color = "#ffffff";
     std::string stroke_color2 = "#000000";
     double stroke_angle = 0.0;
+    std::string stroke_gradient = "linear";  // "linear" | "radial"
     double stroke_width = 0.006;  // fraction of canvas width
 };
 

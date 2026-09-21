@@ -326,3 +326,30 @@ def test_shipped_templates():
     assert filled.items[0].text == "W1XYZ de KC2G\nSNR 12 dB"
     filled = substitute(cq, Fields({"mycall": "KC2G"}, {"Comment": "QRZ?"}))
     assert filled.items[0].text == "CQ CQ CQ\nde KC2G\nQRZ?"
+
+
+# --- text style and radial gradients --------------------------------------
+
+
+def test_text_style_and_radial_gradients_round_trip():
+    text = TextItem(text="KC2G", bold=True, italic=True, underline=True,
+                    font_family="serif", fill_kind="gradient", fill_color2="#123456",
+                    fill_angle=30.0, fill_gradient="radial")
+    rect = RectItem(fill_kind="gradient", fill_gradient="radial",
+                    stroke_kind="gradient", stroke_gradient="radial")
+    back = OverlayDoc.from_json(OverlayDoc(items=[text, rect]).to_json())
+    assert back.items == [text, rect]
+
+
+def test_style_fields_are_written_only_when_set():
+    """Like `name`: an unstyled document is exactly what an older build
+    writes. (The C++ writer is held to the same rule, per field, in
+    test_native_overlay.py.)"""
+    text_item, rect_item = OverlayDoc(items=[TextItem(), RectItem()]).to_dict()["items"]
+    for key in ("bold", "italic", "underline", "font_family", "fill_kind",
+                "fill_color2", "fill_angle", "fill_gradient"):
+        assert key not in text_item, key
+    assert "fill_gradient" not in rect_item and "stroke_gradient" not in rect_item
+    # A rect's own fill fields predate this change and are always written.
+    assert rect_item["fill_kind"] == "none"
+    assert OverlayDoc(items=[TextItem(bold=True)]).to_dict()["items"][0]["bold"] is True

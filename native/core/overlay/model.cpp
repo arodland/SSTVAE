@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -44,6 +45,13 @@ struct Reader {
         }
     }
 
+    void get(const std::string& key, bool& dst) const {
+        if (const json* v = find(key)) {
+            if (v->is_boolean()) dst = v->get<bool>();
+            else note(key, "expected true or false");
+        }
+    }
+
     void report_unknown(std::initializer_list<std::string_view> known) const {
         for (const auto& item : obj.items()) {
             const std::string_view key = item.key();
@@ -69,8 +77,18 @@ TextItem read_text(const Reader& r) {
     r.get("align", t.align);
     r.get("line_spacing", t.line_spacing);
     r.get("rotation", t.rotation);
+    r.get("bold", t.bold);
+    r.get("italic", t.italic);
+    r.get("underline", t.underline);
+    r.get("font_family", t.font_family);
+    r.get("fill_kind", t.fill_kind);
+    r.get("fill_color2", t.fill_color2);
+    r.get("fill_angle", t.fill_angle);
+    r.get("fill_gradient", t.fill_gradient);
     r.report_unknown({"text", "x", "y", "size", "color", "stroke_color", "stroke_width",
-                      "font", "anchor", "align", "line_spacing", "rotation"});
+                      "font", "anchor", "align", "line_spacing", "rotation", "bold",
+                      "italic", "underline", "font_family", "fill_kind", "fill_color2",
+                      "fill_angle", "fill_gradient"});
     return t;
 }
 
@@ -102,15 +120,29 @@ RectItem read_rect(const Reader& r) {
     r.get("fill_color", i.fill_color);
     r.get("fill_color2", i.fill_color2);
     r.get("fill_angle", i.fill_angle);
+    r.get("fill_gradient", i.fill_gradient);
     r.get("stroke_kind", i.stroke_kind);
     r.get("stroke_color", i.stroke_color);
     r.get("stroke_color2", i.stroke_color2);
     r.get("stroke_angle", i.stroke_angle);
+    r.get("stroke_gradient", i.stroke_gradient);
     r.get("stroke_width", i.stroke_width);
     r.report_unknown({"x", "y", "width", "height", "rotation", "anchor", "fill_kind",
-                      "fill_color", "fill_color2", "fill_angle", "stroke_kind",
-                      "stroke_color", "stroke_color2", "stroke_angle", "stroke_width"});
+                      "fill_color", "fill_color2", "fill_angle", "fill_gradient",
+                      "stroke_kind", "stroke_color", "stroke_color2", "stroke_angle",
+                      "stroke_gradient", "stroke_width"});
     return i;
+}
+
+// Write a field added after the format's first release only when it
+// differs from its default. A document that uses none of them then
+// serializes exactly as it did before they existed -- the rule
+// `Doc::name` already follows -- so an older build reading it has
+// nothing to report, which is what lets `DOC_VERSION` stay at 1.
+// `sstvae/overlay/model.py` omits the same fields by the same test.
+template <typename T>
+void put_unless_default(json& obj, const char* key, const T& value, const T& fallback) {
+    if (value != fallback) obj[key] = value;
 }
 
 }  // namespace
@@ -167,22 +199,34 @@ Doc from_json(const std::string& text, std::vector<Note>* notes) {
 }
 
 std::string to_json(const Doc& doc, int indent) {
+    const TextItem text_defaults;
+    const RectItem rect_defaults;
     json items = json::array();
     for (const Item& item : doc.items) {
         if (const auto* t = std::get_if<TextItem>(&item)) {
-            items.push_back({{"text", t->text},
-                             {"x", t->x},
-                             {"y", t->y},
-                             {"size", t->size},
-                             {"color", t->color},
-                             {"stroke_color", t->stroke_color},
-                             {"stroke_width", t->stroke_width},
-                             {"font", t->font.empty() ? json(nullptr) : json(t->font)},
-                             {"anchor", t->anchor},
-                             {"align", t->align},
-                             {"line_spacing", t->line_spacing},
-                             {"rotation", t->rotation},
-                             {"type", "text"}});
+            json obj = {{"text", t->text},
+                       {"x", t->x},
+                       {"y", t->y},
+                       {"size", t->size},
+                       {"color", t->color},
+                       {"stroke_color", t->stroke_color},
+                       {"stroke_width", t->stroke_width},
+                       {"font", t->font.empty() ? json(nullptr) : json(t->font)},
+                       {"anchor", t->anchor},
+                       {"align", t->align},
+                       {"line_spacing", t->line_spacing},
+                       {"rotation", t->rotation},
+                       {"type", "text"}};
+            const TextItem& d = text_defaults;
+            put_unless_default(obj, "bold", t->bold, d.bold);
+            put_unless_default(obj, "italic", t->italic, d.italic);
+            put_unless_default(obj, "underline", t->underline, d.underline);
+            put_unless_default(obj, "font_family", t->font_family, d.font_family);
+            put_unless_default(obj, "fill_kind", t->fill_kind, d.fill_kind);
+            put_unless_default(obj, "fill_color2", t->fill_color2, d.fill_color2);
+            put_unless_default(obj, "fill_angle", t->fill_angle, d.fill_angle);
+            put_unless_default(obj, "fill_gradient", t->fill_gradient, d.fill_gradient);
+            items.push_back(std::move(obj));
         } else if (const auto* i = std::get_if<ImageItem>(&item)) {
             items.push_back({{"source", i->source},
                              {"x", i->x},
@@ -196,22 +240,27 @@ std::string to_json(const Doc& doc, int indent) {
                              {"type", "image"}});
         } else {
             const auto& r = std::get<RectItem>(item);
-            items.push_back({{"x", r.x},
-                             {"y", r.y},
-                             {"width", r.width},
-                             {"height", r.height},
-                             {"rotation", r.rotation},
-                             {"anchor", r.anchor},
-                             {"fill_kind", r.fill_kind},
-                             {"fill_color", r.fill_color},
-                             {"fill_color2", r.fill_color2},
-                             {"fill_angle", r.fill_angle},
-                             {"stroke_kind", r.stroke_kind},
-                             {"stroke_color", r.stroke_color},
-                             {"stroke_color2", r.stroke_color2},
-                             {"stroke_angle", r.stroke_angle},
-                             {"stroke_width", r.stroke_width},
-                             {"type", "rect"}});
+            json obj = {{"x", r.x},
+                       {"y", r.y},
+                       {"width", r.width},
+                       {"height", r.height},
+                       {"rotation", r.rotation},
+                       {"anchor", r.anchor},
+                       {"fill_kind", r.fill_kind},
+                       {"fill_color", r.fill_color},
+                       {"fill_color2", r.fill_color2},
+                       {"fill_angle", r.fill_angle},
+                       {"stroke_kind", r.stroke_kind},
+                       {"stroke_color", r.stroke_color},
+                       {"stroke_color2", r.stroke_color2},
+                       {"stroke_angle", r.stroke_angle},
+                       {"stroke_width", r.stroke_width},
+                       {"type", "rect"}};
+            put_unless_default(obj, "fill_gradient", r.fill_gradient,
+                               rect_defaults.fill_gradient);
+            put_unless_default(obj, "stroke_gradient", r.stroke_gradient,
+                               rect_defaults.stroke_gradient);
+            items.push_back(std::move(obj));
         }
     }
     json root = {{"version", doc.version}, {"items", items}};
