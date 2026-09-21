@@ -797,6 +797,36 @@ void test_the_resize_handle_tracks_the_items_rotation() {
     delete editor;
 }
 
+void test_a_rect_resizes_freely_on_both_axes() {
+    // A rectangle's proportions are the operator's to choose, so a purely
+    // horizontal drag must widen it without touching its height -- the
+    // grip used to scale both axes from the x distance alone.
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_rect();
+    auto* rect = std::get_if<overlay::RectItem>(editor->selected_item());
+    check::is_true(rect != nullptr, "free resize: a rect is selected");
+    if (rect == nullptr) {
+        delete editor;
+        return;
+    }
+    const double w0 = rect->width;
+    const double h0 = rect->height;
+
+    const overlay::Bbox box = overlay::item_bbox(
+        overlay::CANVAS_W, overlay::CANVAS_H, *editor->selected_item(), nullptr);
+    const QPoint grip = widget_point(box.x + box.w, box.y + box.h);
+    press(*editor, grip);
+    move_to(*editor, grip + QPoint(40, 0));
+    release(*editor, grip + QPoint(40, 0));
+
+    const auto& after = std::get<overlay::RectItem>(*editor->selected_item());
+    check::is_true(after.width > w0 + 1e-6,
+                   "free resize: a horizontal drag widens the rect");
+    check::is_true(std::abs(after.height - h0) <= 1e-9,
+                   "free resize: and leaves its height alone");
+    delete editor;
+}
+
 void test_the_rotate_handle_stays_reachable_near_a_canvas_edge() {
     // Pinned right at the canvas's own top-right corner -- the
     // unclamped handle position (further up and further right of the
@@ -1053,6 +1083,7 @@ int main(int argc, char** argv) {
     test_scale_keys_grow_and_shrink_the_selection();
     test_rotate_keys_turn_the_selection();
     test_the_resize_handle_tracks_the_items_rotation();
+    test_a_rect_resizes_freely_on_both_axes();
     test_the_rotate_handle_stays_reachable_near_a_canvas_edge();
     test_an_unresolved_last_rx_inset_shows_a_placeholder_frame();
     test_the_placeholder_draws_even_when_nothing_is_selected();

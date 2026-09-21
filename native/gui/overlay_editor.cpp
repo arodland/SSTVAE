@@ -680,12 +680,16 @@ void OverlayEditor::mouseMoveEvent(QMouseEvent* event) {
         if (auto* text = std::get_if<overlay::TextItem>(item)) {
             text->size = std::clamp(resize_start_ * factor, 0.01, 1.5);
         } else if (auto* rect = std::get_if<overlay::RectItem>(item)) {
-            // Both axes scale together, from the same horizontal drag
-            // distance every other item type resizes with -- so the
-            // rectangle's own aspect ratio is preserved rather than
-            // stretching only its width.
+            // Each axis follows its own drag distance: a rectangle is the
+            // one item whose proportions are the operator's to choose, so
+            // the grip stretches rather than scaling the aspect it started
+            // with. Text and images keep the horizontal-only factor above.
+            const double y0 = rect->y * overlay::CANVAS_H;
+            const double start_y = std::max(1.0, resize_origin_.y() - y0);
+            const double now_y = std::max(1.0, canvas.y() - y0);
             rect->width = std::clamp(resize_start_ * factor, 0.02, 2.0);
-            rect->height = std::clamp(resize_start_height_ * factor, 0.02, 2.0);
+            rect->height =
+                std::clamp(resize_start_height_ * (now_y / start_y), 0.02, 2.0);
         } else if (auto* image = std::get_if<overlay::ImageItem>(item)) {
             image->width = std::clamp(resize_start_ * factor, 0.02, 2.0);
         }
