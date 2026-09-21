@@ -2550,6 +2550,27 @@ shows as Solid but stays in the document. `edit_color<T>` replaced
 `edit_rect_color` and resolves the item again after the modal colour
 dialog instead of holding a pointer into the item vector across it.
 
+**Fork-only (branch `right-click-menu`): the palette above is gone,
+replaced by a right-click menu** (`gui/item_menu.*`, 2026-09-21). The
+three paragraphs above describe upstream's palette and do not apply on
+this branch. A left-click selects and shows handles, and nothing else;
+`OverlayEditor::contextMenuRequested` (selecting what was clicked,
+grips included, before it emits) opens `ItemMenu` — Format (B/I/U,
+family, size in px), Style (text: Clear, fill mode/stops/angle, stroke,
+rotation; rect: fill and stroke rows, rotation) and Layers (Shift
+relabels to front/back), plus Remove. Sizes are pixels of the 640x480
+frame in the menu and fractions in the document. Three constructions
+are load-bearing. **No `QComboBox` in a `QWidgetAction`** — its popup
+can dismiss the menu on some styles; the family is a nested `QMenu`.
+**The item is never stored** — Layers rotates the vector, so every
+edit asks the editor for its selection afresh. **Hiding a row's action
+is not enough**: `QMenu` skips a hidden action when it lays out and
+never hides its widget, so a row shown once stayed painted over the
+other kind's rows until `popup_for` hid the widget too
+(`test_a_hidden_style_row_is_not_painted`, which has to pop the menu up
+to see it). `sstvae-gui-shot --item-menu` shoots the menu and each
+submenu for a text item and a rect.
+
 ONNX runtime path complete: the codec is onnxruntime, torch is
 training-only, and `cli`/`listen` install ~263 MB instead of
 ~555 MB. The published codec is **v5** (2026-09-01), and `DEFAULT_FILE`
