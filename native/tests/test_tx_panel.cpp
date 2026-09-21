@@ -608,6 +608,28 @@ void test_a_right_click_on_an_item_opens_the_menu() {
 int main(int argc, char** argv) {
     check::report_crashes_instead_of_prompting();
     qputenv("QT_QPA_PLATFORM", "offscreen");
+
+    // Every test here builds an `AppState`, which reads the *operator's*
+    // real config -- so any setting of theirs is an input to this suite.
+    // It bit on the template combo: templates they had saved were listed
+    // beside the built-ins and the count assertion failed on their
+    // machine and nowhere else. Pointing the whole process's home and
+    // config directories at an empty temp dir isolates every such path
+    // at once (config file, template folder, saved pictures), rather
+    // than one override per test for whichever setting is noticed next.
+    QTemporaryDir profile;
+    if (!profile.isValid()) {
+        check::is_true(false, "temp profile created");
+        return check::report("transmit panel");
+    }
+    const QByteArray root = QFile::encodeName(profile.path());
+    qputenv("HOME", root);
+    qputenv("XDG_CONFIG_HOME", root + "/config");
+    qputenv("XDG_DATA_HOME", root + "/data");
+    qputenv("XDG_CACHE_HOME", root + "/cache");
+    qputenv("USERPROFILE", root);        // Windows' own home
+    qputenv("LOCALAPPDATA", root + "/local");
+
     QApplication app(argc, argv);
 
     test_the_strip_height_survives_a_selection();
