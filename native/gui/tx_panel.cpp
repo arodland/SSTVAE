@@ -11,6 +11,7 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
+#include <QFont>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -839,9 +840,133 @@ QFrame* TransmitPanel::build_selection_palette() {
     // the equivalent comment this used to carry in `build_properties`;
     // it still applies; only the box it applies to moved.
     set_swatch(text_swatch_, QColor());
-    text_color_row_ =
-        style::row(box, {new QLabel(tr("Color"), box), text_swatch_.button});
+    // The text's fill kind, beside its color -- the same shape as a
+    // rect's Fill row below. "Outline only" is "none": the glyphs keep
+    // their stroke and nothing inside it.
+    text_fill_kind_combo_ = new QComboBox(box);
+    text_fill_kind_combo_->setObjectName(QStringLiteral("text_fill_kind_combo"));
+    text_fill_kind_combo_->addItem(tr("Solid"), QStringLiteral("solid"));
+    text_fill_kind_combo_->addItem(tr("Gradient"), QStringLiteral("gradient"));
+    text_fill_kind_combo_->addItem(tr("Outline only"), QStringLiteral("none"));
+    connect(text_fill_kind_combo_, &QComboBox::currentIndexChanged, this, [this] {
+        if (auto* item = editing_item()) {
+            if (auto* text = std::get_if<overlay::TextItem>(item)) {
+                text->fill_kind =
+                    text_fill_kind_combo_->currentData().toString().toStdString();
+                editor_->refresh_item();
+            }
+        }
+        update_selection_palette();
+    });
+    text_color_row_ = style::row(box, {new QLabel(tr("Color"), box), text_fill_kind_combo_,
+                                       text_swatch_.button});
     layout->addWidget(text_color_row_);
+
+    // Weight, slant and underline, each labelled in its own style so the
+    // three read as what they do. `setFont` on the button, never a
+    // stylesheet -- see `set_swatch`'s style for why.
+    const auto style_toggle = [box](const QString& label, const char* name,
+                                    const QString& tip, void (QFont::*apply)(bool)) {
+        auto* button = new QToolButton(box);
+        button->setObjectName(QLatin1String(name));
+        button->setText(label);
+        button->setCheckable(true);
+        button->setToolTip(tip);
+        QFont font = button->font();
+        (font.*apply)(true);
+        button->setFont(font);
+        return button;
+    };
+    bold_button_ = style_toggle(tr("B"), "bold_button", tr("Bold"), &QFont::setBold);
+    italic_button_ = style_toggle(tr("I"), "italic_button", tr("Italic"), &QFont::setItalic);
+    underline_button_ =
+        style_toggle(tr("U"), "underline_button", tr("Underline"), &QFont::setUnderline);
+    for (const auto& [button, field] :
+         {std::pair{bold_button_, &overlay::TextItem::bold},
+          std::pair{italic_button_, &overlay::TextItem::italic},
+          std::pair{underline_button_, &overlay::TextItem::underline}}) {
+        connect(button, &QToolButton::toggled, this, [this, field = field](bool on) {
+            if (auto* item = editing_item()) {
+                if (auto* text = std::get_if<overlay::TextItem>(item)) {
+                    text->*field = on;
+                    editor_->refresh_item();
+                }
+            }
+        });
+    }
+    // A real window, not a menu, so a combo's own popup is safe here.
+    family_combo_ = new QComboBox(box);
+    family_combo_->setObjectName(QStringLiteral("family_combo"));
+    family_combo_->addItem(tr("Default face"), QString());
+    family_combo_->addItem(tr("Sans-serif"), QStringLiteral("sans-serif"));
+    family_combo_->addItem(tr("Serif"), QStringLiteral("serif"));
+    family_combo_->addItem(tr("Monospace"), QStringLiteral("monospace"));
+    family_combo_->addItem(tr("Cursive"), QStringLiteral("cursive"));
+    family_combo_->setToolTip(
+        tr("The typeface. A template that names its own font file keeps it; "
+           "this applies when it does not."));
+    connect(family_combo_, &QComboBox::currentIndexChanged, this, [this] {
+        if (auto* item = editing_item()) {
+            if (auto* text = std::get_if<overlay::TextItem>(item)) {
+                text->font_family = family_combo_->currentData().toString().toStdString();
+                editor_->refresh_item();
+            }
+        }
+    });
+    text_style_row_ = style::row(box, {new QLabel(tr("Style"), box), bold_button_,
+                                       italic_button_, underline_button_, family_combo_});
+    layout->addWidget(text_style_row_);
+
+    // Linear or radial, for every gradient on the palette. Radial has no
+    // angle, so choosing it disables the angle beside it
+    // (`update_selection_palette`).
+    const auto shape_combo = [this, box](const char* name) {
+        auto* combo = new QComboBox(box);
+        combo->setObjectName(QLatin1String(name));
+        combo->addItem(tr("Linear"), QStringLiteral("linear"));
+        combo->addItem(tr("Radial"), QStringLiteral("radial"));
+        combo->setToolTip(tr("Linear runs along the angle; radial spreads from the "
+                             "middle and reaches the second color at the corners."));
+        return combo;
+    };
+
+    text_swatch2_.button = new QPushButton(tr("To..."), box);
+    text_swatch2_.button->setObjectName(QStringLiteral("text_fill2_button"));
+    set_swatch(text_swatch2_, QColor());
+    connect(text_swatch2_.button, &QPushButton::clicked, this,
+            [this] { edit_color(&overlay::TextItem::fill_color2, text_swatch2_); });
+    text_fill_shape_combo_ = shape_combo("text_fill_shape_combo");
+    connect(text_fill_shape_combo_, &QComboBox::currentIndexChanged, this, [this] {
+        if (auto* item = editing_item()) {
+            if (auto* text = std::get_if<overlay::TextItem>(item)) {
+                text->fill_gradient =
+                    text_fill_shape_combo_->currentData().toString().toStdString();
+                editor_->refresh_item();
+            }
+        }
+        update_selection_palette();
+    });
+    text_fill_angle_spin_ = new QDoubleSpinBox(box);
+    text_fill_angle_spin_->setObjectName(QStringLiteral("text_fill_angle_spin"));
+    text_fill_angle_spin_->setRange(-180.0, 180.0);
+    text_fill_angle_spin_->setSingleStep(5.0);
+    text_fill_angle_spin_->setSuffix(QStringLiteral("°"));  // see fill_angle_spin_'s comment
+    text_fill_angle_spin_->setToolTip(
+        tr("The gradient's direction: 0 runs left to right, 90 bottom to "
+           "top -- the same counter-clockwise sense as the item's own "
+           "rotation."));
+    connect(text_fill_angle_spin_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
+        if (auto* item = editing_item()) {
+            if (auto* text = std::get_if<overlay::TextItem>(item)) {
+                text->fill_angle = value;
+                editor_->refresh_item();
+            }
+        }
+    });
+    text_gradient_row_ =
+        style::row(box, {new QLabel(tr("Gradient"), box), text_swatch2_.button,
+                         text_fill_shape_combo_, text_fill_angle_spin_});
+    layout->addWidget(text_gradient_row_);
 
     // --- rect fill/stroke (docs/overlay-templates.md's rectangle item) --
     fill_kind_combo_ = new QComboBox(box);
@@ -861,7 +986,7 @@ QFrame* TransmitPanel::build_selection_palette() {
         update_selection_palette();
     });
     connect(fill_swatch_.button, &QPushButton::clicked, this,
-            [this] { edit_rect_color(&overlay::RectItem::fill_color, fill_swatch_); });
+            [this] { edit_color(&overlay::RectItem::fill_color, fill_swatch_); });
     fill_row_ = style::row(
         box, {new QLabel(tr("Fill"), box), fill_kind_combo_, fill_swatch_.button});
     layout->addWidget(fill_row_);
@@ -869,7 +994,7 @@ QFrame* TransmitPanel::build_selection_palette() {
     fill_swatch2_.button = new QPushButton(tr("To..."), box);
     set_swatch(fill_swatch2_, QColor());
     connect(fill_swatch2_.button, &QPushButton::clicked, this,
-            [this] { edit_rect_color(&overlay::RectItem::fill_color2, fill_swatch2_); });
+            [this] { edit_color(&overlay::RectItem::fill_color2, fill_swatch2_); });
     fill_angle_spin_ = new QDoubleSpinBox(box);
     fill_angle_spin_->setObjectName(QStringLiteral("fill_angle_spin"));
     fill_angle_spin_->setRange(-180.0, 180.0);
@@ -893,8 +1018,19 @@ QFrame* TransmitPanel::build_selection_palette() {
             }
         }
     });
-    fill_gradient_row_ = style::row(
-        box, {new QLabel(tr("Fill gradient"), box), fill_swatch2_.button, fill_angle_spin_});
+    fill_shape_combo_ = shape_combo("fill_shape_combo");
+    connect(fill_shape_combo_, &QComboBox::currentIndexChanged, this, [this] {
+        if (auto* item = editing_item()) {
+            if (auto* rect = std::get_if<overlay::RectItem>(item)) {
+                rect->fill_gradient = fill_shape_combo_->currentData().toString().toStdString();
+                editor_->refresh_item();
+            }
+        }
+        update_selection_palette();
+    });
+    fill_gradient_row_ =
+        style::row(box, {new QLabel(tr("Fill gradient"), box), fill_swatch2_.button,
+                         fill_shape_combo_, fill_angle_spin_});
     layout->addWidget(fill_gradient_row_);
 
     stroke_kind_combo_ = new QComboBox(box);
@@ -920,7 +1056,7 @@ QFrame* TransmitPanel::build_selection_palette() {
         update_selection_palette();
     });
     connect(stroke_swatch_.button, &QPushButton::clicked, this,
-            [this] { edit_rect_color(&overlay::RectItem::stroke_color, stroke_swatch_); });
+            [this] { edit_color(&overlay::RectItem::stroke_color, stroke_swatch_); });
     connect(stroke_width_spin_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
         if (auto* item = editing_item()) {
             if (auto* rect = std::get_if<overlay::RectItem>(item)) {
@@ -936,7 +1072,7 @@ QFrame* TransmitPanel::build_selection_palette() {
     stroke_swatch2_.button = new QPushButton(tr("To..."), box);
     set_swatch(stroke_swatch2_, QColor());
     connect(stroke_swatch2_.button, &QPushButton::clicked, this,
-            [this] { edit_rect_color(&overlay::RectItem::stroke_color2, stroke_swatch2_); });
+            [this] { edit_color(&overlay::RectItem::stroke_color2, stroke_swatch2_); });
     stroke_angle_spin_ = new QDoubleSpinBox(box);
     stroke_angle_spin_->setRange(-180.0, 180.0);
     stroke_angle_spin_->setSingleStep(5.0);
@@ -949,8 +1085,20 @@ QFrame* TransmitPanel::build_selection_palette() {
             }
         }
     });
-    stroke_gradient_row_ = style::row(box, {new QLabel(tr("Stroke gradient"), box),
-                                            stroke_swatch2_.button, stroke_angle_spin_});
+    stroke_shape_combo_ = shape_combo("stroke_shape_combo");
+    connect(stroke_shape_combo_, &QComboBox::currentIndexChanged, this, [this] {
+        if (auto* item = editing_item()) {
+            if (auto* rect = std::get_if<overlay::RectItem>(item)) {
+                rect->stroke_gradient =
+                    stroke_shape_combo_->currentData().toString().toStdString();
+                editor_->refresh_item();
+            }
+        }
+        update_selection_palette();
+    });
+    stroke_gradient_row_ =
+        style::row(box, {new QLabel(tr("Stroke gradient"), box), stroke_swatch2_.button,
+                         stroke_shape_combo_, stroke_angle_spin_});
     layout->addWidget(stroke_gradient_row_);
 
     // --- stacking order --------------------------------------------------
@@ -1605,16 +1753,20 @@ void TransmitPanel::set_swatch(ColorSwatch& swatch, const QColor& color) {
     swatch.button->setIcon(QIcon(pixmap));
 }
 
-void TransmitPanel::edit_rect_color(std::string overlay::RectItem::* field,
-                                    ColorSwatch& swatch) {
-    auto* item = editing_item();
-    if (item == nullptr) return;
-    auto* rect = std::get_if<overlay::RectItem>(item);
-    if (rect == nullptr) return;
+template <typename T>
+void TransmitPanel::edit_color(std::string T::* field, ColorSwatch& swatch) {
+    const auto* before = editing_item();
+    const auto* initial = before != nullptr ? std::get_if<T>(before) : nullptr;
+    if (initial == nullptr) return;
     const QColor color =
-        QColorDialog::getColor(QColor(QString::fromStdString(rect->*field)), this);
+        QColorDialog::getColor(QColor(QString::fromStdString(initial->*field)), this);
     if (!color.isValid()) return;
-    rect->*field = color.name().toStdString();
+    // Resolved again, not held across the dialog: it is modal and runs
+    // an event loop, and the selection is a pointer into a vector.
+    auto* item = editing_item();
+    auto* target = item != nullptr ? std::get_if<T>(item) : nullptr;
+    if (target == nullptr) return;
+    target->*field = color.name().toStdString();
     set_swatch(swatch, color);
     editor_->refresh_item();
 }
@@ -1628,6 +1780,25 @@ overlay::Item* TransmitPanel::editing_item() {
     return editor_->selected_item();
 }
 
+void TransmitPanel::show_family(const QString& family) {
+    // The presets, plus at most one more slot for a family a document
+    // names that the presets do not ("DejaVu Serif", from a template) --
+    // shown as itself, because showing it as "Default face" would say
+    // something about the item that is not true, and choosing any entry
+    // writes that entry back. Reused rather than appended to, so the
+    // list does not grow with every item selected.
+    constexpr int PRESETS = 5;
+    int index = family_combo_->findData(family);
+    if (index < 0) {
+        if (family_combo_->count() > PRESETS) family_combo_->removeItem(PRESETS);
+        family_combo_->addItem(family, family);
+        index = PRESETS;
+    } else if (index < PRESETS && family_combo_->count() > PRESETS) {
+        family_combo_->removeItem(PRESETS);
+    }
+    family_combo_->setCurrentIndex(index);
+}
+
 void TransmitPanel::update_selection_palette() {
     const overlay::Item* item = editor_->selected_item();
     const auto* rect = item ? std::get_if<overlay::RectItem>(item) : nullptr;
@@ -1635,6 +1806,17 @@ void TransmitPanel::update_selection_palette() {
     const bool is_rect = rect != nullptr;
 
     text_color_row_->setVisible(is_text);
+    text_style_row_->setVisible(is_text);
+    const QString text_kind = text_fill_kind_combo_->currentData().toString();
+    text_swatch_.button->setEnabled(is_text && text_kind != QLatin1String("none"));
+    text_gradient_row_->setVisible(is_text && text_kind == QLatin1String("gradient"));
+    // Radial has no angle.
+    const auto is_radial = [](const QComboBox* shape) {
+        return shape->currentData().toString() == QLatin1String("radial");
+    };
+    text_fill_angle_spin_->setEnabled(!is_radial(text_fill_shape_combo_));
+    fill_angle_spin_->setEnabled(!is_radial(fill_shape_combo_));
+    stroke_angle_spin_->setEnabled(!is_radial(stroke_shape_combo_));
 
     fill_row_->setVisible(is_rect);
     const QString fill_kind = fill_kind_combo_->currentData().toString();
@@ -1742,6 +1924,7 @@ void TransmitPanel::on_selection(overlay::Item* item) {
         text_edit_->setPlainText(QString());
         loading_properties_ = false;
         set_swatch(text_swatch_, QColor());
+        set_swatch(text_swatch2_, QColor());
         set_swatch(fill_swatch_, QColor());
         set_swatch(fill_swatch2_, QColor());
         set_swatch(stroke_swatch_, QColor());
@@ -1761,20 +1944,37 @@ void TransmitPanel::on_selection(overlay::Item* item) {
         align_combo_->setCurrentIndex(std::max(
             0, align_combo_->findData(QString::fromStdString(text.align))));
         set_swatch(text_swatch_, QColor(QString::fromStdString(text.color)));
+        // An unknown fill kind shows as Solid, which is what the renderer
+        // draws for it.
+        text_fill_kind_combo_->setCurrentIndex(std::max(
+            0, text_fill_kind_combo_->findData(QString::fromStdString(text.fill_kind))));
+        bold_button_->setChecked(text.bold);
+        italic_button_->setChecked(text.italic);
+        underline_button_->setChecked(text.underline);
+        show_family(QString::fromStdString(text.font_family));
+        set_swatch(text_swatch2_, QColor(QString::fromStdString(text.fill_color2)));
+        text_fill_shape_combo_->setCurrentIndex(std::max(
+            0, text_fill_shape_combo_->findData(QString::fromStdString(text.fill_gradient))));
+        text_fill_angle_spin_->setValue(text.fill_angle);
     } else {
         text_edit_->setPlainText(QString());
         set_swatch(text_swatch_, QColor());  // no color on an image or rect item
+        set_swatch(text_swatch2_, QColor());
     }
     if (is_rect) {
         fill_kind_combo_->setCurrentIndex(
             std::max(0, fill_kind_combo_->findData(QString::fromStdString(rect->fill_kind))));
         set_swatch(fill_swatch_, QColor(QString::fromStdString(rect->fill_color)));
         set_swatch(fill_swatch2_, QColor(QString::fromStdString(rect->fill_color2)));
+        fill_shape_combo_->setCurrentIndex(std::max(
+            0, fill_shape_combo_->findData(QString::fromStdString(rect->fill_gradient))));
         fill_angle_spin_->setValue(rect->fill_angle);
         stroke_kind_combo_->setCurrentIndex(std::max(
             0, stroke_kind_combo_->findData(QString::fromStdString(rect->stroke_kind))));
         set_swatch(stroke_swatch_, QColor(QString::fromStdString(rect->stroke_color)));
         set_swatch(stroke_swatch2_, QColor(QString::fromStdString(rect->stroke_color2)));
+        stroke_shape_combo_->setCurrentIndex(std::max(
+            0, stroke_shape_combo_->findData(QString::fromStdString(rect->stroke_gradient))));
         stroke_angle_spin_->setValue(rect->stroke_angle);
         stroke_width_spin_->setValue(rect->stroke_width);
     } else {

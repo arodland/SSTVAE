@@ -44,6 +44,7 @@
 #include <QSlider>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QToolButton>
 #include <QWidget>
 
 #include <string>
@@ -748,6 +749,186 @@ void test_saving_a_loaded_template_defaults_to_its_own_name() {
                  "the dialog opened pre-filled with the loaded template's name");
 }
 
+
+// --- text style and gradient shape in the selection palette ---------------
+//
+// Text gets rows of its own -- a Style row, a fill kind beside its Color,
+// and a Gradient row -- rather than borrowing a rect's Fill rows, which
+// the test above pins as hidden for text. Every gradient, text or rect,
+// gains Linear/Radial, and radial has no angle.
+
+struct Palette {
+    AppState state;
+    QWidget host;
+    TransmitPanel* panel = nullptr;
+    OverlayEditor* editor = nullptr;
+
+    Palette() {
+        panel = new TransmitPanel(&state, &host);
+        host.show();
+        QCoreApplication::processEvents();
+        editor = panel->findChild<OverlayEditor*>();
+    }
+
+    template <typename W>
+    W* find(const char* name) {
+        return panel->findChild<W*>(QString::fromLatin1(name));
+    }
+
+    overlay::TextItem& text() { return std::get<overlay::TextItem>(*editor->selected_item()); }
+    overlay::RectItem& rect() { return std::get<overlay::RectItem>(*editor->selected_item()); }
+
+    // Reload the palette from the selected item, as a fresh selection
+    // would, after the test has edited the item directly.
+    void reselect() {
+        emit editor->selectionChanged(editor->selected_item());
+        QCoreApplication::processEvents();
+    }
+};
+
+void pick(QComboBox* combo, const char* data) {
+    combo->setCurrentIndex(combo->findData(QString::fromLatin1(data)));
+    QCoreApplication::processEvents();
+}
+
+void test_the_text_style_rows_show_for_text_only() {
+    Palette p;
+    auto* bold = p.find<QToolButton>("bold_button");
+    auto* kind = p.find<QComboBox>("text_fill_kind_combo");
+    auto* stop2 = p.find<QPushButton>("text_fill2_button");
+    auto* rect_shape = p.find<QComboBox>("fill_shape_combo");
+    check::is_true(p.editor && bold && kind && stop2 && rect_shape,
+                   "style: the palette has the text style and shape controls");
+    if (!(p.editor && bold && kind && stop2 && rect_shape)) return;
+
+    p.editor->add_text("W1AW");
+    QCoreApplication::processEvents();
+    check::is_true(bold->isVisible() && kind->isVisible(),
+                   "style: text shows its Style row and its fill kind");
+    check::is_true(!stop2->isVisible(), "style: the Gradient row waits for a gradient");
+    pick(kind, "gradient");
+    check::is_true(stop2->isVisible(), "style: choosing Gradient reveals it");
+
+    p.editor->add_rect();
+    QCoreApplication::processEvents();
+    check::is_true(!bold->isVisible() && !kind->isVisible() && !stop2->isVisible(),
+                   "style: a rect shows none of the text rows");
+    pick(p.find<QComboBox>("fill_kind_combo"), "gradient");
+    check::is_true(rect_shape->isVisible(), "style: a rect gradient has its shape too");
+}
+
+void test_each_text_control_writes_its_own_field() {
+    Palette p;
+    if (p.editor == nullptr) return;
+    p.editor->add_text("W1AW");
+    QCoreApplication::processEvents();
+
+    p.find<QToolButton>("bold_button")->setChecked(true);
+    check::is_true(p.text().bold && !p.text().italic && !p.text().underline,
+                   "style: Bold writes bold, and only bold");
+    p.find<QToolButton>("italic_button")->setChecked(true);
+    p.find<QToolButton>("underline_button")->setChecked(true);
+    check::is_true(p.text().italic && p.text().underline, "style: and the other two theirs");
+
+    pick(p.find<QComboBox>("family_combo"), "monospace");
+    check::equal(p.text().font_family, std::string("monospace"), "style: the family is written");
+    pick(p.find<QComboBox>("family_combo"), "");
+    check::equal(p.text().font_family, std::string(), "style: and Default face clears it");
+
+    auto* kind = p.find<QComboBox>("text_fill_kind_combo");
+    auto* color = p.find<QPushButton>("text_color_button");
+    pick(kind, "none");
+    check::equal(p.text().fill_kind, std::string("none"), "style: Outline only writes \"none\"");
+    check::is_true(!color->isEnabled(), "style: with no fill there is no fill color to pick");
+    pick(kind, "gradient");
+    check::equal(p.text().fill_kind, std::string("gradient"), "style: Gradient writes it");
+    check::is_true(color->isEnabled(), "style: and the first stop is pickable again");
+
+    auto* angle = p.find<QDoubleSpinBox>("text_fill_angle_spin");
+    angle->setValue(30.0);
+    check::equal(p.text().fill_angle, 30.0, "style: the angle is written");
+    pick(p.find<QComboBox>("text_fill_shape_combo"), "radial");
+    check::equal(p.text().fill_gradient, std::string("radial"), "style: Radial is written");
+    check::is_true(!angle->isEnabled(), "style: and a radial gradient has no angle");
+    pick(p.find<QComboBox>("text_fill_shape_combo"), "linear");
+    check::is_true(angle->isEnabled(), "style: Linear gives it back");
+}
+
+void test_a_rect_gradient_can_be_radial_on_fill_and_stroke() {
+    Palette p;
+    if (p.editor == nullptr) return;
+    p.editor->add_rect();
+    QCoreApplication::processEvents();
+    pick(p.find<QComboBox>("fill_kind_combo"), "gradient");
+    pick(p.find<QComboBox>("stroke_kind_combo"), "gradient");
+
+    pick(p.find<QComboBox>("fill_shape_combo"), "radial");
+    check::equal(p.rect().fill_gradient, std::string("radial"), "rect: the fill can be radial");
+    check::equal(p.rect().stroke_gradient, std::string("linear"),
+                 "rect: without touching the stroke");
+    check::is_true(!p.find<QDoubleSpinBox>("fill_angle_spin")->isEnabled(),
+                   "rect: a radial fill has no angle");
+    pick(p.find<QComboBox>("stroke_shape_combo"), "radial");
+    check::equal(p.rect().stroke_gradient, std::string("radial"), "rect: nor the stroke");
+}
+
+// Loading a styled item into the palette must not write it back: every
+// setValue/setChecked/setCurrentIndex fires the same signal an edit does.
+// Two cases are here for being the ones a writer would quietly change: a
+// family the presets do not list, which must be shown as itself (not as
+// "Default face", which is not what the item says, and which a later
+// write would then make true), and a fill kind this build does not know,
+// which the combo shows as Solid -- what the renderer draws for it --
+// and must leave in the document for a build that does.
+void test_selecting_a_styled_item_shows_it_and_changes_nothing() {
+    Palette p;
+    if (p.editor == nullptr) return;
+    auto* family = p.find<QComboBox>("family_combo");
+    auto* kind = p.find<QComboBox>("text_fill_kind_combo");
+    auto* shape = p.find<QComboBox>("text_fill_shape_combo");
+    auto* angle = p.find<QDoubleSpinBox>("text_fill_angle_spin");
+    auto* bold = p.find<QToolButton>("bold_button");
+
+    p.editor->add_text("W1AW");
+    QCoreApplication::processEvents();
+    overlay::TextItem& text = p.text();
+    text.bold = true;
+    text.font_family = "DejaVu Serif";
+    text.fill_kind = "gradient";
+    text.fill_gradient = "radial";
+    text.fill_angle = 33.25;
+    text.fill_color2 = "#123456";
+    const overlay::TextItem before = text;
+    p.reselect();
+
+    check::is_true(bold->isChecked(), "load: bold shows");
+    check::equal(family->currentText().toStdString(), std::string("DejaVu Serif"),
+                 "load: a family the presets lack shows as itself");
+    check::equal(kind->currentData().toString().toStdString(), std::string("gradient"),
+                 "load: the fill kind shows");
+    check::equal(shape->currentData().toString().toStdString(), std::string("radial"),
+                 "load: and its shape");
+    check::equal(angle->value(), 33.25, "load: and its angle");
+    const overlay::TextItem& after = p.text();
+    check::is_true(after.bold == before.bold && after.font_family == before.font_family &&
+                       after.fill_kind == before.fill_kind &&
+                       after.fill_gradient == before.fill_gradient &&
+                       after.fill_angle == before.fill_angle &&
+                       after.fill_color2 == before.fill_color2,
+                   "load: selecting it wrote nothing back");
+
+    p.text().fill_kind = "shimmer";
+    p.reselect();
+    check::equal(kind->currentData().toString().toStdString(), std::string("solid"),
+                 "load: an unknown kind shows as Solid, as it is drawn");
+    check::equal(p.text().fill_kind, std::string("shimmer"), "load: and stays in the document");
+
+    // The extra family slot is reused, not appended to.
+    p.editor->add_text("K1ABC");
+    QCoreApplication::processEvents();
+    check::equal(family->count(), 5, "load: a preset family drops the one-off entry");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -772,5 +953,9 @@ int main(int argc, char** argv) {
     test_the_palette_s_remove_button_removes_the_selection();
     test_the_z_order_buttons_reorder_the_selected_item();
     test_saving_a_loaded_template_defaults_to_its_own_name();
+    test_the_text_style_rows_show_for_text_only();
+    test_each_text_control_writes_its_own_field();
+    test_a_rect_gradient_can_be_radial_on_fill_and_stroke();
+    test_selecting_a_styled_item_shows_it_and_changes_nothing();
     return check::report("transmit panel");
 }

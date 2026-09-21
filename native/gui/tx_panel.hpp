@@ -184,11 +184,13 @@ private:
     // re-emits `selectionChanged`), so an unguarded rebuild would
     // reconstruct up to five button icons at drag-frame rate.
     void set_swatch(ColorSwatch& swatch, const QColor& color);
-    // Open a color picker for one of a `RectItem`'s four color
-    // fields, identified by pointer-to-member so the four "Fill"/
-    // "Fill 2"/"Stroke"/"Stroke 2" buttons share one implementation
-    // rather than four near-identical lambdas.
-    void edit_rect_color(std::string overlay::RectItem::* field, ColorSwatch& swatch);
+    // Open a color picker for one color field of the selected item, if it
+    // is a `T` -- a `RectItem`'s four fill/stroke colors or a `TextItem`'s
+    // gradient stop -- identified by pointer-to-member so every such
+    // button shares one implementation rather than a near-identical
+    // lambda each.
+    template <typename T>
+    void edit_color(std::string T::* field, ColorSwatch& swatch);
     // True while the picture is committed to a send in progress.
     bool picture_locked() const;
     void set_picture_controls_enabled(bool on);
@@ -225,6 +227,9 @@ private:
     // from the fill/stroke kind combos, since choosing "Gradient" changes
     // a row's visibility without a new selection.
     void update_selection_palette();
+    // Select `family` in the font-family picker, adding it as a one-off
+    // entry when it is not one of the presets. Called while loading.
+    void show_family(const QString& family);
     // Move the palette next to `editor_->selection_screen_rect()`,
     // flipping to the item's other side if it would run off the
     // *screen* -- the palette is a top-level window now, so its bounds
@@ -342,12 +347,29 @@ private:
     // widget is not part of `control_strip()`, so its rows are free to
     // actually show and hide per item type rather than only disable.
     ColorSwatch text_swatch_;  // text_swatch_.button is "Color..."
+    // Text's own fill kind -- "Solid", "Gradient" or "Outline only"
+    // ("none") -- beside its color, the way a rect's fill kind sits
+    // beside *its* color on the Fill row. `text_swatch_` is the first
+    // stop in every kind, which is what `color` always was.
+    QComboBox* text_fill_kind_combo_ = nullptr;
     QWidget* text_color_row_ = nullptr;
+    // Weight, slant, underline and a family, for text only.
+    QToolButton* bold_button_ = nullptr;
+    QToolButton* italic_button_ = nullptr;
+    QToolButton* underline_button_ = nullptr;
+    QComboBox* family_combo_ = nullptr;
+    QWidget* text_style_row_ = nullptr;
+    // A text gradient's far stop, angle and shape, shown for "Gradient".
+    ColorSwatch text_swatch2_;
+    QDoubleSpinBox* text_fill_angle_spin_ = nullptr;
+    QComboBox* text_fill_shape_combo_ = nullptr;
+    QWidget* text_gradient_row_ = nullptr;
     QComboBox* fill_kind_combo_ = nullptr;
     ColorSwatch fill_swatch_;
     QWidget* fill_row_ = nullptr;
     ColorSwatch fill_swatch2_;
     QDoubleSpinBox* fill_angle_spin_ = nullptr;
+    QComboBox* fill_shape_combo_ = nullptr;  // "linear" | "radial"
     QWidget* fill_gradient_row_ = nullptr;
     QComboBox* stroke_kind_combo_ = nullptr;
     ColorSwatch stroke_swatch_;
@@ -355,6 +377,7 @@ private:
     QWidget* stroke_row_ = nullptr;
     ColorSwatch stroke_swatch2_;
     QDoubleSpinBox* stroke_angle_spin_ = nullptr;
+    QComboBox* stroke_shape_combo_ = nullptr;  // "linear" | "radial"
     QWidget* stroke_gradient_row_ = nullptr;
     QPushButton* raise_button_ = nullptr;
     QPushButton* lower_button_ = nullptr;
