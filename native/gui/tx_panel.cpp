@@ -1,13 +1,11 @@
 #include "tx_panel.hpp"
 
 #include <QColor>
-#include <QColorDialog>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
-#include <QDoubleSpinBox>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
@@ -31,7 +29,6 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QResizeEvent>
-#include <QScreen>
 #include <QSlider>
 #include <QSplitter>
 #include <QStyle>
@@ -60,6 +57,7 @@
 #include "crop_dialog.hpp"
 #include "images/images.hpp"
 #include "flow_layout.hpp"
+#include "item_menu.hpp"
 #include "overlay/template.hpp"
 #include "overlay/template_catalog.hpp"
 #include "overlay_editor.hpp"
@@ -75,12 +73,11 @@ const char* IMAGE_FILTER =
 
 // --- the tool palette's icons -------------------------------------------
 //
-// Hand-drawn rather than shipped as asset files, for the same reason
-// `set_swatch` paints its color buttons: four tiny glyphs are cheaper
-// to draw once than to source, license and keep in step with the
-// platform's icon theme (which several of this project's target
+// Hand-drawn rather than shipped as asset files: four tiny glyphs are
+// cheaper to draw once than to source, license and keep in step with
+// the platform's icon theme (which several of this project's target
 // platforms do not reliably have one of). `PM_LargeIconSize` and
-// `devicePixelRatioF`, the same HiDPI approach the color swatch uses.
+// `devicePixelRatioF`, so a HiDPI screen gets a crisp glyph.
 
 QIcon draw_tool_icon(const QWidget* metrics,
                      const std::function<void(QPainter&, int, const QColor&)>& paint) {
@@ -92,10 +89,8 @@ QIcon draw_tool_icon(const QWidget* metrics,
     pixmap.fill(Qt::transparent);
     QPainter painter(&pixmap);
     painter.setRenderHint(QPainter::Antialiasing, true);
-    // Palette, not a literal color: `set_swatch` warns about a Qt
-    // stylesheet for the same class of reason, and a hand-drawn icon
-    // that ignored the palette would go invisible on a dark theme just
-    // as thoroughly as a stylesheet's padding bug did there.
+    // Palette, not a literal color: a hand-drawn icon that ignored the
+    // palette would go invisible on a dark theme.
     paint(painter, size, metrics->palette().color(QPalette::WindowText));
     return QIcon(pixmap);
 }
@@ -479,24 +474,13 @@ void TransmitPanel::build_ui() {
     // a drag, and the slot behind it renders the whole composite.
     connect(editor_, &OverlayEditor::documentChanged, this,
             &TransmitPanel::schedule_optimization_debounced);
-    // Also plain and immediate: a keyboard scale/rotate shortcut moves
-    // the item without reselecting it, so `documentChanged` (which that
-    // path does emit, via `refresh_item`) is what keeps the palette
-    // tracking it. Cheap -- geometry only -- so it costs nothing beside
-    // the debounced connection above.
-    connect(editor_, &OverlayEditor::documentChanged, this,
-            &TransmitPanel::position_selection_palette);
-    // Parented to the editor itself, not to `strip_`: floating over the
-    // canvas is what lets it show and hide rows freely (see its own
-    // comment). Built once nothing is selected, so it is created hidden.
-    selection_palette_ = build_selection_palette();
-    // **The frame itself is not disabled**, unlike `properties_`, which
-    // starts disabled and so disables every child through the ancestor
-    // chain for free. This box only ever `hide()`s, so nothing here does
-    // that automatically -- its buttons default to enabled and stay that
-    // way until something sets them straight. One call now, with nothing
-    // selected, gives it the same starting state `on_selection` would.
-    update_selection_palette();
+    // Formatting lives on a right-click menu over the item itself, not on
+    // a panel that appears with every selection: a left-click selects
+    // and shows handles, and nothing else. Parented to the panel, so it
+    // is destroyed with it; it holds no item, only the editor.
+    item_menu_ = new ItemMenu(editor_, this);
+    connect(editor_, &OverlayEditor::contextMenuRequested, item_menu_,
+            &ItemMenu::popup_for);
     // Tools *under* the canvas, not beside it. Beside it they cost the
     // composer ~195 px of width that the receive preview does not pay,
     // so the two pictures could never be the same size however the
@@ -700,9 +684,8 @@ QGroupBox* TransmitPanel::build_properties(QWidget* parent) {
     // "way too many buttons" on a box that stayed on screen and disabled
     // itself rather than getting out of the way. Scale and rotation
     // moved to on-canvas handles and keyboard shortcuts
-    // (`OverlayEditor`); everything else moved to
-    // `build_selection_palette`, a floating panel that only exists near
-    // the selection. The text editor stays here, out of line, because
+    // (`OverlayEditor`); everything else is on the item's right-click
+    // menu (`ItemMenu`). The text editor stays here, out of line, because
     // making it inline runs into template field substitution -- the box
     // would have to show the substituted text while still editing the
     // raw `{placeholder}` underneath it, which is not solved yet.
@@ -773,364 +756,6 @@ QGroupBox* TransmitPanel::build_properties(QWidget* parent) {
         }
     });
     form->addWidget(style::row(box, {new QLabel(tr("Align"), box), align_combo_}));
-
-    return box;
-}
-
-QFrame* TransmitPanel::build_selection_palette() {
-    // **Floating, not part of `control_strip()`.** Every other box in
-    // this panel keeps a fixed shape from construction on -- always
-    // present, only ever `setEnabled` -- because `PaneContainer::
-    // equalise_strips` only re-measures the strip at construction and on
-    // resize, so a box that grew or shrank with the selection would
-    // desync the two panes' matched heights (`on_selection`'s old
-    // comment on `properties_` has the story). Parenting this one to
-    // `editor_` instead, outside the strip entirely, exempts it from
-    // that rule -- so unlike `properties_`, it is free to actually show
-    // and hide its rows per item type rather than only disable them.
-    //
-    // **`Qt::Tool`, not an ordinary child widget.** A plain child is
-    // clipped to its parent's own rect, so the first version of this
-    // panel -- a `QFrame(editor_)` positioned and clamped in `editor_`'s
-    // local coordinates -- could never place itself anywhere `editor_`
-    // itself doesn't cover. On a narrow window the picture fills nearly
-    // all of that rect, so "beside the selection, clamped to the
-    // canvas" collapses to "on top of the selection" -- there is no
-    // room left to flip to. A tool window has no such clip: it is a
-    // real top-level window (no taskbar entry, stays above its parent,
-    // hidden and restored with it) positioned in *screen* coordinates,
-    // so it can use the space around the canvas, the rest of the
-    // window, or the desktop beyond it -- whatever `position_
-    // selection_palette` finds clear. `WA_ShowWithoutActivating` is
-    // what keeps `show()` from stealing keyboard focus away from
-    // whatever the operator was doing (typing in `text_edit_`,
-    // dragging in `editor_`) the moment a selection appears.
-    auto* box = new QFrame(editor_, Qt::Tool | Qt::FramelessWindowHint);
-    box->setAttribute(Qt::WA_ShowWithoutActivating);
-    box->setObjectName(QStringLiteral("selection_palette"));
-    // A visible bordered panel via QPalette, never a stylesheet -- see
-    // `set_swatch`'s style for why a stylesheet anywhere in this app is
-    // refused on sight.
-    box->setFrameShape(QFrame::Box);
-    box->setFrameShadow(QFrame::Raised);
-    box->setAutoFillBackground(true);
-    box->setBackgroundRole(QPalette::Window);
-    box->hide();  // nothing is selected at construction
-
-    auto* layout = new QVBoxLayout(box);
-    layout->setSpacing(4);
-
-    text_swatch_.button = new QPushButton(tr("Color..."), box);
-    text_swatch_.button->setObjectName(QStringLiteral("text_color_button"));
-    connect(text_swatch_.button, &QPushButton::clicked, this, [this] {
-        auto* item = editing_item();
-        if (item == nullptr) return;
-        auto* text = std::get_if<overlay::TextItem>(item);
-        if (text == nullptr) return;
-        const QColor color = QColorDialog::getColor(
-            QColor(QString::fromStdString(text->color)), this);
-        if (!color.isValid()) return;
-        text->color = color.name().toStdString();
-        set_swatch(text_swatch_, color);
-        editor_->refresh_item();
-    });
-    // Given its swatch now, before anything is selected -- an empty one
-    // is transparent and draws nothing, but it means the button's own
-    // size never changes the moment a real color is loaded into it. See
-    // the equivalent comment this used to carry in `build_properties`;
-    // it still applies; only the box it applies to moved.
-    set_swatch(text_swatch_, QColor());
-    // The text's fill kind, beside its color -- the same shape as a
-    // rect's Fill row below. "Outline only" is "none": the glyphs keep
-    // their stroke and nothing inside it.
-    text_fill_kind_combo_ = new QComboBox(box);
-    text_fill_kind_combo_->setObjectName(QStringLiteral("text_fill_kind_combo"));
-    text_fill_kind_combo_->addItem(tr("Solid"), QStringLiteral("solid"));
-    text_fill_kind_combo_->addItem(tr("Gradient"), QStringLiteral("gradient"));
-    text_fill_kind_combo_->addItem(tr("Outline only"), QStringLiteral("none"));
-    connect(text_fill_kind_combo_, &QComboBox::currentIndexChanged, this, [this] {
-        if (auto* item = editing_item()) {
-            if (auto* text = std::get_if<overlay::TextItem>(item)) {
-                text->fill_kind =
-                    text_fill_kind_combo_->currentData().toString().toStdString();
-                editor_->refresh_item();
-            }
-        }
-        update_selection_palette();
-    });
-    text_color_row_ = style::row(box, {new QLabel(tr("Color"), box), text_fill_kind_combo_,
-                                       text_swatch_.button});
-    layout->addWidget(text_color_row_);
-
-    // Weight, slant and underline, each labelled in its own style so the
-    // three read as what they do. `setFont` on the button, never a
-    // stylesheet -- see `set_swatch`'s style for why.
-    const auto style_toggle = [box](const QString& label, const char* name,
-                                    const QString& tip, void (QFont::*apply)(bool)) {
-        auto* button = new QToolButton(box);
-        button->setObjectName(QLatin1String(name));
-        button->setText(label);
-        button->setCheckable(true);
-        button->setToolTip(tip);
-        QFont font = button->font();
-        (font.*apply)(true);
-        button->setFont(font);
-        return button;
-    };
-    bold_button_ = style_toggle(tr("B"), "bold_button", tr("Bold"), &QFont::setBold);
-    italic_button_ = style_toggle(tr("I"), "italic_button", tr("Italic"), &QFont::setItalic);
-    underline_button_ =
-        style_toggle(tr("U"), "underline_button", tr("Underline"), &QFont::setUnderline);
-    for (const auto& [button, field] :
-         {std::pair{bold_button_, &overlay::TextItem::bold},
-          std::pair{italic_button_, &overlay::TextItem::italic},
-          std::pair{underline_button_, &overlay::TextItem::underline}}) {
-        connect(button, &QToolButton::toggled, this, [this, field = field](bool on) {
-            if (auto* item = editing_item()) {
-                if (auto* text = std::get_if<overlay::TextItem>(item)) {
-                    text->*field = on;
-                    editor_->refresh_item();
-                }
-            }
-        });
-    }
-    // A real window, not a menu, so a combo's own popup is safe here.
-    family_combo_ = new QComboBox(box);
-    family_combo_->setObjectName(QStringLiteral("family_combo"));
-    family_combo_->addItem(tr("Default face"), QString());
-    family_combo_->addItem(tr("Sans-serif"), QStringLiteral("sans-serif"));
-    family_combo_->addItem(tr("Serif"), QStringLiteral("serif"));
-    family_combo_->addItem(tr("Monospace"), QStringLiteral("monospace"));
-    family_combo_->addItem(tr("Cursive"), QStringLiteral("cursive"));
-    family_combo_->setToolTip(
-        tr("The typeface. A template that names its own font file keeps it; "
-           "this applies when it does not."));
-    connect(family_combo_, &QComboBox::currentIndexChanged, this, [this] {
-        if (auto* item = editing_item()) {
-            if (auto* text = std::get_if<overlay::TextItem>(item)) {
-                text->font_family = family_combo_->currentData().toString().toStdString();
-                editor_->refresh_item();
-            }
-        }
-    });
-    text_style_row_ = style::row(box, {new QLabel(tr("Style"), box), bold_button_,
-                                       italic_button_, underline_button_, family_combo_});
-    layout->addWidget(text_style_row_);
-
-    // Linear or radial, for every gradient on the palette. Radial has no
-    // angle, so choosing it disables the angle beside it
-    // (`update_selection_palette`).
-    const auto shape_combo = [this, box](const char* name) {
-        auto* combo = new QComboBox(box);
-        combo->setObjectName(QLatin1String(name));
-        combo->addItem(tr("Linear"), QStringLiteral("linear"));
-        combo->addItem(tr("Radial"), QStringLiteral("radial"));
-        combo->setToolTip(tr("Linear runs along the angle; radial spreads from the "
-                             "middle and reaches the second color at the corners."));
-        return combo;
-    };
-
-    text_swatch2_.button = new QPushButton(tr("To..."), box);
-    text_swatch2_.button->setObjectName(QStringLiteral("text_fill2_button"));
-    set_swatch(text_swatch2_, QColor());
-    connect(text_swatch2_.button, &QPushButton::clicked, this,
-            [this] { edit_color(&overlay::TextItem::fill_color2, text_swatch2_); });
-    text_fill_shape_combo_ = shape_combo("text_fill_shape_combo");
-    connect(text_fill_shape_combo_, &QComboBox::currentIndexChanged, this, [this] {
-        if (auto* item = editing_item()) {
-            if (auto* text = std::get_if<overlay::TextItem>(item)) {
-                text->fill_gradient =
-                    text_fill_shape_combo_->currentData().toString().toStdString();
-                editor_->refresh_item();
-            }
-        }
-        update_selection_palette();
-    });
-    text_fill_angle_spin_ = new QDoubleSpinBox(box);
-    text_fill_angle_spin_->setObjectName(QStringLiteral("text_fill_angle_spin"));
-    text_fill_angle_spin_->setRange(-180.0, 180.0);
-    text_fill_angle_spin_->setSingleStep(5.0);
-    text_fill_angle_spin_->setSuffix(QStringLiteral("°"));  // see fill_angle_spin_'s comment
-    text_fill_angle_spin_->setToolTip(
-        tr("The gradient's direction: 0 runs left to right, 90 bottom to "
-           "top -- the same counter-clockwise sense as the item's own "
-           "rotation."));
-    connect(text_fill_angle_spin_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
-        if (auto* item = editing_item()) {
-            if (auto* text = std::get_if<overlay::TextItem>(item)) {
-                text->fill_angle = value;
-                editor_->refresh_item();
-            }
-        }
-    });
-    text_gradient_row_ =
-        style::row(box, {new QLabel(tr("Gradient"), box), text_swatch2_.button,
-                         text_fill_shape_combo_, text_fill_angle_spin_});
-    layout->addWidget(text_gradient_row_);
-
-    // --- rect fill/stroke (docs/overlay-templates.md's rectangle item) --
-    fill_kind_combo_ = new QComboBox(box);
-    fill_kind_combo_->setObjectName(QStringLiteral("fill_kind_combo"));
-    fill_kind_combo_->addItem(tr("No fill"), QStringLiteral("none"));
-    fill_kind_combo_->addItem(tr("Solid"), QStringLiteral("solid"));
-    fill_kind_combo_->addItem(tr("Gradient"), QStringLiteral("gradient"));
-    fill_swatch_.button = new QPushButton(tr("Color..."), box);
-    set_swatch(fill_swatch_, QColor());
-    connect(fill_kind_combo_, &QComboBox::currentIndexChanged, this, [this] {
-        if (auto* item = editing_item()) {
-            if (auto* rect = std::get_if<overlay::RectItem>(item)) {
-                rect->fill_kind = fill_kind_combo_->currentData().toString().toStdString();
-                editor_->refresh_item();
-            }
-        }
-        update_selection_palette();
-    });
-    connect(fill_swatch_.button, &QPushButton::clicked, this,
-            [this] { edit_color(&overlay::RectItem::fill_color, fill_swatch_); });
-    fill_row_ = style::row(
-        box, {new QLabel(tr("Fill"), box), fill_kind_combo_, fill_swatch_.button});
-    layout->addWidget(fill_row_);
-
-    fill_swatch2_.button = new QPushButton(tr("To..."), box);
-    set_swatch(fill_swatch2_, QColor());
-    connect(fill_swatch2_.button, &QPushButton::clicked, this,
-            [this] { edit_color(&overlay::RectItem::fill_color2, fill_swatch2_); });
-    fill_angle_spin_ = new QDoubleSpinBox(box);
-    fill_angle_spin_->setObjectName(QStringLiteral("fill_angle_spin"));
-    fill_angle_spin_->setRange(-180.0, 180.0);
-    fill_angle_spin_->setSingleStep(5.0);
-    // A universal-character-name escape, not a raw UTF-8 byte pair: the
-    // literal's characters are `char16_t` (QStringLiteral is `u"..."`),
-    // so `"\xC2\xB0"` became two separate code units -- U+00C2 (Â) and
-    // U+00B0 (°) -- rather than the one degree sign those two bytes
-    // spell in UTF-8. `°` names the code point directly and is
-    // immune to the literal's own encoding.
-    fill_angle_spin_->setSuffix(QStringLiteral("°"));
-    fill_angle_spin_->setToolTip(
-        tr("The gradient's direction: 0 runs left to right, 90 bottom to "
-           "top -- the same counter-clockwise sense as the item's own "
-           "rotation."));
-    connect(fill_angle_spin_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
-        if (auto* item = editing_item()) {
-            if (auto* rect = std::get_if<overlay::RectItem>(item)) {
-                rect->fill_angle = value;
-                editor_->refresh_item();
-            }
-        }
-    });
-    fill_shape_combo_ = shape_combo("fill_shape_combo");
-    connect(fill_shape_combo_, &QComboBox::currentIndexChanged, this, [this] {
-        if (auto* item = editing_item()) {
-            if (auto* rect = std::get_if<overlay::RectItem>(item)) {
-                rect->fill_gradient = fill_shape_combo_->currentData().toString().toStdString();
-                editor_->refresh_item();
-            }
-        }
-        update_selection_palette();
-    });
-    fill_gradient_row_ =
-        style::row(box, {new QLabel(tr("Fill gradient"), box), fill_swatch2_.button,
-                         fill_shape_combo_, fill_angle_spin_});
-    layout->addWidget(fill_gradient_row_);
-
-    stroke_kind_combo_ = new QComboBox(box);
-    stroke_kind_combo_->setObjectName(QStringLiteral("stroke_kind_combo"));
-    stroke_kind_combo_->addItem(tr("No stroke"), QStringLiteral("none"));
-    stroke_kind_combo_->addItem(tr("Solid"), QStringLiteral("solid"));
-    stroke_kind_combo_->addItem(tr("Gradient"), QStringLiteral("gradient"));
-    stroke_swatch_.button = new QPushButton(tr("Color..."), box);
-    set_swatch(stroke_swatch_, QColor());
-    stroke_width_spin_ = new QDoubleSpinBox(box);
-    stroke_width_spin_->setRange(0.0, 0.2);
-    stroke_width_spin_->setSingleStep(0.002);
-    stroke_width_spin_->setDecimals(3);
-    stroke_width_spin_->setToolTip(
-        tr("A fraction of the image's width, like every other size here."));
-    connect(stroke_kind_combo_, &QComboBox::currentIndexChanged, this, [this] {
-        if (auto* item = editing_item()) {
-            if (auto* rect = std::get_if<overlay::RectItem>(item)) {
-                rect->stroke_kind = stroke_kind_combo_->currentData().toString().toStdString();
-                editor_->refresh_item();
-            }
-        }
-        update_selection_palette();
-    });
-    connect(stroke_swatch_.button, &QPushButton::clicked, this,
-            [this] { edit_color(&overlay::RectItem::stroke_color, stroke_swatch_); });
-    connect(stroke_width_spin_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
-        if (auto* item = editing_item()) {
-            if (auto* rect = std::get_if<overlay::RectItem>(item)) {
-                rect->stroke_width = value;
-                editor_->refresh_item();
-            }
-        }
-    });
-    stroke_row_ = style::row(box, {new QLabel(tr("Stroke"), box), stroke_kind_combo_,
-                                   stroke_swatch_.button, stroke_width_spin_});
-    layout->addWidget(stroke_row_);
-
-    stroke_swatch2_.button = new QPushButton(tr("To..."), box);
-    set_swatch(stroke_swatch2_, QColor());
-    connect(stroke_swatch2_.button, &QPushButton::clicked, this,
-            [this] { edit_color(&overlay::RectItem::stroke_color2, stroke_swatch2_); });
-    stroke_angle_spin_ = new QDoubleSpinBox(box);
-    stroke_angle_spin_->setRange(-180.0, 180.0);
-    stroke_angle_spin_->setSingleStep(5.0);
-    stroke_angle_spin_->setSuffix(QStringLiteral("°"));  // see fill_angle_spin_'s comment
-    connect(stroke_angle_spin_, &QDoubleSpinBox::valueChanged, this, [this](double value) {
-        if (auto* item = editing_item()) {
-            if (auto* rect = std::get_if<overlay::RectItem>(item)) {
-                rect->stroke_angle = value;
-                editor_->refresh_item();
-            }
-        }
-    });
-    stroke_shape_combo_ = shape_combo("stroke_shape_combo");
-    connect(stroke_shape_combo_, &QComboBox::currentIndexChanged, this, [this] {
-        if (auto* item = editing_item()) {
-            if (auto* rect = std::get_if<overlay::RectItem>(item)) {
-                rect->stroke_gradient =
-                    stroke_shape_combo_->currentData().toString().toStdString();
-                editor_->refresh_item();
-            }
-        }
-        update_selection_palette();
-    });
-    stroke_gradient_row_ =
-        style::row(box, {new QLabel(tr("Stroke gradient"), box), stroke_swatch2_.button,
-                         stroke_shape_combo_, stroke_angle_spin_});
-    layout->addWidget(stroke_gradient_row_);
-
-    // --- stacking order --------------------------------------------------
-    //
-    // Applies to any item type, not only rects, so these are enabled
-    // purely from position -- see `update_selection_palette`.
-    raise_button_ = new QPushButton(tr("Raise"), box);
-    raise_button_->setObjectName(QStringLiteral("raise_button"));
-    raise_button_->setToolTip(tr("Move the selected item one step toward the front."));
-    connect(raise_button_, &QPushButton::clicked, editor_, &OverlayEditor::raise_selected);
-    lower_button_ = new QPushButton(tr("Lower"), box);
-    lower_button_->setObjectName(QStringLiteral("lower_button"));
-    lower_button_->setToolTip(tr("Move the selected item one step toward the back."));
-    connect(lower_button_, &QPushButton::clicked, editor_, &OverlayEditor::lower_selected);
-    front_button_ = new QPushButton(tr("To &front"), box);
-    front_button_->setObjectName(QStringLiteral("front_button"));
-    connect(front_button_, &QPushButton::clicked, editor_,
-            &OverlayEditor::bring_selected_to_front);
-    back_button_ = new QPushButton(tr("To &back"), box);
-    back_button_->setObjectName(QStringLiteral("back_button"));
-    connect(back_button_, &QPushButton::clicked, editor_,
-            &OverlayEditor::send_selected_to_back);
-    order_row_ = style::row(box, {new QLabel(tr("Order"), box), raise_button_, lower_button_,
-                                  front_button_, back_button_});
-    layout->addWidget(order_row_);
-
-    remove_button_ = new QPushButton(tr("&Remove"), box);
-    remove_button_->setObjectName(QStringLiteral("remove_button"));
-    remove_button_->setToolTip(tr("Remove the selected item (or press Delete)."));
-    connect(remove_button_, &QPushButton::clicked, editor_,
-            &OverlayEditor::remove_selected);
-    layout->addWidget(remove_button_);
 
     return box;
 }
@@ -1717,60 +1342,6 @@ void TransmitPanel::set_last_rx_image(const images::Picture& image) {
     add_rx_button_->setToolTip(QString());
 }
 
-void TransmitPanel::set_swatch(ColorSwatch& swatch, const QColor& color) {
-    // The button said "Color..." and nothing else, so the current
-    // color was invisible -- the one thing a color control has to
-    // show. A filled square on the button, drawn at the icon size the
-    // style asks for so it matches the platform's other buttons.
-    // Dragging an item emits selectionChanged on every mouse move, so
-    // without this guard the whole rebuild -- parse, allocate, paint,
-    // setIcon, and the layout invalidation setIcon triggers -- runs at
-    // mouse-move rate on the app's most latency-sensitive path.
-    //
-    // **`swatch.set`, not just the color.** An invalid QColor equals an
-    // invalid QColor, so before this flag existed a button could not be
-    // given its *first* swatch at construction -- the guard ate the call
-    // -- and it therefore acquired one only when a matching item was
-    // first selected. See `build_properties` for why that mattered.
-    if (swatch.set && color == swatch.color) return;
-    swatch.set = true;
-    swatch.color = color;
-
-    const int size = style()->pixelMetric(QStyle::PM_SmallIconSize);
-    // Device pixels, like the waterfall's backing image: a logical-sized
-    // pixmap is upscaled on a HiDPI screen, giving a soft square with a
-    // half-resolution border.
-    const qreal dpr = devicePixelRatioF();
-    QPixmap pixmap(static_cast<int>(std::lround(size * dpr)),
-                   static_cast<int>(std::lround(size * dpr)));
-    pixmap.setDevicePixelRatio(dpr);
-    pixmap.fill(color.isValid() ? color : Qt::transparent);
-    if (color.isValid()) {
-        QPainter painter(&pixmap);
-        painter.setPen(palette().color(QPalette::WindowText));
-        painter.drawRect(0, 0, size - 1, size - 1);
-    }
-    swatch.button->setIcon(QIcon(pixmap));
-}
-
-template <typename T>
-void TransmitPanel::edit_color(std::string T::* field, ColorSwatch& swatch) {
-    const auto* before = editing_item();
-    const auto* initial = before != nullptr ? std::get_if<T>(before) : nullptr;
-    if (initial == nullptr) return;
-    const QColor color =
-        QColorDialog::getColor(QColor(QString::fromStdString(initial->*field)), this);
-    if (!color.isValid()) return;
-    // Resolved again, not held across the dialog: it is modal and runs
-    // an event loop, and the selection is a pointer into a vector.
-    auto* item = editing_item();
-    auto* target = item != nullptr ? std::get_if<T>(item) : nullptr;
-    if (target == nullptr) return;
-    target->*field = color.name().toStdString();
-    set_swatch(swatch, color);
-    editor_->refresh_item();
-}
-
 // --- property editing -------------------------------------------------------
 
 overlay::Item* TransmitPanel::editing_item() {
@@ -1778,120 +1349,6 @@ overlay::Item* TransmitPanel::editing_item() {
     // change signals do not write the value straight back.
     if (loading_properties_) return nullptr;
     return editor_->selected_item();
-}
-
-void TransmitPanel::show_family(const QString& family) {
-    // The presets, plus at most one more slot for a family a document
-    // names that the presets do not ("DejaVu Serif", from a template) --
-    // shown as itself, because showing it as "Default face" would say
-    // something about the item that is not true, and choosing any entry
-    // writes that entry back. Reused rather than appended to, so the
-    // list does not grow with every item selected.
-    constexpr int PRESETS = 5;
-    int index = family_combo_->findData(family);
-    if (index < 0) {
-        if (family_combo_->count() > PRESETS) family_combo_->removeItem(PRESETS);
-        family_combo_->addItem(family, family);
-        index = PRESETS;
-    } else if (index < PRESETS && family_combo_->count() > PRESETS) {
-        family_combo_->removeItem(PRESETS);
-    }
-    family_combo_->setCurrentIndex(index);
-}
-
-void TransmitPanel::update_selection_palette() {
-    const overlay::Item* item = editor_->selected_item();
-    const auto* rect = item ? std::get_if<overlay::RectItem>(item) : nullptr;
-    const bool is_text = item != nullptr && std::holds_alternative<overlay::TextItem>(*item);
-    const bool is_rect = rect != nullptr;
-
-    text_color_row_->setVisible(is_text);
-    text_style_row_->setVisible(is_text);
-    const QString text_kind = text_fill_kind_combo_->currentData().toString();
-    text_swatch_.button->setEnabled(is_text && text_kind != QLatin1String("none"));
-    text_gradient_row_->setVisible(is_text && text_kind == QLatin1String("gradient"));
-    // Radial has no angle.
-    const auto is_radial = [](const QComboBox* shape) {
-        return shape->currentData().toString() == QLatin1String("radial");
-    };
-    text_fill_angle_spin_->setEnabled(!is_radial(text_fill_shape_combo_));
-    fill_angle_spin_->setEnabled(!is_radial(fill_shape_combo_));
-    stroke_angle_spin_->setEnabled(!is_radial(stroke_shape_combo_));
-
-    fill_row_->setVisible(is_rect);
-    const QString fill_kind = fill_kind_combo_->currentData().toString();
-    fill_swatch_.button->setEnabled(is_rect && fill_kind != QLatin1String("none"));
-    fill_gradient_row_->setVisible(is_rect && fill_kind == QLatin1String("gradient"));
-
-    stroke_row_->setVisible(is_rect);
-    const QString stroke_kind = stroke_kind_combo_->currentData().toString();
-    stroke_swatch_.button->setEnabled(is_rect && stroke_kind != QLatin1String("none"));
-    stroke_width_spin_->setEnabled(is_rect && stroke_kind != QLatin1String("none"));
-    stroke_gradient_row_->setVisible(is_rect && stroke_kind == QLatin1String("gradient"));
-
-    // Stacking order and Remove apply to any item type, not only rects,
-    // so these are driven purely from position and presence.
-    raise_button_->setEnabled(item != nullptr && editor_->can_raise_selected());
-    lower_button_->setEnabled(item != nullptr && editor_->can_lower_selected());
-    front_button_->setEnabled(item != nullptr && editor_->can_raise_selected());
-    back_button_->setEnabled(item != nullptr && editor_->can_lower_selected());
-    remove_button_->setEnabled(item != nullptr);
-
-    // Rows just changed shape, so the palette's own size did too --
-    // reposition it against that new size rather than the stale one a
-    // caller might otherwise reposition against first.
-    position_selection_palette();
-}
-
-void TransmitPanel::position_selection_palette() {
-    if (selection_palette_ == nullptr) return;
-    // No `isVisible()` guard: this must run and set geometry *before*
-    // `on_selection` calls `show()` for the first time (see there), not
-    // only after. A window manager places a newly-mapped `Qt::Tool`
-    // window by its own policy -- centred over its parent, on several
-    // -- and an app-directed `setGeometry` sent only after `show()` can
-    // lose that race, which is what "always appears in the middle of
-    // the window" was. When there is nothing selected, `item_rect`
-    // below is empty and this falls through to `hide()`, which is a
-    // harmless no-op on an already-hidden palette (`resizeEvent` and
-    // `documentChanged` call this unconditionally on every resize/edit).
-    const QRect item_rect = editor_->selection_screen_rect();
-    if (item_rect.isEmpty()) {
-        selection_palette_->hide();
-        return;
-    }
-
-    // `item_rect` is in `editor_`'s own local coordinates; the palette
-    // is a top-level window now (see `build_selection_palette`), so
-    // everything from here on has to be in screen coordinates instead
-    // -- there is no shared parent rect left to measure against.
-    const QRect item_screen(editor_->mapToGlobal(item_rect.topLeft()), item_rect.size());
-    const QSize hint = selection_palette_->sizeHint();
-    constexpr int MARGIN = 8;
-
-    // The available area of whichever screen the canvas itself is on
-    // -- not `editor_`'s bounds, and not the top-level window's either.
-    // That is the whole point: on a narrow window the picture leaves no
-    // room to flip to *inside* the window, but the desktop around the
-    // window is exactly where a floating tool palette is supposed to
-    // go. Falls back to the item's own rect if a screen can't be
-    // resolved (headless/offscreen tests), which keeps the clamps below
-    // from collapsing to an empty region.
-    const QScreen* screen = editor_->screen();
-    const QRect avail = screen != nullptr ? screen->availableGeometry() : item_screen;
-
-    // To the item's right by default; flipped to its left if that would
-    // run off the screen.
-    int x = item_screen.right() + MARGIN;
-    if (x + hint.width() > avail.right()) {
-        x = item_screen.left() - MARGIN - hint.width();
-    }
-    x = std::clamp(x, avail.left(), std::max(avail.left(), avail.right() - hint.width()));
-    const int y = std::clamp(item_screen.top(), avail.top(),
-                              std::max(avail.top(), avail.bottom() - hint.height()));
-
-    selection_palette_->setGeometry(x, y, hint.width(), hint.height());
-    selection_palette_->raise();
 }
 
 void TransmitPanel::on_selection(overlay::Item* item) {
@@ -1909,92 +1366,21 @@ void TransmitPanel::on_selection(overlay::Item* item) {
     // existed and the two pictures silently stopped matching until the
     // window was resized. `test_pane_container.cpp` cannot see that:
     // its stand-in panes have static strips. `test_tx_panel.cpp` is the
-    // guard. `selection_palette_` is the one exception to this rule in
-    // the whole panel, and deliberately so -- it lives outside
-    // `control_strip()` entirely, so nothing here applies to it.
+    // guard.
     properties_->setEnabled(item != nullptr);
 
-    if (item == nullptr) {
-        selection_palette_->hide();
-        // Otherwise the last item's colors stay painted on disabled
-        // buttons, describing a selection that no longer exists.
-        loading_properties_ = true;
-        text_edit_->setEnabled(false);
-        align_combo_->setEnabled(false);
-        text_edit_->setPlainText(QString());
-        loading_properties_ = false;
-        set_swatch(text_swatch_, QColor());
-        set_swatch(text_swatch2_, QColor());
-        set_swatch(fill_swatch_, QColor());
-        set_swatch(fill_swatch2_, QColor());
-        set_swatch(stroke_swatch_, QColor());
-        set_swatch(stroke_swatch2_, QColor());
-        return;
-    }
-
-    const bool is_text = std::holds_alternative<overlay::TextItem>(*item);
-    const auto* rect = std::get_if<overlay::RectItem>(item);
-    const bool is_rect = rect != nullptr;
+    const auto* text = item != nullptr ? std::get_if<overlay::TextItem>(item) : nullptr;
     loading_properties_ = true;
-    text_edit_->setEnabled(is_text);
-    align_combo_->setEnabled(is_text);
-    if (is_text) {
-        const overlay::TextItem& text = std::get<overlay::TextItem>(*item);
-        text_edit_->setPlainText(QString::fromStdString(text.text));
-        align_combo_->setCurrentIndex(std::max(
-            0, align_combo_->findData(QString::fromStdString(text.align))));
-        set_swatch(text_swatch_, QColor(QString::fromStdString(text.color)));
-        // An unknown fill kind shows as Solid, which is what the renderer
-        // draws for it.
-        text_fill_kind_combo_->setCurrentIndex(std::max(
-            0, text_fill_kind_combo_->findData(QString::fromStdString(text.fill_kind))));
-        bold_button_->setChecked(text.bold);
-        italic_button_->setChecked(text.italic);
-        underline_button_->setChecked(text.underline);
-        show_family(QString::fromStdString(text.font_family));
-        set_swatch(text_swatch2_, QColor(QString::fromStdString(text.fill_color2)));
-        text_fill_shape_combo_->setCurrentIndex(std::max(
-            0, text_fill_shape_combo_->findData(QString::fromStdString(text.fill_gradient))));
-        text_fill_angle_spin_->setValue(text.fill_angle);
+    text_edit_->setEnabled(text != nullptr);
+    align_combo_->setEnabled(text != nullptr);
+    if (text != nullptr) {
+        text_edit_->setPlainText(QString::fromStdString(text->text));
+        align_combo_->setCurrentIndex(
+            std::max(0, align_combo_->findData(QString::fromStdString(text->align))));
     } else {
         text_edit_->setPlainText(QString());
-        set_swatch(text_swatch_, QColor());  // no color on an image or rect item
-        set_swatch(text_swatch2_, QColor());
-    }
-    if (is_rect) {
-        fill_kind_combo_->setCurrentIndex(
-            std::max(0, fill_kind_combo_->findData(QString::fromStdString(rect->fill_kind))));
-        set_swatch(fill_swatch_, QColor(QString::fromStdString(rect->fill_color)));
-        set_swatch(fill_swatch2_, QColor(QString::fromStdString(rect->fill_color2)));
-        fill_shape_combo_->setCurrentIndex(std::max(
-            0, fill_shape_combo_->findData(QString::fromStdString(rect->fill_gradient))));
-        fill_angle_spin_->setValue(rect->fill_angle);
-        stroke_kind_combo_->setCurrentIndex(std::max(
-            0, stroke_kind_combo_->findData(QString::fromStdString(rect->stroke_kind))));
-        set_swatch(stroke_swatch_, QColor(QString::fromStdString(rect->stroke_color)));
-        set_swatch(stroke_swatch2_, QColor(QString::fromStdString(rect->stroke_color2)));
-        stroke_shape_combo_->setCurrentIndex(std::max(
-            0, stroke_shape_combo_->findData(QString::fromStdString(rect->stroke_gradient))));
-        stroke_angle_spin_->setValue(rect->stroke_angle);
-        stroke_width_spin_->setValue(rect->stroke_width);
-    } else {
-        set_swatch(fill_swatch_, QColor());
-        set_swatch(fill_swatch2_, QColor());
-        set_swatch(stroke_swatch_, QColor());
-        set_swatch(stroke_swatch2_, QColor());
     }
     loading_properties_ = false;
-
-    // Position *before* `show()`, not after: a `Qt::Tool` window's
-    // first `show()` is what a window manager treats as "place this
-    // window", and several centre a newly-mapped utility window over
-    // its parent regardless of a `setGeometry` call that lands right
-    // after -- the fix is losing that race, not calling `setGeometry`
-    // harder. `update_selection_palette()` sets each row's visibility
-    // for this item type and, since that changes the palette's own
-    // size, ends by computing its geometry from that final size.
-    update_selection_palette();
-    selection_palette_->show();
 }
 
 // --- transmitting -----------------------------------------------------------
@@ -2002,7 +1388,6 @@ void TransmitPanel::on_selection(overlay::Item* item) {
 void TransmitPanel::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
     place_banner();
-    position_selection_palette();
 }
 
 void TransmitPanel::place_banner() { style::place_over(banner_, editor_); }
