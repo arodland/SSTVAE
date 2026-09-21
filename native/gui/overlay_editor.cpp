@@ -368,13 +368,31 @@ void OverlayEditor::rotate_item(overlay::Item& item, double delta_degrees) {
         item);
 }
 
-void OverlayEditor::rerender() {
-    if (base_.empty()) {
-        composed_ = images::Picture();
-    } else {
-        composed_ = overlay::render(base_, overlay::substitute(doc_, fields_),
-                                    last_rx_ ? &*last_rx_ : nullptr);
+// The flat field a document is arranged on before a picture is chosen:
+// the same colour the empty canvas is drawn in, so gaining an overlay
+// does not change what the viewport looks like.
+images::Picture OverlayEditor::blank_base() {
+    images::Picture blank(overlay::CANVAS_W, overlay::CANVAS_H);
+    const QColor fill = style::color::viewport_frame();
+    for (std::size_t i = 0; i + 2 < blank.rgb.size(); i += 3) {
+        blank.rgb[i] = static_cast<std::uint8_t>(fill.red());
+        blank.rgb[i + 1] = static_cast<std::uint8_t>(fill.green());
+        blank.rgb[i + 2] = static_cast<std::uint8_t>(fill.blue());
     }
+    return blank;
+}
+
+void OverlayEditor::rerender() {
+    // Composed even with no picture chosen, onto a blank frame -- a
+    // template is arranged and edited before the photograph is picked
+    // as often as after it, and with nothing drawn the editor was a
+    // dark rectangle that silently swallowed every item added to it.
+    //
+    // This cannot reach the air: `composed_image()` is still gated on a
+    // real base, and it is what `on_send` refuses on.
+    composed_ = overlay::render(base_.empty() ? blank_base() : base_,
+                                overlay::substitute(doc_, fields_),
+                                last_rx_ ? &*last_rx_ : nullptr);
     composed_valid_ = true;
 }
 
@@ -484,7 +502,11 @@ void OverlayEditor::paintEvent(QPaintEvent*) {
     const QRect rect = canvas_rect();
 
     if (!composed_valid_) rerender();
-    if (composed_.empty()) {
+    // Only with nothing to show at all. A document with items in it is
+    // drawn on the blank frame instead (see `rerender`) -- the strip's
+    // "No image selected" label is what says a picture is still
+    // missing, and Send refuses without one.
+    if (base_.empty() && doc_.items.empty()) {
         // **Draw the empty canvas as a 4:3 box, not as nothing.** The
         // two panes are locked to the same width so the pictures are
         // the same size, but an empty composer that painted only its

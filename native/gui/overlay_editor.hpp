@@ -178,6 +178,7 @@ private:
     // between them.
     enum class Drag { None, Move, Resize, Rotate };
 
+    static images::Picture blank_base();
     void rerender();
     // What is actually painted for `item`: substituted per `fields_`.
     // See `set_fields`.

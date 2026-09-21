@@ -10,6 +10,7 @@
 
 #include <QApplication>
 #include <QContextMenuEvent>
+#include <QImage>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QLayout>
@@ -127,6 +128,27 @@ void test_no_picture_means_nothing_to_compose() {
     check::is_true(!editor.composed_image().has_value(),
                    "editor: no base picture composes to nothing");
     check::is_true(!editor.has_base(), "editor: and says so");
+}
+
+// The composer is a template editor before it is a picture editor: a
+// document is arranged and saved without a photograph as often as with
+// one. It used to paint nothing at all until a picture arrived, so
+// every item added went into an empty dark rectangle and appeared to be
+// swallowed. Items now compose onto a blank frame -- and what must not
+// change with them is that there is still nothing to *send*.
+void test_items_are_drawn_before_a_picture_is_chosen() {
+    gui::OverlayEditor editor;
+    editor.resize(W, H);
+
+    const QImage empty = editor.grab().toImage();
+    editor.add_text("N0CALL");
+    QCoreApplication::processEvents();
+    const QImage drawn = editor.grab().toImage();
+
+    check::is_true(drawn != empty, "editor: an item shows with no picture chosen");
+    check::is_true(!editor.composed_image().has_value(),
+                   "editor: and there is still nothing to send");
+    check::is_true(!editor.has_base(), "editor: which is what the panel asks");
 }
 
 void test_clicking_an_item_selects_it() {
@@ -1060,6 +1082,7 @@ int main(int argc, char** argv) {
     const QApplication app(argc, argv);
 
     test_no_picture_means_nothing_to_compose();
+    test_items_are_drawn_before_a_picture_is_chosen();
     test_clicking_an_item_selects_it();
     test_dragging_moves_the_item_to_the_cursor();
     test_a_drag_keeps_the_grab_offset();
