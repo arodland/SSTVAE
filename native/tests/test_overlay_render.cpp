@@ -17,6 +17,7 @@
 #include <QTemporaryDir>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -478,6 +479,307 @@ void test_rect_json_roundtrips_through_the_model() {
                  "rect/json: stroke_width round-trips");
 }
 
+
+// --- text style and radial gradients --------------------------------------
+
+images::Picture render_one(const overlay::Item& item, const images::Picture& base) {
+    overlay::Doc doc;
+    doc.items.push_back(item);
+    return overlay::render(base, doc);
+}
+
+// Mean (red - blue) over the painted pixels inside one rectangle of the
+// canvas: positive leans toward a red first stop, negative toward a blue
+// second one. `ink` says how many pixels that was, so a band that
+// happened to hold no glyph cannot pass as "neutral".
+struct Lean {
+    double value = 0.0;
+    int ink = 0;
+};
+
+Lean lean(const images::Picture& out, const images::Picture& base, int x0, int y0,
+          int x1, int y1) {
+    Lean l;
+    double sum = 0.0;
+    for (int y = std::max(0, y0); y < std::min(out.height, y1); ++y) {
+        for (int x = std::max(0, x0); x < std::min(out.width, x1); ++x) {
+            const Rgb p = pixel(out, x, y);
+            if (same(p, pixel(base, x, y))) continue;
+            sum += p.r - p.b;
+            ++l.ink;
+        }
+    }
+    l.value = l.ink > 0 ? sum / l.ink : 0.0;
+    return l;
+}
+
+int count_exact(const images::Picture& out, const Rgb& colour) {
+    int n = 0;
+    for (int y = 0; y < out.height; ++y)
+        for (int x = 0; x < out.width; ++x)
+            if (same(pixel(out, x, y), colour)) ++n;
+    return n;
+}
+
+// Wide capitals with a red-to-blue gradient and no stroke, so every
+// painted pixel is fill.
+overlay::TextItem gradient_text(const char* text, double size) {
+    overlay::TextItem item;
+    item.text = text;
+    item.x = 0.05;
+    item.y = 0.2;
+    item.size = size;
+    item.stroke_width = 0.0;
+    item.fill_kind = "gradient";
+    item.color = "#ff0000";
+    item.fill_color2 = "#0000ff";
+    return item;
+}
+
+void test_solid_text_never_reads_the_gradient_fields() {
+    // Every document written before these fields existed has a solid
+    // fill, and its pixels must not depend on fields it could not have
+    // set. That is what "an unstyled document renders as before" comes
+    // down to in code: the solid path takes the brush it always did and
+    // reads nothing else.
+    const images::Picture base = solid(320, 240, 10, 20, 30);
+    overlay::TextItem plain;
+    plain.text = "W1AW";
+    plain.size = 0.2;
+    overlay::TextItem noisy = plain;
+    noisy.fill_color2 = "#00ff00";
+    noisy.fill_angle = 77.0;
+    noisy.fill_gradient = "radial";
+    check::is_true(render_one(plain, base).rgb == render_one(noisy, base).rgb,
+                   "render/style: a solid fill ignores the gradient fields");
+
+    // And a fill kind this build does not know draws solid rather than
+    // nothing -- the opposite of a rect's rule, deliberately: a caption
+    // that vanishes on an older build is worse than one drawn flat.
+    overlay::TextItem future = plain;
+    future.fill_kind = "shimmer";
+    check::is_true(render_one(future, base).rgb == render_one(plain, base).rgb,
+                   "render/style: an unknown fill kind draws solid, not nothing");
+}
+
+void test_bold_and_italic_change_the_glyphs() {
+    const images::Picture base = solid(320, 240, 0, 0, 0);
+    overlay::TextItem regular;
+    regular.text = "Wave";
+    regular.size = 0.25;
+    regular.stroke_width = 0.0;
+    overlay::TextItem bold = regular;
+    bold.bold = true;
+    overlay::TextItem italic = regular;
+    italic.italic = true;
+
+    const int ink = painted(render_one(regular, base), base);
+    check::is_true(ink > 0, "render/style: the regular face draws");
+    check::is_true(painted(render_one(bold, base), base) > ink * 11 / 10,
+                   "render/style: bold adds ink (" + std::to_string(ink) + " regular)");
+    check::is_true(render_one(italic, base).rgb != render_one(regular, base).rgb,
+                   "render/style: italic changes the glyphs");
+}
+
+void test_underline_draws_below_the_baseline_and_inside_the_handle() {
+    // Capitals only, so nothing the plain text draws reaches below its
+    // baseline, and any ink lower down is the underline.
+    const images::Picture base = solid(320, 240, 0, 0, 0);
+    overlay::TextItem plain;
+    plain.text = "WAVE";
+    plain.size = 0.2;
+    plain.stroke_width = 0.0;
+    overlay::TextItem underlined = plain;
+    underlined.underline = true;
+
+    const overlay::Bbox plain_ink = painted_bbox(render_one(plain, base), base);
+    const images::Picture out = render_one(underlined, base);
+    const overlay::Bbox ink = painted_bbox(out, base);
+    check::is_true(ink.y + ink.h > plain_ink.y + plain_ink.h,
+                   "render/style: the underline adds ink below the baseline");
+
+    // `item_bbox` extends to cover it: the handle must not clip a line
+    // the renderer draws.
+    const overlay::Bbox handle =
+        overlay::item_bbox(base.width, base.height, overlay::Item{underlined});
+    check::is_true(ink.x >= handle.x && ink.y >= handle.y &&
+                       ink.x + ink.w <= handle.x + handle.w &&
+                       ink.y + ink.h <= handle.y + handle.h,
+                   "render/style: an underline lies inside item_bbox");
+}
+
+void test_outline_text_draws_the_stroke_and_not_the_fill() {
+    const images::Picture base = solid(320, 240, 0, 0, 0);
+    overlay::TextItem filled;
+    filled.text = "WAVE";
+    filled.size = 0.3;
+    filled.color = "#ff0000";
+    filled.stroke_color = "#00ff00";
+    overlay::TextItem outline = filled;
+    outline.fill_kind = "none";
+
+    // Glyph interiors are exactly the fill colour; anti-aliasing only
+    // blends at the edges.
+    const Rgb red{255, 0, 0};
+    const images::Picture solid_out = render_one(filled, base);
+    const images::Picture outline_out = render_one(outline, base);
+    check::is_true(count_exact(solid_out, red) > 0, "render/style: a solid fill is there");
+    check::equal(count_exact(outline_out, red), 0, "render/style: \"none\" draws no fill");
+    check::is_true(painted(outline_out, base) > 0, "render/style: but it draws the stroke");
+
+    outline.stroke_width = 0.0;
+    check::equal(painted(render_one(outline, base), base), 0,
+                 "render/style: no fill and no stroke draws nothing");
+}
+
+void test_a_linear_text_gradient_runs_counter_clockwise_from_its_angle() {
+    const images::Picture base = solid(640, 240, 0, 0, 0);
+    const overlay::TextItem across = gradient_text("MMMMM", 0.3);
+    const images::Picture out = render_one(across, base);
+    const overlay::Bbox ink = painted_bbox(out, base);
+    const int third = ink.w / 3;
+    const Lean left = lean(out, base, ink.x, ink.y, ink.x + third, ink.y + ink.h);
+    const Lean right = lean(out, base, ink.x + ink.w - third, ink.y, ink.x + ink.w,
+                            ink.y + ink.h);
+    check::is_true(left.ink > 0 && right.ink > 0, "render/gradient: ink at both ends");
+    check::is_true(left.value > 0.0, "render/gradient: angle 0 starts red on the left");
+    check::is_true(right.value < 0.0, "render/gradient: and ends blue on the right");
+
+    // **90 runs bottom to top**, the counter-clockwise sense a rect's
+    // gradient and every item's rotation use. A clockwise implementation
+    // passes the check above and puts red at the top here.
+    overlay::TextItem upward = across;
+    upward.fill_angle = 90.0;
+    const images::Picture up = render_one(upward, base);
+    const int half = ink.h / 2;
+    const Lean top = lean(up, base, ink.x, ink.y, ink.x + ink.w, ink.y + half);
+    const Lean bottom = lean(up, base, ink.x, ink.y + half, ink.x + ink.w, ink.y + ink.h);
+    check::is_true(top.ink > 0 && bottom.ink > 0, "render/gradient: ink top and bottom");
+    check::is_true(bottom.value > top.value,
+                   "render/gradient: angle 90 is red at the bottom (counter-clockwise)");
+}
+
+void test_a_radial_text_gradient_is_centred() {
+    const images::Picture base = solid(640, 240, 0, 0, 0);
+    overlay::TextItem radial = gradient_text("MMMMM", 0.3);
+    radial.fill_gradient = "radial";
+    const images::Picture out = render_one(radial, base);
+    const overlay::Bbox ink = painted_bbox(out, base);
+    const int third = ink.w / 3;
+    const Lean left = lean(out, base, ink.x, ink.y, ink.x + third, ink.y + ink.h);
+    const Lean middle = lean(out, base, ink.x + third, ink.y, ink.x + ink.w - third,
+                             ink.y + ink.h);
+    const Lean right = lean(out, base, ink.x + ink.w - third, ink.y, ink.x + ink.w,
+                            ink.y + ink.h);
+    check::is_true(middle.value > left.value && middle.value > right.value,
+                   "render/gradient: radial is reddest in the middle, not at one end");
+    check::is_true(out.rgb != render_one(gradient_text("MMMMM", 0.3), base).rgb,
+                   "render/gradient: radial is not the linear ramp");
+}
+
+void test_a_text_gradient_turns_with_a_rotated_item() {
+    // Rotated a quarter turn counter-clockwise about its centre, the
+    // text's own left-to-right ramp runs bottom to top on screen. Built
+    // in unrotated screen space instead, it would stay left to right
+    // across a now-narrow column and the two halves would barely differ.
+    const images::Picture base = solid(480, 480, 0, 0, 0);
+    overlay::TextItem item = gradient_text("MMMMM", 0.2);
+    item.anchor = "mm";
+    item.x = 0.5;
+    item.y = 0.5;
+    item.rotation = 90.0;
+    const images::Picture out = render_one(item, base);
+    const overlay::Bbox ink = painted_bbox(out, base);
+    check::is_true(ink.h > ink.w, "render/gradient: the rotated text stands upright");
+    const int half = ink.h / 2;
+    const Lean top = lean(out, base, ink.x, ink.y, ink.x + ink.w, ink.y + half);
+    const Lean bottom = lean(out, base, ink.x, ink.y + half, ink.x + ink.w, ink.y + ink.h);
+    check::is_true(bottom.value > 0.0 && top.value < 0.0,
+                   "render/gradient: the ramp turned with the text");
+}
+
+void test_a_radial_rect_is_centred_and_so_is_its_stroke() {
+    const images::Picture base = solid(200, 100, 0, 0, 0);
+    overlay::RectItem rect;
+    rect.x = 0.0;
+    rect.y = 0.0;
+    rect.width = 1.0;
+    rect.height = 1.0;
+    rect.fill_kind = "gradient";
+    rect.fill_color = "#ff0000";
+    rect.fill_color2 = "#0000ff";
+    rect.fill_gradient = "radial";
+    const images::Picture out = render_one(rect, base);
+    const Rgb centre = pixel(out, 100, 50);
+    const Rgb corner = pixel(out, 0, 0);
+    check::is_true(centre.r > 200 && centre.b < 55,
+                   "render/rect: radial starts at the first colour in the centre");
+    check::is_true(corner.b > 200 && corner.r < 55,
+                   "render/rect: and reaches the second at the corners");
+    // The linear ramp is at its midpoint there, which is what makes the
+    // centre check above specific to radial.
+    rect.fill_gradient = "linear";
+    const Rgb linear_centre = pixel(render_one(rect, base), 100, 50);
+    check::is_true(std::abs(linear_centre.r - linear_centre.b) < 40,
+                   "render/rect: (a linear ramp is half-way at the centre)");
+
+    overlay::RectItem outline;
+    outline.x = 0.1;
+    outline.y = 0.1;
+    outline.width = 0.8;
+    outline.height = 0.8;
+    outline.stroke_kind = "gradient";
+    outline.stroke_color = "#ff0000";
+    outline.stroke_color2 = "#0000ff";
+    outline.stroke_width = 0.05;
+    const images::Picture linear_stroke = render_one(outline, base);
+    outline.stroke_gradient = "radial";
+    check::is_true(render_one(outline, base).rgb != linear_stroke.rgb,
+                   "render/rect: a stroke can be radial too");
+}
+
+// A font file this machine is known to have, or empty.
+std::string known_font_file() {
+    for (const char* path : {"/usr/share/fonts/TTF/DejaVuSans.ttf",
+                             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                             "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+                             "/Library/Fonts/Arial.ttf",
+                             "C:/Windows/Fonts/arial.ttf"}) {
+        if (QFile::exists(QString::fromUtf8(path))) return path;
+    }
+    return std::string();
+}
+
+void test_a_family_is_requested_and_a_font_file_still_wins() {
+    // A monospace "i" is as wide as an "m", so the request shows up in
+    // the measured width wherever a fixed-pitch face exists -- and the
+    // style hint is what finds one on platforms whose databases do not
+    // know the generic keywords as family names.
+    overlay::TextItem sans;
+    sans.text = "iiiiii";
+    overlay::TextItem mono = sans;
+    mono.font_family = "monospace";
+    const int sans_w = overlay::item_bbox(640, 480, overlay::Item{sans}).w;
+    const int mono_w = overlay::item_bbox(640, 480, overlay::Item{mono}).w;
+    check::is_true(mono_w > sans_w, "render/font: \"monospace\" is honoured (" +
+                                        std::to_string(mono_w) + " vs " +
+                                        std::to_string(sans_w) + ")");
+
+    const std::string file = known_font_file();
+    if (file.empty()) {
+        std::fprintf(stderr, "SKIP render/font: no known font file on this machine, "
+                             "so font-beats-family is untested here\n");
+        return;
+    }
+    overlay::TextItem from_file = sans;
+    from_file.font = file;
+    overlay::TextItem both = from_file;
+    both.font_family = "monospace";
+    check::equal(overlay::item_bbox(640, 480, overlay::Item{both}).w,
+                 overlay::item_bbox(640, 480, overlay::Item{from_file}).w,
+                 "render/font: a font file wins over a family request");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -504,6 +806,15 @@ int main(int argc, char** argv) {
     test_a_gradient_rect_interpolates_between_its_two_colours();
     test_a_stroke_only_rect_draws_an_outline_not_a_fill();
     test_rect_json_roundtrips_through_the_model();
+    test_solid_text_never_reads_the_gradient_fields();
+    test_bold_and_italic_change_the_glyphs();
+    test_underline_draws_below_the_baseline_and_inside_the_handle();
+    test_outline_text_draws_the_stroke_and_not_the_fill();
+    test_a_linear_text_gradient_runs_counter_clockwise_from_its_angle();
+    test_a_radial_text_gradient_is_centred();
+    test_a_text_gradient_turns_with_a_rotated_item();
+    test_a_radial_rect_is_centred_and_so_is_its_stroke();
+    test_a_family_is_requested_and_a_font_file_still_wins();
 
     return check::report("overlay rendering");
 }

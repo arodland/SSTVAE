@@ -10,6 +10,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPen>
+#include <QRadialGradient>
 #include <QRectF>
 #include <QSize>
 #include <QString>
@@ -84,10 +85,46 @@ QString family_for(const std::string& path) {
     return family;
 }
 
+// The document's four generic keywords. Qt's fontconfig backend
+// understands them as family names, but the other platforms' font
+// databases do not, so the style hint rides along: it is what makes
+// "monospace" mean a fixed-pitch face on a machine where no family is
+// called that. Anything else is a real family name, passed through.
+void apply_family_request(QFont& font, const std::string& request) {
+    const QString name = QString::fromStdString(request);
+    struct Generic {
+        const char* keyword;
+        QFont::StyleHint hint;
+    };
+    static constexpr Generic GENERICS[] = {
+        {"sans-serif", QFont::SansSerif},
+        {"serif", QFont::Serif},
+        {"monospace", QFont::Monospace},
+        {"cursive", QFont::Cursive},
+    };
+    font.setFamily(name);
+    for (const Generic& g : GENERICS) {
+        if (name.compare(QLatin1String(g.keyword), Qt::CaseInsensitive) == 0) {
+            font.setStyleHint(g.hint);
+            return;
+        }
+    }
+}
+
 QFont font_for(const TextItem& item, int size_px) {
     QFont font;
+    // `font` (a path) wins over `font_family`: a template that ships its
+    // own face is naming the exact file it needs. The family request is
+    // the fallback when there is no path *or* the path yielded no family,
+    // so an unreadable file degrades to the operator's choice of face
+    // rather than to the default one.
     const QString family = family_for(item.font);
     if (!family.isEmpty()) font.setFamily(family);
+    else if (!item.font_family.empty()) apply_family_request(font, item.font_family);
+    // Qt synthesizes a weight or a slant the face does not have, so
+    // these always do something visible.
+    font.setBold(item.bold);
+    font.setItalic(item.italic);
     // setPixelSize, not setPointSize: the document sizes text as a
     // fraction of canvas height, so the answer must not depend on the
     // DPI of whatever screen happens to be attached.
@@ -145,26 +182,85 @@ TextLayout layout_text(const TextItem& item, const QFont& font, int size_px,
     return out;
 }
 
-// One path for the whole block, so the stroke is drawn under *all* the
-// glyphs before any of them is filled. Stroking and filling line by
-// line would let a descender's outline cut across the line below it.
-QPainterPath text_path(const TextItem& item, const QFont& font,
-                       const TextLayout& layout) {
+// Where a line's underline sits, from the font's own metrics. Shared by
+// the drawing and by `item_bbox`, so a selection handle cannot stop
+// short of a line the renderer draws.
+//
+// Never thinner than a pixel: `lineWidth()` is 0 or fractional for some
+// faces at small sizes, and an underline that vanished there would make
+// the toggle look broken.
+QRectF underline_rect(const QFontMetricsF& fm, double x, double baseline,
+                      double width) {
+    return QRectF(x, baseline + fm.underlinePos(), width,
+                  std::max(1.0, fm.lineWidth()));
+}
+
+// The whole block as two paths, both stroked before either is filled,
+// so the stroke lies under *all* the glyphs. Stroking and filling line
+// by line would let a descender's outline cut across the line below.
+//
+// **The underline is its own path, not a rect added to the glyphs'.**
+// `QPainterPath::addText` adds outlines only -- a font's underline is a
+// decoration Qt draws separately, so `QFont::setUnderline` renders
+// nothing through this path -- and a rect sharing the glyphs' path
+// fights them over the fill rule: under odd-even a descender crossing
+// it is punched out, under winding a contour running the other way
+// cancels it. Two paths is what a union looks like without asking Qt to
+// compute one.
+struct TextShape {
+    QPainterPath glyphs;
+    QPainterPath underline;
+};
+
+TextShape text_shape(const TextItem& item, const QFont& font,
+                     const TextLayout& layout) {
     const QFontMetricsF fm(font);
-    QPainterPath path;
+    TextShape shape;
     for (int i = 0; i < layout.lines.size(); ++i) {
         const QString& line = layout.lines[i];
         if (line.isEmpty()) continue;
+        const double advance = fm.horizontalAdvance(line);
         double x = layout.left;
-        if (item.align == "center")
-            x += (layout.width - fm.horizontalAdvance(line)) / 2.0;
-        else if (item.align == "right")
-            x += layout.width - fm.horizontalAdvance(line);
+        if (item.align == "center") x += (layout.width - advance) / 2.0;
+        else if (item.align == "right") x += layout.width - advance;
         const double baseline =
             layout.top + layout.ascent + layout.line_height * i;
-        path.addText(QPointF(x, baseline), font, line);
+        shape.glyphs.addText(QPointF(x, baseline), font, line);
+        if (item.underline) {
+            shape.underline.addRect(underline_rect(fm, x, baseline, advance));
+        }
     }
-    return path;
+    return shape;
+}
+
+// Declared here, defined with the other gradient code under "Rectangles":
+// text and rects fill through the same geometry.
+QBrush gradient_brush(const QRectF& box, const std::string& c1, const std::string& c2,
+                      double angle_deg, const std::string& shape);
+
+// The glyph fill, in `RectItem`'s terms. A solid fill -- every document
+// written before these fields existed -- takes exactly the path it
+// always did, and never reads the gradient fields.
+//
+// **An unrecognised kind draws solid, not nothing.** That is the
+// opposite of a rect's rule (`rect_brush` treats an unknown kind as
+// "none"), and deliberately: a caption that vanishes on a build that
+// does not know some later fill kind is worse than one drawn flat, and
+// the whole point of text is to be read.
+//
+// A gradient spans the layout box rather than the ink, so it does not
+// shift as the text is edited, and it is built in the painter's current
+// space -- already rotated for the item -- so it turns with the text,
+// which is what "painted into the item's unrotated layer" means for a
+// rect.
+QBrush text_fill_brush(const TextItem& item, const TextLayout& layout) {
+    if (item.fill_kind == "none") return QBrush(Qt::NoBrush);
+    if (item.fill_kind == "gradient") {
+        return gradient_brush(QRectF(layout.left, layout.top, layout.width, layout.height),
+                              item.color, item.fill_color2, item.fill_angle,
+                              item.fill_gradient);
+    }
+    return QBrush(color_of(item.color, Qt::white));
 }
 
 void draw_text(QPainter& painter, const TextItem& item, int canvas_w,
@@ -199,7 +295,7 @@ void draw_text(QPainter& painter, const TextItem& item, int canvas_w,
         painter.translate(-centre);
     }
 
-    const QPainterPath path = text_path(item, font, layout);
+    const TextShape shape = text_shape(item, font, layout);
     if (stroke > 0.0) {
         QPen pen(color_of(item.stroke_color, Qt::black));
         // PIL's stroke_width is a radius, drawn outside the glyph; a
@@ -207,9 +303,14 @@ void draw_text(QPainter& painter, const TextItem& item, int canvas_w,
         // outside. Same visual weight rather than a coincidence.
         pen.setWidthF(stroke * 2.0);
         pen.setJoinStyle(Qt::RoundJoin);
-        painter.strokePath(path, pen);
+        painter.strokePath(shape.glyphs, pen);
+        if (item.underline) painter.strokePath(shape.underline, pen);
     }
-    painter.fillPath(path, color_of(item.color, Qt::white));
+    const QBrush fill = text_fill_brush(item, layout);
+    if (fill.style() != Qt::NoBrush) {
+        painter.fillPath(shape.glyphs, fill);
+        if (item.underline) painter.fillPath(shape.underline, fill);
+    }
     painter.restore();
 }
 
@@ -313,32 +414,50 @@ void apply_anchor(const std::string& anchor, int w, int h, int& x, int& y) {
 // ---------------------------------------------------------------------
 // Rectangles
 
-// A linear gradient spanning `w` x `h`, along `angle_deg` (counter-
-// clockwise, matching `RectItem::rotation`): 0 runs left to right, 90
-// bottom to top. The extent formula matches `sstvae/overlay/render.py`'s
-// `_gradient_layer` so the two implementations agree on where each
-// colour lands, even though Qt interpolates continuously where PIL's
-// numpy version is per-pixel.
-QLinearGradient rect_gradient(double w, double h, const std::string& c1,
-                              const std::string& c2, double angle_deg) {
+// A two-colour gradient over `box`, for rects and text alike.
+//
+// **Linear** runs along `angle_deg`, counter-clockwise to match the
+// items' `rotation`: 0 runs left to right, 90 bottom to top. The extent
+// formula matches `sstvae/overlay/render.py`'s `_gradient_layer` so the
+// two implementations agree on where each colour lands, even though Qt
+// interpolates continuously where PIL's numpy version is per-pixel.
+//
+// **Radial** is centred on the box and reaches `c2` at its corners -- a
+// radius of half the diagonal, so the whole box is inside the ramp and
+// no corner is left clamped at the far colour. It has no angle. Anything
+// but "radial" is linear: that is how a build that predates some later
+// shape degrades, and how an older build reads a radial one.
+QBrush gradient_brush(const QRectF& box, const std::string& c1, const std::string& c2,
+                      double angle_deg, const std::string& shape) {
+    const QColor from = color_of(c1, Qt::white);
+    const QColor to = color_of(c2, Qt::black);
+    const QPointF centre = box.center();
+    if (shape == "radial") {
+        const double radius = std::max(1.0, std::hypot(box.width(), box.height()) / 2.0);
+        QRadialGradient grad(centre, radius);
+        grad.setColorAt(0.0, from);
+        grad.setColorAt(1.0, to);
+        return QBrush(grad);
+    }
     const double theta = angle_deg * std::numbers::pi / 180.0;
     const double ux = std::cos(theta);
     const double uy = -std::sin(theta);
-    const double cx = w / 2.0;
-    const double cy = h / 2.0;
-    const double extent = (std::abs(ux) * w + std::abs(uy) * h) / 2.0;
+    const double extent = (std::abs(ux) * box.width() + std::abs(uy) * box.height()) / 2.0;
     const double ext = extent > 0.0 ? extent : 1.0;
-    QLinearGradient grad(QPointF(cx - ux * ext, cy - uy * ext),
-                         QPointF(cx + ux * ext, cy + uy * ext));
-    grad.setColorAt(0.0, color_of(c1, Qt::white));
-    grad.setColorAt(1.0, color_of(c2, Qt::black));
-    return grad;
+    QLinearGradient grad(QPointF(centre.x() - ux * ext, centre.y() - uy * ext),
+                         QPointF(centre.x() + ux * ext, centre.y() + uy * ext));
+    grad.setColorAt(0.0, from);
+    grad.setColorAt(1.0, to);
+    return QBrush(grad);
 }
 
 QBrush rect_brush(const std::string& kind, const std::string& color,
-                  const std::string& color2, double angle, double w, double h) {
+                  const std::string& color2, double angle, const std::string& shape,
+                  double w, double h) {
     if (kind == "solid") return QBrush(color_of(color, Qt::white));
-    if (kind == "gradient") return QBrush(rect_gradient(w, h, color, color2, angle));
+    if (kind == "gradient") {
+        return gradient_brush(QRectF(0, 0, w, h), color, color2, angle, shape);
+    }
     return QBrush(Qt::NoBrush);
 }
 
@@ -360,11 +479,11 @@ void draw_rect(QPainter& painter, const RectItem& item, int canvas_w, int canvas
         if (item.fill_kind != "none") {
             lp.fillRect(QRectF(0, 0, iw, ih),
                         rect_brush(item.fill_kind, item.fill_color, item.fill_color2,
-                                   item.fill_angle, iw, ih));
+                                   item.fill_angle, item.fill_gradient, iw, ih));
         }
         if (item.stroke_kind != "none" && sw > 0.0) {
             QPen pen(rect_brush(item.stroke_kind, item.stroke_color, item.stroke_color2,
-                                item.stroke_angle, iw, ih),
+                                item.stroke_angle, item.stroke_gradient, iw, ih),
                      sw);
             pen.setJoinStyle(Qt::MiterJoin);
             lp.setPen(pen);
@@ -447,12 +566,23 @@ Bbox item_bbox(int canvas_w, int canvas_h, const Item& item,
         TextItem measured = *text;
         if (measured.text.empty()) measured.text = " ";
         const TextLayout layout = layout_text(measured, font, size_px, x, y);
+        // An underline can sit below the font's descent, and the handle
+        // must not clip a line the renderer draws. The last line's is the
+        // lowest, and the same `underline_rect` placed it.
+        double bottom = layout.top + layout.height;
+        if (text->underline) {
+            const double baseline = layout.top + layout.ascent +
+                                    layout.line_height * (layout.lines.size() - 1);
+            bottom = std::max(bottom, underline_rect(QFontMetricsF(font), layout.left,
+                                                     baseline, layout.width)
+                                          .bottom());
+        }
         return Bbox{static_cast<int>(std::lround(layout.left - stroke)),
                     static_cast<int>(std::lround(layout.top - stroke)),
                     std::max(1, static_cast<int>(
                                     std::lround(layout.width + 2 * stroke))),
-                    std::max(1, static_cast<int>(
-                                    std::lround(layout.height + 2 * stroke)))};
+                    std::max(1, static_cast<int>(std::lround(
+                                    bottom - layout.top + 2 * stroke)))};
     }
 
     if (const RectItem* rect = std::get_if<RectItem>(&item)) {
