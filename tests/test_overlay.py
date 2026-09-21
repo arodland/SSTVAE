@@ -353,3 +353,269 @@ def test_style_fields_are_written_only_when_set():
     # A rect's own fill fields predate this change and are always written.
     assert rect_item["fill_kind"] == "none"
     assert OverlayDoc(items=[TextItem(bold=True)]).to_dict()["items"][0]["bold"] is True
+
+
+# --- text style: the Python renderer --------------------------------------
+#
+# The styled path draws each line itself, from a copy of Pillow's own
+# multi-line layout, so its fill, stroke and underline masks share one
+# layout. The first test is what makes that copy safe to keep: a Pillow
+# that changed its line-spacing formula would shift styled text by a few
+# pixels and every other test here would still pass.
+
+from dataclasses import replace  # noqa: E402
+
+import pytest  # noqa: E402
+
+from sstvae.images import find_font_face  # noqa: E402
+from sstvae.overlay import item_bbox  # noqa: E402
+
+BG = (20, 40, 60)
+
+
+def ink(out: Image.Image, background=BG) -> np.ndarray:
+    """A boolean mask of every pixel the overlay touched."""
+    return np.any(np.asarray(out) != np.array(background, dtype=np.uint8), axis=2)
+
+
+def ink_box(out: Image.Image, background=BG) -> tuple[int, int, int, int]:
+    ys, xs = np.nonzero(ink(out, background))
+    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
+def render_item(item, size=(640, 480)) -> Image.Image:
+    return render(Image.new("RGB", size, BG), OverlayDoc(items=[item]))
+
+
+@pytest.mark.parametrize("anchor", ["la", "ma", "ra", "ls", "mm", "md"])
+@pytest.mark.parametrize("align", ["left", "center", "right"])
+@pytest.mark.parametrize("stroke_width", [0.12, 0.0])
+def test_the_styled_path_lays_lines_out_exactly_where_pillow_does(anchor, align, stroke_width):
+    # A one-colour gradient is drawn by the styled path and looks like a
+    # solid fill, so the two renders must agree to rounding -- a line one
+    # pixel off shows up as a full-strength difference along every edge.
+    # With no stroke under it, the fill's anti-aliased edge meets bare
+    # canvas, which is also where compositing it wrongly would show.
+    text = "Wide first line\nmid\nlast one"
+    plain = TextItem(text=text, x=0.5, y=0.4, size=0.07, anchor=anchor, align=align,
+                     line_spacing=0.3, color="#ffcc00", stroke_width=stroke_width)
+    styled = replace(plain, fill_kind="gradient", fill_color2="#ffcc00")
+    a = np.asarray(render_item(plain), dtype=np.int16)
+    b = np.asarray(render_item(styled), dtype=np.int16)
+    assert np.abs(a - b).max() <= 2, (anchor, align, stroke_width, int(np.abs(a - b).max()))
+
+
+def test_solid_text_never_reads_the_gradient_fields():
+    plain = TextItem(text="W1AW", size=0.2)
+    noisy = TextItem(text="W1AW", size=0.2, fill_color2="#00ff00", fill_angle=77.0,
+                     fill_gradient="radial")
+    assert np.array_equal(np.asarray(render_item(plain)), np.asarray(render_item(noisy)))
+    # And an unknown kind draws solid rather than nothing, as in C++: a
+    # caption that vanishes on an older build is worse than one drawn flat.
+    future = TextItem(text="W1AW", size=0.2, fill_kind="shimmer")
+    assert np.array_equal(np.asarray(render_item(plain)), np.asarray(render_item(future)))
+
+
+def test_underline_draws_a_bar_under_every_line():
+    # Capitals, so nothing of the plain text reaches below a baseline and
+    # every row the underline adds is new ink. Two lines, so the bars must
+    # come in two separate groups -- one under each -- which is what the
+    # copied multi-line layout is for.
+    plain = TextItem(text="WAVE\nMAST", size=0.12, stroke_width=0.0, line_spacing=0.5)
+    under = TextItem(text="WAVE\nMAST", size=0.12, stroke_width=0.0, line_spacing=0.5,
+                     underline=True)
+    rows_plain = set(np.nonzero(ink(render_item(plain)).any(axis=1))[0])
+    added = sorted(set(np.nonzero(ink(render_item(under)).any(axis=1))[0]) - rows_plain)
+    groups = [[added[0]]]
+    for r in added[1:]:
+        if r == groups[-1][-1] + 1:
+            groups[-1].append(r)
+        else:
+            groups.append([r])
+    assert len(groups) == 2, groups
+    first_band_bottom = max(r for r in rows_plain if r < groups[0][0])
+    assert groups[0][0] > first_band_bottom, "the first bar sits below the first line"
+    assert groups[1][0] > max(rows_plain), "the second sits below the last line"
+
+
+def test_outline_text_is_hollow():
+    # Every pixel deep inside a filled render's ink must be background in
+    # the outline render -- "none" means outlined, not filled in the
+    # stroke colour. (The same assertion caught the C++ renderer.)
+    filled = TextItem(text="HOLLOW", size=0.3, color="#ff0000", stroke_width=0.0)
+    outline = TextItem(text="HOLLOW", size=0.3, fill_kind="none", stroke_color="#00ff00",
+                       stroke_width=0.06)
+    red = np.all(np.asarray(render_item(filled)) == (255, 0, 0), axis=2)
+    deep = red.copy()
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            deep &= np.roll(np.roll(red, dy, axis=0), dx, axis=1)
+    assert deep.sum() > 1000
+    out_ink = ink(render_item(outline))
+    assert not (out_ink & deep).any(), "the glyph interiors stay background"
+    assert out_ink.any(), "and the outline is drawn"
+    outline.stroke_width = 0.0
+    assert not ink(render_item(outline)).any(), "no fill and no stroke draws nothing"
+
+
+def _font_file(stem: str) -> str | None:
+    found = find_font_face({"DejaVuSans": "sans-serif", "DejaVuSansMono": "monospace"}[stem],
+                           False, False)
+    return found[0] if found and found[0].endswith(f"/{stem}.ttf") else None
+
+
+def test_bold_and_italic_change_the_glyphs_real_face_or_synthesized():
+    # With a family, bold and italic select real faces where installed;
+    # with a font *file*, which carries one face only, they are synthesized
+    # as Qt does. Both must visibly do something.
+    regular = TextItem(text="Wave", size=0.25, stroke_width=0.0, font_family="serif")
+    bold = TextItem(text="Wave", size=0.25, stroke_width=0.0, font_family="serif", bold=True)
+    italic = TextItem(text="Wave", size=0.25, stroke_width=0.0, font_family="serif",
+                      italic=True)
+    base_ink = ink(render_item(regular)).sum()
+    assert ink(render_item(bold)).sum() > base_ink * 1.1
+    assert not np.array_equal(np.asarray(render_item(italic)), np.asarray(render_item(regular)))
+
+    path = _font_file("DejaVuSans")
+    if path is None:
+        pytest.skip("DejaVuSans.ttf not installed; synthesized styles untested here")
+    from_file = TextItem(text="Wave", size=0.25, stroke_width=0.0, font=path)
+    fake_bold = TextItem(text="Wave", size=0.25, stroke_width=0.0, font=path, bold=True)
+    assert ink(render_item(fake_bold)).sum() > ink(render_item(from_file)).sum() * 1.1
+
+    # A synthesized slant leans *right*: vertical stems, so the top of the
+    # ink sits further right than the bottom by an amount a shear the
+    # wrong way (or none) cannot produce.
+    def top_minus_bottom(item):
+        mask = ink(render_item(item))
+        rows = np.nonzero(mask.any(axis=1))[0]
+        quarter = (rows[-1] - rows[0]) // 4
+        xs_top = np.nonzero(mask[rows[0]:rows[0] + quarter])[1]
+        xs_bottom = np.nonzero(mask[rows[-1] - quarter:rows[-1] + 1])[1]
+        return xs_top.mean() - xs_bottom.mean()
+    upright = TextItem(text="IIII", size=0.25, stroke_width=0.0, font=path)
+    slanted = TextItem(text="IIII", size=0.25, stroke_width=0.0, font=path, italic=True)
+    assert abs(top_minus_bottom(upright)) < 1.0
+    assert top_minus_bottom(slanted) > 5.0, "a synthesized italic leans right"
+
+
+def test_styled_ink_stays_inside_item_bbox():
+    """The editor's handle is item_bbox; it must not clip anything the
+    styled path draws -- underline, synthesized weight or slant included."""
+    path = _font_file("DejaVuSans")
+    variants = [
+        TextItem(text="Under\nlined", size=0.1, underline=True),
+        TextItem(text="Grad", size=0.15, fill_kind="gradient", fill_gradient="radial"),
+        TextItem(text="Bold", size=0.15, font_family="serif", bold=True, underline=True),
+    ]
+    if path is not None:
+        variants += [TextItem(text="Slant", size=0.15, font=path, italic=True),
+                     TextItem(text="Heavy", size=0.15, font=path, bold=True, underline=True)]
+    for item in variants:
+        x, y, w, h = item_bbox((640, 480), item)
+        box = ink_box(render_item(item))
+        assert box[0] >= x and box[1] >= y and box[2] <= x + w and box[3] <= y + h, (
+            item.text, box, (x, y, w, h))
+
+
+def _lean(out: Image.Image, box) -> float:
+    """Mean (red - blue) over the ink inside `box`."""
+    arr = np.asarray(out, dtype=np.float64)
+    region = ink(out)[box[1]:box[3], box[0]:box[2]]
+    px = arr[box[1]:box[3], box[0]:box[2]][region]
+    return float((px[:, 0] - px[:, 2]).mean())
+
+
+def _ramp(**kw) -> TextItem:
+    return TextItem(text="MMMMM", x=0.05, y=0.2, size=0.3, stroke_width=0.0,
+                    fill_kind="gradient", color="#ff0000", fill_color2="#0000ff", **kw)
+
+
+def test_a_linear_text_gradient_runs_counter_clockwise_from_its_angle():
+    out = render_item(_ramp())
+    x0, y0, x1, y1 = ink_box(out)
+    third = (x1 - x0) // 3
+    assert _lean(out, (x0, y0, x0 + third, y1)) > 0, "angle 0 starts red on the left"
+    assert _lean(out, (x1 - third, y0, x1, y1)) < 0, "and ends blue on the right"
+    # 90 runs bottom to top -- the counter-clockwise sense of `rotation`
+    # and of a rect's gradient. A clockwise one puts red on top.
+    up = render_item(_ramp(fill_angle=90.0))
+    x0, y0, x1, y1 = ink_box(up)
+    half = (y0 + y1) // 2
+    assert _lean(up, (x0, half, x1, y1)) > _lean(up, (x0, y0, x1, half))
+
+
+def _deep(mask: np.ndarray) -> np.ndarray:
+    """Pixels of `mask` whose eight neighbours are in it too."""
+    out = mask.copy()
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            out &= np.roll(np.roll(mask, dy, axis=0), dx, axis=1)
+    return out
+
+
+@pytest.mark.parametrize("shape", ["linear", "radial"])
+def test_a_stroke_does_not_move_the_ramp(shape):
+    # The gradient spans the text's own box, not its paint -- as in the Qt
+    # renderer, where it spans the layout box. So the fill colour deep in
+    # the glyphs is the same under a heavy stroke as under none; a ramp
+    # stretched over the stroke's extent would shift every one of them.
+    bare = replace(_ramp(fill_gradient=shape), text="MM", size=0.2)
+    heavy = replace(bare, stroke_width=0.3, stroke_color="#00ff00")
+    a, b = render_item(bare), render_item(heavy)
+    # "Inside" from an exact-colour solid render, eroded: exact means fully
+    # covered, where merely "not background" would admit anti-aliased
+    # edge pixels whose partial coverage lets the stroke show through.
+    solid = replace(bare, fill_kind="solid", color="#ff00ff")
+    inside = _deep(np.all(np.asarray(render_item(solid)) == (255, 0, 255), axis=2))
+    assert inside.sum() > 1000
+    diff = np.abs(np.asarray(a, dtype=np.int16) - np.asarray(b, dtype=np.int16))[inside]
+    assert diff.max() <= 2, int(diff.max())
+
+
+def test_a_radial_text_gradient_is_centred():
+    out = render_item(_ramp(fill_gradient="radial"))
+    x0, y0, x1, y1 = ink_box(out)
+    third = (x1 - x0) // 3
+    middle = _lean(out, (x0 + third, y0, x1 - third, y1))
+    assert middle > _lean(out, (x0, y0, x0 + third, y1))
+    assert middle > _lean(out, (x1 - third, y0, x1, y1))
+
+
+def test_a_text_gradient_turns_with_a_rotated_item():
+    # A quarter turn counter-clockwise puts the text's own left-to-right
+    # ramp bottom to top on screen.
+    out = render_item(replace(_ramp(), x=0.5, y=0.5, anchor="mm", rotation=90.0, size=0.2))
+    x0, y0, x1, y1 = ink_box(out)
+    assert y1 - y0 > x1 - x0, "the rotated text stands upright"
+    half = (y0 + y1) // 2
+    assert _lean(out, (x0, half, x1, y1)) > 0 > _lean(out, (x0, y0, x1, half))
+
+
+def test_a_radial_rect_is_centred_and_so_is_its_stroke():
+    rect = RectItem(x=0.0, y=0.0, width=1.0, height=1.0, fill_kind="gradient",
+                    fill_color="#ff0000", fill_color2="#0000ff", fill_gradient="radial")
+    out = np.asarray(render(Image.new("RGB", (200, 100), BG), OverlayDoc(items=[rect])))
+    assert out[50, 100, 0] > 200 and out[50, 100, 2] < 55, "the first colour at the centre"
+    assert out[0, 0, 2] > 200 and out[0, 0, 0] < 55, "the second at the corners"
+
+    def stroked(shape):
+        item = RectItem(x=0.1, y=0.1, width=0.8, height=0.8, stroke_kind="gradient",
+                        stroke_color="#ff0000", stroke_color2="#0000ff", stroke_width=0.05,
+                        stroke_gradient=shape)
+        return np.asarray(render(Image.new("RGB", (200, 100), BG), OverlayDoc(items=[item])))
+    assert not np.array_equal(stroked("linear"), stroked("radial")), "a stroke can be radial too"
+
+
+def test_a_family_is_requested_and_a_font_file_still_wins():
+    if _font_file("DejaVuSansMono") is None:
+        pytest.skip("DejaVu Sans Mono not installed")
+    sans = TextItem(text="iiiiii", font_family="sans-serif")
+    mono = TextItem(text="iiiiii", font_family="monospace")
+    assert item_bbox((640, 480), mono)[2] > item_bbox((640, 480), sans)[2]
+    path = _font_file("DejaVuSans")
+    if path is None:
+        pytest.skip("DejaVuSans.ttf not installed")
+    from_file = TextItem(text="iiiiii", font=path)
+    both = TextItem(text="iiiiii", font=path, font_family="monospace")
+    assert item_bbox((640, 480), both)[2] == item_bbox((640, 480), from_file)[2]
