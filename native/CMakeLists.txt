@@ -478,6 +478,7 @@ if(_want_gui)
     gui/rig_config.cpp
     gui/settings_dialog.cpp
     gui/overlay_editor.cpp
+    gui/item_menu.cpp
     gui/tx_panel.cpp
     gui/banner.cpp
     gui/crop_dialog.cpp
