@@ -632,6 +632,51 @@ void test_outline_text_draws_the_stroke_and_not_the_fill() {
                  "render/style: no fill and no stroke draws nothing");
 }
 
+void test_outline_text_is_hollow() {
+    // **The check above cannot see this, and did not.** A Qt pen
+    // straddles the glyph path, so with no fill over it the pen's inner
+    // half paints the glyph interiors in the *stroke* colour -- no fill
+    // colour anywhere, test passed, and "none" rendered as solid
+    // letters. What "outlined text" means is that the inside of every
+    // stem is background, so that is what is asserted: take the pixels
+    // well inside the ink of a filled render (an exact-fill pixel whose
+    // eight neighbours are exact-fill too) and require every one of them
+    // untouched in the outline render. A regular face at a stroke wide
+    // enough to swallow its stems is the case that failed.
+    const images::Picture base = solid(640, 480, 0, 0, 0);
+    overlay::TextItem filled;
+    filled.text = "HOLLOW";
+    filled.size = 0.3;
+    filled.color = "#ff0000";
+    filled.stroke_width = 0.0;
+    const images::Picture ink = render_one(filled, base);
+
+    overlay::TextItem outline = filled;
+    outline.fill_kind = "none";
+    outline.stroke_color = "#00ff00";
+    outline.stroke_width = 0.06;
+    const images::Picture out = render_one(outline, base);
+
+    const Rgb red{255, 0, 0};
+    int interior = 0;
+    int painted_inside = 0;
+    for (int y = 1; y + 1 < ink.height; ++y) {
+        for (int x = 1; x + 1 < ink.width; ++x) {
+            bool deep = true;
+            for (int dy = -1; dy <= 1 && deep; ++dy)
+                for (int dx = -1; dx <= 1 && deep; ++dx)
+                    deep = same(pixel(ink, x + dx, y + dy), red);
+            if (!deep) continue;
+            ++interior;
+            if (!same(pixel(out, x, y), pixel(base, x, y))) ++painted_inside;
+        }
+    }
+    check::is_true(interior > 1000, "render/style: the glyphs have an interior to check (" +
+                                        std::to_string(interior) + " px)");
+    check::equal(painted_inside, 0, "render/style: outline-only text is hollow");
+    check::is_true(painted(out, base) > 0, "render/style: and the outline is drawn");
+}
+
 void test_a_linear_text_gradient_runs_counter_clockwise_from_its_angle() {
     const images::Picture base = solid(640, 240, 0, 0, 0);
     const overlay::TextItem across = gradient_text("MMMMM", 0.3);
@@ -810,6 +855,7 @@ int main(int argc, char** argv) {
     test_bold_and_italic_change_the_glyphs();
     test_underline_draws_below_the_baseline_and_inside_the_handle();
     test_outline_text_draws_the_stroke_and_not_the_fill();
+    test_outline_text_is_hollow();
     test_a_linear_text_gradient_runs_counter_clockwise_from_its_angle();
     test_a_radial_text_gradient_is_centred();
     test_a_text_gradient_turns_with_a_rotated_item();

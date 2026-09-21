@@ -296,6 +296,8 @@ void draw_text(QPainter& painter, const TextItem& item, int canvas_w,
     }
 
     const TextShape shape = text_shape(item, font, layout);
+    const QBrush fill = text_fill_brush(item, layout);
+    const bool filled = fill.style() != Qt::NoBrush;
     if (stroke > 0.0) {
         QPen pen(color_of(item.stroke_color, Qt::black));
         // PIL's stroke_width is a radius, drawn outside the glyph; a
@@ -303,11 +305,27 @@ void draw_text(QPainter& painter, const TextItem& item, int canvas_w,
         // outside. Same visual weight rather than a coincidence.
         pen.setWidthF(stroke * 2.0);
         pen.setJoinStyle(Qt::RoundJoin);
+        painter.save();
+        if (!filled) {
+            // **Outline-only text must be hollow**, and the straddling
+            // pen's *inner* half is what a fill normally covers. With no
+            // fill it would paint the glyph interiors in the stroke
+            // colour -- on a regular-weight face at an ordinary stroke
+            // width that is the whole stem, and "none" came out solid.
+            // Clip it to everything but the ink, which leaves exactly
+            // PIL's outside-only stroke.
+            QPainterPath ink = shape.glyphs;
+            if (item.underline) ink = ink.united(shape.underline);
+            const double margin = stroke * 2.0 + 2.0;
+            QPainterPath outside;
+            outside.addRect(ink.boundingRect().adjusted(-margin, -margin, margin, margin));
+            painter.setClipPath(outside.subtracted(ink), Qt::IntersectClip);
+        }
         painter.strokePath(shape.glyphs, pen);
         if (item.underline) painter.strokePath(shape.underline, pen);
+        painter.restore();
     }
-    const QBrush fill = text_fill_brush(item, layout);
-    if (fill.style() != Qt::NoBrush) {
+    if (filled) {
         painter.fillPath(shape.glyphs, fill);
         if (item.underline) painter.fillPath(shape.underline, fill);
     }
