@@ -1,5 +1,6 @@
 #include "overlay_editor.hpp"
 
+#include <QContextMenuEvent>
 #include <QImage>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -711,6 +712,38 @@ void OverlayEditor::mouseMoveEvent(QMouseEvent* event) {
     update();
     emit selectionChanged(item);
     emit documentChanged();
+}
+
+int OverlayEditor::hit_index(const QPointF& widget_point) const {
+    if (const overlay::Item* item =
+            const_cast<OverlayEditor*>(this)->selected_item()) {
+        const overlay::Bbox box = overlay::item_bbox(
+            overlay::CANVAS_W, overlay::CANVAS_H, rendered(*item),
+            last_rx_ ? &*last_rx_ : nullptr);
+        const double rotation =
+            std::visit([](const auto& i) { return i.rotation; }, *item);
+        const QPoint point = widget_point.toPoint();
+        if (rotate_handle_rect(box, rotation).contains(point) ||
+            handle_rect(box, rotation).contains(point)) {
+            return selected_;
+        }
+    }
+    return hit_test(to_canvas(widget_point));
+}
+
+void OverlayEditor::contextMenuEvent(QContextMenuEvent* event) {
+    const int index = hit_index(QPointF(event->pos()));
+    if (index < 0) {
+        // Empty canvas: nothing of ours. The base class runs, so a menu
+        // offered by an ancestor still works.
+        QWidget::contextMenuEvent(event);
+        return;
+    }
+    // Selecting *first* is the point: a menu opened on whatever was
+    // selected before would edit the item the operator did not click.
+    if (index != selected_) select(index);
+    event->accept();
+    emit contextMenuRequested(selected_item(), event->globalPos());
 }
 
 void OverlayEditor::mouseReleaseEvent(QMouseEvent* event) {

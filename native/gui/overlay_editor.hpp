@@ -146,11 +146,22 @@ signals:
     // different item changes nothing that would be transmitted.
     void documentChanged();
 
+    // A right-click landed on an item -- or on one of the selection's
+    // grips, which belong to the selected item. The item is already
+    // selected when this fires, so a menu opened from it edits what the
+    // operator actually clicked; `global_pos` is where to open it.
+    // Nothing is emitted for a right-click on empty canvas.
+    void contextMenuRequested(overlay::Item* item, const QPoint& global_pos);
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    // Right-click: hit-test as a press does, select, and hand the item
+    // to whoever offers a menu. The editor opens none itself -- it has
+    // no business knowing what is on one.
+    void contextMenuEvent(QContextMenuEvent* event) override;
     // Delete removes the selection; the arrows nudge it. Nudging is
     // what a mouse cannot do: items are placed in normalized
     // coordinates, so the smallest useful drag is one widget pixel,
@@ -177,6 +188,12 @@ private:
     // callers check the rect.
     QPointF to_canvas(const QPointF& widget_point) const;
     int hit_test(const QPointF& canvas_point) const;
+    // The index a right-click at this widget point belongs to: the
+    // selected item if the point is on its rotate or resize grip, else
+    // whatever `hit_test` finds, else -1. The grips are tested first and
+    // in `mousePressEvent`'s order, because they sit outside the item's
+    // own area and would otherwise never be reachable.
+    int hit_index(const QPointF& widget_point) const;
     // `item`'s bbox, mapped into this widget's own pixel coordinates --
     // shared by `paintEvent`'s selection box and `selection_screen_rect`,
     // which must agree about where the item sits on screen. **Not

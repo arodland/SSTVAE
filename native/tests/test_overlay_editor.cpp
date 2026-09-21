@@ -9,6 +9,7 @@
 // like a working editor until an item will not go where you put it.
 
 #include <QApplication>
+#include <QContextMenuEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QLayout>
@@ -921,6 +922,108 @@ void test_selection_screen_rect_tracks_the_selection() {
     delete editor;
 }
 
+namespace {
+
+// --- right-click ------------------------------------------------------
+//
+// The editor opens no menu; `contextMenuRequested` is the whole hook.
+// What it owes a menu is that the item under the cursor is *selected*
+// by the time the signal fires -- otherwise the menu edits whatever was
+// selected before -- and that the selection's grips, which sit outside
+// the item's own area, count as the item.
+
+void right_click(gui::OverlayEditor& editor, QPoint at, QPoint global = QPoint(1000, 700)) {
+    QContextMenuEvent event(QContextMenuEvent::Mouse, at, global);
+    QApplication::sendEvent(&editor, &event);
+}
+
+struct Offers {
+    int count = 0;
+    overlay::Item* item = nullptr;
+    QPoint where;
+};
+
+Offers* watch_offers(gui::OverlayEditor& editor) {
+    auto* offers = new Offers;  // owned by the editor via the lambda's lifetime below
+    QObject::connect(&editor, &gui::OverlayEditor::contextMenuRequested, &editor,
+                     [offers](overlay::Item* item, const QPoint& global) {
+                         ++offers->count;
+                         offers->item = item;
+                         offers->where = global;
+                     });
+    QObject::connect(&editor, &QObject::destroyed, [offers] { delete offers; });
+    return offers;
+}
+
+void test_right_click_selects_the_item_and_offers_a_menu() {
+    std::unique_ptr<gui::OverlayEditor> editor(make_editor());
+    editor->add_text("A");
+    // Somewhere else, so the two do not overlap and the hit test has to
+    // discriminate.
+    std::get<overlay::TextItem>(*editor->selected_item()).x = 0.55;
+    std::get<overlay::TextItem>(*editor->selected_item()).y = 0.55;
+    editor->add_text("B");  // at the default corner, and selected
+    Offers* offers = watch_offers(*editor);
+
+    const QPointF a = centre_of(editor->doc().items[0], nullptr);
+    right_click(*editor, widget_point(a.x(), a.y()), QPoint(1234, 567));
+    check::equal(offers->count, 1, "right-click: on an item, a menu is offered");
+    check::equal(std::get<overlay::TextItem>(*editor->selected_item()).text,
+                 std::string("A"), "right-click: and that item is selected first");
+    check::is_true(offers->item == editor->selected_item(),
+                   "right-click: the item offered is the one now selected");
+    check::equal(offers->where.x(), 1234, "right-click: with where to open it, x");
+    check::equal(offers->where.y(), 567, "right-click: and y");
+
+    // Empty canvas: nothing offered, and the selection is left alone.
+    right_click(*editor, widget_point(overlay::CANVAS_W - 2, overlay::CANVAS_H / 2));
+    check::equal(offers->count, 1, "right-click: empty canvas offers nothing");
+    check::equal(std::get<overlay::TextItem>(*editor->selected_item()).text,
+                 std::string("A"), "right-click: and keeps the selection");
+}
+
+void test_right_click_on_a_grip_offers_the_selected_item() {
+    // Both grips sit outside the item's own area, so a hit test on the
+    // items alone finds nothing there. They belong to the selection.
+    std::unique_ptr<gui::OverlayEditor> editor(make_editor());
+    editor->add_rect();
+    Offers* offers = watch_offers(*editor);
+    const QRect on_screen = editor->selection_screen_rect();
+    const int side =
+        std::max(10, editor->style()->pixelMetric(QStyle::PM_SmallIconSize) * 2 / 3);
+    const QPoint rotate_grip(on_screen.x() + on_screen.width() + side * 2,
+                             on_screen.y() - side * 2);
+    const QPoint resize_grip(on_screen.x() + on_screen.width(),
+                             on_screen.y() + on_screen.height());
+
+    right_click(*editor, rotate_grip);
+    check::equal(offers->count, 1, "right-click: the rotate grip offers the item");
+    right_click(*editor, resize_grip);
+    check::equal(offers->count, 2, "right-click: and so does the resize grip");
+    check::is_true(editor->selected_item() != nullptr, "right-click: which stays selected");
+}
+
+void test_the_right_button_never_drags() {
+    // Qt delivers a press and then a context-menu event for a right
+    // click. `mousePressEvent` returns early on anything but the left
+    // button; if that ever goes, the item follows the pointer while the
+    // menu is open.
+    std::unique_ptr<gui::OverlayEditor> editor(make_editor());
+    editor->add_text("A");
+    const QPointF centre = centre_of(editor->doc().items[0], nullptr);
+    const double x0 = std::get<overlay::TextItem>(editor->doc().items[0]).x;
+    const QPoint at = widget_point(centre.x(), centre.y());
+    QMouseEvent press_event(QEvent::MouseButtonPress, QPointF(at), QPointF(at),
+                            Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+    QApplication::sendEvent(editor.get(), &press_event);
+    right_click(*editor, at);
+    move_to(*editor, widget_point(centre.x() + 120.0, centre.y() + 60.0));
+    check::equal(std::get<overlay::TextItem>(editor->doc().items[0]).x, x0,
+                 "right-click: a right-button drag does not move the item");
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
     check::report_crashes_instead_of_prompting();
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -954,6 +1057,9 @@ int main(int argc, char** argv) {
     test_an_unresolved_last_rx_inset_shows_a_placeholder_frame();
     test_the_placeholder_draws_even_when_nothing_is_selected();
     test_selection_screen_rect_tracks_the_selection();
+    test_right_click_selects_the_item_and_offers_a_menu();
+    test_right_click_on_a_grip_offers_the_selected_item();
+    test_the_right_button_never_drags();
 
     return check::report("overlay editor");
 }
