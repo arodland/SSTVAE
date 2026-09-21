@@ -404,18 +404,49 @@ rule is enforced by `tools/check_layering.py`.
   `sstvae/overlay/templates/` and the C++ test reads those same files,
   so there is one source of what "Reply" says.
   **`RectItem` (2026-09-15)** is the third item kind: a rectangle,
-  independently fillable and strokable with a solid color or a linear
+  independently fillable and strokable with a solid color or a
   gradient (`fill_kind`/`stroke_kind` each "none"/"solid"/"gradient",
   flat fields rather than a nested gradient struct, matching this
   module's style). The gradient angle is counter-clockwise, the same
   sense as `rotation`, deliberately: it is painted into the item's own
   unrotated layer and rotated with it, so the two numbers add exactly
   as they read. `render.py` builds a gradient with numpy (PIL has no
-  gradient primitive); `native/core/overlay/render.cpp` uses
-  `QLinearGradient` for the identical geometry through Qt's own
-  interpolation. Like `ImageItem`, `item_bbox` reports the *unrotated*
-  extent for a rotated rect — an existing simplification carried over
-  for consistency, not a new gap.
+  gradient primitive); `native/core/overlay/render.cpp` builds the
+  identical geometry through Qt's own interpolation, in one
+  `gradient_brush` that text shares. Like `ImageItem`, `item_bbox`
+  reports the *unrotated* extent for a rotated rect — an existing
+  simplification carried over for consistency, not a new gap.
+  **Text style and radial gradients (2026-09-20).** `TextItem` gained
+  `bold`/`italic`/`underline`, a `font_family` (a family name or a
+  generic keyword; `font`, a path, still wins, because a template that
+  ships its own face names the file it needs) and a glyph fill in
+  `RectItem`'s terms — `fill_kind`, `fill_color2`, `fill_angle` — with
+  `color` as the first stop in every kind, which is what keeps an old
+  document unchanged, and "none" drawing outlined text. Every gradient
+  can be radial through `fill_gradient`/`stroke_gradient` ("linear" |
+  "radial"), a field of its own rather than a fourth kind so an older
+  build still draws the gradient, linear, instead of dropping the fill.
+  **`DOC_VERSION` stays 1** — `RectItem`'s own trade — and what makes
+  that honest is that every one of these fields is **written only when
+  it differs from its default**, by both writers (`put_unless_default`,
+  `_SPARSE_FIELDS`): a document using none of them is byte-identical to
+  what an older build writes. `tests/test_native_overlay.py` holds that
+  per field, since a writer emitting the whole group once any of it is
+  set passes a whole-document check. Four renderer facts worth not
+  re-deriving. **Underline is a path of its own**: `QPainterPath::addText`
+  adds outlines only, and a rect sharing the glyphs' path fights them
+  over the fill rule. **Outlined text is clipped to outside the ink**,
+  because a Qt pen straddles the path and its inner half painted every
+  stem solid. **An unknown fill kind draws solid** on text, unlike a
+  rect's "none": a caption that vanishes on an older build is worse
+  than one drawn flat. And **Python's styled path lays lines out from a
+  copy of Pillow's multi-line formula** (its fill, stroke and underline
+  masks must share one layout, and PIL's spacing moves with each mask's
+  stroke width); a parametrized test pins the copy against PIL's own
+  call. An *unstyled* Python item still takes the exact old call on the
+  training face, DejaVu Sans Bold, so existing documents render
+  byte-for-byte as before — which is also why an unstyled caption looks
+  heavier there than in Qt, whose default face is the regular weight.
 
 Two rules the deleted GUI established, which the native app inherits
 and which are the reason its panels look the way they do: a composition
@@ -2505,6 +2536,19 @@ visibility, and the function falls through to a `hide()` that is a
 harmless no-op on an already-hidden window -- `resizeEvent` and
 `documentChanged` already called this unconditionally on every
 resize/edit, visible or not.
+
+**The palette's text rows (2026-09-20)** follow its own idiom rather
+than borrowing a rect's Fill rows, which the tests pin as hidden for
+text: a Style row (bold/italic/underline toggles and a family combo —
+safe here, the palette being a window and not a menu), a fill kind
+beside the Color row, and a Gradient row; every gradient row, text or
+rect, gains Linear/Radial, and Radial disables the angle it lacks.
+Selecting an item fires every control's change signal, and two cases
+would write something back if not handled: a family the presets lack
+is shown as itself in one reused extra slot, and an unknown fill kind
+shows as Solid but stays in the document. `edit_color<T>` replaced
+`edit_rect_color` and resolves the item again after the modal colour
+dialog instead of holding a pointer into the item vector across it.
 
 ONNX runtime path complete: the codec is onnxruntime, torch is
 training-only, and `cli`/`listen` install ~263 MB instead of
