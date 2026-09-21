@@ -219,6 +219,8 @@ private:
     void refresh_templates();
     void open_custom_fields_dialog();
     void save_as_template();
+    void delete_template();
+    void update_delete_enabled();
     static std::filesystem::path builtin_templates_dir();
     void update_level_label();
     overlay::Item* editing_item();
@@ -258,9 +260,14 @@ private:
     // --- templates (docs/overlay-templates.md) --------------------------
     QComboBox* template_combo_ = nullptr;
     QPushButton* save_template_button_ = nullptr;
+    QPushButton* delete_template_button_ = nullptr;
     // Parallel to `template_combo_`'s items: index 0 is the built-in
     // "None" (an empty document, never read from a file).
     std::vector<overlay::Doc> templates_;
+    // Parallel to `templates_`, and what makes a template deletable: a
+    // file of the operator's own has a path here, "None" and the
+    // built-ins (which live beside the executable) have an empty one.
+    std::vector<std::filesystem::path> template_paths_;
     QGroupBox* fields_box_ = nullptr;
     QLineEdit* theircall_edit_ = nullptr;
     // Up to this many custom fields are shown inline, live-updating, in

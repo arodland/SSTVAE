@@ -26,6 +26,7 @@
 // assertion: what the layout cares about is the number, and hiding the
 // row by some other means later would break the panes the same way.
 
+#include <QAbstractButton>
 #include <QApplication>
 #include <QByteArray>
 #include <QComboBox>
@@ -36,6 +37,7 @@
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPoint>
 #include <QPushButton>
@@ -487,6 +489,79 @@ void test_a_template_from_the_configured_folder_is_listed() {
     check::is_true(found, "a template from the configured folder is listed by name");
 }
 
+// --- deleting a template ----------------------------------------------------
+
+// The button is gated on where the template came from, not on what it
+// is called: "None" and the three built-ins live beside the executable,
+// which an installed app has no business writing to.
+void test_delete_is_offered_only_for_the_operators_own_templates() {
+    QTemporaryDir dir;
+    check::is_true(dir.isValid(), "temp dir created");
+
+    overlay::Doc doc;
+    doc.name = "Mine";
+    overlay::TextItem item;
+    item.text = "hi";
+    doc.items.push_back(item);
+    const QString file_path = dir.filePath(QStringLiteral("mine.json"));
+    {
+        QFile file(file_path);
+        check::is_true(file.open(QIODevice::WriteOnly), "template file opened for writing");
+        file.write(QByteArray::fromStdString(overlay::to_json(doc)));
+    }
+
+    AppState state;
+    state.config().folders.template_dir = dir.path().toStdString();
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    auto* remove =
+        panel->findChild<QPushButton*>(QStringLiteral("delete_template_button"));
+    check::is_true(combo != nullptr && remove != nullptr,
+                   "the panel has a template combo and a delete button");
+    if (combo == nullptr || remove == nullptr) return;
+
+    // None, CQ, Reply, Reply with picture, Mine.
+    check::equal(combo->count(), 5, "the built-ins plus the operator's own");
+    check::is_true(!remove->isEnabled(), "delete is off for \"None\"");
+    for (int i = 1; i <= 3; ++i) {
+        combo->setCurrentIndex(i);
+        QCoreApplication::processEvents();
+        check::is_true(!remove->isEnabled(),
+                       ("delete is off for the built-in " + combo->itemText(i)).toStdString());
+    }
+
+    combo->setCurrentIndex(4);
+    QCoreApplication::processEvents();
+    check::is_true(remove->isEnabled(), "and on for a template of the operator's own");
+
+    // Confirm the modal, and the file goes. The Yes button is *clicked*
+    // rather than the dialog closed with `accept()` or `done(Yes)`:
+    // `QMessageBox::question` reports `standardButton(clickedButton())`,
+    // which with nothing clicked is `NoButton` however the box was
+    // closed -- so either shortcut reads as a decline and deletes
+    // nothing, while the test still looks like it answered.
+    QTimer::singleShot(0, remove, [] {
+        if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+            if (QAbstractButton* yes = box->button(QMessageBox::Yes)) yes->click();
+        }
+    });
+    remove->click();
+    QCoreApplication::processEvents();
+
+    check::is_true(!QFile::exists(file_path), "the template file is gone");
+    check::equal(combo->count(), 4, "and it has left the list");
+    // The composition is not the file: deleting one must not wipe the
+    // canvas in front of the operator.
+    auto* editor = panel->findChild<OverlayEditor*>();
+    check::is_true(editor != nullptr && editor->doc().items.size() == 1,
+                   "the canvas still holds what was composed");
+    check::is_true(!remove->isEnabled(), "and the button follows the fallback to \"None\"");
+}
+
 // --- "Save as template..." defaults to the loaded name --------------------
 
 // `save_as_template` opens a modal `QInputDialog`; the test answers it
@@ -642,6 +717,7 @@ int main(int argc, char** argv) {
     test_a_template_with_more_custom_fields_than_fit_inline_overflows();
     test_typing_their_call_updates_the_editor_s_fields();
     test_a_template_from_the_configured_folder_is_listed();
+    test_delete_is_offered_only_for_the_operators_own_templates();
     test_saving_a_loaded_template_defaults_to_its_own_name();
     test_selecting_an_item_opens_nothing();
     test_a_right_click_on_an_item_opens_the_menu();

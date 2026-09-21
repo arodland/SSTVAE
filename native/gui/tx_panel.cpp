@@ -653,13 +653,21 @@ QWidget* TransmitPanel::build_tool_row() {
            "{field Label}."));
     connect(save_template_button_, &QPushButton::clicked, this,
             &TransmitPanel::save_as_template);
+    delete_template_button_ = new QPushButton(tr("De&lete"), panel);
+    delete_template_button_->setObjectName(QStringLiteral("delete_template_button"));
+    delete_template_button_->setToolTip(
+        tr("Delete the selected template's file. The built-ins ship with "
+           "the app and cannot be deleted."));
+    connect(delete_template_button_, &QPushButton::clicked, this,
+            &TransmitPanel::delete_template);
     // One `style::row` item rather than two separate ones: a `FlowLayout`
     // wraps *between* items, and the combo and the button that saves to
     // it are one idea -- "Template: [pick one] [Save...]" -- not two
     // controls that happen to sit near each other. Split across a wrap
     // they read as unrelated.
     column->addWidget(style::row(
-        panel, {new QLabel(tr("Template"), panel), template_combo_, save_template_button_}));
+        panel, {new QLabel(tr("Template"), panel), template_combo_, save_template_button_,
+                delete_template_button_}));
     // **No `column->addWidget(overlay_box)` here.** `overlay_box` is an
     // alias for `panel`, whose layout `column` *is*, so that line asked
     // Qt to add a widget to its own child layout. Qt refuses and prints
@@ -965,17 +973,24 @@ void TransmitPanel::refresh_templates() {
     const QString previous = template_combo_->currentText();
 
     templates_.clear();
+    template_paths_.clear();
     template_combo_->blockSignals(true);
     template_combo_->clear();
 
     // Index 0: not a file, not loaded from anywhere -- an empty
     // document is exactly today's "no overlay" behaviour.
     templates_.push_back(overlay::Doc());
+    template_paths_.emplace_back();
     template_combo_->addItem(tr("None"));
 
     for (overlay::Doc& doc : overlay::load_builtin_templates(builtin_templates_dir())) {
         template_combo_->addItem(QString::fromStdString(doc.name));
         templates_.push_back(std::move(doc));
+        // Deliberately pathless even though these *are* files: they sit
+        // beside the executable, in a directory an installed app has no
+        // business writing to, so "can this be deleted" is the same
+        // question as "did it come from the operator's folder".
+        template_paths_.emplace_back();
     }
     for (overlay::LoadedTemplate& loaded :
         overlay::load_templates(app_->config().folders.template_dir)) {
@@ -983,6 +998,7 @@ void TransmitPanel::refresh_templates() {
             loaded.doc.name.empty() ? loaded.path.stem().string() : loaded.doc.name);
         template_combo_->addItem(label);
         templates_.push_back(std::move(loaded.doc));
+        template_paths_.push_back(std::move(loaded.path));
     }
 
     // Keep the same selection across a refresh (a saved template landed
@@ -991,6 +1007,19 @@ void TransmitPanel::refresh_templates() {
     const int keep = template_combo_->findText(previous);
     template_combo_->setCurrentIndex(std::max(0, keep));
     template_combo_->blockSignals(false);
+    // Signals are blocked above, so `on_template_selected` -- which is
+    // the other place this is kept in step -- does not run here.
+    update_delete_enabled();
+}
+
+// `setEnabled`, never `setVisible`: this row is in the control strip,
+// whose height must not change (see the file header of
+// test_tx_panel.cpp).
+void TransmitPanel::update_delete_enabled() {
+    const int index = template_combo_->currentIndex();
+    delete_template_button_->setEnabled(
+        index >= 0 && index < static_cast<int>(template_paths_.size()) &&
+        !template_paths_[index].empty());
 }
 
 void TransmitPanel::on_template_selected(int index) {
@@ -999,6 +1028,7 @@ void TransmitPanel::on_template_selected(int index) {
     // `set_doc` emits `documentChanged`, already connected to the
     // debounced optimizer, so nothing further is needed for that half.
     editor_->set_doc(templates_[index]);
+    update_delete_enabled();
     // The *set* of custom fields can only change here (a template
     // switch), never on a keystroke -- see `sync_custom_field_rows`'s
     // own comment for why that split matters.
@@ -1156,6 +1186,39 @@ void TransmitPanel::save_as_template() {
     }
     app_->log_event("tx", log::Severity::Info,
                     tr("saved template \"%1\"").arg(name.trimmed()));
+    refresh_templates();
+}
+
+void TransmitPanel::delete_template() {
+    const int index = template_combo_->currentIndex();
+    if (index < 0 || index >= static_cast<int>(template_paths_.size())) return;
+    const std::filesystem::path path = template_paths_[index];
+    if (path.empty()) return;  // "None" or a built-in; the button is disabled
+
+    const QString label = template_combo_->itemText(index);
+    if (QMessageBox::question(
+            this, tr("Delete template?"),
+            tr("Delete the template \"%1\"? This removes %2 from disk.")
+                .arg(label, QString::fromStdString(path.filename().string()))) !=
+        QMessageBox::Yes) {
+        return;
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    if (ec) {
+        app_->log_event("tx", log::Severity::Error,
+                        tr("could not delete template \"%1\": %2")
+                            .arg(label, QString::fromStdString(ec.message())));
+        QMessageBox::critical(this, tr("Could not delete template"),
+                              QString::fromStdString(ec.message()));
+        return;
+    }
+    app_->log_event("tx", log::Severity::Info, tr("deleted template \"%1\"").arg(label));
+    // The canvas keeps what it holds: deleting the file is not a
+    // request to throw away the composition in front of the operator,
+    // who may well be about to re-save it under another name. The combo
+    // falls back to "None" because the name it held is gone.
     refresh_templates();
 }
 
