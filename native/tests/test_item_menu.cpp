@@ -625,6 +625,24 @@ void test_the_family_menu_writes_the_document() {
     check::equal(family->text().toStdString(), std::string("Monospace"), "menu: and shows it");
 }
 
+// The button's text changes with the selection, so its width must cover
+// the longest label rather than whichever one happens to be showing --
+// sized to "Default", "Sans Serif" was clipped.
+void test_the_family_button_fits_every_label() {
+    Fixture fix;
+    fix.editor->add_text("N0CALL");
+    auto* family = fix.find<QPushButton>("menu_family");
+    check::is_true(family != nullptr, "menu: a family button");
+    if (family == nullptr || family->menu() == nullptr) return;
+    fix.open();
+    const int room = family->minimumWidth();
+    for (QAction* action : family->menu()->actions()) {
+        action->trigger();
+        check::is_true(family->sizeHint().width() <= room,
+                       ("menu: the family button fits " + action->text()).toStdString());
+    }
+}
+
 // Remove goes through the editor, so the selection and the document stay
 // one story.
 void test_remove_removes_the_selection() {
@@ -660,6 +678,7 @@ int main(int argc, char** argv) {
     test_it_refuses_an_item_that_is_not_the_selection();
     test_the_weight_toggles_write_the_document();
     test_the_family_menu_writes_the_document();
+    test_the_family_button_fits_every_label();
     test_remove_removes_the_selection();
 
     return check::report("item menu");

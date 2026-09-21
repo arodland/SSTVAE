@@ -304,6 +304,15 @@ void ItemMenu::build_format() {
         });
     }
     family_->setMenu(families);
+    // Sized for the longest label, not for whatever is selected: the text
+    // changes with the selection, and a button sized to "Default" clips
+    // "Sans Serif".
+    for (const Family& family : FAMILIES) {
+        family_->setText(family_label(family.value));
+        family_->setMinimumWidth(
+            std::max(family_->minimumWidth(), family_->sizeHint().width()));
+    }
+    family_->setText(QString());
     layout->addWidget(family_);
 
     layout->addWidget(new QLabel(tr("Size"), row));
