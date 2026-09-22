@@ -1025,8 +1025,10 @@ the Wine work here: a pass is suggestive, a failure conclusive.
 signed at all / In subcomponent: .../templates/reply-picture.json".
 The built-in templates were staged "beside the executable", which in a
 bundle is exactly that directory, and **macdeployqt printed the error
-and exited 0 on every CI run for a week**, so the macOS artifacts
-shipped unsigned with nothing red anywhere. Three things now hold it:
+and exited 0 on every CI run for a week**, so the macOS CI artifacts
+carried no valid signature with nothing red anywhere (no release went
+out in that window, so nothing reached an operator; the first one
+would have). Three things now hold it:
 `sstvae_copy_builtin_templates` puts a bundle's data in
 `Contents/Resources` (and `builtin_templates_dir` looks there first on
 macOS), `package_app.sh` signs ad hoc and *verifies*, so a layout

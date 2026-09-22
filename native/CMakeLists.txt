@@ -237,9 +237,10 @@ function(sstvae_copy_builtin_templates target)
   # it as code: a .json there fails signing with "code object is not
   # signed at all / In subcomponent: .../templates/reply-picture.json".
   # macdeployqt printed exactly that on every CI run from the day the
-  # templates landed and then exited 0, so the bundle shipped unsigned
-  # with nothing red anywhere -- package_app.sh now verifies the
-  # signature so that cannot recur. Data belongs in Contents/Resources,
+  # templates landed and then exited 0, so the CI bundles carried no
+  # valid signature with nothing red anywhere (no release went out in
+  # that window; the first would have) -- package_app.sh now verifies
+  # the signature so that cannot recur. Data belongs in Contents/Resources,
   # and `TransmitPanel::builtin_templates_dir` looks there on macOS.
   # Tests and sstvae-gui-shot are plain executables and keep the
   # beside-the-binary layout everywhere.
