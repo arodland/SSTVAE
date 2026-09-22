@@ -325,7 +325,7 @@ def test_shipped_templates():
     filled = substitute(reply, Fields({"theircall": "W1XYZ", "mycall": "KC2G", "snr": "12 dB"}))
     assert filled.items[0].text == "W1XYZ de KC2G\nSNR 12 dB"
     filled = substitute(cq, Fields({"mycall": "KC2G"}, {"Comment": "QRZ?"}))
-    assert filled.items[0].text == "CQ CQ CQ\nde KC2G\nQRZ?"
+    assert filled.items[0].text == "CQ SSTVAE\nde KC2G\nQRZ?"
 
 
 # --- text style and radial gradients --------------------------------------

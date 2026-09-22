@@ -126,7 +126,7 @@ to get an editable copy. Four is the whole set:
 - **None** — the picture goes out unmodified. Today's behaviour, and the
   default on Android, so nothing changes for anyone who never touches
   this.
-- **CQ** — `CQ CQ CQ` / `de {mycall}` / `{grid}`, top-left, large,
+- **CQ** — `CQ SSTVAE` / `de {mycall}` / `{grid}`, top-left, large,
   with `{field Comment}` beneath.
 - **Reply** — `{theircall} de {mycall}` / `SNR {snr}` /
   `{field Comment}`, top-left.

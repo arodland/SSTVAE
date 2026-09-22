@@ -275,7 +275,7 @@ void test_shipped_templates(const std::string& dir) {
     cq_fields.builtin = {{"mycall", "KC2G"}};
     cq_fields.custom = {{"Comment", "QRZ?"}};
     check::equal(first_text(overlay::substitute(cq, cq_fields)),
-                 std::string("CQ CQ CQ\nde KC2G\nQRZ?"), "cq with a comment, no grid");
+                 std::string("CQ SSTVAE\nde KC2G\nQRZ?"), "cq with a comment, no grid");
 }
 
 }  // namespace
