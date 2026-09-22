@@ -16,6 +16,20 @@
          app does would be withheld from most phones to declare a feature
          some of them use. -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
+    <!-- Two features aapt would otherwise *imply* as required, which Play
+         filters on exactly as if they were declared. Bluetooth is implied
+         by the BLUETOOTH permissions, and rig control over RFCOMM is one
+         optional way of many to key a radio. Portrait is implied by ML
+         Kit's scanner activity fixing its own orientation (merged in from
+         the play-services-code-scanner AAR, not written here); a template
+         scanner is no reason to withhold the app from a landscape-only
+         device. An explicit required="false" is the documented override
+         for an implied feature. Check with
+         aapt2 dump badging: nothing but faketouch and microphone should
+         read as uses-feature without an accompanying required=false. -->
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+    <uses-feature android:name="android.hardware.screen.portrait" android:required="false" />
     <supports-screens
         android:anyDensity="true"
         android:largeScreens="true"
