@@ -119,6 +119,7 @@ add_library(sstvae_core STATIC
   core/optimize/speculative.cpp
   core/overlay/model.cpp
   core/overlay/template.cpp
+  core/overlay/share.cpp
   core/overlay/template_catalog.cpp
   core/sync/sync.cpp
   # Vendored, and the only non-header-only one -- see
@@ -483,7 +484,13 @@ if(_want_gui)
     gui/banner.cpp
     gui/crop_dialog.cpp
     gui/log_pane.cpp
-    gui/app_state.cpp)
+    gui/share_dialog.cpp
+    gui/app_state.cpp
+    # The QR encoder, vendored -- see third_party/qrcodegen/README.md.
+    # Built into the GUI rather than into `sstvae_core`, because showing
+    # a template as a code is a thing a window does; nothing headless
+    # needs it.
+    third_party/qrcodegen/qrcodegen.cpp)
   set_target_properties(sstvae_gui PROPERTIES AUTOMOC ON)
   # The application's own version, for the About box. It reported
   # Hamlib's and Qt's and omitted this one -- which is the number every
@@ -491,6 +498,7 @@ if(_want_gui)
   # running program.
   target_compile_definitions(sstvae_gui PUBLIC SSTVAE_VERSION="${PROJECT_VERSION}")
   target_include_directories(sstvae_gui PUBLIC core gui)
+  target_include_directories(sstvae_gui PRIVATE third_party/qrcodegen)
   target_link_libraries(sstvae_gui PUBLIC
     sstvae_core sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render
     sstvae_fetch

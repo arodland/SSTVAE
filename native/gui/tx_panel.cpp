@@ -61,6 +61,7 @@
 #include "overlay/template.hpp"
 #include "overlay/template_catalog.hpp"
 #include "overlay_editor.hpp"
+#include "share_dialog.hpp"
 #include "style.hpp"
 #include "settings/settings.hpp"
 
@@ -653,6 +654,17 @@ QWidget* TransmitPanel::build_tool_row() {
            "{field Label}."));
     connect(save_template_button_, &QPushButton::clicked, this,
             &TransmitPanel::save_as_template);
+    share_template_button_ = new QPushButton(tr("S&hare..."), panel);
+    share_template_button_->setObjectName(QStringLiteral("share_template_button"));
+    share_template_button_->setToolTip(
+        tr("Show the current composition as a QR code and as text, to "
+           "copy it to another device."));
+    connect(share_template_button_, &QPushButton::clicked, this, [this] {
+        // The *canvas*, not the selected template: what is shared is
+        // what the operator is looking at, which is the same thing
+        // "Save as template..." would write.
+        ShareDialog(editor_->doc(), this).exec();
+    });
     delete_template_button_ = new QPushButton(tr("De&lete"), panel);
     delete_template_button_->setObjectName(QStringLiteral("delete_template_button"));
     delete_template_button_->setToolTip(
@@ -667,7 +679,7 @@ QWidget* TransmitPanel::build_tool_row() {
     // they read as unrelated.
     column->addWidget(style::row(
         panel, {new QLabel(tr("Template"), panel), template_combo_, save_template_button_,
-                delete_template_button_}));
+                delete_template_button_, share_template_button_}));
     // **No `column->addWidget(overlay_box)` here.** `overlay_box` is an
     // alias for `panel`, whose layout `column` *is*, so that line asked
     // Qt to add a widget to its own child layout. Qt refuses and prints

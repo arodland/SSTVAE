@@ -463,8 +463,68 @@ counterpart on Android.
      `ctest` (33/33) and `pytest --native` (407 passed) were re-run
      after the fix and are unaffected otherwise, since nothing else in
      this step touched `native/core/` or `native/gui/`.
-4. **Android: the template editor screen.** Polish; step 3 works with
-   the built-ins and desktop-made files before this exists.
+   **Step 3 was compiled for the first time on 2026-09-21**, when a
+   machine with an NDK came to hand, and it did not build. Two link
+   errors, both of the kind only a compiler finds: the app calls
+   `overlay::render` (`Composition::preview`, which is the rule this
+   design is built on) while `android-app/CMakeLists.txt` still forced
+   `SSTVAE_BUILD_OVERLAY OFF` from when this app had no overlay at all,
+   and it did not link `sstvae_overlay_render` either. Both fixed
+   there; nothing in the step's own logic moved, and it is still
+   untested on a device.
+
+4. **Sharing a template between stations.** **Done 2026-09-21**, and
+   not in the original design — a phone with no editor (step 4) can
+   only use templates it shipped with, and the desktop had no way to
+   hand it one.
+
+   There is deliberately **no share format**: the payload is
+   `overlay::to_json(doc, -1)`, the template's own file contents
+   written compactly, so anything that already understands a template
+   understands this and an operator can read it. The desktop's
+   `ShareDialog` (Share... beside Save/Delete) draws it as a QR code
+   and offers the same text to copy; Android's Send screen has an
+   "Import…" chip that pastes it back, via
+   `Transmitter::importTemplate`.
+
+   Four things this settled.
+   - **The code carries the whole thing with room to spare.** The
+     largest shipped template is 447 compact bytes, which is 73 modules
+     (version 15) at ECC-L; the ceiling is 2953 bytes, roughly a dozen
+     decorated items, and past it the dialog says so and points at the
+     text rather than drawing something unreadable.
+   - **The quiet zone is 8 modules, not the specification's 4, and
+     that was measured.** At 4, OpenCV's detector could not find the
+     code at all until the image was given a wider border; at 6 and 8
+     it read all 447 bytes first time. The margin is painted *into*
+     the image for a second reason: the app's palette is dark, so a
+     code relying on the dialog behind it would have a dark quiet zone.
+   - **An imported document is not handed the local filesystem**
+     (`overlay::sanitize_imported`). A `TextItem::font` and a
+     non-`last_rx` `ImageItem::source` name a file on the machine that
+     wrote them; they cannot mean anything on the machine that reads
+     them, and on a similar machine honouring one lets a document the
+     operator did not write put a file the operator did not pick into a
+     transmission. Both are cleared — text falls back to its
+     `font_family` request, which travels correctly being a name rather
+     than a path, and an inset falls back to `last_rx`.
+   - **Encoding is vendored; decoding is not**
+     (`native/third_party/qrcodegen/`). Encoding is a few hundred lines
+     with an exact answer. Decoding is image processing — perspective,
+     lighting, blur — and belongs to whatever the phone's camera stack
+     offers. So the import path is the clipboard, which needs no camera
+     and is the fallback a scanner would need anyway; a scanner added
+     later hands its result to the same `importTemplate`.
+
+   Verified end to end rather than structurally: a screenshot of the
+   real dialog (`sstvae-gui-shot --share`) decodes with OpenCV back to
+   the exact shipped template, byte for byte. `test_share.cpp` pins
+   what a test can pin without a decoder — the payload round-trip, the
+   sanitizer, the finder patterns and the quiet zone.
+
+5. **Android: the template editor screen.** Polish; steps 3 and 4 work
+   with the built-ins, desktop-made files and shared templates before
+   this exists.
 
 ## Settled on review (2026-09-14)
 

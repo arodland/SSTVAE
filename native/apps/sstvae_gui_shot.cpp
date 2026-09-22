@@ -48,6 +48,8 @@
 #include "rx_panel.hpp"
 #include "settings/settings.hpp"
 #include "settings_dialog.hpp"
+#include "share_dialog.hpp"
+#include "overlay/template_catalog.hpp"
 #include "tx_panel.hpp"
 
 namespace {
@@ -66,6 +68,7 @@ void usage() {
                  "  --log        also shoot the log pane and error banner\n"
                  "  --panes      also shoot both pane layouts, and report the\n"
                  "               minimum width each one imposes on the window\n"
+                 "  --share      also shoot the template share window\n"
                  "  --item-menu  also shoot the composer's right-click menu\n"
                  "               and its submenus, for a text item and a rect\n"
                  "\n"
@@ -98,6 +101,7 @@ int main(int argc, char** argv) {
     int height = 0;
     int only_tab = -1;
     bool transmit = false;
+    bool share = false;
     bool receive = false;
     bool crop = false;
     bool window = false;
@@ -132,6 +136,8 @@ int main(int argc, char** argv) {
             log_widgets = true;
         } else if (arg == QLatin1String("--panes")) {
             panes = true;
+        } else if (arg == QLatin1String("--share")) {
+            share = true;
         } else if (arg == QLatin1String("--item-menu")) {
             item_menu = true;
         } else {
@@ -157,6 +163,24 @@ int main(int argc, char** argv) {
     // layout. Unlike the transmit panel it needs no `AppState` -- the
     // menu's only collaborator is the editor -- so it cannot touch the
     // network.
+    // The one window whose content is generated rather than laid out --
+    // a code that is too dense or too small is not something a test can
+    // tell you. Needs no `AppState`: it is handed a document.
+    if (share) {
+        sstvae::overlay::Doc doc =
+            sstvae::overlay::load_builtin_templates(
+                (QCoreApplication::applicationDirPath() + QStringLiteral("/templates"))
+                    .toStdString())
+                .at(2);
+        sstvae::gui::ShareDialog dialog(doc);
+        dialog.resize(width > 0 ? width : 520, height > 0 ? height : 700);
+        dialog.show();
+        app.processEvents();
+        const QString path = QStringLiteral("%1/share.png").arg(out);
+        dialog.grab().save(path);
+        std::printf("%s\n", path.toLocal8Bit().constData());
+    }
+
     if (item_menu) {
         sstvae::gui::OverlayEditor editor;
         editor.resize(width > 0 ? width : 640, height > 0 ? height : 480);

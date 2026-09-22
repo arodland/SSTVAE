@@ -261,6 +261,7 @@ private:
     QComboBox* template_combo_ = nullptr;
     QPushButton* save_template_button_ = nullptr;
     QPushButton* delete_template_button_ = nullptr;
+    QPushButton* share_template_button_ = nullptr;
     // Parallel to `template_combo_`'s items: index 0 is the built-in
     // "None" (an empty document, never read from a file).
     std::vector<overlay::Doc> templates_;
