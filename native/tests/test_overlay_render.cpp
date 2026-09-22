@@ -742,6 +742,60 @@ void test_outline_text_is_hollow() {
     check::is_true(painted(out, base) > 0, "render/style: and the outline is drawn");
 }
 
+// The Android bug this pins: a font whose glyph has two same-direction
+// overlapping contours (native/tests/fixtures/overlap-glyph.ttf builds
+// one by hand -- two overlapping squares -- since no desktop face here
+// has one) used to (1) punch the overlap into a hole when filled, and
+// (2) leak a stroke line across it when outlined, because both
+// `painter.fillPath(shape.glyphs, ...)` and the hollow-outline clip in
+// `draw_text` judge "inside" by `QPainterPath`'s default even-odd fill,
+// under which a point double-covered by two contours counts as
+// *outside*. The two sample points below are the glyph's own design,
+// not derived from a (possibly still-hollow) render of it: the fixture
+// is two squares sharing the horizontal middle quarter of the union, so
+// that quarter's centre (50% of the union's width) is deep inside both
+// squares, and 37.5% sits exactly on the seam -- the arc of the left
+// square's own right edge that the bug's clip fails to hide.
+void test_a_self_overlapping_glyph_fills_solid_and_outlines_hollow(
+    const std::string& fixtures_dir) {
+    const std::string font = fixtures_dir + "/overlap-glyph.ttf";
+    check::is_true(QFile::exists(QString::fromStdString(font)),
+                   "render/style: the overlap-glyph fixture is present");
+
+    const images::Picture base = solid(200, 200, 0, 0, 0);
+    // U+E000 in UTF-8, spelled as bytes rather than a \u escape: this
+    // file is otherwise plain ASCII, and grep for a stray private-use
+    // codepoint would find nothing here to explain it.
+    overlay::TextItem filled;
+    filled.text = "\xee\x80\x80";
+    filled.font = font;
+    filled.size = 0.35;
+    filled.color = "#ff0000";
+    filled.stroke_width = 0.0;
+    const images::Picture ink = render_one(filled, base);
+    const overlay::Bbox bbox = painted_bbox(ink, base);
+    check::is_true(bbox.w > 20 && bbox.h > 10,
+                   "render/style: the overlap glyph has a real extent to sample (" +
+                       std::to_string(bbox.w) + "x" + std::to_string(bbox.h) + ")");
+
+    const int cy = bbox.y + bbox.h / 2;
+    const int centre_x = bbox.x + bbox.w / 2;       // deep inside the overlap
+    const int seam_x = bbox.x + (bbox.w * 3) / 8;    // 37.5%: on the seam edge
+
+    check::is_true(!same(pixel(ink, centre_x, cy), pixel(base, centre_x, cy)),
+                   "render/style: a solid fill has no hole where two contours overlap");
+
+    overlay::TextItem outline = filled;
+    outline.fill_kind = "none";
+    outline.stroke_color = "#00ff00";
+    outline.stroke_width = 0.05;
+    const images::Picture out = render_one(outline, base);
+
+    check::is_true(painted(out, base) > 0, "render/style: the outline is drawn");
+    check::is_true(same(pixel(out, seam_x, cy), pixel(base, seam_x, cy)),
+                   "render/style: and hollow through a self-overlapping seam");
+}
+
 void test_a_linear_text_gradient_runs_counter_clockwise_from_its_angle() {
     const images::Picture base = solid(640, 240, 0, 0, 0);
     const overlay::TextItem across = gradient_text("MMMMM", 0.3);
@@ -902,6 +956,10 @@ void test_a_family_is_requested_and_a_font_file_still_wins() {
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::fprintf(stderr, "usage: test_overlay_render <fixtures dir>\n");
+        return 2;
+    }
     check::report_crashes_instead_of_prompting();
     // Qt's font database is platform integration, so text needs an
     // application object; offscreen so this runs on a CI box with no
@@ -930,6 +988,7 @@ int main(int argc, char** argv) {
     test_underline_draws_below_the_baseline_and_inside_the_handle();
     test_outline_text_draws_the_stroke_and_not_the_fill();
     test_outline_text_is_hollow();
+    test_a_self_overlapping_glyph_fills_solid_and_outlines_hollow(argv[1]);
     test_a_linear_text_gradient_runs_counter_clockwise_from_its_angle();
     test_a_radial_text_gradient_is_centred();
     test_a_text_gradient_turns_with_a_rotated_item();

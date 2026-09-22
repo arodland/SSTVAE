@@ -447,6 +447,28 @@ rule is enforced by `tools/check_layering.py`.
   training face, DejaVu Sans Bold, so existing documents render
   byte-for-byte as before — which is also why an unstyled caption looks
   heavier there than in Qt, whose default face is the regular weight.
+  **A glyph's own contours need `Qt::WindingFill`, and `QPainterPath`
+  does not default to it** (2026-09-22, reported from a device: outlined
+  text on Android drew a stray line through a capital A's crossbar,
+  right where its strokes meet). Every font rasterizer fills glyph
+  outlines by nonzero winding — it is what the TrueType and PostScript
+  specs say to — because a design with one contour's boundary passing
+  inside another ("overlapping contours") relies on it: two same-
+  direction contours covering one point make it doubly inside, which
+  nonzero counts as filled and `QPainterPath`'s odd-even default counts
+  as a hole. Wrong on its own for a solid fill, and worse for a hollow
+  outline — `draw_text`'s clip subtracts the glyph path from its bounds
+  to hide the interior, so the wrongly-hollow overlap reads as *not*
+  ink and the seam is not clipped away. `shape.glyphs.setFillRule(Qt::
+  WindingFill)` in `text_shape` is the fix, one line. Not reproducible
+  on any face this suite's desktop CI has, so `native/tests/fixtures/
+  overlap-glyph.ttf` is a two-glyph TrueType font built by hand (two
+  overlapping squares, same winding direction, `gen_overlap_glyph_font.
+  py` regenerates it) — portable and platform-independent, confirmed to
+  reproduce the identical bug an Android system font does. Python is
+  unaffected by construction: PIL/FreeType's own `stroke_width`
+  rasterizes the outline directly, with no separate boolean-path
+  subtraction step to get a fill rule wrong.
 
 Two rules the deleted GUI established, which the native app inherits
 and which are the reason its panels look the way they do: a composition
