@@ -70,7 +70,13 @@ qt_standard_project_setup(REQUIRES 6.8)
 # of those being separate libraries behind seams.
 set(SSTVAE_BUILD_GUI OFF CACHE STRING "" FORCE)
 set(SSTVAE_BUILD_QTAUDIO OFF CACHE STRING "" FORCE)
-set(SSTVAE_BUILD_OVERLAY OFF CACHE STRING "" FORCE)
+# **On since the overlay landed here** (docs/overlay-templates.md step
+# 3). It was forced off while this app had no overlay at all, and the
+# step that gave it one did not flip it -- `Composition::preview` calls
+# `overlay::render`, so the app stopped linking, which is the sort of
+# thing a step written without an NDK to hand does not find out. It
+# needs QtGui, which this app requires two lines above anyway.
+set(SSTVAE_BUILD_OVERLAY ON CACHE STRING "" FORCE)
 # **On since 2026-08-22.** docs/android.md had this off because Hamlib
 # opens a device path and Android gives an app none -- but Hamlib takes a
 # socket for any backend (core/rig/transport.hpp records the mechanism),
@@ -116,7 +122,12 @@ qt_add_qml_module(sstvae_android URI SSTVAE VERSION 1.0
     RESOURCES ${SSTVAE_TEMPLATE_FILES})
 target_link_libraries(sstvae_android PRIVATE Qt6::Quick Qt6::Gui sstvae_core
                                              sstvae_audio_android
-                                             sstvae_codec)
+                                             sstvae_codec
+                                             # `Composition::preview` is
+                                             # `overlay::render`'s output, per
+                                             # docs/overlay-templates.md -- the
+                                             # same rule the desktop follows.
+                                             sstvae_overlay_render)
 # The transport is always linked: it is a byte pipe to a USB or
 # Bluetooth device and knows nothing about Hamlib, so the rig screen,
 # the device pickers and the settings all build even in the one

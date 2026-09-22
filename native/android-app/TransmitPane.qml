@@ -74,6 +74,19 @@ ColumnLayout {
             highlighted: index === pane.transmitter.templateIndex
             onClicked: pane.transmitter.templateIndex = index
         }
+
+        // Taking a template from another station. It rides at the end
+        // of the chips rather than on Settings because this is where
+        // templates are, and there is nowhere else on this screen that
+        // would not be a menu -- which is the thing the chip row exists
+        // instead of. There is no editor here (step 4), so pasting one
+        // in is the only way a phone gets a template it did not ship
+        // with.
+        footer: Button {
+            text: "Import…"
+            flat: true
+            onClicked: importTemplate.open()
+        }
     }
 
     // **The fields the current template uses, and only those.**
@@ -493,6 +506,90 @@ ColumnLayout {
                 Layout.topMargin: 8
                 text: "Done"
                 onClicked: customFields.close()
+            }
+        }
+        }
+    }
+
+    // **Paste, not a camera.** Reading a QR code needs a decoder and a
+    // camera preview; the clipboard needs neither and works on a phone
+    // with no camera, so it is the path that exists first. A scanner
+    // put here later would hand its result to the same
+    // `importTemplate`, which is where everything that can go wrong
+    // already lives.
+    Popup {
+        id: importTemplate
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 32, 480)
+        height: Math.min(parent.height - 32, importContent.implicitHeight + 32)
+        modal: true
+        onAboutToShow: {
+            importField.text = "";
+            importResult.text = "";
+        }
+
+        contentItem: Flickable {
+            contentHeight: importContent.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            ScrollBar.vertical: ScrollBar {}
+
+        ColumnLayout {
+            id: importContent
+            width: parent.width
+            spacing: 8
+
+            Label {
+                text: "Import a template"
+                font.bold: true
+                font.pixelSize: 18
+                Layout.fillWidth: true
+            }
+            Label {
+                text: "Paste what the desktop app's Share window showed."
+                font.pixelSize: 13
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+            TextArea {
+                id: importField
+                Layout.fillWidth: true
+                Layout.preferredHeight: 120
+                wrapMode: TextEdit.WrapAnywhere
+                placeholderText: "{\"version\": 1, …}"
+            }
+            Label {
+                id: importResult
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                font.pixelSize: 13
+                visible: text !== ""
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Button {
+                    text: "Paste"
+                    onClicked: importField.paste()
+                }
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "Cancel"
+                    onClicked: importTemplate.close()
+                }
+                Button {
+                    text: "Import"
+                    enabled: importField.text.trim() !== ""
+                    onClicked: {
+                        // The message is shown here rather than in a
+                        // toast: "that does not look like a template"
+                        // is about the text still on screen, and
+                        // closing the popup to say so would throw away
+                        // what the operator would need to fix.
+                        importResult.text = pane.transmitter.importTemplate(importField.text);
+                        if (importResult.text === "") importTemplate.close();
+                    }
+                }
             }
         }
         }

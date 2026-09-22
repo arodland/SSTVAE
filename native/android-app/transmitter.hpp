@@ -221,6 +221,16 @@ public:
     // by voice or by a means this app never sees. What it is is a
     // roadblock to casual misuse -- someone who has not thought about
     // any of that has now been asked to.
+    // Taking a template from another station: the operator pastes what
+    // the desktop's Share window showed (or what a QR scanner put on
+    // the clipboard), and it lands in the template folder as if it had
+    // been saved here. Returns why it could not be imported, or an
+    // empty string when it worked.
+    //
+    // **`overlay::sanitize_imported` first**, always: a document from
+    // elsewhere must not name files on this phone. See that function.
+    Q_INVOKABLE QString importTemplate(const QString& payload);
+
     Q_INVOKABLE void acknowledgeFirstTransmit();
 
     // Drag motion, as a fraction of the *preview's* own width and

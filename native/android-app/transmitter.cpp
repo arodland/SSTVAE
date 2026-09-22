@@ -16,12 +16,14 @@
 #include <atomic>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 
 #include "audio/android/androidaudio.hpp"
 #include "composition.hpp"
 #include "config.hpp"
 #include "dsp/leader.hpp"
+#include "overlay/share.hpp"
 #include "overlay/template_catalog.hpp"
 #include "session.hpp"
 #include "tx/engine.hpp"
@@ -318,6 +320,39 @@ void Transmitter::refreshTemplates() {
 
     const int keep = templateIndexForName(previous);
     template_index_ = keep >= 0 ? keep : 0;
+}
+
+QString Transmitter::importTemplate(const QString& payload) {
+    const std::string text = payload.trimmed().toStdString();
+    if (!overlay::is_share_payload(text)) {
+        return tr("That does not look like a template.");
+    }
+    const overlay::Doc doc = overlay::sanitize_imported(overlay::from_json(text));
+    const std::string name = doc.name.empty() ? "Imported" : doc.name;
+
+    const std::filesystem::path dir = user_templates_dir();
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    const std::filesystem::path path = dir / (overlay::slugify(name) + ".json");
+    {
+        std::ofstream out(path, std::ios::binary);
+        if (!out) return tr("Could not write to the template folder.");
+        out << overlay::to_json(doc);
+        if (!out) return tr("Could not write to the template folder.");
+    }
+
+    // Select what was just imported: the operator pasted it in order to
+    // use it, and finding it among the chips afterwards is a second
+    // step for nothing.
+    refreshTemplates();
+    const int index = templateIndexForName(QString::fromStdString(name));
+    if (index >= 0) setTemplateIndex(index);
+    emit changed();
+    // Empty means it worked. The caller closes on that rather than
+    // matching a message, which would break the moment one is
+    // translated; what says so on screen is the chip selected above and
+    // the preview behind the popup, both of which just changed.
+    return QString();
 }
 
 QStringList Transmitter::templateNames() const {
