@@ -137,8 +137,22 @@ Darwin)
     # UDZO: compressed and read-only, which is what a download should be.
     # An uncompressed image is roughly three times the size and a
     # read-write one invites the user to modify the app in place.
-    hdiutil create -volname "SSTVAE $VERSION" -srcfolder "$dmg_root" \
-                   -fs HFS+ -format UDZO -ov "$out" >/dev/null
+    # Retried: on GitHub's macOS runners `hdiutil create` fails with
+    # "Resource busy" now and then while Spotlight is still indexing the
+    # tree it was just handed, and the same command succeeds seconds
+    # later. Seen on a run whose only change was a test file. Five
+    # attempts, five seconds apart, is well past the longest gap seen.
+    attempt=1
+    until hdiutil create -volname "SSTVAE $VERSION" -srcfolder "$dmg_root" \
+                         -fs HFS+ -format UDZO -ov "$out" >/dev/null; do
+        if [ "$attempt" -ge 5 ]; then
+            echo "make_installer: hdiutil create failed $attempt times" >&2
+            exit 1
+        fi
+        echo "make_installer: hdiutil create failed (attempt $attempt), retrying" >&2
+        attempt=$((attempt + 1))
+        sleep 5
+    done
     ;;
 
 # ------------------------------------------------------------------ Linux

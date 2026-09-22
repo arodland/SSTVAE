@@ -403,10 +403,23 @@ jobs:
         shell: bash
         run: |
           case "$(uname -s)" in
-            Darwin) exe=dist/SSTVAE.app/Contents/MacOS/sstvae-gui ;;
-            MINGW*|MSYS*) exe=dist/sstvae/sstvae-gui.exe ;;
-            *) exe=dist/sstvae/sstvae-gui ;;
+            Darwin) exe=dist/SSTVAE.app/Contents/MacOS/sstvae-gui
+                    templates=dist/SSTVAE.app/Contents/Resources/templates ;;
+            MINGW*|MSYS*) exe=dist/sstvae/sstvae-gui.exe
+                    templates=dist/sstvae/templates ;;
+            *) exe=dist/sstvae/sstvae-gui
+                    templates=dist/sstvae/templates ;;
           esac
+          # The built-in templates, where `TransmitPanel::
+          # builtin_templates_dir` looks for them on this platform. An
+          # app that cannot find them starts and stays up with an empty
+          # template picker, which the liveness check below cannot see;
+          # and on macOS the place they must *not* be is Contents/MacOS,
+          # where codesign refuses them (package_app.sh verifies that).
+          for t in cq reply reply-picture; do
+            test -f "$templates/$t.json" || {
+              echo "built-in template $t.json is not at $templates" >&2; exit 1; }
+          done
           # No `timeout` on macOS, so run it in the background and check
           # it is still alive -- which is the assertion anyway: an app
           # that exits on its own has failed to start.

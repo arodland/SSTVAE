@@ -1019,6 +1019,22 @@ Add/Remove Programs block and that an uninstall leaves nothing behind.
 Seconds against a Windows CI job's minutes. Same caveat as the rest of
 the Wine work here: a pass is suggestive, a failure conclusive.
 
+**Never put a data file under a macOS bundle's `Contents/MacOS`**
+(2026-09-22). codesign treats everything there as code, and a stray
+`.json` fails the whole bundle's signature with "code object is not
+signed at all / In subcomponent: .../templates/reply-picture.json".
+The built-in templates were staged "beside the executable", which in a
+bundle is exactly that directory, and **macdeployqt printed the error
+and exited 0 on every CI run for a week**, so the macOS artifacts
+shipped unsigned with nothing red anywhere. Three things now hold it:
+`sstvae_copy_builtin_templates` puts a bundle's data in
+`Contents/Resources` (and `builtin_templates_dir` looks there first on
+macOS), `package_app.sh` signs ad hoc and *verifies*, so a layout
+mistake fails staging rather than printing, and the packaged-app check
+asserts the templates are where the app looks on each platform. The
+red X that led here was something else: `hdiutil create` failing
+"Resource busy" on a runner, a Spotlight race, now retried.
+
 **Packaging is two scripts, and the split is what makes it usable.**
 `tools/package_app.sh` stages a runnable tree (Qt, Hamlib, onnxruntime,
 the freedesktop files); `tools/make_installer.sh` wraps that same tree in

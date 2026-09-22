@@ -3,6 +3,7 @@
 #include <QColor>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDir>
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -972,13 +973,20 @@ void TransmitPanel::on_mode_changed() {
 // --- templates (docs/overlay-templates.md) -----------------------------------
 
 std::filesystem::path TransmitPanel::builtin_templates_dir() {
-    // Copied here at build time (`sstvae_copy_builtin_templates` in
+    // Copied at build time (`sstvae_copy_builtin_templates` in
     // native/CMakeLists.txt) from `sstvae/overlay/templates/`, the one
-    // place the three ship from. A build tree and an installed tree
-    // both put it beside the executable, so this is the only path that
-    // has to be right.
-    return (QCoreApplication::applicationDirPath() + QStringLiteral("/templates"))
-        .toStdString();
+    // place the three ship from. Beside the executable everywhere --
+    // except inside a macOS bundle, where "beside the executable" is
+    // Contents/MacOS and codesign refuses data there (see the CMake
+    // function), so a bundle carries them in Contents/Resources. Tried
+    // first, since sstvae-gui-shot and the tests are not bundles and
+    // keep the flat layout on macOS too.
+    const QString beside = QCoreApplication::applicationDirPath();
+#ifdef Q_OS_MACOS
+    const QString resources = QDir::cleanPath(beside + QStringLiteral("/../Resources/templates"));
+    if (QDir(resources).exists()) return resources.toStdString();
+#endif
+    return (beside + QStringLiteral("/templates")).toStdString();
 }
 
 void TransmitPanel::refresh_templates() {

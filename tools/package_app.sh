@@ -119,6 +119,16 @@ Darwin)
     macdeployqt "$app" -verbose=1 \
         ${HAMLIB_RUNTIME_DIR:+-libpath="$HAMLIB_RUNTIME_DIR"} \
         ${ORT_LIBDIR:+-libpath="$ORT_LIBDIR"}
+    # **A signature, and a check of it, or a broken bundle ships green.**
+    # macdeployqt signs ad hoc and, when that fails, prints ERROR and
+    # exits 0 -- which it did on every run for a week after a data file
+    # landed under Contents/MacOS, where codesign allows only code. An
+    # ad-hoc signature is what an arm64 Mac needs to launch the portable
+    # download at all, and sign.sh's Developer ID signing replaces it
+    # with --force, so signing here costs nothing; the verify is the
+    # part that turns a layout mistake into a failed step.
+    codesign --force --deep --sign - "$app"
+    codesign --verify --deep --strict "$app"
     ;;
 
 # ------------------------------------------------------------------ Linux

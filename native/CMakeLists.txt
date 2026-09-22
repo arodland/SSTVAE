@@ -232,12 +232,27 @@ function(sstvae_copy_builtin_templates target)
       "No built-in templates found in ${_templates_src}; ${target} would "
       "start with an empty template picker and no diagnostic at all.")
   endif()
+  # **Never data under Contents/MacOS.** For a macOS bundle "beside the
+  # executable" is the code directory, and codesign treats everything in
+  # it as code: a .json there fails signing with "code object is not
+  # signed at all / In subcomponent: .../templates/reply-picture.json".
+  # macdeployqt printed exactly that on every CI run from the day the
+  # templates landed and then exited 0, so the bundle shipped unsigned
+  # with nothing red anywhere -- package_app.sh now verifies the
+  # signature so that cannot recur. Data belongs in Contents/Resources,
+  # and `TransmitPanel::builtin_templates_dir` looks there on macOS.
+  # Tests and sstvae-gui-shot are plain executables and keep the
+  # beside-the-binary layout everywhere.
+  get_target_property(_is_bundle ${target} MACOSX_BUNDLE)
+  if(APPLE AND _is_bundle)
+    set(_dest "$<TARGET_BUNDLE_CONTENT_DIR:${target}>/Resources/templates")
+  else()
+    set(_dest "$<TARGET_FILE_DIR:${target}>/templates")
+  endif()
   add_custom_command(TARGET ${target} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-            "$<TARGET_FILE_DIR:${target}>/templates"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_templates}
-            "$<TARGET_FILE_DIR:${target}>/templates"
-    COMMENT "Copying the built-in overlay templates beside ${target}")
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${_dest}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_templates} "${_dest}"
+    COMMENT "Copying the built-in overlay templates for ${target}")
 endfunction()
 
 # --- Qt audio ---------------------------------------------------------------
