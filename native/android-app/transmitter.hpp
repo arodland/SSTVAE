@@ -230,6 +230,11 @@ public:
     // **`overlay::sanitize_imported` first**, always: a document from
     // elsewhere must not name files on this phone. See that function.
     Q_INVOKABLE QString importTemplate(const QString& payload);
+    // The same import, read off another screen by the phone's camera
+    // (`TemplateScanner.java`, ML Kit's unbundled scanner). Result or
+    // failure arrives through `onScanned`; a failure lands in
+    // `lastError`, since by then the popup that asked is gone.
+    Q_INVOKABLE void scanTemplate();
 
     Q_INVOKABLE void acknowledgeFirstTransmit();
 
@@ -249,6 +254,7 @@ public:
 
     // Called from the picker's JNI callback, on the Android UI thread.
     void onPicked(const QString& path, const QString& error);
+    void onScanned(const QString& payload, const QString& error);
 
 signals:
     void devicesChanged();

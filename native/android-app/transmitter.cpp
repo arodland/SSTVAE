@@ -37,6 +37,7 @@ using sstvae::androidapp::Session;
 
 constexpr const char* kServiceClass = "org/cleverdomain/sstvae/ListenerService";
 constexpr const char* kPickerClass = "org/cleverdomain/sstvae/ImagePicker";
+constexpr const char* kScannerClass = "org/cleverdomain/sstvae/TemplateScanner";
 
 // The label for "let the platform decide", which has to be
 // distinguishable from a device that merely happens to be listed first.
@@ -353,6 +354,35 @@ QString Transmitter::importTemplate(const QString& payload) {
     // translated; what says so on screen is the chip selected above and
     // the preview behind the popup, both of which just changed.
     return QString();
+}
+
+void Transmitter::scanTemplate() {
+    QJniObject ctx = QNativeInterface::QAndroidApplication::context();
+    if (!ctx.isValid()) return;
+    QJniObject::callStaticMethod<void>(kScannerClass, "scan",
+                                       "(Landroid/content/Context;)V", ctx.object());
+    if (QJniEnvironment().checkAndClearExceptions()) {
+        error_ = tr("Could not open the scanner.");
+        emit changed();
+    }
+}
+
+void Transmitter::onScanned(const QString& payload, const QString& error) {
+    if (!error.isEmpty()) {
+        error_ = error;
+        emit changed();
+        return;
+    }
+    // Both empty: backed out of the scanner, nothing to do.
+    if (payload.isEmpty()) return;
+    // Whatever the camera read goes through the same gate a paste does;
+    // "that does not look like a template" is the answer for a QR code
+    // that was something else.
+    const QString problem = importTemplate(payload);
+    if (!problem.isEmpty()) {
+        error_ = problem;
+        emit changed();
+    }
 }
 
 QStringList Transmitter::templateNames() const {
@@ -693,20 +723,39 @@ void Transmitter::cancel() {
 // marshalled onto the Transmitter's own thread before anything is read
 // or written. `Composition::set_source` decodes a photograph, which is
 // not work for whichever thread the platform happened to call us on.
+namespace {
+
+QString to_qstring(JNIEnv* env, jstring s) {
+    if (s == nullptr) return QString{};
+    const char* c = env->GetStringUTFChars(s, nullptr);
+    QString out = QString::fromUtf8(c == nullptr ? "" : c);
+    if (c != nullptr) env->ReleaseStringUTFChars(s, c);
+    return out;
+}
+
+}  // namespace
+
 extern "C" JNIEXPORT void JNICALL Java_org_cleverdomain_sstvae_ImagePicker_nativePicked(
     JNIEnv* env, jclass, jstring jpath, jstring jerror) {
-    const auto to_qstring = [env](jstring s) {
-        if (s == nullptr) return QString{};
-        const char* c = env->GetStringUTFChars(s, nullptr);
-        QString out = QString::fromUtf8(c == nullptr ? "" : c);
-        if (c != nullptr) env->ReleaseStringUTFChars(s, c);
-        return out;
-    };
-    const QString path = to_qstring(jpath);
-    const QString error = to_qstring(jerror);
+    const QString path = to_qstring(env, jpath);
+    const QString error = to_qstring(env, jerror);
 
     Transmitter* t = g_active.load();
     if (t == nullptr) return;
     QMetaObject::invokeMethod(
         t, [t, path, error] { t->onPicked(path, error); }, Qt::QueuedConnection);
+}
+
+// The scanner's result, same shape and same marshalling as the picker's:
+// Play services calls back on the UI thread, and the import writes a
+// file and rebuilds the template list, which belongs on the Transmitter's.
+extern "C" JNIEXPORT void JNICALL Java_org_cleverdomain_sstvae_TemplateScanner_nativeScanned(
+    JNIEnv* env, jclass, jstring jpayload, jstring jerror) {
+    const QString payload = to_qstring(env, jpayload);
+    const QString error = to_qstring(env, jerror);
+
+    Transmitter* t = g_active.load();
+    if (t == nullptr) return;
+    QMetaObject::invokeMethod(
+        t, [t, payload, error] { t->onScanned(payload, error); }, Qt::QueuedConnection);
 }

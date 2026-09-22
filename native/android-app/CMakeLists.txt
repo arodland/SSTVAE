@@ -261,6 +261,43 @@ if(SSTVAE_ANDROID_BUNDLE_MODELS)
         configure_file("${_dl}" "${_pkg_dir}/assets/models/${_name}" COPYONLY)
     endforeach()
 endif()
+# **One Gradle dependency, injected into Qt's own template rather than
+# carried as a copy of it.** The template scanner (`TemplateScanner.java`)
+# is ML Kit's unbundled code scanner, which is a Maven artifact, and the
+# only place androiddeployqt lets one be named is `build.gradle`. It
+# takes a whole `build.gradle` from the package source dir if there is
+# one -- but a committed copy of Qt's template freezes its Gradle plugin
+# and Kotlin versions at whatever Qt shipped the day it was copied, and
+# goes quietly stale on every Qt upgrade after. So the template is read
+# from the Qt in use at configure time and the one line is spliced in;
+# if Qt moves the anchor, this fails here with a message, not in Gradle.
+#
+# The version is pinned, like everything else fetched here.
+# `tools/check_android_java.sh` compiles the Java against this same
+# version's jar and refuses to run if the two disagree.
+set(SSTVAE_ANDROID_CODE_SCANNER_VERSION "16.1.0")
+set(_gradle_template
+    "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_DATA}/src/android/templates/build.gradle")
+if(NOT EXISTS "${_gradle_template}")
+    message(FATAL_ERROR "Qt's Android Gradle template was not found at "
+                        "${_gradle_template}; cannot add the scanner dependency.")
+endif()
+file(READ "${_gradle_template}" _gradle)
+set(_gradle_anchor "implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])")
+string(FIND "${_gradle}" "${_gradle_anchor}" _gradle_at)
+if(_gradle_at EQUAL -1)
+    message(FATAL_ERROR "Qt's Gradle template no longer contains the line this build "
+                        "splices the ML Kit dependency after; update the anchor in "
+                        "native/android-app/CMakeLists.txt.")
+endif()
+string(REPLACE "${_gradle_anchor}"
+    "${_gradle_anchor}
+    // SSTVAE: the QR template scanner (TemplateScanner.java). Spliced in by
+    // native/android-app/CMakeLists.txt; the rest of this file is Qt's.
+    implementation 'com.google.android.gms:play-services-code-scanner:${SSTVAE_ANDROID_CODE_SCANNER_VERSION}'"
+    _gradle "${_gradle}")
+file(WRITE "${_pkg_dir}/build.gradle" "${_gradle}")
+
 set_property(TARGET sstvae_android APPEND PROPERTY
     QT_ANDROID_PACKAGE_SOURCE_DIR "${_pkg_dir}")
 

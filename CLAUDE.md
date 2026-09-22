@@ -1789,12 +1789,17 @@ need when `--native` fails and you want to know *where*.
   Not implemented.
 - `docs/overlay-templates.md` — design for overlay *templates* and the
   overlay on Android (2026-09-14, **steps 1-3 done the same day
-  (module, desktop, Android overlay-on/chips/Reply); step 4, the
-  Android template editor, not started** — build from it in the order
-  its "Sequencing" section gives). Step 3 was written and reviewed with
-  no NDK toolchain available, so unlike steps 1-2 it has not actually
-  been compiled — see the doc's own step-3 entry, which says so rather
-  than claiming more than was verified. The idea is
+  (module, desktop, Android overlay-on/chips/Reply); step 4, sharing a
+  template between stations as a QR code / text, done 2026-09-21; step
+  5, the Android template editor, not started** — build from it in the
+  order its "Sequencing" section gives). Step 3 was written with no NDK
+  available and **did not link when first compiled on 2026-09-21**
+  (`SSTVAE_BUILD_OVERLAY` forced off, renderer not linked) — fixed, APK
+  builds, still untested on a device; the doc's step-3 entry records
+  it. Step 4's phone side is ML Kit's unbundled scanner plus paste;
+  `native/android-app/README.md` "Importing a template" has the build
+  mechanics (Gradle line spliced into Qt's template; the Java check
+  compiles against six hash-pinned ML Kit jars). The idea is
   qsstv's: a template is an ordinary `OverlayDoc` with `{theircall}`-style
   placeholders in its text, the per-over UI is a form derived from which
   placeholders the chosen template uses, and "Reply" on a reception

@@ -110,6 +110,16 @@
                 android:resource="@xml/device_filter" />
         </activity>
 
+        <!-- The template scanner is ML Kit's unbundled code scanner, which
+             lives inside Google Play services and is otherwise fetched the
+             first time any app asks for it. Naming it here has Play
+             services fetch it when this app is installed, so the first
+             tap on Scan does not fail with "still installing". See
+             TemplateScanner.java. -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="barcode_ui" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.qtprovider"

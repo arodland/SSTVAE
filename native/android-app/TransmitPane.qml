@@ -511,12 +511,12 @@ ColumnLayout {
         }
     }
 
-    // **Paste, not a camera.** Reading a QR code needs a decoder and a
-    // camera preview; the clipboard needs neither and works on a phone
-    // with no camera, so it is the path that exists first. A scanner
-    // put here later would hand its result to the same
-    // `importTemplate`, which is where everything that can go wrong
-    // already lives.
+    // Scan or paste, and both land in the same `importTemplate`. The
+    // scanner is Google Play services' (see TemplateScanner.java), so
+    // the popup closes when it opens -- it takes the whole screen and
+    // reports back through `lastError` or by the new chip appearing
+    // selected. Paste is the path for a phone with no camera, or one
+    // where Play services has not got the scanner module yet.
     Popup {
         id: importTemplate
         parent: Overlay.overlay
@@ -547,10 +547,18 @@ ColumnLayout {
                 Layout.fillWidth: true
             }
             Label {
-                text: "Paste what the desktop app's Share window showed."
+                text: "Scan the desktop app's Share window, or paste its text."
                 font.pixelSize: 13
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
+            }
+            Button {
+                text: "Scan QR code"
+                Layout.fillWidth: true
+                onClicked: {
+                    importTemplate.close();
+                    pane.transmitter.scanTemplate();
+                }
             }
             TextArea {
                 id: importField

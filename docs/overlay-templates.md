@@ -508,13 +508,17 @@ counterpart on Android.
      transmission. Both are cleared — text falls back to its
      `font_family` request, which travels correctly being a name rather
      than a path, and an inset falls back to `last_rx`.
-   - **Encoding is vendored; decoding is not**
-     (`native/third_party/qrcodegen/`). Encoding is a few hundred lines
-     with an exact answer. Decoding is image processing — perspective,
-     lighting, blur — and belongs to whatever the phone's camera stack
-     offers. So the import path is the clipboard, which needs no camera
-     and is the fallback a scanner would need anyway; a scanner added
-     later hands its result to the same `importTemplate`.
+   - **Encoding is vendored; decoding is Google Play services'**
+     (`native/third_party/qrcodegen/`, `TemplateScanner.java`). Encoding
+     is a few hundred lines with an exact answer. Decoding is image
+     processing — perspective, lighting, blur — so the phone uses ML
+     Kit's *unbundled* code scanner (Andrew, 2026-09-21: the module is
+     already on almost every phone, since any app that scans a QR code
+     pulled it in), which needs no camera permission and adds nothing
+     to the APK. The manifest asks for the module at install time. The
+     clipboard stays as the path for a phone with no camera, or one
+     whose Play services has not got the module yet, and both hand
+     their result to the same `importTemplate`.
 
    Verified end to end rather than structurally: a screenshot of the
    real dialog (`sstvae-gui-shot --share`) decodes with OpenCV back to
