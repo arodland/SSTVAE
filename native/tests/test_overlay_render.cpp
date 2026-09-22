@@ -595,14 +595,28 @@ bool default_family_has(bool bold, bool italic) {
 // machine where DejaVu Sans Mono was present and used. This is the
 // request `font_for` makes, so the question is the one that matters:
 // did the machine hand a fixed-pitch face to it.
-bool monospace_request_is_honoured() {
-    QFont font;
-    font.setFamily(QStringLiteral("monospace"));
-    font.setStyleHint(QFont::Monospace);
+bool is_fixed_pitch(QFont font) {
     font.setPixelSize(40);
     const QFontMetricsF fm(font);
     return std::abs(fm.horizontalAdvance(QStringLiteral("i")) -
                     fm.horizontalAdvance(QStringLiteral("m"))) < 0.01;
+}
+
+QFont monospace_request() {
+    QFont font;
+    font.setFamily(QStringLiteral("monospace"));
+    font.setStyleHint(QFont::Monospace);
+    return font;
+}
+
+// The check compares a monospace request's width against the default
+// face's, so it needs the two to differ: a fixed-pitch face for the
+// request *and* a proportional default. Windows' one-face offscreen
+// database failed the second half -- its only face is fixed-pitch, so
+// both requests matched it and the widths were equal, which is not the
+// renderer ignoring the request.
+bool monospace_request_is_honoured() {
+    return is_fixed_pitch(monospace_request()) && !is_fixed_pitch(QFont());
 }
 
 void test_bold_and_italic_change_the_glyphs() {
@@ -862,7 +876,12 @@ void test_a_family_is_requested_and_a_font_file_still_wins() {
                                             std::to_string(mono_w) + " vs " +
                                             std::to_string(sans_w) + ")");
     } else {
-        std::fprintf(stderr, "SKIP render/font: no fixed-pitch face answers a monospace request here\n");
+        std::fprintf(stderr,
+                     "SKIP render/font: cannot compare a monospace request against the default "
+                     "face here (default \"%s\" fixed-pitch: %d; monospace \"%s\" fixed-pitch: %d)\n",
+                     QFontInfo(QFont()).family().toUtf8().constData(), is_fixed_pitch(QFont()),
+                     QFontInfo(monospace_request()).family().toUtf8().constData(),
+                     is_fixed_pitch(monospace_request()));
     }
 
     const std::string file = known_font_file();
