@@ -60,32 +60,64 @@ ColumnLayout {
     // `Composition::preview()`, so nothing further is needed to show
     // the result -- the same rule every other preview in this project
     // follows.
-    ListView {
+    RowLayout {
         Layout.fillWidth: true
-        Layout.preferredHeight: 40
         Layout.leftMargin: 12
         Layout.rightMargin: 12
-        orientation: ListView.Horizontal
-        spacing: 6
-        clip: true
-        model: pane.transmitter.templateNames
-        delegate: Button {
-            text: modelData
-            highlighted: index === pane.transmitter.templateIndex
-            onClicked: pane.transmitter.templateIndex = index
+        spacing: 8
+
+        // Named, like the Mode row below: a bare row of buttons said
+        // nothing about what picking one does.
+        Label { text: "Template" }
+
+        ListView {
+            id: chips
+            Layout.fillWidth: true
+            // The chips' own height, not a number: at 40 the Basic
+            // style's buttons were clipped top and bottom by a few
+            // pixels, and a constant would be wrong again on the next
+            // style or font.
+            Layout.preferredHeight: contentItem.childrenRect.height
+            orientation: ListView.Horizontal
+            spacing: 6
+            clip: true
+            model: pane.transmitter.templateNames
+            delegate: Button {
+                text: modelData
+                highlighted: index === pane.transmitter.templateIndex
+                onClicked: pane.transmitter.templateIndex = index
+                // Hold to delete -- the platform's own gesture for "do
+                // something to this one". Built-ins get the same dialog
+                // with Delete disabled, so the gesture is never silent.
+                onPressAndHold: {
+                    deleteTemplate.index = index;
+                    deleteTemplate.name = modelData;
+                    deleteTemplate.open();
+                }
+            }
+
+            // Taking a template from another station. It rides at the
+            // end of the chips rather than on Settings because this is
+            // where templates are, and there is nowhere else on this
+            // screen that would not be a menu -- which is the thing the
+            // chip row exists instead of. There is no editor here (step
+            // 5), so importing is the only way a phone gets a template
+            // it did not ship with.
+            footer: Button {
+                text: "Import…"
+                flat: true
+                onClicked: importTemplate.open()
+            }
         }
 
-        // Taking a template from another station. It rides at the end
-        // of the chips rather than on Settings because this is where
-        // templates are, and there is nowhere else on this screen that
-        // would not be a menu -- which is the thing the chip row exists
-        // instead of. There is no editor here (step 4), so pasting one
-        // in is the only way a phone gets a template it did not ship
-        // with.
-        footer: Button {
-            text: "Import…"
-            flat: true
-            onClicked: importTemplate.open()
+        // A clipped row reads as complete; this says there is more.
+        // Outside the list rather than a fade over it, so it needs no
+        // knowledge of the background colour.
+        Label {
+            text: "›"
+            font.pixelSize: 22
+            opacity: 0.6
+            visible: chips.contentWidth - chips.contentX > chips.width + 1
         }
     }
 
@@ -600,6 +632,65 @@ ColumnLayout {
                 }
             }
         }
+        }
+    }
+
+    // Confirming a delete. One dialog for both cases: a built-in shows
+    // the same sheet with Delete disabled and a line saying why, because
+    // a long-press that does nothing looks like a gesture that does not
+    // exist.
+    Popup {
+        id: deleteTemplate
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 32, 420)
+        modal: true
+        property int index: -1
+        property string name: ""
+        property string problem: ""
+        readonly property bool deletable: pane.transmitter.templateDeletable(index)
+        onAboutToShow: problem = ""
+
+        contentItem: ColumnLayout {
+            spacing: 8
+            Label {
+                text: "Delete template \u201c" + deleteTemplate.name + "\u201d?"
+                font.bold: true
+                font.pixelSize: 18
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+            Label {
+                text: deleteTemplate.deletable
+                      ? "This removes it from the phone. Import it again to get it back."
+                      : "Built-in templates cannot be deleted."
+                font.pixelSize: 13
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+            Label {
+                text: deleteTemplate.problem
+                visible: text !== ""
+                font.pixelSize: 13
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "Cancel"
+                    onClicked: deleteTemplate.close()
+                }
+                Button {
+                    text: "Delete"
+                    enabled: deleteTemplate.deletable
+                    onClicked: {
+                        deleteTemplate.problem = pane.transmitter.deleteTemplate(deleteTemplate.index);
+                        if (deleteTemplate.problem === "") deleteTemplate.close();
+                    }
+                }
+            }
         }
     }
 }

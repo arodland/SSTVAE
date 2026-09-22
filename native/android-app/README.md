@@ -984,6 +984,17 @@ camera). It reads `getRawBytes()` as UTF-8 rather than `getRawValue()`:
 the desktop encodes UTF-8 in byte mode, and the string form guesses the
 charset.
 
+**Hold a chip to delete it.** Free importing with no way to delete is a
+row that only ever grows, so a long-press on a template chip opens a
+confirm sheet; the built-ins get the same sheet with Delete disabled
+and a line saying why, because a long-press that does nothing reads as
+a gesture that does not exist. Deleting the template on the canvas
+takes it off the canvas -- there is no editor here to have composed
+anything from it. Both indices `Transmitter` keeps (the current
+template and the one Reply reopens) are re-found by *name* across a
+reload, since the operator's templates list in filename order and an
+import or a delete shifts every index after it.
+
 Two build-side things worth knowing. **The Gradle dependency is spliced
 into Qt's own `build.gradle` template at configure time**, not carried
 as a committed copy: androiddeployqt takes a whole `build.gradle` from

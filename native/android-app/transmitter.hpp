@@ -31,6 +31,7 @@
 #include <QTimer>
 #include <QtQml/qqmlregistration.h>
 
+#include <filesystem>
 #include <map>
 #include <string>
 #include <vector>
@@ -235,6 +236,12 @@ public:
     // failure arrives through `onScanned`; a failure lands in
     // `lastError`, since by then the popup that asked is gone.
     Q_INVOKABLE void scanTemplate();
+    // Deleting is offered on the operator's own templates only -- the
+    // ones with a file in the app's template folder. "None" and the
+    // built-ins ship with the app and have no path here. Returns why it
+    // could not be deleted, or an empty string when it was.
+    Q_INVOKABLE bool templateDeletable(int index) const;
+    Q_INVOKABLE QString deleteTemplate(int index);
 
     Q_INVOKABLE void acknowledgeFirstTransmit();
 
@@ -288,6 +295,10 @@ private:
     // Parallel to `templateNames()`; index 0 is the built-in "None" (an
     // empty document, not read from any file).
     std::vector<sstvae::overlay::Doc> templates_;
+    // Parallel to `templates_`: the file each came from, empty for "None"
+    // and the built-ins (a Qt resource, not a file the operator owns).
+    // What makes a template deletable, same rule as the desktop's.
+    std::vector<std::filesystem::path> template_paths_;
     int template_index_ = 0;
     QString theircall_;
     // Keyed by label, so a "Comment" field's value survives a switch

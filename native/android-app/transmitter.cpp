@@ -305,22 +305,61 @@ void Transmitter::refreshDevices() {
 // --- templates (docs/overlay-templates.md) -----------------------------
 
 void Transmitter::refreshTemplates() {
+    // Both indices are re-found by *name* after the reload. The
+    // operator's templates are listed in filename order, so an import
+    // can land in the middle and shift every index after it, and a
+    // delete shifts them the other way -- an index kept across either
+    // would silently point at a different template.
     const QString previous = templateNames().value(template_index_);
+    const QString last_reply = templateNames().value(last_reply_template_index_);
 
     templates_.clear();
+    template_paths_.clear();
     // Index 0: not a file, not loaded from anywhere -- an empty
     // document is exactly today's "no overlay" behaviour, and it is
     // what `Composition::template_` already defaults to.
     templates_.push_back(overlay::Doc());
+    template_paths_.emplace_back();
     for (overlay::Doc& doc : load_builtin_templates()) {
         templates_.push_back(std::move(doc));
+        template_paths_.emplace_back();
     }
     for (overlay::LoadedTemplate& loaded : overlay::load_templates(user_templates_dir())) {
         templates_.push_back(std::move(loaded.doc));
+        template_paths_.push_back(std::move(loaded.path));
     }
 
     const int keep = templateIndexForName(previous);
     template_index_ = keep >= 0 ? keep : 0;
+    last_reply_template_index_ = templateIndexForName(last_reply);
+}
+
+bool Transmitter::templateDeletable(int index) const {
+    return index >= 0 && index < static_cast<int>(template_paths_.size()) &&
+           !template_paths_[index].empty();
+}
+
+QString Transmitter::deleteTemplate(int index) {
+    if (!templateDeletable(index)) return tr("Built-in templates cannot be deleted.");
+    const std::filesystem::path path = template_paths_[index];
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    if (ec) return tr("Could not delete: %1").arg(QString::fromStdString(ec.message()));
+
+    // Deleting what is on the canvas takes it off the canvas: unlike
+    // the desktop, there is no editor here to have composed anything
+    // *from* it, so the only thing the overlay could be is the file
+    // that is now gone -- and a chip row showing "None" over a preview
+    // still wearing the template would be lying about one of them.
+    const bool was_current = index == template_index_;
+    refreshTemplates();
+    if (was_current) {
+        template_index_ = 0;
+        Composition::instance().set_template(templates_[0]);
+        refreshFields();
+    }
+    bump();
+    return QString();
 }
 
 QString Transmitter::importTemplate(const QString& payload) {
