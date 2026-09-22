@@ -228,7 +228,8 @@ if(TARGET sstvae_overlay_render)
   target_link_libraries(test_overlay_render PRIVATE sstvae_core
                         sstvae_overlay_render Qt6::Core Qt6::Gui)
   target_include_directories(test_overlay_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-  add_test(NAME overlay_render COMMAND test_overlay_render)
+  add_test(NAME overlay_render
+           COMMAND test_overlay_render ${CMAKE_CURRENT_SOURCE_DIR}/fixtures)
   set_tests_properties(overlay_render PROPERTIES TIMEOUT 300)
 endif()
 

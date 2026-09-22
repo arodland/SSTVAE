@@ -237,6 +237,25 @@ TextShape text_shape(const TextItem& item, const QFont& font,
             shape.underline.addRect(underline_rect(fm, x, baseline, advance));
         }
     }
+    // **Nonzero winding, not `QPainterPath`'s odd-even default.** A
+    // glyph's contours are drawn to that convention by every font
+    // rasterizer there is (it is what the TrueType and PostScript specs
+    // say to use for glyph outlines), so a font whose design has one
+    // contour's boundary pass inside another -- common enough to have a
+    // name, "overlapping contours" -- relies on it: two same-direction
+    // contours covering one point make it doubly inside, which nonzero
+    // counts as filled and even-odd counts as a hole. Left at the
+    // default, that hole is wrong on its own (`fillPath` below), and
+    // worse for a hollow outline (`draw_text`'s clip subtracts `ink`
+    // from its bounds to hide the interior): the wrongly-hollow overlap
+    // reads as *not* ink, so the seam -- the arc of each contour that
+    // lies inside the other -- is not clipped away and strokes a stray
+    // line across the glyph exactly where the contours cross. Seen on
+    // Android, not on the desktop faces this suite runs against, which
+    // is why `native/tests/fixtures/overlap-glyph.ttf` constructs an
+    // overlap by hand rather than relying on finding a system font that
+    // has one.
+    shape.glyphs.setFillRule(Qt::WindingFill);
     return shape;
 }
 
