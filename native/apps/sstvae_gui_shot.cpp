@@ -22,24 +22,34 @@
 #include <QPixmap>
 #include <QStringList>
 #include <QLayout>
+#include <QAction>
 #include <QLabel>
+#include <QMenu>
+#include <QPoint>
 #include <QProgressBar>
 #include <QTabWidget>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 
 #include "app_state.hpp"
 #include "banner.hpp"
 #include "crop_dialog.hpp"
+#include "images/types.hpp"
+#include "item_menu.hpp"
 #include "log/log.hpp"
 #include "log_pane.hpp"
 #include "main_window.hpp"
+#include "overlay_editor.hpp"
 #include "pane_container.hpp"
 #include "rx_panel.hpp"
 #include "settings/settings.hpp"
 #include "settings_dialog.hpp"
+#include "share_dialog.hpp"
+#include "overlay/template_catalog.hpp"
 #include "tx_panel.hpp"
 
 namespace {
@@ -58,6 +68,9 @@ void usage() {
                  "  --log        also shoot the log pane and error banner\n"
                  "  --panes      also shoot both pane layouts, and report the\n"
                  "               minimum width each one imposes on the window\n"
+                 "  --share      also shoot the template share window\n"
+                 "  --item-menu  also shoot the composer's right-click menu\n"
+                 "               and its submenus, for a text item and a rect\n"
                  "\n"
                  "Writes settings-<n>-<name>.png, one per tab.\n");
 }
@@ -88,11 +101,13 @@ int main(int argc, char** argv) {
     int height = 0;
     int only_tab = -1;
     bool transmit = false;
+    bool share = false;
     bool receive = false;
     bool crop = false;
     bool window = false;
     bool log_widgets = false;
     bool panes = false;
+    bool item_menu = false;
 
     const QStringList args = QCoreApplication::arguments();
     for (int i = 1; i < args.size(); ++i) {
@@ -121,6 +136,10 @@ int main(int argc, char** argv) {
             log_widgets = true;
         } else if (arg == QLatin1String("--panes")) {
             panes = true;
+        } else if (arg == QLatin1String("--share")) {
+            share = true;
+        } else if (arg == QLatin1String("--item-menu")) {
+            item_menu = true;
         } else {
             usage();
             return 2;
@@ -136,6 +155,70 @@ int main(int argc, char** argv) {
     if (tabs == nullptr) {
         std::fprintf(stderr, "sstvae-gui-shot: no tab widget found\n");
         return 1;
+    }
+
+    // **A popup is invisible to a normal widget render**, which is why
+    // this is its own option: the item menu is the one surface of the
+    // composer that `--transmit` cannot show, because it is not in any
+    // layout. Unlike the transmit panel it needs no `AppState` -- the
+    // menu's only collaborator is the editor -- so it cannot touch the
+    // network.
+    // The one window whose content is generated rather than laid out --
+    // a code that is too dense or too small is not something a test can
+    // tell you. Needs no `AppState`: it is handed a document.
+    if (share) {
+        sstvae::overlay::Doc doc =
+            sstvae::overlay::load_builtin_templates(
+                (QCoreApplication::applicationDirPath() + QStringLiteral("/templates"))
+                    .toStdString())
+                .at(2);
+        sstvae::gui::ShareDialog dialog(doc);
+        dialog.resize(width > 0 ? width : 520, height > 0 ? height : 700);
+        dialog.show();
+        app.processEvents();
+        const QString path = QStringLiteral("%1/share.png").arg(out);
+        dialog.grab().save(path);
+        std::printf("%s\n", path.toLocal8Bit().constData());
+    }
+
+    if (item_menu) {
+        sstvae::gui::OverlayEditor editor;
+        editor.resize(width > 0 ? width : 640, height > 0 ? height : 480);
+        sstvae::images::Picture base(sstvae::overlay::CANVAS_W, sstvae::overlay::CANVAS_H);
+        std::fill(base.rgb.begin(), base.rgb.end(), std::uint8_t{96});
+        editor.set_base_image(base);
+        sstvae::gui::ItemMenu menu(&editor);
+
+        // Each submenu separately: they are what the menu actually is,
+        // and a shot of three entries says nothing about the rows of
+        // controls behind them. Style differs by item, so it is shot for
+        // both kinds that have one.
+        const auto shoot = [&](const char* kind) {
+            menu.popup_for(editor.selected_item(), QPoint(80, 80));
+            app.processEvents();
+            const QString root = QStringLiteral("%1/item-menu-%2.png")
+                                     .arg(out, QString::fromLatin1(kind));
+            menu.grab().save(root);
+            std::printf("%s\n", root.toLocal8Bit().constData());
+            for (const char* name : {"menu_format", "menu_style", "menu_layers"}) {
+                auto* sub = menu.findChild<QMenu*>(QString::fromLatin1(name));
+                if (sub == nullptr || !sub->menuAction()->isVisible()) continue;
+                sub->popup(QPoint(200, 200));
+                app.processEvents();
+                const QString path = QStringLiteral("%1/item-menu-%2-%3.png")
+                                         .arg(out, QString::fromLatin1(kind),
+                                              QString::fromLatin1(name + 5));
+                sub->grab().save(path);
+                std::printf("%s (%dx%d)\n", path.toLocal8Bit().constData(),
+                            sub->sizeHint().width(), sub->sizeHint().height());
+                sub->close();
+            }
+            menu.close();
+        };
+        editor.add_text("N0CALL");
+        shoot("text");
+        editor.add_rect();
+        shoot("rect");
     }
 
     // Opt-in, because unlike the settings dialog this one needs an

@@ -26,13 +26,23 @@
 // assertion: what the layout cares about is the number, and hiding the
 // row by some other means later would break the panes the same way.
 
+#include <QAbstractButton>
 #include <QApplication>
+#include <QByteArray>
+#include <QComboBox>
+#include <QContextMenuEvent>
+#include <QDialog>
+#include <QFile>
+#include <QIODevice>
 #include <QLabel>
 #include <QLayout>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QPlainTextEdit>
 #include <QPoint>
 #include <QPushButton>
-#include <QSize>
 #include <QSlider>
+#include <QTemporaryDir>
 #include <QTimer>
 #include <QWidget>
 
@@ -41,6 +51,8 @@
 #include "app_state.hpp"
 #include "check.hpp"
 #include "flow_layout.hpp"
+#include "item_menu.hpp"
+#include "overlay/model.hpp"
 #include "overlay_editor.hpp"
 #include "tx_panel.hpp"
 
@@ -241,54 +253,429 @@ void test_a_rebuild_consumes_the_pending_edit() {
                    "a rebuild clears the pending edit rather than repeating it");
 }
 
-// The colour button's size never moves.
-//
-// **This is the platform-independent form of a Windows-only CI
-// failure.** `set_color_swatch` paints the current colour onto the
-// button as an icon, and it used to do so for the first time when a
-// text item was first selected -- a QPushButton grows when it is handed
-// an icon, measured 80x22 without and 80x24 with. The button therefore
-// got 2 px taller at that moment and stayed there.
-//
-// On Linux that was invisible: a taller sibling on the same line of the
-// wrapping row absorbed it, and the strip stayed 143. On Windows this
-// button *is* the tallest thing on its line, so the strip went 185 to
-// 189 and `test_the_strip_height_survives_a_selection` failed there and
-// nowhere else.
-//
-// Asserting on the strip alone would leave that a Windows-only check --
-// green on the machine in front of whoever breaks it next. Asserting on
-// the button says the same thing everywhere.
-void test_the_colour_button_does_not_change_size() {
+// --- templates (docs/overlay-templates.md) ------------------------------
+
+QPushButton* custom_fields_button(TransmitPanel* panel) {
+    for (QPushButton* button : panel->findChildren<QPushButton*>()) {
+        if (button->text().startsWith(QLatin1String("Custom fields"))) return button;
+    }
+    return nullptr;
+}
+
+// The built-ins ship as data beside the executable
+// (`sstvae_copy_builtin_templates` in native/CMakeLists.txt, applied to
+// this target too) and are listed in the fixed order the design names:
+// None, then CQ, Reply, Reply with picture.
+void test_the_template_combo_lists_none_then_the_builtins() {
     AppState state;
     QWidget host;
-    host.resize(900, 700);
     auto* panel = new TransmitPanel(&state, &host);
-    panel->setGeometry(0, 0, 900, 700);
     host.show();
     QCoreApplication::processEvents();
 
-    QPushButton* colour = nullptr;
-    for (QPushButton* button : panel->findChildren<QPushButton*>()) {
-        if (button->text().startsWith(QLatin1String("Colour"))) colour = button;
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    check::is_true(combo != nullptr, "the panel has a template combo");
+    if (combo == nullptr) return;
+    check::equal(combo->count(), 4, "None plus the three built-ins");
+    if (combo->count() == 4) {
+        check::equal(combo->itemText(0).toStdString(), std::string("None"), "none first");
+        check::equal(combo->itemText(1).toStdString(), std::string("CQ"), "cq second");
+        check::equal(combo->itemText(2).toStdString(), std::string("Reply"), "reply third");
+        check::equal(combo->itemText(3).toStdString(), std::string("Reply with picture"),
+                     "reply-picture fourth");
     }
-    check::is_true(colour != nullptr, "the panel has a colour button");
-    if (colour == nullptr) return;
-    const QSize idle = colour->sizeHint();
+}
 
+// Selecting a template replaces the canvas and only enables the fields
+// it actually uses -- "None"'s rows stay inert, "Reply"'s do not. The
+// one custom field the built-ins ever declare ("Comment") fits inline
+// (docs/overlay-templates.md), so the pop-up stays disabled throughout;
+// its own overflow case is `test_a_template_with_more_custom_fields...`
+// below, since none of the built-ins exercise it.
+void test_selecting_a_template_loads_it_and_gates_its_fields() {
+    AppState state;
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    auto* theircall = panel->findChild<QLineEdit*>(QStringLiteral("theircall_edit"));
+    auto* comment = panel->findChild<QLineEdit*>(QStringLiteral("custom_field_edit_0"));
+    QPushButton* custom = custom_fields_button(panel);
     auto* editor = panel->findChild<OverlayEditor*>();
-    check::is_true(editor != nullptr, "the panel has an overlay editor");
-    // A *text* item, which is the only kind with a colour and therefore
-    // the only one that ever painted a swatch.
-    editor->add_text(std::string("KD8XYZ"));
-    QCoreApplication::processEvents();
-    check::is_true(colour->sizeHint() == idle,
-                   "the colour button is the same size with a text item selected");
+    check::is_true(combo != nullptr && theircall != nullptr && comment != nullptr &&
+                       custom != nullptr && editor != nullptr,
+                   "the panel has a combo, a theircall field, an inline custom "
+                   "field, a pop-up button and an editor");
+    if (combo == nullptr || theircall == nullptr || comment == nullptr ||
+        custom == nullptr || editor == nullptr) {
+        return;
+    }
 
-    editor->remove_selected();
+    check::is_true(!theircall->isEnabled(), "their call starts disabled: no template");
+    check::is_true(!comment->isEnabled(), "the inline Comment row starts disabled too");
+    check::is_true(!custom->isEnabled(), "and the overflow pop-up has nothing to overflow");
+
+    combo->setCurrentIndex(2);  // Reply
     QCoreApplication::processEvents();
-    check::is_true(colour->sizeHint() == idle,
-                   "and the same size again with nothing selected");
+    check::is_true(!editor->doc().items.empty(), "the template's items are on the canvas");
+    check::is_true(theircall->isEnabled(), "reply uses {theircall}: enabled");
+    check::is_true(comment->isEnabled(), "reply's Comment field: enabled inline");
+    check::is_true(!custom->isEnabled(),
+                   "still nothing for the pop-up: one field fits inline");
+
+    combo->setCurrentIndex(0);  // None
+    QCoreApplication::processEvents();
+    check::is_true(editor->doc().items.empty(), "\"None\" clears the overlay");
+    check::is_true(!theircall->isEnabled(), "and their call is disabled again");
+    check::is_true(!comment->isEnabled(), "and so is the inline Comment row");
+}
+
+// The point of moving custom fields inline: typing updates the
+// composite without a Done button, because `refresh_fields` runs on
+// every keystroke via `on_custom_field_edited`.
+void test_an_inline_custom_field_updates_live() {
+    AppState state;
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    auto* comment = panel->findChild<QLineEdit*>(QStringLiteral("custom_field_edit_0"));
+    auto* editor = panel->findChild<OverlayEditor*>();
+    check::is_true(combo != nullptr && comment != nullptr && editor != nullptr,
+                   "the panel has a combo, an inline field and an editor");
+    if (combo == nullptr || comment == nullptr || editor == nullptr) return;
+
+    combo->setCurrentIndex(1);  // CQ, which also declares a Comment field
+    QCoreApplication::processEvents();
+    check::is_true(comment->isEnabled(), "CQ's Comment field is enabled inline");
+
+    comment->setText(QStringLiteral("QRZ?"));
+    QCoreApplication::processEvents();
+    const auto it = editor->fields().custom.find("Comment");
+    check::is_true(it != editor->fields().custom.end() && it->second == "QRZ?",
+                   "typing reaches the editor's fields without a Done button");
+
+    // Switching away and back must not leave the stale value behind if
+    // the label changes, and must restore it if the label is the same
+    // -- CQ and Reply both declare "Comment", so the value should carry.
+    combo->setCurrentIndex(2);  // Reply
+    QCoreApplication::processEvents();
+    check::equal(comment->text().toStdString(), std::string("QRZ?"),
+                 "the same label keeps its value across a template switch");
+}
+
+// A template with more custom fields than fit inline
+// (`TransmitPanel::MAX_INLINE_CUSTOM_FIELDS`) is the case the pop-up
+// still exists for.
+void test_a_template_with_more_custom_fields_than_fit_inline_overflows() {
+    QTemporaryDir dir;
+    check::is_true(dir.isValid(), "temp dir created");
+
+    overlay::Doc doc;
+    doc.name = "Many fields";
+    overlay::TextItem item;
+    item.text =
+        "{field A}\n{field B}\n{field C}\n{field D}\n{field E}\n{field F}";
+    doc.items.push_back(item);
+    {
+        QFile file(dir.filePath(QStringLiteral("many.json")));
+        check::is_true(file.open(QIODevice::WriteOnly), "template file opened");
+        file.write(QByteArray::fromStdString(overlay::to_json(doc)));
+    }
+
+    AppState state;
+    state.config().folders.template_dir = dir.path().toStdString();
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    QPushButton* custom = custom_fields_button(panel);
+    check::is_true(combo != nullptr && custom != nullptr,
+                   "the panel has a combo and a pop-up button");
+    if (combo == nullptr || custom == nullptr) return;
+
+    int index = -1;
+    for (int i = 0; i < combo->count(); ++i) {
+        if (combo->itemText(i) == QLatin1String("Many fields")) index = i;
+    }
+    check::is_true(index >= 0, "the six-field template is listed");
+    if (index < 0) return;
+
+    combo->setCurrentIndex(index);
+    QCoreApplication::processEvents();
+    check::is_true(custom->isEnabled(), "the overflow button is enabled");
+    check::is_true(custom->text().contains(QLatin1String("2")),
+                   "it names the two fields (six declared, four inline)");
+
+    // The first four (A..D) each have their own enabled inline row.
+    for (int i = 0; i < 4; ++i) {
+        auto* row = panel->findChild<QLineEdit*>(
+            QStringLiteral("custom_field_edit_%1").arg(i));
+        check::is_true(row != nullptr && row->isEnabled(),
+                       "inline row is present and enabled");
+    }
+}
+
+// Typing their call reaches the editor's substitution fields -- the
+// wiring `refresh_fields` exists for. What substitution actually *does*
+// with a filled field is `test_overlay_editor.cpp`'s to check; this is
+// only "does the panel forward what the operator typed".
+void test_typing_their_call_updates_the_editor_s_fields() {
+    AppState state;
+    state.config().callsign = "KC2G";
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    auto* theircall = panel->findChild<QLineEdit*>(QStringLiteral("theircall_edit"));
+    auto* editor = panel->findChild<OverlayEditor*>();
+    check::is_true(combo != nullptr && theircall != nullptr && editor != nullptr,
+                   "the panel has a combo, a theircall field and an editor");
+    if (combo == nullptr || theircall == nullptr || editor == nullptr) return;
+
+    combo->setCurrentIndex(2);  // Reply
+    QCoreApplication::processEvents();
+    check::equal(editor->fields().builtin.at("mycall"), std::string("KC2G"),
+                 "{mycall} came from the configured callsign, unprompted");
+
+    theircall->setText(QStringLiteral("W1XYZ"));
+    QCoreApplication::processEvents();
+    const auto it = editor->fields().builtin.find("theircall");
+    check::is_true(it != editor->fields().builtin.end() && it->second == "W1XYZ",
+                   "their call reaches the editor's fields as typed");
+}
+
+// A template saved in the operator's configured folder is picked up the
+// same way the built-ins are, at construction -- the path
+// `refresh_templates` reads from `config().folders.template_dir`.
+void test_a_template_from_the_configured_folder_is_listed() {
+    QTemporaryDir dir;
+    check::is_true(dir.isValid(), "temp dir created");
+
+    overlay::Doc doc;
+    doc.name = "Mine";
+    overlay::TextItem item;
+    item.text = "hi";
+    doc.items.push_back(item);
+    {
+        QFile file(dir.filePath(QStringLiteral("mine.json")));
+        check::is_true(file.open(QIODevice::WriteOnly), "template file opened for writing");
+        file.write(QByteArray::fromStdString(overlay::to_json(doc)));
+    }
+
+    AppState state;
+    state.config().folders.template_dir = dir.path().toStdString();
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    check::is_true(combo != nullptr, "the panel has a template combo");
+    if (combo == nullptr) return;
+
+    bool found = false;
+    for (int i = 0; i < combo->count(); ++i) {
+        if (combo->itemText(i) == QLatin1String("Mine")) found = true;
+    }
+    check::is_true(found, "a template from the configured folder is listed by name");
+}
+
+// --- deleting a template ----------------------------------------------------
+
+// The button is gated on where the template came from, not on what it
+// is called: "None" and the three built-ins live beside the executable,
+// which an installed app has no business writing to.
+void test_delete_is_offered_only_for_the_operators_own_templates() {
+    QTemporaryDir dir;
+    check::is_true(dir.isValid(), "temp dir created");
+
+    overlay::Doc doc;
+    doc.name = "Mine";
+    overlay::TextItem item;
+    item.text = "hi";
+    doc.items.push_back(item);
+    const QString file_path = dir.filePath(QStringLiteral("mine.json"));
+    {
+        QFile file(file_path);
+        check::is_true(file.open(QIODevice::WriteOnly), "template file opened for writing");
+        file.write(QByteArray::fromStdString(overlay::to_json(doc)));
+    }
+
+    AppState state;
+    state.config().folders.template_dir = dir.path().toStdString();
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    auto* remove =
+        panel->findChild<QPushButton*>(QStringLiteral("delete_template_button"));
+    check::is_true(combo != nullptr && remove != nullptr,
+                   "the panel has a template combo and a delete button");
+    if (combo == nullptr || remove == nullptr) return;
+
+    // None, CQ, Reply, Reply with picture, Mine.
+    check::equal(combo->count(), 5, "the built-ins plus the operator's own");
+    check::is_true(!remove->isEnabled(), "delete is off for \"None\"");
+    for (int i = 1; i <= 3; ++i) {
+        combo->setCurrentIndex(i);
+        QCoreApplication::processEvents();
+        check::is_true(!remove->isEnabled(),
+                       ("delete is off for the built-in " + combo->itemText(i)).toStdString());
+    }
+
+    combo->setCurrentIndex(4);
+    QCoreApplication::processEvents();
+    check::is_true(remove->isEnabled(), "and on for a template of the operator's own");
+
+    // Confirm the modal, and the file goes. The Yes button is *clicked*
+    // rather than the dialog closed with `accept()` or `done(Yes)`:
+    // `QMessageBox::question` reports `standardButton(clickedButton())`,
+    // which with nothing clicked is `NoButton` however the box was
+    // closed -- so either shortcut reads as a decline and deletes
+    // nothing, while the test still looks like it answered.
+    QTimer::singleShot(0, remove, [] {
+        if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+            if (QAbstractButton* yes = box->button(QMessageBox::Yes)) yes->click();
+        }
+    });
+    remove->click();
+    QCoreApplication::processEvents();
+
+    check::is_true(!QFile::exists(file_path), "the template file is gone");
+    check::equal(combo->count(), 4, "and it has left the list");
+    // The composition is not the file: deleting one must not wipe the
+    // canvas in front of the operator.
+    auto* editor = panel->findChild<OverlayEditor*>();
+    check::is_true(editor != nullptr && editor->doc().items.size() == 1,
+                   "the canvas still holds what was composed");
+    check::is_true(!remove->isEnabled(), "and the button follows the fallback to \"None\"");
+}
+
+// --- "Save as template..." defaults to the loaded name --------------------
+
+// `save_as_template` opens a modal `QInputDialog`; the test answers it
+// from a zero-delay timer, which is the standard way to drive a Qt
+// modal without blocking the test itself.
+void test_saving_a_loaded_template_defaults_to_its_own_name() {
+    AppState state;
+    QWidget host;
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    QCoreApplication::processEvents();
+
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("template_combo"));
+    QPushButton* save = nullptr;
+    for (QPushButton* button : panel->findChildren<QPushButton*>()) {
+        if (button->text().contains(QLatin1String("Save as template"))) save = button;
+    }
+    check::is_true(combo != nullptr && save != nullptr,
+                   "the panel has a template combo and a save button");
+    if (combo == nullptr || save == nullptr) return;
+
+    combo->setCurrentIndex(2);  // "Reply"
+    QCoreApplication::processEvents();
+
+    QString seen_default;
+    QTimer::singleShot(0, save, [&seen_default] {
+        QWidget* modal = QApplication::activeModalWidget();
+        if (auto* dialog = qobject_cast<QDialog*>(modal)) {
+            if (auto* edit = dialog->findChild<QLineEdit*>()) {
+                seen_default = edit->text();
+            }
+            dialog->reject();  // decline the save; only the default is under test
+        }
+    });
+    save->click();
+    QCoreApplication::processEvents();
+
+    check::equal(seen_default.toStdString(), std::string("Reply"),
+                 "the dialog opened pre-filled with the loaded template's name");
+}
+
+
+// --- formatting is a right-click menu ---------------------------------------
+//
+// A left-click selects and shows handles, and nothing else; everything
+// that formats an item is on `ItemMenu`, which opens only on a
+// right-click over the item. `test_item_menu.cpp` covers what the menu
+// writes; this covers that the panel wires it up and that selecting no
+// longer summons anything.
+
+struct Composer {
+    AppState state;
+    QWidget host;
+    TransmitPanel* panel = nullptr;
+    OverlayEditor* editor = nullptr;
+    ItemMenu* menu = nullptr;
+
+    Composer() {
+        host.resize(900, 700);
+        panel = new TransmitPanel(&state, &host);
+        panel->setGeometry(0, 0, 900, 700);
+        host.show();
+        QCoreApplication::processEvents();
+        editor = panel->findChild<OverlayEditor*>();
+        menu = panel->findChild<ItemMenu*>();
+    }
+
+    void right_click(const QPoint& at) {
+        QContextMenuEvent event(QContextMenuEvent::Mouse, at, editor->mapToGlobal(at));
+        QApplication::sendEvent(editor, &event);
+        QCoreApplication::processEvents();
+    }
+
+    // Top-level windows on screen other than the host -- a floating
+    // palette, a menu, anything that appeared by itself.
+    int stray_windows() {
+        int count = 0;
+        for (QWidget* widget : QApplication::topLevelWidgets()) {
+            if (widget != &host && widget->isVisible()) ++count;
+        }
+        return count;
+    }
+};
+
+void test_selecting_an_item_opens_nothing() {
+    Composer c;
+    check::is_true(c.editor != nullptr && c.menu != nullptr,
+                   "the panel has an editor and an item menu");
+    if (c.editor == nullptr || c.menu == nullptr) return;
+
+    c.editor->add_text(std::string("KD8XYZ"));
+    c.editor->add_rect();
+    QCoreApplication::processEvents();
+    check::equal(c.stray_windows(), 0, "selecting an item opens no window of its own");
+}
+
+void test_a_right_click_on_an_item_opens_the_menu() {
+    Composer c;
+    if (c.editor == nullptr || c.menu == nullptr) return;
+    c.editor->add_text(std::string("KD8XYZ"));
+    QCoreApplication::processEvents();
+    const QRect item = c.editor->selection_screen_rect();
+    check::is_true(!item.isEmpty(), "the new item is on screen");
+
+    c.right_click(item.center());
+    check::is_true(c.menu->isVisible(), "a right-click on the item opens its menu");
+    c.menu->close();
+    QCoreApplication::processEvents();
+
+    // The same spot with the item gone: nothing to format, so no menu.
+    c.editor->remove_selected();
+    QCoreApplication::processEvents();
+    c.right_click(item.center());
+    check::is_true(!c.menu->isVisible(), "a right-click on empty canvas opens nothing");
 }
 
 }  // namespace
@@ -296,12 +683,43 @@ void test_the_colour_button_does_not_change_size() {
 int main(int argc, char** argv) {
     check::report_crashes_instead_of_prompting();
     qputenv("QT_QPA_PLATFORM", "offscreen");
+
+    // Every test here builds an `AppState`, which reads the *operator's*
+    // real config -- so any setting of theirs is an input to this suite.
+    // It bit on the template combo: templates they had saved were listed
+    // beside the built-ins and the count assertion failed on their
+    // machine and nowhere else. Pointing the whole process's home and
+    // config directories at an empty temp dir isolates every such path
+    // at once (config file, template folder, saved pictures), rather
+    // than one override per test for whichever setting is noticed next.
+    QTemporaryDir profile;
+    if (!profile.isValid()) {
+        check::is_true(false, "temp profile created");
+        return check::report("transmit panel");
+    }
+    const QByteArray root = QFile::encodeName(profile.path());
+    qputenv("HOME", root);
+    qputenv("XDG_CONFIG_HOME", root + "/config");
+    qputenv("XDG_DATA_HOME", root + "/data");
+    qputenv("XDG_CACHE_HOME", root + "/cache");
+    qputenv("USERPROFILE", root);        // Windows' own home
+    qputenv("LOCALAPPDATA", root + "/local");
+
     QApplication app(argc, argv);
 
     test_the_strip_height_survives_a_selection();
     test_the_level_controls_are_one_flow_item();
-    test_the_colour_button_does_not_change_size();
     test_an_edit_defers_the_rebuild();
     test_a_rebuild_consumes_the_pending_edit();
+    test_the_template_combo_lists_none_then_the_builtins();
+    test_selecting_a_template_loads_it_and_gates_its_fields();
+    test_an_inline_custom_field_updates_live();
+    test_a_template_with_more_custom_fields_than_fit_inline_overflows();
+    test_typing_their_call_updates_the_editor_s_fields();
+    test_a_template_from_the_configured_folder_is_listed();
+    test_delete_is_offered_only_for_the_operators_own_templates();
+    test_saving_a_loaded_template_defaults_to_its_own_name();
+    test_selecting_an_item_opens_nothing();
+    test_a_right_click_on_an_item_opens_the_menu();
     return check::report("transmit panel");
 }

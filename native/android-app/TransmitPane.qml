@@ -4,17 +4,21 @@ import QtQuick.Layouts
 
 // The transmit screen: choose a picture, frame it, send it.
 //
-// **No overlay, and no automatic callsign caption** (Andrew,
-// 2026-08-09). The desktop's transmit panel is an overlay editor because
-// a desktop operator composes; here the picture goes out exactly as
-// framed. The station is identified by the beacon carrier — which every
+// **There was no overlay here, and that was a decision** (Andrew,
+// 2026-08-09) -- reversed 2026-09-14 (see `composition.hpp`). The
+// station is still identified by the beacon carrier -- which every
 // receiver decodes regardless of whether the picture came through well
-// enough to read text in — and, if the operator wants it, by a CW ID a
-// human can copy by ear. Neither costs a pixel of the picture.
+// enough to read text in -- and, if the operator wants it, by a CW ID a
+// human can copy by ear; neither of those can say *whom* a transmission
+// is addressed to, which is what a template's `{theircall}` is for.
+// There is still no editor here (docs/overlay-templates.md step 4, not
+// built) -- only a row of template chips and a small fields row, and an
+// automatic callsign caption is still not offered: `{mycall}` exists
+// only inside a template the operator chose, on purpose.
 //
-// Three things and a button, in the order they are done. Everything with
-// a sensible default (mode, level, CW, VOX) lives on Settings, so this
-// screen stays the picture and the send.
+// Everything with a sensible default (mode, level, CW, VOX) lives on
+// Settings, so this screen stays the picture, the template, and the
+// send.
 ColumnLayout {
     id: pane
     spacing: 8
@@ -45,6 +49,122 @@ ColumnLayout {
             text: "Camera"
             onClicked: pane.transmitter.takePhoto()
         }
+    }
+
+    // **Templates (docs/overlay-templates.md).** Chips, not a combo box
+    // -- a phone picks between a handful of things by tapping, not by
+    // opening a menu first. "None" is always first and is how a
+    // template is left; choosing one *replaces* the whole composition,
+    // same as the desktop's combo, so switching mid-QSO is a deliberate
+    // tap rather than an accident. The preview above is already
+    // `Composition::preview()`, so nothing further is needed to show
+    // the result -- the same rule every other preview in this project
+    // follows.
+    RowLayout {
+        Layout.fillWidth: true
+        Layout.leftMargin: 12
+        Layout.rightMargin: 12
+        spacing: 8
+
+        // Named, like the Mode row below: a bare row of buttons said
+        // nothing about what picking one does.
+        Label { text: "Template" }
+
+        ListView {
+            id: chips
+            Layout.fillWidth: true
+            // The chips' own height, not a number: at 40 the Basic
+            // style's buttons were clipped top and bottom by a few
+            // pixels, and a constant would be wrong again on the next
+            // style or font.
+            Layout.preferredHeight: contentItem.childrenRect.height
+            orientation: ListView.Horizontal
+            spacing: 6
+            clip: true
+            model: pane.transmitter.templateNames
+            delegate: Button {
+                text: modelData
+                highlighted: index === pane.transmitter.templateIndex
+                onClicked: pane.transmitter.templateIndex = index
+                // Hold to delete -- the platform's own gesture for "do
+                // something to this one". Built-ins get the same dialog
+                // with Delete disabled, so the gesture is never silent.
+                onPressAndHold: {
+                    deleteTemplate.index = index;
+                    deleteTemplate.name = modelData;
+                    deleteTemplate.open();
+                }
+            }
+
+            // Taking a template from another station. It rides at the
+            // end of the chips rather than on Settings because this is
+            // where templates are, and there is nowhere else on this
+            // screen that would not be a menu -- which is the thing the
+            // chip row exists instead of. There is no editor here (step
+            // 5), so importing is the only way a phone gets a template
+            // it did not ship with.
+            footer: Button {
+                text: "Import…"
+                flat: true
+                onClicked: importTemplate.open()
+            }
+        }
+
+        // A clipped row reads as complete; this says there is more.
+        // Outside the list rather than a fade over it, so it needs no
+        // knowledge of the background colour.
+        Label {
+            text: "›"
+            font.pixelSize: 22
+            opacity: 0.6
+            visible: chips.contentWidth - chips.contentX > chips.width + 1
+        }
+    }
+
+    // **The fields the current template uses, and only those.**
+    // `theircall` gets its own line because it is the one field that can
+    // block Send; every custom `{field}` lives behind a pop-up, because
+    // a template may declare several and an empty one is the normal
+    // state rather than something worth keeping in view (same reasoning
+    // as the desktop's "Reply fields" box -- a pop-up rather than a pane
+    // that would have to grow and shrink the strip around it).
+    RowLayout {
+        Layout.fillWidth: true
+        Layout.leftMargin: 12
+        Layout.rightMargin: 12
+        spacing: 8
+        visible: pane.transmitter.wantsTheirCall || pane.transmitter.hasCustomFields
+
+        TextField {
+            Layout.fillWidth: true
+            visible: pane.transmitter.wantsTheirCall
+            placeholderText: "Their call"
+            text: pane.transmitter.theirCall
+            // Per keystroke, for the reason every other field on this
+            // screen is: the back gesture dismisses the keyboard
+            // without ever firing editingFinished.
+            onTextEdited: pane.transmitter.theirCall = text
+            inputMethodHints: Qt.ImhUppercaseOnly | Qt.ImhNoPredictiveText
+        }
+        Button {
+            text: pane.transmitter.customFieldsLabel
+            visible: pane.transmitter.hasCustomFields
+            onClicked: customFields.open()
+        }
+    }
+
+    // Blocks Send, same tier as `cwIdProblem` -- "  de KC2G" on the air
+    // is the whole point of a reply template gone wrong.
+    Label {
+        text: pane.transmitter.templateFieldProblem
+        color: "#c00"
+        font.pixelSize: 12
+        visible: text.length > 0
+        Layout.fillWidth: true
+        Layout.leftMargin: 12
+        Layout.rightMargin: 12
+        Layout.maximumHeight: implicitHeight
+        wrapMode: Text.Wrap
     }
 
     // Mode belongs here rather than in Settings, alone among the
@@ -354,6 +474,223 @@ ColumnLayout {
                 }
             }
         }
+        }
+    }
+
+    // The custom-field pop-up (docs/overlay-templates.md). A sheet of
+    // labelled text boxes, one per `{field}` the current template
+    // declares, in the order they first appear -- never mandatory, so
+    // leaving one blank just drops its line (rule 2 of
+    // `sstvae/overlay/template.py`).
+    //
+    // `fieldLabels` is captured on open rather than bound: `Transmitter`
+    // exposes the label list as `Q_INVOKABLE`, not a property (see its
+    // header for why -- the desktop's is a pop-up for the identical
+    // reason), so nothing re-evaluates it on its own. The button that
+    // opens this is visible only while the current template has
+    // custom fields, so the list is always current at the moment it
+    // matters.
+    Popup {
+        id: customFields
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 32, 480)
+        height: Math.min(parent.height - 32, fieldsContent.implicitHeight + 32)
+        modal: true
+        property var fieldLabels: []
+        onAboutToShow: fieldLabels = pane.transmitter.customFieldLabels()
+
+        contentItem: Flickable {
+            contentHeight: fieldsContent.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            ScrollBar.vertical: ScrollBar {}
+
+        ColumnLayout {
+            id: fieldsContent
+            width: parent.width
+            spacing: 8
+
+            Label {
+                text: "Never mandatory — leave one blank and its line is left out."
+                font.pixelSize: 11
+                color: "#666"
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+
+            Repeater {
+                model: customFields.fieldLabels
+                delegate: ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 2
+                    Label { text: modelData; font.bold: true; font.pixelSize: 12 }
+                    TextField {
+                        Layout.fillWidth: true
+                        text: pane.transmitter.customFieldValue(modelData)
+                        onTextEdited: pane.transmitter.setCustomFieldValue(modelData, text)
+                    }
+                }
+            }
+
+            Button {
+                Layout.fillWidth: true
+                Layout.topMargin: 8
+                text: "Done"
+                onClicked: customFields.close()
+            }
+        }
+        }
+    }
+
+    // Scan or paste, and both land in the same `importTemplate`. The
+    // scanner is Google Play services' (see TemplateScanner.java), so
+    // the popup closes when it opens -- it takes the whole screen and
+    // reports back through `lastError` or by the new chip appearing
+    // selected. Paste is the path for a phone with no camera, or one
+    // where Play services has not got the scanner module yet.
+    Popup {
+        id: importTemplate
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 32, 480)
+        height: Math.min(parent.height - 32, importContent.implicitHeight + 32)
+        modal: true
+        onAboutToShow: {
+            importField.text = "";
+            importResult.text = "";
+        }
+
+        contentItem: Flickable {
+            contentHeight: importContent.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            ScrollBar.vertical: ScrollBar {}
+
+        ColumnLayout {
+            id: importContent
+            width: parent.width
+            spacing: 8
+
+            Label {
+                text: "Import a template"
+                font.bold: true
+                font.pixelSize: 18
+                Layout.fillWidth: true
+            }
+            Label {
+                text: "Scan the desktop app's Share window, or paste its text."
+                font.pixelSize: 13
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+            Button {
+                text: "Scan QR code"
+                Layout.fillWidth: true
+                onClicked: {
+                    importTemplate.close();
+                    pane.transmitter.scanTemplate();
+                }
+            }
+            TextArea {
+                id: importField
+                Layout.fillWidth: true
+                Layout.preferredHeight: 120
+                wrapMode: TextEdit.WrapAnywhere
+                placeholderText: "{\"version\": 1, …}"
+            }
+            Label {
+                id: importResult
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                font.pixelSize: 13
+                visible: text !== ""
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Button {
+                    text: "Paste"
+                    onClicked: importField.paste()
+                }
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "Cancel"
+                    onClicked: importTemplate.close()
+                }
+                Button {
+                    text: "Import"
+                    enabled: importField.text.trim() !== ""
+                    onClicked: {
+                        // The message is shown here rather than in a
+                        // toast: "that does not look like a template"
+                        // is about the text still on screen, and
+                        // closing the popup to say so would throw away
+                        // what the operator would need to fix.
+                        importResult.text = pane.transmitter.importTemplate(importField.text);
+                        if (importResult.text === "") importTemplate.close();
+                    }
+                }
+            }
+        }
+        }
+    }
+
+    // Confirming a delete. One dialog for both cases: a built-in shows
+    // the same sheet with Delete disabled and a line saying why, because
+    // a long-press that does nothing looks like a gesture that does not
+    // exist.
+    Popup {
+        id: deleteTemplate
+        parent: Overlay.overlay
+        anchors.centerIn: parent
+        width: Math.min(parent.width - 32, 420)
+        modal: true
+        property int index: -1
+        property string name: ""
+        property string problem: ""
+        readonly property bool deletable: pane.transmitter.templateDeletable(index)
+        onAboutToShow: problem = ""
+
+        contentItem: ColumnLayout {
+            spacing: 8
+            Label {
+                text: "Delete template \u201c" + deleteTemplate.name + "\u201d?"
+                font.bold: true
+                font.pixelSize: 18
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+            Label {
+                text: deleteTemplate.deletable
+                      ? "This removes it from the phone. Import it again to get it back."
+                      : "Built-in templates cannot be deleted."
+                font.pixelSize: 13
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+            Label {
+                text: deleteTemplate.problem
+                visible: text !== ""
+                font.pixelSize: 13
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "Cancel"
+                    onClicked: deleteTemplate.close()
+                }
+                Button {
+                    text: "Delete"
+                    enabled: deleteTemplate.deletable
+                    onClicked: {
+                        deleteTemplate.problem = pane.transmitter.deleteTemplate(deleteTemplate.index);
+                        if (deleteTemplate.problem === "") deleteTemplate.close();
+                    }
+                }
+            }
         }
     }
 }

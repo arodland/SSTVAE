@@ -964,6 +964,49 @@ output file goes in `getExternalCacheDir()`, because Qt's FileProvider
 covers that and not the internal cache — declaring a second provider
 would collide with Qt's, the same trap `Sharing.java` records.
 
+### Importing a template
+
+`TemplateScanner.java` reads a template off another screen — the
+desktop's Share window shows one as a QR code — and hands what the
+camera read to `Transmitter::importTemplate`, the same slot the
+Import popup's paste goes to. There is no share format: the payload is
+the template's own JSON.
+
+**ML Kit's code scanner, unbundled** (`play-services-code-scanner`).
+Google Play services owns the camera, the preview and the decoder, so
+this app declares no camera permission, ships no model and gains no
+APK size. The trade is that the scanner module lives in Play services
+and arrives from the network the first time any app on the phone asks
+for it — the manifest's `com.google.mlkit.vision.DEPENDENCIES` asks for
+it at install time, which makes "still installing" rare rather than
+merely recoverable, and paste covers the rest (and a phone with no
+camera). It reads `getRawBytes()` as UTF-8 rather than `getRawValue()`:
+the desktop encodes UTF-8 in byte mode, and the string form guesses the
+charset.
+
+**Hold a chip to delete it.** Free importing with no way to delete is a
+row that only ever grows, so a long-press on a template chip opens a
+confirm sheet; the built-ins get the same sheet with Delete disabled
+and a line saying why, because a long-press that does nothing reads as
+a gesture that does not exist. Deleting the template on the canvas
+takes it off the canvas -- there is no editor here to have composed
+anything from it. Both indices `Transmitter` keeps (the current
+template and the one Reply reopens) are re-found by *name* across a
+reload, since the operator's templates list in filename order and an
+import or a delete shifts every index after it.
+
+Two build-side things worth knowing. **The Gradle dependency is spliced
+into Qt's own `build.gradle` template at configure time**, not carried
+as a committed copy: androiddeployqt takes a whole `build.gradle` from
+the package source dir if there is one, and a copy freezes Qt's Gradle
+plugin and Kotlin versions at whatever Qt shipped the day it was made.
+If Qt moves the anchor line, CMake fails with a message rather than
+Gradle failing later. And **`tools/check_android_java.sh` compiles
+against the real jars** — six AARs pinned by hash from Google's Maven,
+not stubs — which is how it found, before any APK build, that
+`GmsBarcodeScanner` extends a type from `play-services-base` that
+nothing imports by name.
+
 ### Not done
 
 `Composition` does not survive the process being killed, so swiping the

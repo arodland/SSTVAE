@@ -638,6 +638,8 @@ void ReceivePanel::on_reception(const QString& saved_path) {
     folder_button_->setEnabled(!saved_path.isEmpty());
 
     emit imageReceived(reception->image);
+    emit receptionInfoAvailable(QString::fromStdString(reception->callsign),
+                                reception->snr_db);
     if (!saved_path.isEmpty()) emit receptionSaved(saved_path);
 }
 

@@ -1,12 +1,17 @@
 #include "overlay/render.hpp"
 
+#include <QBrush>
 #include <QColor>
 #include <QFont>
 #include <QFontDatabase>
 #include <QFontMetricsF>
 #include <QImage>
+#include <QLinearGradient>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPen>
+#include <QRadialGradient>
+#include <QRectF>
 #include <QSize>
 #include <QString>
 #include <QStringList>
@@ -16,6 +21,7 @@
 #include <cmath>
 #include <map>
 #include <mutex>
+#include <numbers>
 #include <string>
 #include <utility>
 #include <vector>
@@ -79,10 +85,53 @@ QString family_for(const std::string& path) {
     return family;
 }
 
+// The document's four generic keywords. Qt's fontconfig backend
+// understands them as family names, but the other platforms' font
+// databases do not, so the style hint rides along: it is what makes
+// "monospace" mean a fixed-pitch face on a machine where no family is
+// called that. Anything else is a real family name, passed through.
+void apply_family_request(QFont& font, const std::string& request) {
+    const QString name = QString::fromStdString(request);
+    struct Generic {
+        const char* keyword;
+        QFont::StyleHint hint;
+    };
+    static constexpr Generic GENERICS[] = {
+        {"sans-serif", QFont::SansSerif},
+        {"serif", QFont::Serif},
+        {"monospace", QFont::Monospace},
+        {"cursive", QFont::Cursive},
+    };
+    font.setFamily(name);
+    for (const Generic& g : GENERICS) {
+        if (name.compare(QLatin1String(g.keyword), Qt::CaseInsensitive) == 0) {
+            font.setStyleHint(g.hint);
+            return;
+        }
+    }
+}
+
 QFont font_for(const TextItem& item, int size_px) {
     QFont font;
+    // `font` (a path) wins over `font_family`: a template that ships its
+    // own face is naming the exact file it needs. The family request is
+    // the fallback when there is no path *or* the path yielded no family,
+    // so an unreadable file degrades to the operator's choice of face
+    // rather than to the default one.
     const QString family = family_for(item.font);
     if (!family.isEmpty()) font.setFamily(family);
+    else if (!item.font_family.empty()) apply_family_request(font, item.font_family);
+    // Selects the face's bold or italic variant where it has one. Qt
+    // can synthesize a weight or a slant, but only when rasterising
+    // glyphs -- this renderer takes their *outlines*
+    // (`QPainterPath::addText`, see `text_shape`), which come from the
+    // face as it is. So on a machine whose font database offers one
+    // regular face and nothing else, these change nothing; every
+    // platform's real database has bold and italic for its default
+    // family, and the test that checks this skips where the database
+    // cannot express it.
+    font.setBold(item.bold);
+    font.setItalic(item.italic);
     // setPixelSize, not setPointSize: the document sizes text as a
     // fraction of canvas height, so the answer must not depend on the
     // DPI of whatever screen happens to be attached.
@@ -140,26 +189,85 @@ TextLayout layout_text(const TextItem& item, const QFont& font, int size_px,
     return out;
 }
 
-// One path for the whole block, so the stroke is drawn under *all* the
-// glyphs before any of them is filled. Stroking and filling line by
-// line would let a descender's outline cut across the line below it.
-QPainterPath text_path(const TextItem& item, const QFont& font,
-                       const TextLayout& layout) {
+// Where a line's underline sits, from the font's own metrics. Shared by
+// the drawing and by `item_bbox`, so a selection handle cannot stop
+// short of a line the renderer draws.
+//
+// Never thinner than a pixel: `lineWidth()` is 0 or fractional for some
+// faces at small sizes, and an underline that vanished there would make
+// the toggle look broken.
+QRectF underline_rect(const QFontMetricsF& fm, double x, double baseline,
+                      double width) {
+    return QRectF(x, baseline + fm.underlinePos(), width,
+                  std::max(1.0, fm.lineWidth()));
+}
+
+// The whole block as two paths, both stroked before either is filled,
+// so the stroke lies under *all* the glyphs. Stroking and filling line
+// by line would let a descender's outline cut across the line below.
+//
+// **The underline is its own path, not a rect added to the glyphs'.**
+// `QPainterPath::addText` adds outlines only -- a font's underline is a
+// decoration Qt draws separately, so `QFont::setUnderline` renders
+// nothing through this path -- and a rect sharing the glyphs' path
+// fights them over the fill rule: under odd-even a descender crossing
+// it is punched out, under winding a contour running the other way
+// cancels it. Two paths is what a union looks like without asking Qt to
+// compute one.
+struct TextShape {
+    QPainterPath glyphs;
+    QPainterPath underline;
+};
+
+TextShape text_shape(const TextItem& item, const QFont& font,
+                     const TextLayout& layout) {
     const QFontMetricsF fm(font);
-    QPainterPath path;
+    TextShape shape;
     for (int i = 0; i < layout.lines.size(); ++i) {
         const QString& line = layout.lines[i];
         if (line.isEmpty()) continue;
+        const double advance = fm.horizontalAdvance(line);
         double x = layout.left;
-        if (item.align == "center")
-            x += (layout.width - fm.horizontalAdvance(line)) / 2.0;
-        else if (item.align == "right")
-            x += layout.width - fm.horizontalAdvance(line);
+        if (item.align == "center") x += (layout.width - advance) / 2.0;
+        else if (item.align == "right") x += layout.width - advance;
         const double baseline =
             layout.top + layout.ascent + layout.line_height * i;
-        path.addText(QPointF(x, baseline), font, line);
+        shape.glyphs.addText(QPointF(x, baseline), font, line);
+        if (item.underline) {
+            shape.underline.addRect(underline_rect(fm, x, baseline, advance));
+        }
     }
-    return path;
+    return shape;
+}
+
+// Declared here, defined with the other gradient code under "Rectangles":
+// text and rects fill through the same geometry.
+QBrush gradient_brush(const QRectF& box, const std::string& c1, const std::string& c2,
+                      double angle_deg, const std::string& shape);
+
+// The glyph fill, in `RectItem`'s terms. A solid fill -- every document
+// written before these fields existed -- takes exactly the path it
+// always did, and never reads the gradient fields.
+//
+// **An unrecognised kind draws solid, not nothing.** That is the
+// opposite of a rect's rule (`rect_brush` treats an unknown kind as
+// "none"), and deliberately: a caption that vanishes on a build that
+// does not know some later fill kind is worse than one drawn flat, and
+// the whole point of text is to be read.
+//
+// A gradient spans the layout box rather than the ink, so it does not
+// shift as the text is edited, and it is built in the painter's current
+// space -- already rotated for the item -- so it turns with the text,
+// which is what "painted into the item's unrotated layer" means for a
+// rect.
+QBrush text_fill_brush(const TextItem& item, const TextLayout& layout) {
+    if (item.fill_kind == "none") return QBrush(Qt::NoBrush);
+    if (item.fill_kind == "gradient") {
+        return gradient_brush(QRectF(layout.left, layout.top, layout.width, layout.height),
+                              item.color, item.fill_color2, item.fill_angle,
+                              item.fill_gradient);
+    }
+    return QBrush(color_of(item.color, Qt::white));
 }
 
 void draw_text(QPainter& painter, const TextItem& item, int canvas_w,
@@ -172,21 +280,31 @@ void draw_text(QPainter& painter, const TextItem& item, int canvas_w,
     const double x = std::lround(item.x * canvas_w);
     const double y = std::lround(item.y * canvas_h);
 
+    // Computed before rotating: the layout does not depend on the
+    // painter's transform, and the block's own centre is what the
+    // rotation below needs.
+    const TextLayout layout = layout_text(item, font, size_px, x, y);
+
     painter.save();
     if (item.rotation != 0.0) {
-        // About the anchor point, which is the point the document
-        // actually pins. (The reference rotates a padded layer and
-        // composites it at the anchor, which is close but not the same;
-        // this is the version an editor can show a handle for.) Negated
+        // About the text block's own centre, matching `draw_rect`/
+        // `draw_image` -- not the raw anchor point this used to pivot
+        // on, which for the common "top-left" anchor swung the whole
+        // block out from under the selection box instead of turning it
+        // in place (found via the editor's own rotate handle, which
+        // made the mismatch obvious for the first time). Negated
         // because the document's angle is counter-clockwise, as PIL's
         // is, and QTransform::rotate turns the other way.
-        painter.translate(x, y);
+        const QPointF centre(layout.left + layout.width / 2.0,
+                             layout.top + layout.height / 2.0);
+        painter.translate(centre);
         painter.rotate(-item.rotation);
-        painter.translate(-x, -y);
+        painter.translate(-centre);
     }
 
-    const TextLayout layout = layout_text(item, font, size_px, x, y);
-    const QPainterPath path = text_path(item, font, layout);
+    const TextShape shape = text_shape(item, font, layout);
+    const QBrush fill = text_fill_brush(item, layout);
+    const bool filled = fill.style() != Qt::NoBrush;
     if (stroke > 0.0) {
         QPen pen(color_of(item.stroke_color, Qt::black));
         // PIL's stroke_width is a radius, drawn outside the glyph; a
@@ -194,9 +312,30 @@ void draw_text(QPainter& painter, const TextItem& item, int canvas_w,
         // outside. Same visual weight rather than a coincidence.
         pen.setWidthF(stroke * 2.0);
         pen.setJoinStyle(Qt::RoundJoin);
-        painter.strokePath(path, pen);
+        painter.save();
+        if (!filled) {
+            // **Outline-only text must be hollow**, and the straddling
+            // pen's *inner* half is what a fill normally covers. With no
+            // fill it would paint the glyph interiors in the stroke
+            // colour -- on a regular-weight face at an ordinary stroke
+            // width that is the whole stem, and "none" came out solid.
+            // Clip it to everything but the ink, which leaves exactly
+            // PIL's outside-only stroke.
+            QPainterPath ink = shape.glyphs;
+            if (item.underline) ink = ink.united(shape.underline);
+            const double margin = stroke * 2.0 + 2.0;
+            QPainterPath outside;
+            outside.addRect(ink.boundingRect().adjusted(-margin, -margin, margin, margin));
+            painter.setClipPath(outside.subtracted(ink), Qt::IntersectClip);
+        }
+        painter.strokePath(shape.glyphs, pen);
+        if (item.underline) painter.strokePath(shape.underline, pen);
+        painter.restore();
     }
-    painter.fillPath(path, color_of(item.color, Qt::white));
+    if (filled) {
+        painter.fillPath(shape.glyphs, fill);
+        if (item.underline) painter.fillPath(shape.underline, fill);
+    }
     painter.restore();
 }
 
@@ -297,6 +436,105 @@ void apply_anchor(const std::string& anchor, int w, int h, int& x, int& y) {
     else if (vertical == 'b' || vertical == 'd') y -= h;
 }
 
+// ---------------------------------------------------------------------
+// Rectangles
+
+// A two-colour gradient over `box`, for rects and text alike.
+//
+// **Linear** runs along `angle_deg`, counter-clockwise to match the
+// items' `rotation`: 0 runs left to right, 90 bottom to top. The extent
+// formula matches `sstvae/overlay/render.py`'s `_gradient_layer` so the
+// two implementations agree on where each colour lands, even though Qt
+// interpolates continuously where PIL's numpy version is per-pixel.
+//
+// **Radial** is centred on the box and reaches `c2` at its corners -- a
+// radius of half the diagonal, so the whole box is inside the ramp and
+// no corner is left clamped at the far colour. It has no angle. Anything
+// but "radial" is linear: that is how a build that predates some later
+// shape degrades, and how an older build reads a radial one.
+QBrush gradient_brush(const QRectF& box, const std::string& c1, const std::string& c2,
+                      double angle_deg, const std::string& shape) {
+    const QColor from = color_of(c1, Qt::white);
+    const QColor to = color_of(c2, Qt::black);
+    const QPointF centre = box.center();
+    if (shape == "radial") {
+        const double radius = std::max(1.0, std::hypot(box.width(), box.height()) / 2.0);
+        QRadialGradient grad(centre, radius);
+        grad.setColorAt(0.0, from);
+        grad.setColorAt(1.0, to);
+        return QBrush(grad);
+    }
+    const double theta = angle_deg * std::numbers::pi / 180.0;
+    const double ux = std::cos(theta);
+    const double uy = -std::sin(theta);
+    const double extent = (std::abs(ux) * box.width() + std::abs(uy) * box.height()) / 2.0;
+    const double ext = extent > 0.0 ? extent : 1.0;
+    QLinearGradient grad(QPointF(centre.x() - ux * ext, centre.y() - uy * ext),
+                         QPointF(centre.x() + ux * ext, centre.y() + uy * ext));
+    grad.setColorAt(0.0, from);
+    grad.setColorAt(1.0, to);
+    return QBrush(grad);
+}
+
+QBrush rect_brush(const std::string& kind, const std::string& color,
+                  const std::string& color2, double angle, const std::string& shape,
+                  double w, double h) {
+    if (kind == "solid") return QBrush(color_of(color, Qt::white));
+    if (kind == "gradient") {
+        return gradient_brush(QRectF(0, 0, w, h), color, color2, angle, shape);
+    }
+    return QBrush(Qt::NoBrush);
+}
+
+void draw_rect(QPainter& painter, const RectItem& item, int canvas_w, int canvas_h) {
+    if (item.fill_kind == "none" && item.stroke_kind == "none") return;
+
+    const int iw = std::max(1, static_cast<int>(std::lround(item.width * canvas_w)));
+    const int ih = std::max(1, static_cast<int>(std::lround(item.height * canvas_h)));
+    const double sw = std::max(0.0, item.stroke_width * canvas_w);
+
+    // Painted into its own unrotated layer and then rotated as a whole
+    // by the painter transform below, exactly as `draw_image` does --
+    // which is also why `item_bbox` below reports the *unrotated*
+    // extent: the two must describe the same thing a handle sits on.
+    QImage layer(iw, ih, QImage::Format_ARGB32_Premultiplied);
+    layer.fill(Qt::transparent);
+    {
+        QPainter lp(&layer);
+        if (item.fill_kind != "none") {
+            lp.fillRect(QRectF(0, 0, iw, ih),
+                        rect_brush(item.fill_kind, item.fill_color, item.fill_color2,
+                                   item.fill_angle, item.fill_gradient, iw, ih));
+        }
+        if (item.stroke_kind != "none" && sw > 0.0) {
+            QPen pen(rect_brush(item.stroke_kind, item.stroke_color, item.stroke_color2,
+                                item.stroke_angle, item.stroke_gradient, iw, ih),
+                     sw);
+            pen.setJoinStyle(Qt::MiterJoin);
+            lp.setPen(pen);
+            lp.setBrush(Qt::NoBrush);
+            // A Qt pen straddles the path -- inset by half its width so
+            // the stroke's outer edge lands on the item's own declared
+            // bounds instead of spilling `sw/2` past them.
+            lp.drawRect(QRectF(sw / 2.0, sw / 2.0, iw - sw, ih - sw));
+        }
+    }
+
+    int x = static_cast<int>(std::lround(item.x * canvas_w));
+    int y = static_cast<int>(std::lround(item.y * canvas_h));
+    apply_anchor(item.anchor, layer.width(), layer.height(), x, y);
+
+    painter.save();
+    if (item.rotation != 0.0) {
+        const QPointF centre(x + layer.width() / 2.0, y + layer.height() / 2.0);
+        painter.translate(centre);
+        painter.rotate(-item.rotation);
+        painter.translate(-centre);
+    }
+    painter.drawImage(QPoint(x, y), layer);
+    painter.restore();
+}
+
 void draw_image(QPainter& painter, const ImageItem& item, int canvas_w,
                 int canvas_h, const images::Picture* last_rx) {
     const QImage src = resolve_source(item, last_rx);
@@ -353,12 +591,43 @@ Bbox item_bbox(int canvas_w, int canvas_h, const Item& item,
         TextItem measured = *text;
         if (measured.text.empty()) measured.text = " ";
         const TextLayout layout = layout_text(measured, font, size_px, x, y);
-        return Bbox{static_cast<int>(std::lround(layout.left - stroke)),
-                    static_cast<int>(std::lround(layout.top - stroke)),
-                    std::max(1, static_cast<int>(
-                                    std::lround(layout.width + 2 * stroke))),
-                    std::max(1, static_cast<int>(
-                                    std::lround(layout.height + 2 * stroke)))};
+        // An underline can sit below the font's descent, and the handle
+        // must not clip a line the renderer draws. The last line's is the
+        // lowest, and the same `underline_rect` placed it.
+        double bottom = layout.top + layout.height;
+        if (text->underline) {
+            const double baseline = layout.top + layout.ascent +
+                                    layout.line_height * (layout.lines.size() - 1);
+            bottom = std::max(bottom, underline_rect(QFontMetricsF(font), layout.left,
+                                                     baseline, layout.width)
+                                          .bottom());
+        }
+        // Rounded *outward*, as `sstvae/overlay/render.py` does with
+        // floor/ceil: this box is a cover, and antialiased ink reaches
+        // whichever pixel row a fractional edge lies in. CoreText's
+        // `underlinePos()` and `lineWidth()` are fractional, so on macOS
+        // a nearest-rounded bottom sat one row above the underline it
+        // was meant to contain; FreeType's metrics are integral, which
+        // is why Linux never showed it.
+        const int x0 = static_cast<int>(std::floor(layout.left - stroke));
+        const int y0 = static_cast<int>(std::floor(layout.top - stroke));
+        const int x1 = static_cast<int>(std::ceil(layout.left + layout.width + stroke));
+        const int y1 = static_cast<int>(std::ceil(bottom + stroke));
+        return Bbox{x0, y0, std::max(1, x1 - x0), std::max(1, y1 - y0)};
+    }
+
+    if (const RectItem* rect = std::get_if<RectItem>(&item)) {
+        // Unrotated dimensions, like the `ImageItem` branch below -- an
+        // existing simplification kept for consistency, not a gap
+        // specific to rectangles: see `draw_rect`, which paints into an
+        // unrotated layer and rotates it with a painter transform, so
+        // the handle and the paint describe the same unrotated box.
+        const int iw = std::max(1, static_cast<int>(std::lround(rect->width * canvas_w)));
+        const int ih = std::max(1, static_cast<int>(std::lround(rect->height * canvas_h)));
+        int x = static_cast<int>(std::lround(rect->x * canvas_w));
+        int y = static_cast<int>(std::lround(rect->y * canvas_h));
+        apply_anchor(rect->anchor, iw, ih, x, y);
+        return Bbox{x, y, iw, ih};
     }
 
     const ImageItem& image = std::get<ImageItem>(item);
@@ -386,6 +655,8 @@ images::Picture render(const images::Picture& base, const Doc& doc,
         for (const Item& item : doc.items) {
             if (const TextItem* text = std::get_if<TextItem>(&item)) {
                 draw_text(painter, *text, base.width, base.height);
+            } else if (const RectItem* rect = std::get_if<RectItem>(&item)) {
+                draw_rect(painter, *rect, base.width, base.height);
             } else if (const ImageItem* image = std::get_if<ImageItem>(&item)) {
                 draw_image(painter, *image, base.width, base.height, last_rx);
             }

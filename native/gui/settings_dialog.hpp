@@ -125,6 +125,11 @@ private:
 
     // Transmit
     QLineEdit* callsign_ = nullptr;
+    // Both feed `{grid}` / `{name}` in an overlay template
+    // (docs/overlay-templates.md) and nothing else -- neither is on
+    // the beacon.
+    QLineEdit* grid_ = nullptr;
+    QLineEdit* operator_name_ = nullptr;
     QCheckBox* optimize_ = nullptr;
     QCheckBox* cw_id_ = nullptr;
     QLineEdit* cw_message_ = nullptr;

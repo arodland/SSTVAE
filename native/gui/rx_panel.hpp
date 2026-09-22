@@ -114,6 +114,14 @@ signals:
     // Newest *complete* picture, for the transmit panel's inset. A
     // partial one would be a poor keepsake.
     void imageReceived(const images::Picture& image);
+    // The same reception's callsign and measured SNR, for a template's
+    // `{snr}` (docs/overlay-templates.md; `{theircall}` stays typed on
+    // the desktop -- there is no per-reception "reply to this one"
+    // binding here the way Android's Pictures list has). A separate
+    // signal from `imageReceived` rather than widening it, so nothing
+    // already connected to that one has to change. `snr_db` is NaN on
+    // the same condition `fmt_snr_db` already guards above.
+    void receptionInfoAvailable(const QString& callsign, double snr_db);
     void listeningChanged(bool listening);
     // Whatever the panel's own status line now reads. Emitted for every
     // change, so a second display of it (the status bar, while the

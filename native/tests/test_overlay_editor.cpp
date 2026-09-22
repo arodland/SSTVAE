@@ -9,9 +9,12 @@
 // like a working editor until an item will not go where you put it.
 
 #include <QApplication>
+#include <QContextMenuEvent>
+#include <QImage>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QLayout>
+#include <QStyle>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -19,13 +22,16 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <numbers>
 #include <string>
 #include <variant>
 
 #include "check.hpp"
 #include "images/types.hpp"
 #include "overlay/render.hpp"
+#include "overlay/template.hpp"
 #include "overlay_editor.hpp"
+#include "style.hpp"
 
 using namespace sstvae;
 
@@ -57,6 +63,25 @@ QPoint widget_point(double canvas_x, double canvas_y) {
     const int y0 = (H - h) / 2;
     return QPoint(x0 + static_cast<int>(std::lround(canvas_x * w / overlay::CANVAS_W)),
                   y0 + static_cast<int>(std::lround(canvas_y * h / overlay::CANVAS_H)));
+}
+
+// The inverse of `widget_point`: needed only where a test has to start
+// from a widget pixel it did not choose (the rotate handle's position,
+// which depends on the style's own icon-size metric) and work out what
+// canvas angle that press landed at.
+QPointF canvas_point(QPoint widget_pt) {
+    const double aspect =
+        static_cast<double>(overlay::CANVAS_W) / overlay::CANVAS_H;
+    int w = W;
+    int h = static_cast<int>(std::lround(w / aspect));
+    if (h > H) {
+        h = H;
+        w = static_cast<int>(std::lround(h * aspect));
+    }
+    const int x0 = (W - w) / 2;
+    const int y0 = (H - h) / 2;
+    return QPointF((widget_pt.x() - x0) * overlay::CANVAS_W / static_cast<double>(w),
+                   (widget_pt.y() - y0) * overlay::CANVAS_H / static_cast<double>(h));
 }
 
 void press(gui::OverlayEditor& editor, QPoint at) {
@@ -103,6 +128,27 @@ void test_no_picture_means_nothing_to_compose() {
     check::is_true(!editor.composed_image().has_value(),
                    "editor: no base picture composes to nothing");
     check::is_true(!editor.has_base(), "editor: and says so");
+}
+
+// The composer is a template editor before it is a picture editor: a
+// document is arranged and saved without a photograph as often as with
+// one. It used to paint nothing at all until a picture arrived, so
+// every item added went into an empty dark rectangle and appeared to be
+// swallowed. Items now compose onto a blank frame -- and what must not
+// change with them is that there is still nothing to *send*.
+void test_items_are_drawn_before_a_picture_is_chosen() {
+    gui::OverlayEditor editor;
+    editor.resize(W, H);
+
+    const QImage empty = editor.grab().toImage();
+    editor.add_text("N0CALL");
+    QCoreApplication::processEvents();
+    const QImage drawn = editor.grab().toImage();
+
+    check::is_true(drawn != empty, "editor: an item shows with no picture chosen");
+    check::is_true(!editor.composed_image().has_value(),
+                   "editor: and there is still nothing to send");
+    check::is_true(!editor.has_base(), "editor: which is what the panel asks");
 }
 
 void test_clicking_an_item_selects_it() {
@@ -226,6 +272,62 @@ void test_the_composite_is_the_renderer_s_output() {
     check::equal(composed->width, expected.width, "editor: composite width");
     check::is_true(composed->rgb == expected.rgb,
                    "editor: the composite is exactly overlay::render's output");
+    delete editor;
+}
+
+// --- templates (docs/overlay-templates.md) ------------------------------
+
+void test_set_fields_substitutes_the_composite_but_not_the_document() {
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_text("{theircall} de {mycall}");
+    const std::string raw = std::get<overlay::TextItem>(editor->doc().items[0]).text;
+
+    overlay::Fields fields;
+    fields.builtin = {{"theircall", "W1XYZ"}, {"mycall", "KC2G"}};
+    editor->set_fields(fields);
+
+    // The document stays the template: this is what `Save as
+    // template...` writes and what the property panel's text box shows.
+    check::equal(std::get<overlay::TextItem>(editor->doc().items[0]).text, raw,
+                 "editor: set_fields does not touch the stored document");
+
+    const overlay::Doc expected_doc = overlay::substitute(editor->doc(), fields);
+    const images::Picture expected =
+        overlay::render(grey(overlay::CANVAS_W, overlay::CANVAS_H), expected_doc);
+    const std::optional<images::Picture> composed = editor->composed_image();
+    check::is_true(composed.has_value() && composed->rgb == expected.rgb,
+                   "editor: the composite reflects the substituted text");
+    delete editor;
+}
+
+void test_set_fields_with_no_placeholders_changes_nothing() {
+    // The default-construction case: a plain overlay with no template
+    // active must render exactly as it always has.
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_text("KC2G");
+    const images::Picture before = *editor->composed_image();
+
+    editor->set_fields(overlay::Fields{{{"theircall", "W1XYZ"}}, {}});
+    check::is_true(editor->composed_image()->rgb == before.rgb,
+                   "editor: an unused field changes nothing");
+    delete editor;
+}
+
+void test_a_dropped_line_is_not_hit_testable() {
+    // Rule 2: a hole with nothing else on its line vanishes from the
+    // rendered picture, so it must also vanish from what a click can
+    // land on -- a selection handle that floated over empty canvas
+    // would be the WYSIWYG rule broken silently.
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_text("SNR {snr}");  // no {snr} filled in -> empty text
+    editor->set_fields(overlay::Fields{});
+
+    const std::optional<images::Picture> composed = editor->composed_image();
+    check::is_true(composed.has_value(), "editor: still composes");
+    const images::Picture expected =
+        overlay::render(grey(overlay::CANVAS_W, overlay::CANVAS_H), overlay::Doc());
+    check::is_true(composed->rgb == expected.rgb,
+                   "editor: a fully-empty line paints nothing, same as no item");
     delete editor;
 }
 
@@ -434,24 +536,584 @@ void test_it_pins_no_window_height() {
     }
 }
 
+// --- rectangles and z-order ----------------------------------------------
+
+void test_add_rect_selects_a_visible_item() {
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_rect();
+    const overlay::Item* item = editor->selected_item();
+    check::is_true(item != nullptr, "editor: adding a rect selects it");
+    const auto* rect = std::get_if<overlay::RectItem>(item);
+    check::is_true(rect != nullptr, "editor: the added item is a rect");
+    if (rect == nullptr) return;
+    // Not the model's own bare defaults -- see `add_rect`'s comment --
+    // the button has to place something a click can actually find.
+    check::is_true(rect->fill_kind != "none",
+                   "editor: a freshly added rect is visible, not blank");
+    delete editor;
+}
+
+void test_raise_and_lower_swap_adjacent_items_and_follow_the_selection() {
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_text("A");  // index 0
+    editor->add_text("B");  // index 1, selected
+    check::is_true(!editor->can_raise_selected(),
+                   "editor: the top item cannot be raised further");
+    check::is_true(editor->can_lower_selected(), "editor: but can be lowered");
+
+    editor->lower_selected();
+    check::equal(std::get<overlay::TextItem>(editor->doc().items[0]).text,
+                 std::string("B"), "editor: lower swaps it down");
+    check::equal(std::get<overlay::TextItem>(*editor->selected_item()).text,
+                 std::string("B"), "editor: the selection follows the item");
+
+    editor->raise_selected();
+    check::equal(std::get<overlay::TextItem>(editor->doc().items[1]).text,
+                 std::string("B"), "editor: raise undoes it");
+    delete editor;
+}
+
+void test_bring_to_front_and_send_to_back_preserve_the_rest_of_the_order() {
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_text("A");  // 0
+    editor->add_text("B");  // 1
+    editor->add_text("C");  // 2
+    const auto label = [&](int i) {
+        return std::get<overlay::TextItem>(editor->doc().items[i]).text;
+    };
+
+    // `add_text` always selects the item it just added, which is the
+    // simplest way to get a known item selected without needing real
+    // click geometry -- add a fourth on top of A..C and pull it to the
+    // back, which must not disturb their own relative order.
+    editor->add_text("D");  // 3, selected
+    check::equal(label(3), std::string("D"), "editor: D starts on top");
+    editor->send_selected_to_back();
+    check::equal(label(0), std::string("D"), "editor: D is now at the back");
+    check::equal(label(1), std::string("A"), "editor: A..C keep their order");
+    check::equal(label(2), std::string("B"), "editor: A..C keep their order");
+    check::equal(label(3), std::string("C"), "editor: A..C keep their order");
+    check::equal(std::get<overlay::TextItem>(*editor->selected_item()).text,
+                 std::string("D"), "editor: the selection follows D to index 0");
+
+    editor->bring_selected_to_front();
+    check::equal(label(3), std::string("D"), "editor: and back to the front");
+    check::equal(label(0), std::string("A"), "editor: A..C keep their order again");
+    check::equal(label(1), std::string("B"), "editor: A..C keep their order again");
+    check::equal(label(2), std::string("C"), "editor: A..C keep their order again");
+    delete editor;
+}
+
+void test_z_order_changes_which_item_paints_on_top() {
+    // The property the buttons exist for, not just the vector
+    // arithmetic: after a reorder, `render()` must actually draw the
+    // raised item over the one it used to sit under.
+    gui::OverlayEditor* editor = make_editor();
+    overlay::RectItem under;
+    under.x = 0.1;
+    under.y = 0.1;
+    under.width = 0.3;
+    under.height = 0.3;
+    under.fill_kind = "solid";
+    under.fill_color = "#ff0000";
+    overlay::RectItem over_item = under;
+    over_item.fill_color = "#0000ff";
+
+    overlay::Doc doc;
+    doc.items.push_back(under);      // red, index 0
+    doc.items.push_back(over_item);  // blue, index 1, drawn on top
+    editor->set_doc(doc);
+
+    // Both rects cover the same area, so a click there hits both --
+    // `hit_test` picks front to back, i.e. the one actually on top
+    // (blue), which is the whole point being pinned here.
+    QMouseEvent select_event(QEvent::MouseButtonPress,
+                             widget_point(0.2 * overlay::CANVAS_W, 0.2 * overlay::CANVAS_H),
+                             widget_point(0.2 * overlay::CANVAS_W, 0.2 * overlay::CANVAS_H),
+                             Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(editor, &select_event);
+    check::equal(editor->doc().items.size(), std::size_t{2}, "editor: still two items");
+
+    const auto* selected_rect = std::get_if<overlay::RectItem>(editor->selected_item());
+    check::is_true(selected_rect != nullptr && selected_rect->fill_color == "#0000ff",
+                   "editor: the click selected the blue (topmost) rect");
+
+    // Lower the selected (blue) item below red -- red should now win
+    // the overlap it used to lose.
+    editor->lower_selected();
+    const std::optional<images::Picture> composed = editor->composed_image();
+    check::is_true(composed.has_value(), "editor: composes after the reorder");
+    const std::size_t idx =
+        (static_cast<std::size_t>(0.2 * overlay::CANVAS_H) * composed->width +
+         static_cast<std::size_t>(0.2 * overlay::CANVAS_W)) * 3;
+    check::equal(static_cast<int>(composed->rgb[idx]), 255,
+                 "editor: red now paints over blue after lower_selected");
+    check::equal(static_cast<int>(composed->rgb[idx + 2]), 0,
+                 "editor: and blue no longer shows through");
+    delete editor;
+}
+
+// --- rotation, scaling and the floating palette's anchor -----------------
+
+void test_dragging_the_rotate_handle_rotates_the_item() {
+    // The rotate grip sits above-and-right of the item, offset from its
+    // top-right corner by `handle_px() * 2` in raw screen pixels -- the
+    // opposite corner and direction from the resize grip, so a press can
+    // never be ambiguous between the two. `handle_px()` is derived from
+    // the style, not a literal, so this mirrors that same query rather
+    // than guessing a pixel count.
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_rect();
+    overlay::Item* item = editor->selected_item();
+    check::is_true(item != nullptr, "rotate: a rect is selected after add_rect");
+
+    const overlay::Bbox box =
+        overlay::item_bbox(overlay::CANVAS_W, overlay::CANVAS_H, *item, nullptr);
+    const QPointF center(box.x + box.w / 2.0, box.y + box.h / 2.0);
+
+    const QRect on_screen = editor->selection_screen_rect();
+    const int side =
+        std::max(10, editor->style()->pixelMetric(QStyle::PM_SmallIconSize) * 2 / 3);
+    const int offset = side * 2;
+    const QPoint handle_center(on_screen.x() + on_screen.width() + offset,
+                               on_screen.y() - offset);
+
+    press(*editor, handle_center);
+    check::is_true(editor->selected_item() != nullptr,
+                   "rotate: pressing the handle keeps the item selected");
+    const double r0 =
+        std::visit([](const auto& i) { return i.rotation; }, *editor->selected_item());
+
+    // Work out the canvas-space angle the press actually landed at (it is
+    // near the handle's centre, not on any axis this test controls), then
+    // ask for a point a precise quarter turn further counter-clockwise --
+    // same formula `mousePressEvent`/`mouseMoveEvent` use: screen-down is
+    // +y, so this negation is what makes a visually CCW sweep read as a
+    // positive angle.
+    const QPointF press_canvas = canvas_point(handle_center);
+    const double angle0 =
+        std::atan2(-(press_canvas.y() - center.y()), press_canvas.x() - center.x());
+    const double radius =
+        std::hypot(press_canvas.x() - center.x(), press_canvas.y() - center.y());
+    const double angle_target = angle0 + std::numbers::pi / 2.0;
+    const QPointF target_canvas(center.x() + radius * std::cos(angle_target),
+                                center.y() - radius * std::sin(angle_target));
+    move_to(*editor, widget_point(target_canvas.x(), target_canvas.y()));
+
+    const double rotation =
+        std::visit([](const auto& i) { return i.rotation; }, *editor->selected_item());
+    check::is_true(std::abs(rotation - (r0 + 90.0)) <= 2.0,
+                   "rotate: a quarter-turn CCW drag adds 90 degrees (" +
+                       std::to_string(r0) + " -> " + std::to_string(rotation) + ")");
+
+    release(*editor, widget_point(target_canvas.x(), target_canvas.y()));
+    delete editor;
+}
+
+void test_scale_keys_grow_and_shrink_the_selection() {
+    std::unique_ptr<gui::OverlayEditor> editor(make_editor());
+    editor->add_text("N0CALL");
+    const overlay::TextItem before =
+        std::get<overlay::TextItem>(*editor->selected_item());
+
+    key(*editor, Qt::Key_Plus);
+    const overlay::TextItem grown =
+        std::get<overlay::TextItem>(*editor->selected_item());
+    check::is_true(grown.size > before.size,
+                   "scale: + grows the selection's size");
+
+    key(*editor, Qt::Key_Minus);
+    const overlay::TextItem back =
+        std::get<overlay::TextItem>(*editor->selected_item());
+    check::is_true(back.size < grown.size,
+                   "scale: - shrinks it back down");
+
+    // Shift is the coarse step, matching the nudge convention -- bigger,
+    // not merely different. Compare the two multiplicative factors from
+    // the same starting size rather than chaining more key presses, so
+    // rounding from an earlier step cannot muddy the comparison.
+    const double base = back.size;
+    key(*editor, Qt::Key_Plus);
+    const double fine_size =
+        std::get<overlay::TextItem>(*editor->selected_item()).size;
+    std::get<overlay::TextItem>(*editor->selected_item()).size = base;
+    key(*editor, Qt::Key_Plus, Qt::ShiftModifier);
+    const double coarse_size =
+        std::get<overlay::TextItem>(*editor->selected_item()).size;
+    check::is_true((coarse_size - base) > (fine_size - base),
+                   "scale: shift takes a bigger step than the plain key");
+}
+
+void test_rotate_keys_turn_the_selection() {
+    std::unique_ptr<gui::OverlayEditor> editor(make_editor());
+    editor->add_rect();
+    const double r0 =
+        std::visit([](const auto& i) { return i.rotation; }, *editor->selected_item());
+
+    // `[` rotates counter-clockwise (increasing), `]` clockwise
+    // (decreasing) -- see `keyPressEvent`'s `rotate_item` calls.
+    key(*editor, Qt::Key_BracketLeft);
+    const double r1 =
+        std::visit([](const auto& i) { return i.rotation; }, *editor->selected_item());
+    check::is_true(r1 > r0, "rotate keys: [ increases rotation");
+
+    key(*editor, Qt::Key_BracketRight);
+    const double r2 =
+        std::visit([](const auto& i) { return i.rotation; }, *editor->selected_item());
+    check::is_true(std::abs(r2 - r0) <= 1e-9, "rotate keys: ] undoes it");
+
+    // Shift takes the coarser, 15-degree step.
+    key(*editor, Qt::Key_BracketLeft, Qt::ShiftModifier);
+    const double r3 =
+        std::visit([](const auto& i) { return i.rotation; }, *editor->selected_item());
+    check::is_true(r3 - r0 > r1 - r0,
+                   "rotate keys: shift takes a bigger step than the plain key");
+}
+
+void test_the_resize_handle_tracks_the_items_rotation() {
+    // A square, so a clean quarter turn swings its bottom-right corner
+    // to exactly where its top-right corner used to be -- a precise,
+    // easily-checked prediction rather than an approximate one.
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_rect();
+    auto* rect = std::get_if<overlay::RectItem>(editor->selected_item());
+    check::is_true(rect != nullptr, "rotate/resize: a rect is selected");
+    if (rect == nullptr) {
+        delete editor;
+        return;
+    }
+    // Equal in canvas *pixels*, not merely equal fractions -- CANVAS_W
+    // and CANVAS_H are not equal (4:3), so two equal fractions would be
+    // a rectangle, not the square this test's corner-swap prediction
+    // needs.
+    rect->width = 0.2;
+    rect->height =
+        0.2 * overlay::CANVAS_W / static_cast<double>(overlay::CANVAS_H);
+    editor->refresh_item();
+
+    const overlay::Bbox box =
+        overlay::item_bbox(overlay::CANVAS_W, overlay::CANVAS_H, *editor->selected_item(), nullptr);
+    check::equal(box.w, box.h, "rotate/resize: the test rect is square in canvas pixels");
+
+    // Six 15-degree coarse steps make one quarter turn.
+    for (int i = 0; i < 6; ++i) key(*editor, Qt::Key_BracketLeft, Qt::ShiftModifier);
+    check::is_true(
+        std::abs(std::get<overlay::RectItem>(*editor->selected_item()).rotation - 90.0) <=
+            1e-6,
+        "rotate/resize: six coarse steps make a quarter turn");
+
+    // Press where the item's own top-right corner sits (in the item's
+    // *local*, unrotated frame) -- after a 90-degree turn, that is
+    // exactly where the bottom-right corner, and with it the resize
+    // grip, has rotated to.
+    const QPoint at_rotated_corner = widget_point(box.x + box.w, box.y);
+    const double width_before =
+        std::get<overlay::RectItem>(*editor->selected_item()).width;
+    press(*editor, at_rotated_corner);
+    move_to(*editor, at_rotated_corner + QPoint(30, 0));
+    release(*editor, at_rotated_corner + QPoint(30, 0));
+    const double width_after =
+        std::get<overlay::RectItem>(*editor->selected_item()).width;
+    check::is_true(std::abs(width_after - width_before) > 1e-6,
+                   "rotate/resize: dragging the rotated corner still resizes the item");
+    delete editor;
+}
+
+void test_a_rect_resizes_freely_on_both_axes() {
+    // A rectangle's proportions are the operator's to choose, so a purely
+    // horizontal drag must widen it without touching its height -- the
+    // grip used to scale both axes from the x distance alone.
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_rect();
+    auto* rect = std::get_if<overlay::RectItem>(editor->selected_item());
+    check::is_true(rect != nullptr, "free resize: a rect is selected");
+    if (rect == nullptr) {
+        delete editor;
+        return;
+    }
+    const double w0 = rect->width;
+    const double h0 = rect->height;
+
+    const overlay::Bbox box = overlay::item_bbox(
+        overlay::CANVAS_W, overlay::CANVAS_H, *editor->selected_item(), nullptr);
+    const QPoint grip = widget_point(box.x + box.w, box.y + box.h);
+    press(*editor, grip);
+    move_to(*editor, grip + QPoint(40, 0));
+    release(*editor, grip + QPoint(40, 0));
+
+    const auto& after = std::get<overlay::RectItem>(*editor->selected_item());
+    check::is_true(after.width > w0 + 1e-6,
+                   "free resize: a horizontal drag widens the rect");
+    check::is_true(std::abs(after.height - h0) <= 1e-9,
+                   "free resize: and leaves its height alone");
+    delete editor;
+}
+
+void test_the_rotate_handle_stays_reachable_near_a_canvas_edge() {
+    // Pinned right at the canvas's own top-right corner -- the
+    // unclamped handle position (further up and further right of the
+    // item's own top-right corner, see `rotate_handle_rect`'s outward
+    // offset) would land off the canvas entirely without the clamp.
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_rect();
+    auto* rect = std::get_if<overlay::RectItem>(editor->selected_item());
+    check::is_true(rect != nullptr, "rotate/edge: a rect is selected");
+    if (rect == nullptr) {
+        delete editor;
+        return;
+    }
+    rect->x = 0.92;
+    rect->y = 0.02;
+    rect->width = 0.06;
+    rect->height = 0.06;
+    editor->refresh_item();
+
+    const double r0 = std::get<overlay::RectItem>(*editor->selected_item()).rotation;
+    // A few pixels in from the canvas's literal corner pixel, so the
+    // press is safely inside the clamped handle regardless of rounding
+    // at the exact edge.
+    const QPoint press_at =
+        widget_point(overlay::CANVAS_W, 0) + QPoint(-3, 3);
+    press(*editor, press_at);
+    move_to(*editor, press_at + QPoint(-25, 5));
+    const double r1 = std::get<overlay::RectItem>(*editor->selected_item()).rotation;
+    release(*editor, press_at + QPoint(-25, 5));
+    check::is_true(std::abs(r1 - r0) > 1e-6,
+                   "rotate/edge: the handle is still grabbable at the canvas corner");
+    delete editor;
+}
+
+// A "last received" inset paints nothing at all until a reception
+// arrives -- correctly, since this is also what encodes the
+// transmission and a placeholder must never go out over the air in
+// place of a picture. But that used to leave the item invisible and
+// unfindable on the *preview* too, before the operator had clicked
+// anything -- a real gap for a template that starts with one already
+// in it. The editor now draws its own frame there, over the composed
+// picture rather than into it.
+void test_an_unresolved_last_rx_inset_shows_a_placeholder_frame() {
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_last_rx_inset();  // no reception yet
+    QCoreApplication::processEvents();
+
+    const overlay::Item& item = editor->doc().items.front();
+    // A few pixels in from the box's own top-left corner -- not its
+    // centre, which the placeholder's caption paints over and whose
+    // anti-aliased edge just barely misses an exact colour match. No
+    // `last_rx` picture to measure an aspect from yet, so `item_bbox`
+    // falls back to 0.75, which this sample point has to use too, to
+    // land inside the same box the editor computes.
+    const overlay::Bbox box =
+        overlay::item_bbox(overlay::CANVAS_W, overlay::CANVAS_H, item, nullptr);
+    const QPoint at = widget_point(box.x + 5, box.y + 5);
+
+    const QImage before = editor->grab().toImage();
+    check::is_true(before.rect().contains(at), "placeholder: the sample point is on screen");
+    check::equal(before.pixelColor(at).rgb(), gui::style::color::viewport_frame().rgb(),
+                 "placeholder: an unresolved last_rx inset paints its own frame");
+
+    // Once a reception arrives, the placeholder must get out of the way
+    // -- overlay::render is what draws the actual picture there now.
+    editor->set_last_rx(grey(40, 30));
+    QCoreApplication::processEvents();
+    const QImage after = editor->grab().toImage();
+    check::is_true(after.pixelColor(at).rgb() != gui::style::color::viewport_frame().rgb(),
+                   "placeholder: it is gone once a reception arrives");
+    delete editor;
+}
+
+// The placeholder is findable, not just visible once already selected:
+// it has to draw for every unresolved last_rx item, since the whole
+// point is helping the operator locate one they have not clicked yet.
+void test_the_placeholder_draws_even_when_nothing_is_selected() {
+    gui::OverlayEditor* editor = make_editor();
+    editor->add_last_rx_inset();
+    // Deselect by clicking empty canvas -- `remove_selected` would take
+    // the item out of the document entirely, which is not what this
+    // test wants: the item stays, only the selection changes.
+    press(*editor, widget_point(2, 2));
+    QCoreApplication::processEvents();
+    check::is_true(editor->selected_item() == nullptr,
+                   "placeholder: nothing is selected");
+    check::is_true(!editor->doc().items.empty(),
+                   "placeholder: but the item is still in the document");
+
+    const overlay::Item& item = editor->doc().items.front();
+    const overlay::Bbox box =
+        overlay::item_bbox(overlay::CANVAS_W, overlay::CANVAS_H, item, nullptr);
+    const QPoint at = widget_point(box.x + 5, box.y + 5);
+    const QImage frame = editor->grab().toImage();
+    check::equal(frame.pixelColor(at).rgb(), gui::style::color::viewport_frame().rgb(),
+                 "placeholder: still drawn with nothing selected");
+    delete editor;
+}
+
+void test_selection_screen_rect_tracks_the_selection() {
+    gui::OverlayEditor* editor = make_editor();
+    check::is_true(editor->selection_screen_rect().isEmpty(),
+                   "selection rect: empty with nothing selected");
+
+    editor->add_last_rx_inset();  // no last_rx set yet, but still an item
+    const images::Picture inset = grey(40, 30);
+    editor->set_last_rx(inset);
+
+    const QRect on_screen = editor->selection_screen_rect();
+    check::is_true(!on_screen.isEmpty(),
+                   "selection rect: non-empty once something is selected");
+
+    const overlay::Bbox box = overlay::item_bbox(
+        overlay::CANVAS_W, overlay::CANVAS_H, editor->doc().items.front(), &inset);
+    const QPoint expected_center =
+        widget_point(box.x + box.w / 2.0, box.y + box.h / 2.0);
+    check::is_true(on_screen.contains(expected_center),
+                   "selection rect: covers the item's own on-screen centre");
+
+    editor->remove_selected();
+    check::is_true(editor->selection_screen_rect().isEmpty(),
+                   "selection rect: empty again once the selection is removed");
+    delete editor;
+}
+
+namespace {
+
+// --- right-click ------------------------------------------------------
+//
+// The editor opens no menu; `contextMenuRequested` is the whole hook.
+// What it owes a menu is that the item under the cursor is *selected*
+// by the time the signal fires -- otherwise the menu edits whatever was
+// selected before -- and that the selection's grips, which sit outside
+// the item's own area, count as the item.
+
+void right_click(gui::OverlayEditor& editor, QPoint at, QPoint global = QPoint(1000, 700)) {
+    QContextMenuEvent event(QContextMenuEvent::Mouse, at, global);
+    QApplication::sendEvent(&editor, &event);
+}
+
+struct Offers {
+    int count = 0;
+    overlay::Item* item = nullptr;
+    QPoint where;
+};
+
+Offers* watch_offers(gui::OverlayEditor& editor) {
+    auto* offers = new Offers;  // owned by the editor via the lambda's lifetime below
+    QObject::connect(&editor, &gui::OverlayEditor::contextMenuRequested, &editor,
+                     [offers](overlay::Item* item, const QPoint& global) {
+                         ++offers->count;
+                         offers->item = item;
+                         offers->where = global;
+                     });
+    QObject::connect(&editor, &QObject::destroyed, [offers] { delete offers; });
+    return offers;
+}
+
+void test_right_click_selects_the_item_and_offers_a_menu() {
+    std::unique_ptr<gui::OverlayEditor> editor(make_editor());
+    editor->add_text("A");
+    // Somewhere else, so the two do not overlap and the hit test has to
+    // discriminate.
+    std::get<overlay::TextItem>(*editor->selected_item()).x = 0.55;
+    std::get<overlay::TextItem>(*editor->selected_item()).y = 0.55;
+    editor->add_text("B");  // at the default corner, and selected
+    Offers* offers = watch_offers(*editor);
+
+    const QPointF a = centre_of(editor->doc().items[0], nullptr);
+    right_click(*editor, widget_point(a.x(), a.y()), QPoint(1234, 567));
+    check::equal(offers->count, 1, "right-click: on an item, a menu is offered");
+    check::equal(std::get<overlay::TextItem>(*editor->selected_item()).text,
+                 std::string("A"), "right-click: and that item is selected first");
+    check::is_true(offers->item == editor->selected_item(),
+                   "right-click: the item offered is the one now selected");
+    check::equal(offers->where.x(), 1234, "right-click: with where to open it, x");
+    check::equal(offers->where.y(), 567, "right-click: and y");
+
+    // Empty canvas: nothing offered, and the selection is left alone.
+    right_click(*editor, widget_point(overlay::CANVAS_W - 2, overlay::CANVAS_H / 2));
+    check::equal(offers->count, 1, "right-click: empty canvas offers nothing");
+    check::equal(std::get<overlay::TextItem>(*editor->selected_item()).text,
+                 std::string("A"), "right-click: and keeps the selection");
+}
+
+void test_right_click_on_a_grip_offers_the_selected_item() {
+    // Both grips sit outside the item's own area, so a hit test on the
+    // items alone finds nothing there. They belong to the selection.
+    std::unique_ptr<gui::OverlayEditor> editor(make_editor());
+    editor->add_rect();
+    Offers* offers = watch_offers(*editor);
+    const QRect on_screen = editor->selection_screen_rect();
+    const int side =
+        std::max(10, editor->style()->pixelMetric(QStyle::PM_SmallIconSize) * 2 / 3);
+    const QPoint rotate_grip(on_screen.x() + on_screen.width() + side * 2,
+                             on_screen.y() - side * 2);
+    const QPoint resize_grip(on_screen.x() + on_screen.width(),
+                             on_screen.y() + on_screen.height());
+
+    right_click(*editor, rotate_grip);
+    check::equal(offers->count, 1, "right-click: the rotate grip offers the item");
+    right_click(*editor, resize_grip);
+    check::equal(offers->count, 2, "right-click: and so does the resize grip");
+    check::is_true(editor->selected_item() != nullptr, "right-click: which stays selected");
+}
+
+void test_the_right_button_never_drags() {
+    // Qt delivers a press and then a context-menu event for a right
+    // click. `mousePressEvent` returns early on anything but the left
+    // button; if that ever goes, the item follows the pointer while the
+    // menu is open.
+    std::unique_ptr<gui::OverlayEditor> editor(make_editor());
+    editor->add_text("A");
+    const QPointF centre = centre_of(editor->doc().items[0], nullptr);
+    const double x0 = std::get<overlay::TextItem>(editor->doc().items[0]).x;
+    const QPoint at = widget_point(centre.x(), centre.y());
+    QMouseEvent press_event(QEvent::MouseButtonPress, QPointF(at), QPointF(at),
+                            Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+    QApplication::sendEvent(editor.get(), &press_event);
+    right_click(*editor, at);
+    move_to(*editor, widget_point(centre.x() + 120.0, centre.y() + 60.0));
+    check::equal(std::get<overlay::TextItem>(editor->doc().items[0]).x, x0,
+                 "right-click: a right-button drag does not move the item");
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
     check::report_crashes_instead_of_prompting();
     qputenv("QT_QPA_PLATFORM", "offscreen");
     const QApplication app(argc, argv);
 
     test_no_picture_means_nothing_to_compose();
+    test_items_are_drawn_before_a_picture_is_chosen();
     test_clicking_an_item_selects_it();
     test_dragging_moves_the_item_to_the_cursor();
     test_a_drag_keeps_the_grab_offset();
     test_normalized_coordinates_survive_a_resize();
     test_removing_clears_the_selection();
     test_the_composite_is_the_renderer_s_output();
+    test_set_fields_substitutes_the_composite_but_not_the_document();
+    test_set_fields_with_no_placeholders_changes_nothing();
+    test_a_dropped_line_is_not_hit_testable();
     test_arrows_nudge_by_a_fixed_fraction();
     test_delete_removes_the_selection();
     test_an_added_item_can_be_nudged_without_clicking_first();
     test_a_reception_is_a_change_only_if_an_item_uses_it();
     test_a_reception_is_kept_even_with_nothing_to_show_it();
     test_it_pins_no_window_height();
+    test_add_rect_selects_a_visible_item();
+    test_raise_and_lower_swap_adjacent_items_and_follow_the_selection();
+    test_bring_to_front_and_send_to_back_preserve_the_rest_of_the_order();
+    test_z_order_changes_which_item_paints_on_top();
+    test_dragging_the_rotate_handle_rotates_the_item();
+    test_scale_keys_grow_and_shrink_the_selection();
+    test_rotate_keys_turn_the_selection();
+    test_the_resize_handle_tracks_the_items_rotation();
+    test_a_rect_resizes_freely_on_both_axes();
+    test_the_rotate_handle_stays_reachable_near_a_canvas_edge();
+    test_an_unresolved_last_rx_inset_shows_a_placeholder_frame();
+    test_the_placeholder_draws_even_when_nothing_is_selected();
+    test_selection_screen_rect_tracks_the_selection();
+    test_right_click_selects_the_item_and_offers_a_menu();
+    test_right_click_on_a_grip_offers_the_selected_item();
+    test_the_right_button_never_drags();
 
     return check::report("overlay editor");
 }

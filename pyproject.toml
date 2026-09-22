@@ -125,6 +125,9 @@ build-backend = "setuptools.build_meta"
 # sstvae/modem/framing.py. Without this the wheel imports and then fails
 # at the first transmission.
 "sstvae.modem" = ["*.npy"]
+# The built-in overlay templates (docs/overlay-templates.md). Data, not
+# code, so that the apps can bundle the identical files.
+"sstvae.overlay" = ["templates/*.json"]
 
 [tool.setuptools.packages.find]
 include = ["sstvae*"]

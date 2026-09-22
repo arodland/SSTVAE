@@ -70,7 +70,13 @@ qt_standard_project_setup(REQUIRES 6.8)
 # of those being separate libraries behind seams.
 set(SSTVAE_BUILD_GUI OFF CACHE STRING "" FORCE)
 set(SSTVAE_BUILD_QTAUDIO OFF CACHE STRING "" FORCE)
-set(SSTVAE_BUILD_OVERLAY OFF CACHE STRING "" FORCE)
+# **On since the overlay landed here** (docs/overlay-templates.md step
+# 3). It was forced off while this app had no overlay at all, and the
+# step that gave it one did not flip it -- `Composition::preview` calls
+# `overlay::render`, so the app stopped linking, which is the sort of
+# thing a step written without an NDK to hand does not find out. It
+# needs QtGui, which this app requires two lines above anyway.
+set(SSTVAE_BUILD_OVERLAY ON CACHE STRING "" FORCE)
 # **On since 2026-08-22.** docs/android.md had this off because Hamlib
 # opens a device path and Android gives an app none -- but Hamlib takes a
 # socket for any backend (core/rig/transport.hpp records the mechanism),
@@ -91,11 +97,37 @@ add_subdirectory(.. sstvae_native EXCLUDE_FROM_ALL)
 
 qt_add_executable(sstvae_android main.cpp listener.cpp session.cpp service_jni.cpp java_fetcher.cpp
     assets.cpp waterfall.cpp pictures.cpp composition.cpp transmitter.cpp rigcontrol.cpp)
+
+# The three built-in templates (docs/overlay-templates.md), shipped as a
+# Qt resource rather than an Android asset -- unlike the codec, three
+# JSON files of a few hundred bytes each shipping twice per ABI is not
+# the problem `assets/` exists to avoid. `QT_RESOURCE_ALIAS` is what
+# keeps the resource path `:/qt/qml/SSTVAE/templates/<name>.json`
+# rather than embedding this file's `../../sstvae/...` relative path
+# into it; `transmitter.cpp`'s `builtin_templates_path()` has to agree
+# with the alias exactly.
+set(SSTVAE_TEMPLATE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../sstvae/overlay/templates")
+set(SSTVAE_TEMPLATE_FILES
+    "${SSTVAE_TEMPLATE_SOURCE_DIR}/cq.json"
+    "${SSTVAE_TEMPLATE_SOURCE_DIR}/reply.json"
+    "${SSTVAE_TEMPLATE_SOURCE_DIR}/reply-picture.json")
+foreach(_sstvae_template_file ${SSTVAE_TEMPLATE_FILES})
+    get_filename_component(_sstvae_template_name "${_sstvae_template_file}" NAME)
+    set_source_files_properties("${_sstvae_template_file}" PROPERTIES
+        QT_RESOURCE_ALIAS "templates/${_sstvae_template_name}")
+endforeach()
+
 qt_add_qml_module(sstvae_android URI SSTVAE VERSION 1.0
-    QML_FILES Main.qml LevelMeter.qml CropView.qml TransmitPane.qml RigPane.qml SettingsSection.qml)
+    QML_FILES Main.qml LevelMeter.qml CropView.qml TransmitPane.qml RigPane.qml SettingsSection.qml
+    RESOURCES ${SSTVAE_TEMPLATE_FILES})
 target_link_libraries(sstvae_android PRIVATE Qt6::Quick Qt6::Gui sstvae_core
                                              sstvae_audio_android
-                                             sstvae_codec)
+                                             sstvae_codec
+                                             # `Composition::preview` is
+                                             # `overlay::render`'s output, per
+                                             # docs/overlay-templates.md -- the
+                                             # same rule the desktop follows.
+                                             sstvae_overlay_render)
 # The transport is always linked: it is a byte pipe to a USB or
 # Bluetooth device and knows nothing about Hamlib, so the rig screen,
 # the device pickers and the settings all build even in the one
@@ -229,6 +261,43 @@ if(SSTVAE_ANDROID_BUNDLE_MODELS)
         configure_file("${_dl}" "${_pkg_dir}/assets/models/${_name}" COPYONLY)
     endforeach()
 endif()
+# **One Gradle dependency, injected into Qt's own template rather than
+# carried as a copy of it.** The template scanner (`TemplateScanner.java`)
+# is ML Kit's unbundled code scanner, which is a Maven artifact, and the
+# only place androiddeployqt lets one be named is `build.gradle`. It
+# takes a whole `build.gradle` from the package source dir if there is
+# one -- but a committed copy of Qt's template freezes its Gradle plugin
+# and Kotlin versions at whatever Qt shipped the day it was copied, and
+# goes quietly stale on every Qt upgrade after. So the template is read
+# from the Qt in use at configure time and the one line is spliced in;
+# if Qt moves the anchor, this fails here with a message, not in Gradle.
+#
+# The version is pinned, like everything else fetched here.
+# `tools/check_android_java.sh` compiles the Java against this same
+# version's jar and refuses to run if the two disagree.
+set(SSTVAE_ANDROID_CODE_SCANNER_VERSION "16.1.0")
+set(_gradle_template
+    "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_DATA}/src/android/templates/build.gradle")
+if(NOT EXISTS "${_gradle_template}")
+    message(FATAL_ERROR "Qt's Android Gradle template was not found at "
+                        "${_gradle_template}; cannot add the scanner dependency.")
+endif()
+file(READ "${_gradle_template}" _gradle)
+set(_gradle_anchor "implementation fileTree(dir: 'libs', include: ['*.jar', '*.aar'])")
+string(FIND "${_gradle}" "${_gradle_anchor}" _gradle_at)
+if(_gradle_at EQUAL -1)
+    message(FATAL_ERROR "Qt's Gradle template no longer contains the line this build "
+                        "splices the ML Kit dependency after; update the anchor in "
+                        "native/android-app/CMakeLists.txt.")
+endif()
+string(REPLACE "${_gradle_anchor}"
+    "${_gradle_anchor}
+    // SSTVAE: the QR template scanner (TemplateScanner.java). Spliced in by
+    // native/android-app/CMakeLists.txt; the rest of this file is Qt's.
+    implementation 'com.google.android.gms:play-services-code-scanner:${SSTVAE_ANDROID_CODE_SCANNER_VERSION}'"
+    _gradle "${_gradle}")
+file(WRITE "${_pkg_dir}/build.gradle" "${_gradle}")
+
 set_property(TARGET sstvae_android APPEND PROPERTY
     QT_ANDROID_PACKAGE_SOURCE_DIR "${_pkg_dir}")
 

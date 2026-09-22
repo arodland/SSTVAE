@@ -118,6 +118,9 @@ add_library(sstvae_core STATIC
   core/optimize/optimize.cpp
   core/optimize/speculative.cpp
   core/overlay/model.cpp
+  core/overlay/template.cpp
+  core/overlay/share.cpp
+  core/overlay/template_catalog.cpp
   core/sync/sync.cpp
   # Vendored, and the only non-header-only one -- see
   # third_party/easyexif/README.md. Read for JPEG orientation alone.
@@ -203,6 +206,54 @@ function(sstvae_onnxruntime_copy_runtime target)
             "${SSTVAE_ONNXRUNTIME_LIBDIR}/onnxruntime.dll"
             "$<TARGET_FILE_DIR:${target}>"
     VERBATIM)
+endfunction()
+
+# The built-in overlay templates (docs/overlay-templates.md), copied
+# beside a GUI target the same way the Hamlib and onnxruntime runtimes
+# are: `sstvae/overlay/templates/` is the one source both the CLI and
+# the apps ship, so an installed build reads the same three files a
+# Python station would. `overlay::load_builtin_templates` looks for a
+# `templates/` directory next to the executable.
+#
+# **The path is captured here, not recomputed inside the function.** A
+# function body runs with the *caller's* `CMAKE_CURRENT_SOURCE_DIR`, not
+# this file's -- so a call from `tests/CMakeLists.txt` resolved one
+# directory short (`native/tests/../sstvae/...` instead of
+# `native/tests/../../sstvae/...`) and failed the check below outright.
+# `SSTVAE_TEMPLATES_SRC` is set once, in this file's own scope, and
+# `add_subdirectory` scopes see their parent's variables -- so every
+# caller, whichever directory it is in, gets the same answer.
+set(SSTVAE_TEMPLATES_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../sstvae/overlay/templates")
+function(sstvae_copy_builtin_templates target)
+  set(_templates_src "${SSTVAE_TEMPLATES_SRC}")
+  file(GLOB _templates "${_templates_src}/*.json")
+  if(NOT _templates)
+    message(FATAL_ERROR
+      "No built-in templates found in ${_templates_src}; ${target} would "
+      "start with an empty template picker and no diagnostic at all.")
+  endif()
+  # **Never data under Contents/MacOS.** For a macOS bundle "beside the
+  # executable" is the code directory, and codesign treats everything in
+  # it as code: a .json there fails signing with "code object is not
+  # signed at all / In subcomponent: .../templates/reply-picture.json".
+  # macdeployqt printed exactly that on every CI run from the day the
+  # templates landed and then exited 0, so the CI bundles carried no
+  # valid signature with nothing red anywhere (no release went out in
+  # that window; the first would have) -- package_app.sh now verifies
+  # the signature so that cannot recur. Data belongs in Contents/Resources,
+  # and `TransmitPanel::builtin_templates_dir` looks there on macOS.
+  # Tests and sstvae-gui-shot are plain executables and keep the
+  # beside-the-binary layout everywhere.
+  get_target_property(_is_bundle ${target} MACOSX_BUNDLE)
+  if(APPLE AND _is_bundle)
+    set(_dest "$<TARGET_BUNDLE_CONTENT_DIR:${target}>/Resources/templates")
+  else()
+    set(_dest "$<TARGET_FILE_DIR:${target}>/templates")
+  endif()
+  add_custom_command(TARGET ${target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${_dest}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_templates} "${_dest}"
+    COMMENT "Copying the built-in overlay templates for ${target}")
 endfunction()
 
 # --- Qt audio ---------------------------------------------------------------
@@ -444,11 +495,18 @@ if(_want_gui)
     gui/rig_config.cpp
     gui/settings_dialog.cpp
     gui/overlay_editor.cpp
+    gui/item_menu.cpp
     gui/tx_panel.cpp
     gui/banner.cpp
     gui/crop_dialog.cpp
     gui/log_pane.cpp
-    gui/app_state.cpp)
+    gui/share_dialog.cpp
+    gui/app_state.cpp
+    # The QR encoder, vendored -- see third_party/qrcodegen/README.md.
+    # Built into the GUI rather than into `sstvae_core`, because showing
+    # a template as a code is a thing a window does; nothing headless
+    # needs it.
+    third_party/qrcodegen/qrcodegen.cpp)
   set_target_properties(sstvae_gui PROPERTIES AUTOMOC ON)
   # The application's own version, for the About box. It reported
   # Hamlib's and Qt's and omitted this one -- which is the number every
@@ -456,6 +514,7 @@ if(_want_gui)
   # running program.
   target_compile_definitions(sstvae_gui PUBLIC SSTVAE_VERSION="${PROJECT_VERSION}")
   target_include_directories(sstvae_gui PUBLIC core gui)
+  target_include_directories(sstvae_gui PRIVATE third_party/qrcodegen)
   target_link_libraries(sstvae_gui PUBLIC
     sstvae_core sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render
     sstvae_fetch
@@ -518,6 +577,7 @@ if(_want_gui)
   target_link_libraries(sstvae-gui PRIVATE sstvae_gui)
   sstvae_hamlib_copy_runtime(sstvae-gui)
   sstvae_onnxruntime_copy_runtime(sstvae-gui)
+  sstvae_copy_builtin_templates(sstvae-gui)
   message(STATUS "Desktop application: Qt ${Qt6_VERSION}")
 endif()
 
@@ -567,4 +627,5 @@ if(TARGET sstvae_gui)
   # main with no output at all -- see the note in hamlib.cmake.
   sstvae_hamlib_copy_runtime(sstvae-gui-shot)
   sstvae_onnxruntime_copy_runtime(sstvae-gui-shot)
+  sstvae_copy_builtin_templates(sstvae-gui-shot)
 endif()

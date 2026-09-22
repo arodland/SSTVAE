@@ -813,8 +813,10 @@ QWidget* SettingsDialog::folders_tab() {
                             QString::fromStdString(folders.template_dir),
                             tr("Overlay templates"), page));
     form->addRow(QString(),
-                 style::note(tr("Saving and reusing overlay templates is not "
-                                "implemented yet; this is where they will go."),
+                 style::note(tr("Where \"Save as template...\" on the transmit "
+                                "panel writes, and where the operator's own "
+                                "templates are read back from -- the three "
+                                "built-in ones are not stored here."),
                              page));
     return page;
 }
@@ -971,6 +973,20 @@ QWidget* SettingsDialog::transmit_tab() {
                              page));
     add_gap(form);
 
+    grid_ = new QLineEdit(QString::fromStdString(config_.grid), page);
+    grid_->setPlaceholderText(QStringLiteral("FN31pr"));
+    form->addRow(tr("Grid square"), grid_);
+    operator_name_ =
+        new QLineEdit(QString::fromStdString(config_.operator_name), page);
+    form->addRow(tr("Name"), operator_name_);
+    form->addRow(QString(),
+                 style::note(tr("Neither goes out on the air by itself. Both are "
+                                "only for an overlay template's {grid} and {name} "
+                                "-- leave blank and a template line that uses one "
+                                "is simply omitted."),
+                             page));
+    add_gap(form);
+
     optimize_ = new QCheckBox(tr("Refine each image before sending"), page);
     optimize_->setChecked(config_.transmit.optimize);
     form->addRow(optimize_);
@@ -1058,6 +1074,8 @@ QWidget* SettingsDialog::transmit_tab() {
 
 void SettingsDialog::apply_to(settings::Config& config) const {
     config.callsign = callsign_->text().trimmed().toUpper().toStdString();
+    config.grid = grid_->text().trimmed().toStdString();
+    config.operator_name = operator_name_->text().trimmed().toStdString();
     config.model_path = model_path_->text().trimmed().toStdString();
     config.precision = precision_->currentData().toString().toStdString();
 

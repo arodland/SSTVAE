@@ -48,6 +48,66 @@ FONT_CANDIDATES = (
 )
 AVAILABLE_FONTS = tuple(p for p in FONT_CANDIDATES if os.path.exists(p))
 
+# Faces by family, for the overlay's font_family / bold / italic.
+#
+# PIL can open a font file but cannot look a family up, so this is a small
+# table of the two families nearly every Linux distribution and CI image
+# ships: each stem with its regular / bold / italic / bold-italic suffixes,
+# searched for in the same directories as FONT_CANDIDATES. The Qt renderer
+# asks the system font database instead, which is why text in the two was
+# never promised to match (native/core/overlay/render.hpp) -- what is kept
+# is that a request means the same *kind* of face in both.
+_FACE_SUFFIXES = {
+    "DejaVuSans": ("", "-Bold", "-Oblique", "-BoldOblique"),
+    "DejaVuSerif": ("", "-Bold", "-Italic", "-BoldItalic"),
+    "DejaVuSansMono": ("", "-Bold", "-Oblique", "-BoldOblique"),
+    "LiberationSans": ("-Regular", "-Bold", "-Italic", "-BoldItalic"),
+    "LiberationSerif": ("-Regular", "-Bold", "-Italic", "-BoldItalic"),
+    "LiberationMono": ("-Regular", "-Bold", "-Italic", "-BoldItalic"),
+}
+# The generic keywords, in preference order. "cursive" has no face in
+# either family and falls back to sans-serif, as does any family name this
+# table does not carry.
+_GENERIC_FAMILIES = {
+    "sans-serif": ("DejaVuSans", "LiberationSans"),
+    "serif": ("DejaVuSerif", "LiberationSerif"),
+    "monospace": ("DejaVuSansMono", "LiberationMono"),
+}
+_FONT_DIRS = tuple(sorted({os.path.dirname(p) for p in FONT_CANDIDATES}))
+
+
+@lru_cache(maxsize=64)
+def find_font_face(family: str, bold: bool, italic: bool) -> tuple[str, bool, bool] | None:
+    """The closest face on disk to a family and style request.
+
+    Returns `(path, is_bold, is_italic)` -- what the file actually carries,
+    so the caller can synthesize whatever it lacks, the way Qt does -- or
+    None when no face of any kind in the table is installed. The exact
+    style is preferred, then keeping the weight, then keeping the slant,
+    then the regular face.
+
+    `family` is a generic keyword ("sans-serif", "serif", "monospace",
+    "cursive") or a real family name such as "DejaVu Serif"; empty means
+    sans-serif.
+    """
+    key = family.strip().lower()
+    stems = _GENERIC_FAMILIES.get(key)
+    if stems is None:
+        wanted = key.replace(" ", "")
+        stems = tuple(s for s in _FACE_SUFFIXES if s.lower() == wanted)
+    if not stems:
+        stems = _GENERIC_FAMILIES["sans-serif"]
+    for stem in stems:
+        suffixes = _FACE_SUFFIXES[stem]
+        for b, i in dict.fromkeys(((bold, italic), (bold, False), (False, italic),
+                                   (False, False))):
+            name = stem + suffixes[2 * i + b] + ".ttf"
+            for d in _FONT_DIRS:
+                path = os.path.join(d, name)
+                if os.path.exists(path):
+                    return path, b, i
+    return None
+
 
 @lru_cache(maxsize=128)
 def font(size: int, idx: int = 0):
