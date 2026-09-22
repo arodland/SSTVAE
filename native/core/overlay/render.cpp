@@ -121,8 +121,15 @@ QFont font_for(const TextItem& item, int size_px) {
     const QString family = family_for(item.font);
     if (!family.isEmpty()) font.setFamily(family);
     else if (!item.font_family.empty()) apply_family_request(font, item.font_family);
-    // Qt synthesizes a weight or a slant the face does not have, so
-    // these always do something visible.
+    // Selects the face's bold or italic variant where it has one. Qt
+    // can synthesize a weight or a slant, but only when rasterising
+    // glyphs -- this renderer takes their *outlines*
+    // (`QPainterPath::addText`, see `text_shape`), which come from the
+    // face as it is. So on a machine whose font database offers one
+    // regular face and nothing else, these change nothing; every
+    // platform's real database has bold and italic for its default
+    // family, and the test that checks this skips where the database
+    // cannot express it.
     font.setBold(item.bold);
     font.setItalic(item.italic);
     // setPixelSize, not setPointSize: the document sizes text as a
@@ -595,12 +602,18 @@ Bbox item_bbox(int canvas_w, int canvas_h, const Item& item,
                                                      baseline, layout.width)
                                           .bottom());
         }
-        return Bbox{static_cast<int>(std::lround(layout.left - stroke)),
-                    static_cast<int>(std::lround(layout.top - stroke)),
-                    std::max(1, static_cast<int>(
-                                    std::lround(layout.width + 2 * stroke))),
-                    std::max(1, static_cast<int>(std::lround(
-                                    bottom - layout.top + 2 * stroke)))};
+        // Rounded *outward*, as `sstvae/overlay/render.py` does with
+        // floor/ceil: this box is a cover, and antialiased ink reaches
+        // whichever pixel row a fractional edge lies in. CoreText's
+        // `underlinePos()` and `lineWidth()` are fractional, so on macOS
+        // a nearest-rounded bottom sat one row above the underline it
+        // was meant to contain; FreeType's metrics are integral, which
+        // is why Linux never showed it.
+        const int x0 = static_cast<int>(std::floor(layout.left - stroke));
+        const int y0 = static_cast<int>(std::floor(layout.top - stroke));
+        const int x1 = static_cast<int>(std::ceil(layout.left + layout.width + stroke));
+        const int y1 = static_cast<int>(std::ceil(bottom + stroke));
+        return Bbox{x0, y0, std::max(1, x1 - x0), std::max(1, y1 - y0)};
     }
 
     if (const RectItem* rect = std::get_if<RectItem>(&item)) {

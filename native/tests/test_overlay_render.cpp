@@ -11,6 +11,10 @@
 // operator judges them against the latter.
 
 #include <QFile>
+#include <QFontDatabase>
+#include <QFontInfo>
+#include <QFontMetricsF>
+#include <QFont>
 #include <QGuiApplication>
 #include <QImage>
 #include <QString>
@@ -19,6 +23,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -562,6 +567,44 @@ void test_solid_text_never_reads_the_gradient_fields() {
                    "render/style: an unknown fill kind draws solid, not nothing");
 }
 
+// What this machine's font database can express. The renderer takes
+// glyph *outlines*, which Qt does not synthesize a weight or slant for
+// (see `font_for`), so bold and italic are only checkable where the
+// default family has such a face; and a "monospace" request can only
+// be honoured where some fixed-pitch family exists. Windows' offscreen
+// platform runs on a FreeType database that sees no system fonts -- one
+// regular face -- and asserting there would be asserting about the
+// machine. A skip is printed, so the log says what was not checked.
+bool default_family_has(bool bold, bool italic) {
+    const QString family = QFontInfo(QFont()).family();
+    for (const QString& style : QFontDatabase::styles(family)) {
+        if ((!bold || QFontDatabase::bold(family, style)) &&
+            (!italic || QFontDatabase::italic(family, style))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Asked of the face Qt actually matched, by the definition of fixed
+// pitch -- an "i" advances as far as an "m" -- rather than of any
+// database attribute. Two attributes were tried first and both lied:
+// fontconfig lists its generic aliases ("Monospace") as families and
+// calls them fixed-pitch even when, with one sans face installed, that
+// is what they resolve to; and `QFontInfo::fixedPitch()` said no on a
+// machine where DejaVu Sans Mono was present and used. This is the
+// request `font_for` makes, so the question is the one that matters:
+// did the machine hand a fixed-pitch face to it.
+bool monospace_request_is_honoured() {
+    QFont font;
+    font.setFamily(QStringLiteral("monospace"));
+    font.setStyleHint(QFont::Monospace);
+    font.setPixelSize(40);
+    const QFontMetricsF fm(font);
+    return std::abs(fm.horizontalAdvance(QStringLiteral("i")) -
+                    fm.horizontalAdvance(QStringLiteral("m"))) < 0.01;
+}
+
 void test_bold_and_italic_change_the_glyphs() {
     const images::Picture base = solid(320, 240, 0, 0, 0);
     overlay::TextItem regular;
@@ -575,10 +618,18 @@ void test_bold_and_italic_change_the_glyphs() {
 
     const int ink = painted(render_one(regular, base), base);
     check::is_true(ink > 0, "render/style: the regular face draws");
-    check::is_true(painted(render_one(bold, base), base) > ink * 11 / 10,
-                   "render/style: bold adds ink (" + std::to_string(ink) + " regular)");
-    check::is_true(render_one(italic, base).rgb != render_one(regular, base).rgb,
-                   "render/style: italic changes the glyphs");
+    if (default_family_has(true, false)) {
+        check::is_true(painted(render_one(bold, base), base) > ink * 11 / 10,
+                       "render/style: bold adds ink (" + std::to_string(ink) + " regular)");
+    } else {
+        std::fprintf(stderr, "SKIP render/style: the default family has no bold face here\n");
+    }
+    if (default_family_has(false, true)) {
+        check::is_true(render_one(italic, base).rgb != render_one(regular, base).rgb,
+                       "render/style: italic changes the glyphs");
+    } else {
+        std::fprintf(stderr, "SKIP render/style: the default family has no italic face here\n");
+    }
 }
 
 void test_underline_draws_below_the_baseline_and_inside_the_handle() {
@@ -806,9 +857,13 @@ void test_a_family_is_requested_and_a_font_file_still_wins() {
     mono.font_family = "monospace";
     const int sans_w = overlay::item_bbox(640, 480, overlay::Item{sans}).w;
     const int mono_w = overlay::item_bbox(640, 480, overlay::Item{mono}).w;
-    check::is_true(mono_w > sans_w, "render/font: \"monospace\" is honoured (" +
-                                        std::to_string(mono_w) + " vs " +
-                                        std::to_string(sans_w) + ")");
+    if (monospace_request_is_honoured()) {
+        check::is_true(mono_w > sans_w, "render/font: \"monospace\" is honoured (" +
+                                            std::to_string(mono_w) + " vs " +
+                                            std::to_string(sans_w) + ")");
+    } else {
+        std::fprintf(stderr, "SKIP render/font: no fixed-pitch face answers a monospace request here\n");
+    }
 
     const std::string file = known_font_file();
     if (file.empty()) {
