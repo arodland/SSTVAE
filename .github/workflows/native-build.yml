@@ -408,7 +408,7 @@ jobs:
             MINGW*|MSYS*) exe=dist/sstvae/sstvae-gui.exe
                     templates=dist/sstvae/templates ;;
             *) exe=dist/sstvae/sstvae-gui
-                    templates=dist/sstvae/bin/templates ;;
+                    templates=dist/sstvae/share/sstvae/templates ;;
           esac
           # The built-in templates, where `TransmitPanel::
           # builtin_templates_dir` looks for them on this platform. An

@@ -169,8 +169,14 @@ Darwin)
        "$app/share/icons/hicolor/scalable/apps/org.cleverdomain.sstvae.svg"
 
     cp "$BUILD_DIR/sstvae-gui" "$app/bin/"
-    # Beside the executable, so under bin/ -- see the Windows section.
-    cp -R "$BUILD_DIR/templates" "$app/bin/"
+    # The built-in templates, under share/ like everything else here
+    # that is not code: `builtin_templates_dir` resolves
+    # <prefix>/share/sstvae/templates from the executable's own prefix,
+    # which is what makes this AppDir and a distro package at /usr the
+    # same layout. See the Windows section for why they are copied at
+    # all.
+    mkdir -p "$app/share/sstvae"
+    cp -R "$BUILD_DIR/templates" "$app/share/sstvae/"
     cp "$BUILD_DIR/sstvae-decode" "$app/bin/" 2>/dev/null || true
     cp "$BUILD_DIR/sstvae-audio-check" "$app/bin/" 2>/dev/null || true
     [ -n "$HAMLIB_RUNTIME_DIR" ] && cp -P "$HAMLIB_RUNTIME_DIR"/libhamlib.so* "$app/lib/"

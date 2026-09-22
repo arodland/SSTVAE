@@ -975,17 +975,28 @@ void TransmitPanel::on_mode_changed() {
 std::filesystem::path TransmitPanel::builtin_templates_dir() {
     // Copied at build time (`sstvae_copy_builtin_templates` in
     // native/CMakeLists.txt) from `sstvae/overlay/templates/`, the one
-    // place the three ship from. Beside the executable everywhere --
-    // except inside a macOS bundle, where "beside the executable" is
-    // Contents/MacOS and codesign refuses data there (see the CMake
-    // function), so a bundle carries them in Contents/Resources. Tried
-    // first, since sstvae-gui-shot and the tests are not bundles and
-    // keep the flat layout on macOS too.
+    // place the three ship from. Where an *installed* app keeps its
+    // data is a platform convention, tried first; beside the executable
+    // is the build tree, the tests, sstvae-gui-shot and the Windows
+    // package, and is the fallback everywhere.
+    //
+    // macOS: a bundle's Contents/Resources -- "beside the executable" is
+    // Contents/MacOS there, and codesign refuses data in it (see the
+    // CMake function). Linux: <prefix>/share/sstvae/templates, resolved
+    // from the executable's own prefix, so one rule covers a distro
+    // package at /usr, a hand install at /usr/local or /opt, and the
+    // AppDir -- a packager expects /usr/share/sstvae, not a data
+    // directory under /usr/bin.
     const QString beside = QCoreApplication::applicationDirPath();
-#ifdef Q_OS_MACOS
-    const QString resources = QDir::cleanPath(beside + QStringLiteral("/../Resources/templates"));
-    if (QDir(resources).exists()) return resources.toStdString();
+#if defined(Q_OS_MACOS)
+    const QString installed = QDir::cleanPath(beside + QStringLiteral("/../Resources/templates"));
+#elif defined(Q_OS_UNIX)
+    const QString installed =
+        QDir::cleanPath(beside + QStringLiteral("/../share/sstvae/templates"));
+#else
+    const QString installed;
 #endif
+    if (!installed.isEmpty() && QDir(installed).exists()) return installed.toStdString();
     return (beside + QStringLiteral("/templates")).toStdString();
 }
 

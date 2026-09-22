@@ -1031,7 +1031,10 @@ out in that window, so nothing reached an operator; the first one
 would have). Three things now hold it:
 `sstvae_copy_builtin_templates` puts a bundle's data in
 `Contents/Resources` (and `builtin_templates_dir` looks there first on
-macOS), `package_app.sh` signs ad hoc and *verifies*, so a layout
+macOS, and at `<prefix>/share/sstvae/templates` on Linux -- resolved
+from the executable's prefix, so a distro package at `/usr` and the
+AppDir are one layout, which is what a packager expects rather than
+data under `bin/`), `package_app.sh` signs ad hoc and *verifies*, so a layout
 mistake fails staging rather than printing, and the packaged-app check
 asserts the templates are where the app looks on each platform --
 and that assertion's first run found that `package_app.sh` had never
