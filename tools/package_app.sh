@@ -78,6 +78,13 @@ MINGW*|MSYS*|CYGWIN*)
     app="$STAGE_DIR/sstvae"
     mkdir -p "$app"
     cp "$BUILD_DIR/sstvae-gui.exe" "$app/"
+    # The built-in templates, beside the executable, which is where
+    # `TransmitPanel::builtin_templates_dir` looks. Copied explicitly on
+    # every platform but macOS (whose bundle carries them): they were
+    # not, for a week, and the Linux and Windows packages had an empty
+    # template picker with nothing failing -- the packaged-app check in
+    # CI asserts they are here now.
+    cp -R "$BUILD_DIR/templates" "$app/"
     cp "$BUILD_DIR/sstvae-decode.exe" "$app/" 2>/dev/null || true
     cp "$BUILD_DIR/sstvae-audio-check.exe" "$app/" 2>/dev/null || true
     # Ours first, so windeployqt sees a complete executable and does not
@@ -162,6 +169,8 @@ Darwin)
        "$app/share/icons/hicolor/scalable/apps/org.cleverdomain.sstvae.svg"
 
     cp "$BUILD_DIR/sstvae-gui" "$app/bin/"
+    # Beside the executable, so under bin/ -- see the Windows section.
+    cp -R "$BUILD_DIR/templates" "$app/bin/"
     cp "$BUILD_DIR/sstvae-decode" "$app/bin/" 2>/dev/null || true
     cp "$BUILD_DIR/sstvae-audio-check" "$app/bin/" 2>/dev/null || true
     [ -n "$HAMLIB_RUNTIME_DIR" ] && cp -P "$HAMLIB_RUNTIME_DIR"/libhamlib.so* "$app/lib/"

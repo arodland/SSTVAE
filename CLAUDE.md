@@ -1033,7 +1033,11 @@ would have). Three things now hold it:
 `Contents/Resources` (and `builtin_templates_dir` looks there first on
 macOS), `package_app.sh` signs ad hoc and *verifies*, so a layout
 mistake fails staging rather than printing, and the packaged-app check
-asserts the templates are where the app looks on each platform. The
+asserts the templates are where the app looks on each platform --
+and that assertion's first run found that `package_app.sh` had never
+copied them on Linux or Windows at all, so those packages had an empty
+built-in picker for the same week; macOS only had them because `cp -R`
+carries the whole bundle. The
 red X that led here was something else: `hdiutil create` failing
 "Resource busy" on a runner, a Spotlight race, now retried.
 
