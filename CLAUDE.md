@@ -110,6 +110,55 @@ audio and rig bugs found so far were all invisible to unit tests.
     2026-08-24 in the field, via the `blind_locked`/`blind_score`
     status instrumentation added for exactly that hunt; reproduced
     end-to-end with a ring that wraps before the transmission starts).
+  - **The preamble path measures the whole transmission before it
+    equalizes** (2026-09-22, from Data2G). `_demod_frames` runs twice
+    at acquisition timing and once for real. From the first passes:
+    the residual CFO from every pilot pair (`_residual_cfo`; on mpd
+    the preamble's own estimate reached 2.1 Hz off, this holds
+    0.17), and the window placed from the delay profile so every path
+    sits inside the CP (`_delay_support`/`_window_shift`). The final
+    pass undoes each timing step's phase so the channel estimate never
+    straddles one. Latent SNR, 48 paired seeds, mode A: mpd 8
+    **+1.34 dB**, 80 ppm +0.65, a 6 dB-stronger late path +0.43/+0.83,
+    mpp +0.36, AWGN 0. Placement also runs on the blind path (mpd
+    +0.59). **Measure placement on the stepped pilots, not the
+    unstepped ones**: the frames are demodulated with the steps in, so
+    that is where the paths actually sit. Placing against the
+    unstepped profile cost 0.6 dB on mpd. It also means acquisition's
+    choice of path no longer decides the picture
+    (`test_placement_decodes_either_path_alike`). `scripts/rx_ab.py` is
+    the paired A/B harness; `--blind --ring` is the blind path as a live
+    station sees it, mostly not the transmission.
+    The delay support is **gated on the profile's noise floor** as well
+    as 15 dB under its peak (twice the profile's median): at 0 dB the
+    floor's ripples otherwise read as paths across the whole grid, and
+    placement moved the window up to 28 samples the wrong way.
+  - **The channel estimate is 2-D LMMSE** (`_lmmse_channel`,
+    2026-09-22, from Data2G), replacing Catmull-Rom, which passed every
+    pilot's noise straight to the equalizer. Across carriers a
+    projection onto the measured delay support, in time Wiener
+    interpolation over 8 pilots with a Gaussian Doppler model. The
+    latent weights keep their `|h|/median` meaning, so the decoder is
+    untouched. **+0.21 to +0.56 dB PSNR** through the v5 decoder, every
+    image in 12 cells (modes A/B); latent SNR +0.68 to +1.75 dB on the
+    preamble path and +0.97 to +2.40 in a live ring, every seed. Four
+    things it had to learn, each measured as a loss first:
+    **project with the clock drift taken out** (the timing steps plus a
+    line fitted through each frame's pilot phase slope; 80 ppm cost
+    3.4 dB on the preamble path and 4 dB blind before); **centre the
+    Doppler model on the pilots' own rotation** (the blind path carries
+    up to a few Hz of residual CFO, which a zero-centred model averages
+    away); **take blind statistics from frames coherent with a
+    neighbour** (`_transmission_frames`, pilot coherence > 0.5 --
+    power alone picked a stronger earlier transmission still in the
+    ring, read as junk at this one's timing, and the second of two
+    blind receptions was never delivered; `rx/second-blind` in
+    `test_rx_engine.cpp` caught it); and **gate power on the noise
+    floor, not on 10 dB under the peak** (which threw away a third of a
+    fading transmission's own frames). The C++ finds the projector
+    through the real 2x embedding of the 24x24 Hermitian matrix and a
+    cyclic Jacobi, since `native/` has no linear algebra library; numpy
+    uses `eigh` on the same matrix so both compute the same subspace.
   - `framing.py` per-group interleaver, Golay-coded header.
     `_TX_PERMS` truncates each group's permutation to the transmittable
     budget (dropping the beacon carrier's capacity cost); `interleave`/
@@ -117,8 +166,8 @@ audio and rig bugs found so far were all invisible to unit tests.
     `slot_range_for_frame(abs_frame)` maps a single absolute frame index
     to its canonical latent slice without needing a known mode — used by
     blind decode, which never sees the header.
-  - `modem.py` `Modem.modulate/demodulate`; pilot EQ with Catmull-Rom
-    interpolation, EMA-smoothed sample-clock drift tracking, per-latent
+  - `modem.py` `Modem.modulate/demodulate`; pilot EQ with the 2-D
+    LMMSE estimate above, EMA-smoothed sample-clock drift tracking, per-latent
     confidence weights. `demodulate_blind()` is the preamble-free
     counterpart (via `acquire_blind`): no header, so output is always
     sized for mode C's full range (the one container every mode is a
@@ -161,6 +210,11 @@ audio and rig bugs found so far were all invisible to unit tests.
 - `sstvae/hfchannel.py` — channel sim (AWGN in the `SNR_REF_BW_HZ`
   convention,
   Watterson 2-path fading presets mpg/mpp/mpd, freq/clock offset).
+  **Since 2026-09-22 the taps have the ITU-R F.1487 Gaussian Doppler
+  spectrum** (spread = 2 sigma, tested to 5%) and clock offset is FFT
+  resampling. The old Butterworth taps were 1.5x wide at 2 sigma and
+  `np.interp` added -23 dB of distortion. So every fading figure before
+  that date is pessimistic; `taps="butter"` reproduces them.
 - `sstvae/models/autoencoder.py` — encoder (unit-RMS tanh latents,
   132ch in 3 ordered groups of 44) and decoder (takes latents ×
   weights + weight planes; handles erasures/truncation).
@@ -1818,7 +1872,8 @@ need when `--native` fails and you want to know *where*.
 
 - `sstvae/waveform_channel.py` — stage-2 differentiable modem replica
   (torch): OFDM synth, envelope clip/PAPR, symbol-domain fading,
-  noisy-pilot Catmull-Rom EQ, burst erasures. Tested to correlate
+  noisy-pilot Catmull-Rom EQ (the modem has used a 2-D LMMSE estimate
+  since 2026-09-22; see docs/todo.md), burst erasures. Tested to correlate
   >0.98 with the NumPy modem on clean channels. Runs in fp32 outside
   autocast (complex ops); `train.py --stage2` handles that split.
 

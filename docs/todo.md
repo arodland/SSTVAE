@@ -6,6 +6,65 @@ reasoning doesn't have to be rediscovered.
 Completed items are summarized below; the full measurements and
 reasoning behind each live in `docs/todo-done.md`.
 
+## Open: weights from the channel estimate's MSE
+
+The other half of Data2G's LMMSE suggestion (the estimate itself
+shipped 2026-09-22, see CLAUDE.md) is **not worth a fine-tune** as it
+stands: `scripts/lmmse_study.py` puts its latent-SNR ceiling at +0.29 dB
+(mpp 8), zero on AWGN, and the current decoder already collects
+−0.04 to +0.10 dB PSNR of it untrained. It is not a format break:
+weights are receiver output, so a later change only needs
+`waveform_channel._equalize` mirrored before a fine-tune.
+
+The stage-2 replica still equalizes with Catmull-Rom, so the encoder
+is trained against a noisier receiver than the one it now meets. That
+direction is safe (measured end to end: +0.21 to +0.56 dB PSNR, every
+image), but a stage-2 fine-tune should mirror `_lmmse_channel` first.
+
+## Open: stage-2 fading replica is 1.41x too wide
+
+`waveform_channel._smooth_gains` sets `sigma = sym_rate / (2*pi*doppler)`.
+That is a Gaussian kernel whose power spectrum has sigma
+`doppler/sqrt(2)`, so its F.1487 spread (2 sigma) is 1.41x the
+label. Minor, since training draws Doppler uniformly from 0.1 to 2 Hz,
+but match `hfchannel._gaussian_taps` next time stage 2 is retuned.
+
+## Open: re-measure what the old channel simulator calibrated
+
+`hfchannel` fading moved to the F.1487 spectrum on 2026-09-22 (the
+Butterworth generator was 1.5x too wide at the 2-sigma point, with
+skirts past the pilot rate). Figures measured on the old one are
+pessimistic on fading, mpd most: the README/wiki tables,
+`BLIND_SCORE_THRESHOLD`'s calibration and the `CLIP_HEADROOM_DB`
+optimum. `fading(..., taps="butter")` reproduces the old simulator.
+
+## Open: blind-path CFO refinement
+
+The preamble path now refines frequency from every pilot pair
+(`_residual_cfo`). The blind path does not, and its error is larger:
+`scripts/rx_ab.py --blind`, p50 0.3 to 1.0 Hz, max 3.3 Hz (mps 6).
+The estimator is unambiguous only within +-3.47 Hz, so it needs an
+alias check first (the beacon chips are BPSK: a wrong alias shows as
+quadrature energy on them).
+
+## Rejected: resolving a whole-repeat preamble lock through the header
+
+Data2G found 8% of mpd locks one preamble repeat off and fixed it by
+reading its header at 0, +-1 and +-2 repeats and keeping the best valid
+ML score. The Golay header could do the same, but SSTVAE does not have
+the problem (measured 2026-09-22): of ~750 correctly placed mpd locks
+at -2, 0 and +3 dB, **one** was a repeat off. Data2G's preamble has 16
+repeats, whose periodic side peaks sit at 15/16 of the main one; with
+4 they sit at 3/4, and fading rarely overturns that. SSTVAE's mpd
+header losses (7-15% at those SNRs) happen at the right offset.
+
+Interpolating the header's channel reference between the preamble and
+frame 0's pilot (Data2G's other header item, also receive-only) is
+marginal on the same paired seeds: mpd failures 32->26, 21->17,
+21->14 of 212-283 locks, mpp 17->17 to 22. A header loss falls back
+to the blind path, so it costs lock time more than pictures. Worth
+revisiting only alongside a header format change.
+
 ## Completed: pilot crest factor
 
 **Implemented 2026-08-14, `PROTOCOL_VERSION` 3.** The frozen QPSK pilot

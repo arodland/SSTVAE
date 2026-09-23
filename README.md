@@ -73,13 +73,13 @@ Scottie 2 is 320×256 *by design* — it isn't failing, it's doing its job
 at its own resolution.)
 
 Three modes, **32 / 64 / 95 s**, in **~1200 Hz**, at 640×480 — the same
-airtime and bandwidth as the common analog modes. Across the range where
-acquisition is reliable, 20 dB down to 3 dB SNR, the picture gives up
-just **1.4 dB of PSNR for a 17 dB drop in channel SNR**. That gentle
-slope is the entire point of the design. The cliff hasn't been abolished
-so much as moved off the picture and onto acquisition: below about 0 dB
-you increasingly get *no* picture rather than a poor one — which is a
-much better place for it.
+airtime and bandwidth as the common analog modes. From 20 dB down to
+0 dB SNR, mode C gives up just **1.9 dB of PSNR for a 20 dB drop in
+channel SNR** (2.5 to 2.7 dB on simulated fading). That gentle slope is
+the entire point of the design. The cliff hasn't been abolished so much
+as moved off the picture and onto acquisition: on fading channels,
+below about −2 dB you increasingly get *no* picture rather than a poor
+one — which is a much better place for it.
 
 Two things it costs you:
 

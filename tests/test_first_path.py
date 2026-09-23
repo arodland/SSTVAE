@@ -106,16 +106,23 @@ def test_preamble_acquisition_takes_the_early_path(delay):
 
 
 @pytest.mark.parametrize("delay", DELAYS)
-def test_the_early_path_decodes_better_than_the_late_one(delay):
-    """The reason any of this matters, stated as latent SNR.
+def test_placement_decodes_either_path_alike(delay):
+    """Why first-path selection used to matter, and why it no longer
+    decides the picture.
 
-    Deliberately a *comparison* rather than an absolute bar: a two-path
-    channel with this much delay spread has real frequency-selective
-    nulls in it, so the echo costs picture quality whichever path we sync
-    to, and an absolute threshold would be measuring the nulls. What
-    first-path selection owns is the difference between the two timings,
-    which is 1.2-2.2 dB and which pre-fix went the wrong way for as long
-    as the echo stayed the stronger path.
+    Timed on the strongest path, the early path's energy lands in front
+    of the demod window where the cyclic prefix cannot cover it: that
+    cost 1.2-2.2 dB here, and went the wrong way for as long as the echo
+    stayed the stronger path. Since 2026-09-22 the window is placed from
+    the delay profile the frames themselves measure (`_window_shift`),
+    so both acquisitions converge on the same window and decode alike.
+    First-path selection still sets where acquisition reports the
+    transmission, which the two tests above pin.
+
+    The late candidate is the *argmax*, derived independently, not
+    `early.frame_start + delay`: anchoring it on what acquire_blind
+    returned slides both candidates by the same delay and makes the
+    comparison insensitive to which path was picked.
     """
     modem = Modem()
     lat = np.random.default_rng(0).normal(size=MODES["B"].n_latents)
@@ -130,11 +137,6 @@ def test_the_early_path_decodes_better_than_the_late_one(delay):
         err = (est - truth) * w
         return 10 * np.log10(np.sum((truth * w) ** 2) / (np.sum(err**2) + 1e-20))
 
-    # The comparison point is the *argmax*, derived independently, not
-    # `early.frame_start + delay`. Anchoring the late candidate on what
-    # acquire_blind returned makes the test insensitive to which path it
-    # picked -- verified, that version passes with first-path selection
-    # stubbed out, because both candidates then slide by the same delay.
     early = acquire_blind(to_baseband(y))
     argmax_phase = int(np.argmax(_pilot_fold(y)))
     late = BlindAcquisition(
@@ -144,7 +146,7 @@ def test_the_early_path_decodes_better_than_the_late_one(delay):
         metric=early.metric,
     )
     snr_early, snr_late = latent_snr(early), latent_snr(late)
-    assert snr_early > snr_late + 0.8, (
+    assert abs(snr_early - snr_late) < 0.2, (
         f"{delay}-sample echo: first path {snr_early:.2f} dB, "
         f"strongest path {snr_late:.2f} dB"
     )
