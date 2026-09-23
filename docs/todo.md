@@ -6,6 +6,32 @@ reasoning doesn't have to be rediscovered.
 Completed items are summarized below; the full measurements and
 reasoning behind each live in `docs/todo-done.md`.
 
+## Open: 2-D LMMSE channel estimate, receiver-only
+
+Measured 2026-09-22 (`scripts/lmmse_study.py`, from Data2G's
+`equalizer.estimate`). Replaces Catmull-Rom with a projection onto
+the measured delay support across carriers plus Wiener interpolation
+in time. With today's `|h|/median` weights the decoder needs no
+change: **+0.25 to +0.57 dB PSNR, 16/16 images in all six conditions**
+(awgn 3, mpg 6, mps 6, mpp 8/3, mpd 8; mode A). Latent SNR +0.7 to
++1.4 dB. Not implemented: it needs the C++ port and the blind path.
+
+The other half of the Data2G suggestion, weights from the estimate's
+MSE, is **not worth a fine-tune**. Its latent-SNR ceiling over LMMSE
+with the old weights is +0.29 dB (mpp 8), zero on AWGN, and the current
+decoder already collects −0.04 to +0.10 dB PSNR of it untrained. It is
+not a format break either: weights are receiver output, so a later
+change only needs `waveform_channel._equalize` mirrored before a
+fine-tune.
+
+## Open: stage-2 fading replica is 1.41x too wide
+
+`waveform_channel._smooth_gains` sets `sigma = sym_rate / (2*pi*doppler)`.
+That is a Gaussian kernel whose power spectrum has sigma
+`doppler/sqrt(2)`, so its F.1487 spread (2 sigma) is 1.41x the
+label. Minor, since training draws Doppler uniformly from 0.1 to 2 Hz,
+but match `hfchannel._gaussian_taps` next time stage 2 is retuned.
+
 ## Open: re-measure what the old channel simulator calibrated
 
 `hfchannel` fading moved to the F.1487 spectrum on 2026-09-22 (the
@@ -14,6 +40,15 @@ skirts past the pilot rate). Figures measured on the old one are
 pessimistic on fading, mpd most: the README/wiki tables,
 `BLIND_SCORE_THRESHOLD`'s calibration and the `CLIP_HEADROOM_DB`
 optimum. `fading(..., taps="butter")` reproduces the old simulator.
+
+## Open: blind-path CFO refinement
+
+The preamble path now refines frequency from every pilot pair
+(`_residual_cfo`). The blind path does not, and its error is larger:
+`scripts/rx_ab.py --blind`, p50 0.3 to 1.0 Hz, max 3.3 Hz (mps 6).
+The estimator is unambiguous only within +-3.47 Hz, so it needs an
+alias check first (the beacon chips are BPSK: a wrong alias shows as
+quadrature energy on them).
 
 ## Completed: pilot crest factor
 
