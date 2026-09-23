@@ -65,10 +65,15 @@ def freq_shift(x: np.ndarray, df_hz: float) -> np.ndarray:
 
 
 def sample_clock_offset(x: np.ndarray, ppm: float) -> np.ndarray:
-    """Resample as if the far-end clock ran (1 + ppm*1e-6) fast."""
-    t_out = np.arange(len(x)) * (1 + ppm * 1e-6)
-    t_out = t_out[t_out <= len(x) - 1]
-    return np.interp(t_out, np.arange(len(x)), x)
+    """Resample as if the far-end clock ran (1 + ppm*1e-6) fast.
+
+    Band-limited (FFT) resampling. The np.interp version this replaced adds
+    linear-interpolation distortion at ~-23 dB on this waveform, which
+    its clipper (~12.7 dB SINR) happens to mask but a channel model
+    must not have. The FFT form is circular; the lead-in/out silence
+    absorbs the wrap.
+    """
+    return signal.resample(x, int(round(len(x) / (1 + ppm * 1e-6))))
 
 
 def _butter_taps(n: int, doppler_hz: float, rng: np.random.Generator) -> np.ndarray:
