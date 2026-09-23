@@ -6,7 +6,8 @@ Re-equalizes the receiver's own frame pass four ways, a 2x2 of
 {Catmull-Rom, LMMSE} channel estimate x {today's |h|/median weights,
 per-latent MMSE weights}:
 
-    CR/old   what the modem does today (asserted equal to its output)
+    CR/old   what the modem did before 2026-09-22 (the modem now
+             ships a refined LM/old, `_lmmse_channel`)
     LM/old   receiver-only: better h, same weight semantics
     CR/mmse  weights only
     LM/mmse  both
@@ -141,7 +142,7 @@ def variants(modem, rx):
         r = modem.demodulate(rx)
     finally:
         del modem._demod_frames
-    raw, hp, rcv = got["out"]
+    raw, hp, rcv, _ = got["out"]
     spec = r.mode
     h_cr = cr(hp, rcv)
     h_lm, mse, n0 = lmmse(hp, rcv)
@@ -153,8 +154,6 @@ def variants(modem, rx):
         "CR/mmse": equalize(raw, hp, rcv, spec, h_cr, n0 + np.zeros(h_cr.shape)),
         "LM/mmse": equalize(raw, hp, rcv, spec, h_lm, n0 + mse),
     }
-    # Self-check: the re-equalization reproduces the modem.
-    assert np.allclose(out["CR/old"][0] * out["CR/old"][1], r.latents * r.weights)
     return spec, out
 
 

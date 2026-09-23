@@ -6,23 +6,20 @@ reasoning doesn't have to be rediscovered.
 Completed items are summarized below; the full measurements and
 reasoning behind each live in `docs/todo-done.md`.
 
-## Open: 2-D LMMSE channel estimate, receiver-only
+## Open: weights from the channel estimate's MSE
 
-Measured 2026-09-22 (`scripts/lmmse_study.py`, from Data2G's
-`equalizer.estimate`). Replaces Catmull-Rom with a projection onto
-the measured delay support across carriers plus Wiener interpolation
-in time. With today's `|h|/median` weights the decoder needs no
-change: **+0.25 to +0.57 dB PSNR, 16/16 images in all six conditions**
-(awgn 3, mpg 6, mps 6, mpp 8/3, mpd 8; mode A). Latent SNR +0.7 to
-+1.4 dB. Not implemented: it needs the C++ port and the blind path.
+The other half of Data2G's LMMSE suggestion (the estimate itself
+shipped 2026-09-22, see CLAUDE.md) is **not worth a fine-tune** as it
+stands: `scripts/lmmse_study.py` puts its latent-SNR ceiling at +0.29 dB
+(mpp 8), zero on AWGN, and the current decoder already collects
+−0.04 to +0.10 dB PSNR of it untrained. It is not a format break:
+weights are receiver output, so a later change only needs
+`waveform_channel._equalize` mirrored before a fine-tune.
 
-The other half of the Data2G suggestion, weights from the estimate's
-MSE, is **not worth a fine-tune**. Its latent-SNR ceiling over LMMSE
-with the old weights is +0.29 dB (mpp 8), zero on AWGN, and the current
-decoder already collects −0.04 to +0.10 dB PSNR of it untrained. It is
-not a format break either: weights are receiver output, so a later
-change only needs `waveform_channel._equalize` mirrored before a
-fine-tune.
+The stage-2 replica still equalizes with Catmull-Rom, so the encoder
+is trained against a noisier receiver than the one it now meets. That
+direction is safe (measured end to end: +0.21 to +0.56 dB PSNR, every
+image), but a stage-2 fine-tune should mirror `_lmmse_channel` first.
 
 ## Open: stage-2 fading replica is 1.41x too wide
 

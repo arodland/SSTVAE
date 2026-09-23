@@ -161,6 +161,12 @@ def _time_shift_phase(shift) -> np.ndarray:
     return ofdm._phasor(np.multiply.outer(s, _BB_FREQS), -1)
 
 
+def _shift_phasor(shift: np.ndarray) -> np.ndarray:
+    """_time_shift_phase for fractional shifts (n, NC): not exact, but
+    reduced before exp() as dsp.wrap_cycles requires."""
+    return np.exp(-2j * np.pi * wrap_cycles(np.multiply.outer(shift, _BB_FREQS) / FS))
+
+
 def _residual_cfo(h_pilot: np.ndarray, received: np.ndarray) -> float:
     """Hz: the pilots' common phase rotation frame to frame, summed over
     every adjacent received pair, so fading's random FM averages out
@@ -200,6 +206,163 @@ def _window_shift(support: tuple[int, int]) -> int:
     s = (a_first + a_last - NCP) / 2. Past the CP no shift is clean and
     the centre is still the least bad."""
     return int(round((support[0] + support[1] - NCP) / 2))
+
+
+# Time-interpolation window of the channel estimate: this many pilots
+# either side of the frame.
+LMMSE_TIME_TAPS = 4
+# Doppler spread assumed when too few frame pairs exist to measure one.
+LMMSE_DEFAULT_SPREAD_HZ = 2.0
+
+
+# Pilot coherence with a neighbouring frame that marks a frame as the
+# locked transmission. Measured in a 130 s ring: its frames 0.56-0.84
+# at the 5th percentile (AWGN to mpd), noise frames 0.23 median and
+# 0.46 at the 99th.
+TX_COHERENCE = 0.5
+
+
+def _transmission_frames(h_pilot: np.ndarray) -> np.ndarray:
+    """Frames of a blind buffer that look like the locked transmission.
+
+    Power cannot say it: another transmission still in the ring, read at
+    this one's timing, is junk at whatever power it arrived with, and a
+    stronger one then sets every statistic (the second of two blind
+    receptions, 12 dB weaker than the first, was never delivered). So a
+    frame must first be coherent with a neighbour -- the channel moves
+    slowly and noise or a misaligned symbol does not -- and then within
+    10 dB of the strongest such frame."""
+    pw = np.mean(np.abs(h_pilot) ** 2, axis=1)
+    ok = _coherent_frames(h_pilot)
+    return ok & (pw > 0.1 * pw[ok].max())
+
+
+def _coherent_frames(h_pilot: np.ndarray) -> np.ndarray:
+    """Frames whose pilot correlates with a neighbour's above
+    TX_COHERENCE; all of them if none does."""
+    n = len(h_pilot)
+    c = np.abs(np.sum(h_pilot[1:] * np.conj(h_pilot[:-1]), axis=1)) / np.sqrt(
+        np.sum(np.abs(h_pilot[1:]) ** 2, axis=1) * np.sum(np.abs(h_pilot[:-1]) ** 2, axis=1)
+        + 1e-30
+    )
+    coh = np.zeros(n)
+    coh[1:] = c
+    coh[:-1] = np.maximum(coh[:-1], c)
+    ok = coh > TX_COHERENCE
+    return ok if ok.any() else np.ones(n, dtype=bool)
+
+
+def _lmmse_channel(
+    h_pilot: np.ndarray, steps: np.ndarray | None = None,
+    plausible: np.ndarray | None = None,
+) -> np.ndarray:
+    """(n, 5, NC) channel at every data symbol of n consecutive frames,
+    from their pilots (n, NC). 2-D LMMSE in the robust form of Li,
+    Cimini and Sollenberger (via Data2G's equalizer): across carriers a
+    projection onto the measured delay support, in time Wiener
+    interpolation over the nearest 2*LMMSE_TIME_TAPS pilots with a
+    Gaussian (ITU-R F.1487) Doppler correlation whose spread is
+    measured from the pilots and centred on their measured rotation.
+
+    `plausible` is for a buffer that may be mostly not the transmission
+    (the blind path; see `_transmission_frames`): the delay support and
+    drift then come from those frames, and power and spread from the
+    coherent frames whose pilot power is over twice the noise floor.
+    The noise floor itself comes from every frame, since the projection
+    residual measures it on signal and noise frames alike. Gating power
+    and spread on the 10 dB rule alone dropped a third of a fading
+    transmission's own frames and cost ~1 dB on a late-path channel.
+
+    Two things the pilots do between frames that a textbook estimator
+    does not expect, each measured as a loss before it was handled:
+
+    * **Clock drift.** `steps` are the timing steps `_demod_frames`
+      undid. Undone, the path delays drift with the clock across the
+      whole transmission (~20 samples at 80 ppm over mode A), which
+      smears the delay support and cost 3.4 dB there. So the
+      projection runs on pilots with the drift taken out -- the steps,
+      plus a line fitted through each frame's pilot phase slope for
+      whatever the steps did not take (all of it on the blind path,
+      which has no timing loop: 80 ppm cost it 4 dB) -- and the drift
+      is put back after.
+    * **Residual frequency.** The blind path carries 0.3 to 4 Hz of
+      it, and a Doppler spectrum centred on zero averages rotating
+      pilots away (-2 dB on a late-path channel). The spectrum is
+      centred on the pilots' frame-to-frame rotation instead, which
+      is what Catmull-Rom tracked implicitly. Like Catmull-Rom it
+      cannot see a rotation past +-CFO_PULL_HZ.
+
+    Replaced Catmull-Rom, which interpolated raw per-carrier pilots and
+    so passed every pilot's noise straight into the equalizer: +0.21 to
+    +0.56 dB PSNR through the v5 decoder, every image in all 12 cells
+    measured (modes A and B, AWGN to mpd). The latent weights keep their
+    |h|/median meaning on purpose -- the decoder was trained on it.
+
+    The projector comes from eigh(B B^H), not an SVD of B: the same
+    subspace (singular values above 1e-2 of the largest are
+    eigenvalues above 1e-4), and a 24x24 Hermitian problem is what the
+    C++ port solves too.
+    """
+    n = len(h_pilot)
+    steps = np.zeros(n) if steps is None else steps
+    pw = np.mean(np.abs(h_pilot) ** 2, axis=1)
+    strong = plausible if plausible is not None else np.ones(n, dtype=bool)
+    stepped = h_pilot * np.conj(_time_shift_phase(steps))
+    tau = -np.angle(np.sum(stepped[:, 1:] * np.conj(stepped[:, :-1]), axis=1)) * FS / (2 * np.pi * RS)
+    f_idx = np.arange(n, dtype=np.float64)
+    wts = pw * strong
+    drift = np.zeros(n)
+    if np.count_nonzero(wts) >= 2:
+        fm = np.sum(wts * f_idx) / np.sum(wts)
+        var = np.sum(wts * (f_idx - fm) ** 2)
+        if var > 0:
+            rate = np.sum(wts * (f_idx - fm) * (tau - np.sum(wts * tau) / np.sum(wts))) / var
+            drift = rate * (f_idx - fm)
+    undo = _shift_phasor(steps + drift)
+    aligned = h_pilot * np.conj(undo)
+    d0, d1 = _delay_support(aligned[strong])
+    B = ofdm._phasor(np.outer(_BB_FREQS, np.arange(d0 - 4, d1 + 5)), -1)
+    lam, V = np.linalg.eigh(B @ B.conj().T)
+    U = V[:, lam > lam[-1] * 1e-4]
+    r = U.shape[1]
+    hs = (aligned @ (U @ U.conj().T).T) * undo
+    n0 = float(np.mean(np.abs(h_pilot - hs) ** 2)) * NC / max(NC - r, 1)
+    n0_s = n0 * r / NC  # what is left on a projected pilot
+    if plausible is None:
+        stats = strong
+    else:
+        coherent = _coherent_frames(h_pilot)
+        stats = (coherent & (pw > 2 * n0)) | strong
+    p_sig = max(float(np.mean(np.abs(hs[stats]) ** 2)) - n0_s, 1e-12)
+    pairs = stats[1:] & stats[:-1]
+    lag1 = np.mean(hs[1:][pairs] * np.conj(hs[:-1][pairs])) if pairs.any() else 0.0
+    rot = float(np.angle(lag1)) / (2 * np.pi)  # cycles per frame
+    if pairs.sum() >= 8:
+        rho = float(np.clip(np.abs(lag1) / p_sig, 1e-3, 0.9999))
+        spread = float(np.clip(2 * np.sqrt(-np.log(rho) / 2) / (np.pi * FRAME_S), 0.02, 4.0))
+    else:
+        spread = LMMSE_DEFAULT_SPREAD_HZ
+
+    def turn(t):  # the measured rotation at time t, in frames
+        return np.exp(2j * np.pi * wrap_cycles(rot * np.asarray(t, dtype=np.float64)))
+
+    def corr(dt):  # in frames
+        return np.exp(-2 * (np.pi * spread / 2 * dt * FRAME_S) ** 2)
+
+    k = min(2 * LMMSE_TIME_TAPS, n)
+    offs = np.arange(1, SYMS_PER_FRAME) / SYMS_PER_FRAME
+    tj = np.arange(k)
+    Rpp = p_sig * corr(tj[:, None] - tj[None, :]) + n0_s * np.eye(k)
+    hd = hs * np.conj(turn(np.arange(n)))[:, None]  # rotation removed
+    h = np.zeros((n, SYMS_PER_FRAME - 1, NC), dtype=np.complex128)
+    cache: dict[int, np.ndarray] = {}
+    for f in range(n):
+        lo = max(0, min(f - LMMSE_TIME_TAPS + 1, n - k))
+        if f - lo not in cache:  # evenly spaced pilots: few distinct W
+            Rdp = p_sig * corr((f - lo) + offs[:, None] - tj[None, :])
+            cache[f - lo] = np.linalg.solve(Rpp, Rdp.T).T
+        h[f] = (cache[f - lo] @ hd[lo : lo + k]) * turn(f + offs)[:, None]
+    return h
 
 
 class _DriftTracker:
@@ -257,8 +420,13 @@ class _DriftTracker:
         self._n = np.arange(FRAME_SAMPLES)
 
     def frame(self, z: np.ndarray, p: int) -> np.ndarray:
-        """This frame's samples, de-rotated by the running estimate."""
-        return z[p : p + FRAME_SAMPLES] * np.exp(
+        """This frame's samples, de-rotated by the running estimate.
+        Zero where the frame hangs off the buffer: a placed window can
+        start a frame's CP before the buffer does, and the demod windows
+        never read that part."""
+        seg = z[max(p, 0) : p + FRAME_SAMPLES]
+        seg = np.pad(seg, (max(-p, 0), FRAME_SAMPLES - len(seg) - max(-p, 0)))
+        return seg * np.exp(
             -2j * np.pi * wrap_cycles(self.phase_acc + self.f_est * self._n / FS)
         )
 
@@ -395,12 +563,12 @@ class Modem:
         # the preamble's estimate reaches 2.1 Hz off, the pilots' 0.17)
         # and about delay spread, from which the window is placed so
         # every path sits inside the CP (+1.1 dB latent SNR on mpd).
-        _, hp, rcv = self._demod_frames(z, p_frames, n_f, phi_ref, 0, None, False)
+        _, hp, rcv, _ = self._demod_frames(z, p_frames, n_f, phi_ref, 0, None, False)
         cfo_res = _residual_cfo(hp, rcv)
         z = freq_correct(z, cfo_res)
-        _, hp, rcv = self._demod_frames(z, p_frames, n_f, phi_ref, 0, None, False)
+        _, hp, rcv, _ = self._demod_frames(z, p_frames, n_f, phi_ref, 0, None, False)
         shift = _window_shift(_delay_support(hp[rcv])) if rcv.any() else 0
-        raw, h_pilot, received = self._demod_frames(
+        raw, h_pilot, received, steps = self._demod_frames(
             z, p_frames, n_f, phi_ref, shift, _make_tracker(drift_track)
         )
         # Equalize data symbols with pilots interpolated across the frame.
@@ -408,31 +576,20 @@ class Modem:
         weights = np.zeros(spec.n_tx_latents)
         med_h = np.median(np.abs(h_pilot[received])) if received.any() else 1.0
         floor = max(0.05 * med_h, 1e-9)
-        def pilot_at(i: int, fallback: int) -> np.ndarray:
-            if 0 <= i < n_f and received[i]:
-                return h_pilot[i]
-            return h_pilot[fallback]
+        # Frames present are a prefix: the buffer can only run out.
+        n_rx = int(received.sum())
+        h_est = np.zeros((n_f, SYMS_PER_FRAME - 1, NC), dtype=np.complex128)
+        if n_rx:
+            h_est[:n_rx] = _lmmse_channel(h_pilot[:n_rx], steps[:n_rx])
 
         beacon_soft = np.zeros(n_f * CHIPS_PER_FRAME)
         for f in range(n_f):
             if not received[f]:
                 continue
-            # Catmull-Rom interpolation over four surrounding pilots: the
-            # 6.9 Hz pilot rate oversamples even 2 Hz Doppler fading, but
-            # linear interpolation alone loses ~14 dB tracking it.
-            p0, p1 = pilot_at(f - 1, f), h_pilot[f]
-            p2 = pilot_at(f + 1, f)
-            p3 = pilot_at(f + 2, f + 1 if f + 1 < n_f and received[f + 1] else f)
             frame_slots = np.zeros(LATENTS_PER_FRAME)
             frame_w = np.zeros(LATENTS_PER_FRAME)
             for s in range(1, SYMS_PER_FRAME):
-                u = s / SYMS_PER_FRAME
-                h = 0.5 * (
-                    2 * p1
-                    + (p2 - p0) * u
-                    + (2 * p0 - 5 * p1 + 4 * p2 - p3) * u**2
-                    + (3 * p1 - p0 - 3 * p2 + p3) * u**3
-                )
+                h = h_est[f, s - 1]
                 mag = np.maximum(np.abs(h), floor)
                 y = raw[f, s] * np.conj(h) / mag**2
                 w = np.minimum(np.abs(h) / med_h, 1.0)
@@ -561,14 +718,22 @@ class Modem:
         if np.any(h_pilot):
             # Same placement as the preamble path, from the frames that
             # are plausibly the transmission rather than the noise
-            # around it. Skipped when the moved window would leave the
-            # buffer, which only a lock within a few samples of its
-            # edge can do.
-            pw = np.mean(np.abs(h_pilot) ** 2, axis=1)
-            shift = _window_shift(_delay_support(h_pilot[pw > 0.1 * pw.max()]))
-            first = p_start + shift  # frame 0's CP, where the drift tracker slices
-            last = first + n_f * FRAME_SAMPLES
-            if shift and first >= 0 and last <= len(z):
+            # around it. A frame the moved window would take past either
+            # end of the buffer is dropped rather than the placement
+            # skipped: blind acquisition times on the stronger path, so
+            # a lock that needs moving earlier is the common case, and
+            # skipping it within a few samples of the buffer start cost
+            # a late-path channel a dB. Moving p_start by whole frames
+            # leaves frame0_start where it was, since the beacon's frame
+            # offset moves with it.
+            shift = _window_shift(_delay_support(h_pilot[_transmission_frames(h_pilot)]))
+            lo, n = p_start, n_f
+            if lo + shift + NCP - DEMOD_BACKOFF < 0:  # its first demod window
+                lo, n = lo + FRAME_SAMPLES, n - 1
+            if lo + shift + n * FRAME_SAMPLES > len(z):
+                n -= 1
+            if shift and n > 0:
+                p_start, n_f = lo, n
                 raw, h_pilot = frames(p_start + shift)
 
         # Blind demod always covers every frame the *whole current
@@ -597,22 +762,22 @@ class Modem:
         med_h = np.median(h_mag[plausible]) if np.any(plausible) else 1.0
         floor = max(0.05 * med_h, 1e-9)
 
-        def pilot_at(i: int) -> np.ndarray:
-            return h_pilot[int(np.clip(i, 0, n_f - 1))]
+        # Channel statistics from the frames that are plausibly the
+        # transmission, for the same reason as med_h above; the estimate
+        # still covers every frame, and noise frames get what their
+        # small |h| earns them in the weights.
+        h_est = (
+            _lmmse_channel(h_pilot, plausible=_transmission_frames(h_pilot))
+            if np.any(h_pilot)
+            else np.zeros((n_f, SYMS_PER_FRAME - 1, NC), dtype=np.complex128)
+        )
 
         beacon_soft = np.zeros(n_f * CHIPS_PER_FRAME)
         slot_values = np.zeros((n_f, LATENTS_PER_FRAME))
         slot_weights = np.zeros((n_f, LATENTS_PER_FRAME))
         for f in range(n_f):
-            p0_, p1_, p2_, p3_ = pilot_at(f - 1), h_pilot[f], pilot_at(f + 1), pilot_at(f + 2)
             for s in range(1, SYMS_PER_FRAME):
-                u = s / SYMS_PER_FRAME
-                h = 0.5 * (
-                    2 * p1_
-                    + (p2_ - p0_) * u
-                    + (2 * p0_ - 5 * p1_ + 4 * p2_ - p3_) * u**2
-                    + (3 * p1_ - p0_ - 3 * p2_ + p3_) * u**3
-                )
+                h = h_est[f, s - 1]
                 mag = np.maximum(np.abs(h), floor)
                 y = raw[f, s] * np.conj(h) / mag**2
                 w = np.minimum(np.abs(h) / med_h, 1.0)
@@ -675,10 +840,11 @@ class Modem:
     def _demod_frames(
         self, z: np.ndarray, p: int, n_f: int, phi_ref: float, shift: int,
         tracker: "_DriftTracker | None", unstep: bool = True,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Demodulate up to `n_f` frames from `p`, the window moved
         `shift` samples later than nominal. Returns raw (n_f, 6, NC),
-        pilot gains (n_f, NC) and which frames were in the buffer.
+        pilot gains (n_f, NC), which frames were in the buffer, and each
+        frame's accumulated timing step.
 
         Sample-clock drift is followed by the pilot phase slope across
         carriers against `phi_ref`, through a slow EMA and +-2 sample
@@ -741,7 +907,7 @@ class Modem:
                     tau_ema -= step
         if unstep:
             raw *= _time_shift_phase(steps)[:, None, :]
-        return raw, raw[:, 0] / self.pilot, received
+        return raw, raw[:, 0] / self.pilot, received, steps
 
     @staticmethod
     def _bin_phase_step(h: np.ndarray) -> float:

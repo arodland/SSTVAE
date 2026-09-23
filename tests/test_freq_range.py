@@ -330,13 +330,19 @@ def test_blind_demod_takes_the_same_setting(modem, mode_a):
     loop needs no preamble reference, unlike the sample-clock tracker.
     0.2 Hz/s over 30 s is 6 Hz of drift, whose ~3 Hz of initial residual
     is inside the loop's pull-in -- see the next test for what happens
-    outside it."""
-    _, _, wave = mode_a
+    outside it.
+
+    Scored as latent SNR since the LMMSE channel estimate (2026-09-22):
+    it centres its Doppler model on the pilots' rotation, which does
+    part of the loop's job, and the untracked decode's confident
+    fraction then ties the tracked one while its SNR is still ~0.5 dB
+    behind."""
+    _, latents, wave = mode_a
     frames = wave[LEADIN_SAMPLES + config.PREAMBLE_SAMPLES + config.HEADER_SAMPLES :]
     y = hfchannel.awgn(_drifted(frames[: 30 * FS], 0.2), 6.0, seed=8)
     plain = modem.demodulate_blind(y)
     tracked = modem.demodulate_blind(y, drift_track="slow")
-    assert _good_frac(tracked) > _good_frac(plain)
+    assert _latent_snr(tracked, latents) > _latent_snr(plain, latents) + 0.25
     with pytest.raises(ValueError):
         modem.demodulate_blind(y, drift_track="medium")
 
@@ -363,6 +369,16 @@ def test_the_blind_pull_in_limit_is_real_and_is_a_cliff(modem, mode_a):
 
     assert _good_frac(modem.demodulate_blind(y)) > 0.2
     assert _good_frac(modem.demodulate_blind(y, drift_track="slow")) == 0.0
+
+
+def _latent_snr(result, latents):
+    """dB, best linear fit of latents*weights to the truth, over what
+    was placed."""
+    g = (result.latents * result.weights)[: len(latents)]
+    placed = g != 0
+    t, g = latents[placed], g[placed]
+    rho2 = np.dot(t, g) ** 2 / (np.dot(t, t) * np.dot(g, g))
+    return 10 * np.log10(rho2 / (1 - rho2))
 
 
 def _good_frac(result):

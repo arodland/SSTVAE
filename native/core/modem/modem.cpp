@@ -29,16 +29,19 @@ class DriftTracker {
    public:
     DriftTracker(double alpha, double beta) : alpha_(alpha), beta_(beta) {}
 
-    // This frame's samples, de-rotated by the running estimate.
+    // This frame's samples, de-rotated by the running estimate. Zero
+    // where the frame hangs off the buffer: a placed window can start a
+    // frame's CP before the buffer does, and no demod window reads it.
     std::vector<cdouble> frame(std::span<const cdouble> z, std::int64_t p) const {
         std::vector<cdouble> out(static_cast<std::size_t>(config::FRAME_SAMPLES));
         for (int n = 0; n < config::FRAME_SAMPLES; ++n) {
+            const std::int64_t i = p + n;
+            if (i < 0 || i >= static_cast<std::int64_t>(z.size())) continue;
             const double cycles = dsp::wrap_cycles(
                 phase_acc_ + f_est_ * static_cast<double>(n) / config::FS);
             const double theta = -2.0 * std::numbers::pi * cycles;
             out[static_cast<std::size_t>(n)] =
-                z[static_cast<std::size_t>(p) + static_cast<std::size_t>(n)] *
-                cdouble{std::cos(theta), std::sin(theta)};
+                z[static_cast<std::size_t>(i)] * cdouble{std::cos(theta), std::sin(theta)};
         }
         return out;
     }
@@ -245,6 +248,7 @@ struct Frames {
     std::vector<cdouble> raw;      // (n_f, SYMS_PER_FRAME, NC)
     std::vector<cdouble> h_pilot;  // (n_f, NC)
     std::vector<char> received;    // (n_f)
+    std::vector<std::int64_t> steps;  // (n_f) accumulated timing step
 };
 
 Frames demod_frames(std::span<const cdouble> z, std::int64_t p, int n_f, double phi_ref,
@@ -318,6 +322,7 @@ Frames demod_frames(std::span<const cdouble> z, std::int64_t p, int n_f, double 
             }
         }
     }
+    out.steps = steps;
     for (int f = 0; f < n_f; ++f) {
         const std::size_t fi = static_cast<std::size_t>(f);
         std::array<cdouble, NC> ph{};
@@ -346,20 +351,327 @@ std::vector<cdouble> received_rows(const Frames& fr) {
     return out;
 }
 
-// Catmull-Rom over four surrounding pilots. The 6.9 Hz pilot rate
-// oversamples even 2 Hz Doppler fading, but linear interpolation alone
-// loses ~14 dB tracking it.
-void catmull_rom(std::span<const cdouble> p0, std::span<const cdouble> p1,
-                 std::span<const cdouble> p2, std::span<const cdouble> p3,
-                 double u, std::span<cdouble> out) {
-    const double u2 = u * u;
-    const double u3 = u2 * u;
-    for (int k = 0; k < NC; ++k) {
-        const std::size_t i = static_cast<std::size_t>(k);
-        out[i] = 0.5 * (2.0 * p1[i] + (p2[i] - p0[i]) * u +
-                        (2.0 * p0[i] - 5.0 * p1[i] + 4.0 * p2[i] - p3[i]) * u2 +
-                        (3.0 * p1[i] - p0[i] - 3.0 * p2[i] + p3[i]) * u3);
+// exp(-2j*pi*f*s/FS) for a fractional shift s: not exact, but reduced
+// before the transcendental. Mirrors _shift_phasor in modem.py.
+cdouble frac_shift_phasor(std::int64_t f, double s) {
+    const double c = dsp::wrap_cycles(s * static_cast<double>(f) / FS);
+    return std::polar(1.0, -2.0 * PI * c);
+}
+
+// Eigenvectors of a real symmetric n x n matrix (row-major, destroyed),
+// cyclic Jacobi. Returns eigenvalues; column j of `v` is vector j.
+std::vector<double> jacobi_eigen(std::vector<double>& a, std::vector<double>& v, int n) {
+    auto at = [n](std::vector<double>& m, int r, int c) -> double& {
+        return m[static_cast<std::size_t>(r) * static_cast<std::size_t>(n) +
+                 static_cast<std::size_t>(c)];
+    };
+    v.assign(static_cast<std::size_t>(n) * static_cast<std::size_t>(n), 0.0);
+    for (int i = 0; i < n; ++i) at(v, i, i) = 1.0;
+    double norm = 0.0;
+    for (double x : a) norm += x * x;
+    for (int sweep = 0; sweep < 100; ++sweep) {
+        double off = 0.0;
+        for (int p = 0; p < n; ++p)
+            for (int q = p + 1; q < n; ++q) off += at(a, p, q) * at(a, p, q);
+        if (off <= 1e-30 * norm) break;
+        for (int p = 0; p < n; ++p) {
+            for (int q = p + 1; q < n; ++q) {
+                const double apq = at(a, p, q);
+                if (apq == 0.0) continue;
+                const double theta = (at(a, q, q) - at(a, p, p)) / (2.0 * apq);
+                const double t = (theta >= 0 ? 1.0 : -1.0) /
+                                 (std::abs(theta) + std::sqrt(theta * theta + 1.0));
+                const double c = 1.0 / std::sqrt(t * t + 1.0);
+                const double sn = t * c;
+                for (int k = 0; k < n; ++k) {
+                    const double akp = at(a, k, p), akq = at(a, k, q);
+                    at(a, k, p) = c * akp - sn * akq;
+                    at(a, k, q) = sn * akp + c * akq;
+                }
+                for (int k = 0; k < n; ++k) {
+                    const double apk = at(a, p, k), aqk = at(a, q, k);
+                    at(a, p, k) = c * apk - sn * aqk;
+                    at(a, q, k) = sn * apk + c * aqk;
+                }
+                for (int k = 0; k < n; ++k) {
+                    const double vkp = at(v, k, p), vkq = at(v, k, q);
+                    at(v, k, p) = c * vkp - sn * vkq;
+                    at(v, k, q) = sn * vkp + c * vkq;
+                }
+            }
+        }
     }
+    std::vector<double> lam(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) lam[static_cast<std::size_t>(i)] = at(a, i, i);
+    return lam;
+}
+
+// x = A^{-1} b for a real symmetric positive definite k x k A (Cholesky).
+std::vector<double> spd_solve(const std::vector<double>& a, std::vector<double> b, int k) {
+    std::vector<double> l(a.size(), 0.0);
+    auto L = [&l, k](int r, int c) -> double& {
+        return l[static_cast<std::size_t>(r * k + c)];
+    };
+    for (int r = 0; r < k; ++r)
+        for (int c = 0; c <= r; ++c) {
+            double sum = a[static_cast<std::size_t>(r * k + c)];
+            for (int m = 0; m < c; ++m) sum -= L(r, m) * L(c, m);
+            L(r, c) = r == c ? std::sqrt(sum) : sum / L(c, c);
+        }
+    for (int r = 0; r < k; ++r) {
+        double sum = b[static_cast<std::size_t>(r)];
+        for (int m = 0; m < r; ++m) sum -= L(r, m) * b[static_cast<std::size_t>(m)];
+        b[static_cast<std::size_t>(r)] = sum / L(r, r);
+    }
+    for (int r = k - 1; r >= 0; --r) {
+        double sum = b[static_cast<std::size_t>(r)];
+        for (int m = r + 1; m < k; ++m) sum -= L(m, r) * b[static_cast<std::size_t>(m)];
+        b[static_cast<std::size_t>(r)] = sum / L(r, r);
+    }
+    return b;
+}
+
+constexpr int LMMSE_TIME_TAPS = 4;
+constexpr double LMMSE_DEFAULT_SPREAD_HZ = 2.0;
+constexpr int DATA_SYMS = SYMS_PER_FRAME - 1;
+
+// Port of _coherent_frames / _transmission_frames in modem.py -- read
+// the latter's docstring. `h` is (n, NC).
+constexpr double TX_COHERENCE = 0.5;
+
+std::vector<char> coherent_frames(const std::vector<cdouble>& h) {
+    const std::size_t n = h.size() / NC;
+    std::vector<double> coh(n, 0.0);
+    for (std::size_t f = 1; f < n; ++f) {
+        cdouble acc{0.0, 0.0};
+        double a = 0.0, b = 0.0;
+        for (int k = 0; k < NC; ++k) {
+            const cdouble cur = h[f * NC + static_cast<std::size_t>(k)];
+            const cdouble prev = h[(f - 1) * NC + static_cast<std::size_t>(k)];
+            acc += cur * std::conj(prev);
+            a += std::norm(cur);
+            b += std::norm(prev);
+        }
+        const double c = std::abs(acc) / std::sqrt(a * b + 1e-30);
+        coh[f] = c;
+        coh[f - 1] = std::max(coh[f - 1], c);
+    }
+    std::vector<char> ok(n, 0);
+    bool any = false;
+    for (std::size_t f = 0; f < n; ++f) any |= (ok[f] = coh[f] > TX_COHERENCE) != 0;
+    if (!any) std::fill(ok.begin(), ok.end(), 1);
+    return ok;
+}
+
+std::vector<double> frame_power(const std::vector<cdouble>& h) {
+    std::vector<double> pw(h.size() / NC, 0.0);
+    for (std::size_t f = 0; f < pw.size(); ++f) {
+        for (int k = 0; k < NC; ++k) pw[f] += std::norm(h[f * NC + static_cast<std::size_t>(k)]);
+        pw[f] /= NC;
+    }
+    return pw;
+}
+
+std::vector<char> transmission_frames(const std::vector<cdouble>& h) {
+    const std::vector<double> pw = frame_power(h);
+    std::vector<char> ok = coherent_frames(h);
+    double top = 0.0;
+    for (std::size_t f = 0; f < pw.size(); ++f)
+        if (ok[f]) top = std::max(top, pw[f]);
+    for (std::size_t f = 0; f < pw.size(); ++f) ok[f] = ok[f] && pw[f] > 0.1 * top;
+    return ok;
+}
+
+// Port of _lmmse_channel in sstvae/modem/modem.py -- read its docstring.
+// `h` is (n, NC); returns (n, DATA_SYMS, NC). The Hermitian projector is
+// found through the real-symmetric 2*NC embedding [[Re, -Im], [Im, Re]],
+// whose eigenvalues are the complex matrix's, each twice: the retained
+// real eigenvectors span exactly the retained complex subspace.
+std::vector<cdouble> lmmse_channel(const std::vector<cdouble>& h, std::span<const std::int64_t> steps,
+                                   const std::vector<char>* plausible) {
+    const std::size_t n = h.size() / NC;
+    auto H = [&h](std::size_t f, int k) { return h[f * NC + static_cast<std::size_t>(k)]; };
+    const std::vector<double> pw = frame_power(h);
+    const std::vector<char> strong = plausible ? *plausible : std::vector<char>(n, 1);
+
+    // Residual timing drift: a power-weighted line through each frame's
+    // pilot phase slope, measured with the steps still in.
+    std::vector<double> tau(n, 0.0);
+    for (std::size_t f = 0; f < n; ++f) {
+        const std::int64_t st = steps.empty() ? 0 : steps[f];
+        cdouble acc{0.0, 0.0};
+        cdouble prev{};
+        for (int k = 0; k < NC; ++k) {
+            const cdouble cur = H(f, k) * std::conj(shift_phasor(baseband_hz(k), st));
+            if (k > 0) acc += cur * std::conj(prev);
+            prev = cur;
+        }
+        tau[f] = -std::arg(acc) * FS / (2 * PI * RS);
+    }
+    std::vector<double> drift(n, 0.0);
+    {
+        double sw = 0.0, swf = 0.0, swt = 0.0;
+        std::size_t nz = 0;
+        for (std::size_t f = 0; f < n; ++f) {
+            const double w = strong[f] ? pw[f] : 0.0;
+            if (w != 0.0) ++nz;
+            sw += w;
+            swf += w * static_cast<double>(f);
+            swt += w * tau[f];
+        }
+        if (nz >= 2) {
+            const double fm = swf / sw;
+            const double tm = swt / sw;
+            double var = 0.0, cov = 0.0;
+            for (std::size_t f = 0; f < n; ++f) {
+                const double w = strong[f] ? pw[f] : 0.0;
+                var += w * (static_cast<double>(f) - fm) * (static_cast<double>(f) - fm);
+                cov += w * (static_cast<double>(f) - fm) * (tau[f] - tm);
+            }
+            if (var > 0)
+                for (std::size_t f = 0; f < n; ++f)
+                    drift[f] = cov / var * (static_cast<double>(f) - fm);
+        }
+    }
+    std::vector<cdouble> undo(n * NC), aligned(n * NC);
+    for (std::size_t f = 0; f < n; ++f)
+        for (int k = 0; k < NC; ++k) {
+            const std::size_t i = f * NC + static_cast<std::size_t>(k);
+            const double total = static_cast<double>(steps.empty() ? 0 : steps[f]) + drift[f];
+            undo[i] = frac_shift_phasor(baseband_hz(k), total);
+            aligned[i] = h[i] * std::conj(undo[i]);
+        }
+
+    // Across carriers: projection onto the measured delay support.
+    std::vector<cdouble> strong_rows;
+    for (std::size_t f = 0; f < n; ++f)
+        if (strong[f])
+            strong_rows.insert(strong_rows.end(), aligned.begin() + static_cast<std::ptrdiff_t>(f * NC),
+                               aligned.begin() + static_cast<std::ptrdiff_t>((f + 1) * NC));
+    const auto [d0, d1] = delay_support(strong_rows);
+    std::array<cdouble, NC * NC> g{};  // B B^H
+    for (int d = d0 - 4; d <= d1 + 4; ++d)
+        for (int r = 0; r < NC; ++r)
+            for (int c = 0; c < NC; ++c)
+                g[static_cast<std::size_t>(r * NC + c)] +=
+                    shift_phasor(baseband_hz(r), d) * std::conj(shift_phasor(baseband_hz(c), d));
+    constexpr int N2 = 2 * NC;
+    std::vector<double> emb(static_cast<std::size_t>(N2 * N2));
+    for (int r = 0; r < NC; ++r)
+        for (int c = 0; c < NC; ++c) {
+            const cdouble x = g[static_cast<std::size_t>(r * NC + c)];
+            emb[static_cast<std::size_t>(r * N2 + c)] = x.real();
+            emb[static_cast<std::size_t>(r * N2 + c + NC)] = -x.imag();
+            emb[static_cast<std::size_t>((r + NC) * N2 + c)] = x.imag();
+            emb[static_cast<std::size_t>((r + NC) * N2 + c + NC)] = x.real();
+        }
+    std::vector<double> vec;
+    const std::vector<double> lam = jacobi_eigen(emb, vec, N2);
+    const double lam_max = *std::max_element(lam.begin(), lam.end());
+    std::array<cdouble, NC * NC> proj{};
+    int kept = 0;
+    for (int j = 0; j < N2; ++j) {
+        if (!(lam[static_cast<std::size_t>(j)] > lam_max * 1e-4)) continue;
+        ++kept;
+        for (int r = 0; r < NC; ++r)
+            for (int c = 0; c < NC; ++c) {
+                // P_real = V V^T; P = P_real[top-left] + i P_real[bottom-left].
+                const double vr = vec[static_cast<std::size_t>(r * N2 + j)];
+                const double vi = vec[static_cast<std::size_t>((r + NC) * N2 + j)];
+                const double vc = vec[static_cast<std::size_t>(c * N2 + j)];
+                proj[static_cast<std::size_t>(r * NC + c)] += cdouble{vr * vc, vi * vc};
+            }
+    }
+    const int rank = kept / 2;
+    std::vector<cdouble> hs(n * NC);
+    for (std::size_t f = 0; f < n; ++f)
+        for (int k = 0; k < NC; ++k) {
+            cdouble acc{0.0, 0.0};
+            for (int m = 0; m < NC; ++m)
+                acc += proj[static_cast<std::size_t>(k * NC + m)] * aligned[f * NC + static_cast<std::size_t>(m)];
+            hs[f * NC + static_cast<std::size_t>(k)] = acc * undo[f * NC + static_cast<std::size_t>(k)];
+        }
+
+    double n0 = 0.0;
+    for (std::size_t i = 0; i < hs.size(); ++i) n0 += std::norm(h[i] - hs[i]);
+    n0 = n0 / static_cast<double>(hs.size()) * NC / std::max(NC - rank, 1);
+    const double n0_s = n0 * rank / NC;
+    std::vector<char> stats = strong;
+    if (plausible) {
+        const std::vector<char> coherent = coherent_frames(h);
+        for (std::size_t f = 0; f < n; ++f)
+            stats[f] = (coherent[f] && pw[f] > 2 * n0) || strong[f];
+    }
+    double p_acc = 0.0;
+    std::size_t p_cnt = 0;
+    for (std::size_t f = 0; f < n; ++f)
+        if (stats[f])
+            for (int k = 0; k < NC; ++k, ++p_cnt) p_acc += std::norm(hs[f * NC + static_cast<std::size_t>(k)]);
+    const double p_sig = std::max(p_acc / static_cast<double>(p_cnt) - n0_s, 1e-12);
+    cdouble lag1{0.0, 0.0};
+    std::size_t n_pairs = 0;
+    for (std::size_t f = 1; f < n; ++f) {
+        if (!stats[f] || !stats[f - 1]) continue;
+        ++n_pairs;
+        for (int k = 0; k < NC; ++k)
+            lag1 += hs[f * NC + static_cast<std::size_t>(k)] *
+                    std::conj(hs[(f - 1) * NC + static_cast<std::size_t>(k)]);
+    }
+    if (n_pairs) lag1 /= static_cast<double>(n_pairs * NC);
+    const double rot = std::arg(lag1) / (2 * PI);  // cycles per frame
+    double spread = LMMSE_DEFAULT_SPREAD_HZ;
+    if (n_pairs >= 8) {
+        const double rho = std::clamp(std::abs(lag1) / p_sig, 1e-3, 0.9999);
+        spread = std::clamp(2 * std::sqrt(-std::log(rho) / 2) / (PI * FRAME_S), 0.02, 4.0);
+    }
+    auto corr = [spread](double dt) {
+        const double x = PI * spread / 2 * dt * FRAME_S;
+        return std::exp(-2 * x * x);
+    };
+    auto turn = [rot](double t) { return std::polar(1.0, 2 * PI * dsp::wrap_cycles(rot * t)); };
+
+    // In time: Wiener over the nearest pilots, rotation removed.
+    const int k = static_cast<int>(std::min<std::size_t>(2 * LMMSE_TIME_TAPS, n));
+    std::vector<double> rpp(static_cast<std::size_t>(k * k));
+    for (int r = 0; r < k; ++r)
+        for (int c = 0; c < k; ++c)
+            rpp[static_cast<std::size_t>(r * k + c)] = p_sig * corr(r - c) + (r == c ? n0_s : 0.0);
+    std::vector<cdouble> hd(n * NC);
+    for (std::size_t f = 0; f < n; ++f) {
+        const cdouble tr = std::conj(turn(static_cast<double>(f)));
+        for (int m = 0; m < NC; ++m) hd[f * NC + static_cast<std::size_t>(m)] = hs[f * NC + static_cast<std::size_t>(m)] * tr;
+    }
+    std::vector<std::vector<double>> cache(static_cast<std::size_t>(k));  // W rows by f - lo
+    std::vector<cdouble> out(n * DATA_SYMS * NC);
+    for (std::size_t f = 0; f < n; ++f) {
+        const std::int64_t lo = std::max<std::int64_t>(
+            0, std::min<std::int64_t>(static_cast<std::int64_t>(f) - LMMSE_TIME_TAPS + 1,
+                                      static_cast<std::int64_t>(n) - k));
+        const int rel = static_cast<int>(static_cast<std::int64_t>(f) - lo);
+        auto& w = cache[static_cast<std::size_t>(rel)];
+        if (w.empty()) {  // evenly spaced pilots: few distinct W
+            for (int s = 1; s <= DATA_SYMS; ++s) {
+                std::vector<double> rdp(static_cast<std::size_t>(k));
+                for (int j = 0; j < k; ++j)
+                    rdp[static_cast<std::size_t>(j)] =
+                        p_sig * corr(rel + static_cast<double>(s) / SYMS_PER_FRAME - j);
+                const auto row = spd_solve(rpp, rdp, k);
+                w.insert(w.end(), row.begin(), row.end());
+            }
+        }
+        for (int s = 0; s < DATA_SYMS; ++s) {
+            const cdouble tr = turn(static_cast<double>(f) + static_cast<double>(s + 1) / SYMS_PER_FRAME);
+            for (int m = 0; m < NC; ++m) {
+                cdouble acc{0.0, 0.0};
+                for (int j = 0; j < k; ++j)
+                    acc += w[static_cast<std::size_t>(s * k + j)] *
+                           hd[(static_cast<std::size_t>(lo) + static_cast<std::size_t>(j)) * NC +
+                              static_cast<std::size_t>(m)];
+                out[(f * DATA_SYMS + static_cast<std::size_t>(s)) * NC + static_cast<std::size_t>(m)] = acc * tr;
+            }
+        }
+    }
+    return out;
 }
 
 // One data symbol's equalization: matched-filter combining, per-latent
@@ -601,30 +913,22 @@ DemodResult Modem::demodulate(std::span<const double> x,
     const double med_h = mags.empty() ? 1.0 : median(mags);
     const double floor = std::max(0.05 * med_h, 1e-9);
 
-    auto row = [&h_pilot](int i) {
-        return std::span<const cdouble>(
-            h_pilot.data() + static_cast<std::size_t>(i) * NC, NC);
-    };
-    auto pilot_at = [&](int i, int fallback) {
-        if (i >= 0 && i < n_f && received[static_cast<std::size_t>(i)]) return row(i);
-        return row(fallback);
-    };
+    // Frames present are a prefix: the buffer can only run out.
+    std::size_t n_rx = 0;
+    while (n_rx < received.size() && received[n_rx]) ++n_rx;
+    std::vector<cdouble> h_est;
+    if (n_rx)
+        h_est = lmmse_channel(
+            std::vector<cdouble>(h_pilot.begin(), h_pilot.begin() + static_cast<std::ptrdiff_t>(n_rx * NC)),
+            std::span<const std::int64_t>(fr.steps.data(), n_rx), nullptr);
 
     std::vector<double> beacon_soft(static_cast<std::size_t>(n_f) * CHIPS_PER_FRAME, 0.0);
-    std::vector<cdouble> h(NC);
     for (int f = 0; f < n_f; ++f) {
         if (!received[static_cast<std::size_t>(f)]) continue;
-        const auto p0 = pilot_at(f - 1, f);
-        const auto p1 = row(f);
-        const auto p2 = pilot_at(f + 1, f);
-        const int p3_fallback =
-            (f + 1 < n_f && received[static_cast<std::size_t>(f + 1)]) ? f + 1 : f;
-        const auto p3 = pilot_at(f + 2, p3_fallback);
-
         const std::size_t fbase = static_cast<std::size_t>(f) * SYMS_PER_FRAME * NC;
         for (int s = 1; s < SYMS_PER_FRAME; ++s) {
-            const double u = static_cast<double>(s) / SYMS_PER_FRAME;
-            catmull_rom(p0, p1, p2, p3, u, h);
+            const std::span<const cdouble> h(
+                h_est.data() + (static_cast<std::size_t>(f) * DATA_SYMS + static_cast<std::size_t>(s - 1)) * NC, NC);
             const std::span<const cdouble> raw_sym(
                 raw.data() + fbase + static_cast<std::size_t>(s) * NC, NC);
             const EqualizedSymbol eq = equalize(raw_sym, h, floor, med_h);
@@ -688,8 +992,8 @@ BlindDemodResult Modem::demodulate_blind(
         FRAME_SAMPLES));
     if (L_lo > L_hi)
         throw SyncError("blind lock too close to buffer edge to demod any full frame");
-    const int n_f = static_cast<int>(L_hi - L_lo + 1);
-    const std::int64_t p_start = p0 + L_lo * FRAME_SAMPLES;
+    int n_f = static_cast<int>(L_hi - L_lo + 1);
+    std::int64_t p_start = p0 + L_lo * FRAME_SAMPLES;
 
     auto frames = [&](std::int64_t p) {
         std::vector<cdouble> raw(static_cast<std::size_t>(n_f) * SYMS_PER_FRAME * NC,
@@ -745,27 +1049,32 @@ BlindDemodResult Modem::demodulate_blind(
     std::vector<cdouble> h_pilot = std::move(first_pass.second);
     {
         // Same placement as the preamble path, from the frames that are
-        // plausibly the transmission; skipped when the moved window would
-        // leave the buffer. Mirrors demodulate_blind in modem.py.
-        std::vector<double> pw(static_cast<std::size_t>(n_f), 0.0);
-        for (std::size_t f = 0; f < pw.size(); ++f) {
-            for (int k = 0; k < NC; ++k)
-                pw[f] += std::norm(h_pilot[f * NC + static_cast<std::size_t>(k)]);
-            pw[f] /= NC;
-        }
+        // plausibly the transmission. A frame the moved window would take
+        // past either end of the buffer is dropped rather than the
+        // placement skipped; see demodulate_blind in modem.py.
+        const std::vector<double> pw = frame_power(h_pilot);
         const double pw_max = *std::max_element(pw.begin(), pw.end());
         if (pw_max > 0) {
+            const std::vector<char> plausible = transmission_frames(h_pilot);
             std::vector<cdouble> rows;
             for (std::size_t f = 0; f < pw.size(); ++f)
-                if (pw[f] > 0.1 * pw_max)
+                if (plausible[f])
                     rows.insert(rows.end(),
                                 h_pilot.begin() + static_cast<std::ptrdiff_t>(f * NC),
                                 h_pilot.begin() + static_cast<std::ptrdiff_t>((f + 1) * NC));
             const int shift = window_shift(delay_support(rows));
-            const std::int64_t first = p_start + shift;  // frame 0's CP
-            const std::int64_t last = first + std::int64_t{n_f} * FRAME_SAMPLES;
-            if (shift != 0 && first >= 0 && last <= static_cast<std::int64_t>(z.size()))
+            std::int64_t lo = p_start;
+            int n = n_f;
+            if (lo + shift + NCP - DEMOD_BACKOFF < 0) {  // its first demod window
+                lo += FRAME_SAMPLES;
+                --n;
+            }
+            if (lo + shift + std::int64_t{n} * FRAME_SAMPLES > static_cast<std::int64_t>(z.size())) --n;
+            if (shift != 0 && n > 0) {
+                p_start = lo;
+                n_f = n;
                 std::tie(raw, h_pilot) = frames(p_start + shift);
+            }
         }
     }
 
@@ -800,27 +1109,26 @@ BlindDemodResult Modem::demodulate_blind(
     const double med_h = plausible_mags.empty() ? 1.0 : median(plausible_mags);
     const double floor = std::max(0.05 * med_h, 1e-9);
 
-    auto pilot_at = [&h_pilot, n_f](int i) {
-        const int c = std::clamp(i, 0, n_f - 1);
-        return std::span<const cdouble>(
-            h_pilot.data() + static_cast<std::size_t>(c) * NC, NC);
-    };
+    // Channel statistics from the frames that are plausibly the
+    // transmission; see demodulate_blind in modem.py.
+    std::vector<cdouble> h_est;
+    if (std::any_of(h_pilot.begin(), h_pilot.end(), [](cdouble v) { return v != cdouble{}; })) {
+        const std::vector<char> plausible = transmission_frames(h_pilot);
+        h_est = lmmse_channel(h_pilot, {}, &plausible);
+    } else {
+        h_est.assign(static_cast<std::size_t>(n_f) * DATA_SYMS * NC, cdouble{});
+    }
 
     std::vector<double> beacon_soft(static_cast<std::size_t>(n_f) * CHIPS_PER_FRAME, 0.0);
     std::vector<double> slot_values(
         static_cast<std::size_t>(n_f) * LATENTS_PER_FRAME, 0.0);
     std::vector<double> slot_weights(
         static_cast<std::size_t>(n_f) * LATENTS_PER_FRAME, 0.0);
-    std::vector<cdouble> h(NC);
     for (int f = 0; f < n_f; ++f) {
-        const auto p0_ = pilot_at(f - 1);
-        const auto p1_ = pilot_at(f);
-        const auto p2_ = pilot_at(f + 1);
-        const auto p3_ = pilot_at(f + 2);
         const std::size_t fbase = static_cast<std::size_t>(f) * SYMS_PER_FRAME * NC;
         for (int s = 1; s < SYMS_PER_FRAME; ++s) {
-            const double u = static_cast<double>(s) / SYMS_PER_FRAME;
-            catmull_rom(p0_, p1_, p2_, p3_, u, h);
+            const std::span<const cdouble> h(
+                h_est.data() + (static_cast<std::size_t>(f) * DATA_SYMS + static_cast<std::size_t>(s - 1)) * NC, NC);
             const std::span<const cdouble> raw_sym(
                 raw.data() + fbase + static_cast<std::size_t>(s) * NC, NC);
             const EqualizedSymbol eq = equalize(raw_sym, h, floor, med_h);
