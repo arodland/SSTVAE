@@ -155,6 +155,16 @@ def _time_shift_phase(shift) -> np.ndarray:
     return ofdm._phasor(np.multiply.outer(s, _BB_FREQS), -1)
 
 
+def _residual_cfo(h_pilot: np.ndarray, received: np.ndarray) -> float:
+    """Hz: the pilots' common phase rotation frame to frame, summed over
+    every adjacent received pair, so fading's random FM averages out
+    instead of landing whole on the preamble's 80 ms estimate.
+    Unambiguous within +-CFO_PULL_HZ."""
+    both = received[1:] & received[:-1]
+    d = np.sum(h_pilot[1:][both] * np.conj(h_pilot[:-1][both]))
+    return float(np.angle(d) / (2 * np.pi * FRAME_S)) if np.abs(d) > 0 else 0.0
+
+
 class _DriftTracker:
     """Second-order loop on the pilots' *common* phase, which is residual
     carrier frequency. Off unless `drift_track` says otherwise, and when
@@ -343,6 +353,13 @@ class Modem:
         n_f = spec.n_frames
         phi_ref = self._bin_phase_step(h_pre)
         p_frames = h0 + HEADER_SAMPLES
+        # Pass 1 at acquisition timing only measures the residual
+        # frequency the whole transmission shows: on mpd the preamble's
+        # own estimate reached 2.1 Hz off, and every pilot pair together
+        # holds 0.17.
+        _, hp, rcv = self._demod_frames(z, p_frames, n_f, phi_ref, None)
+        cfo_res = _residual_cfo(hp, rcv)
+        z = freq_correct(z, cfo_res)
         raw, h_pilot, received = self._demod_frames(
             z, p_frames, n_f, phi_ref, _make_tracker(drift_track)
         )
@@ -406,7 +423,7 @@ class Modem:
             latents=latents_full,
             weights=weights_full,
             mode=spec,
-            freq_offset=acq.freq_offset,
+            freq_offset=acq.freq_offset + cfo_res,
             sync_metric=acq.metric,
             frames_received=int(received.sum()),
             beacon=beacon_result,

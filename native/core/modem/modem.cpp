@@ -165,6 +165,27 @@ std::int64_t baseband_hz(int k) {
     return static_cast<std::int64_t>(std::llround(ofdm::baseband_freqs()[static_cast<std::size_t>(k)]));
 }
 
+// Rows of an (n, NC) gain array.
+struct Rows {
+    const cdouble* data;
+    std::size_t n;
+    std::span<const cdouble> row(std::size_t i) const { return {data + i * NC, NC}; }
+};
+
+double residual_cfo(Rows h, std::span<const char> received) {
+    cdouble d{0.0, 0.0};
+    for (std::size_t f = 1; f < h.n; ++f) {
+        if (!received[f] || !received[f - 1]) continue;
+        const auto a = h.row(f);
+        const auto b = h.row(f - 1);
+        for (int k = 0; k < NC; ++k) {
+            const std::size_t i = static_cast<std::size_t>(k);
+            d += a[i] * std::conj(b[i]);
+        }
+    }
+    return std::abs(d) > 0 ? std::arg(d) / (2 * PI * FRAME_S) : 0.0;
+}
+
 // One pass over the frames. Port of Modem._demod_frames in
 // sstvae/modem/modem.py -- read its docstring.
 struct Frames {
@@ -482,8 +503,14 @@ DemodResult Modem::demodulate(std::span<const double> x,
     // of the pilot across carriers (relative to the preamble).
     const int n_f = spec.n_frames;
     const double phi_ref = bin_phase_step(h_pre);
-    const Frames fr = demod_frames(z, h0 + HEADER_SAMPLES, n_f, phi_ref,
-                                   make_tracker(drift_track), pilot_);
+    // Pass 1 at acquisition timing only measures the residual frequency
+    // the whole transmission shows; see Modem.demodulate in modem.py.
+    const std::int64_t p_frames = h0 + HEADER_SAMPLES;
+    const Frames pass1 = demod_frames(z, p_frames, n_f, phi_ref, std::nullopt, pilot_);
+    const double cfo_res = residual_cfo(Rows{pass1.h_pilot.data(), static_cast<std::size_t>(n_f)},
+                                        pass1.received);
+    z = dsp::freq_correct(z, cfo_res);
+    const Frames fr = demod_frames(z, p_frames, n_f, phi_ref, make_tracker(drift_track), pilot_);
     const std::vector<cdouble>& raw = fr.raw;
     const std::vector<cdouble>& h_pilot = fr.h_pilot;
     const std::vector<char>& received = fr.received;
@@ -551,7 +578,7 @@ DemodResult Modem::demodulate(std::span<const double> x,
     return DemodResult{lat_full.latents,
                        w_full.latents,
                        spec,
-                       acq.freq_offset,
+                       acq.freq_offset + cfo_res,
                        acq.metric,
                        n_received,
                        beacon_result,
