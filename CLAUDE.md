@@ -161,6 +161,10 @@ audio and rig bugs found so far were all invisible to unit tests.
 - `sstvae/hfchannel.py` — channel sim (AWGN in the `SNR_REF_BW_HZ`
   convention,
   Watterson 2-path fading presets mpg/mpp/mpd, freq/clock offset).
+  **Since 2026-09-22 the taps have the ITU-R F.1487 Gaussian Doppler
+  spectrum** (spread = 2 sigma, tested to 5%). The old Butterworth taps
+  were 1.5x wide at 2 sigma, so every fading figure before that date is
+  pessimistic; `taps="butter"` reproduces them.
 - `sstvae/models/autoencoder.py` — encoder (unit-RMS tanh latents,
   132ch in 3 ordered groups of 44) and decoder (takes latents ×
   weights + weight planes; handles erasures/truncation).

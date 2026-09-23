@@ -6,6 +6,15 @@ reasoning doesn't have to be rediscovered.
 Completed items are summarized below; the full measurements and
 reasoning behind each live in `docs/todo-done.md`.
 
+## Open: re-measure what the old channel simulator calibrated
+
+`hfchannel` fading moved to the F.1487 spectrum on 2026-09-22 (the
+Butterworth generator was 1.5x too wide at the 2-sigma point, with
+skirts past the pilot rate). Figures measured on the old one are
+pessimistic on fading, mpd most: the README/wiki tables,
+`BLIND_SCORE_THRESHOLD`'s calibration and the `CLIP_HEADROOM_DB`
+optimum. `fading(..., taps="butter")` reproduces the old simulator.
+
 ## Completed: pilot crest factor
 
 **Implemented 2026-08-14, `PROTOCOL_VERSION` 3.** The frozen QPSK pilot

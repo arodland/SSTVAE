@@ -71,8 +71,14 @@ def sample_clock_offset(x: np.ndarray, ppm: float) -> np.ndarray:
     return np.interp(t_out, np.arange(len(x)), x)
 
 
-def _rayleigh_taps(n: int, doppler_hz: float, rng: np.random.Generator) -> np.ndarray:
-    """Complex Gaussian tap gains with ~Gaussian Doppler spectrum, unit power."""
+def _butter_taps(n: int, doppler_hz: float, rng: np.random.Generator) -> np.ndarray:
+    """The tap generator used before 2026-09-22, kept so figures
+    measured on it can be reproduced.
+
+    Not the Watterson spectrum its label claims: measured, the 2 Hz
+    setting has a 2-sigma spread of 3.0 Hz and a 99% bandwidth of 7.4 Hz
+    (2nd-order Butterworth skirts), wider than the 6.9 Hz pilot rate.
+    """
     lowrate = max(8 * doppler_hz, 1.0)
     n_low = int(np.ceil(n * lowrate / FS)) + 8
     g = rng.normal(size=n_low) + 1j * rng.normal(size=n_low)
@@ -85,14 +91,37 @@ def _rayleigh_taps(n: int, doppler_hz: float, rng: np.random.Generator) -> np.nd
     return tap / np.sqrt(np.mean(np.abs(tap) ** 2))
 
 
-def fading(x: np.ndarray, preset: str | FadingPreset, seed: int = 0) -> np.ndarray:
-    """Two independent equal-power Rayleigh paths (Watterson model)."""
+def _gaussian_taps(n: int, spread_hz: float, rng: np.random.Generator) -> np.ndarray:
+    """Unit-power Rayleigh tap with the ITU-R F.1487 Doppler spectrum:
+    Gaussian, frequency spread = 2 sigma. Shaped in the frequency domain
+    at a low rate (circular, so no transient), then linearly
+    interpolated; at 64x oversampling the interpolation error is < -60 dB.
+    """
+    lowrate = max(64 * spread_hz, 8.0)
+    n_low = int(np.ceil(n * lowrate / FS)) + 2
+    g = np.fft.fft(rng.normal(size=n_low) + 1j * rng.normal(size=n_low))
+    f = np.fft.fftfreq(n_low, 1 / lowrate)
+    g = np.fft.ifft(g * np.exp(-(f**2) / (4 * (spread_hz / 2) ** 2)))
+    t_low = np.arange(n_low) * (FS / lowrate)
+    t = np.arange(n)
+    tap = np.interp(t, t_low, g.real) + 1j * np.interp(t, t_low, g.imag)
+    return tap / np.sqrt(np.mean(np.abs(tap) ** 2))
+
+
+_TAPS = {"gaussian": _gaussian_taps, "butter": _butter_taps}
+
+
+def fading(
+    x: np.ndarray, preset: str | FadingPreset, seed: int = 0, taps: str = "gaussian"
+) -> np.ndarray:
+    """Two independent equal-power Rayleigh paths (Watterson model).
+    `taps="butter"` reproduces the pre-2026-09-22 (harsher) simulator."""
     p = FADING_PRESETS[preset] if isinstance(preset, str) else preset
     rng = np.random.default_rng(seed)
     z = _analytic(x)
     delay = int(round(p.delay_ms * 1e-3 * FS))
-    g1 = _rayleigh_taps(len(z), p.doppler_hz, rng)
-    g2 = _rayleigh_taps(len(z), p.doppler_hz, rng)
+    g1 = _TAPS[taps](len(z), p.doppler_hz, rng)
+    g2 = _TAPS[taps](len(z), p.doppler_hz, rng)
     z2 = np.concatenate([np.zeros(delay, dtype=complex), z[: len(z) - delay]])
     return np.real((z * g1 + z2 * g2) / np.sqrt(2))
 
@@ -213,6 +242,7 @@ def apply_channel(
     fading_preset: str | None = None,
     spans: list[tuple[float, float]] | None = None,
     seed: int = 0,
+    taps: str = "gaussian",
 ) -> np.ndarray:
     y = x.astype(np.float64)
     if ppm:
@@ -220,7 +250,7 @@ def apply_channel(
     if freq_offset_hz:
         y = freq_shift(y, freq_offset_hz)
     if fading_preset:
-        y = fading(y, fading_preset, seed=seed)
+        y = fading(y, fading_preset, seed=seed, taps=taps)
     if spans:
         y = zero_spans(y, spans)
     if snr_db is not None:
