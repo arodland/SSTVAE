@@ -18,11 +18,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sstvae.codec import MODEL_HELP, load_torch_model, pad_to_full, reconstruct  # noqa: E402
+from sstvae.codec import MODEL_HELP, load_codec, pad_to_full, reconstruct  # noqa: E402
 from sstvae.config import (  # noqa: E402
     FRAME_SAMPLES,
     FRAMES_PER_GROUP,
@@ -30,8 +29,6 @@ from sstvae.config import (  # noqa: E402
     LATENTS_PER_FRAME,
     MODES,
 )
-from sstvae.images import image_to_tensor  # noqa: E402
-from sstvae.models import SSTVAE  # noqa: E402
 from sstvae.modem import Modem, framing  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -62,7 +59,7 @@ def main() -> None:
     args = ap.parse_args()
 
     images = load_images(args.images, args.n_images)
-    model = load_torch_model(args.model)
+    codec = load_codec(args.model)
     modem = Modem()
     spec = MODES[args.mode]
     frame_of_latent = frame_of_each_latent(spec)
@@ -76,15 +73,13 @@ def main() -> None:
 
     scores = {j: [] for j in JOIN_SECONDS}
     for img in images:
-        with torch.no_grad():
-            z = model.encoder(image_to_tensor(img)[None])
-        flat = SSTVAE.latents_to_flat(z)[0].numpy().astype(np.float64)
+        flat = codec.encode(img)
         r = modem.demodulate(modem.modulate(flat[: spec.n_latents], spec))
         latents, weights = pad_to_full(r.latents), pad_to_full(r.weights)
         for join_s in JOIN_SECONDS:
             cutoff = join_s * FS / FRAME_SAMPLES
             masked = weights * (frame_of_latent >= cutoff)
-            scores[join_s].append(psnr(img, reconstruct(model, latents, masked)))
+            scores[join_s].append(psnr(img, reconstruct(codec, latents, masked)))
 
     print(f"\n| joined at | {' | '.join(f'{j} s' for j in JOIN_SECONDS)} |")
     print("|---|" + "---|" * len(JOIN_SECONDS))
