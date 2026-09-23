@@ -47,6 +47,24 @@ The estimator is unambiguous only within +-3.47 Hz, so it needs an
 alias check first (the beacon chips are BPSK: a wrong alias shows as
 quadrature energy on them).
 
+## Rejected: resolving a whole-repeat preamble lock through the header
+
+Data2G found 8% of mpd locks one preamble repeat off and fixed it by
+reading its header at 0, +-1 and +-2 repeats and keeping the best valid
+ML score. The Golay header could do the same, but SSTVAE does not have
+the problem (measured 2026-09-22): of ~750 correctly placed mpd locks
+at -2, 0 and +3 dB, **one** was a repeat off. Data2G's preamble has 16
+repeats, whose periodic side peaks sit at 15/16 of the main one; with
+4 they sit at 3/4, and fading rarely overturns that. SSTVAE's mpd
+header losses (7-15% at those SNRs) happen at the right offset.
+
+Interpolating the header's channel reference between the preamble and
+frame 0's pilot (Data2G's other header item, also receive-only) is
+marginal on the same paired seeds: mpd failures 32->26, 21->17,
+21->14 of 212-283 locks, mpp 17->17 to 22. A header loss falls back
+to the blind path, so it costs lock time more than pictures. Worth
+revisiting only alongside a header format change.
+
 ## Completed: pilot crest factor
 
 **Implemented 2026-08-14, `PROTOCOL_VERSION` 3.** The frozen QPSK pilot
