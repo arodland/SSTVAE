@@ -152,6 +152,111 @@ double bin_phase_step(std::span<const cdouble> h) {
     return std::arg(acc);
 }
 
+// exp(-2j*pi*f*s/FS) for integer f and s, reduced exactly first for the
+// same reason ofdm's carrier_phasor is. Undoes a demod-window move of s
+// samples on carrier f; see _time_shift_phase in modem.py.
+cdouble shift_phasor(std::int64_t f, std::int64_t s) {
+    std::int64_t q = (f * s) % FS;
+    if (q < 0) q += FS;
+    return std::polar(1.0, -2.0 * PI * (static_cast<double>(q) / FS));
+}
+
+std::int64_t baseband_hz(int k) {
+    return static_cast<std::int64_t>(std::llround(ofdm::baseband_freqs()[static_cast<std::size_t>(k)]));
+}
+
+// One pass over the frames. Port of Modem._demod_frames in
+// sstvae/modem/modem.py -- read its docstring.
+struct Frames {
+    std::vector<cdouble> raw;      // (n_f, SYMS_PER_FRAME, NC)
+    std::vector<cdouble> h_pilot;  // (n_f, NC)
+    std::vector<char> received;    // (n_f)
+};
+
+Frames demod_frames(std::span<const cdouble> z, std::int64_t p, int n_f, double phi_ref,
+                    std::optional<DriftTracker> tracker, std::span<const cdouble> pilot) {
+    Frames out{std::vector<cdouble>(static_cast<std::size_t>(n_f) * SYMS_PER_FRAME * NC),
+               std::vector<cdouble>(static_cast<std::size_t>(n_f) * NC),
+               std::vector<char>(static_cast<std::size_t>(n_f), 0)};
+    std::vector<std::int64_t> steps(static_cast<std::size_t>(n_f), 0);
+    std::vector<double> pilot_powers;
+    std::vector<cdouble> h_prev;
+    double tau_ema = 0.0;
+    std::int64_t total = 0;
+    for (int f = 0; f < n_f; ++f) {
+        if (p + FRAME_SAMPLES > static_cast<std::int64_t>(z.size())) break;
+        const std::size_t fbase = static_cast<std::size_t>(f) * SYMS_PER_FRAME * NC;
+        std::vector<cdouble> zz;
+        if (tracker) zz = tracker->frame(z, p);
+        for (int s = 0; s < SYMS_PER_FRAME; ++s) {
+            const auto sym = tracker
+                ? ofdm::demod_window(zz, s * NSYM + NCP, DEMOD_BACKOFF)
+                : ofdm::demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF);
+            std::copy(sym.begin(), sym.end(),
+                      out.raw.begin() + static_cast<std::ptrdiff_t>(
+                                            fbase + static_cast<std::size_t>(s) * NC));
+        }
+        std::vector<cdouble> h(NC);
+        for (int k = 0; k < NC; ++k) {
+            const std::size_t i = static_cast<std::size_t>(k);
+            h[i] = out.raw[fbase + i] / pilot[i];
+        }
+        out.received[static_cast<std::size_t>(f)] = 1;
+        steps[static_cast<std::size_t>(f)] = total;
+        p += FRAME_SAMPLES;
+
+        double power = 0.0;
+        for (const cdouble& v : h) power += std::norm(v);
+        power /= NC;
+        pilot_powers.push_back(power);
+        const bool healthy = power > 0.1 * median(pilot_powers);
+        if (tracker) {
+            // A faded frame's pilot phase is noise; feed the loop nothing
+            // rather than a bad measurement, but let it coast on its rate.
+            // Its phase sees the step as well, so compare like with like.
+            if (!h_prev.empty()) {
+                const std::int64_t d = steps[static_cast<std::size_t>(f - 1)] -
+                                       steps[static_cast<std::size_t>(f)];
+                for (int k = 0; k < NC; ++k)
+                    h_prev[static_cast<std::size_t>(k)] *= shift_phasor(baseband_hz(k), d);
+            }
+            tracker->update(h, healthy && !h_prev.empty()
+                                   ? std::span<const cdouble>(h_prev)
+                                   : std::span<const cdouble>{});
+        }
+        h_prev = h;
+        if (healthy) {
+            const double phi = bin_phase_step(h);
+            // Wrap the difference to (-pi, pi] before scaling.
+            const double d = std::arg(std::polar(1.0, phi - phi_ref));
+            const double tau = -d * FS / (2 * PI * RS);
+            tau_ema += 0.02 * (tau - tau_ema);
+            if (std::abs(tau_ema) >= 2) {
+                // np.clip(round(x), -2, 2); round() is half-to-even.
+                const int step = static_cast<int>(std::clamp(std::nearbyint(tau_ema), -2.0, 2.0));
+                p += step;
+                total += step;
+                tau_ema -= step;
+            }
+        }
+    }
+    for (int f = 0; f < n_f; ++f) {
+        const std::size_t fi = static_cast<std::size_t>(f);
+        std::array<cdouble, NC> ph{};
+        for (int k = 0; k < NC; ++k)
+            ph[static_cast<std::size_t>(k)] = shift_phasor(baseband_hz(k), steps[fi]);
+        for (int s = 0; s < SYMS_PER_FRAME; ++s)
+            for (int k = 0; k < NC; ++k)
+                out.raw[(fi * SYMS_PER_FRAME + static_cast<std::size_t>(s)) * NC +
+                        static_cast<std::size_t>(k)] *= ph[static_cast<std::size_t>(k)];
+        for (int k = 0; k < NC; ++k) {
+            const std::size_t i = static_cast<std::size_t>(k);
+            out.h_pilot[fi * NC + i] = out.raw[fi * SYMS_PER_FRAME * NC + i] / pilot[i];
+        }
+    }
+    return out;
+}
+
 // Catmull-Rom over four surrounding pilots. The 6.9 Hz pilot rate
 // oversamples even 2 Hz Doppler fading, but linear interpolation alone
 // loses ~14 dB tracking it.
@@ -373,81 +478,15 @@ DemodResult Modem::demodulate(std::span<const double> x,
     if (!spec_opt) throw SyncError("header decode failed");
     const ModeSpec spec = *spec_opt;
 
+    // Demodulate frames, tracking sample-clock drift via the phase slope
+    // of the pilot across carriers (relative to the preamble).
     const int n_f = spec.n_frames;
-    std::vector<cdouble> raw(static_cast<std::size_t>(n_f) * SYMS_PER_FRAME * NC,
-                             cdouble{});
-    std::vector<cdouble> h_pilot(static_cast<std::size_t>(n_f) * NC, cdouble{});
-    std::vector<char> received(static_cast<std::size_t>(n_f), 0);
     const double phi_ref = bin_phase_step(h_pre);
-
-    // Sample-clock drift tracking. The raw per-frame timing estimate
-    // also sees the channel's group delay, which swings by many samples
-    // as multipath taps fade; real clock drift is < 0.1 samples/frame. A
-    // slow EMA keeps the fading wiggle out while following the drift
-    // ramp; shifts are small and incremental.
-    double tau_ema = 0.0;
-    auto tracker = make_tracker(drift_track);
-    std::vector<double> pilot_powers;
-    std::int64_t p = h0 + HEADER_SAMPLES;
-    for (int f = 0; f < n_f; ++f) {
-        if (p + FRAME_SAMPLES > static_cast<std::int64_t>(z.size())) break;
-        const std::size_t fbase = static_cast<std::size_t>(f) * SYMS_PER_FRAME * NC;
-        if (!tracker) {
-            for (int s = 0; s < SYMS_PER_FRAME; ++s) {
-                const auto sym = ofdm::demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF);
-                std::copy(sym.begin(), sym.end(),
-                          raw.begin() + static_cast<std::ptrdiff_t>(
-                                            fbase + static_cast<std::size_t>(s) * NC));
-            }
-        } else {
-            const std::vector<cdouble> zz = tracker->frame(z, p);
-            for (int s = 0; s < SYMS_PER_FRAME; ++s) {
-                const auto sym = ofdm::demod_window(zz, s * NSYM + NCP, DEMOD_BACKOFF);
-                std::copy(sym.begin(), sym.end(),
-                          raw.begin() + static_cast<std::ptrdiff_t>(
-                                            fbase + static_cast<std::size_t>(s) * NC));
-            }
-        }
-        for (int k = 0; k < NC; ++k) {
-            const std::size_t i = static_cast<std::size_t>(k);
-            h_pilot[static_cast<std::size_t>(f) * NC + i] = raw[fbase + i] / pilot_[i];
-        }
-        received[static_cast<std::size_t>(f)] = 1;
-        p += FRAME_SAMPLES;
-
-        double power = 0.0;
-        for (int k = 0; k < NC; ++k)
-            power += std::norm(raw[fbase + static_cast<std::size_t>(k)]);
-        power /= NC;
-        pilot_powers.push_back(power);
-        const bool healthy = power > 0.1 * median(pilot_powers);
-        if (tracker) {
-            // A faded frame's pilot phase is noise; feed the loop nothing
-            // rather than a bad measurement, but let it coast on its rate.
-            const bool usable = f > 0 && healthy && received[static_cast<std::size_t>(f - 1)];
-            tracker->update(
-                std::span<const cdouble>(h_pilot.data() + static_cast<std::size_t>(f) * NC, NC),
-                usable ? std::span<const cdouble>(
-                             h_pilot.data() + static_cast<std::size_t>(f - 1) * NC, NC)
-                       : std::span<const cdouble>{});
-        }
-        if (healthy) {
-            const double phi = bin_phase_step(
-                std::span<const cdouble>(h_pilot.data() + static_cast<std::size_t>(f) * NC, NC));
-            // Wrap the difference to (-pi, pi] before scaling.
-            const double d = std::arg(std::polar(1.0, phi - phi_ref));
-            const double tau = -d * FS / (2 * PI * RS);
-            tau_ema += 0.02 * (tau - tau_ema);
-            if (std::abs(tau_ema) >= 2) {
-                // np.clip(round(x), -2, 2); round() is half-to-even.
-                double r = std::nearbyint(tau_ema);
-                r = std::clamp(r, -2.0, 2.0);
-                const int step = static_cast<int>(r);
-                p += step;
-                tau_ema -= step;
-            }
-        }
-    }
+    const Frames fr = demod_frames(z, h0 + HEADER_SAMPLES, n_f, phi_ref,
+                                   make_tracker(drift_track), pilot_);
+    const std::vector<cdouble>& raw = fr.raw;
+    const std::vector<cdouble>& h_pilot = fr.h_pilot;
+    const std::vector<char>& received = fr.received;
 
     // Equalize data symbols with pilots interpolated across the frame.
     std::vector<double> latents(static_cast<std::size_t>(spec.n_tx_latents), 0.0);

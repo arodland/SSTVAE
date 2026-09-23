@@ -144,6 +144,17 @@ FRAME_S = FRAME_SAMPLES / FS
 CFO_PULL_HZ = 1.0 / (2 * FRAME_S)
 
 
+_BB_FREQS = ofdm.BASEBAND_FREQS  # integer Hz, so phasors reduce exactly
+
+
+def _time_shift_phase(shift) -> np.ndarray:
+    """Per-carrier phasor undoing a demod-window move of `shift` whole
+    samples (scalar or per-frame array): a window moved later by s
+    multiplies carrier k by exp(+2j*pi*f_k*s/FS)."""
+    s = np.asarray(shift, dtype=np.int64)
+    return ofdm._phasor(np.multiply.outer(s, _BB_FREQS), -1)
+
+
 class _DriftTracker:
     """Second-order loop on the pilots' *common* phase, which is residual
     carrier frequency. Off unless `drift_track` says otherwise, and when
@@ -330,53 +341,11 @@ class Modem:
         # Demodulate frames, tracking sample-clock drift via the phase
         # slope of the pilot across carriers (relative to the preamble).
         n_f = spec.n_frames
-        raw = np.zeros((n_f, SYMS_PER_FRAME, NC), dtype=np.complex128)
-        h_pilot = np.zeros((n_f, NC), dtype=np.complex128)
-        received = np.zeros(n_f, dtype=bool)
         phi_ref = self._bin_phase_step(h_pre)
-        pilot_powers: list[float] = []
-
-        # Sample-clock drift tracking. The raw per-frame timing estimate
-        # also sees the channel's group delay, which swings by many
-        # samples as multipath taps fade; real clock drift is < 0.1
-        # samples/frame. A slow EMA keeps the fading wiggle out while
-        # following the drift ramp; shifts are small and incremental.
-        tau_ema = 0.0
-        tracker = _make_tracker(drift_track)
-        p = h0 + HEADER_SAMPLES
-        for f in range(n_f):
-            if p + FRAME_SAMPLES > len(z):
-                break
-            if tracker is None:
-                for s in range(SYMS_PER_FRAME):
-                    raw[f, s] = ofdm.demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF)
-            else:
-                zz = tracker.frame(z, p)
-                for s in range(SYMS_PER_FRAME):
-                    raw[f, s] = ofdm.demod_window(zz, s * NSYM + NCP, DEMOD_BACKOFF)
-            h_pilot[f] = raw[f, 0] / self.pilot
-            received[f] = True
-            p += FRAME_SAMPLES
-
-            power = float(np.mean(np.abs(raw[f, 0]) ** 2))
-            pilot_powers.append(power)
-            healthy = power > 0.1 * np.median(pilot_powers)
-            if tracker is not None:
-                # A faded frame's pilot phase is noise; feed the loop
-                # nothing rather than a bad measurement, but still let it
-                # coast forward on its rate estimate.
-                prev = h_pilot[f - 1] if (f > 0 and healthy and received[f - 1]) else None
-                tracker.update(h_pilot[f], prev)
-            if healthy:
-                phi = self._bin_phase_step(h_pilot[f])
-                d = np.angle(np.exp(1j * (phi - phi_ref)))
-                tau = -d * FS / (2 * np.pi * RS)
-                tau_ema += 0.02 * (tau - tau_ema)
-                if abs(tau_ema) >= 2:
-                    step = int(np.clip(round(tau_ema), -2, 2))
-                    p += step
-                    tau_ema -= step
-
+        p_frames = h0 + HEADER_SAMPLES
+        raw, h_pilot, received = self._demod_frames(
+            z, p_frames, n_f, phi_ref, _make_tracker(drift_track)
+        )
         # Equalize data symbols with pilots interpolated across the frame.
         latents = np.zeros(spec.n_tx_latents)
         weights = np.zeros(spec.n_tx_latents)
@@ -630,6 +599,68 @@ class Modem:
             ),
             snr_db=_estimate_snr_db(h_pilot),
         )
+
+    def _demod_frames(
+        self, z: np.ndarray, p: int, n_f: int, phi_ref: float,
+        tracker: "_DriftTracker | None",
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Demodulate up to `n_f` frames from `p`. Returns raw (n_f, 6, NC),
+        pilot gains (n_f, NC) and which frames were in the buffer.
+
+        Sample-clock drift is followed by the pilot phase slope across
+        carriers against `phi_ref`, through a slow EMA and +-2 sample
+        window steps. The raw per-frame timing estimate also sees the
+        channel's group delay, which swings by many samples as
+        multipath taps fade; real clock drift is < 0.1 samples/frame.
+        Each step's own phase is then undone, so every frame shares one
+        timing reference and the pilot interpolator never straddles a
+        step.
+        """
+        raw = np.zeros((n_f, SYMS_PER_FRAME, NC), dtype=np.complex128)
+        received = np.zeros(n_f, dtype=bool)
+        steps = np.zeros(n_f, dtype=np.int64)
+        pilot_powers: list[float] = []
+        tau_ema, total = 0.0, 0
+        h_prev = None
+        for f in range(n_f):
+            if p + FRAME_SAMPLES > len(z):
+                break
+            if tracker is None:
+                for s in range(SYMS_PER_FRAME):
+                    raw[f, s] = ofdm.demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF)
+            else:
+                zz = tracker.frame(z, p)
+                for s in range(SYMS_PER_FRAME):
+                    raw[f, s] = ofdm.demod_window(zz, s * NSYM + NCP, DEMOD_BACKOFF)
+            h = raw[f, 0] / self.pilot
+            received[f] = True
+            steps[f] = total
+            p += FRAME_SAMPLES
+
+            power = float(np.mean(np.abs(h) ** 2))
+            pilot_powers.append(power)
+            healthy = power > 0.1 * np.median(pilot_powers)
+            if tracker is not None:
+                # A faded frame's pilot phase is noise; feed the loop
+                # nothing rather than a bad measurement, but still let it
+                # coast forward on its rate estimate. Its phase sees the
+                # step as well, so compare like with like.
+                if h_prev is not None:
+                    h_prev = h_prev * _time_shift_phase(steps[f - 1] - steps[f])
+                tracker.update(h, h_prev if healthy else None)
+            h_prev = h
+            if healthy:
+                phi = self._bin_phase_step(h)
+                d = np.angle(np.exp(1j * (phi - phi_ref)))
+                tau = -d * FS / (2 * np.pi * RS)
+                tau_ema += 0.02 * (tau - tau_ema)
+                if abs(tau_ema) >= 2:
+                    step = int(np.clip(round(tau_ema), -2, 2))
+                    p += step
+                    total += step
+                    tau_ema -= step
+        raw *= _time_shift_phase(steps)[:, None, :]
+        return raw, raw[:, 0] / self.pilot, received
 
     @staticmethod
     def _bin_phase_step(h: np.ndarray) -> float:
