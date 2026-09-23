@@ -110,6 +110,24 @@ audio and rig bugs found so far were all invisible to unit tests.
     2026-08-24 in the field, via the `blind_locked`/`blind_score`
     status instrumentation added for exactly that hunt; reproduced
     end-to-end with a ring that wraps before the transmission starts).
+  - **The preamble path measures the whole transmission before it
+    equalizes** (2026-09-22, from Data2G). `_demod_frames` runs twice
+    at acquisition timing and once for real. From the first passes:
+    the residual CFO from every pilot pair (`_residual_cfo`; on mpd
+    the preamble's own estimate reached 2.1 Hz off, this holds
+    0.17), and the window placed from the delay profile so every path
+    sits inside the CP (`_delay_support`/`_window_shift`). The final
+    pass undoes each timing step's phase so Catmull-Rom never
+    straddles one. Latent SNR, 48 paired seeds, mode A: mpd 8
+    **+1.34 dB**, 80 ppm +0.65, a 6 dB-stronger late path +0.43/+0.83,
+    mpp +0.36, AWGN 0. Placement also runs on the blind path (mpd
+    +0.59). **Measure placement on the stepped pilots, not the
+    unstepped ones**: the frames are demodulated with the steps in, so
+    that is where the paths actually sit. Placing against the
+    unstepped profile cost 0.6 dB on mpd. It also means acquisition's
+    choice of path no longer decides the picture
+    (`test_placement_decodes_either_path_alike`). `scripts/rx_ab.py` is
+    the paired A/B harness.
   - `framing.py` per-group interleaver, Golay-coded header.
     `_TX_PERMS` truncates each group's permutation to the transmittable
     budget (dropping the beacon carrier's capacity cost); `interleave`/

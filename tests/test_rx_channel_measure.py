@@ -1,5 +1,6 @@
 """The receiver's whole-transmission measurements (2026-09-22, ported
-from Data2G)."""
+from Data2G): step-phase undo, residual CFO, window placement. Placement
+itself is pinned in test_first_path.py."""
 
 import numpy as np
 

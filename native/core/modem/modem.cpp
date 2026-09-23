@@ -4,6 +4,7 @@
 #include <cmath>
 #include <numbers>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 #include "dsp/dsp.hpp"
@@ -152,9 +153,12 @@ double bin_phase_step(std::span<const cdouble> h) {
     return std::arg(acc);
 }
 
+// --- Receive-side channel measurements over the whole transmission.
+// Ports of sstvae/modem/modem.py's _time_shift_phase, _residual_cfo,
+// _delay_support and _window_shift -- read those docstrings.
+
 // exp(-2j*pi*f*s/FS) for integer f and s, reduced exactly first for the
-// same reason ofdm's carrier_phasor is. Undoes a demod-window move of s
-// samples on carrier f; see _time_shift_phase in modem.py.
+// same reason ofdm's carrier_phasor is.
 cdouble shift_phasor(std::int64_t f, std::int64_t s) {
     std::int64_t q = (f * s) % FS;
     if (q < 0) q += FS;
@@ -186,8 +190,55 @@ double residual_cfo(Rows h, std::span<const char> received) {
     return std::abs(d) > 0 ? std::arg(d) / (2 * PI * FRAME_S) : 0.0;
 }
 
+std::pair<int, int> delay_support(const std::vector<cdouble>& h, double floor_db = -15.0) {
+    constexpr int D = 4 * NCP + 1;  // delays -2*NCP .. 2*NCP
+    const std::size_t n = h.size() / NC;
+    std::array<double, NC> w{};
+    for (int k = 0; k < NC; ++k)
+        w[static_cast<std::size_t>(k)] =
+            0.5 - 0.5 * std::cos(2 * PI * (k + 1) / static_cast<double>(NC + 1));
+    std::array<double, D> prof{};
+    for (int j = 0; j < D; ++j) {
+        const std::int64_t d = j - 2 * NCP;
+        std::array<cdouble, NC> steer{};
+        for (int k = 0; k < NC; ++k)
+            steer[static_cast<std::size_t>(k)] = w[static_cast<std::size_t>(k)] *
+                                                 shift_phasor(baseband_hz(k), -d);
+        double acc = 0.0;
+        for (std::size_t f = 0; f < n; ++f) {
+            cdouble g{0.0, 0.0};
+            for (int k = 0; k < NC; ++k) {
+                const std::size_t i = static_cast<std::size_t>(k);
+                g += h[f * NC + i] * steer[i];
+            }
+            acc += std::norm(g);
+        }
+        prof[static_cast<std::size_t>(j)] = n ? acc / static_cast<double>(n) : 0.0;
+    }
+    const double peak = *std::max_element(prof.begin(), prof.end());
+    const double thr = peak * std::pow(10.0, floor_db / 10.0);
+    int first = -1;
+    int last = -1;
+    for (int j = 1; j < D - 1; ++j) {
+        const std::size_t i = static_cast<std::size_t>(j);
+        if (prof[i] >= thr && prof[i] >= prof[i - 1] && prof[i] >= prof[i + 1]) {
+            if (first < 0) first = j;
+            last = j;
+        }
+    }
+    if (first < 0)
+        first = last = static_cast<int>(std::max_element(prof.begin(), prof.end()) - prof.begin());
+    return {first - 2 * NCP, last - 2 * NCP};
+}
+
+int window_shift(std::pair<int, int> support) {
+    // round() half to even, like Python's.
+    return static_cast<int>(std::nearbyint((support.first + support.second - NCP) / 2.0));
+}
+
 // One pass over the frames. Port of Modem._demod_frames in
-// sstvae/modem/modem.py -- read its docstring.
+// sstvae/modem/modem.py -- read its docstring, in particular for why
+// `unstep` is false on the pass that places the window.
 struct Frames {
     std::vector<cdouble> raw;      // (n_f, SYMS_PER_FRAME, NC)
     std::vector<cdouble> h_pilot;  // (n_f, NC)
@@ -195,7 +246,11 @@ struct Frames {
 };
 
 Frames demod_frames(std::span<const cdouble> z, std::int64_t p, int n_f, double phi_ref,
-                    std::optional<DriftTracker> tracker, std::span<const cdouble> pilot) {
+                    int shift, std::optional<DriftTracker> tracker,
+                    std::span<const cdouble> pilot, bool unstep) {
+    // The shift's own slope, or the loop would walk the window back.
+    phi_ref += 2 * PI * RS * shift / FS;
+    p += shift;
     Frames out{std::vector<cdouble>(static_cast<std::size_t>(n_f) * SYMS_PER_FRAME * NC),
                std::vector<cdouble>(static_cast<std::size_t>(n_f) * NC),
                std::vector<char>(static_cast<std::size_t>(n_f), 0)};
@@ -235,7 +290,7 @@ Frames demod_frames(std::span<const cdouble> z, std::int64_t p, int n_f, double 
             // A faded frame's pilot phase is noise; feed the loop nothing
             // rather than a bad measurement, but let it coast on its rate.
             // Its phase sees the step as well, so compare like with like.
-            if (!h_prev.empty()) {
+            if (unstep && !h_prev.empty()) {
                 const std::int64_t d = steps[static_cast<std::size_t>(f - 1)] -
                                        steps[static_cast<std::size_t>(f)];
                 for (int k = 0; k < NC; ++k)
@@ -265,7 +320,8 @@ Frames demod_frames(std::span<const cdouble> z, std::int64_t p, int n_f, double 
         const std::size_t fi = static_cast<std::size_t>(f);
         std::array<cdouble, NC> ph{};
         for (int k = 0; k < NC; ++k)
-            ph[static_cast<std::size_t>(k)] = shift_phasor(baseband_hz(k), steps[fi]);
+            ph[static_cast<std::size_t>(k)] =
+                unstep ? shift_phasor(baseband_hz(k), steps[fi]) : cdouble{1.0, 0.0};
         for (int s = 0; s < SYMS_PER_FRAME; ++s)
             for (int k = 0; k < NC; ++k)
                 out.raw[(fi * SYMS_PER_FRAME + static_cast<std::size_t>(s)) * NC +
@@ -275,6 +331,16 @@ Frames demod_frames(std::span<const cdouble> z, std::int64_t p, int n_f, double 
             out.h_pilot[fi * NC + i] = out.raw[fi * SYMS_PER_FRAME * NC + i] / pilot[i];
         }
     }
+    return out;
+}
+
+// Received rows only, for the delay profile.
+std::vector<cdouble> received_rows(const Frames& fr) {
+    std::vector<cdouble> out;
+    for (std::size_t f = 0; f < fr.received.size(); ++f)
+        if (fr.received[f])
+            out.insert(out.end(), fr.h_pilot.begin() + static_cast<std::ptrdiff_t>(f * NC),
+                       fr.h_pilot.begin() + static_cast<std::ptrdiff_t>((f + 1) * NC));
     return out;
 }
 
@@ -500,17 +566,22 @@ DemodResult Modem::demodulate(std::span<const double> x,
     const ModeSpec spec = *spec_opt;
 
     // Demodulate frames, tracking sample-clock drift via the phase slope
-    // of the pilot across carriers (relative to the preamble).
+    // of the pilot across carriers (relative to the preamble). Pass 1
+    // at acquisition timing only measures what the whole transmission
+    // says about residual frequency and delay spread; see
+    // Modem.demodulate in sstvae/modem/modem.py.
     const int n_f = spec.n_frames;
     const double phi_ref = bin_phase_step(h_pre);
-    // Pass 1 at acquisition timing only measures the residual frequency
-    // the whole transmission shows; see Modem.demodulate in modem.py.
     const std::int64_t p_frames = h0 + HEADER_SAMPLES;
-    const Frames pass1 = demod_frames(z, p_frames, n_f, phi_ref, std::nullopt, pilot_);
+    Frames pass1 = demod_frames(z, p_frames, n_f, phi_ref, 0, std::nullopt, pilot_, false);
     const double cfo_res = residual_cfo(Rows{pass1.h_pilot.data(), static_cast<std::size_t>(n_f)},
                                         pass1.received);
     z = dsp::freq_correct(z, cfo_res);
-    const Frames fr = demod_frames(z, p_frames, n_f, phi_ref, make_tracker(drift_track), pilot_);
+    pass1 = demod_frames(z, p_frames, n_f, phi_ref, 0, std::nullopt, pilot_, false);
+    const std::vector<cdouble> rows1 = received_rows(pass1);
+    const int shift = rows1.empty() ? 0 : window_shift(delay_support(rows1));
+    const Frames fr = demod_frames(z, p_frames, n_f, phi_ref, shift, make_tracker(drift_track),
+                                   pilot_, true);
     const std::vector<cdouble>& raw = fr.raw;
     const std::vector<cdouble>& h_pilot = fr.h_pilot;
     const std::vector<char>& received = fr.received;
@@ -618,52 +689,82 @@ BlindDemodResult Modem::demodulate_blind(
     const int n_f = static_cast<int>(L_hi - L_lo + 1);
     const std::int64_t p_start = p0 + L_lo * FRAME_SAMPLES;
 
-    std::vector<cdouble> raw(static_cast<std::size_t>(n_f) * SYMS_PER_FRAME * NC,
-                             cdouble{});
-    std::vector<cdouble> h_pilot(static_cast<std::size_t>(n_f) * NC, cdouble{});
-    auto tracker = make_tracker(drift_track);
-    std::vector<double> pilot_powers;
-    std::int64_t p = p_start;
-    for (int f = 0; f < n_f; ++f) {
-        const std::size_t fbase = static_cast<std::size_t>(f) * SYMS_PER_FRAME * NC;
-        if (!tracker) {
-            for (int s = 0; s < SYMS_PER_FRAME; ++s) {
-                const auto sym = ofdm::demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF);
-                std::copy(sym.begin(), sym.end(),
-                          raw.begin() + static_cast<std::ptrdiff_t>(
-                                            fbase + static_cast<std::size_t>(s) * NC));
+    auto frames = [&](std::int64_t p) {
+        std::vector<cdouble> raw(static_cast<std::size_t>(n_f) * SYMS_PER_FRAME * NC,
+                                 cdouble{});
+        std::vector<cdouble> h_pilot(static_cast<std::size_t>(n_f) * NC, cdouble{});
+        auto tracker = make_tracker(drift_track);
+        std::vector<double> pilot_powers;
+        for (int f = 0; f < n_f; ++f) {
+            const std::size_t fbase = static_cast<std::size_t>(f) * SYMS_PER_FRAME * NC;
+            if (!tracker) {
+                for (int s = 0; s < SYMS_PER_FRAME; ++s) {
+                    const auto sym = ofdm::demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF);
+                    std::copy(sym.begin(), sym.end(),
+                              raw.begin() + static_cast<std::ptrdiff_t>(
+                                                fbase + static_cast<std::size_t>(s) * NC));
+                }
+            } else {
+                const std::vector<cdouble> zz = tracker->frame(z, p);
+                for (int s = 0; s < SYMS_PER_FRAME; ++s) {
+                    const auto sym = ofdm::demod_window(zz, s * NSYM + NCP, DEMOD_BACKOFF);
+                    std::copy(sym.begin(), sym.end(),
+                              raw.begin() + static_cast<std::ptrdiff_t>(
+                                                fbase + static_cast<std::size_t>(s) * NC));
+                }
             }
-        } else {
-            const std::vector<cdouble> zz = tracker->frame(z, p);
-            for (int s = 0; s < SYMS_PER_FRAME; ++s) {
-                const auto sym = ofdm::demod_window(zz, s * NSYM + NCP, DEMOD_BACKOFF);
-                std::copy(sym.begin(), sym.end(),
-                          raw.begin() + static_cast<std::ptrdiff_t>(
-                                            fbase + static_cast<std::size_t>(s) * NC));
+            for (int k = 0; k < NC; ++k) {
+                const std::size_t i = static_cast<std::size_t>(k);
+                h_pilot[static_cast<std::size_t>(f) * NC + i] = raw[fbase + i] / pilot_[i];
             }
+            if (tracker) {
+                // Most of this range is usually not the transmission at all
+                // (silence or noise around it -- see the med_h comment
+                // below), so the loop must not integrate phase out of noise
+                // frames. Same health test the preamble path uses.
+                double power = 0.0;
+                for (int k = 0; k < NC; ++k)
+                    power += std::norm(raw[fbase + static_cast<std::size_t>(k)]);
+                power /= NC;
+                pilot_powers.push_back(power);
+                const bool usable = f > 0 && power > 0.1 * median(pilot_powers);
+                tracker->update(
+                    std::span<const cdouble>(h_pilot.data() + static_cast<std::size_t>(f) * NC, NC),
+                    usable ? std::span<const cdouble>(
+                                 h_pilot.data() + static_cast<std::size_t>(f - 1) * NC, NC)
+                           : std::span<const cdouble>{});
+            }
+            p += FRAME_SAMPLES;
         }
-        for (int k = 0; k < NC; ++k) {
-            const std::size_t i = static_cast<std::size_t>(k);
-            h_pilot[static_cast<std::size_t>(f) * NC + i] = raw[fbase + i] / pilot_[i];
-        }
-        if (tracker) {
-            // Most of this range is usually not the transmission at all
-            // (silence or noise around it -- see the med_h comment
-            // below), so the loop must not integrate phase out of noise
-            // frames. Same health test the preamble path uses.
-            double power = 0.0;
+        return std::pair{std::move(raw), std::move(h_pilot)};
+    };
+    auto first_pass = frames(p_start);
+    std::vector<cdouble> raw = std::move(first_pass.first);
+    std::vector<cdouble> h_pilot = std::move(first_pass.second);
+    {
+        // Same placement as the preamble path, from the frames that are
+        // plausibly the transmission; skipped when the moved window would
+        // leave the buffer. Mirrors demodulate_blind in modem.py.
+        std::vector<double> pw(static_cast<std::size_t>(n_f), 0.0);
+        for (std::size_t f = 0; f < pw.size(); ++f) {
             for (int k = 0; k < NC; ++k)
-                power += std::norm(raw[fbase + static_cast<std::size_t>(k)]);
-            power /= NC;
-            pilot_powers.push_back(power);
-            const bool usable = f > 0 && power > 0.1 * median(pilot_powers);
-            tracker->update(
-                std::span<const cdouble>(h_pilot.data() + static_cast<std::size_t>(f) * NC, NC),
-                usable ? std::span<const cdouble>(
-                             h_pilot.data() + static_cast<std::size_t>(f - 1) * NC, NC)
-                       : std::span<const cdouble>{});
+                pw[f] += std::norm(h_pilot[f * NC + static_cast<std::size_t>(k)]);
+            pw[f] /= NC;
         }
-        p += FRAME_SAMPLES;
+        const double pw_max = *std::max_element(pw.begin(), pw.end());
+        if (pw_max > 0) {
+            std::vector<cdouble> rows;
+            for (std::size_t f = 0; f < pw.size(); ++f)
+                if (pw[f] > 0.1 * pw_max)
+                    rows.insert(rows.end(),
+                                h_pilot.begin() + static_cast<std::ptrdiff_t>(f * NC),
+                                h_pilot.begin() + static_cast<std::ptrdiff_t>((f + 1) * NC));
+            const int shift = window_shift(delay_support(rows));
+            const std::int64_t first = p_start + shift;  // frame 0's CP
+            const std::int64_t last = first + std::int64_t{n_f} * FRAME_SAMPLES;
+            if (shift != 0 && first >= 0 && last <= static_cast<std::int64_t>(z.size()))
+                std::tie(raw, h_pilot) = frames(p_start + shift);
+        }
     }
 
     // Blind demod always covers every frame the *whole current buffer*

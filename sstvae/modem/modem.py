@@ -144,7 +144,13 @@ FRAME_S = FRAME_SAMPLES / FS
 CFO_PULL_HZ = 1.0 / (2 * FRAME_S)
 
 
+# --- Receive-side channel measurements over the whole transmission ------
 _BB_FREQS = ofdm.BASEBAND_FREQS  # integer Hz, so phasors reduce exactly
+# Delay grid for the support search, in samples of apparent delay past
+# the demod window's start. Covers every delay the CP could hold and
+# margin either side, since acquisition may have timed on a later path.
+_DELAYS = np.arange(-2 * NCP, 2 * NCP + 1)
+_STEER = ofdm._phasor(np.outer(_BB_FREQS, _DELAYS), -1)  # (NC, D)
 
 
 def _time_shift_phase(shift) -> np.ndarray:
@@ -163,6 +169,32 @@ def _residual_cfo(h_pilot: np.ndarray, received: np.ndarray) -> float:
     both = received[1:] & received[:-1]
     d = np.sum(h_pilot[1:][both] * np.conj(h_pilot[:-1][both]))
     return float(np.angle(d) / (2 * np.pi * FRAME_S)) if np.abs(d) > 0 else 0.0
+
+
+def _delay_support(h_pilot: np.ndarray, floor_db: float = -15.0) -> tuple[int, int]:
+    """(first, last) apparent delay holding power within `floor_db` of
+    the strongest, from the transmission-averaged power delay profile
+    (matched filter, Hann-tapered across carriers to keep sidelobes out
+    of the support). Paths are local maxima, since a lone path's
+    mainlobe is ~10 samples wide and must not read as spread."""
+    w = np.hanning(NC + 2)[1:-1]
+    prof = np.mean(np.abs((h_pilot * w) @ np.conj(_STEER)) ** 2, axis=0)
+    thr = prof.max() * 10 ** (floor_db / 10)
+    peaks = [
+        i for i in range(1, len(prof) - 1)
+        if prof[i] >= thr and prof[i] >= prof[i - 1] and prof[i] >= prof[i + 1]
+    ] or [int(np.argmax(prof))]
+    return int(_DELAYS[peaks[0]]), int(_DELAYS[peaks[-1]])
+
+
+def _window_shift(support: tuple[int, int]) -> int:
+    """Samples to move the demod window later so every path in `support`
+    lies inside the cyclic prefix, centred so drift has margin both ways.
+    A path of apparent delay a is interference-free after a shift s when
+    0 <= a - s <= NCP; the centre of what every path allows is
+    s = (a_first + a_last - NCP) / 2. Past the CP no shift is clean and
+    the centre is still the least bad."""
+    return int(round((support[0] + support[1] - NCP) / 2))
 
 
 class _DriftTracker:
@@ -353,15 +385,18 @@ class Modem:
         n_f = spec.n_frames
         phi_ref = self._bin_phase_step(h_pre)
         p_frames = h0 + HEADER_SAMPLES
-        # Pass 1 at acquisition timing only measures the residual
-        # frequency the whole transmission shows: on mpd the preamble's
-        # own estimate reached 2.1 Hz off, and every pilot pair together
-        # holds 0.17.
-        _, hp, rcv = self._demod_frames(z, p_frames, n_f, phi_ref, None)
+        # Pass 1 at acquisition timing only measures what the whole
+        # transmission says about residual frequency (measured on mpd:
+        # the preamble's estimate reaches 2.1 Hz off, the pilots' 0.17)
+        # and about delay spread, from which the window is placed so
+        # every path sits inside the CP (+1.1 dB latent SNR on mpd).
+        _, hp, rcv = self._demod_frames(z, p_frames, n_f, phi_ref, 0, None, False)
         cfo_res = _residual_cfo(hp, rcv)
         z = freq_correct(z, cfo_res)
+        _, hp, rcv = self._demod_frames(z, p_frames, n_f, phi_ref, 0, None, False)
+        shift = _window_shift(_delay_support(hp[rcv])) if rcv.any() else 0
         raw, h_pilot, received = self._demod_frames(
-            z, p_frames, n_f, phi_ref, _make_tracker(drift_track)
+            z, p_frames, n_f, phi_ref, shift, _make_tracker(drift_track)
         )
         # Equalize data symbols with pilots interpolated across the frame.
         latents = np.zeros(spec.n_tx_latents)
@@ -490,31 +525,46 @@ class Modem:
         n_f = L_hi - L_lo + 1
         p_start = p0 + L_lo * FRAME_SAMPLES
 
-        raw = np.zeros((n_f, SYMS_PER_FRAME, NC), dtype=np.complex128)
-        h_pilot = np.zeros((n_f, NC), dtype=np.complex128)
-        tracker = _make_tracker(drift_track)
-        pilot_powers: list[float] = []
-        p = p_start
-        for f in range(n_f):
-            if tracker is None:
-                for s in range(SYMS_PER_FRAME):
-                    raw[f, s] = ofdm.demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF)
-            else:
-                zz = tracker.frame(z, p)
-                for s in range(SYMS_PER_FRAME):
-                    raw[f, s] = ofdm.demod_window(zz, s * NSYM + NCP, DEMOD_BACKOFF)
-            h_pilot[f] = raw[f, 0] / self.pilot
-            if tracker is not None:
-                # Most of this range is usually not the transmission at
-                # all (silence or noise before it starts, or accumulating
-                # after it ends -- see the med_h comment below), so the
-                # loop must not integrate phase out of noise frames. Same
-                # health test the preamble path uses.
-                power = float(np.mean(np.abs(raw[f, 0]) ** 2))
-                pilot_powers.append(power)
-                healthy = power > 0.1 * np.median(pilot_powers)
-                tracker.update(h_pilot[f], h_pilot[f - 1] if (f > 0 and healthy) else None)
-            p += FRAME_SAMPLES
+        def frames(p: int) -> tuple[np.ndarray, np.ndarray]:
+            raw = np.zeros((n_f, SYMS_PER_FRAME, NC), dtype=np.complex128)
+            h_pilot = np.zeros((n_f, NC), dtype=np.complex128)
+            tracker = _make_tracker(drift_track)
+            pilot_powers: list[float] = []
+            for f in range(n_f):
+                if tracker is None:
+                    for s in range(SYMS_PER_FRAME):
+                        raw[f, s] = ofdm.demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF)
+                else:
+                    zz = tracker.frame(z, p)
+                    for s in range(SYMS_PER_FRAME):
+                        raw[f, s] = ofdm.demod_window(zz, s * NSYM + NCP, DEMOD_BACKOFF)
+                h_pilot[f] = raw[f, 0] / self.pilot
+                if tracker is not None:
+                    # Most of this range is usually not the transmission at
+                    # all (silence or noise before it starts, or accumulating
+                    # after it ends -- see the med_h comment below), so the
+                    # loop must not integrate phase out of noise frames. Same
+                    # health test the preamble path uses.
+                    power = float(np.mean(np.abs(raw[f, 0]) ** 2))
+                    pilot_powers.append(power)
+                    healthy = power > 0.1 * np.median(pilot_powers)
+                    tracker.update(h_pilot[f], h_pilot[f - 1] if (f > 0 and healthy) else None)
+                p += FRAME_SAMPLES
+            return raw, h_pilot
+
+        raw, h_pilot = frames(p_start)
+        if np.any(h_pilot):
+            # Same placement as the preamble path, from the frames that
+            # are plausibly the transmission rather than the noise
+            # around it. Skipped when the moved window would leave the
+            # buffer, which only a lock within a few samples of its
+            # edge can do.
+            pw = np.mean(np.abs(h_pilot) ** 2, axis=1)
+            shift = _window_shift(_delay_support(h_pilot[pw > 0.1 * pw.max()]))
+            first = p_start + shift  # frame 0's CP, where the drift tracker slices
+            last = first + n_f * FRAME_SAMPLES
+            if shift and first >= 0 and last <= len(z):
+                raw, h_pilot = frames(p_start + shift)
 
         # Blind demod always covers every frame the *whole current
         # buffer* can hold, since the transmission's true length is
@@ -618,10 +668,11 @@ class Modem:
         )
 
     def _demod_frames(
-        self, z: np.ndarray, p: int, n_f: int, phi_ref: float,
-        tracker: "_DriftTracker | None",
+        self, z: np.ndarray, p: int, n_f: int, phi_ref: float, shift: int,
+        tracker: "_DriftTracker | None", unstep: bool = True,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Demodulate up to `n_f` frames from `p`. Returns raw (n_f, 6, NC),
+        """Demodulate up to `n_f` frames from `p`, the window moved
+        `shift` samples later than nominal. Returns raw (n_f, 6, NC),
         pilot gains (n_f, NC) and which frames were in the buffer.
 
         Sample-clock drift is followed by the pilot phase slope across
@@ -631,8 +682,15 @@ class Modem:
         multipath taps fade; real clock drift is < 0.1 samples/frame.
         Each step's own phase is then undone, so every frame shares one
         timing reference and the pilot interpolator never straddles a
-        step.
+        step. `unstep=False` leaves them in: that is what the delays
+        look like to the frames as demodulated, which is what window
+        placement must be measured on (measured: placing against the
+        unstepped profile cost 0.6 dB on mpd).
         """
+        # The shift's own slope, or the loop would read it as drift and
+        # walk the window straight back.
+        phi_ref = phi_ref + 2 * np.pi * RS * shift / FS
+        p = p + shift
         raw = np.zeros((n_f, SYMS_PER_FRAME, NC), dtype=np.complex128)
         received = np.zeros(n_f, dtype=bool)
         steps = np.zeros(n_f, dtype=np.int64)
@@ -662,7 +720,7 @@ class Modem:
                 # nothing rather than a bad measurement, but still let it
                 # coast forward on its rate estimate. Its phase sees the
                 # step as well, so compare like with like.
-                if h_prev is not None:
+                if unstep and h_prev is not None:
                     h_prev = h_prev * _time_shift_phase(steps[f - 1] - steps[f])
                 tracker.update(h, h_prev if healthy else None)
             h_prev = h
@@ -676,7 +734,8 @@ class Modem:
                     p += step
                     total += step
                     tau_ema -= step
-        raw *= _time_shift_phase(steps)[:, None, :]
+        if unstep:
+            raw *= _time_shift_phase(steps)[:, None, :]
         return raw, raw[:, 0] / self.pilot, received
 
     @staticmethod
