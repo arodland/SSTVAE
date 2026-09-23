@@ -38,9 +38,12 @@ CONDITIONS = [
     ("mpp8", 8.0, "mpp", 0.0, 0.0),
     ("mpp3", 3.0, "mpp", 0.0, 0.0),
     ("mpd8", 8.0, "mpd", 0.0, 0.0),
+    ("mpd0", 0.0, "mpd", 0.0, 0.0),
+    ("awgn0", 0.0, None, 0.0, 0.0),
     ("mps6", 6.0, "mps", 0.0, 0.0),
     ("mpp8_cfo", 8.0, "mpp", 37.0, 0.0),
     ("mpp8_ppm", 8.0, "mpp", 0.0, 80.0),
+    ("mpp8_ppm20", 8.0, "mpp", 0.0, 20.0),
     ("late6db", 8.0, ("2path", 2.0, 1.0, 6.0), 0.0, 0.0),
     ("late6db_3ms", 8.0, ("2path", 3.0, 0.5, 6.0), 0.0, 0.0),
 ]
@@ -77,13 +80,14 @@ def eff_snr_db(truth, got, mask):
     return 10 * np.log10(rho2 / max(1 - rho2, 1e-12))
 
 
-def demod(modem, rx, mode, blind):
+def demod(modem, rx, mode, blind, ring=False):
     """(latents * weights, cfo) or None. Blind decodes from 20 frames in,
-    preamble and header gone, and returns mode C's container."""
+    preamble and header gone, or with `ring` the whole buffer, and
+    returns mode C's container."""
     n = MODES[mode].n_latents
     try:
         if blind:
-            r = modem.demodulate_blind(rx[BLIND_CUT:])
+            r = modem.demodulate_blind(rx if ring else rx[BLIND_CUT:])
             if r.beacon is None:
                 return None
         else:
@@ -96,9 +100,15 @@ def demod(modem, rx, mode, blind):
 
 
 BLIND_CUT = LEADIN_SAMPLES + PREAMBLE_SAMPLES + HEADER_SAMPLES + 20 * FRAME_SAMPLES
+RING_S, RING_START_S = 130.0, 40.0  # a full live ring, mostly not the transmission
 
 
-def run(mode, trials, conds, blind=False):
+def in_ring(tx):
+    lead = np.zeros(int(RING_START_S * FS))
+    return np.concatenate([lead, tx, np.zeros(max(int(RING_S * FS) - len(lead) - len(tx), 0))])
+
+
+def run(mode, trials, conds, blind=False, ring=False):
     modem = Modem()
     spec = MODES[mode]
     rows = []
@@ -108,10 +118,12 @@ def run(mode, trials, conds, blind=False):
             lat = rng.normal(size=spec.n_latents)
             lat /= np.sqrt(np.mean(lat**2))
             tx = modem.modulate(lat, mode)
+            if ring:
+                tx = in_ring(tx)
             if seed == 0:
-                mask = np.abs(demod(modem, tx, mode, blind)[0]) > 0
+                mask = np.abs(demod(modem, tx, mode, blind, ring)[0]) > 0
             rx = channel(tx, c, seed)
-            got = demod(modem, rx, mode, blind)
+            got = demod(modem, rx, mode, blind, ring)
             if got is not None:
                 rows.append((c[0], seed, 1, eff_snr_db(lat, got[0], mask),
                              abs(got[1] - c[3])))
@@ -130,6 +142,9 @@ def summarize(rows, base=None):
         acq = np.mean([v[0] for v in d.values()])
         snrs = [v[1] for v in d.values() if v[0]]
         cfos = [v[2] for v in d.values() if v[0]]
+        if not snrs:
+            out.append(f"{name:12s} acq {acq:.2f}")
+            continue
         line = (f"{name:12s} acq {acq:.2f}  eff {np.mean(snrs):6.2f} dB  "
                 f"cfo p50 {np.median(cfos):.2f} max {np.max(cfos):.2f} Hz")
         if base and name in base:
@@ -137,8 +152,8 @@ def summarize(rows, base=None):
             diff = [d[s][1] - base[name][s][1] for s in common]
             wins = sum(x > 0 for x in diff)
             b_acq = np.mean([v[0] for v in base[name].values()])
-            line += (f"  | d {np.mean(diff):+.2f} dB ({wins}/{len(diff)} up)"
-                     f"  acq {b_acq:.2f}->{acq:.2f}")
+            dm = f"{np.mean(diff):+.2f}" if diff else "  n/a"
+            line += f"  | d {dm} dB ({wins}/{len(diff)} up)  acq {b_acq:.2f}->{acq:.2f}"
         out.append(line)
     return "\n".join(out), by
 
@@ -157,9 +172,11 @@ def main():
     ap.add_argument("--compare")
     ap.add_argument("--blind", action="store_true",
                     help="score demodulate_blind on audio with the start cut off")
+    ap.add_argument("--ring", action="store_true",
+                    help="with --blind: the whole transmission inside a 130 s buffer")
     a = ap.parse_args()
     conds = [c for c in CONDITIONS if not a.only or c[0] in a.only.split(",")]
-    rows = run(a.mode, a.trials, conds, a.blind)
+    rows = run(a.mode, a.trials, conds, a.blind, a.ring)
     with open(a.out, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["cond", "seed", "ok", "eff_snr_db", "cfo_err_hz"])
