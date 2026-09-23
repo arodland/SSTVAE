@@ -215,8 +215,10 @@ std::pair<int, int> delay_support(const std::vector<cdouble>& h, double floor_db
         }
         prof[static_cast<std::size_t>(j)] = n ? acc / static_cast<double>(n) : 0.0;
     }
+    // Gated on the noise floor as well; see _delay_support in modem.py.
     const double peak = *std::max_element(prof.begin(), prof.end());
-    const double thr = peak * std::pow(10.0, floor_db / 10.0);
+    const double thr = std::max(peak * std::pow(10.0, floor_db / 10.0),
+                                2.0 * median(std::vector<double>(prof.begin(), prof.end())));
     int first = -1;
     int last = -1;
     for (int j = 1; j < D - 1; ++j) {

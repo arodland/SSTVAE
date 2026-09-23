@@ -179,7 +179,12 @@ def _delay_support(h_pilot: np.ndarray, floor_db: float = -15.0) -> tuple[int, i
     mainlobe is ~10 samples wide and must not read as spread."""
     w = np.hanning(NC + 2)[1:-1]
     prof = np.mean(np.abs((h_pilot * w) @ np.conj(_STEER)) ** 2, axis=0)
-    thr = prof.max() * 10 ** (floor_db / 10)
+    # Noise puts a flat floor under the whole profile, and most of the
+    # grid is nothing but that floor, so its median is the floor's level.
+    # At 0 dB the floor sits near -15 dB and its ripples read as paths
+    # across the whole grid: placement then moved the window by up to 28
+    # samples on mpd.
+    thr = max(prof.max() * 10 ** (floor_db / 10), 2 * np.median(prof))
     peaks = [
         i for i in range(1, len(prof) - 1)
         if prof[i] >= thr and prof[i] >= prof[i - 1] and prof[i] >= prof[i + 1]

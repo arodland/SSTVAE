@@ -127,7 +127,12 @@ audio and rig bugs found so far were all invisible to unit tests.
     unstepped profile cost 0.6 dB on mpd. It also means acquisition's
     choice of path no longer decides the picture
     (`test_placement_decodes_either_path_alike`). `scripts/rx_ab.py` is
-    the paired A/B harness.
+    the paired A/B harness; `--blind --ring` is the blind path as a live
+    station sees it, mostly not the transmission.
+    The delay support is **gated on the profile's noise floor** as well
+    as 15 dB under its peak (twice the profile's median): at 0 dB the
+    floor's ripples otherwise read as paths across the whole grid, and
+    placement moved the window up to 28 samples the wrong way.
   - `framing.py` per-group interleaver, Golay-coded header.
     `_TX_PERMS` truncates each group's permutation to the transmittable
     budget (dropping the beacon carrier's capacity cost); `interleave`/
