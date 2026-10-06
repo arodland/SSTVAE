@@ -21,7 +21,7 @@ MOD_C = np.array([-6.05, 0.5, 0.0])   # the modulator plane m(t)
 MOD_R = 0.6
 MAIN_C = np.array([-3.5, 0.5, 0.0])   # the main (carrier / product) plane
 MAIN_R = 1.1
-TRACE_X0, TRACE_X1 = -1.6, 6.9        # the scrolling trace, leading edge at X0
+TRACE_X0, TRACE_X1 = -1.6, 6.5        # the scrolling trace, leading edge at X0
 PX_PER_S = 1.7                        # scroll speed: screen units per second
 TRACE_WINDOW = (TRACE_X1 - TRACE_X0) / PX_PER_S
 
@@ -111,7 +111,7 @@ class ScrollingTrace(VMobject):
 
 def trace_axis(y0, x0=TRACE_X0, x1=TRACE_X1):
     """The time axis under a trace, with its arrowhead."""
-    return Arrow([x0, y0, 0], [x1 + 0.3, y0, 0], buff=0, color=GREY,
+    return Arrow([x0, y0, 0], [x1 + 0.3, y0, 0], buff=0, color=GREY,   # tip ends 0.3 inside the frame
                  stroke_width=1.5, max_tip_length_to_length_ratio=0.03,
                  stroke_opacity=0.6)
 
