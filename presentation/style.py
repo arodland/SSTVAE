@@ -194,17 +194,27 @@ def carrier(t):
     return np.exp(1j * OMEGA * t)
 
 
+# The angle modulations are exaggerated on purpose: at a textbook
+# deviation the trace barely changes over the five seconds on screen.
+PM_BETA, PM_F = 2.0, 0.25     # +-115 deg, carrier swings 0.5..1.5 rev/s
+FM_BETA, FM_F = 4.0, 0.2      # +-230 deg, carrier swings 0.2..1.8 rev/s
+
+
 def m_am(t):
-    return 0.5 + 0.5 * np.sin(TAU * F_MOD * t) + 0j
+    return 0.55 + 0.45 * np.sin(TAU * F_MOD * t) + 0j      # floor of 0.1
 
 
 def m_pm(t):
-    return np.exp(1j * 1.2 * np.sin(TAU * F_MOD * t))
+    return np.exp(1j * PM_BETA * np.sin(TAU * PM_F * t))
+
+
+def fm_angle(t):
+    return FM_BETA * np.sin(TAU * FM_F * t)
 
 
 def m_fm(t):
     # a slow phasor whose *rate* varies: it speeds up, slows, and reverses
-    return np.exp(1j * 3.0 * np.sin(TAU * F_MOD * t))
+    return np.exp(1j * fm_angle(t))
 
 
 QAM = np.array([1 + 1j, -1 + 1j, -1 - 1j, 1 - 1j]) / np.sqrt(2)

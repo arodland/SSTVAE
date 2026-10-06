@@ -121,7 +121,7 @@ class ModFM(_Modulation):
     def modulator_extras(self, t):
         # a faint arc showing where the slow phasor has been: its *rate* is the point
         def arc():
-            th = 3.0 * np.sin(TAU * F_MOD * t.get_value())
+            th = fm_angle(t.get_value())
             return Arc(radius=MOD_R * 0.75, start_angle=0, angle=th,
                        arc_center=MOD_C, color=BLUE, stroke_width=2,
                        stroke_opacity=0.5)
