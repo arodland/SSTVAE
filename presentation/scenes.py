@@ -42,12 +42,12 @@ class PhasorSine(Scene):
         # the projection onto one axis becomes the trace
         axis = trace_axis(MAIN_C[1])
         proj = projection(ph, MAIN_C[1])
-        trace = ScrollingTrace(t, re(carrier), MAIN_C[1], MAIN_R,
+        trace = ScrollingTrace(t, im(carrier), MAIN_C[1], MAIN_R,
                                t_start=t.get_value())
         t_lbl = label("t", size=24).next_to(axis.get_end(), DOWN, buff=0.1)
-        # "Re" moves to head the column the leading dot travels in, clear of its whole path
-        self.play(Create(axis), FadeIn(t_lbl), FadeOut(im_lbl),
-                  re_lbl.animate.move_to([TRACE_X0, MAIN_C[1] + MAIN_R + 0.35, 0]))
+        # "Im" moves to head the column the leading dot travels in, clear of its whole path
+        self.play(Create(axis), FadeIn(t_lbl), FadeOut(re_lbl),
+                  im_lbl.animate.move_to([TRACE_X0, MAIN_C[1] + MAIN_R + 0.35, 0]))
         self.add(proj, trace)
         run_clock(self, t, TRACE_WINDOW + 2.0)
         self.wait(0.5)
@@ -82,7 +82,7 @@ class _Modulation(Scene):
                      tip_radius=0.08)
         axis = trace_axis(y0)
         proj = projection(prod, y0)
-        trace = ScrollingTrace(t, re(z), y0, MAIN_R, t_start=-TRACE_WINDOW)
+        trace = ScrollingTrace(t, im(z), y0, MAIN_R, t_start=-TRACE_WINDOW)
 
         l_small = label(self.m_label, BLUE).next_to(small, UP, buff=0.25)
         l_main = label(f"{self.m_label} · e<sup>jωt</sup>", GOLD).next_to(main, UP, buff=0.25)
@@ -377,7 +377,7 @@ class Carriers(Scene):
         main = make_plane(MAIN_C, MAIN_R)
         z0 = m_k(0)
         prod = Phasor(MAIN_C, MAIN_R, t, lambda tt: z0(tt) * carrier(tt))
-        trace = ScrollingTrace(t, re(lambda tt: z0(tt) * carrier(tt)), MAIN_C[1], MAIN_R,
+        trace = ScrollingTrace(t, im(lambda tt: z0(tt) * carrier(tt)), MAIN_C[1], MAIN_R,
                                t_start=-TRACE_WINDOW)
         axis = trace_axis(MAIN_C[1])
         self.add(main, axis, trace, prod)
@@ -389,7 +389,7 @@ class Carriers(Scene):
         self.play(ReplacementTransform(main, planes), FadeOut(axis), run_time=1.0)
         phasors = [Phasor([CAR_X, y, 0], CAR_R, t, row_signal(k), width=2.5, tip_radius=0.05)
                    for k, y in enumerate(CAR_YS)]
-        rows = [ScrollingTrace(t, re(row_signal(k)), y, CAR_R, x0=ROW_X0, x1=ROW_X1,
+        rows = [ScrollingTrace(t, im(row_signal(k)), y, CAR_R, x0=ROW_X0, x1=ROW_X1,
                                px_per_s=0.75, t_start=t.get_value(), width=2)
                 for k, y in enumerate(CAR_YS)]
         projs = [projection(p, y, x0=ROW_X0) for p, y in zip(phasors, CAR_YS)]
@@ -413,7 +413,7 @@ class Carriers(Scene):
         plus = label("Σ", size=44).move_to([(ROW_X1 + SUM_X0) / 2, 0, 0])
         sum_axis = trace_axis(0.0, x0=SUM_X0, x1=SUM_X1)
         ruler = symbol_ruler(t, -3.4, x0=SUM_X0, x1=SUM_X1, px_per_s=0.75, t_sym=T_OFDM)
-        total = ScrollingTrace(t, re(sum_signal), 0.0, 2.4, x0=SUM_X0, x1=SUM_X1,
+        total = ScrollingTrace(t, im(sum_signal), 0.0, 2.4, x0=SUM_X0, x1=SUM_X1,
                                px_per_s=0.75, t_start=t.get_value(), width=2.5)
         self.play(FadeIn(plus), Create(sum_axis))
         self.add(total, ruler)

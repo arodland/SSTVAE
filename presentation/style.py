@@ -230,5 +230,8 @@ def product(m):
     return lambda t: m(t) * carrier(t)
 
 
-def re(z):
-    return lambda t: np.real(z(t))
+def im(z):
+    """The traced component. The projection line is horizontal, so the
+    trace must plot the tip's height -- the Im part -- or the leading
+    dot and the arrow tip disagree at every angle but four."""
+    return lambda t: np.imag(z(t))
