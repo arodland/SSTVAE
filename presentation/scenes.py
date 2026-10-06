@@ -338,11 +338,33 @@ CAR_X = MAIN_C[0]
 CAR_R = 0.42
 CAR_YS = np.linspace(2.6, -2.6, N_CAR)
 CAR_OMEGA = TAU * np.array([0.5, 0.75, 1.0, 1.25, 1.5, 1.75])
+FEED_X = -5.6         # the per-carrier values, in a column aligned with the rows
 ROW_X0, ROW_X1 = -2.6, 1.3
 SUM_X0, SUM_X1 = 2.3, 6.5
 T_OFDM = 2.0          # one OFDM symbol on screen
 SYM_RNG = np.random.default_rng(3)
-SYMBOLS = SYM_RNG.uniform(-1, 1, (40, N_CAR, 2))   # [symbol, carrier, (re, im)]
+# value tables, [symbol, carrier]: what each carrier is told to carry
+QAM_TABLE = QAM[SYM_RNG.integers(0, 4, (40, N_CAR))]
+_lat = SYM_RNG.uniform(-1, 1, (40, N_CAR, 2))
+LAT_TABLE = (_lat[..., 0] + 1j * _lat[..., 1]) * 0.7
+LAT_PAIRS = _lat                                   # the same values, two per carrier
+
+
+def symbol_index(t):
+    return np.floor(np.asarray(t, dtype=float) / T_OFDM).astype(int)
+
+
+def symbol_value(table, k):
+    return lambda t: table[symbol_index(t) % len(table), k]
+
+
+def row_signal(table, k):
+    return lambda t: symbol_value(table, k)(t) * np.exp(1j * CAR_OMEGA[k] * t)
+
+
+def sum_signal(table):
+    # /4.2 keeps six full-magnitude QAM carriers, all aligned, inside the frame
+    return lambda t: sum(row_signal(table, k)(t) for k in range(N_CAR)) / 4.2
 
 
 def paired_column(x, ys, gap=0.42, radius=0.11):
@@ -355,76 +377,118 @@ def paired_column(x, ys, gap=0.42, radius=0.11):
     return col
 
 
-def m_k(k):
-    def f(t):
-        idx = np.floor(np.asarray(t, dtype=float) / T_OFDM).astype(int) % len(SYMBOLS)
-        return (SYMBOLS[idx, k, 0] + 1j * SYMBOLS[idx, k, 1]) * 0.7
-    return f
+class _CarrierBank(Scene):
+    """One modulated carrier becomes six, summed into one OFDM symbol.
 
+    Shown twice with the same picture: fed with 4-QAM symbols (OFDM) and
+    fed with latent pairs (Carriers). Subclasses supply the feed.
+    """
+    table = QAM_TABLE
 
-def row_signal(k):
-    return lambda t: m_k(k)(t) * np.exp(1j * CAR_OMEGA[k] * t)
+    def feed_source(self, t):
+        """What sits on the modulator plane in the opening frame."""
+        raise NotImplementedError
 
+    def feed(self, t):
+        """The per-carrier values in a column aligned with the rows."""
+        raise NotImplementedError
 
-def sum_signal(t):
-    return sum(row_signal(k)(t) for k in range(N_CAR)) / 3.0
-
-
-class Carriers(Scene):
     def construct(self):
         t = ValueTracker(0.0)
-        # start where LatentOnCarrier ended: one plane, one trace
+        y0 = MAIN_C[1]
+        z0 = row_signal(self.table, 0)
+        # the opening is the modulation layout: one value times one carrier
         main = make_plane(MAIN_C, MAIN_R)
-        z0 = m_k(0)
-        prod = Phasor(MAIN_C, MAIN_R, t, lambda tt: z0(tt) * carrier(tt))
-        trace = ScrollingTrace(t, im(lambda tt: z0(tt) * carrier(tt)), MAIN_C[1], MAIN_R,
-                               t_start=-TRACE_WINDOW)
-        axis = trace_axis(MAIN_C[1])
-        self.add(main, axis, trace, prod)
+        small = make_plane(MOD_C, MOD_R)
+        times = label("×", size=32).move_to(
+            [(MOD_C[0] + MOD_R * 1.15 + MAIN_C[0] - MAIN_R * 1.15) / 2, y0, 0])
+        source = self.feed_source(t)
+        prod = Phasor(MAIN_C, MAIN_R, t, lambda tt: symbol_value(self.table, 0)(tt) * carrier(tt))
+        trace = ScrollingTrace(t, im(lambda tt: symbol_value(self.table, 0)(tt) * carrier(tt)),
+                               y0, MAIN_R, t_start=-TRACE_WINDOW)
+        axis = trace_axis(y0)
+        self.add(small, times, main, axis, trace, prod, source)
         run_clock(self, t, 1.0)
         self.remove(prod, trace)
 
-        # the plane shrinks and multiplies into a stack of carriers
+        # the plane shrinks and multiplies into a stack of carriers,
+        # and the one value on the left into one value per carrier
         planes = VGroup(*[make_plane([CAR_X, y, 0], CAR_R) for y in CAR_YS])
-        self.play(ReplacementTransform(main, planes), FadeOut(axis), run_time=1.0)
-        phasors = [Phasor([CAR_X, y, 0], CAR_R, t, row_signal(k), width=2.5, tip_radius=0.05)
-                   for k, y in enumerate(CAR_YS)]
-        rows = [ScrollingTrace(t, im(row_signal(k)), y, CAR_R, x0=ROW_X0, x1=ROW_X1,
+        column = self.feed(t)
+        self.play(ReplacementTransform(main, planes),
+                  ReplacementTransform(VGroup(small, source), column),
+                  FadeOut(axis), FadeOut(times), run_time=1.0)
+        phasors = [Phasor([CAR_X, y, 0], CAR_R, t, row_signal(self.table, k),
+                          width=2.5, tip_radius=0.05) for k, y in enumerate(CAR_YS)]
+        rows = [ScrollingTrace(t, im(row_signal(self.table, k)), y, CAR_R, x0=ROW_X0, x1=ROW_X1,
                                px_per_s=0.75, t_start=t.get_value(), width=2)
                 for k, y in enumerate(CAR_YS)]
         projs = [projection(p, y, x0=ROW_X0) for p, y in zip(phasors, CAR_YS)]
         car_lbl = label("carriers", GOLD).next_to(planes, UP, buff=0.2)
         omega_lbls = VGroup(*[label(f"ω<sub>{k+1}</sub>", GOLD, size=22)
                               .next_to(p, LEFT, buff=0.1) for k, p in enumerate(planes)])
-
-        # the latent column feeding them, pairs bracketed to rows
-        v = SYMBOLS[0].reshape(-1)
-        col = paired_column(LAT_X, CAR_YS)
-        col.set_activation((v + 1) / 2)
-        braces = VGroup()
-        for k in range(N_CAR):
-            pair = VGroup(col[2 * k], col[2 * k + 1])
-            braces.add(Brace(pair, RIGHT, color=BLUE, buff=0.05).scale(0.8))
-        self.play(FadeIn(col), FadeIn(braces), FadeIn(car_lbl), FadeIn(omega_lbls))
+        self.play(FadeIn(car_lbl), FadeIn(omega_lbls))
         self.add(*phasors, *projs, *rows)
         run_clock(self, t, 2.0)
 
         # ... and their sum: one OFDM symbol
         plus = label("Σ", size=44).move_to([(ROW_X1 + SUM_X0) / 2, 0, 0])
         sum_axis = trace_axis(0.0, x0=SUM_X0, x1=SUM_X1)
+        ofdm_lbl = label("OFDM").move_to([(SUM_X0 + SUM_X1) / 2, CAR_YS[0] + CAR_R + 0.5, 0])
         ruler = symbol_ruler(t, -3.4, x0=SUM_X0, x1=SUM_X1, px_per_s=0.75, t_sym=T_OFDM)
-        total = ScrollingTrace(t, im(sum_signal), 0.0, 2.4, x0=SUM_X0, x1=SUM_X1,
+        total = ScrollingTrace(t, im(sum_signal(self.table)), 0.0, 2.4, x0=SUM_X0, x1=SUM_X1,
                                px_per_s=0.75, t_start=t.get_value(), width=2.5)
-        self.play(FadeIn(plus), Create(sum_axis))
+        self.play(FadeIn(plus), Create(sum_axis), FadeIn(ofdm_lbl))
         self.add(total, ruler)
-
-        # successive blocks: every T_OFDM the column re-lights and the dots jump
-        def relight(m):
-            idx = int(t.get_value() // T_OFDM) % len(SYMBOLS)
-            m.set_activation((SYMBOLS[idx].reshape(-1) + 1) / 2)
-        col.add_updater(relight)
+        # successive symbols: every T_OFDM the feed changes and the dots jump
         run_clock(self, t, 3 * T_OFDM + 1.0)
         self.wait(0.5)
+
+
+class OFDM(_CarrierBank):
+    """From ModQAM: six 4-QAM symbols at once, one per carrier."""
+    table = QAM_TABLE
+
+    @staticmethod
+    def constellation(t, center, r, k, dot_r):
+        faint = VGroup(*[Dot(to_point(center, r, q), radius=dot_r, color=BLUE)
+                         .set_opacity(0.35) for q in QAM])
+        active = always_redraw(lambda: Dot(
+            to_point(center, r, symbol_value(QAM_TABLE, k)(t.get_value())),
+            radius=dot_r * 1.25, color=BLUE))
+        return VGroup(faint, active)
+
+    def feed_source(self, t):
+        return self.constellation(t, MOD_C, MOD_R, 0, 0.08)
+
+    def feed(self, t):
+        r = 0.3
+        return VGroup(*[VGroup(make_plane([FEED_X, y, 0], r),
+                               self.constellation(t, [FEED_X, y, 0], r, k, 0.045))
+                        for k, y in enumerate(CAR_YS)])
+
+
+class Carriers(_CarrierBank):
+    """From LatentOnCarrier: the same bank, fed with latent pairs."""
+    table = LAT_TABLE
+
+    def feed_source(self, t):
+        return always_redraw(lambda: Dot(
+            to_point(MOD_C, MOD_R, symbol_value(LAT_TABLE, 0)(t.get_value())),
+            radius=0.08, color=BLUE))
+
+    def feed(self, t):
+        col = paired_column(FEED_X, CAR_YS)
+        braces = VGroup()
+        for k in range(N_CAR):
+            pair = VGroup(col[2 * k], col[2 * k + 1])
+            braces.add(Brace(pair, RIGHT, color=BLUE, buff=0.05).scale(0.8))
+
+        def relight(m):
+            idx = int(t.get_value() // T_OFDM) % len(LAT_PAIRS)
+            m.set_activation((LAT_PAIRS[idx].reshape(-1) + 1) / 2)
+        col.add_updater(relight)
+        return VGroup(col, braces)
 
 
 class ResourceGrid(Scene):
@@ -436,7 +500,7 @@ class ResourceGrid(Scene):
     def construct(self):
         t = ValueTracker(0.0)
         planes = VGroup(*[make_plane([CAR_X, y, 0], CAR_R) for y in CAR_YS])
-        phasors = [Phasor([CAR_X, y, 0], CAR_R, t, row_signal(k), width=2.5, tip_radius=0.05)
+        phasors = [Phasor([CAR_X, y, 0], CAR_R, t, row_signal(LAT_TABLE, k), width=2.5, tip_radius=0.05)
                    for k, y in enumerate(CAR_YS)]
         omega_lbls = VGroup(*[label(f"ω<sub>{k+1}</sub>", GOLD, size=22)
                               .next_to(p, LEFT, buff=0.1) for k, p in enumerate(planes)])
@@ -450,7 +514,7 @@ class ResourceGrid(Scene):
             x = self.GRID_X0 + s * self.CELL_W
             cells = VGroup()
             for k, y in enumerate(ys):
-                mag = np.hypot(*SYMBOLS[s, k]) / np.sqrt(2)
+                mag = abs(LAT_TABLE[s, k]) / (0.7 * np.sqrt(2))
                 cells.add(Rectangle(width=self.CELL_W, height=self.CELL_H,
                                     color=GREY, stroke_width=1, stroke_opacity=0.5,
                                     fill_color=BLUE, fill_opacity=0.15 + 0.8 * mag)

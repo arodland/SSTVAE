@@ -10,9 +10,10 @@ deck stays one picture.
 |---|---|
 | `PhasorSine` | rotating phasor, Re/Im beat, projection becomes the scrolling sine |
 | `ModAM` `ModPM` `ModFM` `ModQAM` | m(t) × carrier on one fixed layout; FM is a slow phasor whose *rate* varies |
+| `OFDM` | six 4-QAM symbols on six carriers at once, summed: one OFDM symbol, then the next |
 | `AutoencoderWhole` `AutoencoderSplit` `AutoencoderChannel` | 12-8-4-8-12 network; braces; split with the latent duplicated; the channel box |
 | `LatentPairs` `LatentOnCarrier` | latents two-by-two → complex points → the modulator slot from ModQAM |
-| `Carriers` `ResourceGrid` | six carriers, their sum (one OFDM symbol), successive symbols, the carrier × time grid |
+| `Carriers` `ResourceGrid` | the same bank fed with latent pairs; the carrier × time grid |
 
 Colors: gold = carrier, blue = information (m(t), constellation, latents),
 grey = structure, red = the channel and nothing else.
