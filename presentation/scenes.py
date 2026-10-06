@@ -26,7 +26,8 @@ class PhasorSine(Scene):
         run_clock(self, t, 2.0)
 
         # the Re / Im beat: a phasor is two numbers
-        re_lbl = label("Re", size=24).next_to(plane[0][0].get_end(), DOWN, buff=0.1)
+        # "Re" heads the column the leading dot moves in, clear of its whole travel
+        re_lbl = label("Re", size=24).move_to([TRACE_X0, MAIN_C[1] + MAIN_R + 0.35, 0])
         im_lbl = label("Im", size=24).next_to(plane[0][1], UP, buff=0.1)
         im_line = always_redraw(lambda: DashedLine(
             ph.tip_point(), [MAIN_C[0], ph.tip_point()[1], 0],
@@ -71,7 +72,8 @@ class _Modulation(Scene):
 
         main = make_plane(MAIN_C, MAIN_R)
         small = make_plane(MOD_C, MOD_R)
-        times = label("×", size=40).move_to((MOD_C + MAIN_C) / 2 + RIGHT * 0.15)
+        times = label("×", size=32).move_to(
+            [(MOD_C[0] + MOD_R * 1.15 + MAIN_C[0] - MAIN_R * 1.15) / 2, MAIN_C[1], 0])
         ghost = Phasor(MAIN_C, MAIN_R, t, carrier, opacity=0.3, tip_radius=0.0)
         z = product(self.m)
         prod = Phasor(MAIN_C, MAIN_R, t, z)
@@ -270,7 +272,7 @@ N_LAT = 8
 LAT_X = -6.3            # the latent column, where Carriers keeps it
 PAIR_X = -1.6           # where LatentPairs composes it, centred
 PAIR_PLANE_X = 0.6
-PAIR_R = 0.7
+PAIR_R = 0.6
 LAT_RNG = np.random.default_rng(11)
 
 
@@ -285,13 +287,13 @@ def pair_to_complex(v):
 class LatentPairs(Scene):
     def construct(self):
         v = latent_values(N_LAT)
-        col = UnitColumn(N_LAT, PAIR_X, color=BLUE, radius=0.16, spacing=0.5)
+        col = UnitColumn(N_LAT, PAIR_X, color=BLUE, radius=0.15, spacing=0.48)
         col.set_activation((v + 1) / 2)
         lbl = label("latents", BLUE).next_to(col, UP, buff=0.3)
         self.play(FadeIn(col), FadeIn(lbl))
         self.wait(0.5)
 
-        ys = [2.55, 0.85, -0.85, -2.55]
+        ys = [2.4, 0.8, -0.8, -2.4]
         for i in range(N_LAT // 2):
             pair = VGroup(col[N_LAT - 1 - 2 * i], col[N_LAT - 2 - 2 * i])  # top-down
             brace = Brace(pair, RIGHT, color=BLUE, buff=0.1)
@@ -319,7 +321,7 @@ class LatentOnCarrier(_Modulation):
         z0 = pair_to_complex([v[N_LAT - 1], v[N_LAT - 2]])
         self.m = lambda t: z0 * np.ones_like(np.asarray(t, dtype=float))
         # the plane this pair lived on in LatentPairs slides into the modulator slot
-        c = np.array([PAIR_PLANE_X, 2.55, 0])
+        c = np.array([PAIR_PLANE_X, 2.4, 0])
         plane = make_plane(c, PAIR_R)
         dot = Dot(to_point(c, PAIR_R, z0), radius=0.08, color=BLUE)
         self.add(plane, dot)
@@ -332,10 +334,10 @@ class LatentOnCarrier(_Modulation):
 
 N_CAR = 6
 CAR_X = MAIN_C[0]
-CAR_R = 0.55
-CAR_YS = np.linspace(2.75, -2.75, N_CAR)
+CAR_R = 0.42
+CAR_YS = np.linspace(2.6, -2.6, N_CAR)
 CAR_OMEGA = TAU * np.array([0.5, 0.75, 1.0, 1.25, 1.5, 1.75])
-ROW_X0, ROW_X1 = -2.4, 1.3
+ROW_X0, ROW_X1 = -2.6, 1.3
 SUM_X0, SUM_X1 = 2.3, 6.9
 T_OFDM = 2.0          # one OFDM symbol on screen
 SYM_RNG = np.random.default_rng(3)

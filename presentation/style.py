@@ -17,10 +17,10 @@ RED = "#E5533D"    # impairment: the channel, and nothing else
 INK = "#ECECEC"    # the signal going out: the scrolling trace
 
 # ---- fixed positions ------------------------------------------------------
-MOD_C = np.array([-5.9, 0.5, 0.0])    # the modulator plane m(t)
-MOD_R = 0.8
-MAIN_C = np.array([-3.3, 0.5, 0.0])   # the main (carrier / product) plane
-MAIN_R = 1.3
+MOD_C = np.array([-6.05, 0.5, 0.0])   # the modulator plane m(t)
+MOD_R = 0.6
+MAIN_C = np.array([-3.5, 0.5, 0.0])   # the main (carrier / product) plane
+MAIN_R = 1.1
 TRACE_X0, TRACE_X1 = -1.6, 6.9        # the scrolling trace, leading edge at X0
 PX_PER_S = 1.7                        # scroll speed: screen units per second
 TRACE_WINDOW = (TRACE_X1 - TRACE_X0) / PX_PER_S
@@ -30,7 +30,7 @@ OMEGA = TAU * 1.0      # carrier: one revolution per second on screen
 F_MOD = 0.125          # every modulating signal is this slow (8 s period)
 T_SYM = 1.0            # symbol period for the digital runs
 
-LABEL_SIZE = 30
+LABEL_SIZE = 28
 
 
 def label(text, color=GREY, size=LABEL_SIZE, **kw):
@@ -41,8 +41,8 @@ def label(text, color=GREY, size=LABEL_SIZE, **kw):
 def make_plane(center, r, color=GREY):
     """Unit circle with faint axes: the complex plane every phasor lives on."""
     ax = VGroup(
-        Line(center + LEFT * r * 1.2, center + RIGHT * r * 1.2),
-        Line(center + DOWN * r * 1.2, center + UP * r * 1.2),
+        Line(center + LEFT * r * 1.15, center + RIGHT * r * 1.15),
+        Line(center + DOWN * r * 1.15, center + UP * r * 1.15),
     ).set_stroke(color, width=1, opacity=0.4)
     circle = Circle(radius=r, color=color, stroke_width=1.5,
                     stroke_opacity=0.6).move_to(center)
@@ -153,7 +153,7 @@ def symbol_ruler(t, y, x0=TRACE_X0, x1=TRACE_X1, px_per_s=PX_PER_S, t_sym=T_SYM,
 class UnitColumn(VGroup):
     """A layer of a neural network: a column of units, fill = activation."""
 
-    def __init__(self, n, x, color=GREY, radius=0.13, spacing=0.3, y=0.0):
+    def __init__(self, n, x, color=GREY, radius=0.12, spacing=0.28, y=0.0):
         super().__init__()
         self.color = color
         for i in range(n):
