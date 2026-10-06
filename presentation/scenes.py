@@ -26,9 +26,8 @@ class PhasorSine(Scene):
         run_clock(self, t, 2.0)
 
         # the Re / Im beat: a phasor is two numbers
-        # "Re" heads the column the leading dot moves in, clear of its whole travel
-        re_lbl = label("Re", size=24).move_to([TRACE_X0, MAIN_C[1] + MAIN_R + 0.35, 0])
-        im_lbl = label("Im", size=24).next_to(plane[0][1], UP, buff=0.1)
+        re_lbl = label("Re", size=24).next_to(plane[0][0].get_end(), DOWN + RIGHT, buff=0.05)
+        im_lbl = label("Im", size=24).next_to(plane[0][1].get_end(), LEFT, buff=0.1)
         im_line = always_redraw(lambda: DashedLine(
             ph.tip_point(), [MAIN_C[0], ph.tip_point()[1], 0],
             dash_length=0.1, color=GREY, stroke_width=1.5, stroke_opacity=0.7))
@@ -46,7 +45,9 @@ class PhasorSine(Scene):
         trace = ScrollingTrace(t, re(carrier), MAIN_C[1], MAIN_R,
                                t_start=t.get_value())
         t_lbl = label("t", size=24).next_to(axis.get_end(), DOWN, buff=0.1)
-        self.play(Create(axis), FadeIn(t_lbl), FadeOut(im_lbl))
+        # "Re" moves to head the column the leading dot travels in, clear of its whole path
+        self.play(Create(axis), FadeIn(t_lbl), FadeOut(im_lbl),
+                  re_lbl.animate.move_to([TRACE_X0, MAIN_C[1] + MAIN_R + 0.35, 0]))
         self.add(proj, trace)
         run_clock(self, t, TRACE_WINDOW + 2.0)
         self.wait(0.5)
