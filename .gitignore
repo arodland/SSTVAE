@@ -45,3 +45,6 @@ dist/
 
 # Android CMake build tree (native/android-app)
 build-android/
+
+# manim render output for presentation/
+presentation/media/
