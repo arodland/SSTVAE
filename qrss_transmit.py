@@ -14,20 +14,17 @@ trips); otherwise the file is peak-normalised int16.
 """
 
 import argparse
-from datetime import datetime
 
 from sstvae import wavio
-from sstvae.qrss import beaconfile, frame, picture, tx
+from sstvae.qrss import beaconfile, frame, picture, sequences, tx
 from sstvae.qrss.constants import LEAD_IN_MAX_S
 from sstvae.qrss.header import HeaderFields
-from sstvae.qrss.sequences import quarter_hour_count
 
 
 def parse_slot(s: str) -> int:
     """q for an ISO 8601 UTC time on a quarter hour, e.g. 2026-10-09T06:00Z."""
     try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        return quarter_hour_count(dt)
+        return sequences.parse_slot(s)
     except ValueError as e:
         raise SystemExit(f"--slot {s!r}: {e}") from None
 
@@ -44,7 +41,8 @@ def main() -> None:
     ap.add_argument("--lead-in", type=float, default=0.0,
                     help=f"seconds of plain carrier before the preamble (0-{LEAD_IN_MAX_S})")
     ap.add_argument("--ook", action="store_true",
-                    help="on-off keyed callsign windows (a .bin carries its own choice)")
+                    help="on-off keyed callsign windows for a .qrsp (a .bin carries its own "
+                         "choice: --ook with an FSK .bin is refused)")
     ap.add_argument("--frame", choices=sorted(frame.PRESETS), default="full",
                     help="frame shape; anything but full is a test frame")
     ap.add_argument("--float", action="store_true", help="float32 WAV, not normalised")
@@ -60,7 +58,11 @@ def main() -> None:
             src = beaconfile.read(args.input)
             if args.callsign is not None and args.callsign != src.callsign:
                 raise SystemExit(f"the beacon file is for {src.callsign}, not {args.callsign}")
-            ook = True if args.ook else None
+            if args.ook and not src.ook:
+                raise SystemExit("the beacon file keys its callsign windows FSK, and a beacon "
+                                 "sends what its file says: make the .bin with "
+                                 "qrss_beacon.py --ook instead of passing --ook here")
+            ook = None
         else:
             src = picture.load_qrsp(args.input)
             if args.callsign is None:
@@ -77,8 +79,11 @@ def main() -> None:
         raise SystemExit(str(e)) from None
     (wavio.write_wav_float if args.float else wavio.write_wav)(args.output, x)
     call = src.callsign if is_bin else args.callsign
+    keyed = (src.ook if is_bin else args.ook)
+    lead = f", {args.lead_in:g} s lead-in" if args.lead_in else ""
     print(f"wrote {args.output}: slot q={q}, frame {spec.name} "
-          f"({spec.duration_s:.1f} s), {call}, carrier {args.freq:g} Hz, "
+          f"({spec.duration_s:.1f} s), {call} ({'OOK' if keyed else 'FSK'} callsign windows), "
+          f"carrier {args.freq:g} Hz{lead}, "
           f"{len(x) / 8000:.1f} s of audio starting 12 s before t0")
 
 

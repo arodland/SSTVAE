@@ -44,6 +44,18 @@ whole idea.
 > of the world today, use MMSSTV or an existing digital SSTV mode. If
 > you want to help shake out a new one, read on.
 
+## QRSSTVAE (experimental branch)
+
+The `qrss` branch adds QRSSTVAE, a slow, narrow variant in the spirit of
+QRSS beacons. It sends the same v5 latents on one constant-amplitude
+carrier about 50 Hz wide, in 30-minute passes that start on the quarter
+hour. Receivers average repeated passes of a picture, so it can build up
+from signals far below the noise, and an Si5351 clock-chip beacon can
+generate the signal directly. It has been tested in simulation only;
+nothing has been transmitted yet. See
+[docs/qrss/README.md](docs/qrss/README.md) for status, commands and
+simulated results.
+
 ## What makes it different
 
 **Analog SSTV** fails softly — noise looks like noise — but QRM tears a

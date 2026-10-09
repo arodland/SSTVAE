@@ -4,7 +4,8 @@ P4, P5 and P9 (design 10.6).
 The prior arithmetic, the leave-one-out property, the header the EM
 assumes and the template statistic are fast and use synthetic passes
 (`qrss_fakes`). Everything that re-receives real captures is slow except
-the P4 smoke, which runs on TINY frames.
+the P4 smoke, which runs on TINY frames, and one template search (a
+weak SHORT pass found, received and associated).
 
 **What EM can gain here, measured.** The spec's tracking model
 (`qrss_helpers.s_eff`) with CE's reference rates puts the per-pass
@@ -35,7 +36,8 @@ Deviations:
 
 - P4's fast smoke runs four TINY passes, not SHORT ones: a SHORT pass
   takes 5-10 s to receive, and four would break the fast suite's
-  per-test budget.
+  per-test budget. They are received at the nominal frequency and
+  timing, not acquired blind (acquisition was ~90% of its time).
 - P9 runs a FULL frame: the template search integrates the whole frame
   noncoherently in 2 s chunks, and at -40 dB a MEDIUM frame's 327 chunks
   leave the peak at the Bonferroni gate (Z about 6), where FULL's 891
@@ -254,6 +256,7 @@ def test_template_search_finds_a_weak_short_pass(tmp_path):
     assert key == key_of(h) and rule == "corr"
 
 
+@pytest.mark.slow
 def test_template_search_on_a_ch_capture_uses_its_own_mix(tmp_path):
     """A kept 250 Hz capture is searched at the frequency it was mixed at.
 
@@ -284,15 +287,73 @@ def test_template_search_on_a_ch_capture_uses_its_own_mix(tmp_path):
         assert p is not None and p.f_mix_hz == ch.f_mix and abs(p.f_hz - 1500.0) < 0.2
 
 
+def test_passband_store_slot_round_trip(tmp_path):
+    """A slot capture written to the passband store reads back as that slot:
+    same samples (int16, within an LSB), same t0, coverage of the frame."""
+    spec = frame.SHORT
+    q = Q_TEST + 11
+    sim = simulate_pass(spec, -30.0, q, seed=7, preset="quiet")
+    cap = frontend.Capture(sim.fe, q, sim.t0_index)
+    pb = frontend.PassbandStore(tmp_path / "pb", scale=4096.0)
+    t_first, gain = pb.write_capture(cap, expire=False)
+    assert gain < 1.0                              # the simulator's FE is louder than audio
+    assert t_first == pytest.approx(frontend.slot_t0(q) - sim.t0_index / frontend.FE_FS,
+                                    abs=1 / frontend.FE_FS)
+    from sstvae.qrss.constants import T_SYM
+    dur = spec.keyed_end_pos * T_SYM
+    got, cov = pb.capture(q, dur)
+    assert cov == 1.0 and got.q == q and got.fs == frontend.FE_FS
+    k = int(round(sim.t0_index))
+    assert got.t0_index == k                      # leading unwritten span trimmed
+    n = min(len(got.fe), len(sim.fe))
+    assert np.max(np.abs(got.fe[:n] - gain * sim.fe[:n])) <= 1.0 / 4096   # not clipped
+    assert q in pb.slots(dur)
+    none, cov = pb.capture(q + 4, dur)            # an hour later: nothing stored
+    assert none is None and cov == 0.0
+
+
+@pytest.mark.slow
+def test_retro_detect_from_the_passband_store(tmp_path):
+    """Integration review regression: retroactive detection runs from the 48 h
+    passband store. A SHORT pass at -30 dB that only exists in the store is
+    found by `retro_detect`, received and associated; a second run finds
+    nothing new; template_search reads a stored slot given q (and says what
+    it needs without one)."""
+    spec = frame.SHORT
+    st, h = _template_store(tmp_path, frame.FULL)
+    q = Q_TEST + 11
+    sim = simulate_pass(spec, -30.0, q, seed=7, preset="quiet")
+    pb = frontend.PassbandStore(tmp_path / "pb")
+    pb.write_capture(frontend.Capture(sim.fe, q, sim.t0_index), expire=False)
+
+    with pytest.raises(ValueError, match="q="):
+        em.template_search(st, key_of(h), pb, spec)
+    det = em.template_search(st, key_of(h), pb, spec, q=q)
+    assert det is not None and abs(det.f_hz - 1500.0) < 0.2
+
+    log = []
+    found = em.retro_detect(st, key_of(h), pb, spec, log=log.append)
+    print("\n".join(log))
+    assert len(found) == 1
+    p, key, rule = found[0]
+    assert p.q == q and abs(p.f_hz - 1500.0) < 0.2
+    assert key == key_of(h) and rule == "corr"
+    assert p.uid in st.accumulator(key_of(h)).uids
+    assert em.retro_detect(st, key_of(h), pb, spec) == []      # slot now held
+
+
 # --- P4 smoke (fast) -----------------------------------------------------------------------------
 
-def _received_set(spec, snr, n, preset, base_seed, tmp_path, q_step=7, force=False):
+def _received_set(spec, snr, n, preset, base_seed, tmp_path, q_step=7, force=False,
+                  acquire=True):
     """n passes (independent q) received and attached to the picture's accumulator.
 
     With `force`, a pass the blind acquisition misses is received at the
     nominal frequency and timing instead (as the template search would
     hand it over once an accumulator exists); returns the store, header,
-    passes and how many were found blind.
+    passes and how many were found blind. With `acquire` False every pass
+    is received that way, without trying blind acquisition (which is most
+    of a TINY receive's time; see the P4 smoke).
     """
     sp, h = picture_and_header()
     st = Store(tmp_path / "store")
@@ -301,9 +362,9 @@ def _received_set(spec, snr, n, preset, base_seed, tmp_path, q_step=7, force=Fal
     for i in range(n):
         q = Q_TEST + q_step * i
         sim = simulate_pass(spec, snr, q, base_seed + i, preset)
-        p = receive(sim, spec, q)
+        p = receive(sim, spec, q) if acquire else None
         blind += p is not None
-        if p is None and force:
+        if p is None and (force or not acquire):
             p = forced_pass(sim, spec, q)
         if p is None:
             continue
@@ -316,9 +377,14 @@ def _received_set(spec, snr, n, preset, base_seed, tmp_path, q_step=7, force=Fal
 def test_p4_em_smoke_tiny(tmp_path, monkeypatch):
     """P4 smoke: four TINY passes at -15 dB quiet; EM runs, converges, does
     not lose, and every re-receive is given the leave-one-out reference
-    of the other three as its soft data (not merely re-received)."""
+    of the other three as its soft data (not merely re-received).
+
+    The passes are received at the nominal frequency and timing
+    (`forced_pass`) rather than acquired blind: acquisition was ~90% of
+    this test's 13 s and is not what P4 is about (the slow P4 tests
+    acquire blind; `test_qrss_smoke.py` runs a blind TINY receive)."""
     spec = frame.TINY
-    st, h, got = _received_set(spec, -15.0, 4, "quiet", 300, tmp_path)
+    st, h, got = _received_set(spec, -15.0, 4, "quiet", 300, tmp_path, acquire=False)
     assert len(got) == 4
     calls = []
     real = em.rereceive

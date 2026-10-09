@@ -11,6 +11,10 @@
   threshold, at any timing, and each of A2's lead-in defences is pinned.
 - A-7: the committed TBD_GUMBEL_* constants: re-measured on 200 noise-only
   captures per frame length (slow), and a fast 20-capture check.
+
+Slow (each 2-7 s): A-5 at -25 dB (-15 dB is fast), R14's A2 point at
+-28 dB, A2's 1e6-cell tail on noise, and `lead_in_span` on 300 noise
+captures.
 - A3 finds and follows a drifting signal, lead-in included; `acquire`
   end to end through the channel simulator.
 """
@@ -108,6 +112,7 @@ def test_a4_carrier_line_drift():
 
 # --- A-5 --------------------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_a5_preamble_search_at_minus_25_db():
     """A2 on SHORT at -25 dB, every A-4 frequency x timing -1.9/0/+1.7 s:
     detected in every case, df < 0.05 Hz in every case, timing rms < T/20.
@@ -175,6 +180,7 @@ def test_a5_detection_record():
     assert det.path.f_hz[1] == pytest.approx(hit.f_hz)
 
 
+@pytest.mark.slow
 def test_a2_detects_at_minus_28_db():
     """R14's A2 point, on A2's side: SHORT preambles at -28 dB on a steady
     path, 30 frequencies, found by A1 and passed by A2 (f within 0.25 Hz,
@@ -292,6 +298,7 @@ def _noise_fe(n, rng):
         np.complex64)
 
 
+@pytest.mark.slow
 def test_a6_a2_tail_on_noise():
     """~1e6 (tau0, df) cells of A2 on noise: at every scale (2, 4, 10 and
     20 s runs, Gamma(10), (5), (2), (1)) the fraction over the 1e-3 and
@@ -398,6 +405,7 @@ def test_a6_notch_and_zero_mean_templates():
     assert np.abs(W[i0].sum(axis=1)).max() < 1e-9 * norm.min()
 
 
+@pytest.mark.slow
 def test_lead_in_span_on_noise():
     """`lead_in_span` on noise: 0.0 in 300 of 300 noise captures (its
     first window's false alarm is e^-8 = 3.4e-4), and the per-window Z it

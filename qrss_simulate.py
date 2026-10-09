@@ -23,21 +23,18 @@ DF:DB:LEADIN:DRIFT for its lead-in seconds and drift in Hz/min).
 """
 
 import argparse
-from datetime import datetime
 
 from sstvae import wavio
-from sstvae.qrss import beaconfile, channel, frame, picture, tx
+from sstvae.qrss import beaconfile, channel, frame, picture, sequences, tx
 from sstvae.qrss.channel import Agc, ChannelConfig, Impulses, Neighbour
 from sstvae.qrss.constants import LEAD_IN_MAX_S
 from sstvae.qrss.header import HeaderFields
-from sstvae.qrss.sequences import quarter_hour_count
 
 
 def parse_slot(s: str) -> int:
     """q for an ISO 8601 UTC time on a quarter hour, e.g. 2026-10-09T06:00Z."""
     try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        return quarter_hour_count(dt)
+        return sequences.parse_slot(s)
     except ValueError as e:
         raise SystemExit(f"--slot {s!r}: {e}") from None
 

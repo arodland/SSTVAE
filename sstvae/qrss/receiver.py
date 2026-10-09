@@ -33,6 +33,15 @@ a second station that is both under 20 Hz from a stronger one (the CE
 plan spaces stations 50 Hz apart, and at 20 Hz their spectra overlap
 anyway) and slot-aligned to within 3 symbols: it is not received.
 
+A second kind got past that rule (integration review, 2026-10-09): 2 of
+15 FULL passes at about -11 dB also returned a pass 8-14 Hz away with
+its timing 6-10 symbols off, Z_ref 6.1-6.4 (at the gate, against 104
+and 125 for the real pass), kappa at its 2.0 cap and flagged SUSPECT,
+with an all-zero callsign read. After tracking, a SUSPECT pass within
+GHOST_HZ of a sound pass and under GHOST_Z_RATIO of its Z_ref is
+dropped too: whatever it is, its data are not usable, and a genuine
+second station that close is already given up above.
+
 Everything time-like comes from the `FrameSpec`: nothing here assumes a
 slot length.
 """
@@ -54,6 +63,7 @@ from .types import CwIdResult, Detection, EmPrior, FreqPath, PassResult, Timing,
 MERGE_HZ = 5.0
 GHOST_HZ = 20.0            # a weaker detection this close to a stronger one...
 GHOST_T = 3.0              # ...with tau0 within this many symbols of it is a ghost
+GHOST_Z_RATIO = 0.1        # a SUSPECT pass this much weaker than a sound one within GHOST_HZ
 ALIAS_HZ = 0.5
 ALIAS_RATIO = 3.0
 MARGIN_S = 3.0
@@ -215,6 +225,14 @@ def _ghost_of(f_hz: float, tau0: float, g_f_hz: float, g_tau0: float) -> bool:
     return abs(f_hz - g_f_hz) < GHOST_HZ and abs(tau0 - g_tau0) < GHOST_T * T_SYM * CH_FS
 
 
+def _suspect_neighbour(p: PassResult, out: list[PassResult]) -> bool:
+    """Whether p is a SUSPECT pass at the gate beside a sound, much stronger one
+    (module docstring, "Ghosts"): within GHOST_HZ, Z_ref under GHOST_Z_RATIO of it."""
+    return bool(p.report.suspect) and any(
+        abs(p.f_hz - g.f_hz) < GHOST_HZ and not g.report.suspect
+        and p.report.z_ref < GHOST_Z_RATIO * g.report.z_ref for g in out)
+
+
 def _ghosts(dets: list[Detection]) -> list[Detection]:
     """Drop detections that are ghosts of a stronger one (module docstring)."""
     out: list[Detection] = []
@@ -262,6 +280,8 @@ def receive_slot(cap, spec: FrameSpec = FULL, live_only: bool = False,
         # tracking moves a pass's frequency: a ghost that got past detect()
         # can land on the stronger pass it came from
         if any(_ghost_of(p.f_hz, p.timing.tau0, g.f_hz, g.timing.tau0) for g in out):
+            continue
+        if _suspect_neighbour(p, out):
             continue
         out.append(p)
     return out

@@ -515,3 +515,22 @@ def test_c4_full_slot_under_8_s():
     dt = time.perf_counter() - t
     assert len(sim.fe) > 7_000_000
     assert dt < 8.0, dt
+
+
+@pytest.mark.parametrize("f", [3400.0, 5000.0, -5.0, 100.0, float("nan")])
+def test_carrier_outside_the_band_is_refused(f):
+    """Integration review: a carrier receivers do not search (or one past
+    Nyquist, which aliased silently) is refused by the simulator and the
+    transmitter, not quietly sent somewhere else."""
+    from sstvae.qrss import acquire, ce, tx
+    from sstvae.qrss.constants import CARRIER_BAND_HZ
+
+    assert acquire.BAND_HZ == CARRIER_BAND_HZ
+    with pytest.raises(ValueError, match="audio band"):
+        ch.simulate(carrier_sym(), TINY, Q_TEST, ChannelConfig(), carrier_hz=f)
+    with pytest.raises(ValueError, match="audio band"):
+        ch.simulate_audio(np.zeros(8000), TINY, Q_TEST, ChannelConfig(), carrier_hz=f)
+    with pytest.raises(ValueError, match="audio band"):
+        tx.transmit_audio(None, Q_TEST, f, spec=TINY)
+    for ok in CARRIER_BAND_HZ:
+        assert ce.check_carrier(ok) == ok

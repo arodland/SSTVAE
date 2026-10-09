@@ -105,6 +105,26 @@ def quarter_hour_count(utc: datetime) -> int:
     return delta // timedelta(seconds=900)
 
 
+def parse_utc(s: str) -> datetime:
+    """An aware datetime from ISO 8601 text with a zone, e.g. 2026-10-09T06:00Z.
+
+    A time without Z or an offset is refused (ValueError) rather than read
+    as local time.
+    """
+    try:
+        dt = datetime.fromisoformat(s.strip().replace("Z", "+00:00").replace("z", "+00:00"))
+    except ValueError:
+        raise ValueError("not an ISO 8601 time; expected e.g. 2026-10-09T06:00Z") from None
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        raise ValueError("give the time zone: end it with Z for UTC, e.g. 2026-10-09T06:00Z")
+    return dt
+
+
+def parse_slot(s: str) -> int:
+    """q of a quarter hour given as ISO 8601 UTC text, e.g. 2026-10-09T06:00Z (ValueError)."""
+    return quarter_hour_count(parse_utc(s))
+
+
 def quarter_hour_start(q: int) -> datetime:
     """The UTC datetime of quarter hour `q` (inverse of quarter_hour_count)."""
     return _EPOCH + timedelta(seconds=900 * int(q))

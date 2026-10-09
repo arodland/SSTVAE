@@ -705,6 +705,7 @@ def test_p8_noiseless_round_trip():
 # --- P7: H0 of t on real latents ------------------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.codec
 def test_p7_null_on_coco_pictures():
     """40 COCO pictures pairwise, v5: no false association at any SNR; H0 max|t| < 5 at P6."""

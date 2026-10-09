@@ -53,6 +53,7 @@ INT8_SCALE = 20                              # beacon latent = q/20, q in [-127,
 
 # --- receiver rates and gates ---------------------------------------------------
 FE_FS, FE_CENTER_HZ = 4000, 1500             # receiver front end: complex, 300-2700 Hz
+CARRIER_BAND_HZ = (300.0, 2700.0)            # audio carriers a receiver searches (and a sender may use)
 CH_FS, CH_DECIM = 250, 16                    # per-signal channel: complex, +-125 Hz
 Z_ACCEPT = 6.0                               # single detection/association gate
 

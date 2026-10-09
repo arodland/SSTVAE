@@ -12,6 +12,7 @@ checkpoint.
 """
 
 import argparse
+import os
 
 from sstvae.checkpoint import PRECISIONS, resolve_onnx
 from sstvae.codec import MODEL_HELP, load_codec
@@ -30,6 +31,8 @@ def main() -> None:
     ap.add_argument("--codec-id", default=None, metavar="HEX",
                     help="16-bit codec ID, for a model without source metadata")
     args = ap.parse_args()
+    if not os.path.isfile(args.image):
+        raise SystemExit(f"{args.image}: no such file")
 
     codec_id = None
     if args.codec_id is not None:
@@ -44,7 +47,11 @@ def main() -> None:
                              "--codec-id HEX so receivers know which decoder to use")
 
     codec = load_codec(args.model, precision=args.precision)
-    flat = codec.encode(load_image(args.image))
+    try:
+        img = load_image(args.image)
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"{args.image}: {e}") from None
+    flat = codec.encode(img)
     mode = picture.MODE_NAMES.index(args.mode)
     sp = picture.StoredPicture.from_latents(flat, codec_id, mode)
     picture.save_qrsp(args.output, sp)

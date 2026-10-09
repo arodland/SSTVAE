@@ -352,6 +352,39 @@ def test_cli_refusals(sp, tmp_path):
     assert r.returncode != 0
 
 
+@pytest.mark.parametrize("args,why", [
+    (("--freq", "5000"), "outside the 300-2700 Hz"),      # was aliased to 3000 Hz, silently
+    (("--freq", "-5"), "outside the 300-2700 Hz"),
+    (("--freq", "100"), "outside the 300-2700 Hz"),
+    (("--slot", "2025-10-01 00:00"), "time zone"),        # no internal function name
+    (("--ook",), "FSK"),                                  # an FSK .bin is not re-keyed
+])
+def test_cli_transmit_refusals(sp, tmp_path, args, why):
+    """Integration review: arguments that used to be accepted, or refused with an
+    internal message, are refused in the user's terms (exit != 0, no traceback)."""
+    binf = tmp_path / "seg0.bin"
+    beaconfile.write(binf, beaconfile.from_picture(sp, 0, _header(sp, 0)))
+    argv = {"--slot": "2025-10-01T00:00Z", "--frame": "tiny"}
+    extra = list(args)
+    if extra[0] in argv:
+        argv[extra[0]] = extra.pop(1)
+        extra.pop(0)
+    flat = [x for kv in argv.items() for x in kv] + extra
+    r = _run(REPO_ROOT / "qrss_transmit.py", binf, tmp_path / "x.wav", *flat)
+    assert r.returncode != 0 and why in r.stderr and "Traceback" not in r.stderr, r.stderr
+    assert not (tmp_path / "x.wav").exists()
+
+
+def test_cli_transmit_reports_lead_in_and_keying(sp, tmp_path):
+    """The confirmation line says what was sent: keying and lead-in (review)."""
+    binf = tmp_path / "seg0.bin"
+    beaconfile.write(binf, beaconfile.from_picture(sp, 0, _header(sp, 0), ook=True))
+    r = _run(REPO_ROOT / "qrss_transmit.py", binf, tmp_path / "x.wav", "--slot",
+             "2025-10-01T00:00Z", "--frame", "tiny", "--lead-in", "3", "--ook")
+    assert r.returncode == 0, r.stderr
+    assert "OOK callsign windows" in r.stdout and "3 s lead-in" in r.stdout
+
+
 @pytest.mark.codec
 def test_cli_encode(tmp_path):
     """qrss_encode.py: v5 encoder, codec ID 0xD1D8 from the metadata, picture ID

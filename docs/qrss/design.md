@@ -770,8 +770,8 @@ def receive_wav(path, q: int, start_unix: float | None = None, spec=FULL) -> lis
 
 If `start_unix` is None, the WAV is assumed to start at t0 − 12 s, as `qrss_transmit` writes it.
 
-`qrss_receive.py WAV|NPZ --slot 2026-10-09T06:00Z [--start ISO] [--frame ...] [--store DIR] [--no-store] [--estimator joint|plain] [--image OUT.png] [--model DIR] [--precision]` prints, per pass:
-- frequency, offset, drift, wander, Doppler and ppm;
+`qrss_receive.py WAV|NPZ --slot 2026-10-09T06:00Z [--start ISO] [--frame ...] [--store DIR] [--no-store] [--passband DIR] [--no-passband] [--estimator joint|plain] [--image OUT.png] [--model DIR] [--precision]` keeps the slot's FE stream in the passband store (default STORE/passband) and prints, per pass:
+- frequency at t0 (the report's `offset_hz`, absolute audio Hz), drift, wander, Doppler and ppm;
 - Z_ref and SNR₂₅₀₀;
 - the header, and the callsign-window text with its match;
 - mean W in dB;
@@ -802,7 +802,7 @@ class PassResult:
     def save(self, path) ; @classmethod def load(cls, path)   # .npz plus a JSON metadata entry
 ```
 
-A FULL pass at 250 Hz keeps about 3.6 MB of capture for EM. **This does not replace spec §7's 48 h passband store, which is also built** (spec owner, 2026-10-09): `frontend.PassbandStore` (WP5) keeps the whole 4 kHz complex FE stream as int16 I/Q in hourly files on disk (about 1.4 GB/day), with `write(t0, x)`, `read(t_start, t_end) -> complex64`, expiry after 48 h, and survives restarts. `em.template_search` (WP9) reads past slots from it to find passes too weak to detect when they arrived (retroactive detection).
+A FULL pass at 250 Hz keeps about 3.6 MB of capture for EM. **This does not replace spec §7's 48 h passband store, which is also built** (spec owner, 2026-10-09): `frontend.PassbandStore` (WP5) keeps the whole 4 kHz complex FE stream as int16 I/Q in hourly files on disk (about 1.4 GB/day), with `write(t0, x)`, `read(t_start, t_end) -> complex64`, expiry after 48 h, and survives restarts. `em.template_search` (WP9) reads past slots from it to find passes too weak to detect when they arrived (retroactive detection). Wiring (integration review, 2026-10-09): `qrss_receive.py` writes every slot's raw FE stream with `PassbandStore.write_capture`, `PassbandStore.capture(q, dur)` reads a slot back as a `Capture`, `template_search`/`receive_template` take the store with `q=`, and `em.retro_detect(store, key, pb, spec)` searches every stored slot without a member of the picture, receives and associates what it finds; `qrss_decode.py --retro` runs it.
 
 ---
 
@@ -897,7 +897,7 @@ Stop after `rounds`, or when mean W gains less than `tol_db`. The leave-one-out 
 - Accept at Z > 6 after a Bonferroni correction over the search grid.
 - It works only on captures that are kept: `Capture`s in tests, or the per-candidate CH captures of earlier passes.
 
-`qrss_decode.py OUT.png (--key CALL:PID | --pass FILE.npz) [--store DIR] [--em ROUNDS] [--model DIR] [--precision]` writes the image, after EM if asked.
+`qrss_decode.py OUT.png (--key CALL:PID | --pass FILE.npz) [--store DIR] [--retro [--passband DIR] [--frame F]] [--em ROUNDS] [--model DIR] [--precision] [--any-codec]` writes the image, after retroactive detection and EM if asked. The picture's codec ID (accumulator or header) must equal the decoder's (`render.check_codec_id`), or nothing is decoded unless `--any-codec`; `qrss_receive.py --image` checks the same.
 
 ---
 

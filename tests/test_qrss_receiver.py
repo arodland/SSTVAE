@@ -4,8 +4,12 @@ genie, the Kalman smoother, timing, gate V's statistic) are in
 `test_qrss_track.py`, the callsign windows (R18) in `test_qrss_cwid.py`.
 
 Every test runs on SHORT frames at SNR2500 = -12 dB on a steady path
-unless it says otherwise; one SHORT pass takes about 7 s to receive, so
-the fast tests share cached runs and most of the table is `slow`.
+unless it says otherwise. One SHORT pass at -12 dB takes 10-15 s to
+receive (mostly `detect` verifying the grating-lobe candidates), so the
+tests share cached runs and every one that receives a SHORT pass is
+`slow`; the default run's receiver coverage is `test_qrss_smoke.py`
+(a blind TINY pass from transmit audio to rendered picture, and a SHORT
+pass at -6 dB with the pass-contents checks of R2 below).
 
 Losses are measured against the genie (`track.genie_track`: the channel
 simulator's true timing and gain, P = 0) on the same capture, in
@@ -36,8 +40,8 @@ Deviations (see also the module docstrings of `track`, `demod`, `cwid`):
   -29 dB (the -23.5 dB single-pass point less 5.5 dB).
 - R18's window-free tracking: blocks within 10 s of a window lose at most
   0.1 dB more against the genie than the rest.
-- One transmitter is one pass (the review's ghost passes): fast at
-  -12 dB, slow at -6 and 0 dB SHORT and -12 dB FULL.
+- One transmitter is one pass (the review's ghost passes): at -12 dB,
+  and at -6 and 0 dB SHORT and -12 dB FULL (all slow).
 """
 
 import dataclasses
@@ -145,8 +149,9 @@ def truth_timing_err_T(p, sim, spec) -> float:
     return float(np.sqrt(np.mean((tp - sim.truth.t_pos_s) ** 2)) / T.T_SYM)
 
 
-# --- fast --------------------------------------------------------------------------------------
+# --- the cheaper half of the table (slow too: each receives a SHORT pass) ----------------------
 
+@pytest.mark.slow
 def test_r2_steady_loss_and_pass_contents():
     """R2 at -15 dB (loss <= 0.3 dB), and what a pass carries."""
     kw = dict(snr=-15.0)
@@ -167,6 +172,7 @@ def test_r2_steady_loss_and_pass_contents():
     assert p.z.dtype == np.float32 and p.w.dtype == np.float32 and len(p.hdr_llr) == 2474
 
 
+@pytest.mark.slow
 def test_r19_round_b_does_not_lose():
     """R19: round B (header and keying known) against round A on the same pass."""
     p, trs, a, sim, _ = received(snr=-12.0)
@@ -175,6 +181,7 @@ def test_r19_round_b_does_not_lose():
     assert latent_snr_db(p.z, a) >= latent_snr_db(zA, a) - 0.05
 
 
+@pytest.mark.slow
 def test_r15_joint_not_worse_than_plain_quiet():
     """R15 (fast part): joint >= plain - 0.05 dB on a quiet fading pass, same track."""
     p, trs, a, sim, _ = received(snr=-12.0, cfg=_cfg_key(dict(preset="quiet")))
@@ -186,6 +193,7 @@ def test_r15_joint_not_worse_than_plain_quiet():
     assert w_db(wj) >= w_db(wp) - 0.05
 
 
+@pytest.mark.slow
 def test_r3_weights_honest_quiet():
     """R3 (fast part): on a quiet fading pass the predicted block variance
     matches the measured MSE within 1 dB on average over the bins."""
@@ -196,6 +204,7 @@ def test_r3_weights_honest_quiet():
     assert abs(10 * np.log10(np.mean(mse[good]) / np.mean(v[good]))) < 0.5
 
 
+@pytest.mark.slow
 def test_r13_noise_only_tiny_gives_nothing():
     """R13 (fast part): TINY noise-only slots produce no pass."""
     spec = frame.TINY
@@ -207,6 +216,7 @@ def test_r13_noise_only_tiny_gives_nothing():
         assert RX.receive_slot(frontend.Capture(fe, Q_TEST, 12 * 4000.0), spec) == []
 
 
+@pytest.mark.slow
 def test_one_transmitter_gives_one_pass():
     """Review regression (fast case): one steady CE transmitter at the
     nominal -12 dB is one PassResult. Gate V used to accept a second
@@ -217,6 +227,7 @@ def test_one_transmitter_gives_one_pass():
     assert [round(p.f_hz) for p in passes] == [1500]
 
 
+@pytest.mark.slow
 def test_weak_pass_is_calibrated():
     """Review regression: below about -23 dB every symbol's s2n exceeded the
     absolute KAPPA_S2_MAX, so kappa was never measured and every weak pass
@@ -228,6 +239,7 @@ def test_weak_pass_is_calibrated():
     assert abs(latent_snr_db(p.z, a) - w_db(p.w)) <= 0.5
 
 
+@pytest.mark.slow
 def test_cli_receive_npz(tmp_path):
     """qrss_receive.py on a simulator .npz: prints the pass and stores it."""
     _, sim = scenario(snr=-10.0, seed=3)
@@ -240,6 +252,9 @@ def test_cli_receive_npz(tmp_path):
     assert "K1ABC FN42 picture 12345678" in out.stdout
     assert "stored     K1ABC 12345678 by header" in out.stdout
     assert "mean W" in out.stdout and "Z_ref" in out.stdout
+    # the slot's front-end stream is kept for retroactive detection (review)
+    assert list((tmp_path / "store" / "passband").glob("fe_*.i16"))
+    assert " offset " not in out.stdout and "Hz at t0" in out.stdout
 
 
 # --- slow: the rest of the table -----------------------------------------------------------------
@@ -757,3 +772,26 @@ def test_r14_a3_v_detection_full():
     print(f"A3+V at -34 dB, FULL, quiet: {sum(found)}/10")
     print(f"A3+V at -38 dB, FULL, quiet: {sum(_r14_found(-38.0, 'quiet', range(1, 4)))}/3")
     assert sum(found) >= 9
+
+
+def test_suspect_neighbour_of_a_strong_pass_is_dropped():
+    """Integration review: a SUSPECT pass at the gate (Z_ref 6) 8-14 Hz from a
+    sound Z_ref 104 pass, its timing 6-10 symbols off (so not caught as a
+    ghost), was printed and filed as a second pass. It is dropped; a sound
+    neighbour, a strong suspect one and a suspect one 20 Hz away are kept."""
+    from qrss_fakes import make_pass_result
+
+    a = np.zeros(64)
+
+    def fake(f, z, suspect):
+        p = make_pass_result(a, f_hz=f)
+        p.report = dataclasses.replace(p.report, z_ref=z, suspect=suspect)
+        return p
+
+    real = fake(1500.232, 103.8, False)
+    assert RX._suspect_neighbour(fake(1486.424, 6.1, True), [real])
+    assert RX._suspect_neighbour(fake(1507.722, 6.4, True), [real])
+    assert not RX._suspect_neighbour(fake(1507.722, 6.4, False), [real])
+    assert not RX._suspect_neighbour(fake(1507.722, 30.0, True), [real])
+    assert not RX._suspect_neighbour(fake(1521.0, 6.4, True), [real])
+    assert not RX._suspect_neighbour(fake(1507.722, 6.4, True), [fake(1500.2, 103.8, True)])

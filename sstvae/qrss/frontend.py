@@ -338,6 +338,13 @@ def noise_psd(ch, fs: int = CH_FS, exclude_hz=(), win_s: float = 10.0, *,
 # --- the 48 h passband store ---------------------------------------------------------------
 
 _HOUR_RE = re.compile(r"^fe_(\d+)\.i16$")
+PB_LEAD_S = 15.0                 # a slot read back starts this long before t0 (lead-in, search margin)
+PB_TAIL_S = 5.0                  # and ends this long after the frame
+
+
+def slot_t0(q: int) -> int:
+    """Unix time of slot q's nominal t0: the quarter hour plus 1 s."""
+    return 900 * int(q) + 1
 
 
 class PassbandStore:
@@ -403,8 +410,10 @@ class PassbandStore:
         Values are clipped to the int16 range at `scale`. With `expire`,
         files older than keep_hours before the end of x are deleted.
         """
+        self._write_at(int(round(float(t0) * self.fs)), x, expire)
+
+    def _write_at(self, n0: int, x, expire: bool) -> None:
         x = np.asarray(x, dtype=np.complex64)
-        n0 = int(round(float(t0) * self.fs))
         i = 0
         while i < len(x):
             n = n0 + i
@@ -449,6 +458,64 @@ class PassbandStore:
                 del mm
             i += m
         return (out, mask) if return_mask else out
+
+    # --- slots ---
+    def write_capture(self, cap: Capture, expire: bool = True) -> tuple[float, float]:
+        """Store a slot capture's raw FE stream (before the blanker); returns
+        (unix time of its first sample, gain it was stored with).
+
+        The capture's first sample is at t0 - t0_index/fs, t0 = 900 q + 1
+        (a fractional t0_index is rounded to the nearest sample, under
+        125 us at 4 kHz, which the timing search absorbs). A capture whose
+        peak would use more than half the int16 range is stored attenuated
+        by a power of 2 rather than clipped: the receiver undoes any
+        constant gain (inverse AGC), and audio from a WAV never needs it.
+        """
+        if int(cap.fs) != self.fs:
+            raise ValueError(f"the store holds {self.fs} Hz FE, not a {cap.fs} Hz capture")
+        x = np.asarray(cap.fe, dtype=np.complex64)
+        peak = float(max(np.max(np.abs(x.real), initial=0.0),
+                         np.max(np.abs(x.imag), initial=0.0))) * self.scale
+        gain = 1.0
+        if peak > 16383.0:
+            gain = 2.0 ** -math.ceil(math.log2(peak / 16383.0))
+            x = x * np.float32(gain)
+        n0 = int(slot_t0(cap.q)) * self.fs - int(round(float(cap.t0_index)))
+        self._write_at(n0, x, expire)
+        return n0 / self.fs, gain
+
+    def capture(self, q: int, dur_s: float, lead_s: float = PB_LEAD_S,
+                tail_s: float = PB_TAIL_S) -> tuple[Capture | None, float]:
+        """(Capture, coverage) of slot q read back: t0 - lead_s to t0 + dur_s + tail_s.
+
+        `coverage` is the fraction of [t0, t0 + dur_s) that was written;
+        unwritten samples read as zeros. The Capture is None when nothing
+        in the span was written.
+        """
+        t0 = slot_t0(q)
+        a = int(t0) * self.fs - int(round(lead_s * self.fs))
+        b = int(t0) * self.fs + int(round((dur_s + tail_s) * self.fs))
+        x, mask = self.read(a / self.fs, b / self.fs, return_mask=True)
+        if not mask.any():
+            return None, 0.0
+        k0 = int(t0) * self.fs - a
+        k1 = min(len(mask), k0 + int(round(dur_s * self.fs)))
+        cov = float(np.mean(mask[k0:k1])) if k1 > k0 else 0.0
+        # unwritten stretches at either end are dropped (inside, gaps stay zeros)
+        on = np.flatnonzero(mask)
+        i, j = int(on[0]), int(on[-1]) + 1
+        return Capture(fe=x[i:j], q=int(q), t0_index=float(k0 - i), fs=self.fs), cov
+
+    def slots(self, dur_s: float) -> list[int]:
+        """Every q whose frame [t0, t0 + dur_s) overlaps a stored hour, ascending."""
+        out = set()
+        for hour in self.hours():
+            lo = hour * 3600 - dur_s - 1.0
+            hi = (hour + 1) * 3600
+            for q in range(int(math.floor(lo / 900.0)), int(math.ceil(hi / 900.0)) + 1):
+                if slot_t0(q) + dur_s > hour * 3600 and slot_t0(q) < hi:
+                    out.add(q)
+        return sorted(out)
 
     def expire(self, now: float | None = None) -> list[int]:
         """Delete hours that ended more than keep_hours before `now`; return them."""

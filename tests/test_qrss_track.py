@@ -3,7 +3,7 @@
 
 - R1: the genie (true timing and gain, `track.genie_track`) delivers
   per-latent SNR = SNR2500 + 17.09 dB in parallel with the pinned
-  distortion D_PASS, within 0.2 dB (fast at -15 dB, slow at -25/-20).
+  distortion D_PASS, within 0.2 dB (at -15, -20 and -25 dB, slow).
 - The Kalman smoother on a synthetic Gaussian-Doppler gain: q chosen near
   the true spread, NEES near 1, the causal filter worse than the smoother.
 - The matched filter and template: noiseless, m = u c on the known
@@ -15,6 +15,11 @@
 - A claimed lead-in with no carrier in it is not used.
 - KAPPA_SELF and D_PASS: re-derived from `ce.loopback_stats` and checked
   against the pinned constants.
+
+Every check here that receives a SHORT pass is `slow` (10-15 s each,
+see `test_qrss_receiver.py`), as are R1 and gate V's KS test (40 TINY
+channels); the default run keeps the smoother, the noiseless
+measurement model and KAPPA_SELF / D_PASS.
 """
 
 import math
@@ -46,6 +51,7 @@ def _pooled_genie_db(snr_db, seeds):
     return 10 * math.log10(num / den)
 
 
+@pytest.mark.slow
 def test_r1_genie_matches_theory_at_minus_15():
     got = _pooled_genie_db(-15.0, (1, 2, 3))
     assert abs(got - _theory_db(-15.0)) <= 0.2, (got, _theory_db(-15.0))
@@ -105,6 +111,7 @@ def test_noiseless_measurement_model():
     assert 10 * np.log10(np.mean(np.abs(r) ** 2) / np.mean(np.abs(g.m[gk]) ** 2)) < -18
 
 
+@pytest.mark.slow
 def test_clock_errors_recovered():
     """R7 timing on SHORT: tx +100 / rx -100 ppm, timing within 0.02 T rms."""
     p, _, _, sim, _ = received(cfg=_cfg_key(dict(tx_ppm=100.0, rx_ppm=-100.0)))
@@ -114,6 +121,7 @@ def test_clock_errors_recovered():
     assert abs(p.report.ppm + 200) < 20
 
 
+@pytest.mark.slow
 def test_refine_path_follows_warmup():
     """A 1 Hz/min oscillator settling with tau = 60 s: the acquisition fits a
     line; the measured path follows the truth within 0.05 Hz."""
@@ -127,12 +135,14 @@ def test_refine_path_follows_warmup():
     assert latent_snr_db(zg, a) - latent_snr_db(p.z, a) <= 0.2
 
 
+@pytest.mark.slow
 def test_report_drift():
     p = received(cfg=_cfg_key(dict(drift_hz_per_min=1.0)))[0]
     assert abs(p.report.drift_hz_per_min - 1.0) < 0.1
     assert abs(p.report.offset_hz - 1500.0) < 0.05
 
 
+@pytest.mark.slow
 def test_z_ref_on_noise_is_standard_normal():
     """Gate V's statistic at a fixed timing on noise-only TINY channels."""
     spec = frame.TINY
@@ -155,6 +165,7 @@ def test_z_ref_on_noise_is_standard_normal():
     assert p > 0.01
 
 
+@pytest.mark.slow
 def test_false_lead_in_is_dropped():
     """A detection claiming 6 s of lead-in on a frame sent without one: the
     tracker checks the carrier is there and tracks as if it were not claimed."""

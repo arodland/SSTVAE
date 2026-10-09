@@ -8,6 +8,15 @@ rationale lives in the plan history.
 ## Commands
 
 - Run tests: `pytest` (fast, ~10 s; includes full modem end-to-end tests)
+  **plus the QRSSTVAE suite (`tests/test_qrss_*`)**, whose non-slow tier is
+  about 355 tests and ~1.5 min on 4 shared CPUs (2026-10-09; it was 6-7
+  min before every test that receives a SHORT pass, 10-15 s each, moved to
+  `slow`). `tests/test_qrss_smoke.py` keeps the chain in the default run:
+  one blind TINY pass from transmit audio to rendered picture and one
+  SHORT pass at -6 dB (header, callsign windows). `pytest
+  --ignore-glob='tests/test_qrss_*'` is the quick SSTVAE check, `pytest
+  -k qrss` the QRSS one, and `pytest -m slow -k qrss` its slow tier
+  (~120 tests, about 2 hours).
 - Slow gate: `pytest -m slow` (~2 min) — the listener state machine and
   the app's transmit→receive loopback. Run it after touching `sstvae/rx/`.
 - Native port: `tools/build_native.sh --test` (builds `native/`, runs

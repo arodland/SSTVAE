@@ -39,6 +39,7 @@ from scipy.signal import resample_poly, upfirdn
 from .constants import (
     ALPHA,
     BETA,
+    CARRIER_BAND_HZ,
     CH_FS,
     CW_UNIT,
     CW_UNITS,
@@ -425,6 +426,20 @@ def to_audio(z, fs: int, carrier_hz_num: int, carrier_hz_den: int = 1,
     nn = (np.arange(len(z), dtype=np.int64) + int(n0)) % period
     turns = ((nn * (num % period)) % period).astype(np.float64) / period
     return amplitude * np.real(z * np.exp(2j * np.pi * turns))
+
+
+def check_carrier(carrier_hz) -> float:
+    """The carrier in Hz, or ValueError when it is outside CARRIER_BAND_HZ.
+
+    A carrier outside the band receivers search is never found, and one
+    past 4 kHz is not even representable at 8 kHz (it aliases).
+    """
+    f = float(carrier_hz)
+    lo, hi = CARRIER_BAND_HZ
+    if not (math.isfinite(f) and lo <= f <= hi):
+        raise ValueError(f"carrier {carrier_hz} Hz is outside the {lo:g}-{hi:g} Hz audio band "
+                         "that receivers search")
+    return f
 
 
 def carrier_fraction(carrier_hz) -> tuple[int, int]:

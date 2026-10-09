@@ -3,6 +3,7 @@
 
     python qrss_decode.py out.png --key K1ABC:1a2b3c4d
     python qrss_decode.py out.png --key K1ABC:1a2b3c4d --em 3
+    python qrss_decode.py out.png --key K1ABC:1a2b3c4d --retro
     python qrss_decode.py out.png --pass ~/.local/share/qrsstvae/passes/<uid>.npz
     python qrss_decode.py --list
 
@@ -15,9 +16,18 @@ improved passes. --pass renders a single stored pass, which needs a
 decoded header to place its latents. --list prints the store's
 accumulators and exits.
 
+--retro first searches the 48 h passband store (--passband DIR, default
+STORE/passband, kept by `qrss_receive.py`) for passes of the picture
+too weak to detect when they arrived: every stored slot without a member
+is template-searched with the accumulator's soft data (--frame, default
+full), and what is found is received and associated
+(`sstvae.qrss.em.retro_detect`).
+
 Prints, per segment of the picture, the effective SNR (10 log10 median
 W) and the members, then the mean W before and after each EM round.
-The codec is the published v5 decoder (--model DIR, --precision).
+The codec is the published v5 decoder (--model DIR, --precision). The
+picture's codec ID (from the accumulator or the pass's header) must
+match the decoder's, or nothing is decoded (--any-codec overrides).
 """
 
 import argparse
@@ -85,6 +95,13 @@ def main() -> None:
     ap.add_argument("--store", default=None, help="multi-pass store directory")
     ap.add_argument("--em", type=int, default=0, metavar="ROUNDS",
                     help="leave-one-out EM rounds before decoding (default 0)")
+    ap.add_argument("--retro", action="store_true",
+                    help="search the passband store for weaker passes first (--key)")
+    ap.add_argument("--passband", default=None,
+                    help="passband store directory (default STORE/passband)")
+    ap.add_argument("--frame", default="full", help="frame shape for --retro (default full)")
+    ap.add_argument("--any-codec", action="store_true",
+                    help="decode even when the picture's codec ID is not the decoder's")
     ap.add_argument("--model", default=None, help="codec model directory")
     ap.add_argument("--precision", choices=("fp32", "fp16", "int8"), default="fp32",
                     help="codec precision")
@@ -108,10 +125,13 @@ def main() -> None:
     if args.pass_file is not None:
         from sstvae.qrss.types import PassResult
 
-        if args.em:
-            print("--em needs an accumulator (--key); ignored for a single pass")
+        if args.em or args.retro:
+            print("--em and --retro need an accumulator (--key); ignored for a single pass")
+        if not args.pass_file.is_file():
+            sys.exit(f"--pass {args.pass_file}: no such file")
         p = PassResult.load(args.pass_file)
         S, W, mode = planes_from_pass(p)
+        codec_id = p.header.codec_id
         print(f"pass {p.uid}: {p.frame} frame, mean W "
               f"{10 * np.log10(max(float(np.mean(p.w)), 1e-30)):+.2f} dB")
     else:
@@ -119,15 +139,34 @@ def main() -> None:
         key = parse_key(args.key)
         if not store.has_accumulator(key):
             sys.exit(f"no picture {key[0]} {key[1]:08x} in {store.root}")
+        if args.retro:
+            from sstvae.qrss import frame
+            from sstvae.qrss.frontend import PassbandStore
+
+            pb_dir = Path(args.passband) if args.passband else store.root / "passband"
+            if not pb_dir.is_dir():
+                sys.exit(f"--retro: no passband store at {pb_dir}")
+            try:
+                spec = frame.get(args.frame)
+            except (KeyError, ValueError):
+                sys.exit(f"--frame {args.frame!r}: not one of {', '.join(sorted(frame.PRESETS))}")
+            found = em.retro_detect(store, key, PassbandStore(pb_dir), spec,
+                                    log=lambda m: print("retro: " + m))
+            print(f"retro: {len(found)} pass{'es' if len(found) != 1 else ''} found")
         if args.em > 0:
             hist = em.em_refine(store, key, rounds=args.em, log=print)
-            print("EM: mean W " + " -> ".join(f"{h:+.2f}" for h in hist) + " dB (as claimed: "
-                  "a re-receive raises W by up to about twice its true gain)")
+            gain = hist[-1] - hist[0]
+            print("EM: mean W " + " -> ".join(f"{h:+.2f}" for h in hist) + " dB"
+                  + (" (no change)" if abs(gain) < 0.005 else f" ({gain:+.2f} dB)")
+                  + "; W is the receiver's own estimate, and a re-receive can raise it "
+                  "by more than the picture gains")
         acc = store.accumulator(key)
         for line in acc_lines(acc):
             print(line)
         S, W, mode = acc.S, acc.W, acc.mode
-    codec = render.load(args.precision, args.model)
+        codec_id = acc.codec_id
+    codec = render.load(args.precision, args.model, codec_id=codec_id, force=args.any_codec,
+                        warn=print)
     render.render(codec, S, W, mode).save(args.output)
     print(f"wrote {args.output}")
 

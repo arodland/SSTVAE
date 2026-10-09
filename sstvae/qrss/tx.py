@@ -118,6 +118,7 @@ def transmit_audio(src, q: int, carrier_hz=1500, *, spec: FrameSpec = FULL,
     Fraction; the mixing is exact in integer turns. Generated in chunks
     so a full slot never holds more than `chunk_s` of complex baseband.
     """
+    ce.check_carrier(carrier_hz)
     seg, h, _, keying, file_ook = _segment_and_header(src, segment, header)
     if spec.n_win and keying is None:
         raise ValueError(f"frame {spec.name!r} has callsign windows: a callsign is "

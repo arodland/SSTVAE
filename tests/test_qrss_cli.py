@@ -5,7 +5,10 @@ E3 runs the CLIs as subprocesses on a SHORT frame: `qrss_encode.py`
 written directly) -> `qrss_beacon.py` -> `qrss_transmit.py` ->
 `qrss_simulate.py --snr -10` -> `qrss_receive.py --store`; the store
 then holds one pass with the decoded header, and `qrss_decode.py`
-lists it (and renders it when the codec is there).
+lists it (and renders it when the codec is there). E3 takes ~20 s and is
+`slow`, as is `--retro` (a SHORT template search); the default run keeps
+the argument and error handling and an accumulator render, and
+`test_qrss_smoke.py` runs the chain in-process on a TINY slot.
 """
 
 import subprocess
@@ -47,6 +50,7 @@ def _have_codec() -> bool:
         return False
 
 
+@pytest.mark.slow
 def test_e3_cli_chain_short(tmp_path):
     """E3: encode -> beacon -> transmit -> simulate -10 dB -> receive -> store -> decode."""
     qrsp = tmp_path / "pic.qrsp"
@@ -96,6 +100,7 @@ def test_e3_cli_chain_short(tmp_path):
         assert png.exists() and png.stat().st_size > 1000
 
 
+@pytest.mark.slow
 @pytest.mark.xfail(reason="open (WP6/WP7): a spurious second pass of one transmission is "
                           "returned by receive_slot and attached by correlation", strict=False)
 def test_e3_one_transmission_one_member():
@@ -151,3 +156,82 @@ def test_decode_cli_renders_an_accumulator(tmp_path):
     run("qrss_decode.py", tmp_path / "one.png", "--pass", tmp_path / "p.npz",
         *model_args(), "--precision", "fp16")
     assert (tmp_path / "one.png").exists()
+
+
+class _FakeOnnxCodec:
+    """Just enough of `codec.OnnxCodec` for `render.decoder_codec_id`."""
+    backend = "onnx"
+
+    def __init__(self, sha):
+        self._sources = {"decoder": sha} if sha else {}
+
+    def _session(self, part):
+        return None
+
+
+def test_codec_id_is_checked_before_decoding():
+    """Integration review regression: a picture of another codec is not decoded
+    silently by the v5 decoder. A mismatch refuses (or, forced, warns); a
+    decoder without a codec ID warns that nothing could be checked."""
+    from sstvae.qrss import render
+
+    v5 = _FakeOnnxCodec("d1d8" + "0" * 60)
+    assert render.decoder_codec_id(v5) == 0xD1D8
+    assert render.check_codec_id(v5, 0xD1D8) is None
+    assert render.check_codec_id(v5, None) is None
+    with pytest.raises(render.CodecMismatch, match="codec 1234.*codec d1d8"):
+        render.check_codec_id(v5, 0x1234)
+    assert "decoding anyway" in render.check_codec_id(v5, 0x1234, force=True)
+    assert "cannot be checked" in render.check_codec_id(_FakeOnnxCodec(None), 0x1234)
+
+
+@pytest.mark.slow
+@pytest.mark.codec
+def test_decode_cli_refuses_another_codec(tmp_path):
+    """qrss_decode.py --key on an accumulator of codec 1234 with the v5 decoder:
+    refused with the two IDs named, and decoded (with a warning) only on --any-codec."""
+    load_codec("fp16")
+    sp = synthetic_picture(0)
+    h = make_header(sp, callsign=CALL)
+    st = Store(tmp_path / "s")
+    p = make_pass_result(picture.air_values(sp.segs[0], 0), 3.0, seed=0, hdr=h, decoded=True)
+    st.add_pass(p)
+    st.attach((CALL, sp.picture_id), p.uid, 0, "header", mode=0, codec_id=0x1234)
+    png = tmp_path / "out.png"
+    argv = ["qrss_decode.py", png, "--key", f"{CALL}:{sp.picture_id:08x}", "--store",
+            tmp_path / "s", *model_args(), "--precision", "fp16"]
+    r = run(*argv, ok=False)
+    assert r.returncode != 0 and not png.exists()
+    assert "codec 1234" in r.stderr and "codec d1d8" in r.stderr, r.stderr
+    r = run(*argv, "--any-codec")
+    assert png.exists() and "decoding anyway" in r.stdout
+
+
+@pytest.mark.slow
+@pytest.mark.codec
+def test_decode_cli_retro(tmp_path):
+    """Integration review regression: `qrss_decode.py --retro` searches the
+    passband store and attaches a -30 dB SHORT pass that was never received."""
+    load_codec("fp16")
+    from qrss_helpers import Q_TEST
+    from sstvae.qrss import channel as chm
+    from sstvae.qrss import frame, frontend, morse, tx
+    from sstvae.qrss.channel import ChannelConfig
+
+    sp = synthetic_picture(0)
+    h = make_header(sp, callsign=CALL)
+    st = Store(tmp_path / "s")
+    p = make_pass_result(tx.slot_air_latents(sp, 0), 10 ** 0.5, seed=1, hdr=h, decoded=True)
+    st.add_pass(p)
+    st.attach((CALL, sp.picture_id), p.uid, 0, "header", mode=0, codec_id=sp.codec_id)
+    q = Q_TEST + 11
+    sym = tx.slot_symbols(sp, q, frame.SHORT, header=h)
+    sim = chm.simulate(sym, frame.SHORT, q, ChannelConfig(snr_db=-30.0, preset="quiet", seed=7),
+                       keying=morse.keying_units(CALL))
+    frontend.PassbandStore(tmp_path / "s" / "passband").write_capture(
+        frontend.Capture(sim.fe, q, sim.t0_index), expire=False)
+    png = tmp_path / "out.png"
+    r = run("qrss_decode.py", png, "--key", f"{CALL}:{sp.picture_id:08x}", "--store",
+            tmp_path / "s", "--retro", "--frame", "short", *model_args(), "--precision", "fp16")
+    assert "retro: 1 pass found" in r.stdout and "by corr" in r.stdout, r.stdout
+    assert "2 passes" in r.stdout and png.exists()

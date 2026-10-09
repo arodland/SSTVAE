@@ -56,6 +56,7 @@ from sstvae import config as _c
 from sstvae.modem import dsp
 
 from . import frame as _frame
+from .ce import check_carrier
 from .constants import FE_CENTER_HZ, FE_FS, FS, SPAN, T_SYM
 from .frame import FrameSpec
 
@@ -699,6 +700,7 @@ def simulate(sym, spec, q, cfg: ChannelConfig, *, carrier_hz=1500.0, lead_in_s=0
     transmit path must always give them (spec 2.7).
     """
     spec = _frame.get(spec)
+    check_carrier(carrier_hz)
     if spec.n_win and keying is None:
         raise ValueError(f"frame {spec.name!r} has callsign windows: a transmission must "
                          "key the callsign (spec 2.7); pass keying=")
@@ -732,6 +734,7 @@ def simulate_audio(x8k, spec, q, cfg: ChannelConfig, *, carrier_hz=1500.0, lead_
     from sstvae import hfchannel
 
     spec = _frame.get(spec)
+    check_carrier(carrier_hz)
     x8k = np.asarray(x8k, dtype=np.float64)
     scale = cfg.time_scale
     if scale != 1.0:

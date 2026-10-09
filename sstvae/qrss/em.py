@@ -77,7 +77,7 @@ from scipy import stats
 
 from . import ce, demod, frame, header, receiver, track
 from .constants import CH_FS, LEAD_IN_MAX_S, N_HDR_BITS, SPAN, T_SYM, Z_ACCEPT
-from .frame import FrameSpec, layout
+from .frame import FrameSpec
 from .morse import check_callsign, keying_units
 from .precoder import block_index, block_mean, precode
 from .store import Store, canonical_index
@@ -481,14 +481,30 @@ def _search_input(cap, f_mix_hz):
     return prep, None
 
 
+def _from_passband(cap, q, spec: FrameSpec):
+    """A `frontend.PassbandStore` plus slot q -> that slot's Capture; anything else as is."""
+    from .frontend import PassbandStore
+
+    if not isinstance(cap, PassbandStore):
+        return cap
+    if q is None:
+        raise ValueError("searching a PassbandStore needs the slot: pass q= "
+                         "(or use em.retro_detect to search every stored slot)")
+    c, _ = cap.capture(int(q), spec.keyed_end_pos * T_SYM)
+    if c is None:
+        raise ValueError(f"the passband store holds nothing for slot q={int(q)}")
+    return c
+
+
 def template_search(store: Store, key, cap, spec: FrameSpec, *, freqs=(), segments=None,
                     tau_s: float = TS_TAU_S, df_hz: float = TS_DF_HZ,
                     ppm_steps: int = TS_PPM_STEPS, z_accept: float = Z_ACCEPT,
-                    f_mix_hz=None, return_stats: bool = False):
+                    f_mix_hz=None, q=None, return_stats: bool = False):
     """Search a stored slot capture for a pass of picture `key` (design 8.3).
 
     `cap` is a `frontend.Capture` (FE, raw: blanked and normalised here),
-    a `receiver.Prepared`, or a stored `PassResult` (its 250 Hz capture
+    a `frontend.PassbandStore` with the slot `q` to read from it, a
+    `receiver.Prepared`, or a stored `PassResult` (its 250 Hz capture
     and mix). A 250 Hz Capture or Prepared needs `f_mix_hz`, the mix it
     was made with (Hz inside FE, as `PassResult.f_mix_hz`). The
     hypotheses are the members' frequencies, drifts and clocks (plus
@@ -499,9 +515,8 @@ def template_search(store: Store, key, cap, spec: FrameSpec, *, freqs=(), segmen
     """
     key = (key[0], int(key[1]))
     acc = store.accumulator(key)
-    prep, f_mix = _search_input(cap, f_mix_hz)
+    prep, f_mix = _search_input(_from_passband(cap, q, spec), f_mix_hz)
     q = int(prep.q)
-    lay = layout(spec)
     segs = [g for g in range(acc.mode + 1) if acc.has_data(g)] if segments is None else list(segments)
     cands = _candidates(store, acc, freqs)
     if not segs or not cands:
@@ -580,11 +595,14 @@ def _flat(f_hz: float) -> FreqPath:
 
 
 def receive_template(store: Store, key, cap, spec: FrameSpec, det: Detection | None = None,
-                     estimator: str = "joint", **search) -> PassResult | None:
+                     estimator: str = "joint", segment: int | None = None,
+                     **search) -> PassResult | None:
     """Retroactive detection: template-search a capture and receive what it finds.
 
     `cap` as `template_search` (a 250 Hz capture with `f_mix_hz` among
-    the search arguments, or a stored pass).
+    the search arguments, a PassbandStore with `q`, or a stored pass).
+    With `det` given, `segment` is the segment it was found as (default
+    0; the search's own when it runs here).
 
     The pass is tracked with the accumulator's soft data as its template
     (the accumulator does not hold this pass, so this is its leave-one-out
@@ -592,6 +610,7 @@ def receive_template(store: Store, key, cap, spec: FrameSpec, det: Detection | N
     pass the result to `associate.associate`.
     """
     key = (key[0], int(key[1]))
+    cap = _from_passband(cap, search.pop("q", None), spec)
     prep, f_mix = _search_input(cap, search.pop("f_mix_hz", None))
     if det is None:
         det, _, info = template_search(store, key, prep, spec, return_stats=True,
@@ -600,7 +619,7 @@ def receive_template(store: Store, key, cap, spec: FrameSpec, det: Detection | N
             return None
         seg = info["segment"]
     else:
-        seg = 0
+        seg = 0 if segment is None else int(segment)
     acc = store.accumulator(key)
     idx = canonical_index(seg, spec.n_data)
     prior = prior_from(acc.S[seg, idx], acc.W[seg, idx], prep.q)
@@ -626,6 +645,60 @@ def receive_template(store: Store, key, cap, spec: FrameSpec, det: Detection | N
         f_mix_hz=Fraction(chan.f_mix), psi=_psi_frame(tr), estimator=estimator)
 
 
+RETRO_MIN_COVERAGE = 0.9         # a stored slot is searched once this much of its frame is on disk
+RETRO_SAME_HZ = 1.0              # a find this close to a stored pass of its slot is that pass
+
+
+def retro_detect(store: Store, key, pb, spec: FrameSpec, *, slots=None,
+                 estimator: str = "joint", log=None, **search) -> list[tuple]:
+    """Retroactive detection (spec 7 and 8): search the 48 h passband store.
+
+    Every slot of `pb` (a `frontend.PassbandStore`; or just `slots`)
+    whose frame is at least RETRO_MIN_COVERAGE on disk and that holds
+    no member of picture `key` is template-searched with the
+    accumulator's current soft data. What is found is received
+    (`receive_template`, the accumulator as its reference and the header
+    known) and associated (`associate.associate`: the search finds
+    passes, association decides whose they are). A find within
+    RETRO_SAME_HZ of a pass already stored for that slot is that pass and
+    is skipped. Returns [(PassResult, key or None, rule), ...].
+    """
+    from .associate import associate
+
+    key = (key[0], int(key[1]))
+    say = log or (lambda *_: None)
+    acc = store.accumulator(key)
+    dur = spec.keyed_end_pos * T_SYM
+    held = {store.pass_info(u)["q"] for u in acc.uids}
+    stored = [(i["q"], i["f_hz"]) for i in map(store.pass_info, store.pass_uids())]
+    out = []
+    for q in (pb.slots(dur) if slots is None else slots):
+        q = int(q)
+        if q in held:
+            continue
+        cap, cov = pb.capture(q, dur)
+        if cap is None or cov < RETRO_MIN_COVERAGE:
+            continue
+        det, Z, info = template_search(store, key, cap, spec, return_stats=True, **search)
+        if det is None:
+            say(f"slot q={q}: nothing (Z {Z:.1f})")
+            continue
+        if any(qq == q and abs(f - det.f_hz) < RETRO_SAME_HZ for qq, f in stored):
+            say(f"slot q={q}: Z {Z:.1f} at {det.f_hz:.3f} Hz, already stored")
+            continue
+        p = receive_template(store, key, cap, spec, det=det, estimator=estimator,
+                             segment=info["segment"])
+        if p is None:
+            continue
+        k, rule = associate(p, store)
+        stored.append((q, p.f_hz))
+        say(f"slot q={q}: Z {Z:.1f} at {p.f_hz:.3f} Hz, segment {info['segment']}, "
+            + (f"attached to {k[0]} {k[1]:08x} by {rule or 'existing membership'}"
+               if k is not None else "stored provisional"))
+        out.append((p, k, rule))
+    return out
+
+
 __all__ = ["em_prior", "em_refine", "prior_from", "lmmse_latents", "acc_mean_w_db",
            "known_header", "known_keying", "rereceive", "template_search", "template_z",
-           "receive_template"]
+           "receive_template", "retro_detect"]

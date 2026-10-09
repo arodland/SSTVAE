@@ -12,32 +12,32 @@ writes it) unless --start gives its first sample's UTC time; an .npz is
 unless --slot/--frame are given). Every CE signal in the slot is found
 (preamble search, then the whole-slot track-before-detect), verified,
 tracked and demodulated (`sstvae.qrss.receiver.receive_slot`), and for
-each pass this prints its frequency, offset, drift, wander, Doppler,
+each pass this prints its frequency at t0, drift, wander, Doppler,
 clock error, Z_ref, SNR in 2500 Hz, the header, the callsign windows'
 text and match, the mean weight W in dB and the association result.
 
 Passes are stored and associated in the multi-pass store
 (--store DIR, default $QRSSTVAE_HOME or ~/.local/share/qrsstvae)
-unless --no-store. --image renders the single pass (FULL frames with a
+unless --no-store. The slot's whole front-end stream is also kept in the
+48 h passband store (--passband DIR, default STORE/passband; off with
+--no-passband or --no-store), where `qrss_decode.py --retro` later
+template-searches it for passes too weak to detect now. --image renders the single pass (FULL frames with a
 decoded header only) with the codec (--model DIR, --precision).
 """
 
 import argparse
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
-from sstvae.qrss import frame, frontend, receiver
-from sstvae.qrss.sequences import quarter_hour_count
+from sstvae.qrss import frame, frontend, receiver, sequences
 
 
 def parse_slot(s: str) -> int:
     """q for an ISO 8601 UTC time on a quarter hour, e.g. 2026-10-09T06:00Z."""
     try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        return quarter_hour_count(dt)
+        return sequences.parse_slot(s)
     except ValueError as e:
         raise SystemExit(f"--slot {s!r}: {e}") from None
 
@@ -45,13 +45,15 @@ def parse_slot(s: str) -> int:
 def parse_time(s: str) -> float:
     """Unix seconds of an ISO 8601 UTC time."""
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+        return sequences.parse_utc(s).timestamp()
     except ValueError as e:
         raise SystemExit(f"--start {s!r}: {e}") from None
 
 
 def load_capture(path: Path, q: int | None, start: float | None):
     """(Capture, frame name or None) from a WAV or a simulator .npz."""
+    if not path.is_file():
+        raise SystemExit(f"{path}: no such file")
     if path.suffix.lower() == ".npz":
         from sstvae.qrss import channel
 
@@ -66,7 +68,7 @@ def load_capture(path: Path, q: int | None, start: float | None):
 def pass_lines(p) -> list[str]:
     r = p.report
     out = [f"pass {p.uid}",
-           f"  frequency  {p.f_hz:9.3f} Hz   offset {r.offset_hz:9.3f} Hz   "
+           f"  frequency  {r.offset_hz:9.3f} Hz at t0   "
            f"drift {r.drift_hz_per_min:+.3f} Hz/min   wander {r.wander_hz_rms:.3f} Hz rms",
            f"  doppler    {r.doppler_hz:.3f} Hz   clock {r.ppm:+.1f} ppm   "
            f"Z_ref {r.z_ref:.1f}   SNR2500 {r.snr2500_db:+.1f} dB   kappa {r.kappa:.2f}"
@@ -101,7 +103,10 @@ def render_pass(p, image: Path, model: str | None, precision: str) -> str:
     w = np.asarray(p.w, dtype=np.float64)
     S[h.segment, idx] = w * np.asarray(p.z, dtype=np.float64)
     W[h.segment, idx] = w
-    codec = render.load(precision, model)
+    try:
+        codec = render.load(precision, model, codec_id=h.codec_id, warn=print)
+    except render.CodecMismatch as e:
+        return f"image: not written: {e}"
     render.render(codec, S, W, h.mode).save(image)
     return f"image: {image}"
 
@@ -117,6 +122,10 @@ def main() -> None:
                     help="frame shape (default full, or the .npz's own)")
     ap.add_argument("--store", default=None, help="multi-pass store directory")
     ap.add_argument("--no-store", action="store_true", help="do not store or associate")
+    ap.add_argument("--passband", default=None,
+                    help="48 h passband store directory (default STORE/passband)")
+    ap.add_argument("--no-passband", action="store_true",
+                    help="do not keep the slot's front-end stream")
     ap.add_argument("--estimator", choices=("joint", "plain"), default="joint",
                     help="per-block data estimator (default joint)")
     ap.add_argument("--image", type=Path, default=None,
@@ -131,16 +140,20 @@ def main() -> None:
     cap, npz_frame = load_capture(Path(args.input), q, start)
     spec = frame.get(args.frame or npz_frame or "full")
 
-    passes = receiver.receive_slot(cap, spec, estimator=args.estimator)
-    if not passes:
-        print("no CE signal found")
-        sys.exit(1)
-
     store = None
     if not args.no_store:
         from sstvae.qrss.store import Store
 
         store = Store(args.store)
+        if not args.no_passband and cap.fs == frontend.FE_FS:
+            pb_dir = Path(args.passband) if args.passband else store.root / "passband"
+            frontend.PassbandStore(pb_dir).write_capture(cap)
+
+    passes = receiver.receive_slot(cap, spec, estimator=args.estimator)
+    if not passes:
+        print("no CE signal found" + (" (slot kept for a later --retro search)"
+                                      if store is not None and not args.no_passband else ""))
+        sys.exit(1)
     for p in passes:
         for line in pass_lines(p):
             print(line)

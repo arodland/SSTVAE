@@ -97,7 +97,7 @@ from scipy import ndimage, signal, special
 from scipy.interpolate import CubicSpline
 
 from . import ce, frontend
-from .constants import CH_FS, FE_CENTER_HZ, FE_FS, N_PRE, T_SYM
+from .constants import CARRIER_BAND_HZ, CH_FS, FE_CENTER_HZ, FE_FS, N_PRE, T_SYM
 from .frame import FrameSpec
 from .sequences import preamble_ce
 from .types import CarrierCandidate, Detection, FreqPath, Timing
@@ -106,7 +106,7 @@ from .types import CarrierCandidate, Detection, FreqPath, Timing
 
 STFT_FRAME_S = 4.0                       # 0.25 Hz bins
 STFT_HOP_S = 2.0
-BAND_HZ = (300.0, 2700.0)                # audio band searched (and the CFAR median's)
+BAND_HZ = CARRIER_BAND_HZ                # audio band searched (and the CFAR median's)
 LN2 = math.log(2.0)
 CFAR_LOCAL_HZ = 40.0                     # local CFAR: the spectral shape over +-40 Hz
 CFAR_LOCAL_BINS = 2 * int(round(CFAR_LOCAL_HZ * STFT_FRAME_S)) + 1

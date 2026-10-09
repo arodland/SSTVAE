@@ -101,12 +101,63 @@ def model_dir() -> str | None:
     return os.environ.get("QRSSTVAE_MODEL_DIR") or None
 
 
-def load(precision: str = "fp32", path: str | None = None):
+def decoder_codec_id(codec) -> int | None:
+    """The codec ID (D11: first 2 bytes of `sstvae.source_sha256`) of a loaded
+    codec's decoder, or None when it carries no such metadata (or is not ONNX)."""
+    if getattr(codec, "backend", None) != "onnx":
+        return None
+    codec._session("decoder")
+    sha = codec._sources.get("decoder")
+    try:
+        return int(sha[:4], 16) if sha and len(sha) >= 4 else None
+    except ValueError:
+        return None
+
+
+class CodecMismatch(SystemExit):
+    """The picture was sent with another codec than the decoder loaded."""
+
+
+def check_codec_id(codec, codec_id: int | None, force: bool = False) -> str | None:
+    """Refuse to decode a picture of codec `codec_id` with a different decoder.
+
+    A latent vector decoded by another checkpoint's decoder is a picture
+    that is silently wrong, so a mismatch raises CodecMismatch unless
+    `force`, which returns the warning instead. Returns a warning when
+    the decoder carries no codec ID to compare (nothing can be checked),
+    else None.
+    """
+    if codec_id is None:
+        return None
+    have = decoder_codec_id(codec)
+    if have is None:
+        return (f"warning: the decoder carries no codec ID; the picture's codec "
+                f"{int(codec_id):04x} cannot be checked against it")
+    if have == int(codec_id):
+        return None
+    msg = (f"the picture was sent with codec {int(codec_id):04x} but the decoder loaded is "
+           f"codec {have:04x}: it would decode to a silently wrong picture. Load the "
+           f"matching model with --model")
+    if not force:
+        raise CodecMismatch(msg + " (or pass --any-codec to decode anyway).")
+    return "warning: " + msg + "; decoding anyway (--any-codec)."
+
+
+def load(precision: str = "fp32", path: str | None = None, codec_id: int | None = None,
+         force: bool = False, warn=None):
     """The decoder-side codec: `codec.load_codec(model_dir(), precision=...)`.
 
-    `path` overrides the model directory (a CLI's --model).
+    `path` overrides the model directory (a CLI's --model). With
+    `codec_id` (the picture's, from its header or accumulator) the
+    decoder is checked against it (`check_codec_id`); warnings go to
+    `warn` (default: stderr).
     """
+    import sys
+
     from sstvae import codec
 
-    return codec.load_codec(path if path is not None else model_dir(),
-                            precision=precision)
+    c = codec.load_codec(path if path is not None else model_dir(), precision=precision)
+    msg = check_codec_id(c, codec_id, force)
+    if msg:
+        (warn or (lambda m: print(m, file=sys.stderr)))(msg)
+    return c

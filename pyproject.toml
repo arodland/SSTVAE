@@ -138,6 +138,9 @@ testpaths = ["tests"]
 # the real decode loop over them, so they take minutes rather than the
 # ~2 s the rest of the suite does. Excluded by default to keep `pytest`
 # the fast check it is documented as; run them with `pytest -m slow`.
+# The QRSSTVAE tests (tests/test_qrss_*) add ~1.5 min to the default run
+# (see CLAUDE.md "Commands"); skip them with
+# --ignore-glob='tests/test_qrss_*' for a quick check.
 markers = [
     "slow: multi-minute end-to-end tests (run with -m slow)",
     # Needs a downloaded model artifact, so it is the one part of the

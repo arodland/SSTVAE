@@ -16,6 +16,10 @@
   `match` Z > 6 at -16 dB over one pass's windows (MEDIUM, which has two
   windows, not the four the design names: FULL is the four-window case
   and is not run here for time); OOK the same way.
+
+The checks through the receiver (and `read`'s noise and weak-signal
+sweep) are `slow`; `test_qrss_smoke.py` reads and matches the windows of
+a SHORT pass at -6 dB in the default run.
 """
 
 import numpy as np
@@ -54,6 +58,7 @@ def test_decode_units_round_trip():
         assert cwid.decode_units(keying_units(call)[cwid.CALL_UNITS]) == call
 
 
+@pytest.mark.slow
 def test_read_rejects_noise_and_weak_misreads():
     rng = np.random.default_rng(2)
     for mu in (0.5, 1.0, 2.0):          # the LLRs of a receiver expecting mu, on noise
@@ -77,6 +82,7 @@ def test_match_statistic():
     assert cwid.match(soft, "VE3XYZ7") < cwid.match(soft, "K1ABC") - 5
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("ook", [False, True])
 def test_windows_through_the_receiver(ook):
     p, trs, _, _, _ = received(snr=-12.0, ook=ook)
@@ -96,6 +102,7 @@ def test_windows_through_the_receiver(ook):
     assert p.cw.text in (CALL, None)
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("ook", [False, True])
 def test_window_llr_is_honest(ook):
     """The units read wrong (LLR sign against the keying) number about what
@@ -112,6 +119,7 @@ def test_window_llr_is_honest(ook):
     assert abs(n_err - pred) <= 3 * np.sqrt(pred) + 2
 
 
+@pytest.mark.slow
 def test_ook_read_never_wrong():
     """Review regression: OOK, -12 dB, seed 5 read 'TT1ABC' and reported it
     as agreeing with the header (quadratic soft values fed to the reader)."""
