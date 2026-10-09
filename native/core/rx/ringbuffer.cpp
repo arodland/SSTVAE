@@ -80,6 +80,24 @@ std::vector<double> RingBuffer::tail(std::size_t n) const {
     return out;
 }
 
+std::vector<double> RingBuffer::read_since(std::uint64_t from,
+                                           std::uint64_t* total_out) const {
+    const std::size_t cap = buf_.size();
+    const std::uint64_t total = total_.load(std::memory_order_acquire);
+    if (total_out) *total_out = total;
+    if (from >= total) return {};
+    const std::uint64_t first = std::max<std::uint64_t>(from, total > cap ? total - cap : 0);
+    const std::size_t n = static_cast<std::size_t>(total - first);
+    const std::size_t start = static_cast<std::size_t>(first % cap);
+    std::vector<double> out(n);
+    const std::size_t run = std::min(n, cap - start);
+    std::copy(buf_.begin() + static_cast<std::ptrdiff_t>(start),
+              buf_.begin() + static_cast<std::ptrdiff_t>(start + run), out.begin());
+    std::copy(buf_.begin(), buf_.begin() + static_cast<std::ptrdiff_t>(n - run),
+              out.begin() + static_cast<std::ptrdiff_t>(run));
+    return out;
+}
+
 void RingBuffer::clear() {
     // The counter stays where it is: absolute sample positions the
     // decode loop has already recorded must keep meaning the same

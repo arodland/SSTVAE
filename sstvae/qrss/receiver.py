@@ -147,15 +147,36 @@ def _cw_result(tr: track.TrackResult, spec: FrameSpec, hdr) -> tuple[CwIdResult 
     return CwIdResult(text=text, z_match=float(z), keying=kt, agrees=agrees), known
 
 
+def _erase(tr: track.TrackResult, spans) -> None:
+    """Erase (psi = 0) tr's symbols within T of any span (a, b), s after t0."""
+    if not spans:
+        return
+    t = tr.t_pos_s()
+    gone = np.zeros(len(t), dtype=bool)
+    for a, b in spans:
+        gone |= (t > float(a) - T_SYM) & (t < float(b) + T_SYM)
+    tr.psi = np.where(gone, 0.0, tr.psi)
+
+
 def receive_pass(cap, spec: FrameSpec, det: Detection, prior: EmPrior | None = None,
                  estimator: str = "joint", *, exclude_hz=(), f_mix_hz=None,
-                 round_b: bool = True, return_tracks: bool = False):
+                 round_b: bool = True, return_tracks: bool = False,
+                 erase_s=()):
     """Receive one detected pass (design 6.8).
 
     `cap` is a `frontend.Capture` (raw; blanked and normalised here), a
     `Prepared` one, or a CH-rate capture of a stored pass (fs = 250, for
     EM). A detection that has not been through gate V (z_ref nan) is
     verified first and its timing fitted; None is returned if it fails.
+
+    erase_s, spans (a, b) in seconds after t0, receives a pass still in
+    progress or with holes in its audio (the live view, `sstvae.qrss.live`):
+    every symbol within one symbol of a span is erased after tracking
+    (psi = 0), so the latents carry only what was heard. The capture in
+    those spans should be noise (`live.slot_capture` fills it), not
+    zeros: the tracker follows a fade, but a stream of zeros sends its
+    gain estimate off to infinity and every heard symbol is then erased
+    against it.
     """
     prep = prepare(cap)
     chan = channel_for(prep, spec, det, exclude_hz, f_mix_hz)
@@ -168,6 +189,7 @@ def receive_pass(cap, spec: FrameSpec, det: Detection, prior: EmPrior | None = N
     tr = track.track(chan, spec, det, track.make_classes(spec, prior=prior),
                      timing=det.timing)
     tr.z_ref = det.z_ref
+    _erase(tr, erase_s)
     z, w, llr, diag = demod.extract(None, tr, spec, q, estimator)
     hdr = header.decode(llr.astype(np.float64)) if spec.n_hdr else None
     cw, cw_known = _cw_result(tr, spec, hdr)
@@ -177,6 +199,7 @@ def receive_pass(cap, spec: FrameSpec, det: Detection, prior: EmPrior | None = N
         tr2 = track.track(chan, spec, det, track.make_classes(spec, header.encode(hdr), prior),
                           cw_known=cw_known, timing=tr.timing, freq=tr.freq, outer=1)
         tr2.z_ref = det.z_ref
+        _erase(tr2, erase_s)
         z, w, _, diag = demod.extract(None, tr2, spec, q, estimator)
         tr = tr2
         tracks.append(tr2)
@@ -267,14 +290,22 @@ def detect(prep: Prepared, spec: FrameSpec, live_only: bool = False) -> list[Det
 
 
 def receive_slot(cap, spec: FrameSpec = FULL, live_only: bool = False,
-                 estimator: str = "joint") -> list[PassResult]:
-    """A1 -> A2 (+ A3) -> V -> receive_pass for every signal in a stored slot."""
+                 estimator: str = "joint", *, erase_s=(), round_b: bool = True,
+                 dets: list[Detection] | None = None) -> list[PassResult]:
+    """A1 -> A2 (+ A3) -> V -> receive_pass for every signal in a stored slot.
+
+    erase_s and round_b go to every `receive_pass`; `dets` skips the
+    acquisition and receives those detections instead (the live view
+    reuses the ones it found on the preamble).
+    """
     prep = prepare(cap)
-    dets = detect(prep, spec, live_only)
+    if dets is None:
+        dets = detect(prep, spec, live_only)
     out: list[PassResult] = []
     for d in dets:
         others = tuple(g.f_hz for g in dets if g is not d)
-        p = receive_pass(prep, spec, d, estimator=estimator, exclude_hz=others)
+        p = receive_pass(prep, spec, d, estimator=estimator, exclude_hz=others,
+                         round_b=round_b, erase_s=erase_s)
         if p is None:
             continue
         # tracking moves a pass's frequency: a ghost that got past detect()

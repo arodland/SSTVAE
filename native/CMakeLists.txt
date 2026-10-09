@@ -492,6 +492,7 @@ if(_want_gui)
     gui/picture_box.cpp
     gui/waterfall.cpp
     gui/rx_panel.cpp
+    gui/qrss_window.cpp
     gui/rig_config.cpp
     gui/settings_dialog.cpp
     gui/overlay_editor.cpp

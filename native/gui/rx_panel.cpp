@@ -34,6 +34,7 @@
 #include "picture_box.hpp"
 #include "style.hpp"
 #include "settings/settings.hpp"
+#include "qrss_window.hpp"
 #include "waterfall.hpp"
 
 namespace sstvae::gui {
@@ -230,6 +231,7 @@ bool ReceivePanel::start() {
     // the one method that resets all receiver state" needs to be true.
     shared_ = std::make_unique<rx::SharedState>();
     if (Waterfall* w = fall()) w->set_ring(ring_);
+    if (qrss_) qrss_->set_ring(ring_);
 
     try {
         stream_ = std::make_unique<audio::qt::InputStream>(
@@ -250,6 +252,7 @@ bool ReceivePanel::start() {
             });
     } catch (const std::exception& e) {
         if (Waterfall* w = fall()) w->set_ring(nullptr);
+        if (qrss_) qrss_->set_ring(nullptr);
         ring_.reset();
         app_->log_event("rx", log::Severity::Error,
                         tr("could not open the input device: %1")
@@ -331,6 +334,7 @@ void ReceivePanel::stop() {
     running_.store(false);
 
     if (Waterfall* w = fall()) w->set_ring(nullptr);
+    if (qrss_) qrss_->set_ring(nullptr);
     ring_.reset();
 
     if (start_button_ != nullptr) {

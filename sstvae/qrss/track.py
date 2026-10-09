@@ -1219,7 +1219,7 @@ def _carrier_lines(z, chan: ChanCapture, spec: FrameSpec, seg_s: float, span_hz:
         near = np.abs(f - prev) <= span_hz
         k = np.nonzero(near)[0][int(np.argmax(S[near]))]
         med = float(np.median(S[np.abs(f) <= 4 * span_hz + 10]))
-        if S[k] < 10 * med:
+        if not (med > 0 and S[k] >= 10 * med):     # a blanked (all-zero) segment has med 0
             continue
         d = _parabola(S[(k - 1) % nfft], S[k], S[(k + 1) % nfft])
         fr = f[k] + d * fs / nfft

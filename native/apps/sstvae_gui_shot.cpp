@@ -40,6 +40,7 @@
 #include "crop_dialog.hpp"
 #include "images/types.hpp"
 #include "item_menu.hpp"
+#include "qrss_window.hpp"
 #include "log/log.hpp"
 #include "log_pane.hpp"
 #include "main_window.hpp"
@@ -71,6 +72,8 @@ void usage() {
                  "  --share      also shoot the template share window\n"
                  "  --item-menu  also shoot the composer's right-click menu\n"
                  "               and its submenus, for a text item and a rect\n"
+                 "  --qrss DIR   also shoot the QRSS signals window showing the\n"
+                 "               listener tiles in DIR (qrss_listen.py --state)\n"
                  "\n"
                  "Writes settings-<n>-<name>.png, one per tab.\n");
 }
@@ -108,6 +111,7 @@ int main(int argc, char** argv) {
     bool log_widgets = false;
     bool panes = false;
     bool item_menu = false;
+    QString qrss_dir;
 
     const QStringList args = QCoreApplication::arguments();
     for (int i = 1; i < args.size(); ++i) {
@@ -140,6 +144,8 @@ int main(int argc, char** argv) {
             share = true;
         } else if (arg == QLatin1String("--item-menu")) {
             item_menu = true;
+        } else if (arg == QLatin1String("--qrss") && i + 1 < args.size()) {
+            qrss_dir = args[++i];
         } else {
             usage();
             return 2;
@@ -179,6 +185,18 @@ int main(int argc, char** argv) {
         const QString path = QStringLiteral("%1/share.png").arg(out);
         dialog.grab().save(path);
         std::printf("%s\n", path.toLocal8Bit().constData());
+    }
+
+    // Reads tiles a listener already wrote; starts no listener.
+    if (!qrss_dir.isEmpty()) {
+        sstvae::gui::QrssWindow qrss;
+        qrss.set_state_dir(qrss_dir);
+        qrss.resize(width > 0 ? width : 820, height > 0 ? height : 640);
+        qrss.show();
+        app.processEvents();
+        const QString path = QStringLiteral("%1/qrss.png").arg(out);
+        qrss.grab().save(path);
+        std::printf("%s (%d tiles)\n", path.toLocal8Bit().constData(), qrss.tile_count());
     }
 
     if (item_menu) {

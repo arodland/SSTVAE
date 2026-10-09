@@ -44,9 +44,12 @@ the channel simulator in this branch.
 - Both stations need the same v5 codec checkpoint (codec ID `d1d8`).
   The decoder refuses a picture with a different codec ID unless you pass
   `--any-codec`.
-- There is no live receive from a sound card yet. `qrss_receive.py` reads
-  a WAV recording of one slot.
-- There is no GUI, no waterfall and no live view.
+- Live receive works from audio piped into `qrss_listen.py`, and the
+  desktop app has a **QRSS signals** window that runs it on the app's
+  own capture audio (see "Listening live" below). Both are checked by
+  replaying simulated recordings only, never on a radio.
+- There is no QRSS waterfall of its own; the app's waterfall shows the
+  passband as usual.
 - The work covers spec build steps 2 (waveform CE, channel simulator,
   single-pass receiver) and 4 (multi-pass combining, association, EM),
   plus a portable C reference of the beacon's phase generator.
@@ -129,6 +132,68 @@ accumulator. Then:
 .venv/bin/python qrss_decode.py --list
 .venv/bin/python qrss_decode.py out.png --key N0CALL:7b202aad
 ```
+
+## Listening live
+
+`qrss_listen.py` takes raw mono 8 kHz audio on stdin and keeps a tile
+for every CE signal it hears. A signal appears about 25 s after its
+quarter hour, once its preamble has arrived. Its tile is received again
+every `--refresh` seconds (default 60) with everything heard so far, so
+the callsign and picture ID appear after about a minute and the picture
+fills in through the pass. When the frame ends, the whole slot is
+received again, stored and associated, and the tile shows the picture
+accumulated over every pass of it.
+
+From the desktop app: **View > QRSS signals**, then **Start listener**,
+and press **Listen** in the receive pane so there is audio to hear. The
+window pipes the receive pane's audio into the listener and shows its
+tiles. It finds `qrss_listen.py` and the repository's `.venv` by
+walking up from the executable (`native/build/sstvae-gui` in a checkout).
+The command line is editable, and `SSTVAE_QRSS_LISTEN` sets its default.
+While the app transmits, no audio reaches the listener; the gap is
+erased from every pass it touches.
+
+From a terminal, with any capture tool:
+
+```sh
+arecord -q -f S16_LE -r 8000 -c 1 -t raw | .venv/bin/python qrss_listen.py --format s16
+parec --rate 8000 --channels 1 --format float32le | .venv/bin/python qrss_listen.py
+```
+
+The audio is stamped with the computer's clock as it arrives, so the
+clock must be right to about a second (NTP). The tiles go to
+`~/.local/share/qrsstvae/live` (`--state DIR` to change it), and the
+desktop window shows that directory whether or not it started the
+listener.
+
+A replay of a recording runs through the same code faster than real
+time, which is how this was tested:
+
+```sh
+.venv/bin/python qrss_listen.py --wav rx.wav --slot 2026-10-09T06:00Z --refresh 300
+```
+
+Measured on the simulated -10 dB pass from the quick start (FULL frame,
+4 shared CPUs): the header decoded at the first receive with a header,
+about 60 s in. Each live receive took about 20 s for one signal, and the
+final receive about two minutes. With 31% of the latents heard, v5's
+picture is not yet recognizable on that test picture. v5 was not trained
+for partial passes (spec section 11). At the end of the pass the tile
+showed the whole pass: SNR -10.4 dB, mean W +5.4 dB, and the picture
+correct by eye.
+
+**Limits of the live view**
+
+- A signal that starts before the listener did is not seen live. Its
+  preamble is gone, so only the end-of-slot whole-slot search can find it.
+- With continuous audio, each slot's capture also holds half of each
+  neighbouring slot's transmissions (FULL frames last two quarter
+  hours). The whole-slot search can lock onto a neighbour's carrier at
+  the wrong timing. A pass with no header within 20 Hz of a signal of
+  another slot that did decode its header is therefore dropped. A real,
+  very weak second station that close is dropped with it.
+- CPU: roughly 20 s per signal per refresh on a desktop. With many
+  signals, use a longer `--refresh`.
 
 ## The command-line tools
 
@@ -483,8 +548,9 @@ measured numbers. All are simulated.
   density is −60.4 dB, not the −65 dB the design took from an earlier
   simulation that cut the pulse at ±16 symbols. The normative pulse is
   cut at ±8 symbols.
-- **Not built:** waveform L, live sound-card receive, the receiver GUI
-  and waterfall, and a model trained for this mode.
+- **Not built:** waveform L, a QRSS-specific waterfall, and a model
+  trained for this mode. The live listener and the app's QRSS window
+  are built but untested on a radio.
 
 ## Needs hardware or on-air time
 

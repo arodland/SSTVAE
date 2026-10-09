@@ -26,6 +26,7 @@
 #include "app_state.hpp"
 #include "log_pane.hpp"
 #include "pane_container.hpp"
+#include "qrss_window.hpp"
 #include "waterfall.hpp"
 #include "rig/hamlib.hpp"
 #include "rx_panel.hpp"
@@ -116,6 +117,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     rx_panel_ = new ReceivePanel(state_);
     tx_panel_ = new TransmitPanel(state_);
     rx_panel_->attach_waterfall(waterfall_);
+    // The QRSS window is created hidden, now, so the receive pane can hand
+    // it the capture ring from its first Listen (View > QRSS signals).
+    qrss_ = new QrssWindow(this);
+    rx_panel_->attach_qrss(qrss_);
 
     // **Each pane is named.** The tabs this replaced carried the only
     // labels that said which half was which, and dropping them left two
@@ -406,6 +411,13 @@ void MainWindow::build_menu() {
     // the menu pointer is kept on the window via findChild-free means.
     view_menu_ = menuBar()->addMenu(tr("&View"));
     build_layout_menu();
+    QAction* qrss = view_menu_->addAction(tr("&QRSS signals"));
+    connect(qrss, &QAction::triggered, this, [this] {
+        if (!qrss_) return;
+        qrss_->show();
+        qrss_->raise();
+        qrss_->activateWindow();
+    });
 
     QMenu* help = menuBar()->addMenu(tr("&Help"));
     QAction* about = help->addAction(tr("&About SSTVAE"));
@@ -750,6 +762,9 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         tx_panel_->cancel();
     }
     rx_panel_->stop();
+    // A visible QRSS window would otherwise keep the app running as its
+    // last window; its listener stops when the window is destroyed.
+    if (qrss_) qrss_->hide();
     state_->disconnect_rig();
     state_->save_config();
     QMainWindow::closeEvent(event);

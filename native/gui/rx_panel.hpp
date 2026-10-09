@@ -52,6 +52,8 @@ namespace sstvae::gui {
 class AppState;
 class ErrorBanner;
 
+class QrssWindow;
+
 class ReceivePanel : public QWidget {
     Q_OBJECT
 
@@ -68,6 +70,9 @@ public:
     // buffer), so ownership moved to MainWindow while control did not.
     // Null until attached, and every use is guarded.
     void attach_waterfall(Waterfall* waterfall) { waterfall_ = waterfall; }
+    // The QRSS window, which gets the capture ring whenever the waterfall
+    // does (it pipes the audio to the QRSSTVAE listener).
+    void attach_qrss(QrssWindow* qrss) { qrss_ = qrss; }
     // Null-safe accessor. **Not defensive programming for its own
     // sake**: moving the strip up to the window made it a *sibling* of
     // this panel rather than a child, and it is added to the central
@@ -169,6 +174,7 @@ private:
     QLabel* last_card_ = nullptr;
     QProgressBar* progress_ = nullptr;
     QPointer<Waterfall> waterfall_;
+    QPointer<QrssWindow> qrss_;
     QPushButton* start_button_ = nullptr;
     QPushButton* stop_button_ = nullptr;
     QPushButton* save_button_ = nullptr;
