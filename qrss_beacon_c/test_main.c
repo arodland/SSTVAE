@@ -28,6 +28,11 @@
 #include "qrss_ce.h"
 #include "sha256.h"
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 static uint8_t file_buf[70000];
 static qrss_ce_t ce;
 
@@ -154,6 +159,10 @@ int main(int argc, char **argv)
 {
     const char *cmd = argc > 1 ? argv[1] : "";
     uint32_t i;
+#ifdef _WIN32
+    /* Binary arrays go to stdout; text mode would turn each 0x0A into 0D 0A. */
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
     if (!strcmp(cmd, "selftest"))
         return selftest();
     if (!strcmp(cmd, "sha256") && argc == 3) {
