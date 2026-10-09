@@ -119,7 +119,7 @@ jobs:
       # check silently covered two platforms out of three. Named here
       # rather than taken from an extra because this job installs
       # `[cli]`, not `[dev]`.
-      - run: pip install -e ".[cli]" pytest pybind11 platformdirs
+      - run: pip install -e ".[cli]" pytest pybind11 platformdirs pyarrow
       # "Install Qt" below runs its own setup-python (aqtinstall needs
       # >=3.14) with update-environment: true, which silently overwrites
       # PATH for the rest of the job. Every later step that invokes bare
