@@ -217,3 +217,36 @@ def test_tiny_slot_half_heard_then_whole(tmp_path):
     L.step(t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 1.0)
     (tile,) = L.tiles()
     assert tile.status == "complete" and tile.received == 1.0 and tile.heard == 1.0
+
+
+def test_one_listener_per_directory(tmp_path):
+    a = live.dir_lock(tmp_path)
+    assert a is not None
+    assert live.dir_lock(tmp_path) is None          # a second writer is refused
+    a.close()
+    b = live.dir_lock(tmp_path)                     # and allowed once the first is gone
+    assert b is not None
+    b.close()
+
+
+def test_atomic_writes_from_two_writers_do_not_collide(tmp_path):
+    """Two writers of one passband index file: each write's temporary file
+    is its own, so neither os.replace moves the other's away."""
+    import threading
+    p = tmp_path / "fe_1.json"
+    errors = []
+
+    def write(k):
+        try:
+            for i in range(300):
+                frontend._atomic_write(p, f"[{k}, {i}]")
+        except OSError as e:
+            errors.append(e)
+
+    ts = [threading.Thread(target=write, args=(k,)) for k in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert not errors
+    assert json.loads(p.read_text())[1] == 299

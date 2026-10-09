@@ -164,7 +164,10 @@ The audio is stamped with the computer's clock as it arrives, so the
 clock must be right to about a second (NTP). The tiles go to
 `~/.local/share/qrsstvae/live` (`--state DIR` to change it), and the
 desktop window shows that directory whether or not it started the
-listener.
+listener. One listener writes to a directory at a time: a second one on
+the same tiles stops with a message (stop the window's listener first to
+show a replay there, or give the replay its own `--state DIR`), and a
+second one on the same store runs without a store.
 
 A replay of a recording runs through the same code faster than real
 time, which is how this was tested:

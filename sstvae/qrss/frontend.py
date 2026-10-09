@@ -41,6 +41,7 @@ import json
 import math
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from fractions import Fraction
@@ -540,6 +541,6 @@ def _merge_ranges(rs) -> list[list[int]]:
 
 
 def _atomic_write(path: Path, text: str) -> None:
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(text)
     os.replace(tmp, path)

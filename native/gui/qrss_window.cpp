@@ -92,9 +92,14 @@ QrssTile::QrssTile(QWidget* parent) : QWidget(parent) {
     progress_ = new QProgressBar(this);
     progress_->setRange(0, 100);
     progress_->setFixedWidth(PICTURE_W);
-    progress_->setFormat(tr("%p% of the pass"));
+    // The text goes beside the bar, not on it: drawn on the bar, the
+    // fill's edge splits it ("55% of th|e pass") on most styles.
+    progress_->setTextVisible(false);
+    progress_->setFixedHeight(8);
+    progress_text_ = new QLabel(this);
     box->addWidget(picture_);
     box->addWidget(title_);
+    box->addWidget(progress_text_);
     box->addWidget(progress_);
     box->addWidget(details_);
     box->addStretch(1);
@@ -114,6 +119,7 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
 
     const double progress = t.value(QStringLiteral("progress")).toDouble();
     progress_->setValue(static_cast<int>(std::lround(100.0 * std::clamp(progress, 0.0, 1.0))));
+    progress_text_->setText(tr("%1% of the pass").arg(progress_->value()));
 
     QStringList lines;
     lines << tr("Slot %1 · %2 Hz · SNR %3")
@@ -177,6 +183,7 @@ bool QrssTile::has_picture() const {
     return !picture_->pixmap().isNull();
 }
 int QrssTile::progress_percent() const { return progress_->value(); }
+QString QrssTile::progress_text() const { return progress_text_->text(); }
 
 // --- window ----------------------------------------------------------------------------
 

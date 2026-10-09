@@ -69,13 +69,33 @@ def main() -> None:
         raise SystemExit(f"--frame {args.frame!r}: one of {', '.join(sorted(frame.PRESETS))}")
     if args.refresh <= 0:
         raise SystemExit("--refresh must be positive")
-    store = None if args.no_store else Store(args.store)
-    root = store.root if store is not None else (Path(args.store) if args.store else default_root())
+    root = Path(args.store) if args.store else default_root()
     state = args.state if args.state is not None else root / "live"
+    # One listener per directory. A second one on the same tiles would
+    # overwrite the first's state file, so it stops; on the same store it
+    # runs without one (no combining with earlier passes, no passband).
+    locks = [live.dir_lock(state)]
+    if locks[0] is None:
+        raise SystemExit(f"another listener is writing tiles to {state}; stop it, "
+                         "or give this one its own --state DIR")
+    store = None
+    if not args.no_store:
+        locks.append(live.dir_lock(root))
+        if locks[-1] is None:
+            print(f"another listener is using the store in {root}; this one runs "
+                  "without a store (pass --store DIR for one of its own)",
+                  file=sys.stderr, flush=True)
+        else:
+            store = Store(root)
     passband = None
     if store is not None and not args.no_passband:
-        passband = frontend.PassbandStore(Path(args.passband) if args.passband
-                                          else store.root / "passband")
+        pb = Path(args.passband) if args.passband else store.root / "passband"
+        locks.append(live.dir_lock(pb))
+        if locks[-1] is None:
+            print(f"another listener is writing the passband store in {pb}; "
+                  "this one keeps none", file=sys.stderr, flush=True)
+        else:
+            passband = frontend.PassbandStore(pb)
     cfg = live.LiveConfig(spec=spec, refresh_s=args.refresh, precision=args.precision,
                           model=args.model, render=not args.no_pictures)
     listener = live.LiveListener(state, cfg, store=store, passband=passband)

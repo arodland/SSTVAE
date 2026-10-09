@@ -100,6 +100,8 @@ void test_tiles_follow_the_state_file() {
     check::is_true(a->has_picture(), "qrss/tiles: the picture is loaded");
     check::is_true(!b->has_picture(), "qrss/tiles: no picture before the header");
     check::equal(a->progress_percent(), 35, "qrss/tiles: progress through the pass");
+    check::equal(a->progress_text().toStdString(), std::string("35% of the pass"),
+                 "qrss/tiles: and in words, beside the bar");
     check::is_true(a->details().contains(QStringLiteral("3 passes")),
                    "qrss/tiles: says how many passes the picture combines");
 

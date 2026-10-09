@@ -268,6 +268,35 @@ class LiveConfig:
     render: bool = True
 
 
+def dir_lock(path):
+    """Hold an exclusive lock on directory `path` for this process's life.
+
+    Returns the open lock file (keep it referenced), or None when another
+    process holds it. One writer per directory: two listeners on one
+    store or one tile directory overwrite each other's files and, before
+    this lock, crashed on each other's temporary files.
+    """
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    f = open(path / ".lock", "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return None
+    f.seek(0)
+    f.truncate()
+    f.write(f"{os.getpid()}\n")
+    f.flush()
+    return f
+
+
 class LiveListener:
     """Feed it audio (`feed`), call `step(now)`; it keeps `state_dir` current."""
 
@@ -330,7 +359,7 @@ class LiveListener:
             codec_error=self.codec_error,
             tiles=[t.to_json() for t in self.tiles()],
             log=self.lines[-20:])
-        tmp = self.dir / "state.json.tmp"
+        tmp = self.dir / f"state.json.{os.getpid()}.tmp"
         tmp.write_text(json.dumps(st, indent=1))
         os.replace(tmp, self.dir / "state.json")
 
@@ -576,7 +605,7 @@ class LiveListener:
             t.note = f"render failed: {e}"
             return
         rel = f"tiles/{t.id}.png"
-        tmp = self.dir / f"tiles/.{t.id}.png.tmp"
+        tmp = self.dir / f"tiles/.{t.id}.{os.getpid()}.png.tmp"
         img.save(tmp, format="PNG")
         os.replace(tmp, self.dir / rel)
         t.image = rel

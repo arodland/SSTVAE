@@ -142,12 +142,14 @@ public:
     QString details() const;
     bool has_picture() const;
     int progress_percent() const;
+    QString progress_text() const;
 
 private:
     QLabel* picture_ = nullptr;
     QLabel* title_ = nullptr;
     QLabel* details_ = nullptr;
     QProgressBar* progress_ = nullptr;
+    QLabel* progress_text_ = nullptr;
     int image_rev_ = -1;
     QString image_path_;
 };
