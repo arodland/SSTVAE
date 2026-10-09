@@ -22,7 +22,7 @@ Notation used throughout:
 - step 4: accumulator, association, leave-one-out EM, template search;
 - a C reference of the beacon's phase and Si5351-step generator.
 
-**Out of scope:** waveform L (seams are listed in §13), the GUI, model retraining, the 48 h passband ring buffer (a per-pass narrow capture is stored instead), and anything that needs hardware.
+**Out of scope:** waveform L (seams are listed in §13), the GUI, model retraining, and anything that needs hardware.
 
 **Slot length.** Rev 9 §2.7 adds four callsign windows per pass, so a CE frame is 58,810 positions = **1782.678125 s**, not the 1736 s of the earlier brief. This design follows rev 9. Each window delays what follows it and changes nothing else.
 
@@ -61,7 +61,7 @@ F marks a format module. WP is the owning work package (§12). No file has two o
 | `qrss_encode.py`, `qrss_beacon.py`, `qrss_transmit.py` | 3 | CLIs |
 | `sstvae/qrss/channel.py` | 4 | channel simulator (uses `default_rng`) |
 | `qrss_simulate.py` | 4 | CLI |
-| `sstvae/qrss/frontend.py` | 5 | audio↔FE, blanker, inverse AGC, channeliser, noise floor |
+| `sstvae/qrss/frontend.py` | 5 | audio↔FE, blanker, inverse AGC, channeliser, noise floor, `PassbandStore` (48 h on-disk FE store, §6.9) |
 | `sstvae/qrss/acquire.py` | 5 | A1 carrier lines, A2 preamble search, A3 track-before-detect, CFAR constants |
 | `sstvae/qrss/track.py` | 6 | frequency-path spline, timing fit, complex-gain Kalman filter and RTS smoother, process noise by maximum likelihood, verification gate |
 | `sstvae/qrss/demod.py` | 6 | symbol matched filter, extraction, weights, plain and joint estimators, header LLRs |
@@ -201,7 +201,7 @@ def quarter_hour_count(utc: datetime) -> int   # aware datetime exactly on a qua
 - Domain strings are ASCII with no terminator.
 - The scrambler index is the data-latent index in air order. FULL uses 198 hash blocks.
 - The preamble, the references and the header are never scrambled or precoded.
-- `b"QRSSTVAE L preamble"` is reserved for waveform L.
+- `b"QRSSTVAE L preamble"` and `b"QRSSTVAE L reference"` are reserved for waveform L (bit pairs as QPSK).
 
 ### 2.4 Pulse and signal (`ce.py`)
 
@@ -382,7 +382,7 @@ which is the integral of the Hann CDF. Then
 
 which is exact, closed form, and an integer number of turns once the window has ended. a(t) = 1 throughout. The data pulse tails (±8T = ±4 units) die inside the 8 plain units at each end.
 
-**On-off keying (allowed alternative).** θ_cw = 0. In units 8–183, a = k[u] with hard switching: key-down means on. Units 0–7 and 184–191 stay on, so the data tails and the phase reference at the window edges are kept (decision D14). The beacon file's flags select the keying, and receivers accept both.
+**On-off keying (allowed alternative).** θ_cw = 0. In units 5–183, a = k[u] with hard switching: key-down means on; units 5–7 are therefore off (key-up), so the call's first element is readable. Units 0–4 and 184–191 stay on, which covers the data pulse tails (they reach at most 4 units into the window) and keeps the phase reference at the window edges (decision D14, as adopted in the spec 2026-10-09). The beacon file's flags select the keying, and receivers accept both.
 
 ### 2.8 Lead-in carrier
 
@@ -802,7 +802,7 @@ class PassResult:
     def save(self, path) ; @classmethod def load(cls, path)   # .npz plus a JSON metadata entry
 ```
 
-A FULL pass at 250 Hz keeps about 3.6 MB of capture. It stands in for spec §7's 48 h passband store in this build.
+A FULL pass at 250 Hz keeps about 3.6 MB of capture for EM. **This does not replace spec §7's 48 h passband store, which is also built** (spec owner, 2026-10-09): `frontend.PassbandStore` (WP5) keeps the whole 4 kHz complex FE stream as int16 I/Q in hourly files on disk (about 1.4 GB/day), with `write(t0, x)`, `read(t_start, t_end) -> complex64`, expiry after 48 h, and survives restarts. `em.template_search` (WP9) reads past slots from it to find passes too weak to detect when they arrived (retroactive detection).
 
 ---
 
@@ -991,6 +991,7 @@ int32_t  qrss_si5351_next(qrss_ce_t *s, uint32_t u, uint32_t fu_num, uint32_t fu
 | A-5 | A2 on SHORT at −25 dB, offsets as A-4, timing ∈ {−1.9, 0, +1.7} s: detection 100%; τ0 error < T/20; δf < 0.05 Hz |
 | A-6 | A2 and A1 tails on noise: empirical Λ (1e6 cells) and A1 bins match Gamma within a factor 2 at 1e-3 and 1e-4. A lead-in-only carrier at +10 dB gives no A2 peak above threshold |
 | A-7 | `TBD_GUMBEL_*` measured on 200 noise-only CH captures (slow) and committed; a fast test checks a 20-capture subsample against them |
+| A-8 | `PassbandStore`: write a few minutes of FE samples across an hour boundary, read back an arbitrary span (int16 quantisation within 1 LSB), expiry deletes files older than 48 h, a restart re-opens existing files, and gaps read as zeros with a mask |
 
 ### 10.5 Single-pass receiver (WP6)
 
@@ -1089,7 +1090,7 @@ At most two packages run at once on this machine. Each wave starts when its depe
 | **2** | Header and FEC | `polar`, `header`, `tools/gen_qrss_polar.py`, `test_qrss_header.py` | `constants` (from WP1's first commit); `sstvae.modem.beacon` | H1–H4 |
 | **3** | CE transmitter | `ce`, `tx`, `beaconfile`, `si5351`, `qrss_{encode,beacon,transmit}.py`, `test_qrss_{ce,beacon}.py` | WP1; WP2 for `header.encode` (stub with zeros until present) | M1–M10; `ce.loopback_stats` delivered |
 | **4** | Channel | `channel`, `qrss_simulate.py`, `test_qrss_channel.py` | WP1 (`FrameSpec`); `ce.baseband` (an internal tone stub until WP3 lands, in the same wave) | C-1 to C-4 |
-| **5** | Front end and acquisition | `frontend`, `acquire`, `test_qrss_{frontend,acquire}.py` | WP1, WP3, WP4 | A-1 to A-7; commits `TBD_GUMBEL_*` |
+| **5** | Front end and acquisition | `frontend` (incl. `PassbandStore`), `acquire`, `test_qrss_{frontend,acquire}.py` | WP1, WP3, WP4 | A-1 to A-7; commits `TBD_GUMBEL_*` |
 | **7** | Multi-pass core | `store`, `associate`, `render`, `tests/qrss_fakes.py`, `test_qrss_multipass.py`; optional `latent_means.npy` and its pyproject line | WP1 (`types.PassResult`, `picture`), WP2 (`header.decode` for soft headers) | P1, P2, P6, P8, P7 (codec); P10 deferred to WP9 |
 | **6** | Tracker, demodulator, receiver | `track`, `demod`, `cwid`, `receiver`, `qrss_receive.py`, `test_qrss_{track,receiver,cwid}.py` | WP1–WP5 | R1–R19; pins `D_PASS` and `KAPPA_SELF` |
 | **8** | C reference | `qrss_beacon_c/*`, `tools/gen_qrss_tables.py`, `test_qrss_c_ref.py` | WP3 | C1–C3 |
@@ -1111,7 +1112,6 @@ Every package must leave `.venv/bin/python -m pytest` green, including the exist
 
 **Live view and GUI (step 6).** `kalman_rts(causal=True)` and `TrackReport` are what the live view and GUI use.
 
-**48 h passband store.** The 48 h passband store can replace per-pass CH captures without changing `PassResult`'s consumers.
 
 **AVR beacon.** The C reference is the parity oracle for any port.
 
@@ -1125,7 +1125,7 @@ Every package must leave `.venv/bin/python -m pytest` green, including the exist
 | D2 | **Pulse.** RRC with α = 0.15, cut at ±8T on both TX and RX, renormalised to unit energy on the 16 kHz grid. β = 4/5 rad | spec §2.5 cuts at ±8; the sims used ±16 |
 | D3 | **Reference grid.** References sit where (s − 660) mod 16 = 0, in stream indices | the only placement giving 165 header and 3,374 data references |
 | D4 | **Spare header symbol.** The 2,475th non-reference header symbol sends +1 and is used as a reference | 2,475 slots for 2,474 bits |
-| D5 | **Sequences.** ASCII domain strings with no terminator; `uint64_be(q)` with q = floor(unix(QH)/900); `uint32_be` block counter; bits MSB first; bit 0 → +1. Reference m takes bit m of one stream. Labels: "QRSSTVAE CE preamble", "QRSSTVAE CE reference", "QRSSTVAE scramble" (L: "QRSSTVAE L preamble") | spec gives only the scrambler's ingredients |
+| D5 | **Sequences.** ASCII domain strings with no terminator; `uint64_be(q)` with q = floor(unix(QH)/900); `uint32_be` block counter; bits MSB first; bit 0 → +1. Reference m takes bit m of one stream. Labels: "QRSSTVAE CE preamble", "QRSSTVAE CE reference", "QRSSTVAE scramble" (L: "QRSSTVAE L preamble" and "QRSSTVAE L reference", both taking bit pairs as QPSK) | spec gives only the scrambler's ingredients |
 | D6 | **Precoder tail.** The 32 and 8 blocks are orthonormal Sylvester WHTs of their own size. Shorter test frames use a binary decomposition of n mod 64 | not named in the spec |
 | D7 | **Picture ID bytes.** `uint16_be(codec ID) ‖ uint8(mode) ‖` the mode's groups as fp16 LE, canonical 52,800 each, never-sent values zeroed, each scaled to unit RMS over its 50,600 sent values in float64 and then rounded. The fp16 values are what is sent | spec gives the idea, not the bytes |
 | D8 | **CRC.** `beacon._crc16` bit for bit, check value 0xA69D. **This is not CRC-16/CCITT-FALSE (0x29B1).** The spec should say "SSTVAE beacon CRC" or switch to true CCITT-FALSE; either is one line. SSTVAE's docstring is also wrong | spec's two phrases contradict each other |
@@ -1134,14 +1134,14 @@ Every package must leave `.venv/bin/python -m pytest` green, including the exist
 | D11 | **Codec ID.** The first 2 bytes of `sstvae.source_sha256` (v5: 0xD1D8). The encoder refuses a model without it unless `--codec-id` is given | third-party exports may lack the metadata |
 | D12 | **Beacon file.** Format of §2.9: 50,970 bytes for mode A; int8 at a scale of 20, clipped symmetrically to ±127 (±6.35, not −6.4); stores the callsign keying mask and the keying flag | spec gives only the contents |
 | D13 | **Callsign-window details.** Unit u of window w starts at t0 + (P_w − ½ + 2u)·T. The call starts at unit 8. The Hann smoothing is centred on each unit boundary, giving the closed-form θ_cw of §2.7. The Morse alphabet is A–Z, 0–9 and '/', with no trailing gap | spec gives timing to 0.1 s and the keying rules, not sample-exact phase |
-| D14 | **On-off-keyed ID.** The carrier stays on, unmodulated, for units 0–7 and 184–191, and keys on and off only in units 8–183. That keeps the data pulse tails and the phase reference at the window edges | spec says only "key-down = on" |
+| D14 | **On-off-keyed ID.** The carrier stays on, unmodulated, for units 0–4 and 184–191 and keys on and off in units 5–183 (5–7 off). Adopted in the spec with this change, since on through unit 7 would merge with the call's first element | spec says only "key-down = on" |
 | D15 | **Lead-in.** a = 1 and φ = 0 from the lead-in start, up to 10 s, to t0 − 8T. Receivers exclude it from A1 and A2 and use it in A3 and as virtual known positions, keeping only its last 8 s | spec §2.8 wording pending |
 | D16 | **Receiver state factorisation.** The spec's joint Kalman state is split into a frequency path (Viterbi plus a 60 s spline, re-centred from û), a complex-gain constant-velocity Kalman filter and RTS smoother on u (which holds the phase), and an affine timing model. The measurement for every position uses the matched-filtered mean template E[s(t)], covering carrier, references, header, lead-in, windows and EM soft data in one form. Process noise is chosen by maximum innovation likelihood | linear-Gaussian, cannot cycle-slip, and all spec quantities are still estimated and reported |
 | D17 | **Timing** is a fitted affine model, plus an optional quadratic, over the whole pass, not a Kalman state | sound-card clocks do not wander on a symbol scale |
 | D18 | **Weights.** σ² = [N/2 + (A0² + K²)P/2]/(K²\|û\|²ψ²) + D_PASS, then one scalar calibration κ ∈ [0.5, 2] per pass from the reference residuals. N comes from out-of-band CH power in 10 s windows | 10 s holds only about 20 references, too few for a stable 1/var on their own; W must match 1/MSE |
 | D19 | **Joint block estimator by default.** The closed-form LMMSE H·diag(1/(1 + σ²))·y, debiased, with crosstalk counted in its variance. It equals the plain estimator on a flat channel. Plain is kept behind a flag | spec §2.4 asks for the joint solve on fast fading |
 | D20 | **Impulse blanker and inverse AGC.** k = 5 (14 dB) over a 1 s running median, with a 2 ms guard and 1 ms taper, on the 4 kHz FE. Level normalisation is over 100 ms. Symbols with blanked share ψ < 0.5 are erased; otherwise the gain is ψ and the variance 1/ψ² | spec gives no algorithm |
-| D21 | **Front end.** 4 kHz complex at 1500 Hz (300–2700 Hz), and a 250 Hz channel per signal. Each pass keeps its 250 Hz capture (3.6 MB) for EM instead of the 48 h passband ring | efficiency; all of the signal lies within ±75 Hz |
+| D21 | **Front end.** 4 kHz complex at 1500 Hz (300–2700 Hz), and a 250 Hz channel per signal. Each pass keeps its 250 Hz capture (3.6 MB) for EM, in addition to the 48 h passband store, which the spec requires for retroactive detection | efficiency; all of the signal lies within ±75 Hz |
 | D22 | **Acquisition statistics and the single verification gate.** Gamma CFAR in A1 and A2, a Gumbel-calibrated A3, and acceptance only at Z_ref > 6 with known symbols withheld from the tracker | a measured false-alarm rate in one place |
 | D23 | **Association statistic.** t = Σvzm/√Σv²z²m² with v = wW/(1 + w + W), accepted at t > 6 (the spec's 6/√M in self-normalised form). Header matches are validated by correlation, and foreign merges are checked by correlation | unequal weights |
 | D24 | **Channel presets.** quiet = (0.1 Hz, 0.5 ms), moderate = (0.5 Hz, 1.0 ms), disturbed = (1.0 Hz, 2.0 ms), mps = (0.15 Hz, 2.0 ms) | spec names the Doppler only |
