@@ -60,6 +60,9 @@ dev = [
     # the two tests that caught the AppData\Local/Roaming bug would
     # quietly stop running.
     "platformdirs>=3.0",
+    # Reads the COCO validation parquet (arodland/coco640-sstvae) for the
+    # QRSSTVAE slow-tier picture tests.
+    "pyarrow>=14",
 ]
 
 # Nothing outside `train` needs torch at all any more. The codec runs on
