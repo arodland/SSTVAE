@@ -285,7 +285,10 @@ exactly what the receiver wants to add up.
 
 ## Words used on the screen
 
-- **Slot**: a quarter-hour start time, such as 05:45Z (Z means UTC).
+- **Slot**: a quarter-hour start time, such as 05:45Z (Z means UTC),
+  then where the signal is: the radio's dial plus the signal's audio
+  tone, such as 10.141 MHz + 1500 Hz (the tone alone without rig
+  control).
 - **SNR** (beside the title): signal strength against the noise, in dB.
   Negative means weaker than the noise.
 - **The bar** under the title: how far through its 30 minutes the pass

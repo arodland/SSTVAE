@@ -207,6 +207,9 @@ received separately, and a part after a change gets the whole-slot
 search only if it is at least half the slot. 2 s before and 30 s after
 a change count as not heard. Tiles carry `dial_hz` in `state.json`
 (null without the file), and tiles on different dials never merge.
+The app's tile shows it on the slot line as dial plus audio offset
+("Slot 21:00Z · 10.141 MHz + 1500 Hz"; the offset alone when the dial
+is unknown), which is the RF frequency for USB.
 `qrss_decode.py --retro` does not read the file yet. A dial left and
 come back to is one dial: its two stretches are received together.
 
