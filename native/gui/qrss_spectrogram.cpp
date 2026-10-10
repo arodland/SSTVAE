@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <iterator>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -164,7 +166,7 @@ double QrssSpectrogram::y_of_freq(double f) const {
 }
 
 QPoint QrssSpectrogram::plot_point(double t, double f_hz) const {
-    const double x = scale_.x_of(rendered_now_ > 0 ? rendered_now_ - t : now() - t);
+    const double x = x_of_time(t);
     return {static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y_of_freq(f_hz)))};
 }
 
@@ -202,19 +204,68 @@ void QrssSpectrogram::render() {
         row_f[static_cast<std::size_t>(y)] = 0.5 * (fa + fb);
     }
 
-    // Columns are independent, so they are drawn on several cores: the
-    // store is only read here (the feed pumps on this thread, which is
-    // waiting), and each thread writes its own pixels straight into the
-    // image's memory.
-    uchar* const bits = image_.bits();
-    const qsizetype stride = image_.bytesPerLine();
-    const auto draw_columns = [&](int x_begin, int x_end) {
+    // **Only the Time Lens is recomputed every second** (Jeff,
+    // 2026-10-10). The history to its right is drawn on a grid of
+    // history_spp-second blocks anchored to the clock, not to "now": a
+    // block keeps its pixels until the grid moves on by one, when the
+    // whole history shifts a pixel and only the newest block is new. So
+    // a finished block is computed once and kept (`history_cache_`) until
+    // something that changes how it looks changes.
+    const int lens_end = std::min(w, scale_.lens_px());
+    const double spp = scale_.history_spp();
+    const double lens_age = scale_.age_at(lens_end);
+    const long long k0 = static_cast<long long>(std::floor((t_now - lens_age) / spp));
+    render_lens_end_ = lens_end;
+    render_k0_ = k0;
+    render_spp_ = spp;
+    CacheKey key{w, h, f_lo_, f_hi_, inverted_, spp, scale_.lens_spp(), scale_.lens_px(),
+                 feed_, markers_};
+    // A block is final once the store holds a column past its end.
+    const double newest = data().newest();
+    // A store that went back in time was cleared: nothing kept holds.
+    if (!(key == cache_key_) || newest < cache_newest_) {
+        history_cache_.clear();
+        cache_key_ = std::move(key);
+    }
+    cache_newest_ = newest;
+
+    struct Job {
+        int x;
+        double t_lo, t_hi;
+        long long block;   // or LLONG_MIN in the lens
+        std::vector<QRgb> px;
+        bool drawn = false;
+    };
+    std::vector<Job> jobs;
+    std::vector<int> cached_x;
+    std::vector<long long> cached_k;
+    for (int x = 0; x < lens_end; ++x) {
+        jobs.push_back({x, t_now - scale_.age_at(x + 1), t_now - scale_.age_at(x),
+                        std::numeric_limits<long long>::min(), {}});
+    }
+    for (int x = lens_end; x < w; ++x) {
+        const long long k = k0 - (x - lens_end);
+        if (history_cache_.count(k) != 0) {
+            cached_x.push_back(x);
+            cached_k.push_back(k);
+        } else {
+            jobs.push_back({x, static_cast<double>(k) * spp, static_cast<double>(k + 1) * spp, k,
+                            {}});
+        }
+    }
+    last_computed_columns_ = static_cast<int>(jobs.size());
+
+    // The columns to compute are independent, so they are spread over
+    // several cores: the store is only read here (the feed's worker
+    // waits on the lock), and each job has its own output.
+    const auto compute = [&](std::size_t j_begin, std::size_t j_end) {
         std::vector<float> rows(static_cast<std::size_t>(h));
         std::vector<double> cumsum(dsp::SlowSpectrogram::BINS + 1);
         std::vector<const Marker*> here;
-        for (int x = x_begin; x < x_end; ++x) {
-            const double t_hi = t_now - scale_.age_at(x);
-            const double t_lo = t_now - scale_.age_at(x + 1);
+        for (std::size_t j = j_begin; j < j_end; ++j) {
+            Job& job = jobs[j];
+            const double t_lo = job.t_lo;
+            const double t_hi = job.t_hi;
             int n_cols = 0;
             const std::vector<float> col = data().mean_between(t_lo, t_hi, &n_cols);
             if (col.empty()) continue;
@@ -236,6 +287,7 @@ void QrssSpectrogram::render() {
             for (const Marker& m : markers_) {
                 if (m.t0 < t_hi && m.t1 > t_lo) here.push_back(&m);
             }
+            job.px.resize(static_cast<std::size_t>(h));
             for (int y = 0; y < h; ++y) {
                 const double n = static_cast<double>(n_cols) *
                                  (b1[static_cast<std::size_t>(y)] - b0[static_cast<std::size_t>(y)]);
@@ -248,20 +300,63 @@ void QrssSpectrogram::render() {
                         break;
                     }
                 }
-                reinterpret_cast<QRgb*>(bits + y * stride)[x] = shade(v, inverted_, marked);
+                job.px[static_cast<std::size_t>(y)] = shade(v, inverted_, marked);
             }
+            job.drawn = true;
         }
     };
-    const int n_threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 4);
+    const std::size_t n_jobs = jobs.size();
+    const std::size_t n_threads = std::min<std::size_t>(
+        std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 4),
+        std::max<std::size_t>(1, n_jobs / 16));
+    const std::size_t per = (n_jobs + n_threads - 1) / n_threads;
     std::vector<std::thread> threads;
-    const int per = (w + n_threads - 1) / n_threads;
-    for (int i = 1; i < n_threads; ++i) {
-        const int a = std::min(w, i * per);
-        const int b = std::min(w, a + per);
-        if (a < b) threads.emplace_back(draw_columns, a, b);
+    for (std::size_t i = 1; i < n_threads; ++i) {
+        const std::size_t lo = std::min(n_jobs, i * per);
+        const std::size_t hi = std::min(n_jobs, lo + per);
+        if (lo < hi) threads.emplace_back(compute, lo, hi);
     }
-    draw_columns(0, std::min(w, per));
+    compute(0, std::min(n_jobs, per));
     for (std::thread& t : threads) t.join();
+
+    uchar* const bits = image_.bits();
+    const qsizetype stride = image_.bytesPerLine();
+    const auto put = [&](int x, const std::vector<QRgb>& px) {
+        for (int y = 0; y < h; ++y) {
+            reinterpret_cast<QRgb*>(bits + y * stride)[x] = px[static_cast<std::size_t>(y)];
+        }
+    };
+    for (Job& job : jobs) {
+        if (job.drawn) put(job.x, job.px);
+        // Keep a finished block, drawn or empty (an empty one is a gap).
+        if (job.block != std::numeric_limits<long long>::min() && job.t_hi <= newest) {
+            history_cache_[job.block] = job.drawn ? std::move(job.px) : std::vector<QRgb>{};
+        }
+    }
+    for (std::size_t i = 0; i < cached_x.size(); ++i) {
+        const std::vector<QRgb>& px = history_cache_[cached_k[i]];
+        if (!px.empty()) put(cached_x[i], px);
+    }
+    // Forget blocks that have scrolled off the right.
+    const long long oldest = k0 - (w - lens_end);
+    for (auto it = history_cache_.begin(); it != history_cache_.end();) {
+        it = it->first < oldest ? history_cache_.erase(it) : std::next(it);
+    }
+}
+
+double QrssSpectrogram::x_of_time(double t) const {
+    const double t_now = rendered_now_ > 0 ? rendered_now_ : now();
+    if (render_spp_ > 0 && t_now - t > scale_.age_at(render_lens_end_)) {
+        return render_lens_end_ + static_cast<double>(render_k0_ + 1) - t / render_spp_;
+    }
+    return scale_.x_of(t_now - t);
+}
+
+double QrssSpectrogram::time_at_x(double x) const {
+    if (render_spp_ > 0 && x >= render_lens_end_) {
+        return (static_cast<double>(render_k0_ + 1) - (x - render_lens_end_)) * render_spp_;
+    }
+    return rendered_now_ - scale_.age_at(x);
 }
 
 void QrssSpectrogram::resizeEvent(QResizeEvent* event) {
@@ -328,7 +423,7 @@ void QrssSpectrogram::paintEvent(QPaintEvent*) {
                     break;
                 }
             }
-            const double t = rendered_now_ - scale_.age_at(x);
+            const double t = time_at_x(x);
             if (std::floor(t / step) != std::floor(prev_t / step) && x - last_x >= 60) {
                 const double tick = std::floor(prev_t / step) * step;
                 const int px = p.left() + x;

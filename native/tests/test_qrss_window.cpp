@@ -423,6 +423,42 @@ void test_the_spectrogram() {
                    "spectrogram: double-click goes back to the whole range");
 }
 
+// Each redraw recomputes the Time Lens; the history to its right is
+// kept, block by block, and only moves when its grid does.
+void test_the_history_is_kept() {
+    double now = 1791594000.0 + 1200.0;
+    gui::QrssSpectrogram sg;
+    sg.set_clock([&now] { return now; });
+    sg.scale().set_history_spp(2.0);   // a short history, so little audio
+    sg.resize(800, 300);
+    sg.show();
+    QApplication::processEvents();
+    {
+        std::mt19937 rng(9);
+        std::normal_distribution<double> noise(0.0, 0.05);
+        std::vector<double> x(8000 * 900);
+        for (std::size_t i = 0; i < x.size(); ++i) {
+            x[i] = 0.05 * std::sin(2.0 * 3.14159265358979 * 1500.0 * i / 8000.0) + noise(rng);
+        }
+        sg.push_audio(x, now);
+    }
+    const int w = sg.image().width();
+    check::equal(sg.last_computed_columns(), w, "history: the first redraw computes it all");
+    const double t_old = now - 800.0;
+    const QPoint p1 = sg.plot_point(t_old, 1500.0);
+    const QRgb before = sg.image().pixel(p1);
+    check::is_true(p1.x() > sg.scale().lens_px() && qGray(before) < 100,
+                   "history: the tone shows in the history");
+    now += 1.0;
+    sg.pump();
+    const QImage& after = sg.image();
+    check::is_true(sg.last_computed_columns() <= sg.scale().lens_px() + 2,
+                   "history: a second later only the Time Lens (and the newest block) is redone");
+    const QPoint p2 = sg.plot_point(t_old, 1500.0);
+    check::is_true(std::abs(p2.x() - p1.x()) <= 1 && after.pixel(p2) == before,
+                   "history: and the kept history draws the same");
+}
+
 // The tab: the spectrogram and the received pane across a divider, and
 // the tiles' passes reach the spectrogram as red.
 void test_the_tab_layout() {
@@ -451,6 +487,7 @@ int main(int argc, char** argv) {
     test_the_qrss_tab();
     test_provisional_tiles();
     test_the_spectrogram();
+    test_the_history_is_kept();
     test_the_tab_layout();
     return check::report("qrss window");
 }

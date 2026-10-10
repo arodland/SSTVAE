@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 #include "dsp/slow_spectrogram.hpp"
@@ -104,6 +105,9 @@ public:
     // Pixel in the plot for a time and a frequency.
     QPoint plot_point(double t, double f_hz) const;
     double now() const;
+    // For tests: how many columns the last redraw computed (the rest of
+    // the history came from the cache).
+    int last_computed_columns() const { return last_computed_columns_; }
 
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
@@ -137,6 +141,38 @@ private:
     double f_lo_ = F_LO;
     double f_hi_ = F_HI;
     double rendered_now_ = 0.0;
+    // The history's block grid as last drawn (see render()).
+    double x_of_time(double t) const;
+    double time_at_x(double x) const;
+    int render_lens_end_ = 0;
+    long long render_k0_ = 0;
+    double render_spp_ = 0.0;
+    // What a cached history block's pixels depend on.
+    struct CacheKey {
+        int w = 0, h = 0;
+        double f_lo = 0, f_hi = 0;
+        bool inverted = false;
+        double history_spp = 0, lens_spp = 0;
+        int lens_px = 0;
+        const SpectrumFeed* feed = nullptr;
+        std::vector<Marker> markers;
+        bool operator==(const CacheKey& o) const {
+            if (markers.size() != o.markers.size()) return false;
+            for (std::size_t i = 0; i < markers.size(); ++i) {
+                if (markers[i].f_hz != o.markers[i].f_hz || markers[i].t0 != o.markers[i].t0 ||
+                    markers[i].t1 != o.markers[i].t1) {
+                    return false;
+                }
+            }
+            return w == o.w && h == o.h && f_lo == o.f_lo && f_hi == o.f_hi &&
+                   inverted == o.inverted && history_spp == o.history_spp &&
+                   lens_spp == o.lens_spp && lens_px == o.lens_px && feed == o.feed;
+        }
+    };
+    CacheKey cache_key_;
+    std::unordered_map<long long, std::vector<QRgb>> history_cache_;
+    int last_computed_columns_ = 0;
+    double cache_newest_ = 0.0;
 };
 
 }  // namespace sstvae::gui
