@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <vector>
 
 #include "app_state.hpp"
 #include "log_pane.hpp"
@@ -237,6 +238,15 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     connect(state_, &AppState::modelLoaded, this, &MainWindow::on_model_loaded);
     connect(state_, &AppState::rigStatus, this, &MainWindow::on_rig_status);
+    // The tuner never starts under a transmission.
+    state_->set_transmit_busy([this] { return tx_panel_->transmitting(); });
+    // Dial changes, by hand or scheduled, marked on both spectrum views.
+    connect(state_, &AppState::dialChanged, this, [this] {
+        std::vector<double> times;
+        for (const AppState::DialChange& c : state_->dial_changes()) times.push_back(c.t);
+        waterfall_->set_dial_marks(times);
+        qrss_page_->spectrogram()->set_dial_marks(std::move(times));
+    });
     connect(state_, &AppState::modelProgress, this,
             &MainWindow::on_model_progress);
     // The PTT lamp follows the transmit phase; the rig chip greys while

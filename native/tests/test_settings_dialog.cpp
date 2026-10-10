@@ -41,6 +41,7 @@ settings::Config populated() {
     c.rig.poll_interval_s = 1.5;
     c.rig.ptt_lead_s = 0.45;
     c.rig.ptt_tail_s = 0.25;
+    c.rig.tune_after_change = true;
     c.rig.device = "localhost:4532";
     c.rig.baud = 38400;
     c.rig.data_bits = "seven";

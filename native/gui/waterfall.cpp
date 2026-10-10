@@ -1,6 +1,7 @@
 #include "waterfall.hpp"
 
 #include <QColor>
+#include <QDateTime>
 #include <QFontMetrics>
 #include <QMouseEvent>
 #include <QPaintEvent>
@@ -215,6 +216,7 @@ void Waterfall::draw_new_rows() {
         paint_row(image_.scanLine(0), history.row(seq), image_.width());
     }
     drawn_ = count;
+    newest_row_time_ = static_cast<double>(QDateTime::currentMSecsSinceEpoch()) / 1000.0;
     update();
 }
 
@@ -236,8 +238,41 @@ void Waterfall::paintEvent(QPaintEvent* event) {
     // drawing it at the origin puts one image pixel on one device pixel.
     painter.drawImage(QPointF(0, 0), image_);
     draw_band_markers(painter);
+    draw_dial_marks(painter);
     draw_level_meter(painter);
     draw_disabled_scrim(painter);
+}
+
+void Waterfall::set_dial_marks(std::vector<double> times) {
+    dial_marks_ = std::move(times);
+    update();
+}
+
+void Waterfall::draw_dial_marks(QPainter& painter) {
+    if (dial_marks_.empty() || newest_row_time_ <= 0.0) return;
+    const double rows_per_px = std::max(1e-9, image_.devicePixelRatio());
+    const double fps = std::max(1, feed_->fps());
+    const QColor green(0x3c, 0xe0, 0x6e);
+    for (const double t : dial_marks_) {
+        const double age = newest_row_time_ - t;
+        if (age < 0) continue;
+        const int y = static_cast<int>(std::lround(age * fps / rows_per_px));
+        if (y >= height()) continue;
+        painter.setPen(QPen(green, 2));
+        painter.drawLine(0, y, width(), y);
+        const QString label = dial_mark_label(age);
+        painter.setPen(QColor(0, 0, 0, 180));
+        painter.drawText(5, y + 13, label);
+        painter.setPen(green);
+        painter.drawText(4, y + 12, label);
+    }
+}
+
+QString dial_mark_label(double age_s) {
+    const long long m = static_cast<long long>(std::floor(age_s / 60.0));
+    if (age_s < 60.0) return QStringLiteral("<-%1s").arg(static_cast<long long>(age_s));
+    if (m < 60) return QStringLiteral("<-%1m").arg(m);
+    return QStringLiteral("<-%1h%2m").arg(m / 60).arg(m % 60, 2, 10, QLatin1Char('0'));
 }
 
 void Waterfall::draw_disabled_scrim(QPainter& painter) {

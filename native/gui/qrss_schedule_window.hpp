@@ -60,6 +60,7 @@ public:
     struct Defaults {
         std::string mode = "A";
         double freq_hz = 1500.0;
+        double dial_hz = 0.0;   // the radio's dial now, 0 if unknown
     };
     // How far ahead the timeline reaches.
     static constexpr double TIMELINE_HOURS = 48.0;
@@ -99,6 +100,17 @@ public:
     // owns it.
     QMenu* menu_for(const std::string& entry, int send);
 
+    // Frequency changes (green on the timeline). Each returns empty on
+    // success, else why not (also shown in the window).
+    std::string add_freq_change(double at, double dial_hz);
+    std::string move_freq_change(const std::string& id, double at);
+    std::string retune_freq_change(const std::string& id, double dial_hz);
+    void remove_freq_change(const std::string& id);
+    // The menus a right-click on a change, and on empty time, open. The
+    // caller owns them.
+    QMenu* change_menu_for(const std::string& id);
+    QMenu* empty_menu_for(double t);
+
 public slots:
     void refresh();
 
@@ -123,6 +135,8 @@ private:
     void show_result(const std::string& why, const QString& done);
     QString local_and_utc(double slot) const;
     void open_editor(const std::function<bool(QrssEditor&)>& prepare);
+    // Asks for a change's time and dial frequency; false if cancelled.
+    bool ask_freq_change(const QString& title, double* at, double* dial_hz);
 
     QrssScheduler* scheduler_ = nullptr;
     QrssSends* sends_ = nullptr;

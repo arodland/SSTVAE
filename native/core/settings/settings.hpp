@@ -95,6 +95,9 @@ struct RigConfig {
     double poll_interval_s = 5.0;
     double ptt_lead_s = 0.3;
     double ptt_tail_s = 0.3;
+    // After a frequency change (by hand or scheduled), start the radio's
+    // antenna tuner (Hamlib's TUNE, rigctl's `G TUNE`) five seconds on.
+    bool tune_after_change = false;
 
     // --- CAT ---------------------------------------------------------
     // Serial device, or "host:port" when the model is NET rigctl.

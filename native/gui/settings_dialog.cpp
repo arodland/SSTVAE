@@ -653,6 +653,18 @@ QWidget* SettingsDialog::rig_tab() {
                  style::row(page, {new QLabel(tr("Poll"), page), poll_interval_s_,
                                    new QLabel(tr("Lead"), page), ptt_lead_,
                                    new QLabel(tr("Tail"), page), ptt_tail_}));
+    add_gap(form);
+
+    tune_after_change_ = new QCheckBox(tr("Perform tuning after frequency change"), page);
+    tune_after_change_->setObjectName(QStringLiteral("tune_after_change"));
+    tune_after_change_->setChecked(rig.tune_after_change);
+    form->addRow(tune_after_change_);
+    add_check_note(form, page,
+                   style::note(tr("Five seconds after the app changes the radio's frequency, "
+                                  "by hand or from the QRSS schedule, it starts the antenna "
+                                  "tuner (rigctl's G TUNE). The tuner puts a short carrier on "
+                                  "the air."),
+                               page));
 
     // Centred, and set apart from the rows above. Everything else on
     // this tab is a setting that takes effect on OK; these two *do*
@@ -742,6 +754,7 @@ settings::RigConfig SettingsDialog::pending_rig() const {
     rig.poll_interval_s = poll_interval_s_->value();
     rig.ptt_lead_s = ptt_lead_->value();
     rig.ptt_tail_s = ptt_tail_->value();
+    rig.tune_after_change = tune_after_change_->isChecked();
     return rig;
 }
 

@@ -41,6 +41,7 @@
 #include "qrss_schedule_window.hpp"
 #include "qrss_sends.hpp"
 #include "qrss_timeline.hpp"
+#include "waterfall.hpp"
 
 using namespace sstvae;
 using namespace sstvae::gui;
@@ -693,6 +694,103 @@ void test_the_editor(const std::filesystem::path& dir) {
                    "editor: Save as new Send keeps the old one");
 }
 
+void test_frequency_changes(const std::filesystem::path& dir) {
+    Fake fake;
+    std::unique_ptr<QrssScheduler> s(make(fake, dir / "f" / "qrss_schedule.json"));
+    std::vector<double> retuned;
+    QrssScheduler::Start retune_answer = QrssScheduler::Start::Started;
+    s->set_retuner([&](const qs::FreqChange& c, std::string* why) {
+        if (retune_answer == QrssScheduler::Start::Started) retuned.push_back(c.dial_hz);
+        *why = "the transmitter is busy";
+        return retune_answer;
+    });
+    const images::Picture pic(64, 48);
+    // 2 x A from 01:00Z: on the air (with its lead) ~00:56 to ~01:59:32.
+    check::is_true(s->add(entry("A", Q, 2, 0, "aa"), pic).empty(), "change: a send to avoid");
+
+    qs::FreqChange c;
+    c.dial_hz = 10'141'000.0;
+    c.at = Q + 600.0;
+    check::is_true(!s->add_change(c).empty(), "change: not in the middle of a send");
+    c.at = Q + 2 * 1800.0 - 11.0 + 1782.7 - 1800.0 + 10.0;   // 10 s after its audio ends
+    check::is_true(!s->add_change(c).empty(), "change: nor within 30 s of its end");
+    c.at = Q - H + 30.0;
+    check::is_true(!s->add_change(c).empty(), "change: nor with less than a minute's notice");
+    c.at = Q + H + 120.0;
+    check::is_true(s->add_change(c).empty() && s->changes().size() == 1 &&
+                       !s->changes()[0].id.empty(),
+                   "change: clear of the send, it is scheduled");
+    check::is_true(!s->add(entry("A", Q + H, 1, 0, "over"), pic).empty(),
+                   "change: and a send over it is refused");
+    check::is_true(!s->change(s->entries()[0].id, [](qs::Entry& e) { e.count = 3; }).empty(),
+                   "change: as is lengthening one into it");
+
+    // Saved beside the sends, and read back.
+    {
+        Fake other;
+        std::unique_ptr<QrssScheduler> again(make(other, dir / "f" / "qrss_schedule.json"));
+        check::is_true(again->changes().size() == 1 &&
+                           again->changes()[0].dial_hz == 10'141'000.0 &&
+                           again->changes()[0].at == Q + H + 120.0,
+                       "change: kept in the schedule file");
+    }
+
+    // Moving it: into a send is refused, elsewhere is fine.
+    const std::string id = s->changes()[0].id;
+    check::is_true(!s->edit_change(id, [](qs::FreqChange& x) { x.at = Q + 900.0; }).empty() &&
+                       s->changes()[0].at == Q + H + 120.0,
+                   "change: rescheduling into a send is refused, and changes nothing");
+    check::is_true(s->edit_change(id, [](qs::FreqChange& x) { x.at = Q + 2 * H; }).empty() &&
+                       s->changes()[0].at == Q + 2 * H,
+                   "change: rescheduled");
+
+    // Made at its time, once; a busy transmitter makes it wait.
+    fake.now = Q + 2 * H - 1.0;
+    s->tick();
+    check::is_true(retuned.empty(), "change: not before its time");
+    retune_answer = QrssScheduler::Start::Busy;
+    fake.now = Q + 2 * H + 1.0;
+    s->tick();
+    s->tick();
+    check::is_true(retuned.empty() && !s->changes()[0].done, "change: waits while busy");
+    retune_answer = QrssScheduler::Start::Started;
+    s->tick();
+    s->tick();
+    check::is_true(retuned.size() == 1 && retuned[0] == 10'141'000.0 && s->changes()[0].done,
+                   "change: then made, once");
+    check::is_true(!s->edit_change(id, [](qs::FreqChange& x) { x.at = Q + 3 * H; }).empty(),
+                   "change: a made one cannot be moved");
+
+    // Too late: missed, not made.
+    qs::FreqChange late;
+    late.dial_hz = 7'040'000.0;
+    late.at = Q + 3 * H;
+    check::is_true(s->add_change(late).empty(), "change: another");
+    fake.now = Q + 3 * H + qs::CHANGE_LATE_S + 1.0;
+    s->tick();
+    check::is_true(retuned.size() == 1 && s->changes().back().done &&
+                       logged(fake, "missed the frequency change"),
+                   "change: one long past is missed");
+    s->remove_change(s->changes().back().id);
+    check::equal(s->changes().size(), std::size_t{1}, "change: removed");
+
+    // The timeline's green marks, and their wider grip.
+    QrssTimeline t;
+    t.set_view(Q, 16, Q);
+    t.set_marks({{"m", Q + 2 * 900.0, 10e6, false}});
+    const int x = t.x_of(Q + 2 * 900.0);
+    check::is_true(t.mark_at(QPoint(x + QrssTimeline::MARK_GRAB_PX, 40)) == 0 &&
+                       t.mark_at(QPoint(x - QrssTimeline::MARK_GRAB_PX, 40)) == 0 &&
+                       t.mark_at(QPoint(x + QrssTimeline::MARK_GRAB_PX + 2, 40)) < 0,
+                   "timeline: a mark is grabbed a few pixels either side");
+
+    // "<-30m" labels for the spectrum views.
+    check::is_true(dial_mark_label(45) == QStringLiteral("<-45s") &&
+                       dial_mark_label(1800) == QStringLiteral("<-30m") &&
+                       dial_mark_label(7500) == QStringLiteral("<-2h05m"),
+                   "marks: how long ago, in the spectrum views");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -711,5 +809,6 @@ int main(int argc, char** argv) {
     test_change_and_truncate(dir);
     test_the_window(dir);
     test_the_editor(dir);
+    test_frequency_changes(dir);
     return check::report("qrss schedule");
 }

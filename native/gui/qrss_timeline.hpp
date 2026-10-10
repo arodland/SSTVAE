@@ -4,6 +4,10 @@
 // shows the picture, scaled down, with its mode and which repeat it is
 // underneath ("A 2/5").
 //
+// A scheduled frequency change is a green line at its moment, as wide as
+// the red "now" line, with the new dial frequency in the header; a
+// right-click within MARK_GRAB_PX of it opens its menu.
+//
 // The timeline only draws and reports: a click on a block or an empty
 // slot, a right-click on a block, a block dragged to another slot. The
 // schedule window decides what each means, so the widget holds no
@@ -12,6 +16,7 @@
 #ifndef SSTVAE_GUI_QRSS_TIMELINE_HPP
 #define SSTVAE_GUI_QRSS_TIMELINE_HPP
 
+#include <QColor>
 #include <QPixmap>
 #include <QPoint>
 #include <QRect>
@@ -46,12 +51,29 @@ public:
         bool on_air = false;
     };
 
+    // A frequency change.
+    struct Mark {
+        std::string id;
+        double at = 0.0;
+        double dial_hz = 0.0;
+        bool done = false;
+    };
+    // How far either side of a mark's line a right-click still finds it.
+    static constexpr int MARK_GRAB_PX = 6;
+    static QColor mark_color();
+
     explicit QrssTimeline(QWidget* parent = nullptr);
 
     // `start` is the first column's quarter hour; `cells` columns.
     void set_view(double start, int cells, double now);
     void set_blocks(std::vector<Block> blocks);
     const std::vector<Block>& blocks() const { return blocks_; }
+    void set_marks(std::vector<Mark> marks);
+    const std::vector<Mark>& marks() const { return marks_; }
+    // -1 when no mark is there.
+    int mark_at(const QPoint& p) const;
+    // The moment under x (not snapped).
+    double time_at(int x) const;
     // Outlines the blocks of one entry, and tints those of one Send.
     void set_selected_entry(const std::string& entry);
     void set_highlighted_send(const std::string& send_id);
@@ -74,6 +96,9 @@ signals:
     void slotClicked(double slot);
     void menuRequested(const QString& entry, int send, const QPoint& global_pos);
     void moveRequested(const QString& entry, int send, double slot);
+    // A right-click on a frequency change, and on empty time.
+    void markMenuRequested(const QString& id, const QPoint& global_pos);
+    void emptyMenuRequested(double t, const QPoint& global_pos);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -88,6 +113,7 @@ private:
     double now_ = 0.0;
     int cells_ = 96;
     std::vector<Block> blocks_;
+    std::vector<Mark> marks_;
     std::string selected_entry_;
     std::string highlighted_send_;
     bool slot_hint_ = false;

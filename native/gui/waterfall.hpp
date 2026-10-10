@@ -42,6 +42,7 @@
 #define SSTVAE_GUI_WATERFALL_HPP
 
 #include <QImage>
+#include <QString>
 #include <QWidget>
 
 class QTimer;
@@ -57,6 +58,10 @@ class RingBuffer;
 namespace sstvae::gui {
 
 class SpectrumFeed;
+
+// "<-45s", "<-30m", "<-2h05m": how long ago a dial change was, for the
+// marks on this strip and the QRSS spectrogram.
+QString dial_mark_label(double age_s);
 
 class Waterfall : public QWidget {
     Q_OBJECT
@@ -87,6 +92,11 @@ public:
     // into a question with an answer -- which is also why replacing
     // the ring does *not* clear it.
     bool clip_latched() const { return clip_latched_; }
+
+    // Times (unix seconds) the radio's dial was changed: drawn as green
+    // lines across the strip at the row that was newest then, labelled
+    // with how long ago ("<-3m").
+    void set_dial_marks(std::vector<double> times);
     void clear_clip();
 
 protected:
@@ -105,6 +115,7 @@ private:
     void draw_band_markers(QPainter& painter);
     void draw_level_meter(QPainter& painter);
     void draw_disabled_scrim(QPainter& painter);
+    void draw_dial_marks(QPainter& painter);
 
     // Paint the rows the feed has gained since the last call.
     void draw_new_rows();
@@ -120,6 +131,10 @@ private:
     double peak_ = 0.0;
     bool clipping_ = false;
     bool clip_latched_ = false;
+    std::vector<double> dial_marks_;
+    // Wall time when the newest row was drawn, so a mark's row is
+    // counted back from it (and freezes with the rows when capture stops).
+    double newest_row_time_ = 0.0;
 };
 
 }  // namespace sstvae::gui

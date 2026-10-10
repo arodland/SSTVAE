@@ -48,6 +48,30 @@ void QrssTimeline::set_blocks(std::vector<Block> blocks) {
     update();
 }
 
+QColor QrssTimeline::mark_color() { return QColor(0x1f, 0xa8, 0x4a); }
+
+void QrssTimeline::set_marks(std::vector<Mark> marks) {
+    marks_ = std::move(marks);
+    update();
+}
+
+int QrssTimeline::mark_at(const QPoint& p) const {
+    int best = -1;
+    int best_d = MARK_GRAB_PX + 1;
+    for (std::size_t i = 0; i < marks_.size(); ++i) {
+        const int d = std::abs(p.x() - x_of(marks_[i].at));
+        if (d < best_d) {
+            best = static_cast<int>(i);
+            best_d = d;
+        }
+    }
+    return best;
+}
+
+double QrssTimeline::time_at(int x) const {
+    return start_ + static_cast<double>(x) / CELL_W * CELL_S;
+}
+
 void QrssTimeline::set_selected_entry(const std::string& entry) {
     selected_entry_ = entry;
     update();
@@ -187,6 +211,27 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
         p.drawRect(block_rect(ghost).adjusted(0, 0, -1, -1));
     }
 
+    // Frequency changes: a line as wide as "now", and the new dial
+    // frequency in the header beside it.
+    for (const Mark& m : marks_) {
+        const int x = x_of(m.at);
+        if (x < -40 || x > width() + 40) continue;
+        QColor c = mark_color();
+        if (m.done) c.setAlpha(110);
+        p.setPen(QPen(c, 2));
+        p.drawLine(x, HEADER_H - 6, x, height());
+        p.setFont(small);
+        const QString label = QString::number(m.dial_hz / 1e6, 'f', 3);
+        const int w = p.fontMetrics().horizontalAdvance(label) + 4;
+        const QRect box(x + 3, HEADER_H - 1 - p.fontMetrics().height(), w,
+                        p.fontMetrics().height());
+        QColor ground = pal.color(QPalette::Base);
+        ground.setAlpha(220);
+        p.fillRect(box, ground);
+        p.setPen(c);
+        p.drawText(box, Qt::AlignCenter, label);
+    }
+
     // Now.
     const int xn = x_of(now_);
     if (xn >= 0 && xn <= width()) {
@@ -246,8 +291,16 @@ void QrssTimeline::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 void QrssTimeline::contextMenuEvent(QContextMenuEvent* event) {
+    // A mark first: it is narrow and sits at a block's edge.
+    if (const int m = mark_at(event->pos()); m >= 0) {
+        emit markMenuRequested(QString::fromStdString(marks_[m].id), event->globalPos());
+        return;
+    }
     const int i = block_at(event->pos());
-    if (i < 0) return;
+    if (i < 0) {
+        if (event->pos().y() > HEADER_H) emit emptyMenuRequested(time_at(event->pos().x()), event->globalPos());
+        return;
+    }
     const Block& b = blocks_[i];
     emit blockClicked(QString::fromStdString(b.entry), b.send);
     emit menuRequested(QString::fromStdString(b.entry), b.send, event->globalPos());

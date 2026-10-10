@@ -147,6 +147,19 @@ TransmitPanel::TransmitPanel(AppState* state, QWidget* parent)
         }
         app_->log_event("tx", level, m);
     });
+    // A scheduled frequency change waits for the transmitter to be free:
+    // the radio is not retuned under a transmission.
+    scheduler_->set_retuner([this](const qrss_schedule::FreqChange& change, std::string* why) {
+        if (transmitting() || awaiting_optimizer_ || thread_.joinable()) {
+            *why = "the transmitter is busy";
+            return QrssScheduler::Start::Busy;
+        }
+        if (!app_->tune_rig(change.dial_hz)) {
+            *why = "rig control is off or the radio is not connected";
+            return QrssScheduler::Start::Failed;
+        }
+        return QrssScheduler::Start::Started;
+    });
     connect(scheduler_, &QrssScheduler::changed, this, &TransmitPanel::update_schedule_summary);
     update_schedule_summary();
 }
@@ -1662,6 +1675,12 @@ void TransmitPanel::show_schedule() {
                 d.freq_hz = scheduler_->entries().empty()
                                 ? app_->config().transmit.qrss_freq_hz
                                 : scheduler_->entries().back().freq_hz;
+                // The dial now, else the last change scheduled.
+                if (const auto hz = app_->current_frequency_hz()) {
+                    d.dial_hz = *hz;
+                } else if (!scheduler_->changes().empty()) {
+                    d.dial_hz = scheduler_->changes().back().dial_hz;
+                }
                 return d;
             },
             std::move(context), this);

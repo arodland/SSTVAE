@@ -116,6 +116,7 @@ private:
     QDoubleSpinBox* poll_interval_s_ = nullptr;
     QDoubleSpinBox* ptt_lead_ = nullptr;
     QDoubleSpinBox* ptt_tail_ = nullptr;
+    QCheckBox* tune_after_change_ = nullptr;
     QPushButton* test_cat_ = nullptr;
     QPushButton* test_ptt_ = nullptr;
 

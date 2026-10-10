@@ -3,6 +3,10 @@
 #include <QComboBox>
 #include <QDateEdit>
 #include <QDateTime>
+#include <QDateTimeEdit>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -158,8 +162,20 @@ void QrssScheduleWindow::build() {
     message_->setWordWrap(true);
     message_->setText(tr("Drag a send to move it; right-click it to remove it, change its mode "
                          "or repeat it. With a Send selected, click a free slot to start "
-                         "there."));
-    up_layout->addWidget(message_);
+                         "there. Green lines are frequency changes: right-click one to "
+                         "move it, or right-click free time to add one."));
+    auto* message_row = new QHBoxLayout;
+    message_row->addWidget(message_, 1);
+    auto* add_change = new QPushButton(tr("Add frequency change..."), upcoming);
+    add_change->setObjectName(QStringLiteral("add_freq_change"));
+    connect(add_change, &QPushButton::clicked, this, [this] {
+        const double now = scheduler_->now();
+        double at = std::ceil((now + 300.0) / 60.0) * 60.0;
+        double hz = defaults_().dial_hz;
+        if (ask_freq_change(tr("Add frequency change"), &at, &hz)) add_freq_change(at, hz);
+    });
+    message_row->addWidget(add_change, 0, Qt::AlignTop);
+    up_layout->addLayout(message_row);
     outer->addWidget(upcoming);
     connect(timeline_, &QrssTimeline::blockClicked, this, &QrssScheduleWindow::on_block_clicked);
     connect(timeline_, &QrssTimeline::slotClicked, this, [this](double slot) {
@@ -169,6 +185,18 @@ void QrssScheduleWindow::build() {
     connect(timeline_, &QrssTimeline::moveRequested, this,
             [this](const QString& entry, int send, double slot) {
                 move_send(entry.toStdString(), send, slot);
+            });
+    connect(timeline_, &QrssTimeline::markMenuRequested, this,
+            [this](const QString& id, const QPoint& at) {
+                QMenu* menu = change_menu_for(id.toStdString());
+                menu->setAttribute(Qt::WA_DeleteOnClose);
+                menu->popup(at);
+            });
+    connect(timeline_, &QrssTimeline::emptyMenuRequested, this,
+            [this](double t, const QPoint& at) {
+                QMenu* menu = empty_menu_for(t);
+                menu->setAttribute(Qt::WA_DeleteOnClose);
+                menu->popup(at);
             });
     connect(timeline_, &QrssTimeline::menuRequested, this,
             [this](const QString& entry, int send, const QPoint& at) {
@@ -742,6 +770,137 @@ void QrssScheduleWindow::refresh_timeline() {
         }
     }
     timeline_->set_blocks(std::move(blocks));
+    std::vector<QrssTimeline::Mark> marks;
+    for (const qs::FreqChange& c : scheduler_->changes()) {
+        marks.push_back({c.id, c.at, c.dial_hz, c.done});
+    }
+    timeline_->set_marks(std::move(marks));
+}
+
+// --- frequency changes ----------------------------------------------------
+
+namespace {
+
+const qs::FreqChange* change_by_id(const std::vector<qs::FreqChange>& changes,
+                                   const std::string& id) {
+    for (const qs::FreqChange& c : changes) {
+        if (c.id == id) return &c;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+std::string QrssScheduleWindow::add_freq_change(double at, double dial_hz) {
+    qs::FreqChange c;
+    c.at = at;
+    c.dial_hz = dial_hz;
+    const std::string why = scheduler_->add_change(c);
+    show_result(why, tr("Frequency change to %1 at %2.")
+                         .arg(QString::fromStdString(qs::mhz(dial_hz)), local_and_utc(at)));
+    return why;
+}
+
+std::string QrssScheduleWindow::move_freq_change(const std::string& id, double at) {
+    const std::string why =
+        scheduler_->edit_change(id, [at](qs::FreqChange& c) { c.at = at; });
+    show_result(why, tr("Frequency change moved to %1.").arg(local_and_utc(at)));
+    return why;
+}
+
+std::string QrssScheduleWindow::retune_freq_change(const std::string& id, double dial_hz) {
+    const std::string why =
+        scheduler_->edit_change(id, [dial_hz](qs::FreqChange& c) { c.dial_hz = dial_hz; });
+    show_result(why, tr("Frequency change now to %1.")
+                         .arg(QString::fromStdString(qs::mhz(dial_hz))));
+    return why;
+}
+
+void QrssScheduleWindow::remove_freq_change(const std::string& id) {
+    scheduler_->remove_change(id);
+    show_result({}, tr("Frequency change removed."));
+}
+
+QMenu* QrssScheduleWindow::change_menu_for(const std::string& id) {
+    auto* menu = new QMenu(this);
+    menu->setObjectName(QStringLiteral("freq_change_menu"));
+    const qs::FreqChange* c = change_by_id(scheduler_->changes(), id);
+    if (c == nullptr) {
+        menu->addAction(tr("No longer scheduled"))->setEnabled(false);
+        return menu;
+    }
+    menu->addSection(tr("Frequency change to %1, %2")
+                         .arg(QString::fromStdString(qs::mhz(c->dial_hz)), local_and_utc(c->at)));
+    const double at0 = c->at;
+    const double hz0 = c->dial_hz;
+    QAction* move = menu->addAction(tr("Reschedule..."));
+    move->setObjectName(QStringLiteral("menu_reschedule_change"));
+    connect(move, &QAction::triggered, this, [this, id, at0, hz0] {
+        double at = at0;
+        double hz = hz0;
+        if (ask_freq_change(tr("Reschedule frequency change"), &at, &hz)) {
+            const std::string why = scheduler_->edit_change(id, [at, hz](qs::FreqChange& x) {
+                x.at = at;
+                x.dial_hz = hz;
+            });
+            show_result(why, tr("Frequency change to %1 at %2.")
+                                 .arg(QString::fromStdString(qs::mhz(hz)), local_and_utc(at)));
+        }
+    });
+    QAction* remove = menu->addAction(tr("Remove"));
+    remove->setObjectName(QStringLiteral("menu_remove_change"));
+    connect(remove, &QAction::triggered, this, [this, id] { remove_freq_change(id); });
+    if (c->done) {
+        move->setEnabled(false);
+        move->setText(tr("Reschedule... (already made)"));
+    }
+    return menu;
+}
+
+QMenu* QrssScheduleWindow::empty_menu_for(double t) {
+    auto* menu = new QMenu(this);
+    menu->setObjectName(QStringLiteral("schedule_empty_menu"));
+    const double at0 = std::round(t / 60.0) * 60.0;
+    QAction* add = menu->addAction(tr("Add frequency change here..."));
+    add->setObjectName(QStringLiteral("menu_add_change"));
+    connect(add, &QAction::triggered, this, [this, at0] {
+        double at = at0;
+        double hz = defaults_().dial_hz;
+        if (ask_freq_change(tr("Add frequency change"), &at, &hz)) add_freq_change(at, hz);
+    });
+    return menu;
+}
+
+bool QrssScheduleWindow::ask_freq_change(const QString& title, double* at, double* dial_hz) {
+    QDialog dialog(this);
+    dialog.setWindowTitle(title);
+    auto* form = new QFormLayout(&dialog);
+    auto* when = new QDateTimeEdit(&dialog);
+    when->setObjectName(QStringLiteral("freq_change_time"));
+    when->setTimeSpec(Qt::UTC);
+    when->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm:ss 'UTC'"));
+    when->setDateTime(utc_of(*at));
+    form->addRow(tr("When:"), when);
+    auto* freq = new QDoubleSpinBox(&dialog);
+    freq->setObjectName(QStringLiteral("freq_change_mhz"));
+    freq->setDecimals(6);
+    freq->setRange(0.001, 10000.0);
+    freq->setSingleStep(0.001);
+    freq->setSuffix(tr(" MHz"));
+    freq->setValue(*dial_hz > 0.0 ? *dial_hz / 1e6 : 10.141);
+    form->addRow(tr("Dial frequency:"), freq);
+    form->addRow(style::note(tr("Keep it at least 30 s clear of any send. With \"Perform "
+                                "tuning after frequency change\" on (Settings > Rig control), "
+                                "the tuner starts 5 s later."),
+                             &dialog));
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    form->addRow(buttons);
+    if (dialog.exec() != QDialog::Accepted) return false;
+    *at = static_cast<double>(when->dateTime().toSecsSinceEpoch());
+    *dial_hz = std::round(freq->value() * 1e6);
+    return true;
 }
 
 // --- the timeline's right-click menu -------------------------------------

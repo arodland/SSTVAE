@@ -205,6 +205,7 @@ void read_rig(const Reader& r, RigConfig& c) {
     r.get("poll_interval_s", c.poll_interval_s);
     r.get("ptt_lead_s", c.ptt_lead_s);
     r.get("ptt_tail_s", c.ptt_tail_s);
+    r.get("tune_after_change", c.tune_after_change);
     r.get("device", c.device);
     r.get("baud", c.baud);
     r.get("data_bits", c.data_bits);
@@ -226,7 +227,7 @@ void read_rig(const Reader& r, RigConfig& c) {
     // changed shape" and a wall of complaints about a file they did not
     // write.
     r.report_unknown({"enabled", "model", "poll_interval_s", "ptt_lead_s",
-                      "ptt_tail_s", "device", "baud", "data_bits", "stop_bits",
+                      "ptt_tail_s", "tune_after_change", "device", "baud", "data_bits", "stop_bits",
                       "parity", "handshake", "dtr", "rts", "ptt_method",
                       "ptt_device", "ptt_audio", "mode",
                       // v1, ignored:
@@ -450,6 +451,7 @@ std::string to_json(const Config& c) {
           {"poll_interval_s", c.rig.poll_interval_s},
           {"ptt_lead_s", c.rig.ptt_lead_s},
           {"ptt_tail_s", c.rig.ptt_tail_s},
+          {"tune_after_change", c.rig.tune_after_change},
           {"device", c.rig.device},
           {"baud", c.rig.baud},
           {"data_bits", c.rig.data_bits},

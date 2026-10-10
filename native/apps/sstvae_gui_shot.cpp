@@ -299,6 +299,10 @@ int main(int argc, char** argv) {
             b.count = 0;
             b.every_min = 240;
             scheduler.add(b, picture_of(ids[1]));
+            qs::FreqChange c;
+            c.at = first + 2 * 3600.0 + 120.0;
+            c.dial_hz = 7'038'600.0;
+            scheduler.add_change(c);
         }
         sstvae::gui::QrssScheduleWindow w(
             &scheduler, &sends,
@@ -664,6 +668,7 @@ int main(int argc, char** argv) {
         qw->set_state_dir(state);
         sstvae::gui::QrssPage page(qw);
         page.spectrogram()->set_clock([now] { return now; });
+        page.spectrogram()->set_dial_marks({now - 5400.0, now - 1800.0});
         page.set_schedule_summary(QStringLiteral("Next send: \"Sunset\", mode A at 17:45Z."));
         // The audio, a minute at a time.
         std::mt19937 rng(7);

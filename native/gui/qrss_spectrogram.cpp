@@ -1,6 +1,7 @@
 #include "qrss_spectrogram.hpp"
 
 #include <QDateTime>
+#include <QFontMetrics>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QLinearGradient>
@@ -19,6 +20,7 @@
 
 #include "rx/ringbuffer.hpp"
 #include "spectrum_feed.hpp"
+#include "waterfall.hpp"
 
 namespace sstvae::gui {
 
@@ -111,6 +113,11 @@ void QrssSpectrogram::pump() {
     if (feed_ == own_feed_.get()) feed_->pump();
     // The picture moves with the clock even with no audio.
     invalidate();
+}
+
+void QrssSpectrogram::set_dial_marks(std::vector<double> times) {
+    dial_marks_ = std::move(times);
+    update();
 }
 
 void QrssSpectrogram::set_markers(std::vector<Marker> markers) {
@@ -400,6 +407,34 @@ void QrssSpectrogram::paintEvent(QPaintEvent*) {
     // Now.
     painter.setPen(QPen(accent, 2));
     painter.drawLine(p.left() + 1, p.top(), p.left() + 1, p.bottom());
+
+    // Dial changes: green, as on the schedule's timeline, each with how
+    // long ago, so a line here can be matched to one there.
+    {
+        const QColor green = inverted_ ? QColor(0x14, 0x8c, 0x3a) : QColor(0x3c, 0xe0, 0x6e);
+        const QColor ground = inverted_ ? QColor(255, 255, 255, 200) : QColor(0, 0, 0, 170);
+        QFont small = font();
+        small.setPointSizeF(std::max(6.5, small.pointSizeF() * 0.8));
+        painter.setFont(small);
+        const double t_now = rendered_now_ > 0 ? rendered_now_ : now();
+        int row = 0;
+        for (const double t : dial_marks_) {
+            if (t > t_now) continue;
+            const double x = x_of_time(t);
+            if (x < 0 || x >= p.width()) continue;
+            const int px = p.left() + static_cast<int>(std::lround(x));
+            painter.setPen(QPen(green, 2));
+            painter.drawLine(px, p.top() + 14, px, p.bottom());
+            const QString label = dial_mark_label(t_now - t);
+            const QFontMetrics fm(small);
+            // Staggered, so labels of changes close together stay legible.
+            const QRect box(px + 3, p.top() + 16 + (row++ % 3) * (fm.height() + 1),
+                            fm.horizontalAdvance(label) + 4, fm.height());
+            painter.fillRect(box, ground);
+            painter.setPen(green);
+            painter.drawText(box, Qt::AlignCenter, label);
+        }
+    }
 
     QFont axis_font = font();
     axis_font.setPointSizeF(std::max(6.5, axis_font.pointSizeF() * 0.8));

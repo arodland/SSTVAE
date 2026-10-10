@@ -84,6 +84,7 @@ NON_DEFAULT = {
         "mode": "pkt_usb",
         "ptt_lead_s": 0.45,
         "ptt_tail_s": 0.25,
+        "tune_after_change": True,
         "poll_interval_s": 2.5,
     },
     "folders": {

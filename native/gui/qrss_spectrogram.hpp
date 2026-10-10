@@ -81,6 +81,9 @@ public:
     // Audio whose last sample was captured at `end_time` (unix seconds).
     void push_audio(const std::vector<double>& samples, double end_time);
     void set_markers(std::vector<Marker> markers);
+    // Times (unix seconds) the radio's dial was changed: green lines up
+    // the plot, each labelled with how long ago ("<-30m").
+    void set_dial_marks(std::vector<double> times);
     // For tests: the wall clock, in unix seconds.
     void set_clock(std::function<double()> clock);
 
@@ -133,6 +136,7 @@ private:
     SpectrumFeed* feed_ = nullptr;
     dsp::TimeScale scale_;
     std::vector<Marker> markers_;
+    std::vector<double> dial_marks_;
     std::function<double()> clock_;
     QTimer* timer_ = nullptr;
     QImage image_;

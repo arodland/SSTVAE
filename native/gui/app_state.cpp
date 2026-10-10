@@ -1,5 +1,8 @@
 #include "app_state.hpp"
 
+#include <QDateTime>
+#include <QTimer>
+
 #include <exception>
 #include <initializer_list>
 #include <utility>
@@ -187,6 +190,22 @@ bool AppState::tune_rig(double hz) {
     if (!config_.rig.enabled || !rig_.request_frequency(hz)) return false;
     log_event("rig", log::Severity::Info,
               QStringLiteral("Tuning to %1 MHz").arg(hz / 1e6, 0, 'f', 6));
+    dial_changes_.push_back({static_cast<double>(QDateTime::currentMSecsSinceEpoch()) / 1000.0, hz});
+    // A day is plenty for any display.
+    while (dial_changes_.size() > 1 && dial_changes_.front().t < dial_changes_.back().t - 86400.0) {
+        dial_changes_.erase(dial_changes_.begin());
+    }
+    emit dialChanged();
+    if (config_.rig.tune_after_change) {
+        QTimer::singleShot(TUNE_AFTER_CHANGE_MS, this, [this] {
+            if (transmit_busy_ && transmit_busy_()) {
+                log_event("rig", log::Severity::Warning,
+                          QStringLiteral("Not tuning after the frequency change: transmitting"));
+                return;
+            }
+            start_rig_tuner();
+        });
+    }
     return true;
 }
 

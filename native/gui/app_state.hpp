@@ -30,6 +30,8 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "codec/codec.hpp"
 #include "log/log.hpp"
@@ -71,7 +73,20 @@ public:
     void disconnect_rig();
     // Ask the radio to tune (Hz). Never blocks; false when rig control is
     // off or the radio is keyed. The result shows as the next readout.
+    // With rig.tune_after_change, the antenna tuner follows
+    // TUNE_AFTER_CHANGE_S later, unless `busy` (set_transmit_busy) then
+    // says a transmission is under way.
     bool tune_rig(double hz);
+    static constexpr int TUNE_AFTER_CHANGE_MS = 5000;
+    // Says whether a transmission is under way.
+    void set_transmit_busy(std::function<bool()> busy) { transmit_busy_ = std::move(busy); }
+    // Every dial change this session asked for: when (unix seconds) and
+    // to what (Hz), oldest first. The spectrum displays mark them.
+    struct DialChange {
+        double t = 0.0;
+        double hz = 0.0;
+    };
+    const std::vector<DialChange>& dial_changes() const { return dial_changes_; }
     // Start the radio's antenna tuner. Same rules as tune_rig.
     bool start_rig_tuner();
     void pause_rig_polling();
@@ -102,6 +117,8 @@ signals:
     // `error` distinguishes a CAT failure from a routine status; the
     // text alone cannot (failure text is the backend's exception).
     void rigStatus(const QString& text, bool error);
+    // tune_rig asked the radio for a new frequency.
+    void dialChanged();
     // Every log entry, queued to the GUI thread for the pane.
     void logEntry(qlonglong ms, const QString& source, int severity,
                   const QString& text);
@@ -115,6 +132,8 @@ signals:
 
 private:
     settings::Config config_;
+    std::function<bool()> transmit_busy_;
+    std::vector<DialChange> dial_changes_;
 
     log::StatusLog log_;
     std::unique_ptr<log::FileWriter> file_log_;

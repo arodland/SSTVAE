@@ -34,6 +34,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "images/types.hpp"
@@ -115,9 +116,45 @@ std::optional<Clash> clash(const Entry& e, const std::vector<Entry>& others, dou
 std::optional<Upcoming> clash_with(const std::vector<Entry>& entries, double from, double to,
                                    double now);
 
-std::string to_json(const std::vector<Entry>& entries);
+// --- frequency changes ------------------------------------------------
+//
+// A scheduled change of the radio's dial frequency, at a moment between
+// transmissions. Five seconds later the antenna tuner may follow
+// (Settings > Rig control), so a change keeps CHANGE_CLEAR_S clear of
+// any send's span on both sides, the tune included.
+
+inline constexpr double TUNE_DELAY_S = 5.0;
+inline constexpr double CHANGE_CLEAR_S = 30.0;
+// Not done within this long of its time (the transmitter was busy, the
+// app was not running): missed.
+inline constexpr double CHANGE_LATE_S = 600.0;
+
+struct FreqChange {
+    std::string id;
+    double at = 0.0;        // unix seconds
+    double dial_hz = 0.0;   // the radio's dial frequency
+    bool done = false;      // made, or missed
+};
+
+// Empty when the change can be scheduled; otherwise why not.
+std::string problem(const FreqChange& c);
+// The span a change needs clear of transmissions.
+std::pair<double, double> busy(const FreqChange& c);
+// The first enabled send in `entries` that a change at `c` would cut
+// into, as for `clash_with`.
+std::optional<Upcoming> clash(const FreqChange& c, const std::vector<Entry>& entries);
+// The first pending change that `e`'s sends would cut into (within a
+// week of `now`), else nothing.
+std::optional<FreqChange> clash(const Entry& e, const std::vector<FreqChange>& changes,
+                                double now);
+// "10.141000 MHz".
+std::string mhz(double hz);
+
+std::string to_json(const std::vector<Entry>& entries,
+                    const std::vector<FreqChange>& changes = {});
 // Unreadable entries are dropped, not fatal.
 std::vector<Entry> from_json(const std::string& text);
+std::vector<FreqChange> changes_from_json(const std::string& text);
 
 }  // namespace sstvae::gui::qrss_schedule
 
@@ -138,6 +175,10 @@ public:
                                         const std::vector<qrss_tx::Pass>& passes,
                                         std::string* why)>;
     using Clock = std::function<double()>;
+    // Makes a frequency change: Started when the radio was told, Busy
+    // when it must wait (the transmitter is in use), Failed otherwise.
+    using Retuner = std::function<Start(const qrss_schedule::FreqChange& change,
+                                        std::string* why)>;
 
     // `file` is the schedule (JSON); pictures go in a directory beside
     // it. Empty `clock` is the system clock. `tick_ms` 0 leaves the
@@ -168,6 +209,18 @@ public:
     // Empty on success; resuming an entry that would clash is refused.
     std::string set_enabled(const std::string& id, bool on);
 
+    // Frequency changes, in time order. Made ones are kept a day, for
+    // the timeline.
+    const std::vector<qrss_schedule::FreqChange>& changes() const { return changes_; }
+    void set_retuner(Retuner retuner) { retuner_ = std::move(retuner); }
+    // Adds a change; its `id` is filled in here. Empty on success, else
+    // why not (too soon, or it would cut into a send).
+    std::string add_change(qrss_schedule::FreqChange change);
+    // Moves or retunes a pending change, with the same checks.
+    std::string edit_change(const std::string& id,
+                            const std::function<void(qrss_schedule::FreqChange&)>& edit);
+    void remove_change(const std::string& id);
+
     // The entry whose run is on the air (or getting ready), else empty.
     const std::string& active() const { return active_; }
     // The transmitter finished whatever it was doing.
@@ -195,6 +248,12 @@ private:
     Clock clock_;
     QTimer* timer_ = nullptr;
     std::vector<qrss_schedule::Entry> entries_;
+    std::vector<qrss_schedule::FreqChange> changes_;
+    Retuner retuner_;
+    std::string change_refused_;   // the change whose wait was logged
+    // Why a send could not go where asked because of a change, or empty.
+    std::string change_clash_text(const qrss_schedule::Entry& e, double now) const;
+    void tick_changes(double now, bool& dirty);
     std::string active_;
     // The last refusal logged, "<id>/<send>", so a busy transmitter is
     // logged once per send rather than once per tick.

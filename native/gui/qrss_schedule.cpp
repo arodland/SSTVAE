@@ -184,7 +184,40 @@ std::optional<Upcoming> clash_with(const std::vector<Entry>& entries, double fro
     return best;
 }
 
-std::string to_json(const std::vector<Entry>& entries) {
+std::string problem(const FreqChange& c) {
+    if (!(c.dial_hz > 0.0 && c.dial_hz < 1e10)) return "the frequency must be above 0 Hz";
+    if (!(c.at > 0.0)) return "a frequency change needs a time";
+    return {};
+}
+
+std::pair<double, double> busy(const FreqChange& c) {
+    return {c.at - CHANGE_CLEAR_S, c.at + TUNE_DELAY_S + CHANGE_CLEAR_S};
+}
+
+std::optional<Upcoming> clash(const FreqChange& c, const std::vector<Entry>& entries) {
+    const auto [from, to] = busy(c);
+    return clash_with(entries, from, to, 0.0);
+}
+
+std::optional<FreqChange> clash(const Entry& e, const std::vector<FreqChange>& changes,
+                                double now) {
+    if (!e.enabled || finished(e) || !problem(e).empty()) return std::nullopt;
+    const double end = std::max(now, e.first_slot) + WEEK_S;
+    std::optional<FreqChange> best;
+    for (const FreqChange& c : changes) {
+        if (c.done || c.at > end) continue;
+        const auto [from, to] = busy(c);
+        const auto [lo, hi] = overlapping(e, from, to);
+        if (lo <= hi && (!best || c.at < best->at)) best = c;
+    }
+    return best;
+}
+
+std::string mhz(double hz) {
+    return QString::number(hz / 1e6, 'f', 6).toStdString() + " MHz";
+}
+
+std::string to_json(const std::vector<Entry>& entries, const std::vector<FreqChange>& changes) {
     QJsonArray list;
     for (const Entry& e : entries) {
         QJsonObject o;
@@ -204,6 +237,16 @@ std::string to_json(const std::vector<Entry>& entries) {
     QJsonObject root;
     root[QStringLiteral("version")] = 1;
     root[QStringLiteral("entries")] = list;
+    QJsonArray moves;
+    for (const FreqChange& c : changes) {
+        QJsonObject o;
+        o[QStringLiteral("id")] = QString::fromStdString(c.id);
+        o[QStringLiteral("at")] = c.at;
+        o[QStringLiteral("dial_hz")] = c.dial_hz;
+        o[QStringLiteral("done")] = c.done;
+        moves.append(o);
+    }
+    if (!moves.isEmpty()) root[QStringLiteral("freq_changes")] = moves;
     return QJsonDocument(root).toJson(QJsonDocument::Indented).toStdString();
 }
 
@@ -227,6 +270,24 @@ std::vector<Entry> from_json(const std::string& text) {
         if (e.id.empty() || e.picture.empty() || !problem(e).empty()) continue;
         out.push_back(std::move(e));
     }
+    return out;
+}
+
+std::vector<FreqChange> changes_from_json(const std::string& text) {
+    std::vector<FreqChange> out;
+    const QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(text));
+    for (const QJsonValue& v : doc.object().value(QStringLiteral("freq_changes")).toArray()) {
+        const QJsonObject o = v.toObject();
+        FreqChange c;
+        c.id = o.value(QStringLiteral("id")).toString().toStdString();
+        c.at = o.value(QStringLiteral("at")).toDouble();
+        c.dial_hz = o.value(QStringLiteral("dial_hz")).toDouble();
+        c.done = o.value(QStringLiteral("done")).toBool();
+        if (c.id.empty() || !problem(c).empty()) continue;
+        out.push_back(c);
+    }
+    std::sort(out.begin(), out.end(),
+              [](const FreqChange& a, const FreqChange& b) { return a.at < b.at; });
     return out;
 }
 
@@ -264,14 +325,16 @@ std::filesystem::path QrssScheduler::picture_dir() const {
 void QrssScheduler::load() {
     QFile f(QString::fromStdString(file_.string()));
     if (!f.open(QIODevice::ReadOnly)) return;
-    entries_ = qs::from_json(f.readAll().toStdString());
+    const std::string text = f.readAll().toStdString();
+    entries_ = qs::from_json(text);
+    changes_ = qs::changes_from_json(text);
 }
 
 void QrssScheduler::save() {
     std::error_code ec;
     std::filesystem::create_directories(file_.parent_path(), ec);
     QSaveFile f(QString::fromStdString(file_.string()));
-    const std::string text = qs::to_json(entries_);
+    const std::string text = qs::to_json(entries_, changes_);
     if (!f.open(QIODevice::WriteOnly) ||
         f.write(text.data(), static_cast<qint64>(text.size())) !=
             static_cast<qint64>(text.size()) ||
@@ -303,6 +366,7 @@ std::string QrssScheduler::add(qs::Entry entry, const images::Picture& picture) 
                qs::when(c->other_slot, now) + " send of \"" + c->other +
                "\"; the transmitter sends one thing at a time";
     }
+    if (std::string why = change_clash_text(entry, now); !why.empty()) return why;
     do {
         entry.id = QUuid::createUuid().toString(QUuid::Id128).left(12).toStdString();
     } while (find(entry.id) != nullptr);
@@ -373,6 +437,7 @@ std::string QrssScheduler::change(const std::string& id,
                    qs::when(c->other_slot, now) + " send of \"" + c->other +
                    "\"; the transmitter sends one thing at a time";
         }
+        if (std::string why = change_clash_text(trial, now); !why.empty()) return why;
     }
     *e = trial;
     save();
@@ -410,6 +475,7 @@ std::string QrssScheduler::set_enabled(const std::string& id, bool on) {
             return "its " + qs::when(c->slot, clock_()) + " send would overlap the " +
                    qs::when(c->other_slot, clock_()) + " send of \"" + c->other + "\"";
         }
+        if (std::string why = change_clash_text(trial, clock_()); !why.empty()) return why;
     }
     e->enabled = on;
     QString note;
@@ -444,9 +510,134 @@ void QrssScheduler::run_finished() {
     emit changed();
 }
 
+std::string QrssScheduler::change_clash_text(const qs::Entry& e, double now) const {
+    const auto c = qs::clash(e, changes_, now);
+    if (!c) return {};
+    return "it would be on the air at the " + qs::when(c->at, now) + " frequency change (to " +
+           qs::mhz(c->dial_hz) + "); move or remove the change first";
+}
+
+namespace {
+
+std::string change_problem(const qs::FreqChange& c, const std::vector<qs::Entry>& entries,
+                           double now) {
+    if (std::string why = qs::problem(c); !why.empty()) return why;
+    if (c.at < now + 60.0) return "that is too soon: a frequency change needs a minute's notice";
+    if (const auto u = qs::clash(c, entries)) {
+        return "it would cut into the " + qs::when(u->slot, now) + " send of \"" +
+               entries[u->entry].label +
+               "\"; a change keeps 30 s clear of a send on each side (and 5 s for the tuner)";
+    }
+    return {};
+}
+
+}  // namespace
+
+std::string QrssScheduler::add_change(qs::FreqChange change) {
+    const double now = clock_();
+    change.done = false;
+    if (std::string why = change_problem(change, entries_, now); !why.empty()) return why;
+    const auto taken = [this](const std::string& id) {
+        return std::any_of(changes_.begin(), changes_.end(),
+                           [&](const qs::FreqChange& c) { return c.id == id; });
+    };
+    do {
+        change.id = QUuid::createUuid().toString(QUuid::Id128).left(12).toStdString();
+    } while (taken(change.id));
+    changes_.push_back(change);
+    std::stable_sort(changes_.begin(), changes_.end(),
+                     [](const qs::FreqChange& a, const qs::FreqChange& b) { return a.at < b.at; });
+    save();
+    emit logged(0, tr("QRSS schedule: frequency change to %1 at %2")
+                           .arg(QString::fromStdString(qs::mhz(change.dial_hz)),
+                                QString::fromStdString(qs::when(change.at, now))));
+    emit changed();
+    return {};
+}
+
+std::string QrssScheduler::edit_change(const std::string& id,
+                                       const std::function<void(qs::FreqChange&)>& edit) {
+    const auto it = std::find_if(changes_.begin(), changes_.end(),
+                                 [&](const qs::FreqChange& c) { return c.id == id; });
+    if (it == changes_.end()) return "it is no longer on the schedule";
+    if (it->done) return "it has already been made";
+    const double now = clock_();
+    qs::FreqChange trial = *it;
+    edit(trial);
+    trial.id = id;
+    if (std::string why = change_problem(trial, entries_, now); !why.empty()) return why;
+    *it = trial;
+    std::stable_sort(changes_.begin(), changes_.end(),
+                     [](const qs::FreqChange& a, const qs::FreqChange& b) { return a.at < b.at; });
+    save();
+    emit logged(0, tr("QRSS schedule: frequency change now to %1 at %2")
+                           .arg(QString::fromStdString(qs::mhz(trial.dial_hz)),
+                                QString::fromStdString(qs::when(trial.at, now))));
+    emit changed();
+    return {};
+}
+
+void QrssScheduler::remove_change(const std::string& id) {
+    const auto it = std::find_if(changes_.begin(), changes_.end(),
+                                 [&](const qs::FreqChange& c) { return c.id == id; });
+    if (it == changes_.end()) return;
+    const QString what = tr("%1 at %2").arg(QString::fromStdString(qs::mhz(it->dial_hz)),
+                                            QString::fromStdString(qs::when(it->at, clock_())));
+    changes_.erase(it);
+    save();
+    emit logged(0, tr("QRSS schedule: removed the frequency change to %1").arg(what));
+    emit changed();
+}
+
+void QrssScheduler::tick_changes(double now, bool& dirty) {
+    // Made ones are kept a day, for the timeline.
+    const auto old = std::remove_if(changes_.begin(), changes_.end(), [now](const qs::FreqChange& c) {
+        return c.done && c.at < now - 86400.0;
+    });
+    if (old != changes_.end()) {
+        changes_.erase(old, changes_.end());
+        dirty = true;
+    }
+    for (qs::FreqChange& c : changes_) {
+        if (c.done || now < c.at) continue;
+        const QString what = tr("%1 at %2").arg(QString::fromStdString(qs::mhz(c.dial_hz)),
+                                                QString::fromStdString(qs::when(c.at, now)));
+        if (now > c.at + qs::CHANGE_LATE_S) {
+            emit logged(1, tr("QRSS schedule: missed the frequency change to %1 (%2)")
+                                  .arg(what, change_refused_ == c.id
+                                                 ? tr("the transmitter stayed busy")
+                                                 : tr("the app was not running then")));
+            c.done = true;
+            dirty = true;
+            continue;
+        }
+        if (!retuner_) continue;
+        std::string why;
+        const Start result = retuner_(c, &why);
+        if (result == Start::Started) {
+            emit logged(0, tr("QRSS schedule: changing frequency to %1").arg(what));
+            c.done = true;
+            dirty = true;
+        } else if (result == Start::Busy) {
+            if (change_refused_ != c.id) {
+                emit logged(0, tr("QRSS schedule: the frequency change to %1 is waiting: %2")
+                                       .arg(what, QString::fromStdString(why)));
+                change_refused_ = c.id;
+            }
+        } else {
+            emit logged(2, tr("QRSS schedule: the frequency change to %1 was not made: %2")
+                                  .arg(what, QString::fromStdString(why)));
+            c.done = true;
+            dirty = true;
+        }
+        break;   // one radio command a tick
+    }
+}
+
 void QrssScheduler::tick() {
     const double now = clock_();
     bool dirty = false;
+    tick_changes(now, dirty);
     // Sends whose audio is too close (or past) to start: missed.
     for (qs::Entry& e : entries_) {
         if (!e.enabled || qs::finished(e)) continue;
