@@ -132,6 +132,12 @@ preamble of every signal in the channel. Each signal it finds gets a
 **tile** on the screen: a small card with its frequency, its strength
 and, once the header is read, the sender's callsign.
 
+It repeats that search every minute for the first five minutes, because
+a weak signal can take a few minutes of audio to confirm. If nothing has
+turned up by then, it searches only every five minutes for the rest of
+the slot. On a quiet band that saves most of the listener's work, and a
+signal it misses can still be found by the last look at the end (step 4).
+
 ### 3. It fills in the picture as the pass arrives
 
 Every minute or so it re-reads everything heard so far for each signal,

@@ -6,7 +6,8 @@ capture audio in and shows the tiles this writes.
 
     8 kHz audio chunks --StreamFE--> FE 4 kHz --> FeRing (in memory, ~33 min)
                                               \\-> PassbandStore (48 h, optional)
-    every refresh_s, for each slot whose frame is on the air:
+    every refresh_s (every empty_refresh_s for a slot where nothing has
+    been found by detect_until_s), for each slot whose frame is on the air:
         slot_capture: the slot's FE so far, blanked and normalised, the
                       rest (future, and any holes) noise, erased
         detect on the preamble (until detect_until_s), then
@@ -283,6 +284,10 @@ class LiveConfig:
     refresh_s: float = 60.0           # time between live receives of a slot
     first_s: float = 25.0             # first receive this long after t0 (the preamble is 20 s)
     detect_until_s: float = 300.0     # acquisition re-runs at each refresh until then
+    # ...and after it, a slot where nothing has been found yet is searched
+    # again only this often: on a quiet band that search, over two slots
+    # at a time, was most of the listener's work, every minute, for nothing
+    empty_refresh_s: float = 300.0
     keep_done_s: float = 6 * 3600.0   # a finished tile stays listed this long
     estimator: str = "joint"
     precision: str = "fp32"
@@ -539,7 +544,7 @@ class LiveListener:
                     self._submit(self._finish, s)
                     changed = True
             elif now >= t0 + self.cfg.first_s and (
-                    s.last_refresh is None or now - s.last_refresh >= self.cfg.refresh_s):
+                    s.last_refresh is None or now - s.last_refresh >= self._interval(s, now)):
                 if self._jobs is None or (self.busy is None and self._jobs.empty()):
                     s.last_refresh = now     # (when busy, it is still due next time)
                     self._submit(self._refresh, s)
@@ -558,6 +563,13 @@ class LiveListener:
         changed |= len(keep) != len(self.done_tiles)
         self.done_tiles = keep
         return changed
+
+    def _interval(self, s: SlotState, now: float) -> float:
+        """Seconds between live receives of slot s: refresh_s, or
+        empty_refresh_s once detect_until_s has passed with nothing found."""
+        if not s.dets and now - slot_t0(s.q) >= self.cfg.detect_until_s:
+            return max(self.cfg.refresh_s, self.cfg.empty_refresh_s)
+        return self.cfg.refresh_s
 
     # -- the worker -----------------------------------------------------------------------
 

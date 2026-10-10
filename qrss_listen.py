@@ -16,8 +16,9 @@ unless --speed is given.
 
 Tiles go to --state DIR (default STORE/live): `state.json`, rewritten
 after every change, and `tiles/<id>.png`. A signal is looked for on its
-preamble (every --refresh seconds until 5 minutes into the slot), then
-received every --refresh seconds with what has arrived so far; when its
+preamble (every --refresh seconds until 5 minutes into the slot, then
+every 5 minutes while none has been found), then received every
+--refresh seconds with what has arrived so far; when its
 frame ends the whole slot is received again (round B, and the whole-slot
 search for signals too weak to see on the preamble), stored and
 associated in the multi-pass store (--store DIR, default $QRSSTVAE_HOME

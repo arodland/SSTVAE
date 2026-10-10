@@ -168,6 +168,35 @@ def test_slot_bookkeeping_with_a_stub_receiver(tmp_path, monkeypatch):
     assert L2.tiles() == []
 
 
+def test_an_empty_slot_is_searched_less_often(tmp_path):
+    """Every refresh_s until detect_until_s; after it, a slot where nothing
+    was found is searched every empty_refresh_s, and one with a signal is
+    still received every refresh_s."""
+    cfg = live.LiveConfig(render=False)            # FULL: 60 s, 25 s, 300 s, 300 s
+    end = live.frame_seconds(cfg.spec)
+
+    def refreshes(found_at):
+        L = live.LiveListener(tmp_path / f"f{found_at}", cfg, log=lambda m: None)
+        t0 = slot_t0(Q_TEST)
+        seen = []
+
+        def refresh(s):
+            if s.q != Q_TEST:
+                return                            # (the slot before, still on the air)
+            seen.append(round(L.now - t0))
+            if found_at is not None and len(seen) >= found_at:
+                s.dets = [_Det(1500.0)]
+
+        L._refresh = refresh
+        for t in np.arange(0.0, end, 5.0):
+            L.step(t0 + t)
+        return seen
+
+    assert refreshes(None) == [25, 85, 145, 205, 265, 565, 865, 1165, 1465, 1765]
+    found = refreshes(2)                          # found at the second search
+    assert found[:2] == [25, 85] and np.all(np.diff(found) == 60) and found[-1] > end - 60
+
+
 def test_confidence_over_the_pass():
     """The band under a tile: per-latent SNR over time, from W and the header LLRs."""
     from types import SimpleNamespace
