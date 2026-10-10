@@ -76,6 +76,7 @@ EARLY_WINDOW_S = 30.0             # ...when audio has run ahead of the clock thi
 RING_S = 2100.0                   # FE kept in memory: a FULL slot, its margins and slack
 MERGE_HZ = receiver.MERGE_HZ      # a detection this close to a tile is that tile
 PREAMBLE_S = 20                   # the preamble's span after t0 (660 symbols, 20.0 s)
+CAPTURE_MARGIN_S = 2.0            # blanker and AGC run this far past the newest audio
 FINISH_SEARCH_MIN_HEARD = 0.5     # the end-of-slot search over the whole slot needs this much heard
 FINISH_MAX_CANDIDATES = 12        # ...and verifies at most this many candidates
 FINISH_BUDGET_S = 180.0           # ...for at most this long (a false one costs ~1 min)
@@ -203,9 +204,18 @@ def slot_capture(ring: FeRing, q: int, spec: FrameSpec, seed: int | None = None,
     b = t0 * FE_FS + int(round((frame_seconds(spec) + tail_s) * FE_FS))
     x, ok = ring.read(a, b)
     origin = t0 * FE_FS - a
-    fe, keep = frontend.blank(x)
+    # The blanker and the inverse AGC look at most about 0.6 s either
+    # side of a sample, and everything after the newest heard sample is
+    # replaced by noise below, so they run only up to CAPTURE_MARGIN_S past
+    # it: the same capture, bit for bit, without working through the
+    # unheard rest of the slot at every refresh.
+    h = int(np.flatnonzero(ok)[-1]) + 1 if ok.any() else 0
+    m = min(len(x), h + int(CAPTURE_MARGIN_S * FE_FS))
+    fe = np.zeros(len(x), dtype=np.complex64)
+    keep = np.ones(len(x), dtype=np.float32)
+    fe[:m], keep[:m] = frontend.blank(x[:m])
     keep = keep * ok
-    fe, _ = frontend.normalise(fe, keep)
+    fe[:m], _ = frontend.normalise(fe[:m], keep[:m])
     rng = np.random.default_rng(q if seed is None else seed)
     miss = ~ok
     nm = int(miss.sum())

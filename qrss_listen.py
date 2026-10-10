@@ -31,9 +31,18 @@ a desktop; slow machines want a longer --refresh.
 """
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
+
+# One thread for numpy's linear algebra. The receiver's arrays are too
+# small for a thread pool to speed anything up, and an idle pool's
+# threads spin, which is CPU spent for nothing on every core it starts.
+# It has to be set before numpy is first imported; a value already in
+# the environment wins.
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "1")
 
 
 def main() -> None:

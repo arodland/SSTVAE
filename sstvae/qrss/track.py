@@ -998,9 +998,15 @@ def track(chan: ChanCapture, spec: FrameSpec, det: Detection, classes: Classes |
                      m=None, c=c, u=None, P=None, N=None, psi=None, meas=meas, pu=None,
                      classes=classes, keying=keying, ook=ook, lead_in_s=lead)
 
+    psi_for = [None, None]                   # (timing, psi): psi depends on the timing alone
+
     def measure():
         tr.m = symbol_mf(tr.z_d, CH_FS, tr.timing, grid, t0_index=chan.t0_index, n_pos=n_pos)
-        tr.psi = psi_at(chan.keep, tr.timing, grid, t0_index=chan.t0_index, n_pos=n_pos)
+        key = (tr.timing.tau0, tr.timing.ppm, tr.timing.gamma)
+        if psi_for[0] != key:                # (re-centring the frequency keeps the timing)
+            psi_for[:] = key, psi_at(chan.keep, tr.timing, grid, t0_index=chan.t0_index,
+                                     n_pos=n_pos)
+        tr.psi = psi_for[1]
         tr.N = chan.noise_psd_at(tr.t_pos_s()) / T_SYM
         tr.meas = meas & (tr.psi >= PSI_MIN)
 
@@ -1014,7 +1020,8 @@ def track(chan: ChanCapture, spec: FrameSpec, det: Detection, classes: Classes |
     def run(q_grid=Q_GRID):
         Pu_loc, Pu_g = pu_loc()
         mu, R = _measurements(tr, kappa, sf, Pu_loc)
-        q, _ = select_q(mu, R, Pu_g, q_grid)
+        # (one value to choose from needs no likelihood: kalman_rts computes it)
+        q = q_grid[0] if len(q_grid) == 1 else select_q(mu, R, Pu_g, q_grid)[0]
         u, P, ll = kalman_rts(mu, R, q, Pu_g)
         tr.u, tr.P, tr.q, tr.loglik, tr.pu = u, P, q, ll, Pu_loc
         return q

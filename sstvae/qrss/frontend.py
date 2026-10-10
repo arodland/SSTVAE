@@ -230,13 +230,19 @@ def mix_phasor(n0: int, n: int, f_mix: Fraction, fs_in: int) -> np.ndarray:
     if Fraction(num, F_MIX_DEN) != f_mix:
         raise ValueError(f"f_mix {f_mix} is not on the 1/{F_MIX_DEN} Hz grid")
     D = F_MIX_DEN * int(fs_in)
-    idx = (np.arange(n, dtype=np.int64) + int(n0)) % D
-    turns = ((idx * (num % D)) % D).astype(np.float64) / D
+    k = num % D
+    # The phase repeats every P = D / gcd(k, D) samples, so one period is
+    # computed and repeated: the same arithmetic per value as computing
+    # every sample (so the same result, bit for bit), at a fraction of the
+    # cost over a whole slot.
+    P = D // math.gcd(k, D)
+    idx = np.arange(P, dtype=np.int64)
+    turns = ((idx * k) % D).astype(np.float64) / D
     ang = 2 * np.pi * turns
-    out = np.empty(n, dtype=np.complex128)
-    out.real = np.cos(ang)
-    out.imag = -np.sin(ang)
-    return out
+    tab = np.empty(P, dtype=np.complex128)
+    tab.real = np.cos(ang)
+    tab.imag = -np.sin(ang)
+    return np.tile(np.roll(tab, -(int(n0) % P)), -(-n // P))[:n]
 
 
 def channelise(fe, fs_in: int, f_mix_hz, fs_out: int = CH_FS, *, n0: int = 0
