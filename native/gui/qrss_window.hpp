@@ -201,8 +201,8 @@ public:
     // Apply one tile object from state.json; `dir` resolves its image.
     void update_from(const QJsonObject& tile, const QString& dir);
     QString title() const;
-    // The SNR shown at the right of the title ("" when unknown).
-    QString snr_text() const;
+    // The mean weight shown at the right of the title ("" when unknown).
+    QString weight_text() const;
     QString details() const;
     bool has_picture() const;
     int progress_percent() const;
@@ -217,7 +217,7 @@ protected:
 private:
     QLabel* picture_ = nullptr;
     QLabel* title_ = nullptr;
-    QLabel* snr_ = nullptr;
+    QLabel* weight_ = nullptr;
     QLabel* details_ = nullptr;
     PassBar* progress_ = nullptr;
     int image_rev_ = -1;

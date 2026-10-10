@@ -103,16 +103,16 @@ constexpr Stop BAND_STOPS[] = {
 
 }  // namespace
 
-QColor PassBar::color(double snr_db) {
+QColor PassBar::color(double weight_db) {
     const auto& lo = BAND_STOPS[0];
     const auto& hi = BAND_STOPS[std::size(BAND_STOPS) - 1];
-    if (!(snr_db > lo.db)) return QColor(lo.r, lo.g, lo.b);
-    if (snr_db >= hi.db) return QColor(hi.r, hi.g, hi.b);
+    if (!(weight_db > lo.db)) return QColor(lo.r, lo.g, lo.b);
+    if (weight_db >= hi.db) return QColor(hi.r, hi.g, hi.b);
     for (std::size_t i = 1; i < std::size(BAND_STOPS); ++i) {
         const Stop& a = BAND_STOPS[i - 1];
         const Stop& b = BAND_STOPS[i];
-        if (snr_db <= b.db) {
-            const double f = (snr_db - a.db) / (b.db - a.db);
+        if (weight_db <= b.db) {
+            const double f = (weight_db - a.db) / (b.db - a.db);
             auto mix = [f](int x, int y) {
                 return static_cast<int>(std::lround(x + (y - x) * f));
             };
@@ -201,12 +201,14 @@ QrssTile::QrssTile(QWidget* parent) : QWidget(parent) {
     bold.setPointSizeF(std::max(7.0, bold.pointSizeF() * 0.88));
     bold.setBold(true);
     title_->setFont(bold);
-    // The signal's SNR, the number most worth a glance: on the title line,
-    // at the right, in the same bold (Jeff, 2026-10-10).
-    snr_ = new QLabel(this);
-    snr_->setObjectName(QStringLiteral("tile_snr"));
-    snr_->setFont(bold);
-    snr_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    // The picture's mean weight (per-latent SNR, receiver.mean_w_db), the
+    // number most worth a glance: on the title line, at the right, in the
+    // same bold. Not the carrier's SNR, which the spectrogram shows
+    // better (Jeff, 2026-10-10).
+    weight_ = new QLabel(this);
+    weight_->setObjectName(QStringLiteral("tile_weight"));
+    weight_->setFont(bold);
+    weight_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     details_ = new QLabel(this);
     details_->setFont(small);
     details_->setWordWrap(true);
@@ -220,7 +222,7 @@ QrssTile::QrssTile(QWidget* parent) : QWidget(parent) {
     auto* title_row = new QHBoxLayout;
     title_row->setContentsMargins(0, 0, 0, 0);
     title_row->addWidget(title_, 1);
-    title_row->addWidget(snr_);
+    title_row->addWidget(weight_);
     box->addLayout(title_row);
     box->addWidget(progress_);
     box->addWidget(details_);
@@ -246,7 +248,7 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
     }
     progress_->set(bins, progress);
 
-    snr_->setText(number_or(t.value(QStringLiteral("snr_db")), 1, tr(" dB"), QString()));
+    weight_->setText(number_or(t.value(QStringLiteral("mean_w_db")), 1, tr(" dB"), QString()));
     QStringList lines;
     // Where it is: the dial plus the audio offset (USB), as an operator
     // would say it ("10.141 MHz + 1500 Hz", Jeff, 2026-10-10); the offset
@@ -280,8 +282,6 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
         state = tr("Receiving");
     }
     lines << state;
-    const QString wdb = number_or(t.value(QStringLiteral("mean_w_db")), 1, tr(" dB"), QString());
-    if (!wdb.isEmpty()) lines << tr("Mean weight %1").arg(wdb);
     QString note = t.value(QStringLiteral("note")).toString();
     note.remove(QStringLiteral("; ") + GUESS_NOTE).remove(GUESS_NOTE);
     if (!note.isEmpty()) lines << note;
@@ -312,7 +312,7 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
 }
 
 QString QrssTile::title() const { return title_->text(); }
-QString QrssTile::snr_text() const { return snr_->text(); }
+QString QrssTile::weight_text() const { return weight_->text(); }
 QString QrssTile::details() const { return details_->text(); }
 bool QrssTile::has_picture() const {
     return !picture_->pixmap().isNull();

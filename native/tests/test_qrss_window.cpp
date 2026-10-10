@@ -50,6 +50,7 @@ QJsonObject tile_json(const QString& id, double f_hz, const QString& call, doubl
     t[QStringLiteral("f_hz")] = f_hz;
     t[QStringLiteral("status")] = QStringLiteral("receiving");
     t[QStringLiteral("snr_db")] = -12.5;
+    t[QStringLiteral("mean_w_db")] = -7.8;
     if (!call.isEmpty()) {
         t[QStringLiteral("callsign")] = call;
         t[QStringLiteral("grid")] = QStringLiteral("FN42");
@@ -113,10 +114,12 @@ void test_tiles_follow_the_state_file() {
                  "qrss/tiles: a decoded header names the station");
     check::equal(b->title().toStdString(), std::string("Signal at 1550.2 Hz"),
                  "qrss/tiles: before the header, the frequency");
-    check::equal(a->snr_text().toStdString(), std::string("-12.5 dB"),
-                 "qrss/tiles: the SNR beside the title");
-    check::is_true(!a->details().contains(QStringLiteral("SNR")),
-                   "qrss/tiles: and not again in the small print");
+    check::equal(a->weight_text().toStdString(), std::string("-7.8 dB"),
+                 "qrss/tiles: the mean weight beside the title");
+    check::is_true(!a->details().contains(QStringLiteral("SNR")) &&
+                       !a->details().contains(QStringLiteral("-12.5")) &&
+                       !a->details().contains(QStringLiteral("weight")),
+                   "qrss/tiles: no SNR on the tile, and the weight not twice");
     check::is_true(a->has_picture(), "qrss/tiles: the picture is loaded");
     check::is_true(!b->has_picture(), "qrss/tiles: no picture before the header");
     check::equal(a->progress_percent(), 35, "qrss/tiles: progress through the pass");
