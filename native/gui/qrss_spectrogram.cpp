@@ -11,7 +11,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <thread>
 #include <utility>
+#include <vector>
 
 #include "rx/ringbuffer.hpp"
 #include "spectrum_feed.hpp"
@@ -198,47 +200,66 @@ void QrssSpectrogram::render() {
         row_f[static_cast<std::size_t>(y)] = 0.5 * (fa + fb);
     }
 
-    std::vector<float> rows(static_cast<std::size_t>(h));
-    std::vector<double> cumsum(dsp::SlowSpectrogram::BINS + 1);
-    for (int x = 0; x < w; ++x) {
-        const double t_hi = t_now - scale_.age_at(x);
-        const double t_lo = t_now - scale_.age_at(x + 1);
-        int n_cols = 0;
-        const std::vector<float> col = data().mean_between(t_lo, t_hi, &n_cols);
-        if (col.empty()) continue;
-        cumsum[0] = 0.0;
-        for (int k = 0; k < dsp::SlowSpectrogram::BINS; ++k) cumsum[k + 1] = cumsum[k] + col[k];
-        for (int y = 0; y < h; ++y) {
-            const int lo = b0[static_cast<std::size_t>(y)];
-            const int hi = b1[static_cast<std::size_t>(y)];
-            rows[static_cast<std::size_t>(y)] =
-                static_cast<float>((cumsum[hi] - cumsum[lo]) / (hi - lo));
-        }
-        // How far above the noise each row is, in units of the noise's
-        // own roughness: a mean of n power values of noise varies by
-        // about 1/sqrt(n) of the floor, so the same weak signal stands
-        // out as well at 15 s a pixel as at 1, and better.
-        const double floor_p = std::max(1e-30, static_cast<double>(dsp::median_of(rows)));
-        // Which markers this column's time falls in.
+    // Columns are independent, so they are drawn on several cores: the
+    // store is only read here (the feed pumps on this thread, which is
+    // waiting), and each thread writes its own pixels straight into the
+    // image's memory.
+    uchar* const bits = image_.bits();
+    const qsizetype stride = image_.bytesPerLine();
+    const auto draw_columns = [&](int x_begin, int x_end) {
+        std::vector<float> rows(static_cast<std::size_t>(h));
+        std::vector<double> cumsum(dsp::SlowSpectrogram::BINS + 1);
         std::vector<const Marker*> here;
-        for (const Marker& m : markers_) {
-            if (m.t0 < t_hi && m.t1 > t_lo) here.push_back(&m);
-        }
-        for (int y = 0; y < h; ++y) {
-            const double n = static_cast<double>(n_cols) *
-                             (b1[static_cast<std::size_t>(y)] - b0[static_cast<std::size_t>(y)]);
-            const double z = (rows[static_cast<std::size_t>(y)] / floor_p - 1.0) * std::sqrt(n);
-            const double v = std::clamp((z - Z_FLOOR) / Z_RANGE, 0.0, 1.0);
-            bool marked = false;
-            for (const Marker* m : here) {
-                if (std::abs(row_f[static_cast<std::size_t>(y)] - m->f_hz) <= MARK_HALF_HZ) {
-                    marked = true;
-                    break;
-                }
+        for (int x = x_begin; x < x_end; ++x) {
+            const double t_hi = t_now - scale_.age_at(x);
+            const double t_lo = t_now - scale_.age_at(x + 1);
+            int n_cols = 0;
+            const std::vector<float> col = data().mean_between(t_lo, t_hi, &n_cols);
+            if (col.empty()) continue;
+            cumsum[0] = 0.0;
+            for (int k = 0; k < dsp::SlowSpectrogram::BINS; ++k) cumsum[k + 1] = cumsum[k] + col[k];
+            for (int y = 0; y < h; ++y) {
+                const int lo = b0[static_cast<std::size_t>(y)];
+                const int hi = b1[static_cast<std::size_t>(y)];
+                rows[static_cast<std::size_t>(y)] =
+                    static_cast<float>((cumsum[hi] - cumsum[lo]) / (hi - lo));
             }
-            image_.setPixel(x, y, shade(v, inverted_, marked));
+            // How far above the noise each row is, in units of the noise's
+            // own roughness: a mean of n power values of noise varies by
+            // about 1/sqrt(n) of the floor, so the same weak signal stands
+            // out as well at 15 s a pixel as at 1, and better.
+            const double floor_p = std::max(1e-30, static_cast<double>(dsp::median_of(rows)));
+            // Which markers this column's time falls in.
+            here.clear();
+            for (const Marker& m : markers_) {
+                if (m.t0 < t_hi && m.t1 > t_lo) here.push_back(&m);
+            }
+            for (int y = 0; y < h; ++y) {
+                const double n = static_cast<double>(n_cols) *
+                                 (b1[static_cast<std::size_t>(y)] - b0[static_cast<std::size_t>(y)]);
+                const double z = (rows[static_cast<std::size_t>(y)] / floor_p - 1.0) * std::sqrt(n);
+                const double v = std::clamp((z - Z_FLOOR) / Z_RANGE, 0.0, 1.0);
+                bool marked = false;
+                for (const Marker* m : here) {
+                    if (std::abs(row_f[static_cast<std::size_t>(y)] - m->f_hz) <= MARK_HALF_HZ) {
+                        marked = true;
+                        break;
+                    }
+                }
+                reinterpret_cast<QRgb*>(bits + y * stride)[x] = shade(v, inverted_, marked);
+            }
         }
+    };
+    const int n_threads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()), 1, 4);
+    std::vector<std::thread> threads;
+    const int per = (w + n_threads - 1) / n_threads;
+    for (int i = 1; i < n_threads; ++i) {
+        const int a = std::min(w, i * per);
+        const int b = std::min(w, a + per);
+        if (a < b) threads.emplace_back(draw_columns, a, b);
     }
+    draw_columns(0, std::min(w, per));
+    for (std::thread& t : threads) t.join();
 }
 
 void QrssSpectrogram::resizeEvent(QResizeEvent* event) {
