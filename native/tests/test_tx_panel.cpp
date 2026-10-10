@@ -28,6 +28,7 @@
 
 #include <QAbstractButton>
 #include <QApplication>
+#include <QStringList>
 #include <QByteArray>
 #include <QComboBox>
 #include <QContextMenuEvent>
@@ -168,6 +169,43 @@ void test_the_level_controls_are_one_flow_item() {
     check::is_true(group != nullptr &&
                        dynamic_cast<FlowLayout*>(group->layout()) == nullptr,
                    "their container does not wrap between them");
+}
+
+// QRSS CE modes sit in the same mode list, and the carrier slider is
+// live only while one of them is selected. Choosing one must not touch
+// the SSTVAE mode the rest of the panel (and the optimizer) reads.
+void test_qrss_modes_and_the_carrier_slider() {
+    AppState state;
+    QWidget host;
+    host.resize(1400, 700);
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("mode_combo"));
+    auto* slider = panel->findChild<QSlider*>(QStringLiteral("qrss_freq_slider"));
+    auto* label = panel->findChild<QLabel*>(QStringLiteral("qrss_freq_label"));
+    check::is_true(combo && slider && label, "qrss: mode list, carrier slider and readout");
+    if (!combo || !slider || !label) return;
+    QStringList items;
+    for (int i = 0; i < combo->count(); ++i) items << combo->itemText(i);
+    check::is_true(items.contains(QStringLiteral("QRSS CE Mode A - 30 min")) &&
+                       items.contains(QStringLiteral("QRSS CE Mode B - 60 min")) &&
+                       items.contains(QStringLiteral("QRSS CE Mode C - 90 min")),
+                   "qrss: the three CE modes, labelled with their airtime");
+
+    combo->setCurrentIndex(combo->findData(QStringLiteral("B")));
+    check::is_true(!slider->isEnabled(), "qrss: the slider is off for an SSTVAE mode");
+    combo->setCurrentIndex(combo->findData(QStringLiteral("QRSS-C")));
+    check::is_true(slider->isEnabled(), "qrss: and on for a QRSS mode");
+    check::equal(state.config().transmit.qrss_mode, std::string("C"),
+                 "qrss: the choice is saved as its own setting");
+    check::equal(state.config().transmit.mode, std::string("B"),
+                 "qrss: leaving the SSTVAE mode as it was");
+    slider->setValue(1234);
+    check::equal(label->text().toStdString(), std::string("1234 Hz"), "qrss: the readout follows");
+    check::equal(state.config().transmit.qrss_freq_hz, 1234.0, "qrss: and the setting");
+    combo->setCurrentIndex(combo->findData(QStringLiteral("A")));
+    check::equal(state.config().transmit.qrss_mode, std::string(),
+                 "qrss: an SSTVAE mode clears it");
 }
 
 // Editing defers the composite rebuild instead of doing it inline.
@@ -709,6 +747,7 @@ int main(int argc, char** argv) {
 
     test_the_strip_height_survives_a_selection();
     test_the_level_controls_are_one_flow_item();
+    test_qrss_modes_and_the_carrier_slider();
     test_an_edit_defers_the_rebuild();
     test_a_rebuild_consumes_the_pending_edit();
     test_the_template_combo_lists_none_then_the_builtins();

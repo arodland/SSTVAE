@@ -274,7 +274,15 @@ void read_transmit(const Reader& r, TransmitConfig& c) {
     r.get("cw_id", c.cw_id);
     r.get("cw_message", c.cw_message);
     r.get("vox_lead_s", c.vox_lead_s);
-    r.report_unknown({"mode", "level", "optimize", "cw_id", "cw_message", "vox_lead_s"});
+    r.get("qrss_mode", c.qrss_mode);
+    if (!c.qrss_mode.empty() && c.qrss_mode != "A" && c.qrss_mode != "B" && c.qrss_mode != "C") {
+        r.notes.add(r.path("qrss_mode"), "unknown qrss_mode '" + c.qrss_mode + "'; using none");
+        c.qrss_mode.clear();
+    }
+    r.get("qrss_freq_hz", c.qrss_freq_hz);
+    c.qrss_freq_hz = std::clamp(c.qrss_freq_hz, 300.0, 2700.0);
+    r.report_unknown({"mode", "level", "optimize", "cw_id", "cw_message", "vox_lead_s",
+                      "qrss_mode", "qrss_freq_hz"});
 }
 
 void read_ui(const Reader& r, UiConfig& c) {
@@ -464,7 +472,9 @@ std::string to_json(const Config& c) {
           {"optimize", c.transmit.optimize},
           {"cw_id", c.transmit.cw_id},
           {"cw_message", c.transmit.cw_message},
-          {"vox_lead_s", c.transmit.vox_lead_s}}},
+          {"vox_lead_s", c.transmit.vox_lead_s},
+          {"qrss_mode", c.transmit.qrss_mode},
+          {"qrss_freq_hz", c.transmit.qrss_freq_hz}}},
         {"ui",
          {{"layout", c.ui.layout},
           {"log_visible", c.ui.log_visible},

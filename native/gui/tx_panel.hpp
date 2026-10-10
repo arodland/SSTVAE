@@ -155,6 +155,7 @@ private slots:
     void on_selection(overlay::Item* item);
     void on_mode_changed();
     void on_level_changed(int steps);
+    void on_qrss_freq_changed(int hz);
     // A different template replaces the composition on the canvas --
     // see `template_combo_`'s tooltip -- and the fields row is rebuilt
     // for whichever placeholders it uses.
@@ -175,6 +176,16 @@ private:
     // for the optimizer first, and that wait must not block the GUI.
     void begin_transmit(const images::Picture& picture,
                         std::vector<double> latents);
+    // A QRSS mode's send (gui/qrss_tx.hpp): encode, then each pass on its
+    // half hour, keyed through the same engine and PTT.
+    void begin_qrss(const images::Picture& picture);
+    // The selected SSTVAE mode ("A"/"B"/"C"); with a QRSS mode selected,
+    // the SSTVAE mode last saved, so the optimizer and `{mode}` always
+    // see a real SSTVAE mode.
+    std::string sstvae_mode() const;
+    // The selected QRSS mode ("A"/"B"/"C"), or empty.
+    std::string qrss_mode() const;
+    void update_qrss_controls();
     void rebuild_optimizer();
     QWidget* build_tool_row();
     // Text and its alignment only, now -- everything else a selection
@@ -302,6 +313,8 @@ private:
     QSlider* level_slider_ = nullptr;
     QLabel* level_label_ = nullptr;
     QTimer* save_level_timer_ = nullptr;
+    QSlider* qrss_slider_ = nullptr;   // the QRSS carrier, Hz; enabled for QRSS modes
+    QLabel* qrss_label_ = nullptr;
     QPushButton* send_button_ = nullptr;
     QPushButton* cancel_button_ = nullptr;
     QProgressBar* progress_ = nullptr;

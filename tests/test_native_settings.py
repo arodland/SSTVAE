@@ -112,6 +112,8 @@ NON_DEFAULT = {
         "cw_id": True,
         "cw_message": "TEST DE {callsign}",
         "vox_lead_s": 0.5,
+        "qrss_mode": "B",
+        "qrss_freq_hz": 1234.5,
     },
     "ui": {
         # None is a default: the default layout is "auto", the default

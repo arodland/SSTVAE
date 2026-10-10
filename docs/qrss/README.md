@@ -210,6 +210,34 @@ correct by eye.
 - CPU: roughly 20 s per signal per refresh on a desktop. With many
   signals, use a longer `--refresh`.
 
+## Sending from the app
+
+The desktop app's transmit panel lists three QRSS modes after the
+SSTVAE ones: **QRSS CE Mode A - 30 min**, **B - 60 min** and
+**C - 90 min**. One pass carries one 50,600-latent group and lasts
+1782.7 s, so mode A is one pass, B two and C three, a half hour apart.
+With a QRSS mode selected, the **QRSS carrier** slider beside Level sets
+the audio frequency the signal goes out on (300-2700 Hz; Page Up/Down
+moves 50 Hz, about one CE channel). It is disabled for SSTVAE modes.
+
+Send composes the picture as usual, then:
+
+1. runs `qrss_encode.py --mode A|B|C` on it once (a stored picture);
+2. for each pass, waits until a minute before its quarter hour, runs
+   `qrss_transmit.py` for that slot and segment with your callsign (and
+   your grid, when it is a locator), and
+3. keys the radio 11 s before the quarter hour, with the same PTT lead,
+   tail and watchdog as an SSTVAE send, and plays the pass.
+
+The first pass takes the first quarter hour at least a minute and a half
+away. Every pass carries its own Morse callsign windows (spec 2.7), so
+the SSTVAE CW ID and VOX leader are not added. Receive is paused from
+Send to the end of the last pass; Cancel stops at once, keyed or not.
+A callsign is required. The app looks for the scripts beside its
+executable and up to four directories above it; set `SSTVAE_QRSS_DIR`
+(and `SSTVAE_QRSS_PYTHON`) otherwise. The computer's clock must be right
+to about a second.
+
 ## The command-line tools
 
 Flags are listed as defined in each script's argparse. Run any script

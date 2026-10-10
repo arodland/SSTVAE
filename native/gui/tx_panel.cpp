@@ -62,6 +62,7 @@
 #include "overlay/template.hpp"
 #include "overlay/template_catalog.hpp"
 #include "overlay_editor.hpp"
+#include "qrss_tx.hpp"
 #include "share_dialog.hpp"
 #include "style.hpp"
 #include "settings/settings.hpp"
@@ -368,8 +369,7 @@ void TransmitPanel::schedule_optimization() {
     if (model == nullptr) return;
 
     images::ImageArray array = images::to_array(*image);
-    const std::string mode_name =
-        mode_combo_->currentData().toString().toStdString();
+    const std::string mode_name = sstvae_mode();
     const config::ModeSpec* mode = &config::MODES[0];
     for (const config::ModeSpec& m : config::MODES) {
         if (mode_name == m.name) mode = &m;
@@ -839,18 +839,33 @@ QWidget* TransmitPanel::build_send_bar() {
     layout->setContentsMargins(0, 0, 0, 0);
 
     mode_combo_ = new QComboBox(bar);
+    mode_combo_->setObjectName(QStringLiteral("mode_combo"));
     for (const config::ModeSpec& spec : config::MODES) {
         const QString name = QString::fromUtf8(spec.name.data(),
                                                static_cast<int>(spec.name.size()));
         mode_combo_->addItem(
             tr("Mode %1 - %2 s").arg(name).arg(spec.duration_s, 0, 'f', 0), name);
     }
-    const int mode_index =
-        mode_combo_->findData(QString::fromStdString(app_->config().transmit.mode));
+    // QRSSTVAE CE: one half-hour pass per 50,600-latent group, so mode
+    // A takes 30 min, B 60 and C 90 (docs/qrss/README.md). The data is
+    // "QRSS-A" etc., never a bare letter, so nothing confuses the two.
+    for (const char* name : {"A", "B", "C"}) {
+        mode_combo_->addItem(tr("QRSS CE Mode %1 - %2 min")
+                                 .arg(QLatin1String(name))
+                                 .arg(qrss_tx::minutes_for(name)),
+                             QStringLiteral("QRSS-%1").arg(QLatin1String(name)));
+    }
+    const settings::TransmitConfig& tcfg = app_->config().transmit;
+    const int mode_index = mode_combo_->findData(
+        tcfg.qrss_mode.empty() ? QString::fromStdString(tcfg.mode)
+                               : QStringLiteral("QRSS-") + QString::fromStdString(tcfg.qrss_mode));
     mode_combo_->setCurrentIndex(std::max(0, mode_index));
     mode_combo_->setToolTip(
         tr("How long the transmission takes, and how much detail it carries. "
-           "Longer modes send more latents, so they survive a poorer path."));
+           "Longer modes send more latents, so they survive a poorer path.\n\n"
+           "QRSS CE modes send the picture as one very narrow carrier, one "
+           "half-hour pass per group of latents, each starting on the next "
+           "quarter hour, with your callsign in Morse every 7.5 minutes."));
     connect(mode_combo_, &QComboBox::currentIndexChanged, this,
             &TransmitPanel::on_mode_changed);
 
@@ -898,6 +913,28 @@ QWidget* TransmitPanel::build_send_bar() {
             [this] { app_->save_config(); });
     update_level_label();
 
+    // Where in the passband a QRSS signal goes. Enabled only with a QRSS
+    // mode selected; present always, like everything in this row, so
+    // switching modes never reflows it.
+    qrss_slider_ = new QSlider(Qt::Horizontal, bar);
+    qrss_slider_->setObjectName(QStringLiteral("qrss_freq_slider"));
+    qrss_slider_->setRange(static_cast<int>(qrss_tx::FREQ_MIN_HZ),
+                           static_cast<int>(qrss_tx::FREQ_MAX_HZ));
+    qrss_slider_->setSingleStep(1);
+    qrss_slider_->setPageStep(50);   // one CE channel
+    qrss_slider_->setMinimumWidth(80);
+    qrss_slider_->setMaximumWidth(160);
+    qrss_slider_->setToolTip(
+        tr("QRSS carrier: the audio frequency the signal is sent on, 300-2700 Hz. "
+           "CE signals are about 50 Hz wide; Page Up/Down moves one channel."));
+    qrss_slider_->setValue(static_cast<int>(std::lround(app_->config().transmit.qrss_freq_hz)));
+    connect(qrss_slider_, &QSlider::valueChanged, this, &TransmitPanel::on_qrss_freq_changed);
+    qrss_label_ = new QLabel(bar);
+    qrss_label_->setObjectName(QStringLiteral("qrss_freq_label"));
+    qrss_label_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    qrss_label_->setMinimumWidth(
+        qrss_label_->fontMetrics().horizontalAdvance(QStringLiteral("2700 Hz")));
+
     send_button_ = new QPushButton(tr("&Send"), bar);
     connect(send_button_, &QPushButton::clicked, this, &TransmitPanel::send);
     send_button_->setToolTip(
@@ -939,10 +976,40 @@ QWidget* TransmitPanel::build_send_bar() {
     // Grouped, they wrap as a unit or not at all.
     layout->addWidget(style::row(
         bar, {new QLabel(tr("Level:"), bar), level_slider_, level_label_}));
+    layout->addWidget(style::row(
+        bar, {new QLabel(tr("QRSS carrier:"), bar), qrss_slider_, qrss_label_}));
     layout->addWidget(send_button_);
     layout->addWidget(cancel_button_);
     layout->addWidget(status_);
+    update_qrss_controls();
     return bar;
+}
+
+std::string TransmitPanel::sstvae_mode() const {
+    const QString data = mode_combo_->currentData().toString();
+    if (data.startsWith(QStringLiteral("QRSS-"))) {
+        const std::string saved = app_->config().transmit.mode;
+        return saved.empty() ? std::string("A") : saved;
+    }
+    return data.toStdString();
+}
+
+std::string TransmitPanel::qrss_mode() const {
+    const QString data = mode_combo_->currentData().toString();
+    return data.startsWith(QStringLiteral("QRSS-")) ? data.mid(5).toStdString() : std::string();
+}
+
+void TransmitPanel::update_qrss_controls() {
+    const bool qrss = !qrss_mode().empty();
+    qrss_slider_->setEnabled(qrss && !transmitting());
+    qrss_label_->setEnabled(qrss);
+    qrss_label_->setText(tr("%1 Hz").arg(qrss_slider_->value()));
+}
+
+void TransmitPanel::on_qrss_freq_changed(int hz) {
+    app_->config().transmit.qrss_freq_hz = hz;
+    update_qrss_controls();
+    save_level_timer_->start();   // the same debounced save the level uses
 }
 
 void TransmitPanel::on_level_changed(int steps) {
@@ -960,7 +1027,10 @@ void TransmitPanel::on_mode_changed() {
     // A different mode is a different latent budget, so any result in
     // hand is for the wrong transmission.
     schedule_optimization();
-    app_->config().transmit.mode = mode_combo_->currentData().toString().toStdString();
+    settings::TransmitConfig& tcfg = app_->config().transmit;
+    tcfg.qrss_mode = qrss_mode();
+    if (tcfg.qrss_mode.empty()) tcfg.mode = mode_combo_->currentData().toString().toStdString();
+    update_qrss_controls();
     app_->save_config();
     // `{mode}` may be in the composition. `schedule_optimization` above
     // already rebuilds the composite, but from `editor_->composed_image()`
@@ -1127,7 +1197,7 @@ void TransmitPanel::refresh_fields() {
     const QDateTime now = QDateTime::currentDateTimeUtc();
     fields.builtin["utc"] = now.toString(QStringLiteral("HH:mm")).toStdString();
     fields.builtin["date"] = now.toString(QStringLiteral("yyyy-MM-dd")).toStdString();
-    fields.builtin["mode"] = mode_combo_->currentData().toString().toStdString();
+    fields.builtin["mode"] = qrss_mode().empty() ? sstvae_mode() : "QRSS " + qrss_mode();
     for (const std::string& label : used.custom) {
         const auto it = custom_field_values_.find(label);
         if (it != custom_field_values_.end()) fields.custom[label] = it->second;
@@ -1513,6 +1583,12 @@ void TransmitPanel::send() {
                                  tr("Choose an image to transmit first."));
         return;
     }
+    if (!qrss_mode().empty()) {
+        if (thread_.joinable()) thread_.join();
+        banner_->clear();
+        begin_qrss(*image);
+        return;
+    }
     codec::OnnxCodec* model = app_->model();
     if (model == nullptr) {
         QMessageBox::warning(
@@ -1570,7 +1646,7 @@ void TransmitPanel::begin_transmit(const images::Picture& picture,
 
     const settings::Config& config = app_->config();
     tx::TxConfig tx_config;
-    tx_config.mode = mode_combo_->currentData().toString().toStdString();
+    tx_config.mode = sstvae_mode();
     tx_config.callsign = config.callsign;
     tx_config.device = config.audio.output_device;
     tx_config.level = config.transmit.level;
@@ -1626,6 +1702,90 @@ void TransmitPanel::begin_transmit(const images::Picture& picture,
     });
 }
 
+void TransmitPanel::begin_qrss(const images::Picture& picture) {
+    const settings::Config& config = app_->config();
+    qrss_tx::Request request;
+    request.picture = picture;
+    request.mode = qrss_mode();
+    request.freq_hz = qrss_slider_->value();
+    request.callsign = config.callsign;
+    request.grid = config.grid;
+    request.tx.device = config.audio.output_device;
+    request.tx.level = config.transmit.level;
+    request.tx.ptt_lead_s = config.rig.ptt_lead_s;
+    request.tx.ptt_tail_s = config.rig.ptt_tail_s;
+    // No SSTVAE CW ID and no VOX leader: every QRSS pass carries its own
+    // Morse ID windows, and a leader would land on the preamble.
+    request.tx.cw_id = false;
+    request.tx.vox_lead_s = 0.0;
+
+    const std::string problem = qrss_tx::problem(request);
+    if (!problem.empty()) {
+        QMessageBox::warning(this, tr("Cannot send QRSS"), QString::fromStdString(problem));
+        return;
+    }
+    const std::optional<qrss_tx::Tools> tools = qrss_tx::find_tools();
+    if (!tools) {
+        QMessageBox::warning(
+            this, tr("QRSS tools not found"),
+            tr("QRSS sending runs qrss_encode.py and qrss_transmit.py from the "
+               "repository, and they were not found near this program. Set "
+               "SSTVAE_QRSS_DIR to the repository (and SSTVAE_QRSS_PYTHON to its "
+               "Python, if it has no .venv)."));
+        return;
+    }
+    // Which quarter hours the passes take is decided once encoding is
+    // done (`qrss_tx::run`), and logged then as the "waiting for" line.
+    app_->log_event("tx", log::Severity::Info,
+                    tr("QRSS CE mode %1 at %2 Hz: %3 pass(es) of 1782.7 s")
+                        .arg(QString::fromStdString(request.mode))
+                        .arg(request.freq_hz, 0, 'f', 0)
+                        .arg(qrss_tx::passes_for(request.mode)));
+
+    engine_ = std::make_unique<tx::TxEngine>(
+        app_->ptt(),
+        [](const std::string& device, std::span<const double> wave, int samplerate,
+           const std::function<void(double)>& on_progress,
+           const std::function<bool()>& should_stop,
+           const std::function<void(const std::string&)>& on_error) {
+            return audio::qt::play(device, wave, samplerate, on_progress, should_stop,
+                                   on_error);
+        },
+        [](const images::ImageArray&) -> std::vector<double> {
+            throw std::logic_error("a QRSS send never encodes through the SSTVAE path");
+        },
+        [this](const tx::TxState& state) {
+            emit stateChanged(static_cast<int>(state.phase), state.progress,
+                              QString::fromStdString(state.message));
+        },
+        [this](const std::string& message) {
+            emit errorOccurred(QString::fromStdString(message));
+        });
+
+    send_button_->setEnabled(false);
+    set_picture_controls_enabled(false);
+    cancel_button_->setEnabled(true);
+    level_slider_->setEnabled(false);
+    mode_combo_->setEnabled(false);
+    qrss_slider_->setEnabled(false);
+    last_logged_phase_ = -1;
+    running_.store(true);
+    emit transmitStarted();
+
+    thread_ = std::thread([this, request, tools = *tools] {
+        bool ok = false;
+        try {
+            ok = qrss_tx::run(*engine_, request, tools, [this](const std::string& message) {
+                emit errorOccurred(QString::fromStdString(message));
+            });
+        } catch (const std::exception& e) {
+            emit errorOccurred(QString::fromUtf8(e.what()));
+        }
+        running_.store(false);
+        emit sendFinished(ok);
+    });
+}
+
 void TransmitPanel::cancel() {
     if (!engine_) return;
     engine_->cancel();
@@ -1640,6 +1800,7 @@ void TransmitPanel::on_state(int phase, double progress, const QString& message)
     if (phase != last_logged_phase_) {
         last_logged_phase_ = phase;
         switch (tx_phase) {
+            case tx::TxPhase::Waiting:
             case tx::TxPhase::Keying:
             case tx::TxPhase::Sending:
             case tx::TxPhase::Unkeying:
@@ -1674,6 +1835,8 @@ void TransmitPanel::on_state(int phase, double progress, const QString& message)
                tx_phase == tx::TxPhase::Modulating) {
         // Indeterminate: there is no useful fraction to report.
         progress_->setRange(0, 0);
+    } else if (tx_phase == tx::TxPhase::Waiting) {
+        progress_->setRange(0, 0);
     } else {
         progress_->setRange(0, 100);
     }
@@ -1707,6 +1870,8 @@ void TransmitPanel::on_finished(bool ok) {
     set_picture_controls_enabled(true);
     cancel_button_->setEnabled(false);
     level_slider_->setEnabled(true);
+    mode_combo_->setEnabled(true);
+    update_qrss_controls();
     progress_->setRange(0, 100);
     progress_->setValue(ok ? 100 : 0);
     if (ok) {

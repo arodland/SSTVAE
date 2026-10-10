@@ -215,6 +215,16 @@ struct TransmitConfig {
     // default because a station keyed by CAT or a manual PTT foot switch
     // has no use for it, and it costs airtime.
     double vox_lead_s = 0.0;
+
+    // QRSSTVAE CE (docs/qrss/README.md): the mode the transmit panel's
+    // mode list has selected, "A"/"B"/"C", or empty for an SSTVAE mode
+    // (then `mode` above applies). Kept apart from `mode` so nothing
+    // that reads an SSTVAE mode is ever handed a QRSS one.
+    std::string qrss_mode;
+
+    // The QRSS audio carrier, Hz (300-2700): where in the passband the
+    // signal goes. CE signals sit about 50 Hz apart.
+    double qrss_freq_hz = 1500.0;
 };
 
 // How the window arranges the receive and transmit halves.
