@@ -65,8 +65,23 @@ the channel simulator in this branch.
 ## Quick start
 
 You need the repository's Python environment with the `cli` extras
-(onnxruntime). No torch is needed. The examples below assume a checkout
-in the current directory and use the `.venv` interpreter.
+(onnxruntime). No torch is needed. Set it up once from the checkout,
+and add `soundfile` if you run the live listener:
+
+```sh
+uv sync --extra cli
+uv pip install soundfile    # optional: the passband store as FLAC
+```
+
+`soundfile` lets the listener pack each finished hour of its 48-hour
+passband store into FLAC, about half the size of raw (see "Listening
+live"). Without it the hours stay raw and everything else works. It is
+not in the project's lock file yet, so a later `uv sync` removes it
+again (`uv run` does not). Run the `uv pip install` line again after
+any `uv sync`.
+
+The examples below assume a checkout in the current directory and use
+the `.venv` interpreter.
 
 `--model DIR` points at a directory of exported v5 `.onnx` files. Without
 it, the published ONNX artifacts are downloaded and cached on first use.

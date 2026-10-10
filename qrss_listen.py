@@ -29,6 +29,8 @@ or ~/.local/share/qrsstvae; off with --no-store), and the tile shows the
 picture accumulated over every pass of it. The front-end stream also
 goes to the 48 h passband store (--passband DIR, default STORE/passband;
 off with --no-passband or --no-store) for `qrss_decode.py --retro`.
+With the soundfile package installed (`uv pip install soundfile`; a
+`uv sync` removes it again), each finished hour is packed into FLAC.
 
 A live receive of a FULL slot costs roughly 10-30 s of CPU per signal on
 a desktop; slow machines want a longer --refresh.
