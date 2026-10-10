@@ -45,7 +45,6 @@ class QJsonObject;
 class QLabel;
 class QLineEdit;
 class QVBoxLayout;
-class QProgressBar;
 class QPlainTextEdit;
 class QPushButton;
 class QScrollArea;
@@ -188,6 +187,28 @@ private:
     double progress_ = 0.0;
 };
 
+// How far through its pass a signal is, as a bar whose filled length is
+// the share of the pass so far, with red holes where the picture has no
+// latents: stretches not heard, or heard and erased. From the same
+// `confidence` bins as the band above (None past the preamble and
+// before `progress`, or the -30 dB floor, is a hole).
+class PassBar : public QWidget {
+public:
+    explicit PassBar(QWidget* parent = nullptr);
+    void set(const std::vector<std::optional<double>>& bins, double progress);
+    double progress() const { return progress_; }
+    // Each bin up to `progress`: true where latents are missing.
+    const std::vector<bool>& holes() const { return holes_; }
+    static QColor hole_color();
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+
+private:
+    std::vector<bool> holes_;
+    double progress_ = 0.0;
+};
+
 // One signal: picture, what it is, how far through its pass.
 class QrssTile : public QWidget {
     Q_OBJECT
@@ -203,8 +224,8 @@ public:
     QString details() const;
     bool has_picture() const;
     int progress_percent() const;
-    QString progress_text() const;
     ConfidenceBand* band() const { return band_; }
+    PassBar* pass_bar() const { return progress_; }
     // The picture file shown, at its full size ("" before one).
     QString image_path() const { return image_path_; }
 
@@ -217,8 +238,7 @@ private:
     ConfidenceBand* band_ = nullptr;
     QLabel* title_ = nullptr;
     QLabel* details_ = nullptr;
-    QProgressBar* progress_ = nullptr;
-    QLabel* progress_text_ = nullptr;
+    PassBar* progress_ = nullptr;
     int image_rev_ = -1;
     bool provisional_ = true;
     QString image_path_;

@@ -26,6 +26,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <random>
 #include <vector>
 
@@ -115,8 +116,8 @@ void test_tiles_follow_the_state_file() {
     check::is_true(a->has_picture(), "qrss/tiles: the picture is loaded");
     check::is_true(!b->has_picture(), "qrss/tiles: no picture before the header");
     check::equal(a->progress_percent(), 35, "qrss/tiles: progress through the pass");
-    check::equal(a->progress_text().toStdString(), std::string("35% of the pass"),
-                 "qrss/tiles: and in words, beside the bar");
+    check::is_true(!a->details().contains(QStringLiteral("% of")),
+                   "qrss/tiles: no percentages in words; the bar says it");
     check::is_true(a->details().contains(QStringLiteral("3 passes")),
                    "qrss/tiles: says how many passes the picture combines");
     check::is_true(a->details().contains(QStringLiteral("RF 10.140200 MHz (dial 10.138700)")),
@@ -350,6 +351,33 @@ void test_provisional_tiles() {
     w.reload();
     check::is_true(w.tile(QStringLiteral("b"))->parentWidget() == w.received_area(),
                    "provisional: a header moves it to Received");
+}
+
+// The pass bar: filled to the share of the pass so far, red holes where
+// latents are missing (not heard or erased), none for the preamble or
+// for what has not arrived yet.
+void test_the_pass_bar() {
+    gui::PassBar bar;
+    std::vector<std::optional<double>> bins(120, std::optional<double>(3.0));
+    bins[0] = std::nullopt;        // the preamble
+    bins[10] = std::nullopt;       // not heard
+    bins[20] = -30.0;              // heard, all erased
+    bins[30] = -12.0;              // weak, but there
+    for (int i = 60; i < 120; ++i) bins[static_cast<std::size_t>(i)] = std::nullopt;   // to come
+    bar.set(bins, 0.5);
+    const std::vector<bool>& h = bar.holes();
+    check::is_true(!h[0] && h[10] && h[20] && !h[30] && !h[5],
+                   "pass bar: holes where latents are missing, not the preamble or weak data");
+    check::is_true(!h[70], "pass bar: what has not arrived yet is not a hole");
+    bar.resize(240, 8);
+    QImage img(bar.size(), QImage::Format_RGB32);
+    bar.render(&img);
+    const int x10 = 1 + static_cast<int>(10.5 * 238 / 120);
+    const QRgb hole = img.pixel(x10, 4);
+    check::is_true(qRed(hole) > 180 && qGreen(hole) < 80, "pass bar: a hole is drawn red");
+    check::is_true(img.pixel(1 + static_cast<int>(40.5 * 238 / 120), 4) != hole &&
+                       img.pixel(200, 4) != img.pixel(1 + static_cast<int>(40.5 * 238 / 120), 4),
+                   "pass bar: filled to the progress, empty after");
 }
 
 // One tile per picture: a later pass that combines earlier ones hides
@@ -595,6 +623,7 @@ int main(int argc, char** argv) {
     test_audio_reaches_the_listener_once();
     test_the_qrss_tab();
     test_provisional_tiles();
+    test_the_pass_bar();
     test_combined_passes_hide_their_parts();
     test_the_spectrogram();
     test_the_history_is_kept();

@@ -18,7 +18,6 @@
 #include <QPixmap>
 #include <QPlainTextEdit>
 #include <QProcessEnvironment>
-#include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSet>
@@ -154,6 +153,61 @@ void ConfidenceBand::paintEvent(QPaintEvent*) {
     }
 }
 
+// --- pass bar ---------------------------------------------------------------------------
+
+namespace {
+constexpr int PASS_BAR_H = 8;
+// The preamble at the start of a pass carries no latents: not a hole.
+constexpr double PREAMBLE_S = 20.0;
+// receiver.CONF_FLOOR_DB: a bin whose latents were all erased.
+constexpr double CONF_FLOOR_DB = -30.0;
+}  // namespace
+
+PassBar::PassBar(QWidget* parent) : QWidget(parent) {
+    setObjectName(QStringLiteral("pass_bar"));
+    setFixedSize(PICTURE_W, PASS_BAR_H);
+    setToolTip(tr("The pass so far, left to right. Red: stretches with no picture data "
+                  "(not heard, or lost)."));
+}
+
+QColor PassBar::hole_color() { return QColor(215, 30, 30); }
+
+void PassBar::set(const std::vector<std::optional<double>>& bins, double progress) {
+    progress_ = std::clamp(progress, 0.0, 1.0);
+    holes_.assign(bins.size(), false);
+    const double n = static_cast<double>(bins.size());
+    for (std::size_t i = 0; i < bins.size(); ++i) {
+        const double start = static_cast<double>(i) / n;
+        const double end = static_cast<double>(i + 1) / n;
+        if (start >= progress_) break;
+        // A bin wholly inside the preamble has nothing to miss.
+        if (end * PASS_S <= PREAMBLE_S) continue;
+        holes_[i] = !bins[i] || *bins[i] <= CONF_FLOOR_DB + 0.01;
+    }
+    update();
+}
+
+void PassBar::paintEvent(QPaintEvent*) {
+    QPainter painter(this);
+    const QPalette& pal = palette();
+    const int w = width();
+    const int h = height();
+    painter.fillRect(rect(), pal.color(QPalette::Base));
+    painter.setPen(pal.color(QPalette::Mid));
+    painter.drawRect(0, 0, w - 1, h - 1);
+    const int fill = static_cast<int>(std::lround(progress_ * (w - 2)));
+    painter.fillRect(1, 1, fill, h - 2, pal.color(QPalette::Highlight));
+    const int n = static_cast<int>(holes_.size());
+    for (int i = 0; i < n; ++i) {
+        if (!holes_[static_cast<std::size_t>(i)]) continue;
+        const int x0 = 1 + static_cast<int>(std::lround(static_cast<double>(i) * (w - 2) / n));
+        int x1 = 1 + static_cast<int>(std::lround(static_cast<double>(i + 1) * (w - 2) / n));
+        x1 = std::min(x1, 1 + fill);
+        if (x1 <= x0) x1 = x0 + 1;   // a hole is never too narrow to see
+        painter.fillRect(x0, 1, x1 - x0, h - 2, hole_color());
+    }
+}
+
 // --- tile -------------------------------------------------------------------------------
 
 QrssTile::QrssTile(QWidget* parent) : QWidget(parent) {
@@ -181,15 +235,9 @@ QrssTile::QrssTile(QWidget* parent) : QWidget(parent) {
     details_->setWordWrap(true);
     details_->setFixedWidth(PICTURE_W);
     details_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    progress_ = new QProgressBar(this);
-    progress_->setRange(0, 100);
-    progress_->setFixedWidth(PICTURE_W);
-    // The text goes beside the bar, not on it: drawn on the bar, the
-    // fill's edge splits it ("55% of th|e pass") on most styles.
-    progress_->setTextVisible(false);
-    progress_->setFixedHeight(8);
-    progress_text_ = new QLabel(this);
-    progress_text_->setFont(small);
+    // **The bar says it all** (Jeff, 2026-10-10): its length is how far
+    // through the pass, its red holes the latents missing; no words.
+    progress_ = new PassBar(this);
     // The band sits right under the picture it describes.
     auto* picture_and_band = new QVBoxLayout;
     picture_and_band->setSpacing(1);
@@ -197,7 +245,6 @@ QrssTile::QrssTile(QWidget* parent) : QWidget(parent) {
     picture_and_band->addWidget(band_);
     box->addLayout(picture_and_band);
     box->addWidget(title_);
-    box->addWidget(progress_text_);
     box->addWidget(progress_);
     box->addWidget(details_);
     box->addStretch(1);
@@ -216,12 +263,11 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
     }
 
     const double progress = t.value(QStringLiteral("progress")).toDouble();
-    progress_->setValue(static_cast<int>(std::lround(100.0 * std::clamp(progress, 0.0, 1.0))));
-    progress_text_->setText(tr("%1% of the pass").arg(progress_->value()));
     std::vector<std::optional<double>> bins;
     for (const QJsonValue& v : t.value(QStringLiteral("confidence")).toArray()) {
         bins.push_back(v.isDouble() ? std::optional<double>(v.toDouble()) : std::nullopt);
     }
+    progress_->set(bins, progress);
     band_->set(std::move(bins), std::clamp(progress, 0.0, 1.0));
 
     QStringList lines;
@@ -245,8 +291,6 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
     }
     const QString cw = t.value(QStringLiteral("cw_text")).toString();
     if (!cw.isEmpty() && cw != call) lines << tr("Morse ID read: %1").arg(cw);
-    const double received = t.value(QStringLiteral("received")).toDouble();
-    const double heard = t.value(QStringLiteral("heard")).toDouble();
     QString state;
     if (status == QStringLiteral("complete")) {
         state = tr("Complete");
@@ -255,10 +299,7 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
     } else {
         state = tr("Receiving");
     }
-    lines << tr("%1 · %2% of latents · heard %3% of the pass")
-                 .arg(state)
-                 .arg(static_cast<int>(std::lround(100.0 * received)))
-                 .arg(static_cast<int>(std::lround(100.0 * heard)));
+    lines << state;
     const QString wdb = number_or(t.value(QStringLiteral("mean_w_db")), 1, tr(" dB"), QString());
     if (!wdb.isEmpty()) lines << tr("Mean weight %1").arg(wdb);
     QString note = t.value(QStringLiteral("note")).toString();
@@ -303,8 +344,9 @@ void QrssTile::mouseDoubleClickEvent(QMouseEvent* event) {
     QWidget::mouseDoubleClickEvent(event);
 }
 
-int QrssTile::progress_percent() const { return progress_->value(); }
-QString QrssTile::progress_text() const { return progress_text_->text(); }
+int QrssTile::progress_percent() const {
+    return static_cast<int>(std::lround(100.0 * progress_->progress()));
+}
 
 // --- window ----------------------------------------------------------------------------
 
