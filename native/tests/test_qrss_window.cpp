@@ -53,6 +53,7 @@ QJsonObject tile_json(const QString& id, double f_hz, const QString& call, doubl
     t[QStringLiteral("mean_w_db")] = -7.8;
     if (!call.isEmpty()) {
         t[QStringLiteral("callsign")] = call;
+        t[QStringLiteral("note")] = QStringLiteral("stored (header)");
         t[QStringLiteral("grid")] = QStringLiteral("FN42");
         t[QStringLiteral("picture_id")] = QStringLiteral("98f0da1e");
         t[QStringLiteral("mode")] = QStringLiteral("A");
@@ -136,6 +137,9 @@ void test_tiles_follow_the_state_file() {
     check::is_true(b->details().contains(QStringLiteral("· 1550 Hz")) &&
                        !b->details().contains(QStringLiteral("MHz")),
                    "qrss/tiles: and the offset alone when the dial is unknown");
+    check::is_true(
+        a->details().contains(QStringLiteral("Saved: matched to its picture by its header")),
+        "qrss/tiles: how it was filed, in words");
 
     // A finished frame whose end-of-slot receive is running.
     {
@@ -368,8 +372,10 @@ void test_provisional_tiles() {
     check::is_true(tb->parentWidget() == w.provisional_area() && tb->provisional(),
                    "provisional: a headerless one is Provisional");
     check::is_true(!tb->details().contains(QStringLiteral("mode A")) &&
-                       tb->details().contains(QStringLiteral("stored (provisional)")),
-                   "provisional: the mode A note goes, the rest of the note stays");
+                       tb->details().contains(
+                           QStringLiteral("Saved, not matched to a picture yet")) &&
+                       !tb->details().contains(QStringLiteral("stored")),
+                   "provisional: the mode A note goes, the rest in plain words");
     QJsonArray later;
     later.append(tile_json(QStringLiteral("b"), 1550.0, QStringLiteral("K1ABC"), 0.6, QString(), 0));
     write_state(dir.path(), later, 2'000'000);

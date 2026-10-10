@@ -61,6 +61,32 @@ QString number_or(const QJsonValue& v, int decimals, const QString& unit,
     return QString::number(v.toDouble(), 'f', decimals) + unit;
 }
 
+// The listener's note in plain words (Jeff, 2026-10-10): "stored (rule)"
+// says how the pass was filed with others of its picture
+// (sstvae/qrss/associate.py); anything not recognised is shown as is.
+QString plain_note(const QString& note) {
+    static const std::pair<const char*, const char*> STORED[] = {
+        {"stored (header)", QT_TR_NOOP("Saved: matched to its picture by its header")},
+        {"stored (soft-header)",
+         QT_TR_NOOP("Saved: header read by adding up several passes")},
+        {"stored (corr)", QT_TR_NOOP("Saved: matched to a stored picture by its contents")},
+        {"stored (already a member)", QT_TR_NOOP("Saved earlier")},
+        {"stored (provisional)", QT_TR_NOOP("Saved, not matched to a picture yet")},
+    };
+    QString out = note;
+    for (const auto& [from, to] : STORED) {
+        out.replace(QString::fromLatin1(from), QCoreApplication::translate("QrssTile", to));
+    }
+    if (out.startsWith(QStringLiteral("store failed: "))) {
+        out = QCoreApplication::translate("QrssTile", "Could not save: %1")
+                  .arg(out.mid(QStringLiteral("store failed: ").size()));
+    } else if (out.startsWith(QStringLiteral("render failed: "))) {
+        out = QCoreApplication::translate("QrssTile", "Could not draw the picture: %1")
+                  .arg(out.mid(QStringLiteral("render failed: ").size()));
+    }
+    return out;
+}
+
 // The inverse of QProcess::splitCommand, for showing a command line.
 QString join_command(const QStringList& args) {
     QStringList out;
@@ -284,6 +310,7 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
     lines << state;
     QString note = t.value(QStringLiteral("note")).toString();
     note.remove(QStringLiteral("; ") + GUESS_NOTE).remove(GUESS_NOTE);
+    note = plain_note(note);
     if (!note.isEmpty()) lines << note;
     provisional_ = pid.isEmpty();
     details_->setText(lines.join(QLatin1Char('\n')));
