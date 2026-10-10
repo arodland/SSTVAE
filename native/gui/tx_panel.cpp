@@ -154,7 +154,7 @@ TransmitPanel::TransmitPanel(AppState* state, QWidget* parent)
             *why = "the transmitter is busy";
             return QrssScheduler::Start::Busy;
         }
-        if (!app_->tune_rig(change.dial_hz)) {
+        if (!app_->tune_rig(change.dial_hz, "schedule")) {
             *why = "rig control is off or the radio is not connected";
             return QrssScheduler::Start::Failed;
         }

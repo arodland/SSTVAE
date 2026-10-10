@@ -515,6 +515,7 @@ if(_want_gui)
     gui/log_pane.cpp
     gui/share_dialog.cpp
     gui/app_state.cpp
+    gui/dial_log.cpp
     # The QR encoder, vendored -- see third_party/qrcodegen/README.md.
     # Built into the GUI rather than into `sstvae_core`, because showing
     # a template as a code is a thing a window does; nothing headless

@@ -238,6 +238,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     connect(state_, &AppState::modelLoaded, this, &MainWindow::on_model_loaded);
     connect(state_, &AppState::rigStatus, this, &MainWindow::on_rig_status);
+    // The dial log goes where the listener reads it.
+    state_->set_dial_log_dir(qrss_->state_dir());
     // The tuner never starts under a transmission.
     state_->set_transmit_busy([this] { return tx_panel_->transmitting(); });
     // Dial changes, by hand or scheduled, marked on both spectrum views.

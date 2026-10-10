@@ -3,6 +3,8 @@
 #include <QDateTime>
 #include <QTimer>
 
+#include <cmath>
+
 #include <exception>
 #include <initializer_list>
 #include <utility>
@@ -37,13 +39,17 @@ AppState::AppState(QObject* parent)
           // slot runs on the receiving object's thread and nothing on
           // the GUI thread ever touches the rig. log_event is
           // thread-safe by design, so logging here is fine too.
-          [](std::optional<double>) {},
+          [this](std::optional<double> hz) {
+              if (hz) emit dialRead(*hz);
+          },
           [this](const std::string& text, bool error) {
               const QString qtext = QString::fromStdString(text);
               log_event("rig", error ? log::Severity::Error : log::Severity::Info,
                         qtext);
               emit rigStatus(qtext, error);
           }) {
+    // The readout arrives on the rig's thread; the dial log is this one's.
+    connect(this, &AppState::dialRead, this, &AppState::on_dial_read, Qt::QueuedConnection);
     // Every append reaches the pane (queued signal; non-blocking from
     // any thread) and, if it opened, the file. Registered before the
     // first append so nothing is ever visible in one place and not the
@@ -181,21 +187,56 @@ void AppState::connect_rig() {
         emit rigStatus(QStringLiteral("Rig control off"), false);
         return;
     }
+    first_read_pending_ = true;
     rig_.start(make_backend(config_.rig), controller_config(config_.rig));
 }
 
 void AppState::disconnect_rig() { rig_.stop(); }
 
-bool AppState::tune_rig(double hz) {
-    if (!config_.rig.enabled || !rig_.request_frequency(hz)) return false;
-    log_event("rig", log::Severity::Info,
-              QStringLiteral("Tuning to %1 MHz").arg(hz / 1e6, 0, 'f', 6));
-    dial_changes_.push_back({static_cast<double>(QDateTime::currentMSecsSinceEpoch()) / 1000.0, hz});
+namespace {
+
+double wall_now() { return static_cast<double>(QDateTime::currentMSecsSinceEpoch()) / 1000.0; }
+
+}  // namespace
+
+void AppState::set_dial_log_dir(const QString& dir) { dial_log_.set_dir(dir); }
+
+void AppState::note_dial(double t, double hz, const char* why, bool mark) {
+    const long long rounded = std::llround(hz);
+    if (last_dial_ && *last_dial_ == rounded) return;
+    last_dial_ = rounded;
+    dial_log_.record(t, hz, why);
+    if (!mark) return;
+    dial_changes_.push_back({t, hz});
     // A day is plenty for any display.
     while (dial_changes_.size() > 1 && dial_changes_.front().t < dial_changes_.back().t - 86400.0) {
         dial_changes_.erase(dial_changes_.begin());
     }
     emit dialChanged();
+}
+
+void AppState::on_dial_read(double hz) {
+    const double now = wall_now();
+    if (first_read_pending_) {
+        // What the dial is as rig control connects: a line for the
+        // listener, not a change to mark.
+        first_read_pending_ = false;
+        note_dial(now, hz, "start", false);
+        return;
+    }
+    // A reading just after a command may still be the old dial.
+    if (now < command_quiet_until_) return;
+    note_dial(now, hz, "radio", true);
+}
+
+bool AppState::tune_rig(double hz, const char* why) {
+    if (!config_.rig.enabled || !rig_.request_frequency(hz)) return false;
+    log_event("rig", log::Severity::Info,
+              QStringLiteral("Tuning to %1 MHz").arg(hz / 1e6, 0, 'f', 6));
+    const double now = wall_now();
+    command_quiet_until_ = now + 3.0;
+    first_read_pending_ = false;
+    note_dial(now, hz, why, true);
     if (config_.rig.tune_after_change) {
         QTimer::singleShot(TUNE_AFTER_CHANGE_MS, this, [this] {
             if (transmit_busy_ && transmit_busy_()) {

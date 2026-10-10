@@ -42,6 +42,7 @@
 #include "qrss_sends.hpp"
 #include "qrss_timeline.hpp"
 #include "waterfall.hpp"
+#include "dial_log.hpp"
 
 using namespace sstvae;
 using namespace sstvae::gui;
@@ -791,6 +792,41 @@ void test_frequency_changes(const std::filesystem::path& dir) {
                    "marks: how long ago, in the spectrum views");
 }
 
+QList<QByteArray> dial_lines(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    QList<QByteArray> out;
+    for (const QByteArray& l : f.readAll().split('\n')) {
+        if (!l.isEmpty()) out.push_back(l);
+    }
+    return out;
+}
+
+void test_the_dial_log(const std::filesystem::path& dir) {
+    const QString d = QString::fromStdString((dir / "dial").string());
+    DialLog log(d);
+    check::is_true(log.record(1000.0, 10'141'000.0, "start"), "dial log: the first dial");
+    check::is_true(!log.record(1001.0, 10'141'000.4, "radio"), "dial log: the same dial is no change");
+    check::is_true(log.record(1002.0, 7'040'000.0, "menu"), "dial log: a change");
+    const QList<QByteArray> lines = dial_lines(log.path());
+    check::is_true(lines.size() == 2 && lines[1].contains("\"dial_hz\":7040000") &&
+                       lines[1].contains("\"t\":1002") && lines[1].contains("\"why\":\"menu\""),
+                   "dial log: one JSON line a change, integer Hz");
+    DialLog again(d);
+    check::is_true(again.last_hz() == 7'040'000LL && !again.record(1003.0, 7'040'000.0, "start"),
+                   "dial log: reopened, it knows the last dial");
+    check::is_true(!DialLog().record(1.0, 1e7, "menu"), "dial log: no directory, no file");
+
+    // Trimmed to 48 h, keeping the newest line before the cutoff.
+    const double now = 1000.0 + DialLog::KEEP_S + 100.0;
+    log.record(1050.0, 14'000'000.0, "radio");
+    log.record(now - 10.0, 3'500'000.0, "radio");
+    log.trim(now);
+    const QList<QByteArray> kept = dial_lines(log.path());
+    check::is_true(kept.size() == 2 && kept[0].contains("14000000") && kept[1].contains("3500000"),
+                   "dial log: old lines trimmed, the dial at the cutoff kept");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -810,5 +846,6 @@ int main(int argc, char** argv) {
     test_the_window(dir);
     test_the_editor(dir);
     test_frequency_changes(dir);
+    test_the_dial_log(dir);
     return check::report("qrss schedule");
 }

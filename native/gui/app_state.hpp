@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "codec/codec.hpp"
+#include "dial_log.hpp"
 #include "log/log.hpp"
 #include "rig/controller.hpp"
 #include "settings/settings.hpp"
@@ -76,7 +77,11 @@ public:
     // With rig.tune_after_change, the antenna tuner follows
     // TUNE_AFTER_CHANGE_S later, unless `busy` (set_transmit_busy) then
     // says a transmission is under way.
-    bool tune_rig(double hz);
+    // `why` goes in the listener's dial log ("menu", "schedule").
+    bool tune_rig(double hz, const char* why = "menu");
+    // Where the dial log (dial_log.hpp) goes: the QRSS listener's state
+    // directory.
+    void set_dial_log_dir(const QString& dir);
     static constexpr int TUNE_AFTER_CHANGE_MS = 5000;
     // Says whether a transmission is under way.
     void set_transmit_busy(std::function<bool()> busy) { transmit_busy_ = std::move(busy); }
@@ -119,6 +124,8 @@ signals:
     void rigStatus(const QString& text, bool error);
     // tune_rig asked the radio for a new frequency.
     void dialChanged();
+    // The rig readout, from the rig's worker thread (queued to this).
+    void dialRead(double hz);
     // Every log entry, queued to the GUI thread for the pane.
     void logEntry(qlonglong ms, const QString& source, int severity,
                   const QString& text);
@@ -134,6 +141,12 @@ private:
     settings::Config config_;
     std::function<bool()> transmit_busy_;
     std::vector<DialChange> dial_changes_;
+    DialLog dial_log_;
+    std::optional<long long> last_dial_;
+    bool first_read_pending_ = false;
+    double command_quiet_until_ = 0.0;
+    void note_dial(double t, double hz, const char* why, bool mark);
+    void on_dial_read(double hz);
 
     log::StatusLog log_;
     std::unique_ptr<log::FileWriter> file_log_;
