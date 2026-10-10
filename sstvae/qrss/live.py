@@ -686,24 +686,36 @@ class LiveListener:
         guess: segment 0 of a mode A send with the codec loaded, which is
         right for every mode A send and the first pass of B and C, and
         noise otherwise. It is marked GUESS_NOTE, never combined with the
-        store, and replaced once a header decodes.
+        store, and replaced once a header decodes. A headerless pass the
+        store matched to a picture (`key`, by a combined header or by its
+        latents, spec section 9) is drawn as that picture instead.
         """
         from . import render
 
         h = p.header
         if len(p.z) != picture.SENT:
             return                       # nowhere to place the latents
-        codec = self._codec(h.codec_id if h is not None else None)
+        matched = None
+        if h is None and key is not None and self.store is not None \
+                and self.store.has_accumulator(key):
+            matched = self.store.accumulator(key)
+        codec_id = h.codec_id if h is not None else matched.codec_id if matched else None
+        codec = self._codec(codec_id)
         if codec is None:
             return
-        if h is None:
+        if matched is not None:
+            seg, mode = None, int(matched.mode)      # the pass is a member already
+            t.callsign, t.picture_id = str(key[0]), f"{int(key[1]):08x}"
+            t.mode = "ABC"[mode]
+        if h is None and matched is None:
             seg, mode = 0, 0
             if GUESS_NOTE not in t.note:
                 t.note = f"{t.note}; {GUESS_NOTE}" if t.note else GUESS_NOTE
         else:
-            seg, mode = int(h.segment), int(h.mode)
+            if h is not None:
+                seg, mode = int(h.segment), int(h.mode)
             try:
-                render.check_codec_id(codec, h.codec_id)
+                render.check_codec_id(codec, codec_id)
             except SystemExit as e:      # CodecMismatch: a silently wrong picture
                 t.note = str(e)
                 return
@@ -711,7 +723,7 @@ class LiveListener:
         S = np.zeros((picture.N_GROUPS, picture.GROUP_LATENTS), dtype=np.float64)
         W = np.zeros_like(S)
         n = 1
-        k = None if h is None else key if key is not None else (h.callsign, int(h.picture_id))
+        k = key if key is not None else None if h is None else (h.callsign, int(h.picture_id))
         member = False
         if k is not None and self.store is not None and self.store.has_accumulator(k):
             acc = self.store.accumulator(k)
@@ -719,7 +731,7 @@ class LiveListener:
             W += acc.W
             member = p.uid in acc.uids
             n = len(acc.members) + (0 if member else 1)
-        if not member:
+        if not member and seg is not None:
             idx = picture.air_to_canonical(seg)
             w = np.asarray(p.w, dtype=np.float64)
             S[seg, idx] += np.where(w > 0, w * np.asarray(p.z, dtype=np.float64), 0.0)

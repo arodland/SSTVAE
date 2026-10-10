@@ -379,3 +379,37 @@ def test_a_headerless_pass_gets_a_provisional_picture(tmp_path):
     assert t.note == "" and t.image_rev == 3
     # the guess put the pass in group 0; the header puts it in group 1
     assert not np.array_equal(decoded[0], decoded[2])
+
+
+def test_a_headerless_pass_the_store_matched_is_drawn_as_its_picture(tmp_path):
+    """Section 9: a headerless pass matched to a picture by the store (a
+    combined header, or its latents) shows that picture, not the guess."""
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from sstvae.qrss import picture
+
+    decoded = []
+
+    class Codec:
+        def decode(self, lat, wt):
+            decoded.append(np.asarray(wt))
+            return Image.new("RGB", (64, 48))
+
+    p = _Pass(1500.0, n=picture.SENT)
+    S = np.zeros((picture.N_GROUPS, picture.GROUP_LATENTS), dtype=np.float32)
+    W = np.zeros_like(S)
+    W[1] = 1.0                                     # the store placed it in group 1
+    acc = SimpleNamespace(mode=1, codec_id=0xD1D8, S=S, W=W, members=[{}, {}],
+                          uids=[p.uid, "other"])
+    key = ("AG7EW", 7)
+    store = SimpleNamespace(has_accumulator=lambda k: k == key, accumulator=lambda k: acc)
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=True), store=store,
+                          log=lambda m: None)
+    L.codec = Codec()
+    t = live.Tile(id="t", q=Q_TEST, slot_utc="x", frame="full", f_hz=1500.0,
+                  note="stored (corr)")
+    L._render(t, p, key=key)
+    assert t.note == "stored (corr)" and t.callsign == "AG7EW" and t.mode == "B"
+    assert t.passes == 2 and len(decoded) == 1
