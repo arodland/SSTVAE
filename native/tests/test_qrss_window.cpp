@@ -124,10 +124,28 @@ void test_tiles_follow_the_state_file() {
                    "qrss/tiles: no percentages in words; the bar says it");
     check::is_true(a->details().contains(QStringLiteral("3 passes")),
                    "qrss/tiles: says how many passes the picture combines");
-    check::is_true(a->details().contains(QStringLiteral("RF 10.140200 MHz (dial 10.138700)")),
-                   "qrss/tiles: on the air at dial + audio (USB)");
-    check::is_true(!b->details().contains(QStringLiteral("RF ")),
-                   "qrss/tiles: and nothing when the dial is unknown");
+    check::is_true(a->details().contains(QStringLiteral("10.1387 MHz + 1500 Hz")) &&
+                       !a->details().contains(QStringLiteral("RF ")),
+                   "qrss/tiles: on the air as dial + audio offset (USB)");
+    check::is_true(b->details().contains(QStringLiteral("· 1550 Hz")) &&
+                       !b->details().contains(QStringLiteral("MHz")),
+                   "qrss/tiles: and the offset alone when the dial is unknown");
+
+    // A finished frame whose end-of-slot receive is running.
+    {
+        QJsonArray fin;
+        QJsonObject fa = tile_json(QStringLiteral("a"), 1500.0, QStringLiteral("N0CALL"), 1.0,
+                                   QStringLiteral("tiles/a.png"), 2);
+        fa[QStringLiteral("status")] = QStringLiteral("finishing");
+        fin.append(fa);
+        QJsonObject fb = tile_json(QStringLiteral("b"), 1550.2, QString(), 1.0, QString(), 0);
+        fb[QStringLiteral("status")] = QStringLiteral("finishing");
+        fin.append(fb);
+        write_state(dir.path(), fin, 1'500'000);
+        w.reload();
+        check::is_true(w.tile(QStringLiteral("a"))->details().contains(QStringLiteral("Finishing")),
+                       "qrss/tiles: finishing is said so");
+    }
 
     // The listener drops a signal: so does the window.
     QJsonArray one;
