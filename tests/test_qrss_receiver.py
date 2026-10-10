@@ -181,6 +181,41 @@ def test_r19_round_b_does_not_lose():
     assert latent_snr_db(p.z, a) >= latent_snr_db(zA, a) - 0.05
 
 
+def test_a_gain_decayed_to_nothing_is_erased_without_overflow():
+    """Through a long stretch with no signal the tracker's gain estimate
+    decays to denormal values; those symbols are erased (y 0, s2 inf, and
+    a block wholly inside gets W 0) without dividing by it, which
+    overflowed with a RuntimeWarning (seen on a real station)."""
+    import types
+    import warnings
+
+    spec = frame.TINY
+    lay = frame.layout(spec)
+    n = spec.n_pos
+    rng = np.random.default_rng(5)
+    u = np.ones(n, dtype=np.complex128)
+    psi = np.ones(n)
+    data_pos = np.asarray(lay.pos)[np.asarray(lay.data)]
+    gone = slice(int(data_pos[256]), int(data_pos[512]))         # data latents 256..511
+    u[gone] = 1e-160
+    psi[int(data_pos[700]):int(data_pos[710])] = 0.0               # erased: psi 0
+    tr = types.SimpleNamespace(
+        spec=spec, pos=np.arange(n), gi=lambda q: np.asarray(q, dtype=np.int64),
+        m=(rng.standard_normal(n) + 1j * rng.standard_normal(n)) * 0.1, u=u,
+        P=np.full(n, 1e-3), N=np.ones(n), psi=psi)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        y, s2n, s2 = demod.symbol_estimates(tr, lay.data)
+    dead = np.zeros(spec.n_data, bool)
+    dead[256:512] = dead[700:710] = True
+    assert np.all(y[dead] == 0) and np.all(np.isinf(s2n[dead]))
+    assert np.all(np.isfinite(s2n[~dead])) and np.all(y[~dead] != 0)
+    _, v = demod.block_estimate(y, s2, Q_TEST)
+    bi = block_index(spec.n_data)
+    inside = np.isin(bi, np.unique(bi[256:512])) & ~np.isin(bi, np.unique(bi[~dead]))
+    assert inside.any() and np.all(np.isinf(v[inside]))
+
+
 @pytest.mark.slow
 def test_r15_joint_not_worse_than_plain_quiet():
     """R15 (fast part): joint >= plain - 0.05 dB on a quiet fading pass, same track."""

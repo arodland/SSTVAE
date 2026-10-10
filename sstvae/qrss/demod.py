@@ -72,11 +72,17 @@ def symbol_estimates(tr, stream_idx) -> tuple[np.ndarray, np.ndarray, np.ndarray
     u2 = np.abs(u) ** 2
     med = float(np.median(np.abs(tr.u[tr.pos >= 0]) ** 2)) if len(tr.u) else 0.0
     bad = (psi < 0.5) | (u2 < U_MIN_REL * med) | (u2 <= 0)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        y = np.imag(m * np.conj(u)) / (K_LIN * u2 * psi)
-        s2n = (N / 2 + (A0 ** 2 + K_LIN ** 2) * P / 2) / (K_LIN ** 2 * u2 * psi ** 2)
-    y = np.where(bad, 0.0, y)
-    s2n = np.where(bad, np.inf, s2n)
+    # Only the usable symbols are divided by their gain. Through a long
+    # stretch with no signal in it (the station gone, a neighbour's carrier
+    # ending, digital silence) the tracker's gain estimate decays to
+    # denormal values, and dividing by it overflowed (a RuntimeWarning)
+    # into values that were then thrown away.
+    ok = ~bad
+    y = np.zeros(len(u2), dtype=np.float64)
+    s2n = np.full(len(u2), np.inf, dtype=np.float64)
+    y[ok] = np.imag(m[ok] * np.conj(u[ok])) / (K_LIN * u2[ok] * psi[ok])
+    s2n[ok] = ((N[ok] / 2 + (A0 ** 2 + K_LIN ** 2) * P[ok] / 2)
+               / (K_LIN ** 2 * u2[ok] * psi[ok] ** 2))
     return y, s2n, s2n + D_PASS
 
 
