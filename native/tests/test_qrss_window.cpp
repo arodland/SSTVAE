@@ -237,9 +237,10 @@ void test_audio_reaches_the_listener_once() {
     w.pump_audio();
     w.pump_audio();                                // nothing new: nothing sent
 
-    w.stop_listener();
+    // SSTVAE mode: inactive, the listener goes and nothing is fed.
+    w.set_active(false);
     check::is_true(wait_until([&] { return !w.listener_running(); }, 10000),
-                   "qrss/feed: closing its input ends the listener");
+                   "qrss/feed: inactive (SSTVAE mode) stops the listener");
 
     QFile f(out);
     check::is_true(f.open(QIODevice::ReadOnly), "qrss/feed: the listener's input file opened");

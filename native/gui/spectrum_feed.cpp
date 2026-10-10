@@ -40,6 +40,15 @@ void SpectrumFeed::start(int fps) {
     timer_->start(std::max(1, 1000 / std::max(1, fps)));
 }
 
+void SpectrumFeed::set_enabled(bool waterfall, bool qrss) {
+    fast_on_ = waterfall;
+    if (qrss && !slow_on_) {
+        if (ring_) cursor_ = ring_->total_written();
+        slow_.restart();
+    }
+    slow_on_ = qrss;
+}
+
 void SpectrumFeed::set_clock(std::function<double()> clock) { clock_ = std::move(clock); }
 
 void SpectrumFeed::pump() {
@@ -47,13 +56,18 @@ void SpectrumFeed::pump() {
         const double t = now();
         // The waterfall: the newest block, a display-sized slice (never
         // the whole ring; see waterfall.hpp).
-        const std::vector<double> block = ring_->tail(dsp::WATERFALL_NFFT);
+        const std::vector<double> block =
+            fast_on_ ? ring_->tail(dsp::WATERFALL_NFFT) : std::vector<double>{};
         if (static_cast<int>(block.size()) == dsp::WATERFALL_NFFT) {
             peak_ = 0.0;
             for (const double sample : block) peak_ = std::max(peak_, std::abs(sample));
             fast_.push(t, dsp::spectrum_db(block, dsp::WATERFALL_BINS));
         }
         // The QRSS store: every sample, in order.
+        if (!slow_on_) {
+            emit pumped();
+            return;
+        }
         std::uint64_t total = 0;
         std::vector<double> x = ring_->read_since(cursor_, &total);
         if (total < cursor_) {

@@ -86,6 +86,15 @@ void QrssSpectrogram::set_feed(SpectrumFeed* feed) {
     invalidate();
 }
 
+void QrssSpectrogram::set_active(bool on) {
+    if (on) {
+        if (!timer_->isActive()) timer_->start();
+        invalidate();
+    } else {
+        timer_->stop();
+    }
+}
+
 const dsp::SlowSpectrogram& QrssSpectrogram::data() const { return feed_->slow(); }
 
 void QrssSpectrogram::push_audio(const std::vector<double>& samples, double end_time) {

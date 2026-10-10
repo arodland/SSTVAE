@@ -209,8 +209,8 @@ void ReceivePanel::sync_from_config() {
 bool ReceivePanel::start() {
     if (listening()) return true;
 
-    codec::OnnxCodec* model = app_->model();
-    if (model == nullptr) {
+    // Only the SSTVAE decoder needs the codec; QRSSTVAE mode does not.
+    if (decoding_ && app_->model() == nullptr) {
         QMessageBox::warning(
             this, tr("Model still loading"),
             tr("The codec checkpoint is still loading. Try again in a moment."));
@@ -264,6 +264,30 @@ bool ReceivePanel::start() {
         return false;
     }
 
+    const int device_rate = stream_->device_rate();
+    running_.store(true);
+    if (decoding_) start_decoder();
+
+    start_button_->setEnabled(false);
+    stop_button_->setEnabled(true);
+    set_status(decoding_ ? tr("Listening at %1 Hz").arg(device_rate) : paused_text());
+    // A clean restart of the activity clears its error banner; the log
+    // keeps the history.
+    banner_->clear();
+    was_receiving_ = false;
+    app_->log_event("rx", log::Severity::Info,
+                    tr("listening (device at %1 Hz)").arg(device_rate));
+    emit listeningChanged(true);
+    return true;
+}
+
+// The SSTVAE decode loop, on the ring capture already fills. Separate
+// from capture because QRSSTVAE mode runs capture without it.
+void ReceivePanel::start_decoder() {
+    if (thread_.joinable() || !ring_) return;
+    codec::OnnxCodec* model = app_->model();
+    if (model == nullptr) return;
+    const settings::Config& config = app_->config();
     rx::RxConfig rx_config;
     rx_config.out_dir = config.folders.receive_dir;
     rx_config.poll_interval = config.receive.poll_interval;
@@ -287,9 +311,8 @@ bool ReceivePanel::start() {
 
     stop_flag_.clear();
     const bool low_cpu = config.receive.low_cpu;
-    const int device_rate = stream_->device_rate();
 
-    running_.store(true);
+    decoder_running_.store(true);
     thread_ = std::thread([this, rx_config, decoder, sink, low_cpu] {
         try {
             if (low_cpu) {
@@ -304,33 +327,52 @@ bool ReceivePanel::start() {
             emit errorOccurred(
                 tr("receive loop stopped: %1").arg(QString::fromUtf8(e.what())));
         }
-        running_.store(false);
+        decoder_running_.store(false);
     });
 
-    start_button_->setEnabled(false);
-    stop_button_->setEnabled(true);
-    set_status(tr("Listening at %1 Hz").arg(device_rate));
-    // A clean restart of the activity clears its error banner; the log
-    // keeps the history.
-    banner_->clear();
-    was_receiving_ = false;
-    app_->log_event("rx", log::Severity::Info,
-                    tr("listening (device at %1 Hz)").arg(device_rate));
-    emit listeningChanged(true);
-    return true;
+}
+
+void ReceivePanel::stop_decoder() {
+    stop_flag_.set();
+    if (thread_.joinable()) thread_.join();
+    decoder_running_.store(false);
+    stop_flag_.clear();
+}
+
+void ReceivePanel::set_decoding(bool on) {
+    if (on == decoding_) return;
+    decoding_ = on;
+    if (!listening()) return;
+    if (on) {
+        // A fresh progress record, as start() gives one.
+        shared_ = std::make_unique<rx::SharedState>();
+        was_receiving_ = false;
+        start_decoder();
+        set_status(tr("Listening"));
+        app_->log_event("rx", log::Severity::Info, tr("SSTVAE decoding resumed"));
+    } else {
+        stop_decoder();
+        set_status(paused_text());
+        progress_->setValue(0);
+        app_->log_event("rx", log::Severity::Info,
+                        tr("SSTVAE decoding paused (QRSSTVAE mode)"));
+    }
+}
+
+QString ReceivePanel::paused_text() const {
+    return tr("Capturing audio; SSTVAE decoding is off in QRSSTVAE mode");
 }
 
 void ReceivePanel::stop() {
     // Idempotence matters here: closeEvent stops the panel and the
     // destructor stops it again, and only the transition from "was
     // actually listening" deserves a log line.
-    const bool was_listening = thread_.joinable();
-
+    const bool was_listening = running_.load() || thread_.joinable();
     stop_flag_.set();
     // The stream first: it is what feeds the loop, and stopping it means
     // the loop's next poll sees no new audio rather than racing us.
     stream_.reset();
-    if (thread_.joinable()) thread_.join();
+    stop_decoder();
     running_.store(false);
 
     if (Waterfall* w = fall()) w->set_ring(nullptr);
@@ -476,7 +518,7 @@ void ReceivePanel::set_status(const QString& text) {
 }
 
 void ReceivePanel::refresh_status() {
-    if (!listening()) return;
+    if (!listening() || !decoder_running_.load()) return;
     const rx::Progress progress = shared_->get();
 
     // The engine has no "sync acquired" event -- acquisition is just the

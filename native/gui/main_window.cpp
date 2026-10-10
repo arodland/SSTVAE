@@ -192,8 +192,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     modes_->addWidget(qrss_page_);
     connect(qrss_page_, &QrssPage::listenRequested, this, [this](bool on) {
         if (on) {
-            // Start on this tab means "hear QRSS": the listener too.
-            if (rx_panel_->start() && !qrss_->listener_running()) qrss_->start_listener();
+            // The listener follows capture (below).
+            rx_panel_->start();
         } else {
             // And Stop here stops both, so there is one switch.
             rx_panel_->stop();
@@ -201,6 +201,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         }
     });
     connect(rx_panel_, &ReceivePanel::listeningChanged, qrss_page_, &QrssPage::set_listening);
+    // In QRSSTVAE mode, capture starting (a click, auto start, the end of
+    // an over) starts the QRSS listener if it is not already running.
+    connect(rx_panel_, &ReceivePanel::listeningChanged, this, [this](bool on) {
+        if (on && ui_mode() == UiMode::Qrsstvae && !qrss_->listener_running()) {
+            qrss_->start_listener();
+        }
+    });
     connect(qrss_page_, &QrssPage::scheduleRequested, tx_panel_, &TransmitPanel::show_schedule);
     connect(tx_panel_, &TransmitPanel::scheduleChanged, qrss_page_,
             &QrssPage::set_schedule_summary);
@@ -504,6 +511,15 @@ void MainWindow::set_ui_mode(UiMode mode) {
     // (Jeff, 2026-10-10). Its rows keep arriving from the shared feed, so
     // it comes back with its history.
     waterfall_->setVisible(!qrss);
+    // And each mode runs only its own receiver (Jeff, 2026-10-10): no
+    // SSTVAE decoder in QRSSTVAE mode, no QRSS listener, store or
+    // redraws in SSTVAE mode. Capture itself is shared and keeps going.
+    // The QRSS transmit schedule is not a receiver and runs in both.
+    rx_panel_->set_decoding(!qrss);
+    spectrum_feed_->set_enabled(!qrss, qrss);
+    qrss_page_->spectrogram()->set_active(qrss);
+    qrss_->set_active(qrss);
+    if (qrss && rx_panel_->listening() && !qrss_->listener_running()) qrss_->start_listener();
     // Side by side or tabbed is about the SSTVAE panes only.
     if (layout_menu_ != nullptr) layout_menu_->setEnabled(!qrss);
     const QString app = QString::fromLatin1(APP_NAME);

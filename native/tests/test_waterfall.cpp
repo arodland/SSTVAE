@@ -294,6 +294,19 @@ void test_a_shared_feed() {
                    "waterfall/shared: and the same audio went to the QRSS store");
     check::is_true(!is_dark(shot(widget), tone_column(), 5),
                    "waterfall/shared: rows arrive when the feed pumps");
+    // Each mode fills only its own store.
+    feed.set_enabled(true, false);
+    const std::size_t fine_before = feed.slow().fine().size();
+    ring->write(tone);
+    for (int i = 0; i < 20; ++i) feed.pump();
+    check::is_true(feed.slow().fine().size() == fine_before && feed.fast().count() == 170,
+                   "waterfall/shared: SSTVAE mode fills no QRSS store");
+    feed.set_enabled(false, true);
+    ring->write(tone);
+    for (int i = 0; i < 20; ++i) feed.pump();
+    check::is_true(feed.fast().count() == 170 && feed.slow().fine().size() > fine_before,
+                   "waterfall/shared: QRSSTVAE mode makes no waterfall rows");
+    feed.set_enabled(true, true);
     // Taller than it has ever been: the extra rows come from the history.
     widget.resize(W, 140);
     check::is_true(!is_dark(shot(widget), tone_column(), 120),

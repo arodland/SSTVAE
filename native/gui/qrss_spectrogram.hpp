@@ -75,6 +75,8 @@ public:
     // widget's own; `set_ring` then sets the feed's ring.
     void set_feed(SpectrumFeed* feed);
     SpectrumFeed* feed() const { return feed_; }
+    // Off in SSTVAE mode: no redraw timer.
+    void set_active(bool on);
     // Audio whose last sample was captured at `end_time` (unix seconds).
     void push_audio(const std::vector<double>& samples, double end_time);
     void set_markers(std::vector<Marker> markers);

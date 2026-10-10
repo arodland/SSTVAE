@@ -97,6 +97,11 @@ public:
     // The listener's command row and its output log. Shown in a window
     // of its own; the QRSSTVAE mode hides them behind a toggle.
     void set_details_visible(bool on);
+    // Off in SSTVAE mode: the listener this window started is stopped
+    // and nothing polls or feeds it. On again: polling resumes from the
+    // audio arriving now (the main window restarts the listener).
+    void set_active(bool on);
+    bool active() const { return active_; }
     bool details_visible() const;
 
     bool listener_running() const;
@@ -127,6 +132,7 @@ private:
 
     QString state_dir_;
     QWidget* listener_row_ = nullptr;
+    bool active_ = true;
     QLineEdit* command_edit_ = nullptr;
     QPushButton* start_button_ = nullptr;
     QPushButton* stop_button_ = nullptr;

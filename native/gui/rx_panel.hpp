@@ -97,6 +97,12 @@ public:
 public slots:
     bool start();
     void stop();
+    // Whether capture also runs the SSTVAE decoder. Off in QRSSTVAE
+    // mode, where the audio only feeds the QRSS listener; switching it
+    // while listening starts or stops the decoder alone.
+    void set_decoding(bool on);
+    bool decoding() const { return decoding_; }
+    bool decoder_running() const { return decoder_running_.load(); }
     void save_current();
     // Reveal the last saved picture in the desktop's file manager.
     void open_saved_folder();
@@ -187,7 +193,12 @@ private:
     std::unique_ptr<rx::SharedState> shared_;
     rx::StopFlag stop_flag_;
     std::thread thread_;
-    std::atomic<bool> running_{false};
+    void start_decoder();
+    void stop_decoder();
+    QString paused_text() const;
+    std::atomic<bool> running_{false};           // capture is open
+    std::atomic<bool> decoder_running_{false};   // the decode loop is
+    bool decoding_ = true;
 
     // The picture currently in the preview, and what to name it. Not
     // necessarily a *finished* reception: the loop reconstructs on every

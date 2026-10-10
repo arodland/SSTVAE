@@ -457,6 +457,22 @@ void QrssWindow::set_details_visible(bool on) {
     log_->setVisible(on);
 }
 
+void QrssWindow::set_active(bool on) {
+    if (on == active_) return;
+    active_ = on;
+    if (on) {
+        // Skip what the ring gathered while off rather than send it late.
+        if (ring_) fed_ = ring_->total_written();
+        poll_timer_->start();
+        feed_timer_->start();
+        reload();
+    } else {
+        stop_listener();
+        poll_timer_->stop();
+        feed_timer_->stop();
+    }
+}
+
 bool QrssWindow::details_visible() const { return !listener_row_->isHidden(); }
 
 QString QrssWindow::command() const { return command_edit_->text(); }

@@ -56,6 +56,12 @@ public:
     // Pump on a timer, `fps` times a second (the waterfall's row rate).
     void start(int fps);
     void set_clock(std::function<double()> clock);
+    // Which stores to fill: the waterfall's rows (SSTVAE mode) and the
+    // QRSS columns (QRSSTVAE mode). Both on by default. A store switched
+    // back on starts from the audio arriving then; the gap stays a gap.
+    void set_enabled(bool waterfall, bool qrss);
+    bool waterfall_enabled() const { return fast_on_; }
+    bool qrss_enabled() const { return slow_on_; }
     double now() const { return clock_(); }
 
     const dsp::SlowSpectrogram& slow() const { return slow_; }
@@ -79,6 +85,8 @@ private:
     std::function<double()> clock_;
     QTimer* timer_ = nullptr;
     double peak_ = 0.0;
+    bool fast_on_ = true;
+    bool slow_on_ = true;
 };
 
 }  // namespace sstvae::gui
