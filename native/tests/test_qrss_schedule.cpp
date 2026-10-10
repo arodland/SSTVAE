@@ -717,6 +717,8 @@ void test_frequency_changes(const std::filesystem::path& dir) {
     check::is_true(!s->add_change(c).empty(), "change: nor within 30 s of its end");
     c.at = Q - H + 30.0;
     check::is_true(!s->add_change(c).empty(), "change: nor with less than a minute's notice");
+    check::is_true(qs::busy(c).first == c.at - 30.0 && qs::busy(c).second == c.at + 50.0,
+                   "change: 30 s clear before, 5 s plus a 45 s tune after");
     c.at = Q + H + 120.0;
     check::is_true(s->add_change(c).empty() && s->changes().size() == 1 &&
                        !s->changes()[0].id.empty(),

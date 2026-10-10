@@ -191,7 +191,7 @@ std::string problem(const FreqChange& c) {
 }
 
 std::pair<double, double> busy(const FreqChange& c) {
-    return {c.at - CHANGE_CLEAR_S, c.at + TUNE_DELAY_S + CHANGE_CLEAR_S};
+    return {c.at - CHANGE_CLEAR_S, c.at + TUNE_DELAY_S + std::max(CHANGE_CLEAR_S, TUNE_MAX_S)};
 }
 
 std::optional<Upcoming> clash(const FreqChange& c, const std::vector<Entry>& entries) {

@@ -121,10 +121,12 @@ std::optional<Upcoming> clash_with(const std::vector<Entry>& entries, double fro
 // A scheduled change of the radio's dial frequency, at a moment between
 // transmissions. Five seconds later the antenna tuner may follow
 // (Settings > Rig control), so a change keeps CHANGE_CLEAR_S clear of
-// any send's span on both sides, the tune included.
+// any send's span before it, and after it the tune's delay plus the
+// longest a tune takes (TUNE_MAX_S: Jeff's tuner, rarely, 45 s).
 
 inline constexpr double TUNE_DELAY_S = 5.0;
 inline constexpr double CHANGE_CLEAR_S = 30.0;
+inline constexpr double TUNE_MAX_S = 45.0;
 // Not done within this long of its time (the transmitter was busy, the
 // app was not running): missed.
 inline constexpr double CHANGE_LATE_S = 600.0;
