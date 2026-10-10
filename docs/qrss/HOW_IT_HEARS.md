@@ -289,8 +289,13 @@ exactly what the receiver wants to add up.
   then where the signal is: the radio's dial plus the signal's audio
   tone, such as 10.141 MHz + 1500 Hz (the tone alone without rig
   control).
-- **SNR** (beside the title): signal strength against the noise, in dB.
-  Negative means weaker than the noise.
+- **The number beside the title**: the picture's mean weight, how
+  confident its numbers are on average, in dB. Higher (closer to 0 dB
+  or above) is better; a single pass needs around +2 dB for a good
+  picture.
+- **SNR**: signal strength against the noise, in dB. Negative means
+  weaker than the noise. The tile doesn't show it; the signal's trace
+  on the spectrogram is the better picture of that.
 - **The bar** under the title: how far through its 30 minutes the pass
   is, and how well each stretch came through, left to right. Black
   means that stretch was no better than noise, or has no picture
@@ -302,8 +307,6 @@ exactly what the receiver wants to add up.
 - **Receiving / Finishing / Complete / Lost**: on the air; over and
   being looked at once more; done and filed; or not found at all in the
   last look.
-- **Mean weight**: how confident the picture's numbers are on average.
-  Higher (closer to 0 dB or above) is better.
 - **Mode A / B / C** and **passes**: how many passes the picture is sent
   in, and how many of them are in the picture shown.
 
