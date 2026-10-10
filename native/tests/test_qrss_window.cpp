@@ -80,6 +80,9 @@ void write_state(const QString& dir, const QJsonArray& tiles, qint64 mtime_ms) {
     check::is_true(f.open(QIODevice::WriteOnly | QIODevice::Truncate),
                    "qrss/tiles: state file opened for writing");
     f.write(QJsonDocument(st).toJson());
+    // Flushed first: a flush at close would stamp the real time over this
+    // one, and two writes inside one filesystem tick would look like one.
+    f.flush();
     f.setFileTime(QDateTime::fromMSecsSinceEpoch(mtime_ms), QFileDevice::FileModificationTime);
     f.close();
 }
@@ -167,6 +170,7 @@ void test_tiles_follow_the_state_file() {
         check::is_true(f.open(QIODevice::WriteOnly | QIODevice::Truncate),
                        "qrss/tiles: torn state file opened for writing");
         f.write("{\"tiles\": [");
+        f.flush();
         f.setFileTime(QDateTime::fromMSecsSinceEpoch(3'000'000),
                       QFileDevice::FileModificationTime);
     }
