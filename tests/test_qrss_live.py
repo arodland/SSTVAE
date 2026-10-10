@@ -172,7 +172,7 @@ def test_an_empty_slot_is_searched_less_often(tmp_path):
     """Every refresh_s until detect_until_s; after it, a slot where nothing
     was found is searched every empty_refresh_s, and one with a signal is
     still received every refresh_s."""
-    cfg = live.LiveConfig(render=False)            # FULL: 60 s, 25 s, 300 s, 300 s
+    cfg = live.LiveConfig(render=False)            # FULL: 120 s, 25 s, 300 s, 300 s
     end = live.frame_seconds(cfg.spec)
 
     def refreshes(found_at):
@@ -192,9 +192,9 @@ def test_an_empty_slot_is_searched_less_often(tmp_path):
             L.step(t0 + t)
         return seen
 
-    assert refreshes(None) == [25, 85, 145, 205, 265, 565, 865, 1165, 1465, 1765]
+    assert refreshes(None) == [25, 145, 265, 565, 865, 1165, 1465, 1765]
     found = refreshes(2)                          # found at the second search
-    assert found[:2] == [25, 85] and np.all(np.diff(found) == 60) and found[-1] > end - 60
+    assert found[:2] == [25, 145] and np.all(np.diff(found) == 120) and found[-1] > end - 120
 
 
 def test_confidence_over_the_pass():
@@ -383,6 +383,64 @@ def test_receives_run_on_the_worker_and_state_keeps_moving(tmp_path, monkeypatch
     with L.lock:
         L.step(end + 2.0)
     assert q in L.finished and L.idle()
+
+
+def test_the_end_of_slot_receive_runs_in_its_own_process(tmp_path):
+    """With finish_process, the end-of-slot receive runs in a child process
+    while the live worker stays free, gets the same passes, and a child that
+    dies is replaced at the next receive."""
+    import os
+    import time as _t
+
+    q = Q_TEST
+    a = unit_rms_latents(TINY.n_data, 0)
+    sym = frame.assemble(TINY, None, precoder.precode(a, q))
+    sim = chm.simulate(sym, TINY, q, ChannelConfig(snr_db=-10.0, seed=2), carrier_hz=1500.0)
+    t0 = slot_t0(q)
+    n0 = t0 * FE_FS - int(round(sim.t0_index))
+    end = t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 0.5
+    cfg = live.LiveConfig(spec=TINY, render=False, background=True, finish_process=True)
+    L = live.LiveListener(tmp_path, cfg, log=lambda m: None)
+    try:
+        L.ring.write(n0, sim.fe)
+        L._refresh = lambda s: None           # (live receives are not what is tested)
+        got = []
+        apply = L._finish_apply
+        L._finish_apply = lambda s, passes, heard: (got.append((passes, heard)),
+                                                    apply(s, passes, heard))
+        with L.lock:
+            L.step(t0 + 30.0)                 # the slot starts
+            L.step(end)                       # and ends
+        s = L.slots[q]
+        child = None
+        deadline = _t.monotonic() + 120.0
+        while not (s.done and L.idle()) and _t.monotonic() < deadline:
+            if child is None and L._proc._proc is not None:
+                child = L._proc._proc.pid
+                assert L._busy["live"] is None and "finish" in L.busy
+            _t.sleep(0.05)
+        assert s.done and L.idle(), "the end-of-slot receive did not finish"
+        assert child is not None and child != os.getpid()
+        with L.lock:
+            L.step(end + 1.0)
+        assert q in L.finished
+        (tile,) = L.tiles()
+        assert tile.status == "complete" and abs(tile.f_hz - 1500.0) < 0.5
+        # the same receive in this process gives the same pass
+        x, ok, origin = live.capture_read(L.ring, q, TINY)
+        here, heard = live.finish_receive(x, ok, origin, q, TINY, cfg.estimator, [])
+        ((there, heard2),) = got
+        assert heard == heard2 and len(here) == len(there) == 1
+        assert np.array_equal(here[0].z, there[0].z) and np.array_equal(here[0].w, there[0].w)
+        # a child that dies is replaced
+        L._proc._proc.kill()
+        L._proc._proc.join(10.0)
+        empty = (np.zeros(len(x), np.complex64), np.zeros(len(x), bool), origin, q, TINY,
+                 cfg.estimator, [])
+        assert L._proc.call(empty) == ([], 0.0)
+    finally:
+        L.close()
+    assert L._proc._proc is None
 
 
 def test_a_restarted_listener_reads_the_preamble_back(tmp_path):

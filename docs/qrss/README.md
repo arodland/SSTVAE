@@ -146,11 +146,15 @@ accumulator. Then:
 `qrss_listen.py` takes raw mono 8 kHz audio on stdin and keeps a tile
 for every CE signal it hears. A signal appears about 25 s after its
 quarter hour, once its preamble has arrived. Its tile is received again
-every `--refresh` seconds (default 60) with everything heard so far, so
-the callsign and picture ID appear after about a minute and the picture
-fills in through the pass. When the frame ends, the whole slot is
-received again, stored and associated, and the tile shows the picture
-accumulated over every pass of it.
+every `--refresh` seconds (default 120) with everything heard so far, so
+the callsign and picture ID appear after about two and a half minutes
+and the picture fills in through the pass. A slot where nothing has
+been found 5 minutes in is searched again only every 5 minutes. When
+the frame ends, the whole slot is received again, stored and
+associated, and the tile shows the picture accumulated over every pass
+of it. That end-of-slot receive runs in a second process, on another
+core, so the tiles of the slot still on the air keep updating
+meanwhile.
 
 Under each tile's picture a 2-pixel band shows that pass's confidence
 over time, from the start of the pass at the left to its end at the
@@ -248,8 +252,9 @@ correct by eye.
   the wrong timing. A pass with no header within 20 Hz of a signal of
   another slot that did decode its header is therefore dropped. A real,
   very weak second station that close is dropped with it.
-- CPU: roughly 20 s per signal per refresh on a desktop. With many
-  signals, use a longer `--refresh`.
+- CPU: roughly 20 s per signal per refresh on a desktop, plus up to a
+  few minutes for each end-of-slot receive. With many signals, use a
+  longer `--refresh`.
 
 ## Sending from the app
 

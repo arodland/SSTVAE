@@ -18,9 +18,10 @@ Tiles go to --state DIR (default STORE/live): `state.json`, rewritten
 after every change, and `tiles/<id>.png`. A signal is looked for on its
 preamble (every --refresh seconds until 5 minutes into the slot, then
 every 5 minutes while none has been found), then received every
---refresh seconds with what has arrived so far; when its
-frame ends the whole slot is received again (round B, and the whole-slot
-search for signals too weak to see on the preamble), stored and
+--refresh seconds (default 2 minutes) with what has arrived so far; when
+its frame ends the whole slot is received again (round B, and the
+whole-slot search for signals too weak to see on the preamble) in a
+second process, so the other slots' tiles keep updating, stored and
 associated in the multi-pass store (--store DIR, default $QRSSTVAE_HOME
 or ~/.local/share/qrsstvae; off with --no-store), and the tile shows the
 picture accumulated over every pass of it. The front-end stream also
@@ -58,8 +59,8 @@ def main() -> None:
     ap.add_argument("--speed", type=float, default=0.0,
                     help="replay at this many times real time (default: as fast as possible)")
     ap.add_argument("--frame", default="full", help="frame shape (default full)")
-    ap.add_argument("--refresh", type=float, default=60.0,
-                    help="seconds between live receives of a slot (default 60)")
+    ap.add_argument("--refresh", type=float, default=120.0,
+                    help="seconds between live receives of a slot (default 120)")
     ap.add_argument("--state", type=Path, default=None, help="tile directory (default STORE/live)")
     ap.add_argument("--store", default=None, help="multi-pass store directory")
     ap.add_argument("--no-store", action="store_true", help="do not store or associate")
@@ -112,7 +113,8 @@ def main() -> None:
         else:
             passband = frontend.PassbandStore(pb)
     cfg = live.LiveConfig(spec=spec, refresh_s=args.refresh, precision=args.precision,
-                          model=args.model, render=not args.no_pictures, background=True)
+                          model=args.model, render=not args.no_pictures, background=True,
+                          finish_process=True)
     listener = live.LiveListener(state, cfg, store=store, passband=passband)
 
     if args.wav is not None:
@@ -139,6 +141,8 @@ def main() -> None:
     except KeyboardInterrupt:
         listener.log("stopped")
         listener.write_state(listening=False)
+    finally:
+        listener.close()
 
 
 if __name__ == "__main__":

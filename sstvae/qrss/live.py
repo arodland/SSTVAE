@@ -13,7 +13,7 @@ capture audio in and shows the tiles this writes.
         detect on the preamble (until detect_until_s), then
         receive_pass, round A only, with the unheard spans erased
         --> tile: header, SNR, share received, picture so far
-    when a slot's frame has ended:
+    when a slot's frame has ended (in a process of its own, beside the live ones):
         receive_slot over the whole slot (round B, whole-slot search),
         associate into the multi-pass store, render the accumulator
         --> the tile goes "complete"
@@ -198,13 +198,25 @@ def slot_capture(ring: FeRing, q: int, spec: FrameSpec, seed: int | None = None,
     The heard samples are blanked and normalised as `receiver.prepare`
     would; everything not heard (the future, and holes) is complex noise
     at the normalised level (median power 1) and is returned as spans to
-    erase, in seconds after t0.
+    erase, in seconds after t0. It is `capture_read` (quick: the part a
+    worker does holding the listener's lock) then `capture_prepare`.
     """
+    return capture_prepare(*capture_read(ring, q, spec, lead_s, tail_s), q, spec, seed)
+
+
+def capture_read(ring, q: int, spec: FrameSpec, lead_s: float = PB_LEAD_S,
+                 tail_s: float = PB_TAIL_S) -> tuple[np.ndarray, np.ndarray, int]:
+    """(FE, written, index of t0 in them): slot q as read from the ring (or
+    anything with its `read`, such as the passband store)."""
     t0 = slot_t0(q)
     a = t0 * FE_FS - int(round(lead_s * FE_FS))
     b = t0 * FE_FS + int(round((frame_seconds(spec) + tail_s) * FE_FS))
     x, ok = ring.read(a, b)
-    origin = t0 * FE_FS - a
+    return x, ok, t0 * FE_FS - a
+
+
+def capture_prepare(x, ok, origin: int, q: int, spec: FrameSpec, seed: int | None = None):
+    """`slot_capture` from what `capture_read` returned."""
     # The blanker and the inverse AGC look at most about 0.6 s either
     # side of a sample, and everything after the newest heard sample is
     # replaced by noise below, so they run only up to CAPTURE_MARGIN_S past
@@ -229,6 +241,110 @@ def slot_capture(ring: FeRing, q: int, spec: FrameSpec, seed: int | None = None,
     k1 = min(len(ok), origin + int(round(frame_seconds(spec) * FE_FS)))
     heard = float(np.mean(ok[origin:k1])) if k1 > origin else 0.0
     return prep, _spans(ok, FE_FS, origin), heard
+
+
+def finish_receive(x, ok, origin: int, q: int, spec: FrameSpec, estimator: str,
+                   dets: list) -> tuple[list[PassResult], float]:
+    """(passes, share heard): the end-of-slot receive of slot q from its
+    `capture_read`.
+
+    The search over the whole slot (for signals too weak to see on the
+    preamble) runs only when most of the slot was heard, and verifies at
+    most FINISH_MAX_CANDIDATES candidates for FINISH_BUDGET_S, strongest
+    first: on a phone band, voices and carriers make candidates that each
+    cost about a minute to reject, and the search ran for longer than a
+    slot. With less heard, only `dets`, the signals already found on the
+    preamble, are received.
+    """
+    prep, erase, heard = capture_prepare(x, ok, origin, q, spec)
+    passes = []
+    if heard >= FINISH_SEARCH_MIN_HEARD:
+        passes = receiver.receive_slot(prep, spec, estimator=estimator, erase_s=erase,
+                                       max_candidates=FINISH_MAX_CANDIDATES,
+                                       budget_s=FINISH_BUDGET_S)
+    elif dets and heard > 0.0:
+        passes = receiver.receive_slot(prep, spec, estimator=estimator, erase_s=erase, dets=dets)
+    return passes, heard
+
+
+class _FinishProcess:
+    """A child process that runs `finish_receive`, so the end-of-slot
+    receive (minutes, on a busy band) runs beside the live receives
+    instead of holding them up.
+
+    A process rather than a thread because the receiver's tracker is a
+    Python loop, which two threads cannot run at once. It is started on
+    first use (spawned: none of this process's threads or locks come
+    with it), started again if it dies, runs at a lower priority than the
+    live receives, and exits by itself when this process does.
+    """
+
+    def __init__(self):
+        import multiprocessing
+
+        self._ctx = multiprocessing.get_context("spawn")
+        self._proc = None
+        self._conn = None
+
+    def call(self, args: tuple):
+        if self._proc is None or not self._proc.is_alive():
+            self.close()
+            ours, theirs = self._ctx.Pipe()
+            self._proc = self._ctx.Process(target=_finish_process_main, args=(theirs,),
+                                           name="qrss-finish", daemon=True)
+            self._proc.start()
+            theirs.close()
+            self._conn = ours
+        try:
+            self._conn.send(args)
+            ok, val = self._conn.recv()
+        except (EOFError, OSError) as e:
+            self.close()
+            raise RuntimeError("the end-of-slot receive's process stopped") from e
+        if not ok:
+            raise RuntimeError(val)
+        return val
+
+    def close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except OSError:
+                pass
+        if self._proc is not None and self._proc.is_alive():
+            self._proc.terminate()
+            self._proc.join(5.0)
+        self._proc = self._conn = None
+
+
+def _finish_process_main(conn) -> None:
+    """The loop of `_FinishProcess`'s child: args in, (True, result) or
+    (False, error text) out, until the pipe closes or the parent goes."""
+    import multiprocessing
+
+    parent = multiprocessing.parent_process()
+    if parent is not None:
+        def watch():
+            while parent.is_alive():
+                time.sleep(2.0)
+            os._exit(0)              # the listener is gone: so is the reason to finish
+
+        threading.Thread(target=watch, daemon=True).start()
+    if hasattr(os, "nice"):
+        try:
+            os.nice(5)               # the live receives come first
+        except OSError:
+            pass
+    while True:
+        try:
+            args = conn.recv()
+        except (EOFError, OSError):
+            return
+        try:
+            out = (True, finish_receive(*args))
+        except Exception as e:       # reported to the listener, which logs it
+            out = (False, f"{type(e).__name__}: {e}")
+        conn.send(out)
 
 
 # --- tiles -----------------------------------------------------------------------------------
@@ -281,7 +397,7 @@ class SlotState:
 @dataclass
 class LiveConfig:
     spec: FrameSpec = FULL
-    refresh_s: float = 60.0           # time between live receives of a slot
+    refresh_s: float = 120.0          # time between live receives of a slot
     first_s: float = 25.0             # first receive this long after t0 (the preamble is 20 s)
     detect_until_s: float = 300.0     # acquisition re-runs at each refresh until then
     # ...and after it, a slot where nothing has been found yet is searched
@@ -293,10 +409,16 @@ class LiveConfig:
     precision: str = "fp32"
     model: str | None = None
     render: bool = True
-    # Receive on a worker thread, so the loop keeps taking audio and
-    # writing state.json while a receive runs (minutes on a busy band).
-    # Off for tests, which step the listener synchronously.
+    # Receive on worker threads, so the loop keeps taking audio and
+    # writing state.json while a receive runs (minutes on a busy band):
+    # one for the live receives, one for the end-of-slot ones, so a slot
+    # ending does not stop the others' tiles. Off for tests, which step
+    # the listener synchronously.
     background: bool = False
+    # With background: the end-of-slot receives run in a child process
+    # (`_FinishProcess`), on a core of their own. The command line turns
+    # it on; tests that replace the receiver in this process leave it off.
+    finish_process: bool = False
 
 
 def dir_lock(path):
@@ -368,12 +490,28 @@ class LiveListener:
         # lock; a worker job takes it to copy its capture and to apply what
         # it found, never while it computes.
         self.lock = threading.RLock()
-        self.busy: str | None = None       # what the worker is doing, for state.json
-        self._jobs: queue.Queue | None = None
+        self._busy = {"live": None, "finish": None}   # what each worker is doing
+        self._jobs: queue.Queue | None = None          # live receives
+        self._finish_jobs: queue.Queue | None = None   # end-of-slot receives
+        self._proc = None
         if self.cfg.background:
             self._jobs = queue.Queue()
-            threading.Thread(target=self._worker, daemon=True).start()
+            self._finish_jobs = queue.Queue()
+            for name, jobs in (("live", self._jobs), ("finish", self._finish_jobs)):
+                threading.Thread(target=self._worker, args=(name, jobs), daemon=True).start()
+            if self.cfg.finish_process:
+                self._proc = _FinishProcess()
         self._load_previous()
+
+    @property
+    def busy(self) -> str | None:
+        """What the workers are doing, for state.json (None when nothing)."""
+        return "; ".join(b for b in (self._busy["live"], self._busy["finish"]) if b) or None
+
+    def close(self) -> None:
+        """Stop the end-of-slot process, if there is one."""
+        if self._proc is not None:
+            self._proc.close()
 
     # -- logging and state ------------------------------------------------------------
 
@@ -487,8 +625,9 @@ class LiveListener:
 
         Stopping a listener near the end of a frame (just before a quarter
         hour) would otherwise lose the slot: its latents are stored only by
-        that receive. The slots run newest first, each only when nothing
-        live is waiting (see `step`). Returns the slots queued.
+        that receive. The slots run newest first, one at a time, each when
+        no other end-of-slot receive is waiting (see `step`). Returns the
+        slots queued.
         """
         if self.passband is None or hours <= 0:
             return []
@@ -541,18 +680,18 @@ class LiveListener:
             if now >= t0 + dur + PB_TAIL_S:
                 if not s.finishing:
                     s.finishing = True
-                    self._submit(self._finish, s)
+                    self._submit(self._finish, s, finish=True)
                     changed = True
             elif now >= t0 + self.cfg.first_s and (
                     s.last_refresh is None or now - s.last_refresh >= self._interval(s, now)):
-                if self._jobs is None or (self.busy is None and self._jobs.empty()):
+                if self._jobs is None or (self._busy["live"] is None and self._jobs.empty()):
                     s.last_refresh = now     # (when busy, it is still due next time)
                     self._submit(self._refresh, s)
                     changed = True
-        if self._recover and self.idle():
+        if self._recover and self._finish_idle():
             s = self._recover.pop(0)
             self.slots[s.q] = s
-            self._submit(self._finish, s)
+            self._submit(self._finish, s, finish=True)
             changed = True
         for q in [q for q, s in self.slots.items() if s.done]:
             for tid in self.slots[q].tiles:
@@ -573,16 +712,16 @@ class LiveListener:
 
     # -- the worker -----------------------------------------------------------------------
 
-    def _submit(self, job, s: SlotState) -> None:
+    def _submit(self, job, s: SlotState, finish: bool = False) -> None:
         if self._jobs is None:
             job(s)
         else:
-            self._jobs.put((job, s))
+            (self._finish_jobs if finish else self._jobs).put((job, s))
 
-    def _worker(self) -> None:
+    def _worker(self, name: str, jobs: queue.Queue) -> None:
         while True:
-            job, s = self._jobs.get()
-            self.busy = f"{job.__name__.strip('_')} {utc_iso(slot_t0(s.q) - 1)}"
+            job, s = jobs.get()
+            self._busy[name] = f"{job.__name__.strip('_')} {utc_iso(slot_t0(s.q) - 1)}"
             try:
                 job(s)
             except Exception as e:       # one bad slot must not stop the listener
@@ -590,11 +729,17 @@ class LiveListener:
                     self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: {type(e).__name__}: {e}")
                     s.done = True
             finally:
-                self.busy = None
+                self._busy[name] = None
+
+    def _finish_idle(self) -> bool:
+        """No end-of-slot receive queued or running."""
+        return self._finish_jobs is None or (self._busy["finish"] is None
+                                             and self._finish_jobs.empty())
 
     def idle(self) -> bool:
         """No receive queued or running."""
-        return self._jobs is None or (self.busy is None and self._jobs.empty())
+        return self._finish_idle() and (self._jobs is None or (self._busy["live"] is None
+                                                               and self._jobs.empty()))
 
     def _match(self, s: SlotState, f_hz: float) -> Tile | None:
         best = None
@@ -624,8 +769,9 @@ class LiveListener:
             _, ok = self.ring.read(t0 * FE_FS, (t0 + PREAMBLE_S) * FE_FS)
             if ok.mean() < 0.5:
                 return      # joined after its preamble: only the end-of-slot search can find it
-            prep, erase, heard = slot_capture(self.ring, s.q, spec)
+            raw = capture_read(self.ring, s.q, spec)
             elapsed = self.now - t0
+        prep, erase, heard = capture_prepare(*raw, s.q, spec)
         if elapsed < self.cfg.detect_until_s or not s.dets:
             found = receiver.detect(prep, spec, live_only=True)
             for d in found:      # keep one detection per signal, the newest
@@ -648,29 +794,19 @@ class LiveListener:
                      f"{100 * self._progress(s.q):.0f}% ({time.time() - t_start:.0f} s)")
 
     def _finish(self, s: SlotState) -> None:
-        """The frame is over: receive the whole slot, store, render the accumulator.
-
-        The search over the whole slot (for signals too weak to see on the
-        preamble) runs only when most of the slot was heard, and verifies
-        at most FINISH_MAX_CANDIDATES candidates for FINISH_BUDGET_S,
-        strongest first: on a phone band, voices and carriers make
-        candidates that each cost about a minute to reject, and the search
-        ran for longer than a slot. With less heard, only the
-        signals already found on the preamble are received.
-        """
+        """The frame is over: receive the whole slot (`finish_receive`, in
+        the end-of-slot process when there is one), store, render the
+        accumulator."""
         spec = self.cfg.spec
         t_start = time.time()
         with self.lock:
-            prep, erase, heard = slot_capture(s.reader or self.ring, s.q, spec)
+            x, ok, origin = capture_read(s.reader or self.ring, s.q, spec)
             dets = list(s.dets)
-        passes = []
-        if heard >= FINISH_SEARCH_MIN_HEARD:
-            passes = receiver.receive_slot(prep, spec, estimator=self.cfg.estimator,
-                                           erase_s=erase, max_candidates=FINISH_MAX_CANDIDATES,
-                                           budget_s=FINISH_BUDGET_S)
-        elif dets and heard > 0.0:
-            passes = receiver.receive_slot(prep, spec, estimator=self.cfg.estimator,
-                                           erase_s=erase, dets=dets)
+        args = (x, ok, origin, s.q, spec, self.cfg.estimator, dets)
+        if self._proc is not None:
+            passes, heard = self._proc.call(args)
+        else:
+            passes, heard = finish_receive(*args)
         with self.lock:
             self._finish_apply(s, passes, heard)
             what = "" if heard >= FINISH_SEARCH_MIN_HEARD else \
@@ -987,5 +1123,6 @@ def run(listener: LiveListener, source, *, realtime: bool, stop=None) -> None:
         listener.write_state(listening=False)
 
 
-__all__ = ["StreamFE", "FeRing", "slot_capture", "Tile", "LiveConfig", "LiveListener",
+__all__ = ["StreamFE", "FeRing", "slot_capture", "capture_read", "capture_prepare",
+           "finish_receive", "Tile", "LiveConfig", "LiveListener",
            "StdinSource", "WavSource", "run", "frame_seconds", "utc_iso"]

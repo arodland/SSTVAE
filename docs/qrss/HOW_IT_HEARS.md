@@ -132,7 +132,7 @@ preamble of every signal in the channel. Each signal it finds gets a
 **tile** on the screen: a small card with its frequency, its strength
 and, once the header is read, the sender's callsign.
 
-It repeats that search every minute for the first five minutes, because
+It repeats that search every two minutes for the first five minutes, because
 a weak signal can take a few minutes of audio to confirm. If nothing has
 turned up by then, it searches only every five minutes for the rest of
 the slot. On a quiet band that saves most of the listener's work, and a
@@ -140,7 +140,7 @@ signal it misses can still be found by the last look at the end (step 4).
 
 ### 3. It fills in the picture as the pass arrives
 
-Every minute or so it re-reads everything heard so far for each signal,
+Every two minutes it re-reads everything heard so far for each signal,
 draws the picture from the numbers it has, and updates the tile. Each
 number comes with a *confidence weight*. A number heard clearly counts a
 lot, and a number buried in noise or not yet received counts for little
@@ -154,7 +154,9 @@ When a slot's 30 minutes are over, the listener reads the whole slot one
 more time with everything it now knows. This also searches for signals
 that were too weak for anyone to notice on their preamble alone. That
 search is expensive, so it is only done when the listener heard at least
-half of the slot.
+half of the slot. It runs as a separate program on its own processor
+core, so the next slot's tiles, already on the air, keep updating while
+it works.
 
 ### 5. It files the pass
 
