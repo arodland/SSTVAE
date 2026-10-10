@@ -41,7 +41,10 @@ a small extra phase on top of the latents:
   `frame.SPREAD_RHO = 0.054` gives the spread copy the block's energy on
   a FULL frame: 50,600 × 0.054 = 2,732 symbol-energies against the
   block's 2,474, about 10% more to pay for the latents acting as noise on
-  it (below).
+  it (below). That accounting left out the modulator's gain. A ±1 block
+  symbol gets about 1.4 dB more out of CE than a small term on Gaussian
+  data does, so the spread copy alone measures 1.8 dB short of the block
+  (see "Why the spread copy is 1.8 dB short").
 
 The phase is linear in the symbol values, so on the transmitter this is
 one line in `frame.assemble`. Nothing else on the transmit side changes.
@@ -138,23 +141,28 @@ pass once (round A) and decodes the same pass three ways: block LLRs
 alone, spread LLRs alone, and both summed. That makes the three columns
 a paired comparison.
 
-The receiver runs were done on a laptop, 12 seeds per point, so a 0.75
-is 9 of 12 with a 95% interval of roughly ±0.25. The `--seeds` and
-`--snr` lists below are what to widen on a faster machine.
+The header runs are 40 seeds per point (run on the faster machine,
+2026-10-10). A fraction of 0.5 has a 95% interval of about ±0.15; at
+0.9 or 0.1 it is about ±0.1. The 50% thresholds below come from linear
+interpolation between grid points 1.5 dB apart, so they are good to a
+few tenths of a dB.
 
 ### Data cost (genie: exact synthesis and matched filter, MEDIUM frame)
 
-`qrss_spread_header.py genie --rho 0.054 0.1 0.2`. These are paired draws:
-every scheme sees the same latents. The figure is the change in
-per-latent SNR against the plain frame, whose per-latent SNR is
-+13.4 / +6.2 / −3.0 / −12.9 dB at the four noise levels:
+`qrss_spread_header.py genie --rho 0.054 0.08 0.1` (the 0.2 rows are
+from an earlier run with the same draws). These are paired draws: every
+scheme sees the same latents. The figure is the change in per-latent SNR
+against the plain frame, whose per-latent SNR is +13.4 / +6.2 / −3.0 /
+−12.9 dB at the four noise levels:
 
 | Scheme | ρ | Header known | Header unknown |
 |---|---|---|---|
 | on top (this design) | 0.054 | **0.000 / 0.000 / 0.000 / 0.000** | −3.74 / −1.10 / −0.27 / −0.16 |
+| on top | 0.08 | 0.000 at every level | −4.82 / −1.56 / −0.40 / −0.23 |
 | on top | 0.10 | 0.000 at every level | −5.52 / −1.88 / −0.50 / −0.29 |
 | on top | 0.20 | 0.000 at every level | −7.99 / −3.27 / −0.98 / −0.59 |
 | split | 0.054 | +0.49 / +0.01 / −0.08 / −0.09 | −3.65 / −1.13 / −0.36 / −0.25 |
+| split | 0.08 | +0.73 / +0.01 / −0.13 / −0.14 | −4.79 / −1.63 / −0.53 / −0.38 |
 | split | 0.10 | +0.92 / +0.01 / −0.16 / −0.18 | −5.55 / −2.00 / −0.67 / −0.48 |
 
 On top is exactly free once the header is known.
@@ -168,15 +176,19 @@ before its header is known, and it shrinks at lower SNR.
 
 ### Data cost through the real receiver (SHORT, `short` vs `short-spread`)
 
-`qrss_spread_header.py data --snr -12 -18 -24 --seeds 12`. These are
+`qrss_spread_header.py data --snr -12 -18 -24 -28 --seeds 24`. These are
 paired seeds, both frames on the same noise. The figures are spread
 minus plain, ± standard error:
 
-| SNR₂₅₀₀ | Round B (header known), latent SNR | Round B, W | Round A (header unknown), latent SNR | Round A, W |
-|---|---|---|---|---|
-| −12 dB | +0.015 ± 0.009 | −0.005 ± 0.011 | −0.81 ± 0.02 | −0.76 ± 0.02 |
-| −18 dB | +0.007 ± 0.012 | −0.012 ± 0.015 | −0.35 ± 0.01 | −0.35 ± 0.02 |
-| −24 dB | +0.005 ± 0.015 | −0.012 ± 0.014 | −0.20 ± 0.01 | −0.20 ± 0.01 |
+| SNR₂₅₀₀ | n | Round B (header known), latent SNR | Round B, W | Round A (header unknown), latent SNR | Round A, W |
+|---|---|---|---|---|---|
+| −12 dB | 24 | +0.010 ± 0.006 | −0.005 ± 0.008 | −0.82 ± 0.01 | −0.78 ± 0.01 |
+| −18 dB | 24 | +0.002 ± 0.010 | −0.009 ± 0.012 | −0.39 ± 0.04 | −0.36 ± 0.01 |
+| −24 dB | 24 | +0.016 ± 0.012 | +0.003 ± 0.010 | −0.18 ± 0.02 | −0.21 ± 0.01 |
+| −28 dB | 18 | −0.007 ± 0.023 | −0.016 ± 0.022 | −0.17 ± 0.02 | −0.17 ± 0.01 |
+
+At −28 dB SHORT's header fails on 6 of the 24 seeds (5 in both frames,
+1 in the plain frame only), and those seeds are left out of the pairs.
 
 Round B costs nothing through the whole receiver: tracker, timing
 refit, κ calibration and joint estimator included. Round A matches the
@@ -196,108 +208,181 @@ the point):
 |---|---|---|---|---|
 | 0 | 0.800 rad | 57.6 Hz | 78.5 Hz | −30.3 / −50.5 / −75.9 dB |
 | 0.054 | 0.821 rad | +0.6 Hz | +1.0 Hz | +0.2 / +0.6 / +0.4 dB |
+| 0.08 | 0.831 rad | +0.8 Hz | +1.5 Hz | +0.3 / +0.8 / +0.6 dB |
 | 0.10 | 0.839 rad | +1.1 Hz | +1.9 Hz | +0.4 / +1.0 / +0.7 dB |
 
 At ρ = 0.054 this is inside M5's ±1.5 Hz width tolerance but uses about
-a third of it. The +0.6 dB at 50 Hz is the figure to check against the
-−28 ± 1.5 dB neighbour-leakage budget (design M5).
+two thirds of it at 99.9%. ρ = 0.08 uses all of it. The 50 Hz density
+is the figure to check against the −28 ± 1.5 dB neighbour-leakage budget
+(design M5).
 
 ### Header decoding (FULL, `full-spread`)
 
-`qrss_spread_header.py header --snr -22 -23.5 -25 -26.5 -28 --seeds 12`.
-P(decode) per SNR (n = 12):
+`qrss_spread_header.py header --frames full-spread --snr -25 -26.5 -28 -29.5 -31 --seeds 40`.
+Decodes out of 40:
 
 | SNR₂₅₀₀ | Block alone | Spread alone | Both |
 |---|---|---|---|
-| −22.0 dB | 1.00 | 1.00 | 1.00 |
-| −23.5 dB | 1.00 | 1.00 | 1.00 |
-| −25.0 dB | 1.00 | 1.00 | 1.00 |
-| −26.5 dB | 1.00 | 0.75 | 1.00 |
-| −28.0 dB | 0.67 | 0.00 | 1.00 |
+| −25.0 dB | 40 | 39 | 40 |
+| −26.5 dB | 39 | 27 | 40 |
+| −28.0 dB | 33 | 1 | 40 |
+| −29.5 dB | 5 | 0 | 37 |
+| −31.0 dB | 0 | 0 | 7 |
+| **50% threshold** | **−28.7 dB** | **−26.9 dB** | **−30.3 dB** |
 
-Two findings, one expected and one not.
-
-- **Both copies together decode 12/12 at −28 dB, where the block alone
-  manages 8/12.** The combined threshold has not been reached at the
-  lowest point run, so the gain is at least what this table shows. The
-  sweep should go to −31 dB.
-- **The spread copy alone is about 1.5–2 dB short of the block**, where
-  the energy accounting above predicted parity. This is open; see "Open
-  questions".
+- **Both copies together go 1.6 dB deeper than the block alone.** No
+  trial anywhere decoded from one copy and failed on the sum.
+- **The spread copy alone is 1.8 dB short of the block.** The LLR
+  diagnostics below show this is physics, not calibration.
 
 The block itself does better than the design's single-pass threshold
-(−23.5 dB at P ≥ 50%, R17): 8/12 at −28 dB on this steady path.
+(−23.5 dB at P ≥ 50%, R17) on this steady path.
+
+**LLR diagnostics.** These are per pass and per copy, medians over the
+40 seeds. "SNR" is μ²/var of the LLR times the true sign. "Cons" is
+var/2μ, which is 1 for a correctly scaled LLR, and k for an LLR scaled
+by k:
+
+| SNR₂₅₀₀ | Block SNR | Block cons | Spread SNR | Spread cons | Gap |
+|---|---|---|---|---|---|
+| −25.0 dB | −6.78 dB | 0.84 | −8.44 dB | 1.01 | 1.66 dB |
+| −26.5 dB | −8.18 dB | 0.85 | −9.86 dB | 1.03 | 1.68 dB |
+| −28.0 dB | −9.82 dB | 0.85 | −11.26 dB | 1.03 | 1.44 dB |
+| −29.5 dB | −11.38 dB | 0.86 | −12.86 dB | 1.06 | 1.48 dB |
+| −31.0 dB | −12.96 dB | 0.86 | −14.88 dB | 1.08 | 1.92 dB |
+
+### Header decoding without a block (`full-spreadonly`)
+
+`qrss_spread_header.py header --frames full-spreadonly --snr -25 -26.5 -28 --seeds 40`:
+
+| SNR₂₅₀₀ | Decodes | Spread SNR (median) | Spread cons |
+|---|---|---|---|
+| −25.0 dB | 40 / 40 | −8.24 dB | 0.99 |
+| −26.5 dB | 34 / 40 | −9.58 dB | 0.99 |
+| −28.0 dB | 5 / 40 | −11.09 dB | 1.01 |
+| **50% threshold** | **−27.2 dB** | | |
+
+That is 1.5 dB worse than today's `full` frame (the block alone, above),
+for an 80 s shorter slot. The spread copy here is about 0.25 dB better
+than the same copy on `full-spread` (−9.62 against −9.85 dB mean at
+−26.5, −11.10 against −11.36 at −28, standard errors about 0.08). Open
+question 4.
 
 ### The header block lost (`--fade 120`)
 
 The signal is taken 40 dB down for the first 120 s after t0. That
 removes the preamble and the whole header block, which ends 100 s in.
-Timing still comes from gate V on the references.
+Timing still comes from gate V on the references. Decodes out of 40:
 
-| SNR₂₅₀₀ | Block alone | Spread alone | Both |
-|---|---|---|---|
-| −20.0 dB | 0.00 | 1.00 | 1.00 |
-| −23.5 dB | 0.00 | 1.00 | 1.00 |
-| −26.0 dB | 0.00 | 0.75 | 0.75 |
+| SNR₂₅₀₀ | Block alone | Spread alone | Both | Spread SNR (median) |
+|---|---|---|---|---|
+| −23.5 dB | 0 | 40 | 40 | −7.18 dB |
+| −26.0 dB | 0 | 34 | 32 | −9.40 dB |
+| −28.0 dB | 0 | 1 | 1 | −11.47 dB |
+| **50% threshold** | none | **−26.9 dB** | | |
 
 This is what the scheme is for. Today's frame yields no header at any
-SNR here. With the spread copy, the header is recovered at the same SNR
-as from an intact pass: losing 120 s of a 1700 s spread costs about
-0.3 dB of its energy.
+SNR here. With the spread copy, the header is recovered with at most
+0.3 dB of loss against an intact pass's spread copy: losing 120 s of a
+1700 s spread costs 10·log10(1700/1580) = 0.3 dB of its energy.
+
+At −26 dB, 2 of the 40 trials decoded from the spread copy alone but
+failed on the sum. The faded block's LLRs are not correctly scaled:
+their consistency comes out at 1.8 to 2.6 (median), NaN on half the
+trials, and they still add noise to the sum. Open question 3.
+
+## Why the spread copy is 1.8 dB short: CE gain
+
+This is resolved, and it is not calibration. The spread LLRs have
+consistency 1.01–1.08, so they are correctly scaled. The block's are
+0.84–0.86, so they are under-scaled. Read that as the receiver
+under-estimating the block symbols' gain by 1/0.85 = 1.18.
+
+A ±1 symbol comes through the phase modulator with more first-order
+gain than a small term riding on Gaussian data. For an isolated symbol,
+the first-order output is sin β = 0.717 for a ±1 symbol and
+β·e^(−β²/2) = 0.581 for Gaussian data: a ratio of 1.23, or 1.8 dB.
+Overlapping pulses give the measured 1.18 (1.4 dB).
+
+That gain is what the energy accounting in "The scheme" left out.
+Putting it back:
+
+- take the block's measured LLR SNR as r²/σ², with r = 1/cons;
+- predict the spread copy's SNR as ρ·(50,600 / 2,474) / (σ² + 1).
+
+The prediction matches the measurement:
+
+| SNR₂₅₀₀ | Predicted spread SNR | Measured |
+|---|---|---|
+| −25.0 dB | −8.43 dB | −8.44 dB |
+| −28.0 dB | −11.08 dB | −11.26 dB |
+| −29.5 dB | −12.51 dB | −12.86 dB |
+
+The −31 dB point is 0.9 dB off, with 0 to 7 decodes and long-tailed
+LLR statistics. The rule that falls out: **a header bit on top of
+Gaussian data is worth about 1.4 dB less per unit of energy than a bit
+in the block.** Any energy budget for a spread copy should start from
+that.
+
+The under-scaled block LLRs cost almost nothing on their own. In the
+sum they under-weight the block by 0.85, which loses about 0.03 dB
+against optimal combining at these SNRs. Fixing it means using the ±1
+symbols' gain in the block's LLR. That is the same gain `calibrate`
+already uses for the references.
 
 ## Open questions
 
-1. **Why the spread copy is 1.5–2 dB worse than the block.** Energy says
-   +0.43 dB for the spread copy. The latents' self-interference
-   (σ² + 1 against σ²) costs about 0.45 dB at these SNRs, and the
-   carrier 0.15 dB, which nets to roughly −0.2 dB, not −1.5 to −2.
-   Candidates:
-   - The two kinds of symbol differ in effective gain. The block's ±1
-     symbols sit among ±1 neighbours, with a higher effective gain and
-     lower distortion than a small term on Gaussian data; `demod.calibrate`
-     already notes that ±1 symbols come through the modulator with a
-     larger gain.
-   - Round A's tracking is noisier on data with the extra variance.
-   - The spread LLRs are mis-scaled. This matters beyond the spread-only
-     decode, because a mis-scaled copy also weights the block+spread sum
-     wrongly.
+1. **ρ.** Matching the block alone with the spread copy alone needs
+   +1.7 dB, so ρ ≈ 0.08. That has now been measured. It is still free
+   once the header is known. Round A's loss rises from −0.27 / −0.16 to
+   −0.40 / −0.23 dB at the two lower SNRs, and the 99.9% width uses all
+   of M5's ±1.5 Hz tolerance.
 
-   The script now records, per pass and per copy, the LLRs' effective
-   SNR (μ²/var of the LLR times the true sign) and their consistency
-   (var/2μ, which is 1 for a correctly scaled LLR). The commands below
-   split energy from calibration.
-2. **The combined threshold.** Not reached at −28 dB; the sweep must go
-   lower.
-3. **ρ.** 0.054 was set by energy accounting. If the gap in (1) is
-   physics rather than calibration, matching the block alone needs about
-   ρ = 0.08–0.09. That costs nothing once the header is known, but
-   roughly doubles round A's loss and the spectral widening. The choice
-   should follow (1) and the neighbour-leakage check.
-4. **INFO_SET.** It was designed for the block's rate matching (2,474
+   Recommendation: keep 0.054. At 0.054, what the scheme is for already
+   works:
+   - the header survives a lost block 1.8 dB above the intact block's
+     threshold, where today it does not survive at all;
+   - on an intact pass the sum goes 1.6 dB deeper than today's frame.
+
+   0.08 would buy that 1.8 dB back only in the lost-block case, at the
+   cost of the whole width tolerance and half as much again of round-A
+   loss. This is a judgement call, not a measurement.
+2. **The combined gain is short of energy addition.** Adding the two
+   LLR SNRs predicts 2.3 dB over the block alone; the thresholds give
+   1.6. The block's mis-scaling accounts for 0.03 dB of that. The rest
+   is not explained, and some of it may be interpolation on a 1.5 dB
+   grid. A −29 / −30 / −30.5 dB sweep would place it.
+3. **Faded block LLRs.** A block lost to a fade should contribute
+   nothing, but its LLRs come out mis-scaled and occasionally break a
+   decode the spread copy alone makes (2 of 40 at −26 dB). Candidates:
+   - weight the block by its own measured SNR;
+   - drop it when its consistency against the spread copy's hard
+     decisions is off.
+4. **`full-spreadonly`'s spread copy is about 0.25 dB better** than the
+   same copy on `full-spread` (about 3σ). The data and ρ are the same;
+   only the block's presence differs. Not explained.
+5. **INFO_SET.** It was designed for the block's rate matching (2,474
    coded bits from N = 2,048 by circular repetition). Every coded bit
    gets ~20 repeats here, which preserves the relative pattern, so it is
    reused as-is. The folded per-bit SNR is no longer the design point,
    so a GA construction at the new operating point may gain a little.
-5. **Fading paths.** Not measured. This is where the scheme's time
+6. **Fading paths.** Not measured. This is where the scheme's time
    diversity should matter most, since the block's 80 s can sit in a
-   single fade.
+   single fade. `--preset` sweeps are the next run for the faster
+   machine.
 
-## Commands for a faster machine
+## Commands
 
-Each FULL trial is about 1.5 minutes of one core. These use every core
-by default (`--jobs`):
+The raw results are in `docs/qrss/spread-header-data/` (one JSON row per
+trial). These are what produced the tables above (each FULL trial is about
+2.5 minutes of one core; `--jobs` defaults to every core):
 
 ```sh
-# header thresholds, block vs spread vs both, with LLR diagnostics (open question 1, 2)
 python scripts/qrss_spread_header.py header --frames full-spread \
     --snr -25 -26.5 -28 -29.5 -31 --seeds 40 --out header.json
-# the same with the block removed, for the frame that would drop it
 python scripts/qrss_spread_header.py header --frames full-spreadonly \
     --snr -25 -26.5 -28 --seeds 40 --out spreadonly.json
-# header block lost
 python scripts/qrss_spread_header.py header --fade 120 --snr -23.5 -26 -28 --seeds 40 --out fade.json
-# rho: rerun the above with a different frame, e.g.
-#   FrameSpec("full-spread-09", hdr_rho=0.09) added to frame.PROTOTYPES
 python scripts/qrss_spread_header.py data --snr -12 -18 -24 -28 --seeds 24 --out data.json
 python scripts/qrss_spread_header.py genie --rho 0.054 0.08 0.1
 ```
