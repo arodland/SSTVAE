@@ -88,7 +88,9 @@ HEADERLESS_MAX_SNR_DB = -6.0      # a pass this strong whose header did not deco
 RECOVER_HOURS = 3.0               # a restarted listener finishes slots that ended this recently
 GUESS_NOTE = "no header yet: picture assumes the first pass of a mode A send"
 DIAL_FILE = "dial_changes.jsonl"  # the radio's dial over time, in the state directory
-DIAL_GUARD_S = (2.0, 30.0)        # unheard before and after a dial change (settling, a tune)
+# unheard before and after a dial change: settling, and the app's optional
+# tune 5 s after it, which takes up to 45 s on Jeff's tuner (rarely)
+DIAL_GUARD_S = (2.0, 50.0)
 
 
 def utc_iso(t: float) -> str:

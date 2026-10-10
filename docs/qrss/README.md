@@ -204,8 +204,9 @@ With rig control the app appends the radio's dial to
 (other keys are ignored). A slot's live receives use only what was heard
 on the dial it started on; when the frame ends each dial's part is
 received separately, and a part after a change gets the whole-slot
-search only if it is at least half the slot. 2 s before and 30 s after
-a change count as not heard. Tiles carry `dial_hz` in `state.json`
+search only if it is at least half the slot. 2 s before and 50 s after
+a change count as not heard (the app's optional tune starts 5 s after a
+change and can take 45 s). Tiles carry `dial_hz` in `state.json`
 (null without the file), and tiles on different dials never merge.
 The app's tile shows it on the slot line as dial plus audio offset
 ("Slot 21:00Z · 10.141 MHz + 1500 Hz"; the offset alone when the dial

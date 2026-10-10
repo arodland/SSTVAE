@@ -247,8 +247,9 @@ more of the same picture would mix in rubbish. So the app writes every
 change of the radio's dial to a small file next to the tiles
 (`dial_changes.jsonl`), and the listener reads it:
 
-- The 2 seconds before a change and the 30 seconds after it count as
-  not heard, while the radio switches and perhaps tunes its antenna.
+- The 2 seconds before a change and the 50 seconds after it count as
+  not heard, while the radio switches and perhaps tunes its antenna
+  (which can take most of a minute).
 - While the slot is on the air, its tiles are updated only from what
   was heard on the dial the slot started on. Everything after the
   change counts as not heard, as if the audio had stopped.

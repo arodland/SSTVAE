@@ -41,7 +41,7 @@ import numpy as np
 
 FRAME_S = 1782.7          # FULL frame
 LEAD_S, TAIL_S = 15.0, 5.0
-GUARD_S = (2.0, 30.0)     # the listener's dial-change guard (before, after)
+GUARD_S = (2.0, 50.0)     # the listener's dial-change guard (before, after)
 HOUR_RE = re.compile(r"^fe_(\d+)\.(?:i16|flac)$")
 
 
