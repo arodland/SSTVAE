@@ -21,6 +21,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSet>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -643,11 +644,25 @@ void QrssWindow::reload() {
     // Tiles, in the order the listener lists them (newest slot first).
     QStringList order;
     std::vector<QrssSpectrogram::Marker> markers;
+    // Each tile's picture (station, picture ID, mode) and how many passes
+    // it shows, to hide the ones a later combined tile already includes.
+    struct Combined {
+        QString id, picture, slot;
+        int passes = 1;
+    };
+    std::vector<Combined> pictures;
     for (const QJsonValue& v : st.value(QStringLiteral("tiles")).toArray()) {
         const QJsonObject t = v.toObject();
         const QString id = t.value(QStringLiteral("id")).toString();
         if (id.isEmpty() || order.contains(id)) continue;
         order << id;
+        if (const QString pid = t.value(QStringLiteral("picture_id")).toString(); !pid.isEmpty()) {
+            pictures.push_back({id,
+                                t.value(QStringLiteral("callsign")).toString() + QLatin1Char('/') +
+                                    pid + QLatin1Char('/') + t.value(QStringLiteral("mode")).toString(),
+                                t.value(QStringLiteral("slot_utc")).toString(),
+                                t.value(QStringLiteral("passes")).toInt(1)});
+        }
         QrssTile* tile = tiles_.value(id, nullptr);
         if (!tile) {
             tile = new QrssTile(tiles_host_);
@@ -677,8 +692,30 @@ void QrssWindow::reload() {
     while (QLayoutItem* item = prov_list_->takeAt(0)) delete item;
     QStringList received;
     QStringList provisional;
+    // **One tile per picture** (Jeff, 2026-10-10): a later pass of the
+    // same picture shows every earlier pass combined into it ("2 passes
+    // combined"), so the earlier tiles it includes are hidden, not shown
+    // beside it. The listener combines passes across dials too, so the
+    // dial is not part of the picture. An earlier tile is included when a
+    // later one shows more passes than it does; two later tiles of one
+    // pass each (not combined) both stay.
+    QSet<QString> superseded;
+    for (const Combined& older : pictures) {
+        for (const Combined& newer : pictures) {
+            if (newer.picture == older.picture && newer.slot > older.slot &&
+                newer.passes > older.passes) {
+                superseded.insert(older.id);
+                break;
+            }
+        }
+    }
     for (const QString& id : order) {
-        (tiles_.value(id)->provisional() ? provisional : received) << id;
+        QrssTile* tile = tiles_.value(id);
+        if (!tile->provisional() && superseded.contains(id)) {
+            tile->hide();
+            continue;
+        }
+        (tile->provisional() ? provisional : received) << id;
     }
     empty_label_->setVisible(received.isEmpty());
     if (received.isEmpty()) flow_->addWidget(empty_label_);

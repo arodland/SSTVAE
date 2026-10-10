@@ -352,6 +352,49 @@ void test_provisional_tiles() {
                    "provisional: a header moves it to Received");
 }
 
+// One tile per picture: a later pass that combines earlier ones hides
+// them; passes not combined into it stay.
+void test_combined_passes_hide_their_parts() {
+    QTemporaryDir dir;
+    gui::QrssWindow w;
+    w.set_state_dir(dir.path());
+    const auto pass = [](const QString& id, const QString& slot, int passes, const QString& pid) {
+        QJsonObject t = tile_json(id, 1204.0, QStringLiteral("KC2G"), 1.0, QString(), 0);
+        t[QStringLiteral("slot_utc")] = slot;
+        t[QStringLiteral("passes")] = passes;
+        t[QStringLiteral("picture_id")] = pid;
+        return t;
+    };
+    QJsonArray tiles;   // newest first, as the listener lists them
+    tiles.append(pass(QStringLiteral("c"), QStringLiteral("2026-10-10T21:00:00Z"), 2,
+                      QStringLiteral("cbc634ec")));
+    tiles.append(pass(QStringLiteral("b"), QStringLiteral("2026-10-10T20:30:00Z"), 1,
+                      QStringLiteral("cbc634ec")));
+    tiles.append(pass(QStringLiteral("o"), QStringLiteral("2026-10-10T20:15:00Z"), 1,
+                      QStringLiteral("0000beef")));
+    write_state(dir.path(), tiles, 1'000'000);
+    w.reload();
+    gui::QrssTile* c = w.tile(QStringLiteral("c"));
+    gui::QrssTile* b = w.tile(QStringLiteral("b"));
+    gui::QrssTile* o = w.tile(QStringLiteral("o"));
+    check::is_true(c && b && o, "combined: all three tiles known");
+    if (!(c && b && o)) return;
+    check::is_true(!c->isHidden() && b->isHidden(),
+                   "combined: the two-pass tile shows, the pass it includes does not");
+    check::is_true(!o->isHidden(), "combined: another picture's tile stays");
+    // Two single passes of one picture, not combined: both stay.
+    QJsonArray apart;
+    apart.append(pass(QStringLiteral("c"), QStringLiteral("2026-10-10T21:00:00Z"), 1,
+                      QStringLiteral("cbc634ec")));
+    apart.append(pass(QStringLiteral("b"), QStringLiteral("2026-10-10T20:30:00Z"), 1,
+                      QStringLiteral("cbc634ec")));
+    write_state(dir.path(), apart, 2'000'000);
+    w.reload();
+    check::is_true(!w.tile(QStringLiteral("c"))->isHidden() &&
+                       !w.tile(QStringLiteral("b"))->isHidden(),
+                   "combined: passes not combined both show");
+}
+
 // The spectrogram: a tone shows where it is, darker on the default
 // (inverse) scheme, red where a synced signal is, and the controls do
 // what they say.
@@ -552,6 +595,7 @@ int main(int argc, char** argv) {
     test_audio_reaches_the_listener_once();
     test_the_qrss_tab();
     test_provisional_tiles();
+    test_combined_passes_hide_their_parts();
     test_the_spectrogram();
     test_the_history_is_kept();
     test_the_tab_layout();
