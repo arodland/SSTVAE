@@ -176,15 +176,16 @@ the last refresh. A tile's `progress` is the share of the frame
 elapsed when its audio was read, so the audio that arrived while a
 receive ran is not counted as missing.
 
-Under each tile's picture a 2-pixel band shows that pass's confidence
-over time, from the start of the pass at the left to its end at the
-right: the per-latent SNR of the picture numbers sent in each ~15 s
-stretch (and, for the header's first 80 s, of the header symbols).
-Black is no better than noise (-10 dB or less), then blue (-5 dB), red
-(0 dB), yellow (+5 dB) and white (+10 dB or more); a single pass needs
-around +2 dB on average for a good picture. Grey marks a stretch with
-nothing to measure (the preamble, or audio the listener did not hear),
-and the band grows as the pass arrives. The values are the tile's
+The bar under each tile's title shows that pass's confidence over
+time, from the start of the pass at the left to its end at the right,
+filled as far as the pass has arrived: the per-latent SNR of the
+picture numbers sent in each ~15 s stretch (and, for the header's first
+80 s, of the header symbols). Black is no better than noise (-10 dB or
+less), and also a stretch with no picture numbers at all (audio the
+listener did not hear, or heard and erased); then blue (-5 dB), red
+(0 dB), yellow (+5 dB) and white (+10 dB or more). A single pass needs
+around +2 dB on average for a good picture. The preamble, which carries
+no picture numbers, is grey. The values are the tile's
 `confidence` in `state.json`, 120 bins in dB, null where there is
 nothing to say.
 

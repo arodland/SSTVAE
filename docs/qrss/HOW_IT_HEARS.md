@@ -286,22 +286,21 @@ exactly what the receiver wants to add up.
 ## Words used on the screen
 
 - **Slot**: a quarter-hour start time, such as 05:45Z (Z means UTC).
-- **SNR**: signal strength against the noise, in dB. Negative means
-  weaker than the noise.
+- **SNR** (beside the title): signal strength against the noise, in dB.
+  Negative means weaker than the noise.
 - **The bar** under the title: how far through its 30 minutes the pass
-  is. A red stretch in it is part of the pass with no picture numbers:
-  audio the listener didn't hear, or heard but lost entirely.
+  is, and how well each stretch came through, left to right. Black
+  means that stretch was no better than noise, or has no picture
+  numbers at all (audio the listener didn't hear, or heard but lost);
+  blue is weak, then red, yellow, and white for a strong, clear signal.
+  Grey is the knock at the start, which carries no picture numbers. A
+  black stretch in the middle is usually a fade or a burst of
+  interference.
 - **Receiving / Finishing / Complete / Lost**: on the air; over and
   being looked at once more; done and filed; or not found at all in the
   last look.
-- **Mean weight**: how confident the picture's numbers are on average. Higher
-  (closer to 0 dB or above) is better.
-- **The coloured band** under a picture: the same confidence, moment by
-  moment through the pass, left to right. Black means that stretch was
-  no better than noise; blue is weak, then red, yellow, and white for a
-  strong, clear signal. Grey means there was nothing to measure there
-  (the knock at the start, or audio the listener didn't hear). A black
-  stretch in the middle is usually a fade or a burst of interference.
+- **Mean weight**: how confident the picture's numbers are on average.
+  Higher (closer to 0 dB or above) is better.
 - **Mode A / B / C** and **passes**: how many passes the picture is sent
   in, and how many of them are in the picture shown.
 
