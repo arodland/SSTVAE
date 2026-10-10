@@ -113,7 +113,7 @@ def main() -> None:
             print(f"another listener is writing the passband store in {pb}; "
                   "this one keeps none", file=sys.stderr, flush=True)
         else:
-            passband = frontend.PassbandStore(pb)
+            passband = frontend.PassbandStore(pb, pack=True)
     cfg = live.LiveConfig(spec=spec, refresh_s=args.refresh, precision=args.precision,
                           model=args.model, render=not args.no_pictures, background=True,
                           finish_process=True)

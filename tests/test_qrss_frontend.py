@@ -303,6 +303,56 @@ def test_a8_passband_store(tmp_path):
     assert again.hours() == [hour0 + 60]
 
 
+def test_a_finished_hour_is_packed_into_flac(tmp_path):
+    """Packed, an hour reads back exactly as it was written (mask included),
+    in less space; a write into it unpacks it; expiry removes it."""
+    pytest.importorskip("soundfile")
+    store = frontend.PassbandStore(tmp_path, scale=8192.0)
+    rng = np.random.default_rng(3)
+    hour0 = 490_000
+    t_a = hour0 * 3600 + 3000.0
+    x = _noise(60 * FE_FS, 0.1, rng).astype(np.complex64)
+    store.write(t_a, x, expire=False)
+    store.write(t_a + 90.0, x[:FE_FS], expire=False)      # a gap
+    span = (t_a - 10.0, t_a + 100.0)
+    before = store.read(*span, return_mask=True)
+    raw = tmp_path / f"fe_{hour0}.i16"
+    assert store.raw_hours() == [hour0] and store.pack_hour(hour0)
+    assert not raw.exists() and (tmp_path / f"fe_{hour0}.flac").exists()
+    assert store.hours() == [hour0] and store.raw_hours() == []
+    after = store.read(*span, return_mask=True)
+    assert np.array_equal(after[0], before[0]) and np.array_equal(after[1], before[1])
+    again = frontend.PassbandStore(tmp_path)                  # a restart reads it too
+    assert np.array_equal(again.read(*span), before[0])
+    assert (tmp_path / f"fe_{hour0}.flac").stat().st_size < 0.1 * 3600 * FE_FS * 4
+    # a write into a packed hour unpacks it and keeps what was there
+    store.write(t_a + 95.0, x[:FE_FS], expire=False)
+    assert raw.exists() and not (tmp_path / f"fe_{hour0}.flac").exists()
+    y, m = store.read(*span, return_mask=True)
+    assert np.array_equal(y[:int(100 * FE_FS)], before[0][:int(100 * FE_FS)])
+    assert m[int(105 * FE_FS):int(106 * FE_FS)].all()
+    assert store.pack_hour(hour0)
+    assert store.expire((hour0 + 50) * 3600.0) == [hour0] and not list(tmp_path.glob("fe_*"))
+
+
+def test_the_listener_store_packs_hours_as_they_finish(tmp_path):
+    """With pack on, an hour is packed on a thread PB_PACK_AFTER_S after
+    it ends (by the stream's time); the hour being written stays raw."""
+    pytest.importorskip("soundfile")
+    store = frontend.PassbandStore(tmp_path, pack=True)
+    hour0 = 490_000
+    x = np.full(10 * FE_FS, 0.1 + 0.2j, dtype=np.complex64)
+    store.write(hour0 * 3600 + 3590.0, x, expire=False)      # into the next hour
+    store.write((hour0 + 1) * 3600 + 60.0, x)                 # not yet due
+    assert store._packer is None
+    store.write((hour0 + 1) * 3600 + frontend.PB_PACK_AFTER_S + 70.0, x)
+    store._packer.join(30.0)
+    assert store.raw_hours() == [hour0 + 1] and store.hours() == [hour0, hour0 + 1]
+    y, m = store.read(hour0 * 3600 + 3590.0, hour0 * 3600 + 3600.0, return_mask=True)
+    assert m.all() and np.allclose(y, 0.1 + 0.2j, atol=1 / 8192)
+    assert not frontend.PassbandStore(tmp_path / "off").pack     # off unless asked for
+
+
 def test_passband_store_clips_to_int16(tmp_path):
     store = frontend.PassbandStore(tmp_path, scale=8192.0)
     store.write(1000.0, np.array([10 + 0j, -10j, 1 + 1j], dtype=np.complex64), expire=False)

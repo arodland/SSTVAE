@@ -123,7 +123,9 @@ output and does the following.
 
 It keeps the last 35 minutes or so of audio in memory, and the last 48
 hours on disk (the *passband store*). The disk copy turns out to be
-important: it lets the receiver go back and look again.
+important: it lets the receiver go back and look again. Each finished
+hour is squeezed with FLAC, the lossless format music archives use, to
+about half its size; nothing in it changes.
 
 ### 2. It listens for the knock
 

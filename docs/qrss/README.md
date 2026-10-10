@@ -197,6 +197,14 @@ seen to follow on; only audio that stays late is treated as missing.
 `scripts/qrss_check_store.py` reports, for each recent slot, the holes,
 clipping, dropouts and dial changes in the passband store.
 
+The passband store holds the front-end stream (4 kHz complex, int16 I/Q,
+57.6 MB an hour raw, 2.8 GB for 48 hours). With the `soundfile` package
+installed (`uv pip install soundfile`), the listener packs each finished
+hour into FLAC two minutes after it ends, checked sample for sample
+before the raw file is deleted: 47-68% of the raw size on band noise
+(zstd: 72-89%). Raw and FLAC hours read the same, a write into a packed
+hour unpacks it, and without `soundfile` hours stay raw.
+
 From a terminal, with any capture tool:
 
 ```sh

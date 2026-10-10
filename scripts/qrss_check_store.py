@@ -6,7 +6,8 @@ tile reads less than 100% although the whole pass seemed to be heard.
     python3 scripts/qrss_check_store.py --slot 2026-10-10T20:30Z
     python3 scripts/qrss_check_store.py --store DIR --hours 6
 
-Needs only Python 3 and numpy. Writes nothing. For each slot whose pass
+Needs only Python 3 and numpy (and soundfile for an hour the listener
+has packed as FLAC). Writes nothing. For each slot whose pass
 window (t0 - 15 s to t0 + 1787.7 s, t0 = the quarter hour + 1 s) overlaps
 the period it covers, it reports:
 
@@ -41,7 +42,7 @@ import numpy as np
 FRAME_S = 1782.7          # FULL frame
 LEAD_S, TAIL_S = 15.0, 5.0
 GUARD_S = (2.0, 30.0)     # the listener's dial-change guard (before, after)
-HOUR_RE = re.compile(r"^fe_(\d+)\.i16$")
+HOUR_RE = re.compile(r"^fe_(\d+)\.(?:i16|flac)$")
 
 
 def utc(t: float) -> str:
@@ -64,8 +65,12 @@ class Store:
         self.per_hour = 3600 * self.fs
 
     def hours(self) -> list[int]:
-        return sorted(int(m.group(1)) for p in self.root.iterdir()
-                      if (m := HOUR_RE.match(p.name)))
+        return sorted({int(m.group(1)) for p in self.root.iterdir()
+                       if (m := HOUR_RE.match(p.name))})
+
+    def file(self, hour: int) -> Path:
+        raw = self.root / f"fe_{hour}.i16"
+        return raw if raw.exists() else self.root / f"fe_{hour}.flac"
 
     def ranges(self, hour: int) -> list[tuple[int, int]]:
         p = self.root / f"fe_{hour}.json"
@@ -80,15 +85,22 @@ class Store:
         while n < n1:
             hour, k = divmod(n, self.per_hour)
             m = min(n1 - n, self.per_hour - k)
-            p = self.root / f"fe_{hour}.i16"
+            p = self.file(hour)
             if p.exists():
-                mm = np.memmap(p, dtype=np.int16, mode="r", shape=(self.per_hour, 2))
                 for lo, hi in self.ranges(hour):
                     lo, hi = max(lo, k), min(hi, k + m)
                     if lo < hi:
-                        x[n - n0 + lo - k:n - n0 + hi - k] = mm[lo:hi]
+                        if p.suffix == ".i16":
+                            mm = np.memmap(p, dtype=np.int16, mode="r",
+                                           shape=(self.per_hour, 2))
+                            y = np.array(mm[lo:hi])
+                            del mm
+                        else:            # a finished hour packed as FLAC (needs soundfile)
+                            import soundfile
+                            y, _ = soundfile.read(str(p), start=lo, stop=hi, dtype="int16",
+                                                  always_2d=True)
+                        x[n - n0 + lo - k:n - n0 + hi - k] = y
                         ok[n - n0 + lo - k:n - n0 + hi - k] = True
-                del mm
             n += m
         return x, ok
 
@@ -216,8 +228,9 @@ def main() -> None:
     for h in hs:
         rs = st.ranges(h)
         got = sum(hi - lo for lo, hi in rs) / st.fs
-        size = (pb / f"fe_{h}.i16").stat()
-        print(f"  {utc(3600 * h)}  {got:7.1f} s written in {len(rs)} range(s), "
+        f = st.file(h)
+        size = f.stat()
+        print(f"  {utc(3600 * h)}  {got:7.1f} s written in {len(rs)} range(s), {f.suffix[1:]}, "
               f"{size.st_size / 1e6:.1f} MB apparent, "
               f"{getattr(size, 'st_blocks', 0) * 512 / 1e6:.1f} MB on disk")
     state = None
