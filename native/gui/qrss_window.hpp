@@ -161,21 +161,22 @@ private:
     QString state_summary_;
 };
 
-// A pass's confidence over time, a 2-pixel strip under a tile's picture:
-// the listener's `confidence`, the per-latent SNR in dB of each stretch
-// of the pass (receiver.confidence_db), from t0 at the left to the end
-// of the frame at the right. A stretch with nothing measured (the
-// preamble, audio not heard) is grey once the pass has reached it, and
-// a stretch still to come is not drawn.
-class ConfidenceBand : public QWidget {
+// How far through its pass a signal is, and how well each stretch of it
+// came through, in one bar under the title (Jeff, 2026-10-10). Its
+// filled length is the share of the pass so far; each stretch is
+// coloured by the listener's `confidence`, the per-latent SNR in dB
+// (receiver.confidence_db): black at -10 dB or less, so a stretch whose
+// latents are missing (not heard, or erased) is black, then blue at -5,
+// red at 0, yellow at +5 and white at +10 dB or more. The preamble,
+// which has no latents, is grey; what is still to come is empty.
+class PassBar : public QWidget {
 public:
-    explicit ConfidenceBand(QWidget* parent = nullptr);
-    void set(std::vector<std::optional<double>> bins, double progress);
-    const std::vector<std::optional<double>>& bins() const { return bins_; }
-
-    // Black at -10 dB per latent or less (no better than noise), then
-    // blue at -5, red at 0, yellow at +5 and white at +10 dB or more,
-    // so the colour brightens as confidence rises.
+    explicit PassBar(QWidget* parent = nullptr);
+    void set(const std::vector<std::optional<double>>& bins, double progress);
+    double progress() const { return progress_; }
+    // Each bin up to `progress`: true where latents are missing (black).
+    const std::vector<bool>& holes() const { return holes_; }
+    // The colour for a per-latent SNR, and for the preamble.
     static QColor color(double snr_db);
     static QColor unmeasured();
 
@@ -183,29 +184,8 @@ protected:
     void paintEvent(QPaintEvent* event) override;
 
 private:
-    std::vector<std::optional<double>> bins_;
-    double progress_ = 0.0;
-};
-
-// How far through its pass a signal is, as a bar whose filled length is
-// the share of the pass so far, with red holes where the picture has no
-// latents: stretches not heard, or heard and erased. From the same
-// `confidence` bins as the band above (None past the preamble and
-// before `progress`, or the -30 dB floor, is a hole).
-class PassBar : public QWidget {
-public:
-    explicit PassBar(QWidget* parent = nullptr);
-    void set(const std::vector<std::optional<double>>& bins, double progress);
-    double progress() const { return progress_; }
-    // Each bin up to `progress`: true where latents are missing.
-    const std::vector<bool>& holes() const { return holes_; }
-    static QColor hole_color();
-
-protected:
-    void paintEvent(QPaintEvent* event) override;
-
-private:
     std::vector<bool> holes_;
+    std::vector<std::optional<double>> bins_;
     double progress_ = 0.0;
 };
 
@@ -221,10 +201,11 @@ public:
     // Apply one tile object from state.json; `dir` resolves its image.
     void update_from(const QJsonObject& tile, const QString& dir);
     QString title() const;
+    // The SNR shown at the right of the title ("" when unknown).
+    QString snr_text() const;
     QString details() const;
     bool has_picture() const;
     int progress_percent() const;
-    ConfidenceBand* band() const { return band_; }
     PassBar* pass_bar() const { return progress_; }
     // The picture file shown, at its full size ("" before one).
     QString image_path() const { return image_path_; }
@@ -235,8 +216,8 @@ protected:
 
 private:
     QLabel* picture_ = nullptr;
-    ConfidenceBand* band_ = nullptr;
     QLabel* title_ = nullptr;
+    QLabel* snr_ = nullptr;
     QLabel* details_ = nullptr;
     PassBar* progress_ = nullptr;
     int image_rev_ = -1;

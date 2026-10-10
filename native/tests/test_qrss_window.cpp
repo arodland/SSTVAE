@@ -113,6 +113,10 @@ void test_tiles_follow_the_state_file() {
                  "qrss/tiles: a decoded header names the station");
     check::equal(b->title().toStdString(), std::string("Signal at 1550.2 Hz"),
                  "qrss/tiles: before the header, the frequency");
+    check::equal(a->snr_text().toStdString(), std::string("-12.5 dB"),
+                 "qrss/tiles: the SNR beside the title");
+    check::is_true(!a->details().contains(QStringLiteral("SNR")),
+                   "qrss/tiles: and not again in the small print");
     check::is_true(a->has_picture(), "qrss/tiles: the picture is loaded");
     check::is_true(!b->has_picture(), "qrss/tiles: no picture before the header");
     check::equal(a->progress_percent(), 35, "qrss/tiles: progress through the pass");
@@ -163,33 +167,29 @@ void test_the_confidence_band() {
     write_state(dir.path(), tiles, 5'000'000);
     w.reload();
     gui::QrssTile* tile = w.tile(QStringLiteral("c"));
-    check::is_true(tile != nullptr && tile->band() != nullptr, "qrss/band: every tile has one");
-    if (tile == nullptr || tile->band() == nullptr) return;
-    gui::ConfidenceBand* band = tile->band();
-    check::equal(band->bins().size(), std::size_t{5}, "qrss/band: one stretch per listed bin");
-    check::equal(band->height(), 2, "qrss/band: two pixels tall");
-    check::equal(band->width(), tile->width() - 12, "qrss/band: as wide as the picture");
-    const QImage img = band->grab().toImage();
-    const int step = band->width() / 5;
-    auto at = [&](int bin) { return img.pixelColor(bin * step + step / 2, 1); };
-    check::is_true(at(0) == gui::ConfidenceBand::unmeasured(),
-                   "qrss/band: the preamble, reached but unmeasured, is grey");
-    check::is_true(at(1) == QColor(0, 0, 0), "qrss/band: no better than noise is black");
-    check::is_true(at(2) == gui::ConfidenceBand::color(0.0) && at(2).red() > 200 &&
-                       at(2).green() < 30,
-                   "qrss/band: 0 dB per latent is red");
-    check::is_true(at(3) == QColor(255, 255, 255), "qrss/band: strong is white");
-    check::is_true(at(4) != gui::ConfidenceBand::unmeasured() && at(4) != QColor(0, 0, 0) &&
-                       at(4) != QColor(255, 255, 255),
-                   "qrss/band: what is still to come is not drawn");
-    const QColor blue = gui::ConfidenceBand::color(-5.0);
-    const QColor yellow = gui::ConfidenceBand::color(5.0);
+    check::is_true(tile != nullptr && tile->pass_bar() != nullptr, "qrss/bar: every tile has one");
+    if (tile == nullptr || tile->pass_bar() == nullptr) return;
+    gui::PassBar* bar = tile->pass_bar();
+    check::equal(bar->width(), tile->width() - 12, "qrss/bar: as wide as the picture");
+    const QImage img = bar->grab().toImage();
+    const double step = (bar->width() - 2) / 5.0;
+    auto at = [&](int bin) { return img.pixelColor(1 + static_cast<int>((bin + 0.5) * step), 4); };
+    check::is_true(at(0) == QColor(0, 0, 0),
+                   "qrss/bar: past the preamble, nothing measured is black");
+    check::is_true(at(1) == QColor(0, 0, 0), "qrss/bar: no better than noise is black");
+    check::is_true(at(2) == gui::PassBar::color(0.0) && at(2).red() > 200 && at(2).green() < 30,
+                   "qrss/bar: 0 dB per latent is red");
+    check::is_true(at(3) == QColor(255, 255, 255), "qrss/bar: strong is white");
+    check::is_true(at(4) == bar->palette().color(QPalette::Window),
+                   "qrss/bar: what is still to come is not drawn");
+    const QColor blue = gui::PassBar::color(-5.0);
+    const QColor yellow = gui::PassBar::color(5.0);
     check::is_true(blue.blue() > 200 && blue.red() < 30 && yellow.red() > 200 &&
                        yellow.green() > 200 && yellow.blue() < 30,
-                   "qrss/band: blue low, yellow high, between red and white");
-    check::is_true(gui::ConfidenceBand::color(-40.0) == QColor(0, 0, 0) &&
-                       gui::ConfidenceBand::color(30.0) == QColor(255, 255, 255),
-                   "qrss/band: clamped at both ends");
+                   "qrss/bar: blue low, yellow high, between red and white");
+    check::is_true(gui::PassBar::color(-40.0) == QColor(0, 0, 0) &&
+                       gui::PassBar::color(30.0) == QColor(255, 255, 255),
+                   "qrss/bar: clamped at both ends");
 }
 
 std::vector<double> ramp(double from, int n) {
@@ -353,7 +353,7 @@ void test_provisional_tiles() {
                    "provisional: a header moves it to Received");
 }
 
-// The pass bar: filled to the share of the pass so far, red holes where
+// The pass bar: filled to the share of the pass so far, black where
 // latents are missing (not heard or erased), none for the preamble or
 // for what has not arrived yet.
 void test_the_pass_bar() {
@@ -374,7 +374,9 @@ void test_the_pass_bar() {
     bar.render(&img);
     const int x10 = 1 + static_cast<int>(10.5 * 238 / 120);
     const QRgb hole = img.pixel(x10, 4);
-    check::is_true(qRed(hole) > 180 && qGreen(hole) < 80, "pass bar: a hole is drawn red");
+    check::is_true(hole == qRgb(0, 0, 0), "pass bar: missing latents are black");
+    check::is_true(QColor(img.pixel(1, 4)) == gui::PassBar::unmeasured(),
+                   "pass bar: the preamble is grey");
     check::is_true(img.pixel(1 + static_cast<int>(40.5 * 238 / 120), 4) != hole &&
                        img.pixel(200, 4) != img.pixel(1 + static_cast<int>(40.5 * 238 / 120), 4),
                    "pass bar: filled to the progress, empty after");

@@ -81,12 +81,14 @@ QString hhmm(const QString& iso) {
 
 }  // namespace
 
-// --- confidence band ---------------------------------------------------------------------
+// --- pass bar ---------------------------------------------------------------------------
 
 namespace {
-
-constexpr int BAND_H = 2;
-
+constexpr int PASS_BAR_H = 8;
+// The preamble at the start of a pass carries no latents: not a hole.
+constexpr double PREAMBLE_S = 20.0;
+// receiver.CONF_FLOOR_DB: a bin whose latents were all erased.
+constexpr double CONF_FLOOR_DB = -30.0;
 struct Stop {
     double db;
     int r, g, b;
@@ -101,21 +103,7 @@ constexpr Stop BAND_STOPS[] = {
 
 }  // namespace
 
-ConfidenceBand::ConfidenceBand(QWidget* parent) : QWidget(parent) {
-    setFixedSize(PICTURE_W, BAND_H);
-    setToolTip(tr("Confidence through the pass, left to right: the SNR of each stretch's "
-                  "picture numbers. Black is no better than noise (-10 dB or less), then "
-                  "blue, red, yellow, and white at +10 dB or more. Grey: nothing to measure "
-                  "there (the preamble, or audio not heard)."));
-}
-
-void ConfidenceBand::set(std::vector<std::optional<double>> bins, double progress) {
-    bins_ = std::move(bins);
-    progress_ = progress;
-    update();
-}
-
-QColor ConfidenceBand::color(double snr_db) {
+QColor PassBar::color(double snr_db) {
     const auto& lo = BAND_STOPS[0];
     const auto& hi = BAND_STOPS[std::size(BAND_STOPS) - 1];
     if (!(snr_db > lo.db)) return QColor(lo.r, lo.g, lo.b);
@@ -134,46 +122,21 @@ QColor ConfidenceBand::color(double snr_db) {
     return QColor(hi.r, hi.g, hi.b);
 }
 
-QColor ConfidenceBand::unmeasured() { return QColor(128, 128, 128); }
+QColor PassBar::unmeasured() { return QColor(128, 128, 128); }
 
-void ConfidenceBand::paintEvent(QPaintEvent*) {
-    const int n = static_cast<int>(bins_.size());
-    if (n == 0) return;
-    QPainter painter(this);
-    for (int i = 0; i < n; ++i) {
-        const int x0 = static_cast<int>(std::lround(static_cast<double>(i) * width() / n));
-        const int x1 = static_cast<int>(std::lround(static_cast<double>(i + 1) * width() / n));
-        if (x1 <= x0) continue;
-        const std::optional<double>& v = bins_[static_cast<std::size_t>(i)];
-        if (v) {
-            painter.fillRect(x0, 0, x1 - x0, height(), color(*v));
-        } else if (static_cast<double>(i) / n < progress_) {
-            painter.fillRect(x0, 0, x1 - x0, height(), unmeasured());
-        }
-    }
-}
-
-// --- pass bar ---------------------------------------------------------------------------
-
-namespace {
-constexpr int PASS_BAR_H = 8;
-// The preamble at the start of a pass carries no latents: not a hole.
-constexpr double PREAMBLE_S = 20.0;
-// receiver.CONF_FLOOR_DB: a bin whose latents were all erased.
-constexpr double CONF_FLOOR_DB = -30.0;
-}  // namespace
 
 PassBar::PassBar(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("pass_bar"));
     setFixedSize(PICTURE_W, PASS_BAR_H);
-    setToolTip(tr("The pass so far, left to right. Red: stretches with no picture data "
-                  "(not heard, or lost)."));
+    setToolTip(tr("The pass so far, left to right, coloured by how well each stretch came "
+                  "through: black is no better than noise (or nothing there: not heard, or "
+                  "lost), then blue, red, yellow, and white at +10 dB or more per latent. "
+                  "Grey: the preamble."));
 }
-
-QColor PassBar::hole_color() { return QColor(215, 30, 30); }
 
 void PassBar::set(const std::vector<std::optional<double>>& bins, double progress) {
     progress_ = std::clamp(progress, 0.0, 1.0);
+    bins_ = bins;
     holes_.assign(bins.size(), false);
     const double n = static_cast<double>(bins.size());
     for (std::size_t i = 0; i < bins.size(); ++i) {
@@ -192,19 +155,28 @@ void PassBar::paintEvent(QPaintEvent*) {
     const QPalette& pal = palette();
     const int w = width();
     const int h = height();
-    painter.fillRect(rect(), pal.color(QPalette::Base));
+    // The track is the window's colour, not Base: Base is white on most
+    // themes, which is also the strongest confidence.
+    painter.fillRect(rect(), pal.color(QPalette::Window));
     painter.setPen(pal.color(QPalette::Mid));
     painter.drawRect(0, 0, w - 1, h - 1);
     const int fill = static_cast<int>(std::lround(progress_ * (w - 2)));
-    painter.fillRect(1, 1, fill, h - 2, pal.color(QPalette::Highlight));
-    const int n = static_cast<int>(holes_.size());
+    const int n = static_cast<int>(bins_.size());
+    if (n == 0) {
+        // No confidence yet: the length alone.
+        painter.fillRect(1, 1, fill, h - 2, unmeasured());
+        return;
+    }
     for (int i = 0; i < n; ++i) {
-        if (!holes_[static_cast<std::size_t>(i)]) continue;
         const int x0 = 1 + static_cast<int>(std::lround(static_cast<double>(i) * (w - 2) / n));
-        int x1 = 1 + static_cast<int>(std::lround(static_cast<double>(i + 1) * (w - 2) / n));
-        x1 = std::min(x1, 1 + fill);
-        if (x1 <= x0) x1 = x0 + 1;   // a hole is never too narrow to see
-        painter.fillRect(x0, 1, x1 - x0, h - 2, hole_color());
+        const int x1 = std::min(
+            1 + fill, 1 + static_cast<int>(std::lround(static_cast<double>(i + 1) * (w - 2) / n)));
+        if (x1 <= x0) continue;
+        const std::optional<double>& v = bins_[static_cast<std::size_t>(i)];
+        const QColor c = v ? color(*v)
+                         : holes_[static_cast<std::size_t>(i)] ? color(CONF_FLOOR_DB)
+                                                               : unmeasured();
+        painter.fillRect(x0, 1, x1 - x0, h - 2, c);
     }
 }
 
@@ -220,7 +192,6 @@ QrssTile::QrssTile(QWidget* parent) : QWidget(parent) {
     picture_->setFrameShape(QFrame::Box);
     picture_->setText(tr("Waiting for the header"));
     picture_->setWordWrap(true);
-    band_ = new ConfidenceBand(this);
     // Small print under the picture, as Glissando has it: the picture
     // is what the tile is for.
     QFont small = font();
@@ -230,21 +201,27 @@ QrssTile::QrssTile(QWidget* parent) : QWidget(parent) {
     bold.setPointSizeF(std::max(7.0, bold.pointSizeF() * 0.88));
     bold.setBold(true);
     title_->setFont(bold);
+    // The signal's SNR, the number most worth a glance: on the title line,
+    // at the right, in the same bold (Jeff, 2026-10-10).
+    snr_ = new QLabel(this);
+    snr_->setObjectName(QStringLiteral("tile_snr"));
+    snr_->setFont(bold);
+    snr_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     details_ = new QLabel(this);
     details_->setFont(small);
     details_->setWordWrap(true);
     details_->setFixedWidth(PICTURE_W);
     details_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     // **The bar says it all** (Jeff, 2026-10-10): its length is how far
-    // through the pass, its red holes the latents missing; no words.
+    // through the pass, its colours how well each stretch came through
+    // (missing latents are black); no words, and no second strip.
     progress_ = new PassBar(this);
-    // The band sits right under the picture it describes.
-    auto* picture_and_band = new QVBoxLayout;
-    picture_and_band->setSpacing(1);
-    picture_and_band->addWidget(picture_);
-    picture_and_band->addWidget(band_);
-    box->addLayout(picture_and_band);
-    box->addWidget(title_);
+    box->addWidget(picture_);
+    auto* title_row = new QHBoxLayout;
+    title_row->setContentsMargins(0, 0, 0, 0);
+    title_row->addWidget(title_, 1);
+    title_row->addWidget(snr_);
+    box->addLayout(title_row);
     box->addWidget(progress_);
     box->addWidget(details_);
     box->addStretch(1);
@@ -268,13 +245,12 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
         bins.push_back(v.isDouble() ? std::optional<double>(v.toDouble()) : std::nullopt);
     }
     progress_->set(bins, progress);
-    band_->set(std::move(bins), std::clamp(progress, 0.0, 1.0));
 
+    snr_->setText(number_or(t.value(QStringLiteral("snr_db")), 1, tr(" dB"), QString()));
     QStringList lines;
-    lines << tr("Slot %1 · %2 Hz · SNR %3")
+    lines << tr("Slot %1 · %2 Hz")
                  .arg(hhmm(t.value(QStringLiteral("slot_utc")).toString()))
-                 .arg(f_hz, 0, 'f', 1)
-                 .arg(number_or(t.value(QStringLiteral("snr_db")), 1, tr(" dB")));
+                 .arg(f_hz, 0, 'f', 1);
     // On the air: the dial the listener heard it on plus its audio
     // frequency (USB). Unknown dial (null): nothing.
     if (const QJsonValue dial = t.value(QStringLiteral("dial_hz")); dial.isDouble() && f_hz > 0) {
@@ -331,6 +307,7 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
 }
 
 QString QrssTile::title() const { return title_->text(); }
+QString QrssTile::snr_text() const { return snr_->text(); }
 QString QrssTile::details() const { return details_->text(); }
 bool QrssTile::has_picture() const {
     return !picture_->pixmap().isNull();
