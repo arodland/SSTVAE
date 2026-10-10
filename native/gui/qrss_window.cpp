@@ -228,6 +228,13 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
                  .arg(hhmm(t.value(QStringLiteral("slot_utc")).toString()))
                  .arg(f_hz, 0, 'f', 1)
                  .arg(number_or(t.value(QStringLiteral("snr_db")), 1, tr(" dB")));
+    // On the air: the dial the listener heard it on plus its audio
+    // frequency (USB). Unknown dial (null): nothing.
+    if (const QJsonValue dial = t.value(QStringLiteral("dial_hz")); dial.isDouble() && f_hz > 0) {
+        lines << tr("RF %1 MHz (dial %2)")
+                     .arg((dial.toDouble() + f_hz) / 1e6, 0, 'f', 6)
+                     .arg(dial.toDouble() / 1e6, 0, 'f', 6);
+    }
     const QString pid = t.value(QStringLiteral("picture_id")).toString();
     if (!pid.isEmpty()) {
         const int passes = t.value(QStringLiteral("passes")).toInt(1);

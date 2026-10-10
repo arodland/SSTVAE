@@ -94,9 +94,13 @@ void test_tiles_follow_the_state_file() {
     check::equal(w.tile_count(), 0, "qrss/tiles: none without a state file");
 
     QJsonArray tiles;
-    tiles.append(tile_json(QStringLiteral("a"), 1500.0, QStringLiteral("N0CALL"), 0.35,
-                           QStringLiteral("tiles/a.png"), 2));
-    tiles.append(tile_json(QStringLiteral("b"), 1550.2, QString(), 0.02, QString(), 0));
+    QJsonObject with_dial = tile_json(QStringLiteral("a"), 1500.0, QStringLiteral("N0CALL"), 0.35,
+                                      QStringLiteral("tiles/a.png"), 2);
+    with_dial[QStringLiteral("dial_hz")] = 10'138'700;
+    tiles.append(with_dial);
+    QJsonObject no_dial = tile_json(QStringLiteral("b"), 1550.2, QString(), 0.02, QString(), 0);
+    no_dial[QStringLiteral("dial_hz")] = QJsonValue();
+    tiles.append(no_dial);
     write_state(dir.path(), tiles, 1'000'000);
     w.reload();
     check::equal(w.tile_count(), 2, "qrss/tiles: one per listed signal");
@@ -115,6 +119,10 @@ void test_tiles_follow_the_state_file() {
                  "qrss/tiles: and in words, beside the bar");
     check::is_true(a->details().contains(QStringLiteral("3 passes")),
                    "qrss/tiles: says how many passes the picture combines");
+    check::is_true(a->details().contains(QStringLiteral("RF 10.140200 MHz (dial 10.138700)")),
+                   "qrss/tiles: on the air at dial + audio (USB)");
+    check::is_true(!b->details().contains(QStringLiteral("RF ")),
+                   "qrss/tiles: and nothing when the dial is unknown");
 
     // The listener drops a signal: so does the window.
     QJsonArray one;
