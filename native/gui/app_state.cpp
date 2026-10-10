@@ -183,6 +183,13 @@ void AppState::connect_rig() {
 
 void AppState::disconnect_rig() { rig_.stop(); }
 
+bool AppState::tune_rig(double hz) {
+    if (!config_.rig.enabled || !rig_.request_frequency(hz)) return false;
+    log_event("rig", log::Severity::Info,
+              QStringLiteral("Tuning to %1 MHz").arg(hz / 1e6, 0, 'f', 6));
+    return true;
+}
+
 void AppState::pause_rig_polling() { rig_.pause_polling(); }
 
 void AppState::resume_rig_polling() { rig_.resume_polling(); }

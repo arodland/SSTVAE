@@ -79,6 +79,11 @@ public:
         return inner_->frequency_hz();
     }
 
+    void set_frequency_hz(double hz) override {
+        require_inner();
+        inner_->set_frequency_hz(hz);
+    }
+
     std::string description() const override {
         std::string text = inner_ ? inner_->description() : std::string("rig");
         if (transport_) {

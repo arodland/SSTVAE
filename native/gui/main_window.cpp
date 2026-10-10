@@ -6,6 +6,7 @@
 #include <QDateTime>
 #include <QDockWidget>
 #include <QGroupBox>
+#include <QInputDialog>
 #include <QKeySequence>
 #include <QLabel>
 #include <QMenu>
@@ -23,6 +24,8 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <cmath>
+#include <optional>
 
 #include "app_state.hpp"
 #include "log_pane.hpp"
@@ -614,6 +617,12 @@ void MainWindow::build_status_bar() {
         bar->addPermanentWidget(label);
     }
 
+    // Right-click the readout to retune the radio.
+    rig_label_->setObjectName(QStringLiteral("rig_label"));
+    rig_label_->setContextMenuPolicy(Qt::CustomContextMenu);
+    rig_label_->setToolTip(tr("Right-click to change the frequency."));
+    connect(rig_label_, &QWidget::customContextMenuRequested, this, &MainWindow::show_rig_menu);
+
     rig_error_timer_ = new QTimer(this);
     rig_error_timer_->setInterval(5000);
     connect(rig_error_timer_, &QTimer::timeout, this,
@@ -742,6 +751,43 @@ void MainWindow::on_rig_status(const QString& text, bool error) {
         rig_error_text_.clear();
         rig_error_timer_->stop();
         rig_label_->setText(text);
+    }
+}
+
+void MainWindow::show_rig_menu(const QPoint& at) {
+    QMenu menu(this);
+    QAction* change = menu.addAction(tr("Change frequency..."));
+    change->setObjectName(QStringLiteral("menu_change_frequency"));
+    // Not while transmitting: that covers an SSTVAE over and a QRSS
+    // send from the moment it starts, including the run-up before a
+    // pass is keyed and the waits between passes.
+    if (tx_panel_->transmitting()) {
+        change->setEnabled(false);
+        change->setText(tr("Change frequency... (not while transmitting)"));
+    } else if (!state_->current_frequency_hz()) {
+        change->setEnabled(false);
+        change->setText(tr("Change frequency... (no frequency from the rig)"));
+    }
+    if (menu.exec(rig_label_->mapToGlobal(at)) == change) change_frequency();
+}
+
+void MainWindow::change_frequency() {
+    const std::optional<double> now = state_->current_frequency_hz();
+    if (!now || tx_panel_->transmitting()) return;
+    bool ok = false;
+    const double mhz = QInputDialog::getDouble(
+        this, tr("Change frequency"), tr("Dial frequency (MHz):"), *now / 1e6, 0.001, 10000.0,
+        6, &ok, Qt::WindowFlags(), 0.001);
+    if (!ok) return;
+    // A scheduled QRSS send may have started while the dialog was open.
+    if (tx_panel_->transmitting()) {
+        QMessageBox::warning(this, tr("Change frequency"),
+                             tr("A transmission started; the frequency was not changed."));
+        return;
+    }
+    if (!state_->tune_rig(std::round(mhz * 1e6))) {
+        QMessageBox::warning(this, tr("Change frequency"),
+                             tr("The rig is not connected, so the frequency was not changed."));
     }
 }
 

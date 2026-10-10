@@ -144,6 +144,13 @@ public:
     // `operation_timeout_s`.
     void set_ptt(bool on);
 
+    // Ask the radio to tune to `hz`. Returns at once: the worker tunes,
+    // then polls, so the new dial frequency arrives the usual way.
+    // False, with nothing asked, when there is no session or polling is
+    // paused for a transmission. A rig that refuses is reported through
+    // the status callback as an error.
+    bool request_frequency(double hz);
+
     // A `tx::Ptt` for `TxEngine`. Keeps working across `start`/`stop`:
     // keying with no session throws RigError, which the engine reports
     // and treats as a failure to key -- the right answer for a

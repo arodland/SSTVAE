@@ -65,6 +65,11 @@ struct RigSession {
     };
     std::shared_ptr<PttJob> ptt;
 
+    // A dial frequency to tune to. Asynchronous, unlike keying: the
+    // operator's request comes from the GUI thread, which must never
+    // wait on the rig, and the result arrives as the next poll's reading.
+    std::optional<double> tune;
+
     std::optional<double> frequency;
     std::string last_status;
 
@@ -122,6 +127,7 @@ void run(std::shared_ptr<RigSession> s) {
 
     while (true) {
         std::shared_ptr<RigSession::PttJob> job;
+        std::optional<double> tune;
         {
             std::unique_lock<std::mutex> lock(s->m);
             // Wake for: a stop, a keying request, or the poll deadline.
@@ -138,7 +144,9 @@ void run(std::shared_ptr<RigSession> s) {
             // check it would sleep straight through that notify and leave
             // polling dead until the next over keys the rig, which is what
             // issue #40 saw as "the frequency stops updating".
-            const auto wake = [&] { return s->stopping || s->ptt != nullptr; };
+            const auto wake = [&] {
+                return s->stopping || s->ptt != nullptr || s->tune.has_value();
+            };
             if (s->paused) {
                 s->cv.wait(lock, [&] { return wake() || !s->paused; });
             } else {
@@ -147,6 +155,10 @@ void run(std::shared_ptr<RigSession> s) {
             if (s->stopping) return;
             job = s->ptt;
             s->ptt.reset();
+            if (!job && s->tune) {
+                if (!s->paused) tune = s->tune;  // keyed since it was asked
+                s->tune.reset();
+            }
         }
 
         if (job) {
@@ -168,6 +180,17 @@ void run(std::shared_ptr<RigSession> s) {
             // been keyed is the last thing worth interrogating.
             next_poll = Clock::now() + secs(interval);
             continue;
+        }
+
+        if (tune) {
+            try {
+                s->backend->set_frequency_hz(*tune);
+            } catch (const std::exception& e) {
+                s->publish_status(first_line(e.what()), true);
+            }
+            // Read it straight back, so the display shows where the
+            // radio actually went rather than where it was asked to go.
+            next_poll = Clock::now();
         }
 
         {
@@ -316,6 +339,23 @@ void RigController::set_ptt(bool on) {
                        std::to_string(s->config.operation_timeout_s) + " s");
     }
     if (job->failed) throw RigError(job->error);
+}
+
+bool RigController::request_frequency(double hz) {
+    std::shared_ptr<RigSession> s;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        s = session_;
+    }
+    if (!s || !(hz > 0.0)) return false;
+    {
+        std::lock_guard<std::mutex> lock(s->m);
+        // Paused means keyed: never retune mid-over.
+        if (s->stopping || s->paused) return false;
+        s->tune = hz;
+    }
+    s->cv.notify_all();
+    return true;
 }
 
 std::function<void(bool)> RigController::ptt_function() {

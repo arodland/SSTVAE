@@ -253,6 +253,12 @@ public:
         return static_cast<double>(freq);
     }
 
+    void set_frequency_hz(double hz) override {
+        require_open();
+        const int rc = rig_set_freq(rig_, RIG_VFO_CURR, static_cast<freq_t>(hz));
+        if (rc != RIG_OK) throw RigError(hamlib_error("could not set frequency", rc));
+    }
+
     std::string description() const override {
         // Via rig_get_caps_cptr rather than rig_->caps->..., and that is
         // deliberate: **nothing here may dereference a RIG\***.

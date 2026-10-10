@@ -111,6 +111,9 @@ private:
     void restore_waterfall_height();
     void remember_waterfall_height();
     void refresh_rig_error_age();
+    // The rig readout's right-click menu, and what its one item does.
+    void show_rig_menu(const QPoint& at);
+    void change_frequency();
 
     AppState* state_ = nullptr;
     QSplitter* stack_ = nullptr;

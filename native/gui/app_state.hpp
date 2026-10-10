@@ -69,6 +69,9 @@ public:
 
     void connect_rig();
     void disconnect_rig();
+    // Ask the radio to tune (Hz). Never blocks; false when rig control is
+    // off or the radio is keyed. The result shows as the next readout.
+    bool tune_rig(double hz);
     void pause_rig_polling();
     void resume_rig_polling();
 
