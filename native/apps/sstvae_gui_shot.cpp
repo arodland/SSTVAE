@@ -301,7 +301,7 @@ int main(int argc, char** argv) {
             scheduler.add(b, picture_of(ids[1]));
         }
         sstvae::gui::QrssScheduleWindow w(
-            &scheduler, &sends, [] { return std::optional<sstvae::gui::QrssScheduleWindow::Composition>(); },
+            &scheduler, &sends,
             [] { return sstvae::gui::QrssScheduleWindow::Defaults{"A", 1500.0}; }, context);
         w.resize(width > 0 ? width : 1000, height > 0 ? height : 720);
         w.show();

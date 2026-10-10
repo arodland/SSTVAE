@@ -442,7 +442,7 @@ void test_the_window(const std::filesystem::path& dir) {
     QrssSends sends(dir / "c" / "qrss_sends");
     const std::string red = sends.add("Red", solid(200, 0, 0), {}, solid(255, 0, 0));
     const std::string blue = sends.add("Blue", solid(0, 0, 200), {}, solid(0, 0, 255));
-    QrssScheduleWindow w(s.get(), &sends, [] { return std::optional<QrssScheduleWindow::Composition>(); },
+    QrssScheduleWindow w(s.get(), &sends,
                          [] { return QrssScheduleWindow::Defaults{"B", 1234.0}; }, {});
     w.resize(1000, 700);
     w.show();

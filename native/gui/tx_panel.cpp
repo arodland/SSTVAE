@@ -1656,10 +1656,6 @@ void TransmitPanel::show_schedule() {
         context.picture_dir = app_->config().folders.transmit_dir;
         schedule_window_ = new QrssScheduleWindow(
             scheduler_, sends_,
-            [this]() -> std::optional<QrssScheduleWindow::Composition> {
-                if (!editor_->has_base()) return std::nullopt;
-                return QrssScheduleWindow::Composition{editor_->base_image(), editor_->doc()};
-            },
             [this] {
                 QrssScheduleWindow::Defaults d;
                 // The carrier last scheduled, else the saved one.

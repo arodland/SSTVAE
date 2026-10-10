@@ -104,11 +104,10 @@ const qs::Entry* entry_by_id(const std::vector<qs::Entry>& entries, const std::s
 }  // namespace
 
 QrssScheduleWindow::QrssScheduleWindow(QrssScheduler* scheduler, QrssSends* sends,
-                                       CompositionFn composition,
                                        std::function<Defaults()> defaults,
                                        QrssEditor::Context editor_context, QWidget* parent)
     : QWidget(parent, Qt::Window), scheduler_(scheduler), sends_(sends),
-      composition_(std::move(composition)), defaults_(std::move(defaults)),
+      defaults_(std::move(defaults)),
       editor_context_(std::move(editor_context)) {
     setObjectName(QStringLiteral("qrss_schedule_window"));
     setWindowTitle(tr("QRSS schedule"));
@@ -213,10 +212,6 @@ QWidget* QrssScheduleWindow::build_sends(QWidget* parent) {
     new_button->setObjectName(QStringLiteral("sends_new"));
     new_button->setToolTip(tr("Open the Editor on a blank picture"));
     connect(new_button, &QPushButton::clicked, this, &QrssScheduleWindow::new_send);
-    auto* from_comp = new QPushButton(tr("From &composition..."), box);
-    from_comp->setObjectName(QStringLiteral("sends_from_composition"));
-    from_comp->setToolTip(tr("Open the Editor on the Transmit pane's picture and overlay"));
-    connect(from_comp, &QPushButton::clicked, this, &QrssScheduleWindow::new_from_composition);
     auto* open_file = new QPushButton(tr("&Open file..."), box);
     open_file->setObjectName(QStringLiteral("sends_open_file"));
     open_file->setToolTip(tr("Open the Editor on a picture file, framed first unless it is "
@@ -245,7 +240,7 @@ QWidget* QrssScheduleWindow::build_sends(QWidget* parent) {
         }
         delete_send(id);
     });
-    layout->addWidget(style::row(box, {new_button, from_comp}));
+    layout->addWidget(style::row(box, {new_button}));
     layout->addWidget(style::row(box, {open_file, edit_send_, delete_send_}));
     return box;
 }
@@ -466,7 +461,7 @@ void QrssScheduleWindow::on_send_selected() {
         thumb_->setPixmap(QPixmap());
         thumb_->setText(tr("No Send"));
         send_name_->setText(sends_->sends().empty()
-                                ? tr("Make a Send first: New, From composition or Open file, "
+                                ? tr("Make a Send first: New or Open file, "
                                      "on the left.")
                                 : tr("Choose a Send on the left to schedule it."));
     } else {
@@ -488,21 +483,6 @@ void QrssScheduleWindow::open_editor(const std::function<bool(QrssEditor&)>& pre
 void QrssScheduleWindow::new_send() {
     open_editor([](QrssEditor& e) {
         e.start_blank();
-        return true;
-    });
-}
-
-void QrssScheduleWindow::new_from_composition() {
-    const std::optional<Composition> c = composition_ ? composition_() : std::nullopt;
-    if (!c) {
-        show_result("the Transmit pane has no picture yet", {});
-        return;
-    }
-    const std::string label = utc_of(scheduler_->now())
-                                  .toString(QStringLiteral("'composition' d MMM HH:mm'Z'"))
-                                  .toStdString();
-    open_editor([&c, &label](QrssEditor& e) {
-        e.start_from(c->base, c->doc, label);
         return true;
     });
 }

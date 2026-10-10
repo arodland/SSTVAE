@@ -10,7 +10,7 @@
 //   its mode or set how soon it repeats. Clicking an empty slot with a
 //   Send selected sets the form's start time to that slot.
 // - **Sends**, on the left: pictures prepared for the schedule and kept
-//   on disk (gui/qrss_sends.hpp). New, From composition and Open file
+//   on disk (gui/qrss_sends.hpp). New and Open file
 //   open the Editor (gui/qrss_editor.hpp); a Send on the schedule is
 //   tinted, and selecting one tints its blocks on the timeline.
 // - **Schedule**, on the right: mode, carrier, first quarter hour and
@@ -57,12 +57,6 @@ class QrssScheduleWindow : public QWidget {
     Q_OBJECT
 
 public:
-    // The Transmit pane's picture (framed, 640 x 480) and its overlay.
-    struct Composition {
-        images::Picture base;
-        overlay::Doc doc;
-    };
-    using CompositionFn = std::function<std::optional<Composition>()>;
     struct Defaults {
         std::string mode = "A";
         double freq_hz = 1500.0;
@@ -70,7 +64,7 @@ public:
     // How far ahead the timeline reaches.
     static constexpr double TIMELINE_HOURS = 48.0;
 
-    QrssScheduleWindow(QrssScheduler* scheduler, QrssSends* sends, CompositionFn composition,
+    QrssScheduleWindow(QrssScheduler* scheduler, QrssSends* sends,
                        std::function<Defaults()> defaults, QrssEditor::Context editor_context,
                        QWidget* parent = nullptr);
 
@@ -82,10 +76,9 @@ public:
     void select_send(const std::string& id);
     QrssTimeline* timeline() const { return timeline_; }
 
-    // The Editor, modal: a new Send, the Transmit pane's composition, a
-    // picture file, or an existing Send. Each selects what was saved.
+    // The Editor, modal: a new Send, a picture file, or an existing
+    // Send. Each selects what was saved.
     void new_send();
-    void new_from_composition();
     void new_from_file(const QString& path);
     void edit_send(const std::string& id);
     void delete_send(const std::string& id);
@@ -131,7 +124,6 @@ private:
 
     QrssScheduler* scheduler_ = nullptr;
     QrssSends* sends_ = nullptr;
-    CompositionFn composition_;
     std::function<Defaults()> defaults_;
     QrssEditor::Context editor_context_;
     std::string selected_entry_;
