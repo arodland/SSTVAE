@@ -450,6 +450,72 @@ def test_receives_run_on_the_worker_and_state_keeps_moving(tmp_path, monkeypatch
     assert q in L.finished and L.idle()
 
 
+def _until(cond, timeout=10.0):
+    import time as _t
+    deadline = _t.monotonic() + timeout
+    while not cond() and _t.monotonic() < deadline:
+        _t.sleep(0.02)
+    assert cond()
+
+
+def test_a_finishing_slot_shows_the_whole_pass_meanwhile(tmp_path, monkeypatch):
+    """The end-of-slot receive takes minutes. Meanwhile the tile reads
+    "finishing", and one more live receive of the whole frame takes it to
+    the pass's end, where it used to stay at the last refresh (96% for
+    five minutes in a field test). A tile's progress is when its audio was read,
+    not when its receive returned."""
+    import threading
+
+    reads = []
+
+    def receive_slot(*a, **k):
+        reads.append(L.now)
+        with L.lock:
+            L.now += 10.0             # the loop steps on while a receive runs
+        return [_Pass(1500.0)]
+
+    monkeypatch.setattr(RX, "detect", lambda *a, **k: [_Det(1500.0)])
+    monkeypatch.setattr(RX, "receive_slot", receive_slot)
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False, background=True),
+                          log=lambda m: None)
+    release = threading.Event()
+    finish = L._finish
+    L._finish = lambda s: (release.wait(10), finish(s))
+    q = Q_TEST
+    t0 = slot_t0(q)
+    dur = live.frame_seconds(TINY)
+    end = t0 + dur + frontend.PB_TAIL_S + 0.5
+    L.feed(np.zeros(int((end - t0 + 15) * FS)), end)
+    live_idle = lambda: L._busy["live"] is None and L._jobs.empty()   # noqa: E731
+    with L.lock:
+        L.step(t0 + 30.0)
+    _until(lambda: live_idle() and reads)
+    (tile,) = L.tiles()
+    assert tile.status == "receiving" and tile.progress == pytest.approx(30.0 / dur)
+    with L.lock:
+        L.step(end)
+    assert tile.status == "finishing"
+    _until(lambda: live_idle() and len(reads) == 2)
+    assert tile.status == "finishing" and tile.progress == 1.0 and tile.heard == 1.0
+    with L.lock:
+        L.step(end + 1.0)             # no second final refresh
+    assert len(reads) == 2
+    release.set()
+    _until(L.idle)
+    with L.lock:
+        L.step(end + 2.0)
+    assert q in L.finished and tile.status == "complete"
+    # a listener stopped while it finished re-finishes the slot, not lists the tile
+    t = live.Tile(id="x", q=q + 1, slot_utc="", frame="tiny", f_hz=1500.0, status="finishing")
+    (tmp_path / "s2").mkdir()
+    (tmp_path / "s2" / "state.json").write_text(json.dumps({"tiles": [t.to_json()]}))
+    L2 = live.LiveListener(tmp_path / "s2", live.LiveConfig(spec=TINY, render=False),
+                           log=lambda m: None)
+    assert L2.tiles() == [] and q + 1 not in L2.finished
+    L2.close()
+    L.close()
+
+
 def test_the_end_of_slot_receive_runs_in_its_own_process(tmp_path):
     """With finish_process, the end-of-slot receive runs in a child process
     while the live worker stays free, gets the same passes, and a child that

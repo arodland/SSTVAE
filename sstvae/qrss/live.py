@@ -17,6 +17,8 @@ capture audio in and shows the tiles this writes.
         receive_slot over the whole slot (round B, whole-slot search),
         associate into the multi-pass store, render the accumulator
         --> the tile goes "complete"
+    (the tile reads "finishing" while that runs, and one more live
+    receive of the whole frame brings it to the pass's end meanwhile)
 
 The tiles are a directory: `state.json` (rewritten atomically after
 every change) and `tiles/<id>.png`. Anything can show them; nothing in
@@ -485,7 +487,7 @@ class Tile:
     frame: str
     f_hz: float                     # audio Hz at t0
     dial_hz: int | None = None      # the radio's dial while it was heard (None: unknown)
-    status: str = "receiving"       # receiving | complete | lost
+    status: str = "receiving"       # receiving | finishing | complete | lost
     snr_db: float | None = None     # SNR in 2500 Hz
     z_ref: float | None = None
     callsign: str | None = None
@@ -494,7 +496,7 @@ class Tile:
     mode: str | None = None         # A, B, C
     segment: int | None = None
     cw_text: str | None = None
-    progress: float = 0.0           # share of the frame's time elapsed
+    progress: float = 0.0           # share of the frame's time elapsed when its audio was read
     heard: float = 0.0              # share of the frame's audio heard
     received: float = 0.0           # share of the data latents with W > 0
     mean_w_db: float | None = None
@@ -659,7 +661,7 @@ class LiveListener:
         for t in st.get("tiles", []):
             if t.get("status") in ("complete", "lost") and "q" in t:
                 self.finished.add(int(t["q"]))       # (a state file from before "finished")
-            if t.get("status") != "receiving":
+            if t.get("status") not in ("receiving", "finishing"):
                 if (not t.get("callsign") and not t.get("cw_text")
                         and (t.get("snr_db") or -99.0) > HEADERLESS_MAX_SNR_DB):
                     continue           # kept by an older listener; see _plausible
@@ -809,6 +811,16 @@ class LiveListener:
             if now >= t0 + dur + PB_TAIL_S:
                 if not s.finishing:
                     s.finishing = True
+                    for t in s.tiles.values():
+                        t.status = "finishing"
+                    # The end-of-slot receive takes minutes (3-5 on a desktop).
+                    # One more live receive, of the whole frame, shows the
+                    # pass to its end meanwhile instead of where the last
+                    # refresh, up to refresh_s before the end, left it.
+                    if self._jobs is not None and s.dets and (
+                            s.last_refresh is None or s.last_refresh < t0 + dur):
+                        s.last_refresh = now
+                        self._submit(self._refresh, s)
                     self._submit(self._finish, s, finish=True)
                     changed = True
             elif now >= t0 + self.cfg.first_s and (
@@ -895,12 +907,18 @@ class LiveListener:
         return t
 
     def _refresh(self, s: SlotState) -> None:
+        if s.done:
+            return              # (a final refresh queued behind a finish that has run)
         spec = self.cfg.spec
         t_start = time.time()
         t0 = slot_t0(s.q)
         with self.lock:
             x, ok, origin = capture_read(self.ring, s.q, spec)
             elapsed = self.now - t0
+            # the tile's progress is when its audio was read, not when the
+            # receive returned: the audio in between is not in this receive
+            # and must not read as a hole
+            progress = self._progress(s.q)
             self.dial.refresh()
             dial = self.dial.dial_at(t0)
             heard = dict(self.dial.by_dial(t0 - origin / FE_FS, t0 + len(x) / FE_FS))
@@ -926,8 +944,8 @@ class LiveListener:
                 if not self._plausible(s, p, dial):
                     continue
                 t = self._tile_for(s, p.f_hz, dial)
-                self._update_tile(t, p, heard)
-                t.status = "receiving"
+                self._update_tile(t, p, heard, progress=progress)
+                t.status = "finishing" if s.finishing else "receiving"
                 self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: {len(passes)} signal(s) at "
                      f"{100 * self._progress(s.q):.0f}% ({time.time() - t_start:.0f} s)")
 
@@ -1048,12 +1066,13 @@ class LiveListener:
         return not any(t.callsign and same_dial(t.dial_hz, dial)
                        and abs(t.f_hz - f) < receiver.GHOST_HZ for t in others)
 
-    def _update_tile(self, t: Tile, p: PassResult, heard: float, key=None) -> None:
+    def _update_tile(self, t: Tile, p: PassResult, heard: float, key=None,
+                     progress: float | None = None) -> None:
         r = p.report
         t.f_hz = float(p.f_hz)
         t.snr_db = float(r.snr2500_db) if np.isfinite(r.snr2500_db) else None
         t.z_ref = float(r.z_ref) if np.isfinite(r.z_ref) else None
-        t.progress = self._progress(t.q)
+        t.progress = self._progress(t.q) if progress is None else progress
         t.heard = float(heard)
         w = np.asarray(p.w, dtype=np.float64)
         t.received = float(np.mean(w > 0)) if len(w) else 0.0

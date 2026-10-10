@@ -158,7 +158,9 @@ that were too weak for anyone to notice on their preamble alone. That
 search is expensive, so it is only done when the listener heard at least
 half of the slot. It runs as a separate program on its own processor
 core, so the next slot's tiles, already on the air, keep updating while
-it works.
+it works. It takes a few minutes. Meanwhile the tile says it is
+finishing, and one more quick look at the whole pass shows it to the
+end rather than where the last two-minute update left it.
 
 ### 5. It files the pass
 
@@ -286,11 +288,13 @@ exactly what the receiver wants to add up.
 - **Slot**: a quarter-hour start time, such as 05:45Z (Z means UTC).
 - **SNR**: signal strength against the noise, in dB. Negative means
   weaker than the noise.
-- **% of the pass**: how far through its 30 minutes the pass is.
-- **heard**: how much of the pass the listener actually recorded.
-- **% of latents**: how many of the picture's numbers have arrived with
-  any confidence at all.
-- **Mean weight**: how confident those numbers are on average. Higher
+- **The bar** under the title: how far through its 30 minutes the pass
+  is. A red stretch in it is part of the pass with no picture numbers:
+  audio the listener didn't hear, or heard but lost entirely.
+- **Receiving / Finishing / Complete / Lost**: on the air; over and
+  being looked at once more; done and filed; or not found at all in the
+  last look.
+- **Mean weight**: how confident the picture's numbers are on average. Higher
   (closer to 0 dB or above) is better.
 - **The coloured band** under a picture: the same confidence, moment by
   moment through the pass, left to right. Black means that stretch was

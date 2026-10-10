@@ -169,7 +169,12 @@ the frame ends, the whole slot is received again, stored and
 associated, and the tile shows the picture accumulated over every pass
 of it. That end-of-slot receive runs in a second process, on another
 core, so the tiles of the slot still on the air keep updating
-meanwhile.
+meanwhile. It takes minutes (3 to 5 on a desktop). While it runs, the
+tile's status reads `finishing` and one more live receive of the whole
+frame takes the tile to the end of the pass, where it used to stay at
+the last refresh. A tile's `progress` is the share of the frame
+elapsed when its audio was read, so the audio that arrived while a
+receive ran is not counted as missing.
 
 Under each tile's picture a 2-pixel band shows that pass's confidence
 over time, from the start of the pass at the left to its end at the
