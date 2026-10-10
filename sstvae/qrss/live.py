@@ -48,6 +48,7 @@ recording can be replayed faster than real time.
 from __future__ import annotations
 
 import collections
+import copy
 import json
 import math
 import os
@@ -336,6 +337,7 @@ class LiveListener:
         self.finished: set[int] = set()
         self.done_tiles: list[Tile] = []
         self._recover: list[SlotState] = []   # ended slots to finish from the passband store
+        self._headers: dict = {}               # tile id -> the header its signal decoded
         self.codec = None
         self.codec_error: str | None = None
         self.now = 0.0
@@ -534,6 +536,8 @@ class LiveListener:
             self._submit(self._finish, s)
             changed = True
         for q in [q for q, s in self.slots.items() if s.done]:
+            for tid in self.slots[q].tiles:
+                self._headers.pop(tid, None)
             self.done_tiles.extend(self.slots.pop(q).tiles.values())
             self.finished.add(q)
         keep = [t for t in self.done_tiles if now - t.updated < self.cfg.keep_done_s]
@@ -608,6 +612,7 @@ class LiveListener:
             if s.done:
                 return
             for p in passes:
+                p = self._known_header(s, p)
                 if not self._plausible(s, p):
                     continue
                 t = self._tile_for(s, p.f_hz)
@@ -651,6 +656,7 @@ class LiveListener:
 
     def _finish_apply(self, s: SlotState, passes, heard: float) -> None:
         s.done = True
+        passes = [self._known_header(s, p) for p in passes]
         passes = [p for p in passes if self._plausible(s, p)]
         seen = set()
         for p in passes:
@@ -671,6 +677,26 @@ class LiveListener:
             if tid not in seen:
                 t.status = "lost"
                 t.updated = self.now
+
+    def _known_header(self, s: SlotState, p: PassResult) -> PassResult:
+        """p, with the header its signal decoded at an earlier receive when
+        this one did not decode it.
+
+        Each live receive decodes the header afresh from what has arrived,
+        and near its threshold one receive can miss what an earlier one
+        found. The header of a signal does not change during its pass, and
+        a decoded one is checked to well under 1e-8 false accepts, so it
+        stands; without this a tile fell back to the headerless guess.
+        """
+        if p.header is not None:
+            return p
+        t = self._match(s, p.f_hz)
+        h = self._headers.get(t.id) if t is not None else None
+        if h is None:
+            return p
+        p = copy.copy(p)                  # (the receiver's result stays as it was)
+        p.header = h
+        return p
 
     def _plausible(self, s: SlotState, p: PassResult) -> bool:
         """Whether a pass is worth a tile (and the store).
@@ -711,6 +737,7 @@ class LiveListener:
         t.mean_w_db = receiver.mean_w_db(p) if t.received > 0 else None
         h = p.header
         if h is not None:
+            self._headers[t.id] = h
             t.callsign, t.grid = h.callsign, h.grid
             t.picture_id = f"{int(h.picture_id):08x}"
             t.mode, t.segment = "ABC"[h.mode], int(h.segment)

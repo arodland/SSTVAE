@@ -440,3 +440,37 @@ def test_a_restarted_listener_finishes_a_slot_that_ended_while_it_was_stopped(tm
     assert L2.recover(now) == []                        # finished already, by the first
     assert live.LiveListener(tmp_path / "live3", cfg, passband=pb,
                              log=lambda m: None).recover(now, hours=0.1) == []   # too long ago
+
+
+def test_a_header_decoded_once_stays_with_its_signal(tmp_path, monkeypatch):
+    """A later live receive that misses the header keeps the one decoded
+    earlier: the tile keeps its callsign and is not redrawn as the guess,
+    and the end-of-slot pass goes to the store with it."""
+    from types import SimpleNamespace
+
+    hdr = SimpleNamespace(callsign="AG7EW", grid="CN85", picture_id=0x621AC873, mode=1,
+                          segment=0, codec_id=0xD1D8)
+    headers = iter([hdr, None, None])
+
+    def receive_slot(prep, spec, live_only=False, estimator="joint", *, erase_s=(),
+                     round_b=True, dets=None, max_candidates=None, budget_s=None):
+        return [_Pass(1500.0, header=next(headers))]
+
+    monkeypatch.setattr(RX, "detect", lambda prep, spec, live_only=False, **kw: [_Det(1500.0)])
+    monkeypatch.setattr(RX, "receive_slot", receive_slot)
+    stored = []
+
+    import sstvae.qrss.associate as assoc
+    monkeypatch.setattr(assoc, "associate", lambda p, store: stored.append(p.header) or
+                        (("AG7EW", 1), "header"))
+    store = SimpleNamespace(has_accumulator=lambda k: False)
+    cfg = live.LiveConfig(spec=TINY, refresh_s=10.0, first_s=25.0, render=False)
+    L = live.LiveListener(tmp_path, cfg, store=store, log=lambda m: None)
+    t0 = slot_t0(Q_TEST)
+    L.feed(np.zeros(76 * FS), t0 + 60.0)
+    L.step(t0 + 30.0)
+    L.step(t0 + 41.0)                                   # this receive missed the header
+    (t,) = L.tiles()
+    assert t.callsign == "AG7EW" and t.mode == "B" and live.GUESS_NOTE not in t.note
+    L.step(t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 0.5)
+    assert stored == [hdr]
