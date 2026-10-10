@@ -266,7 +266,7 @@ void QrssSpectrogram::render() {
             Job& job = jobs[j];
             const double t_lo = job.t_lo;
             const double t_hi = job.t_hi;
-            int n_cols = 0;
+            double n_cols = 0.0;
             const std::vector<float> col = data().mean_between(t_lo, t_hi, &n_cols);
             if (col.empty()) continue;
             cumsum[0] = 0.0;
@@ -289,7 +289,7 @@ void QrssSpectrogram::render() {
             }
             job.px.resize(static_cast<std::size_t>(h));
             for (int y = 0; y < h; ++y) {
-                const double n = static_cast<double>(n_cols) *
+                const double n = n_cols *
                                  (b1[static_cast<std::size_t>(y)] - b0[static_cast<std::size_t>(y)]);
                 const double z = (rows[static_cast<std::size_t>(y)] / floor_p - 1.0) * std::sqrt(n);
                 const double v = std::clamp((z - Z_FLOOR) / Z_RANGE, 0.0, 1.0);

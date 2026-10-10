@@ -70,12 +70,13 @@ public:
     void restart();
     void clear();
 
-    // The mean power of every column beginning in [t0, t1): from the
-    // coarse store when the range is a block or longer (the same mean,
-    // fifteen times cheaper), else from the fine one where it reaches.
-    // Empty when no column falls in the range. `count` is how many
-    // seconds of audio went into it (a coarse column counts COARSE_S).
-    std::vector<float> mean_between(double t0, double t1, int* count = nullptr) const;
+    // The mean power over [t0, t1): every column overlapping it, summed
+    // in power weighted by the fraction of it inside the range, divided
+    // by the total weight. From the coarse store when the range is a
+    // block or longer (fifteen times cheaper), else from the fine one
+    // where it reaches. Empty when no column overlaps. `seconds` is how
+    // many seconds of audio the mean is worth, for its noise.
+    std::vector<float> mean_between(double t0, double t1, double* seconds = nullptr) const;
 
     const std::deque<FineColumn>& fine() const { return fine_; }
     const std::deque<Column>& coarse() const { return coarse_; }

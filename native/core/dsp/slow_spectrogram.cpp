@@ -37,7 +37,8 @@ double power_scale() {
     return s;
 }
 
-// The columns of `d` whose [t, t + len) overlaps [t0, t1).
+// The columns of `d` whose [t, t + len) overlaps [t0, t1), each with
+// the fraction of it that lies inside the range.
 template <class Col, class Fn>
 int each_overlapping(const std::deque<Col>& d, double len, double t0, double t1, Fn fn) {
     auto it = std::lower_bound(d.begin(), d.end(), t0 - len,
@@ -45,7 +46,8 @@ int each_overlapping(const std::deque<Col>& d, double len, double t0, double t1,
     int n = 0;
     for (; it != d.end() && it->t < t1; ++it) {
         if (it->t + len <= t0) continue;
-        fn(*it);
+        const double inside = std::min(t1, it->t + len) - std::max(t0, it->t);
+        fn(*it, std::clamp(inside / len, 0.0, 1.0));
         ++n;
     }
     return n;
@@ -150,35 +152,47 @@ std::vector<float> SlowSpectrogram::FineColumn::powers() const {
     return out;
 }
 
-std::vector<float> SlowSpectrogram::mean_between(double t0, double t1, int* count) const {
+std::vector<float> SlowSpectrogram::mean_between(double t0, double t1, double* seconds) const {
+    // Every column under the range is summed in power, weighted by how
+    // much of it lies inside, and divided by the total weight: a column
+    // straddling two pixels counts half in each rather than whole in
+    // both.
     std::vector<double> sum;
-    const auto add = [&sum](const Column& c) {
+    double weight = 0.0;   // sum of the fractions
+    double var = 0.0;      // sum of fraction^2 / seconds, for the noise
+    const auto add = [&](const Column& c, double f) {
         if (sum.empty()) sum.assign(c.power.size(), 0.0);
-        for (std::size_t k = 0; k < c.power.size(); ++k) sum[k] += c.power[k];
+        for (std::size_t k = 0; k < c.power.size(); ++k) sum[k] += f * c.power[k];
+        weight += f;
+        var += f * f / COARSE_S;
     };
     const std::array<float, 256>& lut = level_power();
-    const auto add_fine = [&sum, &lut](const FineColumn& c) {
+    const auto add_fine = [&](const FineColumn& c, double f) {
         if (sum.empty()) sum.assign(c.level.size(), 0.0);
-        for (std::size_t k = 0; k < c.level.size(); ++k) sum[k] += lut[c.level[k]];
+        for (std::size_t k = 0; k < c.level.size(); ++k) sum[k] += f * lut[c.level[k]];
+        weight += f;
+        var += f * f / COLUMN_S;
     };
-    int columns = 0;   // how many were summed
-    int seconds = 0;   // how much audio they hold
+    int columns = 0;
     const bool fine_reaches = !fine_.empty() && t0 >= fine_.front().t - COLUMN_S;
     if (!fine_reaches || t1 - t0 >= COARSE_S) {
         columns = each_overlapping(coarse_, COARSE_S, t0, t1, add);
-        // Counted in seconds of audio, as a fine column is: what the
-        // mean's noise depends on.
-        seconds = columns * static_cast<int>(COARSE_S / COLUMN_S);
     }
     // Recent enough for the fine store, or the block still filling,
     // which is not in the coarse one yet.
     if (columns == 0 && !fine_.empty()) {
         columns = each_overlapping(fine_, COLUMN_S, t0, t1, add_fine);
-        seconds = columns;
     }
-    if (count != nullptr) *count = seconds;
+    if (columns == 0 || weight <= 0.0) {
+        if (seconds != nullptr) *seconds = 0.0;
+        return {};
+    }
+    // How many seconds of audio the weighted mean is worth, for its
+    // noise: the whole column when the range is inside one, the sum
+    // when it holds several whole.
+    if (seconds != nullptr) *seconds = weight * weight / var;
     std::vector<float> out(sum.size());
-    for (std::size_t k = 0; k < sum.size(); ++k) out[k] = static_cast<float>(sum[k] / columns);
+    for (std::size_t k = 0; k < sum.size(); ++k) out[k] = static_cast<float>(sum[k] / weight);
     return out;
 }
 

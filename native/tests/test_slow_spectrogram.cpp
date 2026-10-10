@@ -60,14 +60,28 @@ void test_columns() {
                  "slow/coarse: the two whole 15 s blocks (the third is still filling)");
     check::is_true(s.coarse().front().t == T0, "slow/coarse: stamped with its block");
 
-    int n = 0;
+    double n = 0.0;
     const std::vector<float> m = s.mean_between(T0 + 10, T0 + 13, &n);
-    check::equal(n, 3, "slow/mean: the columns that overlap the range");
+    check::is_true(std::abs(n - 3) < 1e-9, "slow/mean: the columns that overlap the range");
     double expect = 0.0;
     for (int k = 10; k <= 12; ++k) expect += fine[static_cast<std::size_t>(k)].power(bin);
     check::is_true(std::abs(m[static_cast<std::size_t>(bin)] - expect / 3) < 1e-6,
                    "slow/mean: their mean");
     check::is_true(s.mean_between(T0 - 100, T0 - 50).empty(), "slow/mean: nothing before");
+
+    // A range that cuts columns in half takes half of each: summed in
+    // power, weighted by what lies inside, divided by the total weight.
+    const std::vector<float> cut = s.mean_between(T0 + 10.5, T0 + 12.5, &n);
+    // A noise bin, where the columns differ enough to tell the weights.
+    const int nb = bin + 40;
+    const double w = 0.5 * fine[10].power(nb) + fine[11].power(nb) + 0.5 * fine[12].power(nb);
+    check::is_true(std::abs(cut[static_cast<std::size_t>(nb)] - w / 2.0) < 1e-6 * w,
+                   "slow/mean: a column half inside counts half");
+    check::is_true(std::abs(n - 4.0 / 1.5) < 1e-9,
+                   "slow/mean: and is worth its share of the noise");
+    s.mean_between(T0 + 10.2, T0 + 10.7, &n);
+    check::is_true(std::abs(n - 1.0) < 1e-9,
+                   "slow/mean: inside one column, it is worth that whole column");
 }
 
 void test_a_gap_stays_a_gap() {
@@ -91,11 +105,11 @@ void test_history_comes_from_the_coarse_store() {
     feed(s, T0, 60.0, 1200.0, 0.3, rng);
     const std::size_t fine_n = s.fine().size();
     check::is_true(s.coarse().size() == 3, "slow/coarse: three whole blocks in a minute");
-    int n = 0;
+    double n = 0.0;
     s.mean_between(T0 + 20, T0 + 30, &n);
-    check::equal(n, 10, "slow/mean: a short range from the fine store while it reaches back");
+    check::is_true(std::abs(n - 10) < 1e-9, "slow/mean: a short range from the fine store while it reaches back");
     const std::vector<float> wide = s.mean_between(T0, T0 + 30, &n);
-    check::equal(n, 30, "slow/mean: a block or longer from the coarse one");
+    check::is_true(std::abs(n - 30) < 1e-9, "slow/mean: a block or longer from the coarse one");
     std::vector<float> by_hand(wide.size(), 0.0f);
     for (const auto& c : s.coarse()) {
         if (c.t < T0 + 30) {
@@ -127,9 +141,9 @@ void test_older_than_the_fine_store() {
     // Past its length, so the first minute is only coarse.
     feed(s, T0, KEEP + 120.0, 1200.0, 0.3, rng);
     check::is_true(s.fine().front().t > T0 + 60.0, "slow/old: the fine store has moved on");
-    int n = 0;
+    double n = 0.0;
     const std::vector<float> m = s.mean_between(T0, T0 + 5.0, &n);
-    check::equal(n, 15, "slow/old: even a short range, from the coarse block (15 s of audio)");
+    check::is_true(std::abs(n - 15) < 1e-9, "slow/old: even a short range, from the coarse block (15 s of audio)");
     const int bin = peak_bin(m);
     check::is_true(!m.empty() && std::abs(bin * SlowSpectrogram::BIN_HZ - 1200.0) < 1.0 &&
                        m[static_cast<std::size_t>(bin)] > 0.05 &&
