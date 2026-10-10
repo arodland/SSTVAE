@@ -244,14 +244,17 @@ moves 50 Hz, about one CE channel). It is disabled for SSTVAE modes.
 Send composes the picture as usual, then:
 
 1. runs `qrss_encode.py --mode A|B|C` on it once (a stored picture);
-2. for each pass, waits until a minute before its quarter hour, runs
-   `qrss_transmit.py` for that slot and segment with your callsign (and
-   your grid, when it is a locator), and
-3. keys the radio 11 s before the quarter hour, with the same PTT lead,
-   tail and watchdog as an SSTVAE send, and plays the pass.
+2. runs `qrss_transmit.py` for every pass's slot and segment with your
+   callsign (and your grid, when it is a locator), starting a minute per
+   pass before the first pass, because the passes follow each other
+   with only about 2 s between one's audio and the next one's (about
+   7 s per pass on a desktop, 57 MB of temporary audio each), and
+3. keys the radio 11 s before each pass's quarter hour, with the same
+   PTT lead, tail and watchdog as an SSTVAE send, and plays the pass,
+   reading the next pass's audio in while this one plays.
 
-The first pass takes the first quarter hour at least a minute and a half
-away. Every pass carries its own Morse callsign windows (spec 2.7), so
+The first pass takes the first quarter hour at least 11 s plus a minute
+per pass away. Every pass carries its own Morse callsign windows (spec 2.7), so
 the SSTVAE CW ID and VOX leader are not added. Receive is paused from
 Send to the end of the last pass; Cancel stops at once, keyed or not.
 A callsign is required. The app looks for the scripts beside its

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <future>
 #include <utility>
 
 #include "audio/wavio.hpp"
@@ -191,41 +192,60 @@ bool run(tx::TxEngine& engine, const Request& request, const Tools& tools,
         return fail("QRSS encode failed: " + out.toStdString());
     }
 
+    // Passes follow each other with about 2 s between one's audio and the
+    // next (a pass's audio lasts ~1798 s, passes are 1800 s apart), so
+    // every pass's audio is made before the first is keyed, and the next
+    // pass's is read in while the current one plays.
     const int n = passes_for(request.mode);
-    const std::vector<double> pass_slots = plan(clock(), n, request.prep_s);
+    const std::vector<double> pass_slots = plan(clock(), n, request.prep_s * n);
+    auto what = [&](int k) {
+        return "QRSS pass " + std::to_string(k + 1) + " of " + std::to_string(n) + " at " +
+               hhmm(pass_slots[static_cast<std::size_t>(k)]) + ", " +
+               QString::number(request.freq_hz, 'f', 0).toStdString() + " Hz";
+    };
+    std::vector<QString> wavs;
     for (int k = 0; k < n; ++k) {
         const double slot = pass_slots[static_cast<std::size_t>(k)];
-        const double audio_start = slot + T0_OFFSET_S - AUDIO_LEAD_S;
-        const std::string what = "QRSS pass " + std::to_string(k + 1) + " of " +
-                                 std::to_string(n) + " at " + hhmm(slot) + ", " +
-                                 QString::number(request.freq_hz, 'f', 0).toStdString() + " Hz";
-        if (!engine.wait(audio_start - request.prep_s - clock(), tx::TxPhase::Waiting,
-                         "waiting for " + what)) {
+        if (k == 0 && !engine.wait(slot + T0_OFFSET_S - AUDIO_LEAD_S - request.prep_s * n - clock(),
+                                   tx::TxPhase::Waiting, "waiting to make " + what(0))) {
             engine.report(tx::TxPhase::Cancelled, "cancelled");
             return false;
         }
-        engine.report(tx::TxPhase::Modulating, "making " + what);
-        const QString wav = tmp.filePath(QStringLiteral("pass%1.wav").arg(k));
-        if (!runner(transmit_args(tools, qrsp, wav, slot, k, request), &out)) {
+        engine.report(tx::TxPhase::Modulating, "making " + what(k));
+        wavs.push_back(tmp.filePath(QStringLiteral("pass%1.wav").arg(k)));
+        if (!runner(transmit_args(tools, qrsp, wavs.back(), slot, k, request), &out)) {
             if (engine.cancelled()) {
                 engine.report(tx::TxPhase::Cancelled, "cancelled");
                 return false;
             }
             return fail("QRSS pass audio failed: " + out.toStdString());
         }
-        std::vector<double> wave =
+    }
+    auto load = [&](int k) {
+        const QString& wav = wavs[static_cast<std::size_t>(k)];
+        std::vector<double> w =
             tx::condition_for_output(audio::read_wav(wav.toStdString()), request.tx.level);
         QFile::remove(wav);
+        return w;
+    };
+    std::vector<double> wave = load(0);
+    for (int k = 0; k < n; ++k) {
+        const double audio_start =
+            pass_slots[static_cast<std::size_t>(k)] + T0_OFFSET_S - AUDIO_LEAD_S;
         const double lead = audio_start - request.tx.ptt_lead_s - clock();
         if (lead < -1.0) {
-            return fail("QRSS: the pass audio was ready " + std::to_string(-lead) +
-                        " s after its start; not sending it late");
+            return fail("QRSS: " + what(k) + " was due to start " + std::to_string(-lead) +
+                        " s ago; not sending it late");
         }
-        if (!engine.wait(lead, tx::TxPhase::Waiting, "starting " + what)) {
+        if (!engine.wait(lead, tx::TxPhase::Waiting, "starting " + what(k))) {
             engine.report(tx::TxPhase::Cancelled, "cancelled");
             return false;
         }
-        if (!engine.transmit_wave(wave, request.tx)) return false;
+        std::future<std::vector<double>> next;
+        if (k + 1 < n) next = std::async(std::launch::async, load, k + 1);
+        const bool sent = engine.transmit_wave(wave, request.tx);
+        if (next.valid()) wave = next.get();
+        if (!sent) return false;
     }
     engine.report(tx::TxPhase::Done, "QRSS sent");
     return true;

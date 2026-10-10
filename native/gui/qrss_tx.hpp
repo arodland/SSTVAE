@@ -9,9 +9,11 @@
 // A picture is encoded once into a stored picture (.qrsp). Mode A sends
 // one 50,600-latent group in one pass, B two and C three, one pass per
 // half hour: a pass lasts 1782.7 s from t0 = quarter hour + 1 s, and its
-// audio (qrss_transmit.py's WAV) starts 12 s before t0. Each pass is
-// made a minute before its quarter hour, and carries the callsign in
-// its own Morse ID windows (spec 2.7), so the SSTVAE CW ID is not added.
+// audio (qrss_transmit.py's WAV) starts 12 s before t0, so one pass's
+// audio ends about 2 s before the next one's starts. Every pass's audio
+// is therefore made (a minute per pass) before the first is keyed. Each
+// carries the callsign in its own Morse ID windows (spec 2.7), so the
+// SSTVAE CW ID is not added.
 
 #ifndef SSTVAE_GUI_QRSS_TX_HPP
 #define SSTVAE_GUI_QRSS_TX_HPP
@@ -69,7 +71,7 @@ struct Request {
     std::string callsign;
     std::string grid;                  // used only when it is a 4-character locator
     tx::TxConfig tx;                   // device, level, PTT timing
-    double prep_s = PREP_S;            // make each pass's audio this long ahead
+    double prep_s = PREP_S;            // per pass: start making the audio this long ahead
 };
 
 // The command lines `run` executes, for tests and the log.

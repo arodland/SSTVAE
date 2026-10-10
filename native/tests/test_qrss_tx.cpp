@@ -130,6 +130,58 @@ void test_run_keys_the_pass_on_its_start() {
                    "qrss_tx/run: and not before its start");
 }
 
+void test_passes_back_to_back(const std::string& mode, int n) {
+    // A pass's audio ends ~2 s before the next one's starts: the player
+    // jumps the clock to that moment, and making a pass's audio takes a
+    // while, so it has to be made before the first pass is keyed.
+    const std::string name = "qrss_tx/mode " + mode + ": ";
+    std::vector<std::string> events;
+    QElapsedTimer since;
+    since.start();
+    const double prep = 0.2;
+    double jump = 0.0;
+    int played = 0;
+    const double start = Q - 11.0 - n * prep;
+    auto clock = [&] { return start + since.elapsed() / 1000.0 + jump; };
+    tx::TxEngine engine(
+        [](bool) {},
+        [&](const std::string&, std::span<const double> wave, int,
+            const std::function<void(double)>&, const std::function<bool()>&,
+            const std::function<void(const std::string&)>&) {
+            events.push_back("play " + std::to_string(wave.size()));
+            ++played;
+            jump += (Q - 11.0 + 1800.0 * played - 2.0) - clock();
+            return true;
+        },
+        [](const images::ImageArray&) { return std::vector<double>(); });
+    auto runner = [&](const QStringList& argv, QString*) {
+        if (argv.at(1).endsWith(QStringLiteral("qrss_transmit.py"))) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            const int seg = argv.at(argv.indexOf(QStringLiteral("--segment")) + 1).toInt();
+            audio::write_wav_float(argv.at(3).toStdString(),
+                                   std::vector<double>(700 + seg, 0.25));
+            events.push_back("make " + std::to_string(seg));
+        }
+        return true;
+    };
+    qrss_tx::Request r;
+    r.picture = images::Picture(16, 12);
+    r.callsign = "AG7EW";
+    r.mode = mode;
+    r.prep_s = prep;
+    r.tx.ptt_lead_s = 0.0;
+    r.tx.ptt_tail_s = 0.0;
+    std::vector<std::string> errors;
+    const bool ok = qrss_tx::run(engine, r, {QStringLiteral("py"), QStringLiteral("/repo")},
+                                 [&](const std::string& e) { errors.push_back(e); }, clock,
+                                 runner);
+    check::is_true(ok && errors.empty(), name + "every pass sent");
+    std::vector<std::string> want;
+    for (int k = 0; k < n; ++k) want.push_back("make " + std::to_string(k));
+    for (int k = 0; k < n; ++k) want.push_back("play " + std::to_string(700 + k));
+    check::is_true(events == want, name + "every pass made before the first is keyed, in order");
+}
+
 void test_cancel_while_waiting() {
     tx::TxEngine engine([](bool) {}, {}, {});
     // The pass is fifteen minutes away.
@@ -161,6 +213,8 @@ int main(int argc, char** argv) {
     test_plan();
     test_problems_and_args();
     test_run_keys_the_pass_on_its_start();
+    test_passes_back_to_back("B", 2);
+    test_passes_back_to_back("C", 3);
     test_cancel_while_waiting();
     return check::report("qrss tx");
 }
