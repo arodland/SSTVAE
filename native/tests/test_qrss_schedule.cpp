@@ -591,6 +591,15 @@ void test_the_window(const std::filesystem::path& dir) {
     check::is_true(!w.repeat_every(id, 60).empty() && s->entries()[0].every_min == 180,
                    "menu: but not every hour, and says why");
 
+    // Change Offset moves the carrier of every send, within range.
+    menu.reset(w.menu_for(id, 0));
+    check::is_true(menu->findChild<QAction*>(QStringLiteral("menu_change_offset")) != nullptr,
+                   "menu: Change Offset on offer");
+    check::is_true(w.change_offset(id, 1200).empty() && s->entries()[0].freq_hz == 1200.0,
+                   "menu: Change Offset moves the carrier");
+    check::is_true(!w.change_offset(id, 5000).empty() && s->entries()[0].freq_hz == 1200.0,
+                   "menu: but not outside the passband, and says why");
+
     // A single send asked to repeat becomes two.
     w.select_send(red);
     w.set_chosen_slot(Q + 12 * H);

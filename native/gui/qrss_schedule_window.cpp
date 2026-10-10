@@ -9,6 +9,7 @@
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QInputDialog>
 #include <QLabel>
 #include <QListWidget>
 #include <QMenu>
@@ -790,6 +791,20 @@ QMenu* QrssScheduleWindow::menu_for(const std::string& entry, int send) {
         connect(a, &QAction::triggered, this, [this, id, mode] { change_mode(id, mode); });
     }
 
+    QAction* offset = menu->addAction(tr("Change Offset... (now %1 Hz)").arg(e->freq_hz, 0, 'f', 0));
+    offset->setObjectName(QStringLiteral("menu_change_offset"));
+    connect(offset, &QAction::triggered, this, [this, id, hz = e->freq_hz] {
+        bool ok = false;
+        const int chosen = QInputDialog::getInt(
+            this, tr("Change Offset"),
+            tr("Audio frequency of the carrier, %1 to %2 Hz:")
+                .arg(qrss_tx::FREQ_MIN_HZ, 0, 'f', 0)
+                .arg(qrss_tx::FREQ_MAX_HZ, 0, 'f', 0),
+            static_cast<int>(std::lround(hz)), static_cast<int>(qrss_tx::FREQ_MIN_HZ),
+            static_cast<int>(qrss_tx::FREQ_MAX_HZ), 10, &ok);
+        if (ok) change_offset(id, chosen);
+    });
+
     QMenu* repeat = menu->addMenu(tr("Repeat in"));
     repeat->setObjectName(QStringLiteral("menu_repeat_in"));
     const int current = e->every_min == 0 ? qs::period_min(*e) : e->every_min;
@@ -836,6 +851,13 @@ std::string QrssScheduleWindow::change_mode(const std::string& entry, const std:
         if (e.every_min != 0 && e.every_min < qrss_tx::minutes_for(mode)) e.every_min = 0;
     });
     show_result(why, tr("Changed to mode %1.").arg(QString::fromStdString(mode)));
+    return why;
+}
+
+std::string QrssScheduleWindow::change_offset(const std::string& entry, double hz) {
+    // Every send of the entry moves; the picture and its ID stay the same.
+    std::string why = scheduler_->change(entry, [hz](qs::Entry& e) { e.freq_hz = hz; });
+    show_result(why, tr("Moved to %1 Hz.").arg(hz, 0, 'f', 0));
     return why;
 }
 

@@ -88,6 +88,8 @@ public:
     std::string remove_entry(const std::string& entry);
     std::string remove_from(const std::string& entry, int send);
     std::string change_mode(const std::string& entry, const std::string& mode);
+    // The audio carrier frequency, every send of the entry.
+    std::string change_offset(const std::string& entry, double hz);
     std::string repeat_every(const std::string& entry, int minutes);
     std::string move_send(const std::string& entry, int send, double slot);
     // The "Repeat in" choices for a mode, in minutes: never sooner than
