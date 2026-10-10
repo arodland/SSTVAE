@@ -85,10 +85,10 @@ def slot_symbols(src: StoredPicture | BeaconFile, q: int, spec: FrameSpec = FULL
     if len(air) < spec.n_data:
         raise ValueError(f"frame {spec.name!r} sends {spec.n_data} latents; the source "
                          f"holds {len(air)}")
-    if spec.n_hdr and bits is None:
+    if spec.has_header and bits is None:
         raise ValueError(f"frame {spec.name!r} has a header: pass header= for a .qrsp")
     x = precode(air[:spec.n_data], q)
-    return assemble(spec, bits if spec.n_hdr else None, x)
+    return assemble(spec, bits if spec.has_header else None, x)
 
 
 def slot_keying(src, header: HeaderFields | None = None) -> np.ndarray | None:

@@ -33,6 +33,11 @@ the draft spec **"QRSSTVAE: ultra-slow narrowband SSTVAE for HF", rev 9**
 had to decide something the spec left open, the design's section 14
 lists the decision.
 
+A prototype that also spreads the header over every data symbol, so it
+survives a lost header block, is described with its measurements in
+[docs/qrss/spread-header.md](spread-header.md); it is not part of the
+on-air format.
+
 ## Status
 
 **Everything here has been verified in simulation only.** Nothing has

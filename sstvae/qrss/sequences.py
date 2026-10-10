@@ -25,6 +25,7 @@ from .constants import N_PRE
 PREAMBLE_DOMAIN = b"QRSSTVAE CE preamble"
 REFERENCE_DOMAIN = b"QRSSTVAE CE reference"
 SCRAMBLE_DOMAIN = b"QRSSTVAE scramble"
+SPREAD_DOMAIN = b"QRSSTVAE CE spread header"   # prototype (docs/qrss/spread-header.md)
 L_PREAMBLE_DOMAIN = b"QRSSTVAE L preamble"   # reserved for waveform L
 
 _BITS_PER_BLOCK = 256
@@ -72,6 +73,20 @@ def references_ce(n_ref: int) -> np.ndarray:
     shorter frame's references are a prefix of a longer one's.
     """
     return _references(int(n_ref))
+
+
+@functools.lru_cache(maxsize=8)
+def _spread_whitener(n: int) -> np.ndarray:
+    out = pm1(sha_bits(SPREAD_DOMAIN, n))
+    out.setflags(write=False)
+    return out
+
+
+def spread_whitener(n: int) -> np.ndarray:
+    """Sign flips of the spread header (prototype, docs/qrss/spread-header.md),
+    int8 +-1, indexed by data symbol. Not keyed by q: the spread header is
+    the same in every pass, so its LLRs add across passes."""
+    return _spread_whitener(int(n))
 
 
 def scrambler(q: int, n: int) -> np.ndarray:

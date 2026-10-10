@@ -42,8 +42,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from .constants import A0, K_LIN
+from .constants import A0, BETA, K_LIN, N_HDR_BITS
 from .frame import FrameSpec, layout
+from .sequences import spread_whitener
 from .precoder import block_index, block_sizes, wht
 from .sequences import scrambler
 
@@ -79,6 +80,37 @@ def symbol_estimates(tr, stream_idx) -> tuple[np.ndarray, np.ndarray, np.ndarray
     return y, s2n, s2n + D_PASS
 
 
+def data_estimates(tr) -> tuple[np.ndarray, np.ndarray, float]:
+    """(y, s2 noise part, extra variance) of the data symbols, uncalibrated.
+
+    On a spread-header frame whose header is not yet known
+    (`Classes.spread_rho` > 0) the unknown header phase lowers the data's
+    linear gain by exp(-beta^2 rho / 2), which y is corrected for, and
+    adds rho of interference (the extra variance). Otherwise extra is 0.
+    """
+    lay = layout(tr.spec)
+    y, s2n, _ = symbol_estimates(tr, lay.data)
+    rho = float(getattr(tr.classes, "spread_rho", 0.0) or 0.0)
+    if rho <= 0:
+        return y, s2n, 0.0
+    g = float(np.exp(-float(BETA) ** 2 * rho / 2))
+    return y / g, s2n / g ** 2, rho
+
+
+def spread_llr(y, s2, spec: FrameSpec) -> np.ndarray:
+    """float64[2474]: coded-bit LLRs from the spread header on the data symbols.
+
+    y_i = x_i + sqrt(rho) h_i + noise, with the latent x_i (unit variance)
+    counted as noise beside s2_i. Unwhitened and folded over the repeats.
+    """
+    rho = spec.hdr_rho
+    ok = np.isfinite(s2)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        l = np.where(ok, 2.0 * np.sqrt(rho) * y / (np.where(ok, s2, 0.0) + 1.0), 0.0)
+    l = l * spread_whitener(spec.n_data)
+    return np.bincount(np.arange(spec.n_data) % N_HDR_BITS, l, minlength=N_HDR_BITS)
+
+
 def calibrate(tr) -> tuple[float, bool]:
     """(kappa, suspect) from the residuals of the pass's own symbols (design 6.6).
 
@@ -109,8 +141,9 @@ def calibrate(tr) -> tuple[float, bool]:
     ref = np.asarray(lay.ref)
     s2_max = KAPPA_S2_MAX
     yd, s2d = np.zeros(0), np.zeros(0)
+    extra = 0.0
     if spec.n_data:
-        yd, s2d, _ = symbol_estimates(tr, lay.data)
+        yd, s2d, extra = data_estimates(tr)
         fin = s2d[np.isfinite(s2d)]
         if len(fin):
             s2_max = max(KAPPA_S2_MAX, KAPPA_S2_REL * float(np.median(fin)))
@@ -131,8 +164,8 @@ def calibrate(tr) -> tuple[float, bool]:
         if ok.sum() >= 256:
             den = float(np.mean(s2n[ok]))
             if den > 0:
-                k = (float(np.mean(y[ok] ** 2)) - 1.0 - D_PASS) / den
-                var = 2.0 * (1.0 + D_PASS + den) ** 2 / ok.sum() / den ** 2
+                k = (float(np.mean(y[ok] ** 2)) - 1.0 - extra - D_PASS) / den
+                var = 2.0 * (1.0 + extra + D_PASS + den) ** 2 / ok.sum() / den ** 2
                 ests.append((k, var))
     if not ests:
         return 1.0, False
@@ -195,19 +228,27 @@ def extract(m, track, spec: FrameSpec, q: int, estimator: str = "joint", *,
     lay = layout(spec)
     kappa, suspect = calibrate(track) if calibrate_kappa else (1.0, False)
     scale = kappa if not suspect else 1.0
-    yd, s2n_d, _ = symbol_estimates(track, lay.data)
-    s2d = s2n_d * scale + D_PASS
+    yd, s2n_d, extra = data_estimates(track)
+    s2d = s2n_d * scale + D_PASS + extra
     z, v = block_estimate(yd, s2d, q, estimator)
     with np.errstate(divide="ignore"):
         w = np.where(np.isfinite(v) & (v > 0), 1.0 / v, 0.0)
     z = np.where(w > 0, z, 0.0)
-    llr = np.zeros(len(lay.hdr_bits), dtype=np.float32)
+    llr = np.zeros(N_HDR_BITS if spec.has_header else 0, dtype=np.float64)
     yh = np.zeros(0)
+    llr_block = llr_spread = None
     if spec.n_hdr:
         yh, s2n_h, _ = symbol_estimates(track, lay.hdr_bits)
         s2h = s2n_h * scale + D_PASS
         with np.errstate(divide="ignore", invalid="ignore"):
-            llr = np.where(np.isfinite(s2h), 2.0 * yh / s2h, 0.0).astype(np.float32)
+            llr_block = np.where(np.isfinite(s2h), 2.0 * yh / s2h, 0.0)
+        llr = llr + llr_block
+    if spec.hdr_rho > 0 and extra > 0:
+        # header not known yet: the data symbols carry it too. (Once it is
+        # known the tracker has removed it, and these y hold none.)
+        llr_spread = spread_llr(yd, s2n_d * scale + D_PASS, spec)
+        llr = llr + llr_spread
+    llr = llr.astype(np.float32)
     diag = dict(kappa=float(kappa), suspect=bool(suspect), y=yd, s2=s2d, y_hdr=yh,
-                estimator=estimator)
+                estimator=estimator, llr_block=llr_block, llr_spread=llr_spread)
     return z.astype(np.float32), w.astype(np.float32), llr, diag

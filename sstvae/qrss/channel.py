@@ -572,7 +572,7 @@ def _neighbour_symbols(nb: Neighbour, spec):
     from .morse import keying_units
 
     rng = np.random.default_rng(nb.seed)
-    hdr = rng.integers(0, 2, _frame.N_HDR_BITS, dtype=np.uint8) if spec.n_hdr else None
+    hdr = rng.integers(0, 2, _frame.N_HDR_BITS, dtype=np.uint8) if spec.has_header else None
     sym = _frame.assemble(spec, hdr, rng.standard_normal(spec.n_data))
     keying = keying_units(f"N{nb.seed % 10}NBR") if spec.n_win else None
     return sym, keying

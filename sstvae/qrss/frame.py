@@ -21,6 +21,16 @@ Reference symbols are the stream symbols with j = s - n_pre >= 0 and
 j % 16 == 0 (decision D3). Header non-reference symbol i carries coded
 bit i for i < 2474; the 2475th is the spare and sends a known +1
 (decision D4). Data non-reference symbol i carries precoded value x_i.
+
+**Spread header (prototype, `docs/qrss/spread-header.md`).** A frame
+with `hdr_rho` > 0 also adds sqrt(hdr_rho) * h_i to data symbol i, where
+h_i = w_i * (1 - 2 * coded_bit[i mod 2474]) and w is
+`sequences.spread_whitener`: the same polar codeword, repeated over the
+whole data section, as extra phase on top of the latents (which keep
+their unit variance). Once the header is known the receiver removes
+that phase exactly, so it costs the data nothing. It is independent of
+the explicit header block: `n_hdr` = 0 with `hdr_rho` > 0 is a frame
+whose only header is the spread one.
 """
 
 import functools
@@ -38,7 +48,7 @@ from .constants import (
     SPAN,
     T_SYM,
 )
-from .sequences import preamble_ce, references_ce
+from .sequences import preamble_ce, references_ce, spread_whitener
 
 
 def _data_symbols(n_data: int) -> int:
@@ -65,9 +75,13 @@ class FrameSpec:
     n_hdr: int = N_HDR                       # 0 (no header) or 2640
     n_data: int = 50600                      # data latents (a prefix of air order)
     cw_after: tuple[int, ...] = CW_AFTER_FULL
+    hdr_rho: float = 0.0                     # spread-header power, latent units (prototype)
 
     def __post_init__(self):
         object.__setattr__(self, "cw_after", tuple(int(c) for c in self.cw_after))
+        object.__setattr__(self, "hdr_rho", float(self.hdr_rho))
+        if not 0.0 <= self.hdr_rho < 1.0:
+            raise ValueError(f"hdr_rho must be in [0, 1), not {self.hdr_rho}")
         if self.n_pre != N_PRE:
             # The preamble is a fixed sequence; a different length would
             # be a different waveform, not a different frame.
@@ -86,6 +100,11 @@ class FrameSpec:
             if prev is not None and c <= prev:
                 raise ValueError(f"{self.name}: cw_after must be strictly increasing")
             prev = c
+
+    @property
+    def has_header(self) -> bool:
+        """Whether the frame carries the header at all (block, spread or both)."""
+        return bool(self.n_hdr) or self.hdr_rho > 0
 
     # --- derived lengths ---------------------------------------------------
     @property
@@ -162,13 +181,26 @@ SHORT = FrameSpec("short", n_data=4096, cw_after=(5000, 7670))
 TINY = FrameSpec("tiny", n_hdr=0, n_data=1024, cw_after=())
 PRESETS = {s.name: s for s in (FULL, MEDIUM, SHORT, TINY)}
 
+# Spread-header prototypes (docs/qrss/spread-header.md). "-spread" keeps
+# the header block and adds the spread copy; "-spreadonly" drops the
+# block (80 s shorter).
+SPREAD_RHO = 0.054                           # matches the block's single-pass threshold on FULL
+FULL_SPREAD = FrameSpec("full-spread", hdr_rho=SPREAD_RHO)
+FULL_SPREADONLY = FrameSpec("full-spreadonly", n_hdr=0, hdr_rho=SPREAD_RHO,
+                            cw_after=tuple(c - N_HDR for c in CW_AFTER_FULL))
+SHORT_SPREAD = FrameSpec("short-spread", n_data=4096, cw_after=(5000, 7670),
+                         hdr_rho=SPREAD_RHO)
+# Kept apart from PRESETS, which is the on-air format the C reference and
+# the CLIs mirror; `get` finds these too, so a stored pass can be re-read.
+PROTOTYPES = {s.name: s for s in (FULL_SPREAD, FULL_SPREADONLY, SHORT_SPREAD)}
+
 
 def get(name_or_spec) -> FrameSpec:
     """A preset by name, or a FrameSpec passed through."""
     if isinstance(name_or_spec, FrameSpec):
         return name_or_spec
     try:
-        return PRESETS[name_or_spec]
+        return PRESETS[name_or_spec] if name_or_spec in PRESETS else PROTOTYPES[name_or_spec]
     except KeyError:
         raise ValueError(
             f"unknown frame {name_or_spec!r}; one of {', '.join(PRESETS)}") from None
@@ -241,12 +273,30 @@ def layout(spec: FrameSpec) -> Layout:
     )
 
 
+def spread_signs(spec: FrameSpec, hdr_bits) -> np.ndarray:
+    """float64[n_data] of +-1: h_i = w_i (1 - 2 bit[i mod 2474]) (module docstring)."""
+    b = np.asarray(hdr_bits, dtype=np.float64)
+    if b.shape != (N_HDR_BITS,):
+        raise ValueError(f"hdr_bits must be {N_HDR_BITS} values of 0/1")
+    w = spread_whitener(spec.n_data).astype(np.float64)
+    return w * (1.0 - 2.0 * b[np.arange(spec.n_data) % N_HDR_BITS])
+
+
+def spread_symbols(spec: FrameSpec, hdr_bits) -> np.ndarray:
+    """float64[n_sym]: the spread header's part of the stream symbols
+    (sqrt(hdr_rho) h at the data symbols, 0 elsewhere)."""
+    out = np.zeros(spec.n_sym, dtype=np.float64)
+    out[layout(spec).data] = np.sqrt(spec.hdr_rho) * spread_signs(spec, hdr_bits)
+    return out
+
+
 def assemble(spec: FrameSpec, hdr_bits, x) -> np.ndarray:
     """float64[n_sym]: the frame's symbol values in stream order.
 
     `hdr_bits` (uint8 0/1, 2474 coded bits, bit 0 -> +1) is required when
-    the frame has a header and must be None when it does not; `x` is the
-    n_data precoded data values.
+    the frame has a header (`has_header`: the block, the spread copy or
+    both) and must be None when it does not; `x` is the n_data precoded
+    data values.
     """
     lay = layout(spec)
     x = np.asarray(x, dtype=np.float64)
@@ -254,16 +304,19 @@ def assemble(spec: FrameSpec, hdr_bits, x) -> np.ndarray:
         raise ValueError(f"x has shape {x.shape}, expected ({spec.n_data},)")
     out = np.zeros(spec.n_sym, dtype=np.float64)
     out[lay.known_idx] = lay.known_val
-    if spec.n_hdr:
+    if spec.has_header:
         if hdr_bits is None:
             raise ValueError(f"frame {spec.name!r} has a header: hdr_bits is required")
         b = np.asarray(hdr_bits)
         if b.shape != (N_HDR_BITS,) or np.any((b != 0) & (b != 1)):
             raise ValueError(f"hdr_bits must be {N_HDR_BITS} values of 0/1")
-        out[lay.hdr_bits] = 1.0 - 2.0 * b
+        if spec.n_hdr:
+            out[lay.hdr_bits] = 1.0 - 2.0 * b
     elif hdr_bits is not None and len(hdr_bits):
         raise ValueError(f"frame {spec.name!r} has no header but hdr_bits were given")
     out[lay.data] = x
+    if spec.hdr_rho > 0:
+        out[lay.data] += np.sqrt(spec.hdr_rho) * spread_signs(spec, hdr_bits)
     return out
 
 

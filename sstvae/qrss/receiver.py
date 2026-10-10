@@ -192,7 +192,7 @@ def receive_pass(cap, spec: FrameSpec, det: Detection, prior: EmPrior | None = N
     tr.z_ref = det.z_ref
     _erase(tr, erase_s)
     z, w, llr, diag = demod.extract(None, tr, spec, q, estimator)
-    hdr = header.decode(llr.astype(np.float64)) if spec.n_hdr else None
+    hdr = header.decode(llr.astype(np.float64)) if spec.has_header else None
     cw, cw_known = _cw_result(tr, spec, hdr)
     tracks = [tr]
     # round B

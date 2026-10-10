@@ -252,7 +252,7 @@ def rereceive(p: PassResult, prior: EmPrior | None, hdr: header.HeaderFields | N
     chan = receiver.channel_for(prep, spec, det, f_mix_hz=p.f_mix_hz)
     det = dataclasses.replace(det, path=pass_path(p, chan) if path is None else path)
     rnd = p.em_round if em_round is None else em_round
-    if hdr is None or not spec.n_hdr:
+    if hdr is None or not spec.has_header:
         new, trs = receiver.receive_pass(prep, spec, det, prior=prior, estimator=est,
                                          f_mix_hz=p.f_mix_hz, return_tracks=True)
         hdr_out = p.header if p.header is not None else new.header
@@ -293,7 +293,10 @@ def rereceive(p: PassResult, prior: EmPrior | None, hdr: header.HeaderFields | N
                 tr, llr, diag = trk, llrk, dk
     rep = track.report(tr, diag["kappa"], diag["suspect"])
     out = dataclasses.replace(
-        p, f_hz=float(tr.freq(0.0)), timing=tr.timing, report=rep, z=z, w=w, hdr_llr=llr,
+        p, f_hz=float(tr.freq(0.0)), timing=tr.timing, report=rep, z=z, w=w,
+        # a known spread header has been removed before extraction, so its
+        # LLRs are only in the pass's first reading
+        hdr_llr=p.hdr_llr if spec.hdr_rho > 0 else llr,
         psi=_psi_frame(tr), estimator=est, em_round=rnd)
     return (out, _path_of(tr)) if return_path else out
 
@@ -538,7 +541,7 @@ def template_search(store: Store, key, cap, spec: FrameSpec, *, freqs=(), segmen
         idx = canonical_index(g, n)
         prior = prior_from(acc.S[g, idx], acc.W[g, idx], q)
         h = known_header(store, acc, g)
-        bits = header.encode(h) if (h is not None and spec.n_hdr) else None
+        bits = header.encode(h) if (h is not None and spec.has_header) else None
         cl = track.make_classes(spec, bits, prior)
         for f0, drift, ppm0 in cands:
             if prep.fs == CH_FS:
@@ -625,7 +628,7 @@ def receive_template(store: Store, key, cap, spec: FrameSpec, det: Detection | N
     prior = prior_from(acc.S[seg, idx], acc.W[seg, idx], prep.q)
     h = known_header(store, acc, seg)
     chan = receiver.channel_for(prep, spec, det, f_mix_hz=f_mix)
-    if h is not None and spec.n_hdr:
+    if h is not None and spec.has_header:
         classes = track.make_classes(spec, header.encode(h), prior)
         cwk = known_keying(store, acc, h.callsign.rstrip(" "))
         tr = track.track(chan, spec, det, classes, cw_known=cwk, timing=det.timing)
@@ -640,7 +643,7 @@ def receive_template(store: Store, key, cap, spec: FrameSpec, det: Detection | N
     return PassResult(
         uid=pass_uid(prep.q, f_hz, z), q=int(prep.q), frame=spec.name, waveform=0,
         f_hz=f_hz, timing=tr.timing, report=rep, z=z, w=w, hdr_llr=llr,
-        header=header.decode(llr.astype(np.float64)) if spec.n_hdr else None, cw=None,
+        header=header.decode(llr.astype(np.float64)) if spec.has_header else None, cw=None,
         ch=chan.ch.astype(np.complex64), ch_fs=CH_FS, ch_t0_index=float(chan.t0_index),
         f_mix_hz=Fraction(chan.f_mix), psi=_psi_frame(tr), estimator=estimator)
 

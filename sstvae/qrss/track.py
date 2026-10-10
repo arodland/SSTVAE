@@ -69,7 +69,7 @@ from .constants import (
     T_SYM,
     Z_ACCEPT,
 )
-from .frame import FrameSpec, layout
+from .frame import FrameSpec, layout, spread_symbols
 from .types import Detection, FreqPath, Timing, TrackReport
 
 # --- calibrated constants ---------------------------------------------------------------
@@ -573,11 +573,20 @@ def _parabola(ym, y0, yp) -> float:
 
 @dataclass
 class Classes:
-    """Per stream symbol: template mean and variance, and which are known."""
+    """Per stream symbol: template mean and variance, and which are known.
+
+    On a spread-header frame (`FrameSpec.hdr_rho` > 0) `spread` holds the
+    header's own stream symbols once the header is known: `track` then
+    removes their phase from the channel before anything else, and the
+    data templates are the plain ones. Until then the header is a further
+    hdr_rho of unknown variance on every data symbol (`spread_rho`).
+    """
     mu: np.ndarray
     nu: np.ndarray
     known: np.ndarray                      # bool[n_sym]
     hdr_known: bool = False
+    spread: np.ndarray | None = None       # float64[n_sym], known spread header
+    spread_rho: float = 0.0                # unknown spread-header variance on the data
 
 
 def make_classes(spec: FrameSpec, hdr_bits=None, prior=None) -> Classes:
@@ -596,7 +605,44 @@ def make_classes(spec: FrameSpec, hdr_bits=None, prior=None) -> Classes:
     if prior is not None:
         mu[lay.data] = np.asarray(prior.x_hat, dtype=np.float64)
         nu[lay.data] = np.clip(np.asarray(prior.v, dtype=np.float64), 0.0, 1.0)
-    return Classes(mu=mu, nu=nu, known=known, hdr_known=hdr_bits is not None)
+    spread, rho_u = None, 0.0
+    if spec.hdr_rho > 0:
+        if hdr_bits is not None:
+            spread = spread_symbols(spec, hdr_bits)
+        else:
+            rho_u = spec.hdr_rho
+            nu[lay.data] += rho_u
+    return Classes(mu=mu, nu=nu, known=known, hdr_known=hdr_bits is not None,
+                   spread=spread, spread_rho=rho_u)
+
+
+def _tau_of_rx(timing: Timing, rel, n_pos: int) -> np.ndarray:
+    """Sender time (symbols) received at CH index `rel` after t0_index: rx_index inverted."""
+    rel = np.asarray(rel, dtype=np.float64)
+    s = T_SYM * CH_FS * (1 + timing.ppm * 1e-6)
+    tau = (rel - timing.tau0) / s
+    for _ in range(3):
+        tau = (rel - timing.tau0 - timing.gamma * (tau / n_pos) ** 2) / s
+    return tau
+
+
+def remove_spread(z, chan: ChanCapture, spec: FrameSpec, timing: Timing, spread) -> np.ndarray:
+    """z * exp(-j phi_h): the known spread header's phase taken off the channel.
+
+    phi_h is the header's part of the sender's phase (`ce.phase_at` of
+    its stream symbols), at the sender time each CH sample was sent. CE
+    is a pure phase signal, so this leaves exactly the frame without the
+    spread header (docs/qrss/spread-header.md).
+    """
+    if spread is None:
+        return z
+    z = np.asarray(z, dtype=np.complex128)
+    tau = _tau_of_rx(timing, np.arange(len(z)) - chan.t0_index, spec.n_pos)
+    near = (tau > -SPAN - 2) & (tau < spec.n_pos + SPAN + 2)
+    phi = np.zeros(len(z))
+    if near.any():
+        phi[near] = ce.phase_at(tau[near], spread, spec)[0]
+    return z * np.exp(-1j * phi)
 
 
 def templates(spec: FrameSpec, grid_pos, mu, nu, keying=None, ook=False,
@@ -920,6 +966,7 @@ def track(chan: ChanCapture, spec: FrameSpec, det: Detection, classes: Classes |
     lead = float(min(max(lead, 0.0), 10.0))
     if z_d is None:
         z_d = derotate(chan, fn)
+    z_d = remove_spread(z_d, chan, spec, tm, classes.spread)
     if lead > 0 and not _lead_supported(chan, z_d, tm, spec, lead):
         lead = 0.0
     n_lead = int(math.floor(min(lead, LEAD_KEEP_S) / T_SYM))
@@ -997,6 +1044,9 @@ def track(chan: ChanCapture, spec: FrameSpec, det: Detection, classes: Classes |
             moved = abs(new_tm.tau0 - tr.timing.tau0) + abs(
                 (new_tm.ppm - tr.timing.ppm) * 1e-6 * n_pos * _SPS)
             tr.timing = new_tm
+            if classes.spread is not None:
+                tr.z_d = remove_spread(derotate(chan, tr.freq), chan, spec, tr.timing,
+                                       classes.spread)
             measure()
             if moved < 0.02:
                 break
@@ -1011,7 +1061,7 @@ def track(chan: ChanCapture, spec: FrameSpec, det: Detection, classes: Classes |
         if df_max < 0.002:
             break
         tr.freq = fn2
-        tr.z_d = derotate(chan, fn2)
+        tr.z_d = remove_spread(derotate(chan, fn2), chan, spec, tr.timing, classes.spread)
         measure()
         q = run(near(q))
     tr.df_max = df_max
@@ -1430,6 +1480,7 @@ def genie_track(chan: ChanCapture, spec: FrameSpec, truth, carrier_hz: float,
     slope, icpt = np.polyfit(p, t * CH_FS, 1)
     tm = Timing(tau0=float(icpt), ppm=float((slope / _SPS - 1) * 1e6), gamma=0.0, z=0.0,
                 cov=np.zeros((3, 3)))
+    z_d = remove_spread(z_d, chan, spec, tm, classes.spread)
     grid = np.arange(-SPAN, spec.n_pos, dtype=np.int64)
     c, _ = templates(spec, grid, classes.mu, classes.nu)
     m = symbol_mf(z_d, CH_FS, tm, grid, t0_index=chan.t0_index, n_pos=spec.n_pos)
