@@ -3,6 +3,9 @@
 #include <QApplication>
 #include <QContextMenuEvent>
 #include <QDateTime>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QTimeZone>
@@ -27,6 +30,7 @@ QDateTime utc_of(double t) {
 }  // namespace
 
 QrssTimeline::QrssTimeline(QWidget* parent) : QWidget(parent) {
+    setAcceptDrops(true);
     setObjectName(QStringLiteral("schedule_timeline"));
     setMouseTracking(true);
     setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
@@ -122,6 +126,10 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
     p.fillRect(rect(), pal.color(QPalette::Base));
     const QColor grid = pal.color(QPalette::Mid);
     const QColor faint(grid.red(), grid.green(), grid.blue(), 70);
+    // A light grey line down every quarter hour, one per slot (Jeff,
+    // 2026-10-10); the hour lines stay darker.
+    QColor slot_line = grid;
+    slot_line.setAlpha(110);
     const QColor text = pal.color(QPalette::Text);
     const QColor muted = style::secondary_text(pal);
 
@@ -135,7 +143,7 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
         const QDateTime u = utc_of(t);
         const bool hour = u.time().minute() == 0;
         const bool half = u.time().minute() == 30;
-        p.setPen(hour ? grid : faint);
+        p.setPen(hour ? grid : slot_line);
         p.drawLine(x, hour ? 0 : HEADER_H - 4, x, height());
         if (half) {
             p.setPen(faint);
@@ -154,7 +162,8 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
     p.drawLine(0, HEADER_H, width(), HEADER_H);
 
     // Where a send added from the selected Send would go.
-    if (slot_hint_ && hover_x_ >= 0 && block_at(QPoint(hover_x_, HEADER_H + 4)) < 0) {
+    if ((slot_hint_ || dropping_) && hover_x_ >= 0 &&
+        block_at(QPoint(hover_x_, HEADER_H + 4)) < 0) {
         const int x = x_of(slot_at(hover_x_));
         QColor h = pal.color(QPalette::Highlight);
         h.setAlpha(40);
@@ -304,6 +313,39 @@ void QrssTimeline::contextMenuEvent(QContextMenuEvent* event) {
     const Block& b = blocks_[i];
     emit blockClicked(QString::fromStdString(b.entry), b.send);
     emit menuRequested(QString::fromStdString(b.entry), b.send, event->globalPos());
+}
+
+void QrssTimeline::dragEnterEvent(QDragEnterEvent* event) {
+    if (!event->mimeData()->hasFormat(QString::fromLatin1(SEND_MIME))) return;
+    dropping_ = true;
+    hover_x_ = event->position().toPoint().x();
+    event->acceptProposedAction();
+    update();
+}
+
+void QrssTimeline::dragMoveEvent(QDragMoveEvent* event) {
+    if (!event->mimeData()->hasFormat(QString::fromLatin1(SEND_MIME))) return;
+    hover_x_ = event->position().toPoint().x();
+    event->acceptProposedAction();
+    update();
+}
+
+void QrssTimeline::dragLeaveEvent(QDragLeaveEvent* event) {
+    dropping_ = false;
+    hover_x_ = -1;
+    update();
+    QWidget::dragLeaveEvent(event);
+}
+
+void QrssTimeline::dropEvent(QDropEvent* event) {
+    dropping_ = false;
+    hover_x_ = -1;
+    update();
+    const QByteArray id = event->mimeData()->data(QString::fromLatin1(SEND_MIME));
+    if (id.isEmpty()) return;
+    event->acceptProposedAction();
+    // The quarter hour under the pointer, as a click there would choose.
+    emit sendDropped(QString::fromUtf8(id), slot_at(event->position().toPoint().x()));
 }
 
 void QrssTimeline::leaveEvent(QEvent* event) {

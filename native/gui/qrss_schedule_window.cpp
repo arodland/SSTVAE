@@ -16,6 +16,7 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QMenu>
+#include <QMimeData>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
@@ -45,6 +46,28 @@
 namespace sstvae::gui {
 
 namespace qs = qrss_schedule;
+
+namespace {
+
+// The Sends list, whose items drag onto the timeline as their Send's id.
+class SendsList : public QListWidget {
+public:
+    using QListWidget::QListWidget;
+
+protected:
+    QStringList mimeTypes() const override {
+        return {QString::fromLatin1(QrssTimeline::SEND_MIME)};
+    }
+    QMimeData* mimeData(const QList<QListWidgetItem*>& items) const override {
+        if (items.isEmpty()) return nullptr;
+        auto* data = new QMimeData;
+        data->setData(QString::fromLatin1(QrssTimeline::SEND_MIME),
+                      items.front()->data(Qt::UserRole).toString().toUtf8());
+        return data;
+    }
+};
+
+}  // namespace
 
 namespace {
 
@@ -159,8 +182,8 @@ void QrssScheduleWindow::build() {
     message_->setObjectName(QStringLiteral("schedule_message"));
     message_->setWordWrap(true);
     message_->setText(tr("Drag a send to move it; right-click it to pause or remove it, or "
-                         "change its mode, offset or repeat. With a Send selected, click a free slot to start "
-                         "there. Green lines are frequency changes: right-click one to "
+                         "change its mode, offset or repeat. Drag a Send here from below to schedule it, or "
+                         "with one selected, click a free slot to start there. Green lines are frequency changes: right-click one to "
                          "move it, or right-click free time to add one."));
     auto* message_row = new QHBoxLayout;
     message_row->addWidget(message_, 1);
@@ -180,6 +203,10 @@ void QrssScheduleWindow::build() {
         if (selected_send().empty()) return;
         set_chosen_slot(slot);
     });
+    connect(timeline_, &QrssTimeline::sendDropped, this,
+            [this](const QString& send_id, double slot) {
+                drop_send(send_id.toStdString(), slot);
+            });
     connect(timeline_, &QrssTimeline::moveRequested, this,
             [this](const QString& entry, int send, double slot) {
                 move_send(entry.toStdString(), send, slot);
@@ -222,13 +249,17 @@ void QrssScheduleWindow::build() {
 QWidget* QrssScheduleWindow::build_sends(QWidget* parent) {
     auto* box = new QGroupBox(tr("Sends"), parent);
     auto* layout = new QVBoxLayout(box);
-    sends_list_ = new QListWidget(box);
+    sends_list_ = new SendsList(box);
     sends_list_->setObjectName(QStringLiteral("schedule_sends"));
+    // Drag one onto the timeline to schedule it there.
+    sends_list_->setDragEnabled(true);
+    sends_list_->setDragDropMode(QAbstractItemView::DragOnly);
     sends_list_->setIconSize(QSize(LIST_ICON_W, LIST_ICON_H));
     sends_list_->setSelectionMode(QAbstractItemView::SingleSelection);
     sends_list_->setWordWrap(true);
     sends_list_->setToolTip(tr("Pictures ready to schedule, kept on disk. Tinted ones are on "
-                               "the schedule. Double-click to edit."));
+                               "the schedule. Double-click to edit; drag one onto the timeline above to schedule it "
+                               "there."));
     connect(sends_list_, &QListWidget::itemSelectionChanged, this,
             &QrssScheduleWindow::on_send_selected);
     connect(sends_list_, &QListWidget::itemDoubleClicked, this,
@@ -611,6 +642,22 @@ void QrssScheduleWindow::add() {
                           .arg(QString::fromStdString(s->label),
                                QString::fromStdString(qs::describe(e))));
     add_->setEnabled(false);
+}
+
+std::string QrssScheduleWindow::drop_send(const std::string& send_id, double slot) {
+    if (sends_->find(send_id) == nullptr) return "that Send is gone";
+    // As if chosen in the list and clicked on the timeline, then Add:
+    // mode, carrier and repeats are the form's, and every rule Add keeps
+    // (no overlap, frequency changes kept clear) still holds.
+    select_send(send_id);
+    set_chosen_slot(slot);
+    if (!add_->isEnabled()) {
+        message_->setText(summary_->text());
+        return summary_->text().toStdString();
+    }
+    add();
+    message_->setText(summary_->text());
+    return {};
 }
 
 // --- what is scheduled ----------------------------------------------------

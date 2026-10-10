@@ -98,6 +98,9 @@ public:
     // The menu a right-click on send `send` of `entry` opens. The caller
     // owns it.
     QMenu* menu_for(const std::string& entry, int send);
+    // A Send dropped on the timeline at `slot`: scheduled there as the
+    // form says. Empty on success, else why not (also shown).
+    std::string drop_send(const std::string& send_id, double slot);
     // The entry selected on the timeline ("" for none).
     const std::string& selected_entry() const { return selected_entry_; }
 

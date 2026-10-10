@@ -9,6 +9,9 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
 #include <QFile>
 #include <QGroupBox>
 #include <QLineEdit>
@@ -642,6 +645,43 @@ void test_the_window(const std::filesystem::path& dir) {
     check::is_true(w.remove_entry(id).empty() && s->entries().size() == 1 &&
                        s->entries()[0].id == single,
                    "menu: Remove removes it");
+    // A Send dragged from the list onto the timeline is scheduled on the
+    // quarter hour it is dropped in, as the form says.
+    {
+        QModelIndex blue_index;
+        for (int i = 0; i < list->count(); ++i) {
+            if (list->item(i)->data(Qt::UserRole).toString().toStdString() == blue) {
+                blue_index = list->model()->index(i, 0);
+            }
+        }
+        std::unique_ptr<QMimeData> mime(list->model()->mimeData({blue_index}));
+        check::is_true(mime && mime->data(QString::fromLatin1(QrssTimeline::SEND_MIME)) ==
+                                   QByteArray::fromStdString(blue),
+                       "drop: a Send drags as its id");
+        mode->setCurrentIndex(mode->findData(QStringLiteral("A")));
+        count->setValue(1);
+        const QPoint at(t->x_of(Q + 20 * H) + QrssTimeline::CELL_W / 2, t->height() / 2);
+        if (mime) {
+            QDragEnterEvent enter(at, Qt::CopyAction, mime.get(), Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(t, &enter);
+            check::is_true(enter.isAccepted(), "drop: the timeline takes a Send");
+            QDropEvent drop(QPointF(at), Qt::CopyAction, mime.get(), Qt::LeftButton,
+                            Qt::NoModifier);
+            QApplication::sendEvent(t, &drop);
+        }
+        QApplication::processEvents();
+        const qs::Entry* dropped = nullptr;
+        for (const qs::Entry& e : s->entries()) {
+            if (e.send_id == blue) dropped = &e;
+        }
+        check::is_true(dropped != nullptr && dropped->first_slot == Q + 20 * H &&
+                           dropped->count == 1 && dropped->mode == "A",
+                       "drop: scheduled on the quarter hour it lands in");
+        const std::size_t n = s->entries().size();
+        check::is_true(!w.drop_send(blue, Q + 20 * H).empty() && s->entries().size() == n,
+                       "drop: onto a send already there is refused, and says why");
+    }
+
     w.delete_send(blue);
     QApplication::processEvents();
     check::equal(list->count(), 1, "window: a deleted Send leaves the list");

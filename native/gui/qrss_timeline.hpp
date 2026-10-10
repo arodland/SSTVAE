@@ -61,6 +61,9 @@ public:
     // How far either side of a mark's line a right-click still finds it.
     static constexpr int MARK_GRAB_PX = 6;
     static QColor mark_color();
+    // The drag-and-drop type of a Send dragged from the Sends list: its
+    // id, as UTF-8.
+    static constexpr const char* SEND_MIME = "application/x-sstvae-send";
 
     explicit QrssTimeline(QWidget* parent = nullptr);
 
@@ -99,6 +102,8 @@ signals:
     // A right-click on a frequency change, and on empty time.
     void markMenuRequested(const QString& id, const QPoint& global_pos);
     void emptyMenuRequested(double t, const QPoint& global_pos);
+    // A Send dropped on the quarter hour `slot`.
+    void sendDropped(const QString& send_id, double slot);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -107,6 +112,10 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void contextMenuEvent(QContextMenuEvent* event) override;
     void leaveEvent(QEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
+    void dragLeaveEvent(QDragLeaveEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
 private:
     double start_ = 0.0;
@@ -117,6 +126,7 @@ private:
     std::string selected_entry_;
     std::string highlighted_send_;
     bool slot_hint_ = false;
+    bool dropping_ = false;   // a Send is being dragged over
     int hover_x_ = -1;
 
     int pressed_ = -1;
