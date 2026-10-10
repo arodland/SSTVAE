@@ -186,7 +186,16 @@ received separately, and a part after a change gets the whole-slot
 search only if it is at least half the slot. 2 s before and 30 s after
 a change count as not heard. Tiles carry `dial_hz` in `state.json`
 (null without the file), and tiles on different dials never merge.
-`qrss_decode.py --retro` does not read the file yet.
+`qrss_decode.py --retro` does not read the file yet. A dial left and
+come back to is one dial: its two stretches are received together.
+
+Audio on stdin is stamped with the time it was read, but after a stall
+(the app's audio pump held up, or a listener starting with audio queued
+for it) several seconds arrive at once. A chunk that reads as late is
+therefore held, up to 5 s, until the queue has drained and the stream is
+seen to follow on; only audio that stays late is treated as missing.
+`scripts/qrss_check_store.py` reports, for each recent slot, the holes,
+clipping, dropouts and dial changes in the passband store.
 
 From a terminal, with any capture tool:
 

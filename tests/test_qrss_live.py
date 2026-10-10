@@ -103,6 +103,71 @@ def test_clock_follows_on_and_restarts_after_a_gap(tmp_path):
     assert any("ahead of the clock" in s for s in L.lines)
 
 
+def _steady(t, secs, n=2000):
+    """(chunk, read time) of audio heard from t on, read as it arrives (n samples a chunk)."""
+    return [(np.zeros(n), t + (k + 1) * n / FS) for k in range(int(round(secs * FS / n)))]
+
+
+def _feed(L, chunks, stamper=None):
+    for x, t in chunks:
+        for y, te in (stamper.push(x, t) if stamper is not None else [(x, t)]):
+            L.feed(y, te)
+
+
+def test_a_burst_after_a_stall_is_not_missing_audio(tmp_path):
+    """The app's audio pump held up for 3 s, then the 3 s arriving at once:
+    stamped by read time, the first piece reads 2.75 s late and the
+    listener leaves a hole; the stamper sees the backlog drain and the
+    stream follows on, with nothing missing."""
+    T = 1_000_000.0
+    stall = [(np.zeros(2000), T + 23.0 + 1e-4 * k) for k in range(12)]   # heard T+20..T+23
+    chunks = _steady(T, 20.0) + stall + _steady(T + 23.0, 40.0)
+    old = live.LiveListener(tmp_path / "old", live.LiveConfig(spec=TINY, render=False),
+                            log=lambda m: None)
+    _feed(old, chunks)
+    assert any("missing" in s for s in old.lines)          # what stamping by read time did
+    L = live.LiveListener(tmp_path / "new", live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    st = live.Stamper()
+    _feed(L, chunks, st)
+    for y, te in st.flush():
+        L.feed(y, te)
+    assert not any("missing" in s or "ahead" in s for s in L.lines)
+    assert L.fe.next_index == int(round((T + 63.0) * FS)) + 1     # on the clock at the end
+    _, ok = L.ring.read(int((T + 1.0) * FE_FS), int((T + 62.0) * FE_FS))
+    assert ok.all()
+
+
+def test_missing_audio_is_still_missing(tmp_path):
+    """10 s that never arrive (the receive muted): held, then a hole of 10 s
+    with the audio after it on the clock."""
+    T = 1_000_000.0
+    chunks = _steady(T, 20.0) + _steady(T + 30.0, 20.0)
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    _feed(L, chunks, live.Stamper())
+    (gap,) = [s for s in L.lines if "missing" in s]
+    assert "10.0 s of audio missing" in gap
+    _, ok = L.ring.read(int((T + 32.0) * FE_FS), int((T + 44.0) * FE_FS))
+    assert ok.all()
+    _, ok = L.ring.read(int((T + 21.0) * FE_FS), int((T + 29.0) * FE_FS))
+    assert not ok.any()
+
+
+def test_audio_queued_for_a_starting_listener_starts_when_it_was_heard(tmp_path):
+    """8 s of audio queued while the listener started up, read at once,
+    then audio as it arrives: the stream starts where the queue did."""
+    T = 1_000_000.0
+    queued = [(np.zeros(2000), T + 8.0 + 1e-4 * k) for k in range(32)]
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    _feed(L, queued + _steady(T + 8.0, 40.0), live.Stamper())
+    assert not any("missing" in s or "ahead" in s for s in L.lines)
+    _, ok = L.ring.read(int((T + 1.0) * FE_FS), int((T + 47.0) * FE_FS))
+    assert ok.all()
+    assert L.fe.next_index > int(round((T + 47.0) * FS))
+
+
 class _Det:
     def __init__(self, f):
         self.f_hz = f
@@ -467,6 +532,15 @@ def test_the_dial_log_splits_time_into_epochs(tmp_path):
                                        (2000.0 + g1, 3000.0 - g0, 14_096_000)]
     assert D.spans(3100.0, 3200.0) == [(3000.0 + g1, np.inf, 7_039_000)]
     # the app's 48 h trim replaces the file: read again by path
+    # a dial left and come back to is one dial, heard twice
+    assert D.by_dial(0.0, 9999.0) == [(10_140_000, [(-np.inf, 2000.0 - g0)]),
+                                      (14_096_000, [(2000.0 + g1, 3000.0 - g0)]),
+                                      (7_039_000, [(3000.0 + g1, np.inf)])]
+    path.write_text("\n".join(json.dumps({"t": t, "dial_hz": hz}) for t, hz in
+                              [(1000.0, 7_040_000), (2000.0, 7_041_000), (2001.0, 7_040_000)]))
+    D.refresh()
+    assert D.by_dial(0.0, 9999.0) == [(7_040_000, [(-np.inf, 2000.0 - g0), (2001.0 + g1, np.inf)])]
+    assert D.dial_at(2000.5) == 7_041_000
     path.write_text(json.dumps({"t": 5000.0, "dial_hz": 3_568_600}) + "\n")
     D.refresh()
     assert D.points == [(5000.0, 3_568_600)]
@@ -481,11 +555,14 @@ def test_restrict_keeps_only_what_was_heard_on_one_dial():
     origin = 10 * FE_FS
     ok = np.ones(100 * FE_FS, dtype=bool)
     ok[50 * FE_FS:55 * FE_FS] = False                 # a hole stays a hole
-    assert live.restrict(ok, origin, q, -np.inf, np.inf) is ok
-    r = live.restrict(ok, origin, q, t0 + 20.0, t0 + 60.0)
+    assert live.restrict(ok, origin, q, [(-np.inf, np.inf)]) is ok
+    r = live.restrict(ok, origin, q, [(t0 + 20.0, t0 + 60.0)])
     assert np.flatnonzero(np.diff(r.astype(np.int8))).tolist() == [
         30 * FE_FS - 1, 50 * FE_FS - 1, 55 * FE_FS - 1, 70 * FE_FS - 1]
-    assert not live.restrict(ok, origin, q, t0 + 200.0, np.inf).any()
+    assert not live.restrict(ok, origin, q, [(t0 + 200.0, np.inf)]).any()
+    assert not live.restrict(ok, origin, q, []).any()
+    r = live.restrict(ok, origin, q, [(-np.inf, t0 + 5.0), (t0 + 80.0, np.inf)])
+    assert r[:15 * FE_FS].all() and not r[15 * FE_FS:90 * FE_FS].any() and r[90 * FE_FS:].all()
     assert live.same_dial(None, 7_040_000) and not live.same_dial(7_040_000, 14_096_000)
 
 

@@ -73,6 +73,7 @@ FE_DECIM = FS // FE_FS            # 2
 ALIGN = 16                        # audio blocks start on multiples of 16 (to_baseband's table)
 HALO = 128                        # audio samples each side of a block (the FE FIR is 255 taps)
 RESYNC_S = 1.0                    # clock disagreement that restarts the stream
+STAMP_HOLD_S = 5.0                # stdin audio arriving late is held this long (backlog or gap?)
 EARLY_WINDOW_S = 30.0             # ...when audio has run ahead of the clock this long
 RING_S = 2100.0                   # FE kept in memory: a FULL slot, its margins and slack
 MERGE_HZ = receiver.MERGE_HZ      # a detection this close to a tile is that tile
@@ -427,6 +428,18 @@ class DialLog:
                 out.append((lo, hi, hz))
         return out
 
+    def by_dial(self, a: float, b: float) -> list[tuple[int | None, list[tuple[float, float]]]]:
+        """`spans` gathered by dial, in order of first use: a dial left and
+        come back to is one capture with a hole in it, not two passes."""
+        out: dict = {}
+        for lo, hi, dial in self.spans(a, b):
+            out.setdefault(dial, []).append((lo, hi))
+        return list(out.items())
+
+    def dial_at(self, t: float) -> int | None:
+        """The dial in force at time t (None: unknown)."""
+        return self.span_at(t)[2]
+
     def span_at(self, t: float) -> tuple[float, float, int | None]:
         """`spans` for the dial in force at time t (its guard included, so lo
         can lie after t when t is just after a change)."""
@@ -445,17 +458,19 @@ def same_dial(a: int | None, b: int | None) -> bool:
     return a is None or b is None or a == b
 
 
-def restrict(ok: np.ndarray, origin: int, q: int, lo: float, hi: float) -> np.ndarray:
-    """`capture_read`'s written mask, less everything outside [lo, hi) (unix s)."""
-    if lo == -math.inf and hi == math.inf:
+def restrict(ok: np.ndarray, origin: int, q: int, spans) -> np.ndarray:
+    """`capture_read`'s written mask, less everything outside the spans
+    [(lo, hi), ...] (unix s, -inf/inf for unbounded)."""
+    if any(lo == -math.inf and hi == math.inf for lo, hi in spans):
         return ok
     t0 = slot_t0(q)
-    k_lo = 0 if lo == -math.inf else origin + int(math.ceil((lo - t0) * FE_FS))
-    k_hi = len(ok) if hi == math.inf else origin + int(math.ceil((hi - t0) * FE_FS))
     out = np.zeros_like(ok)
-    a, b = max(0, k_lo), min(len(ok), k_hi)
-    if b > a:
-        out[a:b] = ok[a:b]
+    for lo, hi in spans:
+        k_lo = 0 if lo == -math.inf else origin + int(math.ceil((lo - t0) * FE_FS))
+        k_hi = len(ok) if hi == math.inf else origin + int(math.ceil((hi - t0) * FE_FS))
+        a, b = max(0, k_lo), min(len(ok), k_hi)
+        if b > a:
+            out[a:b] = ok[a:b]
     return out
 
 
@@ -887,10 +902,11 @@ class LiveListener:
             x, ok, origin = capture_read(self.ring, s.q, spec)
             elapsed = self.now - t0
             self.dial.refresh()
-            lo, hi, dial = self.dial.span_at(t0)
+            dial = self.dial.dial_at(t0)
+            heard = dict(self.dial.by_dial(t0 - origin / FE_FS, t0 + len(x) / FE_FS))
         # live, a slot is received on the dial it started on: anything heard
         # on another counts as not heard
-        ok = restrict(ok, origin, s.q, lo, hi)
+        ok = restrict(ok, origin, s.q, heard.get(dial, []))
         if ok[origin:origin + PREAMBLE_S * FE_FS].mean() < 0.5:
             return          # joined after its preamble: only the end-of-slot search can find it
         prep, erase, heard = capture_prepare(x, ok, origin, s.q, spec)
@@ -926,15 +942,14 @@ class LiveListener:
             x, ok, origin = capture_read(s.reader or self.ring, s.q, spec)
             dets = list(s.dets)
             self.dial.refresh()
-            spans = self.dial.spans((t0 * FE_FS - origin) / FE_FS,
-                                    t0 + frame_seconds(spec) + PB_TAIL_S)
-            first = self.dial.span_at(t0)
+            dials = self.dial.by_dial(t0 - origin / FE_FS, t0 + len(x) / FE_FS)
+            first = self.dial.dial_at(t0)
         results = []
         # one receive per dial the slot was heard on, each with the others
         # erased; the preamble's detections belong to the dial it started on
-        for lo, hi, dial in spans:
-            args = (x, restrict(ok, origin, s.q, lo, hi), origin, s.q, spec, self.cfg.estimator,
-                    dets if (lo, hi, dial) == first else [])
+        for dial, spans in dials:
+            args = (x, restrict(ok, origin, s.q, spans), origin, s.q, spec, self.cfg.estimator,
+                    dets if dial == first else [])
             if self._proc is not None:
                 passes, heard = self._proc.call(args)
             else:
@@ -1146,19 +1161,76 @@ class LiveListener:
 
 # --- audio sources -------------------------------------------------------------------------
 
+class Stamper:
+    """Unix times for audio read from a pipe, which says when it was read,
+    not when it was heard.
+
+    Audio only ever arrives late: a chunk read at time t ended at t or
+    before. Steadily it arrives as it is heard, but after a stall (the
+    app's audio pump held up, this process busy, a listener starting with
+    audio queued for it) several seconds come at once, and stamping each
+    piece with its read time put the first piece seconds after the audio
+    before it: the listener took a burst for missing audio, left a hole,
+    and ran the rest of the burst seconds late until it stepped back.
+
+    So a chunk that reads as late is held, with the chunks after it,
+    until either one of them reads as following on (a backlog, now
+    drained: nothing was missing) or hold_s has passed (audio really was
+    missing). Held chunks go out as one, timed by the chunk that arrived
+    least late: if the stream is contiguous, the start it implies is the
+    latest start possible. The stream's first audio is held hold_s too,
+    since a listener starting up has audio queued for it.
+    """
+
+    def __init__(self, hold_s: float = STAMP_HOLD_S):
+        self.hold_s = float(hold_s)
+        self._held: list[tuple[np.ndarray, float]] = []
+        self._next: int | None = None       # 8 kHz index after the last sample put out
+
+    def push(self, x: np.ndarray, t: float) -> list[tuple[np.ndarray, float]]:
+        """Chunk x, read at unix time t: the (x, time of its last sample) ready to go out."""
+        self._held.append((x, t))
+        start = self._start()
+        if t - self._held[0][1] < self.hold_s and (
+                self._next is None or start - self._next > RESYNC_S * FS):
+            return []
+        return self.flush()
+
+    def flush(self) -> list[tuple[np.ndarray, float]]:
+        """Everything held, as one chunk."""
+        if not self._held:
+            return []
+        start = self._start()
+        x = np.concatenate([c for c, _ in self._held])
+        self._held = []
+        self._next = start + len(x)
+        return [(x, (start + len(x) - 1) / FS)]
+
+    def _start(self) -> int:
+        n, best = 0, None
+        for c, t in self._held:
+            n += len(c)
+            a = int(round(t * FS)) - n + 1
+            best = a if best is None else min(best, a)
+        return best
+
+
 class StdinSource:
     """Raw mono 8 kHz audio on stdin (float32 or int16, little-endian), read on a thread.
 
-    Each chunk is stamped with the time it was read. The reading thread
-    never waits on the receiver, so a receive that takes a minute loses
-    no audio (the queue holds it).
+    Each chunk is stamped with the time it was read (see `Stamper` for
+    what happens after a stall). The reading thread never waits on the
+    receiver, so a receive that takes a minute loses no audio (the queue
+    holds it).
     """
 
-    def __init__(self, fmt: str = "f32", chunk_s: float = 0.25, stream=None):
+    def __init__(self, fmt: str = "f32", chunk_s: float = 0.25, stream=None,
+                 hold_s: float = STAMP_HOLD_S):
         self.dtype = np.dtype("<f4") if fmt == "f32" else np.dtype("<i2")
         self.scale = 1.0 if fmt == "f32" else 1.0 / 32768.0
         self.nbytes = int(chunk_s * FS) * self.dtype.itemsize
         self.stream = stream if stream is not None else sys.stdin.buffer
+        self.stamper = Stamper(hold_s)
         self.q: queue.Queue = queue.Queue()
         self.eof = False
         self.name = f"stdin ({fmt}, 8 kHz)"
@@ -1176,7 +1248,11 @@ class StdinSource:
             k = len(b) // self.dtype.itemsize * self.dtype.itemsize
             rest = b[k:]
             if k:
-                self.q.put((np.frombuffer(b[:k], self.dtype).astype(np.float64) * self.scale, t))
+                x = np.frombuffer(b[:k], self.dtype).astype(np.float64) * self.scale
+                for out in self.stamper.push(x, t):
+                    self.q.put(out)
+        for out in self.stamper.flush():
+            self.q.put(out)
         self.q.put(None)
 
     def chunks(self, timeout: float = 1.0):
@@ -1266,4 +1342,4 @@ def run(listener: LiveListener, source, *, realtime: bool, stop=None) -> None:
 
 __all__ = ["StreamFE", "FeRing", "slot_capture", "capture_read", "capture_prepare",
            "finish_receive", "DialLog", "same_dial", "restrict", "Tile", "LiveConfig", "LiveListener",
-           "StdinSource", "WavSource", "run", "frame_seconds", "utc_iso"]
+           "Stamper", "StdinSource", "WavSource", "run", "frame_seconds", "utc_iso"]
