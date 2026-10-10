@@ -320,3 +320,27 @@ def test_receives_run_on_the_worker_and_state_keeps_moving(tmp_path, monkeypatch
     with L.lock:
         L.step(end + 2.0)
     assert q in L.finished and L.idle()
+
+
+def test_a_restarted_listener_reads_the_preamble_back(tmp_path):
+    """A listener started mid-slot refills its ring from the passband store
+    an earlier one wrote, so the slot's preamble (and its tile) is not lost."""
+    q = Q_TEST
+    a = unit_rms_latents(TINY.n_data, 0)
+    sym = frame.assemble(TINY, None, precoder.precode(a, q))
+    sim = chm.simulate(sym, TINY, q, ChannelConfig(snr_db=-6.0, seed=2), carrier_hz=1500.0)
+    t0 = slot_t0(q)
+    n0 = t0 * FE_FS - int(round(sim.t0_index))
+    half = int(round(sim.t0_index + 0.5 * live.frame_seconds(TINY) * FE_FS))
+    pb = frontend.PassbandStore(tmp_path / "passband")
+    pb.write(n0 / FE_FS, sim.fe[:half], expire=False)      # what the first listener heard
+    now = (n0 + half) / FE_FS
+    L = live.LiveListener(tmp_path / "live", live.LiveConfig(spec=TINY, render=False),
+                          passband=pb, log=lambda m: None)
+    assert L.step(now) is not None and not L.tiles()     # nothing heard: no preamble
+    L = live.LiveListener(tmp_path / "live2", live.LiveConfig(spec=TINY, render=False),
+                          passband=pb, log=lambda m: None)
+    assert L.backfill(now) == pytest.approx(half / FE_FS, abs=1.0)
+    L.step(now)
+    (tile,) = L.tiles()
+    assert abs(tile.f_hz - 1500.0) < 0.2 and tile.status == "receiving"

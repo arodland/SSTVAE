@@ -418,6 +418,29 @@ class LiveListener:
                 self.passband.write(n0 / FE_FS, fe)
         self.audio_end = (a + len(x) - 1) / FS
 
+    def backfill(self, now: float) -> float:
+        """Refill the ring from the passband store: seconds of audio read back.
+
+        A listener restarted mid-slot (the app restarting, receive stopping
+        for a transmission) otherwise starts with an empty ring, so every
+        slot already under way has lost its preamble, and with it the live
+        view, until it ends. The passband store holds the same front-end
+        stream, so whatever an earlier listener heard is put back. Call it
+        once, before the first `feed`.
+        """
+        if self.passband is None:
+            return 0.0
+        a = int(round(now * FE_FS)) - self.ring.n
+        x, m = self.passband.read(a / FE_FS, a / FE_FS + self.ring.n / FE_FS, return_mask=True)
+        if not m.any():
+            return 0.0
+        edges = np.flatnonzero(np.diff(np.concatenate(([0], m.astype(np.int8), [0]))))
+        for lo, hi in zip(edges[::2], edges[1::2]):
+            self.ring.write(a + int(lo), x[lo:hi])
+        got = float(m.sum()) / FE_FS
+        self.log(f"{got:.0f} s of earlier audio read back from the passband store")
+        return got
+
     # -- slots ----------------------------------------------------------------------------
 
     def _progress(self, q: int) -> float:

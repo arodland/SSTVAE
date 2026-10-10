@@ -32,6 +32,7 @@ a desktop; slow machines want a longer --refresh.
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 
@@ -116,6 +117,7 @@ def main() -> None:
             raise SystemExit("pipe 8 kHz mono audio into stdin (see --help), or use --wav")
         source = live.StdinSource(args.format)
         realtime = True
+        listener.backfill(time.time())
     print(f"tiles in {state}", file=sys.stderr, flush=True)
     try:
         live.run(listener, source, realtime=realtime)

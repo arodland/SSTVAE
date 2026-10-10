@@ -169,6 +169,14 @@ the same tiles stops with a message (stop the window's listener first to
 show a replay there, or give the replay its own `--state DIR`), and a
 second one on the same store runs without a store.
 
+A signal is found on its preamble, so a listener started after a slot's
+preamble shows nothing for that slot until the slot ends. A listener
+with a passband store (the default) therefore reads the last 36 minutes
+back from it when it starts, so restarting the app or the listener
+loses nothing an earlier listener heard. The app stops receiving while
+it transmits (half duplex), so the listener never hears the app's own
+QRSS passes.
+
 A replay of a recording runs through the same code faster than real
 time, which is how this was tested:
 
