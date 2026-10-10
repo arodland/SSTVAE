@@ -96,6 +96,7 @@ void Waterfall::set_feed(SpectrumFeed* feed) {
     timer_->stop();
     connect(feed_, &SpectrumFeed::pumped, this, &Waterfall::draw_new_rows);
     // Redraw from the shared history at once.
+    const auto hold = feed_->lock();
     drawn_ = feed_->fast().count();
     image_ = QImage();
     ensure_image();
@@ -122,6 +123,7 @@ void Waterfall::clear() {
     update();
 }
 
+// The caller holds the feed's lock: this may redraw from its history.
 void Waterfall::ensure_image() {
     // Device pixels, not logical ones.
     //
@@ -186,6 +188,7 @@ void Waterfall::tick() {
 }
 
 void Waterfall::draw_new_rows() {
+    const auto hold = feed_->lock();
     const dsp::WaterfallHistory& history = feed_->fast();
     const std::uint64_t count = history.count();
     if (count == drawn_) return;
@@ -217,12 +220,16 @@ void Waterfall::draw_new_rows() {
 
 void Waterfall::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
+    const auto hold = feed_->lock();
     ensure_image();
 }
 
 void Waterfall::paintEvent(QPaintEvent* event) {
     Q_UNUSED(event);
-    ensure_image();
+    {
+        const auto hold = feed_->lock();
+        ensure_image();
+    }
     QPainter painter(this);
     // 1:1 by construction, so this is a blit and not a rescale: the
     // image carries the same device pixel ratio as the painter, so

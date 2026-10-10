@@ -9,13 +9,17 @@
 // answer, so each is asserted here.
 
 #include <QApplication>
+#include <QElapsedTimer>
 #include <QImage>
 #include <QMouseEvent>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <memory>
 #include <numbers>
+#include <thread>
 #include <vector>
 
 #include "check.hpp"
@@ -313,6 +317,45 @@ void test_a_shared_feed() {
                    "waterfall/shared: dragged taller, it shows older rows, not black");
 }
 
+// The shared feed pumps on a worker thread, and its rows reach the
+// widget on the screen's thread.
+void test_the_feed_runs_on_a_worker() {
+    gui::SpectrumFeed feed;
+    gui::Waterfall widget;
+    widget.resize(W, 60);
+    widget.set_feed(&feed);
+    widget.set_ring(ring_with_tone(TONE_HZ));
+    const std::thread::id gui_thread = std::this_thread::get_id();
+    std::atomic<int> pumps_on_gui{0};
+    std::atomic<int> pumps_elsewhere{0};
+    QObject::connect(&feed, &gui::SpectrumFeed::pumped, &feed,
+                     [&, gui_thread] {
+                         (std::this_thread::get_id() == gui_thread ? pumps_on_gui
+                                                                   : pumps_elsewhere)++;
+                     },
+                     Qt::DirectConnection);
+    feed.start(50);
+    QElapsedTimer clock;
+    clock.start();
+    std::uint64_t rows = 0;
+    while (clock.elapsed() < 10000) {
+        QApplication::processEvents();
+        {
+            const auto hold = feed.lock();
+            rows = feed.fast().count();
+        }
+        if (rows >= 5) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    feed.stop();
+    QApplication::processEvents();
+    check::is_true(rows >= 5, "waterfall/worker: the feed pumps by itself once started");
+    check::is_true(pumps_elsewhere.load() > 0 && pumps_on_gui.load() == 0,
+                   "waterfall/worker: and not on the screen's thread");
+    check::is_true(!is_dark(shot(widget), tone_column(), 2),
+                   "waterfall/worker: its rows still reach the widget");
+}
+
 int main(int argc, char** argv) {
     check::report_crashes_instead_of_prompting();
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -326,6 +369,7 @@ int main(int argc, char** argv) {
     test_disabled_looks_different();
     test_clear_blanks_it();
     test_a_shared_feed();
+    test_the_feed_runs_on_a_worker();
 
     return check::report("waterfall widget");
 }

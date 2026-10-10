@@ -175,6 +175,8 @@ const QImage& QrssSpectrogram::image() {
 
 void QrssSpectrogram::render() {
     dirty_ = false;
+    // The feed's worker may be pumping; it waits while this reads.
+    const auto hold = feed_->lock();
     const QRect p = plot_rect();
     const int w = p.width();
     const int h = p.height();
