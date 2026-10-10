@@ -344,3 +344,38 @@ def test_a_restarted_listener_reads_the_preamble_back(tmp_path):
     L.step(now)
     (tile,) = L.tiles()
     assert abs(tile.f_hz - 1500.0) < 0.2 and tile.status == "receiving"
+
+
+def test_a_headerless_pass_gets_a_provisional_picture(tmp_path):
+    """No header: the picture is drawn as segment 0 of a mode A send and
+    marked so; once a header decodes it is redrawn from it, unmarked."""
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from sstvae.qrss import picture
+
+    decoded = []
+
+    class Codec:
+        def decode(self, lat, wt):
+            decoded.append(np.asarray(wt))
+            return Image.new("RGB", (64, 48))
+
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=True),
+                          log=lambda m: None)
+    L.codec = Codec()
+    t = live.Tile(id="t", q=Q_TEST, slot_utc="x", frame="full", f_hz=1500.0)
+    p = _Pass(1500.0, n=picture.SENT)
+    p.z = np.ones(picture.SENT, dtype=np.float32)
+    L._render(t, p)
+    assert t.image == "tiles/t.png" and (tmp_path / t.image).is_file()
+    assert live.GUESS_NOTE in t.note and len(decoded) == 1
+    L._render(t, p)
+    assert t.note.count(live.GUESS_NOTE) == 1            # marked once, however often redrawn
+    p.header = SimpleNamespace(segment=1, mode=1, codec_id=0xD1D8, callsign="AG7EW",
+                               grid="CN85", picture_id=7)
+    L._render(t, p)
+    assert t.note == "" and t.image_rev == 3
+    # the guess put the pass in group 0; the header puts it in group 1
+    assert not np.array_equal(decoded[0], decoded[2])

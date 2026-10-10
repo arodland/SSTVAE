@@ -177,6 +177,12 @@ loses nothing an earlier listener heard. The app stops receiving while
 it transmits (half duplex), so the listener never hears the app's own
 QRSS passes.
 
+A tile whose header has not decoded (not yet, or never) still gets a
+picture, marked "no header yet": it assumes the first pass of a mode A
+send, which is right for every mode A send and the first pass of B and
+C, and noise for the later passes. It is never combined with earlier
+passes, and it is redrawn properly once a header decodes.
+
 A replay of a recording runs through the same code faster than real
 time, which is how this was tested:
 

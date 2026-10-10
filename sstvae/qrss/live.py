@@ -79,6 +79,7 @@ FINISH_SEARCH_MIN_HEARD = 0.5     # the end-of-slot search over the whole slot n
 FINISH_MAX_CANDIDATES = 12        # ...and verifies at most this many candidates
 FINISH_BUDGET_S = 180.0           # ...for at most this long (a false one costs ~1 min)
 HEADERLESS_MAX_SNR_DB = -6.0      # a pass this strong whose header did not decode is not QRSSTVAE
+GUESS_NOTE = "no header yet: picture assumes the first pass of a mode A send"
 
 
 def utc_iso(t: float) -> str:
@@ -679,34 +680,54 @@ class LiveListener:
         return self.codec
 
     def _render(self, t: Tile, p: PassResult, key=None) -> None:
+        """Draw the tile's picture: this pass, plus the store's accumulator.
+
+        Without a header (not decoded yet, or never) the picture is a
+        guess: segment 0 of a mode A send with the codec loaded, which is
+        right for every mode A send and the first pass of B and C, and
+        noise otherwise. It is marked GUESS_NOTE, never combined with the
+        store, and replaced once a header decodes.
+        """
         from . import render
 
         h = p.header
-        if h is None or len(p.z) != picture.SENT:
-            return                       # nowhere to place the latents yet
-        codec = self._codec(h.codec_id)
+        if len(p.z) != picture.SENT:
+            return                       # nowhere to place the latents
+        codec = self._codec(h.codec_id if h is not None else None)
         if codec is None:
             return
+        if h is None:
+            seg, mode = 0, 0
+            if GUESS_NOTE not in t.note:
+                t.note = f"{t.note}; {GUESS_NOTE}" if t.note else GUESS_NOTE
+        else:
+            seg, mode = int(h.segment), int(h.mode)
+            try:
+                render.check_codec_id(codec, h.codec_id)
+            except SystemExit as e:      # CodecMismatch: a silently wrong picture
+                t.note = str(e)
+                return
+            t.note = t.note.replace(f"; {GUESS_NOTE}", "").replace(GUESS_NOTE, "")
         S = np.zeros((picture.N_GROUPS, picture.GROUP_LATENTS), dtype=np.float64)
         W = np.zeros_like(S)
         n = 1
-        k = key if key is not None else (h.callsign, int(h.picture_id))
+        k = None if h is None else key if key is not None else (h.callsign, int(h.picture_id))
         member = False
-        if self.store is not None and self.store.has_accumulator(k):
+        if k is not None and self.store is not None and self.store.has_accumulator(k):
             acc = self.store.accumulator(k)
             S += acc.S
             W += acc.W
             member = p.uid in acc.uids
             n = len(acc.members) + (0 if member else 1)
         if not member:
-            idx = picture.air_to_canonical(h.segment)
+            idx = picture.air_to_canonical(seg)
             w = np.asarray(p.w, dtype=np.float64)
-            S[h.segment, idx] += np.where(w > 0, w * np.asarray(p.z, dtype=np.float64), 0.0)
-            W[h.segment, idx] += w
+            S[seg, idx] += np.where(w > 0, w * np.asarray(p.z, dtype=np.float64), 0.0)
+            W[seg, idx] += w
         if not np.any(W > 0):
             return
         try:
-            img = render.render(codec, S, W, h.mode)
+            img = render.render(codec, S, W, mode)
         except Exception as e:
             t.note = f"render failed: {e}"
             return
