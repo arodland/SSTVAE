@@ -10,7 +10,10 @@
 // time axis changes the scale under the pointer (the lens's or the
 // history's), and over the frequency axis zooms frequency about the
 // pointer; a double-click on the frequency axis goes back to the whole
-// QRSS range.
+// QRSS range. Dragging an axis pans it, the point grabbed staying under
+// the pointer: the frequency axis up and down, the time axis back into
+// the history (which freezes the view there; a double-click on the time
+// axis, or dragging back to the present, goes live again).
 //
 // Inverse greyscale by default, stronger darker, which is what weak
 // signal work wants; the sun/moon in the lower right corner flips it.
@@ -96,6 +99,14 @@ public:
     double f_lo() const { return f_lo_; }
     double f_hi() const { return f_hi_; }
     void set_frequency_range(double lo, double hi);
+    // The time at the plot's left edge when panned back, or live
+    // (following the clock).
+    bool live() const { return view_end_ <= 0.0; }
+    double view_end() const { return live() ? now() : view_end_; }
+    // Pin the left edge at `t`; at or past now, or before the oldest
+    // audio, it is clamped (now means live).
+    void set_view_end(double t);
+    void go_live();
     const dsp::SlowSpectrogram& data() const;
 
     // Where things are, for tests and for the mouse.
@@ -125,8 +136,12 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void leaveEvent(QEvent* event) override;
 
 private:
+    void update_cursor(QPoint pos);
     void render();
     void invalidate();
     double freq_at_y(double y) const;
@@ -145,6 +160,11 @@ private:
     double f_lo_ = F_LO;
     double f_hi_ = F_HI;
     double rendered_now_ = 0.0;
+    double view_end_ = 0.0;   // 0: live
+    enum class Drag { None, Time, Freq };
+    Drag drag_ = Drag::None;
+    double drag_t_ = 0.0;     // the time grabbed on the time axis
+    double drag_f_ = 0.0;     // the frequency grabbed on the frequency axis
     // The history's block grid as last drawn (see render()).
     double x_of_time(double t) const;
     double time_at_x(double x) const;

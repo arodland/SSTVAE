@@ -429,6 +429,64 @@ void test_the_spectrogram() {
     }
     check::is_true(sg.f_lo() == gui::QrssSpectrogram::F_LO && sg.f_hi() == gui::QrssSpectrogram::F_HI,
                    "spectrogram: double-click goes back to the whole range");
+
+    // Dragging the axes pans them, the grabbed point under the pointer.
+    const auto mouse = [&sg](QEvent::Type type, QPoint at, Qt::MouseButtons held) {
+        QMouseEvent e(type, QPointF(at), QPointF(sg.mapToGlobal(at)),
+                      type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton, held,
+                      Qt::NoModifier);
+        QApplication::sendEvent(&sg, &e);
+    };
+    const auto drag = [&mouse](QPoint from, QPoint to) {
+        mouse(QEvent::MouseButtonPress, from, Qt::LeftButton);
+        mouse(QEvent::MouseMove, to, Qt::LeftButton);
+        mouse(QEvent::MouseButtonRelease, to, Qt::NoButton);
+    };
+    sg.set_frequency_range(1000.0, 1600.0);
+    {
+        const int h = sg.plot_rect().height();
+        // 1300 Hz is half way up; dragged down a quarter of the plot it
+        // shows 150 Hz higher.
+        drag(QPoint(faxis.center().x(), sg.plot_rect().top() + h / 2),
+             QPoint(faxis.center().x(), sg.plot_rect().top() + h / 2 + h / 4));
+        check::is_true(std::abs(sg.f_lo() - 1150.0) < 3.0 && std::abs(sg.f_hi() - 1750.0) < 3.0,
+                       "spectrogram: dragging the frequency axis down pans it up, span kept");
+        // Dragged far, it stops at the top of the range.
+        drag(QPoint(faxis.center().x(), sg.plot_rect().top() + 2),
+             QPoint(faxis.center().x(), sg.plot_rect().top() + 20 * h));
+        check::is_true(sg.f_hi() == dsp::SlowSpectrogram::MAX_HZ &&
+                           std::abs(sg.f_hi() - sg.f_lo() - 600.0) < 1e-6,
+                       "spectrogram: and stops at the top of the range");
+    }
+    sg.set_frequency_range(gui::QrssSpectrogram::F_LO, gui::QrssSpectrogram::F_HI);
+    check::is_true(sg.live(), "spectrogram: live to start with");
+    {
+        // Grab a minute ago on the time axis and drag it to the left
+        // edge: the view ends a minute ago, frozen there.
+        const int y = axis.center().y();
+        const int x60 = sg.plot_point(NOW - 60, 1500.0).x();
+        drag(QPoint(axis.left() + x60, y), QPoint(axis.left(), y));
+        check::is_true(!sg.live() && std::abs(sg.view_end() - (NOW - 60)) < 3.0,
+                       "spectrogram: dragging the time axis left goes back in time");
+        sg.image();   // plot_point reads the view as last drawn
+        const QPoint tone = sg.plot_point(NOW - 90, 1500.0);
+        check::is_true(tone.x() < 60 && qGray(sg.image().pixel(tone)) < 100,
+                       "spectrogram: and the older audio is drawn at the left");
+        // Dragging right past the present goes live again.
+        drag(QPoint(axis.left() + 5, y), QPoint(axis.left() + 400, y));
+        check::is_true(sg.live(), "spectrogram: dragging back past now goes live");
+        drag(QPoint(axis.left() + x60, y), QPoint(axis.left(), y));
+        const QPoint c(axis.left() + 300, y);
+        QMouseEvent dbl(QEvent::MouseButtonDblClick, QPointF(c), QPointF(sg.mapToGlobal(c)),
+                        Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(&sg, &dbl);
+        check::is_true(sg.live(), "spectrogram: double-click on the time axis goes live");
+        // No further back than the audio kept.
+        sg.set_view_end(NOW - 86400.0);
+        check::is_true(sg.view_end() > NOW - 200.0,
+                       "spectrogram: no further back than the oldest audio");
+        sg.go_live();
+    }
 }
 
 // Each redraw recomputes the Time Lens; the history to its right is

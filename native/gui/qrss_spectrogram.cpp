@@ -68,7 +68,8 @@ QrssSpectrogram::QrssSpectrogram(QWidget* parent) : QWidget(parent) {
                   "fifteen seconds per pixel for the history.\n"
                   "Mouse wheel over the time axis: change the scale under the pointer.\n"
                   "Mouse wheel over the frequency axis: zoom; double-click it to see the "
-                  "whole range.\nThe sun/moon flips the colours. Red: a signal the QRSS "
+                  "whole range.\nDrag an axis to pan it; double-click the time axis to "
+                  "go back to live.\nThe sun/moon flips the colours. Red: a signal the QRSS "
                   "listener has synced on."));
 }
 
@@ -139,6 +140,27 @@ void QrssSpectrogram::set_frequency_range(double lo, double hi) {
     invalidate();
 }
 
+void QrssSpectrogram::set_view_end(double t) {
+    const double t_now = now();
+    // The oldest audio kept: the left edge cannot go further back than
+    // where there is still something to the right of it to see.
+    const auto& d = data();
+    double oldest = d.newest();
+    if (!d.coarse().empty()) oldest = std::min(oldest, d.coarse().front().t);
+    if (!d.fine().empty()) oldest = std::min(oldest, d.fine().front().t);
+    if (oldest <= 0.0 || t >= t_now - 0.5) {
+        view_end_ = 0.0;
+    } else {
+        view_end_ = std::max(t, std::min(t_now, oldest + 60.0));
+    }
+    invalidate();
+}
+
+void QrssSpectrogram::go_live() {
+    view_end_ = 0.0;
+    invalidate();
+}
+
 void QrssSpectrogram::invalidate() {
     dirty_ = true;
     update();
@@ -190,7 +212,7 @@ void QrssSpectrogram::render() {
     const int w = p.width();
     const int h = p.height();
     image_ = QImage(w, h, QImage::Format_RGB32);
-    const double t_now = now();
+    const double t_now = view_end();
     rendered_now_ = t_now;
     const QRgb gap = inverted_ ? qRgb(232, 232, 232) : qRgb(28, 28, 32);
     image_.fill(gap);
@@ -404,9 +426,27 @@ void QrssSpectrogram::paintEvent(QPaintEvent*) {
                              tr("%1 s/px").arg(scale_.history_spp(), 0, 'g', 3));
         }
     }
-    // Now.
-    painter.setPen(QPen(accent, 2));
-    painter.drawLine(p.left() + 1, p.top(), p.left() + 1, p.bottom());
+    // Now, or, panned back, where the view stops and how long ago.
+    if (live()) {
+        painter.setPen(QPen(accent, 2));
+        painter.drawLine(p.left() + 1, p.top(), p.left() + 1, p.bottom());
+    } else {
+        painter.setPen(QPen(accent, 2, Qt::DashLine));
+        painter.drawLine(p.left() + 1, p.top(), p.left() + 1, p.bottom());
+        const double t_end = rendered_now_ > 0 ? rendered_now_ : view_end();
+        const QString text = tr("Paused at %1 (%2 ago). Double-click the time axis for live.")
+                                 .arg(clock_label(t_end, true),
+                                      dial_mark_label(now() - t_end).mid(2));
+        QFont small = font();
+        small.setPointSizeF(std::max(6.5, small.pointSizeF() * 0.8));
+        painter.setFont(small);
+        const QFontMetrics fm(small);
+        const QRect box(p.left() + 4, p.bottom() - fm.height() - 6,
+                        fm.horizontalAdvance(text) + 8, fm.height() + 2);
+        painter.fillRect(box, inverted_ ? QColor(255, 255, 255, 220) : QColor(0, 0, 0, 190));
+        painter.setPen(ink);
+        painter.drawText(box, Qt::AlignCenter, text);
+    }
 
     // Dial changes: green, as on the schedule's timeline, each with how
     // long ago, so a line here can be matched to one there.
@@ -417,6 +457,7 @@ void QrssSpectrogram::paintEvent(QPaintEvent*) {
         small.setPointSizeF(std::max(6.5, small.pointSizeF() * 0.8));
         painter.setFont(small);
         const double t_now = rendered_now_ > 0 ? rendered_now_ : now();
+        const double t_real = now();
         int row = 0;
         for (const double t : dial_marks_) {
             if (t > t_now) continue;
@@ -425,7 +466,9 @@ void QrssSpectrogram::paintEvent(QPaintEvent*) {
             const int px = p.left() + static_cast<int>(std::lround(x));
             painter.setPen(QPen(green, 2));
             painter.drawLine(px, p.top() + 14, px, p.bottom());
-            const QString label = dial_mark_label(t_now - t);
+            // Its age from the clock, not from the view, so it still
+            // matches the schedule when panned back.
+            const QString label = dial_mark_label(t_real - t);
             const QFontMetrics fm(small);
             // Staggered, so labels of changes close together stay legible.
             const QRect box(px + 3, p.top() + 16 + (row++ % 3) * (fm.height() + 1),
@@ -552,18 +595,89 @@ void QrssSpectrogram::wheelEvent(QWheelEvent* event) {
 }
 
 void QrssSpectrogram::mousePressEvent(QMouseEvent* event) {
-    if (event->button() == Qt::LeftButton &&
-        theme_button_rect().contains(event->position().toPoint())) {
+    const QPoint pos = event->position().toPoint();
+    if (event->button() == Qt::LeftButton && theme_button_rect().contains(pos)) {
         set_inverted(!inverted_);
+        event->accept();
+        return;
+    }
+    if (event->button() == Qt::LeftButton && time_axis_rect().contains(pos)) {
+        // The time under the pointer, which stays under it as it moves.
+        image();   // so the grid time_at_x reads is this size's
+        drag_ = Drag::Time;
+        drag_t_ = time_at_x(pos.x() - plot_rect().left());
+        update_cursor(pos);
+        event->accept();
+        return;
+    }
+    if (event->button() == Qt::LeftButton && freq_axis_rect().contains(pos)) {
+        drag_ = Drag::Freq;
+        drag_f_ = freq_at_y(pos.y() - plot_rect().top());
+        update_cursor(pos);
         event->accept();
         return;
     }
     QWidget::mousePressEvent(event);
 }
 
+void QrssSpectrogram::mouseMoveEvent(QMouseEvent* event) {
+    const QPoint pos = event->position().toPoint();
+    if (drag_ == Drag::Time) {
+        // The left edge such that the grabbed time sits at the pointer.
+        const double x = std::max(0, pos.x() - plot_rect().left());
+        set_view_end(drag_t_ + scale_.age_at(x));
+        event->accept();
+        return;
+    }
+    if (drag_ == Drag::Freq) {
+        // The grabbed frequency at the pointer, the span unchanged.
+        const double span = f_hi_ - f_lo_;
+        const double y = pos.y() - plot_rect().top();
+        double hi = drag_f_ + span * y / std::max(1, plot_rect().height());
+        hi = std::clamp(hi, span, dsp::SlowSpectrogram::MAX_HZ);
+        set_frequency_range(hi - span, hi);
+        event->accept();
+        return;
+    }
+    update_cursor(pos);
+    QWidget::mouseMoveEvent(event);
+}
+
+void QrssSpectrogram::mouseReleaseEvent(QMouseEvent* event) {
+    if (drag_ != Drag::None && event->button() == Qt::LeftButton) {
+        drag_ = Drag::None;
+        update_cursor(event->position().toPoint());
+        event->accept();
+        return;
+    }
+    QWidget::mouseReleaseEvent(event);
+}
+
+void QrssSpectrogram::leaveEvent(QEvent* event) {
+    if (drag_ == Drag::None) unsetCursor();
+    QWidget::leaveEvent(event);
+}
+
+void QrssSpectrogram::update_cursor(QPoint pos) {
+    if (drag_ != Drag::None) {
+        setCursor(Qt::ClosedHandCursor);
+    } else if (time_axis_rect().contains(pos) || freq_axis_rect().contains(pos)) {
+        setCursor(Qt::OpenHandCursor);
+    } else {
+        unsetCursor();
+    }
+}
+
 void QrssSpectrogram::mouseDoubleClickEvent(QMouseEvent* event) {
-    if (freq_axis_rect().contains(event->position().toPoint())) {
+    const QPoint pos = event->position().toPoint();
+    drag_ = Drag::None;
+    if (freq_axis_rect().contains(pos)) {
         set_frequency_range(F_LO, F_HI);
+        event->accept();
+        return;
+    }
+    if (time_axis_rect().contains(pos)) {
+        go_live();
         event->accept();
         return;
     }
