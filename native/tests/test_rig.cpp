@@ -108,6 +108,8 @@ public:
         probe_->frequency = hz;
     }
 
+    void tune_antenna() override { probe_->record("atu"); }
+
     double frequency_hz() override {
         probe_->record("freq");
         block();
@@ -502,9 +504,14 @@ void test_tuning_reads_the_dial_back() {
     check::is_true(tune_idx + 1 < calls.size() && calls[tune_idx + 1] == "freq",
                    "rig/tune: the readback follows the tune");
 
+    check::is_true(controller.request_antenna_tune(), "rig/atu: asked");
+    check::is_true(pub.wait_for_status_containing("tuner started"),
+                   "rig/atu: the tuner was started and said so");
+
     controller.pause_polling();
     check::is_true(!controller.request_frequency(14'070'000.0),
                    "rig/tune: refused while keyed");
+    check::is_true(!controller.request_antenna_tune(), "rig/atu: refused while keyed");
     controller.resume_polling();
     controller.stop();
 }

@@ -761,14 +761,25 @@ void MainWindow::show_rig_menu(const QPoint& at) {
     // Not while transmitting: that covers an SSTVAE over and a QRSS
     // send from the moment it starts, including the run-up before a
     // pass is keyed and the waits between passes.
-    if (tx_panel_->transmitting()) {
-        change->setEnabled(false);
-        change->setText(tr("Change frequency... (not while transmitting)"));
-    } else if (!state_->current_frequency_hz()) {
-        change->setEnabled(false);
-        change->setText(tr("Change frequency... (no frequency from the rig)"));
+    // Tuning keys a carrier, so it follows the same rules.
+    QAction* atu = menu.addAction(tr("Tune Rig"));
+    atu->setObjectName(QStringLiteral("menu_tune_rig"));
+    const QString why = tx_panel_->transmitting()       ? tr(" (not while transmitting)")
+                        : !state_->current_frequency_hz() ? tr(" (no frequency from the rig)")
+                                                          : QString();
+    if (!why.isEmpty()) {
+        for (QAction* a : {change, atu}) {
+            a->setEnabled(false);
+            a->setText(a->text() + why);
+        }
     }
-    if (menu.exec(rig_label_->mapToGlobal(at)) == change) change_frequency();
+    QAction* chosen = menu.exec(rig_label_->mapToGlobal(at));
+    if (chosen == change) {
+        change_frequency();
+    } else if (chosen == atu && !tx_panel_->transmitting() && !state_->start_rig_tuner()) {
+        QMessageBox::warning(this, tr("Tune Rig"),
+                             tr("The rig is not connected, so the tuner was not started."));
+    }
 }
 
 void MainWindow::change_frequency() {

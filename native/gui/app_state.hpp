@@ -72,6 +72,8 @@ public:
     // Ask the radio to tune (Hz). Never blocks; false when rig control is
     // off or the radio is keyed. The result shows as the next readout.
     bool tune_rig(double hz);
+    // Start the radio's antenna tuner. Same rules as tune_rig.
+    bool start_rig_tuner();
     void pause_rig_polling();
     void resume_rig_polling();
 

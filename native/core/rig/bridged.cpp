@@ -84,6 +84,11 @@ public:
         inner_->set_frequency_hz(hz);
     }
 
+    void tune_antenna() override {
+        require_inner();
+        inner_->tune_antenna();
+    }
+
     std::string description() const override {
         std::string text = inner_ ? inner_->description() : std::string("rig");
         if (transport_) {

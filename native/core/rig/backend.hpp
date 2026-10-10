@@ -48,6 +48,12 @@ public:
         throw RigError("this rig cannot be tuned from here");
     }
 
+    // Start the antenna tuner's tune cycle (Hamlib's RIG_OP_TUNE). The
+    // radio puts a brief carrier on the air to do it.
+    virtual void tune_antenna() {
+        throw RigError("this rig cannot start its tuner from here");
+    }
+
     // For status text. Need not be the model name the user picked.
     virtual std::string description() const = 0;
 };

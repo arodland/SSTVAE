@@ -190,6 +190,12 @@ bool AppState::tune_rig(double hz) {
     return true;
 }
 
+bool AppState::start_rig_tuner() {
+    if (!config_.rig.enabled || !rig_.request_antenna_tune()) return false;
+    log_event("rig", log::Severity::Info, QStringLiteral("Starting the antenna tuner"));
+    return true;
+}
+
 void AppState::pause_rig_polling() { rig_.pause_polling(); }
 
 void AppState::resume_rig_polling() { rig_.resume_polling(); }

@@ -259,6 +259,12 @@ public:
         if (rc != RIG_OK) throw RigError(hamlib_error("could not set frequency", rc));
     }
 
+    void tune_antenna() override {
+        require_open();
+        const int rc = rig_vfo_op(rig_, RIG_VFO_CURR, RIG_OP_TUNE);
+        if (rc != RIG_OK) throw RigError(hamlib_error("could not start the tuner", rc));
+    }
+
     std::string description() const override {
         // Via rig_get_caps_cptr rather than rig_->caps->..., and that is
         // deliberate: **nothing here may dereference a RIG\***.

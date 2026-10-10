@@ -150,6 +150,8 @@ public:
     // paused for a transmission. A rig that refuses is reported through
     // the status callback as an error.
     bool request_frequency(double hz);
+    // Likewise for the antenna tuner's tune cycle.
+    bool request_antenna_tune();
 
     // A `tx::Ptt` for `TxEngine`. Keeps working across `start`/`stop`:
     // keying with no session throws RigError, which the engine reports
