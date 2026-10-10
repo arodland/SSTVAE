@@ -28,6 +28,7 @@ class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
+class QSpinBox;
 class QPushButton;
 class QWidget;
 
@@ -140,6 +141,7 @@ private:
     QCheckBox* autosave_ = nullptr;
     QCheckBox* save_audio_ = nullptr;
     QCheckBox* low_cpu_ = nullptr;
+    QSpinBox* waterfall_fps_ = nullptr;
     QCheckBox* blind_wide_ = nullptr;
     QComboBox* drift_track_ = nullptr;
     QLineEdit* filename_template_ = nullptr;

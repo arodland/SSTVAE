@@ -95,6 +95,7 @@ NON_DEFAULT = {
         "autosave": False,
         "auto_start": True,
         "low_cpu": True,
+        "waterfall_fps": 7,
         "buffer_seconds": 95.5,
         "poll_interval": 11.0,
         "blind_search_seconds": 30.0,

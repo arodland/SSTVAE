@@ -244,6 +244,13 @@ void read_receive(const Reader& r, ReceiveConfig& c) {
     r.get("autosave", c.autosave);
     r.get("auto_start", c.auto_start);
     r.get("low_cpu", c.low_cpu);
+    r.get("waterfall_fps", c.waterfall_fps);
+    if (c.waterfall_fps < 1 || c.waterfall_fps > 30) {
+        r.notes.add(r.path("waterfall_fps"),
+                    "is out of range (1-30); using 20 instead of " +
+                        std::to_string(c.waterfall_fps));
+        c.waterfall_fps = 20;
+    }
     r.get("buffer_seconds", c.buffer_seconds);
     r.get("poll_interval", c.poll_interval);
     r.get("blind_search_seconds", c.blind_search_seconds);
@@ -261,7 +268,7 @@ void read_receive(const Reader& r, ReceiveConfig& c) {
                                                "'; using off");
         c.drift_track = "off";
     }
-    r.report_unknown({"autosave", "auto_start", "low_cpu", "buffer_seconds",
+    r.report_unknown({"autosave", "auto_start", "low_cpu", "waterfall_fps", "buffer_seconds",
                       "poll_interval", "blind_search_seconds", "blind_wide",
                       "drift_track", "end_grace", "save_size", "save_audio",
                       "filename_template"});
@@ -463,6 +470,7 @@ std::string to_json(const Config& c) {
          {{"autosave", c.receive.autosave},
           {"auto_start", c.receive.auto_start},
           {"low_cpu", c.receive.low_cpu},
+          {"waterfall_fps", c.receive.waterfall_fps},
           {"buffer_seconds", c.receive.buffer_seconds},
           {"poll_interval", c.receive.poll_interval},
           {"blind_search_seconds", c.receive.blind_search_seconds},

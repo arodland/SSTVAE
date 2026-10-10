@@ -157,6 +157,9 @@ struct ReceiveConfig {
     // and must not restart a session the operator has since stopped.
     bool auto_start = false;
     bool low_cpu = false;
+    // Waterfall rows a second (1-30). Lower saves a little CPU and
+    // scrolls less smoothly; the QRSS spectrogram does not depend on it.
+    int waterfall_fps = 20;
     double buffer_seconds = 130.0;
     double poll_interval = 5.0;
     double blind_search_seconds = 25.0;

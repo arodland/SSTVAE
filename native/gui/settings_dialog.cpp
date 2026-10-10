@@ -21,6 +21,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSpacerItem>
+#include <QSpinBox>
 #include <QStyle>
 #include <QSizePolicy>
 #include <QStringList>
@@ -863,6 +864,18 @@ QWidget* SettingsDialog::receive_tab() {
                                page));
     add_gap(form);
 
+    waterfall_fps_ = new QSpinBox(page);
+    waterfall_fps_->setObjectName(QStringLiteral("waterfall_fps"));
+    waterfall_fps_->setRange(1, 30);
+    waterfall_fps_->setSuffix(tr(" rows/s"));
+    waterfall_fps_->setValue(receive.waterfall_fps);
+    form->addRow(tr("Waterfall speed:"), waterfall_fps_);
+    add_check_note(form, page,
+                   style::note(tr("How many rows a second the SSTVAE waterfall "
+                                  "scrolls. Fewer use less CPU; 20 is smooth."),
+                               page));
+    add_gap(form);
+
     blind_wide_ = new QCheckBox(tr("Wide frequency search"), page);
     blind_wide_->setChecked(receive.blind_wide);
     form->addRow(blind_wide_);
@@ -1098,6 +1111,7 @@ void SettingsDialog::apply_to(settings::Config& config) const {
     config.receive.autosave = autosave_->isChecked();
     config.receive.save_audio = save_audio_->isChecked();
     config.receive.low_cpu = low_cpu_->isChecked();
+    config.receive.waterfall_fps = waterfall_fps_->value();
     config.receive.blind_wide = blind_wide_->isChecked();
     config.receive.drift_track =
         drift_track_->currentData().toString().toStdString();

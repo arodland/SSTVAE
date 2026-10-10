@@ -65,6 +65,7 @@ settings::Config populated() {
     c.receive.auto_start = true;
     c.receive.save_audio = true;
     c.receive.low_cpu = true;
+    c.receive.waterfall_fps = 7;
     c.receive.blind_wide = true;
     c.receive.drift_track = "fast";
     c.receive.filename_template = "{callsign}_{date}";

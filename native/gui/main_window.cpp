@@ -183,7 +183,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // One spectrum feed for the waterfall and the QRSS spectrogram: the
     // audio is read once and both histories kept (spectrum_feed.hpp).
     spectrum_feed_ = new SpectrumFeed(this);
-    spectrum_feed_->start(20);
+    spectrum_feed_->start(state_->config().receive.waterfall_fps);
     waterfall_->set_feed(spectrum_feed_);
     qrss_page_->spectrogram()->set_feed(spectrum_feed_);
     modes_ = new QStackedWidget(this);
@@ -819,6 +819,7 @@ void MainWindow::open_settings() {
     state_->save_config();
     update_station_label();
     rx_panel_->sync_from_config();
+    spectrum_feed_->start(state_->config().receive.waterfall_fps);
     // Picture refinement can be switched on or off here, and either way
     // it has to take effect now: on, and a run starts for what is
     // already composed; off, and any refined latents are discarded.
