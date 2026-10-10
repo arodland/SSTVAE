@@ -55,6 +55,10 @@ def main() -> None:
     ap.add_argument("--no-store", action="store_true", help="do not store or associate")
     ap.add_argument("--passband", default=None, help="48 h passband store directory")
     ap.add_argument("--no-passband", action="store_true", help="do not keep the front-end stream")
+    ap.add_argument("--recover-hours", type=float, default=3.0,
+                    help="on start, receive from the passband store every slot that ended "
+                         "this recently while no listener finished it (default 3; 0 turns "
+                         "it off)")
     ap.add_argument("--model", default=None, help="codec model directory")
     ap.add_argument("--precision", choices=("fp32", "fp16", "int8"), default="fp32",
                     help="codec precision (default fp32)")
@@ -118,6 +122,7 @@ def main() -> None:
         source = live.StdinSource(args.format)
         realtime = True
         listener.backfill(time.time())
+        listener.recover(time.time(), args.recover_hours)
     print(f"tiles in {state}", file=sys.stderr, flush=True)
     try:
         live.run(listener, source, realtime=realtime)

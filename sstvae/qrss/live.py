@@ -79,6 +79,7 @@ FINISH_SEARCH_MIN_HEARD = 0.5     # the end-of-slot search over the whole slot n
 FINISH_MAX_CANDIDATES = 12        # ...and verifies at most this many candidates
 FINISH_BUDGET_S = 180.0           # ...for at most this long (a false one costs ~1 min)
 HEADERLESS_MAX_SNR_DB = -6.0      # a pass this strong whose header did not decode is not QRSSTVAE
+RECOVER_HOURS = 3.0               # a restarted listener finishes slots that ended this recently
 GUESS_NOTE = "no header yet: picture assumes the first pass of a mode A send"
 
 
@@ -259,6 +260,7 @@ class SlotState:
     last_refresh: float | None = None
     done: bool = False
     finishing: bool = False         # the end-of-slot receive is queued or running
+    reader: object = None           # where its audio is read from (None: the ring)
 
 
 @dataclass
@@ -307,6 +309,16 @@ def dir_lock(path):
     return f
 
 
+class _PassbandReader:
+    """A PassbandStore read like an FeRing: (x, written) for FE indices [a, b)."""
+
+    def __init__(self, passband):
+        self.passband = passband
+
+    def read(self, a: int, b: int):
+        return self.passband.read(a / FE_FS, b / FE_FS, return_mask=True)
+
+
 class LiveListener:
     """Feed it audio (`feed`), call `step(now)`; it keeps `state_dir` current."""
 
@@ -323,6 +335,7 @@ class LiveListener:
         self.slots: dict[int, SlotState] = {}
         self.finished: set[int] = set()
         self.done_tiles: list[Tile] = []
+        self._recover: list[SlotState] = []   # ended slots to finish from the passband store
         self.codec = None
         self.codec_error: str | None = None
         self.now = 0.0
@@ -355,7 +368,10 @@ class LiveListener:
             st = json.loads((self.dir / "state.json").read_text())
         except (OSError, ValueError):
             return
+        self.finished |= {int(q) for q in st.get("finished", [])}
         for t in st.get("tiles", []):
+            if t.get("status") in ("complete", "lost") and "q" in t:
+                self.finished.add(int(t["q"]))       # (a state file from before "finished")
             if t.get("status") != "receiving":
                 if not t.get("callsign") and (t.get("snr_db") or -99.0) > HEADERLESS_MAX_SNR_DB:
                     continue           # kept by an older listener; see _plausible
@@ -379,7 +395,9 @@ class LiveListener:
                    for q, s in sorted(self.slots.items())],
             codec_error=self.codec_error, busy=self.busy,
             tiles=[t.to_json() for t in self.tiles()],
-            log=self.lines[-20:])
+            log=self.lines[-20:],
+            finished=sorted(q for q in self.finished
+                            if slot_t0(q) > (self.now or time.time()) - 48 * 3600))
         tmp = self.dir / f"state.json.{os.getpid()}.tmp"
         tmp.write_text(json.dumps(st, indent=1))
         os.replace(tmp, self.dir / "state.json")
@@ -442,6 +460,36 @@ class LiveListener:
         self.log(f"{got:.0f} s of earlier audio read back from the passband store")
         return got
 
+    def recover(self, now: float, hours: float = RECOVER_HOURS) -> list[int]:
+        """Queue the end-of-slot receive of every slot that ended in the last
+        `hours` while no listener finished it, from the passband store.
+
+        Stopping a listener near the end of a frame (just before a quarter
+        hour) would otherwise lose the slot: its latents are stored only by
+        that receive. The slots run newest first, each only when nothing
+        live is waiting (see `step`). Returns the slots queued.
+        """
+        if self.passband is None or hours <= 0:
+            return []
+        dur = frame_seconds(self.cfg.spec)
+        reader = _PassbandReader(self.passband)
+        out = []
+        for q in range(int(math.floor(now / 900.0)), int(math.floor(
+                (now - hours * 3600.0 - dur) / 900.0)) - 1, -1):
+            end = slot_t0(q) + dur + PB_TAIL_S
+            if (not (now - hours * 3600.0 <= end <= now) or q in self.finished
+                    or q in self.slots or any(r.q == q for r in self._recover)):
+                continue
+            t0 = slot_t0(q)
+            _, ok = reader.read(t0 * FE_FS, int(round((t0 + dur) * FE_FS)))
+            if ok.mean() < FINISH_SEARCH_MIN_HEARD:
+                continue                 # not heard (enough) by an earlier listener
+            self._recover.append(SlotState(q, finishing=True, reader=reader))
+            out.append(q)
+            self.log(f"slot {utc_iso(t0 - 1)}: ended while no listener finished it; "
+                     "receiving it from the passband store")
+        return out
+
     # -- slots ----------------------------------------------------------------------------
 
     def _progress(self, q: int) -> float:
@@ -480,6 +528,11 @@ class LiveListener:
                     s.last_refresh = now     # (when busy, it is still due next time)
                     self._submit(self._refresh, s)
                     changed = True
+        if self._recover and self.idle():
+            s = self._recover.pop(0)
+            self.slots[s.q] = s
+            self._submit(self._finish, s)
+            changed = True
         for q in [q for q, s in self.slots.items() if s.done]:
             self.done_tiles.extend(self.slots.pop(q).tiles.values())
             self.finished.add(q)
@@ -577,7 +630,7 @@ class LiveListener:
         spec = self.cfg.spec
         t_start = time.time()
         with self.lock:
-            prep, erase, heard = slot_capture(self.ring, s.q, spec)
+            prep, erase, heard = slot_capture(s.reader or self.ring, s.q, spec)
             dets = list(s.dets)
         passes = []
         if heard >= FINISH_SEARCH_MIN_HEARD:
@@ -591,6 +644,8 @@ class LiveListener:
             self._finish_apply(s, passes, heard)
             what = "" if heard >= FINISH_SEARCH_MIN_HEARD else \
                 f", {100 * heard:.0f}% heard: no whole-slot search"
+            if s.reader is not None:
+                what += ", from the passband store"
             self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: frame over, {len(passes)} pass(es)"
                      f"{what} ({time.time() - t_start:.0f} s)")
 

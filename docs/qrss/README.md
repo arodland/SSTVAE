@@ -173,7 +173,14 @@ A signal is found on its preamble, so a listener started after a slot's
 preamble shows nothing for that slot until the slot ends. A listener
 with a passband store (the default) therefore reads the last 36 minutes
 back from it when it starts, so restarting the app or the listener
-loses nothing an earlier listener heard. The app stops receiving while
+loses nothing an earlier listener heard. A slot's latents are stored only
+when its frame ends (5 s after 100%, then up to about 3 minutes of
+receiving), so a listener stopped before that, say just before a
+quarter hour, would lose them; on its next start a listener therefore
+also receives, from the passband store, every slot that ended in the
+last 3 hours (`--recover-hours`, 0 for none) that it had heard at least
+half of and that no listener finished. These run one at a time, newest
+first, whenever no live receive is waiting. The app stops receiving while
 it transmits (half duplex), so the listener never hears the app's own
 QRSS passes.
 

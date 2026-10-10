@@ -413,3 +413,30 @@ def test_a_headerless_pass_the_store_matched_is_drawn_as_its_picture(tmp_path):
     L._render(t, p, key=key)
     assert t.note == "stored (corr)" and t.callsign == "AG7EW" and t.mode == "B"
     assert t.passes == 2 and len(decoded) == 1
+
+
+def test_a_restarted_listener_finishes_a_slot_that_ended_while_it_was_stopped(tmp_path):
+    """A slot heard by an earlier listener that stopped before its frame
+    ended is received from the passband store on the next start, once."""
+    q = Q_TEST
+    a = unit_rms_latents(TINY.n_data, 0)
+    sym = frame.assemble(TINY, None, precoder.precode(a, q))
+    sim = chm.simulate(sym, TINY, q, ChannelConfig(snr_db=-6.0, seed=2), carrier_hz=1500.0)
+    t0 = slot_t0(q)
+    n0 = t0 * FE_FS - int(round(sim.t0_index))
+    pb = frontend.PassbandStore(tmp_path / "passband")
+    pb.write(n0 / FE_FS, sim.fe, expire=False)        # the earlier listener heard it all
+    now = t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 600.0
+    cfg = live.LiveConfig(spec=TINY, render=False)
+    L = live.LiveListener(tmp_path / "live", cfg, passband=pb, log=lambda m: None)
+    assert L.recover(now) == [q]
+    assert not L.recover(now)                          # queued once
+    L.step(now)
+    (tile,) = L.tiles()
+    assert abs(tile.f_hz - 1500.0) < 0.2 and tile.status == "complete"
+    L.write_state()
+    assert q in json.loads((tmp_path / "live" / "state.json").read_text())["finished"]
+    L2 = live.LiveListener(tmp_path / "live", cfg, passband=pb, log=lambda m: None)
+    assert L2.recover(now) == []                        # finished already, by the first
+    assert live.LiveListener(tmp_path / "live3", cfg, passband=pb,
+                             log=lambda m: None).recover(now, hours=0.1) == []   # too long ago
