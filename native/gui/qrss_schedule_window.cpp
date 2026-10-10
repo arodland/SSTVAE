@@ -12,7 +12,6 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
-#include <QHeaderView>
 #include <QInputDialog>
 #include <QLabel>
 #include <QListWidget>
@@ -25,7 +24,6 @@
 #include <QSplitter>
 #include <QTimeZone>
 #include <QTimer>
-#include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
@@ -160,8 +158,8 @@ void QrssScheduleWindow::build() {
     message_ = new QLabel(upcoming);
     message_->setObjectName(QStringLiteral("schedule_message"));
     message_->setWordWrap(true);
-    message_->setText(tr("Drag a send to move it; right-click it to remove it, change its mode "
-                         "or repeat it. With a Send selected, click a free slot to start "
+    message_->setText(tr("Drag a send to move it; right-click it to pause or remove it, or "
+                         "change its mode, offset or repeat. With a Send selected, click a free slot to start "
                          "there. Green lines are frequency changes: right-click one to "
                          "move it, or right-click free time to add one."));
     auto* message_row = new QHBoxLayout;
@@ -372,36 +370,9 @@ QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
         update_summary();
     });
 
-    auto* list_box = new QGroupBox(tr("Scheduled"), right);
-    auto* list_layout = new QVBoxLayout(list_box);
-    table_ = new QTreeWidget(list_box);
-    table_->setObjectName(QStringLiteral("schedule_table"));
-    table_->setRootIsDecorated(false);
-    table_->setIconSize(QSize(48, 36));
-    table_->setHeaderLabels({tr("Picture"), tr("Repeats"), tr("Carrier"), tr("Next send"),
-                             tr("Status")});
-    table_->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    table_->header()->setStretchLastSection(true);
-    table_->setMinimumHeight(table_->fontMetrics().height() * 6);
-    list_layout->addWidget(table_);
-    pause_ = new QPushButton(tr("Pause"), list_box);
-    pause_->setObjectName(QStringLiteral("schedule_pause"));
-    resume_ = new QPushButton(tr("Resume"), list_box);
-    resume_->setObjectName(QStringLiteral("schedule_resume"));
-    remove_ = new QPushButton(tr("Remove"), list_box);
-    remove_->setObjectName(QStringLiteral("schedule_remove"));
-    remove_->setToolTip(tr("Take it off the schedule. A send already on the air carries on; "
-                           "Cancel on the Transmit pane stops it."));
-    connect(pause_, &QPushButton::clicked, this, [this] { set_selected_enabled(false); });
-    connect(resume_, &QPushButton::clicked, this, [this] { set_selected_enabled(true); });
-    connect(remove_, &QPushButton::clicked, this, &QrssScheduleWindow::remove_selected);
-    connect(table_, &QTreeWidget::itemSelectionChanged, this, [this] {
-        const QList<QTreeWidgetItem*> sel = table_->selectedItems();
-        if (sel.isEmpty()) return;
-        select_entry(sel.front()->data(0, Qt::UserRole).toString().toStdString());
-    });
-    list_layout->addWidget(style::row(list_box, {pause_, resume_, remove_}));
-    column->addWidget(list_box, 1);
+    // What is scheduled is the timeline above and its right-click menu;
+    // the list that repeated it here is gone (Jeff, 2026-10-10).
+    column->addStretch(1);
     return right;
 }
 
@@ -644,34 +615,10 @@ void QrssScheduleWindow::add() {
 
 // --- what is scheduled ----------------------------------------------------
 
-void QrssScheduleWindow::set_selected_enabled(bool on) {
-    const QList<QTreeWidgetItem*> sel = table_->selectedItems();
-    if (sel.isEmpty()) return;
-    const std::string why =
-        scheduler_->set_enabled(sel.front()->data(0, Qt::UserRole).toString().toStdString(), on);
-    if (!why.empty()) show_result(why, {});
-}
-
-void QrssScheduleWindow::remove_selected() {
-    const QList<QTreeWidgetItem*> sel = table_->selectedItems();
-    if (sel.isEmpty()) return;
-    remove_entry(sel.front()->data(0, Qt::UserRole).toString().toStdString());
-}
-
 void QrssScheduleWindow::select_entry(const std::string& entry) {
     selected_entry_ = entry;
     timeline_->set_selected_entry(entry);
-    {
-        const QSignalBlocker block(table_);
-        for (int i = 0; i < table_->topLevelItemCount(); ++i) {
-            QTreeWidgetItem* item = table_->topLevelItem(i);
-            item->setSelected(item->data(0, Qt::UserRole).toString().toStdString() == entry);
-        }
-    }
     const qs::Entry* e = entry_by_id(scheduler_->entries(), entry);
-    pause_->setEnabled(e != nullptr && e->enabled && !qs::finished(*e));
-    resume_->setEnabled(e != nullptr && !e->enabled && !qs::finished(*e));
-    remove_->setEnabled(e != nullptr);
     // Its Send, back on the left.
     if (e != nullptr && !e->send_id.empty() && sends_->find(e->send_id) != nullptr &&
         selected_send() != e->send_id) {
@@ -693,35 +640,6 @@ void QrssScheduleWindow::show_result(const std::string& why, const QString& done
 
 void QrssScheduleWindow::refresh() {
     const auto& entries = scheduler_->entries();
-    {
-        const QSignalBlocker block(table_);
-        table_->clear();
-        for (const qs::Entry& e : entries) {
-            auto* item = new QTreeWidgetItem(table_);
-            const QString id = QString::fromStdString(e.id);
-            item->setData(0, Qt::UserRole, id);
-            item->setText(0, QString::fromStdString(e.label));
-            const QPixmap pix = thumbnail(e.picture, 48, 36);
-            if (!pix.isNull()) item->setIcon(0, QIcon(pix));
-            item->setText(1, QString::fromStdString(qs::describe(e)));
-            item->setText(2, tr("%1 Hz").arg(e.freq_hz, 0, 'f', 0));
-            item->setText(3, qs::finished(e) ? tr("none") : local_and_utc(qs::send_slot(e, e.next)));
-            QString status;
-            if (scheduler_->active() == e.id) {
-                status = tr("Sending");
-            } else if (qs::finished(e)) {
-                status = tr("Done");
-            } else if (!e.enabled) {
-                status = tr("Paused");
-            } else {
-                status = e.next == 0   ? tr("Scheduled")
-                         : e.count > 0 ? tr("%1 of %2 done").arg(e.next).arg(e.count)
-                                       : tr("%1 done").arg(e.next);
-            }
-            item->setText(4, status);
-            if (e.id == selected_entry_) item->setSelected(true);
-        }
-    }
     if (entry_by_id(entries, selected_entry_) == nullptr) selected_entry_.clear();
     select_entry(selected_entry_);
     refresh_timeline();
@@ -933,6 +851,16 @@ QMenu* QrssScheduleWindow::menu_for(const std::string& entry, int send) {
     menu->addSection(e->count == 1 ? label
                                    : tr("%1, send %2").arg(label).arg(send + 1));
 
+    if (!qs::finished(*e)) {
+        // What the scheduled list's Pause and Resume did.
+        QAction* pause = menu->addAction(e->enabled ? tr("Pause") : tr("Resume"));
+        pause->setObjectName(QStringLiteral("menu_pause"));
+        const bool on = !e->enabled;
+        connect(pause, &QAction::triggered, this, [this, id, on] {
+            const std::string why = scheduler_->set_enabled(id, on);
+            if (!why.empty()) show_result(why, {});
+        });
+    }
     QAction* remove = menu->addAction(
         e->count == 1 ? tr("Remove") : tr("Remove all its sends"));
     remove->setObjectName(QStringLiteral("menu_remove"));

@@ -45,7 +45,6 @@ class QPushButton;
 class QScrollArea;
 class QSpinBox;
 class QTimer;
-class QTreeWidget;
 
 namespace sstvae::gui {
 
@@ -99,6 +98,8 @@ public:
     // The menu a right-click on send `send` of `entry` opens. The caller
     // owns it.
     QMenu* menu_for(const std::string& entry, int send);
+    // The entry selected on the timeline ("" for none).
+    const std::string& selected_entry() const { return selected_entry_; }
 
     // Frequency changes (green on the timeline). Each returns empty on
     // success, else why not (also shown in the window).
@@ -125,8 +126,6 @@ private:
     void update_summary();
     void fill_times();
     void add();
-    void set_selected_enabled(bool on);
-    void remove_selected();
     void refresh_sends();
     void refresh_timeline();
     void on_send_selected();
@@ -163,10 +162,6 @@ private:
     QComboBox* every_ = nullptr;
     QLabel* summary_ = nullptr;
     QPushButton* add_ = nullptr;
-    QTreeWidget* table_ = nullptr;
-    QPushButton* pause_ = nullptr;
-    QPushButton* resume_ = nullptr;
-    QPushButton* remove_ = nullptr;
     QTimer* clock_timer_ = nullptr;
 };
 

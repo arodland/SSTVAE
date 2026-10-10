@@ -457,12 +457,12 @@ void test_the_window(const std::filesystem::path& dir) {
     auto* every = w.findChild<QComboBox*>(QStringLiteral("schedule_every"));
     auto* summary = w.findChild<QLabel*>(QStringLiteral("schedule_summary"));
     auto* add = w.findChild<QPushButton*>(QStringLiteral("schedule_add"));
-    auto* table = w.findChild<QTreeWidget*>(QStringLiteral("schedule_table"));
-    const bool all = list && form && mode && freq && count && every && summary && add && table;
+    const bool all = list && form && mode && freq && count && every && summary && add;
     check::is_true(all, "window: every control is there");
     if (!all) return;
-    check::is_true(w.findChild<QListWidget*>(QStringLiteral("schedule_coming")) == nullptr,
-                   "window: the timeline replaces the coming-up list");
+    check::is_true(w.findChild<QListWidget*>(QStringLiteral("schedule_coming")) == nullptr &&
+                       w.findChild<QTreeWidget*>(QStringLiteral("schedule_table")) == nullptr,
+                   "window: the timeline replaces the coming-up and scheduled lists");
     check::equal(list->count(), 2, "window: both Sends listed");
     check::is_true(!form->isEnabled() && !add->isEnabled(),
                    "window: nothing to schedule until a Send is chosen");
@@ -499,7 +499,6 @@ void test_the_window(const std::filesystem::path& dir) {
                    "window: Add schedules the chosen Send as the form says");
     if (s->entries().size() != 1) return;
     const std::string id = s->entries()[0].id;
-    check::equal(table->topLevelItemCount(), 1, "window: and it is listed");
     {
         // What the app finds after a restart: the schedule, its Send and
         // its picture, from disk.
@@ -549,7 +548,7 @@ void test_the_window(const std::filesystem::path& dir) {
     w.select_send(red);
     emit t->blockClicked(QString::fromStdString(id), 1);
     QApplication::processEvents();
-    check::is_true(w.selected_send() == blue && !table->selectedItems().isEmpty(),
+    check::is_true(w.selected_send() == blue && w.selected_entry() == id,
                    "timeline: a click selects the entry and its Send");
 
     // The right-click menu.
@@ -592,6 +591,21 @@ void test_the_window(const std::filesystem::path& dir) {
                    "menu: C fits every 3 hours");
     check::is_true(!w.repeat_every(id, 60).empty() && s->entries()[0].every_min == 180,
                    "menu: but not every hour, and says why");
+
+    // Pause and Resume, which the scheduled list used to have.
+    {
+        menu.reset(w.menu_for(id, 0));
+        QAction* pause = menu->findChild<QAction*>(QStringLiteral("menu_pause"));
+        check::is_true(pause && pause->text() == QStringLiteral("Pause"), "menu: Pause on offer");
+        if (pause) pause->trigger();
+        check::is_true(!s->entries()[0].enabled, "menu: Pause pauses it");
+        menu.reset(w.menu_for(id, 0));
+        pause = menu->findChild<QAction*>(QStringLiteral("menu_pause"));
+        check::is_true(pause && pause->text() == QStringLiteral("Resume"),
+                       "menu: and then Resume");
+        if (pause) pause->trigger();
+        check::is_true(s->entries()[0].enabled, "menu: Resume resumes it");
+    }
 
     // Change Offset moves the carrier of every send, within range.
     menu.reset(w.menu_for(id, 0));
