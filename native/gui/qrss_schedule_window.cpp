@@ -877,7 +877,12 @@ bool QrssScheduleWindow::ask_freq_change(const QString& title, double* at, doubl
     auto* form = new QFormLayout(&dialog);
     auto* when = new QDateTimeEdit(&dialog);
     when->setObjectName(QStringLiteral("freq_change_time"));
+    // setTimeZone arrived in Qt 6.7 and deprecates setTimeSpec there.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+    when->setTimeZone(QTimeZone::utc());
+#else
     when->setTimeSpec(Qt::UTC);
+#endif
     when->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm:ss 'UTC'"));
     when->setDateTime(utc_of(*at));
     form->addRow(tr("When:"), when);
