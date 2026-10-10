@@ -234,6 +234,31 @@ A radio can't listen while it transmits, so the app stops receiving
 during your own passes. It won't hear its own picture. To test, use a
 second receiver.
 
+### You changed frequency during a slot
+
+The app can retune the radio, by hand or on a schedule. After a change
+the radio hears a different stretch of the band, so whatever now sits
+at a signal's audio frequency is somebody else, or nobody. Reading it as
+more of the same picture would mix in rubbish. So the app writes every
+change of the radio's dial to a small file next to the tiles
+(`dial_changes.jsonl`), and the listener reads it:
+
+- The 2 seconds before a change and the 30 seconds after it count as
+  not heard, while the radio switches and perhaps tunes its antenna.
+- While the slot is on the air, its tiles are updated only from what
+  was heard on the dial the slot started on. Everything after the
+  change counts as not heard, as if the audio had stopped.
+- At the end of the slot, each dial's stretch is received on its own.
+  The signals found on the first dial are received as usual. A later
+  stretch gets the whole-slot search only if it covers at least half
+  the slot, the same rule as starting late.
+
+Each tile remembers its dial, so a signal at 1500 Hz on 30 m and one at
+1500 Hz on 20 m are two tiles, never one. The numbers heard before the
+change are not wasted: they are stored like any partial pass and add to
+the picture when it is sent again. Without rig control there is no
+file, and the listener assumes the dial never moved.
+
 ### A voice, a whistle or a nearby carrier
 
 On a busy band, a person talking or a steady tone can look a little like

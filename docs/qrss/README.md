@@ -177,6 +177,17 @@ The command line is editable, and `SSTVAE_QRSS_LISTEN` sets its default.
 While the app transmits, no audio reaches the listener; the gap is
 erased from every pass it touches.
 
+With rig control the app appends the radio's dial to
+`dial_changes.jsonl` in the listener's state directory, one
+`{"t": unix seconds, "dial_hz": Hz}` line at each change and at connect
+(other keys are ignored). A slot's live receives use only what was heard
+on the dial it started on; when the frame ends each dial's part is
+received separately, and a part after a change gets the whole-slot
+search only if it is at least half the slot. 2 s before and 30 s after
+a change count as not heard. Tiles carry `dial_hz` in `state.json`
+(null without the file), and tiles on different dials never merge.
+`qrss_decode.py --retro` does not read the file yet.
+
 From a terminal, with any capture tool:
 
 ```sh

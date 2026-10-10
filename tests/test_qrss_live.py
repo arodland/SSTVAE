@@ -406,8 +406,7 @@ def test_the_end_of_slot_receive_runs_in_its_own_process(tmp_path):
         L._refresh = lambda s: None           # (live receives are not what is tested)
         got = []
         apply = L._finish_apply
-        L._finish_apply = lambda s, passes, heard: (got.append((passes, heard)),
-                                                    apply(s, passes, heard))
+        L._finish_apply = lambda s, results: (got.append(results), apply(s, results))
         with L.lock:
             L.step(t0 + 30.0)                 # the slot starts
             L.step(end)                       # and ends
@@ -429,7 +428,7 @@ def test_the_end_of_slot_receive_runs_in_its_own_process(tmp_path):
         # the same receive in this process gives the same pass
         x, ok, origin = live.capture_read(L.ring, q, TINY)
         here, heard = live.finish_receive(x, ok, origin, q, TINY, cfg.estimator, [])
-        ((there, heard2),) = got
+        ((_, there, heard2),) = got[0]
         assert heard == heard2 and len(here) == len(there) == 1
         assert np.array_equal(here[0].z, there[0].z) and np.array_equal(here[0].w, there[0].w)
         # a child that dies is replaced
@@ -441,6 +440,100 @@ def test_the_end_of_slot_receive_runs_in_its_own_process(tmp_path):
     finally:
         L.close()
     assert L._proc._proc is None
+
+
+def test_the_dial_log_splits_time_into_epochs(tmp_path):
+    """The app's dial file: lines in any order, a bad or half-written line
+    skipped, a repeated dial not a change, the first dial in force before
+    it, DIAL_GUARD_S taken off around each change, re-read on change."""
+    path = tmp_path / live.DIAL_FILE
+    D = live.DialLog(path)
+    D.refresh()
+    assert D.spans(0.0, 100.0) == [(-np.inf, np.inf, None)]
+    assert D.span_at(50.0) == (-np.inf, np.inf, None)
+    lines = [{"t": 1000.0, "dial_hz": 10_140_000, "why": "start"},
+             {"t": 3000.0, "dial_hz": 7_039_000},
+             {"t": 2000.0, "dial_hz": 14_096_000, "why": "menu"},
+             {"t": 1500.0, "dial_hz": 10_140_000, "why": "radio"},     # no change
+             {"t": 2500.0}]
+    path.write_text("\n".join(json.dumps(d) for d in lines) + '\n{"t": 3500.0, "dial')
+    D.refresh()
+    assert D.points == [(1000.0, 10_140_000), (2000.0, 14_096_000), (3000.0, 7_039_000)]
+    g0, g1 = live.DIAL_GUARD_S
+    assert D.span_at(0.0) == (-np.inf, 2000.0 - g0, 10_140_000)          # before the first line
+    assert D.span_at(2010.0) == (2000.0 + g1, 3000.0 - g0, 14_096_000)   # lo after t: settling
+    assert D.span_at(9999.0) == (3000.0 + g1, np.inf, 7_039_000)
+    assert D.spans(1900.0, 2100.0) == [(-np.inf, 2000.0 - g0, 10_140_000),
+                                       (2000.0 + g1, 3000.0 - g0, 14_096_000)]
+    assert D.spans(3100.0, 3200.0) == [(3000.0 + g1, np.inf, 7_039_000)]
+    # the app's 48 h trim replaces the file: read again by path
+    path.write_text(json.dumps({"t": 5000.0, "dial_hz": 3_568_600}) + "\n")
+    D.refresh()
+    assert D.points == [(5000.0, 3_568_600)]
+    path.unlink()
+    D.refresh()
+    assert D.points == []
+
+
+def test_restrict_keeps_only_what_was_heard_on_one_dial():
+    q = Q_TEST
+    t0 = slot_t0(q)
+    origin = 10 * FE_FS
+    ok = np.ones(100 * FE_FS, dtype=bool)
+    ok[50 * FE_FS:55 * FE_FS] = False                 # a hole stays a hole
+    assert live.restrict(ok, origin, q, -np.inf, np.inf) is ok
+    r = live.restrict(ok, origin, q, t0 + 20.0, t0 + 60.0)
+    assert np.flatnonzero(np.diff(r.astype(np.int8))).tolist() == [
+        30 * FE_FS - 1, 50 * FE_FS - 1, 55 * FE_FS - 1, 70 * FE_FS - 1]
+    assert not live.restrict(ok, origin, q, t0 + 200.0, np.inf).any()
+    assert live.same_dial(None, 7_040_000) and not live.same_dial(7_040_000, 14_096_000)
+
+
+def test_a_slot_heard_on_two_dials_is_received_on_each(tmp_path, monkeypatch):
+    """The dial changes twenty seconds into a slot. Live, the slot is
+    received on the dial it started on with everything after the change
+    erased; at its end each dial is received on its own, and a signal at
+    the same audio frequency on the other dial is another tile."""
+    monkeypatch.setattr(live, "DIAL_GUARD_S", (2.0, 2.0))   # (TINY is 53 s: room after it)
+    calls = []
+
+    def detect(prep, spec, live_only=False):
+        return [_Det(1500.0)]
+
+    def receive_slot(prep, spec, live_only=False, estimator="joint", *, erase_s=(),
+                     round_b=True, dets=None, max_candidates=None, budget_s=None):
+        calls.append((round_b, bool(dets), list(erase_s)))
+        return [_Pass(1500.0)]
+
+    monkeypatch.setattr(RX, "detect", detect)
+    monkeypatch.setattr(RX, "receive_slot", receive_slot)
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    q = Q_TEST
+    t0 = slot_t0(q)
+    end = t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S
+    (tmp_path / live.DIAL_FILE).write_text(
+        json.dumps({"t": t0 - 600.0, "dial_hz": 10_138_700, "why": "start"}) + "\n"
+        + json.dumps({"t": t0 + 20.0, "dial_hz": 14_095_600, "why": "schedule"}) + "\n")
+    start = t0 - frontend.PB_LEAD_S - 1.0
+    L.feed(np.zeros(int((end + 5 - start) * FS)), end + 5)
+    L.step(t0 + 30.0)
+    (tile,) = L.tiles()
+    assert tile.dial_hz == 10_138_700
+    ((round_b, dets, erase),) = calls
+    assert not round_b and dets and erase[0] == (18.0, live.frame_seconds(TINY) + frontend.PB_TAIL_S)
+    calls.clear()
+    L.step(end + 0.5)
+    assert q in L.finished
+    assert [c[:2] for c in calls] == [(True, True), (True, False)]   # its signal; then a search
+    assert calls[0][2][0][0] == 18.0 and calls[1][2][0] == (-frontend.PB_LEAD_S, 22.0)
+    tiles = sorted(L.tiles(), key=lambda t: t.dial_hz)
+    assert [t.dial_hz for t in tiles] == [10_138_700, 14_095_600]
+    assert all(t.status == "complete" and t.f_hz == 1500.0 for t in tiles)
+    assert any("on 2 dials" in s for s in L.lines)
+    L.write_state()
+    st = json.loads((tmp_path / "state.json").read_text())
+    assert sorted(t["dial_hz"] for t in st["tiles"]) == [10_138_700, 14_095_600]
 
 
 def test_a_restarted_listener_reads_the_preamble_back(tmp_path):

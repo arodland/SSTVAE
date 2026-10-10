@@ -84,6 +84,8 @@ FINISH_BUDGET_S = 180.0           # ...for at most this long (a false one costs 
 HEADERLESS_MAX_SNR_DB = -6.0      # a pass this strong whose header did not decode is not QRSSTVAE
 RECOVER_HOURS = 3.0               # a restarted listener finishes slots that ended this recently
 GUESS_NOTE = "no header yet: picture assumes the first pass of a mode A send"
+DIAL_FILE = "dial_changes.jsonl"  # the radio's dial over time, in the state directory
+DIAL_GUARD_S = (2.0, 30.0)        # unheard before and after a dial change (settling, a tune)
 
 
 def utc_iso(t: float) -> str:
@@ -256,6 +258,9 @@ def finish_receive(x, ok, origin: int, q: int, spec: FrameSpec, estimator: str,
     slot. With less heard, only `dets`, the signals already found on the
     preamble, are received.
     """
+    k1 = min(len(ok), origin + int(round(frame_seconds(spec) * FE_FS)))
+    if not ok[origin:k1].any() or (not dets and np.mean(ok[origin:k1]) < FINISH_SEARCH_MIN_HEARD):
+        return [], float(np.mean(ok[origin:k1])) if k1 > origin else 0.0   # nothing to receive
     prep, erase, heard = capture_prepare(x, ok, origin, q, spec)
     passes = []
     if heard >= FINISH_SEARCH_MIN_HEARD:
@@ -347,6 +352,113 @@ def _finish_process_main(conn) -> None:
         conn.send(out)
 
 
+# --- the radio's dial ----------------------------------------------------------------------
+
+class DialLog:
+    """The radio's dial frequency over time, from DIAL_FILE in the state
+    directory, which the app writes: one {"t": unix seconds, "dial_hz": Hz}
+    per line, appended at every change it makes or sees on the rig readout
+    and once when rig control connects (extra keys are ignored, and so is
+    a line that does not parse, such as one still being written).
+
+    A change splits a slot's audio into dial epochs: what was heard on one
+    dial says nothing about a signal heard on another, and a signal
+    tracked across a change would read whatever sits at its audio
+    frequency on the new band as its own picture numbers. Each epoch is
+    received on its own (`spans`), DIAL_GUARD_S around every change
+    counting as unheard. With no file (no rig control) the dial is
+    unknown and nothing is split. The first line's dial is taken to have
+    been in force before it: connecting is not a change.
+    """
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self._sig = None
+        self.points: list[tuple[float, int]] = []    # (time, dial) at the start of each epoch
+
+    def refresh(self) -> None:
+        """Re-read the file if it changed."""
+        try:
+            st = self.path.stat()
+        except OSError:
+            self._sig, self.points = None, []
+            return
+        sig = (st.st_mtime_ns, st.st_size)
+        if sig == self._sig:
+            return
+        try:
+            text = self.path.read_text(errors="replace")
+        except OSError:
+            return
+        self._sig = sig
+        pts = []
+        for line in text.splitlines():
+            try:
+                d = json.loads(line)
+                t, hz = float(d["t"]), int(round(float(d["dial_hz"])))
+            except (ValueError, KeyError, TypeError, IndexError):
+                continue
+            if math.isfinite(t) and hz > 0:
+                pts.append((t, hz))
+        pts.sort(key=lambda p: p[0])
+        out: list[tuple[float, int]] = []
+        for t, hz in pts:
+            if not out or out[-1][1] != hz:
+                out.append((t, hz))
+        self.points = out
+
+    def spans(self, a: float, b: float) -> list[tuple[float, float, int | None]]:
+        """(lo, hi, dial) for each dial in force at some time in [a, b), in
+        time order: heard on that dial from lo to hi, unix seconds (-inf or
+        inf where no change bounds it), DIAL_GUARD_S already taken off
+        around each change; [(-inf, inf, None)] when the dial is unknown."""
+        pts = self.points
+        if not pts:
+            return [(-math.inf, math.inf, None)]
+        out = []
+        for i, (t, hz) in enumerate(pts):
+            start = -math.inf if i == 0 else t
+            end = pts[i + 1][0] if i + 1 < len(pts) else math.inf
+            if end <= a or start >= b:
+                continue
+            lo = start + DIAL_GUARD_S[1] if i else -math.inf
+            hi = end - DIAL_GUARD_S[0] if i + 1 < len(pts) else math.inf
+            if hi > lo:
+                out.append((lo, hi, hz))
+        return out
+
+    def span_at(self, t: float) -> tuple[float, float, int | None]:
+        """`spans` for the dial in force at time t (its guard included, so lo
+        can lie after t when t is just after a change)."""
+        pts = self.points
+        if not pts:
+            return (-math.inf, math.inf, None)
+        i = max(0, int(np.searchsorted([p[0] for p in pts], t, side="right")) - 1)
+        lo = pts[i][0] + DIAL_GUARD_S[1] if i else -math.inf
+        hi = pts[i + 1][0] - DIAL_GUARD_S[0] if i + 1 < len(pts) else math.inf
+        return (lo, hi, pts[i][1])
+
+
+def same_dial(a: int | None, b: int | None) -> bool:
+    """Whether two dials can be the same one: equal, or either unknown (a
+    tile found before rig control connected, or with none)."""
+    return a is None or b is None or a == b
+
+
+def restrict(ok: np.ndarray, origin: int, q: int, lo: float, hi: float) -> np.ndarray:
+    """`capture_read`'s written mask, less everything outside [lo, hi) (unix s)."""
+    if lo == -math.inf and hi == math.inf:
+        return ok
+    t0 = slot_t0(q)
+    k_lo = 0 if lo == -math.inf else origin + int(math.ceil((lo - t0) * FE_FS))
+    k_hi = len(ok) if hi == math.inf else origin + int(math.ceil((hi - t0) * FE_FS))
+    out = np.zeros_like(ok)
+    a, b = max(0, k_lo), min(len(ok), k_hi)
+    if b > a:
+        out[a:b] = ok[a:b]
+    return out
+
+
 # --- tiles -----------------------------------------------------------------------------------
 
 @dataclass
@@ -357,6 +469,7 @@ class Tile:
     slot_utc: str
     frame: str
     f_hz: float                     # audio Hz at t0
+    dial_hz: int | None = None      # the radio's dial while it was heard (None: unknown)
     status: str = "receiving"       # receiving | complete | lost
     snr_db: float | None = None     # SNR in 2500 Hz
     z_ref: float | None = None
@@ -471,6 +584,7 @@ class LiveListener:
         self.store = store
         self.passband = passband
         self.ring = FeRing(frame_seconds(self.cfg.spec) + PB_LEAD_S + PB_TAIL_S + 300.0)
+        self.dial = DialLog(self.dir / DIAL_FILE)
         self.fe = StreamFE()
         self._early: collections.deque = collections.deque()
         self.slots: dict[int, SlotState] = {}
@@ -741,24 +855,28 @@ class LiveListener:
         return self._finish_idle() and (self._jobs is None or (self._busy["live"] is None
                                                                and self._jobs.empty()))
 
-    def _match(self, s: SlotState, f_hz: float) -> Tile | None:
+    def _match(self, s: SlotState, f_hz: float, dial: int | None = None) -> Tile | None:
+        """The tile of slot s at audio f_hz on the same dial (never one heard on another)."""
         best = None
         for t in s.tiles.values():
-            if abs(t.f_hz - f_hz) < MERGE_HZ and (best is None or
-                                                 abs(t.f_hz - f_hz) < abs(best.f_hz - f_hz)):
+            if same_dial(t.dial_hz, dial) and abs(t.f_hz - f_hz) < MERGE_HZ and (
+                    best is None or abs(t.f_hz - f_hz) < abs(best.f_hz - f_hz)):
                 best = t
         return best
 
-    def _tile_for(self, s: SlotState, f_hz: float) -> Tile:
-        t = self._match(s, f_hz)
+    def _tile_for(self, s: SlotState, f_hz: float, dial: int | None = None) -> Tile:
+        t = self._match(s, f_hz, dial)
         if t is None:
             tid = f"{s.q}-{int(round(f_hz))}"
             while tid in s.tiles:
                 tid += "b"
             t = Tile(id=tid, q=s.q, slot_utc=utc_iso(slot_t0(s.q) - 1), frame=self.cfg.spec.name,
-                     f_hz=float(f_hz), updated=self.now)
+                     f_hz=float(f_hz), dial_hz=dial, updated=self.now)
             s.tiles[tid] = t
-            self.log(f"slot {t.slot_utc}: signal at {f_hz:.1f} Hz")
+            on = "" if dial is None else f" (dial {dial / 1e6:.6f} MHz)"
+            self.log(f"slot {t.slot_utc}: signal at {f_hz:.1f} Hz{on}")
+        elif t.dial_hz is None:
+            t.dial_hz = dial          # found before the dial was known (rig control connected)
         return t
 
     def _refresh(self, s: SlotState) -> None:
@@ -766,12 +884,16 @@ class LiveListener:
         t_start = time.time()
         t0 = slot_t0(s.q)
         with self.lock:
-            _, ok = self.ring.read(t0 * FE_FS, (t0 + PREAMBLE_S) * FE_FS)
-            if ok.mean() < 0.5:
-                return      # joined after its preamble: only the end-of-slot search can find it
-            raw = capture_read(self.ring, s.q, spec)
+            x, ok, origin = capture_read(self.ring, s.q, spec)
             elapsed = self.now - t0
-        prep, erase, heard = capture_prepare(*raw, s.q, spec)
+            self.dial.refresh()
+            lo, hi, dial = self.dial.span_at(t0)
+        # live, a slot is received on the dial it started on: anything heard
+        # on another counts as not heard
+        ok = restrict(ok, origin, s.q, lo, hi)
+        if ok[origin:origin + PREAMBLE_S * FE_FS].mean() < 0.5:
+            return          # joined after its preamble: only the end-of-slot search can find it
+        prep, erase, heard = capture_prepare(x, ok, origin, s.q, spec)
         if elapsed < self.cfg.detect_until_s or not s.dets:
             found = receiver.detect(prep, spec, live_only=True)
             for d in found:      # keep one detection per signal, the newest
@@ -784,10 +906,10 @@ class LiveListener:
             if s.done:
                 return
             for p in passes:
-                p = self._known_header(s, p)
-                if not self._plausible(s, p):
+                p = self._known_header(s, p, dial)
+                if not self._plausible(s, p, dial):
                     continue
-                t = self._tile_for(s, p.f_hz)
+                t = self._tile_for(s, p.f_hz, dial)
                 self._update_tile(t, p, heard)
                 t.status = "receiving"
                 self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: {len(passes)} signal(s) at "
@@ -799,48 +921,66 @@ class LiveListener:
         accumulator."""
         spec = self.cfg.spec
         t_start = time.time()
+        t0 = slot_t0(s.q)
         with self.lock:
             x, ok, origin = capture_read(s.reader or self.ring, s.q, spec)
             dets = list(s.dets)
-        args = (x, ok, origin, s.q, spec, self.cfg.estimator, dets)
-        if self._proc is not None:
-            passes, heard = self._proc.call(args)
-        else:
-            passes, heard = finish_receive(*args)
+            self.dial.refresh()
+            spans = self.dial.spans((t0 * FE_FS - origin) / FE_FS,
+                                    t0 + frame_seconds(spec) + PB_TAIL_S)
+            first = self.dial.span_at(t0)
+        results = []
+        # one receive per dial the slot was heard on, each with the others
+        # erased; the preamble's detections belong to the dial it started on
+        for lo, hi, dial in spans:
+            args = (x, restrict(ok, origin, s.q, lo, hi), origin, s.q, spec, self.cfg.estimator,
+                    dets if (lo, hi, dial) == first else [])
+            if self._proc is not None:
+                passes, heard = self._proc.call(args)
+            else:
+                passes, heard = finish_receive(*args)
+            results.append((dial, passes, heard))
         with self.lock:
-            self._finish_apply(s, passes, heard)
+            self._finish_apply(s, results)
+            n = sum(len(p) for _, p, _ in results)
+            heard = max((h for _, _, h in results), default=0.0)
             what = "" if heard >= FINISH_SEARCH_MIN_HEARD else \
                 f", {100 * heard:.0f}% heard: no whole-slot search"
+            if len(results) > 1:
+                what += f", on {len(results)} dials"
             if s.reader is not None:
                 what += ", from the passband store"
-            self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: frame over, {len(passes)} pass(es)"
+            self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: frame over, {n} pass(es)"
                      f"{what} ({time.time() - t_start:.0f} s)")
 
-    def _finish_apply(self, s: SlotState, passes, heard: float) -> None:
+    def _finish_apply(self, s: SlotState, results) -> None:
+        """results: (dial, passes, share heard) for each dial the slot was heard on."""
         s.done = True
-        passes = [self._known_header(s, p) for p in passes]
-        passes = [p for p in passes if self._plausible(s, p)]
         seen = set()
-        for p in passes:
-            t = self._tile_for(s, p.f_hz)
-            seen.add(t.id)
-            key = None
-            if self.store is not None:
-                from .associate import associate
+        for dial, passes, heard in results:
+            passes = [self._known_header(s, p, dial) for p in passes]
+            passes = [p for p in passes if self._plausible(s, p, dial)]
+            for p in passes:
+                t = self._tile_for(s, p.f_hz, dial)
+                seen.add(t.id)
+                key = None
+                if self.store is not None:
+                    from .associate import associate
 
-                try:
-                    key, rule = associate(p, self.store)
-                    t.note = f"stored ({rule or 'already a member'})" if key else "stored (provisional)"
-                except Exception as e:         # never lose the tile over the store
-                    t.note = f"store failed: {e}"
-            self._update_tile(t, p, heard, key=key)
-            t.status = "complete"
+                    try:
+                        key, rule = associate(p, self.store)
+                        t.note = (f"stored ({rule or 'already a member'})" if key
+                                  else "stored (provisional)")
+                    except Exception as e:         # never lose the tile over the store
+                        t.note = f"store failed: {e}"
+                self._update_tile(t, p, heard, key=key)
+                t.status = "complete"
         for tid, t in s.tiles.items():
             if tid not in seen:
                 t.status = "lost"
                 t.updated = self.now
 
-    def _known_header(self, s: SlotState, p: PassResult) -> PassResult:
+    def _known_header(self, s: SlotState, p: PassResult, dial: int | None = None) -> PassResult:
         """p, with the header its signal decoded at an earlier receive when
         this one did not decode it.
 
@@ -852,7 +992,7 @@ class LiveListener:
         """
         if p.header is not None:
             return p
-        t = self._match(s, p.f_hz)
+        t = self._match(s, p.f_hz, dial)
         h = self._headers.get(t.id) if t is not None else None
         if h is None:
             return p
@@ -860,7 +1000,7 @@ class LiveListener:
         p.header = h
         return p
 
-    def _plausible(self, s: SlotState, p: PassResult) -> bool:
+    def _plausible(self, s: SlotState, p: PassResult, dial: int | None = None) -> bool:
         """Whether a pass is worth a tile (and the store).
 
         A pass needs a finite frequency inside the band receivers search.
@@ -890,7 +1030,8 @@ class LiveListener:
             return False
         others = [t for q, o in self.slots.items() if abs(q - s.q) == 1 for t in o.tiles.values()]
         others += [t for t in self.done_tiles if abs(t.q - s.q) == 1]
-        return not any(t.callsign and abs(t.f_hz - f) < receiver.GHOST_HZ for t in others)
+        return not any(t.callsign and same_dial(t.dial_hz, dial)
+                       and abs(t.f_hz - f) < receiver.GHOST_HZ for t in others)
 
     def _update_tile(self, t: Tile, p: PassResult, heard: float, key=None) -> None:
         r = p.report
@@ -1124,5 +1265,5 @@ def run(listener: LiveListener, source, *, realtime: bool, stop=None) -> None:
 
 
 __all__ = ["StreamFE", "FeRing", "slot_capture", "capture_read", "capture_prepare",
-           "finish_receive", "Tile", "LiveConfig", "LiveListener",
+           "finish_receive", "DialLog", "same_dial", "restrict", "Tile", "LiveConfig", "LiveListener",
            "StdinSource", "WavSource", "run", "frame_seconds", "utc_iso"]
