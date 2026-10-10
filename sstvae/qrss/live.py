@@ -75,6 +75,10 @@ EARLY_WINDOW_S = 30.0             # ...when audio has run ahead of the clock thi
 RING_S = 2100.0                   # FE kept in memory: a FULL slot, its margins and slack
 MERGE_HZ = receiver.MERGE_HZ      # a detection this close to a tile is that tile
 PREAMBLE_S = 20                   # the preamble's span after t0 (660 symbols, 20.0 s)
+FINISH_SEARCH_MIN_HEARD = 0.5     # the end-of-slot search over the whole slot needs this much heard
+FINISH_MAX_CANDIDATES = 12        # ...and verifies at most this many candidates
+FINISH_BUDGET_S = 180.0           # ...for at most this long (a false one costs ~1 min)
+HEADERLESS_MAX_SNR_DB = -6.0      # a pass this strong whose header did not decode is not QRSSTVAE
 
 
 def utc_iso(t: float) -> str:
@@ -253,6 +257,7 @@ class SlotState:
     tiles: dict = field(default_factory=dict)     # id -> Tile
     last_refresh: float | None = None
     done: bool = False
+    finishing: bool = False         # the end-of-slot receive is queued or running
 
 
 @dataclass
@@ -266,6 +271,10 @@ class LiveConfig:
     precision: str = "fp32"
     model: str | None = None
     render: bool = True
+    # Receive on a worker thread, so the loop keeps taking audio and
+    # writing state.json while a receive runs (minutes on a busy band).
+    # Off for tests, which step the listener synchronously.
+    background: bool = False
 
 
 def dir_lock(path):
@@ -321,6 +330,15 @@ class LiveListener:
         self.source = ""
         self.lines: list[str] = []
         self._log = log or (lambda m: print(m, file=sys.stderr, flush=True))
+        # Everything but the receivers' own arithmetic happens under this
+        # lock; a worker job takes it to copy its capture and to apply what
+        # it found, never while it computes.
+        self.lock = threading.RLock()
+        self.busy: str | None = None       # what the worker is doing, for state.json
+        self._jobs: queue.Queue | None = None
+        if self.cfg.background:
+            self._jobs = queue.Queue()
+            threading.Thread(target=self._worker, daemon=True).start()
         self._load_previous()
 
     # -- logging and state ------------------------------------------------------------
@@ -338,6 +356,8 @@ class LiveListener:
             return
         for t in st.get("tiles", []):
             if t.get("status") != "receiving":
+                if not t.get("callsign") and (t.get("snr_db") or -99.0) > HEADERLESS_MAX_SNR_DB:
+                    continue           # kept by an older listener; see _plausible
                 try:
                     self.done_tiles.append(Tile(**{k: t[k] for k in Tile.__dataclass_fields__
                                                    if k in t}))
@@ -356,7 +376,7 @@ class LiveListener:
             slots=[dict(q=q, slot_utc=utc_iso(slot_t0(q) - 1),
                         progress=self._progress(q), signals=len(s.tiles))
                    for q, s in sorted(self.slots.items())],
-            codec_error=self.codec_error,
+            codec_error=self.codec_error, busy=self.busy,
             tiles=[t.to_json() for t in self.tiles()],
             log=self.lines[-20:])
         tmp = self.dir / f"state.json.{os.getpid()}.tmp"
@@ -426,13 +446,16 @@ class LiveListener:
             if s.done:
                 continue
             if now >= t0 + dur + PB_TAIL_S:
-                self._finish(s)
-                changed = True
+                if not s.finishing:
+                    s.finishing = True
+                    self._submit(self._finish, s)
+                    changed = True
             elif now >= t0 + self.cfg.first_s and (
                     s.last_refresh is None or now - s.last_refresh >= self.cfg.refresh_s):
-                s.last_refresh = now
-                self._refresh(s)
-                changed = True
+                if self._jobs is None or (self.busy is None and self._jobs.empty()):
+                    s.last_refresh = now     # (when busy, it is still due next time)
+                    self._submit(self._refresh, s)
+                    changed = True
         for q in [q for q, s in self.slots.items() if s.done]:
             self.done_tiles.extend(self.slots.pop(q).tiles.values())
             self.finished.add(q)
@@ -440,6 +463,31 @@ class LiveListener:
         changed |= len(keep) != len(self.done_tiles)
         self.done_tiles = keep
         return changed
+
+    # -- the worker -----------------------------------------------------------------------
+
+    def _submit(self, job, s: SlotState) -> None:
+        if self._jobs is None:
+            job(s)
+        else:
+            self._jobs.put((job, s))
+
+    def _worker(self) -> None:
+        while True:
+            job, s = self._jobs.get()
+            self.busy = f"{job.__name__.strip('_')} {utc_iso(slot_t0(s.q) - 1)}"
+            try:
+                job(s)
+            except Exception as e:       # one bad slot must not stop the listener
+                with self.lock:
+                    self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: {type(e).__name__}: {e}")
+                    s.done = True
+            finally:
+                self.busy = None
+
+    def idle(self) -> bool:
+        """No receive queued or running."""
+        return self._jobs is None or (self.busy is None and self._jobs.empty())
 
     def _match(self, s: SlotState, f_hz: float) -> Tile | None:
         best = None
@@ -465,11 +513,12 @@ class LiveListener:
         spec = self.cfg.spec
         t_start = time.time()
         t0 = slot_t0(s.q)
-        _, ok = self.ring.read(t0 * FE_FS, (t0 + PREAMBLE_S) * FE_FS)
-        if ok.mean() < 0.5:
-            return          # joined after its preamble: only the end-of-slot search can find it
-        prep, erase, heard = slot_capture(self.ring, s.q, spec)
-        elapsed = self.now - t0
+        with self.lock:
+            _, ok = self.ring.read(t0 * FE_FS, (t0 + PREAMBLE_S) * FE_FS)
+            if ok.mean() < 0.5:
+                return      # joined after its preamble: only the end-of-slot search can find it
+            prep, erase, heard = slot_capture(self.ring, s.q, spec)
+            elapsed = self.now - t0
         if elapsed < self.cfg.detect_until_s or not s.dets:
             found = receiver.detect(prep, spec, live_only=True)
             for d in found:      # keep one detection per signal, the newest
@@ -478,23 +527,51 @@ class LiveListener:
             return
         passes = receiver.receive_slot(prep, spec, estimator=self.cfg.estimator, erase_s=erase,
                                        round_b=False, dets=list(s.dets))
-        for p in passes:
-            if not self._plausible(s, p):
-                continue
-            t = self._tile_for(s, p.f_hz)
-            self._update_tile(t, p, heard)
-            t.status = "receiving"
-        self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: {len(passes)} signal(s) at "
-                 f"{100 * self._progress(s.q):.0f}% ({time.time() - t_start:.0f} s)")
+        with self.lock:
+            if s.done:
+                return
+            for p in passes:
+                if not self._plausible(s, p):
+                    continue
+                t = self._tile_for(s, p.f_hz)
+                self._update_tile(t, p, heard)
+                t.status = "receiving"
+                self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: {len(passes)} signal(s) at "
+                     f"{100 * self._progress(s.q):.0f}% ({time.time() - t_start:.0f} s)")
 
     def _finish(self, s: SlotState) -> None:
-        """The frame is over: receive the whole slot, store, render the accumulator."""
+        """The frame is over: receive the whole slot, store, render the accumulator.
+
+        The search over the whole slot (for signals too weak to see on the
+        preamble) runs only when most of the slot was heard, and verifies
+        at most FINISH_MAX_CANDIDATES candidates for FINISH_BUDGET_S,
+        strongest first: on a phone band, voices and carriers make
+        candidates that each cost about a minute to reject, and the search
+        ran for longer than a slot. With less heard, only the
+        signals already found on the preamble are received.
+        """
         spec = self.cfg.spec
+        t_start = time.time()
+        with self.lock:
+            prep, erase, heard = slot_capture(self.ring, s.q, spec)
+            dets = list(s.dets)
+        passes = []
+        if heard >= FINISH_SEARCH_MIN_HEARD:
+            passes = receiver.receive_slot(prep, spec, estimator=self.cfg.estimator,
+                                           erase_s=erase, max_candidates=FINISH_MAX_CANDIDATES,
+                                           budget_s=FINISH_BUDGET_S)
+        elif dets and heard > 0.0:
+            passes = receiver.receive_slot(prep, spec, estimator=self.cfg.estimator,
+                                           erase_s=erase, dets=dets)
+        with self.lock:
+            self._finish_apply(s, passes, heard)
+            what = "" if heard >= FINISH_SEARCH_MIN_HEARD else \
+                f", {100 * heard:.0f}% heard: no whole-slot search"
+            self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: frame over, {len(passes)} pass(es)"
+                     f"{what} ({time.time() - t_start:.0f} s)")
+
+    def _finish_apply(self, s: SlotState, passes, heard: float) -> None:
         s.done = True
-        prep, erase, heard = slot_capture(self.ring, s.q, spec)
-        if heard <= 0.0:
-            return
-        passes = receiver.receive_slot(prep, spec, estimator=self.cfg.estimator, erase_s=erase)
         passes = [p for p in passes if self._plausible(s, p)]
         seen = set()
         for p in passes:
@@ -515,7 +592,6 @@ class LiveListener:
             if tid not in seen:
                 t.status = "lost"
                 t.updated = self.now
-        self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: frame over, {len(passes)} pass(es)")
 
     def _plausible(self, s: SlotState, p: PassResult) -> bool:
         """Whether a pass is worth a tile (and the store).
@@ -526,13 +602,20 @@ class LiveListener:
         hours), whose carriers the whole-slot search can lock onto at the
         wrong timing: a headerless pass within GHOST_HZ of a tile of
         another slot that did decode its header is taken to be that
-        signal, and dropped.
+        signal, and dropped. A headerless pass stronger than
+        HEADERLESS_MAX_SNR_DB is dropped too.
         """
         f = float(p.f_hz)
         if not (math.isfinite(f) and CARRIER_BAND_HZ[0] <= f <= CARRIER_BAND_HZ[1]):
             return False
         if p.header is not None:
             return True
+        # A header decodes far below this SNR, so a pass this strong
+        # without one is something else locked on (a carrier, a birdie, a
+        # voice on a phone band), not a QRSSTVAE signal.
+        snr = float(p.report.snr2500_db)
+        if not math.isfinite(snr) or snr > HEADERLESS_MAX_SNR_DB:
+            return False
         others = [t for q, o in self.slots.items() if q != s.q for t in o.tiles.values()]
         others += [t for t in self.done_tiles if t.q != s.q]
         return not any(t.callsign and abs(t.f_hz - f) < receiver.GHOST_HZ for t in others)
@@ -706,19 +789,31 @@ def run(listener: LiveListener, source, *, realtime: bool, stop=None) -> None:
     for x, t_end in source.chunks():
         if stop is not None and stop.is_set():
             break
-        if x is not None:
-            listener.feed(x, t_end)
-        now = time.time() if realtime else (listener.audio_end or 0.0)
-        if now and (listener.step(now) or time.time() - last_write > 2.0):
-            listener.write_state()
-            last_write = time.time()
+        if not realtime:
+            while not listener.idle():      # a replay waits for its receives
+                time.sleep(0.05)
+        with listener.lock:
+            if x is not None:
+                listener.feed(x, t_end)
+            now = time.time() if realtime else (listener.audio_end or 0.0)
+            if now and (listener.step(now) or time.time() - last_write > 2.0):
+                listener.write_state()
+                last_write = time.time()
     if not realtime and listener.audio_end is not None:
-        ends = [slot_t0(q) + frame_seconds(listener.cfg.spec) + PB_TAIL_S + 1.0
-                for q in listener.slots]
-        if ends:
-            listener.step(max(max(ends), listener.audio_end))
-    listener.log("audio ended")
-    listener.write_state(listening=False)
+        while not listener.idle():
+            time.sleep(0.05)
+        with listener.lock:
+            ends = [slot_t0(q) + frame_seconds(listener.cfg.spec) + PB_TAIL_S + 1.0
+                    for q in listener.slots]
+            if ends:
+                listener.step(max(max(ends), listener.audio_end))
+        while not listener.idle():
+            time.sleep(0.05)
+        with listener.lock:
+            listener.step(listener.now)     # retire the slots the worker finished
+    with listener.lock:
+        listener.log("audio ended")
+        listener.write_state(listening=False)
 
 
 __all__ = ["StreamFE", "FeRing", "slot_capture", "Tile", "LiveConfig", "LiveListener",

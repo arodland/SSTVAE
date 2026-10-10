@@ -97,7 +97,7 @@ def main() -> None:
         else:
             passband = frontend.PassbandStore(pb)
     cfg = live.LiveConfig(spec=spec, refresh_s=args.refresh, precision=args.precision,
-                          model=args.model, render=not args.no_pictures)
+                          model=args.model, render=not args.no_pictures, background=True)
     listener = live.LiveListener(state, cfg, store=store, passband=passband)
 
     if args.wav is not None:

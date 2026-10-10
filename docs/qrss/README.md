@@ -188,7 +188,19 @@ correct by eye.
 **Limits of the live view**
 
 - A signal that starts before the listener did is not seen live. Its
-  preamble is gone, so only the end-of-slot whole-slot search can find it.
+  preamble is gone, so only the end-of-slot whole-slot search can find
+  it, and that search runs only when at least half the slot was heard.
+- The whole-slot search verifies at most 12 candidates, strongest
+  first, for at most 3 minutes. On a busy phone band, voices and
+  carriers make candidates that each cost about a minute of CPU to
+  reject (measured on voice-like audio). Without these limits the search
+  on Hamlet ran for over 11 minutes. A weak real signal ranked below
+  such candidates can be missed.
+- A pass without a header that is stronger than -6 dB is dropped. A
+  header decodes far below that, so such a pass is a carrier or a voice.
+- Receives run on a worker thread. The listener keeps taking audio and
+  updating `state.json` while one runs, and the window shows what the
+  worker is doing.
 - With continuous audio, each slot's capture also holds half of each
   neighbouring slot's transmissions (FULL frames last two quarter
   hours). The whole-slot search can lock onto a neighbour's carrier at

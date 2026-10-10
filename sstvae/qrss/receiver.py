@@ -49,6 +49,7 @@ slot length.
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from fractions import Fraction
 
@@ -265,13 +266,26 @@ def _ghosts(dets: list[Detection]) -> list[Detection]:
     return out
 
 
-def detect(prep: Prepared, spec: FrameSpec, live_only: bool = False) -> list[Detection]:
-    """Acquisition plus gate V over a prepared capture: verified detections."""
+def detect(prep: Prepared, spec: FrameSpec, live_only: bool = False,
+           max_candidates: int | None = None, budget_s: float | None = None) -> list[Detection]:
+    """Acquisition plus gate V over a prepared capture: verified detections.
+
+    max_candidates bounds how many candidates go to the gate (preamble
+    hits first, then the strongest of the rest), and budget_s stops
+    verifying new ones after that many seconds; a candidate that is not
+    a signal costs most (about a minute over a whole FULL slot, measured
+    on voice-like audio).
+    """
+    t_end = None if budget_s is None else time.monotonic() + budget_s
     acq = acquire.acquire(frontend.Capture(prep.fe, prep.q, prep.t0_index, prep.fs), spec,
                           live_only=live_only, preprocessed=True)
     cands = acq.detections(spec)
+    if max_candidates is not None:
+        cands = cands[:max_candidates]
     found: list[Detection] = []
     for d in cands:
+        if t_end is not None and time.monotonic() > t_end:
+            break
         if any(abs(d.f_hz - g.f_hz) < MERGE_HZ for g in found):
             continue
         chan = channel_for(prep, spec, d)
@@ -291,16 +305,19 @@ def detect(prep: Prepared, spec: FrameSpec, live_only: bool = False) -> list[Det
 
 def receive_slot(cap, spec: FrameSpec = FULL, live_only: bool = False,
                  estimator: str = "joint", *, erase_s=(), round_b: bool = True,
-                 dets: list[Detection] | None = None) -> list[PassResult]:
+                 dets: list[Detection] | None = None,
+                 max_candidates: int | None = None,
+                 budget_s: float | None = None) -> list[PassResult]:
     """A1 -> A2 (+ A3) -> V -> receive_pass for every signal in a stored slot.
 
     erase_s and round_b go to every `receive_pass`; `dets` skips the
     acquisition and receives those detections instead (the live view
-    reuses the ones it found on the preamble).
+    reuses the ones it found on the preamble). max_candidates and
+    budget_s go to `detect`.
     """
     prep = prepare(cap)
     if dets is None:
-        dets = detect(prep, spec, live_only)
+        dets = detect(prep, spec, live_only, max_candidates, budget_s)
     out: list[PassResult] = []
     for d in dets:
         others = tuple(g.f_hz for g in dets if g is not d)

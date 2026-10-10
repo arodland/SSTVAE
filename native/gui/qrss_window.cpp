@@ -481,6 +481,8 @@ void QrssWindow::reload() {
                           std::lround(100.0 * s.value(QStringLiteral("progress")).toDouble())));
     }
     if (!on_air.isEmpty()) parts << tr("Slots on the air: %1").arg(on_air.join(QStringLiteral(", ")));
+    const QString busy = st.value(QStringLiteral("busy")).toString();
+    if (!busy.isEmpty()) parts << tr("Working on: %1").arg(busy);
     const QString codec_error = st.value(QStringLiteral("codec_error")).toString();
     if (!codec_error.isEmpty()) parts << tr("No pictures: %1").arg(codec_error);
     const QJsonArray log = st.value(QStringLiteral("log")).toArray();

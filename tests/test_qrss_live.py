@@ -109,13 +109,13 @@ class _Det:
 
 
 class _Report:
-    def __init__(self, z):
-        self.snr2500_db, self.z_ref = -12.0, z
+    def __init__(self, z, snr=-12.0):
+        self.snr2500_db, self.z_ref = snr, z
 
 
 class _Pass:
-    def __init__(self, f, z=20.0, header=None, n=TINY.n_data):
-        self.f_hz, self.report, self.header, self.cw = f, _Report(z), header, None
+    def __init__(self, f, z=20.0, header=None, n=TINY.n_data, snr=-12.0):
+        self.f_hz, self.report, self.header, self.cw = f, _Report(z, snr), header, None
         self.uid = f"u{f}"
         self.w = np.ones(n, dtype=np.float32)
         self.z = np.zeros(n, dtype=np.float32)
@@ -131,7 +131,7 @@ def test_slot_bookkeeping_with_a_stub_receiver(tmp_path, monkeypatch):
     freqs = iter([(1500.3, 1611.0), (1501.9, 1609.5), (1500.0, 1610.0)])
 
     def receive_slot(prep, spec, live_only=False, estimator="joint", *, erase_s=(),
-                     round_b=True, dets=None):
+                     round_b=True, dets=None, max_candidates=None, budget_s=None):
         calls.append(("receive", round_b, bool(erase_s)))
         return [_Pass(f) for f in next(freqs)]
 
@@ -179,6 +179,9 @@ def test_implausible_and_neighbour_passes_get_no_tile(tmp_path):
     assert L._plausible(s, _Pass(1560.0))
     assert not L._plausible(s, _Pass(float("inf")))
     assert not L._plausible(s, _Pass(5000.0))
+    # strong enough that its header would have decoded: a carrier or a voice
+    assert not L._plausible(s, _Pass(1560.0, snr=3.1))
+    assert not L._plausible(s, _Pass(1560.0, snr=float("nan")))
 
 
 def test_tiny_slot_half_heard_then_whole(tmp_path):
@@ -250,3 +253,70 @@ def test_atomic_writes_from_two_writers_do_not_collide(tmp_path):
         t.join()
     assert not errors
     assert json.loads(p.read_text())[1] == 299
+
+
+def test_a_slot_mostly_unheard_gets_no_whole_slot_search(tmp_path, monkeypatch):
+    """Joined late (after the preamble, a third of the slot heard): the end
+    of the slot receives only what the preamble found, which here is
+    nothing, rather than searching the slot; on a phone band that search
+    ran for longer than a slot."""
+    calls = []
+    monkeypatch.setattr(RX, "detect", lambda *a, **k: calls.append("detect") or [])
+    monkeypatch.setattr(RX, "receive_slot", lambda *a, **k: calls.append(("receive", k)) or [])
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    q = Q_TEST
+    t0 = slot_t0(q)
+    dur = live.frame_seconds(TINY)
+    late = t0 + 0.65 * dur
+    L.feed(np.zeros(int((t0 + dur + 5 - late) * FS)), t0 + dur + 5)
+    L.step(late)
+    L.step(t0 + dur + frontend.PB_TAIL_S + 0.5)
+    assert q in L.finished and calls == []
+    assert any("no whole-slot search" in s for s in L.lines)
+
+
+def test_receives_run_on_the_worker_and_state_keeps_moving(tmp_path, monkeypatch):
+    """With background on, a slow receive does not hold up feeding or
+    state.json, which says what the worker is doing."""
+    import threading
+    release = threading.Event()
+    started = threading.Event()
+
+    def slow(*a, **k):
+        started.set()
+        release.wait(10)
+        return []
+
+    monkeypatch.setattr(RX, "receive_slot", slow)
+    monkeypatch.setattr(RX, "detect", lambda *a, **k: [])
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False, background=True),
+                          log=lambda m: None)
+    q = Q_TEST
+    t0 = slot_t0(q)
+    end = t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 0.5
+    L.feed(np.zeros(int((end - t0 + 15) * FS)), end)
+    with L.lock:
+        L.step(t0 + 30.0)             # the slot starts (its refresh finds nothing)
+    for _ in range(100):
+        if L.idle():
+            break
+        import time as _t
+        _t.sleep(0.05)
+    with L.lock:
+        L.step(end)
+    assert started.wait(5)
+    with L.lock:                      # the loop can still feed and write state
+        L.feed(np.zeros(FS), end + 1.0)
+        L.write_state()
+    st = json.loads((tmp_path / "state.json").read_text())
+    assert st["busy"] and "finish" in st["busy"]
+    release.set()
+    for _ in range(100):
+        if L.idle():
+            break
+        import time as _t
+        _t.sleep(0.05)
+    with L.lock:
+        L.step(end + 2.0)
+    assert q in L.finished and L.idle()
