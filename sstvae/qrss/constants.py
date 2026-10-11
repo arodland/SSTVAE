@@ -1,4 +1,4 @@
-"""Every on-air constant of QRSSTVAE waveform CE (design section 2.1).
+"""Every on-air constant of QRSSTVAE waveforms CE and L (design section 2.1).
 
 This is a **format module**: what it says is what goes on the air, so
 nothing here may be computed from a seeded random generator, and nothing
@@ -43,7 +43,7 @@ N_HDR_BITS, N_INFO_BITS, POLAR_N = 2474, 142, 2048
 FORMAT_VERSION = 2
 FORMAT_VERSIONS = (1, 2)                     # what a header may say
 SPREAD_RHO = 0.054                           # spread-header power, latent units (spec 5.1)
-WAVEFORM_CE, WAVEFORM_L = 0, 1               # L reserved
+WAVEFORM_CE, WAVEFORM_L = 0, 1               # L: lframe.py, lwave.py (transmitter only)
 LEAD_IN_MAX_S = 10
 
 # --- callsign windows (spec 2.7) ----------------------------------------------
@@ -64,5 +64,28 @@ Z_ACCEPT = 6.0                               # single detection/association gate
 
 Q_EPOCH_NOTE = "q = floor(unix_utc(QH)/900); unix time ignores leap seconds"
 
+# --- waveform L (spec 2, 2.2, 2.7, 2.8; docs/qrss/waveform-l.md) ------------------
+# One linear carrier plus a pilot tone, for SSB rigs. Two latents per complex
+# symbol at half CE's rate, so a pair of latents takes the same 60.625 ms in
+# both waveforms and every frame time (preamble, header, windows, end) agrees.
+L_T_NUM = 2 * T_NUM                          # 970 grid steps: T_L = 0.060625 s
+L_T_SYM = L_T_NUM / T_DEN                    # 16.495 Bd
+L_N_PRE, L_N_HDR = 330, 1320                 # QPSK preamble, header symbols (83 references)
+L_CW_WINDOW = CW_WINDOW // 2                 # 192 L symbols; one Morse unit = one L symbol
+L_CW_AFTER_FULL = tuple(c // 2 for c in CW_AFTER_FULL)   # (6944, 14175, 21406, 28637)
+# The pilot sits 3.1 Hz above the data band's upper edge (1 + alpha) Rs / 2,
+# 12207/970 Hz above the data centre, exactly: a rational keeps the mixing in
+# integer turns. The carrier a sender names is the pilot's frequency.
+L_EDGE_HZ = (1 + ALPHA) * Fraction(T_DEN, L_T_NUM) / 2      # 920/97 = 9.4845 Hz
+L_PILOT_HZ = L_EDGE_HZ + Fraction(31, 10)                   # 12207/970 = 12.5845 Hz
+L_PILOT_FRAC = Fraction(3, 20)               # pilot share of the power before clipping
+# Clip and filter (spec 2.2): SSTVAE's three passes with overshoot, the
+# threshold 0 dB above the nominal RMS envelope, each pass's correction
+# filtered to the occupied band plus a guard.
+L_CLIP_HEADROOM_DB = 0.0
+L_CLIP_OVERSHOOT = (1.0, 1.5, 2.0)
+L_CLIP_GUARD_HZ = 1.0
+
 assert T_DEN % FS == 0 and FE_FS == CH_FS * CH_DECIM  # rates nest
 assert CW_LEAD_UNITS + CW_ROOM_UNITS + CW_LEAD_UNITS == CW_UNITS
+assert L_PILOT_HZ == Fraction(12207, 970) and 2 * L_CW_WINDOW == CW_WINDOW

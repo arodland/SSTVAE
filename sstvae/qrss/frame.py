@@ -52,6 +52,7 @@ from .constants import (
     SPAN,
     SPREAD_RHO,
     T_SYM,
+    WAVEFORM_CE,
 )
 from .sequences import preamble_ce, references_ce, spread_whitener
 
@@ -83,6 +84,9 @@ class FrameSpec:
     # Spread-header power, latent units. None: SPREAD_RHO with a header
     # block, 0 without (format version 2: every block has its spread copy).
     hdr_rho: float | None = None
+
+    waveform = WAVEFORM_CE                   # class attributes, not fields:
+    t_sym = T_SYM                            # `lframe.LFrameSpec` has L's
 
     def __post_init__(self):
         object.__setattr__(self, "cw_after", tuple(int(c) for c in self.cw_after))

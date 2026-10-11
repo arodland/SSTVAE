@@ -44,6 +44,13 @@ section 5.1). The header then survives a lost header block, and on an
 intact pass it decodes 1.6 dB deeper. The design and its measurements
 are in [docs/qrss/spread-header.md](spread-header.md).
 
+Waveform L (a QPSK data band beside a steady pilot, 2.4 times narrower
+than CE) has a transmitter since 2026-10-11 (`qrss_transmit.py
+--waveform L`) and no receiver yet, so it must not go on the air: a
+listener that knows only CE would spend its search on it.
+[docs/qrss/waveform-l.md](waveform-l.md) says what L gives over CE, what
+running CE taught us, and what decoding both in one window costs.
+
 ## Status
 
 **Everything here has been verified in simulation only.** Nothing has

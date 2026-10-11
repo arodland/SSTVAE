@@ -1,5 +1,6 @@
-"""The CE transmit pipeline: slot symbols from a stored picture or a
-beacon file, and the slot's transmit audio (design section 3).
+"""The transmit pipeline: slot symbols from a stored picture or a beacon
+file, and the slot's transmit audio (design section 3), for waveform CE
+(`frame.FrameSpec`, `ce`) and waveform L (`lframe.LFrameSpec`, `lwave`).
 
 A **format module**. A pass of segment g in slot q sends
 
@@ -18,16 +19,17 @@ reproduces what a beacon would send.
 Every transmit path keys the callsign windows (spec 2.7, a legal
 requirement): the keying comes from the header's callsign, or from the
 beacon file's stored mask, and a frame with windows refuses to transmit
-without one.
+without one. Waveform L keys them by FSK of its pilot only: on-off keying
+is CE's option (spec 2.7), so an OOK beacon file or ook=True is refused.
 """
 
 import math
 
 import numpy as np
 
-from . import ce
+from . import ce, lframe, lwave
 from .beaconfile import BeaconFile
-from .constants import FS, T_SYM
+from .constants import CARRIER_BAND_HZ, FS, L_EDGE_HZ, L_PILOT_HZ, WAVEFORM_L
 from .frame import FULL, FrameSpec, assemble
 from .header import HeaderFields, encode
 from .morse import keying_units
@@ -71,10 +73,12 @@ def slot_air_latents(src, segment: int | None = None, use_int8: bool | None = No
     return from_int8(to_int8(air)) if use_int8 else air
 
 
-def slot_symbols(src: StoredPicture | BeaconFile, q: int, spec: FrameSpec = FULL, *,
+def slot_symbols(src: StoredPicture | BeaconFile, q: int,
+                 spec: FrameSpec | lframe.LFrameSpec = FULL, *,
                  segment: int | None = None, header: HeaderFields | None = None,
                  use_int8: bool | None = None) -> np.ndarray:
-    """float64[spec.n_sym]: the stream symbols of one pass in slot q.
+    """The stream symbols of one pass in slot q: float64[spec.n_sym] for CE,
+    complex128[spec.n_sym] for an L frame.
 
     Data = precode(the first n_data air-order latents, q). The header bits
     come from `header.encode(header)` (a `.qrsp` needs `header` whenever
@@ -88,6 +92,8 @@ def slot_symbols(src: StoredPicture | BeaconFile, q: int, spec: FrameSpec = FULL
     if spec.has_header and bits is None:
         raise ValueError(f"frame {spec.name!r} has a header: pass header= for a .qrsp")
     x = precode(air[:spec.n_data], q)
+    if spec.waveform == WAVEFORM_L:
+        return lframe.assemble(spec, bits if spec.has_header else None, x)
     return assemble(spec, bits if spec.has_header else None, x)
 
 
@@ -101,7 +107,7 @@ def slot_keying(src, header: HeaderFields | None = None) -> np.ndarray | None:
 def slot_samples(spec: FrameSpec, pre_s: float = 12.0, post_s: float = 3.0,
                  fs: int = FS) -> int:
     """Samples in a slot WAV: from t0 - pre_s to the end of keying + post_s."""
-    end_s = spec.keyed_end_pos * T_SYM + post_s
+    end_s = spec.keyed_end_pos * spec.t_sym + post_s
     return int(math.ceil((pre_s + end_s) * fs))
 
 
@@ -118,6 +124,12 @@ def transmit_audio(src, q: int, carrier_hz=1500, *, spec: FrameSpec = FULL,
     Fraction; the mixing is exact in integer turns. Generated in chunks
     so a full slot never holds more than `chunk_s` of complex baseband.
     """
+    if spec.waveform == WAVEFORM_L:
+        if ook:
+            raise ValueError("waveform L keys its callsign windows by FSK of its pilot; "
+                             "on-off keying is waveform CE's option (spec 2.7)")
+        return _transmit_audio_l(src, q, carrier_hz, spec, segment, header, lead_in_s,
+                                 pre_s, post_s, amplitude, chunk_s)
     ce.check_carrier(carrier_hz)
     seg, h, _, keying, file_ook = _segment_and_header(src, segment, header)
     if spec.n_win and keying is None:
@@ -127,9 +139,9 @@ def transmit_audio(src, q: int, carrier_hz=1500, *, spec: FrameSpec = FULL,
     if pre_s * FS != round(pre_s * FS):
         raise ValueError("pre_s must be a whole number of samples at 8 kHz")
     lo, _ = ce.keyed_span_pos(spec, lead_in_s)
-    if -lo * T_SYM + 0.05 > pre_s:
+    if -lo * spec.t_sym + 0.05 > pre_s:
         raise ValueError(f"pre_s = {pre_s} s does not cover the keying start "
-                         f"({-lo * T_SYM:.2f} s before t0 plus the ramp)")
+                         f"({-lo * spec.t_sym:.2f} s before t0 plus the ramp)")
     sym = slot_symbols(src, q, spec, segment=seg, header=h)
     num, den = ce.carrier_fraction(carrier_hz)
     n = slot_samples(spec, pre_s, post_s)
@@ -140,5 +152,51 @@ def transmit_audio(src, q: int, carrier_hz=1500, *, spec: FrameSpec = FULL,
         m = min(step, n - i0)
         z = ce.baseband(sym, spec, FS, (i0 - n_pre) / FS, m, keying=keying, ook=use_ook,
                         lead_in_s=lead_in_s)
+        out[i0:i0 + m] = ce.to_audio(z, FS, num, den, amplitude, n0=i0)
+    return out
+
+
+def check_pilot(carrier_hz) -> float:
+    """An L pilot in Hz, or ValueError when the signal would leave CARRIER_BAND_HZ.
+
+    The carrier an L sender names is its pilot; the data reach
+    f_p + EDGE = 22.07 Hz below it.
+    """
+    f = ce.check_carrier(carrier_hz)
+    low = f - float(L_PILOT_HZ + L_EDGE_HZ)
+    if low < CARRIER_BAND_HZ[0]:
+        raise ValueError(f"an L pilot at {carrier_hz} Hz puts the data down to {low:.1f} Hz, "
+                         f"below the {CARRIER_BAND_HZ[0]:g} Hz receivers search")
+    return f
+
+
+def _transmit_audio_l(src, q, carrier_hz, spec, segment, header, lead_in_s, pre_s,
+                      post_s, amplitude, chunk_s) -> np.ndarray:
+    """`transmit_audio` for an L frame: the whole frame through the clipper
+    (`lwave.frame_baseband`), then 8 kHz in chunks, mixed to the pilot."""
+    check_pilot(carrier_hz)
+    seg, h, _, keying, file_ook = _segment_and_header(src, segment, header)
+    if file_ook:
+        raise ValueError("this beacon file keys its callsign windows on and off, which "
+                         "waveform L does not do: make an FSK one (spec 2.7)")
+    if spec.n_win and keying is None:
+        raise ValueError(f"frame {spec.name!r} has callsign windows: a callsign is "
+                         "required to transmit (spec 2.7); pass header=")
+    if pre_s * FS != round(pre_s * FS):
+        raise ValueError("pre_s must be a whole number of samples at 8 kHz")
+    lo, _ = lwave.keyed_span_pos(spec, lead_in_s)
+    if -lo * spec.t_sym + lwave.KEY_RAMP_S > pre_s:
+        raise ValueError(f"pre_s = {pre_s} s does not cover the keying start "
+                         f"({-lo * spec.t_sym:.2f} s before t0 plus the ramp)")
+    sym = slot_symbols(src, q, spec, segment=seg, header=h)
+    bb = lwave.frame_baseband(sym, spec, keying=keying, lead_in_s=lead_in_s)
+    num, den = ce.carrier_fraction(carrier_hz)
+    n = slot_samples(spec, pre_s, post_s)
+    n_pre = round(pre_s * FS)
+    step = max(1, int(chunk_s * FS))
+    out = np.empty(n, dtype=np.float64)
+    for i0 in range(0, n, step):
+        m = min(step, n - i0)
+        z = lwave.resample(bb, FS, i0 - n_pre, m)
         out[i0:i0 + m] = ce.to_audio(z, FS, num, den, amplitude, n0=i0)
     return out

@@ -116,7 +116,7 @@ def test_cached_sequences_are_read_only():
 
 # Design section 1: modules marked F define what goes on air.
 FORMAT_MODULES = ("constants", "sequences", "precoder", "frame", "morse", "picture",
-                  "header", "polar", "ce", "tx", "beaconfile", "si5351")
+                  "header", "polar", "ce", "tx", "beaconfile", "si5351", "lframe", "lwave")
 # Everything else the design places in sstvae/qrss. A module in neither
 # list fails `test_every_qrss_module_is_classified`, so a new file has to
 # be declared format or not before it can land.

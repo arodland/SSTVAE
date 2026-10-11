@@ -1,6 +1,6 @@
-"""SHA-256 bit streams: the CE preamble, the reference symbols, the
-per-pass scrambler (design section 2.3) and the spread header's whitener
-(spec 5.1).
+"""SHA-256 bit streams: the CE and L preambles, their reference symbols,
+the per-pass scrambler (design section 2.3) and the spread header's
+whitener (spec 5.1).
 
 A **format module**. Every sequence here is closed form over integers --
 SHA-256 of an ASCII domain string, an optional prefix and a big-endian
@@ -11,7 +11,9 @@ format constants"): no seeded generator ever defines what goes on air.
 
 Bit conventions (decision D5): block b is SHA256(domain || prefix ||
 uint32_be(b)); bit i is bit (7 - i%8) of byte (i%256)//8 of block i//256,
-i.e. MSB first; and bit 0 maps to +1, bit 1 to -1.
+i.e. MSB first; and bit 0 maps to +1, bit 1 to -1. Waveform L takes the
+bits in pairs, the first to I and the second to Q, each scaled by 1/sqrt(2)
+(spec 2.3): `qpsk`.
 """
 
 import functools
@@ -21,13 +23,14 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
-from .constants import N_PRE
+from .constants import L_N_PRE, N_PRE
 
 PREAMBLE_DOMAIN = b"QRSSTVAE CE preamble"
 REFERENCE_DOMAIN = b"QRSSTVAE CE reference"
 SCRAMBLE_DOMAIN = b"QRSSTVAE scramble"
 SPREAD_DOMAIN = b"QRSSTVAE CE spread header"   # spec 5.1, format version 2
-L_PREAMBLE_DOMAIN = b"QRSSTVAE L preamble"   # reserved for waveform L
+L_PREAMBLE_DOMAIN = b"QRSSTVAE L preamble"
+L_REFERENCE_DOMAIN = b"QRSSTVAE L reference"
 
 _BITS_PER_BLOCK = 256
 
@@ -74,6 +77,38 @@ def references_ce(n_ref: int) -> np.ndarray:
     shorter frame's references are a prefix of a longer one's.
     """
     return _references(int(n_ref))
+
+
+def qpsk(bits) -> np.ndarray:
+    """complex128: bits 2i and 2i+1 to I and Q of symbol i, 0 -> +1, scaled by 1/sqrt(2)."""
+    b = np.asarray(bits)
+    if b.ndim != 1 or len(b) % 2:
+        raise ValueError(f"qpsk takes an even number of bits, not shape {b.shape}")
+    v = pm1(b).astype(np.float64) / np.sqrt(2.0)
+    return v[0::2] + 1j * v[1::2]
+
+
+@functools.lru_cache(maxsize=None)
+def preamble_l() -> np.ndarray:
+    """The L preamble, L_N_PRE = 330 QPSK symbols (complex128, unit power). Read-only."""
+    out = qpsk(sha_bits(L_PREAMBLE_DOMAIN, 2 * L_N_PRE))
+    out.setflags(write=False)
+    return out
+
+
+@functools.lru_cache(maxsize=8)
+def _references_l(n_ref: int) -> np.ndarray:
+    out = qpsk(sha_bits(L_REFERENCE_DOMAIN, 2 * n_ref))
+    out.setflags(write=False)
+    return out
+
+
+def references_l(n_ref: int) -> np.ndarray:
+    """L reference symbols, complex QPSK; reference m takes bits 2m and 2m+1.
+
+    One stream for the whole frame, header references first, as in CE.
+    """
+    return _references_l(int(n_ref))
 
 
 @functools.lru_cache(maxsize=8)
