@@ -240,6 +240,16 @@ QrssTile::QrssTile(QWidget* parent) : QWidget(parent) {
     details_->setWordWrap(true);
     details_->setFixedWidth(PICTURE_W);
     details_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    // The listener's longer notes ("Saved: ...", errors) in smaller print
+    // still, under the rest (Jeff, 2026-10-11).
+    note_ = new QLabel(this);
+    note_->setObjectName(QStringLiteral("tile_note"));
+    QFont smaller = font();
+    smaller.setPointSizeF(std::max(6.0, smaller.pointSizeF() * 0.68));
+    note_->setFont(smaller);
+    note_->setWordWrap(true);
+    note_->setFixedWidth(PICTURE_W);
+    note_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     // **The bar says it all** (Jeff, 2026-10-10): its length is how far
     // through the pass, its colours how well each stretch came through
     // (missing latents are black); no words, and no second strip.
@@ -252,6 +262,7 @@ QrssTile::QrssTile(QWidget* parent) : QWidget(parent) {
     box->addLayout(title_row);
     box->addWidget(progress_);
     box->addWidget(details_);
+    box->addWidget(note_);
     box->addStretch(1);
     setFixedWidth(WIDTH);
 }
@@ -313,7 +324,8 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
     QString note = t.value(QStringLiteral("note")).toString();
     note.remove(QStringLiteral("; ") + GUESS_NOTE).remove(GUESS_NOTE);
     note = plain_note(note);
-    if (!note.isEmpty()) lines << note;
+    note_->setText(note);
+    note_->setVisible(!note.isEmpty());
     provisional_ = pid.isEmpty();
     details_->setText(lines.join(QLatin1Char('\n')));
 
@@ -342,7 +354,11 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
 
 QString QrssTile::title() const { return title_->text(); }
 QString QrssTile::weight_text() const { return weight_->text(); }
-QString QrssTile::details() const { return details_->text(); }
+QString QrssTile::details() const {
+    return note_->text().isEmpty() ? details_->text()
+                                   : details_->text() + QLatin1Char('\n') + note_->text();
+}
+QString QrssTile::note() const { return note_->text(); }
 bool QrssTile::has_picture() const {
     return !picture_->pixmap().isNull();
 }

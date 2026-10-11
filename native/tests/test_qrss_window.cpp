@@ -140,6 +140,10 @@ void test_tiles_follow_the_state_file() {
     check::is_true(
         a->details().contains(QStringLiteral("Saved: matched to its picture by its header")),
         "qrss/tiles: how it was filed, in words");
+    check::is_true(a->note().startsWith(QStringLiteral("Saved:")) &&
+                       a->findChild<QLabel*>(QStringLiteral("tile_note"))->font().pointSizeF() <
+                           a->findChild<QLabel*>(QStringLiteral("tile_note"))->parentWidget()->font().pointSizeF() * 0.75,
+                   "qrss/tiles: the note in smaller print");
     {
         QJsonObject cw_a = tile_json(QStringLiteral("a"), 1500.0, QStringLiteral("N0CALL"), 0.35,
                                      QStringLiteral("tiles/a.png"), 2);

@@ -203,7 +203,10 @@ public:
     QString title() const;
     // The mean weight shown at the right of the title ("" when unknown).
     QString weight_text() const;
+    // Everything under the bar, the note included.
     QString details() const;
+    // The listener's note, in plain words (smaller print).
+    QString note() const;
     bool has_picture() const;
     int progress_percent() const;
     PassBar* pass_bar() const { return progress_; }
@@ -219,6 +222,7 @@ private:
     QLabel* title_ = nullptr;
     QLabel* weight_ = nullptr;
     QLabel* details_ = nullptr;
+    QLabel* note_ = nullptr;
     PassBar* progress_ = nullptr;
     int image_rev_ = -1;
     bool provisional_ = true;
