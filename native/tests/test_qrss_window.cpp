@@ -140,6 +140,19 @@ void test_tiles_follow_the_state_file() {
     check::is_true(
         a->details().contains(QStringLiteral("Saved: matched to its picture by its header")),
         "qrss/tiles: how it was filed, in words");
+    {
+        QJsonObject cw_a = tile_json(QStringLiteral("a"), 1500.0, QStringLiteral("N0CALL"), 0.35,
+                                     QStringLiteral("tiles/a.png"), 2);
+        cw_a[QStringLiteral("cw_text")] = QStringLiteral("N0CAL");
+        QJsonObject cw_b = tile_json(QStringLiteral("b"), 1550.2, QString(), 0.02, QString(), 0);
+        cw_b[QStringLiteral("cw_text")] = QStringLiteral("K1ABC");
+        write_state(dir.path(), QJsonArray{cw_a, cw_b}, 1'200'000);
+        w.reload();
+        check::is_true(!w.tile(QStringLiteral("a"))->details().contains(QStringLiteral("Morse")) &&
+                           w.tile(QStringLiteral("b"))->details().contains(
+                               QStringLiteral("Morse ID read: K1ABC")),
+                       "qrss/tiles: the Morse ID only while the header's callsign is not decoded");
+    }
 
     // A finished frame whose end-of-slot receive is running.
     {

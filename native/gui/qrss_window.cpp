@@ -295,7 +295,9 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
                           passes == 1 ? tr("1 pass") : tr("%1 passes combined").arg(passes));
     }
     const QString cw = t.value(QStringLiteral("cw_text")).toString();
-    if (!cw.isEmpty() && cw != call) lines << tr("Morse ID read: %1").arg(cw);
+    // Only while the header's callsign is not decoded: once it is, the
+    // Morse ID adds nothing (Jeff, 2026-10-10).
+    if (!cw.isEmpty() && call.isEmpty()) lines << tr("Morse ID read: %1").arg(cw);
     QString state;
     if (status == QStringLiteral("complete")) {
         state = tr("Complete");
