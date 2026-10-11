@@ -217,7 +217,11 @@ been transmitting since :00. You missed the knock and the envelope, so:
   behind the new one that now includes it.
 
 The headers of several weak passes can also be combined, so passes
-that couldn't read their header alone sometimes can together.
+that couldn't read their header alone sometimes can together. A station
+may send different pictures, or the parts of one picture, back to back
+on the same tone, so each pass is checked against the header the
+combination found, and only the passes that really carry it are filed
+under it.
 
 If you start after about :15, you heard less than half the slot and
 the end-of-slot search doesn't run. The audio is still on disk for 48

@@ -438,6 +438,33 @@ def test_rule2_soft_combined_header(store):
     assert store.prov_clusters() == []
 
 
+def test_rule2_files_only_the_passes_that_carry_the_header(store, monkeypatch):
+    """A run on one carrier mixes headers: the segments of a mode B or C
+    picture, or different pictures sent back to back. A sum with a weak
+    pass of another header decodes now and then (to the stronger pass's
+    header); only the passes whose own LLRs carry it are filed by it, and
+    the other goes on to rules 3 and 4."""
+    sp, other = synthetic_picture(17), synthetic_picture(18)
+    ha = make_header(sp, callsign="G4XYZ", grid=None)
+    hb = make_header(other, callsign="G4XYZ", grid=None)
+    a = make_pass_result(_air(sp, 0), 0.05, seed=1, hdr=ha, hdr_es_n0_db=-15.0)
+    b = make_pass_result(_air(other, 0), 0.05, seed=2, hdr=hb, hdr_es_n0_db=-17.0,
+                         q=Q_TEST + 2)
+    assert header.decode(a.hdr_llr) is None and header.decode(b.hdr_llr) is None
+    assert asc.header_agrees(ha, a.hdr_llr) and asc.header_agrees(hb, b.hdr_llr)
+    assert not asc.header_agrees(ha, b.hdr_llr) and not asc.header_agrees(hb, a.hdr_llr)
+    for g in range(1, 3):                 # another segment of the same picture
+        hs = header.HeaderFields(**{**ha.__dict__, "mode": 2, "segment": g})
+        assert not asc.header_agrees(hs, a.hdr_llr)
+    assert asc.header_agrees(ha, np.zeros(2474)) and asc.header_agrees(ha, None)
+    assert asc.associate(a, store) == (None, "prov")
+    # the rare decode: b's sum with a decodes to a's header
+    monkeypatch.setattr(asc, "_soft_header", lambda st, uid, llr: (ha, [uid, a.uid]))
+    assert asc.associate(b, store) == (None, "prov")
+    assert store.accumulator((ha.callsign, ha.picture_id)).uids == [a.uid]
+    assert store.prov_cluster_of(b.uid) is not None and store.find_member(b.uid) is None
+
+
 def test_rule4_provisional_clusters_and_resolution(store):
     """Weak repeats cluster; a later header pass names the cluster and absorbs it."""
     sp, other = synthetic_picture(15), synthetic_picture(16)

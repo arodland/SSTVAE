@@ -49,6 +49,8 @@ high-SNR false matches entirely.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from . import header as _header
@@ -64,6 +66,8 @@ HDR_REJECT_T = 3.0               # rule 1: reject at t < 3 ...
 HDR_REJECT_EXPECT = 8.0          # ... while more than 8 was expected
 PAIR_HZ = 10.0                   # rule 2 pairs: within +-10 Hz ...
 PAIR_DAYS = 7.0                  # ... and 7 days
+HDR_AGREE_Z = 3.0                # rule 2 files a pass only if its own LLRs agree with the header
+HDR_OTHER_FLIP = 0.3             # ... and not another's, which flips at least this share of coded bits
 
 
 def _pair(z, w, m, W):
@@ -211,6 +215,51 @@ def _attach_by_header(store: Store, h, uids, method: str) -> list[str]:
 # --- rule 2 --------------------------------------------------------------------------
 
 
+def header_agrees(h, llr) -> bool:
+    """Whether a pass's own header LLRs carry header h, rather than another.
+
+    Rule 2 sums headers on the premise that every pass summed carries the
+    same one, and a run on one carrier mixes them: a mode B or C picture's
+    segments, or different pictures sent back to back. A near-threshold
+    pass summed with a weak pass of another header still decodes to its
+    own header about 3% of the time (measured: -10.8 dB with -22 dB, 9 of
+    300; 0 of 300 with the two at similar strength), and without this
+    check the weak pass was filed under that header's picture and segment.
+
+    For calibrated BPSK LLRs (log P(0)/P(1)) at per-bit SNR a over n heard
+    bits, T = sum llr * (1 - 2c) has mean 2na and standard deviation
+    2 sqrt(na) on the pass's own codeword c; the receiver's are (T / 2na
+    = 1.01-1.02 on SHORT passes at -12 to -18 dB). Another header's
+    codeword differs in a share f of the coded bits, which takes the mean
+    to (1 - 2f) 2na. f is about 0.5 for another picture and 0.31-0.38 for
+    another mode or segment, and at least 0.31 for any change of callsign,
+    grid, picture ID, mode or segment (measured; only single-bit changes
+    of the codec ID, which codec IDs never differ by, go lower). a comes
+    from mean(llr^2) = 4a + 4a^2. The pass agrees when T is past the
+    midpoint between its own mean and the nearest other header's
+    (f = HDR_OTHER_FLIP), and HDR_AGREE_Z standard deviations above the
+    latter, so a weak pass that cannot tell the two apart is not filed by
+    its header: it stays provisional, and its latents can still match the
+    picture later (rule 3). A pass with no header LLRs (joined after its
+    header) has nothing to disagree with and agrees.
+    """
+    if llr is None:
+        return True
+    llr = np.asarray(llr, dtype=np.float64)
+    c = _header.encode(h)
+    if llr.size != c.size:
+        return True
+    heard = llr != 0
+    n = int(heard.sum())
+    if n == 0:
+        return True
+    x = llr[heard]
+    a = (math.sqrt(1.0 + float(np.mean(x * x))) - 1.0) / 2.0
+    t = float(np.dot(x, 1.0 - 2.0 * c[heard].astype(np.float64)))
+    own, other = 2.0 * n * a, (1.0 - 2.0 * HDR_OTHER_FLIP) * 2.0 * n * a
+    return t > max((own + other) / 2.0, other + HDR_AGREE_Z * 2.0 * math.sqrt(n * a))
+
+
 def _soft_header(store: Store, uid: str, llr) -> tuple[object, list[str]] | None:
     """Rule 2: (HeaderFields, uids involved) from summed LLRs, or None."""
     me = store.pass_info(uid)
@@ -268,12 +317,16 @@ def associate(p: PassResult, store: Store) -> tuple[tuple | None, str]:
     found = _soft_header(store, p.uid, p.hdr_llr)
     if found is not None:
         h, uids = found
-        done = _attach_by_header(store, h, uids, "soft-header")
+        # only the passes that carry this header themselves (header_agrees)
+        uids = [u for u in uids if header_agrees(h, store.pass_info(u)["hdr_llr"])]
+        done = _attach_by_header(store, h, uids, "soft-header") if uids else []
         if done:
             resolve_provisional(store)
         if p.uid in done:
             return (h.callsign, int(h.picture_id)), "soft-header"
-        return None, "prov"
+        if p.uid in uids:
+            return None, "prov"             # rule 1's check refused it (a collision)
+        # this pass carries another header: on to rules 3 and 4
 
     # 3. Latent correlation against the open accumulators.
     best = _best_accumulator(store, z, w)
