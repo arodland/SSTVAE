@@ -106,13 +106,14 @@ kill -- -<pgid>
 | Variable | Default | |
 |---|---|---|
 | `MINUTES` | 180 | length of the stream |
-| `URL` | Utah WebSDR, `?tune=7066usb&lto` | any PA3FWM WebSDR page; `tune=` sets frequency and mode; on the Utah pages `lto` triples the idle timeout (6 h) |
+| `URL` | Utah WebSDR, `?tune=7066usb` | any PA3FWM WebSDR page; `tune=` sets frequency and mode |
+| `LTO` | 0 | 1 adds the page's `lto` option, which triples its idle timeout (6 h on Utah); needs the operators' permission |
 | `DISP` | `:99` | Xvfb display |
 | `OUT` | YouTube RTMPS URL built from the key | e.g. a local `.flv` for a dry run |
 | `STREAM` | `~/.qrsstvae-stream` | settings, logs, key, Playwright |
 | `FIREFOX` | `/usr/bin/firefox` | browser the bridge drives |
 | `SRC` | this checkout | where `native/build-stream` and `qrss_listen.py` are |
-| `STALL_S` | 15 | seconds without WebSDR audio before the bridge reloads the page |
+| `STALL_S` | 0 (off) | seconds without WebSDR audio before the bridge reloads the page; needs the operators' permission |
 | `CALLSIGN` | `AG7EW` | name the WebSDR shows for this listener |
 
 ### Logs
@@ -150,11 +151,16 @@ estimate rate" and "Guessed Channel Layout".
   8 kHz) with the websocket still open, so the app just heard silence.
   The page's `timeout_idle_do()` fires after `idletimeout` from the
   site's `tmp/bandinfo.js` (7,200,000 ms on Utah) without tuning or
-  other input, and destroys the audio client. The default URL adds the
-  page's `lto` option (long timeout, x3, so 6 hours on Utah). The bridge now reloads the page when no
-  samples arrive for `STALL_S` seconds, which opens a new session with a
-  gap of a few seconds, and backs off (up to 5 min) if a reload brings
-  no audio.
+  other input, and destroys the audio client. Two settings get round
+  it, and **both are off by default**: `LTO=1` adds the page's `lto`
+  option (x3, so 6 hours on Utah), and `STALL_S=15` makes the bridge
+  reload the page when no samples arrive for 15 s, opening a new
+  session with a gap of a few seconds (backing off up to 5 min if a
+  reload brings no audio). The Northern Utah WebSDR's terms of use have
+  a "No leech policy": defeating its stream time-outs for an unattended,
+  permanent connection needs the operators' explicit permission
+  (sdrinfo@sdrutah.org). Without it, expect the audio to stop at the
+  2-hour mark.
 - **The page runs in its "blind" view**, which closes the waterfall
   stream, so the bridge fetches audio only. The bridge switches to it
   with the page's `setview(3)` once audio flows. Setting the `view=3`

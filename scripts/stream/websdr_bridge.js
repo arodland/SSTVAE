@@ -5,15 +5,17 @@
 // usage: node websdr_bridge.js [URL]   (status lines on stderr)
 // The page stops its own audio after the site's idle timeout (2 hours on
 // the Utah WebSDR, bandinfo.js idletimeout) while the websocket stays
-// open, so when no samples arrive for STALL_S seconds (default 15) the
-// page is loaded again; the output just has a gap of a few seconds.
+// open. With STALL_S set (seconds; off by default), the page is loaded
+// again when no samples arrive for that long, which defeats that
+// timeout: the Northern Utah WebSDR's terms allow it only with the
+// operators' explicit permission.
 // WEBSDR_NAME (a callsign) is given to the site as the listener's name,
 // and once audio flows the page switches to its "blind" view, which
 // closes the waterfall stream.
 const { _bidiFirefox: firefox } = require('playwright');
-const url = process.argv[2] || 'http://websdr1.sdrutah.org:8901/index1a.html?tune=7066usb&lto';
+const url = process.argv[2] || 'http://websdr1.sdrutah.org:8901/index1a.html?tune=7066usb';
 const OUT = 8000;
-const STALL_S = Number(process.env.STALL_S || 15);
+const STALL_S = Number(process.env.STALL_S || 0);
 const NAME = (process.env.WEBSDR_NAME || '').replace(/[^ -~]/g, '').slice(0, 16);
 (async () => {
   const browser = await firefox.launch({
@@ -92,7 +94,7 @@ const NAME = (process.env.WEBSDR_NAME || '').replace(/[^ -~]/g, '').slice(0, 16)
   // Watchdog: reload when the audio has stalled; back off while reloads
   // keep failing (server down, network gone).
   let busy = false, fails = 0, next = 0;
-  setInterval(async () => {
+  if (STALL_S > 0) setInterval(async () => {
     const now = Date.now();
     if (busy || now < next || now - lastAudio < STALL_S * 1000) return;
     busy = true;

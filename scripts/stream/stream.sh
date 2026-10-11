@@ -9,7 +9,14 @@ set -u
 SRC=${SRC:-$(cd "$(dirname "$0")/../.." && pwd)}
 STREAM=${STREAM:-$HOME/.qrsstvae-stream}
 MINUTES=${MINUTES:-180}
-URL=${URL:-http://websdr1.sdrutah.org:8901/index1a.html?tune=7066usb&lto}
+URL=${URL:-http://websdr1.sdrutah.org:8901/index1a.html?tune=7066usb}
+# LTO=1 adds the page's long-timeout option; STALL_S (seconds) makes the
+# bridge reload the page when audio stops. Both are off by default: the
+# Northern Utah WebSDR allows defeating its time-outs only with the
+# operators' explicit permission (see README).
+LTO=${LTO:-0}
+STALL_S=${STALL_S:-0}
+if [ "$LTO" = 1 ]; then case $URL in *[?\&]lto*) ;; *) URL="$URL&lto" ;; esac; fi
 CALLSIGN=${CALLSIGN:-AG7EW}
 DISP=${DISP:-:99}
 KEY=$(cat "$STREAM/youtube_key")
@@ -37,7 +44,7 @@ trap cleanup EXIT INT TERM
 Xvfb "$DISP" -screen 0 1920x1080x24 -nolisten tcp > "$LOG/xvfb.log" 2>&1 & pids+=($!)
 sleep 2
 
-(NODE_PATH="$STREAM/node/node_modules" WEBSDR_NAME="$CALLSIGN" node "$SRC/scripts/stream/websdr_bridge.js" "$URL" 2> "$LOG/bridge.log") \
+(NODE_PATH="$STREAM/node/node_modules" WEBSDR_NAME="$CALLSIGN" STALL_S="$STALL_S" node "$SRC/scripts/stream/websdr_bridge.js" "$URL" 2> "$LOG/bridge.log") \
   | pacat --playback -d websdr_stream --rate=8000 --format=s16le --channels=1 --raw --latency-msec=200 &
 pids+=($!)
 
