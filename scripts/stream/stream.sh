@@ -9,7 +9,7 @@ set -u
 SRC=${SRC:-$(cd "$(dirname "$0")/../.." && pwd)}
 STREAM=${STREAM:-$HOME/.qrsstvae-stream}
 MINUTES=${MINUTES:-180}
-URL=${URL:-http://websdr1.sdrutah.org:8901/index1a.html?tune=7066usb}
+URL=${URL:-http://websdr1.sdrutah.org:8901/index1a.html?tune=7066usb&lto}
 CALLSIGN=${CALLSIGN:-AG7EW}
 DISP=${DISP:-:99}
 KEY=$(cat "$STREAM/youtube_key")

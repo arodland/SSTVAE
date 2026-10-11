@@ -10,7 +10,7 @@
 // WEBSDR_NAME (a callsign) is given to the site as the listener's name,
 // and the page runs in its "blind" view, which opens no waterfall.
 const { _bidiFirefox: firefox } = require('playwright');
-const url = process.argv[2] || 'http://websdr1.sdrutah.org:8901/index1a.html?tune=7066usb';
+const url = process.argv[2] || 'http://websdr1.sdrutah.org:8901/index1a.html?tune=7066usb&lto';
 const OUT = 8000;
 const STALL_S = Number(process.env.STALL_S || 15);
 const NAME = (process.env.WEBSDR_NAME || '').replace(/[^ -~]/g, '').slice(0, 16);

@@ -106,7 +106,7 @@ kill -- -<pgid>
 | Variable | Default | |
 |---|---|---|
 | `MINUTES` | 180 | length of the stream |
-| `URL` | Utah WebSDR, `?tune=7066usb` | any PA3FWM WebSDR page; `tune=` sets frequency and mode |
+| `URL` | Utah WebSDR, `?tune=7066usb&lto` | any PA3FWM WebSDR page; `tune=` sets frequency and mode; on the Utah pages `lto` triples the idle timeout (6 h) |
 | `DISP` | `:99` | Xvfb display |
 | `OUT` | YouTube RTMPS URL built from the key | e.g. a local `.flv` for a dry run |
 | `STREAM` | `~/.qrsstvae-stream` | settings, logs, key, Playwright |
@@ -150,7 +150,8 @@ estimate rate" and "Guessed Channel Layout".
   8 kHz) with the websocket still open, so the app just heard silence.
   The page's `timeout_idle_do()` fires after `idletimeout` from the
   site's `tmp/bandinfo.js` (7,200,000 ms on Utah) without tuning or
-  other input, and destroys the audio client. The bridge now reloads the page when no
+  other input, and destroys the audio client. The default URL adds the
+  page's `lto` option (long timeout, x3, so 6 hours on Utah). The bridge now reloads the page when no
   samples arrive for `STALL_S` seconds, which opens a new session with a
   gap of a few seconds, and backs off (up to 5 min) if a reload brings
   no audio.
