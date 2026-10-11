@@ -8,7 +8,8 @@
 // open, so when no samples arrive for STALL_S seconds (default 15) the
 // page is loaded again; the output just has a gap of a few seconds.
 // WEBSDR_NAME (a callsign) is given to the site as the listener's name,
-// and the page runs in its "blind" view, which opens no waterfall.
+// and once audio flows the page switches to its "blind" view, which
+// closes the waterfall stream.
 const { _bidiFirefox: firefox } = require('playwright');
 const url = process.argv[2] || 'http://websdr1.sdrutah.org:8901/index1a.html?tune=7066usb&lto';
 const OUT = 8000;
@@ -38,12 +39,9 @@ const NAME = (process.env.WEBSDR_NAME || '').replace(/[^ -~]/g, '').slice(0, 16)
     lastAudio = Date.now();
     process.stdout.write(Buffer.from(new Int16Array(out).buffer));
   });
-  // Cookies the page reads at load: view 3 ("blind") starts no waterfall
-  // stream, and username is sent with the tuning to the server.
+  // The page sends its username cookie with the tuning to the server.
   await page.addInitScript(name => {
-    if (!/^https?:/.test(location.protocol)) return;
-    document.cookie = 'view=3; path=/; SameSite=Lax';
-    if (name) document.cookie = `username=${name}; path=/; SameSite=Lax`;
+    if (name && /^https?:/.test(location.protocol)) document.cookie = `username=${name}; path=/; SameSite=Lax`;
   }, NAME);
   await page.addInitScript(() => {
     window.webaud_hookdef = 1;
@@ -75,6 +73,12 @@ const NAME = (process.env.WEBSDR_NAME || '').replace(/[^ -~]/g, '').slice(0, 16)
       await new Promise(r => setTimeout(r, 3000));
     }
     if (n === before) process.stderr.write('no audio after pressing audio start\n');
+    // Switch to the "blind" view, which closes the waterfall stream. Not
+    // via the view cookie: on the Utah page a view=3 cookie makes
+    // bodyonload throw before the audio client starts. setview() saves
+    // view=3 itself, so put the cookie back for the next load.
+    else await page.evaluate(() => { setview(3); document.cookie = 'view=2; path=/; SameSite=Lax'; })
+      .catch(e => process.stderr.write(`blind view: ${e.message.split('\n')[0]}\n`));
     lastAudio = Date.now();
   };
   await connect();

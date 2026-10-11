@@ -155,9 +155,13 @@ estimate rate" and "Guessed Channel Layout".
   samples arrive for `STALL_S` seconds, which opens a new session with a
   gap of a few seconds, and backs off (up to 5 min) if a reload brings
   no audio.
-- **The page runs in its "blind" view** (cookie `view=3`), which opens
-  no waterfall stream, so the bridge fetches audio only. The callsign is
-  set as the `username` cookie, which the page sends with the tuning.
+- **The page runs in its "blind" view**, which closes the waterfall
+  stream, so the bridge fetches audio only. The bridge switches to it
+  with the page's `setview(3)` once audio flows. Setting the `view=3`
+  cookie before load does not work on the Utah page: `bodyonload` throws
+  on it before the audio client starts, and no audio ever arrives. The
+  callsign is set as the `username` cookie, which the page sends with
+  the tuning.
 - **Don't edit `stream.sh` while a stream is running.** Bash reads a
   script as it executes it. Write a new file and rename it over the old
   one instead.
