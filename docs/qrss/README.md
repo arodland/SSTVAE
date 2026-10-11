@@ -30,8 +30,11 @@ specified but not built.
 [HOW_IT_HEARS.md](HOW_IT_HEARS.md) explains how the receiver works in plain
 language. [60m.md](60m.md) is the recommendation for operating on 60 m in the US
 (5352.0 kHz USB dial, 9 W or less into a dipole, a control operator present).
-[scripts/stream/README.md](../../scripts/stream/README.md) sets up a second,
-receive-only QRSSTVAE that streams its view and WebSDR audio to YouTube. The full design is in [docs/qrss/design.md](design.md). It implements
+[baitisj/websdr-bench](https://github.com/baitisj/websdr-bench) sets up a
+second, receive-only QRSSTVAE that streams its view and WebSDR audio to
+YouTube; its scripts take this checkout as `SRC` (for example
+`SRC=~/qrsstvae-streaming ./setup.sh`). The full design is in
+[docs/qrss/design.md](design.md). It implements
 the draft spec **"QRSSTVAE: ultra-slow narrowband SSTVAE for HF", rev 9**,
 plus rev 11's spread header (section 5.1) (`qrsstvae-options.md`, kept
 outside this repository). Where the design
