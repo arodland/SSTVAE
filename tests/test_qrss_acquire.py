@@ -600,3 +600,35 @@ def test_acquire_end_to_end():
     assert dets[0].lead_in_s == 10.0
     live = A.acquire(cap, spec, live_only=True)
     assert live.tbd == [] and len(live.preamble) == len(acq.preamble)
+
+
+def test_a_hint_searches_a_preamble_a1_did_not_offer(monkeypatch):
+    """Field test (2026-10-11): part 2 of KC2G's mode B came 0.6 Hz above
+    part 1. A hint (where a later pass is due) gets A2 at A1's best line
+    within HINT_SPAN_HZ of it, even when that line is not among A1's
+    strongest (here: A1 offers none at all). A hint A2 does not pass is
+    offered to the gate after the preamble hits, with no timing; one
+    beside a passed hit costs nothing."""
+    spec = frame.SHORT
+    rng = np.random.default_rng(5)
+    sym = frame.assemble(spec, rng.integers(0, 2, 2474).astype(np.uint8),
+                         rng.standard_normal(spec.n_data))
+    sim = ch.simulate(sym, spec, Q_TEST, ChannelConfig(
+        snr_db=-20.0, freq_offset_hz=-312.5, seed=6), keying=KEY)
+    cap = frontend.Capture(fe=sim.fe, q=sim.q, t0_index=sim.t0_index)
+    full = A.acquire(cap, spec, live_only=True)
+    assert len(full.preamble) == 1 and abs(full.preamble[0].f_hz - 1187.5) < 0.05
+    same = A.acquire(cap, spec, live_only=True, hints=(1188.1,))
+    assert same.hinted == [] and [h.f_hz for h in same.preamble] == [
+        h.f_hz for h in full.preamble]
+    monkeypatch.setattr(A, "carrier_lines", lambda *a, **k: [])
+    assert A.acquire(cap, spec, live_only=True).preamble == []
+    acq = A.acquire(cap, spec, live_only=True, hints=(1188.6, 2000.0))
+    assert len(acq.preamble) == 1
+    assert abs(acq.preamble[0].f_hz - 1187.5) < 0.05
+    assert abs(acq.preamble[0].tau0_s) < T_SYM / 20
+    assert [round(c.f_hz) for c in acq.hinted] == [2000]
+    dets = acq.detections(spec)
+    assert [d.method for d in dets] == ["preamble", "hint"]
+    assert dets[1].timing is None and abs(dets[1].f_hz - 2000.0) < 2.5
+    assert np.allclose(dets[1].path.f_hz, dets[1].f_hz)       # (no drift on noise)

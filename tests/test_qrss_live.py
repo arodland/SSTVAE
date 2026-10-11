@@ -248,7 +248,8 @@ def test_slot_bookkeeping_with_a_stub_receiver(tmp_path, monkeypatch):
     freqs = iter([(1500.3, 1611.0), (1501.9, 1609.5), (1500.0, 1610.0)])
 
     def receive_slot(prep, spec, live_only=False, estimator="joint", *, erase_s=(),
-                     round_b=True, dets=None, max_candidates=None, budget_s=None):
+                     round_b=True, dets=None, max_candidates=None, budget_s=None,
+                     hints=()):
         calls.append(("receive", round_b, bool(erase_s)))
         return [_Pass(f) for f in next(freqs)]
 
@@ -447,7 +448,8 @@ def test_a_refused_preamble_is_checked_again(tmp_path, monkeypatch):
                         lambda *a, **k: acq.append(1) or [_Det(1500.0), _Det(1600.0)])
     answers = iter([[_Det(1500.0)], [_Det(1600.0)]])
 
-    def detect(prep, spec, live_only=False, *, erase_s=(), cands=None, skip_hz=()):
+    def detect(prep, spec, live_only=False, *, erase_s=(), cands=None, skip_hz=(),
+               hints=()):
         calls.append((tuple(c.f_hz for c in cands), tuple(skip_hz)))
         return next(answers)
 
@@ -750,7 +752,8 @@ def test_a_slot_heard_on_two_dials_is_received_on_each(tmp_path, monkeypatch):
         return [_Det(1500.0)]
 
     def receive_slot(prep, spec, live_only=False, estimator="joint", *, erase_s=(),
-                     round_b=True, dets=None, max_candidates=None, budget_s=None):
+                     round_b=True, dets=None, max_candidates=None, budget_s=None,
+                     hints=()):
         calls.append((round_b, bool(dets), list(erase_s)))
         return [_Pass(1500.0)]
 
@@ -980,7 +983,8 @@ def test_a_header_decoded_once_stays_with_its_signal(tmp_path, monkeypatch):
     headers = iter([hdr, None, None])
 
     def receive_slot(prep, spec, live_only=False, estimator="joint", *, erase_s=(),
-                     round_b=True, dets=None, max_candidates=None, budget_s=None):
+                     round_b=True, dets=None, max_candidates=None, budget_s=None,
+                     hints=()):
         return [_Pass(1500.0, header=next(headers))]
 
     monkeypatch.setattr(RX, "detect", lambda prep, spec, live_only=False, **kw: [_Det(1500.0)])
@@ -1022,3 +1026,103 @@ def test_a_late_joined_pass_is_kept_for_the_store(tmp_path):
     assert not L._plausible(s, strong)
     strong.cw = SimpleNamespace(text="AG7EW")
     assert L._plausible(s, strong)
+
+
+class _Cand:
+    def __init__(self, f, method="preamble"):
+        self.f_hz, self.method = f, method
+
+
+def _part1(q, f, mode="B", dial=None):
+    """A tile of an earlier slot whose header said it was part 1 of `mode`."""
+    return live.Tile(id=f"p{q}_{f}", q=q, slot_utc="", frame="tiny", f_hz=f, dial_hz=dial,
+                     status="complete", mode=mode, segment=0, updated=float(slot_t0(q + 2)))
+
+
+def test_hints_name_where_a_later_pass_is_due(tmp_path):
+    """Field test (2026-10-11): KC2G's mode B part 2 came two slots after
+    part 1, 0.6 Hz higher. The hints for slot q: each later segment due in
+    q of a picture in the multi-pass store or on an earlier slot's tile,
+    moved by the dial change since it was heard (USB), within the band,
+    one per MERGE_HZ."""
+    from qrss_fakes import make_pass_result, synthetic_picture
+    from sstvae.qrss import picture
+    from sstvae.qrss.store import Store
+
+    q = Q_TEST
+    store = Store(tmp_path / "store", clock=lambda: float(slot_t0(q)))
+    sp = synthetic_picture(31, mode=1)
+    p = make_pass_result(picture.air_values(sp.segs[0], 0), 1.0, seed=1, q=q, f_hz=1205.47)
+    store.add_pass(p)
+    store.attach(("KC2G", sp.picture_id), p.uid, 0, "header", mode=1, codec_id=sp.codec_id)
+    L = live.LiveListener(tmp_path / "live", live.LiveConfig(spec=TINY, render=False),
+                          store=store, log=lambda m: None)
+    (tmp_path / "live" / live.DIAL_FILE).write_text(
+        json.dumps({"t": slot_t0(q) - 600.0, "dial_hz": 10_141_000}) + "\n"
+        + json.dumps({"t": slot_t0(q + 1), "dial_hz": 10_140_900}) + "\n")
+    L.dial.refresh()
+    L.done_tiles += [_part1(q, 1205.6),                         # the store's own pass
+                     _part1(q, 1500.0, "C", dial=10_141_000),
+                     _part1(q, 2650.0, "C"),                     # 2750 Hz on the new dial
+                     _part1(q, 900.0, "A")]                      # no later part
+    at = lambda k: L._hints(q + k, L.dial.dial_at(slot_t0(q + k)))   # noqa: E731
+    assert at(2) == [1305.47, 1600.0]
+    assert at(4) == [1600.0]
+    assert at(1) == [] and at(3) == [] and at(6) == []
+    assert L._hints(q + 2, None) == [1205.47, 1500.0, 2650.0]   # (no dial: not moved)
+
+
+def test_a_hint_goes_to_acquisition_and_to_the_end_of_slot_search(tmp_path, monkeypatch):
+    """Live, acquisition gets the slot's hints and a hint A2 did not pass
+    is not verified (with no timing, gate V costs about a minute on FULL);
+    the end of the slot searches with them."""
+    seen, calls = [], []
+    monkeypatch.setattr(RX, "candidates", lambda *a, hints=(), **k: seen.append(hints) or [
+        _Cand(1500.0), _Cand(1600.0, "hint")])
+    monkeypatch.setattr(RX, "detect", lambda *a, cands=None, **k: calls.append(
+        ("detect", [c.f_hz for c in cands])) or [_Det(1500.0)])
+    monkeypatch.setattr(RX, "receive_slot", lambda *a, dets=None, hints=(), **k: calls.append(
+        ("receive", dets is None, list(hints))) or [])
+    lines = []
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lines.append)
+    q = Q_TEST
+    L.done_tiles.append(_part1(q - 2, 1600.0))
+    t0 = slot_t0(q)
+    end = t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 0.5
+    L.feed(_hiss(int((end - t0 + 15) * FS)), end)
+    L.step(t0 + 30.0)
+    assert seen == [(1600.0,)] and calls[0] == ("detect", [1500.0])
+    assert any("a later pass is due at 1600.0 Hz" in m for m in lines)
+    calls.clear()
+    L.step(end)
+    assert q in L.finished
+    assert ("receive", True, [1600.0]) in calls
+
+
+def test_a_late_join_searches_where_a_later_pass_is_due(tmp_path, monkeypatch):
+    """Joined after the preamble (a third of the slot heard), the end of the
+    slot does no whole-slot search, but it does look at a hint: part 2 of a
+    picture whose part 1 was heard, where part 1 was."""
+    calls = []
+
+    def detect(*a, hints=(), skip_hz=(), **k):
+        calls.append(("detect", list(hints), list(skip_hz)))
+        return [_Det(f) for f in hints]
+
+    monkeypatch.setattr(RX, "detect", detect)
+    monkeypatch.setattr(RX, "receive_slot", lambda *a, dets=None, **k: calls.append(
+        ("receive", [d.f_hz for d in dets])) or [])
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    q = Q_TEST
+    L.done_tiles.append(_part1(q - 2, 1600.0))
+    t0 = slot_t0(q)
+    dur = live.frame_seconds(TINY)
+    late = t0 + 0.65 * dur
+    L.feed(_hiss(int((t0 + dur + 5 - late) * FS)), t0 + dur + 5)
+    L.step(late)
+    L.step(t0 + dur + frontend.PB_TAIL_S + 0.5)
+    assert q in L.finished
+    assert calls == [("detect", [1600.0], []), ("receive", [1600.0])]
+    assert any("no whole-slot search" in s for s in L.lines)

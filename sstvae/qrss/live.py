@@ -261,7 +261,7 @@ def capture_prepare(x, ok, origin: int, q: int, spec: FrameSpec, seed: int | Non
 
 
 def finish_receive(x, ok, origin: int, q: int, spec: FrameSpec, estimator: str,
-                   dets: list) -> tuple[list[PassResult], float]:
+                   dets: list, hints=()) -> tuple[list[PassResult], float]:
     """(passes, share heard): the end-of-slot receive of slot q from its
     `capture_read`.
 
@@ -271,19 +271,28 @@ def finish_receive(x, ok, origin: int, q: int, spec: FrameSpec, estimator: str,
     first: on a phone band, voices and carriers make candidates that each
     cost about a minute to reject, and the search ran for longer than a
     slot. With less heard, only `dets`, the signals already found on the
-    preamble, are received.
+    preamble, are received, and whatever is found at the `hints`
+    (`LiveListener._hints`), which are among the candidates either way.
     """
     k1 = min(len(ok), origin + int(round(frame_seconds(spec) * FE_FS)))
-    if not ok[origin:k1].any() or (not dets and np.mean(ok[origin:k1]) < FINISH_SEARCH_MIN_HEARD):
+    if not ok[origin:k1].any() or (not dets and not hints
+                                   and np.mean(ok[origin:k1]) < FINISH_SEARCH_MIN_HEARD):
         return [], float(np.mean(ok[origin:k1])) if k1 > origin else 0.0   # nothing to receive
     prep, erase, heard = capture_prepare(x, ok, origin, q, spec)
     passes = []
     if heard >= FINISH_SEARCH_MIN_HEARD:
         passes = receiver.receive_slot(prep, spec, estimator=estimator, erase_s=erase,
                                        max_candidates=FINISH_MAX_CANDIDATES,
-                                       budget_s=FINISH_BUDGET_S)
-    elif dets and heard > 0.0:
-        passes = receiver.receive_slot(prep, spec, estimator=estimator, erase_s=erase, dets=dets)
+                                       budget_s=FINISH_BUDGET_S, hints=hints)
+    elif (dets or hints) and heard > 0.0:
+        more = []
+        if hints:
+            more = receiver.detect(prep, spec, live_only=True, erase_s=erase, hints=hints,
+                                   skip_hz=[d.f_hz for d in dets],
+                                   max_candidates=FINISH_MAX_CANDIDATES,
+                                   budget_s=FINISH_BUDGET_S)
+        passes = receiver.receive_slot(prep, spec, estimator=estimator, erase_s=erase,
+                                       dets=list(dets) + more)
     return passes, heard
 
 
@@ -536,6 +545,7 @@ class SlotState:
     finishing: bool = False         # the end-of-slot receive is queued or running
     reader: object = None           # where its audio is read from (None: the ring)
     cands: list | None = None       # its acquisition candidates, once they can no longer change
+    hints: tuple = ()               # ...and the hints they were found with (`_hints`)
 
 
 @dataclass
@@ -1009,14 +1019,48 @@ class LiveListener:
         """Slot s's live acquisition candidates. Acquisition reads only the
         preamble and a few seconds around it, so once the audio read is
         past that (with the blanker's reach) its answer is final: kept,
-        rather than found again at every refresh."""
-        if s.cands is not None:
-            return s.cands
-        cands = receiver.candidates(prep, self.cfg.spec, live_only=True)
-        heard = np.flatnonzero(ok)
-        if len(heard) and (heard[-1] + 1 - origin) / FE_FS > acquire.live_end_s() + 1.0:
-            s.cands = cands
-        return cands
+        rather than found again at every refresh (unless a new hint turns
+        up). A hint A2 did not pass is left to the end of the slot: with
+        no timing, gate V costs about a minute."""
+        hints = tuple(self._hints(s.q, self.dial.dial_at(slot_t0(s.q))))
+        if s.cands is None or not set(hints) <= set(s.hints):
+            if hints and set(hints) != set(s.hints):
+                self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: a later pass is due at "
+                         + ", ".join(f"{f:.1f}" for f in hints) + " Hz")
+            cands = receiver.candidates(prep, self.cfg.spec, live_only=True, hints=hints)
+            heard = np.flatnonzero(ok)
+            final = len(heard) and (heard[-1] + 1 - origin) / FE_FS > acquire.live_end_s() + 1.0
+            s.cands, s.hints = (cands if final else None), hints
+        else:
+            cands = s.cands
+        return [c for c in cands if getattr(c, "method", None) != "hint"]
+
+    def _hints(self, q: int, dial: int | None) -> list[float]:
+        """Audio frequencies (on `dial`) where a later pass of a picture
+        partly received is due in slot q: from the multi-pass store, and
+        from the tiles of earlier slots (whose end-of-slot receive may not
+        have filed them yet). A pass heard on another dial is moved by the
+        difference (USB), and dropped if that leaves the band."""
+        due = []                                       # (f_hz, the dial it was heard on)
+        if self.store is not None:
+            try:
+                due = [(d["f_hz"], self.dial.dial_at(slot_t0(d["q"]))) for d in self.store.due(q)]
+            except Exception as e:                     # never lose the slot over the store
+                self.log(f"hints: {e}")
+        for t in self.tiles():
+            if t.mode in ("A", "B", "C") and t.segment is not None and t.q < q:
+                n = "ABC".index(t.mode) + 1
+                if any(t.q + 2 * (g - t.segment) == q for g in range(t.segment + 1, n)):
+                    due.append((t.f_hz, t.dial_hz if t.dial_hz is not None
+                                else self.dial.dial_at(slot_t0(t.q))))
+        out: list[float] = []
+        for f, was in due:
+            if was is not None and dial is not None:
+                f += was - dial
+            if CARRIER_BAND_HZ[0] <= f <= CARRIER_BAND_HZ[1] and all(
+                    abs(f - g) >= MERGE_HZ for g in out):
+                out.append(round(float(f), 2))
+        return sorted(out)
 
     def _refresh(self, s: SlotState) -> None:
         if s.done:
@@ -1082,12 +1126,13 @@ class LiveListener:
             self.dial.refresh()
             dials = self.dial.by_dial(t0 - origin / FE_FS, t0 + len(x) / FE_FS)
             first = self.dial.dial_at(t0)
+            hints = self._hints(s.q, first)
         results = []
         # one receive per dial the slot was heard on, each with the others
         # erased; the preamble's detections belong to the dial it started on
         for dial, spans in dials:
             args = (x, restrict(ok, origin, s.q, spans), origin, s.q, spec, self.cfg.estimator,
-                    dets if dial == first else [])
+                    dets if dial == first else [], hints if dial == first else [])
             if self._proc is not None:
                 passes, heard = self._proc.call(args)
             else:

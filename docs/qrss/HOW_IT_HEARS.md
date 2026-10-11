@@ -144,6 +144,15 @@ Sometimes a preamble is plainly there but the signal is still too weak
 to confirm. Such a signal is checked again every two minutes for the
 first 15 minutes, because each check has more audio to go on.
 
+Pictures sent in mode B or C come in two or three parts, 30 minutes
+apart. Once the listener has read the header of part 1, it knows when
+part 2 is due and roughly where: on part 1's tone, give or take a hertz
+(and if you moved the dial in between, it allows for that). So it
+looks there for a preamble even when that tone is too faint to stand
+out from the rest of the band. It still asks for the same evidence
+before it believes a signal is there, so the hint doesn't make it see
+signals that aren't.
+
 ### 3. It fills in the picture as the pass arrives
 
 Every two minutes it re-reads everything heard so far for each signal,
@@ -160,7 +169,8 @@ When a slot's 30 minutes are over, the listener reads the whole slot one
 more time with everything it now knows. This also searches for signals
 that were too weak for anyone to notice on their preamble alone. That
 search is expensive, so it is only done when the listener heard at least
-half of the slot. It runs as a separate program on its own processor
+half of the slot; with less, it still looks wherever a later part of a
+picture was due. It runs as a separate program on its own processor
 core, so the next slot's tiles, already on the air, keep updating while
 it works. It takes a few minutes. Meanwhile the tile says it is
 finishing, and one more quick look at the whole pass shows it to the

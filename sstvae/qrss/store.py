@@ -382,6 +382,29 @@ class Store:
             keys.append((meta["callsign"], int(meta["picture_id"])))
         return keys
 
+    def due(self, q: int) -> list[dict]:
+        """The later passes of pictures partly received that are due in slot q.
+
+        A picture of mode m sends its segment g in slot q0 + 2g (passes
+        are 30 minutes apart), so a member heard as segment k in slot qk
+        is followed by each missing segment g > k in slot qk + 2 (g - k).
+        One dict per (member, segment): key, segment, f_hz and q of the member.
+        """
+        out = []
+        for j in sorted((self.root / "acc").glob("*.json")):
+            try:
+                meta = _read_json(j)
+                have = {int(m["segment"]) for m in meta["members"]}
+                for m in meta["members"]:
+                    k, info = int(m["segment"]), self.pass_info(m["uid"])
+                    for g in range(k + 1, int(meta["mode"]) + 1):
+                        if g not in have and info["q"] + 2 * (g - k) == int(q):
+                            out.append(dict(key=(meta["callsign"], int(meta["picture_id"])),
+                                            segment=g, f_hz=info["f_hz"], q=info["q"]))
+            except (OSError, KeyError, ValueError):
+                continue                  # (an accumulator being written, or a pass expired)
+        return out
+
     def find_member(self, uid: str) -> tuple | None:
         """The key of the accumulator holding pass `uid`, or None."""
         for key in self.open_keys():

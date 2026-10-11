@@ -808,3 +808,35 @@ def test_one_transmission_is_one_member(store):
                             hdr=h, decoded=True)
     assert asc.associate(near, store) == (key, "header")
     assert store.accumulator(key).uids == [strong.uid, again.uid, near.uid]
+
+
+def test_due_names_the_later_passes_of_a_picture(store):
+    """Field test (2026-10-11): KC2G's mode B sent part 1 in one slot and
+    part 2 two slots (30 min) later, 0.6 Hz higher. `Store.due(q)` is what
+    the listener's hints come from: each member's later missing segments,
+    in the slot each is due, at the member's frequency."""
+    sp = synthetic_picture(21, mode=2)
+    key = ("KC2G", sp.picture_id)
+    p0 = make_pass_result(_air(sp, 0), 1.0, seed=1, q=Q_TEST, f_hz=1205.47)
+    store.add_pass(p0)
+    store.attach(key, p0.uid, 0, "header", mode=2, codec_id=sp.codec_id)
+    due = lambda q: sorted((d["segment"], d["f_hz"], d["q"]) for d in store.due(q))
+    assert due(Q_TEST) == [] and due(Q_TEST + 1) == [] and due(Q_TEST + 3) == []
+    assert due(Q_TEST + 2) == [(1, 1205.47, Q_TEST)]
+    assert due(Q_TEST + 4) == [(2, 1205.47, Q_TEST)]
+    assert all(d["key"] == key for d in store.due(Q_TEST + 2))
+    # part 2 heard: it is no longer due, and part 3 is due from both members
+    p1 = make_pass_result(_air(sp, 1), 1.0, seed=2, q=Q_TEST + 2, f_hz=1206.08)
+    store.add_pass(p1)
+    store.attach(key, p1.uid, 1, "header", mode=2, codec_id=sp.codec_id)
+    assert due(Q_TEST + 2) == []
+    assert due(Q_TEST + 4) == [(2, 1205.47, Q_TEST), (2, 1206.08, Q_TEST + 2)]
+    # a mode B picture has no third part; a mode A picture nothing later
+    sp_b, sp_a = synthetic_picture(22, mode=1), synthetic_picture(23, mode=0)
+    for sp, f in ((sp_b, 900.0), (sp_a, 2000.0)):
+        p = make_pass_result(_air(sp, 0), 1.0, seed=3, q=Q_TEST + 10, f_hz=f)
+        store.add_pass(p)
+        store.attach(("K1ABC", sp.picture_id), p.uid, 0, "header", mode=sp.mode,
+                     codec_id=sp.codec_id)
+    assert due(Q_TEST + 12) == [(1, 900.0, Q_TEST + 10)]
+    assert due(Q_TEST + 14) == [] and due(Q_TEST + 10) == []

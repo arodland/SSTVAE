@@ -288,18 +288,20 @@ def _ghosts(dets: list[Detection]) -> list[Detection]:
     return out
 
 
-def candidates(prep: Prepared, spec: FrameSpec, live_only: bool = False) -> list[Detection]:
+def candidates(prep: Prepared, spec: FrameSpec, live_only: bool = False,
+               hints=()) -> list[Detection]:
     """Acquisition over a prepared capture: the candidates for gate V,
-    preamble hits first (A1 -> A2, and A3 unless live_only)."""
+    preamble hits first (A1 -> A2, and A3 unless live_only), with the
+    `hints` (expected frequencies, `acquire.acquire`) A2 did not pass after them."""
     acq = acquire.acquire(frontend.Capture(prep.fe, prep.q, prep.t0_index, prep.fs), spec,
-                          live_only=live_only, preprocessed=True)
+                          live_only=live_only, preprocessed=True, hints=hints)
     return acq.detections(spec)
 
 
 def detect(prep: Prepared, spec: FrameSpec, live_only: bool = False,
            max_candidates: int | None = None, budget_s: float | None = None,
            erase_s=(), cands: list[Detection] | None = None,
-           skip_hz=()) -> list[Detection]:
+           skip_hz=(), hints=()) -> list[Detection]:
     """Acquisition plus gate V over a prepared capture: verified detections.
 
     max_candidates bounds how many candidates go to the gate (preamble
@@ -311,10 +313,11 @@ def detect(prep: Prepared, spec: FrameSpec, live_only: bool = False,
     are `candidates` already found (the live view keeps a slot's), and a
     candidate within MERGE_HZ of `skip_hz` (signals known already) is not
     verified again, though it is still left out of the others' noise.
+    `hints` go to `candidates`.
     """
     t_end = None if budget_s is None else time.monotonic() + budget_s
     if cands is None:
-        cands = candidates(prep, spec, live_only)
+        cands = candidates(prep, spec, live_only, hints)
     if max_candidates is not None:
         cands = cands[:max_candidates]
     found: list[Detection] = []
@@ -350,17 +353,18 @@ def receive_slot(cap, spec: FrameSpec = FULL, live_only: bool = False,
                  estimator: str = "joint", *, erase_s=(), round_b: bool = True,
                  dets: list[Detection] | None = None,
                  max_candidates: int | None = None,
-                 budget_s: float | None = None) -> list[PassResult]:
+                 budget_s: float | None = None, hints=()) -> list[PassResult]:
     """A1 -> A2 (+ A3) -> V -> receive_pass for every signal in a stored slot.
 
     erase_s and round_b go to every `receive_pass`; `dets` skips the
     acquisition and receives those detections instead (the live view
-    reuses the ones it found on the preamble). max_candidates, budget_s
-    and erase_s go to `detect`.
+    reuses the ones it found on the preamble). max_candidates, budget_s,
+    erase_s and hints go to `detect`.
     """
     prep = prepare(cap)
     if dets is None:
-        dets = detect(prep, spec, live_only, max_candidates, budget_s, erase_s=erase_s)
+        dets = detect(prep, spec, live_only, max_candidates, budget_s, erase_s=erase_s,
+                      hints=hints)
     out: list[PassResult] = []
     for d in dets:
         others = tuple(g.f_hz for g in dets if g is not d)

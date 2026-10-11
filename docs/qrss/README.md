@@ -172,7 +172,19 @@ preamble that gate V refused is checked again at every refresh until 15
 minutes in (`LiveConfig.recheck_until_s`; about 14 s of CPU each), since
 a weak signal's Z_ref grows with the audio. The preamble search itself
 runs once per slot: its answer is final once the audio is about 30 s
-past the quarter hour (`acquire.live_end_s`), and kept. When
+past the quarter hour (`acquire.live_end_s`), and kept. Mode B and C
+send their parts 30 minutes apart, so once part 1 of a picture has
+been heard (its header said so), the slot where part 2 is due gets a
+*hint*: part 1's frequency, moved by any dial change since
+(`LiveListener._hints`, from the multi-pass store and the tiles of
+earlier slots). Acquisition searches for a preamble at A1's strongest
+line within 2 Hz of each hint (`acquire.HINT_SPAN_HZ`) even when A1
+did not offer that line, at A2's usual pass mark, so a signal outside
+A1's 16 strongest lines is still found and the false-alarm rate rises
+only by that of one more line. A hint whose preamble does not pass is
+not verified live (with no timing, gate V costs about a minute), but
+the end-of-slot receive checks it, also when less than half the slot
+was heard and there is no whole-slot search. When
 the frame ends, the whole slot is received again, stored and
 associated, and the tile shows the picture accumulated over every pass
 of it. That end-of-slot receive runs in a second process, on another

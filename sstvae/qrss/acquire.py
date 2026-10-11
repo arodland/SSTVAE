@@ -139,6 +139,8 @@ A2_ALIAS_RATIO = 3.0
 # --- A3 --------------------------------------------------------------------------------------
 
 TBD_START_S = -10.0                      # first frame starts here, so a lead-in contributes
+HINT_SPAN_HZ = 2.0                       # a hint's line: A1's best bin this close to it (one
+                                         # station's two passes were 0.6 Hz apart, 2026-10-11)
 TBD_END_PAD_S = 2.0                      # frames run to the end of keying plus this
 TBD_HALF_HZ = 40.0                       # channel half-width
 TBD_GRID_HZ = 50.0                       # channel grid across the band
@@ -322,15 +324,15 @@ def a1_threshold(M: int, pfa: float = A1_PFA, fs: float = FE_FS) -> float:
 
 def carrier_lines(fe, t0_index: float, fs: float = FE_FS, *, pfa: float = A1_PFA,
                   max_cands: int = A1_MAX_CANDS, min_sep_hz: float = A1_MIN_SEP_HZ,
-                  band_hz=BAND_HZ) -> list[CarrierCandidate]:
+                  band_hz=BAND_HZ, stats: CarrierStats | None = None) -> list[CarrierCandidate]:
     """A1: up to `max_cands` carrier lines above the Gamma CFAR threshold.
 
     Local maxima at least `min_sep_hz` apart, strongest first. f_hz is
     the line's audio frequency at t0, refined between bins by a
     parabola on the log statistic; `metric` is the A1 statistic (Gamma(M)
-    on noise, `a1_gamma`).
+    on noise, `a1_gamma`). `stats`: `carrier_line_stats` already computed.
     """
-    cs = carrier_line_stats(fe, t0_index, fs, band_hz=band_hz)
+    cs = carrier_line_stats(fe, t0_index, fs, band_hz=band_hz) if stats is None else stats
     thr = a1_threshold(cs.M, pfa, fs)
     best_d = np.argmax(cs.stat, axis=0)
     best = cs.stat[best_d, np.arange(cs.stat.shape[1])]
@@ -358,6 +360,32 @@ def carrier_lines(fe, t0_index: float, fs: float = FE_FS, *, pfa: float = A1_PFA
         out.append(CarrierCandidate(f_hz=f0 + off * df,
                                     drift_hz_per_min=float(cs.drifts[d]), metric=v))
     return out
+
+
+def hint_line(cs: CarrierStats, f_hz: float, fs: float = FE_FS, *, pfa: float = A1_PFA,
+              span_hz: float = HINT_SPAN_HZ) -> CarrierCandidate:
+    """The carrier line for a hint, a frequency where a signal is expected
+    (the next pass of a picture already partly received): A1's best (bin,
+    drift) within span_hz of f_hz when it clears the threshold, refined as
+    `carrier_lines` does, else f_hz itself, straight."""
+    near = np.flatnonzero(np.abs(cs.f_hz - f_hz) <= span_hz)
+    if not len(near):
+        return CarrierCandidate(f_hz=float(f_hz), drift_hz_per_min=0.0, metric=0.0)
+    sub = cs.stat[:, near]
+    d, k = np.unravel_index(int(np.argmax(sub)), sub.shape)
+    b, v = int(near[k]), float(sub[d, k])
+    if v <= a1_threshold(cs.M, pfa, fs):
+        return CarrierCandidate(f_hz=float(f_hz), drift_hz_per_min=0.0, metric=v)
+    d0 = int(np.argmin(np.abs(cs.drifts)))
+    if v - float(cs.stat[d0, b]) < A1_DRIFT_MARGIN * (v - cs.M):
+        d = d0
+    row = cs.stat[d]
+    off = 0.0
+    if 0 < b < len(row) - 1:
+        off = _parabola(*np.log(np.maximum(row[b - 1:b + 2], 1e-9)))
+    df = cs.f_hz[1] - cs.f_hz[0]
+    return CarrierCandidate(f_hz=float(cs.f_hz[b]) + off * df,
+                            drift_hz_per_min=float(cs.drifts[d]), metric=v)
 
 
 # --- A2 ----------------------------------------------------------------------------------------
@@ -909,11 +937,18 @@ class Acquisition:
     lines: list                              # A1 CarrierCandidates
     preamble: list                           # A2 PreambleHits that passed
     tbd: list                                # A3 TbdHits that passed
+    hinted: list = field(default_factory=list)   # CarrierCandidates of hints A2 did not pass
 
     def detections(self, spec: FrameSpec) -> list[Detection]:
-        """Every candidate for the verification gate, preamble hits first."""
+        """Every candidate for the verification gate: preamble hits, then
+        hints A2 did not pass (method "hint", no timing), then A3's."""
         dur = spec.keyed_end_pos * T_SYM
-        return ([h.to_detection(dur) for h in self.preamble]
+        t = np.array([TBD_START_S, 0.0, dur])
+        hinted = [Detection(f_hz=c.f_hz, path=FreqPath(t_s=t, f_hz=c.f_hz + c.drift_hz_per_min
+                                                       * t / 60.0, weight=np.ones(3)),
+                            timing=None, z_ref=float("nan"), method="hint", lead_in_s=0.0)
+                  for c in self.hinted]
+        return ([h.to_detection(dur) for h in self.preamble] + hinted
                 + [h.to_detection() for h in self.tbd])
 
 
@@ -946,20 +981,38 @@ def live_end_s() -> float:
 
 
 def acquire(cap: frontend.Capture, spec: FrameSpec, *, live_only: bool = False,
-            preprocessed: bool = False) -> Acquisition:
+            preprocessed: bool = False, hints=()) -> Acquisition:
     """A1 -> A2 at each line (and A3 over the slot unless live_only).
 
     `cap.fe` is blanked and normalised first unless `preprocessed`.
+    hints: audio frequencies where a signal is expected (`hint_line`).
+    Each gets A2 at its own line when no A1 line is that close: one more
+    cell set at A2's false-alarm rate, so a weak signal outside A1's
+    strongest A1_MAX_CANDS lines still has its preamble searched. One
+    that A2 does not pass is kept in `hinted`, for a gate V that looks
+    over the whole frame.
     """
     fe = cap.fe
     if not preprocessed:
         fe, keep = frontend.blank(fe, fs=cap.fs)
         fe, _ = frontend.normalise(fe, keep, fs=cap.fs)
-    lines = carrier_lines(fe, cap.t0_index, cap.fs)
-    pre = drop_symbol_rate_aliases(
-        [h for h in (preamble_search(fe, cap.t0_index, c, cap.fs) for c in lines) if h.passed])
+    cs = carrier_line_stats(fe, cap.t0_index, cap.fs)
+    lines = carrier_lines(fe, cap.t0_index, cap.fs, stats=cs)
+    hits = [preamble_search(fe, cap.t0_index, c, cap.fs) for c in lines]
+    hinted = []
+    for f in hints:
+        if any(h.passed and abs(h.f_hz - f) <= HINT_SPAN_HZ + 0.5 for h in hits):
+            continue
+        near = [h for h in hits if abs(h.f_hz - f) <= HINT_SPAN_HZ + 0.5]
+        line = hint_line(cs, float(f), cap.fs)
+        h = near[0] if near else preamble_search(fe, cap.t0_index, line, cap.fs)
+        if h.passed:
+            hits.append(h)
+        else:
+            hinted.append(line)
+    pre = drop_symbol_rate_aliases([h for h in hits if h.passed])
     for h in pre:
         h.lead_in_s = lead_in_span(fe, cap.t0_index, h.f_hz, h.drift_hz_per_min, h.tau0_s,
                                    cap.fs)
     tbd = [] if live_only else track_before_detect(fe, cap.t0_index, spec, lines, cap.fs)
-    return Acquisition(lines=lines, preamble=pre, tbd=tbd)
+    return Acquisition(lines=lines, preamble=pre, tbd=tbd, hinted=hinted)
