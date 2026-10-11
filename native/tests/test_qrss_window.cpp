@@ -471,6 +471,26 @@ void test_combined_passes_hide_their_parts() {
     check::is_true(!w.tile(QStringLiteral("c"))->isHidden() &&
                        !w.tile(QStringLiteral("b"))->isHidden(),
                    "combined: passes not combined both show");
+    // A provisional tile identified later, by a newer pass's header, goes
+    // behind the combined tile like any other included pass.
+    QJsonArray prov;
+    prov.append(pass(QStringLiteral("c"), QStringLiteral("2026-10-10T21:00:00Z"), 2,
+                     QStringLiteral("cbc634ec")));
+    QJsonObject headerless = tile_json(QStringLiteral("b"), 1204.0, QString(), 1.0, QString(), 0);
+    headerless[QStringLiteral("slot_utc")] = QStringLiteral("2026-10-10T20:30:00Z");
+    prov.append(headerless);
+    write_state(dir.path(), prov, 3'000'000);
+    w.reload();
+    check::is_true(w.tile(QStringLiteral("b"))->provisional() &&
+                       !w.tile(QStringLiteral("b"))->isHidden(),
+                   "combined: a headerless pass shows, provisional");
+    prov[1] = pass(QStringLiteral("b"), QStringLiteral("2026-10-10T20:30:00Z"), 1,
+                   QStringLiteral("cbc634ec"));
+    write_state(dir.path(), prov, 4'000'000);
+    w.reload();
+    check::is_true(w.tile(QStringLiteral("b"))->isHidden() &&
+                       !w.tile(QStringLiteral("c"))->isHidden(),
+                   "combined: once identified, it goes behind the combined tile");
 }
 
 // The spectrogram: a tone shows where it is, darker on the default
