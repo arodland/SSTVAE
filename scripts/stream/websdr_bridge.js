@@ -19,7 +19,14 @@ const NAME = (process.env.WEBSDR_NAME || '').replace(/[^ -~]/g, '').slice(0, 16)
   const browser = await firefox.launch({
     executablePath: process.env.FIREFOX || '/usr/bin/firefox',
     // Autoplay without a gesture; output muted (the hook taps the audio).
-    firefoxUserPrefs: { 'media.autoplay.default': 0, 'media.autoplay.blocking_policy': 0, 'media.volume_scale': '0.0' },
+    // Background services (telemetry, updates, connectivity checks) off.
+    firefoxUserPrefs: {
+      'media.autoplay.default': 0, 'media.autoplay.blocking_policy': 0, 'media.volume_scale': '0.0',
+      'datareporting.policy.dataSubmissionEnabled': false, 'datareporting.healthreport.uploadEnabled': false,
+      'toolkit.telemetry.enabled': false, 'app.update.enabled': false, 'app.update.auto': false,
+      'network.connectivity-service.enabled': false, 'network.captive-portal-service.enabled': false,
+      'browser.safebrowsing.malware.enabled': false, 'browser.safebrowsing.phishing.enabled': false,
+    },
   });
   const page = await browser.newPage();
   let rate = 0, n = 0, pos = 0, last = 0, lastAudio = 0; const t0 = Date.now();
