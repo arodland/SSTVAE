@@ -1,7 +1,9 @@
 #include "qrss_page.hpp"
 
 #include <QHBoxLayout>
+#include <QColor>
 #include <QLabel>
+#include <QPalette>
 #include <QPushButton>
 #include <QSplitter>
 #include <QVBoxLayout>
@@ -22,7 +24,14 @@ QrssPage::QrssPage(QrssWindow* signals_view, QWidget* parent)
     listen_->setToolTip(tr("Starts and stops the radio's audio and the QRSS listener "
                            "together. The audio also feeds the SSTVAE decoder, the same "
                            "as Start receiving in SSTVAE mode."));
-    connect(listen_, &QPushButton::clicked, this, [this] { emit listenRequested(!listening_); });
+    connect(listen_, &QPushButton::clicked, this, [this] {
+        if (transmitting_) {
+            emit haltRequested();
+        } else {
+            emit listenRequested(!listening_);
+        }
+    });
+    normal_palette_ = listen_->palette();
     row->addWidget(listen_);
     listen_state_ = new QLabel(this);
     listen_state_->setObjectName(QStringLiteral("qrss_listen_state"));
@@ -77,12 +86,24 @@ void QrssPage::set_transmitting(bool on) {
 }
 
 void QrssPage::show_state() {
-    listen_->setEnabled(!transmitting_);
     if (transmitting_) {
-        listen_->setText(tr("Transmission active"));
+        QPalette red = normal_palette_;
+        red.setColor(QPalette::Button, QColor(200, 30, 30));
+        red.setColor(QPalette::ButtonText, Qt::white);
+        listen_->setPalette(red);
+        listen_->setAutoFillBackground(true);
+        listen_->setText(tr("&Halt transmission"));
+        listen_->setToolTip(tr("A send is on the air and receiving is paused. This stops the "
+                               "send now and unkeys the radio; receiving then starts again. "
+                               "The rest of a scheduled run is not sent."));
         listen_state_->setText(tr("Sending: receiving starts again when the send ends."));
         return;
     }
+    listen_->setPalette(normal_palette_);
+    listen_->setAutoFillBackground(false);
+    listen_->setToolTip(tr("Starts and stops the radio's audio and the QRSS listener "
+                           "together. The audio also feeds the SSTVAE decoder, the same "
+                           "as Start receiving in SSTVAE mode."));
     listen_->setText(listening_ ? tr("&Stop receiving") : tr("&Start receiving"));
     listen_state_->setText(listening_ ? tr("Receiving: the QRSS listener hears the radio.")
                                       : tr("Not receiving: start it to hear QRSS signals."));

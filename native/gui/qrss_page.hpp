@@ -39,8 +39,8 @@ public:
 public slots:
     void set_listening(bool on);
     // While a send is on the air receiving is suspended (half duplex) and
-    // comes back by itself afterwards, so the button is greyed out and
-    // says so rather than offering to start it.
+    // comes back by itself afterwards, so the button turns red and halts
+    // the send instead (`haltRequested`).
     void set_transmitting(bool on);
     void set_schedule_summary(const QString& text);
 
@@ -48,6 +48,8 @@ signals:
     // Start (true) or stop (false) receiving.
     void listenRequested(bool on);
     void scheduleRequested();
+    // Stop the send on the air.
+    void haltRequested();
 
 private:
     QrssWindow* signals_ = nullptr;
@@ -60,6 +62,7 @@ private:
     bool listening_ = false;
     bool transmitting_ = false;
     void show_state();
+    QPalette normal_palette_;
 };
 
 }  // namespace sstvae::gui

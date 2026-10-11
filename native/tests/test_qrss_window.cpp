@@ -342,14 +342,21 @@ void test_the_qrss_tab() {
     listen->click();
     check::is_true(asked.size() == 2 && !asked[1] && listen->text().contains(QStringLiteral("Stop")),
                    "tab: then Stop stops it");
-    // A send suspends receiving: the button says so and cannot be pressed.
+    // A send suspends receiving: the button turns red and halts the send.
+    int halts = 0;
+    QObject::connect(page, &gui::QrssPage::haltRequested, [&] { ++halts; });
     page->set_transmitting(true);
     page->set_listening(false);
-    check::is_true(!listen->isEnabled() && listen->text() == QStringLiteral("Transmission active"),
-                   "tab: greyed out as \"Transmission active\" while sending");
+    check::is_true(listen->isEnabled() && listen->text().contains(QStringLiteral("Halt")) &&
+                       listen->palette().color(QPalette::Button).red() > 150 &&
+                       listen->palette().color(QPalette::Button).green() < 100,
+                   "tab: red \"Halt transmission\" while sending");
+    listen->click();
+    check::is_true(halts == 1 && asked.size() == 2, "tab: which halts the send, not receiving");
     page->set_transmitting(false);
     page->set_listening(true);
-    check::is_true(listen->isEnabled() && listen->text().contains(QStringLiteral("Stop")),
+    check::is_true(listen->isEnabled() && listen->text().contains(QStringLiteral("Stop")) &&
+                       listen->palette().color(QPalette::Button).green() > 100,
                    "tab: and back to Stop when receiving resumes");
     schedule->click();
     check::equal(opened, 1, "tab: Schedule... asks for the schedule");
