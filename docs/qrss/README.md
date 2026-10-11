@@ -287,6 +287,16 @@ and segment within 5 Hz): the copy carrying more stays and the other is
 left out (noted "already a member"), so W never counts a pass's noise
 twice.
 
+Gate V measures each candidate's noise floor 85-120 Hz either side of it
+and leaves out the other preamble hits and the signals already verified
+(`receiver.detect`), and counts only the symbols heard. A neighbour in
+that band read as noise: KC2G at -18.6 dB, 101 Hz from AG7EW and 14 dB
+weaker, passed A2 at every live refresh of the 2026-10-11 04:15Z slot
+and failed V (Z_ref about 1 in a replay), so it had no live tile; with
+the neighbour left out it passes from the 145 s refresh (Z_ref 8-11),
+and the end-of-slot receive is unchanged but for Z_ref. With neighbours
+on both sides leaving no bin, the floor is the quieter side.
+
 The listener writes every log line to `listener.log` in its state
 directory (moved to `listener.log.1` past 2 MB), beside `state.json`,
 which keeps only the last 20.

@@ -289,6 +289,16 @@ no header and no Morse callsign is thrown away. And the search only
 checks a limited number of candidates per slot, strongest first, so a
 noisy band can't keep the computer busy for longer than a slot.
 
+### A strong signal right next door
+
+To judge whether a weak candidate is real, the receiver compares it
+with the noise on either side of it, about 100 Hz away. A stronger
+signal sitting there would look like a lot of noise and make the weak
+one look hopeless. So when it measures the noise for one candidate, the
+receiver leaves out the other signals it has found. (On 2026-10-11 a
+weak station 100 Hz from a strong one was missed for the whole pass
+for exactly this reason, and only the end-of-slot search found it.)
+
 ### Echoes of the neighbouring slot
 
 Since passes last 30 minutes and slots are 15 minutes apart, the end of

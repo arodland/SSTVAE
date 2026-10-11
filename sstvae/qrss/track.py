@@ -1212,14 +1212,29 @@ def z_ref_stat(tr: TrackResult, c_known: np.ndarray) -> float:
     return float(np.sum(w * t[ok])) / math.sqrt(max(den, 1e-300))
 
 
+def erase(tr: TrackResult, spans) -> None:
+    """Erase (psi = 0) tr's symbols within T of any span (a, b), s after t0."""
+    if not spans:
+        return
+    t = tr.t_pos_s()
+    gone = np.zeros(len(t), dtype=bool)
+    for a, b in spans:
+        gone |= (t > float(a) - T_SYM) & (t < float(b) + T_SYM)
+    tr.psi = np.where(gone, 0.0, tr.psi)
+
+
 def verify(ch, ch_fs, spec: FrameSpec, cand: Detection, *, fit: bool = True,
-           tau_range=None) -> Detection | None:
+           tau_range=None, erase_s=()) -> Detection | None:
     """Gate V (design 6.3): fit the timing, track with the known symbols
     withheld, accept at Z_ref > Z_ACCEPT. Returns the detection with its
     timing and z_ref filled in, or None.
 
     `ch` is the candidate's `ChanCapture`. With fit=False the candidate's
-    own timing is used (Z_ref is then N(0, 1) on noise).
+    own timing is used (Z_ref is then N(0, 1) on noise). erase_s, spans
+    (a, b) in seconds after t0, were not heard (a pass in progress, holes):
+    Z_ref is taken over the known symbols outside them, so the noise that
+    fills them adds nothing to it (the matched weights already make that
+    small).
     """
     # the acquisition's drift can be wrong (a preamble's estimate on a fading
     # or warming-up signal): the path is measured on the frame itself
@@ -1228,7 +1243,8 @@ def verify(ch, ch_fs, spec: FrameSpec, cand: Detection, *, fit: bool = True,
     for base in (cand.path, _flat_path(cand.path), None):
         # the last try, a line over the whole frame, is for weak candidates
         pth = refine_path(ch, spec, base) if base is not None else line_path(ch, spec, cand.path)
-        alt = verify_track(ch, spec, replace(cand, path=pth), fit=fit, tau_range=tau_range)
+        alt = verify_track(ch, spec, replace(cand, path=pth), fit=fit, tau_range=tau_range,
+                           erase_s=erase_s)
         if alt is not None and (tr is None or alt.z_ref > tr.z_ref):
             tr, path = alt, pth
         if tr is not None and tr.z_ref > Z_ACCEPT:
@@ -1243,7 +1259,8 @@ def verify(ch, ch_fs, spec: FrameSpec, cand: Detection, *, fit: bool = True,
             tms = fit_timing(ch, CH_FS, fn, spec, None, None, t0_index=ch.t0_index,
                              z_d=derotate(ch, fn), n_best=V_TIMING_TRIES)
             for tm in tms[1:]:
-                alt = verify_track(ch, spec, replace(cand, path=pth, timing=tm), fit=False)
+                alt = verify_track(ch, spec, replace(cand, path=pth, timing=tm), fit=False,
+                                   erase_s=erase_s)
                 if alt is not None and (tr is None or alt.z_ref > tr.z_ref):
                     tr, path = alt, pth
                 if tr is not None and tr.z_ref > Z_ACCEPT:
@@ -1410,8 +1427,9 @@ def _flat_path(path: FreqPath) -> FreqPath:
 
 
 def verify_track(chan: ChanCapture, spec: FrameSpec, cand: Detection, *, fit: bool = True,
-                 tau_range=None) -> TrackResult | None:
-    """The tracker run behind `verify`, with tr.z_ref set."""
+                 tau_range=None, erase_s=()) -> TrackResult | None:
+    """The tracker run behind `verify`, with tr.z_ref set (over what was
+    heard: the symbols in `erase_s` are erased after tracking)."""
     fn = freq_path_spline(cand.path)
     z_d = derotate(chan, fn)
     tm = cand.timing
@@ -1426,6 +1444,7 @@ def verify_track(chan: ChanCapture, spec: FrameSpec, cand: Detection, *, fit: bo
     classes = make_classes(spec)
     tr = track(chan, spec, cand, classes, timing=tm, freq=fn, withhold_known=True, outer=0,
                refine=False, z_d=z_d)
+    erase(tr, erase_s)
     lay = layout(spec)
     keyed_from = spec.keyed_start_pos - tr.lead_in_s / T_SYM
     c_known, _ = templates(spec, tr.pos, classes.mu, classes.nu, None, False, keyed_from)

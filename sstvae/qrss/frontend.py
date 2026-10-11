@@ -308,7 +308,10 @@ def noise_psd(ch, fs: int = CH_FS, exclude_hz=(), win_s: float = 10.0, *,
     leaving out bins within guard_hz of any frequency in `exclude_hz`
     (detected neighbours, Hz in ch) or of its alias one fs away; the
     45 Hz default covers a CE neighbour's 99.9% width (+-36 Hz) plus the
-    decimation filter's skirt, through which its sideband folds in. Each bin is divided by the
+    decimation filter's skirt, through which its sideband folds in. When
+    neighbours leave no bin either side (signals about 100 Hz apart on
+    both sides), each window takes the quieter side, neighbours and all:
+    a neighbour only adds power. Each bin is divided by the
     channeliser's aliased noise response there (the band sits on the
     decimation filter's skirt), and the median over bins is divided by
     ln 2, the median of an exponential. White FE noise of variance s2 at
@@ -324,21 +327,24 @@ def noise_psd(ch, fs: int = CH_FS, exclude_hz=(), win_s: float = 10.0, *,
         w = n
     nwin = max(1, -(-n // w))
     f = np.fft.fftfreq(w, 1.0 / fs)
-    sel = (np.abs(f) >= band_hz[0]) & (np.abs(f) <= band_hz[1])
+    band = (np.abs(f) >= band_hz[0]) & (np.abs(f) <= band_hz[1])
+    sel = band.copy()
     for fx in exclude_hz:
         for alias in (-fs, 0, fs):             # its skirt folds back across +-fs/2
             sel &= np.abs(f - float(fx) - alias) > guard_hz
-    if not sel.any():
-        raise ValueError("noise_psd: every bin in the band is excluded")
-    resp = _noise_response(int(fs_in), int(fs), w)[sel] if fs_in % fs == 0 else 1.0
+    sides = [sel] if sel.any() else [band & (f < 0), band & (f > 0)]
+    if not any(s.any() for s in sides):
+        raise ValueError("noise_psd: no bin in the band")
+    resp = (_noise_response(int(fs_in), int(fs), w) if fs_in % fs == 0
+            else np.ones(w))
     win = signal.windows.hann(w, sym=False)
     scale = 1.0 / (fs * np.sum(win ** 2))
     out = np.empty(nwin, dtype=np.float32)
     for i in range(nwin):
         a = min(i * w, n - w)
         X = np.fft.fft(ch[a:a + w] * win)
-        pw = (X.real[sel] ** 2 + X.imag[sel] ** 2) * scale / resp
-        out[i] = np.median(pw) / math.log(2)
+        p = (X.real ** 2 + X.imag ** 2) * scale / resp
+        out[i] = min(np.median(p[s]) for s in sides if s.any()) / math.log(2)
     return out
 
 

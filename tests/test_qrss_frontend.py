@@ -254,6 +254,13 @@ def test_noise_psd_is_the_in_band_floor():
     excl = frontend.noise_psd(c, exclude_hz=[100.0])
     assert np.mean(excl) == pytest.approx(s2 / FE_FS, rel=0.06)
     assert np.mean(with_nb) > np.mean(excl)
+    # neighbours 100 Hz down and up leave no bin: the quieter side is the floor
+    nb2 = (ce.baseband(_sym(spec, seed=11), spec, FE_FS, -1.0, n)
+           * np.exp(-2j * np.pi * 100.0 * np.arange(n) / FE_FS) * math.sqrt(s2 * 2500 / FE_FS))
+    c2, _ = frontend.channelise(x + nb2, FE_FS, 0.0)    # (the one below at 0 dB)
+    both = frontend.noise_psd(c2, exclude_hz=[100.0, -100.0])
+    assert np.mean(both) < np.mean(frontend.noise_psd(c2, exclude_hz=[-100.0]))  # the +20 dB side
+    assert np.mean(both) < 0.5 * np.mean(frontend.noise_psd(c2))
 
 
 # --- A-8 --------------------------------------------------------------------------------------

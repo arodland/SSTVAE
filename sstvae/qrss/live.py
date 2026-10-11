@@ -1021,7 +1021,7 @@ class LiveListener:
             return          # joined after its preamble: only the end-of-slot search can find it
         prep, erase, heard = capture_prepare(x, ok, origin, s.q, spec)
         if elapsed < self.cfg.detect_until_s or not s.dets:
-            found = receiver.detect(prep, spec, live_only=True)
+            found = receiver.detect(prep, spec, live_only=True, erase_s=erase)
             for d in found:      # keep one detection per signal, the newest
                 s.dets = [g for g in s.dets if abs(g.f_hz - d.f_hz) >= MERGE_HZ] + [d]
         if not s.dets:

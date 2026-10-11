@@ -240,7 +240,7 @@ class _Pass:
 def test_slot_bookkeeping_with_a_stub_receiver(tmp_path, monkeypatch):
     calls = []
 
-    def detect(prep, spec, live_only=False):
+    def detect(prep, spec, live_only=False, **kw):
         calls.append(("detect", live_only))
         return [_Det(1500.0), _Det(1610.0)]
 
@@ -691,7 +691,7 @@ def test_a_slot_heard_on_two_dials_is_received_on_each(tmp_path, monkeypatch):
     monkeypatch.setattr(live, "DIAL_GUARD_S", (2.0, 2.0))   # (TINY is 53 s: room after it)
     calls = []
 
-    def detect(prep, spec, live_only=False):
+    def detect(prep, spec, live_only=False, **kw):
         return [_Det(1500.0)]
 
     def receive_slot(prep, spec, live_only=False, estimator="joint", *, erase_s=(),

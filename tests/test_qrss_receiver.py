@@ -859,3 +859,43 @@ def test_one_signal_is_one_pass_whatever_the_timings(monkeypatch):
         monkeypatch.setattr(RX, "receive_pass", lambda prep, spec, d, **k: by_f[d.f_hz])
         got = RX.receive_slot(None, frame.FULL, dets=dets)
         assert [p.f_hz for p in got] == [p.f_hz for p in [strong, other] if p in order]
+
+
+def test_detect_leaves_known_neighbours_out_of_the_noise_floor(monkeypatch):
+    """Field test (2026-10-11, slot 04:15Z): KC2G at -18.6 dB, 101 Hz above
+    AG7EW and 14 dB weaker, passed A2 at every live refresh and failed gate
+    V at Z_ref ~1, because AG7EW sat in the band its noise floor is
+    measured in. Each candidate's channel leaves out the other preamble
+    hits and whatever is verified, and the gate counts only what was heard."""
+    from types import SimpleNamespace
+
+    from sstvae.qrss import acquire
+
+    def det(f, method):
+        return Detection(f_hz=f, path=None, timing=None, z_ref=math.nan, method=method,
+                         lead_in_s=1.0)
+
+    cands = [det(1104.2, "preamble"), det(1205.6, "preamble"), det(1700.0, "tbd"),
+             det(1900.0, "tbd")]
+    monkeypatch.setattr(acquire, "acquire",
+                        lambda *a, **k: SimpleNamespace(detections=lambda spec: cands))
+    chans, erased = {}, {}
+
+    def channel_for(prep, spec, d, exclude_hz=()):
+        chans[d.f_hz] = tuple(exclude_hz)
+        return d.f_hz
+
+    def verify(chan, fs, spec, d, erase_s=()):
+        erased[d.f_hz] = erase_s
+        if d.f_hz == 1900.0:
+            return None                                   # a candidate that is not a signal
+        return dataclasses.replace(d, z_ref=10.0, timing=SimpleNamespace(tau0=d.f_hz))
+
+    monkeypatch.setattr(RX, "channel_for", channel_for)
+    monkeypatch.setattr(T, "verify", verify)
+    prep = SimpleNamespace(fe=None, q=Q_TEST, t0_index=0.0, fs=4000)
+    got = RX.detect(prep, frame.FULL, erase_s=((60.0, 1800.0),))
+    assert [d.f_hz for d in got] == [1104.2, 1205.6, 1700.0]
+    assert chans == {1104.2: (1205.6,), 1205.6: (1104.2,), 1700.0: (1104.2, 1205.6),
+                     1900.0: (1104.2, 1205.6, 1700.0)}
+    assert set(erased.values()) == {((60.0, 1800.0),)}

@@ -150,17 +150,6 @@ def _cw_result(tr: track.TrackResult, spec: FrameSpec, hdr) -> tuple[CwIdResult 
     return CwIdResult(text=text, z_match=float(z), keying=kt, agrees=agrees), known
 
 
-def _erase(tr: track.TrackResult, spans) -> None:
-    """Erase (psi = 0) tr's symbols within T of any span (a, b), s after t0."""
-    if not spans:
-        return
-    t = tr.t_pos_s()
-    gone = np.zeros(len(t), dtype=bool)
-    for a, b in spans:
-        gone |= (t > float(a) - T_SYM) & (t < float(b) + T_SYM)
-    tr.psi = np.where(gone, 0.0, tr.psi)
-
-
 def receive_pass(cap, spec: FrameSpec, det: Detection, prior: EmPrior | None = None,
                  estimator: str = "joint", *, exclude_hz=(), f_mix_hz=None,
                  round_b: bool = True, return_tracks: bool = False,
@@ -184,7 +173,7 @@ def receive_pass(cap, spec: FrameSpec, det: Detection, prior: EmPrior | None = N
     prep = prepare(cap)
     chan = channel_for(prep, spec, det, exclude_hz, f_mix_hz)
     if not np.isfinite(det.z_ref) or det.timing is None:
-        det = track.verify(chan, CH_FS, spec, det)
+        det = track.verify(chan, CH_FS, spec, det, erase_s=erase_s)
         if det is None:
             return None
     q = prep.q
@@ -192,7 +181,7 @@ def receive_pass(cap, spec: FrameSpec, det: Detection, prior: EmPrior | None = N
     tr = track.track(chan, spec, det, track.make_classes(spec, prior=prior),
                      timing=det.timing)
     tr.z_ref = det.z_ref
-    _erase(tr, erase_s)
+    track.erase(tr, erase_s)
     z, w, llr, diag = demod.extract(None, tr, spec, q, estimator)
     hdr, llr, spec = decode_header(llr, diag, spec)
     cw, cw_known = _cw_result(tr, spec, hdr)
@@ -202,7 +191,7 @@ def receive_pass(cap, spec: FrameSpec, det: Detection, prior: EmPrior | None = N
         tr2 = track.track(chan, spec, det, track.make_classes(spec, header.encode(hdr), prior),
                           cw_known=cw_known, timing=tr.timing, freq=tr.freq, outer=1)
         tr2.z_ref = det.z_ref
-        _erase(tr2, erase_s)
+        track.erase(tr2, erase_s)
         z, w, _, diag = demod.extract(None, tr2, spec, q, estimator)
         tr = tr2
         tracks.append(tr2)
@@ -300,14 +289,16 @@ def _ghosts(dets: list[Detection]) -> list[Detection]:
 
 
 def detect(prep: Prepared, spec: FrameSpec, live_only: bool = False,
-           max_candidates: int | None = None, budget_s: float | None = None) -> list[Detection]:
+           max_candidates: int | None = None, budget_s: float | None = None,
+           erase_s=()) -> list[Detection]:
     """Acquisition plus gate V over a prepared capture: verified detections.
 
     max_candidates bounds how many candidates go to the gate (preamble
     hits first, then the strongest of the rest), and budget_s stops
     verifying new ones after that many seconds; a candidate that is not
     a signal costs most (about a minute over a whole FULL slot, measured
-    on voice-like audio).
+    on voice-like audio). erase_s, spans (a, b) in seconds after t0, were
+    not heard: the gate counts only what was (`track.verify`).
     """
     t_end = None if budget_s is None else time.monotonic() + budget_s
     acq = acquire.acquire(frontend.Capture(prep.fe, prep.q, prep.t0_index, prep.fs), spec,
@@ -316,13 +307,21 @@ def detect(prep: Prepared, spec: FrameSpec, live_only: bool = False,
     if max_candidates is not None:
         cands = cands[:max_candidates]
     found: list[Detection] = []
+    # a neighbour's sideband in the band the noise floor is measured in
+    # (85-120 Hz off) reads as noise and sinks a weaker signal's Z_ref:
+    # KC2G at -18.6 dB beside AG7EW 101 Hz away and 14 dB stronger read
+    # Z_ref ~1 on the first minutes of the slot, and 8-11 without it. So
+    # each candidate leaves out the preamble hits (signals, at A2's false
+    # alarm rate) and whatever has been verified already.
+    hits = [c.f_hz for c in cands if c.method == "preamble"]
     for d in cands:
         if t_end is not None and time.monotonic() > t_end:
             break
         if any(abs(d.f_hz - g.f_hz) < MERGE_HZ for g in found):
             continue
-        chan = channel_for(prep, spec, d)
-        v = track.verify(chan, CH_FS, spec, d)
+        others = {f for f in hits + [g.f_hz for g in found] if abs(f - d.f_hz) >= MERGE_HZ}
+        chan = channel_for(prep, spec, d, tuple(sorted(others)))
+        v = track.verify(chan, CH_FS, spec, d, erase_s=erase_s)
         if v is None:
             continue
         if v.method != "preamble" and v.lead_in_s == 0.0:
@@ -345,12 +344,12 @@ def receive_slot(cap, spec: FrameSpec = FULL, live_only: bool = False,
 
     erase_s and round_b go to every `receive_pass`; `dets` skips the
     acquisition and receives those detections instead (the live view
-    reuses the ones it found on the preamble). max_candidates and
-    budget_s go to `detect`.
+    reuses the ones it found on the preamble). max_candidates, budget_s
+    and erase_s go to `detect`.
     """
     prep = prepare(cap)
     if dets is None:
-        dets = detect(prep, spec, live_only, max_candidates, budget_s)
+        dets = detect(prep, spec, live_only, max_candidates, budget_s, erase_s=erase_s)
     out: list[PassResult] = []
     for d in dets:
         others = tuple(g.f_hz for g in dets if g is not d)
