@@ -4,6 +4,7 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QEvent>
 #include <QFile>
 #include <QFileInfo>
 #include <QFont>
@@ -817,6 +818,14 @@ void QrssWindow::reload() {
     prov_host_->update();
     scroll_->viewport()->update();
     prov_scroll_->viewport()->update();
+    // And tell both scroll areas the content's height changed. A flow
+    // layout's minimum is one card whatever the count, so Qt sees no
+    // size change to pass on by itself, and new cards could arrive with
+    // no scroll bar to reach them (Jeff, 2026-10-11).
+    tiles_host_->updateGeometry();
+    prov_host_->updateGeometry();
+    QCoreApplication::postEvent(scroll_, new QEvent(QEvent::LayoutRequest));
+    QCoreApplication::postEvent(prov_scroll_, new QEvent(QEvent::LayoutRequest));
     update_markers(markers);
 
     QStringList parts;

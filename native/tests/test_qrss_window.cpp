@@ -6,6 +6,7 @@
 #include <QApplication>
 #include <QLayout>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QColor>
 #include <QDateTime>
 #include <QDir>
@@ -590,10 +591,18 @@ void test_tiles_do_not_overlap() {
         t[QStringLiteral("cw_text")] = QStringLiteral("KC2G KC2G FN21");
         tiles.append(t);
     }
+    // One card first, then the rest arriving: the pane must grow a
+    // scroll bar for them (Jeff saw none).
+    write_state(dir.path(), QJsonArray{tiles[0]}, 500'000);
+    w.reload();
+    QApplication::processEvents();
     write_state(dir.path(), tiles, 1'000'000);
     w.reload();
     QApplication::processEvents();
     auto* scroll = w.findChild<QScrollArea*>(QStringLiteral("qrss_received"));
+    check::is_true(scroll && scroll->verticalScrollBar()->isVisible() &&
+                       scroll->verticalScrollBar()->maximum() > 0,
+                   "qrss/overlap: new cards beyond the pane bring a scroll bar");
     check::is_true(scroll != nullptr, "qrss/overlap: the received pane");
     if (!scroll) return;
     std::string why;
