@@ -3,14 +3,17 @@
 // browser download is needed; FIREFOX overrides its path), taps the decoded audio through the page's hook_webaud hook,
 // and writes it to stdout as s16le mono resampled to 8000 Hz.
 // usage: node websdr_bridge.js [URL]   (status lines on stderr)
-// The Utah WebSDR ends a session after 2 hours by silently stopping the
-// audio while the websocket stays open, so when no samples arrive for
-// STALL_S seconds (default 15) the page is loaded again, which starts a
-// new session; the output just has a gap of a few seconds.
+// The page stops its own audio after the site's idle timeout (2 hours on
+// the Utah WebSDR, bandinfo.js idletimeout) while the websocket stays
+// open, so when no samples arrive for STALL_S seconds (default 15) the
+// page is loaded again; the output just has a gap of a few seconds.
+// WEBSDR_NAME (a callsign) is given to the site as the listener's name,
+// and the page runs in its "blind" view, which opens no waterfall.
 const { _bidiFirefox: firefox } = require('playwright');
 const url = process.argv[2] || 'http://websdr1.sdrutah.org:8901/index1a.html?tune=7066usb';
 const OUT = 8000;
 const STALL_S = Number(process.env.STALL_S || 15);
+const NAME = (process.env.WEBSDR_NAME || '').replace(/[^ -~]/g, '').slice(0, 16);
 (async () => {
   const browser = await firefox.launch({
     executablePath: process.env.FIREFOX || '/usr/bin/firefox',
@@ -35,6 +38,13 @@ const STALL_S = Number(process.env.STALL_S || 15);
     lastAudio = Date.now();
     process.stdout.write(Buffer.from(new Int16Array(out).buffer));
   });
+  // Cookies the page reads at load: view 3 ("blind") starts no waterfall
+  // stream, and username is sent with the tuning to the server.
+  await page.addInitScript(name => {
+    if (!/^https?:/.test(location.protocol)) return;
+    document.cookie = 'view=3; path=/; SameSite=Lax';
+    if (name) document.cookie = `username=${name}; path=/; SameSite=Lax`;
+  }, NAME);
   await page.addInitScript(() => {
     window.webaud_hookdef = 1;
     const q = []; let D = 0;

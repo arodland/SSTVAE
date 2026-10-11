@@ -113,6 +113,7 @@ kill -- -<pgid>
 | `FIREFOX` | `/usr/bin/firefox` | browser the bridge drives |
 | `SRC` | this checkout | where `native/build-stream` and `qrss_listen.py` are |
 | `STALL_S` | 15 | seconds without WebSDR audio before the bridge reloads the page |
+| `CALLSIGN` | `AG7EW` | name the WebSDR shows for this listener |
 
 ### Logs
 
@@ -144,13 +145,18 @@ estimate rate" and "Guessed Channel Layout".
   hook with `Object.defineProperty` and a setter that ignores
   reassignment. Without that, the bridge runs happily and outputs zero
   samples.
-- **The Utah WebSDR ends a session after 2 hours, silently.** On
+- **The WebSDR page stops its own audio after an idle timeout.** On
   2026-10-11 the audio stopped at exactly 57,600,768 samples (7200 s at
-  8 kHz). The page showed no error and the websocket stayed open, so the
-  app just heard silence. The bridge now reloads the page when no
+  8 kHz) with the websocket still open, so the app just heard silence.
+  The page's `timeout_idle_do()` fires after `idletimeout` from the
+  site's `tmp/bandinfo.js` (7,200,000 ms on Utah) without tuning or
+  other input, and destroys the audio client. The bridge now reloads the page when no
   samples arrive for `STALL_S` seconds, which opens a new session with a
   gap of a few seconds, and backs off (up to 5 min) if a reload brings
   no audio.
+- **The page runs in its "blind" view** (cookie `view=3`), which opens
+  no waterfall stream, so the bridge fetches audio only. The callsign is
+  set as the `username` cookie, which the page sends with the tuning.
 - **Don't edit `stream.sh` while a stream is running.** Bash reads a
   script as it executes it. Write a new file and rename it over the old
   one instead.

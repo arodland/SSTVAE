@@ -10,6 +10,7 @@ SRC=${SRC:-$(cd "$(dirname "$0")/../.." && pwd)}
 STREAM=${STREAM:-$HOME/.qrsstvae-stream}
 MINUTES=${MINUTES:-180}
 URL=${URL:-http://websdr1.sdrutah.org:8901/index1a.html?tune=7066usb}
+CALLSIGN=${CALLSIGN:-AG7EW}
 DISP=${DISP:-:99}
 KEY=$(cat "$STREAM/youtube_key")
 # OUT overrides the destination (e.g. a local .flv for a dry run).
@@ -36,7 +37,7 @@ trap cleanup EXIT INT TERM
 Xvfb "$DISP" -screen 0 1920x1080x24 -nolisten tcp > "$LOG/xvfb.log" 2>&1 & pids+=($!)
 sleep 2
 
-(NODE_PATH="$STREAM/node/node_modules" node "$SRC/scripts/stream/websdr_bridge.js" "$URL" 2> "$LOG/bridge.log") \
+(NODE_PATH="$STREAM/node/node_modules" WEBSDR_NAME="$CALLSIGN" node "$SRC/scripts/stream/websdr_bridge.js" "$URL" 2> "$LOG/bridge.log") \
   | pacat --playback -d websdr_stream --rate=8000 --format=s16le --channels=1 --raw --latency-msec=200 &
 pids+=($!)
 
