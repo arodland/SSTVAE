@@ -41,7 +41,9 @@ more than RESYNC_S the other way -- samples arriving later than their
 count says, which is audio that was never sent (the app stopped feeding
 while it transmitted, or a capture stalled) -- the stream restarts at
 the new time and the missing stretch stays a hole, erased in every pass
-it touches. Samples arriving early (a burst after a stall) are only
+it touches. Digital silence (SILENCE_S of samples under SILENCE_LEVEL,
+which is what a WebSDR sends once it has dropped the session) is a hole
+too: nothing was heard there. Samples arriving early (a burst after a stall) are only
 believed after EARLY_WINDOW_S of nothing but: a pipe loses nothing, so
 early audio is the sound card's clock running fast, which is slow. A
 replayed file (`WavSource`) is stamped from its start time instead, so a
@@ -78,6 +80,11 @@ RESYNC_S = 1.0                    # clock disagreement that restarts the stream
 STAMP_HOLD_S = 5.0                # stdin audio arriving late is held this long (backlog or gap?)
 EARLY_WINDOW_S = 30.0             # ...when audio has run ahead of the clock this long
 RING_S = 2100.0                   # FE kept in memory: a FULL slot, its margins and slack
+# Audio this quiet this long is a source sending nothing (a WebSDR that
+# has dropped the session, a muted stream), not a quiet band: no sound
+# card hears below a 24-bit step. It is kept as unheard.
+SILENCE_LEVEL = 2.0 ** -24
+SILENCE_S = 1.0
 MERGE_HZ = receiver.MERGE_HZ      # a detection this close to a tile is that tile
 PREAMBLE_S = 20                   # the preamble's span after t0 (660 symbols, 20.0 s)
 CAPTURE_MARGIN_S = 2.0            # blanker and AGC run this far past the newest audio
@@ -609,6 +616,9 @@ class LiveListener:
         self.dial = DialLog(self.dir / DIAL_FILE)
         self.fe = StreamFE()
         self._early: collections.deque = collections.deque()
+        self._quiet: tuple[int, int] | None = None    # the run of silence ending the last chunk
+        self._silent: list[list[int]] = []            # audio spans of digital silence, unheard
+        self._silent_from: int | None = None          # the silence going on now began here
         self.slots: dict[int, SlotState] = {}
         self.finished: set[int] = set()
         self.done_tiles: list[Tile] = []
@@ -737,11 +747,61 @@ class LiveListener:
                     self._early.clear()
                 else:
                     a = nxt
+        self._note_silence(a, x)
         for n0, fe in self.fe.push(a, x):
-            self.ring.write(n0, fe)
-            if self.passband is not None:
-                self.passband.write(n0 / FE_FS, fe)
+            for lo, hi in self._heard(n0, len(fe)):
+                self.ring.write(n0 + lo, fe[lo:hi])
+                if self.passband is not None:
+                    self.passband.write((n0 + lo) / FE_FS, fe[lo:hi])
         self.audio_end = (a + len(x) - 1) / FS
+
+    def _note_silence(self, a: int, x: np.ndarray) -> None:
+        """Add x's runs of digital silence (x from audio index a) to `_silent`.
+
+        A run is counted once it has lasted SILENCE_S, so the first part of
+        one spanning several chunks may already be written as heard: at
+        most SILENCE_S of it, once per silence.
+        """
+        n_min = int(round(SILENCE_S * FS))
+        run = self._quiet if self._quiet is not None and self._quiet[1] == a else None
+        self._quiet = None
+        d = np.diff(np.r_[0, (np.abs(x) < SILENCE_LEVEL).astype(np.int8), 0])
+        starts, ends = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
+        if self._silent_from is not None and (not len(starts) or starts[0]):
+            self._sound_back(a)                   # the silence ended where this chunk began
+        for s, e in zip(starts, ends):
+            lo = run[0] if s == 0 and run is not None else a + int(s)
+            hi = a + int(e)
+            if hi - lo >= n_min:
+                if self._silent and lo <= self._silent[-1][1]:
+                    self._silent[-1][1] = max(self._silent[-1][1], hi)
+                else:
+                    self._silent.append([lo, hi])
+                if self._silent_from is None:
+                    self._silent_from = lo
+                    self.log(f"the audio is digital silence from {utc_iso(lo / FS)}: "
+                             "not counted as heard")
+            if e == len(x):
+                self._quiet = (lo, hi)            # it may go on in the next chunk
+            elif self._silent_from is not None:
+                self._sound_back(hi)
+
+    def _sound_back(self, a: int) -> None:
+        self.log(f"audio back after {(a - self._silent_from) / FS:.0f} s of digital silence")
+        self._silent_from = None
+
+    def _heard(self, n0: int, n: int) -> list[tuple[int, int]]:
+        """The runs [lo, hi) of FE samples n0 .. n0+n-1 that are not digital silence."""
+        ok = np.ones(n, dtype=bool)
+        keep = []
+        for lo, hi in self._silent:
+            ka, kb = -(-lo // FE_DECIM) - n0, -(-hi // FE_DECIM) - n0
+            if kb > -10 * FE_FS:                  # (kept a while: the stream can step back)
+                keep.append([lo, hi])
+            ok[max(ka, 0):max(min(kb, n), 0)] = False
+        self._silent = keep
+        d = np.diff(np.r_[0, ok.astype(np.int8), 0])
+        return list(zip(np.flatnonzero(d == 1).tolist(), np.flatnonzero(d == -1).tolist()))
 
     def backfill(self, now: float) -> float:
         """Refill the ring from the passband store: seconds of audio read back.

@@ -239,6 +239,15 @@ that *ended* while the listener was stopped (in the last 3 hours) is
 read back from disk and finished, so stopping the listener just before
 a quarter hour doesn't lose the pass it was working on.
 
+### The audio went silent
+
+Some sources go quiet without saying so. The Utah WebSDR, for one,
+stops sending sound when a session reaches two hours, though the
+connection stays open. What arrives then is perfect silence, which no
+real band sounds like, however quiet. A second or more of it counts as
+not heard, exactly as if the audio had stopped, and the log says when it
+started and when sound came back.
+
 ### Your own station was transmitting
 
 A radio can't listen while it transmits, so the app stops receiving

@@ -222,6 +222,10 @@ Audio on stdin is stamped with the time it was read, but after a stall
 for it) several seconds arrive at once. A chunk that reads as late is
 therefore held, up to 5 s, until the queue has drained and the stream is
 seen to follow on; only audio that stays late is treated as missing.
+A second or more of digital silence (samples under 2^-24, which no sound
+card hears on a real band) is treated as missing too and logged: it is
+what a source sends when it has nothing, such as the Utah WebSDR after
+it drops a session at its two-hour limit.
 `scripts/qrss_check_store.py` reports, for each recent slot, the holes,
 clipping, dropouts and dial changes in the passband store.
 

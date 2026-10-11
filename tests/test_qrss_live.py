@@ -25,6 +25,11 @@ from sstvae.qrss.frontend import slot_t0
 TINY = frame.TINY
 
 
+def _hiss(n):
+    """n samples of a quiet band: faint, but heard (exact zeros are not, see SILENCE_S)."""
+    return 1e-3 * np.random.default_rng(n).standard_normal(n)
+
+
 def test_stream_fe_equals_batch():
     x = np.random.default_rng(3).standard_normal(30000)
     ref = frontend.audio_to_fe(x)
@@ -82,11 +87,11 @@ def test_clock_follows_on_and_restarts_after_a_gap(tmp_path):
     L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
                           log=lambda m: None)
     t = 1_000_000.0
-    L.feed(np.zeros(FS), t)
+    L.feed(_hiss(FS), t)
     first = L.fe.next_index
-    L.feed(np.zeros(FS), t + 1.0 + 0.3)        # 0.3 s of clock disagreement: follows on
+    L.feed(_hiss(FS), t + 1.0 + 0.3)        # 0.3 s of clock disagreement: follows on
     assert L.fe.next_index == first + FS
-    L.feed(np.zeros(FS), t + 10.0)             # 7.7 s missing: restarts there
+    L.feed(_hiss(FS), t + 10.0)             # 7.7 s missing: restarts there
     assert L.fe.next_index == int(round((t + 10.0) * FS)) + 1
     _, ok = L.ring.read(int((t + 2.5) * FE_FS), int((t + 8.5) * FE_FS))
     assert not ok.any()
@@ -94,18 +99,50 @@ def test_clock_follows_on_and_restarts_after_a_gap(tmp_path):
     # a burst (ten seconds read at once) follows on: a pipe loses nothing
     nxt = L.fe.next_index
     for k in range(10):
-        L.feed(np.zeros(FS), t + 10.5 + 0.01 * k)
+        L.feed(_hiss(FS), t + 10.5 + 0.01 * k)
     assert L.fe.next_index == nxt + 10 * FS
     # audio early for EARLY_WINDOW_S on end: the sound card runs fast, step back
     t2 = t + 20.0
     for k in range(40):
-        L.feed(np.zeros(FS), t2 - 1.0 + k)      # the stream 2 s ahead of every stamp
+        L.feed(_hiss(FS), t2 - 1.0 + k)      # the stream 2 s ahead of every stamp
     assert any("ahead of the clock" in s for s in L.lines)
+
+
+def test_digital_silence_is_not_heard(tmp_path):
+    """What a WebSDR sends once it has dropped the session: exact zeros,
+    which used to count as heard (a silent band). They are a hole in the
+    ring and the passband store like missing audio, logged once each way;
+    a moment of them inside a quiet band is still heard."""
+    lines = []
+    pb = frontend.PassbandStore(tmp_path / "passband")
+    L = live.LiveListener(tmp_path / "live", live.LiveConfig(spec=TINY, render=False),
+                          passband=pb, log=lines.append)
+    t = 1_000_000.0
+    sound = _hiss(20 * FS)
+    sound[5 * FS:5 * FS + FS // 2] = 0.0                  # half a second of zeros: heard
+    audio = np.concatenate([sound[:10 * FS], np.zeros(60 * FS), sound[10 * FS:]])
+    for k in range(0, len(audio), 2000):
+        L.feed(audio[k:k + 2000], t + (k + 2000) / FS)
+    t0 = t + 1 / FS                                       # the first sample's time
+
+    def heard(a, b):
+        _, ok = L.ring.read(int((t0 + a) * FE_FS), int((t0 + b) * FE_FS))
+        _, m = pb.read(t0 + a, t0 + b, return_mask=True)
+        assert np.array_equal(ok, m)
+        return ok
+
+    assert heard(1.0, 9.9).all()                          # the short run included
+    assert not heard(11.0, 69.9).any()                    # (its first second may count)
+    assert heard(70.1, 79.0).all()
+    said = [m.split(" ", 1)[1] for m in lines if "silence" in m]     # (after the time)
+    assert said == [
+        f"the audio is digital silence from {live.utc_iso(t0 + 10.0)}: not counted as heard",
+        "audio back after 60 s of digital silence"]
 
 
 def _steady(t, secs, n=2000):
     """(chunk, read time) of audio heard from t on, read as it arrives (n samples a chunk)."""
-    return [(np.zeros(n), t + (k + 1) * n / FS) for k in range(int(round(secs * FS / n)))]
+    return [(_hiss(n), t + (k + 1) * n / FS) for k in range(int(round(secs * FS / n)))]
 
 
 def _feed(L, chunks, stamper=None):
@@ -120,7 +157,7 @@ def test_a_burst_after_a_stall_is_not_missing_audio(tmp_path):
     listener leaves a hole; the stamper sees the backlog drain and the
     stream follows on, with nothing missing."""
     T = 1_000_000.0
-    stall = [(np.zeros(2000), T + 23.0 + 1e-4 * k) for k in range(12)]   # heard T+20..T+23
+    stall = [(_hiss(2000), T + 23.0 + 1e-4 * k) for k in range(12)]   # heard T+20..T+23
     chunks = _steady(T, 20.0) + stall + _steady(T + 23.0, 40.0)
     old = live.LiveListener(tmp_path / "old", live.LiveConfig(spec=TINY, render=False),
                             log=lambda m: None)
@@ -172,7 +209,7 @@ def test_audio_queued_for_a_starting_listener_starts_when_it_was_heard(tmp_path)
     """8 s of audio queued while the listener started up, read at once,
     then audio as it arrives: the stream starts where the queue did."""
     T = 1_000_000.0
-    queued = [(np.zeros(2000), T + 8.0 + 1e-4 * k) for k in range(32)]
+    queued = [(_hiss(2000), T + 8.0 + 1e-4 * k) for k in range(32)]
     L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
                           log=lambda m: None)
     _feed(L, queued + _steady(T + 8.0, 40.0), live.Stamper())
@@ -220,7 +257,7 @@ def test_slot_bookkeeping_with_a_stub_receiver(tmp_path, monkeypatch):
     L = live.LiveListener(tmp_path, cfg, log=lambda m: None)
     q = Q_TEST
     t0 = slot_t0(q)
-    L.feed(np.zeros(76 * FS), t0 + 60.0)       # the whole TINY slot heard
+    L.feed(_hiss(76 * FS), t0 + 60.0)       # the whole TINY slot heard
     assert not L.step(t0 - 20.0)
     assert L.step(t0 + 30.0) and set(L.slots) == {q}
     tiles = {round(t.f_hz): t.id for t in L.tiles()}
@@ -411,7 +448,7 @@ def test_a_slot_mostly_unheard_gets_no_whole_slot_search(tmp_path, monkeypatch):
     t0 = slot_t0(q)
     dur = live.frame_seconds(TINY)
     late = t0 + 0.65 * dur
-    L.feed(np.zeros(int((t0 + dur + 5 - late) * FS)), t0 + dur + 5)
+    L.feed(_hiss(int((t0 + dur + 5 - late) * FS)), t0 + dur + 5)
     L.step(late)
     L.step(t0 + dur + frontend.PB_TAIL_S + 0.5)
     assert q in L.finished and calls == []
@@ -437,7 +474,7 @@ def test_receives_run_on_the_worker_and_state_keeps_moving(tmp_path, monkeypatch
     q = Q_TEST
     t0 = slot_t0(q)
     end = t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 0.5
-    L.feed(np.zeros(int((end - t0 + 15) * FS)), end)
+    L.feed(_hiss(int((end - t0 + 15) * FS)), end)
     with L.lock:
         L.step(t0 + 30.0)             # the slot starts (its refresh finds nothing)
     for _ in range(100):
@@ -449,7 +486,7 @@ def test_receives_run_on_the_worker_and_state_keeps_moving(tmp_path, monkeypatch
         L.step(end)
     assert started.wait(5)
     with L.lock:                      # the loop can still feed and write state
-        L.feed(np.zeros(FS), end + 1.0)
+        L.feed(_hiss(FS), end + 1.0)
         L.write_state()
     st = json.loads((tmp_path / "state.json").read_text())
     assert st["busy"] and "finish" in st["busy"]
@@ -499,7 +536,7 @@ def test_a_finishing_slot_shows_the_whole_pass_meanwhile(tmp_path, monkeypatch):
     t0 = slot_t0(q)
     dur = live.frame_seconds(TINY)
     end = t0 + dur + frontend.PB_TAIL_S + 0.5
-    L.feed(np.zeros(int((end - t0 + 15) * FS)), end)
+    L.feed(_hiss(int((end - t0 + 15) * FS)), end)
     live_idle = lambda: L._busy["live"] is None and L._jobs.empty()   # noqa: E731
     with L.lock:
         L.step(t0 + 30.0)
@@ -673,7 +710,7 @@ def test_a_slot_heard_on_two_dials_is_received_on_each(tmp_path, monkeypatch):
         json.dumps({"t": t0 - 600.0, "dial_hz": 10_138_700, "why": "start"}) + "\n"
         + json.dumps({"t": t0 + 20.0, "dial_hz": 14_095_600, "why": "schedule"}) + "\n")
     start = t0 - frontend.PB_LEAD_S - 1.0
-    L.feed(np.zeros(int((end + 5 - start) * FS)), end + 5)
+    L.feed(_hiss(int((end + 5 - start) * FS)), end + 5)
     L.step(t0 + 30.0)
     (tile,) = L.tiles()
     assert tile.dial_hz == 10_138_700
@@ -902,7 +939,7 @@ def test_a_header_decoded_once_stays_with_its_signal(tmp_path, monkeypatch):
     cfg = live.LiveConfig(spec=TINY, refresh_s=10.0, first_s=25.0, render=False)
     L = live.LiveListener(tmp_path, cfg, store=store, log=lambda m: None)
     t0 = slot_t0(Q_TEST)
-    L.feed(np.zeros(76 * FS), t0 + 60.0)
+    L.feed(_hiss(76 * FS), t0 + 60.0)
     L.step(t0 + 30.0)
     L.step(t0 + 41.0)                                   # this receive missed the header
     (t,) = L.tiles()
