@@ -3,9 +3,14 @@
 // browser download is needed; FIREFOX overrides its path), taps the decoded audio through the page's hook_webaud hook,
 // and writes it to stdout as s16le mono resampled to 8000 Hz.
 // usage: node websdr_bridge.js [URL]   (status lines on stderr)
+// The Utah WebSDR ends a session after 2 hours by silently stopping the
+// audio while the websocket stays open, so when no samples arrive for
+// STALL_S seconds (default 15) the page is loaded again, which starts a
+// new session; the output just has a gap of a few seconds.
 const { _bidiFirefox: firefox } = require('playwright');
 const url = process.argv[2] || 'http://websdr1.sdrutah.org:8901/index1a.html?tune=7066usb';
 const OUT = 8000;
+const STALL_S = Number(process.env.STALL_S || 15);
 (async () => {
   const browser = await firefox.launch({
     executablePath: process.env.FIREFOX || '/usr/bin/firefox',
@@ -13,7 +18,7 @@ const OUT = 8000;
     firefoxUserPrefs: { 'media.autoplay.default': 0, 'media.autoplay.blocking_policy': 0, 'media.volume_scale': '0.0' },
   });
   const page = await browser.newPage();
-  let rate = 0, n = 0, pos = 0, last = 0; const t0 = Date.now();
+  let rate = 0, n = 0, pos = 0, last = 0, lastAudio = 0; const t0 = Date.now();
   await page.exposeFunction('pushAudio', (b64, D) => {
     const b = Buffer.from(b64, 'base64');
     const x = new Int16Array(b.buffer, b.byteOffset, b.length / 2);
@@ -27,6 +32,7 @@ const OUT = 8000;
     }
     pos -= x.length; last = x[x.length - 1];
     n += out.length;
+    lastAudio = Date.now();
     process.stdout.write(Buffer.from(new Int16Array(out).buffer));
   });
   await page.addInitScript(() => {
@@ -47,15 +53,36 @@ const OUT = 8000;
   page.on('close', () => { process.stderr.write('page closed\n'); process.exit(2); });
   page.on('crash', () => process.stderr.write('page crashed\n'));
   browser.on('disconnected', () => process.stderr.write('browser disconnected\n'));
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  // Firefox gets no audio until the page's "Firefox/Mozilla audio start"
-  // button is pressed; press it until audio arrives.
-  const start = page.locator('input[onclick^="mozilla_audio_start"]');
-  for (let i = 0; i < 10 && !rate; i++) {
-    await start.click({ timeout: 10000 }).catch(e => process.stderr.write(`audio start: ${e.message.split('\n')[0]}\n`));
-    await new Promise(r => setTimeout(r, 3000));
-  }
-  if (!rate) process.stderr.write('no audio after pressing audio start\n');
+  // Load the page and press Firefox's audio start button until audio
+  // arrives (Firefox gets none until it is pressed). The init script and
+  // pushAudio carry over to every load.
+  const connect = async () => {
+    const before = n;
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    const start = page.locator('input[onclick^="mozilla_audio_start"]');
+    for (let i = 0; i < 10 && n === before; i++) {
+      await start.click({ timeout: 10000 }).catch(e => process.stderr.write(`audio start: ${e.message.split('\n')[0]}\n`));
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    if (n === before) process.stderr.write('no audio after pressing audio start\n');
+    lastAudio = Date.now();
+  };
+  await connect();
+  // Watchdog: reload when the audio has stalled; back off while reloads
+  // keep failing (server down, network gone).
+  let busy = false, fails = 0, next = 0;
+  setInterval(async () => {
+    const now = Date.now();
+    if (busy || now < next || now - lastAudio < STALL_S * 1000) return;
+    busy = true;
+    const iso = new Date(now).toISOString();
+    process.stderr.write(`${iso} no audio for ${((now - lastAudio) / 1000).toFixed(0)} s at ${n} samples; reconnecting\n`);
+    const before = n;
+    try { await connect(); } catch (e) { process.stderr.write(`reconnect: ${e.message.split('\n')[0]}\n`); }
+    if (n > before) { fails = 0; process.stderr.write(`${new Date().toISOString()} reconnected\n`); }
+    else { fails++; next = Date.now() + Math.min(300, 15 * 2 ** fails) * 1000; }
+    busy = false;
+  }, 5000);
   setInterval(() => {
     const secs = (Date.now() - t0) / 1000;
     process.stderr.write(`out ${n} samples in ${secs.toFixed(0)} s (${(n / secs).toFixed(0)}/s)\n`);

@@ -112,6 +112,7 @@ kill -- -<pgid>
 | `STREAM` | `~/.qrsstvae-stream` | settings, logs, key, Playwright |
 | `FIREFOX` | `/usr/bin/firefox` | browser the bridge drives |
 | `SRC` | this checkout | where `native/build-stream` and `qrss_listen.py` are |
+| `STALL_S` | 15 | seconds without WebSDR audio before the bridge reloads the page |
 
 ### Logs
 
@@ -120,7 +121,9 @@ kill -- -<pgid>
 - `run.log`
 - `ffmpeg.log`
 - `bridge.log`: the WebSDR's sample rate, plus a rate line every minute;
-  expect about 8000 samples/s.
+  expect about 8000 samples/s. A "no audio for N s ... reconnecting"
+  line followed by "reconnected" means the bridge reloaded the page
+  after the audio stopped (see the 2-hour cap below).
 - `app.log`
 - `xvfb.log`
 
@@ -141,6 +144,13 @@ estimate rate" and "Guessed Channel Layout".
   hook with `Object.defineProperty` and a setter that ignores
   reassignment. Without that, the bridge runs happily and outputs zero
   samples.
+- **The Utah WebSDR ends a session after 2 hours, silently.** On
+  2026-10-11 the audio stopped at exactly 57,600,768 samples (7200 s at
+  8 kHz). The page showed no error and the websocket stayed open, so the
+  app just heard silence. The bridge now reloads the page when no
+  samples arrive for `STALL_S` seconds, which opens a new session with a
+  gap of a few seconds, and backs off (up to 5 min) if a reload brings
+  no audio.
 - **Don't edit `stream.sh` while a stream is running.** Bash reads a
   script as it executes it. Write a new file and rename it over the old
   one instead.
