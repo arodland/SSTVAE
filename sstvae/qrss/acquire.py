@@ -939,6 +939,12 @@ def drop_symbol_rate_aliases(hits: list) -> list:
     return out
 
 
+def live_end_s() -> float:
+    """How far past t0 a live (preamble-only) acquisition reads FE: A2's
+    timing search and its filters' margin past the preamble (A1 stops sooner)."""
+    return A2_TAU_S + N_PRE * T_SYM + _A2_MARGIN_S
+
+
 def acquire(cap: frontend.Capture, spec: FrameSpec, *, live_only: bool = False,
             preprocessed: bool = False) -> Acquisition:
     """A1 -> A2 at each line (and A3 over the slot unless live_only).

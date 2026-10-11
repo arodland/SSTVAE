@@ -167,7 +167,12 @@ quarter hour, once its preamble has arrived. Its tile is received again
 every `--refresh` seconds (default 120) with everything heard so far, so
 the callsign and picture ID appear after about two and a half minutes
 and the picture fills in through the pass. A slot where nothing has
-been found 5 minutes in is searched again only every 5 minutes. When
+been found 5 minutes in is searched again only every 5 minutes. A
+preamble that gate V refused is checked again at every refresh until 15
+minutes in (`LiveConfig.recheck_until_s`; about 14 s of CPU each), since
+a weak signal's Z_ref grows with the audio. The preamble search itself
+runs once per slot: its answer is final once the audio is about 30 s
+past the quarter hour (`acquire.live_end_s`), and kept. When
 the frame ends, the whole slot is received again, stored and
 associated, and the tile shows the picture accumulated over every pass
 of it. That end-of-slot receive runs in a second process, on another

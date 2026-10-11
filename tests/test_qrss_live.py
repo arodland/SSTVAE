@@ -16,6 +16,7 @@ import pytest
 
 from qrss_helpers import Q_TEST, unit_rms_latents
 from sstvae.qrss import channel as chm
+from sstvae.qrss import acquire as acquisition
 from sstvae.qrss import frame, frontend, live, precoder
 from sstvae.qrss import receiver as RX
 from sstvae.qrss.channel import ChannelConfig
@@ -432,6 +433,60 @@ def test_atomic_writes_from_two_writers_do_not_collide(tmp_path):
         t.join()
     assert not errors
     assert json.loads(p.read_text())[1] == 299
+
+
+def test_a_refused_preamble_is_checked_again(tmp_path, monkeypatch):
+    """Field test (2026-10-11, slot 04:15Z): KC2G's preamble passed A2 at
+    every refresh, gate V refused it, and once AG7EW had been found the
+    slot's search stopped at detect_until_s, so KC2G was never checked
+    again. A refused preamble hit is checked again until recheck_until_s,
+    on its own (a signal already found is not verified again), and the
+    slot's acquisition runs once, its answer final once the audio is past it."""
+    acq, calls = [], []
+    monkeypatch.setattr(RX, "candidates",
+                        lambda *a, **k: acq.append(1) or [_Det(1500.0), _Det(1600.0)])
+    answers = iter([[_Det(1500.0)], [_Det(1600.0)]])
+
+    def detect(prep, spec, live_only=False, *, erase_s=(), cands=None, skip_hz=()):
+        calls.append((tuple(c.f_hz for c in cands), tuple(skip_hz)))
+        return next(answers)
+
+    monkeypatch.setattr(RX, "detect", detect)
+    monkeypatch.setattr(RX, "receive_slot",
+                        lambda prep, spec, *, dets=None, **k: [_Pass(d.f_hz) for d in dets])
+    cfg = live.LiveConfig(spec=TINY, refresh_s=10.0, first_s=25.0, detect_until_s=30.0,
+                          recheck_until_s=45.0, render=False)
+    L = live.LiveListener(tmp_path, cfg, log=lambda m: None)
+    t0 = slot_t0(Q_TEST)
+    L.feed(_hiss(76 * FS), t0 + 60.0)
+    L.step(t0 + 26.0)                          # the search: 1600 refused
+    L.step(t0 + 36.0)                          # past detect_until_s: 1600 checked again
+    assert calls == [((1500.0, 1600.0), ()), ((1500.0, 1600.0), (1500.0,))]
+    assert sorted(round(t.f_hz) for t in L.tiles()) == [1500, 1600]
+    L.step(t0 + 46.0)                          # past recheck_until_s (and nothing refused)
+    assert len(calls) == 2 and acq == [1]
+
+
+def test_acquisition_is_kept_only_once_it_is_final(tmp_path, monkeypatch):
+    """A refresh heard to less than acquisition's reach past t0 (plus the
+    blanker's) finds the candidates again next time; one past it keeps them."""
+    acq = []
+    monkeypatch.setattr(RX, "candidates", lambda *a, **k: acq.append(1) or [])
+    monkeypatch.setattr(RX, "detect", lambda *a, **k: [])
+    monkeypatch.setattr(RX, "receive_slot", lambda *a, **k: [])
+    cfg = live.LiveConfig(spec=TINY, refresh_s=5.0, first_s=25.0, render=False)
+    L = live.LiveListener(tmp_path, cfg, log=lambda m: None)
+    t0 = slot_t0(Q_TEST)
+    reach = acquisition.live_end_s() + 1.0
+    L.feed(_hiss(int((reach - 0.5 + 16) * FS)), t0 + reach - 0.5)
+    L.step(t0 + 26.0)
+    s = L.slots[Q_TEST]
+    assert acq == [1] and s.cands is None
+    L.feed(_hiss(FS), t0 + reach + 0.5)
+    L.step(t0 + 31.0)
+    assert acq == [1, 1] and s.cands == []
+    L.step(t0 + 36.0)
+    assert acq == [1, 1]
 
 
 def test_a_slot_mostly_unheard_gets_no_whole_slot_search(tmp_path, monkeypatch):

@@ -10,7 +10,8 @@ capture audio in and shows the tiles this writes.
     been found by detect_until_s), for each slot whose frame is on the air:
         slot_capture: the slot's FE so far, blanked and normalised, the
                       rest (future, and any holes) noise, erased
-        detect on the preamble (until detect_until_s), then
+        detect on the preamble (until detect_until_s; after it, until
+        recheck_until_s, only the preamble hits gate V refused), then
         receive_pass, round A only, with the unheard spans erased
         --> tile: header, SNR, share received, picture so far
     when a slot's frame has ended (in a process of its own, beside the live ones):
@@ -67,7 +68,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import frontend, picture, receiver
+from . import acquire, frontend, picture, receiver
 from .constants import CARRIER_BAND_HZ, FE_FS, FS, T_SYM
 from .frame import FULL, FrameSpec
 from .frontend import PB_LEAD_S, PB_TAIL_S, slot_t0
@@ -534,6 +535,7 @@ class SlotState:
     done: bool = False
     finishing: bool = False         # the end-of-slot receive is queued or running
     reader: object = None           # where its audio is read from (None: the ring)
+    cands: list | None = None       # its acquisition candidates, once they can no longer change
 
 
 @dataclass
@@ -542,6 +544,11 @@ class LiveConfig:
     refresh_s: float = 120.0          # time between live receives of a slot
     first_s: float = 25.0             # first receive this long after t0 (the preamble is 20 s)
     detect_until_s: float = 300.0     # acquisition re-runs at each refresh until then
+    # ...and after it, until this, a preamble hit that gate V refused is
+    # checked again at each refresh (about 14 s each, measured): a weak
+    # signal's Z_ref grows with the audio, and refused at 205 s for a
+    # wandering frequency estimate, KC2G was never checked again
+    recheck_until_s: float = 900.0
     # ...and after it, a slot where nothing has been found yet is searched
     # again only this often: on a quiet band that search, over two slots
     # at a time, was most of the listener's work, every minute, for nothing
@@ -998,6 +1005,19 @@ class LiveListener:
             t.dial_hz = dial          # found before the dial was known (rig control connected)
         return t
 
+    def _candidates(self, s: SlotState, prep, ok, origin: int) -> list:
+        """Slot s's live acquisition candidates. Acquisition reads only the
+        preamble and a few seconds around it, so once the audio read is
+        past that (with the blanker's reach) its answer is final: kept,
+        rather than found again at every refresh."""
+        if s.cands is not None:
+            return s.cands
+        cands = receiver.candidates(prep, self.cfg.spec, live_only=True)
+        heard = np.flatnonzero(ok)
+        if len(heard) and (heard[-1] + 1 - origin) / FE_FS > acquire.live_end_s() + 1.0:
+            s.cands = cands
+        return cands
+
     def _refresh(self, s: SlotState) -> None:
         if s.done:
             return              # (a final refresh queued behind a finish that has run)
@@ -1020,10 +1040,18 @@ class LiveListener:
         if ok[origin:origin + PREAMBLE_S * FE_FS].mean() < 0.5:
             return          # joined after its preamble: only the end-of-slot search can find it
         prep, erase, heard = capture_prepare(x, ok, origin, s.q, spec)
+        found = []
         if elapsed < self.cfg.detect_until_s or not s.dets:
-            found = receiver.detect(prep, spec, live_only=True, erase_s=erase)
-            for d in found:      # keep one detection per signal, the newest
-                s.dets = [g for g in s.dets if abs(g.f_hz - d.f_hz) >= MERGE_HZ] + [d]
+            found = receiver.detect(prep, spec, live_only=True, erase_s=erase,
+                                    cands=self._candidates(s, prep, ok, origin))
+        elif elapsed < self.cfg.recheck_until_s:
+            known = [d.f_hz for d in s.dets]
+            cands = self._candidates(s, prep, ok, origin)
+            if any(all(abs(c.f_hz - f) >= MERGE_HZ for f in known) for c in cands):
+                found = receiver.detect(prep, spec, live_only=True, erase_s=erase,
+                                        cands=cands, skip_hz=known)
+        for d in found:          # keep one detection per signal, the newest
+            s.dets = [g for g in s.dets if abs(g.f_hz - d.f_hz) >= MERGE_HZ] + [d]
         if not s.dets:
             return
         passes = receiver.receive_slot(prep, spec, estimator=self.cfg.estimator, erase_s=erase,

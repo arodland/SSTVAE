@@ -288,9 +288,18 @@ def _ghosts(dets: list[Detection]) -> list[Detection]:
     return out
 
 
+def candidates(prep: Prepared, spec: FrameSpec, live_only: bool = False) -> list[Detection]:
+    """Acquisition over a prepared capture: the candidates for gate V,
+    preamble hits first (A1 -> A2, and A3 unless live_only)."""
+    acq = acquire.acquire(frontend.Capture(prep.fe, prep.q, prep.t0_index, prep.fs), spec,
+                          live_only=live_only, preprocessed=True)
+    return acq.detections(spec)
+
+
 def detect(prep: Prepared, spec: FrameSpec, live_only: bool = False,
            max_candidates: int | None = None, budget_s: float | None = None,
-           erase_s=()) -> list[Detection]:
+           erase_s=(), cands: list[Detection] | None = None,
+           skip_hz=()) -> list[Detection]:
     """Acquisition plus gate V over a prepared capture: verified detections.
 
     max_candidates bounds how many candidates go to the gate (preamble
@@ -298,12 +307,14 @@ def detect(prep: Prepared, spec: FrameSpec, live_only: bool = False,
     verifying new ones after that many seconds; a candidate that is not
     a signal costs most (about a minute over a whole FULL slot, measured
     on voice-like audio). erase_s, spans (a, b) in seconds after t0, were
-    not heard: the gate counts only what was (`track.verify`).
+    not heard: the gate counts only what was (`track.verify`). `cands`
+    are `candidates` already found (the live view keeps a slot's), and a
+    candidate within MERGE_HZ of `skip_hz` (signals known already) is not
+    verified again, though it is still left out of the others' noise.
     """
     t_end = None if budget_s is None else time.monotonic() + budget_s
-    acq = acquire.acquire(frontend.Capture(prep.fe, prep.q, prep.t0_index, prep.fs), spec,
-                          live_only=live_only, preprocessed=True)
-    cands = acq.detections(spec)
+    if cands is None:
+        cands = candidates(prep, spec, live_only)
     if max_candidates is not None:
         cands = cands[:max_candidates]
     found: list[Detection] = []
@@ -313,11 +324,11 @@ def detect(prep: Prepared, spec: FrameSpec, live_only: bool = False,
     # Z_ref ~1 on the first minutes of the slot, and 8-11 without it. So
     # each candidate leaves out the preamble hits (signals, at A2's false
     # alarm rate) and whatever has been verified already.
-    hits = [c.f_hz for c in cands if c.method == "preamble"]
+    hits = [c.f_hz for c in cands if c.method == "preamble"] + [float(f) for f in skip_hz]
     for d in cands:
         if t_end is not None and time.monotonic() > t_end:
             break
-        if any(abs(d.f_hz - g.f_hz) < MERGE_HZ for g in found):
+        if any(abs(d.f_hz - f) < MERGE_HZ for f in [g.f_hz for g in found] + list(skip_hz)):
             continue
         others = {f for f in hits + [g.f_hz for g in found] if abs(f - d.f_hz) >= MERGE_HZ}
         chan = channel_for(prep, spec, d, tuple(sorted(others)))

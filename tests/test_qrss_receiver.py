@@ -899,3 +899,11 @@ def test_detect_leaves_known_neighbours_out_of_the_noise_floor(monkeypatch):
     assert chans == {1104.2: (1205.6,), 1205.6: (1104.2,), 1700.0: (1104.2, 1205.6),
                      1900.0: (1104.2, 1205.6, 1700.0)}
     assert set(erased.values()) == {((60.0, 1800.0),)}
+    # given the candidates and a signal already known: that one is not
+    # verified again, and still left out of the others' noise
+    chans.clear()
+    got = RX.detect(prep, frame.FULL, cands=cands[1:2], skip_hz=[1104.2])
+    assert [d.f_hz for d in got] == [1205.6] and chans == {1205.6: (1104.2,)}
+    chans.clear()
+    assert RX.detect(prep, frame.FULL, cands=cands[:2], skip_hz=[1104.4]) and \
+        chans == {1205.6: (1104.2, 1104.4)}
