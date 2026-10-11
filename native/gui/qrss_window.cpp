@@ -71,7 +71,7 @@ QString plain_note(const QString& note) {
          QT_TR_NOOP("Saved: header read by adding up several passes")},
         {"stored (corr)", QT_TR_NOOP("Saved: matched to a stored picture by its contents")},
         {"stored (already a member)",
-         QT_TR_NOOP("Already saved with its picture")},
+         QT_TR_NOOP("Somehow I already received all of this image!")},
         {"stored (provisional)", QT_TR_NOOP("Saved, not matched to a picture yet")},
     };
     QString out = note;
