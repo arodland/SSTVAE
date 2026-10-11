@@ -72,7 +72,7 @@ QString plain_note(const QString& note) {
         {"stored (corr)", QT_TR_NOOP("Saved: matched to a stored picture by its contents")},
         {"stored (already a member)",
          QT_TR_NOOP("Somehow I already received all of this image!")},
-        {"stored (provisional)", QT_TR_NOOP("Saved, not matched to a picture yet")},
+        {"stored (provisional)", QT_TR_NOOP("Kept; waiting to find out which picture this is")},
     };
     QString out = note;
     for (const auto& [from, to] : STORED) {

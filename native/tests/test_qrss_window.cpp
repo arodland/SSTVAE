@@ -390,7 +390,7 @@ void test_provisional_tiles() {
                    "provisional: a headerless one is Provisional");
     check::is_true(!tb->details().contains(QStringLiteral("mode A")) &&
                        tb->details().contains(
-                           QStringLiteral("Saved, not matched to a picture yet")) &&
+                           QStringLiteral("Kept; waiting to find out which picture this is")) &&
                        !tb->details().contains(QStringLiteral("stored")),
                    "provisional: the mode A note goes, the rest in plain words");
     QJsonArray later;
