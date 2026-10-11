@@ -4,6 +4,8 @@
 // How a tile looks is a judgement call and is not asserted.
 
 #include <QApplication>
+#include <QLayout>
+#include <QScrollArea>
 #include <QColor>
 #include <QDateTime>
 #include <QDir>
@@ -512,6 +514,92 @@ void test_combined_passes_hide_their_parts() {
 // The spectrogram: a tone shows where it is, darker on the default
 // (inverse) scheme, red where a synced signal is, and the controls do
 // what they say.
+// Tiles with long notes (which wrap) must not draw over the row below:
+// each tile gets the height its wrapped text needs, and no two shown
+// tiles overlap, through note changes, hidden tiles and resizes.
+bool tiles_apart(QWidget* host, std::string* why) {
+    std::vector<QWidget*> shown;
+    for (QWidget* t : host->findChildren<gui::QrssTile*>(QString(), Qt::FindDirectChildrenOnly)) {
+        if (t->isVisible()) shown.push_back(t);
+    }
+    for (QWidget* t : shown) {
+        const int need = t->layout()->hasHeightForWidth()
+                             ? t->layout()->totalHeightForWidth(t->width())
+                             : t->layout()->totalMinimumSize().height();
+        if (t->height() < need) {
+            *why = "a tile is " + std::to_string(t->height()) + " px tall and needs " +
+                   std::to_string(need);
+            return false;
+        }
+        for (QWidget* u : shown) {
+            if (t != u && t->geometry().intersects(u->geometry())) {
+                *why = "two tiles overlap";
+                return false;
+            }
+        }
+        if (t->geometry().bottom() >= host->height()) {
+            *why = "a tile runs past the bottom of the scrolled area";
+            return false;
+        }
+    }
+    return true;
+}
+
+void test_tiles_do_not_overlap() {
+    QTemporaryDir dir;
+    gui::QrssWindow w;
+    w.set_state_dir(dir.path());
+    w.resize(900, 700);
+    w.show();
+    const QStringList notes = {
+        QStringLiteral("stored (header)"),
+        QStringLiteral("store failed: the disk is full and nothing more can be written there "
+                       "until some space is freed"),
+        QStringLiteral("stored (provisional)"),
+        QStringLiteral("render failed: the decoder could not load its model from the cache"),
+        QStringLiteral("stored (soft-header)"),
+        QStringLiteral("stored (already a member)"),
+    };
+    QJsonArray tiles;
+    for (int i = 0; i < 12; ++i) {
+        QJsonObject t = tile_json(QStringLiteral("t%1").arg(i), 600.0 + 100 * i,
+                                  i % 4 == 3 ? QString() : QStringLiteral("KC2G"), 0.5,
+                                  QString(), 0);
+        t[QStringLiteral("picture_id")] = QStringLiteral("p%1").arg(i);
+        t[QStringLiteral("note")] = notes[i % notes.size()];
+        t[QStringLiteral("status")] = i % 2 ? QStringLiteral("finishing")
+                                            : QStringLiteral("complete");
+        t[QStringLiteral("cw_text")] = QStringLiteral("KC2G KC2G FN21");
+        tiles.append(t);
+    }
+    write_state(dir.path(), tiles, 1'000'000);
+    w.reload();
+    QApplication::processEvents();
+    auto* scroll = w.findChild<QScrollArea*>(QStringLiteral("qrss_received"));
+    check::is_true(scroll != nullptr, "qrss/overlap: the received pane");
+    if (!scroll) return;
+    std::string why;
+    check::is_true(tiles_apart(scroll->widget(), &why), "qrss/overlap: tiles apart: " + why);
+    // Notes change length in place (finishing -> complete, saved).
+    for (int i = 0; i < tiles.size(); ++i) {
+        QJsonObject t = tiles[i].toObject();
+        t[QStringLiteral("status")] = QStringLiteral("complete");
+        t[QStringLiteral("note")] = notes[(i + 1) % notes.size()];
+        tiles[i] = t;
+    }
+    write_state(dir.path(), tiles, 2'000'000);
+    w.reload();
+    QApplication::processEvents();
+    check::is_true(tiles_apart(scroll->widget(), &why),
+                   "qrss/overlap: still apart after the notes change: " + why);
+    for (int width : {500, 1300, 700}) {
+        w.resize(width, 600);
+        QApplication::processEvents();
+        check::is_true(tiles_apart(scroll->widget(), &why),
+                       "qrss/overlap: apart at " + std::to_string(width) + " px: " + why);
+    }
+}
+
 void test_the_spectrogram() {
     constexpr double NOW = 1791594000.0 + 600.0;
     gui::QrssSpectrogram sg;
@@ -711,6 +799,7 @@ int main(int argc, char** argv) {
     test_provisional_tiles();
     test_the_pass_bar();
     test_combined_passes_hide_their_parts();
+    test_tiles_do_not_overlap();
     test_the_spectrogram();
     test_the_history_is_kept();
     test_the_tab_layout();
