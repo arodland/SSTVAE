@@ -799,6 +799,70 @@ def test_a_restarted_listener_finishes_a_slot_that_ended_while_it_was_stopped(tm
                              log=lambda m: None).recover(now, hours=0.1) == []   # too long ago
 
 
+def test_a_slot_the_store_holds_is_not_received_again(tmp_path):
+    """An earlier listener that filed a slot's passes and stopped before it
+    recorded the slot as finished: the restart does not receive it again,
+    which would file a second copy of each pass under its picture."""
+    from types import SimpleNamespace
+
+    q = Q_TEST
+    pb = frontend.PassbandStore(tmp_path / "passband")
+    t0 = slot_t0(q)
+    pb.write(t0 - 15.0, np.ones(int(80 * FE_FS), np.complex64), expire=False)
+    now = t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 600.0
+    cfg = live.LiveConfig(spec=TINY, render=False)
+    held = SimpleNamespace(pass_uids=lambda: [f"{q}_1500000_0123abcd", "junk"])
+    L = live.LiveListener(tmp_path / "a", cfg, store=held, passband=pb, log=lambda m: None)
+    assert L.recover(now) == [] and q in L.finished
+    other = SimpleNamespace(pass_uids=lambda: [f"{q - 4}_1500000_0123abcd"])
+    L = live.LiveListener(tmp_path / "b", cfg, store=other, passband=pb, log=lambda m: None)
+    assert L.recover(now) == [q]
+
+
+def test_a_provisional_tile_takes_the_picture_a_later_header_finds(tmp_path, monkeypatch):
+    """A pass filed provisional, then pulled into its picture when a later
+    pass's header decodes: the older tile takes the picture's callsign, ID
+    and mode (so the app hides it behind the newer one); others stay."""
+    from types import SimpleNamespace
+
+    import sstvae.qrss.associate as assoc
+
+    key = ("AG7EW", 0x7B202AAD)
+    hdr = SimpleNamespace(callsign="AG7EW", grid="CN85", picture_id=key[1], mode=1,
+                          segment=1, codec_id=0xD1D8)
+    filed = set()
+
+    def associate(p, store):
+        if p.header is None:
+            return None, "prov"
+        filed.add("old")                  # the header pulls the provisional pass in
+        return key, "header"
+
+    monkeypatch.setattr(assoc, "associate", associate)
+    acc = SimpleNamespace(mode=1, member=lambda u: {"uid": u, "segment": 0, "method": "corr"})
+    store = SimpleNamespace(find_member=lambda u: key if u == "old" and filed else None,
+                            accumulator=lambda k: acc)
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False), store=store,
+                          log=lambda m: None)
+    L.now = slot_t0(Q_TEST + 4)
+    first, second = live.SlotState(Q_TEST), live.SlotState(Q_TEST + 4)
+    old, stray = _Pass(1500.0), _Pass(1700.0)
+    old.uid, stray.uid = "old", "stray"
+    L._finish_apply(first, [(None, [old, stray], 1.0)])
+    L.done_tiles.extend(first.tiles.values())
+    by_f = {round(t.f_hz): t for t in L.done_tiles}
+    assert by_f[1500].note == "stored (provisional)" and by_f[1500].uid == "old"
+    new = _Pass(1500.0, header=hdr)
+    new.uid = "new"
+    L._finish_apply(second, [(None, [new], 1.0)])
+    t = by_f[1500]
+    assert (t.callsign, t.picture_id, t.mode, t.segment) == ("AG7EW", "7b202aad", "B", 0)
+    assert t.note == "stored (corr)" and t.passes == 1
+    assert by_f[1700].picture_id is None and by_f[1700].note == "stored (provisional)"
+    (n,) = second.tiles.values()
+    assert n.note == "stored (header)" and n.uid == "new"
+
+
 def test_a_header_decoded_once_stays_with_its_signal(tmp_path, monkeypatch):
     """A later live receive that misses the header keeps the one decoded
     earlier: the tile keeps its callsign and is not redrawn as the guess,

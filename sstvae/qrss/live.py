@@ -510,6 +510,7 @@ class Tile:
     image_rev: int = 0              # bumped every time the picture changes
     updated: float = 0.0
     note: str = ""
+    uid: str | None = None          # the pass as filed in the multi-pass store
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -766,6 +767,17 @@ class LiveListener:
             return []
         dur = frame_seconds(self.cfg.spec)
         reader = _PassbandReader(self.passband)
+        # A slot whose passes the store already holds was finished by the
+        # earlier listener, which stopped before it recorded that: receiving
+        # it again would file a second copy of each pass (the passband
+        # store's audio is not bit for bit the ring's, so the copy is a new
+        # pass) and count one slot as two passes of its picture.
+        stored = set()
+        if self.store is not None:
+            for u in self.store.pass_uids():       # pass_uid: "<q>_<mHz>_<sha8>"
+                head = u.split("_", 1)[0]
+                if head.lstrip("-").isdigit():
+                    stored.add(int(head))
         out = []
         for q in range(int(math.floor(now / 900.0)), int(math.floor(
                 (now - hours * 3600.0 - dur) / 900.0)) - 1, -1):
@@ -774,6 +786,11 @@ class LiveListener:
                     or q in self.slots or any(r.q == q for r in self._recover)):
                 continue
             t0 = slot_t0(q)
+            if q in stored:
+                self.finished.add(q)
+                self.log(f"slot {utc_iso(t0 - 1)}: its passes are in the store already; "
+                         "not received again")
+                continue
             _, ok = reader.read(t0 * FE_FS, int(round((t0 + dur) * FE_FS)))
             if ok.mean() < FINISH_SEARCH_MIN_HEARD:
                 continue                 # not heard (enough) by an earlier listener
@@ -1006,6 +1023,7 @@ class LiveListener:
                         key, rule = associate(p, self.store)
                         t.note = (f"stored ({rule or 'already a member'})" if key
                                   else "stored (provisional)")
+                        t.uid = p.uid
                     except Exception as e:         # never lose the tile over the store
                         t.note = f"store failed: {e}"
                 self._update_tile(t, p, heard, key=key)
@@ -1014,6 +1032,36 @@ class LiveListener:
             if tid not in seen:
                 t.status = "lost"
                 t.updated = self.now
+        if seen:
+            self._identify_provisional()
+
+    def _identify_provisional(self) -> None:
+        """Finished tiles filed provisional whose pass the store has since
+        filed with its picture: a later pass's header (or the contents of
+        a picture stored since) identified it. They take the picture's
+        callsign, ID and mode, so the app hides them behind the newer
+        tile that combines them; their own picture is not redrawn."""
+        todo = [t for t in self.done_tiles
+                if t.uid and t.status == "complete" and t.note.startswith("stored (provisional)")]
+        if not todo or self.store is None:
+            return
+        for t in todo:
+            try:
+                key = self.store.find_member(t.uid)
+                if key is None:
+                    continue
+                acc = self.store.accumulator(key)
+                m = acc.member(t.uid) or {}
+            except Exception:          # a store problem must not stop the finish
+                continue
+            t.callsign, t.picture_id = str(key[0]), f"{int(key[1]):08x}"
+            t.mode = "ABC"[int(acc.mode)]
+            if m.get("segment") is not None:
+                t.segment = int(m["segment"])
+            t.note = f"stored ({m.get('method', 'corr')})"
+            t.updated = self.now
+            self.log(f"slot {t.slot_utc}: the pass at {t.f_hz:.1f} Hz is "
+                     f"{t.callsign} {t.picture_id}")
 
     def _known_header(self, s: SlotState, p: PassResult, dial: int | None = None) -> PassResult:
         """p, with the header its signal decoded at an earlier receive when

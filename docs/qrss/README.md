@@ -258,9 +258,19 @@ quarter hour, would lose them; on its next start a listener therefore
 also receives, from the passband store, every slot that ended in the
 last 3 hours (`--recover-hours`, 0 for none) that it had heard at least
 half of and that no listener finished. These run one at a time, newest
-first, whenever no live receive is waiting. The app stops receiving while
+first, whenever no live receive is waiting. A slot whose passes the
+multi-pass store already holds counts as finished: the listener that
+filed them stopped before it recorded that, and receiving the slot again
+would file a second copy of each pass and count it twice. The app stops receiving while
 it transmits (half duplex), so the listener never hears the app's own
 QRSS passes.
+
+When a later pass files a provisional one with its picture (by its
+header, or by the contents of a picture stored since), the older tile
+takes that picture's callsign, picture ID and mode, and its note says how
+it was matched. The app then hides it behind the newer tile that
+combines the two. Its own picture is not redrawn. Tiles carry the stored
+pass's id as `uid`.
 
 A tile whose header has not decoded (not yet, or never) still gets a
 picture, marked "no header yet": it assumes the first pass of a mode A

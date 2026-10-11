@@ -213,7 +213,8 @@ been transmitting since :00. You missed the knock and the envelope, so:
   header, the receiver compares the provisional pass's numbers against
   the newly named picture. If they match (they will, if it's the same
   picture and the same part of it), the provisional pass is added in.
-  Your late start still counts.
+  Your late start still counts, and the earlier tile is tidied away
+  behind the new one that now includes it.
 
 The headers of several weak passes can also be combined, so passes
 that couldn't read their header alone sometimes can together.
