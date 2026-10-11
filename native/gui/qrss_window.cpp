@@ -804,6 +804,16 @@ void QrssWindow::reload() {
         tile->show();
     }
     prov_list_->addStretch(1);
+    // Lay the tiles out now and repaint both columns whole. Left to the
+    // posted layout request, tiles that moved could stay drawn where
+    // they were, over the ones that moved into their place, until a
+    // scroll repainted the pane (Jeff, 2026-10-11).
+    flow_->activate();
+    prov_list_->activate();
+    tiles_host_->update();
+    prov_host_->update();
+    scroll_->viewport()->update();
+    prov_scroll_->viewport()->update();
     update_markers(markers);
 
     QStringList parts;
@@ -850,6 +860,13 @@ void QrssWindow::update_header() {
     lines << tr("Tiles: %1").arg(QDir::toNativeSeparators(state_dir_));
     if (!state_summary_.isEmpty()) lines << state_summary_;
     status_label_->setText(lines.join(QLatin1Char('\n')));
+    // Never shorter than it has been: a line coming and going moved both
+    // tile columns up and down with it, and a column moved that way could
+    // stay drawn over itself until scrolled (Jeff, 2026-10-11).
+    const int need = status_label_->width() > 0
+                         ? status_label_->heightForWidth(status_label_->width())
+                         : status_label_->sizeHint().height();
+    if (need > status_label_->minimumHeight()) status_label_->setMinimumHeight(need);
 }
 
 void QrssWindow::closeEvent(QCloseEvent* event) {
