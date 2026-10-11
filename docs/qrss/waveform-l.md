@@ -103,11 +103,11 @@ The spec leaves these open; they are now fixed in code and are offered to
   the preamble's first 8 symbols after a lead-in. The data pulses on either
   side are left untouched (the ramp is added to the pilot, not a
   crossfade).
-- **The spread header copy, if adopted**, scales the latents to make room:
-  latent i is sent as (x_i + √ρ·h_i)/√(1 + ρ), with CE's whitener and coded
-  bits indexed by latent, so an L pass's spread-copy soft bits add to a CE
-  pass's. It costs 10·log10(1.054) = 0.23 dB on every latent. Jeff's call
-  (card in the "Build QRSSTVAE" thread); built on, as recommended.
+- **The spread header copy** (Jeff chose it, 2026-10-11) scales the
+  latents to make room: latent i is sent as (x_i + √ρ·h_i)/√(1 + ρ), with
+  CE's whitener and coded bits indexed by latent, so an L pass's
+  spread-copy soft bits add to a CE pass's. It costs 10·log10(1.054) =
+  0.23 dB on every latent.
 
 **Measured** (genie loopback: true timing, no noise; `lwave.loopback_stats`):
 
@@ -140,7 +140,7 @@ The 8 kHz audio through a genie receiver gives the same symbols as the
    waveform first.
 4. **Headers get lost** to late joins, restarts and fades. L's header is
    estimated at -27 dB, right at its first recognizable picture (-27.9 dB),
-   which is why the spread copy is recommended for L.
+   which is why L carries the spread copy too.
 5. **Timing moves between passes** (KC2G 0.72 to 0.82-0.90 s), so no
    timing prior across passes, for L as for CE.
 6. **Digital silence, dial changes, one transmission one pass** are
