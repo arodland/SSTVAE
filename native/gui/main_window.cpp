@@ -217,6 +217,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             qrss_->start_listener();
         }
     });
+    // The divider between the spectrogram and the Received pane: the
+    // Received pane keeps the width the operator dragged it to.
+    qrss_page_->set_received_width(state_->config().ui.qrss_received_width);
+    connect(qrss_page_, &QrssPage::receivedWidthChanged, this, [this](int w) {
+        if (state_->config().ui.qrss_received_width == w) return;
+        state_->config().ui.qrss_received_width = w;
+        state_->save_config();
+    });
     connect(qrss_page_, &QrssPage::scheduleRequested, tx_panel_, &TransmitPanel::show_schedule);
     connect(tx_panel_, &TransmitPanel::scheduleChanged, qrss_page_,
             &QrssPage::set_schedule_summary);

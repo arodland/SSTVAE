@@ -363,6 +363,18 @@ void test_the_qrss_tab() {
     schedule->click();
     check::equal(opened, 1, "tab: Schedule... asks for the schedule");
     page->set_schedule_summary(QStringLiteral("Next send: x"));
+    {
+        // The Received pane keeps the width it was given (saved by the
+        // main window), once the page has its real width.
+        gui::QrssPage sized(new gui::QrssWindow);
+        sized.resize(1400, 700);
+        sized.set_received_width(800);
+        sized.show();
+        QApplication::processEvents();
+        check::is_true(std::abs(sized.received_width() - 800) <= 2,
+                       "tab: the Received pane opens at its saved width (" +
+                           std::to_string(sized.received_width()) + ")");
+    }
     check::is_true(summary->text() == QStringLiteral("Next send: x"), "tab: and shows the next send");
 
     // One switch: the listener's own Start/Stop row and its log are
@@ -534,6 +546,12 @@ bool tiles_apart(QWidget* host, std::string* why) {
         for (QWidget* u : shown) {
             if (t != u && t->geometry().intersects(u->geometry())) {
                 *why = "two tiles overlap";
+                return false;
+            }
+            // Side by side on one line: their tops line up.
+            const bool same_line = t->y() < u->geometry().bottom() && u->y() < t->geometry().bottom();
+            if (t != u && same_line && t->y() != u->y()) {
+                *why = "two tiles on one line do not line up at the top";
                 return false;
             }
         }

@@ -35,6 +35,10 @@ public:
     QrssWindow* signals_view() const { return signals_; }
     QrssSpectrogram* spectrogram() const { return spectrogram_; }
     QSplitter* splitter() const { return splitter_; }
+    // The Received pane's width beside the spectrogram, in pixels; 0
+    // leaves the initial split. Applied once the page has its real width.
+    void set_received_width(int px);
+    int received_width() const;
 
 public slots:
     void set_listening(bool on);
@@ -50,8 +54,16 @@ signals:
     void scheduleRequested();
     // Stop the send on the air.
     void haltRequested();
+    // The operator dragged the divider: the Received pane's new width.
+    void receivedWidthChanged(int px);
+
+protected:
+    void resizeEvent(QResizeEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
+    void apply_received_width();
+    int pending_received_w_ = 0;
     QrssWindow* signals_ = nullptr;
     QrssSpectrogram* spectrogram_ = nullptr;
     QSplitter* splitter_ = nullptr;

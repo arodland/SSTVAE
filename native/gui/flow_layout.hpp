@@ -51,6 +51,11 @@ public:
     QSize minimumSize() const override;
     void setGeometry(const QRect& rect) override;
 
+    // Items sit at the top of their line rather than centred in it: for
+    // cards of different heights (the QRSS Received pane), where centring
+    // drops a short card below its neighbours' tops.
+    void set_align_top(bool on) { align_top_ = on; }
+
 private:
     // `apply` false measures, true also moves the items. One routine for
     // both so a measured height cannot disagree with a laid-out one.
@@ -62,6 +67,7 @@ private:
     QList<QLayoutItem*> items_;
     int hspace_;
     int vspace_;
+    bool align_top_ = false;
 };
 
 }  // namespace sstvae::gui

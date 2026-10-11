@@ -454,6 +454,9 @@ QrssWindow::QrssWindow(QWidget* parent, Qt::WindowFlags flags) : QWidget(parent,
     scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     tiles_host_ = new QWidget(scroll_);
     flow_ = new FlowLayout(tiles_host_, 6, 8, 8);
+    // Cards line up by their tops: a short "receiving" card no longer
+    // sits lower than a finished one beside it.
+    flow_->set_align_top(true);
     empty_label_ = new QLabel(
         tr("No QRSS signals yet. A signal appears here about 25 s after its "
            "quarter hour, once its preamble has been heard."),

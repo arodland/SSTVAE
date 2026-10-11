@@ -124,6 +124,7 @@ NON_DEFAULT = {
         "layout": "tabs",
         "log_visible": False,
         "mode": "qrsstvae",
+        "qrss_received_width": 560,
         "waterfall_height": 140,
     },
     "version": 2,

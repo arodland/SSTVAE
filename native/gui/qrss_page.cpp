@@ -8,6 +8,8 @@
 #include <QSplitter>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 #include "qrss_spectrogram.hpp"
 #include "qrss_window.hpp"
 
@@ -71,6 +73,10 @@ QrssPage::QrssPage(QrssWindow* signals_view, QWidget* parent)
     }
     splitter_->setStretchFactor(0, 3);
     splitter_->setStretchFactor(1, 2);
+    connect(splitter_, &QSplitter::splitterMoved, this, [this](int, int) {
+        pending_received_w_ = 0;
+        emit receivedWidthChanged(received_width());
+    });
     box->addWidget(splitter_, 1);
     set_listening(false);
 }
@@ -107,6 +113,36 @@ void QrssPage::show_state() {
     listen_->setText(listening_ ? tr("&Stop receiving") : tr("&Start receiving"));
     listen_state_->setText(listening_ ? tr("Receiving: the QRSS listener hears the radio.")
                                       : tr("Not receiving: start it to hear QRSS signals."));
+}
+
+void QrssPage::set_received_width(int px) {
+    pending_received_w_ = std::max(0, px);
+    apply_received_width();
+}
+
+int QrssPage::received_width() const {
+    const QList<int> sizes = splitter_->sizes();
+    return sizes.size() < 2 ? 0 : sizes.back();
+}
+
+void QrssPage::apply_received_width() {
+    // Before the page has its width, setSizes would be scaled to it
+    // later, so it waits for a resize that gives it a real one.
+    const int total = splitter_->width() - splitter_->handleWidth();
+    if (pending_received_w_ <= 0 || !isVisible() || total < 200) return;
+    const int w = std::min(pending_received_w_, total - 100);
+    splitter_->setSizes({total - w, w});
+    pending_received_w_ = 0;
+}
+
+void QrssPage::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    apply_received_width();
+}
+
+void QrssPage::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
+    apply_received_width();
 }
 
 void QrssPage::set_schedule_summary(const QString& text) { schedule_summary_->setText(text); }

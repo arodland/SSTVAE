@@ -248,6 +248,11 @@ struct UiConfig {
     // height instead.
     int waterfall_height = 0;
 
+    // How wide the QRSSTVAE view's Received pane is, in pixels, beside
+    // the spectrogram. Dragged by the operator; 0 = never set, which
+    // takes the initial 3:2 split.
+    int qrss_received_width = 0;
+
     // Whether the status-log dock is open.
     //
     // Open by default, which is what it has always been -- the log is

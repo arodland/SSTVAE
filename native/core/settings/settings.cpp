@@ -298,6 +298,13 @@ void read_ui(const Reader& r, UiConfig& c) {
     r.get("log_visible", c.log_visible);
     r.get("mode", c.mode);
     r.get("waterfall_height", c.waterfall_height);
+    r.get("qrss_received_width", c.qrss_received_width);
+    if (c.qrss_received_width < 0 || c.qrss_received_width > 10000) {
+        r.notes.add(r.path("qrss_received_width"),
+                    "is out of range (0-10000); ignoring " +
+                        std::to_string(c.qrss_received_width));
+        c.qrss_received_width = 0;
+    }
     // Negative is meaningless and a huge value would push the panes off
     // the window; clamp quietly rather than refuse, since the only way
     // to get one is to hand-edit the file.
@@ -321,7 +328,7 @@ void read_ui(const Reader& r, UiConfig& c) {
                     "unknown mode '" + c.mode + "'; expected sstvae or qrsstvae");
         c.mode = "sstvae";
     }
-    r.report_unknown({"layout", "log_visible", "mode", "waterfall_height"});
+    r.report_unknown({"layout", "log_visible", "mode", "qrss_received_width", "waterfall_height"});
 }
 
 // Empty string <-> JSON null, for the fields Python declares optional.
@@ -495,6 +502,7 @@ std::string to_json(const Config& c) {
          {{"layout", c.ui.layout},
           {"log_visible", c.ui.log_visible},
           {"mode", c.ui.mode},
+          {"qrss_received_width", c.ui.qrss_received_width},
           {"waterfall_height", c.ui.waterfall_height}}},
         {"version", c.version},
     };

@@ -102,7 +102,8 @@ int FlowLayout::reflow(const QRect& rect, bool apply) const {
     std::vector<std::pair<QLayoutItem*, QRect>> line;
     auto place_line = [&] {
         for (const auto& [item, box] : line) {
-            item->setGeometry(box.translated(0, (line_height - box.height()) / 2));
+            item->setGeometry(
+                align_top_ ? box : box.translated(0, (line_height - box.height()) / 2));
         }
         line.clear();
     };
