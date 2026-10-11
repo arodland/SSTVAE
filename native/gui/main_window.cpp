@@ -205,6 +205,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         }
     });
     connect(rx_panel_, &ReceivePanel::listeningChanged, qrss_page_, &QrssPage::set_listening);
+    connect(tx_panel_, &TransmitPanel::transmitStarted, qrss_page_,
+            [this] { qrss_page_->set_transmitting(true); });
+    connect(tx_panel_, &TransmitPanel::transmitFinished, qrss_page_,
+            [this] { qrss_page_->set_transmitting(false); });
     // In QRSSTVAE mode, capture starting (a click, auto start, the end of
     // an over) starts the QRSS listener if it is not already running.
     connect(rx_panel_, &ReceivePanel::listeningChanged, this, [this](bool on) {

@@ -68,9 +68,24 @@ QrssPage::QrssPage(QrssWindow* signals_view, QWidget* parent)
 
 void QrssPage::set_listening(bool on) {
     listening_ = on;
-    listen_->setText(on ? tr("&Stop receiving") : tr("&Start receiving"));
-    listen_state_->setText(on ? tr("Receiving: the QRSS listener hears the radio.")
-                              : tr("Not receiving: start it to hear QRSS signals."));
+    show_state();
+}
+
+void QrssPage::set_transmitting(bool on) {
+    transmitting_ = on;
+    show_state();
+}
+
+void QrssPage::show_state() {
+    listen_->setEnabled(!transmitting_);
+    if (transmitting_) {
+        listen_->setText(tr("Transmission active"));
+        listen_state_->setText(tr("Sending: receiving starts again when the send ends."));
+        return;
+    }
+    listen_->setText(listening_ ? tr("&Stop receiving") : tr("&Start receiving"));
+    listen_state_->setText(listening_ ? tr("Receiving: the QRSS listener hears the radio.")
+                                      : tr("Not receiving: start it to hear QRSS signals."));
 }
 
 void QrssPage::set_schedule_summary(const QString& text) { schedule_summary_->setText(text); }

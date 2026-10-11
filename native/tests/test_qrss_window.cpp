@@ -342,6 +342,15 @@ void test_the_qrss_tab() {
     listen->click();
     check::is_true(asked.size() == 2 && !asked[1] && listen->text().contains(QStringLiteral("Stop")),
                    "tab: then Stop stops it");
+    // A send suspends receiving: the button says so and cannot be pressed.
+    page->set_transmitting(true);
+    page->set_listening(false);
+    check::is_true(!listen->isEnabled() && listen->text() == QStringLiteral("Transmission active"),
+                   "tab: greyed out as \"Transmission active\" while sending");
+    page->set_transmitting(false);
+    page->set_listening(true);
+    check::is_true(listen->isEnabled() && listen->text().contains(QStringLiteral("Stop")),
+                   "tab: and back to Stop when receiving resumes");
     schedule->click();
     check::equal(opened, 1, "tab: Schedule... asks for the schedule");
     page->set_schedule_summary(QStringLiteral("Next send: x"));

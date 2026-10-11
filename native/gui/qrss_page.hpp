@@ -38,6 +38,10 @@ public:
 
 public slots:
     void set_listening(bool on);
+    // While a send is on the air receiving is suspended (half duplex) and
+    // comes back by itself afterwards, so the button is greyed out and
+    // says so rather than offering to start it.
+    void set_transmitting(bool on);
     void set_schedule_summary(const QString& text);
 
 signals:
@@ -54,6 +58,8 @@ private:
     QLabel* schedule_summary_ = nullptr;
     QPushButton* details_ = nullptr;
     bool listening_ = false;
+    bool transmitting_ = false;
+    void show_state();
 };
 
 }  // namespace sstvae::gui
