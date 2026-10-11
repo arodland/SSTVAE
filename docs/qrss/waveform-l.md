@@ -8,7 +8,7 @@ constant-amplitude carrier whose phase carries one latent per symbol,
 about 50 Hz wide, which an Si5351 beacon can make directly. **L** is a
 linear signal for SSB rigs: one carrier carrying two latents per complex
 symbol plus a pilot tone, about 22 Hz wide. The spec
-(`qrsstvae-options.md` rev 12, sections 2 to 2.2, 2.7, 2.8 and 6) defines L;
+(`qrsstvae-options.md` rev 13, sections 2 to 2.2, 2.7, 2.8, 5.1 and 6) defines L;
 this note records what building it settled, what it is for, and what it
 costs a receiver to listen for both.
 
@@ -27,8 +27,8 @@ least recognises it** (below, "Before L goes on the air").
 | Chance two random signals overlap | 1.8% | 4% |
 | Power into a neighbour during the data | **-52 dB** (an L signal 30 Hz away, measured) | -28 dB into a CE 50 Hz away; -26 dB into an L 40 Hz from the carrier |
 | Into a neighbour during the callsign windows | -28 dB (30 Hz above), -39 dB (below) | -22 dB (OOK) |
-| Good picture, one pass, quiet path, **same average power** | **-14.2 dB** | -10.9 dB (3.3 dB worse) |
-| The same at the same peak power | -11.0 dB | -10.9 dB (a tie) |
+| Good picture, one pass, quiet path, **same average power** | **-14.0 dB** | -10.9 dB (3.2 dB worse) |
+| The same at the same peak power | -10.8 dB | -10.9 dB (a tie) |
 | Morse ID | FSK of an audio tone through an SSB rig (J2A, plain CW in US rules) | FSK of the carrier (F1A, not listed as CW; OOK is the fallback) |
 | Receiver work per detected signal | about half of CE's (half the symbol positions; estimated) | |
 | Transmitter | any SSB rig and sound card, linear amplifier | also an Si5351 board, class C/D/E amplifiers |
@@ -43,7 +43,7 @@ least recognises it** (below, "Before L goes on the air").
   power for 30 minutes, so an SSB rig runs it well below its rating (our
   IC-7100 runs 25 to 50 W). L averages 3.2 dB below its peak, so the same
   rig at its full PEP runs at the same average power as CE at half power,
-  and at the same average power L needs **3.3 dB less SNR** for the same
+  and at the same average power L needs **3.2 dB less SNR** for the same
   picture. Where the limit is the rig's or the amplifier's heat, that is a
   3 dB gain on every pass. Where the limit is peak power (a legal PEP limit,
   as on 60 m and 630 m, or a rig run at its PEP), they tie for good
@@ -139,7 +139,7 @@ The 8 kHz audio through a genie receiver gives the same symbols as the
    over as they are, plus the waveform: part k+1 is searched as part k's
    waveform first.
 4. **Headers get lost** to late joins, restarts and fades. L's header is
-   estimated at -27 dB, right at its first recognizable picture (-27.9 dB),
+   estimated at -27 dB, right at its first recognizable picture (-27.8 dB),
    which is why L carries the spread copy too.
 5. **Timing moves between passes** (KC2G 0.72 to 0.82-0.90 s), so no
    timing prior across passes, for L as for CE.
@@ -221,11 +221,14 @@ L receiver.
 2. **Recognise L in the listener** and keep it out of the CE gate (above).
 3. **The L receiver:** A2 with the L preamble, the tracker on the pilot and
    the references, demodulation by I/Q pairs (divided by the 0.881 data gain),
-   EM, the header from QPSK soft bits plus the spread copy, and the Morse
+   EM, the header from QPSK soft bits plus the spread copy, tracking on the
+   spread copy as well once the header is known (spec 6.3's L figures assume
+   it), and the Morse
    reader with one unit per L symbol. Then the joint listener: both A2s per
    line, the shape test, per-waveform aliases and noise bands, and the
    waveform recorded per pass.
 4. **Check the thresholds** of spec 6.3 on Watterson paths, and measure L's
-   header (estimated -27 dB).
+   header (estimated -27 dB from the block, about 1.5 dB deeper with the
+   spread copy).
 5. **The app:** a waveform choice in the Send editor and the waveform shown
    per pass (UI thread).
