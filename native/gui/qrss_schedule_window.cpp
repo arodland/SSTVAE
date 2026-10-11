@@ -585,7 +585,8 @@ void QrssScheduleWindow::update_summary() {
     if (why.isEmpty()) {
         if (const auto c = qs::clash(e, scheduler_->entries(), now)) {
             why = tr("the %1 send would overlap the %2 send of \"%3\": the transmitter sends "
-                     "one thing at a time.")
+                     "one thing at a time. A send can follow another straight on, the half hour "
+                     "after its last pass.")
                       .arg(QString::fromStdString(qs::when(c->slot, now)),
                            QString::fromStdString(qs::when(c->other_slot, now)),
                            QString::fromStdString(c->other));
@@ -708,7 +709,7 @@ void QrssScheduleWindow::refresh_timeline() {
     for (const qs::Entry& e : scheduler_->entries()) {
         const int n = qrss_tx::passes_for(e.mode);
         if (n == 0) continue;
-        const bool active = scheduler_->active() == e.id;
+        const bool active = scheduler_->on_air(e.id);
         // The send on the air is just before `next`; show it too.
         int k = std::max(0, e.next - (active ? std::max(1, qs::MAX_RUN_PASSES / n) : 0));
         auto& thumb = thumbs[e.id];

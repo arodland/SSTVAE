@@ -18,6 +18,11 @@
 // the one before keeps that to two passes' audio on disk at a time.
 // Each pass carries the callsign in its own Morse ID windows (spec
 // 2.7), so the SSTVAE CW ID is not added.
+//
+// A different picture can follow straight on (`Chain`): it joins the
+// run on the air, is encoded while the pass before it plays, and its
+// first pass keys about 2 s after the last one ends, exactly as a
+// run's own passes do. There is no time to start a fresh run there.
 
 #ifndef SSTVAE_GUI_QRSS_TX_HPP
 #define SSTVAE_GUI_QRSS_TX_HPP
@@ -25,7 +30,10 @@
 #include <QString>
 #include <QStringList>
 
+#include <deque>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -80,6 +88,33 @@ struct Tools {
 };
 std::optional<Tools> find_tools();
 
+// A picture that follows the run's passes straight on, in its own mode
+// and on its own carrier.
+struct Part {
+    images::Picture picture;
+    std::string mode = "A";
+    double freq_hz = FREQ_DEFAULT_HZ;
+    std::vector<Pass> passes;   // the first a half hour (or more) after the run's last
+};
+
+// Pictures to add to a run while it is on the air. `append` is called
+// from any thread; the run takes what is waiting when it keys its last
+// pass, and from then on (or once the run has ended) refuses more, so a
+// part is either sent or refused, never silently dropped.
+class Chain {
+public:
+    // False when the run has already keyed its last pass or ended.
+    bool append(Part part);
+    // For `run`: the next part waiting, else nothing, and the chain closes.
+    std::optional<Part> take_or_close();
+    void close();
+
+private:
+    std::mutex mutex_;
+    std::deque<Part> parts_;
+    bool closed_ = false;
+};
+
 struct Request {
     images::Picture picture;
     std::string mode = "A";            // A, B or C
@@ -91,6 +126,8 @@ struct Request {
     // The passes to send, in order. Empty: the mode's passes, from the
     // first quarter hour `plan` finds once the picture is encoded.
     std::vector<Pass> passes;
+    // Pictures that follow straight on; optional.
+    std::shared_ptr<Chain> chain;
 };
 
 // The command lines `run` executes, for tests and the log.
@@ -101,6 +138,8 @@ QStringList transmit_args(const Tools& tools, const QString& qrsp, const QString
 
 // Empty when the request can go out; otherwise why not, for the operator.
 std::string problem(const Request& request);
+// The same for a part following a run whose last pass is at `after`.
+std::string problem(const Part& part, double after);
 
 using Clock = std::function<double()>;               // unix seconds
 using Runner = std::function<bool(const QStringList& argv, QString* output)>;

@@ -5,6 +5,7 @@
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QFileInfo>
 #include <QStringList>
 
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <chrono>
 #include <cstdio>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <string>
@@ -253,6 +255,96 @@ void test_pass_lists_are_checked() {
                    "qrss_tx/passes: a pass's audio runs from 11 s before its quarter hour");
 }
 
+// A different picture following straight on: it joins the run, is
+// encoded and made while the pass before it plays, and goes out in its
+// own mode on its own carrier.
+void test_a_following_picture_joins_the_run() {
+    std::mutex mu;
+    std::vector<std::string> events;
+    QElapsedTimer since;
+    since.start();
+    const double prep = 0.2;
+    double jump = 0.0;
+    int played = 0;
+    const double start = Q - 11.0 - prep - 1.0;
+    auto clock = [&] {
+        std::lock_guard<std::mutex> lock(mu);
+        return start + since.elapsed() / 1000.0 + jump;
+    };
+    auto chain = std::make_shared<qrss_tx::Chain>();
+    tx::TxEngine engine(
+        [](bool) {},
+        [&](const std::string&, std::span<const double> wave, int,
+            const std::function<void(double)>&, const std::function<bool()>&,
+            const std::function<void(const std::string&)>&) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(120));
+            std::lock_guard<std::mutex> lock(mu);
+            events.push_back("play " + std::to_string(wave.size()));
+            ++played;
+            jump += (Q - 11.0 + 1800.0 * played - 2.0) -
+                    (start + since.elapsed() / 1000.0 + jump);
+            return true;
+        },
+        [](const images::ImageArray&) { return std::vector<double>(); });
+    int made = 0;
+    auto runner = [&](const QStringList& argv, QString*) {
+        std::lock_guard<std::mutex> lock(mu);
+        if (argv.at(1).endsWith(QStringLiteral("qrss_encode.py"))) {
+            events.push_back("encode " + argv.at(5).toStdString());
+            return true;
+        }
+        const QString freq = argv.at(argv.indexOf(QStringLiteral("--freq")) + 1);
+        const int seg = argv.at(argv.indexOf(QStringLiteral("--segment")) + 1).toInt();
+        audio::write_wav_float(argv.at(3).toStdString(),
+                               std::vector<double>(700 + 10 * made + seg, 0.25));
+        events.push_back("make " + std::to_string(made) + " " + freq.toStdString() + " " +
+                         QFileInfo(argv.at(2)).fileName().toStdString());
+        ++made;
+        return true;
+    };
+    qrss_tx::Request r;
+    r.picture = images::Picture(16, 12);
+    r.callsign = "AG7EW";
+    r.mode = "A";
+    r.prep_s = prep;
+    r.passes = {{Q, 0}};
+    r.chain = chain;
+    r.tx.ptt_lead_s = 0.0;
+    r.tx.ptt_tail_s = 0.0;
+    qrss_tx::Part part;
+    part.picture = images::Picture(16, 12);
+    part.mode = "B";
+    part.freq_hz = 900.0;
+    part.passes = {{Q + 1800.0, 0}, {Q + 3600.0, 1}};
+    check::is_true(chain->append(part), "qrss_tx/chain: a following picture is taken");
+    std::vector<std::string> errors;
+    const bool ok = qrss_tx::run(engine, r, {QStringLiteral("py"), QStringLiteral("/repo")},
+                                 [&](const std::string& e) { errors.push_back(e); }, clock,
+                                 runner);
+    check::is_true(ok && errors.empty(), "qrss_tx/chain: every pass of both pictures sent");
+    const std::vector<std::string> want = {
+        "encode A",
+        "make 0 1500.0 picture0.qrsp",
+        "encode B",                       // while pass 1 plays
+        "make 1 900.0 picture1.qrsp",
+        "play 700",
+        "make 2 900.0 picture1.qrsp",
+        "play 710",
+        "play 721",
+    };
+    check::is_true(events == want, "qrss_tx/chain: encoded and made while the pass before plays");
+    if (events != want) {
+        for (const auto& e : events) std::fprintf(stderr, "  %s\n", e.c_str());
+    }
+    check::is_true(!chain->append(part), "qrss_tx/chain: a finished run takes no more");
+
+    qrss_tx::Part early = part;
+    early.passes = {{Q + 900.0, 0}, {Q + 2700.0, 1}};
+    check::is_true(!qrss_tx::problem(early, Q).empty(),
+                   "qrss_tx/chain: a part may not start before the last pass ends");
+    check::is_true(qrss_tx::problem(part, Q).empty(), "qrss_tx/chain: straight on is fine");
+}
+
 void test_cancel_while_waiting() {
     tx::TxEngine engine([](bool) {}, {}, {});
     // The pass is fifteen minutes away.
@@ -294,6 +386,8 @@ int main(int argc, char** argv) {
     test_passes_back_to_back();
     check::current_step = "pass lists are checked";
     test_pass_lists_are_checked();
+    check::current_step = "a following picture joins the run";
+    test_a_following_picture_joins_the_run();
     check::current_step = "cancel while waiting";
     test_cancel_while_waiting();
     return check::report("qrss tx");

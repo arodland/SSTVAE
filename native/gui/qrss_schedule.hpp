@@ -17,7 +17,10 @@
 // to encode. Sends with a gap between them are separate runs, and the
 // app goes back to receiving in the gap. Two entries may not overlap:
 // the transmitter can send one thing at a time, and starting a send
-// takes `START_LEAD_S`.
+// takes `START_LEAD_S`. The one exception is a send that starts the half
+// hour after another send's last pass (`follows_on`): that one joins the
+// run on the air (`qrss_tx::Chain`), is encoded while the pass before it
+// plays, and needs no lead of its own.
 //
 // The model (`Entry` and the free functions) is plain data and
 // arithmetic, so `test_qrss_schedule.cpp` checks it on its own;
@@ -51,6 +54,9 @@ inline constexpr double START_LEAD_S = 240.0;
 // Not started by this long before its audio: the send is missed. The
 // transmitter needs about a minute to encode and make the first pass.
 inline constexpr double MIN_LEAD_S = 90.0;
+// A send that follows straight on is handed to the run on the air no
+// later than this long before that run's last pass keys.
+inline constexpr double CHAIN_LEAD_S = 60.0;
 // A back-to-back run is at most this many passes: a day on the air.
 inline constexpr int MAX_RUN_PASSES = 48;
 // The repeat intervals the window offers, in minutes; 0 is back to back.
@@ -82,6 +88,12 @@ std::vector<qrss_tx::Pass> passes_of(const Entry& e, int k);
 // When send k needs the transmitter: from START_LEAD_S before its first
 // pass's audio to the end of its last pass's audio.
 std::pair<double, double> busy(const Entry& e, int k);
+
+// Whether send k of `e` starts the half hour after the last pass of a
+// send of an entry in `all` (another entry, or an earlier send of `e`
+// itself), early enough at `now` to join that send's run. Such a send
+// needs the transmitter only from its own audio.
+bool follows_on(const Entry& e, int k, const std::vector<Entry>& all, double now);
 
 // Empty when the entry can be scheduled; otherwise why not.
 std::string problem(const Entry& e);
@@ -177,6 +189,11 @@ public:
                                         const std::vector<qrss_tx::Pass>& passes,
                                         std::string* why)>;
     using Clock = std::function<double()>;
+    // Adds an entry's passes to the end of the run on the air; false
+    // (with why) when the run will not take them.
+    using Chainer = std::function<bool(const qrss_schedule::Entry& entry,
+                                       const std::vector<qrss_tx::Pass>& passes,
+                                       std::string* why)>;
     // Makes a frequency change: Started when the radio was told, Busy
     // when it must wait (the transmitter is in use), Failed otherwise.
     using Retuner = std::function<Start(const qrss_schedule::FreqChange& change,
@@ -215,6 +232,7 @@ public:
     // the timeline.
     const std::vector<qrss_schedule::FreqChange>& changes() const { return changes_; }
     void set_retuner(Retuner retuner) { retuner_ = std::move(retuner); }
+    void set_chainer(Chainer chainer) { chainer_ = std::move(chainer); }
     // Adds a change; its `id` is filled in here. Empty on success, else
     // why not (too soon, or it would cut into a send).
     std::string add_change(qrss_schedule::FreqChange change);
@@ -225,6 +243,9 @@ public:
 
     // The entry whose run is on the air (or getting ready), else empty.
     const std::string& active() const { return active_; }
+    // Whether `id` has a send in the run on the air: the entry that
+    // started it, or one that followed on.
+    bool on_air(const std::string& id) const;
     // The transmitter finished whatever it was doing.
     void run_finished();
 
@@ -257,6 +278,11 @@ private:
     std::string change_clash_text(const qrss_schedule::Entry& e, double now) const;
     void tick_changes(double now, bool& dirty);
     std::string active_;
+    std::vector<std::string> on_air_;   // active_ and the entries that followed on
+    double run_end_ = 0.0;              // the run's last pass, its quarter hour
+    Chainer chainer_;
+    // Hands sends that follow straight on to the run on the air.
+    void chain(double now, bool& dirty);
     // The last refusal logged, "<id>/<send>", so a busy transmitter is
     // logged once per send rather than once per tick.
     std::string refused_;

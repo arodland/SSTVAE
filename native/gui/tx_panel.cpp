@@ -160,6 +160,30 @@ TransmitPanel::TransmitPanel(AppState* state, QWidget* parent)
         }
         return QrssScheduler::Start::Started;
     });
+    // A send that starts the half hour after the run on the air ends
+    // joins that run: it is encoded while the pass before it plays.
+    scheduler_->set_chainer([this](const qrss_schedule::Entry& entry,
+                                   const std::vector<qrss_tx::Pass>& passes, std::string* why) {
+        if (!thread_.joinable() || !qrss_chain_) {
+            *why = "no QRSS send is on the air to follow";
+            return false;
+        }
+        qrss_tx::Part part;
+        try {
+            part.picture = images::load(entry.picture);
+        } catch (const std::exception& e) {
+            *why = std::string("its picture could not be read: ") + e.what();
+            return false;
+        }
+        part.mode = entry.mode;
+        part.freq_hz = entry.freq_hz;
+        part.passes = passes;
+        if (!qrss_chain_->append(std::move(part))) {
+            *why = "the send on the air has already keyed its last pass";
+            return false;
+        }
+        return true;
+    });
     connect(scheduler_, &QrssScheduler::changed, this, &TransmitPanel::update_schedule_summary);
     update_schedule_summary();
 }
@@ -1549,6 +1573,7 @@ std::string TransmitPanel::begin_qrss(const images::Picture& picture, const std:
     request.mode = mode;
     request.freq_hz = freq_hz;
     request.passes = std::move(passes);
+    request.chain = std::make_shared<qrss_tx::Chain>();
     request.callsign = config.callsign;
     request.grid = config.grid;
     request.tx.device = config.audio.output_device;
@@ -1617,6 +1642,7 @@ std::string TransmitPanel::begin_qrss(const images::Picture& picture, const std:
     running_.store(true);
     emit transmitStarted();
 
+    qrss_chain_ = request.chain;
     thread_ = std::thread([this, request, tools = *tools] {
         bool ok = false;
         try {

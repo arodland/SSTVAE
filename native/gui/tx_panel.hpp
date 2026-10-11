@@ -349,6 +349,8 @@ private:
     std::atomic<bool> running_{false};
 
     QrssScheduler* scheduler_ = nullptr;          // a child of this panel
+    // The QRSS run on the air takes following sends through this.
+    std::shared_ptr<qrss_tx::Chain> qrss_chain_;
     QrssScheduleWindow* schedule_window_ = nullptr;
     QrssSends* sends_ = nullptr;                  // a child of this panel
     // The newest reception, for a "last received" inset in the Editor.

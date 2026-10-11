@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <deque>
 #include <future>
 #include <utility>
 
@@ -145,6 +146,31 @@ QStringList transmit_args(const Tools& tools, const QString& qrsp, const QString
     return a;
 }
 
+namespace {
+
+// What a picture's own passes must satisfy, in a request or a part.
+std::string passes_problem(const std::string& mode, double freq_hz,
+                           const std::vector<Pass>& passes) {
+    if (passes_for(mode) == 0) return "unknown QRSS mode '" + mode + "'";
+    if (!(freq_hz >= FREQ_MIN_HZ && freq_hz <= FREQ_MAX_HZ)) {
+        return "the QRSS carrier must be between 300 and 2700 Hz";
+    }
+    const int n = passes_for(mode);
+    for (std::size_t k = 0; k < passes.size(); ++k) {
+        const Pass& p = passes[k];
+        if (p.segment < 0 || p.segment >= n) {
+            return "mode " + mode + " has no pass " + std::to_string(p.segment + 1);
+        }
+        if (std::fmod(p.slot, 900.0) != 0.0) return "QRSS passes start on a quarter hour";
+        if (k > 0 && p.slot - passes[k - 1].slot < PASS_SPACING_S) {
+            return "QRSS passes last half an hour, so they must be at least that far apart";
+        }
+    }
+    return {};
+}
+
+}  // namespace
+
 std::string problem(const Request& request) {
     if (passes_for(request.mode) == 0) return "unknown QRSS mode '" + request.mode + "'";
     const std::string& c = request.callsign;
@@ -156,21 +182,42 @@ std::string problem(const Request& request) {
         return std::isalnum(static_cast<unsigned char>(ch)) || ch == '/';
     });
     if (!ok) return "QRSS callsigns are 1-8 of A-Z, 0-9 and /; '" + c + "' is not.";
-    if (!(request.freq_hz >= FREQ_MIN_HZ && request.freq_hz <= FREQ_MAX_HZ)) {
-        return "the QRSS carrier must be between 300 and 2700 Hz";
+    return passes_problem(request.mode, request.freq_hz, request.passes);
+}
+
+std::string problem(const Part& part, double after) {
+    if (part.passes.empty()) return "a following picture needs its passes";
+    if (std::string why = passes_problem(part.mode, part.freq_hz, part.passes); !why.empty()) {
+        return why;
     }
-    const int n = passes_for(request.mode);
-    for (std::size_t k = 0; k < request.passes.size(); ++k) {
-        const Pass& p = request.passes[k];
-        if (p.segment < 0 || p.segment >= n) {
-            return "mode " + request.mode + " has no pass " + std::to_string(p.segment + 1);
-        }
-        if (std::fmod(p.slot, 900.0) != 0.0) return "QRSS passes start on a quarter hour";
-        if (k > 0 && p.slot - request.passes[k - 1].slot < PASS_SPACING_S) {
-            return "QRSS passes last half an hour, so they must be at least that far apart";
-        }
+    if (part.passes.front().slot - after < PASS_SPACING_S) {
+        return "a following picture starts at least half an hour after the last pass";
     }
     return {};
+}
+
+bool Chain::append(Part part) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_) return false;
+    parts_.push_back(std::move(part));
+    return true;
+}
+
+std::optional<Part> Chain::take_or_close() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (parts_.empty()) {
+        closed_ = true;
+        return std::nullopt;
+    }
+    Part p = std::move(parts_.front());
+    parts_.pop_front();
+    return p;
+}
+
+void Chain::close() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    closed_ = true;
+    parts_.clear();
 }
 
 bool run(tx::TxEngine& engine, const Request& request, const Tools& tools,
@@ -183,9 +230,20 @@ bool run(tx::TxEngine& engine, const Request& request, const Tools& tools,
             return default_runner(argv, out, engine);
         };
     }
+    // However the run ends, nothing more may join it.
+    struct CloseChain {
+        Chain* chain;
+        ~CloseChain() {
+            if (chain) chain->close();
+        }
+    } close_chain{request.chain.get()};
     auto fail = [&](const std::string& msg) {
         on_error(msg);
         engine.report(tx::TxPhase::Failed, msg);
+        return false;
+    };
+    auto cancelled = [&] {
+        engine.report(tx::TxPhase::Cancelled, "cancelled");
         return false;
     };
     const std::string why = problem(request);
@@ -193,48 +251,84 @@ bool run(tx::TxEngine& engine, const Request& request, const Tools& tools,
 
     QTemporaryDir tmp;
     if (!tmp.isValid()) return fail("QRSS: no temporary directory");
-    const QString png = tmp.filePath(QStringLiteral("picture.png"));
-    const QString qrsp = tmp.filePath(QStringLiteral("picture.qrsp"));
-    images::save_png(request.picture, png.toStdString());
+
+    // Each picture in the run: its own mode, carrier and stored picture.
+    // The first is the request's; any others joined through the chain.
+    struct Picture {
+        Request request;    // its picture, mode and carrier; the rest the run's
+        QString qrsp;
+        bool encoded = false;
+    };
+    std::deque<Picture> pictures;
+    pictures.push_back({request, {}, false});
+    pictures.front().request.chain.reset();
+    // Encode picture i; empty on success, else the tool's output.
+    auto encode = [&](std::size_t i) -> std::string {
+        Picture& p = pictures[i];
+        if (p.encoded) return {};
+        const QString png = tmp.filePath(QStringLiteral("picture%1.png").arg(i));
+        p.qrsp = tmp.filePath(QStringLiteral("picture%1.qrsp").arg(i));
+        images::save_png(p.request.picture, png.toStdString());
+        QString out;
+        const bool ok = runner(encode_args(tools, png, p.qrsp, p.request.mode), &out);
+        QFile::remove(png);
+        if (!ok) return out.isEmpty() ? std::string("failed") : out.toStdString();
+        p.encoded = true;
+        return {};
+    };
 
     engine.report(tx::TxPhase::Encoding, "QRSS: encoding the picture");
-    QString out;
-    if (!runner(encode_args(tools, png, qrsp, request.mode), &out)) {
-        if (engine.cancelled()) {
-            engine.report(tx::TxPhase::Cancelled, "cancelled");
-            return false;
-        }
-        return fail("QRSS encode failed: " + out.toStdString());
+    if (std::string out = encode(0); !out.empty()) {
+        if (engine.cancelled()) return cancelled();
+        return fail("QRSS encode failed: " + out);
     }
 
     // Passes can follow each other with about 2 s between one's audio and
     // the next (a pass's audio lasts ~1798 s, passes are 1800 s apart),
     // so only the first pass's audio is made before keying, and each
-    // later one is made and read in while the pass before it plays.
-    const int segments = passes_for(request.mode);
-    std::vector<Pass> passes = request.passes;
-    if (passes.empty()) {
-        const std::vector<double> quarter_hours = plan(clock(), segments, request.prep_s);
-        for (int k = 0; k < segments; ++k) passes.push_back({quarter_hours[static_cast<std::size_t>(k)], k});
-    }
-    const int n = static_cast<int>(passes.size());
-    auto what = [&](int k) {
-        const Pass& p = passes[static_cast<std::size_t>(k)];
-        std::string w = "QRSS pass " + std::to_string(k + 1) + " of " + std::to_string(n);
-        if (n != segments && segments > 1) {
-            w += " (part " + std::to_string(p.segment + 1) + " of " + std::to_string(segments) +
-                 ")";
-        }
-        return w + " at " + hhmm(p.slot) + ", " +
-               QString::number(request.freq_hz, 'f', 0).toStdString() + " Hz";
+    // later one is made and read in while the pass before it plays. A
+    // following picture is encoded then too.
+    struct Slot {
+        std::size_t picture = 0;
+        Pass pass;
     };
-    auto wav_of = [&](int k) { return tmp.filePath(QStringLiteral("pass%1.wav").arg(k)); };
+    std::vector<Slot> passes;
+    if (request.passes.empty()) {
+        const int segments = passes_for(request.mode);
+        const std::vector<double> quarter_hours = plan(clock(), segments, request.prep_s);
+        for (int k = 0; k < segments; ++k) {
+            passes.push_back({0, {quarter_hours[static_cast<std::size_t>(k)], k}});
+        }
+    } else {
+        for (const Pass& p : request.passes) passes.push_back({0, p});
+    }
+    auto what = [&](std::size_t k) {
+        const Slot& s = passes[k];
+        const Request& r = pictures[s.picture].request;
+        const int segments = passes_for(r.mode);
+        std::string w = "QRSS pass " + std::to_string(k + 1) + " of " +
+                        std::to_string(passes.size());
+        if (pictures.size() > 1) w += " (picture " + std::to_string(s.picture + 1) + ")";
+        if (segments > 1) {
+            w += " (part " + std::to_string(s.pass.segment + 1) + " of " +
+                 std::to_string(segments) + ")";
+        }
+        return w + " at " + hhmm(s.pass.slot) + ", " +
+               QString::number(r.freq_hz, 'f', 0).toStdString() + " Hz";
+    };
     // Make pass k's audio and read it in; empty with `*error` set if not.
-    auto make = [&](int k, std::string* error) {
-        const Pass& p = passes[static_cast<std::size_t>(k)];
-        const QString wav = wav_of(k);
+    // Encodes its picture first when that has not been done.
+    auto make = [&](std::size_t k, std::string* error) {
+        const Slot& s = passes[k];
+        if (std::string out = encode(s.picture); !out.empty()) {
+            *error = "encoding the next picture: " + out;
+            return std::vector<double>();
+        }
+        const Picture& p = pictures[s.picture];
+        const QString wav = tmp.filePath(QStringLiteral("pass%1.wav").arg(k));
         QString output;
-        if (!runner(transmit_args(tools, qrsp, wav, p.slot, p.segment, request), &output)) {
+        if (!runner(transmit_args(tools, p.qrsp, wav, s.pass.slot, s.pass.segment, p.request),
+                    &output)) {
             *error = output.toStdString();
             return std::vector<double>();
         }
@@ -243,43 +337,50 @@ bool run(tx::TxEngine& engine, const Request& request, const Tools& tools,
         QFile::remove(wav);
         return w;
     };
-    if (!engine.wait(audio_start(passes[0].slot) - request.prep_s - clock(),
+    if (!engine.wait(audio_start(passes[0].pass.slot) - request.prep_s - clock(),
                      tx::TxPhase::Waiting, "waiting to make " + what(0))) {
-        engine.report(tx::TxPhase::Cancelled, "cancelled");
-        return false;
+        return cancelled();
     }
     engine.report(tx::TxPhase::Modulating, "making " + what(0));
     std::string error;
     std::vector<double> wave = make(0, &error);
     if (wave.empty()) {
-        if (engine.cancelled()) {
-            engine.report(tx::TxPhase::Cancelled, "cancelled");
-            return false;
-        }
+        if (engine.cancelled()) return cancelled();
         return fail("QRSS pass audio failed: " + error);
     }
-    for (int k = 0; k < n; ++k) {
-        const double lead =
-            audio_start(passes[static_cast<std::size_t>(k)].slot) - request.tx.ptt_lead_s - clock();
+    for (std::size_t k = 0; k < passes.size(); ++k) {
+        const double lead = audio_start(passes[k].pass.slot) - request.tx.ptt_lead_s - clock();
         if (lead < -1.0) {
             return fail("QRSS: " + what(k) + " was due to start " + std::to_string(-lead) +
                         " s ago; not sending it late");
         }
-        if (!engine.wait(lead, tx::TxPhase::Waiting, "starting " + what(k))) {
-            engine.report(tx::TxPhase::Cancelled, "cancelled");
-            return false;
+        if (!engine.wait(lead, tx::TxPhase::Waiting, "starting " + what(k))) return cancelled();
+        // Keying the last pass: a picture waiting to follow joins now, or
+        // the run closes to more.
+        while (k + 1 == passes.size() && request.chain) {
+            std::optional<Part> part = request.chain->take_or_close();
+            if (!part) break;
+            if (std::string bad = problem(*part, passes.back().pass.slot); !bad.empty()) {
+                on_error("QRSS: the picture to follow was not added: " + bad);
+                continue;
+            }
+            Request r = request;
+            r.chain.reset();
+            r.passes.clear();
+            r.picture = std::move(part->picture);
+            r.mode = part->mode;
+            r.freq_hz = part->freq_hz;
+            pictures.push_back({std::move(r), {}, false});
+            for (const Pass& p : part->passes) passes.push_back({pictures.size() - 1, p});
         }
         std::string next_error;
         std::future<std::vector<double>> next;
-        if (k + 1 < n) next = std::async(std::launch::async, make, k + 1, &next_error);
+        if (k + 1 < passes.size()) next = std::async(std::launch::async, make, k + 1, &next_error);
         const bool sent = engine.transmit_wave(wave, request.tx);
         if (next.valid()) wave = next.get();
         if (!sent) return false;
-        if (k + 1 < n && wave.empty()) {
-            if (engine.cancelled()) {
-                engine.report(tx::TxPhase::Cancelled, "cancelled");
-                return false;
-            }
+        if (k + 1 < passes.size() && wave.empty()) {
+            if (engine.cancelled()) return cancelled();
             return fail("QRSS audio for " + what(k + 1) + " failed: " + next_error);
         }
     }

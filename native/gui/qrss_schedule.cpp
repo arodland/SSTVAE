@@ -79,6 +79,25 @@ std::pair<double, double> busy(const Entry& e, int k) {
     return {slot + busy_from(e), slot + busy_to(e)};
 }
 
+bool follows_on(const Entry& e, int k, const std::vector<Entry>& all, double now) {
+    if (!problem(e).empty()) return false;
+    const double slot = send_slot(e, k);
+    for (const Entry& o : all) {
+        if (!o.enabled || !problem(o).empty()) continue;
+        if (o.id == e.id && o.every_min == 0) continue;   // already one run
+        const double len = qrss_tx::passes_for(o.mode) * qrss_tx::PASS_SPACING_S;
+        const double p = period_min(o) * 60.0;
+        const double x = (slot - len - o.first_slot) / p;
+        if (x < 0.0 || x != std::floor(x)) continue;
+        const int j = static_cast<int>(x);
+        if (o.id == e.id && j >= k) continue;
+        if (o.count > 0 && j >= o.count) continue;
+        const double last = slot - qrss_tx::PASS_SPACING_S;
+        if (now < qrss_tx::audio_start(last) - CHAIN_LEAD_S) return true;
+    }
+    return false;
+}
+
 std::string problem(const Entry& e) {
     const int n = qrss_tx::passes_for(e.mode);
     if (n == 0) return "unknown QRSS mode '" + e.mode + "'";
@@ -153,18 +172,39 @@ std::vector<Upcoming> upcoming(const std::vector<Entry>& entries, double now,
 std::optional<Clash> clash(const Entry& e, const std::vector<Entry>& others, double now) {
     if (!problem(e).empty()) return std::nullopt;
     const double end = std::max(now, e.first_slot) + WEEK_S;
+    // Everything that will be on the schedule, `e` as it would be.
+    std::vector<Entry> all;
+    for (const Entry& o : others) {
+        if (o.id != e.id) all.push_back(o);
+    }
+    all.push_back(e);
+    // A send that follows straight on joins the run before it, so it
+    // needs the transmitter only from its own audio (and PTT).
+    auto span = [&](const Entry& x, int k) {
+        auto s = busy(x, k);
+        if (follows_on(x, k, all, now)) s.first = qrss_tx::audio_start(send_slot(x, k)) - 1.0;
+        return s;
+    };
     std::optional<Clash> best;
     for (const Entry& o : others) {
         if (o.id == e.id || !o.enabled || finished(o) || !problem(o).empty()) continue;
         for (int k = e.next; e.count == 0 || k < e.count; ++k) {
             if (best && send_slot(e, k) >= best->slot) break;
             if (send_slot(e, k) > end) break;
-            const auto [from, to] = busy(e, k);
+            const auto [from, to] = span(e, k);
+            // `overlapping` allows every send its full lead, so it finds
+            // every candidate; each is then checked with its real span.
             const auto [lo, hi] = overlapping(o, from, to);
-            if (lo <= hi) {
-                best = Clash{o.label, send_slot(e, k), send_slot(o, lo)};
-                break;
+            bool hit = false;
+            for (int j = lo; j <= hi; ++j) {
+                const auto [of, ot] = span(o, j);
+                if (of < to && from < ot) {
+                    best = Clash{o.label, send_slot(e, k), send_slot(o, j)};
+                    hit = true;
+                    break;
+                }
             }
+            if (hit) break;
         }
     }
     return best;
@@ -401,7 +441,7 @@ void QrssScheduler::remove(const std::string& id) {
     const QString label = QString::fromStdString(it->label);
     entries_.erase(it);
     save();
-    emit logged(0, active_ == id
+    emit logged(0, on_air(id)
                            ? tr("QRSS schedule: removed \"%1\"; the send on the air carries "
                                 "on (Cancel stops it)")
                                  .arg(label)
@@ -413,7 +453,7 @@ std::string QrssScheduler::change(const std::string& id,
                                   const std::function<void(qs::Entry&)>& edit) {
     qs::Entry* e = find(id);
     if (e == nullptr) return "it is no longer on the schedule";
-    if (active_ == id) return "it is on the air now; Cancel on the Transmit pane stops it";
+    if (on_air(id)) return "it is on the air now; Cancel on the Transmit pane stops it";
     if (qs::finished(*e)) return "every send of it is past";
     const double now = clock_();
     qs::Entry trial = *e;
@@ -507,7 +547,55 @@ int QrssScheduler::first_startable(const qs::Entry& e, double now) const {
 void QrssScheduler::run_finished() {
     if (active_.empty()) return;
     active_.clear();
+    on_air_.clear();
+    run_end_ = 0.0;
     emit changed();
+}
+
+bool QrssScheduler::on_air(const std::string& id) const {
+    return std::find(on_air_.begin(), on_air_.end(), id) != on_air_.end();
+}
+
+void QrssScheduler::chain(double now, bool& dirty) {
+    if (active_.empty() || !chainer_ || run_end_ <= 0.0) return;
+    for (;;) {
+        qs::Entry* follow = nullptr;
+        for (qs::Entry& e : entries_) {
+            if (!e.enabled || qs::finished(e)) continue;
+            if (qs::send_slot(e, e.next) == run_end_ + qrss_tx::PASS_SPACING_S) {
+                follow = &e;
+                break;
+            }
+        }
+        if (follow == nullptr) return;
+        qs::Entry& e = *follow;
+        const int n = qrss_tx::passes_for(e.mode);
+        const int m = e.every_min == 0 ? std::min(e.count - e.next, qs::MAX_RUN_PASSES / n) : 1;
+        std::vector<qrss_tx::Pass> passes;
+        for (int k = e.next; k < e.next + m; ++k) {
+            for (const qrss_tx::Pass& p : qs::passes_of(e, k)) passes.push_back(p);
+        }
+        const std::string key = e.id + "/" + std::to_string(e.next);
+        const QString label = QString::fromStdString(e.label);
+        const QString at = QString::fromStdString(qs::when(qs::send_slot(e, e.next), now));
+        std::string why;
+        if (!chainer_(e, passes, &why)) {
+            if (refused_ != key) {
+                emit logged(1, tr("QRSS schedule: the %1 send of \"%2\" could not follow on: %3")
+                                       .arg(at, label, QString::fromStdString(why)));
+                refused_ = key;
+                refused_why_ = why;
+            }
+            return;
+        }
+        emit logged(0, tr("QRSS schedule: \"%1\" (%2) follows straight on at %3")
+                               .arg(label, QString::fromStdString(qs::describe(e)), at));
+        e.next += m;
+        if (!on_air(e.id)) on_air_.push_back(e.id);
+        run_end_ = passes.back().slot;
+        refused_.clear();
+        dirty = true;
+    }
 }
 
 std::string QrssScheduler::change_clash_text(const qs::Entry& e, double now) const {
@@ -638,6 +726,9 @@ void QrssScheduler::tick() {
     const double now = clock_();
     bool dirty = false;
     tick_changes(now, dirty);
+    // Sends that follow straight on join the run on the air before
+    // anything below can count them missed or try to start them alone.
+    chain(now, dirty);
     // Sends whose audio is too close (or past) to start: missed.
     for (qs::Entry& e : entries_) {
         if (!e.enabled || qs::finished(e)) continue;
@@ -685,6 +776,8 @@ void QrssScheduler::tick() {
                                    .arg(label, QString::fromStdString(qs::describe(e)), at, which));
             e.next += m;
             active_ = e.id;
+            on_air_ = {e.id};
+            run_end_ = passes.back().slot;
             refused_.clear();
             dirty = true;
         } else if (result == Start::Busy) {
@@ -701,6 +794,7 @@ void QrssScheduler::tick() {
             dirty = true;
         }
     }
+    chain(now, dirty);
     if (dirty) {
         save();
         emit changed();

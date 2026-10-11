@@ -125,8 +125,18 @@ void test_what_cannot_be_scheduled() {
 
 void test_clashes() {
     const std::vector<qs::Entry> one{entry("A", Q, 1, 0, "first")};
-    check::is_true(qs::clash(entry("A", Q + 1800.0, 1, 0, "next"), one, Q - H).has_value(),
-                   "schedule/clash: another picture straight after one cannot start in time");
+    // Straight after: it joins the run on the air, so no lead of its own.
+    check::is_true(!qs::clash(entry("B", Q + 1800.0, 1, 0, "next"), one, Q - H).has_value(),
+                   "schedule/clash: another picture may follow straight on");
+    check::is_true(!qs::clash(entry("A", Q - 1800.0, 1, 0, "before"), one, Q - H).has_value(),
+                   "schedule/clash: or come straight before");
+    check::is_true(qs::follows_on(entry("B", Q + 1800.0, 1, 0, "next"), 0, one, Q - H),
+                   "schedule/clash: and is known to follow on");
+    check::is_true(qs::clash(entry("A", Q + 1800.0, 1, 0, "next"), one, Q - 11.0 - 30.0)
+                       .has_value(),
+                   "schedule/clash: but not once the last pass is about to key");
+    check::is_true(qs::clash(entry("A", Q + 900.0, 1, 0, "inside"), one, Q - H).has_value(),
+                   "schedule/clash: a send inside another is still refused");
     check::is_true(!qs::clash(entry("A", Q + 2700.0, 1, 0, "later"), one, Q - H).has_value(),
                    "schedule/clash: a quarter hour's gap is enough");
     // A every 2 h from Q against A every 3 h from Q + 1 h: they meet at
@@ -169,6 +179,8 @@ void test_upcoming_and_the_file() {
 
 struct Fake {
     double now = Q - H;
+    bool chain_ok = true;
+    std::vector<std::vector<qrss_tx::Pass>> chained;
     QrssScheduler::Start answer = QrssScheduler::Start::Started;
     std::string why;
     std::vector<std::vector<qrss_tx::Pass>> runs;
@@ -184,6 +196,15 @@ QrssScheduler* make(Fake& fake, const std::filesystem::path& file) {
             return fake.answer;
         },
         [&fake] { return fake.now; }, 0);
+    s->set_chainer([&fake](const qs::Entry&, const std::vector<qrss_tx::Pass>& passes,
+                           std::string* why) {
+        if (!fake.chain_ok) {
+            *why = "the send on the air has already keyed its last pass";
+            return false;
+        }
+        fake.chained.push_back(passes);
+        return true;
+    });
     QObject::connect(s, &QrssScheduler::logged, [&fake](int sev, const QString& m) {
         fake.log.push_back({sev, m.toStdString()});
     });
@@ -272,6 +293,55 @@ void test_the_scheduler_starts_what_is_due(const std::filesystem::path& dir) {
     again->remove(again->entries()[0].id);
     check::is_true(again->entries().size() == 1 && !std::filesystem::exists(png),
                    "scheduler/remove: the entry and its picture go");
+}
+
+// Two different Sends back to back: the second joins the first's run.
+void test_sends_follow_straight_on(const std::filesystem::path& dir) {
+    Fake fake;
+    std::unique_ptr<QrssScheduler> s(make(fake, dir / "follow" / "qrss_schedule.json"));
+    const images::Picture pic(64, 48);
+    check::is_true(s->add(entry("A", Q, 1, 0, "one"), pic).empty(), "follow/add: A at 01:00Z");
+    check::is_true(s->add(entry("B", Q + 1800.0, 1, 0, "two"), pic).empty(),
+                   "follow/add: B straight after, at 01:30Z");
+    check::is_true(s->add(entry("A", Q + 5400.0, 1, 0, "three"), pic).empty(),
+                   "follow/add: and A straight after that, at 02:30Z");
+    fake.now = Q - 11.0 - qs::START_LEAD_S + 1.0;
+    s->tick();
+    check::is_true(fake.runs.size() == 1 && fake.runs[0].size() == 1 && fake.runs[0][0].slot == Q,
+                   "follow/tick: the first starts its own run");
+    check::is_true(fake.chained.size() == 2 && fake.chained[0].size() == 2 &&
+                       fake.chained[0][0].slot == Q + 1800.0 &&
+                       fake.chained[0][1].segment == 1 && fake.chained[1].size() == 1 &&
+                       fake.chained[1][0].slot == Q + 5400.0,
+                   "follow/tick: both others join it, in order");
+    const std::string one = s->entries()[0].id, two = s->entries()[1].id,
+                      three = s->entries()[2].id;
+    check::is_true(s->on_air(one) && s->on_air(two) && s->on_air(three) && s->active() == one,
+                   "follow/tick: all three are on the air");
+    check::is_true(!s->change(two, [](qs::Entry& e) { e.freq_hz = 900.0; }).empty(),
+                   "follow/tick: one that joined is not changed under the run");
+    fake.now = Q + 1800.0 - 11.0 - qs::START_LEAD_S + 1.0;
+    s->tick();
+    check::equal(fake.runs.size(), std::size_t{1}, "follow/tick: nothing starts a run of its own");
+    s->run_finished();
+    check::is_true(!s->on_air(two), "follow/done: off the air with the run");
+
+    // The run will not take it: logged once, then missed like any send
+    // the transmitter was too busy for.
+    Fake late;
+    std::unique_ptr<QrssScheduler> t(make(late, dir / "late" / "qrss_schedule.json"));
+    check::is_true(t->add(entry("A", Q, 1, 0, "one"), pic).empty() &&
+                       t->add(entry("A", Q + 1800.0, 1, 0, "two"), pic).empty(),
+                   "follow/refused: two As back to back");
+    late.chain_ok = false;
+    late.now = Q - 11.0 - qs::START_LEAD_S + 1.0;
+    t->tick();
+    t->tick();
+    check::is_true(late.chained.empty() && logged(late, "could not follow on"),
+                   "follow/refused: reported");
+    int reports = 0;
+    for (const auto& [sev, m] : late.log) reports += m.find("could not follow on") != std::string::npos;
+    check::equal(reports, 1, "follow/refused: once");
 }
 
 void test_missed_and_paused(const std::filesystem::path& dir) {
@@ -896,6 +966,7 @@ int main(int argc, char** argv) {
     test_clashes();
     test_upcoming_and_the_file();
     test_the_scheduler_starts_what_is_due(dir);
+    test_sends_follow_straight_on(dir);
     test_missed_and_paused(dir);
     test_the_sends_store(dir);
     test_change_and_truncate(dir);
