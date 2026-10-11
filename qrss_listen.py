@@ -15,7 +15,8 @@ recording instead (from --start, default 12 s before the slot given by
 unless --speed is given.
 
 Tiles go to --state DIR (default STORE/live): `state.json`, rewritten
-after every change, and `tiles/<id>.png`. With rig control the desktop
+after every change, and `tiles/<id>.png`; every log line goes to
+`listener.log` there too. With rig control the desktop
 app writes the radio's dial there too (`dial_changes.jsonl`), and a slot
 heard on more than one dial is received separately on each. A signal is looked for on its
 preamble (every --refresh seconds until 5 minutes into the slot, then

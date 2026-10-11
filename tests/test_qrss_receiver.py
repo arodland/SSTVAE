@@ -830,3 +830,32 @@ def test_suspect_neighbour_of_a_strong_pass_is_dropped():
     assert not RX._suspect_neighbour(fake(1507.722, 30.0, True), [real])
     assert not RX._suspect_neighbour(fake(1521.0, 6.4, True), [real])
     assert not RX._suspect_neighbour(fake(1507.722, 6.4, True), [fake(1500.2, 103.8, True)])
+
+
+def test_one_signal_is_one_pass_whatever_the_timings(monkeypatch):
+    """Field test (2026-10-11, slot 03:45Z): one strong signal was received
+    as two passes 0.62 Hz apart, Z_ref 197 and 29 with timings 4.1 symbols
+    apart (so not a ghost, and the stronger one SUSPECT, so not a suspect
+    neighbour either), and both were filed: one pass counted twice. Two
+    passes within MERGE_HZ are one signal; the stronger stands for it, in
+    either order, and a signal MERGE_HZ away is still its own."""
+    from qrss_fakes import make_pass_result
+
+    a = np.zeros(64)
+
+    def fake(f, z, tau0, suspect):
+        p = make_pass_result(a, f_hz=f)
+        p.report = dataclasses.replace(p.report, z_ref=z, suspect=suspect)
+        p.timing = dataclasses.replace(p.timing, tau0=tau0)
+        return p
+
+    strong = fake(1103.738, 196.96, 225.162, True)
+    weak = fake(1104.358, 29.24, 255.942, False)
+    other = fake(1103.738 + RX.MERGE_HZ, 29.24, 255.942, False)
+    monkeypatch.setattr(RX, "prepare", lambda cap: cap)
+    for order in ([strong, weak], [weak, strong], [strong, weak, other]):
+        dets = [dataclasses.make_dataclass("D", ["f_hz"])(p.f_hz) for p in order]
+        by_f = {p.f_hz: p for p in order}
+        monkeypatch.setattr(RX, "receive_pass", lambda prep, spec, d, **k: by_f[d.f_hz])
+        got = RX.receive_slot(None, frame.FULL, dets=dets)
+        assert [p.f_hz for p in got] == [p.f_hz for p in [strong, other] if p in order]

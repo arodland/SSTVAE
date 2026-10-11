@@ -364,6 +364,14 @@ def receive_slot(cap, spec: FrameSpec = FULL, live_only: bool = False,
             continue
         if _suspect_neighbour(p, out):
             continue
+        # and two passes within MERGE_HZ are one signal whatever their
+        # timings say (two signals that close cannot be received apart):
+        # the stronger stands for it
+        i = next((i for i, g in enumerate(out) if abs(p.f_hz - g.f_hz) < MERGE_HZ), None)
+        if i is not None:
+            if p.report.z_ref > out[i].report.z_ref:
+                out[i] = p
+            continue
         out.append(p)
     return out
 

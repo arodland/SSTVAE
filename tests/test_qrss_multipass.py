@@ -772,3 +772,39 @@ def test_p7_null_on_coco_pictures():
             if name == "P6":
                 assert np.abs(h0).max() < 5.0
     print("P7: " + "; ".join(report))
+
+
+def test_one_transmission_is_one_member(store):
+    """Field test (2026-10-11): one 03:45Z pass, received twice in the same
+    slot 0.62 Hz apart, was filed as two passes of its picture, so the tile
+    said 2 passes and W claimed the pass's own noise twice. A pass of the
+    same slot and segment within SAME_PASS_HZ of a member is that member
+    received again: the copy carrying more stays, the other is left out
+    (and associate reports it as already a member); a later slot still adds."""
+    from sstvae.qrss.store import SAME_PASS_HZ
+
+    sp = synthetic_picture(14)
+    key = ("AG7EW", sp.picture_id)
+    h = make_header(sp, callsign="AG7EW")
+    a = _air(sp, 0)
+    weak = make_pass_result(a, 1.2, seed=1, q=Q_TEST, f_hz=1104.358, hdr=h, decoded=True)
+    strong = make_pass_result(a, 8.2, seed=2, q=Q_TEST, f_hz=1103.738, hdr=h, decoded=True)
+    assert asc.associate(weak, store) == (key, "header")
+    assert asc.associate(strong, store) == (key, "header")      # replaces the weaker copy
+    assert store.accumulator(key).uids == [strong.uid]
+    assert asc.associate(weak, store) == (key, "")              # left out again
+    acc = store.accumulator(key)
+    assert acc.uids == [strong.uid]
+    S, W = _expected_sums(store, [(strong.uid, 0)])
+    np.testing.assert_array_equal(acc.W, W.astype(np.float32))
+    log = [json.loads(x) for x in (store.root / "log.jsonl").read_text().splitlines()]
+    assert [(e["uid"], e["kept"]) for e in log if e["event"] == "duplicate"] == [
+        (weak.uid, strong.uid), (weak.uid, strong.uid)]
+    # what is not a copy still adds: the next pass of it, half an hour on
+    # (and a copy of one only within SAME_PASS_HZ)
+    again = make_pass_result(a, 1.2, seed=3, q=Q_TEST + 2, f_hz=1104.0, hdr=h, decoded=True)
+    assert asc.associate(again, store) == (key, "header")
+    near = make_pass_result(a, 1.2, seed=4, q=Q_TEST, f_hz=1103.738 + SAME_PASS_HZ,
+                            hdr=h, decoded=True)
+    assert asc.associate(near, store) == (key, "header")
+    assert store.accumulator(key).uids == [strong.uid, again.uid, near.uid]

@@ -60,7 +60,7 @@ def _frame_name(n: int) -> str:
     return "full"
 
 
-def make_pass_result(a_air, s=1.0, *, w=None, seed: int = 0, q: int = Q_TEST,
+def make_pass_result(a_air, s=1.0, *, w=None, seed: int = 0, q: int | None = None,
                      f_hz: float = 1500.0, hdr: header.HeaderFields | None = None,
                      decoded: bool = False, hdr_es_n0_db: float | None = None,
                      erase_after: int | None = None, z_ref: float = 10.0,
@@ -73,8 +73,12 @@ def make_pass_result(a_air, s=1.0, *, w=None, seed: int = 0, q: int = Q_TEST,
     pass was sent with: its LLRs are drawn at `hdr_es_n0_db`, and with
     `decoded` it is also reported as decoded on this pass. The uid
     follows `types.pass_uid`, so passes differing only in noise differ
-    in uid.
+    in uid. q defaults to Q_TEST - seed: passes of one picture at one
+    frequency are different transmissions only in different slots (the
+    store keeps one member per transmission, `Store.twin`).
     """
+    if q is None:
+        q = Q_TEST - int(seed)
     rng = np.random.default_rng(seed)
     a = np.asarray(a_air, dtype=np.float64)
     n = a.size

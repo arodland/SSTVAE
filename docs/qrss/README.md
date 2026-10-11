@@ -274,6 +274,19 @@ it was matched. The app then hides it behind the newer tile that
 combines the two. Its own picture is not redrawn. Tiles carry the stored
 pass's id as `uid`.
 
+A transmission is one pass however it was received. Two passes of one
+slot within 5 Hz are one signal: the receive keeps the one with the
+higher Z_ref (in a field test one strong signal came out as two passes
+0.6 Hz apart, their timings 4 symbols apart, and both were filed). The
+multi-pass store also keeps one member per transmission (the same slot
+and segment within 5 Hz): the copy carrying more stays and the other is
+left out (noted "already a member"), so W never counts a pass's noise
+twice.
+
+The listener writes every log line to `listener.log` in its state
+directory (moved to `listener.log.1` past 2 MB), beside `state.json`,
+which keeps only the last 20.
+
 A tile whose header has not decoded (not yet, or never) still gets a
 picture, marked "no header yet": it assumes the first pass of a mode A
 send, which is right for every mode A send and the first pass of B and

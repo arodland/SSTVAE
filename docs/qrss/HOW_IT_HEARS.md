@@ -167,7 +167,9 @@ end rather than where the last two-minute update left it.
 Each pass found goes into the **multi-pass store** on disk, which keeps
 one running total per picture. Passes of the same picture are added in,
 each number weighted by its confidence. A picture you heard three times
-looks better than one you heard once.
+looks better than one you heard once. A pass counts once, however it
+was heard: a strong signal can be picked up twice in the same slot, at
+two slightly different timings, and then only the better copy is kept.
 
 ## When things go wrong
 

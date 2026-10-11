@@ -289,13 +289,20 @@ def _soft_header(store: Store, uid: str, llr) -> tuple[object, list[str]] | None
 # --- the rules ------------------------------------------------------------------------
 
 
+def _rule(store: Store, key, uid: str, rule: str) -> str:
+    """`rule`, or "" when the pass was left out because the store holds
+    its transmission already (`Store.twin`): it is that member."""
+    return rule if uid in store.accumulator(key).uids else ""
+
+
 def associate(p: PassResult, store: Store) -> tuple[tuple | None, str]:
     """Attach pass p by the first rule that succeeds (stores the pass first).
 
     Returns (key, rule) with rule in {"header", "soft-header", "corr",
     "prov", ""}: key is the accumulator's (callsign, picture_id), or None
     for a provisional pass. "" means the pass was already a member of
-    `key` and nothing changed.
+    `key`, or its transmission was (another copy of it, `Store.twin`),
+    and nothing changed.
     """
     if not store.has_pass(p.uid):
         store.add_pass(p)
@@ -310,7 +317,8 @@ def associate(p: PassResult, store: Store) -> tuple[tuple | None, str]:
         h = p.header
         if _attach_by_header(store, h, [p.uid], "header"):
             resolve_provisional(store)
-            return (h.callsign, int(h.picture_id)), "header"
+            key = (h.callsign, int(h.picture_id))
+            return key, _rule(store, key, p.uid, "header")
         return None, "prov"
 
     # 2. Soft-combined header.
@@ -323,7 +331,8 @@ def associate(p: PassResult, store: Store) -> tuple[tuple | None, str]:
         if done:
             resolve_provisional(store)
         if p.uid in done:
-            return (h.callsign, int(h.picture_id)), "soft-header"
+            key = (h.callsign, int(h.picture_id))
+            return key, _rule(store, key, p.uid, "soft-header")
         if p.uid in uids:
             return None, "prov"             # rule 1's check refused it (a collision)
         # this pass carries another header: on to rules 3 and 4
@@ -333,7 +342,7 @@ def associate(p: PassResult, store: Store) -> tuple[tuple | None, str]:
     if best is not None:
         t, key, g = best
         store.attach(key, p.uid, g, "corr")
-        return key, "corr"
+        return key, _rule(store, key, p.uid, "corr")
 
     # 4. Provisional: join the best-correlated cluster, or start one. A
     # pass that is already provisional (re-associated after a restart) is

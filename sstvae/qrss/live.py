@@ -88,6 +88,8 @@ HEADERLESS_MAX_SNR_DB = -6.0      # a pass this strong whose header did not deco
 RECOVER_HOURS = 3.0               # a restarted listener finishes slots that ended this recently
 GUESS_NOTE = "no header yet: picture assumes the first pass of a mode A send"
 DIAL_FILE = "dial_changes.jsonl"  # the radio's dial over time, in the state directory
+LOG_FILE = "listener.log"         # every log line, in the state directory...
+LOG_FILE_BYTES = 2_000_000        # ...moved to listener.log.1 past this size (one kept)
 # unheard before and after a dial change: settling, and the app's optional
 # tune 5 s after it, which takes up to 45 s on Jeff's tuner (rarely)
 DIAL_GUARD_S = (2.0, 50.0)
@@ -653,6 +655,17 @@ class LiveListener:
         line = f"{utc_iso(self.now or time.time())} {msg}"
         self.lines = (self.lines + [line])[-50:]
         self._log(line)
+        # and to a file: state.json keeps the last 20 lines and the app's
+        # panel lives as long as the app, while a question about last night
+        # needs the whole night (a field test, 2026-10-11)
+        path = self.dir / LOG_FILE
+        try:
+            if path.exists() and path.stat().st_size > LOG_FILE_BYTES:
+                os.replace(path, path.with_name(LOG_FILE + ".1"))
+            with open(path, "a") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass                          # a log that cannot be written must not stop the listener
 
     def _load_previous(self) -> None:
         """Finished tiles from an earlier run stay listed (until keep_done_s)."""
@@ -1205,7 +1218,9 @@ class LiveListener:
             acc = self.store.accumulator(k)
             S += acc.S
             W += acc.W
-            member = p.uid in acc.uids
+            # (a copy of a transmission the store holds already is that member)
+            member = p.uid in acc.uids or (
+                seg is not None and self.store.twin(acc, p.q, p.f_hz, seg) is not None)
             n = len(acc.members) + (0 if member else 1)
         if not member and seg is not None:
             idx = picture.air_to_canonical(seg)

@@ -154,6 +154,20 @@ def test_missing_audio_is_still_missing(tmp_path):
     assert not ok.any()
 
 
+def test_the_log_is_kept_in_the_state_directory(tmp_path, monkeypatch):
+    """Every log line goes to listener.log beside state.json (which keeps 20),
+    moved to listener.log.1 once the file passes LOG_FILE_BYTES."""
+    monkeypatch.setattr(live, "LOG_FILE_BYTES", 2000)
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    for k in range(100):
+        L.log(f"line {k}")
+    now = (tmp_path / live.LOG_FILE).read_text().splitlines()
+    old = (tmp_path / (live.LOG_FILE + ".1")).read_text().splitlines()
+    assert [x.split()[-1] for x in old + now] == [str(k) for k in range(100 - len(old + now), 100)]
+    assert len(old) > 20 and now[-1].endswith("line 99")
+
+
 def test_audio_queued_for_a_starting_listener_starts_when_it_was_heard(tmp_path):
     """8 s of audio queued while the listener started up, read at once,
     then audio as it arrives: the stream starts where the queue did."""

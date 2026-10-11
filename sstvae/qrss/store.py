@@ -58,6 +58,7 @@ SENT = picture.SENT                         # 50,600
 DAY_S = 86400.0
 SLOT_S = 900                                # a slot's q counts quarter hours
 ZW_CACHE = 128                              # passes' (z, w) kept in memory, ~0.8 MB each
+SAME_PASS_HZ = 5.0                          # passes of one slot this close are one transmission
 
 
 def default_root() -> Path:
@@ -395,7 +396,9 @@ class Store:
         Creates the accumulator if needed: mode and codec ID come from the
         arguments, else from the pass's own header, else (mode = segment,
         codec 0). A pass belongs to one accumulator: attaching moves it
-        out of any other one and out of the provisional clusters.
+        out of any other one and out of the provisional clusters. A pass
+        whose transmission is a member already (`twin`) replaces it if it
+        carries more, and is left out otherwise.
         """
         if not self.has_pass(uid):
             raise KeyError(f"no pass {uid}")
@@ -419,6 +422,19 @@ class Store:
         rec = {"uid": uid, "segment": segment, "method": str(method),
                "z_ref": info["z_ref"], "mean_w_db": mean_w_db(w),
                "em_round": info["em_round"]}
+        # One transmission received twice (two detections of one signal, or
+        # one slot received again) is one member: counting both would put
+        # its noise in W twice and claim an SNR it never had. The member is
+        # whichever copy carries more; the other stays a pass file only.
+        twin = self.twin(acc, info["q"], info["f_hz"], segment, uid)
+        if twin is not None:
+            keep, drop = (twin, rec) if twin["mean_w_db"] >= rec["mean_w_db"] else (rec, twin)
+            self.log({"event": "duplicate", "key": [acc.key[0], acc.key[1]],
+                      "uid": drop["uid"], "kept": keep["uid"]})
+            acc.members = [m for m in acc.members if m["uid"] != drop["uid"]]
+            if keep is twin:
+                self._commit(acc)            # (uid may have been a member already)
+                return acc
         old = acc.member(uid)
         if old is None:
             acc.members.append(rec)
@@ -426,6 +442,20 @@ class Store:
             old.update(rec)
         self._commit(acc)
         return acc
+
+    def twin(self, acc: Accumulator, q: int, f_hz: float, segment: int,
+             uid: str | None = None) -> dict | None:
+        """The member of `acc` that is the transmission at (q, f_hz) of
+        `segment` received again: the same slot and segment, within
+        SAME_PASS_HZ (two signals that close could not be told apart).
+        `uid` itself is not its own twin. None if there is none."""
+        for m in acc.members:
+            if m["uid"] == uid or int(m["segment"]) != int(segment):
+                continue
+            o = self.pass_info(m["uid"])
+            if o["q"] == int(q) and abs(o["f_hz"] - float(f_hz)) < SAME_PASS_HZ:
+                return m
+        return None
 
     def detach(self, key, uid: str) -> Accumulator:
         """Remove pass `uid` from `key` and rebuild (the pass file is kept)."""
