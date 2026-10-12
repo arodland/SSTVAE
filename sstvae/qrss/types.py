@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from .constants import WAVEFORM_CE
+
 if TYPE_CHECKING:  # header.py belongs to another work package
     from .header import HeaderFields
 
@@ -62,8 +64,9 @@ class Detection:
     path: FreqPath
     timing: Timing | None
     z_ref: float
-    method: str                              # "preamble" | "tbd" | "template"
+    method: str                              # "preamble" | "hint" | "tbd" | "template"
     lead_in_s: float
+    waveform: int = WAVEFORM_CE              # which waveform's frame this candidate is
 
 
 @dataclass

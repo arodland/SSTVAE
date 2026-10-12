@@ -87,6 +87,7 @@ class FrameSpec:
 
     waveform = WAVEFORM_CE                   # class attributes, not fields:
     t_sym = T_SYM                            # `lframe.LFrameSpec` has L's
+    cw_window = CW_WINDOW                    # symbols per callsign window
 
     def __post_init__(self):
         object.__setattr__(self, "cw_after", tuple(int(c) for c in self.cw_after))

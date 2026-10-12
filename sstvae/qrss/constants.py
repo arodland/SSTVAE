@@ -43,7 +43,8 @@ N_HDR_BITS, N_INFO_BITS, POLAR_N = 2474, 142, 2048
 FORMAT_VERSION = 2
 FORMAT_VERSIONS = (1, 2)                     # what a header may say
 SPREAD_RHO = 0.054                           # spread-header power, latent units (spec 5.1)
-WAVEFORM_CE, WAVEFORM_L = 0, 1               # L: lframe.py, lwave.py (transmitter only)
+WAVEFORM_CE, WAVEFORM_L = 0, 1               # CE: frame.py, ce.py; L: lframe.py, lwave.py
+WAVEFORM_NAMES = {WAVEFORM_CE: "CE", WAVEFORM_L: "L"}
 LEAD_IN_MAX_S = 10
 
 # --- callsign windows (spec 2.7) ----------------------------------------------

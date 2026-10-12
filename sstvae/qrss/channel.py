@@ -24,7 +24,7 @@ The steps are applied in the order a real link sees them:
    float64 turns and wrapped before `exp`.
 3. **Watterson fading.** Two equal-power Gaussian-Doppler Rayleigh
    paths, the second delayed; "steady" is a unit gain.
-4. **Neighbours.** Other CE stations with their own random latents.
+4. **Neighbours.** Other stations, CE or L, with their own random latents.
 5. **AWGN** in the `SNR_REF_BW_HZ` convention of `hfchannel.awgn`,
    against the wanted signal's power over its keyed samples.
 6. **Impulses and crashes.**
@@ -36,10 +36,27 @@ times the trajectory phasor, relative to a carrier at the nominal
 carrier_hz with zero phase at t0), the carrier's audio frequency and
 the receive time of every position.
 
-`ce.baseband` (WP3) supplies the transmitted signal. Until that module
-exists an internal stub stands in: a bare carrier keyed over the same
-span with the same ramps, enough for every channel property tested
-here (`baseband_is_stub()` says which one is in use).
+`transmit_source` supplies the transmitted signal, built once per
+transmission. For CE it is `ce.baseband` (WP3), a closed form evaluated
+chunk by chunk at any time; until that module exists an internal stub
+stands in: a bare carrier keyed over the same span with the same ramps,
+enough for every channel property tested here (`baseband_is_stub()`
+says which one is in use).
+
+**Waveform L** (`lframe.LFrameSpec`, `lwave`) goes through the same
+steps. Its named frequency (carrier_hz, a neighbour's df_hz, truth.f_hz)
+is the pilot, and its baseband is pilot-centred, so nothing after the
+source changes: evaluating it at t*scale scales the data's -f_p offset
+too, and the clock's share of the carrier error scales the pilot, so
+the data land at (pilot - f_p)*scale as they should. Three things do
+differ. The clipper runs over the whole frame (`lwave.frame_baseband`),
+so the source builds it once and serves chunks from it; recomputing it
+per chunk would cost a FULL slot 30 s and more. The data centre sits
+f_p = 12.58 Hz below the pilot, so on a delayed second path its gain is
+not the pilot's: `Truth.u_data` holds it (0.3-1.9 dB of genie error on
+the presets otherwise). And the signal power P is taken over the keying
+span itself: L's envelope has nulls, which CE's amplitude rule would
+drop (about 0.5% of the samples, 0.02 dB of P).
 """
 
 from __future__ import annotations
@@ -56,9 +73,11 @@ from sstvae import config as _c
 from sstvae.modem import dsp
 
 from . import frame as _frame
+from . import lframe, lwave
 from .ce import check_carrier
-from .constants import FE_CENTER_HZ, FE_FS, FS, SPAN, T_SYM
+from .constants import FE_CENTER_HZ, FE_FS, FS, L_PILOT_HZ, WAVEFORM_CE, WAVEFORM_L
 from .frame import FrameSpec
+from .lframe import LFrameSpec
 
 WANDER_RATE_HZ = 20.0                 # OU process sample rate before interpolation
 AGC_FLOOR = 1e-9                      # never divide by less than this envelope
@@ -69,17 +88,21 @@ CHUNK = 1 << 16                       # samples per processing chunk (keeps temp
 
 @dataclass(frozen=True)
 class Neighbour:
-    """Another CE station sharing the slot.
+    """Another station sharing the slot.
 
-    Its carrier is the wanted one's nominal carrier plus df_hz, at rel_db
-    relative to the wanted signal's power, with its own random latents,
-    header and callsign keying drawn from `seed`.
+    Its named frequency (a CE carrier, an L pilot) is the wanted one's
+    nominal named frequency plus df_hz, at rel_db relative to the wanted
+    signal's power (each over its own keyed span), with its own random
+    latents, header and callsign keying drawn from `seed`. Its frame is
+    the wanted frame's twin in its own `waveform` ("short" <-> "l-short",
+    `lframe.twin`).
     """
     df_hz: float
     rel_db: float
     lead_in_s: float = 0.0
     drift_hz_per_min: float = 0.0
     seed: int = 1
+    waveform: int = WAVEFORM_CE
 
 
 @dataclass(frozen=True)
@@ -173,6 +196,10 @@ class Truth:
     agc_gain: np.ndarray | None = field(repr=False, default=None)   # float32[n_fe]
     signal_power: float = 1.0                # P, wanted power over keyed samples, pre-AGC
     time_scale: float = 1.0                  # transmit s per receive s
+    # L only (None for CE): u at the data centre, pilot - f_p*scale, in u's
+    # convention otherwise -- the gain the data band sees, which a delayed
+    # second path makes differ from the pilot's.
+    u_data: np.ndarray | None = field(repr=False, default=None)    # complex128[n_pos]
 
 
 @dataclass
@@ -181,7 +208,7 @@ class Sim:
     fs: int
     t0_index: float                          # FE sample index of t0 (receiver's clock)
     q: int
-    spec: FrameSpec
+    spec: FrameSpec | LFrameSpec
     truth: Truth
 
 
@@ -218,18 +245,96 @@ def _tone_stub(sym, spec, fs, start_s, n, *, keying=None, ook=False, lead_in_s=0
                ramp_s=0.05, time_scale=1.0):
     """Stand-in for `ce.baseband`: the bare carrier (phi = 0) over the keyed span."""
     t = (start_s + np.arange(n) / fs) * time_scale
-    on = -SPAN * T_SYM - lead_in_s
-    off = spec.keyed_end_pos * T_SYM
+    on = spec.keyed_start_pos * spec.t_sym - lead_in_s
+    off = spec.keyed_end_pos * spec.t_sym
     return _raised_cosine_gate(t, on, off, ramp_s).astype(np.complex128)
+
+
+# lwave.resample's interpolation filter is designed at 8 kHz whatever the
+# rate: right at FS, fine at FE_FS (-60 dB against FS), wrong elsewhere.
+_L_EXACT_FS = (FE_FS, FS)
+
+
+def _l_source(bb: lwave.Baseband, fs, start_s, n, time_scale=1.0) -> np.ndarray:
+    """An L frame's clipped baseband at t0 + (start_s + i/fs)*time_scale.
+
+    On an exact grid (no clock error, start on a sample of FE_FS or FS)
+    this is `lwave.resample`; otherwise the frame is resampled at FS over
+    the span the times cover and interpolated linearly: -96 dB against
+    a band-limited delay of the FS resample (measured on L_TINY and
+    L_SHORT), far below that filter's own -61 dB at FE_FS.
+    """
+    n = int(n)
+    x = start_s * fs
+    i0 = round(x)
+    if time_scale == 1.0 and fs in _L_EXACT_FS and abs(x - i0) < 1e-6:
+        return lwave.resample(bb, fs, i0, n)
+    if n <= 0:
+        return np.zeros(0, dtype=np.complex128)
+    k = (start_s + np.arange(n) / fs) * time_scale * FS        # transmit time in FS samples
+    lo = math.floor(min(k[0], k[-1])) - 2
+    hi = math.ceil(max(k[0], k[-1])) + 3
+    g = lwave.resample(bb, FS, lo, hi - lo)
+    x = k - lo
+    j = x.astype(np.int64)
+    gj = g[j]
+    return gj + (g[j + 1] - gj) * (x - j)
+
+
+def transmit_source(sym, spec, *, keying=None, ook=False, lead_in_s=0.0):
+    """The wanted signal, built once: src(fs, start_s, n, time_scale=1.0) gives
+    complex128[n] at t0 + (start_s + i/fs)*time_scale.
+
+    CE: `ce.baseband` evaluated per call, as `transmit_baseband` always did
+    (its closed form costs nothing extra per chunk). L: the whole frame
+    through the clipper once (`lwave.frame_baseband`), then `_l_source`
+    per call; on-off keying is CE's and is refused. `src.keyed_power` is
+    the mean power over the keying span, for scaling a neighbour (1 for
+    CE's unit envelope, which is never rescaled).
+    """
+    spec = lframe.get_any(spec)
+    if spec.waveform == WAVEFORM_L:
+        if ook:
+            raise ValueError("waveform L keys its callsign windows by FSK of its pilot; "
+                             "on-off keying is waveform CE's option (spec 2.7)")
+        bb = lwave.frame_baseband(sym, spec, keying=keying, lead_in_s=lead_in_s)
+        lo, hi = lwave.keyed_span_pos(spec, lead_in_s)
+        t = np.arange(bb.n0, bb.n0 + len(bb.z)) / bb.fs
+        on = (t >= lo * spec.t_sym) & (t < hi * spec.t_sym)
+
+        def l_src(fs, start_s, n, time_scale=1.0):
+            return _l_source(bb, fs, start_s, n, time_scale)
+        l_src.keyed_power = float(np.mean(np.abs(bb.z[on]) ** 2))
+        return l_src
+    fn = _ce_baseband() or _tone_stub
+
+    def ce_src(fs, start_s, n, time_scale=1.0):
+        return np.asarray(fn(sym, spec, fs, start_s, n, keying=keying, ook=ook,
+                             lead_in_s=lead_in_s, time_scale=time_scale),
+                          dtype=np.complex128)
+    ce_src.keyed_power = 1.0
+    return ce_src
 
 
 def transmit_baseband(sym, spec, fs, start_s, n, *, keying=None, ook=False,
                       lead_in_s=0.0, time_scale=1.0) -> np.ndarray:
-    """complex128[n]: the CE signal at t0 + (start_s + i/fs)*time_scale."""
-    fn = _ce_baseband() or _tone_stub
-    return np.asarray(fn(sym, spec, fs, start_s, n, keying=keying, ook=ook,
-                         lead_in_s=lead_in_s, time_scale=time_scale),
-                      dtype=np.complex128)
+    """complex128[n]: the wanted signal at t0 + (start_s + i/fs)*time_scale.
+
+    One call of `transmit_source`: free for CE, but an L frame runs its
+    whole-frame clipper on every call, so anything chunked builds a
+    source once instead.
+    """
+    return transmit_source(sym, spec, keying=keying, ook=ook,
+                           lead_in_s=lead_in_s)(fs, start_s, n, time_scale)
+
+
+def _check_freq(spec, carrier_hz) -> float:
+    """The named frequency in Hz: a CE carrier (`ce.check_carrier`), or an L
+    pilot whose data, 22.07 Hz below it, must stay in band (`tx.check_pilot`)."""
+    if spec.waveform == WAVEFORM_L:
+        from .tx import check_pilot
+        return check_pilot(carrier_hz)
+    return check_carrier(carrier_hz)
 
 
 # --- front-end conversion ------------------------------------------------------------
@@ -568,24 +673,31 @@ def agc_envelope(x, fs: float, agc: Agc) -> np.ndarray:
 # --- the channel --------------------------------------------------------------------------
 
 def _neighbour_symbols(nb: Neighbour, spec):
-    """(sym, keying) of a neighbour: random latents and header bits, its own call."""
+    """(sym, keying) of a neighbour: random latents and header bits, its own call.
+
+    `spec` is the neighbour's own frame (CE or L), so the draws are the
+    same for either and only the assembly differs.
+    """
     from .morse import keying_units
 
     rng = np.random.default_rng(nb.seed)
     hdr = rng.integers(0, 2, _frame.N_HDR_BITS, dtype=np.uint8) if spec.has_header else None
-    sym = _frame.assemble(spec, hdr, rng.standard_normal(spec.n_data))
+    assemble = lframe.assemble if spec.waveform == WAVEFORM_L else _frame.assemble
+    sym = assemble(spec, hdr, rng.standard_normal(spec.n_data))
     keying = keying_units(f"N{nb.seed % 10}NBR") if spec.n_win else None
     return sym, keying
 
 
 def _channel(src, n, t_start, spec, q, cfg: ChannelConfig, *, carrier_hz, lead_in_s,
-             mix_nominal, rng, pos_t=None) -> Sim:
+             mix_nominal, rng, pos_t=None, keyed_s=None) -> Sim:
     """Steps 2-7 on the clean wanted signal; `src(a, b)` gives its samples [a, b).
 
     Sample i is at receive time t_start + i/FE_FS (s after t0).
     `mix_nominal`: the source is at 0 Hz and still needs mixing to
     carrier_hz (the synthesis path), rather than already carrying its
-    carrier and its clock scaling (the WAV path).
+    carrier and its clock scaling (the WAV path). `keyed_s`: the keying
+    span [on, off) in receive time, over which P is measured (L); None
+    keeps CE's rule, samples above a tenth of the rms amplitude.
 
     Processed in chunks of CHUNK samples so no full-length temporaries
     are made: pass 1 forms the faded wanted signal and measures its
@@ -597,8 +709,8 @@ def _channel(src, n, t_start, spec, q, cfg: ChannelConfig, *, carrier_hz, lead_i
     n0 = -t_start * fs                                 # t0's sample index
     traj = Trajectory(cfg.freq_offset_hz + c_off, cfg.drift_hz_per_min, cfg.drift_tau_s,
                       cfg.wander_rms_hz, cfg.wander_tau_s, t_start=t_start - 1.0,
-                      t_end=t_start + n / fs + 1.0, t_key=-SPAN * T_SYM - lead_in_s,
-                      rng=rng)
+                      t_end=t_start + n / fs + 1.0,
+                      t_key=spec.keyed_start_pos * spec.t_sym - lead_in_s, rng=rng)
     fad = cfg.fading
     fading = None if fad is None else _Fading(n, fad[0], fad[1], fs, rng)
 
@@ -621,34 +733,53 @@ def _channel(src, n, t_start, spec, q, cfg: ChannelConfig, *, carrier_hz, lead_i
         if fading is not None:
             y, tail = fading.apply(y, a, b, tail), fading.next_tail(tail, y)
         out[a:b] = y
-    keyed = amp > 0.1 * math.sqrt(float(np.mean(amp.astype(np.float64) ** 2)))
+    if keyed_s is None:
+        keyed = amp > 0.1 * math.sqrt(float(np.mean(amp.astype(np.float64) ** 2)))
+    else:
+        keyed = np.zeros(n, dtype=bool)
+        i_on, i_off = (min(n, max(0, math.ceil((s - t_start) * fs))) for s in keyed_s)
+        keyed[i_on:i_off] = True
     if not keyed.any():
         keyed[:] = True
     P = sum(float(np.sum(np.abs(out[a:a + CHUNK][keyed[a:a + CHUNK]].astype(np.complex128))
                          ** 2)) for a in range(0, n, CHUNK)) / int(keyed.sum())
 
     # truth at positions
-    t_pos = (np.arange(spec.n_pos) * T_SYM / scale if pos_t is None
+    t_pos = (np.arange(spec.n_pos) * spec.t_sym / scale if pos_t is None
              else np.asarray(pos_t, dtype=np.float64))
     u = np.exp(2j * np.pi * _wrap(traj.theta(t_pos)))
     f_true = carrier_hz + traj.f(t_pos)
+    u_data = None
+    if spec.waveform == WAVEFORM_L:
+        f_data = f_true - float(L_PILOT_HZ) * scale        # the data centre, clock-scaled
+        u_data = u.copy()
     if fading is not None:
         # composite narrowband gain: path 2 lags by d samples of carrier phase
         idx = (t_pos - t_start) * fs
+        g1, g2 = fading.g1.at(idx), fading.g2.at(idx)
+        if u_data is not None:
+            lag = np.exp(-2j * np.pi * _wrap((f_data - FE_CENTER_HZ) * fading.d / fs))
+            u_data = u_data * (g1 + g2 * lag) / math.sqrt(2)
         lag = np.exp(-2j * np.pi * _wrap((f_true - FE_CENTER_HZ) * fading.d / fs))
-        u = u * (fading.g1.at(idx) + fading.g2.at(idx) * lag) / math.sqrt(2)
+        u = u * (g1 + g2 * lag) / math.sqrt(2)
 
     # pass 2: neighbours, AWGN, impulses, AGC
     nbs = []
     for nb in cfg.neighbours:
-        sym_n, key_n = _neighbour_symbols(nb, spec)
+        nspec = lframe.twin(spec, nb.waveform)
+        sym_n, key_n = _neighbour_symbols(nb, nspec)
+        nsrc = transmit_source(sym_n, nspec, keying=key_n, lead_in_s=nb.lead_in_s)
         nrng = np.random.default_rng([cfg.seed, nb.seed, 7])
         nts = 1.0 / (1 + cfg.rx_ppm * 1e-6)
         f_nb = (carrier_hz + nb.df_hz) * nts - FE_CENTER_HZ
-        ntraj = Trajectory(0.0, nb.drift_hz_per_min, t_key=-SPAN * T_SYM - nb.lead_in_s)
+        ntraj = Trajectory(0.0, nb.drift_hz_per_min,
+                           t_key=nspec.keyed_start_pos * nspec.t_sym - nb.lead_in_s)
         nfad = None if fad is None else _Fading(n, fad[0], fad[1], fs, nrng)
-        gain = math.sqrt(P * 10 ** (nb.rel_db / 10)) * np.exp(2j * np.pi * nrng.uniform())
-        nbs.append([sym_n, key_n, nb, nts, f_nb, ntraj, nfad, gain,
+        p_nb = P * 10 ** (nb.rel_db / 10)
+        if nspec.waveform == WAVEFORM_L:
+            p_nb = p_nb / nsrc.keyed_power                 # CE's unit envelope needs none
+        gain = math.sqrt(p_nb) * np.exp(2j * np.pi * nrng.uniform())
+        nbs.append([nsrc, nb, nts, f_nb, ntraj, nfad, gain,
                     np.zeros(nfad.d if nfad else 0, dtype=np.complex128)])
     noise_var = 0.0
     if cfg.snr_db is not None:
@@ -663,14 +794,13 @@ def _channel(src, n, t_start, spec, q, cfg: ChannelConfig, *, carrier_hz, lead_i
         b = min(n, a + CHUNK)
         y = out[a:b].astype(np.complex128)
         for nbx in nbs:
-            sym_n, key_n, nb, nts, f_nb, ntraj, nfad, gain, ntail = nbx
+            nsrc, nb, nts, f_nb, ntraj, nfad, gain, ntail = nbx
             t = t_start + np.arange(a, b) / fs
-            z = transmit_baseband(sym_n, spec, fs, t_start + a / fs, b - a, keying=key_n,
-                                  lead_in_s=nb.lead_in_s, time_scale=nts)
+            z = nsrc(fs, t_start + a / fs, b - a, nts)
             z = z * np.exp(2j * np.pi * _wrap(
                 nominal_turns(f_nb, np.arange(a, b), fs, n0) + _wrap(ntraj.theta(t))))
             if nfad is not None:
-                z, nbx[8] = nfad.apply(z, a, b, ntail), nfad.next_tail(ntail, z)
+                z, nbx[7] = nfad.apply(z, a, b, ntail), nfad.next_tail(ntail, z)
             y += gain * z
         if noise_var > 0:
             y += math.sqrt(noise_var / 2) * rng.standard_normal(2 * (b - a)).view(np.complex128)
@@ -685,8 +815,17 @@ def _channel(src, n, t_start, spec, q, cfg: ChannelConfig, *, carrier_hz, lead_i
         out[a:b] = y
 
     truth = Truth(u=u, f_hz=f_true, t_pos_s=t_pos, noise_var_fe=float(noise_var),
-                  impulse_mask=mask, agc_gain=agc_gain, signal_power=P, time_scale=scale)
+                  impulse_mask=mask, agc_gain=agc_gain, signal_power=P, time_scale=scale,
+                  u_data=u_data)
     return Sim(fe=out, fs=fs, t0_index=n0, q=int(q), spec=spec, truth=truth)
+
+
+def _l_keyed_tx_s(spec, lead_in_s) -> tuple[float, float] | None:
+    """An L frame's keying span [on, off) in transmit seconds after t0; None for CE."""
+    if spec.waveform != WAVEFORM_L:
+        return None
+    lo, hi = lwave.keyed_span_pos(spec, lead_in_s)
+    return lo * spec.t_sym, hi * spec.t_sym
 
 
 def simulate(sym, spec, q, cfg: ChannelConfig, *, carrier_hz=1500.0, lead_in_s=0.0,
@@ -696,28 +835,32 @@ def simulate(sym, spec, q, cfg: ChannelConfig, *, carrier_hz=1500.0, lead_in_s=0
     The FE capture starts at t0 - pre_s on the receiver's clock and runs
     post_s past the end of keying. `keying` (uint8[192] from
     `morse.keying_units`, the header callsign's) and `ook` select the
-    callsign windows' keying and go straight to `ce.baseband`; a
-    transmit path must always give them (spec 2.7).
+    callsign windows' keying and go straight to the source
+    (`transmit_source`); a transmit path must always give them (spec
+    2.7). An L frame (`lframe.LFrameSpec`) takes complex symbols
+    (`lframe.assemble`), carrier_hz is its pilot, and ook is refused.
     """
-    spec = _frame.get(spec)
-    check_carrier(carrier_hz)
+    spec = lframe.get_any(spec)
+    _check_freq(spec, carrier_hz)
     if spec.n_win and keying is None:
         raise ValueError(f"frame {spec.name!r} has callsign windows: a transmission must "
                          "key the callsign (spec 2.7); pass keying=")
-    if lead_in_s + SPAN * T_SYM + 0.05 > pre_s:
+    if lead_in_s - spec.keyed_start_pos * spec.t_sym + 0.05 > pre_s:
         raise ValueError(f"pre_s = {pre_s} s does not cover the keying start with a "
                          f"{lead_in_s} s lead-in")
     scale = cfg.time_scale
-    end_s = spec.keyed_end_pos * T_SYM / scale
+    end_s = spec.keyed_end_pos * spec.t_sym / scale
     n = int(round((pre_s + end_s + post_s) * FE_FS))
+    source = transmit_source(sym, spec, keying=keying, ook=ook, lead_in_s=lead_in_s)
+    span = _l_keyed_tx_s(spec, lead_in_s)
 
     def src(a, b):
-        return transmit_baseband(sym, spec, FE_FS, -pre_s + a / FE_FS, b - a, keying=keying,
-                                 ook=ook, lead_in_s=lead_in_s, time_scale=scale)
+        return source(FE_FS, -pre_s + a / FE_FS, b - a, scale)
 
     return _channel(src, n, -pre_s, spec, q, cfg, carrier_hz=carrier_hz,
                     lead_in_s=lead_in_s, mix_nominal=True,
-                    rng=np.random.default_rng(cfg.seed))
+                    rng=np.random.default_rng(cfg.seed),
+                    keyed_s=None if span is None else (span[0] / scale, span[1] / scale))
 
 
 def simulate_audio(x8k, spec, q, cfg: ChannelConfig, *, carrier_hz=1500.0, lead_in_s=0.0,
@@ -729,21 +872,26 @@ def simulate_audio(x8k, spec, q, cfg: ChannelConfig, *, carrier_hz=1500.0, lead_
     follows that); the trajectory then shifts the whole front end.
     truth.u's phase is relative to whatever carrier phase the audio had
     at t0, and carrier_hz is only used for truth.f_hz and the clock's
-    share of the frequency error.
+    share of the frequency error. For an L frame carrier_hz is the pilot
+    and lead_in_s places the keying span P is measured over; truth.u
+    excludes the audio's own amplitude, as for CE.
     """
     from sstvae import hfchannel
 
-    spec = _frame.get(spec)
-    check_carrier(carrier_hz)
+    spec = lframe.get_any(spec)
+    _check_freq(spec, carrier_hz)
     x8k = np.asarray(x8k, dtype=np.float64)
     scale = cfg.time_scale
     if scale != 1.0:
         x8k = hfchannel.sample_clock_offset(x8k, (scale - 1) * 1e6)
     x = audio_to_fe(x8k)
-    t_pos = (pre_s + np.arange(spec.n_pos) * T_SYM) / scale - pre_s
+    t_pos = (pre_s + np.arange(spec.n_pos) * spec.t_sym) / scale - pre_s
+    span = _l_keyed_tx_s(spec, lead_in_s)
     return _channel(lambda a, b: x[a:b].astype(np.complex128), len(x), -pre_s, spec, q, cfg,
                     carrier_hz=carrier_hz, lead_in_s=lead_in_s, mix_nominal=False,
-                    rng=np.random.default_rng(cfg.seed), pos_t=t_pos)
+                    rng=np.random.default_rng(cfg.seed), pos_t=t_pos,
+                    keyed_s=None if span is None else
+                    tuple((pre_s + s) / scale - pre_s for s in span))
 
 
 # --- files -------------------------------------------------------------------------------
@@ -752,24 +900,30 @@ _TRUTH_ARRAYS = ("u", "f_hz", "t_pos_s", "impulse_mask")
 
 
 def save_npz(path, sim: Sim) -> None:
-    """fe (c8), fs, t0_index, q, frame and the truth, as one .npz."""
+    """fe (c8), fs, t0_index, q, frame and the truth, as one .npz.
+
+    The frame is stored by name, which names its waveform too ("l-..." is L).
+    """
     tr = sim.truth
     arrays = {f"truth_{k}": getattr(tr, k) for k in _TRUTH_ARRAYS}
     if tr.agc_gain is not None:
         arrays["truth_agc_gain"] = tr.agc_gain
+    if tr.u_data is not None:
+        arrays["truth_u_data"] = tr.u_data
     np.savez(path, fe=sim.fe.astype(np.complex64), fs=sim.fs, t0_index=sim.t0_index,
              q=sim.q, frame=sim.spec.name, truth_noise_var_fe=tr.noise_var_fe,
              truth_signal_power=tr.signal_power, truth_time_scale=tr.time_scale, **arrays)
 
 
 def load_npz(path) -> Sim:
-    """The `Sim` written by `save_npz` (frame by preset name)."""
+    """The `Sim` written by `save_npz` (frame by preset name, either waveform)."""
     with np.load(path, allow_pickle=False) as d:
         truth = Truth(
             **{k: d[f"truth_{k}"] for k in _TRUTH_ARRAYS},
             noise_var_fe=float(d["truth_noise_var_fe"]),
             agc_gain=d["truth_agc_gain"] if "truth_agc_gain" in d else None,
             signal_power=float(d["truth_signal_power"]),
-            time_scale=float(d["truth_time_scale"]))
+            time_scale=float(d["truth_time_scale"]),
+            u_data=d["truth_u_data"] if "truth_u_data" in d else None)
         return Sim(fe=d["fe"], fs=int(d["fs"]), t0_index=float(d["t0_index"]),
-                   q=int(d["q"]), spec=_frame.get(str(d["frame"])), truth=truth)
+                   q=int(d["q"]), spec=lframe.get_any(str(d["frame"])), truth=truth)

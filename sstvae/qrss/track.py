@@ -47,6 +47,16 @@ Calibrated constants (measured with `ce.loopback_stats`, pinned here):
 KAPPA_SELF scales the self-noise prediction of unknown symbols' carrier
 measurements and KAPPA_SELF_KNOWN that of known ones (the prediction is
 pessimistic there, the symbol's own term being deterministic).
+
+**Two waveforms.** The tracker's model (templates, classes, timing fit,
+gate V) is CE's, and its entry points refuse an L frame (`ltrack` is
+L's). What both share is waveform-neutral once the symbol period comes
+from the frame: positions are in the spec's own symbols (`spec.t_sym`;
+`Timing` itself is in CH samples), a Morse unit is `spec.cw_window //
+CW_UNITS` of them, the matched filter is an `MfTable` per period
+(`mf_table`) and the process-noise grid is per period too (`q_grid`).
+The Kalman filter and smoother, `erase`, `report`, path refinement and
+`z_ref_stat` (with a known signature) work on either.
 """
 
 from __future__ import annotations
@@ -63,10 +73,14 @@ from sstvae.modem import dsp
 from . import ce, frontend
 from .constants import (
     CH_FS,
-    CW_UNIT,
+    CW_LEAD_UNITS,
+    CW_ROOM_UNITS,
+    CW_UNITS,
     FE_CENTER_HZ,
+    L_T_SYM,
     SPAN,
     T_SYM,
+    WAVEFORM_CE,
     Z_ACCEPT,
 )
 from .frame import FrameSpec, layout, spread_symbols
@@ -93,28 +107,38 @@ PU_SMOOTH_S = 1.0                  # local |u|^2 smoothing for the self-noise te
 C_MIN = 0.1                        # |c_p psi_p| below this: no measurement
 PSI_MIN = 0.5                      # blanked share: erase below this (design 6.2)
 NOISE_WIN_S = 10.0
-_SPS = T_SYM * CH_FS               # CH samples per symbol (7.578)
-_MF_RES = 512                      # polyphase resolution of the MF table, per CH sample
-_MF_HALF = int(math.ceil(SPAN * _SPS)) + 1
+MF_RES = 512                       # polyphase resolution of an MF table, per CH sample
 
 
-def q_of_spread(spread_hz: float) -> float:
+def q_of_spread(spread_hz: float, t_sym: float = T_SYM) -> float:
     """Process-noise intensity per position for a 2-sigma Doppler spread.
 
     A Gaussian-Doppler gain of rms frequency sigma = spread/2 has
     E|u'|^2 = (2 pi sigma T)^2 Pu per position and loses that velocity in
     about 1/(2 pi sigma T) positions, so the white acceleration that
-    reproduces it has intensity (2 pi sigma T)^3 Pu.
+    reproduces it has intensity (2 pi sigma T)^3 Pu. T is the position's
+    period, `t_sym` (L's is twice CE's: 8x the q per position).
     """
-    return (2 * math.pi * 0.5 * float(spread_hz) * T_SYM) ** 3
+    return (2 * math.pi * 0.5 * float(spread_hz) * t_sym) ** 3
 
 
-def spread_of_q(q: float) -> float:
+def spread_of_q(q: float, t_sym: float = T_SYM) -> float:
     """Inverse of `q_of_spread`: the effective 2-sigma spread (Hz) of q."""
-    return 2.0 * q ** (1.0 / 3.0) / (2 * math.pi * T_SYM)
+    return 2.0 * q ** (1.0 / 3.0) / (2 * math.pi * t_sym)
 
 
-Q_GRID = tuple(q_of_spread(b) for b in Q_SPREADS_HZ)
+_Q_GRIDS: dict = {}
+
+
+def q_grid(t_sym: float = T_SYM) -> tuple:
+    """`select_q`'s grid at period t_sym: q_of_spread of each Q_SPREADS_HZ."""
+    key = float(t_sym)
+    if key not in _Q_GRIDS:
+        _Q_GRIDS[key] = tuple(q_of_spread(b, t_sym) for b in Q_SPREADS_HZ)
+    return _Q_GRIDS[key]
+
+
+Q_GRID = q_grid()                  # CE's
 R_FLOOR = 1e-3                   # model-error floor on R, relative to |u|^2 (-30 dB)
 _DEBUG_SEG = False
 PATH_SEG_S = 20.0                # refine_path: segment length
@@ -124,6 +148,12 @@ PATH_FINE_RATIO = 40.0           # ...at a median line-to-floor ratio of 16 dB (
 PATH_SPAN_HZ = 2.0               # refine_path: search either side of the last segment
 SEG_TIMING_S = 20.0              # segment length of fit_timing's local offsets
 V_TIMING_TRIES = 8               # gate V: coarse timing peaks tracked for a blind candidate
+
+
+def _ce_only(spec, what: str, instead: str) -> None:
+    """CE's model on an L frame gives plausible, wrong numbers: refuse it."""
+    assert spec.waveform == WAVEFORM_CE, \
+        f"{what} is CE's; {spec.name!r} is waveform {spec.waveform}: use {instead}"
 
 
 # --- the narrow channel -----------------------------------------------------------------------
@@ -283,57 +313,117 @@ def derotate(chan: ChanCapture, fn) -> np.ndarray:
 
 # --- timing -----------------------------------------------------------------------------------
 
-def rx_index(timing: Timing, tau, n_pos: int, fs: int = CH_FS) -> np.ndarray:
-    """CH index (relative to t0_index) at which sender time tau (symbols) is received."""
+def rx_index(timing: Timing, tau, n_pos: int, fs: int = CH_FS,
+             t_sym: float = T_SYM) -> np.ndarray:
+    """CH index (relative to t0_index) at which sender time tau (symbols of
+    period t_sym, the spec's) is received."""
     tau = np.asarray(tau, dtype=np.float64)
-    sps = T_SYM * fs
+    sps = t_sym * fs
     return timing.tau0 + tau * sps * (1 + timing.ppm * 1e-6) + timing.gamma * (tau / n_pos) ** 2
 
 
-def _mf_table() -> np.ndarray:
-    d = np.arange(-_MF_HALF * _MF_RES, _MF_HALF * _MF_RES + 1) / _MF_RES
-    return ce.pulse(d / _SPS)
+@dataclass(frozen=True, eq=False)
+class MfTable:
+    """A position matched filter for `symbol_mf` and `psi_at`.
+
+    t_sym: the period positions are in (what `rx_index` uses); sps: the
+    output's divisor (the pulse's width in CH samples, t_sym * CH_FS for
+    a symbol MF); half: the reach either side of a position, CH samples;
+    tab: the taps at offsets d = n - t_p, sampled every 1/MF_RES CH
+    sample from -half to +half (2 half MF_RES + 1 values, applied as
+    they are, so a complex table is a filter at a frequency); g0: the
+    output for a constant 1 (what `psi_at` divides by).
+    """
+    t_sym: float
+    sps: float
+    half: int
+    tab: np.ndarray = field(repr=False)
+    g0: float
+
+    def __post_init__(self):
+        if len(self.tab) != 2 * self.half * MF_RES + 1:
+            raise ValueError(f"tab must hold {2 * self.half * MF_RES + 1} taps, "
+                             f"not {len(self.tab)}")
 
 
-_MF_TAB = _mf_table()
+_MF_TABLES: dict = {}
+
+
+def _pulse_at(x, t_sym: float) -> np.ndarray:
+    """The unit-energy RRC of the waveform with symbol period t_sym, at x symbols."""
+    if t_sym == T_SYM:
+        return ce.pulse(x)
+    if t_sym == L_T_SYM:
+        from . import lwave              # L's normalisation on its own 16 kHz grid
+        return np.where(np.abs(x) <= SPAN, ce._rrc(x) / lwave.PULSE_NORM, 0.0)
+    raise ValueError(f"no symbol pulse with period {t_sym!r} s")
+
+
+def _pulse_g0(t_sym: float) -> float:
+    if t_sym == T_SYM:
+        return ce.G0
+    from . import lwave
+    return lwave.G0
+
+
+def mf_table(t_sym: float = T_SYM) -> MfTable:
+    """The symbol matched filter at period t_sym (CE's T_SYM or L's L_T_SYM):
+    the waveform's RRC (alpha 0.15, cut at +-SPAN symbols) at sps = t_sym *
+    CH_FS, with that waveform's G0. Cached."""
+    key = float(t_sym)
+    if key not in _MF_TABLES:
+        sps = t_sym * CH_FS
+        half = int(math.ceil(SPAN * sps)) + 1
+        d = np.arange(-half * MF_RES, half * MF_RES + 1) / MF_RES
+        tab = _pulse_at(d / sps, t_sym)
+        tab.setflags(write=False)
+        _MF_TABLES[key] = MfTable(t_sym=t_sym, sps=sps, half=half, tab=tab, g0=_pulse_g0(t_sym))
+    return _MF_TABLES[key]
 
 
 def symbol_mf(z, ch_fs: int, timing: Timing, pos, *, t0_index: float, n_pos: int,
-              chunk: int = 4096) -> np.ndarray:
-    """m_p = (1/(fs T)) sum_n z(n) p((n - t_p)/(fs T)) at every position p.
+              chunk: int = 4096, table: MfTable | None = None) -> np.ndarray:
+    """m_p = (1/sps) sum_n z(n) tab(n - t_p) at every position p.
 
-    t_p = t0_index + rx_index(timing, p). The pulse comes from a 1/512-sample
-    table with linear interpolation (relative error ~1e-7); samples outside
-    z count as zero.
+    t_p = t0_index + rx_index(timing, p) at the table's period; `table`
+    defaults to CE's symbol MF (`mf_table()`), whose taps are p((n -
+    t_p)/(fs T)). The taps come from a 1/512-sample table with linear
+    interpolation (relative error ~1e-7) and may be complex; samples
+    outside z count as zero.
     """
     assert int(ch_fs) == CH_FS
+    tb = mf_table() if table is None else table
+    tab, half = tb.tab, tb.half
     z = np.asarray(z)
     pos = np.asarray(pos, dtype=np.float64)
-    tp = t0_index + rx_index(timing, pos, n_pos, ch_fs)
-    off = np.arange(-_MF_HALF, _MF_HALF + 1)
+    tp = t0_index + rx_index(timing, pos, n_pos, ch_fs, t_sym=tb.t_sym)
+    off = np.arange(-half, half + 1)
     out = np.zeros(len(pos), dtype=np.complex128)
     nz = len(z)
     for lo in range(0, len(pos), chunk):
         t = tp[lo:lo + chunk]
         base = np.floor(t).astype(np.int64)
         nn = base[:, None] + off[None, :]                     # (c, width)
-        d = (nn - t[:, None]) * _MF_RES + _MF_HALF * _MF_RES    # table coordinate
+        d = (nn - t[:, None]) * MF_RES + half * MF_RES        # table coordinate
         i = np.floor(d).astype(np.int64)
         fr = d - i
-        ok = (i >= 0) & (i < len(_MF_TAB) - 1) & (nn >= 0) & (nn < nz)
-        ic = np.clip(i, 0, len(_MF_TAB) - 2)
-        taps = (_MF_TAB[ic] * (1 - fr) + _MF_TAB[ic + 1] * fr) * ok
+        ok = (i >= 0) & (i < len(tab) - 1) & (nn >= 0) & (nn < nz)
+        ic = np.clip(i, 0, len(tab) - 2)
+        taps = (tab[ic] * (1 - fr) + tab[ic + 1] * fr) * ok
         vals = z[np.clip(nn, 0, nz - 1)]
         out[lo:lo + chunk] = np.einsum("ij,ij->i", vals, taps)
-    return out / _SPS
+    return out / tb.sps
 
 
-def psi_at(keep_ch, timing: Timing, pos, *, t0_index: float, n_pos: int) -> np.ndarray:
-    """psi_p = MF{keep}(t_p)/G0, the unblanked share at each position (1 without a blanker)."""
+def psi_at(keep_ch, timing: Timing, pos, *, t0_index: float, n_pos: int,
+           table: MfTable | None = None) -> np.ndarray:
+    """psi_p = MF{keep}(t_p)/G0, the unblanked share at each position (1 without
+    a blanker), through `table` (default CE's symbol MF) and its g0."""
     if keep_ch is None:
         return np.ones(len(np.asarray(pos)))
+    tb = mf_table() if table is None else table
     return np.clip(symbol_mf(keep_ch, CH_FS, timing, pos, t0_index=t0_index,
-                             n_pos=n_pos).real / ce.G0, 0.0, 1.0)
+                             n_pos=n_pos, table=tb).real / tb.g0, 0.0, 1.0)
 
 
 def _lowpass(x, hz: float, fs: int = CH_FS) -> np.ndarray:
@@ -345,9 +435,11 @@ def _lowpass(x, hz: float, fs: int = CH_FS) -> np.ndarray:
     return signal.oaconvolve(x, h, mode="same")
 
 
-def _mf_taps(fs: int = CH_FS) -> np.ndarray:
-    k = np.arange(-_MF_HALF + 1, _MF_HALF)
-    return ce.pulse(k / (T_SYM * fs)) / (T_SYM * fs)
+def _mf_taps(fs: int = CH_FS, t_sym: float = T_SYM) -> np.ndarray:
+    """The symbol MF at integer samples of rate fs (fit_timing's dense MF)."""
+    half = mf_table(t_sym).half
+    k = np.arange(-half + 1, half)
+    return _pulse_at(k / (t_sym * fs), t_sym) / (t_sym * fs)
 
 
 @dataclass
@@ -359,6 +451,7 @@ class _Known:
 
 def known_symbols(spec: FrameSpec, hdr_bits=None) -> _Known:
     """Preamble, references and spare (+ the header bits once decoded)."""
+    _ce_only(spec, "track.known_symbols", "lframe.layout's known_idx/known_val")
     lay = layout(spec)
     idx = np.asarray(lay.known_idx)
     val = np.asarray(lay.known_val, dtype=np.float64)
@@ -393,6 +486,7 @@ def fit_timing(ch, ch_fs, path, spec: FrameSpec, tmpl_fn=None, tau0_init=None,
     statistic, a product of two noisy terms, can put the true timing
     second).
     """
+    _ce_only(spec, "track.fit_timing", "ltrack.fit_timing_l")
     fs = int(ch_fs)
     if z_d is None:
         fn = freq_path_spline(path) if isinstance(path, FreqPath) else path
@@ -591,6 +685,7 @@ class Classes:
 
 def make_classes(spec: FrameSpec, hdr_bits=None, prior=None) -> Classes:
     """Round A (hdr_bits None) or round B classes; `prior` an EmPrior for the data."""
+    _ce_only(spec, "track.make_classes", "ltrack.make_classes_l")
     lay = layout(spec)
     mu = np.zeros(spec.n_sym)
     nu = np.ones(spec.n_sym)
@@ -616,10 +711,11 @@ def make_classes(spec: FrameSpec, hdr_bits=None, prior=None) -> Classes:
                    spread=spread, spread_rho=rho_u)
 
 
-def _tau_of_rx(timing: Timing, rel, n_pos: int) -> np.ndarray:
-    """Sender time (symbols) received at CH index `rel` after t0_index: rx_index inverted."""
+def _tau_of_rx(timing: Timing, rel, n_pos: int, t_sym: float = T_SYM) -> np.ndarray:
+    """Sender time (symbols of period t_sym) received at CH index `rel` after
+    t0_index: rx_index inverted."""
     rel = np.asarray(rel, dtype=np.float64)
-    s = T_SYM * CH_FS * (1 + timing.ppm * 1e-6)
+    s = t_sym * CH_FS * (1 + timing.ppm * 1e-6)
     tau = (rel - timing.tau0) / s
     for _ in range(3):
         tau = (rel - timing.tau0 - timing.gamma * (tau / n_pos) ** 2) / s
@@ -634,6 +730,8 @@ def remove_spread(z, chan: ChanCapture, spec: FrameSpec, timing: Timing, spread)
     is a pure phase signal, so this leaves exactly the frame without the
     spread header (docs/qrss/spread-header.md).
     """
+    _ce_only(spec, "track.remove_spread",
+             "nothing: L's spread copy is linear, in ltrack.make_classes_l's mu")
     if spread is None:
         return z
     z = np.asarray(z, dtype=np.complex128)
@@ -652,6 +750,7 @@ def templates(spec: FrameSpec, grid_pos, mu, nu, keying=None, ook=False,
     E[s] = a exp(j(phi_mu + 2 pi theta_cw)) e^{-v/2} on the sender's 250 Hz
     grid (exact table path), keyed from `keyed_from_pos` (default t0 - 8T).
     """
+    _ce_only(spec, "track.templates", "ltrack's L templates")
     fs = CH_FS
     L = GRID = ce.GRID_FS // fs
     grid_pos = np.asarray(grid_pos, dtype=np.int64)
@@ -838,22 +937,26 @@ class TrackResult:
 
     @property
     def doppler_hz(self) -> float:
-        return spread_of_q(self.q)
+        return spread_of_q(self.q, self.spec.t_sym)
 
     def t_pos_s(self, p=None) -> np.ndarray:
         """Receiver time (s after t0) of positions p (default the grid)."""
         p = self.pos if p is None else p
-        return rx_index(self.timing, p, self.spec.n_pos) / CH_FS
+        return rx_index(self.timing, p, self.spec.n_pos, t_sym=self.spec.t_sym) / CH_FS
 
 
-def _window_unknown(spec: FrameSpec, grid_pos, ook_possible=True) -> np.ndarray:
-    """Positions whose MF support reaches units that may be keyed (5..183)."""
+def _window_unknown(spec, grid_pos, ook_possible=True, reach: int = SPAN) -> np.ndarray:
+    """Positions whose filter support (`reach` positions either side) reaches
+    units that may be keyed: 5..183 (OOK possible) or 8..183. L is FSK only."""
     out = np.zeros(len(grid_pos), dtype=bool)
+    unit = spec.cw_window // CW_UNITS                 # positions per Morse unit (CE 2, L 1)
+    lo_u = ce.OOK_FIRST_KEYED_UNIT if ook_possible and spec.waveform == WAVEFORM_CE \
+        else CW_LEAD_UNITS
+    hi_u = CW_LEAD_UNITS + CW_ROOM_UNITS              # 184: the first plain unit after the call
     for pw in spec.win_start_pos:
         d = grid_pos - pw
-        # units 5..183 are positions 10..367 of the window; the MF reaches 8 more
-        lo_u = 5 if ook_possible else 8
-        out |= (d >= lo_u * CW_UNIT - SPAN) & (d <= 184 * CW_UNIT - 1 + SPAN)
+        # CE: units 5..183 are positions 10..367 of the window; the MF reaches 8 more
+        out |= (d >= lo_u * unit - reach) & (d <= hi_u * unit - 1 + reach)
     return out
 
 
@@ -890,9 +993,10 @@ def _pu_initial(tr: TrackResult) -> float:
 def _recenter(tr: TrackResult) -> tuple[PathFn, float]:
     """Add the frequency u_hat still rotates at (30 s windows) to the path."""
     u = tr.u
+    t_sym = tr.spec.t_sym
     frame_ok = tr.pos >= -SPAN
     t = tr.t_pos_s()
-    n_w = max(1, int(round(RECENTER_WIN_S / T_SYM)))
+    n_w = max(1, int(round(RECENTER_WIN_S / t_sym)))
     tp, df, wt = [], [], []
     idx = np.nonzero(frame_ok)[0]
     for a in range(idx[0], idx[-1], n_w):
@@ -904,7 +1008,7 @@ def _recenter(tr: TrackResult) -> tuple[PathFn, float]:
         if e <= 0:
             continue
         tp.append(0.5 * (t[a] + t[b]))
-        df.append(float(np.angle(s)) / (2 * np.pi * T_SYM))
+        df.append(float(np.angle(s)) / (2 * np.pi * t_sym))
         wt.append(float(abs(s)))
     if not tp:
         return tr.freq, 0.0
@@ -957,6 +1061,7 @@ def track(chan: ChanCapture, spec: FrameSpec, det: Detection, classes: Classes |
     `refine`; the frequency path is det.path (or `freq`), re-centred
     `outer` times.
     """
+    _ce_only(spec, "track.track", "ltrack.track_l")
     if classes is None:
         classes = make_classes(spec, prior=prior)
     keying, ook = _keying_tuple(cw_known)
@@ -1049,7 +1154,7 @@ def track(chan: ChanCapture, spec: FrameSpec, det: Detection, classes: Classes |
             if new_tm is None:
                 break
             moved = abs(new_tm.tau0 - tr.timing.tau0) + abs(
-                (new_tm.ppm - tr.timing.ppm) * 1e-6 * n_pos * _SPS)
+                (new_tm.ppm - tr.timing.ppm) * 1e-6 * n_pos * (spec.t_sym * CH_FS))
             tr.timing = new_tm
             if classes.spread is not None:
                 tr.z_d = remove_spread(derotate(chan, tr.freq), chan, spec, tr.timing,
@@ -1083,13 +1188,17 @@ def refine_timing(tr: TrackResult, iters: int = 3, u_ref=None, P_ref=None) -> Ti
 
     l(theta) = sum_known |m_k(theta) - u_hat_k c_k psi_k|^2 / Var_k with
     theta = (tau0, slip) in CH samples (slip = clock error accumulated over
-    the frame), plus gamma for frames over 10,000 positions when it raises
-    the known symbols' Z by more than 1. The inverse Hessian of l is the
-    covariance (complex Gaussian: it is the Fisher information).
+    the frame), plus gamma for frames over 10,000 CE positions (303 s) when
+    it raises the known symbols' Z by more than 1. The inverse Hessian of l
+    is the covariance (complex Gaussian: it is the Fisher information).
+
+    CE's model (CE's matched filter on z_d, the carrier-quadrature zk,
+    KAPPA_SELF_KNOWN); L's is `ltrack.refine_timing_l`.
     """
     spec = tr.spec
+    _ce_only(spec, "track.refine_timing", "ltrack.refine_timing_l")
     n_pos = spec.n_pos
-    sps = _SPS
+    sps = spec.t_sym * CH_FS
     gk = tr.gi(known_symbols(spec).pos if tr.classes is None else
                np.asarray(layout(spec).pos)[tr.classes.known])
     gk = gk[(gk >= 0) & (gk < len(tr.pos))]
@@ -1161,7 +1270,7 @@ def refine_timing(tr: TrackResult, iters: int = 3, u_ref=None, P_ref=None) -> Ti
     if H is None or not np.all(np.isfinite(th)):
         return None
     dims = (0, 1)
-    if n_pos > 10000:
+    if n_pos * spec.t_sym > 10000 * T_SYM:
         th3, H3 = newton(th, (0, 1, 2))
         if H3 is not None and np.all(np.isfinite(th3)) and zk(th3) > zk(th) + 1.0:
             th, H, dims = th3, H3, (0, 1, 2)
@@ -1182,7 +1291,15 @@ def refine_timing(tr: TrackResult, iters: int = 3, u_ref=None, P_ref=None) -> Ti
 
 # --- the verification gate ----------------------------------------------------------------------
 
-def z_ref_stat(tr: TrackResult, c_known: np.ndarray) -> float:
+def _layout_of(spec):
+    """The frame's layout in either waveform (`frame.layout` or `lframe.layout`)."""
+    if spec.waveform == WAVEFORM_CE:
+        return layout(spec)
+    from . import lframe
+    return lframe.layout(spec)
+
+
+def z_ref_stat(tr: TrackResult, c_known: np.ndarray, d_known=None) -> float:
     """Z_ref over the known positions: sum_k w_k t_k / sqrt(sum_k w_k^2 V_k).
 
     t_k = c''_k Im(m_k conj(u_k)), c''_k = Im(c_k) of the template with the
@@ -1193,21 +1310,37 @@ def z_ref_stat(tr: TrackResult, c_known: np.ndarray) -> float:
     path -- has a large P_k and counts little). u_hat must not have seen
     m_k (`withhold_known`), and w_k does not depend on m_k, so Z_ref is
     N(0, 1) on noise.
+
+    In general the known symbols have a signature d_k (`d_known`, complex
+    per grid position, like c_known): t_k = Re(m_k conj(u_k d_k)), V_k =
+    |d_k|^2 (N |u|^2 + |c_k|^2 |u|^2 P + N P)/2, w_k = |d_k|^2 |u_k|^2/V_k.
+    None is CE's d = j Im(c_known), the form above (computed as it always
+    was). Either waveform's layout and classes.known.
     """
-    gk = tr.gi(np.asarray(layout(tr.spec).pos)[tr.classes.known])
+    gk = tr.gi(np.asarray(_layout_of(tr.spec).pos)[tr.classes.known])
     gk = gk[(gk >= 0) & (gk < len(tr.pos))]
     gk = gk[tr.psi[gk] >= PSI_MIN]
     if len(gk) == 0:
         return 0.0
-    ci = c_known[gk].imag
     m, u, N, P = tr.m[gk], tr.u[gk], tr.N[gk], tr.P[gk]
     u2 = np.abs(u) ** 2
-    t = ci * np.imag(m * np.conj(u))
-    V = ci * ci * (N * u2 + np.abs(c_known[gk]) ** 2 * u2 * P + N * P) / 2
-    ok = V > 0
-    if not ok.any():
-        return 0.0
-    w = ci[ok] ** 2 * u2[ok] / V[ok]
+    if d_known is None:
+        ci = c_known[gk].imag
+        t = ci * np.imag(m * np.conj(u))
+        V = ci * ci * (N * u2 + np.abs(c_known[gk]) ** 2 * u2 * P + N * P) / 2
+        ok = V > 0
+        if not ok.any():
+            return 0.0
+        w = ci[ok] ** 2 * u2[ok] / V[ok]
+    else:
+        d = np.asarray(d_known)[gk]
+        d2 = np.abs(d) ** 2
+        t = np.real(m * np.conj(u * d))
+        V = d2 * (N * u2 + np.abs(c_known[gk]) ** 2 * u2 * P + N * P) / 2
+        ok = V > 0
+        if not ok.any():
+            return 0.0
+        w = d2[ok] * u2[ok] / V[ok]
     den = float(np.sum(w * w * V[ok]))
     return float(np.sum(w * t[ok])) / math.sqrt(max(den, 1e-300))
 
@@ -1216,10 +1349,11 @@ def erase(tr: TrackResult, spans) -> None:
     """Erase (psi = 0) tr's symbols within T of any span (a, b), s after t0."""
     if not spans:
         return
+    t_sym = tr.spec.t_sym
     t = tr.t_pos_s()
     gone = np.zeros(len(t), dtype=bool)
     for a, b in spans:
-        gone |= (t > float(a) - T_SYM) & (t < float(b) + T_SYM)
+        gone |= (t > float(a) - t_sym) & (t < float(b) + t_sym)
     tr.psi = np.where(gone, 0.0, tr.psi)
 
 
@@ -1236,6 +1370,7 @@ def verify(ch, ch_fs, spec: FrameSpec, cand: Detection, *, fit: bool = True,
     fills them adds nothing to it (the matched weights already make that
     small).
     """
+    _ce_only(spec, "track.verify", "ltrack.verify_l")
     # the acquisition's drift can be wrong (a preamble's estimate on a fading
     # or warming-up signal): the path is measured on the frame itself
     # first, from the candidate's path and, failing that, its flat version
@@ -1270,19 +1405,25 @@ def verify(ch, ch_fs, spec: FrameSpec, cand: Detection, *, fit: bool = True,
     if tr is None or not tr.z_ref > Z_ACCEPT:
         return None
     return Detection(f_hz=cand.f_hz, path=path, timing=tr.timing, z_ref=tr.z_ref,
-                     method=cand.method, lead_in_s=cand.lead_in_s)
+                     method=cand.method, lead_in_s=cand.lead_in_s, waveform=cand.waveform)
 
 
-def _carrier_lines(z, chan: ChanCapture, spec: FrameSpec, seg_s: float, span_hz: float):
+def _carrier_lines(z, chan: ChanCapture, spec, seg_s: float, span_hz: float, *,
+                   med_band=None, ratio: float = 10.0):
     """(t, f, ratio) of the carrier line in each seg_s segment of z over the
-    frame, walking from t0: each searched +-span_hz around the last."""
+    frame, walking from t0: each searched +-span_hz around the last, kept
+    when at least `ratio` times the spectrum's median over |f| <= 4 span_hz
+    + 10 Hz, or over lo <= f <= hi with med_band = (lo, hi) (an L pilot,
+    whose data band lies below it)."""
     fs = float(chan.fs)
     n = int(round(seg_s * fs))
     i0 = max(int(math.ceil(chan.t0_index)), 0)
-    i1 = min(int(chan.t0_index + spec.n_pos * T_SYM * fs), len(z))
+    i1 = min(int(chan.t0_index + spec.n_pos * spec.t_sym * fs), len(z))
     nfft = 1 << math.ceil(math.log2(8 * n))
     f = np.fft.fftfreq(nfft, 1.0 / fs)
     win = np.hanning(n)
+    in_med = (np.abs(f) <= 4 * span_hz + 10) if med_band is None else \
+        ((f >= med_band[0]) & (f <= med_band[1]))
     tt, ff, ww = [], [], []
     prev = 0.0
     for a in range(i0, max(i1 - n // 2, i0 + 1), n):
@@ -1292,8 +1433,8 @@ def _carrier_lines(z, chan: ChanCapture, spec: FrameSpec, seg_s: float, span_hz:
         S = np.abs(np.fft.fft(seg * win[:len(seg)], nfft)) ** 2
         near = np.abs(f - prev) <= span_hz
         k = np.nonzero(near)[0][int(np.argmax(S[near]))]
-        med = float(np.median(S[np.abs(f) <= 4 * span_hz + 10]))
-        if not (med > 0 and S[k] >= 10 * med):     # a blanked (all-zero) segment has med 0
+        med = float(np.median(S[in_med]))
+        if not (med > 0 and S[k] >= ratio * med):  # a blanked (all-zero) segment has med 0
             continue
         d = _parabola(S[(k - 1) % nfft], S[k], S[(k + 1) % nfft])
         fr = f[k] + d * fs / nfft
@@ -1304,8 +1445,10 @@ def _carrier_lines(z, chan: ChanCapture, spec: FrameSpec, seg_s: float, span_hz:
     return np.array(tt), np.array(ff), np.array(ww)
 
 
-def refine_path(chan: ChanCapture, spec: FrameSpec, path: FreqPath, seg_s: float = PATH_SEG_S,
-                span_hz: float = PATH_SPAN_HZ) -> FreqPath:
+def refine_path(chan: ChanCapture, spec, path: FreqPath, seg_s: float = PATH_SEG_S,
+                span_hz: float = PATH_SPAN_HZ, *, med_band=None, ratio: float = 10.0,
+                fine_ratio: float = PATH_FINE_RATIO,
+                fine_share: float = PATH_FINE_SHARE) -> FreqPath:
     """The carrier's frequency path, measured on the frame: `path` (fitted
     with knots every 60 s) plus the residual carrier frequency of each
     `seg_s` segment.
@@ -1316,17 +1459,19 @@ def refine_path(chan: ChanCapture, spec: FrameSpec, path: FreqPath, seg_s: float
     (the first around 0), so the measurement walks along a path whose
     drift the acquisition got wrong (a preamble's drift estimate on a
     fading or warming-up signal) instead of trusting it. Segments whose
-    line is under 10 times the spectrum's median are skipped.
+    line is under `ratio` (10) times the spectrum's median are skipped;
+    `med_band` moves the median's region (`_carrier_lines`).
 
     A second pass with PATH_FINE_S segments, +-1 Hz about the first,
     measures the path finely enough for wander with a 10 s correlation
     time; it is used when the carrier is strong enough that at least
-    PATH_FINE_SHARE of its segments find their line, at a median ratio of
-    PATH_FINE_RATIO (weaker, its noise costs more than wander does).
+    `fine_share` (PATH_FINE_SHARE) of its segments find their line, at a
+    median ratio of `fine_ratio` (PATH_FINE_RATIO; weaker, its noise costs
+    more than wander does). Its median region follows med_band too.
     """
     fn = PathFn(path.t_s, path.f_hz, path.weight, 60.0)
     z = derotate(chan, fn)
-    tt, ff, ww = _carrier_lines(z, chan, spec, seg_s, span_hz)
+    tt, ff, ww = _carrier_lines(z, chan, spec, seg_s, span_hz, med_band=med_band, ratio=ratio)
     if len(tt) < 2:
         return path
     res = PathFn(tt, ff, ww, max(3 * seg_s, 60.0))
@@ -1334,9 +1479,10 @@ def refine_path(chan: ChanCapture, spec: FrameSpec, path: FreqPath, seg_s: float
     ts = np.r_[tt[0] - 10, tt, tt[-1] + 10]
     fn1 = PathFn(ts, fn(ts) + res(ts), None, 60.0)
     z1 = derotate(chan, fn1)
-    t2, f2, w2 = _carrier_lines(z1, chan, spec, PATH_FINE_S, 1.0)
-    n_fine = spec.n_pos * T_SYM / PATH_FINE_S
-    if len(t2) >= max(8, PATH_FINE_SHARE * n_fine) and np.median(w2) >= PATH_FINE_RATIO:
+    t2, f2, w2 = _carrier_lines(z1, chan, spec, PATH_FINE_S, 1.0, med_band=med_band,
+                                ratio=ratio)
+    n_fine = spec.n_pos * spec.t_sym / PATH_FINE_S
+    if len(t2) >= max(8, fine_share * n_fine) and np.median(w2) >= fine_ratio:
         res2 = PathFn(t2, f2, w2, 2 * PATH_FINE_S)
         t = np.arange(min(t2[0], 0.0) - 10.0, t2[-1] + 2.0 * PATH_FINE_S, 1.0)
         return FreqPath(t_s=t, f_hz=fn1(t) + res2(t), weight=np.ones(len(t)))
@@ -1363,7 +1509,7 @@ def line_path(chan: ChanCapture, spec: FrameSpec, path: FreqPath) -> FreqPath:
     within +-LINE_SPAN_HZ.
     """
     fn = PathFn(path.t_s, path.f_hz, path.weight, 60.0)
-    t_frame = np.array([0.0, spec.n_pos * T_SYM])
+    t_frame = np.array([0.0, spec.n_pos * spec.t_sym])
     f_lin = fn(t_frame)
     d0 = float(f_lin[1] - f_lin[0]) / float(t_frame[1])          # Hz/s
     tm = float(t_frame[1]) / 2
@@ -1374,7 +1520,7 @@ def line_path(chan: ChanCapture, spec: FrameSpec, path: FreqPath) -> FreqPath:
     fs = float(chan.fs)
     n = int(round(LINE_SEG_S * fs))
     i0 = max(int(math.ceil(chan.t0_index)), 0)
-    i1 = min(int(chan.t0_index + spec.n_pos * T_SYM * fs), len(z))
+    i1 = min(int(chan.t0_index + spec.n_pos * spec.t_sym * fs), len(z))
     nfft = 1 << math.ceil(math.log2(4 * n))
     win = np.hanning(n)
     S, ts = [], []
@@ -1412,7 +1558,7 @@ def line_path(chan: ChanCapture, spec: FrameSpec, path: FreqPath) -> FreqPath:
     fine = 0.5 * df / max(float(np.max(np.abs(ts))), 1.0)
     _, foff, dd = search(dd + np.arange(-LINE_DRIFT_STEP / 60.0, LINE_DRIFT_STEP / 60.0 + 1e-12,
                                         fine))
-    t = np.arange(-LEAD_LINE_S, spec.n_pos * T_SYM + 10.0, 10.0)
+    t = np.arange(-LEAD_LINE_S, spec.n_pos * spec.t_sym + 10.0, 10.0)
     f = f_mid + foff + (d0 + dd) * (t - tm)
     return FreqPath(t_s=t, f_hz=f, weight=np.ones(len(t)))
 
@@ -1430,6 +1576,7 @@ def verify_track(chan: ChanCapture, spec: FrameSpec, cand: Detection, *, fit: bo
                  tau_range=None, erase_s=()) -> TrackResult | None:
     """The tracker run behind `verify`, with tr.z_ref set (over what was
     heard: the symbols in `erase_s` are erased after tracking)."""
+    _ce_only(spec, "track.verify_track", "ltrack.verify_track_l")
     fn = freq_path_spline(cand.path)
     z_d = derotate(chan, fn)
     tm = cand.timing
@@ -1466,10 +1613,11 @@ def report(tr: TrackResult, kappa: float = 1.0, suspect: bool = False) -> TrackR
     # instantaneous frequency from u_hat, smoothed over 3 s, around the line
     u = tr.u[frame]
     w = np.abs(u[1:]) * np.abs(u[:-1])
-    n3 = max(1, int(round(3.0 / T_SYM)))
+    t_sym = spec.t_sym
+    n3 = max(1, int(round(3.0 / t_sym)))
     num = _smooth((u[1:] * np.conj(u[:-1])).real, n3) + 1j * _smooth(
         (u[1:] * np.conj(u[:-1])).imag, n3)
-    finst = tr.freq(tf[:-1]) + np.angle(num) / (2 * np.pi * T_SYM)
+    finst = tr.freq(tf[:-1]) + np.angle(num) / (2 * np.pi * t_sym)
     res = finst - np.polyval(line, tf[:-1])
     good = w > 0.25 * np.median(w) if len(w) else np.zeros(0, bool)
     wander = float(np.sqrt(np.mean(res[good] ** 2))) if good.any() else 0.0
@@ -1498,13 +1646,15 @@ def genie_track(chan: ChanCapture, spec: FrameSpec, truth, carrier_hz: float,
     position. The front end's overall complex scale (the inverse AGC) is
     fitted once by least squares over the frame; P = 0.
     """
+    _ce_only(spec, "track.genie_track", "ltrack.genie_track_l")
     classes = make_classes(spec) if classes is None else classes
     fn = PathFn(np.array([-30.0, 0.0, 30.0]), np.full(3, float(carrier_hz)))
     z_d = derotate(chan, fn)
     t = np.asarray(truth.t_pos_s, dtype=np.float64)
     p = np.arange(spec.n_pos)
     slope, icpt = np.polyfit(p, t * CH_FS, 1)
-    tm = Timing(tau0=float(icpt), ppm=float((slope / _SPS - 1) * 1e6), gamma=0.0, z=0.0,
+    sps = spec.t_sym * CH_FS
+    tm = Timing(tau0=float(icpt), ppm=float((slope / sps - 1) * 1e6), gamma=0.0, z=0.0,
                 cov=np.zeros((3, 3)))
     z_d = remove_spread(z_d, chan, spec, tm, classes.spread)
     grid = np.arange(-SPAN, spec.n_pos, dtype=np.int64)

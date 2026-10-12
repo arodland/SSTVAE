@@ -69,7 +69,7 @@ from pathlib import Path
 import numpy as np
 
 from . import acquire, frontend, picture, receiver
-from .constants import CARRIER_BAND_HZ, FE_FS, FS, T_SYM
+from .constants import CARRIER_BAND_HZ, FE_FS, FS
 from .frame import FULL, FrameSpec
 from .frontend import PB_LEAD_S, PB_TAIL_S, slot_t0
 from .types import Detection, PassResult
@@ -108,8 +108,9 @@ def utc_iso(t: float) -> str:
 
 
 def frame_seconds(spec: FrameSpec) -> float:
-    """Seconds from t0 to the end of the frame's last keyed symbol."""
-    return spec.keyed_end_pos * T_SYM
+    """Seconds from t0 to the end of the frame's last keyed symbol (either
+    waveform: positions are in the spec's own symbols)."""
+    return spec.keyed_end_pos * spec.t_sym
 
 
 # --- audio -> FE, streaming ----------------------------------------------------------------

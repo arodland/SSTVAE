@@ -1,11 +1,19 @@
 """Reading and matching the callsign windows (spec 2.7, design 6.7, WP6).
 
-Not a format module. Each window is 192 Morse units of two CE symbols;
+Not a format module. Each window is 192 Morse units of two CE symbols
+(one L symbol: `spec.cw_window // CW_UNITS`, 60.625 ms in both);
 units 0..7 and everything after the call are plain carrier, the call
 sits in units 8..183. With FSK keying (the default) key-down is the
 carrier one cycle per unit low (-16.495 Hz), with the same envelope;
 with on-off keying it is the carrier switched on (units 5..183 follow
 the keying, the rest stay on).
+
+L keys its pilot the same way, FSK only, so with the track's z_d
+derotated on the pilot everything here reads an L window unchanged,
+but for two things: there is no OOK to tell apart (`keying_type` says
+"fsk"), and units 0..7 and 184..191 of an L window hold the pilot's
+ramp to window level and the data pulses' tails, so `window_llr` takes
+the FSK tone amplitude from units 8..183 alone.
 
 `window_soft` turns each unit of each window into one soft value, + for
 key-down. For FSK it is the noncoherent tone comparison
@@ -50,7 +58,7 @@ import math
 import numpy as np
 from scipy import special
 
-from .constants import CW_LEAD_UNITS, CW_ROOM_UNITS, CW_UNIT, CW_UNITS
+from .constants import CW_LEAD_UNITS, CW_ROOM_UNITS, CW_UNITS, WAVEFORM_L
 from .frame import FrameSpec
 from .morse import MORSE, check_callsign, keying_units
 from .track import TrackResult, rx_index
@@ -64,18 +72,20 @@ def _unit_sums(tr: TrackResult, spec: FrameSpec, z=None):
     """(X0, X1, sigma2): (n_win, 192) sums of each unit at 0 Hz and at -1 cycle/unit.
 
     sigma2 is the noise variance of each sum (noise PSD x fs x samples).
+    Reads tr.z_d, tr.chan and tr.timing only; positions in the spec's symbols.
     """
     z = tr.z_d if z is None else np.asarray(z)
     chan = tr.chan
     n_win = spec.n_win
+    unit = spec.cw_window // CW_UNITS                     # symbols per Morse unit (CE 2, L 1)
     X0 = np.zeros((n_win, CW_UNITS), dtype=np.complex128)
     X1 = np.zeros((n_win, CW_UNITS), dtype=np.complex128)
     s2 = np.ones((n_win, CW_UNITS))
     for w, pw in enumerate(spec.win_start_pos):
         u = np.arange(CW_UNITS)
-        ta = pw - 0.5 + CW_UNIT * u                       # sender time of unit start (symbols)
-        na = chan.t0_index + rx_index(tr.timing, ta, spec.n_pos)
-        nb = chan.t0_index + rx_index(tr.timing, ta + CW_UNIT, spec.n_pos)
+        ta = pw - 0.5 + unit * u                          # sender time of unit start (symbols)
+        na = chan.t0_index + rx_index(tr.timing, ta, spec.n_pos, t_sym=spec.t_sym)
+        nb = chan.t0_index + rx_index(tr.timing, ta + unit, spec.n_pos, t_sym=spec.t_sym)
         first = np.ceil(na).astype(np.int64)
         width = int(np.max(np.ceil(nb) - first)) + 1
         nn = first[:, None] + np.arange(width)[None, :]
@@ -99,6 +109,7 @@ def window_soft(ch, ch_fs, track: TrackResult, spec: FrameSpec, ook: bool = Fals
     """
     if spec.n_win == 0:
         return np.zeros((0, CW_ROOM_UNITS), dtype=np.float32)
+    _fsk_only(spec, ook)
     X0, X1, s2 = _unit_sums(track, spec, ch)
     p0, p1 = np.abs(X0) ** 2, np.abs(X1) ** 2
     if not ook:
@@ -110,6 +121,11 @@ def window_soft(ch, ch_fs, track: TrackResult, spec: FrameSpec, ook: bool = Fals
 
 
 AMP_SMOOTH_UNITS = 15      # FSK: units over which the tone amplitude is averaged
+
+
+def _fsk_only(spec, ook: bool) -> None:
+    if ook and spec.waveform == WAVEFORM_L:
+        raise ValueError(f"{spec.name}: waveform L keys its callsign by FSK only")
 
 
 def _ln_i0(x):
@@ -126,13 +142,22 @@ def window_llr(ch, ch_fs, track: TrackResult, spec: FrameSpec, ook: bool = False
     """
     if spec.n_win == 0:
         return np.zeros((0, CW_ROOM_UNITS), dtype=np.float32)
+    _fsk_only(spec, ook)
     X0, X1, s2 = _unit_sums(track, spec, ch)
     p0, p1 = np.abs(X0) ** 2, np.abs(X1) ** 2
     if not ook:
         e = p0 + p1 - 2 * s2
         k = np.ones(AMP_SMOOTH_UNITS)
-        num = np.apply_along_axis(lambda r: np.convolve(r, k, "same"), 1, e)
-        cnt = np.convolve(np.ones(CW_UNITS), k, "same")
+        if spec.waveform == WAVEFORM_L:
+            # only the call units hold the tone at window level (the rest: the
+            # pilot's ramp and the data pulses' tails); their mean, by count
+            use = np.zeros(CW_UNITS)
+            use[CALL_UNITS] = 1.0
+            num = np.apply_along_axis(lambda r: np.convolve(r * use, k, "same"), 1, e)
+            cnt = np.maximum(np.convolve(use, k, "same"), 1.0)
+        else:
+            num = np.apply_along_axis(lambda r: np.convolve(r, k, "same"), 1, e)
+            cnt = np.convolve(np.ones(CW_UNITS), k, "same")
         a = np.sqrt(np.maximum(num / cnt[None, :], 0.0))
         llr = (_ln_i0(2 * a * np.sqrt(p1) / s2) - _ln_i0(2 * a * np.sqrt(p0) / s2))
     else:
@@ -343,8 +368,9 @@ def keying_type(ch, track: TrackResult, spec: FrameSpec, callsign: str | None = 
 
     With a callsign, the larger `match` Z; without, whether the call units
     hold energy one cycle per unit below the carrier (only FSK puts any there).
+    L keys by FSK only: "fsk", with nothing computed.
     """
-    if spec.n_win == 0:
+    if spec.n_win == 0 or spec.waveform == WAVEFORM_L:
         return "fsk"
     if callsign is not None:
         zf = match(window_soft(ch, None, track, spec, ook=False), callsign)

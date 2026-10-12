@@ -698,12 +698,15 @@ LEAD_Z = 4.0                             # per window: P(Z > 4 | noise) = e^-8
 
 
 def lead_in_span(fe, t0_index: float, f_hz: float, drift_hz_per_min: float = 0.0,
-                 tau0_s: float = 0.0, fs: int = FE_FS, *, z_min: float = LEAD_Z) -> float:
+                 tau0_s: float = 0.0, fs: int = FE_FS, *, z_min: float = LEAD_Z,
+                 t_sym: float = T_SYM) -> float:
     """Seconds of lead-in carrier found before the preamble (design 6.3).
 
     The channel at f_hz (drift removed about t0), matched-filtered with no
     notch, is summed coherently over 1 s windows walking back from the
-    keying start (t0 + tau0 - 8T on the receiver's clock); the span is the
+    keying start (t0 + tau0 - 8T on the receiver's clock, T = t_sym, the
+    frame's symbol: an L pilot's lead-in ends 8 L symbols before tau0;
+    the CE matched filter stays, a tone low-pass here); the span is the
     run of windows with Z = |sum| / sqrt(n sigma^2 / 2) > z_min (the sum's
     amplitude in units of its per-quadrature noise sd, so P(Z > 4) = e^-8
     per window on noise, and 1 s of lead-in reaches Z = 4 at about
@@ -713,7 +716,7 @@ def lead_in_span(fe, t0_index: float, f_hz: float, drift_hz_per_min: float = 0.0
     first window fails.
     """
     from .constants import LEAD_IN_MAX_S, SPAN
-    end = tau0_s - SPAN * T_SYM                       # s after nominal t0
+    end = tau0_s - SPAN * t_sym                       # s after nominal t0
     lo_s = end - LEAD_IN_MAX_S - 8.0
     decim = int(fs) // CH_FS
     i_a = int(math.floor(t0_index + lo_s * fs))
@@ -754,7 +757,7 @@ def tbd_frame_starts(spec: FrameSpec, n_fe: int | None = None, t0_index: float =
                      fs: float = FE_FS) -> np.ndarray:
     """Frame start times (s after t0) covering [t0 - 10 s, end of keying + 2 s],
     limited to frames lying wholly inside a capture of n_fe samples."""
-    end = spec.keyed_end_pos * T_SYM + TBD_END_PAD_S
+    end = spec.keyed_end_pos * spec.t_sym + TBD_END_PAD_S
     t = TBD_START_S + STFT_HOP_S * np.arange(
         int((end - TBD_START_S - STFT_FRAME_S) // STFT_HOP_S) + 1)
     if n_fe is not None:
@@ -942,7 +945,7 @@ class Acquisition:
     def detections(self, spec: FrameSpec) -> list[Detection]:
         """Every candidate for the verification gate: preamble hits, then
         hints A2 did not pass (method "hint", no timing), then A3's."""
-        dur = spec.keyed_end_pos * T_SYM
+        dur = spec.keyed_end_pos * spec.t_sym
         t = np.array([TBD_START_S, 0.0, dur])
         hinted = [Detection(f_hz=c.f_hz, path=FreqPath(t_s=t, f_hz=c.f_hz + c.drift_hz_per_min
                                                        * t / 60.0, weight=np.ones(3)),

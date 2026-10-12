@@ -109,9 +109,9 @@ def channel_for(prep: Prepared, spec: FrameSpec, det: Detection, exclude_hz=(),
         return track.ChanCapture(ch=np.asarray(prep.fe), fs=CH_FS, t0_index=prep.t0_index,
                                  f_mix=fm, keep=None, exclude_hz=tuple(exclude_hz))
     fn = track.freq_path_spline(det.path)
-    dur = spec.keyed_end_pos * T_SYM
+    dur = spec.keyed_end_pos * spec.t_sym
     slip = 260e-6 * dur
-    lo = -(LEAD_IN_MAX_S + SPAN * T_SYM) - MARGIN_S - slip
+    lo = -(LEAD_IN_MAX_S + SPAN * spec.t_sym) - MARGIN_S - slip
     if det.timing is not None:
         lo += det.timing.tau0 / CH_FS
     hi = dur + MARGIN_S + slip + (det.timing.tau0 / CH_FS if det.timing is not None else 2.5)

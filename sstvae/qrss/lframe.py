@@ -201,6 +201,28 @@ def get(name_or_spec) -> LFrameSpec:
     raise ValueError(f"unknown L frame {name_or_spec!r}; one of {', '.join(PRESETS)}")
 
 
+def get_any(name_or_spec):
+    """A frame of either waveform: an `LFrameSpec` or an "l-..." name gives
+    L's (`get`), anything else CE's (`frame.get`), so a stored pass or a
+    recording names its own frame."""
+    from . import frame
+
+    if isinstance(name_or_spec, (LFrameSpec, frame.FrameSpec)):
+        return name_or_spec
+    if isinstance(name_or_spec, str) and name_or_spec.startswith("l-"):
+        return get(name_or_spec)
+    return frame.get(name_or_spec)
+
+
+def twin(spec, waveform: int):
+    """The frame of the same shape in the other waveform ("short" <-> "l-short")."""
+    if spec.waveform == waveform:
+        return spec
+    if waveform == WAVEFORM_L:
+        return get("l-" + spec.name)
+    return get_any(spec.name[2:])
+
+
 @dataclass(frozen=True, eq=False)
 class Layout:
     """Where every symbol class sits (int64 stream indices), as `frame.Layout`."""

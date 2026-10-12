@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .constants import A0, BETA, K_LIN, N_HDR_BITS
+from .constants import A0, BETA, K_LIN, N_HDR_BITS, WAVEFORM_CE
 from .frame import FrameSpec, layout
 from .sequences import spread_whitener
 from .precoder import block_index, block_sizes, wht
@@ -142,6 +142,9 @@ def calibrate(tr) -> tuple[float, bool]:
     s2n), the second on a weak one (4096+ symbols against ~500 references).
     """
     spec = tr.spec
+    assert spec.waveform == WAVEFORM_CE, (
+        f"demod.calibrate is CE's; {spec.name!r} is waveform {spec.waveform}: "
+        f"use ldemod.calibrate_l")
     lay = layout(spec)
     ests = []
     ref = np.asarray(lay.ref)
@@ -229,6 +232,9 @@ def extract(m, track, spec: FrameSpec, q: int, estimator: str = "joint", *,
     kappa, suspect, y and s2 of the data in the precoded domain, and the
     header symbols' y.
     """
+    assert spec.waveform == WAVEFORM_CE, (
+        f"demod.extract is CE's; {spec.name!r} is waveform {spec.waveform}: "
+        f"use ldemod.extract_l")
     if m is not None and m is not track.m:
         track.m = np.asarray(m)
     lay = layout(spec)
