@@ -14,6 +14,12 @@
 #ifdef SSTVAE_HAVE_LIBHEIF
 #include <libheif/heif.h>
 #endif
+#ifdef SSTVAE_HAVE_LIBWEBP
+#include <webp/decode.h>
+#endif
+#ifdef SSTVAE_HAVE_LIBOPENJP2
+#include <openjpeg.h>
+#endif
 
 // Vendored; read for the orientation tag alone. See
 // native/third_party/easyexif/README.md.
@@ -308,7 +314,176 @@ bool looks_like_heif(const std::uint8_t* data, std::size_t len) {
     return false;
 }
 
+bool webp_supported() {
+#ifdef SSTVAE_HAVE_LIBWEBP
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool jp2_supported() {
+#ifdef SSTVAE_HAVE_LIBOPENJP2
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool looks_like_webp(const std::uint8_t* data, std::size_t len) {
+    return len >= 12 && std::memcmp(data, "RIFF", 4) == 0 && std::memcmp(data + 8, "WEBP", 4) == 0;
+}
+
+bool looks_like_jp2(const std::uint8_t* data, std::size_t len) {
+    static const std::uint8_t jp2[] = {0, 0, 0, 0x0C, 'j', 'P', ' ', ' ', 0x0D, 0x0A, 0x87, 0x0A};
+    static const std::uint8_t j2k[] = {0xFF, 0x4F, 0xFF, 0x51};
+    return (len >= sizeof jp2 && std::memcmp(data, jp2, sizeof jp2) == 0) ||
+           (len >= sizeof j2k && std::memcmp(data, j2k, sizeof j2k) == 0);
+}
+
 namespace {
+
+[[noreturn]] void missing_library(const std::string& path, const std::string& what,
+                                  const std::string& packages) {
+    throw std::runtime_error("cannot read " + path + ": " + what + " pictures need " +
+                             packages + ". Install it, then rebuild the app.");
+}
+
+#ifdef SSTVAE_HAVE_LIBWEBP
+Picture load_webp(const std::vector<std::uint8_t>& bytes, const std::string& path) {
+    int w = 0, h = 0;
+    std::uint8_t* data = WebPDecodeRGB(bytes.data(), bytes.size(), &w, &h);
+    if (data == nullptr || w <= 0 || h <= 0) {
+        if (data) WebPFree(data);
+        throw std::runtime_error("cannot read " + path + ": not a readable WebP picture");
+    }
+    Picture out(w, h);
+    std::copy(data, data + static_cast<std::size_t>(w) * h * 3, out.rgb.begin());
+    WebPFree(data);
+    return out;
+}
+#endif
+
+#ifdef SSTVAE_HAVE_LIBOPENJP2
+struct MemoryStream {
+    const std::vector<std::uint8_t>* bytes;
+    std::size_t pos = 0;
+};
+
+OPJ_SIZE_T mem_read(void* buf, OPJ_SIZE_T n, void* user) {
+    auto* m = static_cast<MemoryStream*>(user);
+    const std::size_t left = m->bytes->size() - m->pos;
+    if (left == 0) return static_cast<OPJ_SIZE_T>(-1);
+    const std::size_t k = std::min<std::size_t>(n, left);
+    std::memcpy(buf, m->bytes->data() + m->pos, k);
+    m->pos += k;
+    return k;
+}
+
+OPJ_OFF_T mem_skip(OPJ_OFF_T n, void* user) {
+    auto* m = static_cast<MemoryStream*>(user);
+    const auto size = static_cast<OPJ_OFF_T>(m->bytes->size());
+    OPJ_OFF_T to = static_cast<OPJ_OFF_T>(m->pos) + n;
+    to = std::clamp<OPJ_OFF_T>(to, 0, size);
+    const OPJ_OFF_T moved = to - static_cast<OPJ_OFF_T>(m->pos);
+    m->pos = static_cast<std::size_t>(to);
+    return moved;
+}
+
+OPJ_BOOL mem_seek(OPJ_OFF_T to, void* user) {
+    auto* m = static_cast<MemoryStream*>(user);
+    if (to < 0 || static_cast<std::size_t>(to) > m->bytes->size()) return OPJ_FALSE;
+    m->pos = static_cast<std::size_t>(to);
+    return OPJ_TRUE;
+}
+
+// One component sample at picture position (x, y), scaled to 8 bits.
+// Components may be subsampled (dx, dy), as chroma often is.
+int jp2_sample(const opj_image_comp_t& c, int x, int y) {
+    const int cx = std::min<int>(x / static_cast<int>(std::max(1u, c.dx)), static_cast<int>(c.w) - 1);
+    const int cy = std::min<int>(y / static_cast<int>(std::max(1u, c.dy)), static_cast<int>(c.h) - 1);
+    long v = c.data[static_cast<std::size_t>(cy) * c.w + cx];
+    if (c.sgnd) v += 1L << (c.prec - 1);
+    if (c.prec > 8) v >>= (c.prec - 8);
+    else if (c.prec < 8) v = v * 255 / ((1L << c.prec) - 1);
+    return static_cast<int>(std::clamp<long>(v, 0, 255));
+}
+
+std::uint8_t clamp8(double v) {
+    return static_cast<std::uint8_t>(std::clamp(std::lround(v), 0L, 255L));
+}
+
+Picture load_jp2(const std::vector<std::uint8_t>& bytes, const std::string& path) {
+    const bool boxed = bytes.size() >= 4 && bytes[0] == 0 && bytes[3] == 0x0C;
+    struct Codec {
+        opj_codec_t* p;
+        ~Codec() { if (p) opj_destroy_codec(p); }
+    } codec{opj_create_decompress(boxed ? OPJ_CODEC_JP2 : OPJ_CODEC_J2K)};
+    struct Stream {
+        opj_stream_t* p = opj_stream_create(OPJ_J2K_STREAM_CHUNK_SIZE, OPJ_TRUE);
+        ~Stream() { if (p) opj_stream_destroy(p); }
+    } stream;
+    struct Image {
+        opj_image_t* p = nullptr;
+        ~Image() { if (p) opj_image_destroy(p); }
+    } image;
+    auto fail = [&] {
+        throw std::runtime_error("cannot read " + path + ": not a readable JPEG 2000 picture");
+    };
+    if (codec.p == nullptr || stream.p == nullptr) fail();
+
+    MemoryStream mem{&bytes};
+    opj_stream_set_user_data(stream.p, &mem, nullptr);
+    opj_stream_set_user_data_length(stream.p, bytes.size());
+    opj_stream_set_read_function(stream.p, mem_read);
+    opj_stream_set_skip_function(stream.p, mem_skip);
+    opj_stream_set_seek_function(stream.p, mem_seek);
+
+    opj_dparameters_t params;
+    opj_set_default_decoder_parameters(&params);
+    if (!opj_setup_decoder(codec.p, &params) ||
+        !opj_read_header(stream.p, codec.p, &image.p) ||
+        !opj_decode(codec.p, stream.p, image.p) || !opj_end_decompress(codec.p, stream.p)) {
+        fail();
+    }
+    const opj_image_t& img = *image.p;
+    if (img.numcomps < 1 || img.comps[0].data == nullptr) fail();
+    for (OPJ_UINT32 i = 0; i < img.numcomps && i < 3; ++i) {
+        if (img.comps[i].data == nullptr || img.comps[i].w == 0 || img.comps[i].h == 0) fail();
+    }
+
+    // The picture's size is the first component's at full resolution.
+    const int w = static_cast<int>(img.comps[0].w * std::max(1u, img.comps[0].dx));
+    const int h = static_cast<int>(img.comps[0].h * std::max(1u, img.comps[0].dy));
+    if (w <= 0 || h <= 0) fail();
+    Picture out(w, h);
+    const bool colour = img.numcomps >= 3;
+    const bool ycc = colour && (img.color_space == OPJ_CLRSPC_SYCC ||
+                                img.color_space == OPJ_CLRSPC_EYCC);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            std::uint8_t* px = &out.rgb[(static_cast<std::size_t>(y) * w + x) * 3];
+            const int a = jp2_sample(img.comps[0], x, y);
+            if (!colour) {
+                px[0] = px[1] = px[2] = static_cast<std::uint8_t>(a);
+                continue;
+            }
+            const int b = jp2_sample(img.comps[1], x, y);
+            const int c = jp2_sample(img.comps[2], x, y);
+            if (ycc) {  // BT.601 full range, as opj_decompress converts it
+                px[0] = clamp8(a + 1.402 * (c - 128));
+                px[1] = clamp8(a - 0.344136 * (b - 128) - 0.714136 * (c - 128));
+                px[2] = clamp8(a + 1.772 * (b - 128));
+            } else {
+                px[0] = static_cast<std::uint8_t>(a);
+                px[1] = static_cast<std::uint8_t>(b);
+                px[2] = static_cast<std::uint8_t>(c);
+            }
+        }
+    }
+    return out;
+}
+#endif
 
 #ifdef SSTVAE_HAVE_LIBHEIF
 // The primary image, decoded to interleaved 8-bit RGB. libheif applies
@@ -377,10 +552,21 @@ Picture load(const std::string& path) {
 #ifdef SSTVAE_HAVE_LIBHEIF
         return load_heif(bytes, path);
 #else
-        throw std::runtime_error(
-            "cannot read " + path +
-            ": HEIC/HEIF pictures need libheif. Install libheif-dev and "
-            "libheif-plugin-libde265, then rebuild the app.");
+        missing_library(path, "HEIC/HEIF", "libheif (libheif-dev and libheif-plugin-libde265)");
+#endif
+    }
+    if (looks_like_webp(bytes.data(), bytes.size())) {
+#ifdef SSTVAE_HAVE_LIBWEBP
+        return apply_orientation(load_webp(bytes, path), exif_orientation(bytes.data(), bytes.size()));
+#else
+        missing_library(path, "WebP", "libwebp (libwebp-dev)");
+#endif
+    }
+    if (looks_like_jp2(bytes.data(), bytes.size())) {
+#ifdef SSTVAE_HAVE_LIBOPENJP2
+        return load_jp2(bytes, path);
+#else
+        missing_library(path, "JPEG 2000", "openjpeg (libopenjp2-7-dev)");
 #endif
     }
 
