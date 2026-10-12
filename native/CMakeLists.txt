@@ -72,6 +72,11 @@ set_property(CACHE SSTVAE_BUILD_GUI PROPERTY STRINGS ON OFF AUTO)
 # OFF still builds and tests the threading design in
 # core/rig/controller.cpp, which has no external dependency at all.
 option(SSTVAE_BUILD_RIG "Build libhamlib rig control" ON)
+# QRSSTVAE (native/core/qrss/): the slow narrow picture mode, ported from
+# sstvae/qrss/ module by module with Python as the reference. No external
+# dependency; the switch exists so a build (Android, today) can leave it
+# out until it is wanted.
+option(SSTVAE_BUILD_QRSS "Build the QRSSTVAE library (native/core/qrss)" ON)
 
 # The numeric core is compared against Python to ~1e-12. Fast-math would
 # licence the compiler to reassociate exactly the sums those tolerances
@@ -117,6 +122,7 @@ add_library(sstvae_core STATIC
   core/latents/latents.cpp
   core/log/log.cpp
   core/util/event.cpp
+  core/util/sha256.cpp
   core/rx/ringbuffer.cpp
   core/rig/controller.cpp
   core/rig/trace.cpp
@@ -198,6 +204,27 @@ sstvae_picture_library(SSTVAE_HEIF libheif LIBHEIF "HEIC/HEIF"
                        "libheif-dev and libheif-plugin-libde265")
 sstvae_picture_library(SSTVAE_WEBP libwebp LIBWEBP "WebP" "libwebp-dev")
 sstvae_picture_library(SSTVAE_JP2 libopenjp2 LIBOPENJP2 "JPEG 2000" "libopenjp2-7-dev")
+
+# --- QRSSTVAE -----------------------------------------------------------------
+# One library for the whole port, its sources globbed so a module added
+# under core/qrss/ needs no edit here (the port lands one module at a time,
+# often several at once). Python (sstvae/qrss/) is the reference; see
+# tests/qrss_native/ for how the pytest suites are pointed at this code.
+#
+# -ffp-contract=off: the transmit chain is checked bit for bit against
+# numpy, and Clang on arm64 contracts a*b+c into an FMA by default, which
+# rounds once where numpy rounds twice. GCC on x86-64 does not contract
+# without -mfma, and MSVC's /fp:precise never does.
+if(SSTVAE_BUILD_QRSS)
+  file(GLOB _qrss_sources CONFIGURE_DEPENDS
+       ${CMAKE_CURRENT_SOURCE_DIR}/core/qrss/*.cpp)
+  add_library(sstvae_qrss STATIC ${_qrss_sources})
+  target_link_libraries(sstvae_qrss PUBLIC sstvae_core)
+  set_target_properties(sstvae_qrss PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  if(NOT MSVC)
+    target_compile_options(sstvae_qrss PRIVATE -ffp-contract=off)
+  endif()
+endif()
 
 # --- codec ------------------------------------------------------------------
 if(SSTVAE_BUILD_CODEC)

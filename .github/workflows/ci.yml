@@ -68,6 +68,8 @@ jobs:
         run: python tools/gen_config_header.py --check
       - name: Golden vectors match the Python reference
         run: python tools/gen_golden_vectors.py --check
+      - name: QRSS constants and tables match sstvae/qrss
+        run: python tools/gen_qrss_config_header.py --check
       # Encoding check only: it compares the generated C++ against
       # sstvae/modem/interleaver_perms.npy, which is the frozen on-air
       # format. It does NOT re-derive from numpy -- see

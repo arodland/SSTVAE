@@ -57,6 +57,12 @@ NATIVE = ROOT / "native"
 
 SOURCE_SUFFIXES = {".cpp", ".hpp", ".h", ".cc", ".cxx"}
 
+# The C++ counterparts of sstvae/qrss's format modules (what goes on air).
+QRSS_FORMAT_MODULES = {
+    "sequences", "frame", "precoder", "morse", "polar", "header", "picture",
+    "beaconfile", "pulse", "ce", "lwave", "tx", "config", "tables",
+}
+
 # (description, path predicate, forbidden #include regex)
 RULES = [
     (
@@ -84,6 +90,17 @@ RULES = [
         "only core/checkpoint/ may depend on Qt Network",
         lambda p: p.parts[0] == "core" and p.parts[:2] != ("core", "checkpoint"),
         re.compile(r'^\s*#\s*include\s*[<"](QtNetwork|QNetwork)', re.M),
+    ),
+    (
+        "core/qrss/ must not depend on Qt at all (QtCore included): it links no Qt",
+        lambda p: p.parts[:2] == ("core", "qrss"),
+        re.compile(r'^\s*#\s*include\s*[<"](Qt[A-Za-z]*/|Q[A-Z][A-Za-z]*>|Qt[A-Z][A-Za-z]*>)', re.M),
+    ),
+    (
+        "QRSSTVAE format modules must not use a random generator "
+        "(what goes on air is closed form; tests/test_qrss_frozen.py is the Python rule)",
+        lambda p: p.parts[:2] == ("core", "qrss") and p.stem in QRSS_FORMAT_MODULES,
+        re.compile(r'(^\s*#\s*include\s*<random>|\b(s?rand|mt19937(_64)?|default_random_engine)\b)', re.M),
     ),
     (
         "only bindings/embed/ may link libpython",
@@ -140,14 +157,18 @@ def main() -> int:
                     f"    {match.group(0).strip()}"
                 )
 
-    generated = NATIVE / "core" / "config.hpp"
-    if generated.exists():
-        head = generated.read_text(encoding="utf-8")[:200]
-        if "GENERATED FILE" not in head:
-            violations.append(
-                f"native/core/config.hpp has lost its generated-file banner; "
-                "it must come from tools/gen_config_header.py"
-            )
+    for rel, tool in (("core/config.hpp", "tools/gen_config_header.py"),
+                      ("core/qrss/config.hpp", "tools/gen_qrss_config_header.py"),
+                      ("core/qrss/tables.hpp", "tools/gen_qrss_config_header.py"),
+                      ("core/qrss/tables.cpp", "tools/gen_qrss_config_header.py")):
+        generated = NATIVE / rel
+        if generated.exists():
+            head = generated.read_text(encoding="utf-8")[:200]
+            if "GENERATED FILE" not in head:
+                violations.append(
+                    f"native/{rel} has lost its generated-file banner; "
+                    f"it must come from {tool}"
+                )
 
     if violations:
         print("Layering violations:\n", file=sys.stderr)

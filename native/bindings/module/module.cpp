@@ -40,6 +40,10 @@
 #include "ofdm/ofdm.hpp"
 #include "sync/sync.hpp"
 
+#ifdef SSTVAE_HAVE_QRSS
+#include "qrss/registry.hpp"
+#endif
+
 namespace py = pybind11;
 using sstvae::ofdm::cdouble;
 
@@ -895,4 +899,10 @@ PYBIND11_MODULE(sstvae_native, m) {
     config.attr("GROUP_LATENTS") = sstvae::config::GROUP_LATENTS;
     config.attr("PREAMBLE_SAMPLES") = sstvae::config::PREAMBLE_SAMPLES;
     config.attr("PROTOCOL_VERSION") = sstvae::config::PROTOCOL_VERSION;
+
+#ifdef SSTVAE_HAVE_QRSS
+    // QRSSTVAE, as `sstvae_native.qrss.<module>`: each ported module binds
+    // itself from bindings/module/qrss/<module>.cpp.
+    sstvae_bindings::qrss::bind_all(m);
+#endif
 }

@@ -381,3 +381,27 @@ if(TARGET sstvae_gui)
 endif()
 
 
+
+# --- QRSSTVAE core (native/core/qrss) ------------------------------------------
+# One executable per tests/qrss/test_<module>.cpp, globbed so a ported
+# module adds its test without editing this file; ctest names are
+# qrss_core_<module>. Keyed on the target, not the option, for the
+# reason given above add_subdirectory(tests) in ../CMakeLists.txt. Each
+# gets the QRSS golden corpus directory as its one argument.
+if(TARGET sstvae_qrss)
+  file(GLOB _qrss_core_tests CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/qrss/test_*.cpp)
+  foreach(_src ${_qrss_core_tests})
+    get_filename_component(_name ${_src} NAME_WE)
+    string(REGEX REPLACE "^test_" "" _mod ${_name})
+    add_executable(test_qrss_core_${_mod} ${_src})
+    target_link_libraries(test_qrss_core_${_mod} PRIVATE sstvae_qrss)
+    target_include_directories(test_qrss_core_${_mod} PRIVATE
+                               ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/qrss)
+    if(NOT MSVC)
+      target_compile_options(test_qrss_core_${_mod} PRIVATE -ffp-contract=off)
+    endif()
+    add_test(NAME qrss_core_${_mod}
+             COMMAND test_qrss_core_${_mod} ${CMAKE_CURRENT_SOURCE_DIR}/golden_qrss)
+    set_tests_properties(qrss_core_${_mod} PROPERTIES TIMEOUT 120)
+  endforeach()
+endif()
