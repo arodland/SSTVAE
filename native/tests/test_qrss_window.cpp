@@ -644,6 +644,55 @@ void test_tiles_do_not_overlap() {
     }
 }
 
+void test_tiles_arrive_one_by_one() {
+    QTemporaryDir dir;
+    gui::QrssWindow w;
+    w.set_state_dir(dir.path());
+    w.resize(900, 700);
+    w.show();
+    QApplication::processEvents();
+    auto* scroll = w.findChild<QScrollArea*>(QStringLiteral("qrss_received"));
+    std::mt19937 rng(7);
+    QJsonArray tiles;
+    std::string why;
+    for (int step = 0; step < 40; ++step) {
+        const int kind = static_cast<int>(rng() % 4);
+        if (kind == 0 || tiles.isEmpty()) {
+            const int i = step;
+            QJsonObject t = tile_json(QStringLiteral("t%1").arg(i), 600.0 + 10 * i,
+                                      rng() % 3 ? QStringLiteral("KC2G") : QString(), 0.1, QString(), 0);
+            t[QStringLiteral("picture_id")] = rng() % 3 ? QStringLiteral("p%1").arg(i) : QString();
+            if (rng() % 2) t[QStringLiteral("note")] = QStringLiteral("render failed: the decoder could not load its model from the cache, a long note");
+            tiles.prepend(t);
+        } else if (kind == 1) {
+            tiles.removeAt(static_cast<int>(rng() % tiles.size()));
+        } else if (kind == 2) {
+            const int k = static_cast<int>(rng() % tiles.size());
+            QJsonObject t = tiles[k].toObject();
+            t[QStringLiteral("callsign")] = QStringLiteral("AG7EW");
+            t[QStringLiteral("picture_id")] = QStringLiteral("x%1").arg(step);
+            t[QStringLiteral("note")] = rng() % 2 ? QString() : QStringLiteral("stored (header) and saved to a path that is quite long indeed");
+            tiles[k] = t;
+        } else {
+            const int k = static_cast<int>(rng() % tiles.size());
+            QJsonObject t = tiles[k].toObject();
+            t[QStringLiteral("id")] = QStringLiteral("r%1").arg(step);
+            tiles[k] = t;
+        }
+        write_state(dir.path(), tiles, 1'000'000 + step * 1000);
+        w.reload();
+        // Laid out at once: no tile drawn over another before the
+        // event loop comes round (the scrolled area grows a moment later).
+        bool ok = tiles_apart(scroll->widget(), &why) ||
+                  why == "a tile runs past the bottom of the scrolled area";
+        check::is_true(ok, "qrss/arrive: apart straight after reload, step " +
+                               std::to_string(step) + ": " + why);
+        QApplication::processEvents();
+        ok = tiles_apart(scroll->widget(), &why);
+        check::is_true(ok, "qrss/arrive: apart, step " + std::to_string(step) + ": " + why);
+    }
+}
+
 void test_the_spectrogram() {
     constexpr double NOW = 1791594000.0 + 600.0;
     gui::QrssSpectrogram sg;
@@ -858,6 +907,7 @@ int main(int argc, char** argv) {
     test_the_pass_bar();
     test_combined_passes_hide_their_parts();
     test_tiles_do_not_overlap();
+    test_tiles_arrive_one_by_one();
     test_the_spectrogram();
     test_the_history_is_kept();
     test_the_tab_layout();

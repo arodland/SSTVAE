@@ -763,6 +763,10 @@ void QrssWindow::reload() {
     }
     for (auto it = tiles_.begin(); it != tiles_.end();) {
         if (!order.contains(it.key())) {
+            // Hidden now, not only when the deferred delete comes round:
+            // until then it would still be drawn where it was, under the
+            // tile laid out into its place.
+            it.value()->hide();
             it.value()->deleteLater();
             it = tiles_.erase(it);
         } else {
