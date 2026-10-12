@@ -25,6 +25,7 @@
 #include <QWidget>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace sstvae::gui {
@@ -37,6 +38,8 @@ public:
     static constexpr int CELL_W = 40;
     static constexpr int HEADER_H = 20;
     static constexpr int THUMB_H = 54;
+    // Under the rows: the blinking bug at the proposed first send.
+    static constexpr int BUG_H = 20;
 
     struct Block {
         std::string entry;      // the schedule entry's id
@@ -83,6 +86,14 @@ public:
     // Outlines the blocks of one entry, and tints those of one Send.
     void set_selected_entry(const std::string& entry);
     void set_highlighted_send(const std::string& send_id);
+    // The send the form would add: a red dashed outline on each span
+    // (start, end) and a blinking bug under the rows at `first`, the
+    // time the At Time clocks show (Jeff, 2026-10-12). Empty clears it.
+    void set_proposal(double first, std::vector<std::pair<double, double>> spans);
+    void clear_proposal();
+    bool has_proposal() const { return proposal_; }
+    double proposal_at() const { return proposal_at_; }
+    const std::vector<std::pair<double, double>>& proposal_spans() const { return spans_; }
     // The slot a column under the pointer would start a send on.
     void set_hover_slot_hint(bool on) { slot_hint_ = on; }
 
@@ -123,6 +134,12 @@ protected:
     void dropEvent(QDropEvent* event) override;
 
 private:
+    int rows_bottom() const { return height() - BUG_H; }
+    bool proposal_ = false;
+    double proposal_at_ = 0.0;
+    std::vector<std::pair<double, double>> spans_;
+    bool blink_on_ = true;
+    class QTimer* blink_ = nullptr;
     double start_ = 0.0;
     double now_ = 0.0;
     int cells_ = 96;

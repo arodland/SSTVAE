@@ -8,6 +8,8 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
+#include <QTimer>
 #include <QTimeZone>
 
 #include <algorithm>
@@ -34,6 +36,30 @@ QrssTimeline::QrssTimeline(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("schedule_timeline"));
     setMouseTracking(true);
     setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    blink_ = new QTimer(this);
+    blink_->setInterval(530);
+    connect(blink_, &QTimer::timeout, this, [this] {
+        blink_on_ = !blink_on_;
+        update(QRect(0, rows_bottom(), width(), BUG_H));
+    });
+}
+
+void QrssTimeline::set_proposal(double first, std::vector<std::pair<double, double>> spans) {
+    if (proposal_ && first == proposal_at_ && spans == spans_) return;
+    proposal_ = true;
+    proposal_at_ = first;
+    spans_ = std::move(spans);
+    blink_on_ = true;
+    if (!blink_->isActive()) blink_->start();
+    update();
+}
+
+void QrssTimeline::clear_proposal() {
+    if (!proposal_) return;
+    proposal_ = false;
+    spans_.clear();
+    blink_->stop();
+    update();
 }
 
 void QrssTimeline::set_view(double start, int cells, double now) {
@@ -87,7 +113,7 @@ void QrssTimeline::set_highlighted_send(const std::string& send_id) {
 }
 
 QSize QrssTimeline::sizeHint() const {
-    return {cells_ * CELL_W + 1, HEADER_H + 2 * PAD + THUMB_H + CAPTION_H + 2};
+    return {cells_ * CELL_W + 1, HEADER_H + 2 * PAD + THUMB_H + CAPTION_H + 2 + BUG_H};
 }
 
 QSize QrssTimeline::minimumSizeHint() const { return sizeHint(); }
@@ -103,7 +129,7 @@ double QrssTimeline::slot_at(int x) const {
 QRect QrssTimeline::block_rect(const Block& b) const {
     const int x0 = x_of(b.slot) + 1;
     const int x1 = x_of(b.end) - 1;
-    return {x0, HEADER_H + 1, std::max(4, x1 - x0), height() - HEADER_H - 2};
+    return {x0, HEADER_H + 1, std::max(4, x1 - x0), rows_bottom() - HEADER_H - 2};
 }
 
 int QrssTimeline::block_at(const QPoint& p) const {
@@ -149,7 +175,7 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
         } else {
             p.setPen(slot_line);
         }
-        p.drawLine(x, hour ? 0 : HEADER_H - 4, x, height());
+        p.drawLine(x, hour ? 0 : HEADER_H - 4, x, rows_bottom());
         if (half) {
             p.setPen(faint);
             p.drawLine(x, HEADER_H - 6, x, HEADER_H);
@@ -165,6 +191,7 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
     }
     p.setPen(grid);
     p.drawLine(0, HEADER_H, width(), HEADER_H);
+    p.drawLine(0, rows_bottom(), width(), rows_bottom());
 
     // Where a send added from the selected Send would go.
     if ((slot_hint_ || dropping_) && hover_x_ >= 0 &&
@@ -172,7 +199,7 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
         const int x = x_of(slot_at(hover_x_));
         QColor h = pal.color(QPalette::Highlight);
         h.setAlpha(40);
-        p.fillRect(QRect(x + 1, HEADER_H + 1, 2 * CELL_W - 2, height() - HEADER_H - 2), h);
+        p.fillRect(QRect(x + 1, HEADER_H + 1, 2 * CELL_W - 2, rows_bottom() - HEADER_H - 2), h);
     }
 
     p.setFont(font());
@@ -247,7 +274,7 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
         QColor c = mark_color();
         if (m.done) c.setAlpha(110);
         p.setPen(QPen(c, 2));
-        p.drawLine(x, HEADER_H - 6, x, height());
+        p.drawLine(x, HEADER_H - 6, x, rows_bottom());
         p.setFont(small);
         const QString label = QString::number(m.dial_hz / 1e6, 'f', 3);
         const int w = p.fontMetrics().horizontalAdvance(label) + 4;
@@ -266,7 +293,7 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
         QPen dash(mark_color(), 2);
         dash.setStyle(Qt::DashLine);
         p.setPen(dash);
-        p.drawLine(x, HEADER_H - 6, x, height());
+        p.drawLine(x, HEADER_H - 6, x, rows_bottom());
         p.setFont(small);
         const QString label = utc_of(drag_at_).toString(QStringLiteral("HH:mm'Z'"));
         const int w = p.fontMetrics().horizontalAdvance(label) + 4;
@@ -278,11 +305,47 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
         p.drawText(box, Qt::AlignCenter, label);
     }
 
+    // The send the form would add: dashed outlines, and the bug.
+    if (proposal_) {
+        const QColor red = style::color::danger();
+        QPen dash(red, 2);
+        dash.setStyle(Qt::DashLine);
+        p.setPen(dash);
+        p.setBrush(Qt::NoBrush);
+        for (const auto& [from, to] : spans_) {
+            Block b;
+            b.slot = from;
+            b.end = to;
+            p.drawRect(block_rect(b).adjusted(1, 1, -1, -1));
+        }
+        const int x = x_of(proposal_at_);
+        if (blink_on_) {
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(QPen(red, 2));
+            const int y = rows_bottom();
+            p.drawLine(x, y - 2, x, y + 3);
+            QPainterPath tri;
+            tri.moveTo(x, y + 3);
+            tri.lineTo(x - 6, y + 12);
+            tri.lineTo(x + 6, y + 12);
+            tri.closeSubpath();
+            p.fillPath(tri, red);
+            p.setRenderHint(QPainter::Antialiasing, false);
+        }
+        QFont small = font();
+        small.setPointSizeF(std::max(6.0, small.pointSizeF() * 0.85));
+        p.setFont(small);
+        p.setPen(red);
+        p.drawText(QRect(x + 9, rows_bottom() + 1, 4 * CELL_W, BUG_H - 2),
+                   Qt::AlignLeft | Qt::AlignVCenter,
+                   utc_of(proposal_at_).toString(QStringLiteral("HH:mm'Z'")));
+    }
+
     // Now.
     const int xn = x_of(now_);
     if (xn >= 0 && xn <= width()) {
         p.setPen(QPen(style::color::danger(), 2));
-        p.drawLine(xn, 0, xn, height());
+        p.drawLine(xn, 0, xn, rows_bottom());
     }
 }
 

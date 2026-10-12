@@ -2,7 +2,6 @@
 
 #include <QApplication>
 #include <QComboBox>
-#include <QDateEdit>
 #include <QDateTime>
 #include <QDateTimeEdit>
 #include <QDialog>
@@ -11,6 +10,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -40,6 +40,7 @@
 
 #include "compose_tools.hpp"
 #include "images/images.hpp"
+#include "qrss_clock.hpp"
 #include "qrss_schedule.hpp"
 #include "qrss_sends.hpp"
 #include "qrss_timeline.hpp"
@@ -136,26 +137,13 @@ public:
 
 namespace {
 
-constexpr int THUMB_W = 128;
-constexpr int THUMB_H = 96;
+// The Repeat spin box's top value, shown as "until removed".
+constexpr int TIMES_FOREVER = 100;
 constexpr int LIST_ICON_W = 96;
 constexpr int LIST_ICON_H = 72;
 
 QDateTime utc_of(double t) {
     return QDateTime::fromSecsSinceEpoch(static_cast<qint64>(std::llround(t)), QTimeZone::utc());
-}
-
-QString every_label(int minutes) {
-    if (minutes == 0) return QObject::tr("Back to back");
-    if (minutes == 120) return QObject::tr("2 hours (alternating hours)");
-    if (minutes % 1440 == 0) {
-        return minutes == 1440 ? QObject::tr("1 day") : QObject::tr("%1 days").arg(minutes / 1440);
-    }
-    if (minutes % 60 == 0) {
-        return minutes == 60 ? QObject::tr("1 hour") : QObject::tr("%1 hours").arg(minutes / 60);
-    }
-    if (minutes < 60) return QObject::tr("%1 minutes").arg(minutes);
-    return QObject::tr("%1 hours").arg(minutes / 60.0, 0, 'g', 3);
 }
 
 QString pass_word(int n) { return n == 1 ? QObject::tr("pass") : QObject::tr("passes"); }
@@ -186,17 +174,39 @@ QString waveform_note(const std::string& waveform) {
                        "harmless; every QRSSTVAE listener hears it.");
 }
 
+// `times` repeats after the first send (TIMES_FOREVER: until removed),
+// `every` minutes from the start of one to the next; at the mode's own
+// length that is back to back.
 qs::Entry form_entry(const QComboBox* mode, const QComboBox* waveform, const QSpinBox* freq,
-                     double slot, const QSpinBox* count, const QComboBox* every) {
+                     double slot, int times, int every) {
     qs::Entry e;
     e.mode = mode->currentData().toString().toStdString();
     e.waveform = waveform->currentData().toString().toStdString();
     e.freq_hz = freq->value();
     e.first_slot = slot;
-    e.count = count->value();
-    e.every_min = every->currentData().toInt();
+    e.count = times >= TIMES_FOREVER ? 0 : times + 1;
+    e.every_min = (e.count == 1 || every <= qrss_tx::minutes_for(e.mode)) ? 0 : every;
     return e;
 }
+
+// "[0] times", whose top value reads "until removed".
+class TimesSpin : public QSpinBox {
+public:
+    using QSpinBox::QSpinBox;
+
+protected:
+    QString textFromValue(int v) const override {
+        return v >= TIMES_FOREVER ? QStringLiteral("∞") : QSpinBox::textFromValue(v);
+    }
+    int valueFromText(const QString& text) const override {
+        return text.trimmed() == QStringLiteral("∞") ? TIMES_FOREVER
+                                                         : QSpinBox::valueFromText(text);
+    }
+    QValidator::State validate(QString& text, int& pos) const override {
+        if (text.trimmed() == QStringLiteral("∞")) return QValidator::Acceptable;
+        return QSpinBox::validate(text, pos);
+    }
+};
 
 const qs::Entry* entry_by_id(const std::vector<qs::Entry>& entries, const std::string& id) {
     for (const qs::Entry& e : entries) {
@@ -206,6 +216,37 @@ const qs::Entry* entry_by_id(const std::vector<qs::Entry>& entries, const std::s
 }
 
 }  // namespace
+
+// The Send's picture under its choices: the column's full width, 4:3,
+// no frame (Jeff, 2026-10-12). It takes only the height left over, so
+// the choices above it are never squeezed; short of 3/4 of its width,
+// the picture narrows instead.
+class SendPicture : public QWidget {
+public:
+    explicit SendPicture(QWidget* parent) : QWidget(parent) {
+        setObjectName(QStringLiteral("schedule_picture"));
+        setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Ignored);
+    }
+    void set_pixmap(const QPixmap& pix) {
+        pix_ = pix;
+        update();
+    }
+    const QPixmap& pixmap() const { return pix_; }
+    QSize sizeHint() const override { return {320, 240}; }
+    QSize minimumSizeHint() const override { return {120, 90}; }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        if (pix_.isNull()) return;
+        QPainter p(this);
+        p.setRenderHint(QPainter::SmoothPixmapTransform);
+        const QSize sz = pix_.size().scaled(size(), Qt::KeepAspectRatio);
+        p.drawPixmap(QRect(QPoint(0, 0), sz), pix_);
+    }
+
+private:
+    QPixmap pix_;
+};
 
 QrssScheduleWindow::QrssScheduleWindow(QrssScheduler* scheduler, QrssSends* sends,
                                        std::function<Defaults()> defaults,
@@ -222,13 +263,15 @@ QrssScheduleWindow::QrssScheduleWindow(QrssScheduler* scheduler, QrssSends* send
     waveform_->setCurrentIndex(
         std::max(0, waveform_->findData(QString::fromStdString(d.waveform))));
     waveform_note_->setText(waveform_note(d.waveform));
-    date_->setMinimumDate(utc_of(scheduler_->now()).date());
     set_chosen_slot(qs::earliest_slot(scheduler_->now()));
     connect(scheduler_, &QrssScheduler::changed, this, &QrssScheduleWindow::refresh);
     connect(sends_, &QrssSends::changed, this, &QrssScheduleWindow::refresh_sends);
     clock_timer_ = new QTimer(this);
     clock_timer_->setInterval(30000);
     connect(clock_timer_, &QTimer::timeout, this, [this] {
+        // A first send the clock has passed moves up to the earliest.
+        const double earliest = qs::earliest_slot(scheduler_->now());
+        if (chosen_slot_ < earliest) set_chosen_slot(earliest);
         refresh();
         update_summary();
     });
@@ -236,7 +279,7 @@ QrssScheduleWindow::QrssScheduleWindow(QrssScheduler* scheduler, QrssSends* send
     refresh_sends();
     refresh();
     on_send_selected();
-    resize(980, 760);
+    resize(1040, 800);
 }
 
 void QrssScheduleWindow::build() {
@@ -389,25 +432,27 @@ QWidget* QrssScheduleWindow::build_sends(QWidget* parent) {
 }
 
 QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
-    auto* right = new QWidget(parent);
-    auto* column = new QVBoxLayout(right);
-    column->setContentsMargins(0, 0, 0, 0);
+    // Two columns: the Send's choices on the left, At Time on the right,
+    // and under At Time the Add button, its bottom level with the left
+    // column's, since both columns feed it (Jeff, 2026-10-12).
+    auto* both = new QWidget(parent);
+    auto* columns = new QHBoxLayout(both);
+    columns->setContentsMargins(0, 0, 0, 0);
 
-    form_box_ = new QGroupBox(tr("Schedule the selected Send"), right);
+    // --- the Send ----------------------------------------------------
+    form_box_ = new QGroupBox(tr("Send"), both);
     form_box_->setObjectName(QStringLiteral("schedule_form"));
-    auto* form = new QFormLayout(form_box_);
-    thumb_ = new QLabel(form_box_);
-    thumb_->setObjectName(QStringLiteral("schedule_thumb"));
-    thumb_->setFixedSize(THUMB_W, THUMB_H);
-    thumb_->setAlignment(Qt::AlignCenter);
-    thumb_->setFrameShape(QFrame::StyledPanel);
+    auto* left = new QVBoxLayout(form_box_);
+    auto* grid = new QGridLayout;
+    grid->setColumnStretch(1, 1);
+    int row = 0;
     send_name_ = new QLabel(form_box_);
     send_name_->setObjectName(QStringLiteral("schedule_picture_name"));
     send_name_->setWordWrap(true);
-    auto* pic_row = new QHBoxLayout;
-    pic_row->addWidget(thumb_);
-    pic_row->addWidget(send_name_, 1);
-    form->addRow(pic_row);
+    QFont name_font = send_name_->font();
+    name_font.setBold(true);
+    send_name_->setFont(name_font);
+    grid->addWidget(send_name_, row++, 0, 1, 2);
 
     mode_ = new QComboBox(form_box_);
     mode_->setObjectName(QStringLiteral("schedule_mode"));
@@ -420,7 +465,8 @@ QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
                            .arg(pass_word(qrss_tx::passes_for(s))),
                        QString::fromStdString(s));
     }
-    form->addRow(tr("Mode:"), mode_);
+    grid->addWidget(new QLabel(tr("Mode:"), form_box_), row, 0);
+    grid->addWidget(mode_, row++, 1);
 
     waveform_ = new QComboBox(form_box_);
     waveform_->setObjectName(QStringLiteral("schedule_waveform"));
@@ -429,11 +475,13 @@ QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
     waveform_->addItem(tr("L - linear, 22 Hz"), QString::fromLatin1(qrss_tx::WAVEFORM_L));
     waveform_->setToolTip(tr("How the picture goes on the air. Both carry the same picture, "
                              "and passes of either add into it at a receiver."));
-    form->addRow(tr("Waveform:"), waveform_);
+    grid->addWidget(new QLabel(tr("Waveform:"), form_box_), row, 0);
+    grid->addWidget(waveform_, row++, 1);
     waveform_note_ = new QLabel(form_box_);
     waveform_note_->setObjectName(QStringLiteral("schedule_waveform_note"));
     waveform_note_->setWordWrap(true);
-    form->addRow(waveform_note_);
+    style::dim(waveform_note_);
+    grid->addWidget(waveform_note_, row++, 1);
 
     freq_ = new QSpinBox(form_box_);
     freq_->setObjectName(QStringLiteral("schedule_freq"));
@@ -442,67 +490,131 @@ QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
     freq_->setSuffix(tr(" Hz"));
     freq_->setToolTip(tr("The audio frequency of the carrier, 300-2700 Hz, as on the "
                          "QRSS carrier slider."));
-    form->addRow(tr("Carrier:"), freq_);
+    grid->addWidget(new QLabel(tr("Carrier:"), form_box_), row, 0);
+    grid->addWidget(freq_, row++, 1, Qt::AlignLeft);
 
-    date_ = new QDateEdit(form_box_);
-    date_->setObjectName(QStringLiteral("schedule_date"));
-    date_->setCalendarPopup(true);
-    date_->setDisplayFormat(QStringLiteral("ddd d MMM yyyy"));
-    date_->setToolTip(tr("The UTC date of the first send."));
-    time_ = new QComboBox(form_box_);
-    time_->setObjectName(QStringLiteral("schedule_time"));
-    time_->setToolTip(tr("Sends start on a quarter hour, UTC (Z); your local time is in "
-                         "brackets. Clicking a free slot on the timeline sets this too."));
-    auto* when_row = new QHBoxLayout;
-    when_row->addWidget(date_);
-    when_row->addWidget(time_, 1);
-    form->addRow(tr("First send (UTC):"), when_row);
+    // Repeat: "[0] times", then "every [30] minutes", greyed until there
+    // is a repeat; the minutes start at the mode's own length, back to
+    // back, and go up in quarter hours.
+    times_ = new TimesSpin(form_box_);
+    times_->setObjectName(QStringLiteral("schedule_times"));
+    times_->setRange(0, TIMES_FOREVER);
+    times_->setValue(0);
+    times_->setToolTip(tr("How many more times to send the picture after the first; at the "
+                          "top (∞) until removed. Every send has the same picture ID, so "
+                          "receivers add them together."));
+    auto* times_row = new QHBoxLayout;
+    times_row->addWidget(times_);
+    times_row->addWidget(new QLabel(tr("times"), form_box_));
+    times_row->addStretch(1);
+    grid->addWidget(new QLabel(tr("Repeat:"), form_box_), row, 0);
+    grid->addLayout(times_row, row++, 1);
 
-    count_ = new QSpinBox(form_box_);
-    count_->setObjectName(QStringLiteral("schedule_count"));
-    count_->setRange(0, 999);
-    count_->setSpecialValueText(tr("Until removed"));
-    count_->setValue(2);
-    count_->setToolTip(tr("How many times to send the picture. Every send is the same "
-                          "picture ID, so receivers add them together."));
-    every_ = new QComboBox(form_box_);
+    every_label_ = new QLabel(tr("every"), form_box_);
+    every_label_->setObjectName(QStringLiteral("schedule_every_label"));
+    every_ = new QSpinBox(form_box_);
     every_->setObjectName(QStringLiteral("schedule_every"));
-    for (int m : qs::EVERY_CHOICES_MIN) every_->addItem(every_label(m), m);
-    every_->setToolTip(tr("From the start of one send to the start of the next. Back to "
-                          "back starts the next send the half hour after the last pass "
-                          "of the one before."));
-    auto* repeat_row = new QHBoxLayout;
-    repeat_row->addWidget(count_);
-    repeat_row->addWidget(new QLabel(tr("sends, every"), form_box_));
-    repeat_row->addWidget(every_, 1);
-    form->addRow(tr("Repeat:"), repeat_row);
+    every_->setRange(qrss_tx::minutes_for("A"), 7 * 24 * 60);
+    every_->setSingleStep(static_cast<int>(qs::QUARTER_S / 60));
+    every_->setToolTip(tr("Minutes from the start of one send to the start of the next. At "
+                          "the mode's own length the sends go back to back."));
+    every_unit_ = new QLabel(tr("minutes"), form_box_);
+    auto* every_row = new QHBoxLayout;
+    every_row->addWidget(every_);
+    every_row->addWidget(every_unit_);
+    every_row->addStretch(1);
+    grid->addWidget(every_label_, row, 0, Qt::AlignRight | Qt::AlignVCenter);
+    grid->addLayout(every_row, row++, 1);
+    left->addLayout(grid);
 
-    summary_ = new QLabel(form_box_);
+    picture_ = new SendPicture(form_box_);
+    left->addWidget(picture_, 1);
+    columns->addWidget(form_box_, 1);
+
+    // --- At Time ------------------------------------------------------
+    auto* right = new QVBoxLayout;
+    at_box_ = new QGroupBox(tr("At Time"), both);
+    at_box_->setObjectName(QStringLiteral("schedule_at_time"));
+    auto* at = new QVBoxLayout(at_box_);
+    auto* faces = new QHBoxLayout;
+    auto clock_column = [this, faces](QrssClockFace* face, QLabel* caption, QLabel* readout) {
+        auto* col = new QVBoxLayout;
+        caption->setAlignment(Qt::AlignHCenter);
+        readout->setAlignment(Qt::AlignHCenter);
+        readout->setTextFormat(Qt::RichText);
+        col->addWidget(caption);
+        col->addWidget(face, 0, Qt::AlignHCenter);
+        col->addWidget(readout);
+        faces->addLayout(col);
+        connect(face, &QrssClockFace::stepRequested, this, &QrssScheduleWindow::step_slot);
+    };
+    clock_utc_ = new QrssClockFace(true, at_box_);
+    clock_local_ = new QrssClockFace(false, at_box_);
+    utc_readout_ = new QLabel(at_box_);
+    utc_readout_->setObjectName(QStringLiteral("at_time_utc_readout"));
+    local_caption_ = new QLabel(at_box_);
+    local_caption_->setObjectName(QStringLiteral("at_time_local_caption"));
+    local_readout_ = new QLabel(at_box_);
+    local_readout_->setObjectName(QStringLiteral("at_time_local_readout"));
+    clock_column(clock_utc_, new QLabel(tr("UTC"), at_box_), utc_readout_);
+    clock_column(clock_local_, local_caption_, local_readout_);
+    at->addLayout(faces);
+
+    auto* hint = new QHBoxLayout;
+    hint->setSpacing(4);
+    auto* wheel = new QLabel(tr("Wheel: ±15 min ·"), at_box_);
+    auto* shift_wheel = new QLabel(tr("+wheel: ±1 hour"), at_box_);
+    for (QLabel* l : {wheel, shift_wheel}) style::dim(l);
+    hint->addStretch(1);
+    hint->addWidget(wheel, 0, Qt::AlignVCenter);
+    hint->addWidget(new ShiftKeyCap(at_box_), 0, Qt::AlignVCenter);
+    hint->addWidget(shift_wheel, 0, Qt::AlignVCenter);
+    hint->addStretch(1);
+    at->addLayout(hint);
+    right->addWidget(at_box_);
+    right->addStretch(1);
+
+    summary_ = new QLabel(both);
     summary_->setObjectName(QStringLiteral("schedule_summary"));
     summary_->setWordWrap(true);
     summary_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    form->addRow(summary_);
-    add_ = new QPushButton(tr("&Add to schedule"), form_box_);
-    add_->setObjectName(QStringLiteral("schedule_add"));
-    connect(add_, &QPushButton::clicked, this, [this] { add(); });
-    form->addRow(style::row(form_box_, {add_}));
-    column->addWidget(form_box_);
+    right->addWidget(summary_);
 
-    for (QComboBox* c : {mode_, waveform_, time_, every_}) {
-        connect(c, &QComboBox::currentIndexChanged, this, &QrssScheduleWindow::update_summary);
+    add_ = new QPushButton(tr("&Add to schedule"), both);
+    add_->setObjectName(QStringLiteral("schedule_add"));
+    add_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    add_->setMinimumHeight(add_->sizeHint().height() * 3 / 2);
+    {
+        // The accent, while it can be clicked; greyed as usual when not.
+        QPalette pal = add_->palette();
+        for (QPalette::ColorGroup g : {QPalette::Active, QPalette::Inactive}) {
+            pal.setColor(g, QPalette::Button, pal.color(g, QPalette::Highlight));
+            pal.setColor(g, QPalette::ButtonText, pal.color(g, QPalette::HighlightedText));
+        }
+        add_->setPalette(pal);
+        QFont f = add_->font();
+        f.setBold(true);
+        add_->setFont(f);
     }
-    for (QSpinBox* s : {freq_, count_}) {
+    connect(add_, &QPushButton::clicked, this, [this] { add(); });
+    right->addWidget(add_);
+    columns->addLayout(right, 1);
+
+    for (QComboBox* c : {mode_, waveform_}) {
+        connect(c, &QComboBox::currentIndexChanged, this, &QrssScheduleWindow::sync_repeat);
+    }
+    connect(times_, &QSpinBox::valueChanged, this, &QrssScheduleWindow::sync_repeat);
+    for (QSpinBox* s : {freq_, every_}) {
         connect(s, &QSpinBox::valueChanged, this, &QrssScheduleWindow::update_summary);
     }
-    connect(date_, &QDateEdit::dateChanged, this, [this] {
-        fill_times();
-        update_summary();
+    // A typed interval lands on a quarter hour.
+    connect(every_, &QSpinBox::editingFinished, this, [this] {
+        const int q = static_cast<int>(qs::QUARTER_S / 60);
+        every_->setValue(std::max(every_->minimum(), (every_->value() + q / 2) / q * q));
     });
-
-    // What is scheduled is the timeline above and its right-click menu;
-    // the list that repeated it here is gone (Jeff, 2026-10-10).
-    column->addStretch(1);
-    return right;
+    every_->setValue(qrss_tx::minutes_for("A"));
+    sync_repeat();
+    return both;
 }
 
 bool QrssScheduleWindow::eventFilter(QObject* watched, QEvent* event) {
@@ -584,17 +696,17 @@ void QrssScheduleWindow::on_send_selected() {
     edit_send_->setEnabled(s != nullptr);
     delete_send_->setEnabled(s != nullptr);
     form_box_->setEnabled(s != nullptr);
+    at_box_->setEnabled(s != nullptr);
     timeline_->set_highlighted_send(id);
     timeline_->set_hover_slot_hint(s != nullptr);
     if (s == nullptr) {
-        thumb_->setPixmap(QPixmap());
-        thumb_->setText(tr("No Send"));
+        picture_->set_pixmap(QPixmap());
         send_name_->setText(sends_->sends().empty()
                                 ? tr("Make a Send first: New or Open file, "
                                      "on the left.")
                                 : tr("Choose a Send on the left to schedule it."));
     } else {
-        thumb_->setPixmap(thumbnail(s->picture, THUMB_W, THUMB_H));
+        picture_->set_pixmap(QPixmap(QString::fromStdString(s->picture.string())));
         send_name_->setText(QString::fromStdString(s->label));
     }
     update_summary();
@@ -638,40 +750,44 @@ QString QrssScheduleWindow::local_and_utc(double slot) const {
              local.toString(QStringLiteral("HH:mm")));
 }
 
-void QrssScheduleWindow::fill_times() {
-    const QVariant keep = time_->currentData();
-    const QSignalBlocker block(time_);
-    time_->clear();
-    const QDateTime midnight(date_->date(), QTime(0, 0), QTimeZone::utc());
-    for (int q = 0; q < 96; ++q) {
-        const QDateTime t = midnight.addSecs(q * 900);
-        time_->addItem(tr("%1Z (%2 local)")
-                           .arg(t.toString(QStringLiteral("HH:mm")),
-                                t.toLocalTime().toString(QStringLiteral("HH:mm"))),
-                       q * 900);
-    }
-    time_->setCurrentIndex(keep.isValid() ? std::max(0, time_->findData(keep)) : 0);
-}
-
-double QrssScheduleWindow::chosen_slot() const {
-    const QDateTime midnight(date_->date(), QTime(0, 0), QTimeZone::utc());
-    return static_cast<double>(midnight.toSecsSinceEpoch()) + time_->currentData().toInt();
-}
+double QrssScheduleWindow::chosen_slot() const { return chosen_slot_; }
 
 void QrssScheduleWindow::set_chosen_slot(double slot) {
-    const QDateTime t = utc_of(slot);
-    {
-        const QSignalBlocker block(date_);
-        date_->setDate(t.date());
+    chosen_slot_ = slot;
+    clock_utc_->set_time(slot);
+    clock_local_->set_time(slot);
+    const QDateTime local = utc_of(slot).toLocalTime();
+    local_caption_->setText(tr("Local (%1)").arg(local.timeZoneAbbreviation()));
+    const auto readout = [](const QrssClockFace* face) {
+        return QStringLiteral("<b>%1</b><br><small>%2</small>")
+            .arg(face->readout().toHtmlEscaped(), face->date_text().toHtmlEscaped());
+    };
+    utc_readout_->setText(readout(clock_utc_));
+    local_readout_->setText(readout(clock_local_));
+    update_summary();
+}
+
+void QrssScheduleWindow::step_slot(int seconds) {
+    set_chosen_slot(std::max(qs::earliest_slot(scheduler_->now()), chosen_slot_ + seconds));
+}
+
+void QrssScheduleWindow::sync_repeat() {
+    if (every_ == nullptr) return;
+    // The interval can't be shorter than the mode's passes; at that
+    // length the sends go back to back.
+    every_->setMinimum(qrss_tx::minutes_for(mode_->currentData().toString().toStdString()));
+    const bool repeats = times_->value() > 0;
+    for (QWidget* w : {static_cast<QWidget*>(every_label_), static_cast<QWidget*>(every_),
+                       static_cast<QWidget*>(every_unit_)}) {
+        w->setEnabled(repeats);
     }
-    fill_times();
-    time_->setCurrentIndex(std::max(0, time_->findData(t.time().msecsSinceStartOfDay() / 1000)));
     update_summary();
 }
 
 void QrssScheduleWindow::update_summary() {
     if (summary_ == nullptr) return;
-    const qs::Entry e = form_entry(mode_, waveform_, freq_, chosen_slot(), count_, every_);
+    const qs::Entry e =
+        form_entry(mode_, waveform_, freq_, chosen_slot(), times_->value(), every_->value());
     if (waveform_note_ != nullptr) waveform_note_->setText(waveform_note(e.waveform));
     // Only "choose a Send" is said unasked. Whether the form's send can
     // go where it says (too soon, an overlap, an impossible repeat) is
@@ -680,29 +796,36 @@ void QrssScheduleWindow::update_summary() {
     if (selected_send().empty()) {
         add_->setEnabled(false);
         summary_->setText(tr("Choose a Send first."));
+        timeline_->clear_proposal();
         return;
     }
     add_->setEnabled(true);
-    if (!qs::problem(e).empty()) {
-        summary_->clear();
-        return;
+    // On the timeline: a dashed outline for each send the form would
+    // add, and the blinking bug at the first (Jeff, 2026-10-12).
+    {
+        const int passes = qrss_tx::passes_for(e.mode);
+        std::vector<std::pair<double, double>> spans;
+        const bool ok = qs::problem(e).empty();
+        const int shown = !ok ? 1 : e.count == 0 ? 48 : std::min(e.count, 48);
+        for (int k = 0; k < shown; ++k) {
+            const double t = qs::send_slot(e, k);
+            spans.emplace_back(t, t + passes * qrss_tx::PASS_SPACING_S);
+        }
+        timeline_->set_proposal(e.first_slot, std::move(spans));
+        if (!ok) {
+            summary_->clear();
+            return;
+        }
     }
     const int n = qrss_tx::passes_for(e.mode);
-    QStringList times;
-    const int shown = e.count == 0 ? 3 : std::min(e.count, 4);
-    for (int k = 0; k < shown; ++k) times << local_and_utc(qs::send_slot(e, k));
-    QString when = times.join(tr(", "));
-    if (e.count == 0 || e.count > shown) when += tr(", ...");
-    QString total;
+    // When is on the clocks and the timeline; this says what and how much.
+    QString text = QString::fromStdString(qs::describe(e)) + tr(".");
     if (e.count > 0) {
-        total = tr(" In all: %1 %2, %3 on the air.")
+        text += tr(" In all: %1 %2, %3 on the air.")
                     .arg(e.count * n)
                     .arg(pass_word(e.count * n))
                     .arg(duration_text(e.count * n * 30));
     }
-    QString text = tr("%1. %2 at %3.%4")
-                       .arg(QString::fromStdString(qs::describe(e)),
-                            e.count == 1 ? tr("Sends") : tr("Sends start"), when, total);
     if (e.count != 1) {
         text += tr(" Every send has the same picture ID, so receivers add them up.");
     }
@@ -721,7 +844,8 @@ std::string QrssScheduleWindow::add() {
         summary_->setText(tr("Can't add: %1.").arg(QString::fromStdString(why)));
         return why;
     }
-    qs::Entry e = form_entry(mode_, waveform_, freq_, chosen_slot(), count_, every_);
+    qs::Entry e =
+        form_entry(mode_, waveform_, freq_, chosen_slot(), times_->value(), every_->value());
     e.label = s->label;
     e.send_id = s->id;
     // The scheduler checks it, and logs a refusal with its reason.
@@ -765,9 +889,9 @@ void QrssScheduleWindow::form_from(const qs::Entry& e) {
     waveform_->setCurrentIndex(
         std::max(0, waveform_->findData(QString::fromStdString(e.waveform))));
     freq_->setValue(static_cast<int>(std::lround(e.freq_hz)));
-    count_->setValue(e.count);
-    every_->setCurrentIndex(std::max(0, every_->findData(e.every_min)));
-    update_summary();
+    times_->setValue(e.count == 0 ? TIMES_FOREVER : std::min(TIMES_FOREVER - 1, e.count - 1));
+    every_->setValue(e.every_min == 0 ? qrss_tx::minutes_for(e.mode) : e.every_min);
+    sync_repeat();
 }
 
 void QrssScheduleWindow::select_entry(const std::string& entry) {

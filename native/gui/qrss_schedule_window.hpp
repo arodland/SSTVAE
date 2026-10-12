@@ -37,7 +37,6 @@
 #include "qrss_schedule.hpp"
 
 class QComboBox;
-class QDateEdit;
 class QGroupBox;
 class QLabel;
 class QListWidget;
@@ -52,6 +51,9 @@ namespace sstvae::gui {
 class QrssScheduler;
 class QrssSends;
 class QrssTimeline;
+
+class QrssClockFace;
+class SendPicture;
 
 class QrssScheduleWindow : public QWidget {
     Q_OBJECT
@@ -130,7 +132,10 @@ private:
     QWidget* build_sends(QWidget* parent);
     QWidget* build_form(QWidget* parent);
     void update_summary();
-    void fill_times();
+    // The clocks moved the first send by `seconds`, kept no earlier
+    // than the earliest a send can be added now.
+    void step_slot(int seconds);
+    void sync_repeat();
     // Empty when added, else why not (shown in the summary and logged).
     std::string add();
     void refresh_sends();
@@ -161,17 +166,27 @@ private:
     QPushButton* edit_send_ = nullptr;
     QPushButton* delete_send_ = nullptr;
 
+    // The Send's choices on the left, At Time (the clocks) on the right,
+    // Add under the right, level with the bottom of the left (Jeff,
+    // 2026-10-12, from the mockup).
     QGroupBox* form_box_ = nullptr;
-    QLabel* thumb_ = nullptr;
+    QGroupBox* at_box_ = nullptr;
     QLabel* send_name_ = nullptr;
+    SendPicture* picture_ = nullptr;
     QComboBox* mode_ = nullptr;
     QSpinBox* freq_ = nullptr;
     QComboBox* waveform_ = nullptr;
     QLabel* waveform_note_ = nullptr;
-    QDateEdit* date_ = nullptr;
-    QComboBox* time_ = nullptr;
-    QSpinBox* count_ = nullptr;
-    QComboBox* every_ = nullptr;
+    QSpinBox* times_ = nullptr;     // repeats after the first send: 0 = once
+    QLabel* every_label_ = nullptr;
+    QSpinBox* every_ = nullptr;     // minutes; at the mode's own length, back to back
+    QLabel* every_unit_ = nullptr;
+    QrssClockFace* clock_utc_ = nullptr;
+    QrssClockFace* clock_local_ = nullptr;
+    QLabel* utc_readout_ = nullptr;
+    QLabel* local_caption_ = nullptr;
+    QLabel* local_readout_ = nullptr;
+    double chosen_slot_ = 0.0;
     QLabel* summary_ = nullptr;
     QPushButton* add_ = nullptr;
     QTimer* clock_timer_ = nullptr;

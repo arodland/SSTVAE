@@ -26,6 +26,7 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QTreeWidget>
+#include <QWheelEvent>
 
 #include <cstdint>
 #include <filesystem>
@@ -43,6 +44,7 @@
 #include "qrss_schedule.hpp"
 #include "overlay/model.hpp"
 #include "overlay_editor.hpp"
+#include "qrss_clock.hpp"
 #include "qrss_editor.hpp"
 #include "qrss_schedule_window.hpp"
 #include "qrss_sends.hpp"
@@ -579,11 +581,16 @@ void test_the_window(const std::filesystem::path& dir) {
     auto* form = w.findChild<QGroupBox*>(QStringLiteral("schedule_form"));
     auto* mode = w.findChild<QComboBox*>(QStringLiteral("schedule_mode"));
     auto* freq = w.findChild<QSpinBox*>(QStringLiteral("schedule_freq"));
-    auto* count = w.findChild<QSpinBox*>(QStringLiteral("schedule_count"));
-    auto* every = w.findChild<QComboBox*>(QStringLiteral("schedule_every"));
+    auto* times = w.findChild<QSpinBox*>(QStringLiteral("schedule_times"));
+    auto* every = w.findChild<QSpinBox*>(QStringLiteral("schedule_every"));
+    auto* at_time = w.findChild<QGroupBox*>(QStringLiteral("schedule_at_time"));
+    auto* utc = w.findChild<QrssClockFace*>(QStringLiteral("at_time_utc"));
+    auto* local = w.findChild<QrssClockFace*>(QStringLiteral("at_time_local"));
+    auto* shift = w.findChild<ShiftKeyCap*>(QStringLiteral("at_time_shift"));
     auto* summary = w.findChild<QLabel*>(QStringLiteral("schedule_summary"));
     auto* add = w.findChild<QPushButton*>(QStringLiteral("schedule_add"));
-    const bool all = list && form && mode && freq && count && every && summary && add;
+    const bool all = list && form && mode && freq && times && every && summary && add &&
+                     at_time && utc && local && shift;
     check::is_true(all, "window: every control is there");
     if (!all) return;
     check::is_true(w.findChild<QListWidget*>(QStringLiteral("schedule_coming")) == nullptr &&
@@ -601,9 +608,58 @@ void test_the_window(const std::filesystem::path& dir) {
                    "window: mode and carrier start as the Transmit pane has them");
     check::is_true(w.chosen_slot() == qs::earliest_slot(fake.now),
                    "window: the first send starts at the earliest quarter hour");
-    check::is_true(summary->text().contains(QStringLiteral("2 x CE mode B, back to back")) &&
-                       add->isEnabled(),
-                   "window: the default is two sends back to back");
+    check::is_true(summary->text().contains(QStringLiteral("CE mode B, once")) &&
+                       add->isEnabled() && times->value() == 0,
+                   "window: the default is one send, no repeats");
+    check::is_true(!every->isEnabled() && every->value() == 60 && every->minimum() == 60,
+                   "window: the interval waits, greyed, at mode B's own hour");
+    {
+        // At Time: both clocks show the first send; the wheel moves it a
+        // quarter hour a notch, an hour with Shift, never before the
+        // earliest it could go.
+        const double first = w.chosen_slot();
+        check::is_true(utc->time() == first && local->time() == first,
+                       "clocks: both show the first send");
+        auto wheel = [](QWidget* target, int notches, Qt::KeyboardModifiers mods) {
+            const QPointF at(target->width() / 2.0, target->height() / 2.0);
+            QWheelEvent ev(at, target->mapToGlobal(at), QPoint(), QPoint(0, 120 * notches),
+                           Qt::NoButton, mods, Qt::NoScrollPhase, false);
+            QApplication::sendEvent(target, &ev);
+        };
+        wheel(utc, 1, Qt::NoModifier);
+        check::equal(w.chosen_slot(), first + 900.0, "clocks: a notch is 15 minutes");
+        wheel(local, 2, Qt::ShiftModifier);
+        check::equal(w.chosen_slot(), first + 900.0 + 2 * 3600.0,
+                     "clocks: with Shift, an hour a notch, on either clock");
+        check::is_true(utc->time() == w.chosen_slot() && local->time() == w.chosen_slot(),
+                       "clocks: and both follow");
+        check::is_true(shift->down(), "clocks: Shift on the wheel turns the key cap red");
+        wheel(utc, -1, Qt::NoModifier);
+        check::is_true(!shift->down(), "clocks: and back when it is let go");
+        wheel(utc, -20, Qt::NoModifier);
+        check::equal(w.chosen_slot(), qs::earliest_slot(fake.now),
+                     "clocks: never before the earliest a send can start");
+        auto* t = w.findChild<QrssTimeline*>();
+        check::is_true(t && t->has_proposal() && t->proposal_at() == w.chosen_slot() &&
+                           t->proposal_spans().size() == 1 &&
+                           t->proposal_spans()[0].second - t->proposal_spans()[0].first ==
+                               2 * 1800.0,
+                       "timeline: the bug and an outline where the form would add");
+        times->setValue(2);
+        check::is_true(every->isEnabled() && t && t->proposal_spans().size() == 3 &&
+                           t->proposal_spans()[1].first == w.chosen_slot() + 3600.0,
+                       "repeat: two more wakes the interval; three outlines back to back");
+        every->setValue(120);
+        check::is_true(t && t->proposal_spans()[2].first == w.chosen_slot() + 2 * 7200.0 &&
+                           summary->text().contains(QStringLiteral("CE mode B every 2 hours")),
+                       "repeat: every two hours, outlined so");
+        mode->setCurrentIndex(mode->findData(QStringLiteral("C")));
+        check::is_true(every->minimum() == 90 && every->value() == 120,
+                       "repeat: the interval's floor follows the mode");
+        mode->setCurrentIndex(mode->findData(QStringLiteral("B")));
+        times->setValue(0);
+        every->setValue(every->minimum());
+    }
     // The waveform: CE unless chosen, L saying what it needs.
     auto* waveform = w.findChild<QComboBox*>(QStringLiteral("schedule_waveform"));
     auto* note = w.findChild<QLabel*>(QStringLiteral("schedule_waveform_note"));
@@ -618,11 +674,11 @@ void test_the_window(const std::filesystem::path& dir) {
         waveform->setCurrentIndex(waveform->findData(QStringLiteral("CE")));
     }
     mode->setCurrentIndex(mode->findData(QStringLiteral("A")));
-    count->setValue(0);
-    every->setCurrentIndex(every->findData(120));
+    times->setValue(times->maximum());
+    every->setValue(120);
     check::is_true(summary->text().contains(QStringLiteral("(alternating hours), until removed")),
                    "window: every other hour, until removed");
-    every->setCurrentIndex(every->findData(0));
+    every->setValue(every->minimum());
     check::is_true(add->isEnabled() && !summary->text().contains(QStringLiteral("Can't")),
                    "window: back to back endless is not complained of unasked");
     add->click();
@@ -632,7 +688,7 @@ void test_the_window(const std::filesystem::path& dir) {
 
     // A slot clicked on the timeline is where the form starts.
     w.set_chosen_slot(Q);
-    count->setValue(2);
+    times->setValue(1);
     add->click();
     QApplication::processEvents();
     check::is_true(s->entries().size() == 1 && s->entries()[0].mode == "A" &&
@@ -794,7 +850,7 @@ void test_the_window(const std::filesystem::path& dir) {
     w.select_send(red);
     w.set_chosen_slot(Q + 12 * H);
     mode->setCurrentIndex(mode->findData(QStringLiteral("A")));
-    count->setValue(1);
+    times->setValue(0);
     add->click();
     QApplication::processEvents();
     check::equal(s->entries().size(), std::size_t{2}, "window: a second entry, one A");
@@ -830,7 +886,7 @@ void test_the_window(const std::filesystem::path& dir) {
                                    QByteArray::fromStdString(blue),
                        "drop: a Send drags as its id");
         mode->setCurrentIndex(mode->findData(QStringLiteral("A")));
-        count->setValue(1);
+        times->setValue(0);
         const QPoint at(t->x_of(Q + 20 * H) + QrssTimeline::CELL_W / 2, t->height() / 2);
         if (mime) {
             QDragEnterEvent enter(at, Qt::CopyAction, mime.get(), Qt::LeftButton, Qt::NoModifier);
