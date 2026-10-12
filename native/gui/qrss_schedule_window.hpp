@@ -131,7 +131,8 @@ private:
     QWidget* build_form(QWidget* parent);
     void update_summary();
     void fill_times();
-    void add();
+    // Empty when added, else why not (shown in the summary and logged).
+    std::string add();
     void refresh_sends();
     void refresh_timeline();
     void on_send_selected();

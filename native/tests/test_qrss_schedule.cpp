@@ -623,8 +623,12 @@ void test_the_window(const std::filesystem::path& dir) {
     check::is_true(summary->text().contains(QStringLiteral("(alternating hours), until removed")),
                    "window: every other hour, until removed");
     every->setCurrentIndex(every->findData(0));
-    check::is_true(!add->isEnabled() && summary->text().startsWith(QStringLiteral("Can't add")),
-                   "window: back to back endless is refused, and says why");
+    check::is_true(add->isEnabled() && !summary->text().contains(QStringLiteral("Can't")),
+                   "window: back to back endless is not complained of unasked");
+    add->click();
+    QApplication::processEvents();
+    check::is_true(s->entries().empty() && summary->text().startsWith(QStringLiteral("Can't add")),
+                   "window: but refused on Add, saying why");
 
     // A slot clicked on the timeline is where the form starts.
     w.set_chosen_slot(Q);
@@ -637,6 +641,22 @@ void test_the_window(const std::filesystem::path& dir) {
                        s->entries()[0].first_slot == Q,
                    "window: Add schedules the chosen Send as the form says");
     if (s->entries().size() != 1) return;
+    check::equal(w.chosen_slot(), Q + 2 * 1800.0,
+                 "window: and the form moves on past the sends just added");
+    {
+        // Back on the taken slot: nothing said until Add is clicked.
+        w.set_chosen_slot(Q);
+        check::is_true(add->isEnabled() && !summary->text().contains(QStringLiteral("Can't")),
+                       "window: a taken slot is not complained of unasked");
+        fake.log.clear();
+        add->click();
+        QApplication::processEvents();
+        check::is_true(s->entries().size() == 1 &&
+                           summary->text().contains(QStringLiteral("would overlap")) &&
+                           logged(fake, "refused to add"),
+                       "window: Add there is refused, says why, and logs it");
+        w.set_chosen_slot(Q + 2 * 1800.0);
+    }
     const std::string id = s->entries()[0].id;
     {
         // What the app finds after a restart: the schedule, its Send and

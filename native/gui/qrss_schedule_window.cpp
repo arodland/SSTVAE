@@ -418,7 +418,7 @@ QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
     form->addRow(summary_);
     add_ = new QPushButton(tr("&Add to schedule"), form_box_);
     add_->setObjectName(QStringLiteral("schedule_add"));
-    connect(add_, &QPushButton::clicked, this, &QrssScheduleWindow::add);
+    connect(add_, &QPushButton::clicked, this, [this] { add(); });
     form->addRow(style::row(form_box_, {add_}));
     column->addWidget(form_box_);
 
@@ -606,28 +606,19 @@ void QrssScheduleWindow::set_chosen_slot(double slot) {
 void QrssScheduleWindow::update_summary() {
     if (summary_ == nullptr) return;
     const qs::Entry e = form_entry(mode_, waveform_, freq_, chosen_slot(), count_, every_);
-    const double now = scheduler_->now();
     if (waveform_note_ != nullptr) waveform_note_->setText(waveform_note(e.waveform));
-    QString why;
-    if (selected_send().empty()) why = tr("choose a Send first.");
-    if (why.isEmpty()) why = QString::fromStdString(qs::problem(e));
-    if (why.isEmpty() && e.first_slot < qs::earliest_slot(now)) {
-        why = tr("that is too soon: the earliest a send added now can start is %1.")
-                  .arg(local_and_utc(qs::earliest_slot(now)));
+    // Only "choose a Send" is said unasked. Whether the form's send can
+    // go where it says (too soon, an overlap, an impossible repeat) is
+    // said when Add is clicked: shown live, it appeared unprovoked
+    // whenever a click on the timeline filled the form (Jeff, 2026-10-12).
+    if (selected_send().empty()) {
+        add_->setEnabled(false);
+        summary_->setText(tr("Choose a Send first."));
+        return;
     }
-    if (why.isEmpty()) {
-        if (const auto c = qs::clash(e, scheduler_->entries(), now)) {
-            why = tr("the %1 send would overlap the %2 send of \"%3\": the transmitter sends "
-                     "one thing at a time. A send can follow another straight on, the half hour "
-                     "after its last pass.")
-                      .arg(QString::fromStdString(qs::when(c->slot, now)),
-                           QString::fromStdString(qs::when(c->other_slot, now)),
-                           QString::fromStdString(c->other));
-        }
-    }
-    add_->setEnabled(why.isEmpty());
-    if (!why.isEmpty()) {
-        summary_->setText(tr("Can't add yet: %1").arg(why));
+    add_->setEnabled(true);
+    if (!qs::problem(e).empty()) {
+        summary_->clear();
         return;
     }
     const int n = qrss_tx::passes_for(e.mode);
@@ -652,30 +643,38 @@ void QrssScheduleWindow::update_summary() {
     summary_->setText(text.left(1).toUpper() + text.mid(1));
 }
 
-void QrssScheduleWindow::add() {
+std::string QrssScheduleWindow::add() {
     const std::string id = selected_send();
     const QrssSend* s = sends_->find(id);
-    if (s == nullptr) return;
+    if (s == nullptr) return "choose a Send first";
     images::Picture picture;
     try {
         picture = images::load(s->picture.string());
     } catch (const std::exception& ex) {
-        summary_->setText(tr("Can't add: the Send's picture would not load (%1).")
-                              .arg(QString::fromUtf8(ex.what())));
-        return;
+        const std::string why = std::string("the Send's picture would not load (") + ex.what() + ")";
+        summary_->setText(tr("Can't add: %1.").arg(QString::fromStdString(why)));
+        return why;
     }
     qs::Entry e = form_entry(mode_, waveform_, freq_, chosen_slot(), count_, every_);
     e.label = s->label;
     e.send_id = s->id;
+    // The scheduler checks it, and logs a refusal with its reason.
     const std::string why = scheduler_->add(e, picture);
     if (!why.empty()) {
-        summary_->setText(tr("Can't add: %1").arg(QString::fromStdString(why)));
-        return;
+        summary_->setText(tr("Can't add: %1.").arg(QString::fromStdString(why)));
+        return why;
+    }
+    // The form moves on to the quarter hour after the send just added,
+    // so it does not sit on a slot that is now taken.
+    if (e.count > 0) {
+        set_chosen_slot(qs::send_slot(e, e.count - 1) +
+                        qrss_tx::passes_for(e.mode) * qrss_tx::PASS_SPACING_S);
     }
     summary_->setText(tr("Added \"%1\": %2.")
                           .arg(QString::fromStdString(s->label),
                                QString::fromStdString(qs::describe(e))));
     add_->setEnabled(false);
+    return {};
 }
 
 std::string QrssScheduleWindow::drop_send(const std::string& send_id, double slot) {
@@ -685,20 +684,9 @@ std::string QrssScheduleWindow::drop_send(const std::string& send_id, double slo
     // (no overlap, frequency changes kept clear) still holds.
     select_send(send_id);
     set_chosen_slot(slot);
-    if (!add_->isEnabled()) {
-        message_->setText(summary_->text());
-        QString why = summary_->text();
-        why.remove(QStringLiteral("Can't add yet: "));
-        const QrssSend* sent = sends_->find(send_id);
-        scheduler_->refused(why.toStdString(),
-                            tr("to add \"%1\" at %2")
-                                .arg(QString::fromStdString(sent ? sent->label : send_id),
-                                     QString::fromStdString(qs::when(slot, scheduler_->now()))));
-        return summary_->text().toStdString();
-    }
-    add();
+    const std::string why = add();
     message_->setText(summary_->text());
-    return {};
+    return why;
 }
 
 // --- what is scheduled ----------------------------------------------------
