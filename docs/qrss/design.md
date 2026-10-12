@@ -1,6 +1,6 @@
 # QRSSTVAE build design: waveform CE, single-pass receiver, multi-pass combining
 
-**QRSSTVAE in one paragraph.** [SSTVAE](https://github.com/arodland/SSTVAE) sends a picture over HF radio as about 50,000 analog numbers (latents) made by a neural encoder; a neural decoder rebuilds the picture and degrades gently with noise. QRSSTVAE is a slow, narrow variant in the spirit of QRSS beacons. One group of 50,600 latents is sent as a single carrier about 50 Hz wide over a ~30-minute slot that starts on the quarter hour. The same picture is repeated over hours or days, and the receiver averages every pass it hears into one accumulator per (callsign, picture ID). That lets a picture build up from signals far below the noise, around −26 dB SNR in 2500 Hz after 16 passes. Waveform CE, built here, is a constant-amplitude carrier whose phase carries the latents. It is meant for Si5351 clock-chip beacons that can only set frequency and phase. A later waveform L does the same with a linear signal for SSB rigs.
+**QRSSTVAE in one paragraph.** [SSTVAE](https://github.com/arodland/SSTVAE) sends a picture over HF radio as about 50,000 analog numbers (latents) made by a neural encoder; a neural decoder rebuilds the picture and degrades gently with noise. QRSSTVAE is a slow, narrow variant in the spirit of QRSS beacons. One group of 50,600 latents is sent as a single carrier about 50 Hz wide over a ~30-minute slot that starts on the quarter hour. The same picture is repeated over hours or days, and the receiver averages every pass it hears into one accumulator per (callsign, picture ID). That lets a picture build up from signals far below the noise, around −26 dB SNR in 2500 Hz after 16 passes. Waveform CE, built here, is a constant-amplitude carrier whose phase carries the latents. It is meant for Si5351 clock-chip beacons that can only set frequency and phase. Waveform L does the same with a linear signal for SSB rigs: two latents per complex symbol below a pilot tone, about 22 Hz wide ([waveform-l.md](waveform-l.md)). Its receiver, and the receiver that hears both at once, are §6.10.
 
 This document is the build design for spec **rev 9** (`/mnt/project-files/qrss-spec/qrsstvae-options.md`), covering build steps 2 and 4 (spec §14) plus a portable C reference of the beacon's phase generator. It merges two earlier designs: A, "faithful and minimal", and B, "robust receiver first". Appendix A records what came from each and the errors found in both.
 
@@ -20,9 +20,10 @@ Notation used throughout:
 **In scope:**
 - spec §14 step 2: CE transmitter with scrambler, precoder, header, picture ID and callsign windows; a beacon file for Si5351 boards; a channel simulator with the consumer impairments; the single-pass coherent receiver; the comparison of per-block and joint estimation;
 - step 4: accumulator, association, leave-one-out EM, template search;
-- a C reference of the beacon's phase and Si5351-step generator.
+- a C reference of the beacon's phase and Si5351-step generator;
+- waveform L in the receiver and the live listener (2026-10-12, §6.10): L's acquisition, tracker, gate V, demodulator and callsign windows, and one receiver that listens for both waveforms by default. L's on-air definition is `lframe.py` and `lwave.py`, with the spec's rev 13 and [waveform-l.md](waveform-l.md).
 
-**Out of scope:** waveform L (seams are listed in §13), the GUI, model retraining, and anything that needs hardware.
+**Out of scope:** EM, the template search and retroactive detection for waveform L (§8.3, §13), the GUI, model retraining, and anything that needs hardware.
 
 **Slot length.** Rev 9 §2.7 adds four callsign windows per pass, so a CE frame is 58,810 positions = **1782.678125 s**, not the 1736 s of the earlier brief. This design follows rev 9. Each window delays what follows it and changes nothing else.
 
@@ -90,6 +91,8 @@ Tests are owned by the work package they belong to:
 | 8 | `tests/test_qrss_c_ref.py` |
 | 9 | `tests/test_qrss_{em,cli,acceptance}.py` |
 
+**Waveform L** came after the work packages and has no WP: `lframe.py` F and `lwave.py` F (its frame and signal, both in F6's frozen list), `ltrack.py` and `ldemod.py` (its tracker and demodulator, §6.10), and L branches in `acquire`, `cwid`, `receiver`, `em`, `store`, `associate`, `live` and the CLIs. Its tests are `tests/test_qrss_{lunits,lchannel,lacquire,ltrack,ldemod,lreceiver,live_l}.py` (§10.9).
+
 `pyproject.toml` is edited only if WP7 ends up shipping `qrss/latent_means.npy` (§8.2), in which case WP7 adds `"sstvae.qrss" = ["*.npy"]` to package data.
 
 **Calibrated receiver constants** live in the module that uses them, so no work package edits another's file:
@@ -120,7 +123,7 @@ N_HDR_BITS, N_INFO_BITS, POLAR_N = 2474, 142, 2048
 FORMAT_VERSION = 2                           # 1 had no spread header (tests only); 2.6.1
 FORMAT_VERSIONS = (1, 2)                     # what a header may say
 SPREAD_RHO = 0.054                           # spread-header power, latent units (2.6.1)
-WAVEFORM_CE, WAVEFORM_L = 0, 1               # L reserved
+WAVEFORM_CE, WAVEFORM_L = 0, 1               # CE: frame.py, ce.py; L: lframe.py, lwave.py
 LEAD_IN_MAX_S = 10
 CW_WINDOW = 384                              # CE symbols per callsign window (11.64 s)
 CW_UNIT = 2                                  # CE symbols per Morse unit (60.625 ms)
@@ -209,7 +212,7 @@ def quarter_hour_count(utc: datetime) -> int   # aware datetime exactly on a qua
 - Domain strings are ASCII with no terminator.
 - The scrambler index is the data-latent index in air order. FULL uses 198 hash blocks.
 - The preamble, the references and the header are never scrambled or precoded.
-- `b"QRSSTVAE L preamble"` and `b"QRSSTVAE L reference"` are reserved for waveform L (bit pairs as QPSK).
+- `b"QRSSTVAE L preamble"` and `b"QRSSTVAE L reference"` are waveform L's (bit pairs as QPSK: 330 preamble symbols, and reference m takes bits 2m and 2m+1).
 
 ### 2.4 Pulse and signal (`ce.py`)
 
@@ -341,7 +344,7 @@ sha256(np.array(INFO_SET, ">u2").tobytes()) = 4e064eee9b1df68ee4d044970b51f05a16
   2. Run SCL with L = 8, f = min-sum, exact g and the LLR path metric, vectorized over the list. Target: under 0.5 s per decode in numpy.
   3. Accept the most likely path that passes the CRC **and** has version = 2, reserved = 0, mode ≤ 2, segment ≤ mode, and a callsign made only of `[A-Z0-9/ ]`. Version 1 is accepted only by the block-alone fallback of 2.6.1 and on a `-v1` frame.
   4. Otherwise return None and keep the LLRs.
-- **LLRs.** llr = log P(b=0)/P(b=1), so a positive value means symbol +1. Coded bit e rides header non-reference symbol e as +1 for 0 and −1 for 1. For waveform L later, bit e goes to L symbol ⌊e/2⌋, on I for even e and Q for odd, so LLR indices are shared across waveforms.
+- **LLRs.** llr = log P(b=0)/P(b=1), so a positive value means symbol +1. Coded bit e rides header non-reference symbol e as +1 for 0 and −1 for 1. For waveform L, bit e goes to L symbol ⌊e/2⌋, on I for even e and Q for odd, so LLR indices are shared across waveforms (§6.10).
 
 ```python
 @dataclass(frozen=True)
@@ -372,7 +375,8 @@ Every CE frame with a header block also carries the header on its data symbols, 
 
 - **Round A** decodes the header from the block's LLRs plus the spread copy's (`demod.spread_llr`, folded over the repeats), then from the spread copy alone, then from the block alone accepting either version. A version 1 header switches the pass to `frame.plain(spec)` (`receiver.decode_header`).
 - **Round B** removes the known phase exactly (`track.remove_spread`), so the latents lose nothing once the header is known.
-- Design, costs and Andrew's measurements: [spread-header.md](spread-header.md). Waveform L has no spread copy until it is built.
+- Design, costs and Andrew's measurements: [spread-header.md](spread-header.md).
+- Waveform L carries the same copy linearly: its data latents are sent as (x + √ρ·h)/√(1+ρ), two per symbol (`lframe.data_latents`). A linear signal cannot be de-spread on the channel, so L's receiver subtracts the copy in the demodulator once the header is known (§6.10).
 
 ### 2.7 Callsign windows (`morse.py`, `ce.py`)
 
@@ -784,14 +788,16 @@ def receive_slot(cap: Capture, spec=FULL, live_only=False) -> list[PassResult]  
 def receive_wav(path, q: int, start_unix: float | None = None, spec=FULL) -> list[PassResult]
 ```
 
-If `start_unix` is None, the WAV is assumed to start at t0 − 12 s, as `qrss_transmit` writes it.
+If `start_unix` is None, the WAV is assumed to start at t0 − 12 s, as `qrss_transmit` writes it. `spec` may also be a tuple of frames, at most one per waveform. One that holds an L frame is the joint receiver of §6.10; CE alone, as a frame or a tuple of one, is the receiver described here, call for call.
 
-`qrss_receive.py WAV|NPZ --slot 2026-10-09T06:00Z [--start ISO] [--frame ...] [--store DIR] [--no-store] [--passband DIR] [--no-passband] [--estimator joint|plain] [--image OUT.png] [--model DIR] [--precision]` keeps the slot's FE stream in the passband store (default STORE/passband) and prints, per pass:
+`qrss_receive.py WAV|NPZ --slot 2026-10-09T06:00Z [--start ISO] [--frame ...] [--just-ce | --just-l] [--store DIR] [--no-store] [--passband DIR] [--no-passband] [--estimator joint|plain] [--image OUT.png] [--model DIR] [--precision]` keeps the slot's FE stream in the passband store (default STORE/passband) and prints, per pass:
 - frequency at t0 (the report's `offset_hz`, absolute audio Hz), drift, wander, Doppler and ppm;
 - Z_ref and SNR₂₅₀₀;
 - the header, and the callsign-window text with its match;
 - mean W in dB;
 - the association result.
+
+With neither `--just-ce` nor `--just-l` it listens for both waveforms, and each pass line names its waveform and frame (an L pass's frequency is its pilot's). `--frame` takes either waveform's name ("short" or "l-short") and the other waveform listens for the same shape (`lframe.twin`). An .npz's own frame fixes its waveform, so a flag that excludes it is refused.
 
 ### 6.9 Shared types (`types.py`, WP1)
 
@@ -799,8 +805,10 @@ If `start_unix` is None, the WAV is assumed to start at t0 − 12 s, as `qrss_tr
 @dataclass class Timing: tau0: float; ppm: float; gamma: float; z: float; cov: ndarray
 @dataclass class FreqPath: t_s: ndarray; f_hz: ndarray; weight: ndarray
 @dataclass class CarrierCandidate: f_hz: float; drift_hz_per_min: float; metric: float
+                                   waveform: int | None = None    # a hint's waveform; None: an A1 line (any)
 @dataclass class Detection: f_hz: float; path: FreqPath; timing: Timing | None; z_ref: float
-                            method: str; lead_in_s: float          # method: "preamble" | "tbd" | "template"
+                            method: str; lead_in_s: float          # method: "preamble" | "hint" | "tbd" | "template"
+                            waveform: int = WAVEFORM_CE            # the frame this candidate is gated with
 @dataclass class TrackReport: offset_hz: float; drift_hz_per_min: float; wander_hz_rms: float
                               doppler_hz: float; ppm: float; snr2500_db: float; z_ref: float
                               kappa: float; slip_free: bool; suspect: bool
@@ -809,7 +817,7 @@ If `start_unix` is None, the WAV is assumed to start at t0 − 12 s, as `qrss_tr
 @dataclass
 class PassResult:
     uid: str                      # f"{q}_{round(f_hz*1000)}_{sha8 of z bytes}"
-    q: int; frame: str; waveform: int                 # waveform 0 = CE
+    q: int; frame: str; waveform: int                 # 0 = CE; 1 = L, frame "l-...", f_hz its pilot
     f_hz: float; timing: Timing; report: TrackReport
     z: float32[n_data]; w: float32[n_data]            # air order, unscrambled, unprecoded
     hdr_llr: float32[2474]; header: HeaderFields | None; cw: CwIdResult | None
@@ -818,7 +826,124 @@ class PassResult:
     def save(self, path) ; @classmethod def load(cls, path)   # .npz plus a JSON metadata entry
 ```
 
+An L pass fills the same fields: waveform 1, its frame's name ("l-full" and so on), f_hz and the report's offset at the pilot, z and w in air order as for CE (two latents per L symbol), hdr_llr in coded-bit order, and psi over the L frame's n_pos. The store, association and `render` read either waveform's passes unchanged, so CE and L passes of one segment add.
+
 A FULL pass at 250 Hz keeps about 3.6 MB of capture for EM. **This does not replace spec §7's 48 h passband store, which is also built** (spec owner, 2026-10-09): `frontend.PassbandStore` (WP5) keeps the whole 4 kHz complex FE stream as int16 I/Q in hourly files on disk (about 1.4 GB/day), with `write(t0, x)`, `read(t_start, t_end) -> complex64`, expiry after 48 h, and survives restarts. `em.template_search` (WP9) reads past slots from it to find passes too weak to detect when they arrived (retroactive detection). Wiring (integration review, 2026-10-09): `qrss_receive.py` writes every slot's raw FE stream with `PassbandStore.write_capture`, `PassbandStore.capture(q, dur)` reads a slot back as a `Capture`, `template_search`/`receive_template` take the store with `q=`, and `em.retro_detect(store, key, pb, spec)` searches every stored slot without a member of the picture, receives and associates what it finds; `qrss_decode.py --retro` runs it.
+
+### 6.10 Waveform L (`acquire`, `ltrack.py`, `ldemod.py`, `cwid`, `receiver`, `live`; 2026-10-12)
+
+L's frame and signal are `lframe.py` and `lwave.py` (format modules). What the receiver takes from them:
+- T_L = 2T = 0.060625 s (16.495 Bd). Positions count the frame's own symbols (`spec.t_sym`), and every duration comes from the frame: L_FULL keys up to 1782.648 s after t0 (`keyed_end_pos·t_sym`), FULL to 1782.663 s.
+- One complex symbol carries two latents, √2·Re on latent 2k and √2·Im on 2k+1 (`lframe.unpair`). The preamble is 330 QPSK symbols. The header block is 1,320 symbols, 1,237 of which carry the 2,474 coded bits two at a time (there is no spare). L_FULL has 1,770 references against FULL's 3,539.
+- The data occupy 3.10 to 22.07 Hz below a pilot tone. The pilot sits f_p = 12207/970 = 12.5845 Hz above the data centre (the band edge, 920/97 = 9.4845 Hz, plus 3.1 Hz), and f_p·T_L = 12207/16000 turn exactly. An L signal is named by its pilot's frequency f.
+- A callsign window is 192 L symbols, one Morse unit each (60.625 ms, as in CE). L keys by FSK only.
+
+**Selection.** `receiver.frames(spec)` lists the frames a selection names, CE's first, at most one per waveform, and `is_joint(spec)` says whether one is L. A selection of CE alone, a frame or a tuple of one, is the CE receiver of §6.1 to §6.9 call for call (D37). One holding an L frame is the joint receiver: every candidate carries its waveform and is gated, tracked and demodulated with that waveform's frame. `receive_pass` dispatches on the frame's waveform and raises `ValueError` for a detection of the other one.
+
+**Joint acquisition** (`acquire.acquire` with a tuple of frames; one frame keeps exactly the path of §6.3).
+1. A1 once, unchanged: up to 16 lines at least 10 Hz apart.
+2. At each line one channelisation and notch (`_a2_input`) feeds the A2 of every enabled waveform. A2 takes a `PreambleKind`:
+   - `CE_PRE`: the real ±1 preamble at T in 66-symbol chunks, phase offset −π/2;
+   - `L_PRE`: L's QPSK preamble at T_L in 33-symbol chunks, so both have ten 2 s chunks. The notched channel is mixed up by f_p from nominal t0 before L's matched filter, which puts the data centre at 0 Hz and what the notch leaves of the pilot at +12.58 Hz, outside the filter's ±9.48 Hz.
+   - The chunk templates are complex and zero-mean, W = b*·e^{−j2πδf·t} normalised by Σ|b|², and Λ is Gamma(10, 1) on noise as before. Zero-mean costs L about 0.15 dB.
+   - L's phase is the pilot's at t0: arg ΣS·exp(−j2π[(δf + f_p)·τ0 − ½·rate·τ0²]).
+3. **Pilot hypotheses** (`pilot_lines`). During the preamble the pilot carries 10.5% of the power and the data band's spectral lumps sit 10 to 20 Hz below it, so a lump can take A1's line and, by the 10 Hz separation, hide the pilot. For each line f, A1's best (bin, drift) cell in (f + 3.1, f + 22.1] Hz becomes one more line for A2-L, whether or not it clears A1's threshold. One within 0.5 Hz of a line or an earlier hypothesis is dropped.
+4. **Hints** are frequencies or (frequency, waveform) pairs (D40). A bare frequency is searched in every enabled waveform. An L hint whose own A1 cell does not clear A1's threshold gets A2-L at f and f ± 1 Hz (`L_HINT_OFFSETS_HZ`), the best of the three kept, since A2's δf reaches only ±0.5 Hz.
+5. **Arbitration**, of the passed hits:
+   - per waveform, `drop_symbol_rate_aliases` at that waveform's own T: a hit at f ± k/T (k = 1, 2, within 0.5 Hz), within T/2 of a stronger hit's timing and with a 2 s Λ 3× smaller, is that hit;
+   - for L, `drop_band_owned`: an L hit whose pilot lies 3.1 to 22.1 Hz below a stronger L hit's, within 3 T_L of its timing, is in that signal's data band and is that signal. It is there for the −1/T_L alias 16.5 Hz below the pilot, which passes A2-L in 3 of 12 SHORT preambles at −12 dB and in 12 of 12 at −6 and 0 dB. Its timing peak is broad (measured −1.9 to +0.8 T_L off), hence 3 T_L;
+   - across waveforms, `merge_hits`: hits within 5 Hz and T_L/2 of each other are one signal, kept in the waveform with the smaller p;
+   - each survivor's lead-in is measured at its own T.
+6. **A3** runs once, over the longest enabled frame, and each hit carries its spectral shape. With E the CFAR-normalised power − 1 (§6.3) and b the path's bin in each frame, over the frames that overlap no callsign window of any enabled frame and start after keying:
+   - S_below = Σ E over the bins 3.10 to 22.07 Hz below b (76 bins of 0.25 Hz), S_above over the mirror band above;
+   - z1 = (S_below − S_above)/(sd·√2) and z_above = S_above/sd, with sd one band sum's noise sd, allowing for the frames' half overlap. Both are N(0, 1) on noise;
+   - **L** when z1 > 4 and z_above ≤ 3 (`SHAPE_L_Z`); **CE** when z_above > 3 and |z1| < 3; otherwise ambiguous, gated as both.
+   
+   A weak L signal's Viterbi path can run in its data band rather than on the pilot (L_FULL at −28 dB: 6 Hz below it). With L enabled each hit is also re-anchored (`l_pilot_bins`): a Viterbi from −6 to +26 Hz about the path's line, on an emission of the bin plus the one-sided band below it, which peaks at the pilot. The verdict takes either shape's waveform where the other says nothing, and is ambiguous where they disagree (`_shape_verdict`). The anchored path only places the pilot; A3's statistic and its Gumbel are the pilot-only Z of §6.3.
+7. **Order** (`Acquisition.detections`): preamble hits of every enabled waveform by Λ; hints A2 did not pass, in their waveform; A3 hits in the waveform their shape says, an ambiguous one as CE; then an L copy of each ambiguous hit, and last the hits whose shape names a waveform that is not enabled, gated as the one that is. An A3 detection within 10 Hz of an earlier A3 one of the same waveform is left out.
+
+**Tracker** (`ltrack.track_l`). The channel is centred on the pilot's path, so derotation puts the pilot at 0 Hz. The model is one complex gain u, the data band's reference gain (a reference symbol a arrives as u·a), fed by two independent streams:
+- **Data band.** z_dd = z_d·exp(+j2π·f_p·T_L·τ(n)), the data mixed to 0 Hz in sender time (τ from the timing model), then L's matched filter at every position. A receiver-time mix would drift 2.2 turns over L_FULL at 100 ppm. The template is c = g·μ, g the class gain, with Var = N + Pu·g²(ν + D) and N = PSD/T_L.
+- **Pilot.** An RRC at 2T_L on z_d (`PILOT_K` = 2), read at even positions, where its noise is white. It lets in 0.9% of the data's power, against 23.7% for an RRC at T_L. Its template is `lwave.pilot` through the same filter times the clipper's pilot gain per section, over A_ID·G_REF_ABS, with N_pl = PSD/(2T_L) and a residual of K_PL_DATA = 0.016 of the signal power. With the keying unknown, units 8 to 183 of every window, plus the filter's reach, give no pilot measurement; with it known the FSK is in the template.
+- **δ**, the pilot's gain over the data band's (the rig's passband phase, up to 0.15 rad, or a delayed path), so the pilot measures u·δ·c_pl. It is fitted once per pass by least squares at the known symbols with a prior sd of 0.25 about 1, profiled out in the timing refinement, and held at 1 inside gate V.
+
+The two streams are fused per position by inverse variance and fed to §6.5's Kalman filter and RTS smoother unchanged, with q chosen on `track.q_grid(L_T_SYM)`: the 13 spreads of §6.5 at L's symbol, 8× CE's q per position. In round A the data band measures only the preamble and the references, 1 in 16 of the frame, and the pilot carries the track between them as CE's carrier does. Round B adds the header as known. L's spread copy is linear, so it enters the data template's mean (`make_classes_l`) and nothing is removed from the channel (contrast `track.remove_spread`).
+
+**Timing.** `fit_timing_l` correlates the known symbols with MF{z_d·e^{+j2πf_p·t}}·conj(LP z_d) over lags and clock errors, the pilot's low-pass (0.03, 0.3, 1 or 2 Hz) being the phase reference. `refine_timing_l` maximises the known symbols' correlation with the pilot-only gain track, re-mixing z_dd at each trial timing and profiling δ's phase out against its prior. τ0 then comes mostly from the pulse envelope, and a rig's passband phase cannot bias it: 0.13 CH sample rms on l-short at −12 dB (6 seeds, from a blind gate V). `report_l` quotes SNR₂₅₀₀ on the frame's keyed power (`L_KEYED_POWER`, per frame) rather than on the references' |u|².
+
+**Gate V for L** (`ltrack.verify_l`). The known symbols are withheld and δ = 1, so û is the pilot's alone. With d the known symbols' complex template:
+- t_k = Re(m_k·conj(û_k·d_k)), V_k = |d_k|²(N_k|û_k|² + |c_k|²|û_k|²P_k + N_kP_k)/2, w_k = |d_k|²|û_k|²/V_k;
+- Z = Σ w_k·t_k / √(Σ w_k²·V_k). This is `track.z_ref_stat` in its general form; CE's is d = j·Im c (§6.3).
+
+On l-tiny at −12 dB it reads 0.97 of √(Σ 2|uc|²/N), where a CE-style Im-only form would read 0.68. A CE signal also correlates under the L hypothesis: with the pilot taken on a CE carrier or its sideband, L's references see CE's sideband in L's data band, at about 1.5σ of the true noise (Z 6 to 12 on CE SHORT at −12 and −6 dB). So the gate checks the known symbols' residual against the noise model,
+
+R = Σ ω_k·|m_k − û_k·c_k|² / Σ ω_k·(N_k + |c_k|²P_k + |û_k|²g_k²D_k),  ω_k = w_k²|c_k|²|û_k|²,
+
+and uses Z_ref = Z/√max(R, 1), accepted at Z_ref > 6. Measured R on gate-V tracks: an L signal 0.77 to 1.54 (l-short, steady to disturbed, −6 to −25 dB); noise 1.05 ± 0.20 at a fixed timing (l-tiny, 40 seeds); a CE signal under the L hypothesis 2.8 to 30. Z_ref only shrinks, so its tail on noise stays N(0, 1)'s or narrower: at a fixed timing, 60 noise seeds gave mean 0.02, sd 0.78, max 1.86; blind, 20 gave mean 0.5, sd 1.2, max 3.2. The tail out at 6 is not measured.
+
+**CE under the joint gate** (`receiver._gate`, D39). CE's gate V passes an L signal too (Z_ref 6 to 11 on l-short at −12 and −6 dB: L's references correlate with CE's in the data band). In the joint receiver a CE accept is re-checked with the same ratio over CE's known symbols, weighted as CE's Z_ref weighs them (`_ce_resid_ratio`), and refused when R > 2 (`CE_RESID_MIN`) and Z_ref/√R ≤ 6. Measured R:
+- CE SHORT 1.02 to 1.07 at −12 dB and 1.29 to 1.35 at −6 (CE's own distortion is not in the model), CE TINY 0.93 to 1.48;
+- fading CE 0.55 to 1.31 on TINY, and up to 2.16 on SHORT at Z_ref 48, which is kept;
+- an L signal under CE's gate 3.6 to 4.3 at −12 dB and 12.7 to 15.4 at −6;
+- CE's own ±11.5 Hz sideband ghosts 5.2 to 6.2, refused.
+
+It costs about 0.09 s per CE accept on TINY. The CE-only receiver does not run it (D37).
+
+**Extraction** (`ldemod.extract_l`), from the tracker's data-band m, u, P, N and ψ and the class gain g (`G_*_L`):
+
+```
+r   = m·u* / (|u|²·ψ·g)                  E[r | a] = a
+y   = unpair(r)                          √2·Re, √2·Im on latents 2k, 2k+1
+s2n = (N + g²·P) / (g²·|u|²·ψ²)          per latent, the same on I and Q
+```
+
+- There is no ½ (unpair's √2 puts each half of the complex noise on its own latent) and no carrier term (the pilot does not reach the data matched filter). A symbol is erased where ψ < 0.5 or |u|² < `U_MIN_REL` of its median, as for CE.
+- Header unknown: y_x = √(1+ρ)·y and s2n_x = (1+ρ)·s2n, and the unknown copy adds ρ of variance. Header known: y_x = √(1+ρ)·y − √ρ·h, with nothing extra.
+- σ² = κ·s2n_x + D_PASS_L·(1+ρ) + extra, and CE's `block_estimate` (§6.6) does the rest.
+- **Pinned constants**, from 24 noiseless loopbacks through the clipper (L_MEDIUM and L_FULL, Gaussian and tanh latents, precoded as sent, 2026-10-12):
+  - class gains against the references': G_REF_L = 1, G_HDR_L = 0.996, G_DATA_L = 0.881, G_PRE_L = 0.995;
+  - the pilot's gain through the clipper per section: 0.656 (preamble), 0.664 (header), 0.703 (data), 1.0 where the pilot runs alone (lead-in, window units 8 to 183); the references' own gain G_REF_ABS = 1.006;
+  - distortion per latent: D_PASS_L = 0.058 (measured 0.0583, 12.34 dB), D_REF_L = 0.0236, D_HDR_L = 0.0201, D_PRE_L = 0.0200.
+- **κ** is CE's calibration (§6.6) on L's residuals: the references' complex residual against D_REF_L, and the data's unit-RMS contract E[y_x²] = 1 + extra + D_x + κ·s2n_x. L has about half CE's references and they carry much more of u (the pilot is 14% of the power, CE's carrier 53%), so the reference branch allows for each measured reference's pull on u: κ = (mean|e|² − D_REF_L + mean P_m)/mean(N + P_u), P_m the measured references' P and P_u the others'. On `track_l` passes of l-short in moderate fading CE's form read 0.2 to 0.7 where the honest κ was 0.9 to 1.2, and overstated W by up to 1.7 dB.
+
+**Header.** llr = 2·y_h/(κ·s2n_h + D_HDR_L), scaled by G_HDR_L, with coded bit 2j on I and 2j+1 on Q of header symbol j, so the LLRs are in coded-bit order and mean what CE's do. While the header is unknown the spread copy adds `demod.spread_llr(y_x, κ·s2n_x + D_x)`. `decode_header` tries the sum, then the spread copy alone, then the block alone, each accepting version 2 only (`L_HEADER_VERSIONS`): L has no version 1, so an L pass never switches to `frame.plain`, and the LLRs kept are the sum's.
+
+**Callsign windows** (`cwid`). A Morse unit is `spec.cw_window // CW_UNITS` symbols: 2 for CE, 1 for L. With z_d derotated on the pilot, every function reads an L window as it reads CE's, except that `keying_type` returns "fsk" without computing anything, OOK raises, and `window_llr` takes the FSK tone amplitude from units 8 to 183 alone, since units 0 to 7 and 184 to 191 of an L window hold the pilot's ramp and the data pulses' tails. Round B takes the keying as known (FSK) when the header's callsign matched at Z > 6.
+
+**Orchestration** (`receiver.py`).
+- `_receive_pass_l`: gate V (`verify_l`) for an unverified detection; round A (`track_l`, `extract_l`, `decode_header`, the callsign windows); round B when the header decodes, with `make_classes_l(spec, header.encode(hdr), prior)`, the keying if it matched, round A's timing and frequency, and one outer iteration; then `report_l`.
+- **One signal, one identity** (D38). Signals are compared at their band centre, `centre_hz`: f for CE, and f − 9.5 Hz for L (`L_EXCLUDE_OFFSET_HZ`). An L neighbour's 45 Hz guard in another signal's noise floor, symmetric about that centre, then covers [f − 54.5, f + 35.5] Hz, all of its spectrum. Merging, "already found", the noise exclusion and the merge after tracking compare centres within 5 Hz across waveforms; where a CE and an L result share a centre, the larger Z_ref stands for the signal, and its waveform with it.
+- `detect` (`_detect_joint`): candidates in `detections` order, with `max_candidates` and `budget_s` one budget across both waveforms. A candidate within 5 Hz of a found signal or a `skip_hz` centre is not gated; each gate's noise floor leaves out the preamble hits' and the found signals' centres; then one detection per centre, and aliases and ghosts per waveform at its own symbol.
+- `receive_slot` (`_receive_slot_joint`): each detection received with its own waveform's frame (the selection's twin, `lframe.twin`, for a waveform not in it). After tracking, the ghost rule applies within a waveform at its own symbol (GHOST_T = 3 symbols), the suspect-neighbour rule across both by centre (`_suspect_beside`), and one pass per centre.
+- `confidence_db` uses the pass's own frame when none is given, and places L's latents 2k, 2k+1 and coded bits 2j, 2j+1 at their symbol's time.
+
+**Live listener** (`live.py`, `qrss_listen.py`).
+- `LiveConfig.waveforms`: None is CE alone, the listener as it was before L, and so is (WAVEFORM_CE,). `specs` is `spec`'s twin in each waveform listened for (a shape with no twin, such as full-v1, is a `ValueError`). `selection` hands the receiver the tuple when it holds an L frame and the CE frame itself otherwise, so CE alone makes exactly the calls, with the same object, that it made before L.
+- The slot lasts as long as the longest enabled frame (`frame_seconds` of the tuple), and a tile's confidence time is measured against that.
+- The end-of-slot search verifies at most 12 candidates in at most 180 s (`FINISH_MAX_CANDIDATES`, `FINISH_BUDGET_S`): one budget across both waveforms, in `detections` order.
+- Tiles are matched by band centre on the same dial (`centre_of`). A pass of the tile's waveform updates it; a pass of the other waveform only with a strictly larger Z_ref, and the tile then becomes that waveform. `_keep` holds one detection per centre by the same rule.
+- `Tile.waveform` is "CE" or "L" (a tile from before L reads as CE) and `Tile.frame` the pass's frame; an L tile's f_hz is its pilot. state.json gains "waveforms", the names listened for.
+- `in_band`: an L signal is in band when its data's low edge, f − 22.07 Hz, is at or above 300 Hz and its pilot at or below 2700 Hz.
+- Hints carry the waveform of the stored pass that names them: its frame's ("l-..." is L), else its "waveform" field, else CE (D41).
+- `qrss_listen.py` listens for both unless given `--just-ce` or `--just-l`; the app starts it with only `--state` and so hears both. `--frame` names the shape in either waveform, and a CE-only frame such as full-v1 with L enabled is a `SystemExit` that names `--just-ce`.
+- `acquire.live_end_s()`, how far past t0 a live acquisition reads, is computed from CE's preamble. L's lasts as long in time (330 T_L = 660 T), so it holds for both; it is not checked for frames whose twins differ.
+
+**Measured** (simulated; SNR in 2500 Hz; where latent SNR is given, the genie's is in brackets):
+- A2-L at the true pilot on l-short: 8/8 at −25, −28 and −31 dB, Λ medians 105 / 67 / 43, timing rms 0.040 / 0.057 / 0.083 T_L. The joint live chain on l-short, limited by A1: 6/8 at −24 dB, 2/8 at −28, 0/8 at −31.
+- Shape on SHORT at −15 / −20 / −25 dB: L's z1 +155 / +50 / +16; CE's |z1| ≤ 2.3 with z_above 29 to 34 / 6 to 10 / −0.2 to 3.2. On noise, z1 has mean +0.01 and sd 1.025. L_FULL along its true path: z1 21.5 / 13.3 / 5.0 at −28 / −30 / −34 dB. A3 finds L_FULL at −28 and −30 dB, not at −34. A3's emission for L is about 6 dB behind CE's, the pilot holding 13.8% of the power.
+- Joint acquisition costs about twice a single one: TINY 0.8 s against 0.42 s, SHORT 2 to 3 s against 1.1 to 1.3 s.
+- Round A against the genie in data SINR, l-short at −12 dB, two seeds: steady −0.07 / −0.17 dB, quiet −0.29 / −0.46, moderate −1.19 / −1.81. Round B adds +0.02 to +0.18. The moderate loss is noise in the pilot track, not δ: using the true pilot gain as the data gain costs only 0.05 to 0.10 dB there. Timing after `track_l` is 0.005 to 0.010 T_L rms (l-short, −12 dB).
+- The joint receiver, blind: l-tiny at −12 dB 6.46 (6.73), 6.70 (6.84), 7.73 (7.31), 6.67 (6.78) dB; l-short at −12 dB 6.97 (6.97), 6.71 (6.91), 7.04 (6.97); at −6 dB 10.16 (10.06), 9.78 (9.92), header and callsign decoded; at −24 dB −3.63 (−3.62), −4.10 (−3.72), header decoded; at −28 dB −7.50 (−7.57), header decoded (one seed, steady path). Every case is within about 0.4 dB of the genie, either side. Noise alone gives nothing, and an L and a CE signal 60 Hz apart at −12 dB are both received, either way round.
+- A CE recording through the joint path gives the pass the CE-only receiver gives. Listening for L costs CE recordings time: a CE SHORT .npz took 12.6 s through `qrss_receive.py` by default against 7.7 s with `--just-ce`.
+- Live, fed as audio: a TINY slot with CE at 1500 Hz and an L pilot 80 Hz above, both at −12 dB. Both waveforms: CE 4.71 dB and L 6.80 dB, 5.7 s; `--just-l`: L 6.79 dB, 3.6 s; `--just-ce`: CE 4.71 dB plus a junk tile, 3.9 s. The same on SHORT: CE K1ABC 4.68 dB and L W1AW 6.57 dB with headers and callsigns, 30.3 s; `--just-ce` 21.3 s, `--just-l` 22.2 s.
+
+**Known limits.**
+- A1 finds an L pilot only to about −26 dB (the pilot is 10.5% of the preamble's power), so live L acquisition stops there, against −31 dB for A2-L itself. An L-shaped A1 statistic is the fix (§13).
+- Weaker L is found at the end of the slot by A3 and gate V, to about −30 dB on L_FULL (found at −28 and −30, not at −34).
+- The inverse AGC (§6.2, 100 ms median) follows L's envelope above about −6 dB SNR₂₅₀₀: the genie on L_SHORT at +10 dB drops from 12.13 to 9.89 dB of latent SNR through it, and a strong L signal modulates the others in the band.
+- Near the band edges, within about 40 to 75 Hz of 300 or 2700 Hz, the noise floor reads low for both waveforms: its region 85 to 120 Hz from the signal reaches past the front end's passband. A CE signal alone at 305 to 340 or 2680 to 2695 Hz reports an SNR₂₅₀₀ of −2.4 to −4.4 dB for a −12 dB signal. It is worse for L beside a CE neighbour: an L pilot at 326 Hz with CE at 400, or at 2695 Hz with CE at 2600, at −12 dB, reports +7.3 / +23 dB with κ at its clamp of 2, suspect, and its tile "lost"; its latent SNR is −0.04 / 1.46 dB against 6.49 / 6.33 with `--just-l`.
+- Moderate fading costs L 1.2 to 1.8 dB of data SINR against the genie in round A (l-short at −12 dB, two seeds), from the pilot track's noise.
+- Under `--just-ce`, which is the CE receiver unchanged, an L signal can show as a weak headerless CE pass or a junk CE tile: Z_ref 6.41 (R 4.26) on l-short at −12 dB, Z 9.2 to 12.6 on l-tiny at −6 dB, a live tile at Z 7.3 and −8.0 dB latent SNR (TINY) or Z 7.2 (SHORT), and a SUSPECT pass at Z_ref 6.5 from `qrss_receive.py` on an l-short recording. With both waveforms enabled the CE re-check refuses these (D37, D39).
 
 ---
 
@@ -870,12 +995,14 @@ class Store:
 
 `merge` adds a foreign (S, W) only after its correlation with the local members passes the §8.2 test (spec §8: "verify merged data").
 
+**Waveform L.** A stored pass's metadata carries its "waveform" (0 when absent, a pass stored before L) and its "frame", and `pass_info` and `due` report both. The frame name decides a stored pass's spec (`lframe.get_any`: "l-..." is L), ahead of the waveform field (D41). `twin(acc, q, f_hz, segment, uid=None, waveform=None)` finds the member that is this transmission received again; with `waveform` given, a member of the other waveform is compared by band centre (§6.10), so one transmission is one member whichever waveform read it.
+
 ### 8.2 Association (`associate.py`)
 
 The first rule that succeeds wins.
 
 1. **Header decoded on this pass.** Look up (callsign, picture ID). If the accumulator's segment has median W > −10 dB, validate by correlation: reject the header match if t < 3 while the expected t exceeds 8. A rejected pass goes to provisional and a collision is logged.
-2. **Soft-combined header.** Sum this pass's LLRs with each provisional cluster's summed LLRs, then pairwise with every other undecoded pass from the last 7 days within ±10 Hz, and try `header.decode` on each sum. Success attaches every pass involved, after the correlation check of rule 1.
+2. **Soft-combined header.** Sum this pass's LLRs with each provisional cluster's summed LLRs, then pairwise with every other undecoded pass from the last 7 days within ±10 Hz, and try `header.decode` on each sum. Success attaches every pass involved, after the correlation check of rule 1. Only passes of a frame with a header take part: a headerless frame (TINY, l-tiny) keeps no LLRs, and decoding their empty sum used to make storing a slot's second TINY pass fail, in either waveform (fixed 2026-10-12).
 3. **Latent correlation** against every open accumulator, over latents where w > 0 and W > 0, with m = S/W:
    - v = w·W/(1 + w + W);
    - t = Σ v·z·m / √(Σ v²·z²·m²);
@@ -912,6 +1039,14 @@ Stop after `rounds`, or when mean W gains less than `tol_db`. The leave-one-out 
 - Correlate a stored capture with the expected waveform mean_template(μ = x̂, ν = v) of that slot's q, after A3/A1 frequency candidates, using the same Z statistic and gate as V.
 - Accept at Z > 6 after a Bonferroni correction over the search grid.
 - It works only on captures that are kept: `Capture`s in tests, or the per-candidate CH captures of earlier passes.
+
+**Waveform L.** EM, the template search and retroactive detection are CE-only. An accumulator may hold members of both waveforms, and they decode alike; an L member is never refined or searched for, and nothing crashes on it:
+- `pass_spec` resolves a pass's frame through `lframe.get_any`, and `is_l(p)` says whether it is L.
+- `em_refine` skips L members and logs each once, in the first round: "pass <uid>: waveform L, not re-received (EM is CE-only)". `rereceive` returns None for an L pass.
+- `known_keying(store, acc, call, waveform=WAVEFORM_CE)` counts only that waveform's members (OOK is False for L), and the template search's frequency hypotheses come from CE members only.
+- `pass_path`, `template_search`, `receive_template` and `retro_detect` raise `ValueError` ("... is CE-only (design 8.3)") for an L frame.
+- `retro_detect`'s "already stored" check compares by band centre (§6.10): a find within `RETRO_SAME_HZ` of a stored pass of that slot, of either waveform, is that pass and is skipped.
+- `qrss_decode.py --retro --frame l-...` is refused; `qrss_decode.py` lists each member's waveform and frame.
 
 `qrss_decode.py OUT.png (--key CALL:PID | --pass FILE.npz) [--store DIR] [--retro [--passband DIR] [--frame F]] [--em ROUNDS] [--model DIR] [--precision] [--any-codec]` writes the image, after retroactive detection and EM if asked. The picture's codec ID (accumulator or header) must equal the decoder's (`render.check_codec_id`), or nothing is decoded unless `--any-codec`; `qrss_receive.py --image` checks the same.
 
@@ -1075,6 +1210,23 @@ Each check asserts that measured per-latent SNR ≥ +2.2 − 0.5 dB at the spec'
 - all consumer impairments together (±400 Hz, 1 Hz/min, 0.5 Hz rms wander at τ = 10 s, ±100 ppm each end, clicks, fast AGC) at −10.4 dB on quiet gives ≥ +1.7 dB;
 - decoded PSNR on 5 COCO pictures at the −10.9 dB case is within 0.5 dB of a direct-latent-noise reference at the same measured SNR.
 
+### 10.9 Waveform L (2026-10-12)
+
+The L receiver's tests, one file per part of §6.10. Fast-tier seconds are the file's test time, and slow counts and times are as measured once each.
+
+| File | Checks | Tier |
+|---|---|---|
+| `test_qrss_lunits.py` | The shared pieces in either waveform's units, each a check a CE constant would fail silently: durations from the frame (L_FULL's 1782.65 s, where CE's T would give 891), `rx_index` and its inverse at T_L, the L matched-filter table (unit energy, agreeing with `lwave.matched_filter`), `q_grid(L_T_SYM)` = 8× CE's q, window units 8 to 183 FSK only, `z_ref_stat` with CE's d = j·Im c equal to CE's own form, line search, erase margin and report in L's period | fast, 0.5 s |
+| `test_qrss_lchannel.py` | The channel simulator on L: noiseless pass sample for sample, SNR₂₅₀₀ on a pilot-only frame, keying span and clock ramp in L symbols, u the pilot's gain and u_data the data band's, neighbours of the other waveform with their own spectra, npz round trip, `qrss_simulate.py --waveform L`. Slow: a FULL L slot with every impairment in under 8 s, the CLI from a .qrsp | fast, 3.7 s; slow, 2 in 5.7 s |
+| `test_qrss_lacquire.py` | A2-L at −20 dB (δf, timing, phase) and its Gamma tail; the −1/T_L alias dropped by band ownership; neither waveform's A2 passing on the other's signal at 0 and +6 dB; `merge_hits`; the shape test on noise and at −15 dB, the pilot re-anchoring; a mixed slot end to end and the detection order. Slow: A2-L at −28 and −31 dB, the joint live rate at −24 dB, the tail over 1e6 cells, a lead-in pilot with no preamble after it, the shape test along A3's paths on noise, re-anchoring on L_FULL at −28 dB, hints at −29 dB | fast, 6.2 s; slow, 7 in 48.2 s |
+| `test_qrss_ltrack.py` | q grid at T_L (NEES near 1); the classes in rounds A and B and with an EM prior; the pilot filter against its closed form, white at even positions; noiseless genie (m = u·c, class gains, δ ≈ 1, K_PL_DATA, FSK pilot in the template with the keying known); `track_l` at −12 dB against the genie; gate V's Z_ref as the complex matched statistic and N(0, 1) or narrower on noise; a 0.15 rad rig phase recovered in δ; lead-in claims; `report_l`. Slow: Z_ref on noise, ±100 ppm, rounds A and B against the genie (steady, quiet, moderate), a CE signal taken for L refused by R, refinement at −24 dB and from a slip on the shoulder at −26 dB, the pilot's path through an oscillator's warm-up | fast, 5.1 s; slow, 9 in 33.3 s |
+| `test_qrss_ldemod.py` | On an L_MEDIUM genie through the real clipper: the symbol-estimate formula with P and ψ, latent SINR to genie theory within 0.3 dB with the header unknown and known, W honest, the header from either copy, κ near 1 and following a 1.5× noise, the references' pull on u, an L and a CE pass too weak alone decoding their header together, the pinned constants against this frame's own loopback | fast, 0.8 s |
+| `test_qrss_lreceiver.py` | Selection and band centres, the L header (version 2 only, sum or either copy), a wrong-waveform detection refused, the joint detect and receive (merging by centre, aliases and ghosts per waveform, suspect rule across), a CE selection taking CE's path, the CE re-check of D39 (stubbed), store and association by centre, EM and retro leaving L alone, both CLIs in process, one blind l-tiny pass at −12 dB. Slow: l-short at −6 and −24 dB, noise, L beside CE either way round, the CE re-check on real gate-V tracks, `qrss_receive.py` on an L recording | fast, 2.3 s; slow, 8 in 41.6 s |
+| `test_qrss_live_l.py` | What each command line listens for, the frames every receiver call is handed (CE alone exactly as before L), the slot length per selection, one tile per signal whichever waveform reads it, waveform in tiles, state.json and hints, a stored member read as the other waveform counted once, L's band edge. Slow: real slots holding a CE and an L signal, written to the ring and heard as audio across the slot's end | fast, 2.7 s; slow, 3 in 21.9 s |
+
+- The seven files' fast tier is 145 tests in 22.8 s wall (21.4 s of test time). With them the default QRSS tier measured 591 passed in 157.4 s once, before six tests moved to slow (against 440 in 123.9 s before L), so §10's 90 s budget is not met; the tier was already over it before L.
+- **CE is unchanged**: with a CE-only selection the receiver's 34 output arrays on a fixed set of CE cases are bit-identical to the tree before L, checked with a scratchpad script that is not in the repo, and live runs at −12 dB with no selection and with CE alone traced every receiver call identical to the old `live.py` (9 of 9 calls on TINY, 19 of 19 on SHORT).
+
 ---
 
 ## 11. CLIs (summary)
@@ -1120,13 +1272,21 @@ Every package must leave `.venv/bin/python -m pytest` green, including the exist
 
 ## 13. Seams for later steps (not built now)
 
-**Waveform L.**
-- `FrameSpec` gains a `waveform` field.
-- `sequences` already reserves `b"QRSSTVAE L preamble"`.
-- Header LLR indices are shared (§2.6).
-- The CW windows become 192 L symbols with the same keying.
-- `demod` gets an L branch: √2·Re/Im divided by 0.88.
-- The beacon file already has a waveform byte.
+**Waveform L, built** (§6.10, 2026-10-12). What the earlier seams became:
+- Frames carry `waveform`; L's are `lframe.LFrameSpec`, each the twin of a CE frame of the same shape (`lframe.twin`).
+- `sequences` holds L's preamble and references.
+- Header LLR indices are shared (§2.6), so CE and L passes of one segment add.
+- The callsign windows are 192 L symbols, one per Morse unit, FSK only.
+- `ldemod` is L's demodulator: √2·Re and √2·Im over the class gain, the data's G_DATA_L = 0.881.
+- The beacon file's waveform byte stays CE: `beaconfile` refuses any other, and L is sent from a sound card (`qrss_transmit.py --waveform L`, which has no OOK).
+
+**Waveform L, still seams.**
+- **An L-shaped A1 statistic.** A1 looks for a line, and an L pilot carries 10.5% of the preamble's power, so live L acquisition stops at about −26 dB (§6.10). A statistic matched to the pilot and its one-sided data band is estimated to gain 2 to 3 dB; that is not measured. An A3 statistic on an L-matched emission would need its own Gumbel; today A3's Z is the pilot-only one, about 6 dB behind CE's, and `l_pilot_bins` only places the path.
+- **EM, the template search and retroactive detection for L** (§8.3): an L mean template given (x̂, v), L's Z for the search, and `retro_detect` over L frames.
+- **The L ghost rule.** It is CE's rule with its timing window in L symbols (GHOST_T = 3 T_L within GHOST_HZ = 20 Hz). L's references recur every 16 T_L, so its ghosts would sit near multiples of 1/(16 T_L) = 1.03 Hz; none appeared in the runs of §6.10, and the rule is pinned by stub tests only. Unmeasured.
+- **Recovery bookkeeping per waveform.** The listener's `finished` set and `recover`'s "passes already in the store" test are per slot: a slot with any stored pass is not received again, so a slot an earlier listener heard with one waveform enabled is not recovered for the other.
+- **`live_end_s` per frame.** It is computed from CE's preamble. L's lasts as long in time, so it holds today; a frame whose twin's preamble differed would need its own.
+- **The app's L tile.** state.json carries each tile's "waveform", and an L tile's f_hz is its pilot, with its signal reaching 22.07 Hz below. How the app draws that is the app's.
 
 **Live view and GUI (step 6).** `kalman_rts(causal=True)` and `TrackReport` are what the live view and GUI use.
 
@@ -1166,6 +1326,21 @@ Every package must leave `.venv/bin/python -m pytest` green, including the exist
 | D25 | **Store layout.** One accumulator per (callsign, picture ID), with S and W [3, 52800] canonical plus S_ext and W_ext, per-pass files, atomic writes and 7-day expiry | spec §8 sets the contents, not the format |
 | D26 | **Spec arithmetic corrections.** The frame is 1782.678 s (stream 1736.118 s, not "1736 s"). CE timing slip at ±100 ppm per end is up to 12 symbols, not "~6". CE's reference share is 54.8%, not 54.6% | arithmetic |
 | D27 | **The receiver uses the closed-form K = 0.58092.** The sims measured 0.4% higher, which is within M3's tolerance | closed form over calibration |
+| D28 | **One A2, a preamble kind per waveform.** A2 takes a `PreambleKind` (sequence, symbol, chunk, data offset, phase offset, matched filter). L's is its QPSK preamble at T_L in 33-symbol chunks, mixed up by f_p so the notch's pilot remnant falls outside the filter, with complex zero-mean templates; Λ stays Gamma(10, 1) on noise | spec §2 and §2.3 give L's preamble, not how to search for it; one search with two kinds leaves CE's numbers untouched |
+| D29 | **A1 unchanged, plus pilot hypotheses.** For L, A1's best cell 3.1 to 22.1 Hz above each line is searched as a pilot, and an L hint whose A1 cell is under threshold gets A2-L at f and f ± 1 Hz | during the preamble L's data lumps take A1's line and hide the pilot; an L-shaped A1, estimated at 2 to 3 dB better, is not built (§13) |
+| D30 | **A3's spectral-shape test.** z1 compares the one-sided band 3.10 to 22.07 Hz below the path with its mirror, and z_above measures the mirror alone: L at z1 > 4 with z_above ≤ 3, CE at z_above > 3 with \|z1\| < 3, otherwise ambiguous and gated as both. A pilot-anchored path fills in where the path's own shape is silent | the spec has no blind waveform test. z1 alone gated a CE signal whose preamble A2 missed as L only (z1 4.2 to 5.1 on 2 of 8 SHORT passes at −10 dB); power above the line is what L never has |
+| D31 | **Arbitration.** Symbol-rate aliases per waveform at its own T; L band ownership (a hit 3.1 to 22.1 Hz below a stronger L hit, within 3 T_L, is that signal); across waveforms one hit per signal within 5 Hz and T_L/2, the smaller p kept | the −1/T_L alias passes A2-L from about −12 dB (12 of 12 at −6 dB, SHORT); a pilot can be found by a line and a hypothesis at once |
+| D32 | **L tracker.** One complex gain, the data band's reference gain, from two independent streams: the data band mixed to 0 Hz in sender time, and the pilot through an RRC at 2T_L read at even positions. δ, the pilot's gain over the data's, is fitted by least squares with a 0.25 prior and never inside gate V. §6.5's Kalman filter and smoother run unchanged on `q_grid(L_T_SYM)` | linear-Gaussian, as D16. A receiver-time mix would drift 2.2 turns over L_FULL at 100 ppm; an RRC at T_L lets in 23.7% of the data's power against 0.9% |
+| D33 | **L gate V.** Z_ref is the matched statistic over the complex known symbols, divided by √max(R, 1), R the known symbols' residual over the noise model's | an Im-only form reads 0.68 of the matched statistic; a CE signal taken for L reads Z 6 to 12 and R 2.8 to 30, against 0.77 to 1.54 for L |
+| D34 | **L extraction and weights.** r = m·u*/(\|u\|²ψg) split into two latents with no ½; class gains, pilot gains and D_PASS_L = 0.058 pinned from 24 noiseless loopbacks; κ's reference branch allows for each measured reference's pull on u | spec gives the 0.881 data gain and the √2 split, not the variance. CE's κ form read 0.2 to 0.7 on moderately fading L passes and overstated W by up to 1.7 dB |
+| D35 | **L header.** Coded bits 2j and 2j+1 on I and Q of header symbol j; version 2 only, tried as the sum, the spread copy alone, then the block alone, never `frame.plain`. The spread copy is subtracted in the demodulator once the header is known, and sits in the data template's mean in round B | L has no version 1; a linear signal cannot be de-spread on the channel as CE's constant envelope is |
+| D36 | **L callsign windows.** One L symbol per Morse unit, FSK only: `keying_type` says "fsk" without computing, OOK raises, and the tone amplitude comes from units 8 to 183 | spec §2.7 keys L as CE; units 0 to 7 and 184 to 191 of an L window hold the pilot's ramp and the data pulses' tails |
+| D37 | **A CE-only selection is the old receiver bit for bit.** `--just-ce`, `LiveConfig.waveforms` None or (CE,) make exactly the calls they made before L, without D39's re-check, so an L signal there can come out as a weak headerless junk CE tile or pass (Z_ref 6.41, R 4.26 on l-short at −12 dB) | keeps the CE receiver on the air since 2026-10-09 exactly as tested (34 output arrays bit-identical); running the re-check there would break that, and has not been decided |
+| D38 | **One signal, one identity.** Signals are compared at their band centre: f for CE, f − 9.5 Hz for L, f being L's pilot. Within 5 Hz the larger Z_ref stands for the signal, and its waveform with it | both waveforms can lock on one signal, and the offset puts the symmetric 45 Hz noise-floor guard over L's one-sided spectrum, [f − 54.5, f + 35.5] Hz |
+| D39 | **CE accepts are re-checked in the joint path.** One is refused when R > 2 and Z_ref/√R ≤ 6 | CE's gate V passes an L signal at Z_ref 6 to 11. CE reads R 0.93 to 1.48 (TINY and SHORT at −12 and −6 dB; fading up to 2.16, at Z_ref 48, kept), L under CE's gate 3.6 to 15.4; it costs about 0.09 s per CE accept on TINY |
+| D40 | **Hints are frequencies or (frequency, waveform) pairs.** A bare frequency is searched in every enabled waveform, a pair in its own; the CE-only receiver keeps CE pairs as frequencies and drops the rest | the store knows each due pass's waveform, so its hint need not cost an A2 search in both; a bare frequency keeps the old argument working |
+| D41 | **A stored pass's frame name decides its spec.** "l-..." is L, ahead of the "waveform" field, and a pass stored before L is CE | the frame name fixes the layout as well as the waveform, so the two cannot disagree; the field is only a fallback |
+| D42 | **Both waveforms by default** (Jeff, 2026-10-12), with `--just-ce` and `--just-l` on `qrss_receive.py` and `qrss_listen.py`. `--frame` names the shape in either waveform and the other listens for its twin; the app starts the listener with only `--state` and hears both | a receiver cannot know which waveform a station sends. The cost: a CE SHORT .npz took 12.6 s by default against 7.7 s with `--just-ce`, and joint acquisition about twice a single one |
 
 ---
 

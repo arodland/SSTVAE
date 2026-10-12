@@ -16,9 +16,10 @@ trips); otherwise the file is peak-normalised int16.
 
 --waveform CE (the default) is the constant-envelope carrier, about 50 Hz
 wide, centred on --freq. --waveform L is the linear signal for SSB rigs:
-a pilot tone at --freq with the data 22 Hz wide just below it, about
-3.2 dB peak to average, so set the rig's drive by its peaks (ALC not
-engaged, speech processor off). Receivers do not decode L yet.
+a pilot tone at --freq with the data just below it, about 22 Hz wide in
+all and 3.2 dB peak to average, so set the rig's drive by its peaks (ALC
+not engaged, speech processor off). qrss_listen.py and qrss_receive.py hear
+L, beside CE, unless they are run with --just-ce.
 """
 
 import argparse

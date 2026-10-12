@@ -13,10 +13,16 @@ this note records what building it settled, what it is for, and what it
 costs a receiver to listen for both.
 
 **Status.** The transmitter is built and checked against the spec
-(`sstvae/qrss/lframe.py`, `lwave.py`, `qrss_transmit.py --waveform L`).
-No receiver decodes L yet, and today's listener would waste its blind
-search on L signals, so **L should not go on the air until the listener at
-least recognises it** (below, "Before L goes on the air").
+(`sstvae/qrss/lframe.py`, `lwave.py`, `qrss_transmit.py --waveform L`),
+and since 2026-10-12 the receiver is built too (`acquire.py`, `ltrack.py`,
+`ldemod.py`, `receiver.py`, `live.py`): `qrss_receive.py` and the live
+listener `qrss_listen.py` hear L beside CE by default, and `--just-ce` or
+`--just-l` picks one. So **L may go on the air once a station's listeners
+run this code.** A listener on older code, or one run with `--just-ce`
+(which is the old receiver bit for bit), does not know L: it shows an L
+signal at most as a weak, headerless CE tile (below, "Keeping L out of
+the CE gate"). Everything about L here is simulated: no L signal has
+been received off the air.
 
 ## What L gives over CE
 
@@ -30,7 +36,7 @@ least recognises it** (below, "Before L goes on the air").
 | Good picture, one pass, quiet path, **same average power** | **-14.0 dB** | -10.9 dB (3.2 dB worse) |
 | The same at the same peak power | -10.8 dB | -10.9 dB (a tie) |
 | Morse ID | FSK of an audio tone through an SSB rig (J2A, plain CW in US rules) | FSK of the carrier (F1A, not listed as CW; OOK is the fallback) |
-| Receiver work per detected signal | about half of CE's (half the symbol positions; estimated) | |
+| Receiver work per detected signal | about the same as CE's (measured on a FULL frame: tracking 7.25 s against 6.33 s, gate V 10.9 s against 13.3 s) | |
 | Transmitter | any SSB rig and sound card, linear amplifier | also an Si5351 board, class C/D/E amplifiers |
 
 - **Density and cleanliness.** L is 2.4 times narrower, and its clipper's
@@ -58,8 +64,10 @@ amplifiers, 630 m). A carrier 9 dB stronger than L's pilot at the same peak
 power, which tracks disturbed paths better (0.6 to 2.5 dB at the usable and
 recognizable levels after 16 passes), tolerates oscillator wander twice as
 well, and is detected blind down to about -38 dB against L's -34 dB
-(average power) or -31 dB (same peak). And CE's header is measured; L's is
-an estimate.
+(average power) or -31 dB (same peak); this receiver's blind search finds
+L only to about -30 dB so far ("What is left", below). And CE's header
+threshold is measured; L's is not yet (an l-short header decoded at
+-28 dB on a steady path, one seed).
 
 **Which to send.** L from an SSB rig on a busy band, or whenever the rig is
 held back by heat; CE from a beacon, on 630 m, under a peak-power limit
@@ -124,6 +132,63 @@ The 8 kHz audio through a genie receiver gives the same symbols as the
 250 Hz loopback to 1e-3, and a full pass takes 2.5 s of CPU to write (CE:
 2.2 s).
 
+## What the receiver settled
+
+Built 2026-10-12, and measured in simulation only.
+
+- **One signal, one identity.** An L signal's frequency is its pilot
+  everywhere (detections, passes, tiles), and its data run from 22.07 to
+  3.10 Hz below it. Signals are compared at their band centre, f for CE
+  and f - 9.5 Hz for L, so a CE and an L reading of one transmission
+  within MERGE_HZ (5 Hz) are one signal, and the larger Z_ref says which
+  waveform it is. The same centre places an L neighbour in another
+  signal's noise floor: the usual 45 Hz guard about it covers 54.5 Hz
+  below its pilot to 35.5 Hz above.
+- **Acquisition.** A1 is shared. A2 runs both preambles on every A1 line,
+  and L's also at each line's strongest cell 3.1 to 22.1 Hz above it,
+  because a lump of data band can win A1's 10 Hz separation and hide the
+  pilot. L's preamble is correlated in ten 33-symbol chunks, so CE's
+  calibration and pass mark carry over. Given the right line, A2-L passed
+  8 of 8 l-short preambles at -25, -28 and -31 dB.
+- **The tracker** (`ltrack.py`) follows one complex gain, the data
+  band's, fed by two measurement streams: the pilot, and the data band's
+  known symbols. A complex pilot/data ratio is fitted from the references
+  (and held at 1 in gate V, so Z_ref stays N(0,1) on noise). On l-short
+  at -12 dB its first round came within 0.07 to 0.17 dB of the genie on a
+  steady path, 0.29 to 0.46 dB on a quiet one and 1.2 to 1.8 dB on
+  moderate fading, where the loss is noise in the pilot track (the pilot
+  is 13.8% of the power).
+- **The demodulator** (`ldemod.py`) divides by the spec's 0.881 data
+  gain; 24 noiseless loopbacks measured 0.8846 ± 0.0029, which includes
+  it. Its kappa allows for the references pulling the gain track, which
+  they do far more in L than in CE (the pilot carries less): with CE's
+  rule W read 11 to 14% too large on average over 24 to 36 passes, with
+  the allowance 0 to 2%.
+- **The header** is decoded as format version 2 only (L has no version
+  1): from both copies, then the spread copy alone, then the block alone.
+  How often the fallbacks rescue a header the sum missed is not measured.
+- **Hints** are frequencies or (frequency, waveform) pairs, and a stored
+  pass's frame name ("l-..." for L) decides its waveform.
+
+**Measured end to end** (simulated, steady path, SNR in 2500 Hz at L's
+average power; latent SNR is against the true latents, and the genie is
+the same pass received at the true timing and gain):
+
+| Pass | Latent SNR | Genie | Header, callsign |
+|---|---|---|---|
+| l-tiny, -12 dB, blind, 4 seeds | 6.46 to 7.73 dB | 6.73 to 7.31 dB | (TINY has neither) |
+| l-short, -6 dB, 2 seeds | 9.78, 10.16 dB | 9.92, 10.06 dB | header; callsign read |
+| l-short, -12 dB, 3 seeds | 6.71 to 7.04 dB | 6.91 to 6.97 dB | header; callsign read |
+| l-short beside a CE signal 60 Hz up, both -12 dB, 2 seeds | 6.67, 6.98 dB | 6.75, 6.98 dB | header; the CE signal received too |
+| l-short, -24 dB, 2 seeds | -4.10, -3.63 dB | -3.72, -3.62 dB | header |
+| l-short, -28 dB, 1 seed | -7.50 dB | -7.57 dB | header |
+| CE short, -12 dB, for comparison, 4 runs | 4.27 to 4.68 dB | | header |
+| Noise only (short and tiny) | nothing found, of either waveform | | |
+
+A live listener fed one slot as audio, a CE signal at 1500 Hz and an L
+pilot at 1580 Hz, both at -12 dB, gave CE 4.71 and L 6.80 dB on TINY, and
+on SHORT CE 4.68 and L 6.57 dB with both headers and both callsigns.
+
 ## Lessons from running CE live, applied to L
 
 1. **A stronger neighbour must stay out of the noise estimate** (3c76b3a:
@@ -131,13 +196,18 @@ The 8 kHz audio through a genie receiver gives the same symbols as the
    signals 30 Hz apart and its band is one-sided, so the noise floor should
    come from bins no detected signal of either waveform occupies, each
    neighbour taken with its own band (CE ±25 Hz, L 22 Hz below its pilot).
+   Built more simply: an L neighbour is left out about its band centre,
+   9.5 Hz below its pilot, with CE's symmetric 45 Hz guard.
 2. **A1's 16 lines and 10 Hz separation are too few for L.** A busy band
    already crowds a weak part 1 out of the 16 strongest lines; 80 L
    positions make that common. A2 costs 0.05 s a line (measured below), so
-   64 lines cost 3 s a slot.
+   64 lines cost 3 s a slot. Not built that way: A1 still gives 16 lines,
+   and each line's strongest cell 3.1 to 22.1 Hz above it is searched as
+   an L pilot as well. Live L acquisition stops at about -26 dB because of
+   A1 ("What is left", below).
 3. **Hints, re-checks and kept acquisitions** (103dcb3, 63c7eb1) carry
    over as they are, plus the waveform: part k+1 is searched as part k's
-   waveform first.
+   waveform first. Built: a hint is a (frequency, waveform) pair.
 4. **Headers get lost** to late joins, restarts and fades. L's header is
    estimated at -27 dB, right at its first recognizable picture (-27.8 dB),
    which is why L carries the spread copy too.
@@ -148,10 +218,15 @@ The 8 kHz audio through a genie receiver gives the same symbols as the
 7. **Aliases, ghosts and merges are per waveform.** CE's symbol-rate
    aliases sit at ±33 Hz; L's would sit at ±16.5 Hz, inside its own data
    band. MERGE_HZ (5 Hz) still holds across waveforms: two signals that
-   close overlap whatever they are.
+   close overlap whatever they are. Built: aliases per waveform at its own
+   symbol time, merges at band centres. L's ghost rule is CE's with its
+   timing window in L symbols, and unmeasured.
 8. **The tracker is the CPU** (25 s per signal per live refresh, mostly the
    pure-Python Kalman loop over every symbol position). L has half the
-   positions, so about half the work per signal.
+   positions, so about half the work per signal, this note expected.
+   Measured, it is about the same: L's tracker reads two streams, and its
+   first round on a FULL frame took 7.25 s against CE's 6.33 s (gate V
+   10.9 s against 13.3 s).
 9. **The rig.** L's peaks are 3.2 dB above its average, so the drive must
    be set by the peaks with ALC not engaged; the app's transmit level
    advice needs an L line (the UI thread's).
@@ -169,7 +244,7 @@ with the gate's costs from the listener's own measurements:
 | A3 track-before-detect (2 s a slot) | follows lines over the whole slot | yes | none |
 | Gate V on a preamble hit (about 17 s) | tracker over the frame | the preamble says which waveform | none |
 | Gate V on a blind candidate (17 s if real, 60 to 80 s if not) | A3 lines, refused hints | **no: the waveform is unknown** | up to one more gate per candidate |
-| Receiving a signal (25 s a live refresh) | tracker, EM, decoder | each its own waveform | none; L about half of CE |
+| Receiving a signal (25 s a live refresh) | tracker, EM, decoder | each its own waveform | none; L about the same as CE (measured, above) |
 
 **Everything is shared or nearly free except the blind gate.** A preamble
 hit names its waveform, so live reception costs under a second more per
@@ -177,6 +252,15 @@ slot. A blind candidate does not, and trying both waveforms doubles the
 expensive case: a line that is not a signal costs 60 to 80 s per waveform,
 inside the end-of-slot search's 180 s and 12-candidate budget. Doubling it
 halves how many blind candidates a busy slot gets through.
+
+**Measured with the receiver** (simulated, on a shared 4-CPU machine): a
+joint acquisition costs about twice a single one (TINY 0.8 s against
+0.42 s, SHORT 2 to 3 s against 1.1 to 1.3 s; A2-L takes 27 to 31 ms a
+line, 18 ms of it the Gamma tail probability). A whole receive costs more
+than that suggests: `qrss_receive.py` on a CE SHORT recording took 12.6 s
+listening for both against 7.7 s with `--just-ce`, the difference being
+L's acquisition and the gates it adds. The CE re-check below costs about
+0.09 s per CE accept on TINY.
 
 **The spectrum's shape removes most of that.** L's data sit entirely below
 its pilot; CE's sidebands are symmetric about its carrier. A3's
@@ -189,46 +273,114 @@ signal shows almost nothing either side (its sidebands are under 1 sigma
 at -38 dB), so "no band below" says CE or unknown. Gate V then runs once
 for a recognised L line and for a strong CE line, and twice only for the
 weak ambiguous ones, CE first since only CE reaches below -34 dB. Estimated:
-blind-search work grows by 10 to 20%, not 100%. This is arithmetic, not a
-measurement; it gets measured when the receiver exists.
+blind-search work grows by 10 to 20%, not 100%. That figure is still
+arithmetic; the test itself is now measured (simulated):
+
+- The statistic, z1 = (power below - power above) over its noise sd, is
+  N(0,1) on noise: mean +0.01, sd 1.03 on SHORT bands, and mean +0.03,
+  sd 1.00 along A3's paths.
+- On SHORT at -15, -20 and -25 dB an L signal reads z1 +155, +50 and +16,
+  and a CE signal |z1| 2.3 or less. A CE signal at -25 dB is ambiguous in
+  2 of 3 passes, and is gated as CE and then as L.
+- Along L_FULL's true path z1 is 21.5, 13.3 and 5.0 at -28, -30 and
+  -34 dB, so the shape would still say L at -34 dB. A3 itself finds
+  L_FULL only at -28 and -30 dB, though: its pilot-only search is about
+  6 dB behind CE's.
+- As built, a line is L when z1 > 4 and the power above it is not
+  significant (z 3 or less: under a strong CE signal the noise cross-terms
+  widen z1, which passed 4 in 2 of 8 SHORT passes at -10 dB); CE when the
+  power above is significant (z over 3) and the two sides are alike
+  (|z1| < 3); and ambiguous otherwise.
 
 **False alarms do not grow measurably.** Two preamble searches double A2's
 cells (1e-7 each), and a candidate tried as both waveforms takes two
 chances at the gate, but the gate's Z > 6 is what decides, and it does not
-pass noise.
+pass noise. On the simulated noise-only slots tried (short and tiny),
+neither waveform found anything. L's blind gate V on noise reads higher
+than CE's (20 seeds: mean 0.5, sd 1.2, highest 3.2), and how often it
+would pass 6 is not measured.
 
 **Header soft bits combine across waveforms.** L's QPSK header bits and
 CE's ±1 bits are the same 2,474 coded bits, and with the spread copy both
-use the same whitener indexed by latent, so their LLRs add.
+use the same whitener indexed by latent, so their LLRs add. In a genie
+test an L pass and a CE pass that each failed alone decoded together.
 
-### Before L goes on the air
+### Keeping L out of the CE gate
 
-Today's listener (on Hamlet, and the qrss-live decoding Andrew runs from
-the Utah WebSDR) does not know L. It would see an L pilot as an A1 line,
-find no CE preamble there (cheap), then pick the pilot up again in A3 at
-the end of the slot and spend a refused CE gate on it, 60 to 80 s each. Three
-L signals on the band use the whole 180 s budget, and the weak blind CE
-candidates behind them go unchecked that slot. So the first receiver
-change, before any L transmission, is to recognise an L line by its shape
-and leave it out of the CE gate. That is small and can ship ahead of the
-L receiver.
+The listener from before L (on Hamlet, and the qrss-live decoding Andrew
+runs from the Utah WebSDR) does not know L. This note expected it to
+refuse an L signal at the CE gate, 60 to 80 s each, so that three L
+signals would use the whole 180 s budget. Measured, it does something
+else: CE's gate V passes an L signal (Z_ref 6 to 11 on l-short at -12 and
+-6 dB), because L's references correlate with CE's in the data band. So
+the old listener shows an L signal as a weak, headerless CE tile with
+nothing usable in it. Simulated, at -12 dB: a live TINY slot gave a junk
+CE tile at z 7.3 and latent SNR -8.0 dB, a live SHORT slot one at z 7.2,
+and `qrss_receive.py` on a recording a SUSPECT CE pass at Z_ref 6.5.
 
-## Plan
+Listening for both keeps L out of the CE gate three ways. L's own
+preamble names the waveform; the shape test names it for an A3 line; and
+a CE accept is checked again against the residual its known symbols leave
+under the noise model (the residual ratio R, about 1 for a real CE pass).
+An accept with R > 2 and Z_ref/√R ≤ 6 is refused. Measured R: CE's own
+passes 0.93 to 1.48 on TINY, fading CE up to 2.16 (at Z_ref 48, so kept),
+an L signal under CE's gate 3.6 to 15.4, and CE's own sideband ghosts
+about 12 Hz off its carrier 5.2 to 6.2 (refused, which is no loss).
+
+`--just-ce` is, by decision, the old receiver bit for bit, so it does
+none of this and behaves as the old listener does. That is why L may go
+on the air once a station's listeners run this code and listen for both.
+
+## Plan: what was done and what is left
 
 1. **Done:** the L transmitter, frame and tests (`tests/test_qrss_lwave.py`).
-   `qrss_transmit.py --waveform L` writes a pass; the app runs that script,
-   so a Send can carry L once the UI offers the choice.
-2. **Recognise L in the listener** and keep it out of the CE gate (above).
-3. **The L receiver:** A2 with the L preamble, the tracker on the pilot and
-   the references, demodulation by I/Q pairs (divided by the 0.881 data gain),
-   EM, the header from QPSK soft bits plus the spread copy, tracking on the
-   spread copy as well once the header is known (spec 6.3's L figures assume
-   it), and the Morse
-   reader with one unit per L symbol. Then the joint listener: both A2s per
-   line, the shape test, per-waveform aliases and noise bands, and the
-   waveform recorded per pass.
-4. **Check the thresholds** of spec 6.3 on Watterson paths, and measure L's
-   header (estimated -27 dB from the block, about 1.5 dB deeper with the
-   spread copy).
-5. **The app:** a waveform choice in the Send editor and the waveform shown
-   per pass (UI thread).
+   `qrss_transmit.py --waveform L` writes a pass, and the app's schedule
+   window can send L (a Waveform choice beside Mode).
+2. **Done (2026-10-12):** recognise L in the listener and keep it out of
+   the CE gate (above), whenever both waveforms are listened for.
+3. **Done (2026-10-12), but for EM:** the L receiver (A2 with the L
+   preamble, the tracker on the pilot and the references, demodulation by
+   I/Q pairs divided by the 0.881 data gain, the header from QPSK soft bits
+   plus the spread copy, tracking on the spread copy as well once the
+   header is known, and the Morse reader with one unit per L symbol), and
+   the joint listener (both A2s per line, the shape test, per-waveform
+   aliases, signals compared at band centres, and the waveform recorded
+   per pass and per tile).
+4. **Partly done:** on a steady path L's latent SNR is within about 0.4 dB
+   of the genie from -6 to -28 dB, and its header decoded at -28 dB (one
+   seed). Spec 6.3's thresholds on Watterson paths, and L's header
+   threshold, are not measured.
+5. **Partly done:** the app's waveform choice for scheduled sends is in.
+   The QRSS window does not yet read a tile's `waveform`: an L tile's
+   marker should cover its band, from about 22 Hz below its pilot to just
+   above it, rather than CE's f ± 25 Hz (UI thread).
+
+**What is left**, in the receiver:
+
+- **An L-shaped A1 statistic.** A1 sees only the pilot, 10.5% of the
+  preamble's power, so live acquisition of L stops at about -26 dB:
+  simulated on l-short, 6 of 8 at -24 dB, 2 of 8 at -28 and 0 of 8 at
+  -31, where A2-L given the right line passes 8 of 8 at -31 and the spec
+  says -31 dB. A weaker L signal waits for the end-of-slot search. The
+  fix is estimated at 2 to 3 dB.
+- **A3 for L**, which finds L_FULL at -28 and -30 dB but not at -34,
+  where CE's is found: an L-matched search needs its own Gumbel table.
+- **EM, the template search and retro detection for L.** All three are
+  CE-only. An L member of an accumulator joins every template, but is
+  never re-received or searched for.
+- **The L ghost rule, measured.** L's references recur every 16 L
+  symbols, so its ghosts would sit at multiples of about 1.03 Hz; none
+  appeared in any run, and the rule in use is CE's with its timing window
+  in L symbols.
+- **Recovery per waveform.** The listener records finished slots by slot
+  only, so a slot finished under `--just-ce` is not received again for L
+  when the listener restarts listening for both.
+- **A strong L signal and the front end's normaliser.** Above about -6 dB
+  SNR2500 the 100 ms inverse AGC follows L's envelope (an l-short genie at
+  +10 dB read 12.13 dB of latent SNR before it and 9.89 dB after), and a
+  strong L signal modulates the others in the band.
+- **The noise floor near the band edges**, which also affects CE: within
+  about 75 Hz of 300 or 2700 Hz a -12 dB signal reads several dB too
+  strong, and in the joint receiver a CE neighbour close by makes an L
+  pass there much worse (latent SNR -0.04 dB against 6.49 with
+  `--just-l`, an L pilot at 326 Hz beside CE at 400 Hz).

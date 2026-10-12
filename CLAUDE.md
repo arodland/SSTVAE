@@ -9,9 +9,13 @@ rationale lives in the plan history.
 
 - Run tests: `pytest` (fast, ~10 s; includes full modem end-to-end tests)
   **plus the QRSSTVAE suite (`tests/test_qrss_*`)**, whose non-slow tier is
-  about 355 tests and ~1.5 min on 4 shared CPUs (2026-10-09; it was 6-7
-  min before every test that receives a SHORT pass, 10-15 s each, moved to
-  `slow`). `tests/test_qrss_smoke.py` keeps the chain in the default run:
+  about 585 tests and ~2.5 min on 4 shared CPUs (2026-10-12, waveform L's
+  tests included:
+  `tests/test_qrss_l{acquire,channel,demod,receiver,track,units,wave}.py`
+  and `tests/test_qrss_live_l.py`; it was 6-7 min before every test that
+  receives a SHORT pass, 10-15 s each, moved to `slow`, and an l-short
+  pass is `slow` too).
+  `tests/test_qrss_smoke.py` keeps the chain in the default run:
   one blind TINY pass from transmit audio to rendered picture and one
   SHORT pass at -6 dB (header, callsign windows). `pytest
   --ignore-glob='tests/test_qrss_*'` is the quick SSTVAE check, `pytest

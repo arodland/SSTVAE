@@ -23,14 +23,30 @@ human could hear through. QRSSTVAE does the same for pictures:
 | | SSTVAE | QRSSTVAE |
 |---|---|---|
 | Time to send one picture | 32 seconds | about 30 minutes (one *pass*) |
-| Width of the signal | about 1,200 Hz | about 50 Hz |
-| Signals that fit in one voice channel | 1 | up to about 48, side by side |
-| How weak a signal still works | around the strength of the noise | about 12 times weaker than the noise for a good picture in one pass, and weaker still if passes are repeated |
+| Width of the signal | about 1,200 Hz | about 50 Hz (CE) or 22 Hz (L) |
+| Signals that fit in one voice channel | 1 | up to about 48 side by side (CE), or about 80 (L) |
+| How weak a signal still works | around the strength of the noise | for a good picture in one pass, about 12 times weaker than the noise (CE) or 25 times (L, at the same average power), and weaker still if passes are repeated |
 | Repeats | each transmission stands alone | repeats of the same picture add up |
 
 So the trade is time for sensitivity. Going about 50 times slower and
-about 25 times narrower lets the picture through when the signal is buried deep in the
-noise.
+about 25 times narrower lets the picture through when the signal is
+buried deep in the noise.
+
+QRSSTVAE comes in two *waveforms*, two shapes of signal, and the
+sending station picks one:
+
+- **CE** (constant envelope) is a single tone, about 50 Hz wide, whose
+  phase the data push back and forth. Its power never changes, so any
+  transmitter can send it at full power, the way WSPR and FT8 are sent.
+- **L** (linear) is a steady tone, the *pilot*, with the data in a band
+  just below it, about 22 Hz wide in all. Its power goes up and down,
+  its peaks about 3.2 dB above its average, so it needs a transmitter
+  that stays linear: an SSB rig with the ALC not engaged and the speech
+  processor off. In return it is narrower, and at the same average power it needs
+  less signal.
+
+The listener hears both at once, and passes of the same picture add up
+whichever waveform each was sent in.
 
 ## Why "below the noise" is possible at all
 
@@ -44,11 +60,15 @@ the same picture again later makes it clearer.
 Signal strength here is quoted as *SNR*, signal-to-noise ratio, in
 decibels (dB). 0 dB means the signal and the noise in a voice-width
 channel are equally strong, and negative numbers mean the signal is
-weaker. Every 10 dB is a factor of ten. In simulation, one QRSSTVAE pass
-gives a good picture at about -11 dB, a signal a little over a tenth as
-strong as the noise. Sixteen passes of the same picture added together
-give a good picture at about -26 dB, where the signal is a few hundred
-times weaker than the noise.
+weaker. Every 10 dB is a factor of ten. In simulation, on a quiet
+path, one CE pass gives a good picture at about -11 dB, a signal a
+little over a tenth as strong as the noise. Sixteen passes of the same
+picture added together give a good picture at about -26 dB, where the
+signal is a few hundred times weaker than the noise. L needs about 3 dB
+less at the same average power: about -14 dB for one pass and -30 dB
+for sixteen. Most transmitters are limited by their peak power, though,
+and L's peaks sit 3.2 dB above its average, so at the same peak power
+the two come out about even, with CE ahead on disturbed paths.
 
 ## The clock: everything happens on the quarter hour
 
@@ -78,7 +98,8 @@ A pass is like a letter with an envelope:
 
 - **Preamble (20 seconds).** A fixed pattern every receiver knows in
   advance, like a knock on the door. The receiver uses it to notice that
-  a signal is there and to measure its exact frequency.
+  a signal is there and to measure its exact frequency. Each waveform
+  has its own.
 - **Header (80 seconds).** The envelope. It says who is sending (the
   callsign and location), which picture this is (the *picture ID*),
   which part of the picture this pass carries, and which version of the
@@ -130,9 +151,41 @@ about half its size; nothing in it changes.
 ### 2. It listens for the knock
 
 Shortly after each quarter hour, it searches the recording for the
-preamble of every signal in the channel. Each signal it finds gets a
-**tile** on the screen: a small card with its frequency, its strength
+preamble of every signal in the channel. There are two knocks to listen
+for, one per waveform. The listener first finds the narrow lines that
+stand out in the band (a CE signal's tone, or an L signal's pilot) and
+then listens at each line for both. An L signal can also stand out by
+its data band rather than its pilot, so for L it listens a little above
+each line too, where the pilot would then be. Each signal it finds gets
+a **tile** on the screen: a small card with its frequency, its strength
 and, once the header is read, the sender's callsign.
+
+During the preamble an L signal's pilot carries only about a tenth of
+its power, so while the pass is on the air an L signal is found on its
+knock only down to about -26 dB. A weaker one is found by the last look
+at the end of the slot (step 4).
+
+The two waveforms are not always easy to tell apart, and the listener
+takes care to call each signal by the right one:
+
+- **One signal, one tile.** A CE tone and an L pilot are both a steady
+  line, so one signal can sometimes be read both ways. The listener
+  places every signal by the middle of its band (a CE signal's tone; for
+  L, about 10 Hz below the pilot, in its data), counts two readings
+  within 5 Hz of each other as one signal, and keeps the stronger
+  reading, and its waveform with it.
+- **An L signal can pass CE's check.** Before it believes a CE signal
+  is there, the receiver checks that the parts every pass is known to
+  contain are really in it. An L signal can pass that check, weakly: its
+  pilot looks like a CE tone, and the known parts of an L pass partly
+  line up with CE's. So a signal that passes as CE is looked at once
+  more: once the CE signal it expects is taken away, how much is left at
+  the known places? A real CE signal leaves about what the noise would.
+  An L signal read as CE leaves several times more, and a CE reading
+  with more than twice the expected leftover is refused unless it still
+  passes once that excess is allowed for. The L reading of the same
+  signal then stands. An L reading gets the same second look, so a CE
+  signal is not taken for L either.
 
 It repeats that search every two minutes for the first five minutes, because
 a weak signal can take a few minutes of audio to confirm. If nothing has
@@ -146,7 +199,8 @@ first 15 minutes, because each check has more audio to go on.
 
 Pictures sent in mode B or C come in two or three parts, 30 minutes
 apart. Once the listener has read the header of part 1, it knows when
-part 2 is due and roughly where: on part 1's tone, give or take a hertz
+part 2 is due, roughly where, and in which waveform: on part 1's tone
+(an L signal's pilot), give or take a hertz, and with part 1's knock
 (and if you moved the dial in between, it allows for that). So it
 looks there for a preamble even when that tone is too faint to stand
 out from the rest of the band. It still asks for the same evidence
@@ -170,11 +224,15 @@ more time with everything it now knows. This also searches for signals
 that were too weak for anyone to notice on their preamble alone. That
 search is expensive, so it is only done when the listener heard at least
 half of the slot; with less, it still looks wherever a later part of a
-picture was due. It runs as a separate program on its own processor
-core, so the next slot's tiles, already on the air, keep updating while
-it works. It takes a few minutes. Meanwhile the tile says it is
-finishing, and one more quick look at the whole pass shows it to the
-end rather than where the last two-minute update left it.
+picture was due. That search has no knock to go on, so it tells the
+waveforms apart by the shape of the signal around each line it finds:
+L's data all sit on one side, below its pilot, while CE's spread evenly
+on both sides of its tone. Where the shape is not clear, it tries CE
+first and L later. This last look runs as a separate program on its own
+processor core, so the next slot's tiles, already on the air, keep
+updating while it works. It takes a few minutes. Meanwhile the tile says
+it is finishing, and one more quick look at the whole pass shows it to
+the end rather than where the last two-minute update left it.
 
 ### 5. It files the pass
 
@@ -183,7 +241,8 @@ one running total per picture. Passes of the same picture are added in,
 each number weighted by its confidence. A picture you heard three times
 looks better than one you heard once. A pass counts once, however it
 was heard: a strong signal can be picked up twice in the same slot, at
-two slightly different timings, and then only the better copy is kept.
+two slightly different timings or as both waveforms, and then only the
+better copy is kept.
 
 ## When things go wrong
 
@@ -243,7 +302,7 @@ If you start after about :15, you heard less than half the slot and
 the end-of-slot search doesn't run. The audio is still on disk for 48
 hours, though, and once you have the picture from another pass, a
 separate tool (`qrss_decode.py --retro`) can search those old recordings
-for it.
+for it. So far that tool searches only for CE passes.
 
 ### You stopped the listener, or it was restarted
 
@@ -303,33 +362,49 @@ no header and no Morse callsign is thrown away. And the search only
 checks a limited number of candidates per slot, strongest first, so a
 noisy band can't keep the computer busy for longer than a slot.
 
+### A listener that only knows CE
+
+A listener from before L, or one started with `--just-ce`, knows
+nothing of L and makes none of the waveform checks above. It can take an
+L signal for a weak CE one, which then shows up as a CE tile at the L
+signal's pilot, with no header and a picture that means nothing. If L
+signals may be on the band you listen to, listen for both waveforms,
+which is the default.
+
 ### A strong signal right next door
 
-To judge whether a weak candidate is real, the receiver compares it
-with the noise on either side of it, about 100 Hz away. A stronger
-signal sitting there would look like a lot of noise and make the weak
-one look hopeless. So when it measures the noise for one candidate, the
-receiver leaves out the other signals it has found. (On 2026-10-11 a
-weak station 100 Hz from a strong one was missed for the whole pass
-for exactly this reason, and only the end-of-slot search found it.)
+To judge whether a weak candidate is real, the receiver compares it with
+the noise on either side of it, about 100 Hz away. A stronger signal
+sitting there would look like a lot of noise and make the weak one look
+hopeless. So when it measures the noise for one candidate, the receiver
+leaves out the other signals it has found, the whole width of each: for
+an L signal that means its data band below the pilot as well as the
+pilot itself. (On 2026-10-11 a weak station 100 Hz from a strong one was
+missed for the whole pass for exactly this reason, and only the
+end-of-slot search found it.)
 
 ### Echoes of the neighbouring slot
 
 Since passes last 30 minutes and slots are 15 minutes apart, the end of
 the :00 slot's recording also contains the first half of anything sent
-at :15. The search could mistake that signal for one in the :00 slot,
-at the wrong timing. So a header-less pass at the same frequency as a
-signal the neighbouring slot identified is treated as that signal's
-echo and ignored. Only the two immediate neighbours count: the same
-picture sent again half an hour or more later is not an echo, and is
-exactly what the receiver wants to add up.
+at :15. The search could mistake that signal for one in the :00 slot, at
+the wrong timing. So a header-less pass at the same frequency as a
+signal the neighbouring slot identified (of either waveform, compared by
+the middle of each band) is treated as that signal's echo and ignored.
+Only the two immediate neighbours count: the same picture sent again
+half an hour or more later is not an echo, and is exactly what the
+receiver wants to add up.
 
 ## Words used on the screen
 
 - **Slot**: a quarter-hour start time, such as 05:45Z (Z means UTC),
   then where the signal is: the radio's dial plus the signal's audio
   tone, such as 10.141 MHz + 1500 Hz (the tone alone without rig
-  control).
+  control). For an L signal the tone is its pilot, and its data lie in
+  the 22 Hz just below.
+- **Waveform**: each tile records whether its signal is CE or L
+  (`waveform` in `state.json`), but the app's window does not show it
+  yet, and marks an L signal as it would a CE one.
 - **The number beside the title**: the picture's mean weight, how
   confident its numbers are on average, in dB. Higher (closer to 0 dB
   or above) is better; a single pass needs around +2 dB for a good
@@ -357,3 +432,9 @@ Start the listener from the desktop app (View > QRSS signals > Start
 listener), or from a terminal by piping audio into `qrss_listen.py`.
 [README.md](README.md) has the commands. Everything it learns is saved in
 your home folder, under `~/.local/share/qrsstvae`.
+
+The listener hears both waveforms unless it is told otherwise, and the
+app starts it that way. On the command line, `--just-ce` or `--just-l`
+makes it listen for one. Listening for both costs more computer time:
+receiving one short test recording of a CE signal took about 1.6 times
+as long as listening for CE alone (12.6 s against 7.7 s).

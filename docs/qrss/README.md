@@ -4,17 +4,20 @@ QRSSTVAE is an experimental branch of SSTVAE (branch `qrss`). It sends a
 picture the way a QRSS beacon sends a callsign: very slowly, in a very
 narrow signal, repeated many times. It uses SSTVAE's published v5 image
 codec unchanged. A picture is encoded once into about 50,000 analog
-numbers ("latents"). Each 30-minute pass sends them on one carrier about
-50 Hz wide, starting on a quarter hour. The station repeats the same
-picture over hours or days. The receiver averages every pass it hears
-into one accumulator per (callsign, picture ID), so the picture builds up
-from signals well below the noise.
+numbers ("latents"). Each 30-minute pass sends them on one narrow
+signal, about 50 Hz wide for waveform CE or 22 Hz for L, starting on a
+quarter hour. The station repeats the same picture over hours or days.
+The receiver averages every pass it hears into one accumulator per
+(callsign, picture ID), so the picture builds up from signals well below
+the noise.
 
-The waveform built so far is **CE**: a constant-amplitude carrier whose
+There are two waveforms. **CE** is a constant-amplitude carrier whose
 phase carries the latents. It is meant for an Si5351 clock-chip beacon
 that can only set frequency and phase, and it can also be played through
-an SSB rig as audio. A second waveform, L, for linear SSB rigs, is
-specified but not built.
+an SSB rig as audio. **L**, for linear SSB rigs, is a data band just
+below a steady pilot tone, about 22 Hz wide in all. The table below
+compares SSTVAE with CE; [waveform-l.md](waveform-l.md) compares L with
+CE.
 
 | | SSTVAE | QRSSTVAE (this branch, waveform CE) |
 |---|---|---|
@@ -36,8 +39,8 @@ YouTube; its scripts take this checkout as `SRC` (for example
 `SRC=~/qrsstvae-streaming ./setup.sh`). The full design is in
 [docs/qrss/design.md](design.md). It implements
 the draft spec **"QRSSTVAE: ultra-slow narrowband SSTVAE for HF", rev 9**,
-plus rev 11's spread header (section 5.1) (`qrsstvae-options.md`, kept
-outside this repository). Where the design
+plus rev 11's spread header (section 5.1) and rev 13's waveform L
+(`qrsstvae-options.md`, kept outside this repository). Where the design
 had to decide something the spec left open, the design's section 14
 lists the decision.
 
@@ -49,10 +52,14 @@ are in [docs/qrss/spread-header.md](spread-header.md).
 
 Waveform L (a QPSK data band beside a steady pilot, 2.4 times narrower
 than CE) has a transmitter since 2026-10-11 (`qrss_transmit.py
---waveform L`) and no receiver yet, so it must not go on the air: a
-listener that knows only CE would spend its search on it.
-[docs/qrss/waveform-l.md](waveform-l.md) says what L gives over CE, what
-running CE taught us, and what decoding both in one window costs.
+--waveform L`) and a receiver since 2026-10-12: `qrss_receive.py` and
+`qrss_listen.py` listen for both waveforms by default, and `--just-ce`
+or `--just-l` picks one. So L may go on the air once the listeners meant
+to hear it run this code. A listener on older code, or run with
+`--just-ce`, does not know L and can show an L signal as a weak,
+headerless CE tile. [docs/qrss/waveform-l.md](waveform-l.md) says what L
+gives over CE, what running CE taught us, what the receiver settled, and
+what decoding both in one window costs.
 
 ## Status
 
@@ -73,7 +80,11 @@ the channel simulator in this branch.
   passband as usual.
 - The work covers spec build steps 2 (waveform CE, channel simulator,
   single-pass receiver) and 4 (multi-pass combining, association, EM),
-  plus a portable C reference of the beacon's phase generator.
+  plus a portable C reference of the beacon's phase generator, and for
+  waveform L the transmitter, the channel simulator, the single-pass
+  receiver and a listener that hears both waveforms. L passes combine
+  with CE passes of the same picture; EM, the template search and retro
+  detection are CE-only so far.
 
 ## Quick start
 
@@ -137,9 +148,9 @@ hour. It ends 3 s after the frame.
 .venv/bin/python qrss_simulate.py tx.wav rx.wav --slot 2026-10-09T06:00Z --snr -10.9 --preset quiet --seed 11
 ```
 
-**5. Receive the slot.** This finds every CE signal in the recording,
-tracks and demodulates it, reads the header and callsign windows, and
-stores the pass in the multi-pass store.
+**5. Receive the slot.** This finds every signal in the recording, of
+either waveform, tracks and demodulates it, reads the header and
+callsign windows, and stores the pass in the multi-pass store.
 
 ```sh
 .venv/bin/python qrss_receive.py rx.wav --slot 2026-10-09T06:00Z
@@ -148,8 +159,8 @@ stores the pass in the multi-pass store.
 Example output (from the end-to-end run, quiet path at −10.9 dB):
 
 ```
-pass 1990584_1499968_28b521d4
-  frequency   1499.968 Hz   offset  1499.968 Hz   drift +0.000 Hz/min   wander 0.039 Hz rms
+pass 1990584_1499968_28b521d4   CE full
+  frequency   1499.968 Hz at t0   drift +0.000 Hz/min   wander 0.039 Hz rms
   doppler    0.173 Hz   clock -0.2 ppm   Z_ref 128.0   SNR2500 -11.2 dB   kappa 0.92
   header     N0CALL FN42 picture 7b202aad mode A segment 0 codec d1d8
   callsign   N0CALL   match Z 239.3   keying fsk   agrees
@@ -158,7 +169,10 @@ pass 1990584_1499968_28b521d4
 ```
 
 "mean W" is the receiver's estimate of SNR per latent. The spec's "good
-picture" target is +2.2 dB per latent for mode A.
+picture" target is +2.2 dB per latent for mode A. The first line names
+the pass's waveform and frame (`L l-full` for an L pass, whose frequency
+line reads `pilot`: an L signal's frequency is its pilot tone, with the
+data just below it).
 
 **6. Decode the accumulated picture.** Repeat steps 3 to 5 for more slots.
 Each received pass of the same (callsign, picture ID) is added to one
@@ -172,39 +186,39 @@ accumulator. Then:
 ## Listening live
 
 `qrss_listen.py` takes raw mono 8 kHz audio on stdin and keeps a tile
-for every CE signal it hears. A signal appears about 25 s after its
-quarter hour, once its preamble has arrived. Its tile is received again
-every `--refresh` seconds (default 120) with everything heard so far, so
-the callsign and picture ID appear after about two and a half minutes
-and the picture fills in through the pass. A slot where nothing has
-been found 5 minutes in is searched again only every 5 minutes. A
-preamble that gate V refused is checked again at every refresh until 15
-minutes in (`LiveConfig.recheck_until_s`; about 14 s of CPU each), since
-a weak signal's Z_ref grows with the audio. The preamble search itself
-runs once per slot: its answer is final once the audio is about 30 s
-past the quarter hour (`acquire.live_end_s`), and kept. Mode B and C
-send their parts 30 minutes apart, so once part 1 of a picture has
-been heard (its header said so), the slot where part 2 is due gets a
-*hint*: part 1's frequency, moved by any dial change since
-(`LiveListener._hints`, from the multi-pass store and the tiles of
-earlier slots). Acquisition searches for a preamble at A1's strongest
-line within 2 Hz of each hint (`acquire.HINT_SPAN_HZ`) even when A1
-did not offer that line, at A2's usual pass mark, so a signal outside
-A1's 16 strongest lines is still found and the false-alarm rate rises
-only by that of one more line. A hint whose preamble does not pass is
-not verified live (with no timing, gate V costs about a minute), but
-the end-of-slot receive checks it, also when less than half the slot
-was heard and there is no whole-slot search. When
-the frame ends, the whole slot is received again, stored and
-associated, and the tile shows the picture accumulated over every pass
-of it. That end-of-slot receive runs in a second process, on another
-core, so the tiles of the slot still on the air keep updating
-meanwhile. It takes minutes (3 to 5 on a desktop). While it runs, the
-tile's status reads `finishing` and one more live receive of the whole
-frame takes the tile to the end of the pass, where it used to stay at
-the last refresh. A tile's `progress` is the share of the frame
-elapsed when its audio was read, so the audio that arrived while a
-receive ran is not counted as missing.
+for every signal it hears, of either waveform. A signal appears about
+25 s after its quarter hour, once its preamble has arrived. Its tile is
+received again every `--refresh` seconds (default 120) with everything
+heard so far, so the callsign and picture ID appear after about two and
+a half minutes and the picture fills in through the pass. A slot where
+nothing has been found 5 minutes in is searched again only every 5
+minutes. A preamble that gate V refused is checked again at every
+refresh until 15 minutes in (`LiveConfig.recheck_until_s`; about 14 s of
+CPU each), since a weak signal's Z_ref grows with the audio. The
+preamble search itself runs once per slot: its answer is final once the
+audio is about 30 s past the quarter hour (`acquire.live_end_s`), and
+kept. Mode B and C send their parts 30 minutes apart, so once part 1 of
+a picture has been heard (its header said so), the slot where part 2 is
+due gets a *hint*: part 1's frequency and waveform, moved by any dial
+change since (`LiveListener._hints`, from the multi-pass store and the
+tiles of earlier slots; a stored pass's frame name, `l-...` for L, says
+its waveform). Acquisition searches for a preamble at A1's strongest
+line within 2 Hz of each hint (`acquire.HINT_SPAN_HZ`) even when A1 did
+not offer that line, at A2's usual pass mark, so a signal outside A1's
+16 strongest lines is still found and the false-alarm rate rises only by
+that of one more line. A hint whose preamble does not pass is not
+verified live (with no timing, gate V costs about a minute), but the
+end-of-slot receive checks it, also when less than half the slot was
+heard and there is no whole-slot search. When the frame ends, the whole
+slot is received again, stored and associated, and the tile shows the
+picture accumulated over every pass of it. That end-of-slot receive runs
+in a second process, on another core, so the tiles of the slot still on
+the air keep updating meanwhile. It takes minutes (3 to 5 on a desktop).
+While it runs, the tile's status reads `finishing` and one more live
+receive of the whole frame takes the tile to the end of the pass, where
+it used to stay at the last refresh. A tile's `progress` is the share of
+the frame elapsed when its audio was read, so the audio that arrived
+while a receive ran is not counted as missing.
 
 The bar under each tile's title shows that pass's confidence over
 time, from the start of the pass at the left to its end at the right,
@@ -218,6 +232,22 @@ around +2 dB on average for a good picture. The preamble, which carries
 no picture numbers, is grey. The values are the tile's
 `confidence` in `state.json`, 120 bins in dB, null where there is
 nothing to say.
+
+**Both waveforms.** The listener listens for CE and L together unless
+`--just-ce` or `--just-l` names one (one or the other, not both).
+`--frame` names the frame shape in either waveform's name (`full` or
+`l-full`), and each waveform listens for its own frame of that shape, so
+a CE-only frame such as `full-v1` needs `--just-ce`. The desktop app
+starts the listener with no waveform flag, so it hears both. One signal
+is one tile whichever waveform reads it: signals are compared at their
+band centre, a CE carrier's frequency or 9.5 Hz below an L pilot, and
+where both waveforms lock on one signal the reading with the larger
+Z_ref stands. In `state.json` each tile carries `waveform` (`"CE"` or
+`"L"`; a tile without it is CE) and its pass's own `frame` (`"l-full"`
+for L), and the top level lists the `"waveforms"` listened for. An L
+tile's `f_hz` is its pilot, with its data from 3 to 22 Hz below it.
+`--just-ce` is the listener from before L, unchanged, and knows nothing
+of L: an L signal can come out there as a weak, headerless CE tile.
 
 From the desktop app: **View > QRSS signals**, then **Start listener**,
 and press **Listen** in the receive pane so there is audio to hear. The
@@ -306,7 +336,8 @@ combines the two. Its own picture is not redrawn. Tiles carry the stored
 pass's id as `uid`.
 
 A transmission is one pass however it was received. Two passes of one
-slot within 5 Hz are one signal: the receive keeps the one with the
+slot within 5 Hz are one signal (compared at their band centres, so
+this holds across waveforms too): the receive keeps the one with the
 higher Z_ref (in a field test one strong signal came out as two passes
 0.6 Hz apart, their timings 4 symbols apart, and both were filed). The
 multi-pass store also keeps one member per transmission (the same slot
@@ -316,7 +347,8 @@ twice.
 
 Gate V measures each candidate's noise floor 85-120 Hz either side of it
 and leaves out the other preamble hits and the signals already verified
-(`receiver.detect`), and counts only the symbols heard. A neighbour in
+(`receiver.detect`; an L neighbour about its band centre, 9.5 Hz below
+its pilot), and counts only the symbols heard. A neighbour in
 that band read as noise: KC2G at -18.6 dB, 101 Hz from AG7EW and 14 dB
 weaker, passed A2 at every live refresh of the 2026-10-11 04:15Z slot
 and failed V (Z_ref about 1 in a replay), so it had no live tile; with
@@ -370,11 +402,30 @@ correct by eye.
   neighbouring slot's transmissions (FULL frames last two quarter
   hours). The whole-slot search can lock onto a neighbour's carrier at
   the wrong timing. A pass with no header within 20 Hz of a signal of
-  another slot that did decode its header is therefore dropped. A real,
-  very weak second station that close is dropped with it.
+  another slot that did decode its header (compared at band centres) is
+  therefore dropped. A real, very weak second station that close is
+  dropped with it.
+- Live, an L signal is found on its preamble only down to about -26 dB
+  SNR2500 (simulated, l-short: 6 of 8 at -24 dB, 2 of 8 at -28): the
+  first search sees only its pilot, a tenth of the preamble's power. A
+  weaker L signal is found at the end of the slot by the whole-slot
+  search, which for L reaches about -30 dB (FULL frames found at -28 and
+  -30 dB, not at -34, where CE is found).
+- Keep signals well inside 300-2700 Hz. The listener gives no tile to an
+  L pass whose pilot is less than 22.07 Hz above 300 Hz, since its data
+  would fall below 300 Hz. Within about 75 Hz of either edge the noise
+  floor reads low, so a -12 dB signal is reported several dB too strong
+  (simulated: CE at 305-340 Hz reported -2.4 to -4.4 dB), and a
+  headerless pass there can be dropped as stronger than -6 dB. An L
+  signal near an edge with a CE neighbour close by fares worst.
+- Under `--just-ce` an L signal can show as a junk CE tile with no
+  header (simulated at -12 dB: z about 7.2, latent SNR about -8 dB).
 - CPU: roughly 20 s per signal per refresh on a desktop, plus up to a
   few minutes for each end-of-slot receive. With many signals, use a
-  longer `--refresh`.
+  longer `--refresh`. Listening for both waveforms costs more than for
+  one, since every line is searched as both and the whole-slot search
+  may try a candidate as each (`qrss_receive.py` below has a
+  measurement).
 
 ## Sending from the app
 
@@ -421,6 +472,9 @@ is one picture, one QRSS mode and one carrier, sent a number of times
   on the Transmit pane do not change it.
 - **First send (UTC)**: a date and a quarter hour, with your local time
   in brackets.
+- **Waveform**: CE (the default) or L. L is about 22 Hz wide and needs a
+  linear chain with the ALC out, and only a listener that hears L (this
+  branch's, without `--just-ce`) decodes it.
 - **Repeat**: how many sends, and how far apart their starts are. *Back
   to back* starts the next send the half hour after the last pass of
   the one before, so two mode A sends back to back ("2 x A") are two
@@ -484,10 +538,11 @@ INPUT is a `.qrsp` or a beacon `.bin`.
 |---|---|
 | `--slot` | Required. Quarter hour in ISO UTC, e.g. `2026-10-09T06:00Z` |
 | `--callsign`, `--grid`, `--segment` | For a `.qrsp` input. A `.qrsp` needs `--callsign`, because every pass must key the callsign windows |
-| `--freq` | Audio carrier frequency in Hz. Default 1500 |
+| `--waveform {CE,L}` | `CE` (default), the constant-envelope carrier, or `L`, the linear signal for SSB rigs: a pilot at `--freq` with the data just below it, about 22 Hz wide in all and 3.2 dB peak to average, so set the drive by its peaks with the ALC out |
+| `--freq` | Audio carrier frequency in Hz (for L, the pilot's). Default 1500 |
 | `--lead-in S` | Seconds (0–10) of plain carrier before the preamble |
-| `--ook` | On-off keyed callsign windows, for a `.qrsp`. A `.bin` carries its own choice, and `--ook` with an FSK `.bin` is refused |
-| `--frame` | Frame shape: `full` (default), `medium`, `short` or `tiny`. Anything but `full` is a test frame |
+| `--ook` | On-off keyed callsign windows, for a `.qrsp`. A `.bin` carries its own choice, and `--ook` with an FSK `.bin` is refused. CE only |
+| `--frame` | Frame shape: `full` (default), `medium`, `short` or `tiny`, the same name for either waveform. Anything but `full` is a test frame |
 | `--float` | Write float32 with no normalisation, for exact round trips. Default is peak-normalised int16 |
 
 ### `qrss_simulate.py INPUT OUTPUT`
@@ -501,6 +556,7 @@ receiver.
 |---|---|
 | `--slot` | Required. Quarter hour in ISO UTC |
 | `--callsign`, `--grid`, `--segment`, `--freq`, `--frame`, `--lead-in`, `--ook` | As for `qrss_transmit.py`, used when INPUT is a `.qrsp` or `.bin` |
+| `--waveform {CE,L}` | The waveform to simulate (default CE). A WAV input must then be a transmission of that waveform; beacon files and `--ook` are CE's |
 | `--snr` | SNR in 2500 Hz in dB, measured on the wanted signal's keyed samples. Default: no noise |
 | `--preset` | Watterson path: `steady`, `quiet` (0.1 Hz Doppler spread, 0.5 ms delay), `moderate` (0.5 Hz, 1 ms), `disturbed` (1 Hz, 2 ms), `mps` (0.15 Hz, 2 ms) |
 | `--doppler`, `--delay` | Doppler spread (Hz, 2σ) and second-path delay (ms), instead of a preset |
@@ -511,7 +567,7 @@ receiver.
 | `--impulse-rate`, `--impulse-db` | Clicks per second and their level over the signal (default 30 dB) |
 | `--crashes` | Static crashes per minute |
 | `--agc` | Fast receive AGC (2 ms attack, 200 ms decay) |
-| `--neighbour DF:DB` | Another CE station DF Hz away at DB relative to this one. Repeatable. `DF:DB:LEADIN:DRIFT` also sets its lead-in seconds and drift |
+| `--neighbour DF:DB` | Another station DF Hz away (between named frequencies, carrier or pilot) at DB relative to this one. Repeatable. `DF:DB:LEADIN:DRIFT` also sets its lead-in seconds and drift, and a last field `CE` or `L` its waveform (default `--waveform`'s). A negative DF needs the `=` form, `--neighbour=-60:0:L` |
 | `--pre`, `--post` | Seconds before t0 and after the frame in the output (default 12 and 3) |
 | `--seed` | Random seed (default 0) |
 | `--float` | float32 WAV, not normalised |
@@ -524,13 +580,19 @@ INPUT is an 8 kHz WAV of one slot, or a `qrss_simulate.py` `.npz`.
 |---|---|
 | `--slot` | Quarter hour in ISO UTC. Needed for a WAV; an `.npz` carries its own |
 | `--start` | UTC time of the WAV's first sample. Default: t0 − 12 s, as `qrss_transmit.py` and `qrss_simulate.py` write it |
-| `--frame` | Frame shape. Default `full`, or the `.npz`'s own |
+| `--frame` | Frame shape, in either waveform's name (`short` or `l-short`); the other waveform listens for the same shape. Default `full`, or the `.npz`'s own |
+| `--just-ce`, `--just-l` | Listen for one waveform only (one or the other, not both). Default: both. `--just-ce` is the receiver from before L, unchanged, and can report an L signal as a weak, headerless CE pass |
 | `--store DIR` | Multi-pass store. Default `$QRSSTVAE_HOME` or `~/.local/share/qrsstvae` |
 | `--no-store` | Do not store or associate the passes |
 | `--passband DIR`, `--no-passband` | Where to keep the slot's front-end stream for 48 hours (default `STORE/passband`), or do not keep it. `qrss_decode.py --retro` searches it later |
 | `--estimator {joint,plain}` | Per-block data estimator. Default `joint` |
 | `--image PNG` | Render the first pass's picture on its own (FULL frames with a decoded header only) |
 | `--model`, `--precision` | Codec for `--image`. Precision default fp32 |
+
+An `.npz` fixes the waveform it holds: a flag that excludes it is
+refused, and so is an `.npz` of a CE-only frame (such as `full-v1`)
+without `--just-ce`. Listening for both costs more CPU than one: a CE
+SHORT recording took 12.6 s with both against 7.7 s with `--just-ce`.
 
 ### `qrss_decode.py [OUTPUT.png]`
 
@@ -542,11 +604,15 @@ Exactly one of `--key`, `--pass` or `--list`.
 | `--pass FILE.npz` | Render one stored pass. It needs a decoded header |
 | `--list` | List the store's pictures and their passes, then exit |
 | `--store DIR` | Multi-pass store, as for `qrss_receive.py` |
-| `--em ROUNDS` | Run that many rounds of leave-one-out EM over the passes before decoding (re-tracks each pass with the others as reference). Default 0 |
-| `--retro` | With `--key`: first search the 48 h passband store for passes of this picture that were too weak to detect when they arrived |
+| `--em ROUNDS` | Run that many rounds of leave-one-out EM over the passes before decoding (re-tracks each pass with the others as reference). Default 0. CE passes only: an L member is left as it was received, and the log says so |
+| `--retro` | With `--key`: first search the 48 h passband store for passes of this picture that were too weak to detect when they arrived. CE passes only (an `l-...` `--frame` is refused) |
 | `--passband DIR`, `--frame` | Passband store and frame shape for `--retro` |
 | `--any-codec` | Decode even if the picture's codec ID does not match the decoder's |
 | `--model`, `--precision` | Codec model and precision. Precision default fp32 |
+
+An accumulator may hold passes of both waveforms, and they decode alike.
+`--list` prints each member's waveform and frame (`CE full`, `L l-full`),
+and `--pass` the pass's.
 
 ## Callsign windows and lead-in
 
@@ -752,6 +818,24 @@ from the test files:
   frame, −12 dB): the weights stay honest, but per-latent SNR is about
   2 dB under the closed form, more than the separate losses add up to.
 
+### Waveform L (simulated)
+
+Through the receiver listening for both waveforms, on a steady path, SNR
+in 2500 Hz at L's average power ([waveform-l.md](waveform-l.md) has the
+table):
+
+- **Per-latent SNR.** l-short at −12 dB gave 6.7 to 7.0 dB (3 seeds),
+  within 0.2 dB of a genie receiver handed the true timing and gain. CE
+  SHORT passes at −12 dB gave 4.3 to 4.7 dB.
+- **Header and callsign.** The header decoded in every l-short run,
+  down to −28 dB (two seeds at −24 dB, one at −28), and the callsign was
+  read from its Morse windows at −6 and −12 dB.
+- **Both at once.** An L and a CE signal 60 Hz apart, both at −12 dB,
+  were both received, either way round, and a live listener fed such a
+  slot as audio (80 Hz apart) ended with both tiles complete.
+- **Noise.** Neither waveform found anything in the noise-only slots
+  tried.
+
 To run the QRSSTVAE tests:
 
 ```sh
@@ -808,9 +892,14 @@ measured numbers. All are simulated.
   density is −60.4 dB, not the −65 dB the design took from an earlier
   simulation that cut the pulse at ±16 symbols. The normative pulse is
   cut at ±8 symbols.
-- **Not built:** waveform L, a QRSS-specific waterfall, and a model
-  trained for this mode. The live listener and the app's QRSS window
-  are built but untested on a radio.
+- **Waveform L's receiver is younger than CE's.** EM, the template
+  search and retro detection skip L passes, live L acquisition stops at
+  about −26 dB, and L's thresholds on fading paths are not measured.
+  [waveform-l.md](waveform-l.md) lists what is left.
+- **Not built:** a QRSS-specific waterfall, a model trained for this
+  mode, and the app's display of a tile's waveform (an L tile is marked
+  as a CE one, 25 Hz either side of its pilot). The live listener and
+  the app's QRSS window are built but untested on a radio.
 
 ## Needs hardware or on-air time
 
