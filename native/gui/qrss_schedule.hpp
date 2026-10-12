@@ -222,6 +222,10 @@ public:
     // in here. Empty on success, else why not (nothing is added).
     std::string add(qrss_schedule::Entry entry, const images::Picture& picture);
     void remove(const std::string& id);
+    // Logs a refusal (`what` was refused, `why`) and returns `why`. The
+    // edits below log their own; the window calls this for one it
+    // refuses before asking (a dropped Send that cannot go there).
+    std::string refused(std::string why, const QString& what);
     // Changes an entry -- its mode, its repeats, when it starts -- through
     // `edit`, refusing (and changing nothing) when the result could not
     // be scheduled: an impossible repeat, too soon to start, or a clash.
@@ -286,6 +290,16 @@ private:
     std::string change_refused_;   // the change whose wait was logged
     // Why a send could not go where asked because of a change, or empty.
     std::string change_clash_text(const qrss_schedule::Entry& e, double now) const;
+    // The public edits, unlogged; the public ones log a refusal.
+    std::string try_add(qrss_schedule::Entry entry, const images::Picture& picture);
+    std::string try_change(const std::string& id,
+                           const std::function<void(qrss_schedule::Entry&)>& edit);
+    std::string try_set_enabled(const std::string& id, bool on);
+    std::string try_add_change(qrss_schedule::FreqChange change);
+    std::string try_edit_change(const std::string& id,
+                                const std::function<void(qrss_schedule::FreqChange&)>& edit);
+    QString entry_name(const std::string& id) const;
+    QString change_name(const std::string& id) const;
     void tick_changes(double now, bool& dirty);
     void prune(bool& dirty);
     std::string active_;

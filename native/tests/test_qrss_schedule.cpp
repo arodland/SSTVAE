@@ -257,6 +257,8 @@ void test_the_scheduler_starts_what_is_due(const std::filesystem::path& dir) {
                    "scheduler/add: the picture and the schedule are on disk");
     check::is_true(!s->add(entry("A", Q + 1800.0, 1, 0, "clash"), pic).empty(),
                    "scheduler/add: an overlapping send is refused");
+    check::is_true(logged(fake, "refused to add \"clash\"") && logged(fake, "would overlap"),
+                   "scheduler/add: and the refusal is logged, with why");
     fake.now = Q + 900.0 - qs::ADD_BY_S + 1.0;
     check::is_true(!s->add(entry("A", Q + 900.0, 1, 0, "soon"), pic).empty(),
                    "scheduler/add: one under 30 s before its quarter hour is refused");

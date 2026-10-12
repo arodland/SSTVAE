@@ -687,6 +687,13 @@ std::string QrssScheduleWindow::drop_send(const std::string& send_id, double slo
     set_chosen_slot(slot);
     if (!add_->isEnabled()) {
         message_->setText(summary_->text());
+        QString why = summary_->text();
+        why.remove(QStringLiteral("Can't add yet: "));
+        const QrssSend* sent = sends_->find(send_id);
+        scheduler_->refused(why.toStdString(),
+                            tr("to add \"%1\" at %2")
+                                .arg(QString::fromStdString(sent ? sent->label : send_id),
+                                     QString::fromStdString(qs::when(slot, scheduler_->now()))));
         return summary_->text().toStdString();
     }
     add();

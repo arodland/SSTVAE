@@ -400,7 +400,67 @@ qs::Entry* QrssScheduler::find(const std::string& id) {
     return nullptr;
 }
 
+// Refusals are logged as well as returned: the window shows them only
+// on screen, and the log is what someone looking on later can read
+// (Hamlet's 16:00Z re-add refusal, 2026-10-12).
+std::string QrssScheduler::refused(std::string why, const QString& what) {
+    if (!why.empty()) {
+        emit logged(1, tr("QRSS schedule: refused %1: %2").arg(what, QString::fromStdString(why)));
+    }
+    return why;
+}
+
+QString QrssScheduler::entry_name(const std::string& id) const {
+    for (const qs::Entry& e : entries_) {
+        if (e.id == id) return QStringLiteral("\"%1\"").arg(QString::fromStdString(e.label));
+    }
+    return QStringLiteral("an entry");
+}
+
+QString QrssScheduler::change_name(const std::string& id) const {
+    for (const qs::FreqChange& c : changes_) {
+        if (c.id == id) {
+            return tr("the %1 change to %2")
+                .arg(QString::fromStdString(qs::when(c.at, clock_())),
+                     QString::fromStdString(qs::mhz(c.dial_hz)));
+        }
+    }
+    return tr("a frequency change");
+}
+
 std::string QrssScheduler::add(qs::Entry entry, const images::Picture& picture) {
+    const QString what =
+        tr("to add \"%1\" (%2, first send %3)")
+            .arg(QString::fromStdString(entry.label), QString::fromStdString(qs::describe(entry)),
+                 QString::fromStdString(qs::when(entry.first_slot, clock_())));
+    return refused(try_add(std::move(entry), picture), what);
+}
+
+std::string QrssScheduler::change(const std::string& id,
+                                  const std::function<void(qs::Entry&)>& edit) {
+    const QString what = tr("a change to %1").arg(entry_name(id));
+    return refused(try_change(id, edit), what);
+}
+
+std::string QrssScheduler::set_enabled(const std::string& id, bool on) {
+    const QString what = tr("to %1 %2").arg(on ? tr("resume") : tr("pause"), entry_name(id));
+    return refused(try_set_enabled(id, on), what);
+}
+
+std::string QrssScheduler::add_change(qs::FreqChange change) {
+    const QString what = tr("a frequency change to %1 at %2")
+                             .arg(QString::fromStdString(qs::mhz(change.dial_hz)),
+                                  QString::fromStdString(qs::when(change.at, clock_())));
+    return refused(try_add_change(std::move(change)), what);
+}
+
+std::string QrssScheduler::edit_change(const std::string& id,
+                                       const std::function<void(qs::FreqChange&)>& edit) {
+    const QString what = tr("an edit to %1").arg(change_name(id));
+    return refused(try_edit_change(id, edit), what);
+}
+
+std::string QrssScheduler::try_add(qs::Entry entry, const images::Picture& picture) {
     const double now = clock_();
     entry.next = 0;
     entry.enabled = true;
@@ -467,8 +527,8 @@ void QrssScheduler::remove(const std::string& id) {
     emit changed();
 }
 
-std::string QrssScheduler::change(const std::string& id,
-                                  const std::function<void(qs::Entry&)>& edit) {
+std::string QrssScheduler::try_change(const std::string& id,
+                                      const std::function<void(qs::Entry&)>& edit) {
     qs::Entry* e = find(id);
     if (e == nullptr) return "it is no longer on the schedule";
     if (on_air(id)) return "it is on the air now; Cancel on the Transmit pane stops it";
@@ -524,7 +584,7 @@ void QrssScheduler::truncate(const std::string& id, int k) {
     emit changed();
 }
 
-std::string QrssScheduler::set_enabled(const std::string& id, bool on) {
+std::string QrssScheduler::try_set_enabled(const std::string& id, bool on) {
     qs::Entry* e = find(id);
     if (e == nullptr || e->enabled == on) return {};
     if (on) {
@@ -660,7 +720,7 @@ std::string change_problem(const qs::FreqChange& c, const std::vector<qs::Entry>
 
 }  // namespace
 
-std::string QrssScheduler::add_change(qs::FreqChange change) {
+std::string QrssScheduler::try_add_change(qs::FreqChange change) {
     const double now = clock_();
     change.done = false;
     if (std::string why = change_problem(change, entries_, now); !why.empty()) return why;
@@ -682,8 +742,8 @@ std::string QrssScheduler::add_change(qs::FreqChange change) {
     return {};
 }
 
-std::string QrssScheduler::edit_change(const std::string& id,
-                                       const std::function<void(qs::FreqChange&)>& edit) {
+std::string QrssScheduler::try_edit_change(const std::string& id,
+                                           const std::function<void(qs::FreqChange&)>& edit) {
     const auto it = std::find_if(changes_.begin(), changes_.end(),
                                  [&](const qs::FreqChange& c) { return c.id == id; });
     if (it == changes_.end()) return "it is no longer on the schedule";
