@@ -593,4 +593,11 @@ void save_png(const Picture& img, const std::string& path) {
     }
 }
 
+void save_jpg(const Picture& img, const std::string& path, int quality) {
+    if (stbi_write_jpg(path.c_str(), img.width, img.height, 3, img.rgb.data(),
+                       std::clamp(quality, 1, 100)) == 0) {
+        throw std::runtime_error("cannot write " + path);
+    }
+}
+
 }  // namespace sstvae::images

@@ -4,6 +4,7 @@
 #include <QDesktopServices>
 #include <QSignalBlocker>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -743,11 +744,18 @@ void ReceivePanel::save_current() {
         QString::fromStdString((out_dir / (stem + ".png")).string());
 
     const QString path = QFileDialog::getSaveFileName(
-        this, tr("Save received image"), suggested, tr("Images (*.png *.jpg)"));
+        this, tr("Save received image"), suggested,
+        tr("PNG image (*.png);;JPEG image (*.jpg *.jpeg)"));
     if (path.isEmpty()) return;
 
     try {
-        images::save_png(*displayed_, path.toStdString());
+        // Write the format the name says; anything else is PNG.
+        const QString suffix = QFileInfo(path).suffix().toLower();
+        if (suffix == QLatin1String("jpg") || suffix == QLatin1String("jpeg")) {
+            images::save_jpg(*displayed_, path.toStdString());
+        } else {
+            images::save_png(*displayed_, path.toStdString());
+        }
     } catch (const std::exception& e) {
         app_->log_event("rx", log::Severity::Error,
                         tr("could not save %1: %2")

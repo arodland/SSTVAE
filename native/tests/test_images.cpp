@@ -469,6 +469,23 @@ void test_other_formats_are_read(const std::string& fixtures) {
     check_fixture(fixtures, "jp2", sstvae::images::jp2_supported(), "openjpeg");
 }
 
+void test_a_jpeg_is_written(const std::string& tmpdir) {
+    Picture src(32, 24);
+    for (std::size_t i = 0; i < src.rgb.size(); i += 3) src.rgb[i] = 220;  // red
+    const std::string path = tmpdir + "/saved.jpg";
+    sstvae::images::save_jpg(src, path);
+    std::ifstream f(path, std::ios::binary);
+    unsigned char magic[3] = {};
+    f.read(reinterpret_cast<char*>(magic), 3);
+    check::is_true(magic[0] == 0xFF && magic[1] == 0xD8 && magic[2] == 0xFF,
+                   "images/jpg: JPEG bytes, not PNG");
+    const Picture got = sstvae::images::load(path);
+    check::equal(got.width, 32, "images/jpg: width");
+    check::is_true(got.rgb[0] > 200 && got.rgb[2] < 40, "images/jpg: still red");
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
 void test_heif_is_recognised() {
     const std::uint8_t heic[] = {0, 0, 0, 24, 'f', 't', 'y', 'p', 'h', 'e', 'i', 'c', 0, 0, 0, 0};
     const std::uint8_t mp4[] = {0, 0, 0, 24, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm', 0, 0, 0, 0};
@@ -504,6 +521,7 @@ int main(int argc, char** argv) {
     test_an_enormous_file_is_refused(tmpdir);
     test_a_png_is_untouched(tmpdir);
     test_heif_is_recognised();
+    test_a_jpeg_is_written(tmpdir);
     test_other_formats_are_read(argc > 2 ? argv[2] : "fixtures");
 
     return check::report("images");
