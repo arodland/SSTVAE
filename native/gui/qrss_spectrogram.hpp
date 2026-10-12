@@ -55,14 +55,21 @@ class QrssSpectrogram : public QWidget {
 
 public:
     // A synced signal: its carrier and the time its pass covers.
+    // A signal's pass: its carrier (CE) or pilot (L), its time, and how
+    // far below and above f_hz it reaches.
     struct Marker {
         double f_hz = 0.0;
         double t0 = 0.0;
         double t1 = 0.0;
+        double below_hz = MARK_HALF_HZ;
+        double above_hz = MARK_HALF_HZ;
     };
     // Half the width of a CE signal: what a marker colours either side
     // of its carrier.
     static constexpr double MARK_HALF_HZ = 25.0;
+    // An L signal sits from 22.1 Hz below its pilot to 3.1 Hz above.
+    static constexpr double MARK_L_BELOW_HZ = 22.1;
+    static constexpr double MARK_L_ABOVE_HZ = 3.1;
     static constexpr double F_LO = 300.0;
     static constexpr double F_HI = 2700.0;
     // Strength is drawn as how many noise deviations a pixel stands

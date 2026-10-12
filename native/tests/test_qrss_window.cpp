@@ -106,6 +106,7 @@ void test_tiles_follow_the_state_file() {
     QJsonObject with_dial = tile_json(QStringLiteral("a"), 1500.0, QStringLiteral("N0CALL"), 0.35,
                                       QStringLiteral("tiles/a.png"), 2);
     with_dial[QStringLiteral("dial_hz")] = 10'138'700;
+    with_dial[QStringLiteral("waveform")] = QStringLiteral("L");
     tiles.append(with_dial);
     QJsonObject no_dial = tile_json(QStringLiteral("b"), 1550.2, QString(), 0.02, QString(), 0);
     no_dial[QStringLiteral("dial_hz")] = QJsonValue();
@@ -127,6 +128,9 @@ void test_tiles_follow_the_state_file() {
                        !a->details().contains(QStringLiteral("-12.5")) &&
                        !a->details().contains(QStringLiteral("weight")),
                    "qrss/tiles: no SNR on the tile, and the weight not twice");
+    check::is_true(a->details().contains(QStringLiteral("waveform L")) &&
+                       !b->details().contains(QStringLiteral("waveform")),
+                   "qrss/tiles: an L signal says so; CE (or none given) goes unsaid");
     check::is_true(a->has_picture(), "qrss/tiles: the picture is loaded");
     check::is_true(!b->has_picture(), "qrss/tiles: no picture before the header");
     check::equal(a->progress_percent(), 35, "qrss/tiles: progress through the pass");
@@ -675,6 +679,20 @@ void test_the_spectrogram() {
     check::is_true(qRed(r) > qGreen(r) + 80 && qRed(r) > qBlue(r) + 80,
                    "spectrogram: a synced signal is red");
     check::is_true(qGray(sg.image().pixel(off)) > 180, "spectrogram: and only there");
+    // An L signal spans 22.1 Hz below its pilot to 3.1 Hz above.
+    {
+        gui::QrssSpectrogram::Marker l{1515.0, NOW - 300, NOW + 1500};
+        l.below_hz = gui::QrssSpectrogram::MARK_L_BELOW_HZ;
+        l.above_hz = gui::QrssSpectrogram::MARK_L_ABOVE_HZ;
+        sg.set_markers({l});
+        const QRgb in = sg.image().pixel(on);
+        l.f_hz = 1490.0;
+        sg.set_markers({l});
+        const QRgb out = sg.image().pixel(on);
+        check::is_true(qRed(in) > qGreen(in) + 80 && !(qRed(out) > qGreen(out) + 80),
+                       "spectrogram: an L marker covers below its pilot, not above");
+        sg.set_markers({{1500.0, NOW - 300, NOW + 1500}});
+    }
 
     // Wheel over the time axis: the scale under the pointer.
     const auto wheel = [&sg](QPoint at, int delta) {

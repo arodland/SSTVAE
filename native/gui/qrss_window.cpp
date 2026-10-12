@@ -299,6 +299,10 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
         if (mhz.endsWith(QLatin1Char('.'))) mhz.chop(1);
         where = tr("%1 MHz + %2").arg(mhz, where);
     }
+    // CE is the default and goes unsaid, as on the schedule's timeline.
+    if (t.value(QStringLiteral("waveform")).toString() == QLatin1String("L")) {
+        where += tr(" · waveform L");
+    }
     lines << tr("Slot %1 · %2").arg(hhmm(t.value(QStringLiteral("slot_utc")).toString()), where);
     const QString pid = t.value(QStringLiteral("picture_id")).toString();
     if (!pid.isEmpty()) {
@@ -749,7 +753,12 @@ void QrssWindow::reload() {
         const double f_hz = t.value(QStringLiteral("f_hz")).toDouble();
         if (slot.isValid() && f_hz > 0) {
             const double t0 = static_cast<double>(slot.toSecsSinceEpoch());
-            markers.push_back({f_hz, t0, t0 + PASS_S});
+            QrssSpectrogram::Marker m{f_hz, t0, t0 + PASS_S};
+            if (t.value(QStringLiteral("waveform")).toString() == QLatin1String("L")) {
+                m.below_hz = QrssSpectrogram::MARK_L_BELOW_HZ;
+                m.above_hz = QrssSpectrogram::MARK_L_ABOVE_HZ;
+            }
+            markers.push_back(m);
         }
     }
     for (auto it = tiles_.begin(); it != tiles_.end();) {

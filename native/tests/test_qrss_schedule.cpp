@@ -604,7 +604,7 @@ void test_the_window(const std::filesystem::path& dir) {
     if (waveform && note) {
         waveform->setCurrentIndex(waveform->findData(QStringLiteral("L")));
         check::is_true(note->text().contains(QStringLiteral("ALC")) &&
-                           note->text().contains(QStringLiteral("hears L")) &&
+                           note->text().contains(QStringLiteral("current code")) &&
                            summary->text().contains(QStringLiteral("waveform L mode B")),
                        "window: choosing L says what it needs");
         waveform->setCurrentIndex(waveform->findData(QStringLiteral("CE")));

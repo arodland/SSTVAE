@@ -324,7 +324,8 @@ void QrssSpectrogram::render() {
                 const double v = std::clamp((z - Z_FLOOR) / Z_RANGE, 0.0, 1.0);
                 bool marked = false;
                 for (const Marker* m : here) {
-                    if (std::abs(row_f[static_cast<std::size_t>(y)] - m->f_hz) <= MARK_HALF_HZ) {
+                    const double df = row_f[static_cast<std::size_t>(y)] - m->f_hz;
+                    if (df >= -m->below_hz && df <= m->above_hz) {
                         marked = true;
                         break;
                     }

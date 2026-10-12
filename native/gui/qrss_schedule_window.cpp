@@ -115,7 +115,7 @@ QString waveform_note(const std::string& waveform) {
         return QObject::tr(
             "L: about 22 Hz wide and needs 3.2 dB less SNR at the same average power. It is "
             "linear: keep the ALC out (drive below where ALC starts) and use a linear "
-            "amplifier. Only receivers whose listener hears L can decode it.");
+            "amplifier. Listeners on current code hear it; older ones (or --just-ce) do not.");
     }
     return QObject::tr("CE: constant envelope, about 50 Hz wide. Any amplifier, ALC "
                        "harmless; every QRSSTVAE listener hears it.");
