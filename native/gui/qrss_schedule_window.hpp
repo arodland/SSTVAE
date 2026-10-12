@@ -140,7 +140,9 @@ private:
     QString local_and_utc(double slot) const;
     void open_editor(const std::function<bool(QrssEditor&)>& prepare);
     // Asks for a change's time and dial frequency; false if cancelled.
-    bool ask_freq_change(const QString& title, double* at, double* dial_hz);
+    // Without the time, only the frequency is asked for.
+    bool ask_freq_change(const QString& title, double* at, double* dial_hz,
+                         bool with_time = true);
 
     QrssScheduler* scheduler_ = nullptr;
     QrssSends* sends_ = nullptr;

@@ -999,6 +999,32 @@ void test_frequency_changes(const std::filesystem::path& dir) {
                        t.mark_at(QPoint(x + QrssTimeline::MARK_GRAB_PX + 2, 40)) < 0,
                    "timeline: a mark is grabbed a few pixels either side");
 
+    // Dragging a mark asks to move it, to the minute; a made one stays put.
+    {
+        t.resize(t.sizeHint());
+        std::vector<double> moved;
+        QObject::connect(&t, &QrssTimeline::markMoveRequested,
+                         [&moved](const QString&, double at) { moved.push_back(at); });
+        const auto drag = [&t](int from, int to) {
+            const auto ev = [&t](QEvent::Type type, int px, Qt::MouseButtons held) {
+                QMouseEvent e(type, QPointF(px, 60), QPointF(t.mapToGlobal(QPoint(px, 60))),
+                              Qt::LeftButton, held, Qt::NoModifier);
+                QApplication::sendEvent(&t, &e);
+            };
+            ev(QEvent::MouseButtonPress, from, Qt::LeftButton);
+            ev(QEvent::MouseMove, (from + to) / 2, Qt::LeftButton);
+            ev(QEvent::MouseMove, to, Qt::LeftButton);
+            ev(QEvent::MouseButtonRelease, to, Qt::NoButton);
+        };
+        drag(x, x + QrssTimeline::CELL_W);   // a quarter hour later
+        check::is_true(moved.size() == 1 && std::abs(moved[0] - (Q + 3 * 900.0)) < 1.0 &&
+                           std::fmod(moved[0], 60.0) == 0.0,
+                       "timeline: a dragged change moves, to the minute");
+        t.set_marks({{"m", Q + 2 * 900.0, 10e6, true}});
+        drag(x, x + QrssTimeline::CELL_W);
+        check::equal(moved.size(), std::size_t{1}, "timeline: a made change does not move");
+    }
+
     // "<-30m" labels for the spectrum views.
     check::is_true(dial_mark_label(45) == QStringLiteral("<-45s") &&
                        dial_mark_label(1800) == QStringLiteral("<-30m") &&

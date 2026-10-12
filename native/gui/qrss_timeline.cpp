@@ -125,11 +125,12 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
     const QPalette& pal = palette();
     p.fillRect(rect(), pal.color(QPalette::Base));
     const QColor grid = pal.color(QPalette::Mid);
-    const QColor faint(grid.red(), grid.green(), grid.blue(), 70);
-    // A light grey line down every quarter hour, one per slot (Jeff,
-    // 2026-10-10); the hour lines stay darker.
-    QColor slot_line = grid;
-    slot_line.setAlpha(110);
+    const QColor faint(grid.red(), grid.green(), grid.blue(), 160);
+    // A grey line down every quarter hour, one per slot (Jeff,
+    // 2026-10-10), solid since "rather subtle" (2026-10-12); the hour
+    // lines are twice as wide in the darker shade.
+    const QColor slot_line = grid;
+    const QPen hour_line(pal.color(QPalette::Dark), 2);
     const QColor text = pal.color(QPalette::Text);
     const QColor muted = style::secondary_text(pal);
 
@@ -143,7 +144,11 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
         const QDateTime u = utc_of(t);
         const bool hour = u.time().minute() == 0;
         const bool half = u.time().minute() == 30;
-        p.setPen(hour ? grid : slot_line);
+        if (hour) {
+            p.setPen(hour_line);
+        } else {
+            p.setPen(slot_line);
+        }
         p.drawLine(x, hour ? 0 : HEADER_H - 4, x, height());
         if (half) {
             p.setPen(faint);
@@ -241,6 +246,24 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
         p.drawText(box, Qt::AlignCenter, label);
     }
 
+    // The change being dragged, where it would land, and when.
+    if (dragging_ && pressed_mark_ >= 0 && pressed_mark_ < static_cast<int>(marks_.size())) {
+        const int x = x_of(drag_at_);
+        QPen dash(mark_color(), 2);
+        dash.setStyle(Qt::DashLine);
+        p.setPen(dash);
+        p.drawLine(x, HEADER_H - 6, x, height());
+        p.setFont(small);
+        const QString label = utc_of(drag_at_).toString(QStringLiteral("HH:mm'Z'"));
+        const int w = p.fontMetrics().horizontalAdvance(label) + 4;
+        const QRect box(x + 3, HEADER_H + 2, w, p.fontMetrics().height());
+        QColor ground = pal.color(QPalette::Base);
+        ground.setAlpha(230);
+        p.fillRect(box, ground);
+        p.setPen(mark_color());
+        p.drawText(box, Qt::AlignCenter, label);
+    }
+
     // Now.
     const int xn = x_of(now_);
     if (xn >= 0 && xn <= width()) {
@@ -251,15 +274,29 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
 
 void QrssTimeline::mousePressEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) return;
-    pressed_ = block_at(event->position().toPoint());
     press_pos_ = event->position().toPoint();
     dragging_ = false;
+    // A change first, as for the right-click: it is narrow and sits at a
+    // block's edge. One already made stays where it was made.
+    pressed_mark_ = mark_at(press_pos_);
+    if (pressed_mark_ >= 0 && marks_[pressed_mark_].done) pressed_mark_ = -1;
+    pressed_ = pressed_mark_ >= 0 ? -1 : block_at(press_pos_);
 }
 
 void QrssTimeline::mouseMoveEvent(QMouseEvent* event) {
     const QPoint pos = event->position().toPoint();
     hover_x_ = pos.x();
-    if (pressed_ >= 0 && (event->buttons() & Qt::LeftButton)) {
+    if (pressed_mark_ >= 0 && (event->buttons() & Qt::LeftButton)) {
+        if (!dragging_ &&
+            (pos - press_pos_).manhattanLength() >= QApplication::startDragDistance()) {
+            dragging_ = true;
+        }
+        if (dragging_) {
+            const double moved = time_at(pos.x()) - time_at(press_pos_.x());
+            drag_at_ = std::round((marks_[pressed_mark_].at + moved) / 60.0) * 60.0;
+            setCursor(Qt::SizeHorCursor);
+        }
+    } else if (pressed_ >= 0 && (event->buttons() & Qt::LeftButton)) {
         if (!dragging_ &&
             (pos - press_pos_).manhattanLength() >= QApplication::startDragDistance()) {
             dragging_ = true;
@@ -272,7 +309,10 @@ void QrssTimeline::mouseMoveEvent(QMouseEvent* event) {
             setCursor(Qt::ClosedHandCursor);
         }
     } else {
-        setCursor(block_at(pos) >= 0 ? Qt::OpenHandCursor : Qt::ArrowCursor);
+        const int m = mark_at(pos);
+        setCursor(m >= 0 && !marks_[m].done ? Qt::SizeHorCursor
+                  : block_at(pos) >= 0      ? Qt::OpenHandCursor
+                                            : Qt::ArrowCursor);
     }
     update();
 }
@@ -280,11 +320,19 @@ void QrssTimeline::mouseMoveEvent(QMouseEvent* event) {
 void QrssTimeline::mouseReleaseEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) return;
     const int i = pressed_;
+    const int m = pressed_mark_;
     const bool was_drag = dragging_;
     pressed_ = -1;
+    pressed_mark_ = -1;
     dragging_ = false;
     unsetCursor();
     update();
+    if (m >= 0 && m < static_cast<int>(marks_.size())) {
+        if (was_drag && drag_at_ != marks_[m].at) {
+            emit markMoveRequested(QString::fromStdString(marks_[m].id), drag_at_);
+        }
+        return;
+    }
     if (i >= 0 && i < static_cast<int>(blocks_.size())) {
         const Block b = blocks_[i];
         if (was_drag) {

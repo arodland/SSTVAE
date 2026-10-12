@@ -6,7 +6,8 @@
 //
 // A scheduled frequency change is a green line at its moment, as wide as
 // the red "now" line, with the new dial frequency in the header; a
-// right-click within MARK_GRAB_PX of it opens its menu.
+// right-click within MARK_GRAB_PX of it opens its menu, and a drag moves
+// it (to the minute) unless it has already been made.
 //
 // The timeline only draws and reports: a click on a block or an empty
 // slot, a right-click on a block, a block dragged to another slot. The
@@ -99,6 +100,8 @@ signals:
     void slotClicked(double slot);
     void menuRequested(const QString& entry, int send, const QPoint& global_pos);
     void moveRequested(const QString& entry, int send, double slot);
+    // A frequency change dragged to `at` (whole minutes).
+    void markMoveRequested(const QString& id, double at);
     // A right-click on a frequency change, and on empty time.
     void markMenuRequested(const QString& id, const QPoint& global_pos);
     void emptyMenuRequested(double t, const QPoint& global_pos);
@@ -133,6 +136,8 @@ private:
     QPoint press_pos_;
     bool dragging_ = false;
     double drag_slot_ = 0.0;
+    int pressed_mark_ = -1;
+    double drag_at_ = 0.0;     // where a dragged mark would land
 };
 
 }  // namespace sstvae::gui

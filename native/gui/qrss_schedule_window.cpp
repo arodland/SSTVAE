@@ -199,8 +199,9 @@ void QrssScheduleWindow::build() {
     message_->setWordWrap(true);
     message_->setText(tr("Drag a send to move it; right-click it to pause or remove it, or "
                          "change its mode, offset or repeat. Drag a Send here from below to schedule it, or "
-                         "with one selected, click a free slot to start there. Green lines are frequency changes: right-click one to "
-                         "move it, or right-click free time to add one."));
+                         "with one selected, click a free slot to start there. Green lines are frequency changes: drag one to "
+                         "move it, right-click it to change its frequency or remove it, or right-click "
+                         "free time to add one."));
     auto* message_row = new QHBoxLayout;
     message_row->addWidget(message_, 1);
     auto* add_change = new QPushButton(tr("Add frequency change..."), upcoming);
@@ -227,6 +228,8 @@ void QrssScheduleWindow::build() {
             [this](const QString& entry, int send, double slot) {
                 move_send(entry.toStdString(), send, slot);
             });
+    connect(timeline_, &QrssTimeline::markMoveRequested, this,
+            [this](const QString& id, double at) { move_freq_change(id.toStdString(), at); });
     connect(timeline_, &QrssTimeline::markMenuRequested, this,
             [this](const QString& id, const QPoint& at) {
                 QMenu* menu = change_menu_for(id.toStdString());
@@ -844,12 +847,20 @@ QMenu* QrssScheduleWindow::change_menu_for(const std::string& id) {
                                  .arg(QString::fromStdString(qs::mhz(hz)), local_and_utc(at)));
         }
     });
+    QAction* retune = menu->addAction(tr("Change frequency..."));
+    retune->setObjectName(QStringLiteral("menu_change_frequency"));
+    connect(retune, &QAction::triggered, this, [this, id, at0, hz0] {
+        double at = at0;
+        double hz = hz0;
+        if (ask_freq_change(tr("Change frequency"), &at, &hz, false)) retune_freq_change(id, hz);
+    });
     QAction* remove = menu->addAction(tr("Remove"));
     remove->setObjectName(QStringLiteral("menu_remove_change"));
     connect(remove, &QAction::triggered, this, [this, id] { remove_freq_change(id); });
     if (c->done) {
         move->setEnabled(false);
         move->setText(tr("Reschedule... (already made)"));
+        retune->setEnabled(false);
     }
     return menu;
 }
@@ -868,7 +879,8 @@ QMenu* QrssScheduleWindow::empty_menu_for(double t) {
     return menu;
 }
 
-bool QrssScheduleWindow::ask_freq_change(const QString& title, double* at, double* dial_hz) {
+bool QrssScheduleWindow::ask_freq_change(const QString& title, double* at, double* dial_hz,
+                                         bool with_time) {
     QDialog dialog(this);
     dialog.setWindowTitle(title);
     auto* form = new QFormLayout(&dialog);
@@ -882,7 +894,11 @@ bool QrssScheduleWindow::ask_freq_change(const QString& title, double* at, doubl
 #endif
     when->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm:ss 'UTC'"));
     when->setDateTime(utc_of(*at));
-    form->addRow(tr("When:"), when);
+    if (with_time) {
+        form->addRow(tr("When:"), when);
+    } else {
+        when->hide();
+    }
     auto* freq = new QDoubleSpinBox(&dialog);
     freq->setObjectName(QStringLiteral("freq_change_mhz"));
     freq->setDecimals(6);
