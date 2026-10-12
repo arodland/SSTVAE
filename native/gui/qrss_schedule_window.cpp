@@ -696,10 +696,24 @@ std::string QrssScheduleWindow::drop_send(const std::string& send_id, double slo
 
 // --- what is scheduled ----------------------------------------------------
 
+void QrssScheduleWindow::form_from(const qs::Entry& e) {
+    // Adding its Send again repeats what was last chosen for it, not
+    // whatever the form held: Jeff changed an entry to L on the timeline
+    // and his re-adds went out as the form's 2 x CE (2026-10-12).
+    mode_->setCurrentIndex(std::max(0, mode_->findData(QString::fromStdString(e.mode))));
+    waveform_->setCurrentIndex(
+        std::max(0, waveform_->findData(QString::fromStdString(e.waveform))));
+    freq_->setValue(static_cast<int>(std::lround(e.freq_hz)));
+    count_->setValue(e.count);
+    every_->setCurrentIndex(std::max(0, every_->findData(e.every_min)));
+    update_summary();
+}
+
 void QrssScheduleWindow::select_entry(const std::string& entry) {
     selected_entry_ = entry;
     timeline_->set_selected_entry(entry);
     const qs::Entry* e = entry_by_id(scheduler_->entries(), entry);
+    if (e != nullptr) form_from(*e);
     // Its Send, back on the left.
     if (e != nullptr && !e->send_id.empty() && sends_->find(e->send_id) != nullptr &&
         selected_send() != e->send_id) {
@@ -745,6 +759,7 @@ void QrssScheduleWindow::refresh_timeline() {
         const bool active = scheduler_->on_air(e.id);
         // The send on the air is just before `next`; show it too.
         int k = std::max(0, e.next - (active ? std::max(1, qs::MAX_RUN_PASSES / n) : 0));
+        double run_first = -1.0;  // the slot of the run's first block shown
         auto& thumb = thumbs[e.id];
         if (thumb.isNull()) thumb = QPixmap(QString::fromStdString(e.picture));
         for (; e.count == 0 || k < e.count; ++k) {
@@ -766,6 +781,16 @@ void QrssScheduleWindow::refresh_timeline() {
             b.label = QString::fromStdString(e.label);
             b.paused = !e.enabled;
             b.on_air = active && k < e.next;
+            // A run is started ahead of its quarter hour to get ready;
+            // until its first pass keys it is not on the air, and says so.
+            if (b.on_air) {
+                if (run_first < 0.0) run_first = slot;
+                const double first_keys = qrss_tx::audio_start(run_first);
+                if (now < first_keys) {
+                    b.on_air = false;
+                    if (slot == run_first) b.keys_at = first_keys;
+                }
+            }
             blocks.push_back(std::move(b));
         }
     }
@@ -1050,6 +1075,10 @@ std::string QrssScheduleWindow::change_mode(const std::string& entry, const std:
         // stand: make it back to back instead.
         if (e.every_min != 0 && e.every_min < qrss_tx::minutes_for(mode)) e.every_min = 0;
     });
+    // The form takes the entry as it now is, for the next add.
+    if (const qs::Entry* e = entry_by_id(scheduler_->entries(), entry); why.empty() && e) {
+        form_from(*e);
+    }
     show_result(why, tr("Changed to mode %1.").arg(QString::fromStdString(mode)));
     return why;
 }
@@ -1057,6 +1086,10 @@ std::string QrssScheduleWindow::change_mode(const std::string& entry, const std:
 std::string QrssScheduleWindow::change_offset(const std::string& entry, double hz) {
     // Every send of the entry moves; the picture and its ID stay the same.
     std::string why = scheduler_->change(entry, [hz](qs::Entry& e) { e.freq_hz = hz; });
+    // The form takes the entry as it now is, for the next add.
+    if (const qs::Entry* e = entry_by_id(scheduler_->entries(), entry); why.empty() && e) {
+        form_from(*e);
+    }
     show_result(why, tr("Moved to %1 Hz.").arg(hz, 0, 'f', 0));
     return why;
 }
@@ -1066,6 +1099,10 @@ std::string QrssScheduleWindow::change_waveform(const std::string& entry,
     // The picture and its ID stay the same: receivers add passes of both.
     std::string why =
         scheduler_->change(entry, [&waveform](qs::Entry& e) { e.waveform = waveform; });
+    // The form takes the entry as it now is, for the next add.
+    if (const qs::Entry* e = entry_by_id(scheduler_->entries(), entry); why.empty() && e) {
+        form_from(*e);
+    }
     show_result(why, tr("Now sent as waveform %1.").arg(QString::fromStdString(waveform)));
     return why;
 }
@@ -1076,6 +1113,10 @@ std::string QrssScheduleWindow::repeat_every(const std::string& entry, int minut
         // A single send repeats once more; a series keeps its count.
         if (e.count == 1) e.count = 2;
     });
+    // The form takes the entry as it now is, for the next add.
+    if (const qs::Entry* e = entry_by_id(scheduler_->entries(), entry); why.empty() && e) {
+        form_from(*e);
+    }
     show_result(why, tr("Repeats every %1.").arg(duration_text(minutes)));
     return why;
 }

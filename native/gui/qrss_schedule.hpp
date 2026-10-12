@@ -49,8 +49,10 @@ namespace sstvae::gui::qrss_schedule {
 
 inline constexpr double QUARTER_S = 900.0;
 // A scheduled send is started (encoded, its first pass made) this long
-// before its first pass's audio.
-inline constexpr double START_LEAD_S = 240.0;
+// before its first pass's audio. Encoding and making an L pass take
+// ~20 s and a late add already manages in 26 s; this was 240 until
+// 2026-10-12, when four minutes of "getting ready" read as an early send.
+inline constexpr double START_LEAD_S = 60.0;
 // A send can be added, or moved, up to this long before its quarter
 // hour; the scheduler starts it at once.
 inline constexpr double ADD_BY_S = 30.0;

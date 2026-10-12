@@ -131,10 +131,9 @@ std::string problem(const Entry& e) {
 }
 
 std::string describe(const Entry& e) {
-    // CE was the only waveform for long enough that it goes unsaid.
-    const std::string mode =
-        (e.waveform == qrss_tx::WAVEFORM_CE ? std::string() : "waveform " + e.waveform + " ") +
-        "mode " + e.mode;
+    // The waveform is always said: an add that took CE when L was meant
+    // (2026-10-12) read as the right thing with CE unsaid.
+    const std::string mode = e.waveform + " mode " + e.mode;
     if (e.count == 1) return mode + ", once";
     if (e.every_min == 0) return std::to_string(e.count) + " x " + mode + ", back to back";
     const std::string times = e.count == 0 ? "until removed" : std::to_string(e.count) + " times";

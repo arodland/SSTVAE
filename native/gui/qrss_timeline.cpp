@@ -205,8 +205,22 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
             p.setPen(muted);
             p.drawText(thumb_box, Qt::AlignCenter, tr("paused"));
         }
+        if (b.keys_at > 0.0) {
+            // Getting ready: say when it keys, on a veil like "paused".
+            QColor veil = pal.color(QPalette::Base);
+            veil.setAlpha(170);
+            p.fillRect(thumb_box, veil);
+            p.setPen(text);
+            p.drawText(thumb_box, Qt::AlignCenter | Qt::TextWordWrap,
+                       tr("getting ready\nkeys %1")
+                           .arg(utc_of(b.keys_at).toString(QStringLiteral("HH:mm:ss'Z'"))));
+        }
         QPen edge(b.on_air ? style::color::danger() : selected ? pal.color(QPalette::Highlight) : grid);
-        edge.setWidth(b.on_air || selected ? 3 : 1);
+        if (b.keys_at > 0.0) {
+            edge = QPen(style::color::danger());
+            edge.setStyle(Qt::DashLine);
+        }
+        edge.setWidth(b.on_air || selected || b.keys_at > 0.0 ? 3 : 1);
         p.setPen(edge);
         p.setBrush(Qt::NoBrush);
         p.drawRect(r.adjusted(0, 0, -1, -1));

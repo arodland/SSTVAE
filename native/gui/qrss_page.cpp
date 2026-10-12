@@ -123,9 +123,7 @@ void QrssPage::show_state() {
     QString state = listening_ ? tr("Receiving: the QRSS listener hears the radio.")
                                : tr("Not receiving: start it to hear QRSS signals.");
     if (!preparing_.isEmpty()) {
-        state = tr("Getting ready, not keyed yet (%1); it keys just before its quarter "
-                   "hour. ")
-                    .arg(preparing_) +
+        state = tr("Getting ready, not on the air yet: %1. ").arg(preparing_) +
                 (listening_ ? tr("Receiving meanwhile.") : tr("Not receiving."));
     }
     listen_state_->setText(state);

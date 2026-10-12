@@ -114,6 +114,13 @@ bool default_runner(const QStringList& argv, QString* output, tx::TxEngine& engi
     return proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0;
 }
 
+std::string hhmmss(double t) {
+    return QDateTime::fromSecsSinceEpoch(static_cast<qint64>(std::llround(t)), QTimeZone::utc())
+               .toString(QStringLiteral("HH:mm:ss"))
+               .toStdString() +
+           "Z";
+}
+
 std::string hhmm(double t) {
     return QDateTime::fromSecsSinceEpoch(static_cast<qint64>(std::llround(t)), QTimeZone::utc())
                .toString(QStringLiteral("HH:mm"))
@@ -286,7 +293,7 @@ bool run(tx::TxEngine& engine, const Request& request, const Tools& tools,
         return {};
     };
 
-    engine.report(tx::TxPhase::Encoding, "QRSS: encoding the picture");
+    engine.report(tx::TxPhase::Encoding, "QRSS: encoding the picture (not keyed)");
     if (std::string out = encode(0); !out.empty()) {
         if (engine.cancelled()) return cancelled();
         return fail("QRSS encode failed: " + out);
@@ -346,11 +353,15 @@ bool run(tx::TxEngine& engine, const Request& request, const Tools& tools,
         QFile::remove(wav);
         return w;
     };
+    // Until the first key, every message says when that is: a run
+    // getting ready must not read as one on the air.
+    const std::string keys_at =
+        "; keys at " + hhmmss(audio_start(passes[0].pass.slot) - request.tx.ptt_lead_s);
     if (!engine.wait(audio_start(passes[0].pass.slot) - request.prep_s - clock(),
-                     tx::TxPhase::Waiting, "waiting to make " + what(0))) {
+                     tx::TxPhase::Waiting, "waiting to make " + what(0) + keys_at)) {
         return cancelled();
     }
-    engine.report(tx::TxPhase::Modulating, "making " + what(0));
+    engine.report(tx::TxPhase::Modulating, "making " + what(0) + keys_at);
     std::string error;
     std::vector<double> wave = make(0, &error);
     if (wave.empty()) {
@@ -363,7 +374,10 @@ bool run(tx::TxEngine& engine, const Request& request, const Tools& tools,
             return fail("QRSS: " + what(k) + " was due to start " + std::to_string(-lead) +
                         " s ago; not sending it late");
         }
-        if (!engine.wait(lead, tx::TxPhase::Waiting, "starting " + what(k))) return cancelled();
+        if (!engine.wait(lead, tx::TxPhase::Waiting,
+                         "starting " + what(k) + (k == 0 ? keys_at : std::string()))) {
+            return cancelled();
+        }
         // Keying the last pass: a picture waiting to follow joins now, or
         // the run closes to more.
         while (k + 1 == passes.size() && request.chain) {

@@ -490,15 +490,16 @@ The window shows what each choice means before you add it (the send
 times and the total time on the air), and refuses an entry whose sends
 would need the transmitter while another entry's do: one entry's
 back-to-back sends go out as one run, but a different picture needs
-about four minutes to encode and make its first pass, so two entries
+about a minute to encode and make its first pass, so two entries
 need at least a quarter hour between one's last pass and the other's
 first. *Coming up* lists the next sends across all entries; entries can
 be paused, resumed and removed.
 
 Scheduled sends go out only while the app is running. Each one starts
-four minutes before its first pass's audio, through the same radio,
-level and callsign as Send, and receive pauses from then until its last
-pass ends. A send that cannot start by 90 s before its audio (the app
+a minute before its first pass's audio, through the same radio, level
+and callsign as Send. Until it keys it is only getting ready (the
+QRSSTVAE view and its timeline block say when it keys) and receiving
+goes on; receive pauses from the first key until its last pass ends. A send that cannot start by 90 s before its audio (the app
 was closed, or the transmitter was busy with a send by hand) is
 skipped and logged as missed; Send warns before starting a send by hand
 that would run over a scheduled one. Cancel during a scheduled send

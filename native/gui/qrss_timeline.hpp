@@ -50,6 +50,8 @@ public:
         QString label;
         bool paused = false;
         bool on_air = false;
+        // Nonzero: the run is getting ready and keys then (not on air).
+        double keys_at = 0.0;
     };
 
     // A frequency change.

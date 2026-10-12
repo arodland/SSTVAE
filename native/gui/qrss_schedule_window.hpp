@@ -34,6 +34,7 @@
 #include "images/types.hpp"
 #include "overlay/model.hpp"
 #include "qrss_editor.hpp"
+#include "qrss_schedule.hpp"
 
 class QComboBox;
 class QDateEdit;
@@ -136,6 +137,7 @@ private:
     void on_send_selected();
     void on_block_clicked(const QString& entry, int send);
     void select_entry(const std::string& entry);
+    void form_from(const qrss_schedule::Entry& e);
     void show_result(const std::string& why, const QString& done);
     QString local_and_utc(double slot) const;
     void open_editor(const std::function<bool(QrssEditor&)>& prepare);

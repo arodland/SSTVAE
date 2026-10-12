@@ -351,15 +351,16 @@ void test_the_qrss_tab() {
                    "tab: then Stop stops it");
     // A send getting ready before its quarter hour is not on the air:
     // the button stays Stop receiving and the line says it is not keyed.
-    page->set_preparing(QStringLiteral("waiting to make QRSS pass 1 of 1 at 15:30"));
+    page->set_preparing(
+        QStringLiteral("waiting to make QRSS pass 1 of 1 at 15:30Z; keys at 15:29:49Z"));
     auto* state_line = page->findChild<QLabel*>(QStringLiteral("qrss_listen_state"));
     check::is_true(listen->text().contains(QStringLiteral("Stop")) &&
                        listen->palette().color(QPalette::Button).green() > 100 &&
-                       state_line->text().contains(QStringLiteral("not keyed")) &&
-                       state_line->text().contains(QStringLiteral("15:30")),
+                       state_line->text().contains(QStringLiteral("not on the air")) &&
+                       state_line->text().contains(QStringLiteral("keys at 15:29:49Z")),
                    "tab: a send getting ready reads as not keyed, receiving goes on");
     page->set_preparing({});
-    check::is_true(!state_line->text().contains(QStringLiteral("keyed")),
+    check::is_true(!state_line->text().contains(QStringLiteral("not on the air")),
                    "tab: and the line clears when it keys or ends");
     // A send suspends receiving: the button turns red and halts the send.
     int halts = 0;

@@ -80,7 +80,7 @@ void test_the_sends_of_a_schedule() {
     std::vector<qrss_tx::Pass> p = qs::passes_of(aa, 1);
     check::is_true(p.size() == 1 && p[0].slot == Q + 1800.0 && p[0].segment == 0,
                    "schedule/2xA: the second send is the next half hour, part 1 again");
-    check::equal(qs::describe(aa), std::string("2 x mode A, back to back"),
+    check::equal(qs::describe(aa), std::string("2 x CE mode A, back to back"),
                  "schedule/2xA: described as Jeff wrote it");
 
     // Mode B every other hour, until removed.
@@ -91,15 +91,15 @@ void test_the_sends_of_a_schedule() {
                        p[1].segment == 1,
                    "schedule/B: the third send, both of its parts");
     check::equal(qs::describe(b),
-                 std::string("mode B every 2 hours (alternating hours), until removed"),
+                 std::string("CE mode B every 2 hours (alternating hours), until removed"),
                  "schedule/B: described");
     const auto [from, to] = qs::busy(b, 0);
     check::is_true(from == Q - 11.0 - qs::START_LEAD_S && to == Q + 1800.0 + 1786.7,
                    "schedule/B: busy from the start lead to the end of the second pass");
-    check::equal(qs::describe(entry("C", Q, 1, 0)), std::string("mode C, once"),
+    check::equal(qs::describe(entry("C", Q, 1, 0)), std::string("CE mode C, once"),
                  "schedule/C: a single send");
     check::equal(qs::describe(entry("A", Q, 5, 90)),
-                 std::string("mode A every 90 minutes, 5 times"), "schedule/A: a count");
+                 std::string("CE mode A every 90 minutes, 5 times"), "schedule/A: a count");
 }
 
 void test_what_cannot_be_scheduled() {
@@ -178,7 +178,7 @@ void test_upcoming_and_the_file() {
                        back[0].count == 3 && back[1].next == 1 && back[1].first_slot == Q &&
                        back[1].mode == "A" && back[0].waveform == "L" && back[1].waveform == "CE",
                    "schedule/file: every field survives the round trip");
-    check::equal(qs::describe(back[0]), std::string("waveform L mode B every 3 hours, 3 times"),
+    check::equal(qs::describe(back[0]), std::string("L mode B every 3 hours, 3 times"),
                  "schedule/file: and an L send says so");
     {
         // The same entry as a schedule from before L: no waveform field.
@@ -286,7 +286,7 @@ void test_the_scheduler_starts_what_is_due(const std::filesystem::path& dir) {
                    "scheduler/busy: B at 04:00Z and 07:00Z");
     fake.answer = QrssScheduler::Start::Busy;
     fake.why = "the transmitter is busy";
-    fake.now = Q + 3 * H - 11.0 - 200.0;
+    fake.now = Q + 3 * H - 11.0 - qs::START_LEAD_S + 10.0;
     s->tick();
     s->tick();
     int waiting = 0;
@@ -301,7 +301,7 @@ void test_the_scheduler_starts_what_is_due(const std::filesystem::path& dir) {
     // A failure (no callsign, say) costs that send and no more.
     fake.answer = QrssScheduler::Start::Failed;
     fake.why = "no callsign";
-    fake.now = Q + 6 * H - 11.0 - 200.0;
+    fake.now = Q + 6 * H - 11.0 - qs::START_LEAD_S + 10.0;
     s->tick();
     check::is_true(s->entries()[1].next == 2 && logged(fake, "was not sent: no callsign"),
                    "scheduler/failed: reported and passed over");
@@ -536,7 +536,7 @@ void test_change_and_truncate(const std::filesystem::path& dir) {
 
     // The first send goes on the air; it may not be changed, and once it
     // is over only the sends still to come change.
-    fake.now = Q - 200;
+    fake.now = Q - 11.0 - qs::START_LEAD_S + 10.0;
     s->tick();
     check::is_true(s->active() == id && s->entries()[0].next == 1, "change: the first send started");
     check::is_true(!s->change(id, [](qs::Entry& x) { x.mode = "A"; }).empty(),
@@ -593,7 +593,7 @@ void test_the_window(const std::filesystem::path& dir) {
                    "window: mode and carrier start as the Transmit pane has them");
     check::is_true(w.chosen_slot() == qs::earliest_slot(fake.now),
                    "window: the first send starts at the earliest quarter hour");
-    check::is_true(summary->text().contains(QStringLiteral("2 x mode B, back to back")) &&
+    check::is_true(summary->text().contains(QStringLiteral("2 x CE mode B, back to back")) &&
                        add->isEnabled(),
                    "window: the default is two sends back to back");
     // The waveform: CE unless chosen, L saying what it needs.
@@ -605,7 +605,7 @@ void test_the_window(const std::filesystem::path& dir) {
         waveform->setCurrentIndex(waveform->findData(QStringLiteral("L")));
         check::is_true(note->text().contains(QStringLiteral("ALC")) &&
                            note->text().contains(QStringLiteral("current code")) &&
-                           summary->text().contains(QStringLiteral("waveform L mode B")),
+                           summary->text().contains(QStringLiteral("L mode B")),
                        "window: choosing L says what it needs");
         waveform->setCurrentIndex(waveform->findData(QStringLiteral("CE")));
     }
@@ -753,6 +753,12 @@ void test_the_window(const std::filesystem::path& dir) {
                    "menu: Change Waveform on offer");
     check::is_true(w.change_waveform(id, "L").empty() && s->entries()[0].waveform == "L",
                    "menu: Change Waveform to L");
+    {
+        // The form follows, so adding its Send again goes out as L too.
+        auto* wf = w.findChild<QComboBox*>(QStringLiteral("schedule_waveform"));
+        check::is_true(wf && wf->currentData().toString() == QStringLiteral("L"),
+                       "menu: and the form takes L for the next add");
+    }
     check::is_true(w.change_waveform(id, "CE").empty() && s->entries()[0].waveform == "CE",
                    "menu: and back to CE");
 
@@ -817,6 +823,29 @@ void test_the_window(const std::filesystem::path& dir) {
         const std::size_t n = s->entries().size();
         check::is_true(!w.drop_send(blue, Q + 20 * H).empty() && s->entries().size() == n,
                        "drop: onto a send already there is refused, and says why");
+    }
+
+    // A run getting ready is not on the air: its block says when it keys.
+    {
+        const double slot = Q + 20 * H;
+        const double keys = qrss_tx::audio_start(slot);
+        fake.now = keys - 30.0;
+        s->tick();
+        w.refresh();
+        const QrssTimeline::Block* b = nullptr;
+        for (const auto& x : w.timeline()->blocks()) {
+            if (x.slot == slot) b = &x;
+        }
+        check::is_true(b != nullptr && !b->on_air && b->keys_at == keys,
+                       "timeline: a run getting ready is not on the air, and says when it keys");
+        fake.now = keys + 5.0;
+        w.refresh();
+        b = nullptr;
+        for (const auto& x : w.timeline()->blocks()) {
+            if (x.slot == slot) b = &x;
+        }
+        check::is_true(b != nullptr && b->on_air && b->keys_at == 0.0,
+                       "timeline: and is on the air once keyed");
     }
 
     w.delete_send(blue);
