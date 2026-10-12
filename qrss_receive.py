@@ -20,8 +20,12 @@ weight W in dB and the association result.
 
 Both waveforms are listened for by default; --just-ce or --just-l
 listens for one. A CE-only receive is the receiver's original
-single-waveform path, unchanged, and knows nothing of L: an L signal in
-the recording can come out as a weak, headerless CE pass. --frame names
+single-waveform path and knows nothing of L: an L signal in the
+recording can come out as a weak, headerless CE pass. Two receiver
+rules changed on 2026-10-12, the noise floor near 300 and 2700 Hz and
+which candidates are verified around a strong signal
+(`sstvae.qrss.rules`); --old-edge-noise and --old-gating set them back,
+and with both --just-ce is the receiver of 2026-10-11 bit for bit. --frame names
 the frame shape in either waveform ("short" or "l-short"), and the
 other waveform listens for the same shape (`lframe.twin`); a frame with
 no twin (the CE version-1 and test frames) needs the flag that names its
@@ -44,7 +48,7 @@ from pathlib import Path
 
 import numpy as np
 
-from sstvae.qrss import frame, frontend, lframe, receiver, sequences
+from sstvae.qrss import frame, frontend, lframe, receiver, rules, sequences
 from sstvae.qrss.constants import WAVEFORM_CE, WAVEFORM_L, WAVEFORM_NAMES
 
 
@@ -189,11 +193,13 @@ def parse_args(argv=None):
     ap.add_argument("--model", default=None, help="codec model directory (for --image)")
     ap.add_argument("--precision", choices=("fp32", "fp16", "int8"), default="fp32",
                     help="codec precision (for --image)")
+    rules.add_arguments(ap)
     return ap.parse_args(argv)
 
 
 def main() -> None:
     args = parse_args()
+    rules.apply(args)
 
     q = parse_slot(args.slot) if args.slot else None
     start = parse_time(args.start) if args.start else None

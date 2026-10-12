@@ -21,7 +21,11 @@ listens for its own frame of that shape, so a CE-only shape such as
 full-v1 needs --just-ce. --just-ce is the listener as it was before L,
 which knows nothing of L: an L signal in the slot can come out as a
 weak, headerless CE tile. The desktop app starts this with no waveform
-flag, so it hears both.
+flag, so it hears both. Two receiver rules changed on 2026-10-12, the
+noise floor near 300 and 2700 Hz and which candidates are verified
+around a strong signal (`sstvae.qrss.rules`); --old-edge-noise and
+--old-gating set them back, and with both --just-ce is the listener of
+2026-10-11 bit for bit.
 
 Tiles go to --state DIR (default STORE/live): `state.json`, rewritten
 after every change, and `tiles/<id>.png`; every log line goes to
@@ -95,6 +99,9 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--precision", choices=("fp32", "fp16", "int8"), default="fp32",
                     help="codec precision (default fp32)")
     ap.add_argument("--no-pictures", action="store_true", help="tiles without pictures")
+    from sstvae.qrss import rules
+
+    rules.add_arguments(ap)
     return ap
 
 
@@ -130,6 +137,10 @@ def build_config(argv=None):
 
 def main(argv=None) -> None:
     args, cfg = build_config(argv)
+
+    from sstvae.qrss import rules
+
+    rules.apply(args)        # before the end-of-slot process is spawned: it inherits them
 
     from sstvae.qrss import frontend, live, sequences
     from sstvae.qrss.store import Store, default_root

@@ -76,8 +76,9 @@ the channel simulator in this branch.
   desktop app has a **QRSS signals** window that runs it on the app's
   own capture audio (see "Listening live" below). Both are checked by
   replaying simulated recordings only, never on a radio.
-- There is no QRSS waterfall of its own; the app's waterfall shows the
-  passband as usual.
+- The app's QRSSTVAE view (**View > QRSSTVAE**, Ctrl+2) has a QRSS
+  spectrogram of its own beside the received pictures, under the usual
+  waterfall.
 - The work covers spec build steps 2 (waveform CE, channel simulator,
   single-pass receiver) and 4 (multi-pass combining, association, EM),
   plus a portable C reference of the beacon's phase generator, and for
@@ -246,13 +247,34 @@ Z_ref stands. In `state.json` each tile carries `waveform` (`"CE"` or
 `"L"`; a tile without it is CE) and its pass's own `frame` (`"l-full"`
 for L), and the top level lists the `"waveforms"` listened for. An L
 tile's `f_hz` is its pilot, with its data from 3 to 22 Hz below it.
-`--just-ce` is the listener from before L, unchanged, and knows nothing
-of L: an L signal can come out there as a weak, headerless CE tile.
+`--just-ce` is the listener from before L and knows nothing of L: an L
+signal can come out there as a weak, headerless CE tile.
 
-From the desktop app: **View > QRSS signals**, then **Start listener**,
-and press **Listen** in the receive pane so there is audio to hear. The
-window pipes the receive pane's audio into the listener and shows its
-tiles. It finds `qrss_listen.py` and the repository's `.venv` by
+**Two receiver rules changed on 2026-10-12.** The noise floor under a
+signal is now measured only where the front end is flat, so near 300
+and 2700 Hz a signal no longer reads several dB too strong. And a line
+inside a signal already found on its preamble (a strong CE's sidebands
+about 12 Hz either side, the L copy of its carrier, lines in an L
+signal's data band) is no longer verified one by one only to be
+refused, unless the whole-slot search found it stronger than that
+signal's own line: a station whose preamble faded can be the stronger
+of two, and it is still verified. The price is that a station heard
+only by the whole-slot search, inside a stronger one's band, is not
+received. In the middle of the band the noise floor is unchanged bit
+for bit, and CE passes with it. `--old-edge-noise` sets the first back
+(on `qrss_listen.py`, `qrss_receive.py` and `qrss_decode.py`) and
+`--old-gating` the second (on the first two), and with both and
+`--just-ce` the listener is the one of 2026-10-11 exactly. Measured on
+simulated audio at -12 dB (TINY, both waveforms): a CE pass at 305 to
+340 or 2680 to 2695 Hz reported -2.4 to -4.4 dB and now -11.9 to -12.6;
+an L pass at 326 Hz beside CE at 400 reported +8.0 dB, suspect, with
+-0.2 dB of latent SNR, and now -9.0 dB with 5.9. On SHORT at -12 and
+-6 dB, CE alone or beside an L signal, acquisition and verification
+found the same signals in 2.8 to 8.3 s of CPU against 5.3 to 24.9 s.
+
+From the desktop app: **View > QRSSTVAE** (Ctrl+2), then **Listen**:
+starting capture in that view starts the listener too. The app pipes
+the receive audio into the listener and shows its tiles. It finds `qrss_listen.py` and the repository's `.venv` by
 walking up from the executable (`native/build/sstvae-gui` in a checkout).
 The command line is editable, and `SSTVAE_QRSS_LISTEN` sets its default.
 While the app transmits, no audio reaches the listener; the gap is
@@ -346,6 +368,7 @@ left out (noted "already a member"), so W never counts a pass's noise
 twice.
 
 Gate V measures each candidate's noise floor 85-120 Hz either side of it
+(where the front end is flat, since 2026-10-12)
 and leaves out the other preamble hits and the signals already verified
 (`receiver.detect`; an L neighbour about its band centre, 9.5 Hz below
 its pilot), and counts only the symbols heard. A neighbour in
@@ -354,7 +377,8 @@ weaker, passed A2 at every live refresh of the 2026-10-11 04:15Z slot
 and failed V (Z_ref about 1 in a replay), so it had no live tile; with
 the neighbour left out it passes from the 145 s refresh (Z_ref 8-11),
 and the end-of-slot receive is unchanged but for Z_ref. With neighbours
-on both sides leaving no bin, the floor is the quieter side.
+on both sides leaving no bin, the floor is the quieter side (of those
+the front end leaves flat).
 
 The listener writes every log line to `listener.log` in its state
 directory (moved to `listener.log.1` past 2 MB), beside `state.json`,
@@ -413,11 +437,16 @@ correct by eye.
   -30 dB, not at -34, where CE is found).
 - Keep signals well inside 300-2700 Hz. The listener gives no tile to an
   L pass whose pilot is less than 22.07 Hz above 300 Hz, since its data
-  would fall below 300 Hz. Within about 75 Hz of either edge the noise
-  floor reads low, so a -12 dB signal is reported several dB too strong
-  (simulated: CE at 305-340 Hz reported -2.4 to -4.4 dB), and a
-  headerless pass there can be dropped as stronger than -6 dB. An L
-  signal near an edge with a CE neighbour close by fares worst.
+  would fall below 300 Hz. Below about 430 Hz and above 2570 Hz only one
+  side of a signal is flat enough to measure the noise on. When a
+  neighbour covers that side, the floor is halfway in dB between that
+  side (high, by the neighbour) and the other compensated for the front
+  end's filter (low, by however much more the radio's filter cuts): an
+  L pilot at 2695 Hz with CE at 2600, both at -12 dB, reports -6.6 dB
+  and keeps 6.9 dB of latent SNR (simulated, through a filter as narrow
+  as the front end's; +23.8 dB and 3.0 before 2026-10-12, when a
+  headerless pass near an edge could be dropped as stronger than
+  -6 dB).
 - Under `--just-ce` an L signal can show as a junk CE tile with no
   header (simulated at -12 dB: z about 7.2, latent SNR about -8 dB).
 - CPU: roughly 20 s per signal per refresh on a desktop, plus up to a
@@ -472,9 +501,9 @@ is one picture, one QRSS mode and one carrier, sent a number of times
   on the Transmit pane do not change it.
 - **First send (UTC)**: a date and a quarter hour, with your local time
   in brackets.
-- **Waveform**: CE (the default) or L. L is about 22 Hz wide and needs a
-  linear chain with the ALC out, and only a listener that hears L (this
-  branch's, without `--just-ce`) decodes it.
+- **Waveform**: L (the default, listed first) or CE. L is about 22 Hz
+  wide and is linear, so keep the ALC out of it; only a listener that
+  hears L (this branch's, without `--just-ce`) decodes it.
 - **Repeat**: how many sends, and how far apart their starts are. *Back
   to back* starts the next send the half hour after the last pass of
   the one before, so two mode A sends back to back ("2 x A") are two
@@ -582,7 +611,8 @@ INPUT is an 8 kHz WAV of one slot, or a `qrss_simulate.py` `.npz`.
 | `--slot` | Quarter hour in ISO UTC. Needed for a WAV; an `.npz` carries its own |
 | `--start` | UTC time of the WAV's first sample. Default: t0 − 12 s, as `qrss_transmit.py` and `qrss_simulate.py` write it |
 | `--frame` | Frame shape, in either waveform's name (`short` or `l-short`); the other waveform listens for the same shape. Default `full`, or the `.npz`'s own |
-| `--just-ce`, `--just-l` | Listen for one waveform only (one or the other, not both). Default: both. `--just-ce` is the receiver from before L, unchanged, and can report an L signal as a weak, headerless CE pass |
+| `--just-ce`, `--just-l` | Listen for one waveform only (one or the other, not both). Default: both. `--just-ce` is the receiver from before L, and can report an L signal as a weak, headerless CE pass |
+| `--old-edge-noise`, `--old-gating` | Set back the receiver rules of 2026-10-12: the noise floor near 300 and 2700 Hz, and gating lines inside a signal already found (see "Two receiver rules changed", above). With both and `--just-ce` the receiver is the one of 2026-10-11 bit for bit |
 | `--store DIR` | Multi-pass store. Default `$QRSSTVAE_HOME` or `~/.local/share/qrsstvae` |
 | `--no-store` | Do not store or associate the passes |
 | `--passband DIR`, `--no-passband` | Where to keep the slot's front-end stream for 48 hours (default `STORE/passband`), or do not keep it. `qrss_decode.py --retro` searches it later |
@@ -593,7 +623,9 @@ INPUT is an 8 kHz WAV of one slot, or a `qrss_simulate.py` `.npz`.
 An `.npz` fixes the waveform it holds: a flag that excludes it is
 refused, and so is an `.npz` of a CE-only frame (such as `full-v1`)
 without `--just-ce`. Listening for both costs more CPU than one: a CE
-SHORT recording took 12.6 s with both against 7.7 s with `--just-ce`.
+SHORT recording at -12 or -6 dB took 7.9 to 8.1 s with both against
+6.8 s with `--just-ce` (12.6 s against 7.7 before 2026-10-12's gating
+rule).
 
 ### `qrss_decode.py [OUTPUT.png]`
 
@@ -610,6 +642,7 @@ Exactly one of `--key`, `--pass` or `--list`.
 | `--passband DIR`, `--frame` | Passband store and frame shape for `--retro` |
 | `--any-codec` | Decode even if the picture's codec ID does not match the decoder's |
 | `--model`, `--precision` | Codec model and precision. Precision default fp32 |
+| `--old-edge-noise` | As for `qrss_receive.py`, for the passes `--em` and `--retro` receive again (they verify no candidates, so there is no `--old-gating`) |
 
 An accumulator may hold passes of both waveforms, and they decode alike.
 `--list` prints each member's waveform and frame (`CE full`, `L l-full`),
@@ -897,9 +930,7 @@ measured numbers. All are simulated.
   search and retro detection skip L passes, live L acquisition stops at
   about −26 dB, and L's thresholds on fading paths are not measured.
   [waveform-l.md](waveform-l.md) lists what is left.
-- **Not built:** a QRSS-specific waterfall, a model trained for this
-  mode, and the app's display of a tile's waveform (an L tile is marked
-  as a CE one, 25 Hz either side of its pilot). The live listener and
+- **Not built:** a model trained for this mode. The live listener and
   the app's QRSS window are built but untested on a radio.
 
 ## Needs hardware or on-air time

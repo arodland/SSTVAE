@@ -16,5 +16,5 @@ __all__ = [
     "constants", "sequences", "precoder", "frame", "morse", "picture",
     "types", "polar", "header", "ce", "tx", "beaconfile", "si5351",
     "channel", "frontend", "acquire", "track", "demod", "cwid",
-    "receiver", "store", "associate", "render", "em",
+    "receiver", "store", "associate", "render", "em", "rules",
 ]

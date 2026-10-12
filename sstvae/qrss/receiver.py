@@ -33,6 +33,26 @@ a second station that is both under 20 Hz from a stronger one (the CE
 plan spaces stations 50 Hz apart, and at 20 Hz their spectra overlap
 anyway) and slot-aligned to within 3 symbols: it is not received.
 
+Those ghosts, and the L copy of a strong CE carrier (A3 cannot tell
+which waveform the carrier's line is, so it is gated as L too: its
+pilot at the carrier, its band 9.5 Hz below), are A3 lines that
+`detect` used to gate one by one, only to refuse them or drop them as
+ghosts: up to 8 CPU s each on SHORT at -12 and -6 dB, and on FULL about
+a minute each of the end-of-slot search's 180 s. So a whole-slot (A3)
+candidate inside the own band of a signal found already on its
+preamble (`_owned`: within GHOST_HZ of a CE carrier, or from
+L_OWN_BELOW_HZ below an L pilot to L_OWN_ABOVE_HZ above it), and no
+stronger in A3 than that signal's own line, is not gated, nor counted
+against max_candidates; preamble hits and hints always are, and the
+hits come first. A ghost or an L copy is no stronger than the line it
+comes from, but a station whose preamble faded can be stronger than a
+weaker one whose preamble was heard, and it is gated. The price is
+the ghost rule's, without its timing condition: a station heard only by
+the whole-slot search inside a preamble-found one's band, and weaker
+there than it, is not received, timing or not; at that distance their
+spectra overlap anyway. `rules.GATING` set back gates every candidate
+as before.
+
 A second kind got past that rule (integration review, 2026-10-09): 2 of
 15 FULL passes at about -11 dB also returned a pass 8-14 Hz away with
 its timing 6-10 symbols off, Z_ref 6.1-6.4 (at the gate, against 104
@@ -88,7 +108,7 @@ from fractions import Fraction
 
 import numpy as np
 
-from . import acquire, cwid, demod, frontend, header, ldemod, lframe, ltrack, track
+from . import acquire, cwid, demod, frontend, header, ldemod, lframe, ltrack, rules, track
 from .constants import (CH_FS, FE_FS, FORMAT_VERSIONS, LEAD_IN_MAX_S, SPAN, T_SYM,
                         WAVEFORM_CE, WAVEFORM_L, WAVEFORM_NAMES, Z_ACCEPT)
 from .frame import FULL, FrameSpec, plain
@@ -104,6 +124,8 @@ ALIAS_HZ = 0.5
 ALIAS_RATIO = 3.0
 MARGIN_S = 3.0
 L_EXCLUDE_OFFSET_HZ = -9.5  # an L signal's band centre, from its pilot (module docstring)
+L_OWN_BELOW_HZ = 22.1       # an L signal's own band: this far below its pilot (its data's edge)...
+L_OWN_ABOVE_HZ = 3.1        # ...to this far above it (`_owned`; centre +- 12.6 Hz)
 CE_RESID_MIN = 2.0          # joint receiver: a CE accept past this residual ratio is re-checked
 L_HEADER_VERSIONS = (2,)    # what an L header may say: there is no L version 1
 
@@ -458,6 +480,53 @@ def _suspect_beside(p: PassResult, out: list[PassResult]) -> bool:
         and p.report.z_ref < GHOST_Z_RATIO * g.report.z_ref for g in out)
 
 
+def _a3_lines(cands) -> list[tuple[float, float, float]]:
+    """(line, centre, Z) of each whole-slot (A3) candidate: what `_owned`
+    weighs a line against."""
+    return [(float(c.f_hz), centre_hz(c), float(c.a3_z)) for c in cands
+            if c.method == "tbd" and math.isfinite(getattr(c, "a3_z", math.nan))]
+
+
+def _owned(d: Detection, found: list[Detection], a3=()) -> bool:
+    """Whether candidate d is not to be gated: a whole-slot (A3) line at a
+    frequency inside the own band of a signal found already on its
+    preamble (within GHOST_HZ of a CE carrier, or from L_OWN_BELOW_HZ
+    below an L pilot to L_OWN_ABOVE_HZ above it) and no stronger in A3
+    than that signal's own line there (`a3`, `_a3_lines`: the largest Z
+    of an A3 line within MERGE_HZ of its line or its centre). Module
+    docstring, "Ghosts". d.f_hz is the line: a CE carrier, or an L pilot.
+
+    Only a preamble-found signal owns its band: those are gated first,
+    so nothing weaker can have taken the band before them. Its own A3
+    line is the yardstick because the preamble says nothing of the rest
+    of the slot: a weaker station whose preamble was heard must not hide
+    a stronger one whose preamble faded (2026-10-12 review). A ghost or
+    the L copy of the owner's carrier is no stronger than that line; a
+    candidate when the owner has none in A3, or a hint (not A3's), is
+    gated."""
+    if d.method != "tbd" or rules.old(rules.GATING):
+        return False
+    z = float(getattr(d, "a3_z", math.nan))
+    if not math.isfinite(z):
+        return False
+    f = float(d.f_hz)
+    for g in found:
+        if g.method != "preamble":
+            continue
+        if getattr(g, "waveform", WAVEFORM_CE) == WAVEFORM_L:
+            inside = g.f_hz - L_OWN_BELOW_HZ <= f <= g.f_hz + L_OWN_ABOVE_HZ
+        else:
+            inside = abs(f - g.f_hz) < GHOST_HZ
+        if not inside:
+            continue
+        c = centre_hz(g)
+        own = [zz for line, cc, zz in a3
+               if abs(line - g.f_hz) < MERGE_HZ or abs(cc - c) < MERGE_HZ]
+        if own and z <= max(own):
+            return True
+    return False
+
+
 def _ghosts(dets: list[Detection], t_sym: float = T_SYM) -> list[Detection]:
     """Drop detections that are ghosts of a stronger one (module docstring)."""
     out: list[Detection] = []
@@ -498,15 +567,17 @@ def detect(prep: Prepared, spec, live_only: bool = False,
     """Acquisition plus gate V over a prepared capture: verified detections.
 
     max_candidates bounds how many candidates go to the gate (preamble
-    hits first, then the strongest of the rest), and budget_s stops
+    hits first, then the strongest of the rest; those `_owned` skips are
+    not counted), and budget_s stops
     verifying new ones after that many seconds; a candidate that is not
     a signal costs most (about a minute over a whole FULL slot, measured
     on voice-like audio). erase_s, spans (a, b) in seconds after t0, were
     not heard: the gate counts only what was (`track.verify`). `cands`
     are `candidates` already found (the live view keeps a slot's), and a
     candidate within MERGE_HZ of `skip_hz` (signals known already) is not
-    verified again, though it is still left out of the others' noise.
-    `hints` go to `candidates`.
+    verified again, though it is still left out of the others' noise; nor
+    is a whole-slot candidate in a preamble-found signal's own band and no
+    stronger in A3 than its own line (`_owned`). `hints` go to `candidates`.
 
     `spec` is a frame or a tuple of frames: joint (`is_joint`) is
     `_detect_joint`, where skip_hz holds band centres (`centre_hz`; a
@@ -520,8 +591,7 @@ def detect(prep: Prepared, spec, live_only: bool = False,
     t_end = None if budget_s is None else time.monotonic() + budget_s
     if cands is None:
         cands = candidates(prep, spec, live_only, hints)
-    if max_candidates is not None:
-        cands = cands[:max_candidates]
+    a3 = _a3_lines(cands)
     found: list[Detection] = []
     # a neighbour's sideband in the band the noise floor is measured in
     # (85-120 Hz off) reads as noise and sinks a weaker signal's Z_ref:
@@ -530,9 +600,15 @@ def detect(prep: Prepared, spec, live_only: bool = False,
     # each candidate leaves out the preamble hits (signals, at A2's false
     # alarm rate) and whatever has been verified already.
     hits = [c.f_hz for c in cands if c.method == "preamble"] + [float(f) for f in skip_hz]
+    taken = 0
     for d in cands:
         if t_end is not None and time.monotonic() > t_end:
             break
+        if _owned(d, found, a3):
+            continue                         # (not gated, so not counted)
+        if max_candidates is not None and taken >= max_candidates:
+            break
+        taken += 1
         if any(abs(d.f_hz - f) < MERGE_HZ for f in [g.f_hz for g in found] + list(skip_hz)):
             continue
         others = {f for f in hits + [g.f_hz for g in found] if abs(f - d.f_hz) >= MERGE_HZ}
@@ -560,7 +636,10 @@ def _detect_joint(prep: Prepared, specs: tuple, live_only: bool, max_candidates,
     (preamble hits of either waveform, then hints, then A3's by spectral
     shape), and max_candidates and budget_s are one budget across both. A
     candidate whose centre is within MERGE_HZ of a signal found already
-    (of either waveform) or of skip_hz is not gated; the preamble hits'
+    (of either waveform) or of skip_hz is not gated, nor a whole-slot
+    candidate in a preamble-found signal's own band and no stronger in A3
+    than its own line (`_owned`, by the candidate's line and the found
+    signal's waveform); the preamble hits'
     and the found signals' centres leave each gate's noise floor
     (`_gate`). Then one detection per centre, the larger Z_ref, and
     aliases and ghosts per waveform at its own symbol.
@@ -569,14 +648,19 @@ def _detect_joint(prep: Prepared, specs: tuple, live_only: bool, max_candidates,
     t_end = None if budget_s is None else time.monotonic() + budget_s
     if cands is None:
         cands = candidates(prep, specs, live_only, hints)
-    if max_candidates is not None:
-        cands = cands[:max_candidates]
+    a3 = _a3_lines(cands)
     skip = _centres(skip_hz)
     hits = [centre_hz(c) for c in cands if c.method == "preamble"] + skip
     found: list[Detection] = []
+    taken = 0
     for d in cands:
         if t_end is not None and time.monotonic() > t_end:
             break
+        if _owned(d, found, a3):
+            continue                         # (not gated, so not counted)
+        if max_candidates is not None and taken >= max_candidates:
+            break
+        taken += 1
         sp = smap.get(getattr(d, "waveform", WAVEFORM_CE))
         if sp is None:
             continue                         # (a waveform not listened for)

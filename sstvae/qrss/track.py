@@ -185,12 +185,14 @@ class ChanCapture:
 
     def noise_psd_at(self, t_s) -> np.ndarray:
         """Noise PSD (CH power per Hz) at receiver times t_s, from 10 s windows
-        85-120 Hz off the mix frequency (`frontend.noise_psd`), interpolated."""
+        85-120 Hz off the mix frequency where the front end is flat
+        (`frontend.noise_psd`), interpolated."""
         if self._psd is None:
             ex = [h - self.mix_audio_hz for h in self.exclude_hz]
             have = np.abs(self.ch) > 0
             w = max(16, int(round(NOISE_WIN_S * self.fs)))
-            psd = frontend.noise_psd(self.ch, self.fs, exclude_hz=ex, win_s=NOISE_WIN_S)
+            psd = frontend.noise_psd(self.ch, self.fs, exclude_hz=ex, win_s=NOISE_WIN_S,
+                                     audio_hz=self.mix_audio_hz)
             nwin = len(psd)
             cen = np.array([min(i * w, max(len(self.ch) - w, 0)) + w / 2 for i in range(nwin)])
             # windows that are mostly zero padding read low: take them from the rest

@@ -964,7 +964,8 @@ def lead_in_span(fe, t0_index: float, f_hz: float, drift_hz_per_min: float = 0.0
     # is in every sample near it
     sps = CH_FS * T_SYM
     have = np.abs(ch) > 0
-    psd = frontend.noise_psd(ch[have], CH_FS, fs_in=fs) if have.sum() > 2 * CH_FS else [1.0]
+    psd = (frontend.noise_psd(ch[have], CH_FS, fs_in=fs, audio_hz=FE_CENTER_HZ + float(f_mix))
+           if have.sum() > 2 * CH_FS else [1.0])
     sigma2 = max(float(np.median(psd)) / T_SYM, 1e-30)
     span = 0.0
     for k in range(int(round(LEAD_IN_MAX_S / LEAD_WIN_S))):
@@ -1105,7 +1106,8 @@ class TbdHit:
             path = self.l_path
             f_hz = float(np.polyval(_path_line(path), 0.0))
         return Detection(f_hz=f_hz, path=path, timing=None, z_ref=float("nan"),
-                         method="tbd", lead_in_s=0.0, waveform=int(waveform))
+                         method="tbd", lead_in_s=0.0, waveform=int(waveform),
+                         a3_z=float(self.z))
 
 
 def _path_line(path: FreqPath) -> np.ndarray:

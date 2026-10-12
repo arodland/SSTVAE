@@ -122,7 +122,7 @@ FORMAT_MODULES = ("constants", "sequences", "precoder", "frame", "morse", "pictu
 # be declared format or not before it can land.
 NON_FORMAT_MODULES = ("__init__", "types", "channel", "frontend", "acquire", "track",
                       "demod", "cwid", "receiver", "store", "associate", "render", "em",
-                      "live", "ltrack", "ldemod")
+                      "live", "ltrack", "ldemod", "rules")
 
 _FORBIDDEN_CALLS = {"default_rng", "RandomState", "seed", "Generator", "PCG64",
                     "MT19937", "SeedSequence"}

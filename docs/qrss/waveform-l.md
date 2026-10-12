@@ -19,7 +19,8 @@ and since 2026-10-12 the receiver is built too (`acquire.py`, `ltrack.py`,
 listener `qrss_listen.py` hear L beside CE by default, and `--just-ce` or
 `--just-l` picks one. So **L may go on the air once a station's listeners
 run this code.** A listener on older code, or one run with `--just-ce`
-(which is the old receiver bit for bit), does not know L: it shows an L
+(the old CE receiver, and with `--old-edge-noise --old-gating` bit for
+bit the one of 2026-10-11), does not know L: it shows an L
 signal at most as a weak, headerless CE tile (below, "Keeping L out of
 the CE gate"). Everything about L here is simulated: no L signal has
 been received off the air.
@@ -259,7 +260,8 @@ joint acquisition costs about twice a single one (TINY 0.8 s against
 line, 18 ms of it the Gamma tail probability). A whole receive costs more
 than that suggests: `qrss_receive.py` on a CE SHORT recording took 12.6 s
 listening for both against 7.7 s with `--just-ce`, the difference being
-L's acquisition and the gates it adds. The CE re-check below costs about
+L's acquisition and the gates it adds; since the gating rule of
+2026-10-12 (below), 7.9 to 8.1 s against 6.8 s. The CE re-check below costs about
 0.09 s per CE accept on TINY.
 
 **The spectrum's shape removes most of that.** L's data sit entirely below
@@ -326,10 +328,21 @@ An accept with R > 2 and Z_ref/√R ≤ 6 is refused. Measured R: CE's own
 passes 0.93 to 1.48 on TINY, fading CE up to 2.16 (at Z_ref 48, so kept),
 an L signal under CE's gate 3.6 to 15.4, and CE's own sideband ghosts
 about 12 Hz off its carrier 5.2 to 6.2 (refused, which is no loss).
+Since 2026-10-12 those ghosts, and the L copy of a strong CE carrier,
+are not gated at all when the CE signal was found on its preamble: a
+whole-slot line inside a preamble-found signal's own band (20 Hz either
+side of a CE carrier, 22.1 Hz below to 3.1 Hz above an L pilot), no
+stronger in A3 than that signal's own line, is skipped, which took the
+search on SHORT, CE beside an L signal 60 Hz up, from 19 to 25 s of CPU
+to 7 to 8 (`--old-gating` sets it back). A stronger line is still
+gated: a station whose preamble faded can outdo one whose preamble was
+heard.
 
-`--just-ce` is, by decision, the old receiver bit for bit, so it does
-none of this and behaves as the old listener does. That is why L may go
-on the air once a station's listeners run this code and listen for both.
+`--just-ce` is, by decision, the CE receiver from before L: it makes
+none of the joint receiver's calls and has no CE re-check, so an L
+signal reaches it as a CE candidate. It does take both 2026-10-12 rules;
+with `--old-edge-noise --old-gating` as well it is the listener of
+2026-10-11 bit for bit.
 
 ## Plan: what was done and what is left
 
@@ -350,10 +363,9 @@ on the air once a station's listeners run this code and listen for both.
    of the genie from -6 to -28 dB, and its header decoded at -28 dB (one
    seed). Spec 6.3's thresholds on Watterson paths, and L's header
    threshold, are not measured.
-5. **Partly done:** the app's waveform choice for scheduled sends is in.
-   The QRSS window does not yet read a tile's `waveform`: an L tile's
-   marker should cover its band, from about 22 Hz below its pilot to just
-   above it, rather than CE's f ± 25 Hz (UI thread).
+5. **Done:** the app's waveform choice for scheduled sends, and the QRSS
+   window reading a tile's `waveform`: an L tile says so, and its marker
+   covers its band, from about 22 Hz below its pilot to 3 Hz above it.
 
 **What is left**, in the receiver:
 
@@ -379,8 +391,17 @@ on the air once a station's listeners run this code and listen for both.
   SNR2500 the 100 ms inverse AGC follows L's envelope (an l-short genie at
   +10 dB read 12.13 dB of latent SNR before it and 9.89 dB after), and a
   strong L signal modulates the others in the band.
-- **The noise floor near the band edges**, which also affects CE: within
-  about 75 Hz of 300 or 2700 Hz a -12 dB signal reads several dB too
-  strong, and in the joint receiver a CE neighbour close by makes an L
-  pass there much worse (latent SNR -0.04 dB against 6.49 with
-  `--just-l`, an L pilot at 326 Hz beside CE at 400 Hz).
+- **Done (2026-10-12): the noise floor near the band edges**, which
+  also affected CE. Within about 75 Hz of 300 or 2700 Hz a -12 dB signal
+  read several dB too strong, and a CE neighbour close by made an L pass
+  there much worse. The floor is now measured only where the front end
+  is flat (`--old-edge-noise` sets it back). Simulated at -12 dB (TINY,
+  both waveforms): an L pilot at 324 to 370 or 2650 to 2690 Hz reported
+  -3.9 to -9.5 dB with kappa at its clamp of 2, now -12.1 to -12.6. When
+  a neighbour covers the only flat side, the floor is halfway in dB
+  between the flat side (too high, by the neighbour) and the skirt
+  compensated for the front end (too low, by however much more the
+  radio's filter cuts): at 326 Hz beside CE at 400 the pilot reported
+  +8.0 dB, suspect, latent SNR -0.24 dB, now -9.0 dB and 5.88 dB; at
+  2695 Hz beside CE at 2600, +23.8 dB, suspect, 2.98 dB, now -6.6 dB and
+  6.87 dB.

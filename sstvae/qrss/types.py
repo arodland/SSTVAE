@@ -68,6 +68,7 @@ class Detection:
     method: str                              # "preamble" | "hint" | "tbd" | "template"
     lead_in_s: float
     waveform: int = WAVEFORM_CE              # which waveform's frame this candidate is
+    a3_z: float = float("nan")               # a whole-slot (A3) candidate's line Z, else nan
 
 
 @dataclass

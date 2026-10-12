@@ -383,6 +383,36 @@ pilot itself. (On 2026-10-11 a weak station 100 Hz from a strong one was
 missed for the whole pass for exactly this reason, and only the
 end-of-slot search found it.)
 
+A strong signal also shows faint copies of itself about 12 Hz either
+side, and its tone can look like the pilot of an L signal. The
+end-of-slot search used to check each of those one by one, a few
+seconds to a minute of computer time apiece, only to throw them away.
+Since 2026-10-12 it doesn't: a line inside the band of a signal already
+found on its preamble, and no stronger than that signal's own line, is
+taken as part of that signal. A stronger one is still checked, since a
+station whose own start was lost in a fade can be the stronger of two.
+The price is that a second, weaker station inside another's band,
+heard only by that search, is not received; at that distance the two
+would spoil each other anyway.
+
+### Near the edges of the band
+
+The listener's own filter passes 300 to 2700 Hz, and near either edge
+it cuts the noise on the outer side of a signal. Measuring the noise
+there used to make a signal near 300 or 2700 Hz look several times
+stronger than it was, and a strong signal with no header is thrown
+away as a voice or a carrier ("A voice, a whistle or a nearby
+carrier", above), so a weak one there could be lost. Since 2026-10-12
+the listener measures the noise only where its filter is flat, which
+near an edge is the inner side alone. When another signal about 100 Hz
+further in covers that side, neither side can be trusted: the inner
+side then reads too loud, by as much as the neighbour is strong, and
+the outer side too quiet, by as much as the radio's own filter cuts
+there. The listener takes the point halfway between the two, so a weak
+signal beside a much stronger one is still found, and its strength is
+off by at most half the difference. It is still best to keep signals
+well inside the band.
+
 ### Echoes of the neighbouring slot
 
 Since passes last 30 minutes and slots are 15 minutes apart, the end of
@@ -428,13 +458,16 @@ receiver wants to add up.
 
 ## Trying it
 
-Start the listener from the desktop app (View > QRSS signals > Start
-listener), or from a terminal by piping audio into `qrss_listen.py`.
+Start the listener from the desktop app (View > QRSSTVAE, then Listen),
+or from a terminal by piping audio into `qrss_listen.py`.
 [README.md](README.md) has the commands. Everything it learns is saved in
 your home folder, under `~/.local/share/qrsstvae`.
 
 The listener hears both waveforms unless it is told otherwise, and the
 app starts it that way. On the command line, `--just-ce` or `--just-l`
 makes it listen for one. Listening for both costs more computer time:
-receiving one short test recording of a CE signal took about 1.6 times
-as long as listening for CE alone (12.6 s against 7.7 s).
+receiving one short test recording of a CE signal took about 1.2 times
+as long as listening for CE alone (8 s against 6.8 s). The two
+changes of 2026-10-12, the noise near the band edges and the copies of
+a strong signal, can each be turned off with `--old-edge-noise` and
+`--old-gating`, to compare a recording both ways.

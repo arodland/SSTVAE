@@ -124,7 +124,11 @@ def main() -> None:
     ap.add_argument("--model", default=None, help="codec model directory")
     ap.add_argument("--precision", choices=("fp32", "fp16", "int8"), default="fp32",
                     help="codec precision")
+    from sstvae.qrss import rules
+
+    rules.add_arguments(ap, (rules.EDGE_NOISE,))   # (--em and --retro gate no candidates)
     args = ap.parse_args()
+    rules.apply(args)        # --em and --retro receive passes again
 
     from sstvae.qrss import em, render
     from sstvae.qrss.store import Store

@@ -53,10 +53,20 @@ from scipy import ndimage, signal
 from sstvae import config as _c
 from sstvae.modem import dsp
 
+from . import rules
 from .constants import CH_FS, FE_CENTER_HZ, FE_FS, FS
 
 _FE_DECIM = FS // FE_FS                       # 2
 _FE_TAPS = signal.firwin(255, 1250.0, fs=FS, window=("kaiser", 8.0))
+# `noise_psd` takes noise only from bins the front end's low-pass leaves
+# within this of white (it is -0.10 dB at 310 Hz, -0.18 at 305, -0.29 at
+# 300 and -6.0 at 250, mirrored about 1500 Hz)
+FE_FLAT_DB = 0.1
+# ...unless neighbours leave fewer than FE_MIN_HZ of those clear: then
+# the skirt's clear bins down to FE_SKIRT_DB, compensated for the
+# low-pass (`_fe_response`), are weighed against them
+FE_MIN_HZ = 3.0
+FE_SKIRT_DB = 20.0
 F_MIX_DEN = 64                                # channeliser mixing grid: 1/64 Hz
 
 
@@ -298,9 +308,66 @@ def _noise_response(fs_in: int, fs_out: int, nfft: int) -> np.ndarray:
     return r
 
 
+@functools.lru_cache(maxsize=8)
+def _fold_power(fs_in: int, fs_out: int, nfft: int, band_hz: tuple) -> tuple:
+    """(idx, fk, P) for `_fe_flat`: the band's bins idx on the
+    fftfreq(nfft, 1/fs_out) grid, the FE frequencies fk[k] each bin's
+    k'th fold comes from (f + k fs_out), and the decimation filter's
+    power |H(fk)|^2 there, `_noise_response`'s terms."""
+    decim = fs_in // fs_out
+    f = np.fft.fftfreq(nfft, 1.0 / fs_out)
+    idx = np.flatnonzero((np.abs(f) >= band_hz[0]) & (np.abs(f) <= band_hz[1]))
+    if decim == 1:
+        return idx, f[idx][None, :], np.ones((1, len(idx)))
+    h = signal.firwin(2 * 10 * decim + 1, 1.0 / decim, window=("kaiser", 10.0))
+    fk = np.array([f[idx] + k * fs_out for k in range(-(decim // 2), decim - decim // 2)])
+    P = np.array([np.abs(signal.freqz(h, worN=row, fs=fs_in)[1]) ** 2 for row in fk])
+    return idx, fk, P
+
+
+@functools.lru_cache(maxsize=64)
+def _fe_power(fs_in: int, fs_out: int, nfft: int, audio_hz: float, band_hz: tuple) -> tuple:
+    """(idx, num, den) for `_fe_flat` and `_fe_response`: the band's bins
+    idx, the noise power white FE-input noise leaves in each through the
+    front end's low-pass and the decimation (num), and through the
+    decimation alone (den, `_noise_response`'s value there)."""
+    idx, fk, P = _fold_power(fs_in, fs_out, nfft, tuple(band_hz))
+    _, G = signal.freqz(_FE_TAPS, worN=((audio_hz + fk - FE_CENTER_HZ) % FS).ravel(), fs=FS)
+    return idx, np.sum(P * np.abs(G.reshape(fk.shape)) ** 2, axis=0), np.sum(P, axis=0)
+
+
+@functools.lru_cache(maxsize=64)
+def _fe_flat(fs_in: int, fs_out: int, nfft: int, audio_hz: float,
+             band_hz: tuple = (85.0, 120.0)) -> np.ndarray:
+    """bool[nfft] on the fftfreq(nfft, 1/fs_out) grid of a channel whose
+    0 Hz is audio_hz: the bins of band_hz (either side) whose noise the
+    front end's low-pass (`audio_to_fe`) leaves within FE_FLAT_DB of
+    white, counting what the decimation folds in from k fs_out away
+    (`_noise_response`'s sum), so a bin near +-fs_out/2 whose fold lies
+    on the skirt is not flat either. False outside band_hz."""
+    idx, num, den = _fe_power(fs_in, fs_out, nfft, audio_hz, tuple(band_hz))
+    flat = np.zeros(nfft, dtype=bool)
+    flat[idx] = num >= 10.0 ** (-FE_FLAT_DB / 10.0) * den
+    flat.flags.writeable = False             # (cached)
+    return flat
+
+
+@functools.lru_cache(maxsize=64)
+def _fe_response(fs_in: int, fs_out: int, nfft: int, audio_hz: float,
+                 band_hz: tuple = (85.0, 120.0)) -> np.ndarray:
+    """float[nfft], `_fe_flat`'s grid: the fraction of white noise's power
+    the front end's low-pass leaves in each bin of band_hz, folds
+    counted; 1 outside band_hz."""
+    idx, num, den = _fe_power(fs_in, fs_out, nfft, audio_hz, tuple(band_hz))
+    r = np.ones(nfft)
+    r[idx] = num / den
+    r.flags.writeable = False                # (cached)
+    return r
+
+
 def noise_psd(ch, fs: int = CH_FS, exclude_hz=(), win_s: float = 10.0, *,
               band_hz=(85.0, 120.0), guard_hz: float = 45.0,
-              fs_in: int = FE_FS) -> np.ndarray:
+              fs_in: int = FE_FS, audio_hz: float | None = None) -> np.ndarray:
     """float32[n_win]: noise PSD (CH power per Hz) in win_s windows.
 
     For each window, a Hann periodogram of the whole window; bins between
@@ -317,6 +384,26 @@ def noise_psd(ch, fs: int = CH_FS, exclude_hz=(), win_s: float = 10.0, *,
     ln 2, the median of an exponential. White FE noise of variance s2 at
     fs_in gives s2/fs_in, which is the PSD of the flat passband.
 
+    `audio_hz`, the audio frequency of ch's 0 Hz, leaves out the bins the
+    front end's own low-pass has taken down by more than FE_FLAT_DB
+    (`_fe_flat`): near 300 and 2700 Hz half the band sits on that skirt,
+    so the floor read low and the SNR high (9.1 dB at 305 Hz, 7.0 at 326,
+    2.5 at 360 Hz, measured on white noise; within about 0.5 dB now).
+    When neighbours leave fewer than FE_MIN_HZ of flat bins clear, no
+    bin is both flat and clear, and each kind errs one way: the flat
+    bins, neighbour and all, can only read high, and the skirt's clear
+    bins (down to FE_SKIRT_DB), each divided by the low-pass's response
+    there (`_fe_response`), only low, as a radio's filter narrower than
+    this front end takes the skirt down further. The floor is the
+    geometric mean of their medians, its error at most half the spread
+    in dB (2026-10-12 review: from the flat bins alone a weak pass beside
+    a stronger neighbour was lost, and from the skirt alone, beside an
+    equal one and through a radio as narrow as this front end, it read
+    some 16 dB strong). With no such skirt bin, the flat sides are the
+    fallback above. A channel whose bins are all flat (audio_hz from
+    about 430 to 2570 Hz) is not changed at all, nor one with no flat
+    bin. `rules.EDGE_NOISE` set back ignores audio_hz.
+
     Window i covers samples [i*w, i*w + w), the last shifted inward to
     stay whole; there are ceil(len(ch)/w) windows.
     """
@@ -328,11 +415,23 @@ def noise_psd(ch, fs: int = CH_FS, exclude_hz=(), win_s: float = 10.0, *,
     nwin = max(1, -(-n // w))
     f = np.fft.fftfreq(w, 1.0 / fs)
     band = (np.abs(f) >= band_hz[0]) & (np.abs(f) <= band_hz[1])
-    sel = band.copy()
+    clear = np.ones(w, dtype=bool)
     for fx in exclude_hz:
         for alias in (-fs, 0, fs):             # its skirt folds back across +-fs/2
-            sel &= np.abs(f - float(fx) - alias) > guard_hz
-    sides = [sel] if sel.any() else [band & (f < 0), band & (f > 0)]
+            clear &= np.abs(f - float(fx) - alias) > guard_hz
+    skirt = None                               # the fallback's: (bins, the low-pass's response)
+    if audio_hz is not None and not rules.old(rules.EDGE_NOISE) and fs_in % fs == 0:
+        key = (int(fs_in), int(fs), w, float(audio_hz), (float(band_hz[0]), float(band_hz[1])))
+        flat = band & _fe_flat(*key)
+        if flat.any() and not np.array_equal(flat, band):
+            if np.count_nonzero(flat & clear) < FE_MIN_HZ * w / fs:
+                r = _fe_response(*key)
+                sk = band & ~flat & clear & (r >= 10.0 ** (-FE_SKIRT_DB / 10.0))
+                if sk.any():
+                    skirt = (sk, r[sk])
+            band = flat
+    sel = band & clear
+    sides = [sel] if sel.any() and skirt is None else [band & (f < 0), band & (f > 0)]
     if not any(s.any() for s in sides):
         raise ValueError("noise_psd: no bin in the band")
     resp = (_noise_response(int(fs_in), int(fs), w) if fs_in % fs == 0
@@ -344,7 +443,14 @@ def noise_psd(ch, fs: int = CH_FS, exclude_hz=(), win_s: float = 10.0, *,
         a = min(i * w, n - w)
         X = np.fft.fft(ch[a:a + w] * win)
         p = (X.real ** 2 + X.imag ** 2) * scale / resp
-        out[i] = min(np.median(p[s]) for s in sides if s.any()) / math.log(2)
+        if skirt is None:
+            out[i] = min(np.median(p[s]) for s in sides if s.any()) / math.log(2)
+        else:
+            # the flat bins, neighbours and all, can only read high; the
+            # skirt, compensated, only low (a radio's filter): between them
+            hi = np.median(p[band])
+            lo = np.median(p[skirt[0]] / skirt[1])
+            out[i] = math.sqrt(hi * lo) / math.log(2)
     return out
 
 

@@ -41,7 +41,7 @@ from qrss_fakes import L_CALL, L_HDR, l_scenario, make_pass_result, noisy_llr, s
 from qrss_helpers import Q_TEST, REPO_ROOT, latent_snr_db, unit_rms_latents
 from sstvae.qrss import associate as asc
 from sstvae.qrss import channel as chm
-from sstvae.qrss import em, frame, frontend, header, lframe, ltrack, picture, track
+from sstvae.qrss import em, frame, frontend, header, lframe, ltrack, picture, rules, track
 from sstvae.qrss import receiver as RX
 from sstvae.qrss.channel import Neighbour
 from sstvae.qrss.constants import CH_FS, WAVEFORM_CE, WAVEFORM_L
@@ -130,6 +130,9 @@ def test_receive_pass_refuses_a_detection_of_the_other_waveform():
 # --- the joint detect and receive (stubs) ------------------------------------------------------
 
 def test_joint_detect_merges_by_centre_and_ghosts_per_waveform(monkeypatch):
+    # gated as before 2026-10-12: now the CE line at 1507 is in the L
+    # signal's own band and is not gated at all (test_qrss_rules.py)
+    monkeypatch.setenv(rules.GATING, "1")
     calls = []
     out = {  # candidate f -> what gate V makes of it (f, Z_ref, tau0)
         1509.5: (1509.5, 30.0, 0.0),   # L, centre 1500
