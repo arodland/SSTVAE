@@ -45,6 +45,29 @@ def rx(native):
     return {attr: f for (_, attr), f in rows_rx.rows(q).items()}
 
 
+def _outcome(f, *args, **kw):
+    """What a call gives: ("ok", result) or ("raise", type, text)."""
+    try:
+        return ("ok", f(*args, **kw))
+    except Exception as e:      # noqa: BLE001 -- any refusal is compared
+        return ("raise", type(e), str(e))
+
+
+def _same_outcome(f_ref, f_nat, *args, **kw):
+    """The same refusal (type and text), or equal results (arrays by value,
+    dtype and shape)."""
+    want, got = _outcome(f_ref, *args, **kw), _outcome(f_nat, *args, **kw)
+    assert got[0] == want[0], (want, got)
+    if want[0] == "raise":
+        assert got[1:] == want[1:]
+    elif isinstance(want[1], np.ndarray):
+        assert got[1].dtype == want[1].dtype and got[1].shape == want[1].shape
+        assert np.array_equal(got[1], want[1])
+    else:
+        assert got[1] == want[1]
+    return want
+
+
 def _same_error(f_ref, f_nat, *args, **kw):
     with pytest.raises(Exception) as want:
         f_ref(*args, **kw)
@@ -325,3 +348,95 @@ def test_decode_refusals(rx):
     llr[0] = np.nan
     _same_error(ref.decode, rx["decode"], llr)
     _same_error(ref.decode, rx["decode"], np.zeros(2474), 8, 2)          # versions not iterable
+
+
+# --- probes: the reference's own argument semantics ---------------------------------
+
+
+def _h(**kw):
+    base = {"callsign": "K1ABC", "grid": "FN42", "picture_id": 5, "mode": 1, "segment": 1, "codec_id": 7}
+    return HeaderFields(**{**base, **kw})
+
+
+@pytest.mark.parametrize("h", [
+    _h(picture_id=1.5), _h(picture_id="5"), _h(picture_id=" 12 "), _h(picture_id=np.float64(3.0)),
+    _h(picture_id=2**32 - 0.5), _h(picture_id=float("nan")), _h(picture_id=None), _h(picture_id=b"7"),
+    _h(codec_id=float("inf")), _h(codec_id=1e20), _h(codec_id="99999999999"), _h(codec_id=np.float32(7.9)),
+    _h(mode=1.5), _h(mode=2.0, segment=1.9), _h(mode=np.float32(1.0)), _h(mode=float("nan")), _h(mode=None),
+    _h(mode="1"), _h(mode=np.array([1])), _h(mode=np.array(2)), _h(mode=2.5), _h(mode=-0.5, segment=0),
+    _h(segment=0.5), _h(segment=1.2), _h(segment=-0.0), _h(segment="0"), _h(segment=np.int64(1)),
+    _h(version=2.0), _h(version=1.0), _h(version=1 + 0j), _h(version="2"), _h(version=np.float64(2)),
+    _h(version=np.array(2)), _h(version=2.5),
+    _h(reserved=0.0), _h(reserved=-0.0), _h(reserved="0"), _h(reserved=None), _h(reserved=1e-300),
+    _h(reserved=np.float16(0)),
+    _h(callsign="bad", picture_id=1.5), _h(callsign="bad", mode=None), _h(grid="XX99", version=1 + 0j),
+    _h(grid="XX99", mode=np.array([1])), _h(grid=None, picture_id="5"), _h(grid=b"FN42", reserved=0.0),
+])
+def test_pack_takes_what_the_reference_takes(tx, h):
+    """_check_fields with Python's own int()/<=/in/!=, then int() of each
+    field: floats, strings, numpy scalars and arrays are accepted, converted
+    or refused exactly as the reference does, refusal texts included."""
+    for name in ("pack", "encode"):
+        _same_outcome(getattr(ref, name), tx[name], h)
+
+
+def test_pack_random_python_values(tx):
+    rng = np.random.default_rng(40)
+    kinds = (int, float, np.int64, np.uint8, np.float64, np.float32, bool, str)
+    for _ in range(2000):
+        h = _random_header(rng)
+        name = ("picture_id", "mode", "segment", "codec_id", "version", "reserved")[int(rng.integers(0, 6))]
+        v = getattr(h, name) + (0.0 if rng.random() < 0.7 else float(rng.choice([0.25, 0.5, -0.5, 1.0])))
+        kind = kinds[int(rng.integers(0, len(kinds)))]
+        try:
+            v = kind(v)
+        except (ValueError, OverflowError):
+            continue
+        h = HeaderFields(**{**h.__dict__, name: v})
+        _same_outcome(ref.pack, tx["pack"], h)
+
+
+@pytest.mark.parametrize("bits", [
+    np.array([2, 0, 1]), np.array([0.5, 1.0]), np.array([-1, 0]), np.array([[0, 1], [1, 0]]), np.array([[0], [1]]),
+    np.array(1), np.array([1, 2**63], np.uint64), np.array([2**63, 1], np.uint64), np.array([1 + 0j, 0j]),
+    np.array([1, 0], dtype=object), np.array([1 + 0j, 0], dtype=object), np.array(["1", "0"]), np.array([b"1"]),
+    [2**70, 1], [1, 2**70], [-(2**70)], np.array([np.inf]), np.array([np.nan, 1.0]), np.array([1e19, 1.0]),
+    [1.0, -0.0, 1], np.zeros((0, 3)), np.zeros(0, dtype=object), "0101", 5, None, [[]], [],
+])
+def test_crc16_any_input(tx, bits):
+    """0/1 bits go through the C++ beacon CRC; anything else is the
+    reference's register over `int(b)`, computed or refused as there."""
+    _same_outcome(ref.crc16, tx["crc16"], bits)
+
+
+def test_crc16_random_integers(tx):
+    rng = np.random.default_rng(41)
+    for _ in range(300):
+        n = int(rng.integers(0, 200))
+        for b in (rng.integers(-5, 5, n), rng.integers(0, 2**16, n), rng.integers(0, 2, n).astype(np.float32),
+                  rng.integers(0, 3, n).astype(np.uint8)):
+            _same_outcome(ref.crc16, tx["crc16"], b)
+
+
+@pytest.mark.parametrize("make", [
+    lambda: "2", lambda: "12", lambda: iter([2]), lambda: (v for v in (1, 2)), lambda: iter([1]), lambda: iter(()),
+    lambda: map(int, "12"), lambda: (2.0,), lambda: [np.int64(2)], lambda: {2: 0}, lambda: range(1, 3),
+    lambda: (True, 2), lambda: (True,), lambda: np.array([1, 2]), lambda: frozenset([1]), lambda: b"\x01\x02",
+])
+def test_decode_versions_like_the_reference(rx, make):
+    """`tuple(versions) == (FORMAT_VERSION,)` picks the path, and every later
+    `in` is made on the caller's own object: an iterator spent by the
+    tuple() accepts nothing, a str raises once a path passes the CRC."""
+    for h in (HEADERS[0], HEADERS[-1]):
+        llr = 10.0 * (1.0 - 2.0 * ref.encode(h))
+        want, got = _outcome(ref.decode, llr, 8, make()), _outcome(rx["decode"], llr, 8, make())
+        assert got == want
+
+
+@pytest.mark.parametrize("list_size", [0.5, 8.0, np.float64(8.0), True, None, "8", np.array(8), np.array([8]),
+                                       np.int8(3), 2**70, -(2**70)])
+def test_decode_list_size_like_the_reference(rx, list_size):
+    llr = 10.0 * (1.0 - 2.0 * ref.encode(H))
+    for versions in ((2,), (1, 2)):
+        _same_outcome(ref.decode, rx["decode"], llr, list_size, versions)
+        _same_outcome(ref.decode, rx["decode"], np.zeros(7), list_size, versions)

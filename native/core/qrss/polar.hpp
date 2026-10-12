@@ -58,7 +58,8 @@ constexpr int mother_index(int e) { return e % N; }
 // v . F^(x)n (mod 2), natural order, in place over consecutive rows of
 // length n (x.size() a multiple of n). Self-inverse. As numpy's reshape in
 // the reference, every h = n/2, n/4, ..., 1 must divide n into 2h-blocks;
-// std::invalid_argument otherwise. Any byte values, XORed.
+// std::invalid_argument otherwise -- unless there are no rows at all
+// (x empty), which numpy reshapes into any shape. Any byte values, XORed.
 void polar_transform_rows(std::span<std::uint8_t> x, std::size_t n);
 
 // One row.

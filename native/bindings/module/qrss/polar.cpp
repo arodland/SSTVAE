@@ -29,12 +29,6 @@ std::string tuple_text(const std::vector<py::ssize_t>& dims) {
     return s + ")";
 }
 
-std::size_t list_size_of(const py::object& list_size) {
-    py::int_ ls = index(list_size);
-    if (ls < py::int_(1)) throw py::value_error("list_size must be >= 1");
-    return ls.cast<std::size_t>();
-}
-
 std::vector<double> coded_llrs(const py::object& llr) {
     return float_vector(llr, pol::E, "expected " + std::to_string(pol::E) + " coded LLRs");
 }
@@ -56,7 +50,9 @@ void bind(py::module_& q) {
         if (x.ndim() == 0) throw py::index_error("tuple index out of range");
         std::vector<py::ssize_t> shape(x.shape(), x.shape() + x.ndim());
         const py::ssize_t n = shape.back();
-        for (py::ssize_t h = n / 2; h >= 1; h /= 2)
+        // A size-0 array reshapes into any size-0 shape, so only a
+        // non-empty one can fail the reference's reshape.
+        for (py::ssize_t h = n / 2; h >= 1 && x.size() != 0; h /= 2)
             if (n % (2 * h)) {
                 std::vector<py::ssize_t> dims(shape.begin(), shape.end() - 1);
                 dims.insert(dims.end(), {n / (2 * h), 2, h});
@@ -65,7 +61,7 @@ void bind(py::module_& q) {
             }
         auto c = py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast>::ensure(x);
         py::array_t<std::uint8_t> out(shape);
-        std::memcpy(out.mutable_data(), c.data(), static_cast<std::size_t>(c.size()));
+        if (c.size() != 0) std::memcpy(out.mutable_data(), c.data(), static_cast<std::size_t>(c.size()));
         pol::polar_transform_rows(std::span<std::uint8_t>(out.mutable_data(), static_cast<std::size_t>(out.size())),
                                   static_cast<std::size_t>(n));
         return out;
@@ -115,22 +111,29 @@ void bind(py::module_& q) {
     }, py::arg("info"));
 
     m.def("decode_list", [](const py::object& llr, const py::object& list_size) {
-        const std::size_t L = list_size_of(list_size);
-        const pol::ListResult r = pol::decode_list(coded_llrs(llr), L);
+        const DecodeArgs a = decode_args(llr, list_size);
+        const pol::ListResult r = pol::decode_list(a.llr, a.list_size);
         return py::make_tuple(to_numpy_2d(r.info, static_cast<py::ssize_t>(r.m), pol::K), to_numpy(r.pm));
     }, py::arg("llr"), py::arg("list_size") = 8);
 
-    // accept=None is the header's own check, as in the reference.
+    // accept=None is the header's own check, as in the reference. A Python
+    // `accept` sees each path as an array, and the one it accepts is the
+    // array returned -- the same object, as the reference returns the row
+    // it handed over (so whatever `accept` did to it shows).
     m.def("polar_decode", [](const py::object& llr, const py::object& list_size, const py::object& accept) -> py::object {
-        const std::size_t L = list_size_of(list_size);
-        const std::vector<double> v = coded_llrs(llr);
+        const DecodeArgs a = decode_args(llr, list_size);
         pol::Accept acc;
+        py::object accepted;
         if (!accept.is_none())
-            acc = [&accept](std::span<const std::uint8_t> bits) {
-                return truthy(accept(to_numpy(bits)));
+            acc = [&accept, &accepted](std::span<const std::uint8_t> bits) {
+                py::object row = to_numpy(bits);
+                const bool ok = truthy(accept(row));
+                if (ok) accepted = row;
+                return ok;
             };
-        const auto bits = pol::polar_decode(v, L, acc);
+        const auto bits = pol::polar_decode(a.llr, a.list_size, acc);
         if (!bits) return py::none();
+        if (accepted) return accepted;
         return to_numpy(*bits);
     }, py::arg("llr"), py::arg("list_size") = 8, py::arg("accept") = py::none());
 }

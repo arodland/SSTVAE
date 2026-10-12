@@ -6,6 +6,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -13,18 +14,19 @@
 #include <string>
 #include <vector>
 
+#include "qrss/polar.hpp"
 #include "qrss/registry.hpp"
 
 namespace sstvae_bindings::qrss::polar_util {
 
 inline py::module_ numpy() { return py::module_::import("numpy"); }
 
-// operator.index(obj): Python ints, numpy integers and bools; TypeError
-// otherwise, with Python's own message.
-inline py::int_ index(const py::handle& obj) {
-    PyObject* r = PyNumber_Index(obj.ptr());
+inline py::object builtin(const char* name) { return py::module_::import("builtins").attr(name); }
+
+// A new reference from the C API, or the pending Python error.
+inline py::object steal(PyObject* r) {
     if (!r) throw py::error_already_set();
-    return py::reinterpret_steal<py::int_>(r);
+    return py::reinterpret_steal<py::object>(r);
 }
 
 // A Python int clamped into int64. Every QRSS integer check is a range
@@ -42,6 +44,14 @@ inline bool truthy(const py::handle& obj) {
     if (t < 0) throw py::error_already_set();
     return t != 0;
 }
+
+// `bool(a <op> b)`: Python's own comparison (reflection included) and truthiness.
+inline bool compare(const py::handle& a, const py::handle& b, int op) {
+    return truthy(steal(PyObject_RichCompare(a.ptr(), b.ptr(), op)));
+}
+
+// f"{obj}": what the reference's refusal texts print.
+inline std::string fmt(const py::handle& obj) { return builtin("format")(obj).cast<std::string>(); }
 
 inline std::string shape_str(const py::array& a) { return py::str(a.attr("shape")).cast<std::string>(); }
 
@@ -75,6 +85,37 @@ inline std::vector<double> float_vector(const py::object& obj, py::ssize_t n, co
     py::array a = numpy().attr("asarray")(obj, py::arg("dtype") = numpy().attr("float64"));
     if (a.ndim() != 1 || a.shape(0) != n) throw py::value_error(what + ", got shape " + shape_str(a));
     return from_numpy<double>(a);
+}
+
+// polar.decode_list's argument handling, in the reference's order:
+//
+//     if list_size < 1: ValueError          Python's own `<` and truthiness
+//     mother = fold(llr)                    np.asarray(llr, float64), its shape
+//     np.all(np.isfinite(mother))           "LLRs must be finite"
+//     _List(list_size)                      np.full(list_size, np.inf); pm[0] = 0.0
+//     np.broadcast_to(mother, (list_size, N))
+//
+// so a float or a bool list size is refused by numpy's own shape
+// conversion, after the LLRs (as there), and the list size the recursion
+// runs with is the broadcast's first dimension, as `_scl` reads it.
+struct DecodeArgs {
+    std::vector<double> llr;
+    std::size_t list_size = 0;
+};
+
+inline DecodeArgs decode_args(const py::object& llr, const py::object& list_size) {
+    namespace pol = sstvae::qrss::polar;
+    if (compare(list_size, py::int_(1), Py_LT)) throw py::value_error("list_size must be >= 1");
+    DecodeArgs out;
+    out.llr = float_vector(llr, pol::E, "expected " + std::to_string(pol::E) + " coded LLRs");
+    for (double v : pol::fold(out.llr))
+        if (!std::isfinite(v)) throw py::value_error("LLRs must be finite");
+    py::module_ np = numpy();
+    py::object pm = np.attr("full")(list_size, np.attr("inf"));
+    pm[py::int_(0)] = py::float_(0.0);
+    py::array alpha = np.attr("broadcast_to")(np.attr("zeros")(pol::N), py::make_tuple(list_size, pol::N));
+    out.list_size = static_cast<std::size_t>(alpha.shape(0));
+    return out;
 }
 
 // A 2-D uint8 array (rows x cols) holding `v`.

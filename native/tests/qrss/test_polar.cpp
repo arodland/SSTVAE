@@ -99,6 +99,13 @@ static void test_transform() {
     check::is_true(pol::polar_transform(six) == std::vector<std::uint8_t>{0, 0, 1, 1, 1, 1}, "length 6");
     check::is_true(refusal([] { pol::polar_transform(std::vector<std::uint8_t>(5)); }) != "(no refusal)",
                    "length 5 is refused");
+    // No rows at all (Python shape (0, 5)): numpy reshapes a size-0 array
+    // into any size-0 shape, so the reference refuses nothing.
+    check::equal(refusal([] {
+                     std::vector<std::uint8_t> none;
+                     pol::polar_transform_rows(none, 5);
+                 }),
+                 std::string("(no refusal)"), "no rows of 5 are not refused");
 }
 
 static void test_rate_match_and_fold() {

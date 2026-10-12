@@ -26,6 +26,30 @@ def nat(native):
     return require(native, "polar")
 
 
+def _outcome(f, *args, **kw):
+    """What a call gives: ("ok", result) or ("raise", type, text)."""
+    try:
+        return ("ok", f(*args, **kw))
+    except Exception as e:      # noqa: BLE001 -- any refusal is compared
+        return ("raise", type(e), str(e))
+
+
+def _same_outcome(f_ref, f_nat, *args, **kw):
+    """The same refusal (type and text), or results equal array by array."""
+    want, got = _outcome(f_ref, *args, **kw), _outcome(f_nat, *args, **kw)
+    assert got[0] == want[0], (want, got)
+    if want[0] == "raise":
+        assert got[1:] == want[1:]
+        return want
+    w, g = want[1], got[1]
+    if w is None or g is None:
+        assert w is None and g is None
+        return want
+    for a, b in zip(w if isinstance(w, tuple) else (w,), g if isinstance(g, tuple) else (g,)):
+        assert a.dtype == b.dtype and a.shape == b.shape and np.array_equal(a, b)
+    return want
+
+
 def _same_error(f_ref, f_nat, *args, **kw):
     """Both raise the same exception type with the same text."""
     with pytest.raises(Exception) as want:
@@ -44,7 +68,8 @@ def test_constants(nat):
 # --- encoder ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("shape", [(2048,), (3, 2048), (2, 2, 2048), (6,), (12,), (1,), (0,), (4, 0), (64,)])
+@pytest.mark.parametrize("shape", [(2048,), (3, 2048), (2, 2, 2048), (6,), (12,), (1,), (0,), (4, 0), (64,),
+                                   (0, 10), (0, 3), (3, 0, 5), (0, 2048)])
 def test_polar_transform(nat, shape):
     rng = np.random.default_rng(1)
     for high in (2, 256):                     # bits, and any byte (XORed)
@@ -270,3 +295,87 @@ def test_polar_decode_accept(nat):
         nat.polar_decode(llr, 8, boom)
     # Truthiness, as the reference's `if accept(bits)`.
     assert np.array_equal(nat.polar_decode(llr, 8, lambda b: np.int64(1)), ref.decode_list(llr, 8)[0][0])
+
+
+# --- probes: the reference's own argument semantics ---------------------------------
+
+
+class _LessIsFalse:
+    """`< 1` is False and the index is 3: numpy, not the comparison, decides."""
+
+    def __lt__(self, other):
+        return False
+
+    def __index__(self):
+        return 3
+
+
+@pytest.mark.parametrize("list_size", [0.5, 8.0, np.float64(8.0), np.float32(2.0), True, False, None, "8", [3],
+                                       np.array(3), np.array([3]), np.array([3, 4]), np.array([[3]]), np.int8(3),
+                                       np.uint64(2), 2**70, -(2**70), _LessIsFalse(), 3])
+def test_decoder_list_size_like_the_reference(nat, list_size):
+    """`list_size < 1` first, then the LLRs, then numpy's own conversion of
+    list_size to a shape (np.full / np.broadcast_to): so a bool or a float
+    is refused with numpy's text, and only after the LLRs are checked."""
+    rng = np.random.default_rng(90)
+    llr = _llr(ref_header.encode(H), -6.0, rng)
+    _same_outcome(ref.decode_list, nat.decode_list, llr, list_size)
+    _same_outcome(ref.polar_decode, nat.polar_decode, llr, list_size)
+    _same_outcome(ref.decode_list, nat.decode_list, np.zeros(10), list_size)        # which refusal wins
+    bad = np.zeros(2474)
+    bad[0] = np.nan
+    _same_outcome(ref.decode_list, nat.decode_list, bad, list_size)
+
+
+def test_polar_decode_returns_the_row_it_handed_over(nat):
+    """The reference returns the very array `accept` saw, so what `accept`
+    did to it shows in the result."""
+    rng = np.random.default_rng(91)
+    llr = _llr(ref_header.encode(H), -6.0, rng)
+    seen = []
+
+    def flip(b):
+        b[0] ^= 1
+        seen.append(b)
+        return len(seen) == 3
+
+    want = ref.polar_decode(llr, 8, flip)
+    ref_seen, seen = seen, []
+    got = nat.polar_decode(llr, 8, flip)
+    assert got is seen[-1] and np.array_equal(got, want)
+    assert all(np.array_equal(a, b) for a, b in zip(seen, ref_seen))
+
+
+def test_polar_transform_probe(nat):
+    """Random shapes, byte values and dtypes, refusals included."""
+    rng = np.random.default_rng(92)
+    for _ in range(300):
+        nd = int(rng.integers(1, 4))
+        shape = tuple(int(x) for x in rng.integers(0, 4, nd - 1)) + (int(rng.integers(0, 70)),)
+        x = rng.integers(-300, 300, shape)
+        for v in (x, x.astype(np.uint8), (x % 2).astype(bool), (x % 7).astype(np.float64)):
+            _same_outcome(ref.polar_transform, nat.polar_transform, v)
+
+
+def test_rate_match_probe(nat):
+    rng = np.random.default_rng(93)
+    for _ in range(100):
+        nd = int(rng.integers(1, 4))
+        shape = tuple(int(x) for x in rng.integers(0, 3, nd - 1)) + (int(rng.choice([0, 1, 2047, 2048, 2049, 2500])),)
+        x = rng.normal(0, 1, shape)
+        for v in (x, x.astype(np.float32), (x > 0), x.astype(">f8"), x + 1j * x):
+            _same_outcome(ref.rate_match, nat.rate_match, v)
+
+
+def test_fold_and_encode_probe(nat):
+    rng = np.random.default_rng(94)
+    for _ in range(200):
+        llr = rng.normal(0, 1, 2474) * 10.0 ** rng.integers(-310, 300, 2474)
+        llr[rng.random(2474) < 0.05] = rng.choice([0.0, -0.0, np.inf, -np.inf, np.nan])
+        got, want = nat.fold(llr), ref.fold(llr)
+        assert np.array_equal(got.view(np.int64), want.view(np.int64)) or np.array_equal(got, want, equal_nan=True)
+        info = rng.integers(0, 2, 142)
+        if rng.random() < 0.3:
+            info = info.astype(object)
+            info[int(rng.integers(0, 142))] = rng.choice([2, -1, 0.5, True, 1.0, None, "1"])
+        _same_outcome(ref.polar_encode, nat.polar_encode, info)

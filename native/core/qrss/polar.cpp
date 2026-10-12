@@ -210,7 +210,9 @@ bool info_set_ok() {
 }
 
 void polar_transform_rows(std::span<std::uint8_t> x, std::size_t n) {
-    if (n == 0) return;
+    // No rows: numpy reshapes a size-0 array into any size-0 shape, so the
+    // reference refuses nothing here (shape (0, 5) comes back as it went in).
+    if (n == 0 || x.empty()) return;
     if (x.size() % n)
         throw std::invalid_argument("polar_transform: " + std::to_string(x.size()) +
                                     " values are not whole rows of " + std::to_string(n));

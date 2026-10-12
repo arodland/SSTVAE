@@ -4,12 +4,15 @@
 // return them as a tuple; tests/qrss_native/header.py (pack, unpack,
 // encode, ...) and header_rx.py (decode) adapt to and from the dataclass.
 //
-// Integers are taken through operator.index (Python ints of any size,
-// numpy integers, bools) and clamped into int64, which every check here
-// refuses exactly as it would the original; the refusal texts are built
-// from Python's own str()/repr() of what the caller passed
-// (header::FieldText), so they are the reference's character for
-// character.
+// The binding makes the reference's checks with Python's own operations on
+// what the caller passed -- `int()` for picture_id and codec_id, `<=`,
+// `in` and `!=` for mode, segment, version and reserved, in
+// _check_fields' order -- and then converts each field with `int()`, as
+// _int_to_bits does, so a float, a numpy scalar, a bool or an int of any
+// size is accepted, refused or converted exactly as there (ints clamped
+// into int64, past which every check refuses). The refusal texts are built
+// from Python's own repr()/format() of the arguments, so they are the
+// reference's character for character.
 
 #include "qrss/registry.hpp"
 
@@ -25,6 +28,7 @@
 #include <vector>
 
 #include "qrss/header.hpp"
+#include "qrss/polar.hpp"
 #include "qrss/polar_util.hpp"
 
 namespace sstvae_bindings::qrss {
@@ -55,23 +59,50 @@ struct Converted {
     hdr::FieldText text;
 };
 
+// header._check_fields, then pack's own conversions, on the Python objects.
 Converted fields(const py::object& callsign, const py::object& grid, const py::object& picture_id,
                  const py::object& mode, const py::object& segment, const py::object& codec_id,
                  const py::object& version, const py::object& reserved) {
     Converted c;
     c.text.callsign = repr_of(callsign);
     c.h.callsign = py::isinstance<py::str>(callsign) ? utf8(callsign) : std::string();
+    if (!py::isinstance<py::str>(callsign) || !hdr::valid_callsign(c.h.callsign))
+        throw py::value_error("callsign must be 1-8 characters of [A-Z0-9/], got " + *c.text.callsign);
+    const py::object to_int = builtin("int");
+    const struct {
+        const char* name;
+        const py::object* obj;
+        std::int64_t hi;
+    } ranged[] = {{"picture_id", &picture_id, std::int64_t(1) << 32}, {"codec_id", &codec_id, std::int64_t(1) << 16}};
+    for (const auto& r : ranged) {
+        const std::int64_t v = clamp_i64(to_int(*r.obj));       // 0 <= int(x) < hi
+        if (!(0 <= v && v < r.hi)) throw py::value_error(std::string(r.name) + " out of range: " + fmt(*r.obj));
+    }
+    const py::int_ zero(0);
+    if (!(compare(zero, mode, Py_LE) && compare(mode, py::int_(hdr::MAX_MODE), Py_LE)))
+        throw py::value_error("mode must be 0.." + std::to_string(hdr::MAX_MODE) + ", got " + fmt(mode));
+    if (!(compare(zero, segment, Py_LE) && compare(segment, mode, Py_LE)))
+        throw py::value_error("segment must be 0..mode (" + fmt(mode) + "), got " + fmt(segment));
+    py::tuple known(sstvae::qrss::config::FORMAT_VERSIONS.size());
+    for (std::size_t i = 0; i < sstvae::qrss::config::FORMAT_VERSIONS.size(); ++i)
+        known[i] = sstvae::qrss::config::FORMAT_VERSIONS[i];
+    const int in = PySequence_Contains(known.ptr(), version.ptr());
+    if (in < 0) throw py::error_already_set();
+    if (!in) throw py::value_error("version must be one of " + str_of(known) + ", got " + fmt(version));
+    if (compare(reserved, zero, Py_NE)) throw py::value_error("reserved must be 0, got " + fmt(reserved));
+    // pack: the grid, then int() of each field in table order.
     c.h.grid = grid_arg(grid, c.text.grid);
-    const std::array<std::pair<const py::object*, std::int64_t*>, 6> ints{{
+    (void)hdr::grid_encode(c.h.grid ? std::optional<std::string_view>(*c.h.grid) : std::nullopt, c.text.grid);
+    const std::pair<const py::object*, std::int64_t*> ints[] = {
         {&picture_id, &c.h.picture_id}, {&mode, &c.h.mode}, {&segment, &c.h.segment},
-        {&codec_id, &c.h.codec_id}, {&version, &c.h.version}, {&reserved, &c.h.reserved}}};
-    for (const auto& [obj, dst] : ints) *dst = clamp_i64(index(*obj));
-    c.text.picture_id = str_of(picture_id);
-    c.text.mode = str_of(mode);
-    c.text.segment = str_of(segment);
-    c.text.codec_id = str_of(codec_id);
-    c.text.version = str_of(version);
-    c.text.reserved = str_of(reserved);
+        {&codec_id, &c.h.codec_id}, {&version, &c.h.version}, {&reserved, &c.h.reserved}};
+    for (const auto& [obj, dst] : ints) *dst = clamp_i64(to_int(*obj));
+    c.text.picture_id = fmt(picture_id);
+    c.text.mode = fmt(mode);
+    c.text.segment = fmt(segment);
+    c.text.codec_id = fmt(codec_id);
+    c.text.version = fmt(version);
+    c.text.reserved = fmt(reserved);
     return c;
 }
 
@@ -82,20 +113,22 @@ py::object as_tuple(const std::optional<hdr::HeaderFields>& h) {
                           h->reserved);
 }
 
-// `version in versions` for every value the 4-bit field can hold, by
-// Python's own `in` over tuple(versions).
-std::vector<int> versions_of(const py::object& versions) {
-    py::tuple vs = py::tuple(versions);
-    std::vector<int> out;
-    for (int k = 0; k < 16; ++k)
-        if (vs.contains(py::int_(k))) out.push_back(k);
-    return out;
-}
-
-std::size_t list_size_of(const py::object& list_size) {
-    py::int_ ls = index(list_size);
-    if (ls < py::int_(1)) throw py::value_error("list_size must be >= 1");
-    return ls.cast<std::size_t>();
+// unpack(bits, versions) on 142 bits already known to be 0/1: the CRC, then
+// Python's own `version in versions` -- consulted only once the CRC has
+// passed, as the reference does, so a generator, a str or a non-container
+// behaves (and fails) the same -- then the field checks.
+std::optional<hdr::HeaderFields> unpack_py(std::span<const std::uint8_t> b, const py::object& versions) {
+    const int c0 = hdr::offset("crc").first;
+    const auto crc = hdr::crc16(b.first(static_cast<std::size_t>(c0)));
+    if (!std::equal(crc.begin(), crc.end(), b.begin() + c0)) return std::nullopt;
+    const auto [v0, v1] = hdr::offset("version");
+    int version = 0;
+    for (int i = v0; i < v1; ++i) version = (version << 1) | b[static_cast<std::size_t>(i)];
+    const int in = PySequence_Contains(versions.ptr(), py::int_(version).ptr());
+    if (in < 0) throw py::error_already_set();
+    std::vector<int> allowed;
+    if (in) allowed.push_back(version);
+    return hdr::unpack(b, allowed);
 }
 
 void bind(py::module_& q) {
@@ -110,14 +143,29 @@ void bind(py::module_& q) {
     }
     m.attr("OFFSET") = off;
 
-    // Over 0/1 bits only (the reference's documented domain); see crc16 in
-    // core/qrss/header.hpp.
-    m.def("crc16", [](const py::object& bits) {
+    // 0/1 bits (bool, integer or float, 1-D) go to the C++ beacon CRC; any
+    // other input runs the reference's register over Python ints --
+    // `for b in bits: reg = ((reg << 1) & 0xFFFF) | int(b)` and numpy's
+    // shift for the 16 bits out -- so it is computed, or refused, exactly as
+    // there (a 2, a 0.5, a 2-D array, a 0-d one).
+    m.def("crc16", [](const py::object& bits) -> py::object {
         py::array a = numpy().attr("asarray")(bits);
-        if (a.ndim() != 1) throw py::type_error("crc16 takes a 1-D array of bits, not shape " + shape_str(a));
-        auto v = bits01(a);
-        if (!v) throw py::value_error("crc16 takes bits of 0 or 1");
-        return to_numpy(hdr::crc16(*v));
+        const char kind = a.dtype().kind();
+        if (a.ndim() == 1 && (kind == 'b' || kind == 'i' || kind == 'u' || kind == 'f'))
+            if (const auto v = bits01(a)) return to_numpy(hdr::crc16(*v));
+        const py::object to_int = builtin("int");
+        const py::int_ one(1), fifteen(15), mask(0xFFFF), poly(0x1021);
+        py::object reg = py::int_(0xFFFF);
+        for (py::handle b : a) {
+            const py::object top = steal(PyNumber_And(steal(PyNumber_Rshift(reg.ptr(), fifteen.ptr())).ptr(), one.ptr()));
+            const py::object low = steal(PyNumber_And(steal(PyNumber_Lshift(reg.ptr(), one.ptr())).ptr(), mask.ptr()));
+            reg = steal(PyNumber_Or(low.ptr(), to_int(b).ptr()));
+            if (truthy(top)) reg = steal(PyNumber_Xor(reg.ptr(), poly.ptr()));
+        }
+        py::module_ np = numpy();
+        const py::object shifts = np.attr("arange")(15, -1, -1);
+        const py::object out = steal(PyNumber_And(steal(PyNumber_Rshift(reg.ptr(), shifts.ptr())).ptr(), one.ptr()));
+        return out.attr("astype")(np.attr("int64")).attr("astype")(np.attr("uint8"));
     }, py::arg("bits"));
 
     m.def("grid_encode", [](const py::object& g) {
@@ -154,33 +202,29 @@ void bind(py::module_& q) {
        py::arg("codec_id"), py::arg("version") = sstvae::qrss::config::FORMAT_VERSION, py::arg("reserved") = 0);
 
     // (callsign, grid, picture_id, mode, segment, codec_id, version, reserved) or None.
-    // `versions` is consulted as the reference consults it: Python's own
-    // `version in versions`, made only once the CRC has passed (so a
-    // generator, a str or a non-container behaves, and fails, the same).
     m.def("unpack", [](const py::object& bits, const py::object& versions) -> py::object {
         py::array a = numpy().attr("asarray")(bits);
         if (a.ndim() != 1 || a.shape(0) != sstvae::qrss::config::N_INFO_BITS) return py::none();
         const auto v = bits01(a);
         if (!v) return py::none();
-        const std::span<const std::uint8_t> b(*v);
-        const int c0 = hdr::offset("crc").first;
-        const auto crc = hdr::crc16(b.first(static_cast<std::size_t>(c0)));
-        if (!std::equal(crc.begin(), crc.end(), b.begin() + c0)) return py::none();
-        const auto [v0, v1] = hdr::offset("version");
-        int version = 0;
-        for (int i = v0; i < v1; ++i) version = (version << 1) | b[static_cast<std::size_t>(i)];
-        std::vector<int> allowed;
-        if (truthy(py::module_::import("operator").attr("contains")(versions, version))) allowed.push_back(version);
-        return as_tuple(hdr::unpack(b, allowed));
+        return as_tuple(unpack_py(*v, versions));
     }, py::arg("bits"), py::arg("versions") = py::make_tuple(sstvae::qrss::config::FORMAT_VERSION));
 
+    // The reference's flow: `tuple(versions) == (FORMAT_VERSION,)` picks
+    // polar_decode's default acceptance (header::unpack with the default
+    // versions), anything else accepts by unpack(b, versions); the result
+    // is unpack(bits, versions). `versions` is the caller's object
+    // throughout, so an iterator consumed by the tuple() is empty for every
+    // later `in`, as there.
     m.def("decode", [](const py::object& llr, const py::object& list_size, const py::object& versions) -> py::object {
-        const std::vector<int> vs = versions_of(versions);
-        const std::size_t L = list_size_of(list_size);
-        const std::vector<double> v = float_vector(
-            llr, sstvae::qrss::config::N_HDR_BITS,
-            "expected " + std::to_string(sstvae::qrss::config::N_HDR_BITS) + " coded LLRs");
-        return as_tuple(hdr::decode(v, L, vs));
+        const bool plain = py::tuple(versions).equal(py::make_tuple(sstvae::qrss::config::FORMAT_VERSION));
+        const DecodeArgs a = decode_args(llr, list_size);
+        sstvae::qrss::polar::Accept accept;
+        if (!plain)
+            accept = [&versions](std::span<const std::uint8_t> b) { return unpack_py(b, versions).has_value(); };
+        const auto bits = sstvae::qrss::polar::polar_decode(a.llr, a.list_size, accept);
+        if (!bits) return py::none();
+        return as_tuple(unpack_py(*bits, versions));
     }, py::arg("llr"), py::arg("list_size") = 8,
        py::arg("versions") = py::make_tuple(sstvae::qrss::config::FORMAT_VERSION));
 }
