@@ -432,6 +432,40 @@ void test_a_png_is_untouched(const std::string& tmpdir) {
     check::is_true(got.rgb == src.rgb, "images/exif: PNG pixels unchanged");
 }
 
+// fixtures/red-over-blue.heic: 64x48, red at the top fading to blue at
+// the bottom, HEVC-coded by heif-enc (libheif 1.17). Lossy, so colours
+// are checked loosely.
+void test_a_heic_is_read(const std::string& fixtures) {
+    const std::string path = fixtures + "/red-over-blue.heic";
+    std::string message;
+    Picture got(0, 0);
+    try {
+        got = sstvae::images::load(path);
+    } catch (const std::exception& e) {
+        message = e.what();
+    }
+    if (!sstvae::images::heif_supported()) {
+        check::is_true(message.find("libheif") != std::string::npos,
+                       "images/heif: without libheif the error names it (got: " + message + ")");
+        return;
+    }
+    check::is_true(message.empty(), "images/heif: decodes (" + message + ")");
+    check::equal(got.width, 64, "images/heif: width");
+    check::equal(got.height, 48, "images/heif: height");
+    if (got.width != 64 || got.height != 48) return;
+    auto px = [&](int x, int y, int c) { return got.rgb[(static_cast<std::size_t>(y) * 64 + x) * 3 + c]; };
+    check::is_true(px(32, 1, 0) > 200 && px(32, 1, 2) < 60, "images/heif: top is red");
+    check::is_true(px(32, 46, 2) > 200 && px(32, 46, 0) < 60, "images/heif: bottom is blue");
+}
+
+void test_heif_is_recognised() {
+    const std::uint8_t heic[] = {0, 0, 0, 24, 'f', 't', 'y', 'p', 'h', 'e', 'i', 'c', 0, 0, 0, 0};
+    const std::uint8_t mp4[] = {0, 0, 0, 24, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm', 0, 0, 0, 0};
+    check::is_true(sstvae::images::looks_like_heif(heic, sizeof heic), "images/heif: heic brand");
+    check::is_true(!sstvae::images::looks_like_heif(mp4, sizeof mp4), "images/heif: mp4 is not");
+    check::is_true(!sstvae::images::looks_like_heif(heic, 8), "images/heif: too short is not");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -448,6 +482,8 @@ int main(int argc, char** argv) {
     test_load_applies_the_tag(tmpdir);
     test_an_enormous_file_is_refused(tmpdir);
     test_a_png_is_untouched(tmpdir);
+    test_heif_is_recognised();
+    test_a_heic_is_read(argc > 2 ? argv[2] : "fixtures");
 
     return check::report("images");
 }

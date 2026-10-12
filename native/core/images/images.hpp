@@ -122,7 +122,18 @@ Picture apply_orientation(const Picture& img, int orientation);
 // -- `fit`'s framing above all -- sees the picture the way it was
 // taken. stb decodes pixels and ignores EXIF entirely; the tag is read
 // separately (third_party/easyexif).
+//
+// HEIC/HEIF/AVIF files (an ISO-BMFF "ftyp" box with a HEIF brand) go to
+// libheif instead when the build found it (`heif_supported()`), which
+// applies the container's own rotation and mirroring; without it they
+// throw a message naming the packages to install.
 Picture load(const std::string& path);
+
+// True when this build can decode HEIC/HEIF pictures.
+bool heif_supported();
+
+// True when the bytes start like a HEIF-family file (HEIC, HEIF, AVIF).
+bool looks_like_heif(const std::uint8_t* data, std::size_t len);
 
 // Cover-resize, centre-crop, convert -- `images.load_image`.
 ImageArray load_array(const std::string& path);
