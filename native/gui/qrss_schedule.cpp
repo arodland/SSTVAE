@@ -568,7 +568,27 @@ void QrssScheduler::run_finished() {
     active_.clear();
     on_air_.clear();
     run_end_ = 0.0;
+    bool dirty = false;
+    prune(dirty);
+    if (dirty) save();
     emit changed();
+}
+
+void QrssScheduler::prune(bool& dirty) {
+    // An entry with every send past, sent, missed or halted is gone from
+    // the schedule once it is off the air: kept, each re-add after a Halt
+    // sat beside the last (four entries at one 15:30Z, 2026-10-12).
+    const auto before = entries_.size();
+    std::erase_if(entries_, [this](const qs::Entry& e) {
+        if (!qs::finished(e) || on_air(e.id)) return false;
+        std::error_code ec;
+        const std::filesystem::path png(e.picture);
+        if (png.parent_path() == picture_dir()) std::filesystem::remove(png, ec);
+        emit logged(0, tr("QRSS schedule: \"%1\" is done and off the schedule")
+                               .arg(QString::fromStdString(e.label)));
+        return true;
+    });
+    if (entries_.size() != before) dirty = true;
 }
 
 bool QrssScheduler::on_air(const std::string& id) const {
@@ -745,6 +765,7 @@ void QrssScheduler::tick() {
     const double now = clock_();
     bool dirty = false;
     tick_changes(now, dirty);
+    prune(dirty);
     // Sends that follow straight on join the run on the air before
     // anything below can count them missed or try to start them alone.
     chain(now, dirty);

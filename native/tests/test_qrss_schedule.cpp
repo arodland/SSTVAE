@@ -279,6 +279,7 @@ void test_the_scheduler_starts_what_is_due(const std::filesystem::path& dir) {
     check::equal(fake.runs.size(), std::size_t{1}, "scheduler/tick: and started once");
     s->run_finished();
     check::is_true(s->active().empty(), "scheduler/tick: until the transmitter finishes");
+    check::is_true(s->entries().empty(), "scheduler/tick: then, done, it leaves the schedule");
 
     // A busy transmitter: waited for once in the log, then missed.
     fake.log.clear();
@@ -294,7 +295,7 @@ void test_the_scheduler_starts_what_is_due(const std::filesystem::path& dir) {
     check::equal(waiting, 1, "scheduler/busy: logged once, not every tick");
     fake.now = Q + 3 * H - 11.0 - qs::MIN_LEAD_S + 1.0;
     s->tick();
-    check::is_true(s->entries()[1].next == 1 && logged(fake, "missed 1 send") &&
+    check::is_true(s->entries()[0].next == 1 && logged(fake, "missed 1 send") &&
                        logged(fake, "the transmitter is busy"),
                    "scheduler/busy: too late to start is missed, with the reason");
 
@@ -303,18 +304,23 @@ void test_the_scheduler_starts_what_is_due(const std::filesystem::path& dir) {
     fake.why = "no callsign";
     fake.now = Q + 6 * H - 11.0 - qs::START_LEAD_S + 10.0;
     s->tick();
-    check::is_true(s->entries()[1].next == 2 && logged(fake, "was not sent: no callsign"),
+    check::is_true(s->entries()[0].next == 2 && logged(fake, "was not sent: no callsign"),
                    "scheduler/failed: reported and passed over");
 
     // Another listener of the same file sees it all.
     Fake other;
     std::unique_ptr<QrssScheduler> again(make(other, file));
-    check::is_true(again->entries().size() == 2 && again->entries()[1].next == 2 &&
+    check::is_true(again->entries().size() == 1 && again->entries()[0].next == 2 &&
                        qs::finished(again->entries()[0]),
                    "scheduler/file: progress survives a restart");
     const std::string png = again->entries()[0].picture;
+    again->tick();
+    check::is_true(again->entries().empty() && !std::filesystem::exists(png),
+                   "scheduler/prune: a done entry and its picture leave at the next tick");
+    check::is_true(again->add(entry("B", Q + 9 * H, 1, 0, "b"), pic).empty(), "scheduler/remove: one to remove");
+    const std::string png2 = again->entries()[0].picture;
     again->remove(again->entries()[0].id);
-    check::is_true(again->entries().size() == 1 && !std::filesystem::exists(png),
+    check::is_true(again->entries().empty() && !std::filesystem::exists(png2),
                    "scheduler/remove: the entry and its picture go");
 }
 

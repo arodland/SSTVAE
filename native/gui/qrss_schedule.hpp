@@ -287,6 +287,7 @@ private:
     // Why a send could not go where asked because of a change, or empty.
     std::string change_clash_text(const qrss_schedule::Entry& e, double now) const;
     void tick_changes(double now, bool& dirty);
+    void prune(bool& dirty);
     std::string active_;
     std::vector<std::string> on_air_;   // active_ and the entries that followed on
     double run_end_ = 0.0;              // the run's last pass, its quarter hour
