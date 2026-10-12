@@ -16,6 +16,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "qrss/config.hpp"
@@ -263,6 +264,16 @@ static void test_names() {
                  std::string("unknown L frame 'l-huge'; one of l-full, l-medium, l-short, l-tiny"), "get_l refusal");
     check::equal(refusal([] { fr::twin(fr::get("full-v1"), 1); }),
                  std::string("unknown L frame 'l-full-v1'; one of l-full, l-medium, l-short, l-tiny"), "twin refusal");
+    // spec.name[2:] slices code points, not UTF-8 bytes: "\u00e9-short"[2:] is
+    // "short", and "\u00e9short"[2:] is "hort" (bytes would give "-short" and
+    // "short", refusing the first and finding the second).
+    const auto e_dash = fr::FrameSpec::make(fr::Waveform::L, "\xc3\xa9-short", 330, 1320, 4096, {2500, 3834});
+    check::equal(fr::twin(e_dash, 0).name(), std::string("short"), "twin slices code points");
+    const auto e_short = fr::FrameSpec::make(fr::Waveform::L, "\xc3\xa9short", 330, 1320, 4096, {2500, 3834});
+    check::equal(refusal([&] { fr::twin(e_short, 0); }),
+                 std::string("unknown frame 'hort'; one of full, medium, short, tiny"), "twin slices code points, refusal");
+    const auto wide = fr::FrameSpec::make(fr::Waveform::L, "\xf0\x9f\x98\x80\xc3\xa9tiny", 330, 0, 1024, {});
+    check::equal(fr::twin(wide, 0).name(), std::string("tiny"), "twin past a 4-byte code point");
     check::equal(fr::py_repr(std::string_view("it's")), std::string("\"it's\""), "repr with a quote");
     check::equal(fr::py_repr(std::string_view("a\\b\n")), std::string("'a\\\\b\\n'"), "repr escapes");
 }
@@ -323,6 +334,33 @@ static void test_refusals() {
     check::is_true(wrong_waveform([&] { fr::assemble_l(sh, &hb, x); }), "L assemble refuses CE");
 }
 
+// The layout cache from several threads at once, over more specs than it
+// holds (16), so lookups, builds and evictions interleave: every layout handed
+// out is the one a single thread builds.
+static void test_layout_cache_threads() {
+    std::vector<fr::FrameSpec> specs;
+    for (int k = 0; k < 24; ++k) {
+        const bool l = k % 2;
+        specs.push_back(fr::FrameSpec::make(l ? fr::Waveform::L : fr::Waveform::CE, "t" + std::to_string(k),
+                                            l ? 330 : 660, 0, 64 + 2 * k, {}));
+    }
+    std::vector<std::string> want;
+    for (const auto& s : specs) want.push_back(layout_digest(*fr::layout(s)));
+    std::vector<int> bad(8, 0);
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 8; ++t)
+        threads.emplace_back([&, t] {
+            for (int i = 0; i < 300; ++i) {
+                const std::size_t k = static_cast<std::size_t>((i * 7 + t * 5) % 24);
+                if (layout_digest(*fr::layout(specs[k])) != want[k]) ++bad[static_cast<std::size_t>(t)];
+            }
+        });
+    for (auto& th : threads) th.join();
+    int total = 0;
+    for (const int b : bad) total += b;
+    check::equal(total, 0, "layouts built from 8 threads");
+}
+
 int main() {
     check::report_crashes_instead_of_prompting();
     try {
@@ -332,6 +370,7 @@ int main() {
         test_assemble();
         test_names();
         test_refusals();
+        test_layout_cache_threads();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;

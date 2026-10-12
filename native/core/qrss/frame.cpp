@@ -56,6 +56,16 @@ int64_t first_at_least(const G& g, int64_t start, int64_t n) {
     return hi;
 }
 
+// s[n:] as Python slices a str: by code points, not bytes (s is UTF-8).
+std::string_view drop_code_points(std::string_view s, std::size_t n) {
+    std::size_t i = 0;
+    for (std::size_t k = 0; k < n && i < s.size(); ++k) {
+        ++i;
+        while (i < s.size() && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80) ++i;
+    }
+    return s.substr(i);
+}
+
 std::string join_names(config::PresetGroup group) {
     std::string out;
     for (const FrameSpec& s : presets(group)) {
@@ -413,7 +423,7 @@ const FrameSpec& get_any(std::string_view name) {
 FrameSpec twin(const FrameSpec& spec, int waveform) {
     if (static_cast<int>(spec.waveform()) == waveform) return spec;
     if (waveform == config::WAVEFORM_L) return get_l("l-" + spec.name());
-    return get_any(spec.name().size() >= 2 ? std::string_view(spec.name()).substr(2) : std::string_view());
+    return get_any(drop_code_points(spec.name(), 2));   // spec.name[2:]
 }
 
 FrameSpec plain(const FrameSpec& spec) {
@@ -523,8 +533,11 @@ std::shared_ptr<const Layout> layout(const FrameSpec& spec) {
             }
         }
     }
-    auto lay = std::make_shared<const Layout>(build_layout(spec));
+    auto lay = std::make_shared<const Layout>(build_layout(spec));   // built unlocked
     std::lock_guard<std::mutex> lock(mu);
+    // Another thread may have built the same one meanwhile: keep one entry.
+    for (const auto& [s, l] : cache)
+        if (s == spec) return l;
     cache.emplace_back(spec, lay);
     if (cache.size() > CACHED) cache.erase(cache.begin());
     return lay;

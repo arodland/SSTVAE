@@ -32,6 +32,25 @@ py::module_ numpy() {
     return np;
 }
 
+// A frame name between Python and the C++: UTF-8 with lone surrogates passed
+// through, so any str the reference takes as a name survives the round trip
+// (and no preset name, all ASCII, can match one that has them).
+std::string utf8_of(const py::handle& s) {
+    return std::string(py::bytes(s.attr("encode")("utf-8", "surrogatepass")));
+}
+
+py::str str_of(std::string_view s) {
+    PyObject* o = PyUnicode_DecodeUTF8(s.data(), static_cast<py::ssize_t>(s.size()), "surrogatepass");
+    if (!o) throw py::error_already_set();
+    return py::reinterpret_steal<py::str>(o);
+}
+
+// Raise `type` with a C++ message that may carry such a name.
+[[noreturn]] void raise_text(PyObject* type, std::string_view what) {
+    PyErr_SetObject(type, str_of(what).ptr());
+    throw py::error_already_set();
+}
+
 // operator.index(h) as int64 (numpy ints included; OverflowError past int64).
 std::int64_t as_index(const py::handle& h) {
     py::object i = py::reinterpret_steal<py::object>(PyNumber_Index(h.ptr()));
@@ -69,8 +88,14 @@ fr::FrameSpec make(const py::handle& waveform, const py::handle& name, const py:
         if (!f) throw py::error_already_set();
         rho = PyFloat_AsDouble(f.ptr());
     }
-    return fr::FrameSpec::make(as_waveform(waveform), py::str(name).cast<std::string>(), as_index(n_pre),
-                               as_index(n_hdr), as_index(n_data), std::move(cw), rho);
+    const fr::Waveform w = as_waveform(waveform);
+    std::string nm = utf8_of(py::str(name));   // f"{self.name}" in the refusals
+    const std::int64_t pre = as_index(n_pre), hdr = as_index(n_hdr), data = as_index(n_data);
+    try {
+        return fr::FrameSpec::make(w, std::move(nm), pre, hdr, data, std::move(cw), rho);
+    } catch (const std::invalid_argument& e) {
+        raise_text(PyExc_ValueError, e.what());
+    }
 }
 
 // A native FrameSpec, or the reference's (any object with its fields).
@@ -84,21 +109,6 @@ std::vector<std::int64_t> shape_of(const py::array& a) {
     return std::vector<std::int64_t>(a.shape(), a.shape() + a.ndim());
 }
 
-// hdr_bits as np.asarray sees them (None stays None).
-std::optional<fr::HdrBits> bits_arg(const py::object& obj) {
-    if (obj.is_none()) return std::nullopt;
-    py::array a = numpy().attr("asarray")(obj);
-    fr::HdrBits b;
-    b.one_d = a.ndim() == 1;
-    b.len = a.ndim() >= 1 ? static_cast<std::size_t>(a.shape(0)) : 1;
-    if (b.one_d) {
-        auto v = py::array_t<double, py::array::c_style | py::array::forcecast>::ensure(a);
-        if (!v) throw py::error_already_set();
-        b.values.assign(v.data(), v.data() + v.size());
-    }
-    return b;
-}
-
 const fr::HdrBits* ptr(const std::optional<fr::HdrBits>& b) { return b ? &*b : nullptr; }
 
 // np.asarray(x, dtype=np.float64), C-contiguous.
@@ -107,6 +117,51 @@ py::array_t<double> float64_array(const py::object& obj) {
     auto v = py::array_t<double, py::array::c_style | py::array::forcecast>::ensure(a);
     if (!v) throw py::error_already_set();
     return v;
+}
+
+// hdr_bits as spread_signs reads them, np.asarray(hdr_bits, dtype=np.float64),
+// so a conversion fails with numpy's own error. None stays None: numpy makes
+// it a 0-d nan, which the C++ refuses with the same text.
+std::optional<fr::HdrBits> bits_f64(const py::object& obj) {
+    if (obj.is_none()) return std::nullopt;
+    const auto a = float64_array(obj);
+    fr::HdrBits b;
+    b.one_d = a.ndim() == 1;
+    b.len = a.ndim() >= 1 ? static_cast<std::size_t>(a.shape(0)) : 1;
+    if (b.one_d) b.values.assign(a.data(), a.data() + a.size());
+    return b;
+}
+
+// {spec.name!r}: the repr of the spec object's own name (a reference spec may
+// carry a name that is not a str; a native one's is).
+std::string name_repr(const py::object& spec) { return py::repr(spec.attr("name")).cast<std::string>(); }
+
+// assemble's header checks, made on hdr_bits as given, as the reference makes
+// them: np.asarray(hdr_bits) and its own (b != 0) & (b != 1) when the frame
+// has a header -- so a dtype whose values would only become 0/1 on the way to
+// float64 (strings, complex with an imaginary part, long double) is refused
+// as Python refuses it -- and len(hdr_bits) when it has none. Then the bits
+// the C++ takes: their float64 values with a header, None without.
+std::optional<fr::HdrBits> assemble_bits(const fr::FrameSpec& s, const py::object& spec, const py::object& obj) {
+    if (!s.has_header()) {
+        if (!obj.is_none() && py::len(obj) != 0)
+            throw py::value_error("frame " + name_repr(spec) + " has no header but hdr_bits were given");
+        return std::nullopt;
+    }
+    if (obj.is_none()) throw py::value_error("frame " + name_repr(spec) + " has a header: hdr_bits is required");
+    py::array b = numpy().attr("asarray")(obj);
+    bool ok = b.ndim() == 1 && b.shape(0) == cfg::N_HDR_BITS;
+    if (ok) {
+        // np.any((b != 0) & (b != 1)), with Python's operators and truth value
+        const auto ne = [&](int v) {
+            py::object r = py::reinterpret_steal<py::object>(PyObject_RichCompare(b.ptr(), py::int_(v).ptr(), Py_NE));
+            if (!r) throw py::error_already_set();
+            return r;
+        };
+        ok = !static_cast<bool>(py::bool_(numpy().attr("any")(ne(0) & ne(1))));
+    }
+    if (!ok) throw py::value_error("hdr_bits must be " + std::to_string(cfg::N_HDR_BITS) + " values of 0/1");
+    return bits_f64(obj);
 }
 
 template <typename T>
@@ -168,21 +223,22 @@ py::array gather_items(const py::array& y, std::size_t row_len, const std::vecto
     return out;
 }
 
+// y[..., idx]: the C++ gather for numeric items of 1-16 bytes, and numpy's own
+// indexing for anything else (objects, strings, datetimes, long double
+// complex), which the reference gathers just the same.
 py::array gather_any(const py::array& y, std::size_t row_len, const std::vector<std::int64_t>& idx) {
     const char kind = y.dtype().kind();
-    if (kind != 'b' && kind != 'i' && kind != 'u' && kind != 'f' && kind != 'c')
-        throw py::type_error("disassemble takes a numeric array, not dtype " +
-                             py::str(y.dtype()).cast<std::string>());
-    switch (y.itemsize()) {
-        case 1: return gather_items<1>(y, row_len, idx);
-        case 2: return gather_items<2>(y, row_len, idx);
-        case 4: return gather_items<4>(y, row_len, idx);
-        case 8: return gather_items<8>(y, row_len, idx);
-        case 16: return gather_items<16>(y, row_len, idx);
-        default:
-            throw py::type_error("disassemble takes items of 1-16 bytes, not dtype " +
-                                 py::str(y.dtype()).cast<std::string>());
+    if (kind == 'b' || kind == 'i' || kind == 'u' || kind == 'f' || kind == 'c') {
+        switch (y.itemsize()) {
+            case 1: return gather_items<1>(y, row_len, idx);
+            case 2: return gather_items<2>(y, row_len, idx);
+            case 4: return gather_items<4>(y, row_len, idx);
+            case 8: return gather_items<8>(y, row_len, idx);
+            case 16: return gather_items<16>(y, row_len, idx);
+            default: break;
+        }
     }
+    return y[py::make_tuple(py::ellipsis(), to_numpy(idx))].cast<py::array>();
 }
 
 // np.asarray(y) with at least one axis, C-contiguous; the last axis checked.
@@ -199,18 +255,29 @@ std::vector<py::ssize_t> with_last(const py::array& y, py::ssize_t last) {
     return shape;
 }
 
-// z as complex128 (real dtypes get +0 imaginary parts, as z.imag is zeros).
-py::array_t<std::complex<double>> complex_array(const py::object& z) {
-    py::object a = numpy().attr("asarray")(z);
-    auto c = py::array_t<std::complex<double>, py::array::c_style | py::array::forcecast>::ensure(a);
-    if (!c) throw py::error_already_set();
-    return c;
-}
-
-py::array unpair_array(const py::array_t<std::complex<double>>& z) {
+// lframe.unpair on np.asarray(z). The C++ takes every dtype that becomes
+// complex128 exactly as numpy's float64 arithmetic would take it (real dtypes
+// get +0 imaginary parts, as z.imag is zeros); for the rest -- long double,
+// whose products numpy rounds once in extended precision, objects, and the
+// non-numeric dtypes numpy refuses with its own error -- numpy runs the
+// reference's own arithmetic.
+py::array unpair_any(const py::object& obj) {
+    py::array z = numpy().attr("asarray")(obj);
     if (z.ndim() == 0) throw py::index_error("tuple index out of range");   // z.shape[-1]
-    const auto out = fr::unpair(std::span<const std::complex<double>>(z.data(), static_cast<std::size_t>(z.size())));
-    return shaped(out, with_last(z, 2 * z.shape(z.ndim() - 1)));
+    const auto shape = with_last(z, 2 * z.shape(z.ndim() - 1));
+    const char kind = z.dtype().kind();
+    const py::ssize_t size = z.itemsize();
+    if (kind == 'b' || kind == 'i' || kind == 'u' || (kind == 'f' && size <= 8) || (kind == 'c' && size <= 16)) {
+        auto c = py::array_t<std::complex<double>, py::array::c_style | py::array::forcecast>::ensure(z);
+        if (!c) throw py::error_already_set();
+        return shaped(fr::unpair(std::span<const std::complex<double>>(c.data(), static_cast<std::size_t>(c.size()))),
+                      shape);
+    }
+    py::array out(py::dtype("float64"), shape);
+    const py::object s = numpy().attr("sqrt")(2.0);
+    out[py::make_tuple(py::ellipsis(), py::slice(py::int_(0), py::none(), py::int_(2)))] = s * z.attr("real");
+    out[py::make_tuple(py::ellipsis(), py::slice(py::int_(1), py::none(), py::int_(2)))] = s * z.attr("imag");
+    return out;
 }
 
 py::object keyed_end(const fr::FrameSpec& s) {
@@ -226,7 +293,8 @@ py::tuple int_tuple(const std::vector<std::int64_t>& v) {
 
 std::string spec_repr(const fr::FrameSpec& s) {
     const char* cls = s.waveform() == fr::Waveform::L ? "LFrameSpec" : "FrameSpec";
-    return std::string(cls) + "(name=" + fr::py_repr(s.name()) + ", n_pre=" + std::to_string(s.n_pre()) +
+    return std::string(cls) + "(name=" + py::repr(str_of(s.name())).cast<std::string>() +
+           ", n_pre=" + std::to_string(s.n_pre()) +
            ", n_hdr=" + std::to_string(s.n_hdr()) + ", n_data=" + std::to_string(s.n_data()) +
            ", cw_after=" + py::repr(int_tuple(s.cw_after())).cast<std::string>() +
            ", hdr_rho=" + fr::py_repr(s.hdr_rho()) + ")";
@@ -238,15 +306,32 @@ py::dict preset_dict(cfg::PresetGroup g) {
     return d;
 }
 
+// The unknown-name refusal with the name shown by Python's own repr (the
+// C++'s escapes ASCII and Latin-1 exactly but takes every other code point
+// as printable; Python consults the Unicode database).
+[[noreturn]] void unknown(const py::handle& name, fr::Waveform w) {
+    throw py::value_error(fr::unknown_frame(py::repr(name).cast<std::string>(), w));
+}
+
+fr::Waveform waveform_of_name(const py::str& name) {
+    return name.attr("startswith")("l-").cast<bool>() ? fr::Waveform::L : fr::Waveform::CE;
+}
+
 // get(name_or_spec) for one waveform's table: a native spec of that waveform
 // passes through; any other non-string is refused as unknown, shown by repr.
 fr::FrameSpec get_in(const py::object& obj, fr::Waveform w) {
     if (py::isinstance<fr::FrameSpec>(obj) && obj.cast<const fr::FrameSpec&>().waveform() == w)
         return obj.cast<fr::FrameSpec>();
-    if (!py::isinstance<py::str>(obj))
-        throw py::value_error(fr::unknown_frame(py::repr(obj).cast<std::string>(), w));
-    const std::string name = obj.cast<std::string>();
-    return w == fr::Waveform::L ? fr::get_l(name) : fr::get(name);
+    if (!py::isinstance<py::str>(obj)) {
+        (void)py::hash(obj);   // `name_or_spec in PRESETS`: an unhashable one is a TypeError
+        unknown(obj, w);
+    }
+    const std::string name = utf8_of(obj);
+    try {
+        return w == fr::Waveform::L ? fr::get_l(name) : fr::get(name);
+    } catch (const std::invalid_argument&) {
+        unknown(obj, w);
+    }
 }
 
 void translate_wrong_waveform() {
@@ -254,7 +339,8 @@ void translate_wrong_waveform() {
         try {
             if (p) std::rethrow_exception(p);
         } catch (const fr::WrongWaveform& e) {
-            PyErr_SetString(PyExc_AssertionError, e.what());
+            const py::str text = str_of(e.what());
+            PyErr_SetObject(PyExc_AssertionError, text.ptr());
         }
     });
 }
@@ -264,7 +350,7 @@ void bind_spec_class(py::module_& m) {
                               "One frame shape of either waveform (frame.FrameSpec / lframe.LFrameSpec); "
                               "build with make() or of().")
         .def_property_readonly("waveform", [](const fr::FrameSpec& s) { return static_cast<int>(s.waveform()); })
-        .def_property_readonly("name", &fr::FrameSpec::name)
+        .def_property_readonly("name", [](const fr::FrameSpec& s) { return str_of(s.name()); })
         .def_property_readonly("n_pre", &fr::FrameSpec::n_pre)
         .def_property_readonly("n_hdr", &fr::FrameSpec::n_hdr)
         .def_property_readonly("n_data", &fr::FrameSpec::n_data)
@@ -308,7 +394,7 @@ void bind_spec_class(py::module_& m) {
             return out;
         })
         .def("fields", [](const fr::FrameSpec& s) {
-            return py::make_tuple(static_cast<int>(s.waveform()), s.name(), s.n_pre(), s.n_hdr(), s.n_data(),
+            return py::make_tuple(static_cast<int>(s.waveform()), str_of(s.name()), s.n_pre(), s.n_hdr(), s.n_data(),
                                   int_tuple(s.cw_after()), s.hdr_rho());
         }, "(waveform, name, n_pre, n_hdr, n_data, cw_after, hdr_rho)")
         .def("__eq__", [](const fr::FrameSpec& a, const py::object& b) -> py::object {
@@ -316,7 +402,7 @@ void bind_spec_class(py::module_& m) {
             return py::bool_(a == b.cast<const fr::FrameSpec&>());
         })
         .def("__hash__", [](const fr::FrameSpec& s) {
-            return py::hash(py::make_tuple(static_cast<int>(s.waveform()), s.name(), s.n_pre(), s.n_hdr(),
+            return py::hash(py::make_tuple(static_cast<int>(s.waveform()), str_of(s.name()), s.n_pre(), s.n_hdr(),
                                            s.n_data(), int_tuple(s.cw_after()), s.hdr_rho()));
         })
         .def("__repr__", &spec_repr);
@@ -348,20 +434,20 @@ void bind_frame(py::module_& q) {
     }, py::arg("spec"), "frame.layout's fields as a dict of read-only arrays");
     m.def("spread_signs", [](const py::object& spec, const py::object& hdr_bits) {
         const fr::FrameSpec s = to_spec(spec);
-        const auto b = bits_arg(hdr_bits);
+        const auto b = bits_f64(hdr_bits);
         return to_numpy(fr::spread_signs(s, ptr(b)));
     }, py::arg("spec"), py::arg("hdr_bits"));
     m.def("spread_symbols", [](const py::object& spec, const py::object& hdr_bits) {
         const fr::FrameSpec s = to_spec(spec);
-        const auto b = bits_arg(hdr_bits);
+        const auto b = bits_f64(hdr_bits);
         return to_numpy(fr::spread_symbols(s, ptr(b)));
     }, py::arg("spec"), py::arg("hdr_bits"));
     m.def("assemble", [](const py::object& spec, const py::object& hdr_bits, const py::object& x) {
         const fr::FrameSpec s = to_spec(spec);
         fr::require_waveform(s, fr::Waveform::CE, "frame.assemble");
-        const auto xa = float64_array(x);
-        if (xa.ndim() != 1) fr::check_x_shape(s, shape_of(xa));
-        const auto b = bits_arg(hdr_bits);
+        const auto xa = float64_array(x);   // x first, then the header (the reference's order)
+        fr::check_x_shape(s, shape_of(xa));
+        const auto b = assemble_bits(s, spec, hdr_bits);
         return to_numpy(fr::assemble(s, ptr(b), std::span<const double>(xa.data(), static_cast<std::size_t>(xa.size()))));
     }, py::arg("spec"), py::arg("hdr_bits"), py::arg("x"));
     m.def("disassemble", [](const py::object& y_sym, const py::object& spec) {
@@ -397,12 +483,30 @@ void bind_lframe(py::module_& q) {
           py::arg("name_or_spec"));
     m.def("get_any", [](const py::object& name_or_spec) {
         if (py::isinstance<fr::FrameSpec>(name_or_spec)) return name_or_spec.cast<fr::FrameSpec>();
-        if (py::isinstance<py::str>(name_or_spec)) return fr::get_any(name_or_spec.cast<std::string>());
-        return get_in(name_or_spec, fr::Waveform::CE);   // frame.get's refusal
+        if (!py::isinstance<py::str>(name_or_spec)) return get_in(name_or_spec, fr::Waveform::CE);   // frame.get's
+        try {
+            return fr::get_any(utf8_of(name_or_spec));
+        } catch (const std::invalid_argument&) {
+            unknown(name_or_spec, waveform_of_name(name_or_spec.cast<py::str>()));
+        }
     }, py::arg("name_or_spec"));
     m.def("twin", [](const py::object& spec, const py::object& waveform) {
-        const std::int64_t w = as_index(waveform);
-        return fr::twin(to_spec(spec), static_cast<int>(std::clamp<std::int64_t>(w, -1000, 1000)));
+        // The reference compares with ==, so a float, a bool or a numpy scalar
+        // selects as its value does and anything else is "the other one".
+        const fr::FrameSpec s = to_spec(spec);
+        const int own = static_cast<int>(s.waveform());
+        const int w = py::int_(own).equal(waveform) ? own
+                      : waveform.equal(py::int_(cfg::WAVEFORM_L)) ? cfg::WAVEFORM_L
+                                                                   : -1;
+        try {
+            return fr::twin(s, w);
+        } catch (const std::invalid_argument&) {
+            // the name looked up: "l-" + spec.name, or spec.name[2:] for get_any
+            const py::str name = str_of(s.name());
+            if (w == cfg::WAVEFORM_L) unknown(py::str("l-") + name, fr::Waveform::L);
+            const py::str rest = name[py::slice(py::int_(2), py::none(), py::none())];
+            unknown(rest, waveform_of_name(rest));
+        }
     }, py::arg("spec"), py::arg("waveform"));
     m.def("layout", [](const py::object& spec) {
         const fr::FrameSpec s = to_spec(spec);
@@ -415,23 +519,23 @@ void bind_lframe(py::module_& q) {
             throw py::value_error("pair takes an even number of values, not shape " + fr::shape_repr(shape_of(a)));
         return to_numpy(fr::pair(std::span<const double>(a.data(), static_cast<std::size_t>(a.size()))));
     }, py::arg("v"));
-    m.def("unpair", [](const py::object& z) { return unpair_array(complex_array(z)); }, py::arg("z"));
+    m.def("unpair", [](const py::object& z) { return unpair_any(z); }, py::arg("z"));
     m.def("data_latents", [](const py::object& spec, const py::object& x, const py::object& hdr_bits) -> py::object {
         const fr::FrameSpec s = to_spec(spec);
-        const auto xa = float64_array(x);
+        py::object a = numpy().attr("asarray")(x, py::arg("dtype") = "float64");
+        const auto xa = float64_array(a);
         fr::check_x_shape(s, shape_of(xa));
-        if (s.hdr_rho() == 0) return xa;   // x itself, as the reference returns it
-        const auto b = bits_arg(hdr_bits);
+        if (s.hdr_rho() == 0) return a;   // np.asarray(x) itself, as the reference returns it
+        const auto b = bits_f64(hdr_bits);
         return to_numpy(fr::data_latents(s, std::span<const double>(xa.data(), static_cast<std::size_t>(xa.size())),
                                          ptr(b)));
     }, py::arg("spec"), py::arg("x"), py::arg("hdr_bits") = py::none());
     m.def("assemble", [](const py::object& spec, const py::object& hdr_bits, const py::object& x) {
         const fr::FrameSpec s = to_spec(spec);
         fr::require_waveform(s, fr::Waveform::L, "lframe.assemble");
-        const auto b = bits_arg(hdr_bits);
-        fr::check_hdr_bits(s, ptr(b));
+        const auto b = assemble_bits(s, spec, hdr_bits);   // the header first, then x (the reference's order)
         const auto xa = float64_array(x);
-        if (xa.ndim() != 1) fr::check_x_shape(s, shape_of(xa));
+        fr::check_x_shape(s, shape_of(xa));
         return to_numpy(fr::assemble_l(s, ptr(b), std::span<const double>(xa.data(), static_cast<std::size_t>(xa.size()))));
     }, py::arg("spec"), py::arg("hdr_bits"), py::arg("x"));
     m.def("disassemble", [](const py::object& y_sym, const py::object& spec) {
@@ -440,9 +544,7 @@ void bind_lframe(py::module_& q) {
         const py::array y = symbol_rows(y_sym, s);
         const auto lay = fr::layout(s);
         const auto n = static_cast<std::size_t>(s.n_sym());
-        const auto c = complex_array(gather_any(y, n, lay->hdr_sym));
-        const auto d = complex_array(gather_any(y, n, lay->data));
-        return py::make_tuple(unpair_array(c), unpair_array(d));
+        return py::make_tuple(unpair_any(gather_any(y, n, lay->hdr_sym)), unpair_any(gather_any(y, n, lay->data)));
     }, py::arg("y_sym"), py::arg("spec"));
 
     m.attr("N_HDR_SLOTS") = fr::N_HDR_SLOTS_L;

@@ -9,6 +9,7 @@ included. Skips when the extension is not built; `pytest
 """
 
 import dataclasses
+import warnings
 
 import numpy as np
 import pytest
@@ -466,3 +467,266 @@ def test_float_repr(nat):
                                "nl\n", "\x00\x7f", "café", " ­", "☃"])
 def test_str_repr(nat, s):
     assert nat._repr_str(s) == repr(s)
+
+
+# --- adversarial probes (review) ----------------------------------------------------------
+#
+# Each probe runs the reference and the port on the same input and requires the
+# same outcome: equal bytes, dtype, shape and type, or the same exception class
+# with the same text. The inputs are what a caller could plausibly hand over
+# (lists, tuples, ranges, every dtype numpy has) and what it should not
+# (strings, complex bits with an imaginary part, long double that rounds to
+# 0/1, scalars where a sequence belongs), because a port that accepts what the
+# reference refuses is the direction that hides a bug upstream.
+
+def _run(call):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            return "ok", call()
+        except Exception as e:  # noqa: BLE001 -- the class is part of the comparison
+            return type(e), str(e)
+
+
+def _agree(ref_call, nat_call, what=""):
+    want, got = _run(ref_call), _run(nat_call)
+    assert got[0] == want[0], (what, got, want)
+    if want[0] != "ok":
+        assert got[1] == want[1], what
+        return
+    w, g = want[1], got[1]
+    if isinstance(w, tuple):
+        assert isinstance(g, tuple) and len(g) == len(w), what
+        for k, (a, b) in enumerate(zip(g, w)):
+            _same(a, b, f"{what}[{k}]")
+    else:
+        assert type(g) is type(w), (what, type(g), type(w))
+        _same(g, w, what)
+
+
+def _bit_forms(b):
+    """hdr_bits as callers hand them over, valid and not."""
+    return {
+        "uint8": b, "bool": b.astype(bool), "int64": b.astype(np.int64), "float16": b.astype(np.float16),
+        "uint64": b.astype(np.uint64), "list": b.tolist(), "tuple": tuple(b.tolist()), "range": range(N_HDR_BITS),
+        "object": np.array(b.tolist(), dtype=object), "strided": np.repeat(b, 2)[::2], "minus-zero": np.where(b, 1.0, -0.0),
+        "complex": b.astype(complex), "complex-imag": b + 1j, "longdouble": b.astype(np.longdouble),
+        "longdouble-off": b.astype(np.longdouble) + np.longdouble(2.0) ** -62, "close": b + 1e-12,
+        "int8-neg": -b.astype(np.int8), "nan": np.full(N_HDR_BITS, np.nan), "inf": np.full(N_HDR_BITS, np.inf),
+        "str": "0" * N_HDR_BITS, "list-str": ["0"] * N_HDR_BITS, "row": b[None, :], "short": b[:-1],
+        "scalar": 0, "numpy-scalar": np.uint8(1), "0-d": np.array(1), "empty": [], "empty-2d": np.zeros((0, 3)),
+        "empty-dict": {}, "empty-str": "", "dict": {1: 2}, "None": None,
+    }
+
+
+@pytest.mark.parametrize("spec", [F.SHORT, F.SHORT_V1, F.TINY, F.FULL_SPREADONLY, LF.L_SHORT, LF.L_TINY,
+                                  LF.LFrameSpec("l-spread", n_hdr=0, n_data=6000, cw_after=(), hdr_rho=0.2),
+                                  LF.LFrameSpec("l-v1", n_data=4096, cw_after=(2500, 3834), hdr_rho=0.0)],
+                         ids=lambda s: s.name)
+def test_probe_hdr_bit_forms(nat, lnat, spec):
+    """assemble checks hdr_bits as the reference does: its own (b != 0) & (b != 1)
+    on np.asarray(hdr_bits) and len() of the argument itself; spread_signs and
+    data_latents read np.asarray(hdr_bits, dtype=np.float64)."""
+    rng = np.random.default_rng(21)
+    x = rng.standard_normal(spec.n_data)
+    ref_asm, nat_asm = (LF.assemble, lnat.assemble) if spec.waveform else (F.assemble, nat.assemble)
+    for name, bb in _bit_forms(_bits(rng)).items():
+        _agree(lambda: ref_asm(spec, bb, x), lambda: nat_asm(spec, bb, x), f"assemble {name}")
+        _agree(lambda: F.spread_signs(spec, bb), lambda: nat.spread_signs(spec, bb), f"spread_signs {name}")
+        if spec.waveform:
+            _agree(lambda: LF.data_latents(spec, x, bb), lambda: lnat.data_latents(spec, x, bb), f"data_latents {name}")
+        else:
+            _agree(lambda: F.spread_symbols(spec, bb), lambda: nat.spread_symbols(spec, bb), f"spread_symbols {name}")
+
+
+@pytest.mark.parametrize("spec", [F.SHORT, F.TINY, LF.L_SHORT, LF.L_TINY], ids=lambda s: s.name)
+def test_probe_x_forms(nat, lnat, spec):
+    """x in every form, alone and together with bad bits (which complaint wins
+    is the reference's operation order: CE checks x first, L the header)."""
+    rng = np.random.default_rng(22)
+    x = rng.standard_normal(spec.n_data)
+    b = _bits(rng) if spec.has_header else None
+    ref_asm, nat_asm = (LF.assemble, lnat.assemble) if spec.waveform else (F.assemble, nat.assemble)
+    forms = {"float32": x.astype(np.float32), "list": x.tolist(), "strided": np.repeat(x, 2)[::2],
+             "int": np.arange(spec.n_data), "object": np.array(x.tolist(), dtype=object), "complex": x + 0j,
+             "longdouble": x.astype(np.longdouble), "row": x[None, :], "scalar": 1.0, "short": x[:-2],
+             "None": None, "str": "abc", "big-int": [2 ** 80] * spec.n_data}
+    for name, xx in forms.items():
+        _agree(lambda: ref_asm(spec, b, xx), lambda: nat_asm(spec, b, xx), f"x {name}")
+        _agree(lambda: ref_asm(spec, np.zeros(5), xx), lambda: nat_asm(spec, np.zeros(5), xx), f"x {name}, bad bits")
+        if spec.waveform:
+            _agree(lambda: LF.data_latents(spec, xx, b), lambda: lnat.data_latents(spec, xx, b), f"data_latents {name}")
+
+
+def test_probe_data_latents_is_x(lnat):
+    """At rho 0 the reference returns np.asarray(x, float64) itself -- a view
+    stays that view (no contiguous copy), a float64 array is returned as is."""
+    x = np.random.default_rng(23).standard_normal(2 * LF.L_TINY.n_data)
+    view = x[::2]
+    assert LF.data_latents(LF.L_TINY, view) is view
+    assert lnat.data_latents(LF.L_TINY, view) is view
+    ro = x[:LF.L_TINY.n_data].copy()
+    ro.setflags(write=False)
+    assert lnat.data_latents(LF.L_TINY, ro) is ro
+
+
+ODD_DTYPES = {
+    "object": lambda v: np.array(v.tolist(), dtype=object),
+    "object-complex": lambda v: np.array((v + 2j).tolist(), dtype=object),
+    "str": lambda v: np.array(["a"] * v.size).reshape(v.shape),
+    "bytes": lambda v: np.array([b"ab"] * v.size).reshape(v.shape),
+    "datetime": lambda v: np.zeros(v.shape, "M8[s]"),
+    "timedelta": lambda v: np.arange(v.size).reshape(v.shape).astype("m8[s]"),
+    "longdouble": lambda v: v.astype(np.longdouble) / 3,
+    "clongdouble": lambda v: ((v + 1j) / 3).astype(np.clongdouble),
+    "big-endian-f8": lambda v: v.astype(">f8"),
+    "big-endian-c16": lambda v: (v + 1j * v[..., ::-1]).astype(">c16"),
+    "uint64": lambda v: (np.abs(v) * 2 ** 60).astype(np.uint64),
+    "int64-inexact": lambda v: (v * 2 ** 61).astype(np.int64) | 1,
+    "float16": lambda v: v.astype(np.float16),
+    "bool": lambda v: v > 0,
+}
+
+
+@pytest.mark.parametrize("spec", [F.SHORT, F.TINY, LF.L_SHORT, LF.L_TINY], ids=lambda s: s.name)
+@pytest.mark.parametrize("dtype", list(ODD_DTYPES))
+def test_probe_disassemble_any_dtype(nat, lnat, spec, dtype):
+    """disassemble is a gather, so it takes any dtype the reference's y[..., idx]
+    takes; L's goes on through unpair, which runs numpy's own arithmetic for
+    dtypes that do not become complex128 exactly (long double rounds once,
+    in extended precision)."""
+    ref, mine = (LF.disassemble, lnat.disassemble) if spec.waveform else (F.disassemble, nat.disassemble)
+    v = np.random.default_rng(24).standard_normal((2, spec.n_sym))
+    y = ODD_DTYPES[dtype](v)
+    _agree(lambda: ref(y, spec), lambda: mine(y, spec), dtype)
+    _agree(lambda: ref(y[0], spec), lambda: mine(y[0], spec), dtype + " 1-D")
+
+
+@pytest.mark.parametrize("dtype", list(ODD_DTYPES))
+def test_probe_unpair_any_dtype(lnat, dtype):
+    v = np.random.default_rng(25).standard_normal((3, 400))
+    z = ODD_DTYPES[dtype](v)
+    _agree(lambda: LF.unpair(z), lambda: lnat.unpair(z), dtype)
+    _agree(lambda: LF.pair(z[0]), lambda: lnat.pair(z[0]), dtype + " pair")
+
+
+@pytest.mark.parametrize("spec", [F.SHORT, F.FULL_V1, F.TINY, LF.L_SHORT, LF.L_FULL], ids=lambda s: s.name)
+def test_probe_twin_compares_like_python(nat, lnat, spec):
+    """twin compares `waveform` with ==, so 1.0, True and numpy scalars select
+    like the ints they equal and anything else (None, "1", 2**70) is neither."""
+    for w in (0, 1, 1.0, 0.0, True, False, np.int64(1), np.float64(0.0), np.array(1), None, "1", 2, -1,
+              2 ** 70, 1 + 0j, 0.5):
+        _agree(lambda: nat.of(LF.twin(spec, w)).fields(), lambda: lnat.twin(spec, w).fields(), repr(w))
+    _agree(lambda: LF.twin(spec, np.array([1, 0])), lambda: lnat.twin(spec, np.array([1, 0])), "array")
+
+
+def test_probe_twin_slices_code_points(nat, lnat):
+    """spec.name[2:] counts code points: "é-short" is SHORT's twin, "éshort"
+    is no frame's (a byte slice would answer the other way round)."""
+    specs = [LF.LFrameSpec("é-short", n_data=4096, cw_after=(2500, 3834)),
+             LF.LFrameSpec("éshort", n_data=4096, cw_after=(2500, 3834)),
+             LF.LFrameSpec("😀étiny", n_hdr=0, n_data=1024, cw_after=()),
+             LF.LFrameSpec("l-", n_data=4096, cw_after=()), LF.LFrameSpec("x", n_data=4096, cw_after=()),
+             F.FrameSpec("ésshort", n_data=4096, cw_after=(5000, 7670)), F.FrameSpec("", n_data=4096, cw_after=()),
+             F.FrameSpec(" x", n_data=4096, cw_after=())]
+    for spec in specs:
+        for w in (WAVEFORM_CE, WAVEFORM_L, 7):
+            _agree(lambda: nat.of(LF.twin(spec, w)).fields(), lambda: lnat.twin(spec, w).fields(),
+                   (spec.name, w))
+
+
+@pytest.mark.parametrize("name", [" ", "​", "x\x85", "é", "퟿", "\U000e0001", "😀", "l- ",
+                                  "l-​", "­", "\x7f"])
+def test_probe_name_refusals_use_python_repr(nat, lnat, name):
+    """The unknown-name refusal shows the name as Python's repr does, which
+    escapes every non-printable code point, not only ASCII and Latin-1."""
+    for ref_call, nat_call in ((lambda: F.get(name), lambda: nat.get(name)),
+                               (lambda: LF.get(name), lambda: lnat.get(name)),
+                               (lambda: LF.get_any(name), lambda: lnat.get_any(name))):
+        _agree(ref_call, nat_call, repr(name))
+    spec = F.FrameSpec(name, n_data=4096, cw_after=())
+    _agree(lambda: F.assemble(spec, None, np.zeros(4096)), lambda: nat.assemble(spec, None, np.zeros(4096)))
+    _agree(lambda: LF.twin(spec, WAVEFORM_L), lambda: lnat.twin(spec, WAVEFORM_L))
+
+
+def test_probe_unhashable_name(nat, lnat):
+    """`name in PRESETS` hashes it first: a list is a TypeError, not an unknown frame."""
+    for v in ([], [1], {}, {1}):
+        _agree(lambda: F.get(v), lambda: nat.get(v), repr(v))
+        _agree(lambda: LF.get(v), lambda: lnat.get(v), repr(v))
+        _agree(lambda: LF.get_any(v), lambda: lnat.get_any(v), repr(v))
+
+
+def _random_specs(seed, count):
+    """Valid frames of either waveform with random lengths, headers, rho and windows."""
+    rng = np.random.default_rng(seed)
+    out = []
+    for k in range(count):
+        is_l = bool(rng.integers(2))
+        cls, n_pre, n_hdr_full = (LF.LFrameSpec, 330, 1320) if is_l else (F.FrameSpec, 660, 2640)
+        n_hdr = int(rng.choice([0, n_hdr_full]))
+        n_data = int(rng.integers(1, 3000)) * (2 if is_l else 1)
+        rho = [None, 0.0, float(rng.random() * 0.99), SPREAD_RHO][int(rng.integers(4))]
+        probe = cls(f"r{k}", n_pre=n_pre, n_hdr=n_hdr, n_data=n_data, cw_after=(), hdr_rho=rho)
+        lo, hi = n_pre + n_hdr, probe.n_sym
+        n_win = int(rng.integers(0, 5))
+        cw = sorted(set(int(c) for c in rng.integers(lo + 1, hi + 1, n_win)))
+        if cw and rng.integers(2):
+            cw[-1] = hi                                    # a window that ends the frame
+        out.append(cls(f"r{k}", n_pre=n_pre, n_hdr=n_hdr, n_data=n_data, cw_after=tuple(cw), hdr_rho=rho))
+    return out
+
+
+RANDOM_SPECS = _random_specs(31, 40)
+
+
+@pytest.mark.parametrize("spec", RANDOM_SPECS, ids=[s.name for s in RANDOM_SPECS])
+def test_probe_random_frames(nat, lnat, spec):
+    """Random frames of both waveforms: every derived property, every layout
+    array, pos_of across the frame and past both ends, and assemble/disassemble
+    bitwise."""
+    n = nat.of(spec)
+    for name in DERIVED + (("n_data_payload",) if spec.waveform == WAVEFORM_L else ()):
+        got, want = getattr(n, name), getattr(spec, name)
+        assert got == want and type(got) is type(want), (name, got, want)
+    assert n.window_spans_s() == spec.window_spans_s()
+    s = np.arange(-3, spec.n_sym + 3)
+    _same(n.pos_of(s), spec.pos_of(s), "pos_of")
+    want, got = _ref_layout(spec), _nat_layout(nat, lnat, spec)
+    for f in dataclasses.fields(want):
+        _same(got[f.name], getattr(want, f.name), f.name)
+    rng = np.random.default_rng(spec.n_data)
+    b = _bits(rng) if spec.has_header else None
+    x = rng.standard_normal(spec.n_data) * 2
+    ref_asm, nat_asm = (LF.assemble, lnat.assemble) if spec.waveform else (F.assemble, nat.assemble)
+    ref_dis, nat_dis = (LF.disassemble, lnat.disassemble) if spec.waveform else (F.disassemble, nat.disassemble)
+    sym = ref_asm(spec, b, x)
+    _same(nat_asm(spec, b, x), sym, "assemble")
+    for a, w in zip(nat_dis(sym, spec), ref_dis(sym, spec)):
+        _same(a, w, "disassemble")
+
+
+def test_probe_names_with_lone_surrogates(nat, lnat):
+    """Any str the reference takes as a name, lone surrogates included, survives
+    the trip through the C++: a lookup refuses it with the reference's
+    ValueError, a spec carries it (repr, fields, refusal texts), and twin
+    slices it by code points ("\\udc80\\udc80short"[2:] is "short")."""
+    for name in ("\udc80", "l-\udc80", "sh\ud800ort"):
+        _agree(lambda: F.get(name), lambda: nat.get(name), ascii(name))
+        _agree(lambda: LF.get(name), lambda: lnat.get(name), ascii(name))
+        _agree(lambda: LF.get_any(name), lambda: lnat.get_any(name), ascii(name))
+        _agree(lambda: F.FrameSpec(name, n_data=4096, cw_after=(1,)),
+               lambda: nat.make(WAVEFORM_CE, name, 660, 2640, 4096, (1,)), ascii(name))
+    specs = [F.FrameSpec("\udc80\udc80short", n_data=4096, cw_after=(5000, 7670)),
+             LF.LFrameSpec("\ud800-short", n_data=4096, cw_after=(2500, 3834)),
+             LF.LFrameSpec("l-\udc80", n_data=4096, cw_after=(2500, 3834)),
+             F.FrameSpec("a\udc80", n_data=4096, cw_after=())]
+    for spec in specs:
+        n = nat.of(spec)
+        assert n.name == spec.name and repr(n) == repr(spec)
+        assert n.fields() == (spec.waveform, *dataclasses.astuple(spec))
+        for w in (WAVEFORM_CE, WAVEFORM_L, 3):
+            _agree(lambda: nat.of(LF.twin(spec, w)).fields(), lambda: lnat.twin(spec, w).fields(), ascii(spec.name))
+        _agree(lambda: nat.of(F.plain(spec)).fields(), lambda: nat.plain(spec).fields(), ascii(spec.name))
+        ref_asm, nat_asm = (LF.assemble, lnat.assemble) if spec.waveform else (F.assemble, nat.assemble)
+        _agree(lambda: ref_asm(spec, None, np.zeros(spec.n_data)), lambda: nat_asm(spec, None, np.zeros(spec.n_data)))
