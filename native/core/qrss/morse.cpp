@@ -23,8 +23,8 @@ std::string check_callsign(std::string_view callsign) {
     while (!call.empty() && call.back() == ' ') call.remove_suffix(1);
     const std::u32string cps = pytext::decode(call);
     if (cps.size() < 1 || cps.size() > static_cast<std::size_t>(config::MAX_CALL_CHARS))
-        throw std::invalid_argument("callsign " + pytext::repr(callsign) + " must be 1 to " +
-                                    std::to_string(config::MAX_CALL_CHARS) + " characters");
+        throw CallsignError(CallsignError::Why::length, "callsign " + pytext::repr(callsign) + " must be 1 to " +
+                                                            std::to_string(config::MAX_CALL_CHARS) + " characters");
     // sorted({c for c in call if c not in MORSE}), printed as a list.
     std::u32string bad;
     for (char32_t c : cps)
@@ -38,8 +38,8 @@ std::string check_callsign(std::string_view callsign) {
             list += pytext::repr(std::u32string_view(&bad[i], 1));
         }
         list += "]";
-        throw std::invalid_argument("callsign " + pytext::repr(callsign) +
-                                    " has characters outside [A-Z0-9/]: " + list);
+        throw CallsignError(CallsignError::Why::characters,
+                            "callsign " + pytext::repr(callsign) + " has characters outside [A-Z0-9/]: " + list, bad);
     }
     return std::string(call);
 }
@@ -61,9 +61,10 @@ std::vector<std::uint8_t> morse_keying(std::string_view callsign) {
 std::vector<std::uint8_t> keying_units(std::string_view callsign) {
     const std::vector<std::uint8_t> k = morse_keying(callsign);
     if (k.size() > static_cast<std::size_t>(config::CW_ROOM_UNITS))
-        throw std::invalid_argument("callsign " + pytext::repr(callsign) + " needs " +
-                                    std::to_string(k.size()) + " Morse units, more than the window's " +
-                                    std::to_string(config::CW_ROOM_UNITS));
+        throw CallsignError(CallsignError::Why::units,
+                            "callsign " + pytext::repr(callsign) + " needs " + std::to_string(k.size()) +
+                                " Morse units, more than the window's " + std::to_string(config::CW_ROOM_UNITS),
+                            {}, k.size());
     std::vector<std::uint8_t> out(config::CW_UNITS, 0);
     std::copy(k.begin(), k.end(), out.begin() + config::CW_LEAD_UNITS);
     return out;

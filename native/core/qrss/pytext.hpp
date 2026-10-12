@@ -8,7 +8,10 @@
 // does not start a well-formed sequence decodes to U+DC00 + byte --
 // Python's "surrogateescape", which is how Python itself decodes an argv
 // that is not valid UTF-8. So a C++ CLI handed the same bytes as a Python
-// one counts the same characters and prints the same repr.
+// one counts the same characters and prints the same repr -- except for
+// bytes that encode a surrogate (ED A0..BF xx), which os.fsdecode escapes
+// byte by byte and this decodes as the one surrogate that the binding's
+// "surrogatepass" form needs.
 
 #ifndef SSTVAE_QRSS_PYTEXT_HPP
 #define SSTVAE_QRSS_PYTEXT_HPP

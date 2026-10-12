@@ -130,7 +130,7 @@ std::vector<double> unprecode(std::span<const double> y, std::uint64_t q, std::s
     return out;
 }
 
-std::vector<double> block_mean(std::span<const double> v, std::size_t n) {
+std::vector<double> block_mean(std::span<const double> v, std::size_t n, Summation summation) {
     const std::size_t rows = rows_of(v.size(), n);
     const std::vector<Run> rs = runs(n);
     std::vector<double> out(v.size());
@@ -142,7 +142,11 @@ std::vector<double> block_mean(std::span<const double> v, std::size_t n) {
                 // np.add.reduce starts from the identity 0.0, then the
                 // mean divides by the count.
                 double sum = 0.0;
-                sum += pairwise_sum(row + s, run.m);
+                if (summation == Summation::pairwise) {
+                    sum += pairwise_sum(row + s, run.m);
+                } else {
+                    for (std::size_t j = 0; j < run.m; ++j) sum = sum + row[s + j];
+                }
                 const double mean = sum / static_cast<double>(run.m);
                 for (std::size_t j = 0; j < run.m; ++j) out[r * n + s + j] = mean;
             }

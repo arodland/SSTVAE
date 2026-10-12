@@ -8,7 +8,10 @@
 #include "qrss/registry.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
+#include <cstdlib>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -85,7 +88,26 @@ auto or_no_memory(F&& f) -> decltype(f()) {
     } catch (const std::length_error&) {
         PyErr_NoMemory();
         throw py::error_already_set();
+    } catch (const std::bad_alloc&) {   // as Python's own: a bare MemoryError, not "std::bad_alloc"
+        PyErr_NoMemory();
+        throw py::error_already_set();
     }
+}
+
+// The order numpy's reduction will sum a block of `a` in (pc::Summation):
+// its iterator puts the axis of smallest |stride| innermost, a stable sort
+// from C order in which a zero stride never moves and a size-1 axis is
+// coalesced away. So the blocks' own (last) axis stays innermost, and the
+// add loop gets each block whole to sum pairwise, unless some other axis
+// of more than one element has a nonzero |stride| strictly below it.
+pc::Summation summation_of(const py::array& a) {
+    const py::ssize_t nd = a.ndim();
+    const py::ssize_t last = std::abs(a.strides(nd - 1));
+    for (py::ssize_t k = 0; k + 1 < nd; ++k) {
+        const py::ssize_t s = std::abs(a.strides(k));
+        if (a.shape(k) > 1 && s != 0 && s < last) return pc::Summation::sequential;
+    }
+    return pc::Summation::pairwise;
 }
 
 py::array_t<double> shaped(const std::vector<double>& v, const Shape& shape) {
@@ -137,9 +159,16 @@ void bind(py::module_& q) {
     }, py::arg("y"), py::arg("q"));
 
     m.def("block_mean", [](const py::object& v_in) {
-        const py::array_t<double> v = float64(v_in, false);
-        const std::size_t n = last_axis(v);
-        return shaped(pc::block_mean(std::span<const double>(v.data(), static_cast<std::size_t>(v.size())), n),
+        // np.asarray(v, dtype=np.float64) as the reference has it, layout
+        // and all: the layout decides numpy's summation order.
+        py::object np = numpy();
+        const py::array a = np.attr("asarray")(v_in, py::arg("dtype") = np.attr("float64"));
+        const std::size_t n = last_axis(a);
+        const pc::Summation summation = summation_of(a);
+        auto v = py::array_t<double, py::array::c_style | py::array::forcecast>::ensure(a);
+        if (!v) throw py::error_already_set();
+        return shaped(pc::block_mean(std::span<const double>(v.data(), static_cast<std::size_t>(v.size())), n,
+                                     summation),
                       shape_of(v));
     }, py::arg("v"));
 

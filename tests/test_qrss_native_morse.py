@@ -2,10 +2,13 @@
 
 Exact: integer keying, and refusals compared by their full text. A
 callsign crosses into C++ as UTF-8 (lone surrogates as "surrogatepass"),
-and qrss/pytext reproduces Python's character count and repr(), so even
-a refusal of non-ASCII text reads the same. Skips when the extension is
-not built; `pytest --native-qrss=tx` runs the rest of the QRSS suites
-against the same code.
+and qrss/pytext reproduces Python's character count, so the same text is
+accepted and refused. The binding words a refusal with Python's own
+repr() of the caller's object (a str subclass such as np.str_ quotes
+itself differently), so its text is exact; the core's own text, which a
+C++ caller sees, is pytext's and is compared too (`_core_refusal`). Skips
+when the extension is not built; `pytest --native-qrss=tx` runs the rest
+of the QRSS suites against the same code.
 """
 
 import unicodedata
@@ -18,7 +21,12 @@ from sstvae.qrss import morse as ref
 
 
 @pytest.fixture(scope="module")
-def nat(native):
+def nat(native, request):
+    if request.config.getoption("--native-qrss", default=None):
+        # The reference is then (partly) the C++ itself -- at stage tx even
+        # precoder.unprecode's own scrambler is -- so there is nothing to
+        # compare against. Run these without --native-qrss.
+        pytest.skip("--native-qrss replaces the reference this file compares against")
     return require(native, "morse")
 
 
@@ -98,7 +106,13 @@ def test_fuzzed_accept_and_reject_agree(nat):
     for call in calls:
         for fn in ("check_callsign", "morse_keying", "keying_units"):
             got, want = _outcome(getattr(nat, fn), call), _outcome(getattr(ref, fn), call)
-            assert got == _unassigned_unescaped(want, call), (fn, call)
+            assert got == want, (fn, call)
+        want = _outcome(ref.keying_units, call)
+        core = nat._core_refusal(call)
+        if want[0] == "ok":
+            assert core is None, call
+        else:
+            assert (ValueError, core) == _unassigned_unescaped(want, call), call
         accepted += _outcome(ref.check_callsign, call)[0] == "ok"
     assert 500 < accepted < len(calls) - 500    # both sides of the boundary were exercised
 
@@ -118,6 +132,37 @@ def test_str_subclasses_are_accepted(nat):
     for call in (np.str_("K1ABC"), Call("W1AW  ")):
         for fn in ("check_callsign", "keying_units"):
             assert _outcome(getattr(nat, fn), call) == _outcome(getattr(ref, fn), call)
+
+
+def test_str_subclasses_are_refused_in_their_own_words(nat):
+    """morse.py quotes `{callsign!r}`: repr of the caller's object, which
+    np.str_ (numpy 2: "np.str_('k1abc')") and any str subclass with its
+    own __repr__ word differently from a plain str."""
+    class Call(str):
+        def __repr__(self):
+            return "<Call>"
+
+    class Plain(str):
+        pass
+
+    calls = [np.str_("k1abc"), np.str_("K1ABCDEFGH"), np.str_(""), np.str_("K\u0378"),
+             Call("k1"), Call(""), Call("K1ABCDEFGHI"), Plain("k1 "), Plain("\udcff")]
+    for call in calls:
+        for fn in ("check_callsign", "morse_keying", "keying_units"):
+            got, want = _outcome(getattr(nat, fn), call), _outcome(getattr(ref, fn), call)
+            assert want[0] is ValueError
+            assert got == want, (fn, call)
+
+
+def test_refusals_of_unassigned_code_points_are_exact(nat):
+    """Python's repr escapes an unassigned code point; the binding words
+    the refusal with that repr, so pytext's simplification never shows."""
+    for call, escaped in (("K\u0378", "\\u0378"), ("\U000e0080AB", "\\U000e0080"),
+                          ("A\U0010ffff", "\\U0010ffff"), ("K1\u0378 ", "\\u0378")):
+        for fn in ("check_callsign", "keying_units"):
+            got, want = _outcome(getattr(nat, fn), call), _outcome(getattr(ref, fn), call)
+            assert want[0] is ValueError and escaped in want[1], (fn, call, want)
+            assert got == want, (fn, call, got)
 
 
 def test_repr_matches_python(nat):

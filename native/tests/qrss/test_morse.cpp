@@ -111,6 +111,21 @@ static void test_refusals() {
         threw = std::string(e.what()) == cases[0].second;
     }
     check::is_true(threw, "keying_units refuses as check_callsign does");
+    // The fields a caller words its own refusal from (the Python binding does).
+    using Why = mo::CallsignError::Why;
+    try {
+        mo::morse_keying("k1a\xc3\x84" "ab");
+        check::is_true(false, "lowercase is refused");
+    } catch (const mo::CallsignError& e) {
+        check::is_true(e.why() == Why::characters && e.bad() == std::u32string{U'a', U'b', U'k', 0xC4},
+                       "CallsignError: the bad characters, sorted and unique");
+    }
+    try {
+        mo::check_callsign("ABCDEFGHI  ");
+        check::is_true(false, "nine characters are refused");
+    } catch (const mo::CallsignError& e) {
+        check::is_true(e.why() == Why::length && e.bad().empty(), "CallsignError: length");
+    }
 }
 
 static void test_pytext() {

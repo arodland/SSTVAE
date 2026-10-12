@@ -130,6 +130,15 @@ static void test_batch_rows() {
         check::is_true(pc::wht(row) == std::vector<double>(w.begin() + r * 4096, w.begin() + (r + 1) * 4096),
                        "wht row " + std::to_string(r));
     }
+    // block_mean of (3, 777) = rat[:2331].reshape(3, 777): C order sums each
+    // block pairwise; np.asfortranarray of it makes numpy's reduction run
+    // the batch axis innermost and sum one element at a time from 0.0.
+    const auto b777 = rat_input(3 * 777);
+    digest_is(pc::block_mean(b777, 777), "57c158d5eb824f91fb8cdfc546af1fc377506410517097f55cbf9d8b4d139fc5",
+              "block_mean rows, pairwise");
+    digest_is(pc::block_mean(b777, 777, pc::Summation::sequential),
+              "15c5b30915513a45ccaf5c6390dec23f073d3c3415d3233db76b0b0a08ce34c9",
+              "block_mean rows, sequential (Fortran order)");
     check::is_true(throws([] { pc::wht(std::vector<double>(10), 4); }), "rows must be whole");
     check::is_true(throws([] { pc::wht(std::vector<double>(3), 0); }), "rows of 0 hold nothing");
     check::is_true(pc::wht(std::vector<double>{}, 0).empty(), "empty");

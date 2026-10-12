@@ -67,9 +67,19 @@ inline std::vector<double> unprecode(std::span<const double> y, std::uint64_t q)
     return unprecode(y, q, y.size());
 }
 
+// How numpy's mean sums a block. np.add.reduce hands the add loop a whole
+// block, which it sums pairwise, when the block's axis is the one its
+// iterator runs innermost: the axis of smallest |stride|, which is the
+// last for every C-ordered input. When a batch axis is laid out inside the
+// last one (Fortran order, a transpose) that batch axis runs innermost
+// instead, and each block is summed one element at a time from 0.0. The
+// reference's last bit therefore depends on memory layout; the binding
+// reads the layout and passes the order numpy will use.
+enum class Summation { pairwise, sequential };
+
 // The mean of each precoder block, broadcast back over the block, per row
-// (numpy's mean: 0 + pairwise sum, then / M).
-std::vector<double> block_mean(std::span<const double> v, std::size_t n);
+// (numpy's mean: 0.0 + the sum, then / M).
+std::vector<double> block_mean(std::span<const double> v, std::size_t n, Summation sum = Summation::pairwise);
 inline std::vector<double> block_mean(std::span<const double> v) { return block_mean(v, v.size()); }
 
 // The precoder block each of n data symbols belongs to.
