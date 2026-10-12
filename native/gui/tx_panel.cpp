@@ -185,6 +185,7 @@ TransmitPanel::TransmitPanel(AppState* state, QWidget* parent)
         }
         return true;
     });
+    scheduler_->set_canceller([this] { cancel(); });
     connect(scheduler_, &QrssScheduler::changed, this, &TransmitPanel::update_schedule_summary);
     update_schedule_summary();
 }

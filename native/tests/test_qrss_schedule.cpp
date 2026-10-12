@@ -327,6 +327,18 @@ void test_a_late_send_starts_at_once(const std::filesystem::path& dir) {
                    "scheduler/late: a send 30 s before its quarter hour is accepted");
     check::is_true(fake.runs.size() == 1 && fake.runs[0][0].slot == Q,
                    "scheduler/late: and handed to the transmitter straight away");
+
+    // Removing it stops that run rather than leaving it to key a picture
+    // that is no longer on the schedule (Jeff, 2026-10-12).
+    int cancels = 0;
+    s->set_canceller([&cancels] { ++cancels; });
+    s->remove(s->entries()[0].id);
+    check::is_true(cancels == 1 && logged(fake, "stopped its send"),
+                   "scheduler/remove: removing the entry on the air stops its run");
+    s->run_finished();
+    fake.now = Q - 20.0;
+    s->remove("no such id");
+    check::equal(cancels, 1, "scheduler/remove: nothing else stops a run");
 }
 
 void test_sends_follow_straight_on(const std::filesystem::path& dir) {

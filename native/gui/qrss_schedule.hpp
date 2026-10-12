@@ -239,6 +239,8 @@ public:
     const std::vector<qrss_schedule::FreqChange>& changes() const { return changes_; }
     void set_retuner(Retuner retuner) { retuner_ = std::move(retuner); }
     void set_chainer(Chainer chainer) { chainer_ = std::move(chainer); }
+    // Stops the run on the air; called when its entry is removed.
+    void set_canceller(std::function<void()> canceller) { canceller_ = std::move(canceller); }
     // Adds a change; its `id` is filled in here. Empty on success, else
     // why not (too soon, or it would cut into a send).
     std::string add_change(qrss_schedule::FreqChange change);
@@ -287,6 +289,7 @@ private:
     std::vector<std::string> on_air_;   // active_ and the entries that followed on
     double run_end_ = 0.0;              // the run's last pass, its quarter hour
     Chainer chainer_;
+    std::function<void()> canceller_;
     // Hands sends that follow straight on to the run on the air.
     void chain(double now, bool& dirty);
     // The last refusal logged, "<id>/<send>", so a busy transmitter is

@@ -452,11 +452,19 @@ void QrssScheduler::remove(const std::string& id) {
     const QString label = QString::fromStdString(it->label);
     entries_.erase(it);
     save();
-    emit logged(0, on_air(id)
-                           ? tr("QRSS schedule: removed \"%1\"; the send on the air carries "
-                                "on (Cancel stops it)")
-                                 .arg(label)
-                           : tr("QRSS schedule: removed \"%1\"").arg(label));
+    // Removing the entry whose run is on the air (or getting ready, which
+    // starts minutes before the first pass keys) stops that run: left
+    // going, it would key a picture that is no longer on the schedule,
+    // and the slot it holds would look free to the next one added. A
+    // picture that followed on is already part of another entry's run.
+    const bool stop = id == active_ && canceller_;
+    emit logged(0, stop ? tr("QRSS schedule: removed \"%1\" and stopped its send").arg(label)
+                   : on_air(id)
+                       ? tr("QRSS schedule: removed \"%1\"; the send on the air carries "
+                            "on (Cancel stops it)")
+                             .arg(label)
+                       : tr("QRSS schedule: removed \"%1\"").arg(label));
+    if (stop) canceller_();
     emit changed();
 }
 
