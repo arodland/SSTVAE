@@ -1,5 +1,6 @@
 #include "qrss_schedule_window.hpp"
 
+#include <QApplication>
 #include <QComboBox>
 #include <QDateEdit>
 #include <QDateTime>
@@ -18,11 +19,13 @@
 #include <QMenu>
 #include <QMimeData>
 #include <QMessageBox>
+#include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSpinBox>
 #include <QSplitter>
+#include <QStyledItemDelegate>
 #include <QTimeZone>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -64,6 +67,68 @@ protected:
         data->setData(QString::fromLatin1(QrssTimeline::SEND_MIME),
                       items.front()->data(Qt::UserRole).toString().toUtf8());
         return data;
+    }
+};
+
+// Draws a Send's name, and under it in smaller, quieter type the rest
+// of its text (when it is scheduled). The item's text keeps both lines,
+// so its size and what a screen reader says are unchanged.
+class SendDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+    static QFont status_font(QFont f) {
+        f.setPointSizeF(f.pointSizeF() > 0 ? f.pointSizeF() * 0.82 : 8.0);
+        return f;
+    }
+    void paint(QPainter* p, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override {
+        QStyleOptionViewItem o(option);
+        initStyleOption(&o, index);
+        const QString all = o.text;
+        // The view hands a newline over as a line separator.
+        qsizetype cut = all.indexOf(QChar::LineSeparator);
+        if (cut < 0) cut = all.indexOf(QLatin1Char('\n'));
+        if (cut < 0) {
+            QStyledItemDelegate::paint(p, option, index);
+            return;
+        }
+        const QString name = all.left(cut);
+        const QString status = all.mid(cut + 1);
+        const QWidget* w = option.widget;
+        QStyle* style = w ? w->style() : QApplication::style();
+        // Background, selection, icon and focus, with the text left out.
+        o.text.clear();
+        style->drawControl(QStyle::CE_ItemViewItem, &o, p, w);
+        o.text = all;
+        // The same margin the plain items get, and the two lines
+        // centred together as one plain item's text is.
+        const int margin = style->pixelMetric(QStyle::PM_FocusFrameHMargin, nullptr, w) + 1;
+        const QRect area =
+            style->subElementRect(QStyle::SE_ItemViewItemText, &o, w).adjusted(margin, 0, -margin, 0);
+        const QFont small_font = status_font(o.font);
+        const QRect name_box = QFontMetrics(o.font).boundingRect(
+            area, Qt::AlignLeft | Qt::TextWordWrap, all.left(cut));
+        const QRect status_box = QFontMetrics(small_font).boundingRect(
+            area, Qt::AlignLeft | Qt::TextWordWrap, all.mid(cut + 1));
+        const int h = name_box.height() + 1 + status_box.height();
+        const QRect text(area.left(), area.top() + std::max(0, (area.height() - h) / 2),
+                         area.width(), h);
+        const bool selected = o.state & QStyle::State_Selected;
+        const QPalette::ColorGroup group =
+            (o.state & QStyle::State_Enabled) ? QPalette::Normal : QPalette::Disabled;
+        QColor ink = o.palette.color(group, selected ? QPalette::HighlightedText : QPalette::Text);
+        p->save();
+        p->setFont(o.font);
+        p->setPen(ink);
+        QRect used;
+        p->drawText(text, Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, name, &used);
+        p->setFont(small_font);
+        QColor quiet = ink;
+        quiet.setAlphaF(selected ? 0.85 : 0.7);
+        p->setPen(quiet);
+        p->drawText(text.adjusted(0, used.height() + 1, 0, 0),
+                    Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, status);
+        p->restore();
     }
 };
 
@@ -260,13 +325,13 @@ void QrssScheduleWindow::build() {
 
     outer->addWidget(style::note(
         tr("Scheduled sends go out only while this app is running, through the same radio, "
-           "level and callsign as Send. Receiving pauses from a few minutes before each send "
-           "until it ends."),
+           "level and callsign as Send. Each gets ready a minute ahead and keys just before its "
+           "quarter hour; receiving pauses only while it is on the air."),
         this));
 }
 
 QWidget* QrssScheduleWindow::build_sends(QWidget* parent) {
-    auto* box = new QGroupBox(tr("Sends"), parent);
+    auto* box = new QGroupBox(tr("Sends (click, or click and drag to add to timeline)"), parent);
     auto* layout = new QVBoxLayout(box);
     sends_list_ = new SendsList(box);
     sends_list_->setObjectName(QStringLiteral("schedule_sends"));
@@ -276,6 +341,7 @@ QWidget* QrssScheduleWindow::build_sends(QWidget* parent) {
     sends_list_->setIconSize(QSize(LIST_ICON_W, LIST_ICON_H));
     sends_list_->setSelectionMode(QAbstractItemView::SingleSelection);
     sends_list_->setWordWrap(true);
+    sends_list_->setItemDelegate(new SendDelegate(sends_list_));
     sends_list_->setToolTip(tr("Pictures ready to schedule, kept on disk. Tinted ones are on "
                                "the schedule. Double-click to edit; drag one onto the timeline above to schedule it "
                                "there."));
