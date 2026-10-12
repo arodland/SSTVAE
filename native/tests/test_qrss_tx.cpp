@@ -68,6 +68,14 @@ void test_problems_and_args() {
                  std::string("py /repo/qrss_transmit.py p.qrsp o.wav --slot 2026-10-10T01:00Z "
                              "--callsign AG7EW --segment 1 --freq 1234.0 --float --grid CN85"),
                  "qrss_tx/args: one pass of the picture, as the script wants it");
+    r.waveform = "L";
+    check::is_true(qrss_tx::transmit_args(tools, "p.qrsp", "o.wav", Q, 1, r)
+                       .join(QLatin1Char(' '))
+                       .endsWith(QStringLiteral("--waveform L --grid CN85")),
+                   "qrss_tx/args: waveform L is asked for; CE, the default, is left out");
+    r.waveform = "X";
+    check::is_true(!qrss_tx::problem(r).empty(), "qrss_tx/problem: an unknown waveform");
+    r.waveform = "CE";
     r.grid = "nowhere";
     a = qrss_tx::transmit_args(tools, "p.qrsp", "o.wav", Q, 0, r);
     check::is_true(!a.contains(QStringLiteral("--grid")),

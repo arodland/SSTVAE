@@ -30,6 +30,10 @@ int passes_for(const std::string& mode) {
 
 int minutes_for(const std::string& mode) { return 30 * passes_for(mode); }
 
+bool known_waveform(const std::string& waveform) {
+    return waveform == WAVEFORM_CE || waveform == WAVEFORM_L;
+}
+
 std::vector<double> plan(double now, int passes, double prep_s) {
     std::vector<double> out;
     if (passes <= 0) return out;
@@ -140,6 +144,10 @@ QStringList transmit_args(const Tools& tools, const QString& qrsp, const QString
                   QStringLiteral("--freq"),
                   QString::number(request.freq_hz, 'f', 1),
                   QStringLiteral("--float")};
+    // CE is qrss_transmit.py's default, so a CE command line is as it was.
+    if (request.waveform != WAVEFORM_CE) {
+        a << QStringLiteral("--waveform") << QString::fromStdString(request.waveform);
+    }
     if (is_locator(request.grid)) {
         a << QStringLiteral("--grid") << QString::fromStdString(request.grid.substr(0, 4)).toUpper();
     }
@@ -149,9 +157,10 @@ QStringList transmit_args(const Tools& tools, const QString& qrsp, const QString
 namespace {
 
 // What a picture's own passes must satisfy, in a request or a part.
-std::string passes_problem(const std::string& mode, double freq_hz,
-                           const std::vector<Pass>& passes) {
+std::string passes_problem(const std::string& mode, const std::string& waveform,
+                           double freq_hz, const std::vector<Pass>& passes) {
     if (passes_for(mode) == 0) return "unknown QRSS mode '" + mode + "'";
+    if (!known_waveform(waveform)) return "unknown QRSS waveform '" + waveform + "'";
     if (!(freq_hz >= FREQ_MIN_HZ && freq_hz <= FREQ_MAX_HZ)) {
         return "the QRSS carrier must be between 300 and 2700 Hz";
     }
@@ -182,12 +191,12 @@ std::string problem(const Request& request) {
         return std::isalnum(static_cast<unsigned char>(ch)) || ch == '/';
     });
     if (!ok) return "QRSS callsigns are 1-8 of A-Z, 0-9 and /; '" + c + "' is not.";
-    return passes_problem(request.mode, request.freq_hz, request.passes);
+    return passes_problem(request.mode, request.waveform, request.freq_hz, request.passes);
 }
 
 std::string problem(const Part& part, double after) {
     if (part.passes.empty()) return "a following picture needs its passes";
-    if (std::string why = passes_problem(part.mode, part.freq_hz, part.passes); !why.empty()) {
+    if (std::string why = passes_problem(part.mode, part.waveform, part.freq_hz, part.passes); !why.empty()) {
         return why;
     }
     if (part.passes.front().slot - after < PASS_SPACING_S) {
@@ -313,7 +322,7 @@ bool run(tx::TxEngine& engine, const Request& request, const Tools& tools,
             w += " (part " + std::to_string(s.pass.segment + 1) + " of " +
                  std::to_string(segments) + ")";
         }
-        return w + " at " + hhmm(s.pass.slot) + ", " +
+        return w + " at " + hhmm(s.pass.slot) + ", " + r.waveform + " at " +
                QString::number(r.freq_hz, 'f', 0).toStdString() + " Hz";
     };
     // Make pass k's audio and read it in; empty with `*error` set if not.
@@ -369,6 +378,7 @@ bool run(tx::TxEngine& engine, const Request& request, const Tools& tools,
             r.passes.clear();
             r.picture = std::move(part->picture);
             r.mode = part->mode;
+            r.waveform = part->waveform;
             r.freq_hz = part->freq_hz;
             pictures.push_back({std::move(r), {}, false});
             for (const Pass& p : part->passes) passes.push_back({pictures.size() - 1, p});

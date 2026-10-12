@@ -53,6 +53,14 @@ inline constexpr double FREQ_MIN_HZ = 300.0;    // CARRIER_BAND_HZ
 inline constexpr double FREQ_MAX_HZ = 2700.0;
 inline constexpr double FREQ_DEFAULT_HZ = 1500.0;
 
+// The two QRSSTVAE waveforms (docs/qrss/waveform-l.md). "CE": constant
+// envelope, one latent per symbol, about 50 Hz wide. "L": linear, two
+// latents per symbol plus a pilot, about 22 Hz wide; needs a linear
+// transmit chain with the ALC out of it, and receivers that hear L.
+inline constexpr const char* WAVEFORM_CE = "CE";
+inline constexpr const char* WAVEFORM_L = "L";
+bool known_waveform(const std::string& waveform);
+
 // Passes a QRSS mode sends ("A" 1, "B" 2, "C" 3); 0 for anything else.
 int passes_for(const std::string& mode);
 
@@ -93,6 +101,7 @@ std::optional<Tools> find_tools();
 struct Part {
     images::Picture picture;
     std::string mode = "A";
+    std::string waveform = WAVEFORM_CE;
     double freq_hz = FREQ_DEFAULT_HZ;
     std::vector<Pass> passes;   // the first a half hour (or more) after the run's last
 };
@@ -118,6 +127,7 @@ private:
 struct Request {
     images::Picture picture;
     std::string mode = "A";            // A, B or C
+    std::string waveform = WAVEFORM_CE;  // CE or L
     double freq_hz = FREQ_DEFAULT_HZ;
     std::string callsign;
     std::string grid;                  // used only when it is a 4-character locator

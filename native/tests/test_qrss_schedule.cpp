@@ -17,6 +17,9 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QLabel>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QListWidget>
 #include <QPushButton>
 #include <QSpinBox>
@@ -168,12 +171,32 @@ void test_upcoming_and_the_file() {
                    "schedule/upcoming: what is left of each, in time order");
     list[0].enabled = false;
     list[0].freq_hz = 987.0;
+    list[0].waveform = "L";
     const std::vector<qs::Entry> back = qs::from_json(qs::to_json(list));
     check::is_true(back.size() == 2 && back[0].id == "b" && !back[0].enabled &&
                        back[0].freq_hz == 987.0 && back[0].every_min == 180 &&
                        back[0].count == 3 && back[1].next == 1 && back[1].first_slot == Q &&
-                       back[1].mode == "A",
+                       back[1].mode == "A" && back[0].waveform == "L" && back[1].waveform == "CE",
                    "schedule/file: every field survives the round trip");
+    check::equal(qs::describe(back[0]), std::string("waveform L mode B every 3 hours, 3 times"),
+                 "schedule/file: and an L send says so");
+    {
+        // The same entry as a schedule from before L: no waveform field.
+        std::vector<qs::Entry> one{list[1]};
+        one[0].waveform = "L";
+        QJsonObject root =
+            QJsonDocument::fromJson(QByteArray::fromStdString(qs::to_json(one))).object();
+        QJsonArray list_json = root.value(QStringLiteral("entries")).toArray();
+        QJsonObject only = list_json.at(0).toObject();
+        only.remove(QStringLiteral("waveform"));
+        list_json[0] = only;
+        root[QStringLiteral("entries")] = list_json;
+        const QString old = QString::fromUtf8(QJsonDocument(root).toJson());
+        const auto back_old = qs::from_json(old.toStdString());
+        check::is_true(!old.contains(QStringLiteral("waveform")) && back_old.size() == 1 &&
+                           back_old[0].waveform == "CE",
+                       "schedule/file: a schedule from before L is CE");
+    }
     check::is_true(qs::from_json("not json").empty(), "schedule/file: a broken file is empty");
 }
 
@@ -551,6 +574,19 @@ void test_the_window(const std::filesystem::path& dir) {
     check::is_true(summary->text().contains(QStringLiteral("2 x mode B, back to back")) &&
                        add->isEnabled(),
                    "window: the default is two sends back to back");
+    // The waveform: CE unless chosen, L saying what it needs.
+    auto* waveform = w.findChild<QComboBox*>(QStringLiteral("schedule_waveform"));
+    auto* note = w.findChild<QLabel*>(QStringLiteral("schedule_waveform_note"));
+    check::is_true(waveform && note && waveform->currentData().toString() == QStringLiteral("CE"),
+                   "window: CE unless L is chosen");
+    if (waveform && note) {
+        waveform->setCurrentIndex(waveform->findData(QStringLiteral("L")));
+        check::is_true(note->text().contains(QStringLiteral("ALC")) &&
+                           note->text().contains(QStringLiteral("hears L")) &&
+                           summary->text().contains(QStringLiteral("waveform L mode B")),
+                       "window: choosing L says what it needs");
+        waveform->setCurrentIndex(waveform->findData(QStringLiteral("CE")));
+    }
     mode->setCurrentIndex(mode->findData(QStringLiteral("A")));
     count->setValue(0);
     every->setCurrentIndex(every->findData(120));
@@ -688,6 +724,15 @@ void test_the_window(const std::filesystem::path& dir) {
                    "menu: Change Offset moves the carrier");
     check::is_true(!w.change_offset(id, 5000).empty() && s->entries()[0].freq_hz == 1200.0,
                    "menu: but not outside the passband, and says why");
+
+    // Change Waveform: CE to L and back, the picture unchanged.
+    menu.reset(w.menu_for(id, 0));
+    check::is_true(menu->findChild<QMenu*>(QStringLiteral("menu_change_waveform")) != nullptr,
+                   "menu: Change Waveform on offer");
+    check::is_true(w.change_waveform(id, "L").empty() && s->entries()[0].waveform == "L",
+                   "menu: Change Waveform to L");
+    check::is_true(w.change_waveform(id, "CE").empty() && s->entries()[0].waveform == "CE",
+                   "menu: and back to CE");
 
     // A single send asked to repeat becomes two.
     w.select_send(red);

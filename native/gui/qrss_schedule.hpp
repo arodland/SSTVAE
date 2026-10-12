@@ -69,6 +69,7 @@ struct Entry {
     std::string label;         // what the operator calls it
     std::string send_id;       // the Send it was made from (gui/qrss_sends.hpp), if any
     std::string mode = "A";    // QRSS A, B or C
+    std::string waveform = qrss_tx::WAVEFORM_CE;   // CE or L
     double freq_hz = qrss_tx::FREQ_DEFAULT_HZ;
     double first_slot = 0.0;   // unix seconds, a quarter hour: the first send's first pass
     int count = 1;             // sends; 0 = until removed

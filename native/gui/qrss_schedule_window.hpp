@@ -60,6 +60,7 @@ public:
         std::string mode = "A";
         double freq_hz = 1500.0;
         double dial_hz = 0.0;   // the radio's dial now, 0 if unknown
+        std::string waveform = "CE";
     };
     // How far ahead the timeline reaches.
     static constexpr double TIMELINE_HOURS = 48.0;
@@ -90,6 +91,7 @@ public:
     std::string change_mode(const std::string& entry, const std::string& mode);
     // The audio carrier frequency, every send of the entry.
     std::string change_offset(const std::string& entry, double hz);
+    std::string change_waveform(const std::string& entry, const std::string& waveform);
     std::string repeat_every(const std::string& entry, int minutes);
     std::string move_send(const std::string& entry, int send, double slot);
     // The "Repeat in" choices for a mode, in minutes: never sooner than
@@ -159,6 +161,8 @@ private:
     QLabel* send_name_ = nullptr;
     QComboBox* mode_ = nullptr;
     QSpinBox* freq_ = nullptr;
+    QComboBox* waveform_ = nullptr;
+    QLabel* waveform_note_ = nullptr;
     QDateEdit* date_ = nullptr;
     QComboBox* time_ = nullptr;
     QSpinBox* count_ = nullptr;

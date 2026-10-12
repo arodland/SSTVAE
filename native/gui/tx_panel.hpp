@@ -200,7 +200,7 @@ private:
     // dialog (Send); the schedule, which nobody may be watching, puts it
     // on the banner and in the log itself.
     std::string begin_qrss(const images::Picture& picture, const std::string& mode,
-                           double freq_hz, std::vector<qrss_tx::Pass> passes,
+                           const std::string& waveform, double freq_hz, std::vector<qrss_tx::Pass> passes,
                            bool interactive);
     // The scheduler's way in.
     QrssScheduler::Start start_scheduled(const qrss_schedule::Entry& entry,

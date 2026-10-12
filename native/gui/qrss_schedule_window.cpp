@@ -109,10 +109,23 @@ QPixmap thumbnail(const std::filesystem::path& png, int w, int h) {
     return pix.scaled(w, h, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 }
 
-qs::Entry form_entry(const QComboBox* mode, const QSpinBox* freq, double slot,
-                     const QSpinBox* count, const QComboBox* every) {
+// What the waveform choice means for the operator, under the choice.
+QString waveform_note(const std::string& waveform) {
+    if (waveform == qrss_tx::WAVEFORM_L) {
+        return QObject::tr(
+            "L: about 22 Hz wide and needs 3.2 dB less SNR at the same average power. It is "
+            "linear: keep the ALC out (drive below where ALC starts) and use a linear "
+            "amplifier. Only receivers whose listener hears L can decode it.");
+    }
+    return QObject::tr("CE: constant envelope, about 50 Hz wide. Any amplifier, ALC "
+                       "harmless; every QRSSTVAE listener hears it.");
+}
+
+qs::Entry form_entry(const QComboBox* mode, const QComboBox* waveform, const QSpinBox* freq,
+                     double slot, const QSpinBox* count, const QComboBox* every) {
     qs::Entry e;
     e.mode = mode->currentData().toString().toStdString();
+    e.waveform = waveform->currentData().toString().toStdString();
     e.freq_hz = freq->value();
     e.first_slot = slot;
     e.count = count->value();
@@ -141,6 +154,9 @@ QrssScheduleWindow::QrssScheduleWindow(QrssScheduler* scheduler, QrssSends* send
     const Defaults d = defaults_ ? defaults_() : Defaults{};
     mode_->setCurrentIndex(std::max(0, mode_->findData(QString::fromStdString(d.mode))));
     freq_->setValue(static_cast<int>(std::lround(d.freq_hz)));
+    waveform_->setCurrentIndex(
+        std::max(0, waveform_->findData(QString::fromStdString(d.waveform))));
+    waveform_note_->setText(waveform_note(d.waveform));
     date_->setMinimumDate(utc_of(scheduler_->now()).date());
     set_chosen_slot(qs::earliest_slot(scheduler_->now()));
     connect(scheduler_, &QrssScheduler::changed, this, &QrssScheduleWindow::refresh);
@@ -328,7 +344,7 @@ QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
     mode_->setObjectName(QStringLiteral("schedule_mode"));
     for (const char* m : {"A", "B", "C"}) {
         const std::string s(m);
-        mode_->addItem(tr("QRSS CE Mode %1 - %2 min (%3 %4)")
+        mode_->addItem(tr("QRSS Mode %1 - %2 min (%3 %4)")
                            .arg(QString::fromStdString(s))
                            .arg(qrss_tx::minutes_for(s))
                            .arg(qrss_tx::passes_for(s))
@@ -336,6 +352,19 @@ QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
                        QString::fromStdString(s));
     }
     form->addRow(tr("Mode:"), mode_);
+
+    waveform_ = new QComboBox(form_box_);
+    waveform_->setObjectName(QStringLiteral("schedule_waveform"));
+    waveform_->addItem(tr("CE - constant envelope, 50 Hz"),
+                       QString::fromLatin1(qrss_tx::WAVEFORM_CE));
+    waveform_->addItem(tr("L - linear, 22 Hz"), QString::fromLatin1(qrss_tx::WAVEFORM_L));
+    waveform_->setToolTip(tr("How the picture goes on the air. Both carry the same picture, "
+                             "and passes of either add into it at a receiver."));
+    form->addRow(tr("Waveform:"), waveform_);
+    waveform_note_ = new QLabel(form_box_);
+    waveform_note_->setObjectName(QStringLiteral("schedule_waveform_note"));
+    waveform_note_->setWordWrap(true);
+    form->addRow(waveform_note_);
 
     freq_ = new QSpinBox(form_box_);
     freq_->setObjectName(QStringLiteral("schedule_freq"));
@@ -390,7 +419,7 @@ QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
     form->addRow(style::row(form_box_, {add_}));
     column->addWidget(form_box_);
 
-    for (QComboBox* c : {mode_, time_, every_}) {
+    for (QComboBox* c : {mode_, waveform_, time_, every_}) {
         connect(c, &QComboBox::currentIndexChanged, this, &QrssScheduleWindow::update_summary);
     }
     for (QSpinBox* s : {freq_, count_}) {
@@ -573,8 +602,9 @@ void QrssScheduleWindow::set_chosen_slot(double slot) {
 
 void QrssScheduleWindow::update_summary() {
     if (summary_ == nullptr) return;
-    const qs::Entry e = form_entry(mode_, freq_, chosen_slot(), count_, every_);
+    const qs::Entry e = form_entry(mode_, waveform_, freq_, chosen_slot(), count_, every_);
     const double now = scheduler_->now();
+    if (waveform_note_ != nullptr) waveform_note_->setText(waveform_note(e.waveform));
     QString why;
     if (selected_send().empty()) why = tr("choose a Send first.");
     if (why.isEmpty()) why = QString::fromStdString(qs::problem(e));
@@ -631,7 +661,7 @@ void QrssScheduleWindow::add() {
                               .arg(QString::fromUtf8(ex.what())));
         return;
     }
-    qs::Entry e = form_entry(mode_, freq_, chosen_slot(), count_, every_);
+    qs::Entry e = form_entry(mode_, waveform_, freq_, chosen_slot(), count_, every_);
     e.label = s->label;
     e.send_id = s->id;
     const std::string why = scheduler_->add(e, picture);
@@ -727,7 +757,8 @@ void QrssScheduleWindow::refresh_timeline() {
             b.count = e.count;
             b.slot = slot;
             b.end = stop;
-            b.mode = e.mode;
+            // An L send says so on its block; CE goes unsaid.
+            b.mode = e.waveform == qrss_tx::WAVEFORM_L ? "L " + e.mode : e.mode;
             b.thumb = thumb;
             b.label = QString::fromStdString(e.label);
             b.paused = !e.enabled;
@@ -931,6 +962,19 @@ QMenu* QrssScheduleWindow::menu_for(const std::string& entry, int send) {
         connect(a, &QAction::triggered, this, [this, id, mode] { change_mode(id, mode); });
     }
 
+    QMenu* waveforms = menu->addMenu(tr("Change Waveform"));
+    waveforms->setObjectName(QStringLiteral("menu_change_waveform"));
+    for (const char* w : {qrss_tx::WAVEFORM_CE, qrss_tx::WAVEFORM_L}) {
+        const std::string waveform(w);
+        QAction* a = waveforms->addAction(waveform == qrss_tx::WAVEFORM_CE
+                                              ? tr("CE - constant envelope")
+                                              : tr("L - linear (ALC out)"));
+        a->setCheckable(true);
+        a->setChecked(waveform == e->waveform);
+        connect(a, &QAction::triggered, this,
+                [this, id, waveform] { change_waveform(id, waveform); });
+    }
+
     QAction* offset = menu->addAction(tr("Change Offset... (now %1 Hz)").arg(e->freq_hz, 0, 'f', 0));
     offset->setObjectName(QStringLiteral("menu_change_offset"));
     connect(offset, &QAction::triggered, this, [this, id, hz = e->freq_hz] {
@@ -998,6 +1042,15 @@ std::string QrssScheduleWindow::change_offset(const std::string& entry, double h
     // Every send of the entry moves; the picture and its ID stay the same.
     std::string why = scheduler_->change(entry, [hz](qs::Entry& e) { e.freq_hz = hz; });
     show_result(why, tr("Moved to %1 Hz.").arg(hz, 0, 'f', 0));
+    return why;
+}
+
+std::string QrssScheduleWindow::change_waveform(const std::string& entry,
+                                                const std::string& waveform) {
+    // The picture and its ID stay the same: receivers add passes of both.
+    std::string why =
+        scheduler_->change(entry, [&waveform](qs::Entry& e) { e.waveform = waveform; });
+    show_result(why, tr("Now sent as waveform %1.").arg(QString::fromStdString(waveform)));
     return why;
 }
 

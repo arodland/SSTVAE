@@ -176,6 +176,7 @@ TransmitPanel::TransmitPanel(AppState* state, QWidget* parent)
             return false;
         }
         part.mode = entry.mode;
+        part.waveform = entry.waveform;
         part.freq_hz = entry.freq_hz;
         part.passes = passes;
         if (!qrss_chain_->append(std::move(part))) {
@@ -1565,12 +1566,13 @@ void TransmitPanel::begin_transmit(const images::Picture& picture,
 }
 
 std::string TransmitPanel::begin_qrss(const images::Picture& picture, const std::string& mode,
-                                      double freq_hz, std::vector<qrss_tx::Pass> passes,
+                                      const std::string& waveform, double freq_hz, std::vector<qrss_tx::Pass> passes,
                                       bool interactive) {
     const settings::Config& config = app_->config();
     qrss_tx::Request request;
     request.picture = picture;
     request.mode = mode;
+    request.waveform = waveform;
     request.freq_hz = freq_hz;
     request.passes = std::move(passes);
     request.chain = std::make_shared<qrss_tx::Chain>();
@@ -1608,8 +1610,9 @@ std::string TransmitPanel::begin_qrss(const images::Picture& picture, const std:
     const int n_passes = request.passes.empty() ? qrss_tx::passes_for(request.mode)
                                                 : static_cast<int>(request.passes.size());
     app_->log_event("tx", log::Severity::Info,
-                    tr("QRSS CE mode %1 at %2 Hz: %3 pass(es) of 1782.7 s")
-                        .arg(QString::fromStdString(request.mode))
+                    tr("QRSS %1 mode %2 at %3 Hz: %4 pass(es) of 1782.7 s")
+                        .arg(QString::fromStdString(request.waveform),
+                             QString::fromStdString(request.mode))
                         .arg(request.freq_hz, 0, 'f', 0)
                         .arg(n_passes));
 
@@ -1674,7 +1677,8 @@ QrssScheduler::Start TransmitPanel::start_scheduled(const qrss_schedule::Entry& 
         *why = std::string("its picture could not be read: ") + e.what();
         return QrssScheduler::Start::Failed;
     }
-    const std::string problem = begin_qrss(picture, entry.mode, entry.freq_hz, passes, false);
+    const std::string problem = begin_qrss(picture, entry.mode, entry.waveform, entry.freq_hz, passes,
+                                           false);
     if (!problem.empty()) {
         *why = problem;
         return QrssScheduler::Start::Failed;
@@ -1701,6 +1705,10 @@ void TransmitPanel::show_schedule() {
                 d.freq_hz = scheduler_->entries().empty()
                                 ? app_->config().transmit.qrss_freq_hz
                                 : scheduler_->entries().back().freq_hz;
+                // And the waveform last scheduled, else CE.
+                if (!scheduler_->entries().empty()) {
+                    d.waveform = scheduler_->entries().back().waveform;
+                }
                 // The dial now, else the last change scheduled.
                 if (const auto hz = app_->current_frequency_hz()) {
                     d.dial_hz = *hz;

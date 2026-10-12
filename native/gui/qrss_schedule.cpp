@@ -101,6 +101,7 @@ bool follows_on(const Entry& e, int k, const std::vector<Entry>& all, double now
 std::string problem(const Entry& e) {
     const int n = qrss_tx::passes_for(e.mode);
     if (n == 0) return "unknown QRSS mode '" + e.mode + "'";
+    if (!qrss_tx::known_waveform(e.waveform)) return "unknown QRSS waveform '" + e.waveform + "'";
     if (!(e.freq_hz >= qrss_tx::FREQ_MIN_HZ && e.freq_hz <= qrss_tx::FREQ_MAX_HZ)) {
         return "the QRSS carrier must be between 300 and 2700 Hz";
     }
@@ -130,7 +131,10 @@ std::string problem(const Entry& e) {
 }
 
 std::string describe(const Entry& e) {
-    const std::string mode = "mode " + e.mode;
+    // CE was the only waveform for long enough that it goes unsaid.
+    const std::string mode =
+        (e.waveform == qrss_tx::WAVEFORM_CE ? std::string() : "waveform " + e.waveform + " ") +
+        "mode " + e.mode;
     if (e.count == 1) return mode + ", once";
     if (e.every_min == 0) return std::to_string(e.count) + " x " + mode + ", back to back";
     const std::string times = e.count == 0 ? "until removed" : std::to_string(e.count) + " times";
@@ -266,6 +270,7 @@ std::string to_json(const std::vector<Entry>& entries, const std::vector<FreqCha
         o[QStringLiteral("label")] = QString::fromStdString(e.label);
         if (!e.send_id.empty()) o[QStringLiteral("send_id")] = QString::fromStdString(e.send_id);
         o[QStringLiteral("mode")] = QString::fromStdString(e.mode);
+        o[QStringLiteral("waveform")] = QString::fromStdString(e.waveform);
         o[QStringLiteral("freq_hz")] = e.freq_hz;
         o[QStringLiteral("first_slot")] = e.first_slot;
         o[QStringLiteral("count")] = e.count;
@@ -302,6 +307,10 @@ std::vector<Entry> from_json(const std::string& text) {
         e.send_id = o.value(QStringLiteral("send_id")).toString().toStdString();
         e.mode = o.value(QStringLiteral("mode")).toString(QStringLiteral("A")).toStdString();
         e.freq_hz = o.value(QStringLiteral("freq_hz")).toDouble(qrss_tx::FREQ_DEFAULT_HZ);
+        // Schedules saved before L existed are CE.
+        e.waveform = o.value(QStringLiteral("waveform"))
+                         .toString(QString::fromLatin1(qrss_tx::WAVEFORM_CE))
+                         .toStdString();
         e.first_slot = o.value(QStringLiteral("first_slot")).toDouble();
         e.count = o.value(QStringLiteral("count")).toInt(1);
         e.every_min = o.value(QStringLiteral("every_min")).toInt();
