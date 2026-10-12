@@ -886,6 +886,27 @@ void test_the_editor(const std::filesystem::path& dir) {
                    "editor: Save as new Send keeps the old one");
 }
 
+void test_a_change_needs_no_sends(const std::filesystem::path& dir) {
+    // Jeff, 2026-10-12: frequency changes run with no sends scheduled.
+    Fake fake;
+    std::unique_ptr<QrssScheduler> s(make(fake, dir / "lone" / "qrss_schedule.json"));
+    std::vector<double> retuned;
+    s->set_retuner([&](const qs::FreqChange& c, std::string*) {
+        retuned.push_back(c.dial_hz);
+        return QrssScheduler::Start::Started;
+    });
+    qs::FreqChange c;
+    c.dial_hz = 5'352'000.0;
+    c.at = Q;
+    fake.now = Q - H;
+    check::is_true(s->add_change(c).empty() && s->entries().empty(),
+                   "lone change: scheduled with no sends");
+    fake.now = Q + 1.0;
+    s->tick();
+    check::is_true(retuned.size() == 1 && retuned[0] == 5'352'000.0 && s->changes()[0].done,
+                   "lone change: made at its time");
+}
+
 void test_frequency_changes(const std::filesystem::path& dir) {
     Fake fake;
     std::unique_ptr<QrssScheduler> s(make(fake, dir / "f" / "qrss_schedule.json"));
@@ -1040,6 +1061,7 @@ int main(int argc, char** argv) {
     test_change_and_truncate(dir);
     test_the_window(dir);
     test_the_editor(dir);
+    test_a_change_needs_no_sends(dir);
     test_frequency_changes(dir);
     test_the_dial_log(dir);
     return check::report("qrss schedule");
