@@ -56,6 +56,11 @@ set(SSTVAE_BUILD_QTAUDIO "AUTO" CACHE STRING "Build Qt Multimedia audio (ON/OFF/
 set_property(CACHE SSTVAE_BUILD_QTAUDIO PROPERTY STRINGS ON OFF AUTO)
 set(SSTVAE_BUILD_OVERLAY "AUTO" CACHE STRING "Build Qt overlay rendering (ON/OFF/AUTO)")
 set_property(CACHE SSTVAE_BUILD_OVERLAY PROPERTY STRINGS ON OFF AUTO)
+# HEIC/HEIF/AVIF pictures (phone photos) through the system libheif.
+# AUTO uses it when pkg-config finds it; without it such a file fails to
+# open with a message naming the packages to install.
+set(SSTVAE_HEIF "AUTO" CACHE STRING "Read HEIC/HEIF pictures with libheif (ON/OFF/AUTO)")
+set_property(CACHE SSTVAE_HEIF PROPERTY STRINGS ON OFF AUTO)
 set(SSTVAE_BUILD_GUI "AUTO" CACHE STRING "Build the desktop application (ON/OFF/AUTO)")
 set_property(CACHE SSTVAE_BUILD_GUI PROPERTY STRINGS ON OFF AUTO)
 # Rig control. Plain ON/OFF rather than the audio layer's AUTO, because
@@ -163,6 +168,25 @@ set_target_properties(sstvae_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # bridge, is intact.
 if(NOT WIN32)
   target_sources(sstvae_core PRIVATE core/rig/bridge.cpp core/rig/bridged.cpp)
+endif()
+
+# --- HEIC/HEIF pictures -----------------------------------------------------
+if(NOT SSTVAE_HEIF STREQUAL "OFF")
+  find_package(PkgConfig QUIET)
+  if(PkgConfig_FOUND)
+    pkg_check_modules(LIBHEIF QUIET IMPORTED_TARGET libheif)
+  endif()
+  if(LIBHEIF_FOUND)
+    target_link_libraries(sstvae_core PRIVATE PkgConfig::LIBHEIF)
+    target_compile_definitions(sstvae_core PRIVATE SSTVAE_HAVE_LIBHEIF=1)
+    message(STATUS "HEIC/HEIF pictures: libheif ${LIBHEIF_VERSION}")
+  elseif(SSTVAE_HEIF STREQUAL "ON")
+    message(FATAL_ERROR
+      "SSTVAE_HEIF=ON but libheif was not found. Install libheif-dev and "
+      "libheif-plugin-libde265, or pass -DSSTVAE_HEIF=OFF.")
+  else()
+    message(STATUS "HEIC/HEIF pictures: off (libheif-dev not found)")
+  endif()
 endif()
 
 # --- codec ------------------------------------------------------------------

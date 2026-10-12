@@ -71,7 +71,7 @@ namespace sstvae::gui {
 namespace {
 
 const char* IMAGE_FILTER =
-    "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif);;All files (*)";
+    "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.heic *.heif *.avif);;All files (*)";
 
 // --- the tool palette's icons -------------------------------------------
 //

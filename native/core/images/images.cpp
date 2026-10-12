@@ -6,7 +6,14 @@
 #include <cstdint>
 #include <fstream>
 #include <stdexcept>
+#include <cstring>
+#include <mutex>
+#include <string>
 #include <vector>
+
+#ifdef SSTVAE_HAVE_LIBHEIF
+#include <libheif/heif.h>
+#endif
 
 // Vendored; read for the orientation tag alone. See
 // native/third_party/easyexif/README.md.
@@ -283,12 +290,99 @@ Picture apply_orientation(const Picture& img, int orientation) {
     return out;
 }
 
+bool heif_supported() {
+#ifdef SSTVAE_HAVE_LIBHEIF
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool looks_like_heif(const std::uint8_t* data, std::size_t len) {
+    if (len < 12 || std::memcmp(data + 4, "ftyp", 4) != 0) return false;
+    static const char* const brands[] = {"heic", "heix", "hevc", "hevx", "heim", "heis",
+                                         "mif1", "msf1", "avif", "avis", "mif2"};
+    for (const char* b : brands) {
+        if (std::memcmp(data + 8, b, 4) == 0) return true;
+    }
+    return false;
+}
+
+namespace {
+
+#ifdef SSTVAE_HAVE_LIBHEIF
+// The primary image, decoded to interleaved 8-bit RGB. libheif applies
+// the container's rotation and mirroring (irot/imir) while decoding, so
+// the result needs no EXIF orientation step.
+Picture load_heif(const std::vector<std::uint8_t>& bytes, const std::string& path) {
+    static std::once_flag init;
+    std::call_once(init, [] { heif_init(nullptr); });  // loads decoder plugins
+
+    auto fail = [&](const heif_error& err) {
+        throw std::runtime_error("cannot read " + path + ": " +
+                                 (err.message ? err.message : "libheif error"));
+    };
+    struct Ctx {
+        heif_context* p = heif_context_alloc();
+        ~Ctx() { heif_context_free(p); }
+    } ctx;
+    heif_error err = heif_context_read_from_memory_without_copy(ctx.p, bytes.data(),
+                                                                bytes.size(), nullptr);
+    if (err.code != heif_error_Ok) fail(err);
+
+    struct Handle {
+        heif_image_handle* p = nullptr;
+        ~Handle() { if (p) heif_image_handle_release(p); }
+    } handle;
+    err = heif_context_get_primary_image_handle(ctx.p, &handle.p);
+    if (err.code != heif_error_Ok) fail(err);
+
+    struct Image {
+        heif_image* p = nullptr;
+        ~Image() { if (p) heif_image_release(p); }
+    } img;
+    err = heif_decode_image(handle.p, &img.p, heif_colorspace_RGB, heif_chroma_interleaved_RGB,
+                            nullptr);
+    if (err.code != heif_error_Ok) fail(err);
+
+    const int w = heif_image_get_width(img.p, heif_channel_interleaved);
+    const int h = heif_image_get_height(img.p, heif_channel_interleaved);
+    int stride = 0;
+    const std::uint8_t* plane = heif_image_get_plane_readonly(img.p, heif_channel_interleaved,
+                                                              &stride);
+    if (plane == nullptr || w <= 0 || h <= 0) {
+        throw std::runtime_error("cannot read " + path + ": no picture in the HEIF file");
+    }
+    Picture out(w, h);
+    const std::size_t row = static_cast<std::size_t>(w) * 3;
+    for (int y = 0; y < h; ++y) {
+        std::copy(plane + static_cast<std::size_t>(y) * stride,
+                  plane + static_cast<std::size_t>(y) * stride + row,
+                  out.rgb.begin() + static_cast<std::ptrdiff_t>(y * row));
+    }
+    return out;
+}
+#endif
+
+}  // namespace
+
 Picture load(const std::string& path) {
     // Read the file once and decode from memory, because the orientation
     // tag and the pixels come from the same bytes: stb ignores EXIF, and
     // easyexif wants the whole file. `stbi_load(path, ...)` would mean
     // opening it twice.
     std::vector<std::uint8_t> bytes = read_file(path);
+
+    if (looks_like_heif(bytes.data(), bytes.size())) {
+#ifdef SSTVAE_HAVE_LIBHEIF
+        return load_heif(bytes, path);
+#else
+        throw std::runtime_error(
+            "cannot read " + path +
+            ": HEIC/HEIF pictures need libheif. Install libheif-dev and "
+            "libheif-plugin-libde265, then rebuild the app.");
+#endif
+    }
 
     int w = 0, h = 0, channels = 0;
     // Forced to 3 channels: an RGBA or greyscale source is converted the
