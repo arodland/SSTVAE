@@ -163,13 +163,6 @@ QPixmap thumbnail(const std::filesystem::path& png, int w, int h) {
     return pix.scaled(w, h, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 }
 
-// Under the waveform: only L's one caution, since getting it wrong
-// splatters; the rest is on the (i) card (Jeff, 2026-10-12).
-QString waveform_note(const std::string& waveform) {
-    if (waveform == qrss_tx::WAVEFORM_L) return QObject::tr("Linear: keep the ALC out.");
-    return {};
-}
-
 // The (i) cards' colours: the window's own, with a green and an amber
 // dark enough to read on a light window and light enough on a dark one.
 QString hex(const QColor& c) { return c.name(QColor::HexRgb); }
@@ -233,9 +226,9 @@ QString waveform_card(const QPalette& pal, const std::string& waveform) {
             {QObject::tr("Needs 3.2 dB less SNR at the same average power"),
              QObject::tr("Less than half CE's width, so more stations fit"),
              QObject::tr("Header decodes to about -28 dB")},
-            {QObject::tr("Needs a linear chain: ALC out, linear amplifier"),
+            {QObject::tr("Because it's linear, avoid hitting the ALC, and use a linear "
+                         "amplifier"),
              QObject::tr("At the same peak power it only ties with CE"),
-             QObject::tr("Older listeners, and any on --just-ce, don't hear it"),
              QObject::tr("Not for Si5351 beacons")},
             {});
     } else {
@@ -244,7 +237,6 @@ QString waveform_card(const QPalette& pal, const std::string& waveform) {
             QObject::tr("A steady-amplitude, phase-modulated carrier. Nothing the transmitter "
                         "does to amplitude can hurt it."),
             {QObject::tr("Any amplifier, class C or D included"), QObject::tr("ALC is harmless"),
-             QObject::tr("Every QRSSTVAE listener hears it"),
              QObject::tr("Si5351 beacons can send it")},
             {QObject::tr("Needs 3.2 dB more SNR at the same average power"),
              QObject::tr("More than twice as wide as L")},
@@ -395,7 +387,8 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::SmoothPixmapTransform);
         const QSize sz = pix_.size().scaled(size(), Qt::KeepAspectRatio);
-        p.drawPixmap(QRect(QPoint(0, 0), sz), pix_);
+        // Centred across the column, its top under the choices.
+        p.drawPixmap(QRect(QPoint((width() - sz.width()) / 2, 0), sz), pix_);
     }
 
 private:
@@ -416,7 +409,6 @@ QrssScheduleWindow::QrssScheduleWindow(QrssScheduler* scheduler, QrssSends* send
     freq_->setValue(static_cast<int>(std::lround(d.freq_hz)));
     waveform_->setCurrentIndex(
         std::max(0, waveform_->findData(QString::fromStdString(d.waveform))));
-    waveform_note_->setText(waveform_note(d.waveform));
     set_chosen_slot(qs::earliest_slot(scheduler_->now()));
     connect(scheduler_, &QrssScheduler::changed, this, &QrssScheduleWindow::refresh);
     connect(sends_, &QrssSends::changed, this, &QrssScheduleWindow::refresh_sends);
@@ -660,11 +652,6 @@ QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
     waveform_row->addWidget(waveform_, 1);
     waveform_row->addWidget(waveform_info_);
     grid->addLayout(waveform_row, row++, 1);
-    waveform_note_ = new QLabel(form_box_);
-    waveform_note_->setObjectName(QStringLiteral("schedule_waveform_note"));
-    waveform_note_->setWordWrap(true);
-    style::dim(waveform_note_);
-    grid->addWidget(waveform_note_, row++, 1);
 
     freq_ = new QSpinBox(form_box_);
     freq_->setObjectName(QStringLiteral("schedule_freq"));
@@ -975,10 +962,6 @@ void QrssScheduleWindow::update_summary() {
     if (summary_ == nullptr) return;
     const qs::Entry e =
         form_entry(mode_, waveform_, freq_, chosen_slot(), times_->value(), every_->value());
-    if (waveform_note_ != nullptr) {
-        waveform_note_->setText(waveform_note(e.waveform));
-        waveform_note_->setVisible(!waveform_note_->text().isEmpty());
-    }
     if (mode_info_ != nullptr) mode_info_->refresh();
     if (waveform_info_ != nullptr) waveform_info_->refresh();
     // Only "choose a Send" is said unasked. Whether the form's send can

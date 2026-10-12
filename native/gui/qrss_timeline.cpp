@@ -150,13 +150,24 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
     QPainter p(this);
     const QPalette& pal = palette();
     p.fillRect(rect(), pal.color(QPalette::Base));
-    const QColor grid = pal.color(QPalette::Mid);
-    const QColor faint(grid.red(), grid.green(), grid.blue(), 160);
-    // A grey line down every quarter hour, one per slot (Jeff,
-    // 2026-10-10), solid since "rather subtle" (2026-10-12); the hour
-    // lines are twice as wide in the darker shade.
+    // The grid is the text colour mixed into the background, not the
+    // style's Mid and Dark: some themes make those barely differ from
+    // Base, and the quarter-hour lines vanished on Hamlet (Jeff,
+    // 2026-10-12). So it has contrast in a light theme and a dark one.
+    const QColor base = pal.color(QPalette::Base);
+    const QColor ink = pal.color(QPalette::Text);
+    const auto mix = [&base, &ink](double a) {
+        return QColor::fromRgbF(base.redF() + (ink.redF() - base.redF()) * a,
+                                base.greenF() + (ink.greenF() - base.greenF()) * a,
+                                base.blueF() + (ink.blueF() - base.blueF()) * a);
+    };
+    const QColor grid = mix(0.35);
+    const QColor faint = mix(0.25);
+    // A line down every quarter hour, one per slot (Jeff, 2026-10-10),
+    // solid since "rather subtle" (2026-10-12); the hour lines are twice
+    // as wide and darker.
     const QColor slot_line = grid;
-    const QPen hour_line(pal.color(QPalette::Dark), 2);
+    const QPen hour_line(mix(0.6), 2);
     const QColor text = pal.color(QPalette::Text);
     const QColor muted = style::secondary_text(pal);
 

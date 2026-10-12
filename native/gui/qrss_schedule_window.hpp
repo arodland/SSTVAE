@@ -177,7 +177,6 @@ private:
     QComboBox* mode_ = nullptr;
     QSpinBox* freq_ = nullptr;
     QComboBox* waveform_ = nullptr;
-    QLabel* waveform_note_ = nullptr;
     InfoButton* mode_info_ = nullptr;      // (i) cards beside the choices
     InfoButton* waveform_info_ = nullptr;
     QSpinBox* times_ = nullptr;     // repeats after the first send: 0 = once
