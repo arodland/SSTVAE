@@ -1,0 +1,8 @@
+{
+  "name": "qrss_ce",
+  "version": "0.0.0",
+  "description": "QRSSTVAE CE reference phase generator (see qrss_ce.h)",
+  "build": {
+    "srcFilter": ["+<qrss_ce.c>", "+<sha256.c>"]
+  }
+}
