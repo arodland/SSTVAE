@@ -40,6 +40,7 @@
 
 #include "compose_tools.hpp"
 #include "images/images.hpp"
+#include "info_button.hpp"
 #include "qrss_clock.hpp"
 #include "qrss_schedule.hpp"
 #include "qrss_sends.hpp"
@@ -162,16 +163,169 @@ QPixmap thumbnail(const std::filesystem::path& png, int w, int h) {
     return pix.scaled(w, h, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 }
 
-// What the waveform choice means for the operator, under the choice.
+// Under the waveform: only L's one caution, since getting it wrong
+// splatters; the rest is on the (i) card (Jeff, 2026-10-12).
 QString waveform_note(const std::string& waveform) {
-    if (waveform == qrss_tx::WAVEFORM_L) {
-        return QObject::tr(
-            "L: about 22 Hz wide and needs 3.2 dB less SNR at the same average power. It is "
-            "linear: keep the ALC out (drive below where ALC starts) and use a linear "
-            "amplifier. Listeners on current code hear it; older ones (or --just-ce) do not.");
+    if (waveform == qrss_tx::WAVEFORM_L) return QObject::tr("Linear: keep the ALC out.");
+    return {};
+}
+
+// The (i) cards' colours: the window's own, with a green and an amber
+// dark enough to read on a light window and light enough on a dark one.
+QString hex(const QColor& c) { return c.name(QColor::HexRgb); }
+bool dark_theme(const QPalette& pal) { return pal.color(QPalette::Base).lightness() < 128; }
+QString good_colour(const QPalette& pal) {
+    return dark_theme(pal) ? QStringLiteral("#5cc983") : QStringLiteral("#23824a");
+}
+QString cost_colour(const QPalette& pal) {
+    return dark_theme(pal) ? QStringLiteral("#f0a648") : QStringLiteral("#a85d00");
+}
+
+QString bullet_list(const QStringList& items) {
+    QString out;
+    // A table, not <ul>: a label's list indent is a fixed 40 px.
+    for (const QString& t : items) {
+        out += QStringLiteral("<tr><td valign=\"top\" style=\"padding-right:4px;\">\u2022</td>"
+                              "<td valign=\"top\" style=\"padding-bottom:3px;\">%1</td></tr>")
+                   .arg(t.toHtmlEscaped());
     }
-    return QObject::tr("CE: constant envelope, about 50 Hz wide. Any amplifier, ALC "
-                       "harmless; every QRSSTVAE listener hears it.");
+    return QStringLiteral("<table cellspacing=\"0\" cellpadding=\"0\" style=\"margin-top:3px;\">%1</table>")
+        .arg(out);
+}
+
+// Title, one line of what it is, "Better at" beside "Costs", then
+// whatever `extra` adds (a table, a footnote).
+QString info_html(const QPalette& pal, const QString& title, const QString& what,
+                  const QStringList& good, const QStringList& cost, const QString& extra) {
+    const QString muted = hex(style::secondary_text(pal));
+    const auto head = [](const QString& colour, const QString& text) {
+        return QStringLiteral("<p style=\"margin:0;\"><span style=\"color:%1; font-size:small; "
+                              "font-weight:600; letter-spacing:1px;\">%2</span></p>")
+            .arg(colour, text.toUpper().toHtmlEscaped());
+    };
+    return QStringLiteral(
+               "<p style=\"margin:0; font-weight:700;\">%1</p>"
+               "<p style=\"margin:2px 0 8px 0; color:%2;\">%3</p>"
+               "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr>"
+               "<td width=\"50%\" valign=\"top\">%4%5</td>"
+               "<td width=\"50%\" valign=\"top\" style=\"padding-left:10px;\">%6%7</td>"
+               "</tr></table>%8")
+        .arg(title.toHtmlEscaped(), muted, what.toHtmlEscaped(),
+             head(good_colour(pal), QObject::tr("Better at")), bullet_list(good),
+             head(cost_colour(pal), QObject::tr("Costs")), bullet_list(cost), extra);
+}
+
+QString footnote(const QPalette& pal, const QString& text) {
+    return QStringLiteral("<p style=\"margin:8px 0 0 0; color:%1; font-size:small;\">%2</p>")
+        .arg(hex(style::secondary_text(pal)), text.toHtmlEscaped());
+}
+
+// The Waveform (i): the chosen waveform, then L beside CE. Numbers from
+// the spec (qrss-spec rev 13 and docs/qrss/waveform-l.md).
+QString waveform_card(const QPalette& pal, const std::string& waveform) {
+    const bool l = waveform == qrss_tx::WAVEFORM_L;
+    QString body;
+    if (l) {
+        body = info_html(
+            pal, QObject::tr("L: linear, about 22 Hz"),
+            QObject::tr("A pilot tone with the data just below it. The Carrier is the pilot; "
+                        "the data sits 3 to 22 Hz under it."),
+            {QObject::tr("Needs 3.2 dB less SNR at the same average power"),
+             QObject::tr("Less than half CE's width, so more stations fit"),
+             QObject::tr("Header decodes to about -28 dB")},
+            {QObject::tr("Needs a linear chain: ALC out, linear amplifier"),
+             QObject::tr("At the same peak power it only ties with CE"),
+             QObject::tr("Older listeners, and any on --just-ce, don't hear it"),
+             QObject::tr("Not for Si5351 beacons")},
+            {});
+    } else {
+        body = info_html(
+            pal, QObject::tr("CE: constant envelope, about 50 Hz"),
+            QObject::tr("A steady-amplitude, phase-modulated carrier. Nothing the transmitter "
+                        "does to amplitude can hurt it."),
+            {QObject::tr("Any amplifier, class C or D included"), QObject::tr("ALC is harmless"),
+             QObject::tr("Every QRSSTVAE listener hears it"),
+             QObject::tr("Si5351 beacons can send it")},
+            {QObject::tr("Needs 3.2 dB more SNR at the same average power"),
+             QObject::tr("More than twice as wide as L")},
+            {});
+    }
+    const QString line = hex(pal.color(QPalette::Mid));
+    const QString muted = hex(style::secondary_text(pal));
+    const auto cell = [l](bool col_l, const QString& t) {
+        const bool sel = col_l == l;
+        return QStringLiteral("<td align=\"right\" style=\"font-family:monospace;%1\">%2</td>")
+            .arg(sel ? QStringLiteral(" font-weight:700;") : QString(), t.toHtmlEscaped());
+    };
+    QString rows;
+    const struct { const char* what; const char* l; const char* ce; } table[] = {
+        {"Width (99%)", "21.5 Hz", "51.5 Hz"},
+        {"Good picture, 1 pass", "-14.0 dB", "-10.9 dB"},
+        {"Good picture, 16 passes", "-29.6 dB", "-26.4 dB"},
+        {"Amplifier", "linear", "any"},
+    };
+    for (const auto& r : table) {
+        rows += QStringLiteral("<tr><td style=\"color:%1;\">%2</td>%3%4</tr>")
+                    .arg(muted, QObject::tr(r.what).toHtmlEscaped(),
+                         cell(true, QObject::tr(r.l)), cell(false, QObject::tr(r.ce)));
+    }
+    body += QStringLiteral(
+                "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"2\" "
+                "style=\"margin-top:10px; border-top:1px solid %1;\">"
+                "<tr><td></td>%2%3</tr>%4</table>")
+                .arg(line, cell(true, QStringLiteral("L")), cell(false, QStringLiteral("CE")), rows);
+    body += footnote(pal, QObject::tr("SNR in 2500 Hz on a quiet path, at the same average "
+                                      "power. Passes of either waveform add into the same "
+                                      "picture."));
+    return body;
+}
+
+// The Mode (i): what the chosen mode sends and what it trades.
+QString mode_card(const QPalette& pal, const std::string& mode) {
+    QString body;
+    if (mode == "C") {
+        body = info_html(pal, QObject::tr("Mode C: 90 minutes, 3 passes"),
+                         QObject::tr("All three groups of the picture, one pass each."),
+                         {QObject::tr("The most detail"),
+                          QObject::tr("Pass 1 alone still gives a rougher picture")},
+                         {QObject::tr("Three times the time on the air"),
+                          QObject::tr("Full detail needs all three passes heard")},
+                         {});
+    } else if (mode == "B") {
+        body = info_html(pal, QObject::tr("Mode B: 60 minutes, 2 passes"),
+                         QObject::tr("Mode A's pass, then a second pass adding the next group."),
+                         {QObject::tr("More detail than A"),
+                          QObject::tr("Pass 1 alone still gives a rougher picture")},
+                         {QObject::tr("Twice the time on the air"),
+                          QObject::tr("The detail needs both passes heard")},
+                         {});
+    } else {
+        body = info_html(pal, QObject::tr("Mode A: 30 minutes, 1 pass"),
+                         QObject::tr("The picture's first group, in one pass."),
+                         {QObject::tr("Shortest time on the air"),
+                          QObject::tr("Easiest to repeat, so receivers can add the passes")},
+                         {QObject::tr("The least detail of the three")}, {});
+    }
+    return body + footnote(pal, QObject::tr("Each pass is 30 minutes on a quarter hour."));
+}
+
+// A box's heading, as in the mockups: small, letter-spaced capitals in
+// the quieter text colour (Jeff, 2026-10-12: "the fonts in your mockups
+// are better"). A label rather than the group box's own title, whose
+// font would also be every child's.
+QFont heading_font(QFont f) {
+    f.setCapitalization(QFont::AllUppercase);
+    f.setLetterSpacing(QFont::PercentageSpacing, 108);
+    f.setWeight(QFont::DemiBold);
+    if (f.pointSizeF() > 0) f.setPointSizeF(f.pointSizeF() * 0.85);
+    return f;
+}
+
+QLabel* heading(const QString& text, QWidget* parent) {
+    auto* l = new QLabel(text, parent);
+    l->setFont(heading_font(l->font()));
+    style::dim(l);
+    return l;
 }
 
 // `times` repeats after the first send (TIMES_FOREVER: until removed),
@@ -286,8 +440,10 @@ void QrssScheduleWindow::build() {
     auto* outer = new QVBoxLayout(this);
 
     // --- Upcoming: the timeline --------------------------------------
-    auto* upcoming = new QGroupBox(tr("Upcoming"), this);
+    auto* upcoming = new QGroupBox(this);
+    upcoming->setObjectName(QStringLiteral("schedule_upcoming"));
     auto* up_layout = new QVBoxLayout(upcoming);
+    up_layout->addWidget(heading(tr("Upcoming"), upcoming));
     timeline_ = new QrssTimeline(upcoming);
     timeline_scroll_ = new QScrollArea(upcoming);
     timeline_scroll_->setObjectName(QStringLiteral("schedule_timeline_scroll"));
@@ -374,8 +530,18 @@ void QrssScheduleWindow::build() {
 }
 
 QWidget* QrssScheduleWindow::build_sends(QWidget* parent) {
-    auto* box = new QGroupBox(tr("Sends (click, or click and drag to add to timeline)"), parent);
+    auto* box = new QGroupBox(parent);
+    box->setObjectName(QStringLiteral("schedule_sends_box"));
     auto* layout = new QVBoxLayout(box);
+    {
+        auto* title = new QHBoxLayout;
+        title->addWidget(heading(tr("Sends"), box));
+        auto* how = new QLabel(tr("click, or click and drag to add to timeline"), box);
+        how->setObjectName(QStringLiteral("schedule_sends_how"));
+        style::dim(how);
+        title->addWidget(how, 1);
+        layout->addLayout(title);
+    }
     sends_list_ = new SendsList(box);
     sends_list_->setObjectName(QStringLiteral("schedule_sends"));
     // Drag one onto the timeline to schedule it there.
@@ -440,9 +606,10 @@ QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
     columns->setContentsMargins(0, 0, 0, 0);
 
     // --- the Send ----------------------------------------------------
-    form_box_ = new QGroupBox(tr("Send"), both);
+    form_box_ = new QGroupBox(both);
     form_box_->setObjectName(QStringLiteral("schedule_form"));
     auto* left = new QVBoxLayout(form_box_);
+    left->addWidget(heading(tr("Send"), form_box_));
     auto* grid = new QGridLayout;
     grid->setColumnStretch(1, 1);
     int row = 0;
@@ -466,7 +633,14 @@ QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
                        QString::fromStdString(s));
     }
     grid->addWidget(new QLabel(tr("Mode:"), form_box_), row, 0);
-    grid->addWidget(mode_, row++, 1);
+    mode_info_ = new InfoButton(
+        [this] { return mode_card(palette(), mode_->currentData().toString().toStdString()); },
+        form_box_);
+    mode_info_->setObjectName(QStringLiteral("schedule_mode_info"));
+    auto* mode_row = new QHBoxLayout;
+    mode_row->addWidget(mode_, 1);
+    mode_row->addWidget(mode_info_);
+    grid->addLayout(mode_row, row++, 1);
 
     waveform_ = new QComboBox(form_box_);
     waveform_->setObjectName(QStringLiteral("schedule_waveform"));
@@ -476,7 +650,16 @@ QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
     waveform_->setToolTip(tr("How the picture goes on the air. Both carry the same picture, "
                              "and passes of either add into it at a receiver."));
     grid->addWidget(new QLabel(tr("Waveform:"), form_box_), row, 0);
-    grid->addWidget(waveform_, row++, 1);
+    waveform_info_ = new InfoButton(
+        [this] {
+            return waveform_card(palette(), waveform_->currentData().toString().toStdString());
+        },
+        form_box_);
+    waveform_info_->setObjectName(QStringLiteral("schedule_waveform_info"));
+    auto* waveform_row = new QHBoxLayout;
+    waveform_row->addWidget(waveform_, 1);
+    waveform_row->addWidget(waveform_info_);
+    grid->addLayout(waveform_row, row++, 1);
     waveform_note_ = new QLabel(form_box_);
     waveform_note_->setObjectName(QStringLiteral("schedule_waveform_note"));
     waveform_note_->setWordWrap(true);
@@ -533,13 +716,16 @@ QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
 
     // --- At Time ------------------------------------------------------
     auto* right = new QVBoxLayout;
-    at_box_ = new QGroupBox(tr("At Time"), both);
+    at_box_ = new QGroupBox(both);
     at_box_->setObjectName(QStringLiteral("schedule_at_time"));
     auto* at = new QVBoxLayout(at_box_);
+    at->addWidget(heading(tr("At Time"), at_box_));
     auto* faces = new QHBoxLayout;
     auto clock_column = [this, faces](QrssClockFace* face, QLabel* caption, QLabel* readout) {
         auto* col = new QVBoxLayout;
         caption->setAlignment(Qt::AlignHCenter);
+        caption->setFont(heading_font(caption->font()));
+        style::dim(caption);
         readout->setAlignment(Qt::AlignHCenter);
         readout->setTextFormat(Qt::RichText);
         col->addWidget(caption);
@@ -759,7 +945,8 @@ void QrssScheduleWindow::set_chosen_slot(double slot) {
     const QDateTime local = utc_of(slot).toLocalTime();
     local_caption_->setText(tr("Local (%1)").arg(local.timeZoneAbbreviation()));
     const auto readout = [](const QrssClockFace* face) {
-        return QStringLiteral("<b>%1</b><br><small>%2</small>")
+        return QStringLiteral("<span style=\"font-family:monospace; font-size:large;\">%1</span>"
+                              "<br><small>%2</small>")
             .arg(face->readout().toHtmlEscaped(), face->date_text().toHtmlEscaped());
     };
     utc_readout_->setText(readout(clock_utc_));
@@ -788,7 +975,12 @@ void QrssScheduleWindow::update_summary() {
     if (summary_ == nullptr) return;
     const qs::Entry e =
         form_entry(mode_, waveform_, freq_, chosen_slot(), times_->value(), every_->value());
-    if (waveform_note_ != nullptr) waveform_note_->setText(waveform_note(e.waveform));
+    if (waveform_note_ != nullptr) {
+        waveform_note_->setText(waveform_note(e.waveform));
+        waveform_note_->setVisible(!waveform_note_->text().isEmpty());
+    }
+    if (mode_info_ != nullptr) mode_info_->refresh();
+    if (waveform_info_ != nullptr) waveform_info_->refresh();
     // Only "choose a Send" is said unasked. Whether the form's send can
     // go where it says (too soon, an overlap, an impossible repeat) is
     // said when Add is clicked: shown live, it appeared unprovoked

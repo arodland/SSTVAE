@@ -19,6 +19,7 @@
 // screenshot tool.
 
 #include <QApplication>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -57,6 +58,7 @@
 #include "qrss_editor.hpp"
 #include "qrss_page.hpp"
 #include "qrss_spectrogram.hpp"
+#include "info_button.hpp"
 #include "qrss_schedule_window.hpp"
 #include "qrss_sends.hpp"
 #include "qrss_timeline.hpp"
@@ -315,6 +317,25 @@ int main(int argc, char** argv) {
         w.grab().save(path);
         std::printf("%s (%zu scheduled, %zu sends)\n", path.toLocal8Bit().constData(),
                     scheduler.entries().size(), sends.sends().size());
+
+        // The (i) cards beside Mode and Waveform, each for both choices.
+        for (const char* name : {"schedule_waveform_info", "schedule_mode_info"}) {
+            auto* info = w.findChild<sstvae::gui::InfoButton*>(QString::fromLatin1(name));
+            auto* combo = w.findChild<QComboBox*>(QString::fromLatin1(
+                std::string(name) == "schedule_waveform_info" ? "schedule_waveform" : "schedule_mode"));
+            if (info == nullptr || combo == nullptr) continue;
+            for (int i = 0; i < combo->count(); ++i) {
+                combo->setCurrentIndex(i);
+                info->show_card();
+                app.processEvents();
+                const QString ipath = QStringLiteral("%1/%2-%3.png")
+                                          .arg(out, QString::fromLatin1(name), combo->currentData().toString());
+                if (info->card() != nullptr) info->card()->grab().save(ipath);
+                std::printf("%s\n", ipath.toLocal8Bit().constData());
+                info->hide_card();
+            }
+            combo->setCurrentIndex(0);
+        }
 
         // The right-click menu on the first block, and its two submenus.
         const auto& blocks = w.timeline()->blocks();

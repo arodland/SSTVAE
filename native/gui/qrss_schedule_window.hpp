@@ -52,6 +52,7 @@ class QrssScheduler;
 class QrssSends;
 class QrssTimeline;
 
+class InfoButton;
 class QrssClockFace;
 class SendPicture;
 
@@ -177,6 +178,8 @@ private:
     QSpinBox* freq_ = nullptr;
     QComboBox* waveform_ = nullptr;
     QLabel* waveform_note_ = nullptr;
+    InfoButton* mode_info_ = nullptr;      // (i) cards beside the choices
+    InfoButton* waveform_info_ = nullptr;
     QSpinBox* times_ = nullptr;     // repeats after the first send: 0 = once
     QLabel* every_label_ = nullptr;
     QSpinBox* every_ = nullptr;     // minutes; at the mode's own length, back to back

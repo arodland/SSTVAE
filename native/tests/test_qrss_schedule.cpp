@@ -16,6 +16,7 @@
 #include <QGroupBox>
 #include <QLineEdit>
 #include <QMenu>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -44,6 +45,7 @@
 #include "qrss_schedule.hpp"
 #include "overlay/model.hpp"
 #include "overlay_editor.hpp"
+#include "info_button.hpp"
 #include "qrss_clock.hpp"
 #include "qrss_editor.hpp"
 #include "qrss_schedule_window.hpp"
@@ -665,13 +667,47 @@ void test_the_window(const std::filesystem::path& dir) {
     auto* note = w.findChild<QLabel*>(QStringLiteral("schedule_waveform_note"));
     check::is_true(waveform && note && waveform->currentData().toString() == QStringLiteral("CE"),
                    "window: CE unless L is chosen");
-    if (waveform && note) {
+    auto* wf_info = w.findChild<InfoButton*>(QStringLiteral("schedule_waveform_info"));
+    auto* mode_info = w.findChild<InfoButton*>(QStringLiteral("schedule_mode_info"));
+    check::is_true(wf_info && mode_info, "info: an (i) beside Waveform and beside Mode");
+    if (waveform && note && wf_info && mode_info) {
+        check::is_true(note->isHidden(), "window: CE needs no note");
+        check::is_true(wf_info->html().contains(QStringLiteral("CE: constant envelope")) &&
+                           wf_info->html().contains(QStringLiteral("Si5351 beacons can send")),
+                       "info: the waveform card is CE's while CE is chosen");
+        // Shown, it follows the choice.
+        wf_info->show_card();
+        QApplication::processEvents();
+        check::is_true(wf_info->card_shown() && !wf_info->pinned(),
+                       "info: the card shows (as on hover)");
         waveform->setCurrentIndex(waveform->findData(QStringLiteral("L")));
-        check::is_true(note->text().contains(QStringLiteral("ALC")) &&
-                           note->text().contains(QStringLiteral("current code")) &&
+        QApplication::processEvents();
+        auto* text = wf_info->card() ? wf_info->card()->findChild<QLabel*>(
+                                           QStringLiteral("info_card_text"))
+                                     : nullptr;
+        check::is_true(!note->isHidden() && note->text().contains(QStringLiteral("ALC")) &&
                            summary->text().contains(QStringLiteral("L mode B")),
-                       "window: choosing L says what it needs");
+                       "window: choosing L keeps its one caution under it");
+        check::is_true(text && text->text().contains(QStringLiteral("L: linear")) &&
+                           text->text().contains(QStringLiteral("--just-ce")),
+                       "info: an open card follows the choice to L");
+        wf_info->hide_card();
+        check::is_true(!wf_info->card_shown(), "info: and hides");
+        // A click pins it; Esc closes it.
+        wf_info->click();
+        QApplication::processEvents();
+        check::is_true(wf_info->card_shown() && wf_info->pinned(), "info: a click pins the card");
+        QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QApplication::sendEvent(&w, &esc);
+        check::is_true(!wf_info->card_shown() && !wf_info->pinned(), "info: Esc closes it");
+        wf_info->click();
+        wf_info->click();
+        check::is_true(!wf_info->card_shown(), "info: so does a second click");
         waveform->setCurrentIndex(waveform->findData(QStringLiteral("CE")));
+        mode->setCurrentIndex(mode->findData(QStringLiteral("C")));
+        check::is_true(mode_info->html().contains(QStringLiteral("Mode C: 90 minutes")),
+                       "info: the mode card is the chosen mode's");
+        mode->setCurrentIndex(mode->findData(QStringLiteral("B")));
     }
     mode->setCurrentIndex(mode->findData(QStringLiteral("A")));
     times->setValue(times->maximum());

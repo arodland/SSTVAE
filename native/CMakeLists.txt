@@ -540,6 +540,7 @@ if(_want_gui)
     gui/qrss_editor.cpp
     gui/qrss_timeline.cpp
     gui/qrss_clock.cpp
+    gui/info_button.cpp
     gui/qrss_page.cpp
     gui/qrss_spectrogram.cpp
     gui/spectrum_feed.cpp
