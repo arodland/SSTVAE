@@ -636,9 +636,10 @@ QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
 
     waveform_ = new QComboBox(form_box_);
     waveform_->setObjectName(QStringLiteral("schedule_waveform"));
+    // L first and the default (Jeff, 2026-10-12).
+    waveform_->addItem(tr("L - linear, 22 Hz"), QString::fromLatin1(qrss_tx::WAVEFORM_L));
     waveform_->addItem(tr("CE - constant envelope, 50 Hz"),
                        QString::fromLatin1(qrss_tx::WAVEFORM_CE));
-    waveform_->addItem(tr("L - linear, 22 Hz"), QString::fromLatin1(qrss_tx::WAVEFORM_L));
     waveform_->setToolTip(tr("How the picture goes on the air. Both carry the same picture, "
                              "and passes of either add into it at a receiver."));
     grid->addWidget(new QLabel(tr("Waveform:"), form_box_), row, 0);
@@ -1365,7 +1366,7 @@ QMenu* QrssScheduleWindow::menu_for(const std::string& entry, int send) {
 
     QMenu* waveforms = menu->addMenu(tr("Change Waveform"));
     waveforms->setObjectName(QStringLiteral("menu_change_waveform"));
-    for (const char* w : {qrss_tx::WAVEFORM_CE, qrss_tx::WAVEFORM_L}) {
+    for (const char* w : {qrss_tx::WAVEFORM_L, qrss_tx::WAVEFORM_CE}) {
         const std::string waveform(w);
         QAction* a = waveforms->addAction(waveform == qrss_tx::WAVEFORM_CE
                                               ? tr("CE - constant envelope")

@@ -1711,7 +1711,7 @@ void TransmitPanel::show_schedule() {
                 d.freq_hz = scheduler_->entries().empty()
                                 ? app_->config().transmit.qrss_freq_hz
                                 : scheduler_->entries().back().freq_hz;
-                // And the waveform last scheduled, else CE.
+                // And the waveform last scheduled, else L.
                 if (!scheduler_->entries().empty()) {
                     d.waveform = scheduler_->entries().back().waveform;
                 }

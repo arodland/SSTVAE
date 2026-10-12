@@ -64,7 +64,7 @@ public:
         std::string mode = "A";
         double freq_hz = 1500.0;
         double dial_hz = 0.0;   // the radio's dial now, 0 if unknown
-        std::string waveform = "CE";
+        std::string waveform = "L";   // the default since 2026-10-12 (Jeff)
     };
     // How far ahead the timeline reaches.
     static constexpr double TIMELINE_HOURS = 48.0;

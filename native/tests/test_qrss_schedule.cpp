@@ -575,7 +575,8 @@ void test_the_window(const std::filesystem::path& dir) {
     const std::string red = sends.add("Red", solid(200, 0, 0), {}, solid(255, 0, 0));
     const std::string blue = sends.add("Blue", solid(0, 0, 200), {}, solid(0, 0, 255));
     QrssScheduleWindow w(s.get(), &sends,
-                         [] { return QrssScheduleWindow::Defaults{"B", 1234.0}; }, {});
+                         [] { return QrssScheduleWindow::Defaults{"B", 1234.0, 0.0, "CE"}; },
+                         {});
     w.resize(1000, 700);
     w.show();
     QApplication::processEvents();
@@ -662,13 +663,17 @@ void test_the_window(const std::filesystem::path& dir) {
         times->setValue(0);
         every->setValue(every->minimum());
     }
-    // The waveform: CE unless chosen; what each needs is on its (i) card,
+    // The waveform: what each needs is on its (i) card,
     // and nothing appears under the choice (Jeff, 2026-10-12).
     auto* waveform = w.findChild<QComboBox*>(QStringLiteral("schedule_waveform"));
     check::is_true(w.findChild<QLabel*>(QStringLiteral("schedule_waveform_note")) == nullptr,
                    "window: no note under the waveform");
     check::is_true(waveform && waveform->currentData().toString() == QStringLiteral("CE"),
-                   "window: CE unless L is chosen");
+                   "window: the waveform the Transmit pane hands over (here CE)");
+    check::is_true(QrssScheduleWindow::Defaults{}.waveform == "L" && waveform &&
+                       waveform->itemData(0).toString() == QStringLiteral("L") &&
+                       waveform->itemData(1).toString() == QStringLiteral("CE"),
+                   "window: L is the default and first in the list, CE second");
     auto* wf_info = w.findChild<InfoButton*>(QStringLiteral("schedule_waveform_info"));
     auto* mode_info = w.findChild<InfoButton*>(QStringLiteral("schedule_mode_info"));
     check::is_true(wf_info && mode_info, "info: an (i) beside Waveform and beside Mode");
