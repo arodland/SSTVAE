@@ -418,14 +418,47 @@ def _data_span_mask(spec: LFrameSpec, tau: np.ndarray) -> np.ndarray:
     return sel
 
 
-def loopback_stats(sym, spec: LFrameSpec, *, keying=None, fs: int = CLIP_FS) -> dict:
+def _pilot_sections(spec: LFrameSpec, tau: np.ndarray, lead_in_s: float) -> dict:
+    """Sample masks of the frame's pilot sections, each away from its edges
+    (the clipper's correction is filtered, so it reaches a few symbols past
+    a section's last pulse): lead-in, preamble, header, data, and the
+    callsign windows' units 8..183 ("id"), each less SPAN at both ends
+    (units 16..175 of a window)."""
+    lay = layout(spec)
+    pre_end = lay.pos[spec.n_pre]
+    hdr_end = lay.pos[spec.n_pre + spec.n_hdr] if spec.n_hdr else pre_end
+    inner = np.zeros(len(tau), dtype=bool)
+    for a, _ in lay.win_pos:
+        x = tau - (a - 0.5)
+        inner |= (x > ID_RAMP_UNITS + SPAN) & (x < L_CW_WINDOW - ID_RAMP_UNITS - SPAN)
+    out = dict(pre=(tau > SPAN) & (tau < pre_end - SPAN), data=_data_span_mask(spec, tau))
+    if lead_in_s > 0:
+        out["lead"] = tau < spec.keyed_start_pos - 2
+    if spec.n_hdr:
+        out["hdr"] = (tau > pre_end + SPAN) & (tau < hdr_end - SPAN)
+    if inner.any():
+        out["id"] = inner
+    return out
+
+
+def loopback_stats(sym, spec: LFrameSpec, *, keying=None, fs: int = CLIP_FS,
+                   lead_in_s: float = 0.0) -> dict:
     """Noiseless genie loopback of one L frame: what the clipper did.
 
     Returns, with the matched filter at true timing on the clipped signal:
       gain_data, gain_ref, gain_hdr  complex LS gains of the symbol classes
+      gain_pre        the same for the preamble
       data_vs_ref     |gain_data| / |gain_ref| (spec 2.2: about 0.88)
       sinr_db         data SINR, 10 log10(|g|^2 E|a|^2 / E|m - g a|^2): per latent too
       sinr_ref_db     the same for the references
+      sinr_hdr_db, sinr_pre_db   the same for the header symbols and the preamble
+      resid           per latent (data) or coded bit (header): E|m/g - a|^2 / E|a|^2
+                      at each class's own gain g, for "data", "ref", "hdr", "pre"
+                      (the clipper's distortion in latent units, `ldemod.D_*`)
+      gain_pilot      complex LS gains of the clipped pilot against the unclipped
+                      `pilot(tau) / A_ID`, per section ("lead" with a lead-in, "pre",
+                      "hdr" with a header block, "data", "id" for window units
+                      8..183), each away from its edges by SPAN symbols
       pilot_frac      the pilot tone's share of the power during the data (13.8%)
       papr_db         envelope PAPR over the data section, 99.99% quantile (3.2 dB)
       avg_power       mean |z|^2 over the data section before the 1/A_id scaling
@@ -433,7 +466,7 @@ def loopback_stats(sym, spec: LFrameSpec, *, keying=None, fs: int = CLIP_FS) -> 
       split           power shares: data, pilot + references, distortion
     """
     lay = layout(spec)
-    bb = frame_baseband(sym, spec, keying=keying, fs=fs)
+    bb = frame_baseband(sym, spec, keying=keying, lead_in_s=lead_in_s, fs=fs)
     zd = to_data_centre(bb)
     m = matched_filter(zd, fs, bb.n0, lay.pos)
     sym = np.asarray(sym, dtype=np.complex128)
@@ -447,8 +480,12 @@ def loopback_stats(sym, spec: LFrameSpec, *, keying=None, fs: int = CLIP_FS) -> 
 
     g_d, s_d = fit(lay.data)
     g_r, s_r = fit(lay.ref)
-    g_h = fit(lay.hdr_sym)[0] if len(lay.hdr_sym) else complex("nan")
+    g_p, s_p = fit(lay.pre)
+    g_h, s_h = fit(lay.hdr_sym) if len(lay.hdr_sym) else (complex("nan"), float("nan"))
     tau = tau_grid(fs, bb.n0, len(bb.z))
+    tmpl = pilot(tau, spec, keying, lead_in_s) / A_ID
+    gain_pilot = {k: complex(np.vdot(tmpl[s], bb.z[s]) / np.vdot(tmpl[s], tmpl[s]))
+                  for k, s in _pilot_sections(spec, tau, lead_in_s).items() if s.sum() >= 50}
     sel = _data_span_mask(spec, tau)
     seg = bb.z[sel]
     p_tot = float(np.mean(abs(seg) ** 2))
@@ -458,8 +495,12 @@ def loopback_stats(sym, spec: LFrameSpec, *, keying=None, fs: int = CLIP_FS) -> 
     n_dat = len(lay.data)
     p_data = abs(g_d) ** 2 * data_pow * n_dat / (n_dat + n_ref)
     p_ref = abs(g_r) ** 2 * n_ref / (n_dat + n_ref)
+    resid = dict(data=10 ** (-s_d / 10), ref=10 ** (-s_r / 10), hdr=10 ** (-s_h / 10),
+                 pre=10 ** (-s_p / 10))
     return dict(gain_data=complex(g_d), gain_ref=complex(g_r), gain_hdr=complex(g_h),
-                data_vs_ref=float(abs(g_d) / abs(g_r)), sinr_db=s_d, sinr_ref_db=s_r,
+                gain_pre=complex(g_p), data_vs_ref=float(abs(g_d) / abs(g_r)),
+                sinr_db=s_d, sinr_ref_db=s_r, sinr_hdr_db=s_h, sinr_pre_db=s_p,
+                resid=resid, gain_pilot=gain_pilot,
                 pilot_frac=p_pilot / p_tot, papr_db=papr_db(seg),
                 avg_power=p_tot * A_ID ** 2, width_hz=occupied_hz(seg, fs),
                 split=dict(data=p_data / p_tot, pilot_ref=(p_pilot + p_ref) / p_tot,

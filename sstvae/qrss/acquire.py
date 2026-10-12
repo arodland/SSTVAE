@@ -82,6 +82,33 @@ The spectrogram is computed once on FE and the channels are bin ranges
 of it, which gives the same 0.25 Hz bins as channelising first at a
 fraction of the cost.
 
+**Waveform L** (`acquire` with a tuple of frames, at most one per
+waveform: the joint listener). L's named frequency, its A1 line and
+everything reported for it is the pilot; its data band lies 3.10-22.07
+Hz below. A2 is per waveform (`PreambleKind`: sequence, symbol, chunk,
+where the symbols sit and the phase convention), and one channelisation
+and notch at a line (`_a2_input`) serves both: A2-L mixes the data centre
+up to 0 Hz (f_p = 12207/970 Hz, from nominal t0) and matched-filters with
+L's pulse, then correlates with the QPSK preamble in ten 33-symbol (2 s)
+chunks, conj(b) templates, so the same Gamma(10) statistic, scales and
+threshold apply. The pilot is notched out with the carrier's notch and
+what is left of it lands 12.58 Hz above the data centre, outside L's
++-9.48 Hz filter. Given the pilot line A2-L passes 8/8 SHORT preambles at
+-31 dB (Lambda ~43, timing rms 0.08 T_L), but during the preamble the
+pilot is only 10.5% of L's power, so A1 sees it to about -26 dB (design
+8.1): A2-L also runs at a pilot hypothesis above each A1 line
+(`pilot_lines`), where a data-band lump took A1's line. Arbitration: the
+symbol-rate aliases per waveform at its own T, then L's band ownership
+(`drop_band_owned`, the -1/T_L alias inside its own data band), then one
+hit per signal across waveforms (`merge_hits`). A3 runs once, its
+emission still the line's (pilot-only for L, so L reaches A3's floor
+~6 dB before CE); each hit carries a spectral-shape test (`shape_z`:
+L's data are one-sided below its pilot, CE's sidebands symmetric) and,
+gated as L, a path re-anchored on the pilot (`l_pilot_bins`), the shape
+along which fills in where the hit's own is ambiguous.
+`Acquisition.detections` orders the candidates for the gate, each
+carrying its waveform.
+
 **Timing convention.** A detection's `Timing.tau0` is in CH samples
 (1/250 s) counted from the nominal t0 on the receiver's clock: the
 preamble's first symbol was received tau0/250 s after nominal t0.
@@ -89,6 +116,8 @@ preamble's first symbol was received tau0/250 s after nominal t0.
 
 from __future__ import annotations
 
+import dataclasses
+import functools
 import math
 from dataclasses import dataclass, field
 
@@ -96,10 +125,25 @@ import numpy as np
 from scipy import ndimage, signal, special
 from scipy.interpolate import CubicSpline
 
-from . import ce, frontend
-from .constants import CARRIER_BAND_HZ, CH_FS, FE_CENTER_HZ, FE_FS, N_PRE, T_SYM
+from . import ce, frontend, lwave
+from .constants import (
+    CARRIER_BAND_HZ,
+    CH_FS,
+    FE_CENTER_HZ,
+    FE_FS,
+    L_EDGE_HZ,
+    L_N_PRE,
+    L_PILOT_HZ,
+    L_T_SYM,
+    N_PRE,
+    SPAN,
+    T_SYM,
+    WAVEFORM_CE,
+    WAVEFORM_L,
+    WAVEFORM_NAMES,
+)
 from .frame import FrameSpec
-from .sequences import preamble_ce
+from .sequences import preamble_ce, preamble_l
 from .types import CarrierCandidate, Detection, FreqPath, Timing
 
 # --- shared spectrogram ------------------------------------------------------------------
@@ -135,6 +179,16 @@ A2_SCALES = (1, 2, 5, 10)                # coherent runs of 2 s chunks: 2, 4, 10
 A2_ALIAS_K = (1, 2)                      # a hit at f +- k/T of a stronger one, same timing,
 A2_ALIAS_HZ = 0.5                        # is that one seen through the symbol-rate alias
 A2_ALIAS_RATIO = 3.0
+# Waveform L (the joint acquisition, `acquire` with a tuple of frames).
+L_BAND_HZ = (float(L_PILOT_HZ - L_EDGE_HZ), float(L_PILOT_HZ + L_EDGE_HZ))   # 3.10..22.07 Hz:
+                                         # L's data band, below its pilot
+L_OWN_HZ = (3.1, 22.1)                   # an L hit this far below a stronger one, same timing, is
+                                         # it; a pilot may hide this far above an A1 line
+L_OWN_T = 3.0                            # "same timing" for that, in L symbols (the -1/T_L alias's
+                                         # timing peak is broad: measured -1.9..+0.8 T_L off)
+L_HINT_OFFSETS_HZ = (0.0, -1.0, 1.0)     # an L hint A1 cannot see: A2-L at f and f +- 1 Hz
+WAVEFORM_MERGE_HZ = 5.0                  # a CE and an L hit this close, same timing: one signal
+                                         # (receiver.MERGE_HZ)
 
 # --- A3 --------------------------------------------------------------------------------------
 
@@ -148,6 +202,11 @@ TBD_MAX_STEP = 2                         # bins per hop (0.5 Hz / 2 s = 15 Hz/mi
 TBD_COST = 0.5                           # per bin of step, in noise-emission sd
 TBD_PFA = 1e-3
 TBD_DEDUP_HZ = 10.0
+# The spectral-shape test on an A3 path (`shape_z`, waveform-aware acquisition):
+SHAPE_L_Z = 4.0                          # z1 (below minus above, N(0,1) on noise) over this: L
+SHAPE_CE_ABOVE_Z = 3.0                   # CE: power above the line this significant,
+SHAPE_CE_MAX_Z1 = 3.0                    # and the two sides this alike
+L_ANCHOR_HZ = (-6.0, 26.0)               # an L pilot looked for this far about an A3 path's line
 
 # Gumbel of Z on noise-only captures, tabulated against n_frames (the
 # TINY, SHORT, MEDIUM and FULL frames) and interpolated linearly in
@@ -376,6 +435,13 @@ def hint_line(cs: CarrierStats, f_hz: float, fs: float = FE_FS, *, pfa: float = 
     b, v = int(near[k]), float(sub[d, k])
     if v <= a1_threshold(cs.M, pfa, fs):
         return CarrierCandidate(f_hz=float(f_hz), drift_hz_per_min=0.0, metric=v)
+    return _cell_line(cs, b, d, v)
+
+
+def _cell_line(cs: CarrierStats, b: int, d: int, v: float) -> CarrierCandidate:
+    """A1's cell (bin b, drift d, statistic v) as a line, refined as
+    `carrier_lines` does: straight unless the drift adds 10%, then a
+    parabola on the log statistic between bins."""
     d0 = int(np.argmin(np.abs(cs.drifts)))
     if v - float(cs.stat[d0, b]) < A1_DRIFT_MARGIN * (v - cs.M):
         d = d0
@@ -386,6 +452,34 @@ def hint_line(cs: CarrierStats, f_hz: float, fs: float = FE_FS, *, pfa: float = 
     df = cs.f_hz[1] - cs.f_hz[0]
     return CarrierCandidate(f_hz=float(cs.f_hz[b]) + off * df,
                             drift_hz_per_min=float(cs.drifts[d]), metric=v)
+
+
+def pilot_lines(cs: CarrierStats, lines, *, sep_hz: float = A2_ALIAS_HZ) -> list[CarrierCandidate]:
+    """L pilot hypotheses beside A1's lines: for each line f, A1's best
+    (bin, drift) cell in (f + 3.1, f + 22.1] Hz, refined as a line.
+
+    During the preamble an L pilot carries 10.5% of the power and its data
+    band's 'lumps' (the fixed preamble's periodogram) sit 10-20 Hz below
+    it, so a lump can take A1's line and, by the 10 Hz separation, hide
+    the pilot above it. The cell need not clear A1's threshold (A2-L
+    judges it). A hypothesis within sep_hz of a line or of an earlier
+    hypothesis is dropped: A2's df search (+-0.5 Hz) covers it already.
+    """
+    lo_hz, hi_hz = L_OWN_HZ
+    taken = [float(c.f_hz) for c in lines]
+    out: list[CarrierCandidate] = []
+    for c in lines:
+        sel = np.flatnonzero((cs.f_hz > c.f_hz + lo_hz) & (cs.f_hz <= c.f_hz + hi_hz))
+        if not len(sel):
+            continue
+        sub = cs.stat[:, sel]
+        d, k = np.unravel_index(int(np.argmax(sub)), sub.shape)
+        h = _cell_line(cs, int(sel[k]), int(d), float(sub[d, k]))
+        if any(abs(h.f_hz - f) <= sep_hz for f in taken):
+            continue
+        taken.append(h.f_hz)
+        out.append(h)
+    return out
 
 
 # --- A2 ----------------------------------------------------------------------------------------
@@ -399,6 +493,55 @@ def _mf_taps(fs: float = CH_FS) -> np.ndarray:
     sps = fs * T_SYM
     k = np.arange(-int(8 * sps), int(8 * sps) + 1)
     return ce.pulse(k / sps) / sps
+
+
+def _l_mf_taps(fs: float = CH_FS) -> np.ndarray:
+    """L's matched filter at rate fs: L's unit-energy RRC (`lwave.PULSE_NORM`
+    on its 16 kHz grid) at sps = fs T_L, cut at +-8 symbols, over sps."""
+    sps = fs * L_T_SYM
+    k = np.arange(-int(SPAN * sps), int(SPAN * sps) + 1)
+    x = k / sps
+    return np.where(np.abs(x) <= SPAN, ce._rrc(x) / lwave.PULSE_NORM, 0.0) / sps
+
+
+@dataclass(frozen=True, eq=False)
+class PreambleKind:
+    """What A2 needs to know about one waveform's preamble.
+
+    seq: the preamble symbols (CE real +-1, L complex QPSK); t_sym its
+    symbol period; chunk symbols per 2 s chunk (10 chunks for both, so
+    `a2_threshold` and `preamble_p` carry over); data_offset_hz where the
+    preamble's symbols sit relative to the A1 line (0 for CE, whose line
+    is the carrier at the centre; -f_p for L, whose line is the pilot);
+    phase_offset added to arg sum S to give arg u (CE's linear part is
+    j K x: -pi/2); mf_taps the symbol matched filter at CH rate.
+    """
+    waveform: int
+    seq: np.ndarray = field(repr=False)
+    t_sym: float
+    chunk: int
+    data_offset_hz: float
+    phase_offset: float
+    mf_taps: np.ndarray = field(repr=False)
+
+    @property
+    def n_chunks(self) -> int:
+        return len(self.seq) // self.chunk
+
+    @property
+    def name(self) -> str:
+        return WAVEFORM_NAMES[self.waveform]
+
+
+CE_PRE = PreambleKind(WAVEFORM_CE, preamble_ce().astype(np.float64), T_SYM, A2_CHUNK, 0.0,
+                      -np.pi / 2, _mf_taps())
+L_PRE = PreambleKind(WAVEFORM_L, np.asarray(preamble_l()), L_T_SYM, A2_CHUNK // 2,
+                     -float(L_PILOT_HZ), 0.0, _l_mf_taps())
+PREAMBLE_KINDS = {WAVEFORM_CE: CE_PRE, WAVEFORM_L: L_PRE}
+assert L_N_PRE == N_PRE // 2 and L_PRE.n_chunks == CE_PRE.n_chunks
+for _k in (CE_PRE, L_PRE):
+    _k.seq.setflags(write=False)
+    _k.mf_taps.setflags(write=False)
 
 
 def a2_threshold(pfa: float = A2_PFA, n_chunks: int = N_PRE // A2_CHUNK,
@@ -420,6 +563,10 @@ class PreambleHit:
     at the scale that cell's p came from (n_groups = k, Gamma(k) on
     noise); p_value: that cell's `preamble_p` (per cell, corrected for
     the scales tested but not for the search); passed = p_value < pfa.
+    waveform: whose preamble (`PreambleKind`) was searched for; for L,
+    f_hz is the pilot and phase is the pilot's at t0 (the f_p shift's and
+    the pilot's own rotation over tau0 taken out). CE's phase leaves out
+    the latter, 2 pi df tau0 (as it always has; nothing reads it but tests).
     """
     f_hz: float
     drift_hz_per_min: float
@@ -434,6 +581,7 @@ class PreambleHit:
     tau0_sd_s: float = float("nan")
     chunk_sums: np.ndarray = field(default=None, repr=False)
     lead_in_s: float = 0.0                   # detected lead-in span (`lead_in_span`)
+    waveform: int = WAVEFORM_CE
 
     def to_detection(self, duration_s: float = 1800.0) -> Detection:
         t = np.array([TBD_START_S, 0.0, duration_s])
@@ -443,7 +591,16 @@ class PreambleHit:
         timing = Timing(tau0=self.tau0_s * CH_FS, ppm=0.0, gamma=0.0, z=self.lam,
                         cov=np.diag([sd ** 2, 0.0]))
         return Detection(f_hz=self.f_hz, path=path, timing=timing, z_ref=float("nan"),
-                         method="preamble", lead_in_s=self.lead_in_s)
+                         method="preamble", lead_in_s=self.lead_in_s, waveform=self.waveform)
+
+
+@dataclass
+class _A2Input:
+    """The channel at one line, drift and mixing residual removed, notched:
+    what every waveform's A2 at that line shares (`_a2_mf` finishes it)."""
+    y: np.ndarray                            # complex128 at CH rate, 0 Hz = the line
+    t0_ch: float                             # CH index of nominal t0 inside y
+    f_mix: object
 
 
 @dataclass
@@ -454,11 +611,22 @@ class _A2Channel:
     sigma2: float                            # median |m|^2 / ln 2 over the search span
     f_mix: object
     local: np.ndarray = field(default=None, repr=False)   # max(sigma2, local mean |m|^2)
+    kind: PreambleKind = CE_PRE
 
 
 def preamble_channel(fe, t0_index: float, f_audio_hz: float, drift_hz_per_min: float = 0.0,
-                     fs: int = FE_FS) -> _A2Channel:
-    """Channelise FE about f_audio_hz (drift removed about t0), notch, MF."""
+                     fs: int = FE_FS, *, kind: PreambleKind = CE_PRE) -> _A2Channel:
+    """Channelise FE about f_audio_hz (drift removed about t0), notch, MF
+    (`_a2_input` then `_a2_mf` for `kind`)."""
+    return _a2_mf(_a2_input(fe, t0_index, f_audio_hz, drift_hz_per_min, fs), kind)
+
+
+def _a2_input(fe, t0_index: float, f_audio_hz: float, drift_hz_per_min: float = 0.0,
+              fs: int = FE_FS) -> _A2Input:
+    """Channelise FE about f_audio_hz, drift chirp and mixing residual
+    taken out about t0, then the notch y - LP(y) at 0 Hz: CE's carrier or
+    L's pilot, either one's lead-in with it. The span is the preamble's,
+    the same 20.006 s for both waveforms."""
     decim = int(fs) // CH_FS
     lo_s = -A2_TAU_S - _A2_MARGIN_S
     hi_s = A2_TAU_S + N_PRE * T_SYM + _A2_MARGIN_S
@@ -483,9 +651,26 @@ def preamble_channel(fe, t0_index: float, f_audio_hz: float, drift_hz_per_min: f
         t = (np.arange(len(y)) - t0_ch) / CH_FS
         y *= np.exp(-2j * np.pi * frontend.dsp.wrap_cycles(resid * t))
     y_hp = y - signal.oaconvolve(y, _notch_taps(), mode="same")
-    m = signal.oaconvolve(y_hp, _mf_taps(), mode="same")
+    return _A2Input(y=y_hp, t0_ch=t0_ch, f_mix=f_mix)
+
+
+def _a2_mf(inp: _A2Input, kind: PreambleKind = CE_PRE) -> _A2Channel:
+    """`kind`'s matched filter on the notched channel, with A2's noise levels.
+
+    For L the channel is first mixed up by f_p, exp(+j 2 pi f_p (t - t0))
+    with t on the receiver's clock from nominal t0, so the data centre
+    sits at 0 Hz: what is left of the pilot after the notch (a lead-in's
+    ramp-down, a neighbour's carrier there) lands at +12.58 Hz, outside
+    L's matched filter (+-9.48 Hz), which is L's main defence against it.
+    """
+    y_hp = inp.y
+    t0_ch = inp.t0_ch
+    if kind.data_offset_hz:
+        t = (np.arange(len(y_hp)) - t0_ch) / CH_FS
+        y_hp = y_hp * np.exp(2j * np.pi * frontend.dsp.wrap_cycles(-kind.data_offset_hz * t))
+    m = signal.oaconvolve(y_hp, kind.mf_taps, mode="same")
     k0 = int(round(t0_ch - A2_TAU_S * CH_FS))
-    k1 = int(round(t0_ch + (A2_TAU_S + N_PRE * T_SYM) * CH_FS))
+    k1 = int(round(t0_ch + (A2_TAU_S + len(kind.seq) * kind.t_sym) * CH_FS))
     core = m[max(k0, 0):min(k1, len(m))]
     sigma2 = max(float(np.median(np.abs(core) ** 2) / LN2) if len(core) else 1.0, 1e-30)
     # Local noise level: a carrier that switches (a lead-in ending, a
@@ -496,21 +681,39 @@ def preamble_channel(fe, t0_index: float, f_audio_hz: float, drift_hz_per_min: f
     # signal nothing (its chunks are coherent, the leftover is not).
     w = int(round(A2_LOCAL_S * CH_FS))
     loc = signal.oaconvolve(np.abs(m) ** 2, np.ones(w) / w, mode="same")
-    return _A2Channel(m=m, t0_ch=t0_ch, sigma2=sigma2, f_mix=f_mix,
-                      local=np.maximum(loc, sigma2))
+    return _A2Channel(m=m, t0_ch=t0_ch, sigma2=sigma2, f_mix=inp.f_mix,
+                      local=np.maximum(loc, sigma2), kind=kind)
 
 
-def _templates(df_hz):
-    """(b, W, norm): zero-mean chunk templates b (n_chunk, 66), the
-    df-rotated weights W (n_df, n_chunk, 66) and sum b^2 per chunk."""
-    a = preamble_ce().astype(np.float64)
-    nc = len(a) // A2_CHUNK
-    b = a[:nc * A2_CHUNK].reshape(nc, A2_CHUNK)
-    b = b - b.mean(axis=1, keepdims=True)
-    t = (np.arange(nc * A2_CHUNK) * T_SYM).reshape(nc, A2_CHUNK)
+def _chunks(kind: PreambleKind) -> np.ndarray:
+    """Zero-mean chunk templates b (n_chunk, chunk) of kind's preamble.
+
+    Zero mean, so a constant at the MF output (CE: the carrier behind the
+    notch; L: a carrier at its data centre, a neighbour's) correlates to
+    nothing in any chunk. For L it costs ~0.15 dB (its QPSK chunks are not
+    zero-mean by themselves) and is kept for that robustness.
+    """
+    a = kind.seq
+    nc = len(a) // kind.chunk
+    b = a[:nc * kind.chunk].reshape(nc, kind.chunk)
+    return b - b.mean(axis=1, keepdims=True)
+
+
+def _norm(b: np.ndarray) -> np.ndarray:
+    """sum |b|^2 per chunk (b * b exactly for CE's real templates)."""
+    return np.sum((b * np.conj(b)).real, axis=1)
+
+
+def _templates(df_hz, kind: PreambleKind = CE_PRE):
+    """(b, W, norm): zero-mean chunk templates b (n_chunk, chunk), the
+    df-rotated weights W = conj(b) e^{-j 2 pi df t} (n_df, n_chunk, chunk),
+    t from the preamble's first symbol, and sum |b|^2 per chunk."""
+    b = _chunks(kind)
+    nc, ck = b.shape
+    t = (np.arange(nc * ck) * kind.t_sym).reshape(nc, ck)
     df = np.asarray(df_hz, dtype=np.float64)
-    W = b[None] * np.exp(-2j * np.pi * df[:, None, None] * t[None])
-    return b, W, np.sum(b * b, axis=1)
+    W = np.conj(b)[None] * np.exp(-2j * np.pi * df[:, None, None] * t[None])
+    return b, W, _norm(b)
 
 
 def preamble_lambda(chan: _A2Channel, df_hz=A2_DF_HZ, tau_s: float = A2_TAU_S):
@@ -524,17 +727,19 @@ def preamble_lambda(chan: _A2Channel, df_hz=A2_DF_HZ, tau_s: float = A2_TAU_S):
 
 def _preamble_sums(chan: _A2Channel, df_hz=A2_DF_HZ, tau_s: float = A2_TAU_S):
     """`preamble_lambda`, plus the noise variance of each chunk sum
-    var[n_tau, n_chunk] = sigma_c^2 sum b_c^2."""
-    b, W, norm = _templates(df_hz)
-    nc = b.shape[0]
-    off = np.round(np.arange(nc * A2_CHUNK) * T_SYM * CH_FS).astype(np.int64)
+    var[n_tau, n_chunk] = sigma_c^2 sum |b_c|^2. The preamble is the
+    channel's (`chan.kind`)."""
+    kind = chan.kind
+    b, W, norm = _templates(df_hz, kind)
+    nc, ck = b.shape
+    off = np.round(np.arange(nc * ck) * kind.t_sym * CH_FS).astype(np.int64)
     k0 = int(round(chan.t0_ch))
     taus = np.arange(-int(round(tau_s * CH_FS)), int(round(tau_s * CH_FS)) + 1)
     m = chan.m
     idx = np.clip((k0 + taus)[:, None] + off[None, :], 0, len(m) - 1)   # in range by margin
-    Mx = m[idx].reshape(len(taus), nc, A2_CHUNK)
+    Mx = m[idx].reshape(len(taus), nc, ck)
     S = np.einsum("fcs,tcs->ftc", W, Mx, optimize=True)
-    cidx = (k0 + taus)[:, None] + off.reshape(nc, A2_CHUNK).mean(axis=1).round().astype(
+    cidx = (k0 + taus)[:, None] + off.reshape(nc, ck).mean(axis=1).round().astype(
         np.int64)[None, :]
     var = chan.local[np.clip(cidx, 0, len(m) - 1)] * norm[None, :]  # (n_tau, n_chunk)
     lam = np.sum(np.abs(S) ** 2 / var[None], axis=2)
@@ -585,16 +790,16 @@ def preamble_p(S: np.ndarray, var: np.ndarray, scales=A2_SCALES):
 
 def _fine_sums(spline, chan, tau, df, rate=0.0):
     """Chunk sums S_c at fractional tau (CH samples from t0), exact symbol
-    offsets, templates rotated by df + rate*t (t from t0, Hz and Hz/s)."""
-    a = preamble_ce().astype(np.float64)
-    nc = len(a) // A2_CHUNK
-    b = a[:nc * A2_CHUNK].reshape(nc, A2_CHUNK)
-    b = b - b.mean(axis=1, keepdims=True)
-    t = np.arange(nc * A2_CHUNK) * T_SYM
+    offsets, templates rotated by df + rate*t (t from t0, Hz and Hz/s),
+    of the channel's preamble (`chan.kind`)."""
+    kind = chan.kind
+    b = _chunks(kind)
+    nc, ck = b.shape
+    t = np.arange(nc * ck) * kind.t_sym
     turns = df * t + 0.5 * rate * t * t
-    W = b * np.exp(-2j * np.pi * turns).reshape(nc, A2_CHUNK)
-    mv = spline(chan.t0_ch + tau + t * CH_FS).reshape(nc, A2_CHUNK)
-    return np.sum(W * mv, axis=1), np.sum(b * b, axis=1)
+    W = np.conj(b) * np.exp(-2j * np.pi * turns).reshape(nc, ck)
+    mv = spline(chan.t0_ch + tau + t * CH_FS).reshape(nc, ck)
+    return np.sum(W * mv, axis=1), _norm(b)
 
 
 def _coherent(spline, chan, tau, df, rate) -> float:
@@ -625,7 +830,8 @@ def _phase_line(S, dt) -> tuple[float, float, float]:
 
 
 def preamble_search(fe, t0_index: float, cand: CarrierCandidate, fs: int = FE_FS, *,
-                    pfa: float = A2_PFA) -> PreambleHit:
+                    pfa: float = A2_PFA, kind: PreambleKind = CE_PRE,
+                    inp: _A2Input | None = None) -> PreambleHit:
     """A2 at one A1 candidate: the best (tau0, df) cell, refined.
 
     Always returns the best cell, the one with the least `preamble_p`;
@@ -634,8 +840,14 @@ def preamble_search(fe, t0_index: float, cand: CarrierCandidate, fs: int = FE_FS
     a line through the chunk-pair phase differences, coherent across the
     20 s preamble; then timing on the coherent correlation of the whole
     preamble at fractional offsets.
+
+    kind: the waveform's preamble (CE_PRE, L_PRE); for L, cand is a pilot
+    line. inp: `_a2_input` at cand already computed (one channelisation
+    serves every kind at a line).
     """
-    chan = preamble_channel(fe, t0_index, cand.f_hz, cand.drift_hz_per_min, fs)
+    if inp is None:
+        inp = _a2_input(fe, t0_index, cand.f_hz, cand.drift_hz_per_min, fs)
+    chan = _a2_mf(inp, kind)
     lam2, taus, S, var = _preamble_sums(chan)
     pc, sc, st = preamble_p(S, var)
     if pc.min() > 1e-250:
@@ -653,12 +865,13 @@ def preamble_search(fe, t0_index: float, cand: CarrierCandidate, fs: int = FE_FS
     if 0 < j < len(taus) - 1:
         tau += _parabola(lam[i, j - 1], lam[i, j], lam[i, j + 1])
 
-    # m is band-limited to the pulse's +-19 Hz at 250 Hz, so a cubic spline
-    # through it is exact to far below the noise at fractional timing.
+    # m is band-limited to the pulse's +-19 Hz (L: +-9.5 Hz) at 250 Hz, so a
+    # cubic spline through it is exact to far below the noise at fractional timing.
     lo = int(max(0, math.floor(chan.t0_ch + tau - 80)))
-    hi = int(min(len(chan.m), math.ceil(chan.t0_ch + tau + N_PRE * T_SYM * CH_FS + 80)))
+    hi = int(min(len(chan.m), math.ceil(chan.t0_ch + tau + len(kind.seq) * kind.t_sym * CH_FS
+                                        + 80)))
     spline = CubicSpline(np.arange(lo, hi), chan.m[lo:hi])
-    dt = A2_CHUNK * T_SYM
+    dt = kind.chunk * kind.t_sym
     rate = 0.0
     for _ in range(2):
         Sc, _n = _fine_sums(spline, chan, tau, df, rate)
@@ -673,11 +886,24 @@ def preamble_search(fe, t0_index: float, cand: CarrierCandidate, fs: int = FE_FS
             ym, y0, yp = (_coherent(spline, chan, tau + e, df, rate) for e in (-d, 0.0, d))
             tau += _parabola(ym, y0, yp) * d
     Sc, norm = _fine_sums(spline, chan, tau, df, rate)
-    cen = chan.t0_ch + tau + (np.arange(len(norm)) + 0.5) * A2_CHUNK * T_SYM * CH_FS
+    cen = chan.t0_ch + tau + (np.arange(len(norm)) + 0.5) * kind.chunk * kind.t_sym * CH_FS
     sig = chan.local[np.clip(np.round(cen).astype(np.int64), 0, len(chan.local) - 1)]
     lam_f = float(np.sum(np.abs(Sc) ** 2 / (norm * sig)))
-    # S ~ u * j K sum b a: arg u = arg sum S - pi/2 (template phases referred to t0)
-    phase = float(np.angle(np.sum(Sc)) - np.pi / 2)
+    if not kind.data_offset_hz:
+        # S ~ u * j K sum b a: arg u = arg sum S - pi/2 (template phases referred to t0)
+        phase = float(np.angle(np.sum(Sc)) + kind.phase_offset)
+    else:
+        # L: S ~ u e^{j 2 pi (f_p tau0 + phi(tau0))} sum |b|^2. The sender
+        # mixes its data down by f_p from its own t0 and the f_p shift here
+        # is referred to nominal t0, tau0 earlier, and the templates' df and
+        # rate rotation starts at the preamble, not t0, so df is the
+        # frequency there and the pilot's phase advanced phi(tau0) = df tau0
+        # - rate tau0^2 / 2 since t0; both are taken out, so phase is the
+        # pilot's at t0 (u's convention).
+        tau_s = tau / CH_FS
+        turns = (df - kind.data_offset_hz) * tau_s - 0.5 * rate * tau_s * tau_s
+        phase = float(np.angle(np.sum(Sc) * np.exp(
+            -2j * np.pi * frontend.dsp.wrap_cycles(turns))) + kind.phase_offset)
     # timing sd from the coherent statistic's curvature: var = 1/(-L'')
     y = [_coherent(spline, chan, tau + e, df, rate) for e in (-0.5, 0.0, 0.5)]
     curv = -(y[0] - 2 * y[1] + y[2]) / 0.25
@@ -688,7 +914,7 @@ def preamble_search(fe, t0_index: float, cand: CarrierCandidate, fs: int = FE_FS
         drift_hz_per_min=float(cand.drift_hz_per_min + 60.0 * rate),
         tau0_s=tau / CH_FS, phase=phase, lam=lam_f, cell_lam=cell,
         p_value=p_cell, passed=p_cell < pfa, n_groups=k_groups,
-        f_mix=chan.f_mix, tau0_sd_s=sd, chunk_sums=Sc)
+        f_mix=chan.f_mix, tau0_sd_s=sd, chunk_sums=Sc, waveform=kind.waveform)
 
 
 # --- lead-in ---------------------------------------------------------------------------------
@@ -829,12 +1055,26 @@ def gumbel_p(z: float, n_frames: int) -> float:
 
 @dataclass
 class TbdHit:
-    """A3's best path in one channel: f per frame (audio Hz), Z and its p."""
+    """A3's best path in one channel: f per frame (audio Hz), Z and its p.
+
+    shape_z, above_z, waveform: the spectral-shape test along the path
+    (`shape_z`, `shape_waveform`) when the acquisition is waveform-aware;
+    nan, nan and None otherwise (and None when the shape is ambiguous).
+    l_path, l_shape_z, l_above_z: the path re-anchored on an L pilot
+    (`l_pilot_bins`), what the hit is gated with as L, and the shape
+    along it, when L is enabled (`track_before_detect`).
+    """
     path: FreqPath
     z: float
     p_value: float
     n_frames: int
     centre_hz: float                         # the channel searched
+    shape_z: float = float("nan")
+    above_z: float = float("nan")
+    waveform: int | None = None
+    l_path: FreqPath | None = field(default=None, repr=False)
+    l_shape_z: float = float("nan")
+    l_above_z: float = float("nan")
 
     @property
     def f_hz(self) -> float:
@@ -848,24 +1088,37 @@ class TbdHit:
 
     def line(self) -> np.ndarray:
         """(slope Hz/s, intercept Hz at t0) of the weighted line fit."""
-        t, f = self.path.t_s, self.path.f_hz
-        w = np.asarray(self.path.weight, dtype=np.float64) + 1e-9
-        keep = np.ones(len(t), dtype=bool)
-        for _ in range(2):
-            if keep.sum() < 2:
-                break
-            c = np.polyfit(t[keep], f[keep], 1, w=np.sqrt(w[keep]))
-            keep = np.abs(f - np.polyval(c, t)) < 1.0
-        return c
+        return _path_line(self.path)
 
     @property
     def passed(self) -> bool:
         return self.p_value < TBD_PFA
 
-    def to_detection(self) -> Detection:
-        """A detection with no timing yet (V fits it, design 6.4)."""
-        return Detection(f_hz=self.f_hz, path=self.path, timing=None, z_ref=float("nan"),
-                         method="tbd", lead_in_s=0.0)
+    def to_detection(self, waveform: int | None = None) -> Detection:
+        """A detection with no timing yet (V fits it, design 6.4), to be
+        gated as `waveform` (default: the shape's, else CE); as L on the
+        pilot-anchored path when there is one."""
+        if waveform is None:
+            waveform = WAVEFORM_CE if self.waveform is None else self.waveform
+        path, f_hz = self.path, self.f_hz
+        if waveform == WAVEFORM_L and self.l_path is not None:
+            path = self.l_path
+            f_hz = float(np.polyval(_path_line(path), 0.0))
+        return Detection(f_hz=f_hz, path=path, timing=None, z_ref=float("nan"),
+                         method="tbd", lead_in_s=0.0, waveform=int(waveform))
+
+
+def _path_line(path: FreqPath) -> np.ndarray:
+    """(slope Hz/s, intercept Hz at t0): `TbdHit.line` of any path."""
+    t, f = path.t_s, path.f_hz
+    w = np.asarray(path.weight, dtype=np.float64) + 1e-9
+    keep = np.ones(len(t), dtype=bool)
+    for _ in range(2):
+        if keep.sum() < 2:
+            break
+        c = np.polyfit(t[keep], f[keep], 1, w=np.sqrt(w[keep]))
+        keep = np.abs(f - np.polyval(c, t)) < 1.0
+    return c
 
 
 def tbd_channels(cands=(), band_hz=BAND_HZ) -> np.ndarray:
@@ -888,11 +1141,118 @@ def tbd_emissions(fe, t0_index: float, spec: FrameSpec, fs: float = FE_FS, *,
     return cfar_normalise(P) - np.float32(1.0), f, t
 
 
+@functools.lru_cache(maxsize=4)
+def _band_cov(n_bins: int, fs: float = FE_FS) -> tuple[float, float]:
+    """(v0, v1): on white noise, the variance of a sum of n_bins adjacent
+    normalised bins (each Exp(1), var 1) of one Hann frame, and the
+    covariance of two such sums in consecutive frames (50% overlap).
+
+    For complex Gaussian bins cov(|Y_i|^2, |Y_j|^2) = |rho_ij|^2, with
+    rho the normalised spectrum of w^2 between bins of one frame (Hann:
+    -2/3 and 1/6 at 1 and 2 bins) and of w(n) w(n - H) between frames.
+    """
+    w = frame_window(fs)
+    L = len(w)
+    H = int(round(STFT_HOP_S * fs))
+    e = float(np.sum(w * w))
+    r0 = np.abs(np.fft.fft(w * w)) / e
+    w1 = np.zeros(L)
+    w1[H:] = w[H:] * w[:L - H]
+    r1 = np.abs(np.fft.fft(w1)) / e
+    k = np.arange(-(n_bins - 1), n_bins)
+    mult = n_bins - np.abs(k)
+    return float(np.sum(mult * r0[k % L] ** 2)), float(np.sum(mult * r1[k % L] ** 2))
+
+
+def shape_frames(t_s, specs, frame_s: float = STFT_FRAME_S) -> np.ndarray:
+    """bool[n_frames]: the A3 frames (starting at t_s, s after t0) the shape
+    test uses: none overlapping a callsign window of any of `specs` (both
+    waveforms key down 16.5 Hz below their line there) or starting before
+    the keying does (-8 symbols; the later of the specs' starts), which
+    leaves out the lead-in."""
+    t_s = np.asarray(t_s, dtype=np.float64)
+    keep = t_s >= max(s.keyed_start_pos * s.t_sym for s in specs)
+    for s in specs:
+        for a, b in s.window_spans_s():
+            keep &= ~((t_s < b) & (t_s + frame_s > a))
+    return keep
+
+
+def shape_z(E: np.ndarray, bins, keep=None, df_hz: float = 1.0 / STFT_FRAME_S,
+            fs: float = FE_FS) -> tuple[float, float]:
+    """(z1, z_above): the spectral-shape test along a path (design 3).
+
+    E: normalised power - 1 (n_frames, n_bins), as A3's emissions; bins:
+    the path's bin per frame; keep: frames to use (`shape_frames`).
+    S_below sums E over L's data band below each frame's path bin
+    (3.10..22.07 Hz, 76 bins of 0.25 Hz) and S_above over its mirror;
+    z1 = (S_below - S_above) / (sd sqrt 2), z_above = S_above / sd, sd one
+    band sum's noise sd (`_band_cov`, frames overlapping by half). Both are
+    N(0, 1) on noise. An L signal puts its data below its pilot (z1 large);
+    a CE signal is symmetric about its carrier (z1 ~ 0, z_above > 0). The
+    difference is what is robust: the local CFAR absorbs part of a strong
+    CE's sidebands and pulls an L signal's z_above negative. Frames where
+    either band leaves E are not used, nor frames with no data (E = -1 on
+    the path: `cfar_normalise` zeroes a frame whose median is 0, a capture
+    gap, which would read as a deficit above the line); (nan, nan) when
+    none is left.
+    """
+    E = np.asarray(E)
+    bins = np.asarray(bins, dtype=np.int64)
+    n, nb = E.shape
+    lo = math.ceil(L_BAND_HZ[0] / df_hz - 1e-9)
+    hi = math.floor(L_BAND_HZ[1] / df_hz + 1e-9)
+    ok = np.ones(n, dtype=bool) if keep is None else np.asarray(keep, dtype=bool).copy()
+    ok &= (bins - hi >= 0) & (bins + hi < nb)
+    ok &= E[np.arange(n), np.clip(bins, 0, nb - 1)] > -1.0       # 0 power only with no data
+    rows = np.flatnonzero(ok)
+    if not len(rows):
+        return float("nan"), float("nan")
+    offs = np.arange(lo, hi + 1)
+    b = bins[rows][:, None]
+    below = float(np.sum(E[rows[:, None], b - offs], dtype=np.float64))
+    above = float(np.sum(E[rows[:, None], b + offs], dtype=np.float64))
+    v0, v1 = _band_cov(len(offs), fs)
+    var = len(rows) * v0 + 2 * int(np.sum(ok[1:] & ok[:-1])) * v1
+    return (below - above) / math.sqrt(2 * var), above / math.sqrt(var)
+
+
+def shape_waveform(z1: float, z_above: float) -> int | None:
+    """The waveform a shape says: L when z1 > SHAPE_L_Z with nothing
+    significant above the line (z_above <= SHAPE_CE_ABOVE_Z); CE when
+    z_above > SHAPE_CE_ABOVE_Z and |z1| < SHAPE_CE_MAX_Z1; else None
+    (ambiguous, gated as both).
+
+    z1's sd is 1 on noise only: a strong signal's noise cross terms widen
+    it (a CE's sidebands are mirror images, so its own data cancels, but
+    not the noise on them), and the PM's small deterministic asymmetry
+    adds to it. On SHORT CE carrier paths z1 read 4.2-5.1 in 2 of 8
+    passes at -10 dB and 1 of 8 at -5 and 0 dB, so z1 alone gated a CE
+    whose preamble A2 missed only as L. Its power above the line (z_above
+    29 at -15 dB, 95 at -10) is what an L signal never has; an L pass with
+    a neighbour 3-22 Hz above reads ambiguous instead, gated as both."""
+    if z1 > SHAPE_L_Z and not z_above > SHAPE_CE_ABOVE_Z:
+        return WAVEFORM_L
+    if z_above > SHAPE_CE_ABOVE_Z and abs(z1) < SHAPE_CE_MAX_Z1:
+        return WAVEFORM_CE
+    return None
+
+
 def track_before_detect(fe, t0_index: float, spec: FrameSpec, cands=(), fs: float = FE_FS,
                         *, pfa: float = TBD_PFA, band_hz=BAND_HZ,
-                        all_hits: bool = False) -> list[TbdHit]:
+                        all_hits: bool = False, shape_specs=None) -> list[TbdHit]:
     """A3 over a stored slot: one Viterbi path per channel; hits at p < pfa
-    (all channels with `all_hits`), deduplicated within 10 Hz, best first."""
+    (all channels with `all_hits`), deduplicated within 10 Hz, best first.
+
+    shape_specs: the frames of a waveform-aware acquisition; each hit then
+    carries its spectral shape (`shape_z` over `shape_frames(.., shape_specs)`)
+    and the waveform it says (`shape_waveform`). With L among them the
+    hit also carries its pilot-anchored path (`l_pilot_bins`) and the
+    shape along that (`l_shape_z`, `l_above_z`), and the waveform is the
+    two shapes' verdict (`_shape_verdict`): a weak L pass's path can run
+    in its data band, where its own shape is ambiguous (the pilot then in
+    the band above) and might read CE.
+    """
     E, f, t = tbd_emissions(fe, t0_index, spec, fs, band_hz=band_hz)
     if len(t) < 2:
         return []
@@ -903,37 +1263,134 @@ def track_before_detect(fe, t0_index: float, spec: FrameSpec, cands=(), fs: floa
     stack = np.stack([E[:, c - half:c + half + 1] for c in ci])     # (n_ch, T, 2h+1)
     paths, Z = tbd_viterbi(stack)
     n = len(t)
-    hits = []
+    keep = None if shape_specs is None else shape_frames(t, tuple(shape_specs))
+    hits, path_bins = [], []
     for k, c in enumerate(ci):
         bins = c - half + paths[k]
-        em = E[np.arange(n), bins]
-        # sub-bin refinement per frame where the emission stands out
-        fk = f[bins].astype(np.float64)
-        inner = (bins > 0) & (bins < len(f) - 1)
-        rows = np.arange(n)[inner]
-        bb = bins[inner]
-        y = np.log(np.maximum(E[rows[:, None], bb[:, None] + np.array([-1, 0, 1])] + 1, 1e-6))
-        den = y[:, 0] - 2 * y[:, 1] + y[:, 2]
-        with np.errstate(divide="ignore", invalid="ignore"):
-            off = np.where(den < 0, np.clip(0.5 * (y[:, 0] - y[:, 2]) / den, -0.5, 0.5), 0.0)
-        fk[inner] += off * df
         p = gumbel_p(float(Z[k]), n)
-        hits.append(TbdHit(path=FreqPath(t_s=t + STFT_FRAME_S / 2, f_hz=fk,
-                                         weight=np.maximum(em, 0.0).astype(np.float64)),
-                           z=float(Z[k]), p_value=p, n_frames=n,
-                           centre_hz=float(centres[k])))
-    hits.sort(key=lambda h: -h.z)
+        hits.append(TbdHit(path=_bins_path(E, f, t, bins), z=float(Z[k]), p_value=p,
+                           n_frames=n, centre_hz=float(centres[k])))
+        path_bins.append(bins)
+    order = sorted(range(len(hits)), key=lambda k: -hits[k].z)
     out: list[TbdHit] = []
-    for h in hits:
+    for k in order:
+        h = hits[k]
         if not all_hits and not h.p_value < pfa:
             continue
         if any(abs(h.f_hz - o.f_hz) < TBD_DEDUP_HZ for o in out):
             continue
+        if keep is not None:
+            h.shape_z, h.above_z = shape_z(E, path_bins[k], keep, df, fs)
+            h.waveform = shape_waveform(h.shape_z, h.above_z)
+            if any(sp.waveform == WAVEFORM_L for sp in shape_specs):
+                lb = l_pilot_bins(E, f, t, h.line(), keep, fs)
+                h.l_path = _bins_path(E, f, t, lb)
+                h.l_shape_z, h.l_above_z = shape_z(E, lb, keep, df, fs)
+                h.waveform = _shape_verdict(h.waveform,
+                                            shape_waveform(h.l_shape_z, h.l_above_z))
         out.append(h)
     return out
 
 
+def _shape_verdict(v: int | None, w: int | None) -> int | None:
+    """The waveform of an A3 hit from its own path's shape (v) and its
+    pilot-anchored path's (w): either one where the other is silent,
+    ambiguous (None) where they disagree.
+
+    On a CE carrier `l_pilot_bins` lands on the carrier (the carrier and
+    its lower sideband peak there), so w = v. A weak L pass's path can run
+    in its data band: L_FULL at -28 and -30 dB gave a second hit 16 Hz
+    below the pilot (z1 -5 to -13, the pilot in its band above: ambiguous)
+    whose anchored path is on the pilot (z1 14-22, L). Along an anchored
+    path z1 is biased on noise (it is chosen for the band below: mean
+    +1.1, sd 0.8 over 110 SHORT noise paths, none past 4), which is why it
+    only fills in where the path's own shape is silent and can otherwise
+    only make the verdict ambiguous, never turn it.
+    """
+    if v == w or w is None:
+        return v
+    return w if v is None else None
+
+
+def _bins_path(E: np.ndarray, f: np.ndarray, t: np.ndarray, bins: np.ndarray) -> FreqPath:
+    """The FreqPath of a path through E (one bin per frame starting at t):
+    frame centres, the bins' frequencies refined between bins by a
+    parabola on the log power where the emission stands out, weights the
+    emission (floored at 0)."""
+    n = len(t)
+    df = f[1] - f[0]
+    em = E[np.arange(n), bins]
+    # sub-bin refinement per frame where the emission stands out
+    fk = f[bins].astype(np.float64)
+    inner = (bins > 0) & (bins < len(f) - 1)
+    rows = np.arange(n)[inner]
+    bb = bins[inner]
+    y = np.log(np.maximum(E[rows[:, None], bb[:, None] + np.array([-1, 0, 1])] + 1, 1e-6))
+    den = y[:, 0] - 2 * y[:, 1] + y[:, 2]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        off = np.where(den < 0, np.clip(0.5 * (y[:, 0] - y[:, 2]) / den, -0.5, 0.5), 0.0)
+    fk[inner] += off * df
+    return FreqPath(t_s=t + STFT_FRAME_S / 2, f_hz=fk,
+                    weight=np.maximum(em, 0.0).astype(np.float64))
+
+
+def l_pilot_bins(E: np.ndarray, f: np.ndarray, t: np.ndarray, line, keep=None,
+                 fs: float = FE_FS, span_hz=L_ANCHOR_HZ) -> np.ndarray:
+    """int[n_frames]: an L pilot's bins near an A3 path, a path through E.
+
+    At a weak L signal A3's Viterbi follows the data band rather than the
+    pilot (L_FULL at -28 dB: 6 Hz below it): a path free to wander in a
+    19 Hz band of signal collects about as much per frame as the steady
+    pilot's bin, the pilot being 14% of the power. The pilot is then 3-22
+    Hz above the path. Here a Viterbi in a window following the path's
+    line (`span_hz` about it) runs on an L-matched emission, the bin plus
+    the one-sided band below it (3.10-22.07 Hz, in units of its own noise
+    sd, `_band_cov`), which peaks at the pilot and, varying slowly with
+    the bin, gains little from wandering. Frames outside `keep` (callsign
+    windows) count nothing. This only places the path; A3's statistic
+    and its Gumbel are the pilot-only Z.
+    """
+    n, nb = E.shape
+    df = f[1] - f[0]
+    lo = math.ceil(L_BAND_HZ[0] / df - 1e-9)
+    hi = math.floor(L_BAND_HZ[1] / df + 1e-9)
+    k_lo = math.floor(span_hz[0] / df)
+    k_hi = math.ceil(span_hz[1] / df)
+    c = np.round((np.polyval(line, t + STFT_FRAME_S / 2) - f[0]) / df).astype(np.int64)
+    g = c[:, None] + np.arange(k_lo - hi, k_hi + 1)[None, :]          # window and its band below
+    ok = (g >= 0) & (g < nb)
+    Eg = np.where(ok, E[np.arange(n)[:, None], np.clip(g, 0, nb - 1)], 0.0).astype(np.float64)
+    cs = np.concatenate([np.zeros((n, 1)), np.cumsum(Eg, axis=1)], axis=1)
+    j = np.arange(hi, Eg.shape[1])                                   # window columns in g
+    band = cs[:, j - lo + 1] - cs[:, j - hi]                          # sum of Eg[:, j-hi .. j-lo]
+    em = Eg[:, j] + band / math.sqrt(_band_cov(hi - lo + 1, fs)[0])
+    em = np.where(ok[:, j], em, -1e3)
+    if keep is not None:
+        em[~np.asarray(keep, dtype=bool)] = 0.0
+    path, _ = tbd_viterbi(em)
+    return np.clip(g[np.arange(n), j[path]], 0, nb - 1)
+
+
 # --- everything at once ---------------------------------------------------------------------
+
+def frame_map(specs) -> dict:
+    """{waveform: frame} of a tuple of frames, at most one per waveform."""
+    out: dict = {}
+    for s in specs:
+        w = int(s.waveform)
+        if w in out:
+            raise ValueError(f"acquire takes at most one frame per waveform, not "
+                             f"{out[w].name!r} and {s.name!r}")
+        out[w] = s
+    if not out:
+        raise ValueError("acquire needs at least one frame")
+    return out
+
+
+def _path_of(f_hz: float, drift_hz_per_min: float, dur: float) -> FreqPath:
+    t = np.array([TBD_START_S, 0.0, dur])
+    return FreqPath(t_s=t, f_hz=f_hz + drift_hz_per_min * t / 60.0, weight=np.ones(3))
+
 
 @dataclass
 class Acquisition:
@@ -941,10 +1398,28 @@ class Acquisition:
     preamble: list                           # A2 PreambleHits that passed
     tbd: list                                # A3 TbdHits that passed
     hinted: list = field(default_factory=list)   # CarrierCandidates of hints A2 did not pass
+    pilots: list = field(default_factory=list)   # L pilot hypotheses searched (`pilot_lines`)
 
-    def detections(self, spec: FrameSpec) -> list[Detection]:
+    def detections(self, spec) -> list[Detection]:
         """Every candidate for the verification gate: preamble hits, then
-        hints A2 did not pass (method "hint", no timing), then A3's."""
+        hints A2 did not pass (method "hint", no timing), then A3's.
+
+        With a tuple of frames (the waveform-aware acquisition), each
+        Detection carries the waveform it is to be gated as, in this order:
+        1. preamble hits of every enabled waveform, strongest (Lambda) first;
+        2. hints A2 did not pass, in their waveform;
+        3. A3 hits in the waveform their shape says, an ambiguous one as CE
+           when CE is enabled (only CE is found blind below -34 dB);
+        4. second guesses: an L copy of each ambiguous hit, then the hits
+           whose shape says a waveform that is not enabled, gated as the
+           one that is (a CE signal with a neighbour 3-22 Hz below can read
+           as L: A3's lines are reordered, never dropped).
+        An A3 detection within TBD_DEDUP_HZ of an earlier A3 one of the same
+        waveform is the same gate and is left out (L copies anchor on a
+        pilot another hit was already moved to).
+        """
+        if isinstance(spec, (tuple, list)):
+            return self._joint_detections(frame_map(spec))
         dur = spec.keyed_end_pos * spec.t_sym
         t = np.array([TBD_START_S, 0.0, dur])
         hinted = [Detection(f_hz=c.f_hz, path=FreqPath(t_s=t, f_hz=c.f_hz + c.drift_hz_per_min
@@ -954,27 +1429,109 @@ class Acquisition:
         return ([h.to_detection(dur) for h in self.preamble] + hinted
                 + [h.to_detection() for h in self.tbd])
 
+    def _joint_detections(self, specs: dict) -> list[Detection]:
+        def dur(w):
+            return specs[w].keyed_end_pos * specs[w].t_sym
 
-def drop_symbol_rate_aliases(hits: list) -> list:
+        pre = [h.to_detection(dur(h.waveform))
+               for h in sorted(self.preamble, key=lambda h: -h.lam) if h.waveform in specs]
+        hinted = []
+        for c in self.hinted:
+            for w in ([c.waveform] if c.waveform is not None else list(specs)):
+                if w in specs:
+                    hinted.append(Detection(
+                        f_hz=c.f_hz, path=_path_of(c.f_hz, c.drift_hz_per_min, dur(w)),
+                        timing=None, z_ref=float("nan"), method="hint", lead_in_s=0.0,
+                        waveform=int(w)))
+        first, copies, others = [], [], []
+        for h in self.tbd:
+            w = h.waveform
+            if w is None:
+                if WAVEFORM_CE in specs:
+                    first.append(h.to_detection(WAVEFORM_CE))
+                    if WAVEFORM_L in specs:
+                        copies.append(h.to_detection(WAVEFORM_L))
+                else:
+                    first.append(h.to_detection(WAVEFORM_L))
+            elif w in specs:
+                first.append(h.to_detection(w))
+            else:
+                others += [h.to_detection(v) for v in specs]
+        # A3's hits are 10 Hz apart, but gated as L each is moved to its
+        # pilot, and a weak L pass's data band holds a second hit that
+        # anchors on the same one (L_FULL at -28/-30 dB): one gate per
+        # (waveform, frequency) is enough, the first in this order.
+        tbd: list[Detection] = []
+        for d in first + copies + others:
+            if not any(g.waveform == d.waveform and abs(g.f_hz - d.f_hz) < TBD_DEDUP_HZ
+                       for g in tbd):
+                tbd.append(d)
+        return pre + hinted + tbd
+
+
+def drop_symbol_rate_aliases(hits: list, t_sym: float = T_SYM) -> list:
     """Passed A2 hits without those that are a stronger hit seen at
     f +- k/T (k in A2_ALIAS_K, within A2_ALIAS_HZ), with its timing
     (within T/2) and a 2 s Lambda A2_ALIAS_RATIO x smaller. Strongest first.
+    T is t_sym, the hits' waveform's symbol (one waveform at a time).
 
     At an offset of k/T the preamble's symbol rotation is whole turns, so
     a CE signal correlates there as well as at its own frequency, down only
     by the matched filter's response (Lambda ~70 against ~590 for a
     signal at 0 dB, measured). A real neighbour there would have to share
     the timing to within 15 ms as well to be lost; A3 still offers it.
+    For L the -1/T alias (16.5 Hz below the pilot, inside its own data
+    band) passes with a ratio that falls toward 3 as the signal grows:
+    `drop_band_owned` is what removes it.
     """
     out: list = []
     for h in sorted(hits, key=lambda h: -h.lam):
-        if any(abs(abs(h.f_hz - g.f_hz) - k / T_SYM) < A2_ALIAS_HZ
-               and abs(h.tau0_s - g.tau0_s) < T_SYM / 2
+        if any(abs(abs(h.f_hz - g.f_hz) - k / t_sym) < A2_ALIAS_HZ
+               and abs(h.tau0_s - g.tau0_s) < t_sym / 2
                and g.lam > A2_ALIAS_RATIO * h.lam
                for g in out for k in A2_ALIAS_K):
             continue
         out.append(h)
     return out
+
+
+def drop_band_owned(hits: list) -> list:
+    """Hits without the L hits whose pilot lies 3.1-22.1 Hz below a
+    stronger (Lambda) L hit's, with its timing within L_OWN_T symbols:
+    that band is the stronger signal's data, and a hit there is that
+    signal. Strongest first.
+
+    The hit this is for is the -1/T_L alias, 16.5 Hz below the pilot: it
+    passes A2-L from about -12 dB (3/12 there, 12/12 at -6 and 0 dB,
+    measured on SHORT's preamble) with a Lambda only 3-14x under the
+    signal's, and it correlates only through the pulses' 2.5 Hz roll-off
+    overlap, so its timing peak is broad: 9 of 31 passed aliases were
+    more than T_L/2 off the signal's (-1.9 to +0.8 T_L), hence 3 T_L.
+    """
+    out: list = []
+    for h in sorted(hits, key=lambda h: -h.lam):
+        if h.waveform == WAVEFORM_L and any(
+                g.waveform == WAVEFORM_L
+                and g.f_hz - L_OWN_HZ[1] <= h.f_hz <= g.f_hz - L_OWN_HZ[0]
+                and abs(h.tau0_s - g.tau0_s) < L_OWN_T * L_T_SYM for g in out):
+            continue
+        out.append(h)
+    return out
+
+
+def merge_hits(hits: list) -> list:
+    """One hit per signal: hits within WAVEFORM_MERGE_HZ and T_L/2 of each
+    other are one signal, of whichever waveform has the smaller p (then the
+    larger Lambda). Across waveforms, one waveform's A2 can pass on the
+    other's signal; within L, a pilot hypothesis or a hint offset can find
+    a pilot a line found too. Strongest (Lambda) first."""
+    out: list = []
+    for h in sorted(hits, key=lambda h: (h.p_value, -h.lam)):
+        if any(abs(h.f_hz - g.f_hz) < WAVEFORM_MERGE_HZ
+               and abs(h.tau0_s - g.tau0_s) < L_T_SYM / 2 for g in out):
+            continue
+        out.append(h)
+    return sorted(out, key=lambda h: -h.lam)
 
 
 def live_end_s() -> float:
@@ -983,7 +1540,7 @@ def live_end_s() -> float:
     return A2_TAU_S + N_PRE * T_SYM + _A2_MARGIN_S
 
 
-def acquire(cap: frontend.Capture, spec: FrameSpec, *, live_only: bool = False,
+def acquire(cap: frontend.Capture, spec, *, live_only: bool = False,
             preprocessed: bool = False, hints=()) -> Acquisition:
     """A1 -> A2 at each line (and A3 over the slot unless live_only).
 
@@ -994,7 +1551,16 @@ def acquire(cap: frontend.Capture, spec: FrameSpec, *, live_only: bool = False,
     strongest A1_MAX_CANDS lines still has its preamble searched. One
     that A2 does not pass is kept in `hinted`, for a gate V that looks
     over the whole frame.
+
+    spec: one frame -- today's acquisition, CE's, whatever the frame's
+    waveform (only the A3 span and the hints' paths follow the frame) --
+    or a tuple of frames, at most one per waveform, for the waveform-aware
+    acquisition (`_acquire_joint`; `(FULL,)` listens for CE alone,
+    `(FULL, L_FULL)` for both).
     """
+    if isinstance(spec, (tuple, list)):
+        return _acquire_joint(cap, frame_map(spec), live_only=live_only,
+                              preprocessed=preprocessed, hints=hints)
     fe = cap.fe
     if not preprocessed:
         fe, keep = frontend.blank(fe, fs=cap.fs)
@@ -1019,3 +1585,82 @@ def acquire(cap: frontend.Capture, spec: FrameSpec, *, live_only: bool = False,
                                    cap.fs)
     tbd = [] if live_only else track_before_detect(fe, cap.t0_index, spec, lines, cap.fs)
     return Acquisition(lines=lines, preamble=pre, tbd=tbd, hinted=hinted)
+
+
+def _hint_items(hints, specs: dict) -> list[tuple[float, list[int]]]:
+    """(f, waveforms) per hint: a bare frequency means every enabled
+    waveform, (f, waveform) that one (nothing when it is not enabled)."""
+    out = []
+    for hnt in hints:
+        if isinstance(hnt, (tuple, list)):
+            f, w = hnt
+            out.append((float(f), [int(w)] if int(w) in specs else []))
+        else:
+            out.append((float(hnt), list(specs)))
+    return out
+
+
+def _acquire_joint(cap: frontend.Capture, specs: dict, *, live_only: bool,
+                   preprocessed: bool, hints) -> Acquisition:
+    """The waveform-aware acquisition: `acquire` with a tuple of frames.
+
+    A1 once. At each A1 line one channelisation (`_a2_input`) feeds the
+    A2 of every enabled waveform; with L enabled, A2-L also runs at each
+    line's pilot hypothesis (`pilot_lines`). Hints are searched with
+    their waveform's A2 (an L hint A1 has no line for at f and f +- 1 Hz,
+    A2's df reaching only +-0.5 Hz). The passed hits are arbitrated per
+    waveform (`drop_symbol_rate_aliases` at its own T; for L
+    `drop_band_owned`), then across (`merge_hits`); each one's lead-in is
+    measured at its own T. A3 runs once over the longest enabled frame,
+    each hit carrying the waveform its spectral shape says.
+    """
+    fe = cap.fe
+    if not preprocessed:
+        fe, keep = frontend.blank(fe, fs=cap.fs)
+        fe, _ = frontend.normalise(fe, keep, fs=cap.fs)
+    t0 = cap.t0_index
+    cs = carrier_line_stats(fe, t0, cap.fs)
+    lines = carrier_lines(fe, t0, cap.fs, stats=cs)
+    kinds = [PREAMBLE_KINDS[w] for w in (WAVEFORM_CE, WAVEFORM_L) if w in specs]
+    hits = []
+    for c in lines:
+        inp = _a2_input(fe, t0, c.f_hz, c.drift_hz_per_min, cap.fs)
+        hits += [preamble_search(fe, t0, c, cap.fs, kind=k, inp=inp) for k in kinds]
+    pilots = pilot_lines(cs, lines) if WAVEFORM_L in specs else []
+    hits += [preamble_search(fe, t0, c, cap.fs, kind=L_PRE) for c in pilots]
+    thr = a1_threshold(cs.M, A1_PFA, cap.fs)
+    hinted = []
+    for f, ws in _hint_items(hints, specs):
+        for w in ws:
+            own = [h for h in hits if h.waveform == w]
+            if any(h.passed and abs(h.f_hz - f) <= HINT_SPAN_HZ + 0.5 for h in own):
+                continue
+            near = [h for h in own if abs(h.f_hz - f) <= HINT_SPAN_HZ + 0.5]
+            line = hint_line(cs, f, cap.fs)
+            if near:
+                h = near[0]
+            elif w == WAVEFORM_L and line.metric <= thr:
+                tries = [preamble_search(fe, t0, CarrierCandidate(f + o, 0.0, line.metric),
+                                         cap.fs, kind=L_PRE) for o in L_HINT_OFFSETS_HZ]
+                h = min(tries, key=lambda h: (h.p_value, -h.lam))
+            else:
+                h = preamble_search(fe, t0, line, cap.fs, kind=PREAMBLE_KINDS[w])
+            if h.passed:
+                hits.append(h)
+            else:
+                hinted.append(dataclasses.replace(line, waveform=w))
+    passed = [h for h in hits if h.passed]
+    per = []
+    for w in specs:
+        per += drop_symbol_rate_aliases([h for h in passed if h.waveform == w],
+                                        PREAMBLE_KINDS[w].t_sym)
+    pre = merge_hits(drop_band_owned(per))
+    for h in pre:
+        h.lead_in_s = lead_in_span(fe, t0, h.f_hz, h.drift_hz_per_min, h.tau0_s, cap.fs,
+                                   t_sym=specs[h.waveform].t_sym)
+    tbd = []
+    if not live_only:
+        longest = max(specs.values(), key=lambda s: s.keyed_end_pos * s.t_sym)
+        tbd = track_before_detect(fe, t0, longest, lines, cap.fs,
+                                  shape_specs=tuple(specs.values()))
+    return Acquisition(lines=lines, preamble=pre, tbd=tbd, hinted=hinted, pilots=pilots)

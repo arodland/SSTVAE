@@ -56,6 +56,7 @@ class CarrierCandidate:
     f_hz: float
     drift_hz_per_min: float
     metric: float
+    waveform: int | None = None              # a hint's waveform; None: an A1 line (any)
 
 
 @dataclass
