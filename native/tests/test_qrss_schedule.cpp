@@ -121,9 +121,9 @@ void test_what_cannot_be_scheduled() {
     qs::Entry far = entry("A", Q, 1, 0);
     far.freq_hz = 2800.0;
     check::is_true(!qs::problem(far).empty(), "schedule/problem: carrier out of the band");
-    check::is_true(qs::earliest_slot(Q - 11.0 - qs::START_LEAD_S) == Q &&
-                       qs::earliest_slot(Q - 11.0 - qs::START_LEAD_S + 1.0) == Q + 900.0,
-                   "schedule/earliest: the first quarter hour with the start lead to spare");
+    check::is_true(qs::earliest_slot(Q - qs::ADD_BY_S) == Q &&
+                       qs::earliest_slot(Q - qs::ADD_BY_S + 1.0) == Q + 900.0,
+                   "schedule/earliest: up to 30 s before the quarter hour");
 }
 
 void test_clashes() {
@@ -257,9 +257,9 @@ void test_the_scheduler_starts_what_is_due(const std::filesystem::path& dir) {
                    "scheduler/add: the picture and the schedule are on disk");
     check::is_true(!s->add(entry("A", Q + 1800.0, 1, 0, "clash"), pic).empty(),
                    "scheduler/add: an overlapping send is refused");
-    fake.now = Q - 11.0 - 200.0 + 900.0;
+    fake.now = Q + 900.0 - qs::ADD_BY_S + 1.0;
     check::is_true(!s->add(entry("A", Q + 900.0, 1, 0, "soon"), pic).empty(),
-                   "scheduler/add: one with no time to start is refused");
+                   "scheduler/add: one under 30 s before its quarter hour is refused");
     fake.now = Q - H;
 
     s->tick();
@@ -319,6 +319,16 @@ void test_the_scheduler_starts_what_is_due(const std::filesystem::path& dir) {
 }
 
 // Two different Sends back to back: the second joins the first's run.
+void test_a_late_send_starts_at_once(const std::filesystem::path& dir) {
+    Fake fake;
+    std::unique_ptr<QrssScheduler> s(make(fake, dir / "late" / "qrss_schedule.json"));
+    fake.now = Q - qs::ADD_BY_S;
+    check::is_true(s->add(entry("A", Q, 1, 0, "late"), images::Picture(64, 48)).empty(),
+                   "scheduler/late: a send 30 s before its quarter hour is accepted");
+    check::is_true(fake.runs.size() == 1 && fake.runs[0][0].slot == Q,
+                   "scheduler/late: and handed to the transmitter straight away");
+}
+
 void test_sends_follow_straight_on(const std::filesystem::path& dir) {
     Fake fake;
     std::unique_ptr<QrssScheduler> s(make(fake, dir / "follow" / "qrss_schedule.json"));
@@ -1011,6 +1021,7 @@ int main(int argc, char** argv) {
     test_clashes();
     test_upcoming_and_the_file();
     test_the_scheduler_starts_what_is_due(dir);
+    test_a_late_send_starts_at_once(dir);
     test_sends_follow_straight_on(dir);
     test_missed_and_paused(dir);
     test_the_sends_store(dir);

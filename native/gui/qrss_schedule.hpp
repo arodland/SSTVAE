@@ -51,9 +51,14 @@ inline constexpr double QUARTER_S = 900.0;
 // A scheduled send is started (encoded, its first pass made) this long
 // before its first pass's audio.
 inline constexpr double START_LEAD_S = 240.0;
-// Not started by this long before its audio: the send is missed. The
-// transmitter needs about a minute to encode and make the first pass.
-inline constexpr double MIN_LEAD_S = 90.0;
+// A send can be added, or moved, up to this long before its quarter
+// hour; the scheduler starts it at once.
+inline constexpr double ADD_BY_S = 30.0;
+// Not started by this long before its audio (which begins 11 s before
+// the quarter hour): the send is missed. Encoding the picture and making
+// the first pass took about 8 s on 4 shared cloud CPUs (2026-10-12), so
+// this leaves room; ADD_BY_S must stay above it plus those 11 s.
+inline constexpr double MIN_LEAD_S = 15.0;
 // A send that follows straight on is handed to the run on the air no
 // later than this long before that run's last pass keys.
 inline constexpr double CHAIN_LEAD_S = 60.0;

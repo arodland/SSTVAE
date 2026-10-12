@@ -150,8 +150,9 @@ std::string when(double slot, double today) {
 }
 
 double earliest_slot(double now) {
-    const double offset = qrss_tx::audio_start(0.0) - START_LEAD_S;
-    return std::ceil((now - offset) / QUARTER_S) * QUARTER_S;
+    static_assert(ADD_BY_S > MIN_LEAD_S + qrss_tx::AUDIO_LEAD_S - qrss_tx::T0_OFFSET_S,
+                  "a send added at the last moment would already be missed");
+    return std::ceil((now + ADD_BY_S) / QUARTER_S) * QUARTER_S;
 }
 
 std::vector<Upcoming> upcoming(const std::vector<Entry>& entries, double now,
@@ -437,6 +438,7 @@ std::string QrssScheduler::add(qs::Entry entry, const images::Picture& picture) 
                            .arg(entry.freq_hz, 0, 'f', 0)
                            .arg(QString::fromStdString(qs::when(entry.first_slot, now))));
     emit changed();
+    tick();  // a send added close to its time starts now, not at the next tick
     return {};
 }
 
@@ -495,6 +497,7 @@ std::string QrssScheduler::change(const std::string& id,
                                 QString::fromStdString(qs::describe(*e)),
                                 QString::fromStdString(qs::when(qs::send_slot(*e, e->next), now))));
     emit changed();
+    tick();  // moved close to its time: start it now, not at the next tick
     return {};
 }
 
