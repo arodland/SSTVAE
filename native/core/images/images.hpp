@@ -148,9 +148,6 @@ ImageArray load_array(const std::string& path);
 // Write a PNG. Throws on failure.
 void save_png(const Picture& img, const std::string& path);
 
-// Write a JPEG (quality 1..100). Throws on failure.
-void save_jpg(const Picture& img, const std::string& path, int quality = 95);
-
 }  // namespace sstvae::images
 
 #endif
