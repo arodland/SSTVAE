@@ -56,11 +56,14 @@ set(SSTVAE_BUILD_QTAUDIO "AUTO" CACHE STRING "Build Qt Multimedia audio (ON/OFF/
 set_property(CACHE SSTVAE_BUILD_QTAUDIO PROPERTY STRINGS ON OFF AUTO)
 set(SSTVAE_BUILD_OVERLAY "AUTO" CACHE STRING "Build Qt overlay rendering (ON/OFF/AUTO)")
 set_property(CACHE SSTVAE_BUILD_OVERLAY PROPERTY STRINGS ON OFF AUTO)
-# HEIC/HEIF/AVIF pictures (phone photos) through the system libheif.
-# AUTO uses it when pkg-config finds it; without it such a file fails to
-# open with a message naming the packages to install.
-set(SSTVAE_HEIF "AUTO" CACHE STRING "Read HEIC/HEIF pictures with libheif (ON/OFF/AUTO)")
-set_property(CACHE SSTVAE_HEIF PROPERTY STRINGS ON OFF AUTO)
+# Picture formats stb cannot read, each through a system library:
+# HEIC/HEIF/AVIF (libheif), WebP (libwebp), JPEG 2000 (openjpeg). AUTO
+# uses a library when pkg-config finds it; without it such a file fails
+# to open with a message naming the packages to install.
+foreach(_fmt HEIF WEBP JP2)
+  set(SSTVAE_${_fmt} "AUTO" CACHE STRING "Read ${_fmt} pictures (ON/OFF/AUTO)")
+  set_property(CACHE SSTVAE_${_fmt} PROPERTY STRINGS ON OFF AUTO)
+endforeach()
 set(SSTVAE_BUILD_GUI "AUTO" CACHE STRING "Build the desktop application (ON/OFF/AUTO)")
 set_property(CACHE SSTVAE_BUILD_GUI PROPERTY STRINGS ON OFF AUTO)
 # Rig control. Plain ON/OFF rather than the audio layer's AUTO, because
@@ -170,24 +173,30 @@ if(NOT WIN32)
   target_sources(sstvae_core PRIVATE core/rig/bridge.cpp core/rig/bridged.cpp)
 endif()
 
-# --- HEIC/HEIF pictures -----------------------------------------------------
-if(NOT SSTVAE_HEIF STREQUAL "OFF")
+# --- extra picture formats --------------------------------------------------
+function(sstvae_picture_library option pkg define what packages)
+  if(${option} STREQUAL "OFF")
+    return()
+  endif()
   find_package(PkgConfig QUIET)
   if(PkgConfig_FOUND)
-    pkg_check_modules(LIBHEIF QUIET IMPORTED_TARGET libheif)
+    pkg_check_modules(${define} QUIET IMPORTED_TARGET ${pkg})
   endif()
-  if(LIBHEIF_FOUND)
-    target_link_libraries(sstvae_core PRIVATE PkgConfig::LIBHEIF)
-    target_compile_definitions(sstvae_core PRIVATE SSTVAE_HAVE_LIBHEIF=1)
-    message(STATUS "HEIC/HEIF pictures: libheif ${LIBHEIF_VERSION}")
-  elseif(SSTVAE_HEIF STREQUAL "ON")
-    message(FATAL_ERROR
-      "SSTVAE_HEIF=ON but libheif was not found. Install libheif-dev and "
-      "libheif-plugin-libde265, or pass -DSSTVAE_HEIF=OFF.")
+  if(${define}_FOUND)
+    target_link_libraries(sstvae_core PRIVATE PkgConfig::${define})
+    target_compile_definitions(sstvae_core PRIVATE SSTVAE_HAVE_${define}=1)
+    message(STATUS "${what} pictures: ${pkg} ${${define}_VERSION}")
+  elseif(${option} STREQUAL "ON")
+    message(FATAL_ERROR "${option}=ON but ${pkg} was not found. Install "
+                        "${packages}, or pass -D${option}=OFF.")
   else()
-    message(STATUS "HEIC/HEIF pictures: off (libheif-dev not found)")
+    message(STATUS "${what} pictures: off (${pkg} not found)")
   endif()
-endif()
+endfunction()
+sstvae_picture_library(SSTVAE_HEIF libheif LIBHEIF "HEIC/HEIF"
+                       "libheif-dev and libheif-plugin-libde265")
+sstvae_picture_library(SSTVAE_WEBP libwebp LIBWEBP "WebP" "libwebp-dev")
+sstvae_picture_library(SSTVAE_JP2 libopenjp2 LIBOPENJP2 "JPEG 2000" "libopenjp2-7-dev")
 
 # --- codec ------------------------------------------------------------------
 if(SSTVAE_BUILD_CODEC)

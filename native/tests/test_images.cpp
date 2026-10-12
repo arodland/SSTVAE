@@ -432,30 +432,41 @@ void test_a_png_is_untouched(const std::string& tmpdir) {
     check::is_true(got.rgb == src.rgb, "images/exif: PNG pixels unchanged");
 }
 
-// fixtures/red-over-blue.heic: 64x48, red at the top fading to blue at
-// the bottom, HEVC-coded by heif-enc (libheif 1.17). Lossy, so colours
-// are checked loosely.
-void test_a_heic_is_read(const std::string& fixtures) {
-    const std::string path = fixtures + "/red-over-blue.heic";
+// fixtures/red-over-blue.{heic,webp,jp2}: 64x48, red at the top fading
+// to blue at the bottom, made from one PNG by heif-enc, cwebp -q 80 and
+// opj_compress -r 20. Lossy, so colours are checked loosely. Without
+// the library the error must name it.
+void check_fixture(const std::string& fixtures, const std::string& ext, bool supported,
+                   const std::string& library) {
+    const std::string path = fixtures + "/red-over-blue." + ext;
+    const std::string tag = "images/" + ext + ": ";
     std::string message;
-    Picture got(0, 0);
+    Picture got;
     try {
         got = sstvae::images::load(path);
     } catch (const std::exception& e) {
         message = e.what();
     }
-    if (!sstvae::images::heif_supported()) {
-        check::is_true(message.find("libheif") != std::string::npos,
-                       "images/heif: without libheif the error names it (got: " + message + ")");
+    if (!supported) {
+        check::is_true(message.find(library) != std::string::npos,
+                       tag + "without " + library + " the error names it (got: " + message + ")");
         return;
     }
-    check::is_true(message.empty(), "images/heif: decodes (" + message + ")");
-    check::equal(got.width, 64, "images/heif: width");
-    check::equal(got.height, 48, "images/heif: height");
+    check::is_true(message.empty(), tag + "decodes (" + message + ")");
+    check::equal(got.width, 64, tag + "width");
+    check::equal(got.height, 48, tag + "height");
     if (got.width != 64 || got.height != 48) return;
-    auto px = [&](int x, int y, int c) { return got.rgb[(static_cast<std::size_t>(y) * 64 + x) * 3 + c]; };
-    check::is_true(px(32, 1, 0) > 200 && px(32, 1, 2) < 60, "images/heif: top is red");
-    check::is_true(px(32, 46, 2) > 200 && px(32, 46, 0) < 60, "images/heif: bottom is blue");
+    auto px = [&](int x, int y, int c) {
+        return got.rgb[(static_cast<std::size_t>(y) * 64 + x) * 3 + c];
+    };
+    check::is_true(px(32, 1, 0) > 200 && px(32, 1, 2) < 60, tag + "top is red");
+    check::is_true(px(32, 46, 2) > 200 && px(32, 46, 0) < 60, tag + "bottom is blue");
+}
+
+void test_other_formats_are_read(const std::string& fixtures) {
+    check_fixture(fixtures, "heic", sstvae::images::heif_supported(), "libheif");
+    check_fixture(fixtures, "webp", sstvae::images::webp_supported(), "libwebp");
+    check_fixture(fixtures, "jp2", sstvae::images::jp2_supported(), "openjpeg");
 }
 
 void test_heif_is_recognised() {
@@ -464,6 +475,16 @@ void test_heif_is_recognised() {
     check::is_true(sstvae::images::looks_like_heif(heic, sizeof heic), "images/heif: heic brand");
     check::is_true(!sstvae::images::looks_like_heif(mp4, sizeof mp4), "images/heif: mp4 is not");
     check::is_true(!sstvae::images::looks_like_heif(heic, 8), "images/heif: too short is not");
+    const std::uint8_t webp[] = {'R', 'I', 'F', 'F', 9, 0, 0, 0, 'W', 'E', 'B', 'P'};
+    const std::uint8_t wav[] = {'R', 'I', 'F', 'F', 9, 0, 0, 0, 'W', 'A', 'V', 'E'};
+    check::is_true(sstvae::images::looks_like_webp(webp, sizeof webp), "images/webp: recognised");
+    check::is_true(!sstvae::images::looks_like_webp(wav, sizeof wav), "images/webp: wav is not");
+    const std::uint8_t jp2[] = {0, 0, 0, 0x0C, 'j', 'P', ' ', ' ', 0x0D, 0x0A, 0x87, 0x0A};
+    const std::uint8_t j2k[] = {0xFF, 0x4F, 0xFF, 0x51};
+    const std::uint8_t jpeg[] = {0xFF, 0xD8, 0xFF, 0xE0};
+    check::is_true(sstvae::images::looks_like_jp2(jp2, sizeof jp2), "images/jp2: box recognised");
+    check::is_true(sstvae::images::looks_like_jp2(j2k, sizeof j2k), "images/jp2: j2k recognised");
+    check::is_true(!sstvae::images::looks_like_jp2(jpeg, sizeof jpeg), "images/jp2: jpeg is not");
 }
 
 }  // namespace
@@ -483,7 +504,7 @@ int main(int argc, char** argv) {
     test_an_enormous_file_is_refused(tmpdir);
     test_a_png_is_untouched(tmpdir);
     test_heif_is_recognised();
-    test_a_heic_is_read(argc > 2 ? argv[2] : "fixtures");
+    test_other_formats_are_read(argc > 2 ? argv[2] : "fixtures");
 
     return check::report("images");
 }
