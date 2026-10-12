@@ -23,8 +23,14 @@ is template-searched with the accumulator's soft data (--frame, default
 full), and what is found is received and associated
 (`sstvae.qrss.em.retro_detect`).
 
+An accumulator may hold passes of either waveform, CE and L, and they
+decode alike (latents in air order). EM and --retro are CE-only: an L
+member is left as it was received and says so, and --retro searches for
+CE passes (an "l-..." --frame is refused).
+
 Prints, per segment of the picture, the effective SNR (10 log10 median
-W) and the members, then the mean W before and after each EM round.
+W) and the members with each one's waveform and frame, then the mean W
+before and after each EM round.
 The codec is the published v5 decoder (--model DIR, --precision). The
 picture's codec ID (from the accumulator or the pass's header) must
 match the decoder's, or nothing is decoded (--any-codec overrides).
@@ -48,7 +54,19 @@ def parse_key(s: str) -> tuple[str, int]:
         raise SystemExit(f"--key {s!r}: picture ID {pid!r} is not hexadecimal") from None
 
 
-def acc_lines(acc) -> list[str]:
+def member_wave(store, uid: str) -> str:
+    """A stored pass's waveform and frame, e.g. "CE short" ("?" if it is gone)."""
+    from sstvae.qrss.constants import WAVEFORM_NAMES
+
+    try:
+        info = store.pass_info(uid)
+    except (OSError, KeyError, ValueError):
+        return "?"
+    return f"{WAVEFORM_NAMES.get(info['waveform'], info['waveform'])} {info['frame'] or '?'}"
+
+
+def acc_lines(acc, store=None) -> list[str]:
+    """The accumulator's summary; with the store, each member's waveform and frame."""
     from sstvae.qrss import em, picture
 
     out = [f"picture {acc.key[0]} {acc.key[1]:08x}  mode {picture.MODE_NAMES[acc.mode]}  "
@@ -59,7 +77,8 @@ def acc_lines(acc) -> list[str]:
         out.append(f"  segment {g}: " + ("no data" if snr is None else
                                          f"effective SNR {snr:+.2f} dB (median W)"))
     for m in acc.members:
-        out.append(f"    {m['uid']}  segment {m['segment']}  by {m['method']}  "
+        wave = "" if store is None else f"  {member_wave(store, m['uid'])}"
+        out.append(f"    {m['uid']}{wave}  segment {m['segment']}  by {m['method']}  "
                    f"Z_ref {m['z_ref']:.1f}  mean W {m['mean_w_db']:+.2f} dB  "
                    f"EM round {m['em_round']}")
     return out
@@ -116,7 +135,7 @@ def main() -> None:
         if not keys:
             print("no pictures in the store")
         for key in keys:
-            for line in acc_lines(store.accumulator(key)):
+            for line in acc_lines(store.accumulator(key), store):
                 print(line)
         return
     if args.output is None or (args.key is None and args.pass_file is None):
@@ -132,7 +151,10 @@ def main() -> None:
         p = PassResult.load(args.pass_file)
         S, W, mode = planes_from_pass(p)
         codec_id = p.header.codec_id
-        print(f"pass {p.uid}: {p.frame} frame, mean W "
+        from sstvae.qrss.constants import WAVEFORM_NAMES
+
+        print(f"pass {p.uid}: {WAVEFORM_NAMES.get(p.waveform, p.waveform)} {p.frame} frame, "
+              "mean W "
               f"{10 * np.log10(max(float(np.mean(p.w)), 1e-30)):+.2f} dB")
     else:
         store = Store(args.store)
@@ -146,6 +168,8 @@ def main() -> None:
             pb_dir = Path(args.passband) if args.passband else store.root / "passband"
             if not pb_dir.is_dir():
                 sys.exit(f"--retro: no passband store at {pb_dir}")
+            if args.frame.startswith("l-"):
+                sys.exit(f"--frame {args.frame!r}: --retro searches for CE passes only")
             try:
                 spec = frame.get(args.frame)
             except (KeyError, ValueError):
@@ -161,7 +185,7 @@ def main() -> None:
                   + "; W is the receiver's own estimate, and a re-receive can raise it "
                   "by more than the picture gains")
         acc = store.accumulator(key)
-        for line in acc_lines(acc):
+        for line in acc_lines(acc, store):
             print(line)
         S, W, mode = acc.S, acc.W, acc.mode
         codec_id = acc.codec_id

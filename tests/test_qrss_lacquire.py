@@ -3,8 +3,7 @@
 
 - A2-L (`acquire.L_PRE`): finds an L_TINY pilot at -20 dB, df < 0.05 Hz,
   timing within T_L/20, phase the pilot's at t0 whatever the receiver's
-  t0; its statistic on noise is A2's Gamma (complex templates); a lead-in
-  pilot with nothing after it, or a pilot with no data, gives no hit.
+  t0; its statistic on noise is A2's Gamma (complex templates).
 - Arbitration: the -1/T_L alias passes A2-L and is dropped by band
   ownership; CE's A2 on an L signal and L's on a CE one pass nowhere at
   0 and +6 dB; `merge_hits` keeps one hit per signal; the joint
@@ -12,13 +11,15 @@
 - A3's spectral shape: z1 is N(0, 1) on noise and tells L from CE at
   -15 dB (L needing nothing above its line); an L path is re-anchored on
   the pilot (`l_pilot_bins`), and the shape along it fills in.
-- `acquire` with a tuple: a mixed CE + L slot end to end, hints with a
-  waveform, `Acquisition.detections`' order, and the frame tuples.
+- `acquire` with a tuple: a mixed CE + L slot end to end,
+  `Acquisition.detections`' order, and the frame tuples.
 
 Slow: A2-L's rate at -28 and -31 dB (10 SHORT preambles each, at the true
 pilot), the joint live acquisition's (A1-limited) rate at -24 dB, A2-L's
-tail over 1e6 noise cells, the shape z along A3's own paths on noise, and
-the pilot re-anchoring on L_FULL at -28 dB.
+tail over 1e6 noise cells, the shape z along A3's own paths on noise, the
+pilot re-anchoring on L_FULL at -28 dB, and (moved from the default tier
+for time, 2026-10-12) a lead-in pilot with nothing after it, or a pilot
+with no data, giving no hit, and hints with a waveform at -29 dB.
 CE through the single-frame `acquire` is pinned bit for bit by the CE
 baseline check, not here.
 
@@ -220,6 +221,7 @@ def test_a2l_tail_on_noise_1e6_cells():
         assert 1 / len(A.A2_SCALES) < r < 1.2, (p, r)
 
 
+@pytest.mark.slow
 def test_a2l_lead_in_only_pilot_gives_no_preamble():
     """An L lead-in (the pilot at average power) ending at t0 - 8 T_L with
     nothing after it, and a pilot with no data under it at all: A1 sees
@@ -501,6 +503,7 @@ def test_joint_acquire_on_a_mixed_slot():
     assert live.tbd == [] and [h.f_hz for h in live.preamble] == [h.f_hz for h in acq.preamble]
 
 
+@pytest.mark.slow
 def test_joint_hints(monkeypatch):
     """Hints in the joint acquisition: (f, waveform) is searched with that
     waveform's A2, a bare f with every enabled one's. An L pass at -29 dB,

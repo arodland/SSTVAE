@@ -44,6 +44,39 @@ second station that close is already given up above.
 
 Everything time-like comes from the `FrameSpec`: nothing here assumes a
 slot length.
+
+**Waveform L, and both at once.** `receive_pass` dispatches on the
+frame's waveform: an L frame (`lframe.LFrameSpec`, f_hz its pilot) is
+gated, tracked and demodulated by `ltrack` and `ldemod` in the same two
+rounds, its header decoded as format version 2 only (an L frame has no
+version 1, so never `frame.plain`). `candidates`, `detect` and
+`receive_slot` take a frame or a tuple of frames, at most one per
+waveform (`frames`). A selection of CE alone is the CE receiver above,
+call for call; one holding an L frame is the joint receiver
+(`is_joint`): the waveform-aware acquisition (`acquire.acquire` with the
+tuple), each candidate gated with its own waveform's frame, aliases and
+ghosts per waveform at that waveform's symbol, and each detection
+received with its own frame.
+
+One signal has one identity, its band centre (`centre_hz`): a CE
+carrier's frequency, or L_EXCLUDE_OFFSET_HZ below an L pilot (L's data
+run from 22.07 to 3.10 Hz below it, so the 45 Hz guard a neighbour gets
+in another signal's noise floor, about that centre, covers [f - 54.5,
+f + 35.5]). Merging, "already found", the noise exclusion and the merge
+after tracking compare centres within MERGE_HZ, across waveforms; where
+a CE and an L result share a centre the larger Z_ref stands for the
+signal, and its waveform with it.
+
+CE's gate V passes an L signal (Z_ref 6-11 on l-short at -12 and -6 dB:
+L's references correlate with CE's in the data band). So in the joint
+receiver a CE accept is checked again on the known symbols' residual
+against the noise model (`_ce_resid_ratio`, R; measured: CE short
+1.02-1.07 at -12 dB and 1.29-1.35 at -6, CE's own distortion not being
+in the model; an L signal under the CE gate 3.6-4.3 at -12 dB and
+12.7-15.4 at -6) and refused when R > CE_RESID_MIN and
+Z_ref / sqrt(R) <= Z_ACCEPT. L's gate makes the converse check itself
+(`ltrack.verify_track_l`). The CE-only receiver does neither: it is
+unchanged.
 """
 
 from __future__ import annotations
@@ -55,9 +88,9 @@ from fractions import Fraction
 
 import numpy as np
 
-from . import acquire, cwid, demod, frontend, header, track
+from . import acquire, cwid, demod, frontend, header, ldemod, lframe, ltrack, track
 from .constants import (CH_FS, FE_FS, FORMAT_VERSIONS, LEAD_IN_MAX_S, SPAN, T_SYM,
-                        WAVEFORM_CE, Z_ACCEPT)
+                        WAVEFORM_CE, WAVEFORM_L, WAVEFORM_NAMES, Z_ACCEPT)
 from .frame import FULL, FrameSpec, plain
 from .frame import layout as frame_layout
 from .morse import check_callsign, keying_units
@@ -70,6 +103,9 @@ GHOST_Z_RATIO = 0.1        # a SUSPECT pass this much weaker than a sound one wi
 ALIAS_HZ = 0.5
 ALIAS_RATIO = 3.0
 MARGIN_S = 3.0
+L_EXCLUDE_OFFSET_HZ = -9.5  # an L signal's band centre, from its pilot (module docstring)
+CE_RESID_MIN = 2.0          # joint receiver: a CE accept past this residual ratio is re-checked
+L_HEADER_VERSIONS = (2,)    # what an L header may say: there is no L version 1
 
 
 @dataclass
@@ -92,6 +128,49 @@ def prepare(cap) -> Prepared:
     fe, keep = frontend.blank(cap.fe, fs=cap.fs)
     fe, _ = frontend.normalise(fe, keep, fs=cap.fs)
     return Prepared(fe=fe, keep=keep, q=cap.q, t0_index=cap.t0_index, fs=cap.fs)
+
+
+# --- which frames, and where a signal is ------------------------------------------------------
+
+def frames(spec) -> tuple:
+    """The frames a selection names, CE's first: one frame of either
+    waveform, or a tuple (or list) of them, at most one per waveform."""
+    m = acquire.frame_map(spec) if isinstance(spec, (tuple, list)) else {int(spec.waveform): spec}
+    return tuple(m[w] for w in (WAVEFORM_CE, WAVEFORM_L) if w in m)
+
+
+def is_joint(spec) -> bool:
+    """Whether a selection takes the joint receiver: it holds an L frame. CE
+    alone (a frame, or a tuple of one) is the CE receiver, call for call."""
+    return any(s.waveform == WAVEFORM_L for s in frames(spec))
+
+
+def _single(spec):
+    """The one CE frame of a selection that is not joint, as given."""
+    return frames(spec)[0] if isinstance(spec, (tuple, list)) else spec
+
+
+def centre_hz(obj) -> float:
+    """A Detection's or PassResult's band centre: f_hz for CE, the pilot
+    plus L_EXCLUDE_OFFSET_HZ for L (module docstring)."""
+    if getattr(obj, "waveform", WAVEFORM_CE) == WAVEFORM_L:
+        return float(obj.f_hz) + L_EXCLUDE_OFFSET_HZ
+    return float(obj.f_hz)
+
+
+def _centres(skip) -> list[float]:
+    """skip_hz for the joint receiver: centres, or Detections / PassResults."""
+    return [float(f) if isinstance(f, (int, float, np.floating, np.integer)) else centre_hz(f)
+            for f in skip]
+
+
+def _ce_hints(hints):
+    """Hints for the CE receiver: (f, waveform) pairs as f when the waveform
+    is CE and left out when not; bare frequencies as they are."""
+    if not any(isinstance(h, (tuple, list)) for h in hints):
+        return hints
+    return [float(h[0]) if isinstance(h, (tuple, list)) else h for h in hints
+            if not isinstance(h, (tuple, list)) or int(h[1]) == WAVEFORM_CE]
 
 
 def channel_for(prep: Prepared, spec: FrameSpec, det: Detection, exclude_hz=(),
@@ -169,7 +248,21 @@ def receive_pass(cap, spec: FrameSpec, det: Detection, prior: EmPrior | None = N
     zeros: the tracker follows a fade, but a stream of zeros sends its
     gain estimate off to infinity and every heard symbol is then erased
     against it.
+
+    An L frame takes `ltrack` and `ldemod` through the same steps
+    (`_receive_pass_l`). `det` must be of the frame's waveform (the
+    acquisition says which, `Detection.waveform`): a ValueError otherwise.
     """
+    wf = getattr(det, "waveform", WAVEFORM_CE)
+    if wf != spec.waveform:
+        raise ValueError(f"a waveform {WAVEFORM_NAMES.get(wf, wf)} detection cannot be "
+                         f"received as frame {spec.name!r} (waveform "
+                         f"{WAVEFORM_NAMES[spec.waveform]}): pass lframe.twin(spec, "
+                         f"det.waveform)")
+    if spec.waveform == WAVEFORM_L:
+        return _receive_pass_l(cap, spec, det, prior, estimator, exclude_hz=exclude_hz,
+                               f_mix_hz=f_mix_hz, round_b=round_b,
+                               return_tracks=return_tracks, erase_s=erase_s)
     prep = prepare(cap)
     chan = channel_for(prep, spec, det, exclude_hz, f_mix_hz)
     if not np.isfinite(det.z_ref) or det.timing is None:
@@ -205,6 +298,51 @@ def receive_pass(cap, spec: FrameSpec, det: Detection, prior: EmPrior | None = N
     return (pr, tracks) if return_tracks else pr
 
 
+def _receive_pass_l(cap, spec, det: Detection, prior: EmPrior | None, estimator: str, *,
+                    exclude_hz, f_mix_hz, round_b: bool, return_tracks: bool, erase_s):
+    """`receive_pass` for an L frame: the channel centred on the pilot, gate V
+    (`ltrack.verify_l`) for an unverified detection, round A, the header
+    (version 2) and the callsign windows, then round B with the header and
+    keying known. There is no spread removal (L's copy is linear, in
+    `make_classes_l`'s data mean), and the keying is FSK: cw_known never
+    says OOK. The report quotes SNR2500 on the frame's keyed power
+    (`ltrack.report_l`)."""
+    prep = prepare(cap)
+    chan = channel_for(prep, spec, det, exclude_hz, f_mix_hz)
+    if not np.isfinite(det.z_ref) or det.timing is None:
+        det = ltrack.verify_l(chan, CH_FS, spec, det, erase_s=erase_s)
+        if det is None:
+            return None
+    q = prep.q
+    # round A
+    tr = ltrack.track_l(chan, spec, det, ltrack.make_classes_l(spec, prior=prior),
+                        timing=det.timing)
+    tr.z_ref = det.z_ref
+    track.erase(tr, erase_s)
+    z, w, llr, diag = ldemod.extract_l(None, tr, spec, q, estimator)
+    hdr, llr, spec = decode_header(llr, diag, spec)
+    cw, cw_known = _cw_result(tr, spec, hdr)
+    tracks = [tr]
+    # round B
+    if round_b and hdr is not None:
+        tr2 = ltrack.track_l(chan, spec, det,
+                             ltrack.make_classes_l(spec, header.encode(hdr), prior),
+                             cw_known=cw_known, timing=tr.timing, freq=tr.freq, outer=1)
+        tr2.z_ref = det.z_ref
+        track.erase(tr2, erase_s)
+        z, w, _, diag = ldemod.extract_l(None, tr2, spec, q, estimator)
+        tr = tr2
+        tracks.append(tr2)
+    rep = ltrack.report_l(tr, diag["kappa"], diag["suspect"])
+    f_hz = float(tr.freq(0.0))
+    pr = PassResult(
+        uid=pass_uid(q, f_hz, z), q=int(q), frame=spec.name, waveform=WAVEFORM_L,
+        f_hz=f_hz, timing=tr.timing, report=rep, z=z, w=w, hdr_llr=llr, header=hdr, cw=cw,
+        ch=chan.ch.astype(np.complex64), ch_fs=CH_FS, ch_t0_index=float(chan.t0_index),
+        f_mix_hz=Fraction(chan.f_mix), psi=_psi_frame(tr), estimator=estimator)
+    return (pr, tracks) if return_tracks else pr
+
+
 def decode_header(llr, diag, spec: FrameSpec):
     """(header or None, the LLRs to keep, the frame to go on with) after round A.
 
@@ -216,9 +354,15 @@ def decode_header(llr, diag, spec: FrameSpec):
     the spread copy (`frame.plain`), so round B removes nothing. A frame
     named as version 1 (`frame.LEGACY`, for an old recording) has only its
     block and accepts either version.
+
+    An L frame (`lframe.LFrameSpec`) has no version 1: each try accepts
+    version 2 alone, the frame never changes, and the LLRs kept are the
+    sum's whichever copy decoded.
     """
     if not spec.has_header:
         return None, llr, spec
+    if spec.waveform == WAVEFORM_L:
+        return _decode_header_l(llr, diag, spec), llr, spec
     if spec.hdr_rho == 0:
         return header.decode(np.asarray(llr, np.float64), versions=FORMAT_VERSIONS), llr, spec
     hdr = header.decode(np.asarray(llr, np.float64))
@@ -236,6 +380,21 @@ def decode_header(llr, diag, spec: FrameSpec):
     return hdr, llr, spec
 
 
+def _decode_header_l(llr, diag, spec):
+    """`decode_header`'s L branch: both copies, then the spread copy alone,
+    then the block alone, version 2 only."""
+    hdr = header.decode(np.asarray(llr, np.float64), versions=L_HEADER_VERSIONS)
+    if hdr is not None or not spec.n_hdr or spec.hdr_rho == 0:
+        return hdr
+    for key in ("llr_spread", "llr_block"):
+        part = diag.get(key)
+        if part is not None:
+            hdr = header.decode(np.asarray(part, np.float64), versions=L_HEADER_VERSIONS)
+            if hdr is not None:
+                return hdr
+    return None
+
+
 def detection_from_pass(p: PassResult, lead_in_s: float = 0.0) -> Detection:
     """A detection reproducing pass p's frequency and timing (for EM re-receives)."""
     t = np.array([-10.0, 0.0, 1800.0])
@@ -243,7 +402,8 @@ def detection_from_pass(p: PassResult, lead_in_s: float = 0.0) -> Detection:
     path = FreqPath(t_s=t, f_hz=r.offset_hz + r.drift_hz_per_min * t / 60.0,
                     weight=np.ones(3))
     return Detection(f_hz=p.f_hz, path=path, timing=p.timing, z_ref=p.report.z_ref,
-                     method="template", lead_in_s=lead_in_s)
+                     method="template", lead_in_s=lead_in_s,
+                     waveform=int(getattr(p, "waveform", WAVEFORM_CE)))
 
 
 def capture_from_pass(p: PassResult) -> Prepared:
@@ -252,13 +412,14 @@ def capture_from_pass(p: PassResult) -> Prepared:
     return Prepared(fe=np.asarray(p.ch), keep=None, q=p.q, t0_index=p.ch_t0_index, fs=p.ch_fs)
 
 
-def _aliases(dets: list[Detection]) -> list[Detection]:
+def _aliases(dets: list[Detection], t_sym: float = T_SYM) -> list[Detection]:
     """Drop detections at a stronger one's f +- k/T (k = 1, 2) with its timing
-    to within k + 1/2 symbols (a 1/T alias can sit a whole symbol off)."""
+    to within k + 1/2 symbols (a 1/T alias can sit a whole symbol off).
+    T is t_sym, the detections' waveform's symbol (one waveform at a time)."""
     out: list[Detection] = []
     for d in sorted(dets, key=lambda d: -d.z_ref):
-        if any(abs(abs(d.f_hz - g.f_hz) - k / T_SYM) < ALIAS_HZ
-               and abs(d.timing.tau0 - g.timing.tau0) < CH_FS * T_SYM * (k + 0.5)
+        if any(abs(abs(d.f_hz - g.f_hz) - k / t_sym) < ALIAS_HZ
+               and abs(d.timing.tau0 - g.timing.tau0) < CH_FS * t_sym * (k + 0.5)
                and g.z_ref > ALIAS_RATIO * d.z_ref
                for g in out for k in (1, 2)):
             continue
@@ -266,9 +427,16 @@ def _aliases(dets: list[Detection]) -> list[Detection]:
     return out
 
 
-def _ghost_of(f_hz: float, tau0: float, g_f_hz: float, g_tau0: float) -> bool:
-    """Whether a detection at (f_hz, tau0) is a ghost of a stronger one at (g_f_hz, g_tau0)."""
-    return abs(f_hz - g_f_hz) < GHOST_HZ and abs(tau0 - g_tau0) < GHOST_T * T_SYM * CH_FS
+def _ghost_of(f_hz: float, tau0: float, g_f_hz: float, g_tau0: float,
+              t_sym: float = T_SYM) -> bool:
+    """Whether a detection at (f_hz, tau0) is a ghost of a stronger one at (g_f_hz, g_tau0).
+
+    For L (t_sym = T_L) the rule is CE's with its timing window in L
+    symbols, unmeasured: L's references recur every 16 T_L, so its ghosts,
+    if gate V passes them as it does CE's, would sit k 1.03 Hz off, inside
+    GHOST_HZ as CE's 2.06 k Hz are; and GHOST_HZ also covers an L signal's
+    own data band, 3-22 Hz below its pilot."""
+    return abs(f_hz - g_f_hz) < GHOST_HZ and abs(tau0 - g_tau0) < GHOST_T * t_sym * CH_FS
 
 
 def _suspect_neighbour(p: PassResult, out: list[PassResult]) -> bool:
@@ -279,26 +447,51 @@ def _suspect_neighbour(p: PassResult, out: list[PassResult]) -> bool:
         and p.report.z_ref < GHOST_Z_RATIO * g.report.z_ref for g in out)
 
 
-def _ghosts(dets: list[Detection]) -> list[Detection]:
+def _suspect_beside(p: PassResult, out: list[PassResult]) -> bool:
+    """`_suspect_neighbour` in the joint receiver: the same rule across
+    waveforms, by band centre (a SUSPECT pass that weak beside a sound one
+    has unusable data whichever waveform either is; within a waveform the
+    centres' difference is the frequencies')."""
+    c = centre_hz(p)
+    return bool(p.report.suspect) and any(
+        abs(c - centre_hz(g)) < GHOST_HZ and not g.report.suspect
+        and p.report.z_ref < GHOST_Z_RATIO * g.report.z_ref for g in out)
+
+
+def _ghosts(dets: list[Detection], t_sym: float = T_SYM) -> list[Detection]:
     """Drop detections that are ghosts of a stronger one (module docstring)."""
     out: list[Detection] = []
     for d in sorted(dets, key=lambda d: -d.z_ref):
-        if not any(_ghost_of(d.f_hz, d.timing.tau0, g.f_hz, g.timing.tau0) for g in out):
+        if not any(_ghost_of(d.f_hz, d.timing.tau0, g.f_hz, g.timing.tau0, t_sym)
+                   for g in out):
             out.append(d)
     return out
 
 
-def candidates(prep: Prepared, spec: FrameSpec, live_only: bool = False,
+def candidates(prep: Prepared, spec, live_only: bool = False,
                hints=()) -> list[Detection]:
     """Acquisition over a prepared capture: the candidates for gate V,
     preamble hits first (A1 -> A2, and A3 unless live_only), with the
-    `hints` (expected frequencies, `acquire.acquire`) A2 did not pass after them."""
-    acq = acquire.acquire(frontend.Capture(prep.fe, prep.q, prep.t0_index, prep.fs), spec,
-                          live_only=live_only, preprocessed=True, hints=hints)
+    `hints` (expected frequencies, `acquire.acquire`) A2 did not pass after them.
+
+    `spec` is a frame or a tuple of frames (`frames`). Joint (`is_joint`):
+    the waveform-aware acquisition, every Detection carrying the waveform
+    it is to be gated as, in `acquire.Acquisition.detections`' order;
+    hints are frequencies (every waveform) or (f, waveform) pairs. Not
+    joint: CE's acquisition, a pair's frequency used only when its
+    waveform is CE."""
+    cap = frontend.Capture(prep.fe, prep.q, prep.t0_index, prep.fs)
+    if is_joint(spec):
+        specs = frames(spec)
+        acq = acquire.acquire(cap, specs, live_only=live_only, preprocessed=True, hints=hints)
+        return acq.detections(specs)
+    spec = _single(spec)
+    acq = acquire.acquire(cap, spec, live_only=live_only, preprocessed=True,
+                          hints=_ce_hints(hints))
     return acq.detections(spec)
 
 
-def detect(prep: Prepared, spec: FrameSpec, live_only: bool = False,
+def detect(prep: Prepared, spec, live_only: bool = False,
            max_candidates: int | None = None, budget_s: float | None = None,
            erase_s=(), cands: list[Detection] | None = None,
            skip_hz=(), hints=()) -> list[Detection]:
@@ -314,7 +507,16 @@ def detect(prep: Prepared, spec: FrameSpec, live_only: bool = False,
     candidate within MERGE_HZ of `skip_hz` (signals known already) is not
     verified again, though it is still left out of the others' noise.
     `hints` go to `candidates`.
+
+    `spec` is a frame or a tuple of frames: joint (`is_joint`) is
+    `_detect_joint`, where skip_hz holds band centres (`centre_hz`; a
+    Detection or PassResult is taken as its centre).
     """
+    if is_joint(spec):
+        return _detect_joint(prep, frames(spec), live_only, max_candidates, budget_s,
+                             erase_s, cands, skip_hz, hints)
+    spec = _single(spec)
+    hints = _ce_hints(hints)
     t_end = None if budget_s is None else time.monotonic() + budget_s
     if cands is None:
         cands = candidates(prep, spec, live_only, hints)
@@ -349,7 +551,103 @@ def detect(prep: Prepared, spec: FrameSpec, live_only: bool = False,
     return _ghosts(_aliases(merged))
 
 
-def receive_slot(cap, spec: FrameSpec = FULL, live_only: bool = False,
+def _detect_joint(prep: Prepared, specs: tuple, live_only: bool, max_candidates, budget_s,
+                  erase_s, cands, skip_hz, hints) -> list[Detection]:
+    """`detect` with CE and L listened for: each candidate gated with its
+    waveform's frame, everything compared by band centre.
+
+    The candidates come in `acquire.Acquisition.detections`' order
+    (preamble hits of either waveform, then hints, then A3's by spectral
+    shape), and max_candidates and budget_s are one budget across both. A
+    candidate whose centre is within MERGE_HZ of a signal found already
+    (of either waveform) or of skip_hz is not gated; the preamble hits'
+    and the found signals' centres leave each gate's noise floor
+    (`_gate`). Then one detection per centre, the larger Z_ref, and
+    aliases and ghosts per waveform at its own symbol.
+    """
+    smap = acquire.frame_map(specs)
+    t_end = None if budget_s is None else time.monotonic() + budget_s
+    if cands is None:
+        cands = candidates(prep, specs, live_only, hints)
+    if max_candidates is not None:
+        cands = cands[:max_candidates]
+    skip = _centres(skip_hz)
+    hits = [centre_hz(c) for c in cands if c.method == "preamble"] + skip
+    found: list[Detection] = []
+    for d in cands:
+        if t_end is not None and time.monotonic() > t_end:
+            break
+        sp = smap.get(getattr(d, "waveform", WAVEFORM_CE))
+        if sp is None:
+            continue                         # (a waveform not listened for)
+        c0 = centre_hz(d)
+        if any(abs(c0 - f) < MERGE_HZ for f in [centre_hz(g) for g in found] + skip):
+            continue
+        others = {f for f in hits + [centre_hz(g) for g in found] if abs(f - c0) >= MERGE_HZ}
+        v = _gate(prep, sp, d, tuple(sorted(others)), erase_s)
+        if v is not None:
+            found.append(v)
+    merged: list[Detection] = []
+    for d in sorted(found, key=lambda d: -d.z_ref):
+        if all(abs(centre_hz(d) - centre_hz(g)) >= MERGE_HZ for g in merged):
+            merged.append(d)
+    out: list[Detection] = []
+    for w, sp in smap.items():
+        out += _ghosts(_aliases([d for d in merged if d.waveform == w], sp.t_sym), sp.t_sym)
+    return sorted(out, key=lambda d: -d.z_ref)
+
+
+def _gate(prep: Prepared, spec, d: Detection, others: tuple, erase_s) -> Detection | None:
+    """Gate V of one joint-receiver candidate with its waveform's frame, the
+    signals at `others` (centres) left out of its noise floor; a CE accept
+    is checked against an L signal (`_ce_resid_ratio`). A lead-in is
+    measured for a detection that has none at the frame's own symbol."""
+    chan = channel_for(prep, spec, d, others)
+    if spec.waveform == WAVEFORM_L:
+        v = ltrack.verify_l(chan, CH_FS, spec, d, erase_s=erase_s)
+    else:
+        v = track.verify(chan, CH_FS, spec, d, erase_s=erase_s)
+        if v is not None:
+            tr = track.verify_track(chan, spec, v, fit=False, erase_s=erase_s)
+            R = _ce_resid_ratio(tr) if tr is not None else 1.0
+            if R > CE_RESID_MIN and v.z_ref / math.sqrt(R) <= Z_ACCEPT:
+                v = None                     # an L signal (or another) under CE's gate
+    if v is not None and v.method != "preamble" and v.lead_in_s == 0.0:
+        v.lead_in_s = acquire.lead_in_span(prep.fe, prep.t0_index, v.f_hz, 0.0,
+                                           v.timing.tau0 / CH_FS, prep.fs, t_sym=spec.t_sym)
+    return v
+
+
+def _ce_resid_ratio(tr: track.TrackResult) -> float:
+    """R of a CE gate-V track: the known symbols' residual |m - u c|^2 over
+    N + |c|^2 P, weighted as Z_ref weighs them (CE's d = j Im c), as
+    `ltrack.resid_ratio` is for L. 1.0 when no known symbol is usable.
+    Measured (module docstring): CE 1.02-1.35, an L signal 3.6-15.4."""
+    spec = tr.spec
+    keyed_from = spec.keyed_start_pos - tr.lead_in_s / T_SYM
+    c_known, _ = track.templates(spec, tr.pos, tr.classes.mu, tr.classes.nu, None, False,
+                                 keyed_from)
+    gk = tr.gi(np.asarray(frame_layout(spec).pos)[tr.classes.known])
+    gk = gk[(gk >= 0) & (gk < len(tr.pos))]
+    gk = gk[tr.psi[gk] >= track.PSI_MIN]
+    if len(gk) == 0:
+        return 1.0
+    m, u, N, P = tr.m[gk], tr.u[gk], tr.N[gk], tr.P[gk]
+    c = c_known[gk]
+    u2, ci = np.abs(u) ** 2, c.imag
+    V = ci * ci * (N * u2 + np.abs(c) ** 2 * u2 * P + N * P) / 2
+    ok = V > 0
+    if not ok.any():
+        return 1.0
+    w = ci[ok] ** 2 * u2[ok] / V[ok]
+    om = w * w * ci[ok] ** 2 * u2[ok]
+    e2 = np.abs(m[ok] - u[ok] * c[ok]) ** 2
+    e0 = N[ok] + np.abs(c[ok]) ** 2 * P[ok]
+    den = float(np.sum(om * e0))
+    return float(np.sum(om * e2)) / den if den > 0 else 1.0
+
+
+def receive_slot(cap, spec=FULL, live_only: bool = False,
                  estimator: str = "joint", *, erase_s=(), round_b: bool = True,
                  dets: list[Detection] | None = None,
                  max_candidates: int | None = None,
@@ -360,7 +658,17 @@ def receive_slot(cap, spec: FrameSpec = FULL, live_only: bool = False,
     acquisition and receives those detections instead (the live view
     reuses the ones it found on the preamble). max_candidates, budget_s,
     erase_s and hints go to `detect`.
+
+    `spec` is a frame or a tuple of frames: joint (`is_joint`) is
+    `_receive_slot_joint`.
     """
+    if is_joint(spec):
+        return _receive_slot_joint(prepare(cap), frames(spec), live_only, estimator,
+                                   erase_s=erase_s, round_b=round_b, dets=dets,
+                                   max_candidates=max_candidates, budget_s=budget_s,
+                                   hints=hints)
+    spec = _single(spec)
+    hints = _ce_hints(hints)
     prep = prepare(cap)
     if dets is None:
         dets = detect(prep, spec, live_only, max_candidates, budget_s, erase_s=erase_s,
@@ -390,6 +698,45 @@ def receive_slot(cap, spec: FrameSpec = FULL, live_only: bool = False,
     return out
 
 
+def _receive_slot_joint(prep: Prepared, specs: tuple, live_only: bool, estimator: str, *,
+                        erase_s, round_b: bool, dets, max_candidates, budget_s,
+                        hints) -> list[PassResult]:
+    """`receive_slot` with CE and L listened for: every detection received
+    with its own waveform's frame (a waveform not in `specs` with its twin),
+    the other signals' centres out of its noise floor. After tracking, the
+    ghost rule applies within a waveform (at its own symbol), the
+    suspect-neighbour rule across both by centre (`_suspect_beside`), and
+    two passes within MERGE_HZ of one centre are one signal of either
+    waveform, the larger Z_ref standing for it."""
+    smap = acquire.frame_map(specs)
+    if dets is None:
+        dets = detect(prep, specs, live_only, max_candidates, budget_s, erase_s=erase_s,
+                      hints=hints)
+    out: list[PassResult] = []
+    for d in dets:
+        w = getattr(d, "waveform", WAVEFORM_CE)
+        sp = smap[w] if w in smap else lframe.twin(specs[0], w)
+        others = tuple(centre_hz(g) for g in dets if g is not d)
+        p = receive_pass(prep, sp, d, estimator=estimator, exclude_hz=others,
+                         round_b=round_b, erase_s=erase_s)
+        if p is None:
+            continue
+        same = [g for g in out if g.waveform == p.waveform]
+        if any(_ghost_of(p.f_hz, p.timing.tau0, g.f_hz, g.timing.tau0, sp.t_sym)
+               for g in same):
+            continue
+        if _suspect_beside(p, out):
+            continue
+        c = centre_hz(p)
+        i = next((i for i, g in enumerate(out) if abs(c - centre_hz(g)) < MERGE_HZ), None)
+        if i is not None:
+            if p.report.z_ref > out[i].report.z_ref:
+                out[i] = p
+            continue
+        out.append(p)
+    return out
+
+
 def capture_from_wav(path, q: int, start_unix: float | None = None) -> frontend.Capture:
     """A slot capture from an 8 kHz WAV; start_unix None means it starts at
     t0 - 12 s (as `qrss_transmit.py` writes it)."""
@@ -402,9 +749,9 @@ def capture_from_wav(path, q: int, start_unix: float | None = None) -> frontend.
     return frontend.Capture(fe=fe, q=int(q), t0_index=lead * FE_FS, fs=FE_FS)
 
 
-def receive_wav(path, q: int, start_unix: float | None = None, spec: FrameSpec = FULL,
+def receive_wav(path, q: int, start_unix: float | None = None, spec=FULL,
                 estimator: str = "joint") -> list[PassResult]:
-    """`receive_slot` on a WAV file."""
+    """`receive_slot` on a WAV file (`spec` a frame or a tuple of frames)."""
     return receive_slot(capture_from_wav(path, q, start_unix), spec, estimator=estimator)
 
 
@@ -417,7 +764,7 @@ CONF_BINS = 120             # one per ~15 s of a FULL pass
 CONF_FLOOR_DB = -30.0       # "no information": W of 0 (erased, or nothing there)
 
 
-def confidence_db(p: PassResult, spec: FrameSpec, elapsed_s: float | None = None,
+def confidence_db(p: PassResult, spec=None, elapsed_s: float | None = None,
                   n: int = CONF_BINS) -> list[float | None]:
     """A pass's confidence over time: per-latent SNR in dB, `n` bins from t0 to the frame's end.
 
@@ -429,16 +776,30 @@ def confidence_db(p: PassResult, spec: FrameSpec, elapsed_s: float | None = None
     nothing to say: not yet arrived (past `elapsed_s` seconds after t0),
     not heard (psi 0 throughout), or no data or header symbols in it
     (the preamble).
+
+    `spec` None, or of another waveform than the pass's, means the pass's
+    own frame (`lframe.get_any(p.frame)`). In an L frame data symbol k
+    carries latents 2k and 2k+1, and header symbol j bits 2j and 2j+1, at
+    that symbol's time in L symbols.
     """
-    lay = frame_layout(spec)
-    end = float(spec.keyed_end_pos * T_SYM)
+    pw = getattr(p, "waveform", None)
+    if spec is None or (pw is not None and int(pw) != spec.waveform):
+        spec = lframe.get_any(p.frame)
+    if spec.waveform == WAVEFORM_L:
+        lay = lframe.layout(spec)
+        lat_at, bit_at = np.repeat(lay.data, 2), np.repeat(lay.hdr_sym, 2)
+    else:
+        lay = frame_layout(spec)
+        lat_at, bit_at = lay.data, lay.hdr_bits
+    t_sym = spec.t_sym
+    end = float(spec.keyed_end_pos * t_sym)
     edges = np.linspace(0.0, end, n + 1)
     psi = getattr(p, "psi", None)
     psi = np.asarray(psi) if psi is not None and len(psi) == spec.n_pos else None
 
     def place(idx):
         pos = lay.pos[idx]
-        t = pos * T_SYM
+        t = pos * t_sym
         ok = np.ones(len(idx), dtype=bool) if psi is None else psi[pos] > 0
         if elapsed_s is not None:
             ok &= t <= elapsed_s
@@ -447,13 +808,13 @@ def confidence_db(p: PassResult, spec: FrameSpec, elapsed_s: float | None = None
     w = np.asarray(p.w, dtype=np.float64)
     total = np.zeros(n)
     count = np.zeros(n)
-    if len(w) == len(lay.data):
-        b, ok = place(lay.data)
+    if len(w) == len(lat_at):
+        b, ok = place(lat_at)
         total += np.bincount(b[ok], w[ok], minlength=n)
         count += np.bincount(b[ok], minlength=n)
     llr = getattr(p, "hdr_llr", None)
-    if llr is not None and spec.n_hdr and len(llr) == len(lay.hdr_bits):
-        b, ok = place(lay.hdr_bits)
+    if llr is not None and spec.n_hdr and len(llr) == len(bit_at):
+        b, ok = place(bit_at)
         k = np.bincount(b[ok], minlength=n)
         m = np.bincount(b[ok], np.asarray(llr, dtype=np.float64)[ok] ** 2, minlength=n) / 4.0
         with np.errstate(invalid="ignore", divide="ignore"):
@@ -474,4 +835,5 @@ def confidence_db(p: PassResult, spec: FrameSpec, elapsed_s: float | None = None
 
 __all__ = ["Prepared", "prepare", "channel_for", "receive_pass", "receive_slot",
            "receive_wav", "capture_from_wav", "detect", "detection_from_pass",
-           "capture_from_pass", "mean_w_db", "confidence_db", "Timing"]
+           "capture_from_pass", "mean_w_db", "confidence_db", "Timing", "frames",
+           "is_joint", "centre_hz", "candidates", "decode_header", "L_EXCLUDE_OFFSET_HZ"]

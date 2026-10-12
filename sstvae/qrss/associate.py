@@ -54,7 +54,7 @@ import math
 import numpy as np
 
 from . import header as _header
-from .constants import Z_ACCEPT
+from .constants import N_HDR_BITS, Z_ACCEPT
 from .store import DAY_S, SENT, SLOT_S, Store, canonical_index
 from .types import PassResult
 
@@ -261,15 +261,22 @@ def header_agrees(h, llr) -> bool:
 
 
 def _soft_header(store: Store, uid: str, llr) -> tuple[object, list[str]] | None:
-    """Rule 2: (HeaderFields, uids involved) from summed LLRs, or None."""
+    """Rule 2: (HeaderFields, uids involved) from summed LLRs, or None.
+
+    Only passes of a frame with a header take part (a headerless frame,
+    TINY or l-tiny, keeps no LLRs), as `em.known_header` sums them."""
     me = store.pass_info(uid)
     llr = np.asarray(llr, dtype=np.float64)
-    near = lambda o: (abs(o["q"] - me["q"]) * SLOT_S <= PAIR_DAYS * DAY_S)  # noqa: E731
+    if llr.size != N_HDR_BITS:
+        return None
+    near = lambda o: (np.size(o["hdr_llr"]) == N_HDR_BITS  # noqa: E731
+                      and abs(o["q"] - me["q"]) * SLOT_S <= PAIR_DAYS * DAY_S)
     clusters = [c for c in store.prov_clusters() if uid not in c["members"]]
     for c in clusters:
         infos = [store.pass_info(u) for u in c["members"]]
         if not any(near(o) for o in infos):
             continue
+        infos = [o for o in infos if np.size(o["hdr_llr"]) == N_HDR_BITS]
         h = _header.decode(llr + sum(o["hdr_llr"] for o in infos))
         if h is not None:
             return h, [uid] + list(c["members"])

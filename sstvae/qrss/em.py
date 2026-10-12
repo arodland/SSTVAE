@@ -64,6 +64,15 @@ a normal Z; a detection needs Z > 6, the receiver's single gate. The
 carrier is the larger part of the template, so a pass of a *different*
 picture from the same station is found too: the search finds passes,
 and association (latent correlation) decides whose they are.
+
+**CE only** (waveform L, design 8.3 for now). An accumulator may hold L
+passes beside CE ones: their latents are in air order as CE's, so they
+take part in every reference and soft-data template, but nothing here
+re-receives or searches for an L pass. `em_refine` leaves L members as
+they are, `rereceive` returns None for one, `known_keying` counts a
+waveform's own members only, the template search takes no hypotheses
+from an L member (its f_hz names a pilot), and `template_search`,
+`receive_template` and `retro_detect` refuse an L frame.
 """
 
 from __future__ import annotations
@@ -75,8 +84,9 @@ from fractions import Fraction
 import numpy as np
 from scipy import stats
 
-from . import ce, demod, frame, header, receiver, track
-from .constants import CH_FS, LEAD_IN_MAX_S, N_HDR_BITS, SPAN, T_SYM, Z_ACCEPT
+from . import ce, demod, frame, header, lframe, receiver, track
+from .constants import (CH_FS, LEAD_IN_MAX_S, N_HDR_BITS, SPAN, T_SYM, WAVEFORM_CE,
+                        WAVEFORM_L, Z_ACCEPT)
 from .frame import FrameSpec
 from .morse import check_callsign, keying_units
 from .precoder import block_index, block_mean, precode
@@ -173,8 +183,11 @@ def known_header(store: Store, acc, segment: int) -> header.HeaderFields | None:
     return dataclasses.replace(found, segment=int(segment))
 
 
-def known_keying(store: Store, acc, call: str | None):
-    """(keying, ook) of the callsign windows if a member's windows matched the call, else None."""
+def known_keying(store: Store, acc, call: str | None, waveform: int = WAVEFORM_CE):
+    """(keying, ook) of the callsign windows if a member's windows matched the call, else None.
+
+    Only members of `waveform` vote: a station's CE and L keyings are its
+    own choice each. L keys FSK alone, so for L ook is always False."""
     if call is None:
         return None
     try:
@@ -184,11 +197,13 @@ def known_keying(store: Store, acc, call: str | None):
     votes = {"fsk": 0, "ook": 0}
     for m in acc.members:
         p = store.load_pass(m["uid"])
+        if pass_spec(p).waveform != waveform:
+            continue
         if p.cw is not None and p.cw.agrees and p.cw.z_match > Z_ACCEPT:
             votes[p.cw.keying] = votes.get(p.cw.keying, 0) + 1
     if votes["fsk"] == 0 and votes["ook"] == 0:
         return None
-    return keying_units(call), votes["ook"] > votes["fsk"]
+    return keying_units(call), waveform != WAVEFORM_L and votes["ook"] > votes["fsk"]
 
 
 # --- one re-receive -----------------------------------------------------------------------------
@@ -197,15 +212,26 @@ def _psi_frame(tr) -> np.ndarray:
     return tr.psi[tr.gi(np.arange(tr.spec.n_pos))].astype(np.float32)
 
 
-def pass_spec(p: PassResult) -> FrameSpec:
-    """The frame pass p was sent in: its recorded frame, without the spread
-    copy when its header says format version 1. A pass stored before
-    version 2 went on the air is recorded as "full", which now names the
-    frame with the spread copy."""
-    spec = frame.get(p.frame)
-    if p.header is not None and p.header.version == 1:
+def pass_spec(p: PassResult):
+    """The frame pass p was sent in: its recorded frame (an "l-..." name is
+    an L frame, `lframe.get_any`), without the spread copy when its header
+    says format version 1. A pass stored before version 2 went on the air
+    is recorded as "full", which now names the frame with the spread copy.
+    An L frame has no version 1."""
+    spec = lframe.get_any(p.frame)
+    if spec.waveform == WAVEFORM_CE and p.header is not None and p.header.version == 1:
         spec = frame.plain(spec)
     return spec
+
+
+def is_l(p: PassResult) -> bool:
+    """Whether pass p is waveform L (its frame says so)."""
+    return pass_spec(p).waveform == WAVEFORM_L
+
+
+def _ce_only(spec, what: str) -> None:
+    if spec.waveform != WAVEFORM_CE:
+        raise ValueError(f"{what} is CE-only (design 8.3): frame {spec.name!r} is waveform L")
 
 
 def pass_path(p: PassResult, chan=None) -> FreqPath:
@@ -218,9 +244,10 @@ def pass_path(p: PassResult, chan=None) -> FreqPath:
     (`track.line_path`) and that line refined segment by segment
     (`track.refine_path`), whichever gives the known symbols the larger
     Z_ref with the pass's own timing (known symbols withheld from the
-    tracker, so the choice does not look at the data).
+    tracker, so the choice does not look at the data). CE only.
     """
     spec = pass_spec(p)
+    _ce_only(spec, "em.pass_path")
     det = receiver.detection_from_pass(p)
     if chan is None:
         chan = receiver.channel_for(receiver.capture_from_pass(p), spec, det,
@@ -253,8 +280,12 @@ def rereceive(p: PassResult, prior: EmPrior | None, hdr: header.HeaderFields | N
     from (default `pass_path`). The result keeps p's uid and its
     callsign-window reading, and p's header unless p had none and the
     re-receive decoded one. With return_path, (PassResult, final path).
+    An L pass is not re-received (EM is CE-only): None, as for a pass
+    without a capture.
     """
     spec = pass_spec(p)
+    if spec.waveform != WAVEFORM_CE:
+        return (None, None) if return_path else None
     if hdr is not None and p.header is not None and hdr.version != p.header.version:
         hdr = dataclasses.replace(hdr, version=p.header.version)   # what p carried
     est = estimator or p.estimator
@@ -323,7 +354,8 @@ def em_refine(store: Store, key, rounds: int = EM_ROUNDS, tol_db: float = EM_TOL
     Returns the accumulator's mean W in dB before EM and after each round
     (so len = rounds run + 1). Members without a stored capture (merged
     or synthetic passes) take part in every reference but are not
-    re-received. `log`, if given, is called with one line per pass.
+    re-received; nor are L members (EM is CE-only), which say so in `log`
+    in the first round. `log`, if given, is called with one line per pass.
 
     The history is W as the passes claim it. A re-receive raises a
     pass's claimed W by up to about twice its gain against the truth
@@ -348,6 +380,10 @@ def em_refine(store: Store, key, rounds: int = EM_ROUNDS, tol_db: float = EM_TOL
             if p.ch is None or len(p.ch) == 0:
                 continue
             spec = pass_spec(p)
+            if spec.waveform != WAVEFORM_CE:
+                if log is not None and r == 1:
+                    log(f"pass {uid}: waveform L, not re-received (EM is CE-only)")
+                continue
             m = acc.member(uid)
             prior = em_prior(acc, uid, store, p.q, spec)
             new, paths[uid] = rereceive(p, prior, hdrs.get(int(m["segment"])), cw_known,
@@ -395,13 +431,16 @@ def _candidates(store: Store, acc, extra_hz=()):
 
     A station's passes of one picture usually share a frequency and a
     clock; the search covers TS_DF_HZ about each frequency, and each
-    member's drift and clock error.
+    member's drift and clock error. An L member gives none: its f_hz is a
+    pilot, and the search is for CE passes.
     """
     out = []
     for m in acc.members:
         try:
             p = store.load_pass(m["uid"])
         except (OSError, KeyError):
+            continue
+        if is_l(p):
             continue
         out.append((float(p.report.offset_hz), float(p.report.drift_hz_per_min),
                     float(p.timing.ppm)))
@@ -527,8 +566,9 @@ def template_search(store: Store, key, cap, spec: FrameSpec, *, freqs=(), segmen
     `freqs`, audio Hz) +- df_hz, timing within +- tau_s of t0, each
     segment with data (or `segments`). Returns a Detection (method
     "template", z_ref the Bonferroni-corrected Z) if Z > z_accept, else
-    None; with return_stats, (Detection or None, Z, info).
+    None; with return_stats, (Detection or None, Z, info). CE frames only.
     """
+    _ce_only(spec, "em.template_search")
     key = (key[0], int(key[1]))
     acc = store.accumulator(key)
     prep, f_mix = _search_input(_from_passband(cap, q, spec), f_mix_hz)
@@ -623,8 +663,9 @@ def receive_template(store: Store, key, cap, spec: FrameSpec, det: Detection | N
     The pass is tracked with the accumulator's soft data as its template
     (the accumulator does not hold this pass, so this is its leave-one-out
     reference) and the picture's header known. It is not associated:
-    pass the result to `associate.associate`.
+    pass the result to `associate.associate`. CE frames only.
     """
+    _ce_only(spec, "em.receive_template")
     key = (key[0], int(key[1]))
     cap = _from_passband(cap, search.pop("q", None), spec)
     prep, f_mix = _search_input(cap, search.pop("f_mix_hz", None))
@@ -678,16 +719,21 @@ def retro_detect(store: Store, key, pb, spec: FrameSpec, *, slots=None,
     known) and associated (`associate.associate`: the search finds
     passes, association decides whose they are). A find within
     RETRO_SAME_HZ of a pass already stored for that slot is that pass and
-    is skipped. Returns [(PassResult, key or None, rule), ...].
+    is skipped (an L pass compared by its band centre, `receiver.centre_hz`).
+    Returns [(PassResult, key or None, rule), ...]. CE frames only: an L
+    pass is not searched for.
     """
     from .associate import associate
 
+    _ce_only(spec, "em.retro_detect")
     key = (key[0], int(key[1]))
     say = log or (lambda *_: None)
     acc = store.accumulator(key)
     dur = spec.keyed_end_pos * T_SYM
     held = {store.pass_info(u)["q"] for u in acc.uids}
-    stored = [(i["q"], i["f_hz"]) for i in map(store.pass_info, store.pass_uids())]
+    stored = [(i["q"], i["f_hz"] + (receiver.L_EXCLUDE_OFFSET_HZ          # band centres
+                                    if i["waveform"] == WAVEFORM_L else 0.0))
+              for i in map(store.pass_info, store.pass_uids())]
     out = []
     for q in (pb.slots(dur) if slots is None else slots):
         q = int(q)

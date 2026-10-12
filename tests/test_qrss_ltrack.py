@@ -20,19 +20,21 @@
   and at the true timing Z_ref is the complex known symbols' matched
   statistic; Z_ref on noise-only captures at a given timing is N(0, 1) or
   narrower (a handful of seeds here, 40 in slow, plus fitted and blind
-  timings). A CE signal taken for L is refused: gate V's known-symbol
-  residual (`resid_ratio`) reads it, where Z_ref alone would pass it.
+  timings).
 - A 0.15 rad pilot/data phase is recovered in delta, u_hat following the
   data, the timing and the data SINR unmoved.
 - A lead-in claimed, unclaimed and falsely claimed; both streams' noise
-  model at -6 dB; a blanked hole; the timing refinement at -24 dB.
+  model at -6 dB; a blanked hole.
 - track.erase and track.report work on an LTrackResult unchanged;
   `report_l` quotes SNR2500 on the frame's keyed power.
 
 Slow: Z_ref's distribution on noise, +-100 ppm clocks on l-short (the
 coarse fit and the tracker), round B against round A, the tracker against
 the genie on l-short (steady, quiet, moderate), the pilot's path on a
-warming-up oscillator.
+warming-up oscillator; and, moved from the default tier for time
+(2026-10-12), a CE signal taken for L refused (gate V's known-symbol
+residual, `resid_ratio`, reads it where Z_ref alone would pass it) and
+the timing refinement at -24 dB.
 """
 
 import math
@@ -343,6 +345,7 @@ def test_z_ref_on_noise_few_seeds():
     assert np.all(np.abs(zs) < 3.5) and abs(np.mean(zs)) < 1.0, zs
 
 
+@pytest.mark.slow
 def test_a_ce_signal_is_not_l():
     """CE TINY at -6 dB gated as L, the pilot taken on its carrier and 22 Hz
     above it (CE's sideband in L's data band): Z_ref on the noise model
@@ -468,6 +471,7 @@ def test_blanked_hole():
     assert 10 * np.log10(np.mean(e) / np.mean(np.abs(g.u) ** 2)) < -20
 
 
+@pytest.mark.slow
 def test_refinement_at_minus_24_db():
     """From the true timing, l-tiny at -24 dB: the refinement stays within
     0.05 T_L rms (a likelihood carrying sum |m(theta)|^2 / Var, the noise at

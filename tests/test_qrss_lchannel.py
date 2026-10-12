@@ -18,8 +18,13 @@ path makes differ from the pilot's.
 - Neighbours of the other waveform: an L neighbour beside CE has its
   one-sided spectrum, a CE one beside L its symmetric one, each at
   rel_db over its own keyed span.
-- npz round trip; `qrss_simulate.py --waveform L` in process.
+- npz round trip; `qrss_simulate.py --waveform L` in process (from
+  transmit audio, and its refusals; from a .qrsp in slow).
 - The genie latent SNR on L_SHORT at -12 dB against theory.
+
+Slow: a FULL L slot with every impairment in under 8 s, and
+`qrss_simulate.py --waveform L` from a .qrsp exactly `simulate()` of its
+symbols (moved from the default tier for time, 2026-10-12).
 """
 
 import importlib.util
@@ -415,6 +420,7 @@ def run_cli(monkeypatch, *argv):
     mod.main()
 
 
+@pytest.mark.slow
 def test_cli_waveform_l(tmp_path, monkeypatch):
     """--waveform L: a .qrsp is exactly simulate() of tx.slot_symbols with the
     header's keying, and the neighbour suffix picks its waveform."""

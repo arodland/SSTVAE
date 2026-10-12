@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
-"""Receive the QRSSTVAE CE passes in one slot recording.
+"""Receive the QRSSTVAE passes, CE and L, in one slot recording.
 
     python qrss_receive.py rx.wav --slot 2026-10-09T06:00Z
     python qrss_receive.py rx.npz --slot 2026-10-09T06:00Z --frame short --no-store
+    python qrss_receive.py rx.wav --slot 2026-10-09T06:00Z --just-l
     python qrss_receive.py rx.wav --slot 2026-10-09T06:00Z --start 2026-10-09T05:59:49Z \\
         --image pass.png
 
 A WAV is 8 kHz audio starting 12 s before t0 (as `qrss_transmit.py`
 writes it) unless --start gives its first sample's UTC time; an .npz is
 `qrss_simulate.py`'s front-end output (its own slot and frame are used
-unless --slot/--frame are given). Every CE signal in the slot is found
+unless --slot/--frame are given). Every signal in the slot is found
 (preamble search, then the whole-slot track-before-detect), verified,
 tracked and demodulated (`sstvae.qrss.receiver.receive_slot`), and for
-each pass this prints its frequency at t0, drift, wander, Doppler,
-clock error, Z_ref, SNR in 2500 Hz, the header, the callsign windows'
-text and match, the mean weight W in dB and the association result.
+each pass this prints its waveform and frame, its frequency at t0 (an L
+pass's is its pilot's), drift, wander, Doppler, clock error, Z_ref, SNR
+in 2500 Hz, the header, the callsign windows' text and match, the mean
+weight W in dB and the association result.
+
+Both waveforms are listened for by default; --just-ce or --just-l
+listens for one. A CE-only receive is the receiver's original
+single-waveform path, unchanged, and knows nothing of L: an L signal in
+the recording can come out as a weak, headerless CE pass. --frame names
+the frame shape in either waveform ("short" or "l-short"), and the
+other waveform listens for the same shape (`lframe.twin`); a frame with
+no twin (the CE version-1 and test frames) needs the flag that names its
+own waveform.
+An .npz's own frame fixes the waveform it holds, so a flag excluding
+that waveform is refused rather than reporting an empty slot.
 
 Passes are stored and associated in the multi-pass store
 (--store DIR, default $QRSSTVAE_HOME or ~/.local/share/qrsstvae)
@@ -31,7 +44,8 @@ from pathlib import Path
 
 import numpy as np
 
-from sstvae.qrss import frame, frontend, receiver, sequences
+from sstvae.qrss import frame, frontend, lframe, receiver, sequences
+from sstvae.qrss.constants import WAVEFORM_CE, WAVEFORM_L, WAVEFORM_NAMES
 
 
 def parse_slot(s: str) -> int:
@@ -65,10 +79,45 @@ def load_capture(path: Path, q: int | None, start: float | None):
     return receiver.capture_from_wav(path, q, start), None
 
 
+def waveforms(args) -> tuple[int, ...]:
+    """The waveforms listened for: one with --just-ce/--just-l, else both."""
+    if args.just_ce:
+        return (WAVEFORM_CE,)
+    if args.just_l:
+        return (WAVEFORM_L,)
+    return (WAVEFORM_CE, WAVEFORM_L)
+
+
+def select_frames(args, npz_frame: str | None = None):
+    """The frame selection for `receiver.receive_slot`: a bare spec when one
+    waveform is listened for, else (CE, L) twins of one shape.
+
+    The shape is --frame's, else the .npz's own, else full.
+    """
+    wf = waveforms(args)
+    base = lframe.get_any(args.frame or npz_frame or "full")
+    if npz_frame is not None:
+        own = lframe.get_any(npz_frame).waveform
+        if own not in wf:
+            flag = "--just-ce" if wf == (WAVEFORM_CE,) else "--just-l"
+            raise SystemExit(f"the .npz holds frame {npz_frame}, waveform "
+                             f"{WAVEFORM_NAMES[own]}, which {flag} does not listen for")
+    specs = []
+    for w in wf:
+        try:
+            specs.append(lframe.twin(base, w))
+        except ValueError:
+            flag = "--just-ce" if base.waveform == WAVEFORM_CE else "--just-l"
+            raise SystemExit(f"frame {base.name} has no {WAVEFORM_NAMES[w]} twin; "
+                             f"add {flag}") from None
+    return specs[0] if len(specs) == 1 else tuple(specs)
+
+
 def pass_lines(p) -> list[str]:
     r = p.report
-    out = [f"pass {p.uid}",
-           f"  frequency  {r.offset_hz:9.3f} Hz at t0   "
+    wf = int(getattr(p, "waveform", WAVEFORM_CE))
+    out = [f"pass {p.uid}   {WAVEFORM_NAMES.get(wf, wf)} {p.frame}",
+           f"  {'pilot    ' if wf == WAVEFORM_L else 'frequency'}  {r.offset_hz:9.3f} Hz at t0   "
            f"drift {r.drift_hz_per_min:+.3f} Hz/min   wander {r.wander_hz_rms:.3f} Hz rms",
            f"  doppler    {r.doppler_hz:.3f} Hz   clock {r.ppm:+.1f} ppm   "
            f"Z_ref {r.z_ref:.1f}   SNR2500 {r.snr2500_db:+.1f} dB   kappa {r.kappa:.2f}"
@@ -111,15 +160,22 @@ def render_pass(p, image: Path, model: str | None, precision: str) -> str:
     return f"image: {image}"
 
 
-def main() -> None:
+def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("input", help="slot recording: 8 kHz WAV, or a qrss_simulate .npz")
     ap.add_argument("--slot", default=None, help="quarter hour, ISO UTC, e.g. 2026-10-09T06:00Z")
     ap.add_argument("--start", default=None,
                     help="UTC time of the WAV's first sample (default: t0 - 12 s)")
-    ap.add_argument("--frame", choices=sorted(frame.PRESETS), default=None,
-                    help="frame shape (default full, or the .npz's own)")
+    ap.add_argument("--frame", choices=sorted(frame.PRESETS) + sorted(lframe.PRESETS),
+                    default=None,
+                    help="frame shape, either waveform's name for it "
+                         "(default full, or the .npz's own)")
+    wf = ap.add_mutually_exclusive_group()
+    wf.add_argument("--just-ce", action="store_true",
+                    help="listen for waveform CE only (default: CE and L)")
+    wf.add_argument("--just-l", action="store_true",
+                    help="listen for waveform L only (default: CE and L)")
     ap.add_argument("--store", default=None, help="multi-pass store directory")
     ap.add_argument("--no-store", action="store_true", help="do not store or associate")
     ap.add_argument("--passband", default=None,
@@ -133,12 +189,16 @@ def main() -> None:
     ap.add_argument("--model", default=None, help="codec model directory (for --image)")
     ap.add_argument("--precision", choices=("fp32", "fp16", "int8"), default="fp32",
                     help="codec precision (for --image)")
-    args = ap.parse_args()
+    return ap.parse_args(argv)
+
+
+def main() -> None:
+    args = parse_args()
 
     q = parse_slot(args.slot) if args.slot else None
     start = parse_time(args.start) if args.start else None
     cap, npz_frame = load_capture(Path(args.input), q, start)
-    spec = frame.get(args.frame or npz_frame or "full")
+    spec = select_frames(args, npz_frame)
 
     store = None
     if not args.no_store:
@@ -151,8 +211,10 @@ def main() -> None:
 
     passes = receiver.receive_slot(cap, spec, estimator=args.estimator)
     if not passes:
-        print("no CE signal found" + (" (slot kept for a later --retro search)"
-                                      if store is not None and not args.no_passband else ""))
+        names = " or ".join(WAVEFORM_NAMES[s.waveform] for s in receiver.frames(spec))
+        print(f"no {names} signal found" + (" (slot kept for a later --retro search)"
+                                            if store is not None and not args.no_passband
+                                            else ""))
         sys.exit(1)
     for p in passes:
         for line in pass_lines(p):

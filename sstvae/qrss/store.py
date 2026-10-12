@@ -50,6 +50,7 @@ from pathlib import Path
 import numpy as np
 
 from . import picture
+from .constants import WAVEFORM_L
 from .types import PassResult
 
 N_GROUPS = picture.N_GROUPS                 # 3
@@ -292,7 +293,12 @@ class Store:
         return self._zw[uid]
 
     def pass_info(self, uid: str) -> dict:
-        """A pass's light metadata: q, f_hz, header (dict or None), hdr_llr, z_ref."""
+        """A pass's light metadata: q, f_hz, header (dict or None), hdr_llr, z_ref,
+        waveform (0 = CE, 1 = L) and frame (the preset's name).
+
+        f_hz is the pass's own frequency: the CE band centre, or the L pilot.
+        A pass written before waveform L existed reads as CE.
+        """
         if uid not in self._light:
             with np.load(self._pass_path(uid), allow_pickle=False) as d:
                 meta = json.loads(d["meta"].tobytes().decode())
@@ -301,7 +307,9 @@ class Store:
                                 "f_hz": float(meta["f_hz"]),
                                 "header": meta["header"], "hdr_llr": llr,
                                 "z_ref": float(meta["report"]["z_ref"]),
-                                "em_round": int(meta["em_round"])}
+                                "em_round": int(meta["em_round"]),
+                                "waveform": int(meta.get("waveform", 0)),
+                                "frame": meta.get("frame")}
         return self._light[uid]
 
     def update_pass(self, p: PassResult) -> list[tuple]:
@@ -388,7 +396,9 @@ class Store:
         A picture of mode m sends its segment g in slot q0 + 2g (passes
         are 30 minutes apart), so a member heard as segment k in slot qk
         is followed by each missing segment g > k in slot qk + 2 (g - k).
-        One dict per (member, segment): key, segment, f_hz and q of the member.
+        One dict per (member, segment): key, segment, and the member's f_hz,
+        q, waveform and frame, so the caller listens for the same waveform
+        at the same frequency.
         """
         out = []
         for j in sorted((self.root / "acc").glob("*.json")):
@@ -400,7 +410,9 @@ class Store:
                     for g in range(k + 1, int(meta["mode"]) + 1):
                         if g not in have and info["q"] + 2 * (g - k) == int(q):
                             out.append(dict(key=(meta["callsign"], int(meta["picture_id"])),
-                                            segment=g, f_hz=info["f_hz"], q=info["q"]))
+                                            segment=g, f_hz=info["f_hz"], q=info["q"],
+                                            waveform=info["waveform"],
+                                            frame=info["frame"]))
             except (OSError, KeyError, ValueError):
                 continue                  # (an accumulator being written, or a pass expired)
         return out
@@ -449,7 +461,7 @@ class Store:
         # one slot received again) is one member: counting both would put
         # its noise in W twice and claim an SNR it never had. The member is
         # whichever copy carries more; the other stays a pass file only.
-        twin = self.twin(acc, info["q"], info["f_hz"], segment, uid)
+        twin = self.twin(acc, info["q"], info["f_hz"], segment, uid, info["waveform"])
         if twin is not None:
             keep, drop = (twin, rec) if twin["mean_w_db"] >= rec["mean_w_db"] else (rec, twin)
             self.log({"event": "duplicate", "key": [acc.key[0], acc.key[1]],
@@ -467,16 +479,26 @@ class Store:
         return acc
 
     def twin(self, acc: Accumulator, q: int, f_hz: float, segment: int,
-             uid: str | None = None) -> dict | None:
+             uid: str | None = None, waveform: int | None = None) -> dict | None:
         """The member of `acc` that is the transmission at (q, f_hz) of
         `segment` received again: the same slot and segment, within
         SAME_PASS_HZ (two signals that close could not be told apart).
-        `uid` itself is not its own twin. None if there is none."""
+        `uid` itself is not its own twin. None if there is none.
+
+        With `waveform` (f_hz then that waveform's own: an L pilot), a
+        member of the other waveform is compared by band centre
+        (`receiver.centre_hz`), as the receiver tells signals apart."""
         for m in acc.members:
             if m["uid"] == uid or int(m["segment"]) != int(segment):
                 continue
             o = self.pass_info(m["uid"])
-            if o["q"] == int(q) and abs(o["f_hz"] - float(f_hz)) < SAME_PASS_HZ:
+            f_o, f = o["f_hz"], float(f_hz)
+            if waveform is not None and o["waveform"] != int(waveform):
+                from .receiver import L_EXCLUDE_OFFSET_HZ as off  # (the store loads no DSP)
+
+                f_o += off if o["waveform"] == WAVEFORM_L else 0.0
+                f += off if int(waveform) == WAVEFORM_L else 0.0
+            if o["q"] == int(q) and abs(f_o - f) < SAME_PASS_HZ:
                 return m
         return None
 

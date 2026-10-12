@@ -25,6 +25,19 @@ The tiles are a directory: `state.json` (rewritten atomically after
 every change) and `tiles/<id>.png`. Anything can show them; nothing in
 here knows about a GUI.
 
+**Both waveforms.** `LiveConfig.waveforms` says which are listened for,
+each in the shape of `LiveConfig.spec` (`lframe.twin`: "full" and
+"l-full"). With L among them the receiver is handed the tuple of frames
+(`LiveConfig.selection`), and acquires, gates and receives every signal
+as its own waveform; the slot is read, blanked and normalised once for
+both, and lasts as long as the longer frame. One signal is one tile
+whichever waveform it is read as: detections, passes, tiles and hints
+are the same signal when their band centres (`receiver.centre_hz`; an L
+pilot sits 9.5 Hz above its band's) are within MERGE_HZ, and where both
+waveforms lock on one signal the larger Z_ref says which it is. With CE
+alone (no `waveforms`, or just CE) the receiver is handed the CE frame
+itself and every call is the one made before L existed.
+
 **The picture so far.** A pass in progress is received like a finished
 one with every symbol not yet heard erased (`receive_pass(erase_s=)`),
 so its W is honest about what arrived, and the tile is the store's
@@ -68,8 +81,9 @@ from pathlib import Path
 
 import numpy as np
 
-from . import acquire, frontend, picture, receiver
-from .constants import CARRIER_BAND_HZ, FE_FS, FS
+from . import acquire, frontend, lframe, picture, receiver
+from .constants import (CARRIER_BAND_HZ, FE_FS, FS, L_EDGE_HZ, L_PILOT_HZ, WAVEFORM_CE,
+                        WAVEFORM_L, WAVEFORM_NAMES)
 from .frame import FULL, FrameSpec
 from .frontend import PB_LEAD_S, PB_TAIL_S, slot_t0
 from .types import Detection, PassResult
@@ -101,16 +115,50 @@ LOG_FILE_BYTES = 2_000_000        # ...moved to listener.log.1 past this size (o
 # unheard before and after a dial change: settling, and the app's optional
 # tune 5 s after it, which takes up to 45 s on Jeff's tuner (rarely)
 DIAL_GUARD_S = (2.0, 50.0)
+L_BELOW_HZ = float(L_PILOT_HZ + L_EDGE_HZ)   # an L signal's data reach this far below its pilot
+_WAVEFORM_OF = {name: w for w, name in WAVEFORM_NAMES.items()}
 
 
 def utc_iso(t: float) -> str:
     return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def frame_seconds(spec: FrameSpec) -> float:
+def frame_seconds(spec) -> float:
     """Seconds from t0 to the end of the frame's last keyed symbol (either
-    waveform: positions are in the spec's own symbols)."""
+    waveform: positions are in the spec's own symbols); for a tuple of
+    frames the longest's, which is how long the listener's slot lasts."""
+    if isinstance(spec, (tuple, list)):
+        return max(frame_seconds(s) for s in spec)
     return spec.keyed_end_pos * spec.t_sym
+
+
+def in_band(f_hz: float, waveform: int = WAVEFORM_CE) -> bool:
+    """Whether a signal named at f_hz lies inside CARRIER_BAND_HZ: a CE
+    carrier, or an L pilot and the data L_BELOW_HZ under it (`tx.check_pilot`)."""
+    lo = f_hz - L_BELOW_HZ if waveform == WAVEFORM_L else f_hz
+    return CARRIER_BAND_HZ[0] <= lo and f_hz <= CARRIER_BAND_HZ[1]
+
+
+def centre_of(f_hz: float, waveform) -> float:
+    """`receiver.centre_hz` for what is not a Detection or a pass (a tile,
+    a hint): the band centre of a signal named at f_hz in `waveform` (the
+    number, or its name in WAVEFORM_NAMES)."""
+    return f_hz + receiver.L_EXCLUDE_OFFSET_HZ if waveform in (WAVEFORM_L, "L") else f_hz
+
+
+def _waveform_id(w) -> int:
+    """A waveform's number from the number or its name (a tile's, or a stored
+    pass's); a name that is not one is CE, which is what a tile without one is."""
+    return _WAVEFORM_OF.get(w, WAVEFORM_CE) if isinstance(w, str) else int(w)
+
+
+def _due_waveform(d: dict) -> int:
+    """The waveform of a pass `store.due` names: its frame's ("l-..." is L),
+    else its "waveform", else CE (a pass stored before L)."""
+    try:
+        return int(lframe.get_any(d["frame"]).waveform)
+    except (KeyError, ValueError, TypeError, AttributeError):
+        return _waveform_id(d.get("waveform", WAVEFORM_CE))
 
 
 # --- audio -> FE, streaming ----------------------------------------------------------------
@@ -209,9 +257,12 @@ def _spans(mask: np.ndarray, fs: float, origin: float) -> list[tuple[float, floa
     return [((s - origin) / fs, (e - origin) / fs) for s, e in zip(starts, ends)]
 
 
-def slot_capture(ring: FeRing, q: int, spec: FrameSpec, seed: int | None = None,
+def slot_capture(ring: FeRing, q: int, spec, seed: int | None = None,
                  lead_s: float = PB_LEAD_S, tail_s: float = PB_TAIL_S):
     """(Prepared, erase spans, share of the frame heard) for slot q from the ring.
+
+    `spec` is a frame, or a tuple of frames (`LiveConfig.selection`): the
+    slot lasts as long as the longest (`frame_seconds`).
 
     The heard samples are blanked and normalised as `receiver.prepare`
     would; everything not heard (the future, and holes) is complex noise
@@ -222,7 +273,7 @@ def slot_capture(ring: FeRing, q: int, spec: FrameSpec, seed: int | None = None,
     return capture_prepare(*capture_read(ring, q, spec, lead_s, tail_s), q, spec, seed)
 
 
-def capture_read(ring, q: int, spec: FrameSpec, lead_s: float = PB_LEAD_S,
+def capture_read(ring, q: int, spec, lead_s: float = PB_LEAD_S,
                  tail_s: float = PB_TAIL_S) -> tuple[np.ndarray, np.ndarray, int]:
     """(FE, written, index of t0 in them): slot q as read from the ring (or
     anything with its `read`, such as the passband store)."""
@@ -233,7 +284,7 @@ def capture_read(ring, q: int, spec: FrameSpec, lead_s: float = PB_LEAD_S,
     return x, ok, t0 * FE_FS - a
 
 
-def capture_prepare(x, ok, origin: int, q: int, spec: FrameSpec, seed: int | None = None):
+def capture_prepare(x, ok, origin: int, q: int, spec, seed: int | None = None):
     """`slot_capture` from what `capture_read` returned."""
     # The blanker and the inverse AGC look at most about 0.6 s either
     # side of a sample, and everything after the newest heard sample is
@@ -261,7 +312,7 @@ def capture_prepare(x, ok, origin: int, q: int, spec: FrameSpec, seed: int | Non
     return prep, _spans(ok, FE_FS, origin), heard
 
 
-def finish_receive(x, ok, origin: int, q: int, spec: FrameSpec, estimator: str,
+def finish_receive(x, ok, origin: int, q: int, spec, estimator: str,
                    dets: list, hints=()) -> tuple[list[PassResult], float]:
     """(passes, share heard): the end-of-slot receive of slot q from its
     `capture_read`.
@@ -274,6 +325,12 @@ def finish_receive(x, ok, origin: int, q: int, spec: FrameSpec, estimator: str,
     slot. With less heard, only `dets`, the signals already found on the
     preamble, are received, and whatever is found at the `hints`
     (`LiveListener._hints`), which are among the candidates either way.
+
+    `spec` is what the listener hands the receiver (`LiveConfig.selection`):
+    the CE frame, or a tuple of frames, whose candidates the receiver puts
+    in one order across both waveforms (preamble hits, then hints, then
+    the whole-slot search's lines by their shape), so one budget serves
+    both; the signals known already are then skipped by their band centres.
     """
     k1 = min(len(ok), origin + int(round(frame_seconds(spec) * FE_FS)))
     if not ok[origin:k1].any() or (not dets and not hints
@@ -288,8 +345,10 @@ def finish_receive(x, ok, origin: int, q: int, spec: FrameSpec, estimator: str,
     elif (dets or hints) and heard > 0.0:
         more = []
         if hints:
+            known = ([receiver.centre_hz(d) for d in dets] if receiver.is_joint(spec)
+                     else [d.f_hz for d in dets])
             more = receiver.detect(prep, spec, live_only=True, erase_s=erase, hints=hints,
-                                   skip_hz=[d.f_hz for d in dets],
+                                   skip_hz=known,
                                    max_candidates=FINISH_MAX_CANDIDATES,
                                    budget_s=FINISH_BUDGET_S)
         passes = receiver.receive_slot(prep, spec, estimator=estimator, erase_s=erase,
@@ -531,6 +590,9 @@ class Tile:
     updated: float = 0.0
     note: str = ""
     uid: str | None = None          # the pass as filed in the multi-pass store
+    # "CE" or "L" (WAVEFORM_NAMES): for L, f_hz is the pilot and the
+    # signal reaches L_BELOW_HZ under it; a tile from before L is CE
+    waveform: str = "CE"
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -552,6 +614,11 @@ class SlotState:
 @dataclass
 class LiveConfig:
     spec: FrameSpec = FULL
+    # The waveforms listened for (WAVEFORM_CE, WAVEFORM_L), each in `spec`'s
+    # shape (`specs`). None is CE alone, the listener as it was before L,
+    # and so is (WAVEFORM_CE,); qrss_listen.py asks for both unless told
+    # --just-ce or --just-l.
+    waveforms: tuple[int, ...] | None = None
     refresh_s: float = 120.0          # time between live receives of a slot
     first_s: float = 25.0             # first receive this long after t0 (the preamble is 20 s)
     detect_until_s: float = 300.0     # acquisition re-runs at each refresh until then
@@ -579,6 +646,28 @@ class LiveConfig:
     # (`_FinishProcess`), on a core of their own. The command line turns
     # it on; tests that replace the receiver in this process leave it off.
     finish_process: bool = False
+
+    @property
+    def specs(self) -> tuple:
+        """The frames listened for, CE's first: `spec` with no `waveforms`,
+        otherwise its twin in each (ValueError for a shape the other
+        waveform has no frame of, such as full-v1)."""
+        if self.waveforms is None:
+            return (self.spec,)
+        ws = sorted({int(w) for w in self.waveforms})
+        if not ws or any(w not in WAVEFORM_NAMES for w in ws):
+            raise ValueError(f"waveforms {self.waveforms!r}: one or more of "
+                             f"{', '.join(map(str, WAVEFORM_NAMES))}")
+        return tuple(lframe.twin(self.spec, w) for w in ws)
+
+    @property
+    def selection(self):
+        """What the listener hands the receiver: the tuple of `specs` when
+        it holds an L frame (`receiver.is_joint`), and otherwise the CE
+        frame itself, so CE alone makes exactly the calls, with the same
+        object, it made before L."""
+        sp = self.specs
+        return sp if receiver.is_joint(sp) else sp[0]
 
 
 def dir_lock(path):
@@ -630,7 +719,12 @@ class LiveListener:
         (self.dir / "tiles").mkdir(parents=True, exist_ok=True)
         self.store = store
         self.passband = passband
-        self.ring = FeRing(frame_seconds(self.cfg.spec) + PB_LEAD_S + PB_TAIL_S + 300.0)
+        # what is listened for, and what the receiver is handed for it
+        self.specs = self.cfg.specs
+        self.selection = self.cfg.selection
+        self.joint = receiver.is_joint(self.selection)
+        self.dur = frame_seconds(self.specs)          # a slot's frame, the longer of the two
+        self.ring = FeRing(self.dur + PB_LEAD_S + PB_TAIL_S + 300.0)
         self.dial = DialLog(self.dir / DIAL_FILE)
         self.fe = StreamFE()
         self._early: collections.deque = collections.deque()
@@ -723,6 +817,7 @@ class LiveListener:
         st = dict(
             version=1, updated=time.time(), now=self.now, now_utc=utc_iso(self.now or time.time()),
             listening=listening, source=self.source, frame=self.cfg.spec.name,
+            waveforms=[WAVEFORM_NAMES[s.waveform] for s in self.specs],
             audio_utc=utc_iso(self.audio_end) if self.audio_end else None,
             slots=[dict(q=q, slot_utc=utc_iso(slot_t0(q) - 1),
                         progress=self._progress(q), signals=len(s.tiles))
@@ -856,7 +951,7 @@ class LiveListener:
         """
         if self.passband is None or hours <= 0:
             return []
-        dur = frame_seconds(self.cfg.spec)
+        dur = self.dur
         reader = _PassbandReader(self.passband)
         # A slot whose passes the store already holds was finished by the
         # earlier listener, which stopped before it recorded that: receiving
@@ -894,11 +989,11 @@ class LiveListener:
     # -- slots ----------------------------------------------------------------------------
 
     def _progress(self, q: int) -> float:
-        return float(min(max((self.now - slot_t0(q)) / frame_seconds(self.cfg.spec), 0.0), 1.0))
+        return float(min(max((self.now - slot_t0(q)) / self.dur, 0.0), 1.0))
 
     def active_slots(self, now: float) -> list[int]:
         """Slots whose frame has started and is not yet finished at `now`."""
-        dur = frame_seconds(self.cfg.spec)
+        dur = self.dur
         lo = int(math.floor((now - dur - PB_TAIL_S - 1.0) / 900.0))
         return [q for q in range(lo, int(math.floor((now - 1.0) / 900.0)) + 1)
                 if slot_t0(q) <= now < slot_t0(q) + dur + PB_TAIL_S]
@@ -907,7 +1002,7 @@ class LiveListener:
         """Do whatever is due at `now` (unix seconds); True if anything changed."""
         self.now = now
         changed = False
-        dur = frame_seconds(self.cfg.spec)
+        dur = self.dur
         for q in self.active_slots(now):
             if q not in self.slots and q not in self.finished:
                 # a slot whose start we never heard is still received live
@@ -992,29 +1087,85 @@ class LiveListener:
         return self._finish_idle() and (self._jobs is None or (self._busy["live"] is None
                                                                and self._jobs.empty()))
 
-    def _match(self, s: SlotState, f_hz: float, dial: int | None = None) -> Tile | None:
-        """The tile of slot s at audio f_hz on the same dial (never one heard on another)."""
-        best = None
+    # -- which signal is which ---------------------------------------------------------
+
+    def _centre(self, x) -> float:
+        """Where a detection or pass sits for "the same signal": its band's
+        centre (`receiver.centre_hz`) when both waveforms may be heard, its
+        frequency when only CE is, as before L."""
+        return receiver.centre_hz(x) if self.joint else x.f_hz
+
+    def _waveform(self, p) -> int:
+        return int(p.waveform) if self.joint else WAVEFORM_CE
+
+    def _kind(self, p) -> tuple[str, str]:
+        """(waveform, frame) for pass p's tile: the pass's own on the joint
+        path, CE and the configured frame on CE's alone."""
+        if not self.joint:
+            return "CE", self.cfg.spec.name
+        return WAVEFORM_NAMES[self._waveform(p)], p.frame
+
+    def _spec_of(self, p):
+        """The frame pass p was received with, which its frame name says."""
+        return lframe.get_any(p.frame) if self.joint else self.cfg.spec
+
+    def _match(self, s: SlotState, f_hz: float, dial: int | None = None,
+               waveform: str = "CE") -> Tile | None:
+        """The tile of slot s (of either waveform) at the band centre of a
+        signal at audio f_hz in `waveform`, on the same dial (never one
+        heard on another)."""
+        c = centre_of(f_hz, waveform)
+        best, gap = None, MERGE_HZ
         for t in s.tiles.values():
-            if same_dial(t.dial_hz, dial) and abs(t.f_hz - f_hz) < MERGE_HZ and (
-                    best is None or abs(t.f_hz - f_hz) < abs(best.f_hz - f_hz)):
-                best = t
+            d = abs(centre_of(t.f_hz, t.waveform) - c)
+            if same_dial(t.dial_hz, dial) and d < gap:
+                best, gap = t, d
         return best
 
-    def _tile_for(self, s: SlotState, f_hz: float, dial: int | None = None) -> Tile:
-        t = self._match(s, f_hz, dial)
+    def _tile_for(self, s: SlotState, f_hz: float, dial: int | None = None,
+                  waveform: str = "CE", frame: str | None = None) -> Tile:
+        t = self._match(s, f_hz, dial, waveform)
         if t is None:
             tid = f"{s.q}-{int(round(f_hz))}"
             while tid in s.tiles:
                 tid += "b"
-            t = Tile(id=tid, q=s.q, slot_utc=utc_iso(slot_t0(s.q) - 1), frame=self.cfg.spec.name,
-                     f_hz=float(f_hz), dial_hz=dial, updated=self.now)
+            t = Tile(id=tid, q=s.q, slot_utc=utc_iso(slot_t0(s.q) - 1),
+                     frame=frame or self.cfg.spec.name, f_hz=float(f_hz), dial_hz=dial,
+                     updated=self.now, waveform=waveform)
             s.tiles[tid] = t
             on = "" if dial is None else f" (dial {dial / 1e6:.6f} MHz)"
-            self.log(f"slot {t.slot_utc}: signal at {f_hz:.1f} Hz{on}")
+            what = f", waveform {waveform}" if self.joint else ""
+            self.log(f"slot {t.slot_utc}: signal at {f_hz:.1f} Hz{what}{on}")
         elif t.dial_hz is None:
             t.dial_hz = dial          # found before the dial was known (rig control connected)
         return t
+
+    def _takes(self, t: Tile, p) -> bool:
+        """Whether pass p may update tile t (`_tile_for`'s, matched by band
+        centre). A pass of the tile's waveform does; one of the other, both
+        waveforms having locked on one signal, only with the larger Z_ref,
+        and the tile then becomes that waveform."""
+        wf, fr = self._kind(p)
+        if t.waveform != wf:
+            z = float(p.report.z_ref)
+            if t.z_ref is not None and not z > t.z_ref:
+                return False
+            was = f" against {t.z_ref:.1f} as {t.waveform}" if t.z_ref is not None else ""
+            self.log(f"slot {t.slot_utc}: the signal at {t.f_hz:.1f} Hz is waveform {wf} "
+                     f"(Z_ref {z:.1f}{was})")
+            t.waveform = wf
+        t.frame = fr
+        return True
+
+    def _keep(self, s: SlotState, d) -> None:
+        """Detection d stands for its signal in s.dets: in place of any at its
+        band centre, the newest, unless that one is the other waveform and
+        at least as strong."""
+        c = self._centre(d)
+        if self.joint and any(abs(self._centre(g) - c) < MERGE_HZ and g.waveform != d.waveform
+                              and not d.z_ref > g.z_ref for g in s.dets):
+            return
+        s.dets = [g for g in s.dets if abs(self._centre(g) - c) >= MERGE_HZ] + [d]
 
     def _candidates(self, s: SlotState, prep, ok, origin: int) -> list:
         """Slot s's live acquisition candidates. Acquisition reads only the
@@ -1026,9 +1177,10 @@ class LiveListener:
         hints = tuple(self._hints(s.q, self.dial.dial_at(slot_t0(s.q))))
         if s.cands is None or not set(hints) <= set(s.hints):
             if hints and set(hints) != set(s.hints):
-                self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: a later pass is due at "
-                         + ", ".join(f"{f:.1f}" for f in hints) + " Hz")
-            cands = receiver.candidates(prep, self.cfg.spec, live_only=True, hints=hints)
+                where = (", ".join(f"{f:.1f} Hz ({WAVEFORM_NAMES[w]})" for f, w in hints)
+                         if self.joint else ", ".join(f"{f:.1f}" for f in hints) + " Hz")
+                self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: a later pass is due at {where}")
+            cands = receiver.candidates(prep, self.selection, live_only=True, hints=hints)
             heard = np.flatnonzero(ok)
             final = len(heard) and (heard[-1] + 1 - origin) / FE_FS > acquire.live_end_s() + 1.0
             s.cands, s.hints = (cands if final else None), hints
@@ -1036,37 +1188,44 @@ class LiveListener:
             cands = s.cands
         return [c for c in cands if getattr(c, "method", None) != "hint"]
 
-    def _hints(self, q: int, dial: int | None) -> list[float]:
+    def _hints(self, q: int, dial: int | None) -> list:
         """Audio frequencies (on `dial`) where a later pass of a picture
         partly received is due in slot q: from the multi-pass store, and
         from the tiles of earlier slots (whose end-of-slot receive may not
         have filed them yet). A pass heard on another dial is moved by the
-        difference (USB), and dropped if that leaves the band."""
-        due = []                                       # (f_hz, the dial it was heard on)
+        difference (USB), and dropped if that leaves the band. On the joint
+        path each is (f, waveform), the waveform its pass was; with CE
+        alone a bare f, as before L. A pass of a waveform not listened for
+        gives none, and one signal (one band centre) gives one."""
+        due = []                                       # (f_hz, waveform, the dial it was heard on)
         if self.store is not None:
             try:
-                due = [(d["f_hz"], self.dial.dial_at(slot_t0(d["q"]))) for d in self.store.due(q)]
+                due = [(d["f_hz"], _due_waveform(d), self.dial.dial_at(slot_t0(d["q"])))
+                       for d in self.store.due(q)]
             except Exception as e:                     # never lose the slot over the store
                 self.log(f"hints: {e}")
         for t in self.tiles():
             if t.mode in ("A", "B", "C") and t.segment is not None and t.q < q:
                 n = "ABC".index(t.mode) + 1
                 if any(t.q + 2 * (g - t.segment) == q for g in range(t.segment + 1, n)):
-                    due.append((t.f_hz, t.dial_hz if t.dial_hz is not None
+                    due.append((t.f_hz, _waveform_id(t.waveform), t.dial_hz if t.dial_hz is not None
                                 else self.dial.dial_at(slot_t0(t.q))))
-        out: list[float] = []
-        for f, was in due:
+        heard_as = {sp.waveform for sp in self.specs}
+        out: list[tuple[float, int]] = []
+        for f, w, was in due:
+            if w not in heard_as:
+                continue
             if was is not None and dial is not None:
                 f += was - dial
-            if CARRIER_BAND_HZ[0] <= f <= CARRIER_BAND_HZ[1] and all(
-                    abs(f - g) >= MERGE_HZ for g in out):
-                out.append(round(float(f), 2))
-        return sorted(out)
+            if in_band(f, w) and all(abs(centre_of(f, w) - centre_of(g, v)) >= MERGE_HZ
+                                     for g, v in out):
+                out.append((round(float(f), 2), w))
+        return sorted(out) if self.joint else sorted(f for f, _ in out)
 
     def _refresh(self, s: SlotState) -> None:
         if s.done:
             return              # (a final refresh queued behind a finish that has run)
-        spec = self.cfg.spec
+        spec = self.selection
         t_start = time.time()
         t0 = slot_t0(s.q)
         with self.lock:
@@ -1090,13 +1249,13 @@ class LiveListener:
             found = receiver.detect(prep, spec, live_only=True, erase_s=erase,
                                     cands=self._candidates(s, prep, ok, origin))
         elif elapsed < self.cfg.recheck_until_s:
-            known = [d.f_hz for d in s.dets]
+            known = [self._centre(d) for d in s.dets]
             cands = self._candidates(s, prep, ok, origin)
-            if any(all(abs(c.f_hz - f) >= MERGE_HZ for f in known) for c in cands):
+            if any(all(abs(self._centre(c) - f) >= MERGE_HZ for f in known) for c in cands):
                 found = receiver.detect(prep, spec, live_only=True, erase_s=erase,
                                         cands=cands, skip_hz=known)
-        for d in found:          # keep one detection per signal, the newest
-            s.dets = [g for g in s.dets if abs(g.f_hz - d.f_hz) >= MERGE_HZ] + [d]
+        for d in found:          # keep one detection per signal
+            self._keep(s, d)
         if not s.dets:
             return
         passes = receiver.receive_slot(prep, spec, estimator=self.cfg.estimator, erase_s=erase,
@@ -1108,7 +1267,9 @@ class LiveListener:
                 p = self._known_header(s, p, dial)
                 if not self._plausible(s, p, dial):
                     continue
-                t = self._tile_for(s, p.f_hz, dial)
+                t = self._tile_for(s, p.f_hz, dial, *self._kind(p))
+                if not self._takes(t, p):
+                    continue
                 self._update_tile(t, p, heard, progress=progress)
                 t.status = "finishing" if s.finishing else "receiving"
                 self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: {len(passes)} signal(s) at "
@@ -1118,7 +1279,7 @@ class LiveListener:
         """The frame is over: receive the whole slot (`finish_receive`, in
         the end-of-slot process when there is one), store, render the
         accumulator."""
-        spec = self.cfg.spec
+        spec = self.selection
         t_start = time.time()
         t0 = slot_t0(s.q)
         with self.lock:
@@ -1160,7 +1321,12 @@ class LiveListener:
             passes = [self._known_header(s, p, dial) for p in passes]
             passes = [p for p in passes if self._plausible(s, p, dial)]
             for p in passes:
-                t = self._tile_for(s, p.f_hz, dial)
+                t = self._tile_for(s, p.f_hz, dial, *self._kind(p))
+                if not self._takes(t, p):
+                    self.log(f"slot {t.slot_utc}: the pass at {p.f_hz:.1f} Hz as waveform "
+                             f"{self._kind(p)[0]} is not kept: the signal read stronger as "
+                             f"{t.waveform}")
+                    continue
                 seen.add(t.id)
                 key = None
                 if self.store is not None:
@@ -1222,7 +1388,7 @@ class LiveListener:
         """
         if p.header is not None:
             return p
-        t = self._match(s, p.f_hz, dial)
+        t = self._match(s, p.f_hz, dial, self._kind(p)[0])
         h = self._headers.get(t.id) if t is not None else None
         if h is None:
             return p
@@ -1233,12 +1399,14 @@ class LiveListener:
     def _plausible(self, s: SlotState, p: PassResult, dial: int | None = None) -> bool:
         """Whether a pass is worth a tile (and the store).
 
-        A pass needs a finite frequency inside the band receivers search.
+        A pass needs a finite frequency inside the band receivers search
+        (for L, its whole signal: `in_band`).
         And with continuous audio every slot's capture holds half of each
         neighbouring slot's transmissions (FULL frames last two quarter
         hours), whose carriers the whole-slot search can lock onto at the
         wrong timing: a headerless pass within GHOST_HZ of a tile of
-        another slot that did decode its header is taken to be that
+        another slot that did decode its header (band centres, whichever
+        waveform each is) is taken to be that
         signal, and dropped; only the two neighbouring slots overlap this
         one, so a decoded tile of any other slot (the same picture sent
         again half an hour later, say) never drops it. A headerless pass
@@ -1247,7 +1415,7 @@ class LiveListener:
         (a listener started mid-slot) is headerless however strong.
         """
         f = float(p.f_hz)
-        if not (math.isfinite(f) and CARRIER_BAND_HZ[0] <= f <= CARRIER_BAND_HZ[1]):
+        if not (math.isfinite(f) and in_band(f, self._waveform(p))):
             return False
         if p.header is not None:
             return True
@@ -1260,8 +1428,10 @@ class LiveListener:
             return False
         others = [t for q, o in self.slots.items() if abs(q - s.q) == 1 for t in o.tiles.values()]
         others += [t for t in self.done_tiles if abs(t.q - s.q) == 1]
+        c = float(self._centre(p))
         return not any(t.callsign and same_dial(t.dial_hz, dial)
-                       and abs(t.f_hz - f) < receiver.GHOST_HZ for t in others)
+                       and abs(centre_of(t.f_hz, t.waveform) - c) < receiver.GHOST_HZ
+                       for t in others)
 
     def _update_tile(self, t: Tile, p: PassResult, heard: float, key=None,
                      progress: float | None = None) -> None:
@@ -1274,8 +1444,9 @@ class LiveListener:
         w = np.asarray(p.w, dtype=np.float64)
         t.received = float(np.mean(w > 0)) if len(w) else 0.0
         t.mean_w_db = receiver.mean_w_db(p) if t.received > 0 else None
-        t.confidence = receiver.confidence_db(
-            p, self.cfg.spec, t.progress * frame_seconds(self.cfg.spec))
+        # (elapsed in seconds: progress is a share of the slot's frame, the
+        # longer one when both waveforms are heard, not of the pass's own)
+        t.confidence = receiver.confidence_db(p, self._spec_of(p), t.progress * self.dur)
         h = p.header
         if h is not None:
             self._headers[t.id] = h
@@ -1352,9 +1523,11 @@ class LiveListener:
             acc = self.store.accumulator(k)
             S += acc.S
             W += acc.W
-            # (a copy of a transmission the store holds already is that member)
+            # (a copy of a transmission the store holds already is that member;
+            # on the joint path compared by band centre, as the store files it)
+            wf ={"waveform": self._waveform(p)} if self.joint else {}
             member = p.uid in acc.uids or (
-                seg is not None and self.store.twin(acc, p.q, p.f_hz, seg) is not None)
+                seg is not None and self.store.twin(acc, p.q, p.f_hz, seg, **wf) is not None)
             n = len(acc.members) + (0 if member else 1)
         if not member and seg is not None:
             idx = picture.air_to_canonical(seg)
@@ -1525,7 +1698,9 @@ def run(listener: LiveListener, source, *, realtime: bool, stop=None) -> None:
     time runs on until every slot it touched has finished.
     """
     listener.source = source.name
-    listener.log(f"listening: {source.name}, frame {listener.cfg.spec.name}")
+    names = [f"{WAVEFORM_NAMES[s.waveform]} ({s.name})" for s in listener.specs]
+    listener.log(f"listening: {source.name}, frame {listener.cfg.spec.name}, "
+                 f"waveform{'s' if len(names) > 1 else ''} {' and '.join(names)}")
     listener.write_state()
     last_write = 0.0
     for x, t_end in source.chunks():
@@ -1545,8 +1720,7 @@ def run(listener: LiveListener, source, *, realtime: bool, stop=None) -> None:
         while not listener.idle():
             time.sleep(0.05)
         with listener.lock:
-            ends = [slot_t0(q) + frame_seconds(listener.cfg.spec) + PB_TAIL_S + 1.0
-                    for q in listener.slots]
+            ends = [slot_t0(q) + listener.dur + PB_TAIL_S + 1.0 for q in listener.slots]
             if ends:
                 listener.step(max(max(ends), listener.audio_end))
         while not listener.idle():
@@ -1560,4 +1734,5 @@ def run(listener: LiveListener, source, *, realtime: bool, stop=None) -> None:
 
 __all__ = ["StreamFE", "FeRing", "slot_capture", "capture_read", "capture_prepare",
            "finish_receive", "DialLog", "same_dial", "restrict", "Tile", "LiveConfig", "LiveListener",
-           "Stamper", "StdinSource", "WavSource", "run", "frame_seconds", "utc_iso"]
+           "Stamper", "StdinSource", "WavSource", "run", "frame_seconds", "in_band", "centre_of",
+           "utc_iso"]
