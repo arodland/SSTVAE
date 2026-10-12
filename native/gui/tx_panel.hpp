@@ -146,6 +146,10 @@ signals:
     void scheduleChanged(const QString& summary);
     void transmitStarted();
     void transmitFinished();
+    // A QRSS run is getting ready (encoding, making audio, waiting for
+    // its quarter hour) and has not keyed: `message` says what for.
+    // Empty when it keys or ends.
+    void qrssPreparing(const QString& message);
 
     // Emitted from the optimizer's worker thread; queued to the slot
     // below, exactly like the transmit callbacks above.
@@ -347,6 +351,12 @@ private:
     std::unique_ptr<tx::TxEngine> engine_;
     std::thread thread_;
     std::atomic<bool> running_{false};
+    // transmitStarted has gone out for the send in progress. A QRSS run
+    // spends minutes encoding, making audio and waiting for its quarter
+    // hour before it keys; it announces itself only at the first key,
+    // so receiving carries on and nothing reads as on the air early.
+    bool announced_ = false;
+    bool qrss_run_ = false;
 
     QrssScheduler* scheduler_ = nullptr;          // a child of this panel
     // The QRSS run on the air takes following sends through this.

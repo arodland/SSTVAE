@@ -37,6 +37,10 @@ QrssPage::QrssPage(QrssWindow* signals_view, QWidget* parent)
     row->addWidget(listen_);
     listen_state_ = new QLabel(this);
     listen_state_->setObjectName(QStringLiteral("qrss_listen_state"));
+    // A send getting ready says so here at length: wrapped, and never
+    // the reason the window is wide.
+    listen_state_->setWordWrap(true);
+    listen_state_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     row->addWidget(listen_state_, 1);
     schedule_summary_ = new QLabel(this);
     schedule_summary_->setObjectName(QStringLiteral("qrss_schedule_summary"));
@@ -91,6 +95,11 @@ void QrssPage::set_transmitting(bool on) {
     show_state();
 }
 
+void QrssPage::set_preparing(const QString& message) {
+    preparing_ = message;
+    show_state();
+}
+
 void QrssPage::show_state() {
     if (transmitting_) {
         QPalette red = normal_palette_;
@@ -111,8 +120,15 @@ void QrssPage::show_state() {
                            "together. The audio also feeds the SSTVAE decoder, the same "
                            "as Start receiving in SSTVAE mode."));
     listen_->setText(listening_ ? tr("&Stop receiving") : tr("&Start receiving"));
-    listen_state_->setText(listening_ ? tr("Receiving: the QRSS listener hears the radio.")
-                                      : tr("Not receiving: start it to hear QRSS signals."));
+    QString state = listening_ ? tr("Receiving: the QRSS listener hears the radio.")
+                               : tr("Not receiving: start it to hear QRSS signals.");
+    if (!preparing_.isEmpty()) {
+        state = tr("Getting ready, not keyed yet (%1); it keys just before its quarter "
+                   "hour. ")
+                    .arg(preparing_) +
+                (listening_ ? tr("Receiving meanwhile.") : tr("Not receiving."));
+    }
+    listen_state_->setText(state);
 }
 
 void QrssPage::set_received_width(int px) {

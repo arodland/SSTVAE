@@ -46,6 +46,10 @@ public slots:
     // comes back by itself afterwards, so the button turns red and halts
     // the send instead (`haltRequested`).
     void set_transmitting(bool on);
+    // A send getting ready before its quarter hour: nothing is keyed and
+    // receiving carries on, so the button stays as it is and the line
+    // under it says what the send is doing. Empty clears it.
+    void set_preparing(const QString& message);
     void set_schedule_summary(const QString& text);
 
 signals:
@@ -73,6 +77,7 @@ private:
     QPushButton* details_ = nullptr;
     bool listening_ = false;
     bool transmitting_ = false;
+    QString preparing_;
     void show_state();
     QPalette normal_palette_;
 };

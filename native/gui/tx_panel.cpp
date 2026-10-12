@@ -1552,6 +1552,8 @@ void TransmitPanel::begin_transmit(const images::Picture& picture,
     level_slider_->setEnabled(false);
     last_logged_phase_ = -1;
     running_.store(true);
+    qrss_run_ = false;
+    announced_ = true;
     emit transmitStarted();
 
     thread_ = std::thread([this, picture, tx_config] {
@@ -1644,7 +1646,10 @@ std::string TransmitPanel::begin_qrss(const images::Picture& picture, const std:
     mode_combo_->setEnabled(false);
     last_logged_phase_ = -1;
     running_.store(true);
-    emit transmitStarted();
+    // Not announced yet: `on_state` does it when the radio first keys.
+    qrss_run_ = true;
+    announced_ = false;
+    emit qrssPreparing(tr("Getting ready to send"));
 
     qrss_chain_ = request.chain;
     thread_ = std::thread([this, request, tools = *tools] {
@@ -1752,6 +1757,17 @@ void TransmitPanel::cancel() {
 
 void TransmitPanel::on_state(int phase, double progress, const QString& message) {
     const auto tx_phase = static_cast<tx::TxPhase>(phase);
+    if (qrss_run_ && !announced_) {
+        if (tx_phase == tx::TxPhase::Keying || tx_phase == tx::TxPhase::Sending) {
+            announced_ = true;
+            emit qrssPreparing({});
+            emit transmitStarted();
+        } else if (tx_phase == tx::TxPhase::Encoding || tx_phase == tx::TxPhase::Waiting ||
+                   tx_phase == tx::TxPhase::Modulating) {
+            emit qrssPreparing(message.isEmpty() ? QString::fromLatin1(tx::phase_name(tx_phase))
+                                                 : message);
+        }
+    }
     // This slot fires on every playback progress tick; the log gets a
     // line only when the phase changes. Keying and unkeying are the
     // lines the on-air PTT shakedown will want timestamps for.
@@ -1842,7 +1858,13 @@ void TransmitPanel::on_finished(bool ok) {
         // already correct, so only a genuine failure is relabelled.
         status_->setText(tr("Failed"));
     }
-    emit transmitFinished();
+    if (qrss_run_) emit qrssPreparing({});
+    qrss_run_ = false;
+    // A run stopped before it keyed paused nothing, so resumes nothing.
+    if (announced_) {
+        announced_ = false;
+        emit transmitFinished();
+    }
 }
 
 }  // namespace sstvae::gui
