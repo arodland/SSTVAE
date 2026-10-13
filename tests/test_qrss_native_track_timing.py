@@ -56,14 +56,27 @@ QRSS_PARITY_WORST=1 with -s prints the worst of each this run):
 - receive_pass with both rows files (track.py's and this one) over
   track's names and ltrack's from-imports, on CE TINY, CE SHORT and an L
   TINY pass: the same passes and headers, f_hz to 1e-6 Hz, latents to
-  1e-6;
+  1e-6; and the other callers of gate V's pieces on the same captures,
+  receiver._gate (verify, then the verify_track row for _ce_resid_ratio)
+  and em.pass_path (line_path, refine_path, verify_track with fit=False on
+  a stored pass's CH-rate capture): the same detections and paths;
 - the reference's refusals, type and text: an L frame, a malformed
-  erase span.
+  erase span;
+- probes (review, 2026-10-13): fit_timing with randomised arguments on the
+  scenarios' own z_d (fractional t0_index moves, local searches on both
+  sides of the reference's 64-lag FFT switch, a one-row clock-error grid,
+  n_best -1 to 11, known-symbol subsets in no order), the path
+  measurements on random captures (frames starting before or far into
+  them, blanked thirds, segment lengths 0.5 to 60 s, median bands, all
+  four refine/line branches), _segment_timing on planted pulses (every
+  branch of its walk), and gate V with every known symbol erased and with
+  an A2-like candidate (2x2 covariance, a 120-sample local search).
 """
 
 import dataclasses
 import math
 import os
+from fractions import Fraction
 from types import SimpleNamespace
 
 import numpy as np
@@ -80,6 +93,7 @@ from sstvae.qrss import track as T
 from sstvae.qrss.channel import ChannelConfig
 from sstvae.qrss.constants import CH_FS, WAVEFORM_L
 from sstvae.qrss.precoder import precode
+from sstvae.qrss.types import FreqPath, Timing
 
 TRACK = "sstvae.qrss.track"
 
@@ -630,6 +644,155 @@ def test_erase_span_refusals(row, scen):
             assert r[0] != "ok" and g == r, (fn, bad, r, g)
 
 
+# --- probes: randomised arguments and edges (review, 2026-10-13) ------------------------------------
+
+def test_probe_fit_timing_random(row, scen, blind):
+    """fit_timing on the scenarios' own z_d with randomised arguments, each
+    scenario through each kind: t0_index moved by up to half a sample; a
+    local search wide enough for the reference's FFT path (40 to 160
+    samples either side, so its grid is a transform and the C++'s a
+    gather); a blind search over 20 to 400 ppm with n_best from -1 to 11; a
+    random half of the known symbols, in no order (tmpl_fn); and a narrow
+    search whose clock-error grid can be one row. The same timings in the
+    same order (on the noise capture: the same noise peaks)."""
+    rng = np.random.default_rng(20261013)
+    labels = ("tiny-12", "ppm-100", "drift", "noise")
+    for trial in range(16):
+        label, kind = labels[trial % 4], trial // 4
+        s, b = scen[label], blind[label]
+        spec, best = s.spec, b.ref[0][0]
+        kw = dict(t0_index=s.chan.t0_index + float(rng.uniform(-0.5, 0.5)), z_d=b.z_d)
+        if kind == 0:
+            kw.update(tau0_init=best.tau0 + float(rng.uniform(-4, 4)), tau_range=float(rng.uniform(40, 160)))
+        elif kind == 1:
+            kw.update(ppm_range=float(rng.uniform(20, 400)), n_best=int(rng.integers(-1, 12)))
+        elif kind == 2:
+            kn = T.known_symbols(spec)
+            sub = rng.permutation(len(kn.pos))[:len(kn.pos) // 2]
+            kw.update(tmpl_fn=T._Known(pos=kn.pos[sub], val=kn.val[sub]),
+                      tau0_init=best.tau0 + float(rng.uniform(-2, 2)), tau_range=float(rng.uniform(2, 20)))
+        else:
+            kw.update(tau0_init=best.tau0 + float(rng.uniform(-1, 1)), tau_range=float(rng.uniform(0, 3)),
+                      ppm_range=float(rng.uniform(0, 40)), n_best=2)
+        r = T.fit_timing(s.chan, CH_FS, b.fn, spec, **kw)
+        g = row["fit_timing"](s.chan, CH_FS, b.fn, spec, **kw)
+        what = (trial, label, {k: v for k, v in kw.items() if k not in ("z_d", "tmpl_fn")})
+        assert type(g) is type(r), what
+        rl, gl = (r, g) if isinstance(r, list) else ([r], [g])
+        assert len(gl) == len(rl), what
+        for k, (gg, rr) in enumerate(zip(gl, rl)):
+            _timing_close(gg, rr, spec, (what, k))
+
+
+def _probe_chan(rng, spec):
+    """A capture holding a carrier (possibly none) at a random offset and
+    drift in unit noise, its frame starting anywhere from before the
+    capture to far into it, sometimes with its first third blanked (zeros)."""
+    dur = spec.n_pos * spec.t_sym
+    t0 = float(rng.choice([-300.5, 0.0, 37.25, 1000.0, 3000.7, rng.uniform(-500, 4000)]))
+    n = int(max(t0, 0) + dur * CH_FS * rng.uniform(0.2, 1.3)) + int(rng.integers(0, 2000))
+    t = np.arange(n)
+    f0, drift = rng.uniform(-3, 3), rng.uniform(-0.05, 0.05)
+    turns = np.cumsum(f0 + drift * (t - t0) / CH_FS) / CH_FS
+    z = rng.choice([0.0, 0.1, 1.0, 5.0]) * np.exp(2j * np.pi * (turns % 1.0))
+    z = z + rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    if rng.uniform() < 0.15:
+        z[:n // 3] = 0
+    return T.ChanCapture(ch=z.astype(np.complex64), fs=CH_FS, t0_index=t0, f_mix=Fraction(0)), f0
+
+
+def test_probe_paths_random(row):
+    """_carrier_lines, refine_path, line_path and _flat_path on random
+    captures (`_probe_chan`): segment lengths from 0.5 to 60 s (odd and
+    even sample counts), spans, a median band, ratios, and paths with
+    random weights. _carrier_lines to the bit; the paths to the same
+    branch (the caller's own object back or not) and grid, f to 1e-7 Hz."""
+    rng = np.random.default_rng(31)
+    branches = set()
+    for trial in range(24):
+        spec = frame.TINY if trial % 3 else frame.get("short")
+        chan, f0 = _probe_chan(rng, spec)
+        z = chan.ch.astype(np.complex128)
+        seg_s = float(rng.choice([20.0, 5.0, 3.3, 7.1, 60.0, 0.5]))
+        span = float(rng.choice([2.0, 1.0, 0.3, 5.0]))
+        kw = {}
+        if trial % 3 == 1:
+            kw["med_band"] = (float(rng.uniform(-40, 0)), float(rng.uniform(0, 40)))
+        if trial % 4 == 2:
+            kw["ratio"] = float(rng.uniform(1, 30))
+        what = (trial, chan.t0_index, len(z), seg_s, span, kw)
+        r = T._carrier_lines(z, chan, spec, seg_s, span, **kw)
+        g = row["_carrier_lines"](z, chan, spec, seg_s, span, **kw)
+        for a, b in zip(g, r):
+            assert a.dtype == b.dtype and np.array_equal(a, b), what
+        pt = np.array([-10.0, 0.0, 30.0, 60.0, 100.0, 200.0])
+        path = FreqPath(t_s=pt, f_hz=1500.0 + f0 + rng.uniform(-0.3, 0.3, len(pt)),
+                        weight=rng.uniform(0, 2, len(pt)))
+        for name in ("refine_path", "line_path"):
+            r, g = getattr(T, name)(chan, spec, path), row[name](chan, spec, path)
+            assert (r is path) == (g is path), (what, name)
+            branches.add((name, r is path))
+            if r is not path:
+                _path_close(g, r, (what, name))
+        r, g = T._flat_path(path), row["_flat_path"](path)
+        assert np.array_equal(g.t_s, r.t_s) and np.array_equal(g.weight, r.weight), what
+        _le("flat_path f", np.max(np.abs(g.f_hz - r.f_hz)), 1e-9, what)
+    assert branches == {(n, u) for n in ("refine_path", "line_path") for u in (True, False)}, branches
+
+
+def test_probe_segment_timing_planted(row):
+    """_segment_timing on statistics with known-symbol pulses planted along
+    a line with a wobble, at noise levels from clean to buried and with half
+    the frame attenuated: every branch of the reference's walk (segments
+    under Z 4 skipped, one segment, the weighted line, the outlier refit,
+    the fit refused past 300 ppm, nothing found)."""
+    rng = np.random.default_rng(7)
+    for trial in range(14):
+        spec = frame.TINY if trial < 10 else frame.get("short")
+        kn = T.known_symbols(spec)
+        sps = spec.t_sym * CH_FS
+        n = int(spec.n_pos * sps) + 4000
+        t0, d = 1000 + rng.uniform(0, 50), rng.uniform(-150e-6, 150e-6)
+        wob = rng.uniform(0, 3) * np.sin(2 * np.pi * kn.pos / spec.n_pos * rng.uniform(0.5, 3))
+        x = rng.standard_normal(n) * rng.choice([0.3, 1.0, 3.0, 8.0])
+        for c, a in zip(t0 + kn.pos * sps * (1 + d) + wob, kn.val):
+            k = np.arange(int(c) - 8, int(c) + 9)
+            x[k] += a * np.maximum(0, 1 - np.abs(k - c) / sps)
+        if trial % 5 == 4:
+            x[:n // 2] *= 0.01
+        sig2 = float(rng.choice([0.5, 1.0, 2.0])) * float(np.median(x ** 2)) / 0.4549
+        t0in, din = t0 + rng.uniform(-2, 2), d + rng.uniform(-3e-5, 3e-5)
+        seg = float(rng.choice([20.0, 5.0, 11.3, 60.0, 2.0]))
+        r = T._segment_timing(x, sig2, kn, t0in, din, sps, spec.n_pos, seg)
+        g = row["_segment_timing"](x, sig2, kn, t0in, din, sps, spec.n_pos, seg)
+        what = (trial, seg)
+        _le("segment t0", abs(g[0] - r[0]), 1e-6, what)
+        _le("segment slip", abs((g[1] - r[1]) * spec.n_pos * sps), 1e-6, what)
+        _le("segment score", abs(g[2] - r[2]) / max(abs(r[2]), 1e-4), 1e-8, what)
+
+
+def test_probe_gate_edges(row, scen):
+    """Gate V where the receiver can take it: every known symbol erased (a
+    pass joined late: Z_ref 0, refused), and an A2-like candidate whose
+    timing is 7 samples off with a 2x2 covariance from a 30-sample tau0 sd
+    (the local search then spans 120 samples either side: the reference's
+    FFT path)."""
+    s = scen["tiny-6"]
+    gone = [(-1e3, 1e4)]
+    r = T.verify_track(s.chan, s.spec, s.v, fit=False, erase_s=gone)
+    g = row["verify_track"](s.chan, s.spec, s.v, fit=False, erase_s=gone)
+    assert r.z_ref == g.z_ref == 0.0 and not np.any(g.psi) and not np.any(r.psi)
+    assert T.verify(s.chan, CH_FS, s.spec, s.v, fit=False, erase_s=gone) is None
+    assert row["verify"](s.chan, CH_FS, s.spec, s.v, fit=False, erase_s=gone) is None
+    tm = Timing(tau0=s.v.timing.tau0 + 7.0, ppm=0.0, gamma=0.0, z=9.0, cov=np.diag([30.0 ** 2, 0.0]))
+    cand = dataclasses.replace(s.det, path=s.v.path, timing=tm, method="preamble")
+    r, g = T.verify_track(s.chan, s.spec, cand), row["verify_track"](s.chan, s.spec, cand)
+    _track_close(g, r, "A2-like")
+    _timing_close(g.timing, r.timing, s.spec, "A2-like")
+    _det_close(row["verify"](s.chan, CH_FS, s.spec, cand), T.verify(s.chan, CH_FS, s.spec, cand), s.spec,
+               "A2-like")
+
+
 # --- the whole caller ------------------------------------------------------------------------------
 
 def _patched(native, monkeypatch):
@@ -679,12 +842,25 @@ def _pass_same(g, r, what):
 def test_receive_pass_on_the_cpp(native, Tt, scen, monkeypatch):
     """receiver.receive_pass on CE TINY (-12 dB) and SHORT (-6 dB) with every
     row of both files: gate V, the tracker and everything under them in
-    C++. The same passes and headers, f_hz to 1e-6 Hz, latents to 1e-6."""
-    refs = {}
+    C++. The same passes and headers, f_hz to 1e-6 Hz, latents to 1e-6.
+
+    And the two other callers of gate V's pieces, on the same captures:
+    receiver._gate on TINY (verify, then the verify_track row's track for
+    _ce_resid_ratio, and the lead-in of a non-preamble candidate) and
+    em.pass_path on both passes received (line_path, refine_path and the
+    verify_track row with fit=False, on a stored pass's CH-rate capture):
+    the same detections and paths."""
+    from sstvae.qrss import em
+
+    refs, gates, paths = {}, {}, {}
     for label in ("tiny-12", "short-6"):
         s = scen[label]
         refs[label] = RX.receive_pass(s.prep, s.spec, s.det, return_tracks=True)
         assert refs[label] is not None, label
+        if label == "tiny-12":
+            gates[label] = RX._gate(s.prep, s.spec, s.det, (), ())
+            assert gates[label] is not None, label
+        paths[label] = em.pass_path(refs[label][0])
     used = _patched(native, monkeypatch)
     for label, ref in refs.items():
         s = scen[label]
@@ -695,6 +871,15 @@ def test_receive_pass_on_the_cpp(native, Tt, scen, monkeypatch):
     # gate V's own tracks run inside the C++ verify; rounds A and B through the row
     assert used.get("verify", 0) == 2, used
     assert used.get("track", 0) == sum(len(r[1]) for r in refs.values()), used
+    for label in refs:
+        s = scen[label]
+        if label in gates:
+            _det_close(RX._gate(s.prep, s.spec, s.det, (), ()), gates[label], s.spec, (label, "_gate"))
+        g = em.pass_path(refs[label][0])
+        _path_close(g, paths[label], (label, "pass_path"))
+    assert used.get("verify", 0) == 2 + len(gates), used
+    assert used.get("verify_track", 0) == len(gates) + 2 * len(refs), used
+    assert used.get("line_path", 0) == used.get("refine_path", 0) == len(refs), used
 
 
 def test_l_receive_pass_on_the_cpp(native, Tt, monkeypatch):
