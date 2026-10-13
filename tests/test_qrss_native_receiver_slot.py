@@ -81,6 +81,23 @@ prints them):
   the reference's capture to the front end's bar (1e-5); q, t0_index and
   fs exactly; FileNotFoundError and IsADirectoryError with the
   reference's errno and text; receive_wav's pass, typed throughout;
+- the WAV reader itself (`_read_wav`) against wavio.read_wav, i.e.
+  scipy.io.wavfile.read's walk: some 100 corner files (the PCM byte-rate
+  check, 1- to 9-byte containers, float16 and long double, the
+  extensible GUID, every format name, the last data chunk and the last
+  fmt chunk's rate, header sizes too small and too large, truncations,
+  odd sizes that misalign the walk, RIFX, RF64, 300 channels), 3000
+  fuzzed files and 800 well-formed ones of random formats and random
+  bytes: the same samples bit for bit (a NaN's payload aside where a
+  channel mean met several), the same exception class and text, the same
+  WavFileWarnings and numpy RuntimeWarnings in the same order; the
+  refusals through capture_from_wav and receive_wav, the file read before
+  q is looked at;
+- _owned walks a3 as the reference's comprehension does (only for an
+  owner, once for each, Python's unpacking errors);
+- a typed scenario never reaches the per-pass bindings through Python (a
+  spy on them: the binding did not quietly fall back), a Python-mode one
+  does;
 - threads: four slots received at once, typed, each what it gives alone.
 """
 
@@ -415,9 +432,21 @@ def _run(native, label, python_mode=False, dets=None):
     r = _reference(label)
     seen = []
     got = None
+    below = []
     with pytest.MonkeyPatch.context() as mp:
         P._apply_rows(native, mp)
         _spy_typed(native, mp, seen)
+        # the per-pass bindings the rows call: a typed run never reaches
+        # them through Python (the C++ calls the C++), so a call here is a
+        # typed run the binding quietly sent over the Python objects
+        nr = native.qrss.receiver
+        for name in ("prepare", "receive_pass"):
+            orig = getattr(nr, name)
+
+            def spy(*a, _orig=orig, _name=name, **k):
+                below.append(_name)
+                return _orig(*a, **k)
+            mp.setattr(nr, name, spy)
         if python_mode:
             verify = T.verify
             mp.setattr(T, "verify", lambda *a, **k: verify(*a, **k))
@@ -430,6 +459,7 @@ def _run(native, label, python_mode=False, dets=None):
                 a, k, _ = r.detect
                 got = RX.detect(*a, **k)
     assert seen and all(flag is not python_mode for _n, flag in seen), (label, seen)
+    assert ("prepare" in below) if python_mode else not below, (label, python_mode, below)
     return SimpleNamespace(passes=passes, dets=got, t=t_slot)
 
 
@@ -1190,3 +1220,403 @@ def test_threads(native, Rs):
             got = list(ex.map(lambda k: RX.receive_slot(refs[k].cap, refs[k].spec), labels))
     for k, g in zip(labels, got):
         assert [p.uid for p in g] == [p.uid for p in want[k]], k
+
+
+# --- review probes: the WAV reader against scipy, corner by corner ---------------------------------
+#
+# wavio.read_wav is scipy.io.wavfile.read, so the reference is whatever scipy
+# returns or raises, quirks included. Each case is the file's bytes; the C++
+# reader (`_read_wav`, the binding's window on wav::read_wav) must return the
+# same float64 samples bit for bit (1e-12 of the scale when resampled), or
+# raise the same exception class with the same text, with the same
+# WavFileWarnings before it.
+
+def _chunk(cid, body, size=None, pad=True, be=False):
+    n = len(body) if size is None else size
+    out = cid + struct.pack(">I" if be else "<I", n & 0xFFFFFFFF) + body
+    return out + (b"\x00" if pad and len(body) % 2 else b"")
+
+
+def _ext(sub, cb=22, tail_ok=True, be=False, valid=16, mask=3):
+    """cbSize + WAVE_FORMAT_EXTENSIBLE's 22 bytes (the subformat GUID's
+    first four bytes `sub`)."""
+    e = ">" if be else "<"
+    tail = (b"\x00\x00\x00\x10" if be else b"\x00\x00\x10\x00") + b"\x80\x00\x00\xaa\x00\x38\x9b\x71"
+    if not tail_ok:
+        tail = tail[:-1] + b"\x72"
+    return struct.pack(e + "HHI", cb, valid, mask) + struct.pack(e + "I", sub) + tail
+
+
+def _fmt(tag, ch, rate, block, bits, byte_rate=None, ext=b"", be=False, size=None):
+    e = ">" if be else "<"
+    br = rate * block if byte_rate is None else byte_rate
+    body = struct.pack(e + "HHIIHH", tag, ch, rate, br & 0xFFFFFFFF, block, bits) + ext
+    return _chunk(b"fmt ", body, size, be=be)
+
+
+def _riff(chunks, kind=b"RIFF", size=None, ds64=None):
+    """The file: RIFF / RIFX with the size field `size` (None: the true
+    one), or RF64 with a ds64 chunk (riff size, data size, extra bytes)."""
+    if kind == b"RF64":
+        riff_size, data_size, extra = ds64
+        body = struct.pack("<QQ", riff_size, data_size) + extra
+        return (b"RF64\xff\xff\xff\xffWAVEds64" + struct.pack("<I", len(body)) + body + chunks)
+    e = ">" if kind == b"RIFX" else "<"
+    n = 4 + len(chunks) if size is None else size
+    return kind + struct.pack(e + "I", n & 0xFFFFFFFF) + b"WAVE" + chunks
+
+
+def _read_outcome(fn, path):
+    import warnings
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        o = _outcome(fn, path)
+    return o, [(x.category.__name__, str(x.message)) for x in w]
+
+
+def _same_read(Rs, path, what, bitwise=None, nan_bits=False):
+    """wavio.read_wav and the C++ reader on one file: the same result or
+    refusal, the same warnings. Returns the reference's outcome. Bit for
+    bit means every sample's bits but a NaN's, NaN where NaN; nan_bits
+    holds the NaNs' bits too (a channel mean over several NaNs keeps
+    whichever payload the compiler's operand order picks: x86 hands on
+    the first operand's, and GCC commutes `+` freely, numpy's build and
+    ours alike)."""
+    ref = _read_outcome(wavio.read_wav, str(path))
+    got = _read_outcome(Rs._read_wav, str(path))
+    (ro, rw), (go, gw) = ref, got
+    assert gw == rw, (what, rw, gw)
+    if ro[0] != "ok":
+        assert go == ro, (what, ro, go)
+        return ro
+    assert go[0] == "ok", (what, go)
+    a, b = np.asarray(ro[1]), go[1]
+    assert type(b) is np.ndarray and b.dtype == np.float64 == a.dtype and b.shape == a.shape, (what, a.shape, b.shape)
+    if nan_bits:
+        same = np.array_equal(a.view(np.uint64), b.view(np.uint64))
+    else:
+        same = np.array_equal(np.isnan(a), np.isnan(b)) and np.array_equal(
+            a.view(np.uint64)[~np.isnan(a)], b.view(np.uint64)[~np.isnan(b)])
+    if not same:   # resampled (bitwise None): 1e-12 of the scale, the same non-finite samples
+        ok = np.isfinite(a)
+        assert np.array_equal(ok, np.isfinite(b)) and np.array_equal(np.isnan(a), np.isnan(b)), what
+        scale = max(1.0, float(np.max(np.abs(a[ok]), initial=0.0)))
+        err = float(np.max(np.abs(a[ok] - b[ok]), initial=0.0)) / scale
+        assert not bitwise and err <= 1e-12, (what, err)
+    return ro
+
+
+def _corner_cases():
+    """(name, bytes, what the reference does: "ok", an exception class name,
+    or a text it says) -- each case checked to reach its corner."""
+    rng = np.random.default_rng(11)
+    i16 = rng.integers(-32768, 32768, 64).astype("<i2").tobytes()
+    f32 = rng.standard_normal(32).astype("<f4").tobytes()
+    fmt16 = _fmt(1, 1, 8000, 2, 16)
+    cases = [
+        # the PCM byte-rate check (scipy refuses a header nAvgBytesPerSec != rate * nBlockAlign)
+        ("byte-rate", _riff(_fmt(1, 1, 8000, 2, 16, byte_rate=8000) + _chunk(b"data", i16)), "nAvgBytesPerSec"),
+        ("byte-rate-float-ok", _riff(_fmt(3, 1, 8000, 4, 32, byte_rate=1) + _chunk(b"data", f32)), "ok"),
+        # integer containers: 40-64 bits left-justified in int64, an int8 for a 1-byte container of >8 bits
+        *[(f"pcm-{8 * c}in{c}", _riff(_fmt(1, 1, 8000, c, 8 * c) + _chunk(b"data", rng.bytes(c * 13))), "ok")
+          for c in (5, 6, 7, 8)],
+        ("pcm-12in1", _riff(_fmt(1, 1, 8000, 1, 12) + _chunk(b"data", rng.bytes(21))), "ok"),
+        ("pcm-0bits-2", _riff(_fmt(1, 1, 8000, 2, 0) + _chunk(b"data", i16)), "ok"),
+        ("pcm-8in2", _riff(_fmt(1, 1, 8000, 2, 8) + _chunk(b"data", i16)), "ok"),
+        ("pcm-8in2-stereo", _riff(_fmt(1, 2, 8000, 4, 8) + _chunk(b"data", i16)), "ok"),
+        ("pcm-20in3-stereo", _riff(_fmt(1, 2, 8000, 6, 20) + _chunk(b"data", rng.bytes(60))), "ok"),
+        ("pcm-72bit", _riff(_fmt(1, 1, 8000, 2, 72) + _chunk(b"data", i16)), "72-bit integer"),
+        ("pcm-72in3", _riff(_fmt(1, 1, 8000, 3, 72) + _chunk(b"data", rng.bytes(30))), "ok"),
+        ("pcm-9-bytes", _riff(_fmt(1, 1, 8000, 9, 64) + _chunk(b"data", rng.bytes(36))), "TypeError"),
+        ("pcm-odd-block", _riff(_fmt(1, 2, 8000, 5, 16) + _chunk(b"data", i16)), "ok"),
+        # floats: the container decides (float16, float64 in a "32-bit" chunk, float32 in a "64-bit")
+        ("float16", _riff(_fmt(3, 1, 8000, 2, 32) + _chunk(b"data", np.array(
+            [0.5, -0.0, 6e-8, 65504, np.inf, np.nan, 1e-5], "<f2").tobytes())), "ok"),
+        ("float32-as-64", _riff(_fmt(3, 1, 8000, 4, 64) + _chunk(b"data", f32)), "ok"),
+        ("float64-as-32", _riff(_fmt(3, 1, 8000, 8, 32) + _chunk(b"data", f32)), "ok"),
+        ("float-3-bytes", _riff(_fmt(3, 1, 8000, 3, 32) + _chunk(b"data", rng.bytes(12))), "TypeError"),
+        ("float-16-bit", _riff(_fmt(3, 1, 8000, 2, 16) + _chunk(b"data", i16)), "16-bit floating-point"),
+        ("float-special", _riff(_fmt(3, 2, 8000, 8, 32) + _chunk(b"data", np.array(
+            [-0.0, -0.0, np.nan, 1.0, np.inf, -np.inf, 3e38, 3e38, 1e-45, -1e-45], "<f4").tobytes())), "ok"),
+        # WAVE_FORMAT_EXTENSIBLE: the GUID's standard tail, cbSize, the 32-bit subformat
+        ("ext-pcm", _riff(_fmt(0xFFFE, 2, 8000, 4, 16, ext=_ext(1)) + _chunk(b"data", i16)), "ok"),
+        ("ext-float", _riff(_fmt(0xFFFE, 1, 8000, 4, 32, ext=_ext(3)) + _chunk(b"data", f32)), "ok"),
+        ("ext-bad-tail", _riff(_fmt(0xFFFE, 1, 8000, 2, 16, ext=_ext(1, tail_ok=False)) + _chunk(b"data", i16)),
+         "EXTENSIBLE"),
+        ("ext-sub-65537", _riff(_fmt(0xFFFE, 1, 8000, 2, 16, ext=_ext(0x10001)) + _chunk(b"data", i16)),
+         "0x10001"),
+        ("ext-sub-mulaw", _riff(_fmt(0xFFFE, 1, 8000, 1, 8, ext=_ext(7)) + _chunk(b"data", i16)), "MULAW"),
+        ("ext-cb-10", _riff(_fmt(0xFFFE, 1, 8000, 2, 16, ext=_ext(1, cb=10)) + _chunk(b"data", i16)),
+         "not compliant"),
+        ("ext-size-16", _riff(_fmt(0xFFFE, 1, 8000, 2, 16) + _chunk(b"data", i16)), "EXTENSIBLE"),
+        ("ext-size-18", _riff(_fmt(0xFFFE, 1, 8000, 2, 16, ext=_ext(1)[:2], size=18) + _chunk(b"data", i16)),
+         "EXTENSIBLE"),   # cbSize 22 in an 18-byte chunk: the GUID read from the data chunk's bytes
+        # format names: scipy's enum, and the hex of a tag it has none for
+        *[(f"tag-{t:#x}", _riff(_fmt(t, 1, 8000, 2, 16) + _chunk(b"data", i16)), "Unknown wave file format")
+          for t in (0, 2, 6, 7, 0x11, 0x55, 0x1234, 0xFFFF)],
+        # the walk: the last data chunk wins, the rate is the last fmt chunk's
+        ("two-data", _riff(fmt16 + _chunk(b"data", i16[:20]) + _chunk(b"data", i16[20:60])), "ok"),
+        ("fmt-after-data", _riff(fmt16 + _chunk(b"data", i16) + _fmt(1, 1, 16000, 2, 16)), "ok"),
+        ("data-fmt-data", _riff(fmt16 + _chunk(b"data", i16) + _fmt(3, 1, 8000, 4, 32) + _chunk(b"data", f32)),
+         "ok"),
+        ("riff-size-0", _riff(fmt16 + _chunk(b"data", i16), size=0), "UnboundLocalError"),
+        ("riff-size-fmt-only", _riff(fmt16 + _chunk(b"data", i16), size=4 + len(fmt16)), "UnboundLocalError"),
+        ("riff-size-long", _riff(fmt16 + _chunk(b"data", i16), size=4 + len(fmt16) + 1000), "ok"),
+        ("riff-size-huge", _riff(fmt16 + _chunk(b"data", i16), size=0xFFFFFFFF), "ok"),
+        ("unknown-chunk", _riff(fmt16 + _chunk(b"abcd", b"xyz") + _chunk(b"data", i16)), "ok"),
+        ("junk-fake-fact", _riff(_chunk(b"JUNK", b"12345") + fmt16 + _chunk(b"fact", b"\1\2\3\4")
+                                 + _chunk(b"Fake", b"") + _chunk(b"data", i16) + _chunk(b"LIST", b"abc")), "ok"),
+        ("unpadded-odd-chunk", _riff(fmt16 + _chunk(b"LIST", b"abc", pad=False) + _chunk(b"data", i16)), None),
+        ("data-truncated", _riff(fmt16 + _chunk(b"data", i16, size=1000))[:-3], "ok"),
+        ("data-odd-size", _riff(fmt16 + _chunk(b"data", i16[:21]) + _chunk(b"LIST", b"abcd")), None),
+        ("i24-odd-size", _riff(_fmt(1, 1, 8000, 3, 24) + _chunk(b"data", rng.bytes(7))), "cannot reshape"),
+        ("stereo-odd-count", _riff(_fmt(1, 2, 8000, 4, 16) + _chunk(b"data", i16[:6])), "cannot reshape"),
+        ("tail-1-byte", _riff(fmt16 + _chunk(b"data", i16)) + b"Z", "ok"),
+        ("tail-3-bytes-no-data", _riff(fmt16, size=4 + len(fmt16) + 3) + b"dat", "Incomplete chunk ID"),
+        ("tail-3-bytes-past-size", _riff(fmt16) + b"dat", "UnboundLocalError"),
+        ("eof-no-data", _riff(fmt16, size=1000), "Unexpected end of file"),
+        ("channels-0", _riff(_fmt(3, 0, 8000, 4, 32) + _chunk(b"data", f32)), "ZeroDivisionError"),
+        ("block-under-channels", _riff(_fmt(3, 2, 8000, 1, 32) + _chunk(b"data", f32)), "ZeroDivisionError"),
+        ("data-before-fmt", _riff(_chunk(b"data", i16) + fmt16), "No fmt chunk before data"),
+        ("fmt-size-14", _riff(_chunk(b"fmt ", b"\0" * 14) + _chunk(b"data", i16)), "not compliant"),
+        ("fmt-truncated", b"RIFF\x64\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00", "unpack requires a buffer of 16"),
+        ("short-riff", b"RIFF\x00\x00", "unpack requires a buffer of 4"),
+        ("empty", b"", "not understood"),
+        ("not-riff", b"OggS\x00\x02" + b"\x00" * 40, "not understood"),
+        ("quote-id", b"it's" + b"\x00" * 40, "not understood"),
+        ("not-wave", b"RIFF\x04\x00\x00\x00WAVX", "RIFF form type"),
+        ("rate-0", _riff(_fmt(3, 1, 0, 4, 32) + _chunk(b"data", f32)), "up and down"),
+        ("rate-16000", _riff(_fmt(1, 1, 16000, 2, 16) + _chunk(b"data", i16)), "ok"),
+        ("rate-11025-stereo", _riff(_fmt(1, 2, 11025, 4, 16) + _chunk(b"data", i16)), "ok"),
+        ("empty-data", _riff(fmt16 + _chunk(b"data", b"")), "ok"),
+        ("empty-data-16000", _riff(_fmt(1, 1, 16000, 2, 16) + _chunk(b"data", b"")), "ok"),
+        # many channels: numpy's mean over axis 1 (a pairwise sum per frame)
+        *[(f"ch-{c}", _riff(_fmt(3, c, 8000, 8 * c, 64) + _chunk(b"data", rng.standard_normal(3 * c).astype(
+            "<f8").tobytes())), "ok") for c in (7, 8, 9, 16, 17, 127, 128, 129, 300)],
+        ("ch-signed-zero", _riff(_fmt(3, 3, 8000, 24, 64) + _chunk(b"data", np.array(
+            [-0.0, -0.0, -0.0, 0.0, -0.0, -0.0, 1e308, 1e308, -1e308], "<f8").tobytes())), "ok"),
+        # RIFX (big-endian) and RF64
+        ("rifx-i16", _riff(_fmt(1, 1, 8000, 2, 16, be=True) + _chunk(b"data", i16, be=True), kind=b"RIFX"), "ok"),
+        ("rifx-i24", _riff(_fmt(1, 1, 8000, 3, 24, be=True) + _chunk(b"data", rng.bytes(30), be=True),
+                           kind=b"RIFX"), "ok"),
+        ("rifx-i48", _riff(_fmt(1, 1, 8000, 6, 48, be=True) + _chunk(b"data", rng.bytes(30), be=True),
+                           kind=b"RIFX"), "ok"),
+        ("rifx-f32-ext", _riff(_fmt(0xFFFE, 1, 8000, 4, 32, ext=_ext(3, be=True), be=True)
+                               + _chunk(b"data", np.frombuffer(f32, "<f4").astype(">f4").tobytes(), be=True),
+                               kind=b"RIFX"), "ok"),
+        ("rf64", _riff(fmt16 + b"data\xff\xff\xff\xff" + i16, kind=b"RF64", ds64=(0xFFFFFFFFFFFFFFFF, 40, b"\0" * 12)),
+         "ok"),
+        ("rf64-sized", _riff(fmt16 + b"data\xff\xff\xff\xff" + i16, kind=b"RF64",
+                             ds64=(4 + 36 + len(fmt16) + 8 + 64, len(i16), b"")), "ok"),
+        ("rf64-no-ds64", b"RF64\xff\xff\xff\xffWAVEJUNK" + b"\0" * 30, "ds64 chunk not found"),
+    ]
+    return cases
+
+
+_RESAMPLED = ("rate-16000", "rate-11025-stereo", "empty-data-16000", "fmt-after-data")
+
+
+def test_wav_scipy_corners(native, Rs, tmp_path):
+    """Every corner of scipy.io.wavfile.read the C++ reader reproduces:
+    the same samples (bit for bit at 8 kHz), or the same exception class
+    and text, with the same WavFileWarnings, each case checked to reach
+    its corner. A file with a NUL in its path is ValueError, as open()."""
+    for name, data, want in _corner_cases():
+        path = tmp_path / f"{name}.wav"
+        path.write_bytes(data)
+        ro = _same_read(Rs, path, name, bitwise=None if name in _RESAMPLED else True)
+        if want == "ok":
+            assert ro[0] == "ok", (name, ro)
+        elif want is not None:
+            assert ro[0] != "ok" and (want == ro[0].__name__ or want in ro[1]), (name, ro)
+    bad = str(tmp_path / "a.wav") + "\0b"
+    assert _outcome(Rs._read_wav, bad) == _outcome(wavio.read_wav, bad) == (ValueError, "embedded null byte")
+
+
+def test_wav_scipy_corners_through_capture(native, row, tmp_path):
+    """The refusals reach capture_from_wav (typed) and receive_wav as the
+    reference raises them, warnings included; a missing file is refused
+    before a bad q, as the reference reads the file first."""
+    import warnings
+
+    for name, data, want in _corner_cases():
+        if want == "ok" or want is None:
+            continue
+        path = tmp_path / f"{name}.wav"
+        path.write_bytes(data)
+        for fn_ref, fn_row in ((RX.capture_from_wav, row["capture_from_wav"]),
+                               (RX.receive_wav, row["receive_wav"])):
+            with warnings.catch_warnings(record=True) as w1:
+                warnings.simplefilter("always")
+                ref = _outcome(fn_ref, path, Q_TEST)
+            with warnings.catch_warnings(record=True) as w2:
+                warnings.simplefilter("always")
+                got = _outcome(fn_row, path, Q_TEST)
+            assert ref[0] is not str and got == ref, (name, ref, got)
+            assert [str(x.message) for x in w1] == [str(x.message) for x in w2], name
+    with pytest.MonkeyPatch.context() as mp:
+        P._apply_rows(native, mp)
+        for fn in (RX.capture_from_wav, row["capture_from_wav"]):
+            got = _outcome(fn, tmp_path / "nope.wav", "not a number")
+            assert got[0] is FileNotFoundError, got
+        missing = tmp_path / "nope.wav"
+        assert _outcome(row["receive_wav"], missing, "x")[0] is FileNotFoundError
+        assert _outcome(RX.receive_wav, missing, "x")[0] is FileNotFoundError
+
+
+def _fuzz_wav(rng):
+    """A random WAV-ish file: chunk orders, lying sizes, odd lengths,
+    truncations, every format scipy distinguishes."""
+    kind = rng.choice([b"RIFF"] * 10 + [b"RIFX", b"RF64"])
+    be = kind == b"RIFX"
+
+    def fmt():
+        tag = rng.choice([1] * 8 + [3] * 4 + [0xFFFE] * 3 + [2, 7, 0x1234])
+        ch = rng.choice([1] * 6 + [2] * 3 + [0, 3, 9])
+        if tag == 3 or (tag == 0xFFFE and rng.random() < 0.4):
+            bits = rng.choice([32, 32, 64, 64, 16, 0])
+        else:
+            bits = rng.choice([8, 16, 16, 24, 32, 32, 64, 0, 4, 12, 20, 40, 48, 56, 72])
+        cont = max(1, (bits + 7) // 8) if rng.random() < 0.8 else rng.randint(1, 9)
+        block = ch * cont if rng.random() < 0.9 else rng.randint(0, 20)
+        rate = rng.choice([8000] * 10 + [16000, 0, 4000])
+        br = rate * block if rng.random() < 0.9 else rng.randint(0, 1 << 20)
+        ext = b""
+        size = None
+        if tag == 0xFFFE:
+            r = rng.random()
+            if r < 0.7:
+                sub = (3 if bits in (32, 64) and rng.random() < 0.5 else 1) if rng.random() < 0.85 else \
+                    rng.choice([2, 0x10001])
+                ext = _ext(sub, cb=rng.choice([22] * 6 + [10, 30]), tail_ok=rng.random() < 0.9, be=be)
+            elif r < 0.85:
+                ext = struct.pack(">H" if be else "<H", rng.choice([22, 0]))
+        if rng.random() < 0.05:
+            size = rng.choice([10, 16, 18, 60])
+        return _fmt(tag, ch, rate, block, bits, br, ext, be=be, size=size)
+
+    def data():
+        n = rng.randint(0, 80)
+        size = None
+        if rng.random() < 0.15:
+            size = rng.choice([n + 1, n + 7, max(0, n - 3), 1000, 0xFFFFFFFF])
+        return _chunk(b"data", bytes(rng.getrandbits(8) for _ in range(n)), size, pad=rng.random() < 0.95, be=be)
+
+    def other():
+        cid = rng.choice([b"LIST", b"JUNK", b"fact", b"Fake", b"abcd", b"bext", b"\x00\x00\x00\x00"])
+        body = bytes(rng.getrandbits(8) for _ in range(rng.randint(0, 9)))
+        size = rng.choice([None] * 9 + [len(body) + 3])
+        return _chunk(cid, body, size, pad=rng.random() < 0.9, be=be)
+
+    shape = rng.random()
+    if shape < 0.6:
+        seq = [fmt, data]
+    elif shape < 0.75:
+        seq = [fmt, data, data]
+    elif shape < 0.85:
+        seq = [fmt, data, fmt]
+    elif shape < 0.9:
+        seq = [data, fmt]
+    else:
+        seq = [rng.choice([fmt, data, other]) for _ in range(rng.randint(0, 4))]
+    pieces = [s() for s in seq]
+    for _ in range(rng.randint(0, 2)):
+        pieces.insert(rng.randint(0, len(pieces)), other())
+    chunks = b"".join(pieces)
+    if kind == b"RF64":
+        out = _riff(chunks, kind, ds64=(rng.choice([4 + 36 + len(chunks), 0xFFFFFFFFFFFFFFFF, 10]),
+                                        rng.choice([0, 7, 40, 1 << 20]), b"\0" * rng.choice([0, 12])))
+    else:
+        size = rng.choice([None] * 30 + [0, 4, len(chunks) - 5, len(chunks) + 9, 0xFFFFFFFF])
+        out = _riff(chunks, kind, size=None if size is None else max(0, size))
+    if rng.random() < 0.08:
+        out = out[:rng.randint(0, len(out))]
+    if rng.random() < 0.05:
+        out += bytes(rng.getrandbits(8) for _ in range(rng.randint(1, 5)))
+    return out
+
+
+def test_wav_scipy_fuzz(native, Rs, tmp_path):
+    """3000 random files (chunk orders, lying sizes, truncations, RIFX and
+    RF64, every format scipy distinguishes): the C++ reader returns what
+    wavio.read_wav returns, or raises what it raises, warnings alike. Every
+    outcome class turns up."""
+    rng = random.Random(20261013)
+    seen: dict = {}
+    path = tmp_path / "fuzz.wav"
+    for i in range(3000):
+        data = _fuzz_wav(rng)
+        path.write_bytes(data)
+        ro = _same_read(Rs, path, (i, data[:80]))
+        k = "ok" if ro[0] == "ok" else ro[0].__name__
+        seen[k] = seen.get(k, 0) + 1
+    print(seen)
+    for k in ("ok", "ValueError", "error", "ZeroDivisionError", "TypeError", "UnboundLocalError"):
+        assert seen.get(k, 0) >= 10, (k, seen)
+
+
+def test_wav_values_fuzz(native, Rs, tmp_path):
+    """800 well-formed files of random formats -- every PCM container 1 to
+    8 bytes (8-bit and wider), float16/32/64 and 16-byte floats, 1 to 140
+    channels, RIFF and RIFX, plain and extensible -- holding random bytes
+    (so float specials: signed zeros, infinities, quiet and signalling
+    NaNs, x87 encodings it rejects): the samples bit for bit, and numpy's
+    RuntimeWarnings (casts, the channel mean's overflow and invalid) alike."""
+    rng = random.Random(7)
+    seen = {"warned": 0, "multi": 0}
+    path = tmp_path / "v.wav"
+    for i in range(800):
+        be = rng.random() < 0.15
+        floaty = rng.random() < 0.5
+        if floaty:
+            cont, bits = rng.choice([(4, 32), (8, 64), (2, 32), (8, 32), (4, 64), (16, 64)])
+            tag = 3
+        else:
+            cont = rng.randint(1, 8)
+            bits = rng.choice([8 * cont, 8 * cont, max(1, 8 * cont - 4), 0 if cont > 1 else 8])
+            tag = 1
+        ch = rng.choice([1, 1, 2, 2, 3, 7, 8, 9, 16, 17, 140])
+        frames = rng.randint(0, 40)
+        raw = bytes(rng.getrandbits(8) for _ in range(ch * cont * frames))
+        ext = b""
+        if rng.random() < 0.3:
+            ext, tag = _ext(tag, be=be), 0xFFFE
+        data = _riff(_fmt(tag, ch, 8000, ch * cont, bits, ext=ext, be=be) + _chunk(b"data", raw, be=be),
+                     kind=b"RIFX" if be else b"RIFF")
+        path.write_bytes(data)
+        ref = _read_outcome(wavio.read_wav, str(path))
+        _same_read(Rs, path, (i, tag, ch, cont, bits, be), bitwise=True, nan_bits=ch == 1)
+        assert ref[0][0] == "ok", (i, ref)
+        seen["warned"] += bool(ref[1])
+        seen["multi"] += ch > 1
+    print(seen)
+    assert seen["warned"] >= 40 and seen["multi"] >= 400, seen
+
+
+# --- review probes: _owned walks a3 as the reference does ------------------------------------------
+
+def test_owned_walks_a3_lazily(row):
+    """_owned unpacks a3's entries only for a preamble-found signal the
+    candidate falls inside, once for each: a malformed entry is no error
+    while nothing owns the band, and an iterator a3 is spent by the first
+    owner, as the reference's comprehension spends it."""
+    def det(f, z, method, a3_z=math.nan):
+        return Detection(f_hz=f, path=None, timing=None, z_ref=z, method=method, lead_in_s=0.0, a3_z=a3_z)
+
+    d = det(1500.0, 9.0, "tbd", 5.0)
+    far = det(1800.0, 30.0, "preamble")
+    near = det(1505.0, 30.0, "preamble")
+    near2 = det(1510.0, 30.0, "preamble")
+    bad = [(1500.0, 1500.0)]
+    for args in (([far], bad), ([], bad), ([near], bad), ([near], [(1500.0, 1500.0, 9.0, 1.0)]),
+                 ([near], [object()]), ([near], [None]), ([near], [np.float64(1.0)]),
+                 ([near], [iter(range(10 ** 9))]), ([near], [(1505.0, 1505.0, 9.0)])):
+        assert _outcome(row["_owned"], d, *args) == _outcome(RX._owned, d, *args), args
+    for found in ([near, near2], [near2, near], [far, near2]):
+        def lines():
+            yield (1505.0, 1505.0, 1.0)       # near's own line, weaker than d
+            yield (1510.0, 1510.0, 9.0)       # near2's own line, stronger
+        assert row["_owned"](d, found, lines()) == RX._owned(d, found, lines()), found
+    # the first owner spends the iterator, the second sees nothing
+    assert RX._owned(d, [near, near2], iter([(1510.0, 1510.0, 9.0)])) is False

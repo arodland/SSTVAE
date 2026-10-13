@@ -21,6 +21,7 @@
 //   _receive_slot_joint(prep, specs, live_only, estimator, erase_s, round_b,
 //                       dets, max_candidates, budget_s, hints, typed)
 //   capture_from_wav(path, q, start_unix, typed) -> frontend.Capture
+//   _read_wav(path) -> float64 (wavread.hpp: wavio.read_wav; tests only)
 //   receive_wav(path, q, start_unix, spec, estimator)   (the C++ throughout)
 //
 // Two ways to run, one orchestration (receiver_slot_flow.hpp):
@@ -48,6 +49,7 @@
 
 #include "qrss/rx_types.hpp"
 
+#include <array>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -123,6 +125,35 @@ std::vector<py::object> objects(const py::handle& o) {
     std::vector<py::object> out;
     for (const py::handle h : py::reinterpret_borrow<py::iterable>(py::iter(o)))
         out.push_back(py::reinterpret_borrow<py::object>(h));
+    return out;
+}
+
+// `line, cc, zz = h`, as Python unpacks it (at most four items taken)
+std::array<py::object, 3> unpack3(const py::handle& h) {
+    PyObject* it = PyObject_GetIter(h.ptr());
+    if (!it) {
+        PyTypeObject* t = Py_TYPE(h.ptr());
+        if (PyErr_ExceptionMatches(PyExc_TypeError) && t->tp_iter == nullptr && !PySequence_Check(h.ptr())) {
+            PyErr_Clear();
+            throw py::type_error(std::string("cannot unpack non-iterable ") + t->tp_name + " object");
+        }
+        throw py::error_already_set();
+    }
+    const py::object iter = steal(it);
+    std::array<py::object, 3> out;
+    for (std::size_t k = 0; k < 3; ++k) {
+        PyObject* v = PyIter_Next(it);
+        if (!v) {
+            if (PyErr_Occurred()) throw py::error_already_set();
+            throw py::value_error("not enough values to unpack (expected 3, got " + std::to_string(k) + ")");
+        }
+        out[k] = steal(v);
+    }
+    if (PyObject* extra = PyIter_Next(it)) {
+        Py_DECREF(extra);
+        throw py::value_error("too many values to unpack (expected 3)");
+    }
+    if (PyErr_Occurred()) throw py::error_already_set();
     return out;
 }
 
@@ -632,6 +663,54 @@ py::object receive_slot_py(const py::object& cap, const py::object& spec, const 
     throw py::error_already_set();
 }
 
+// FormatError as the exception the reference raises (scipy's, numpy's,
+// struct's or Python's own)
+[[noreturn]] void raise_format_error(const wav::FormatError& e) {
+    using K = wav::FormatError::Kind;
+    py::object cls;
+    if (e.kind == K::struct_error) {
+        cls = py::module_::import("struct").attr("error");
+    } else {
+        PyObject* c = e.kind == K::zero_division   ? PyExc_ZeroDivisionError
+                      : e.kind == K::type          ? PyExc_TypeError
+                      : e.kind == K::unbound_local ? PyExc_UnboundLocalError
+                                                   : PyExc_ValueError;
+        cls = py::reinterpret_borrow<py::object>(c);
+    }
+    PyErr_SetString(cls.ptr(), e.what());
+    throw py::error_already_set();
+}
+
+// the reference's warnings, in its order: scipy's WavFileWarnings and
+// numpy's RuntimeWarnings (a warning filter that raises raises the first,
+// as the reference's would)
+void warn_wav(const std::vector<wav::Warning>& warnings) {
+    for (const wav::Warning& w : warnings) {
+        const py::object cat = w.kind == wav::Warning::Kind::runtime
+                                   ? py::reinterpret_borrow<py::object>(PyExc_RuntimeWarning)
+                                   : py::module_::import("scipy.io.wavfile").attr("WavFileWarning");
+        if (PyErr_WarnEx(cat.ptr(), w.text.c_str(), 1) < 0) throw py::error_already_set();
+    }
+}
+
+// wavio.read_wav(path) in C++, the GIL released while the file is read:
+// its refusals and warnings as the reference's
+std::vector<double> read_wav_py(const std::string& path) {
+    std::vector<wav::Warning> warnings;
+    std::vector<double> x;
+    try {
+        py::gil_scoped_release nogil;
+        x = wav::read_wav(path, &warnings);
+    } catch (const wav::ReadError& e) {
+        raise_os_error(e);
+    } catch (const wav::FormatError& e) {
+        warn_wav(warnings);
+        raise_format_error(e);
+    }
+    warn_wav(warnings);
+    return x;
+}
+
 py::object capture_py(const std::vector<std::complex<float>>& fev, const py::object& q, const py::object& start_unix) {
     // q=int(q), t0 = 900.0 * int(q) + 1.0, lead = 12.0 or t0 - float(start_unix)
     const py::object qi = steal(PyNumber_Long(q.ptr()));
@@ -646,14 +725,11 @@ py::object capture_py(const std::vector<std::complex<float>>& fev, const py::obj
 py::object capture_from_wav_py(const py::object& path, const py::object& q, const py::object& start_unix,
                                bool typed) {
     if (typed) {
-        const std::string p = rx::as_string(py::str(path));
+        const std::vector<double> x = read_wav_py(rx::as_string(py::str(path)));
         std::vector<std::complex<float>> v;
-        try {
+        {
             py::gil_scoped_release nogil;
-            const std::vector<double> x = wav::read_wav(p);
             v = fe::audio_to_fe(x);
-        } catch (const wav::ReadError& e) {
-            raise_os_error(e);
         }
         return capture_py(v, q, start_unix);
     }
@@ -711,17 +787,17 @@ void bind(py::module_& qrss) {
         return out;
     }, py::arg("cands"));
     m.def("_owned", [](const py::object& d, const py::object& found, const py::object& a3) {
-        std::vector<fl::A3Line> lines;
-        for (const py::handle h : py::reinterpret_borrow<py::iterable>(py::iter(a3))) {
-            const std::vector<py::object> t = objects(h);
-            if (t.size() != 3)
-                throw py::value_error(t.size() > 3 ? "too many values to unpack (expected 3)"
-                                                   : "not enough values to unpack (expected 3, got " +
-                                                         std::to_string(t.size()) + ")");
-            lines.push_back({rx::as_double(t[0]), rx::as_double(t[1]), rx::as_double(t[2])});
-        }
+        // a3 walked (and its entries unpacked) only for a signal d falls
+        // inside, once for each, as the reference's comprehension walks it
         const Py p;
-        return fl::owned(p, d, objects(found), std::span<const fl::A3Line>(lines));
+        return fl::owned_by(p, d, objects(found), [&a3]() {
+            std::vector<fl::A3Line> lines;
+            for (const py::handle h : py::reinterpret_borrow<py::iterable>(py::iter(a3))) {
+                const std::array<py::object, 3> t = unpack3(h);
+                lines.push_back({rx::as_double(t[0]), rx::as_double(t[1]), rx::as_double(t[2])});
+            }
+            return lines;
+        });
     }, py::arg("d"), py::arg("found"), py::arg("a3"));
     m.def("_ce_resid_ratio", [](const py::object& tr) {
         const tk::TrackResult t = rx::track_result(tr);
@@ -769,20 +845,27 @@ void bind(py::module_& qrss) {
           py::arg("typed"));
     m.def("capture_from_wav", &capture_from_wav_py, py::arg("path"), py::arg("q"), py::arg("start_unix"),
           py::arg("typed"));
+    // wav::read_wav itself, float64 (no row: the tests' window on the
+    // reader, compared with wavio.read_wav bit for bit)
+    m.def("_read_wav", [](const py::object& path) { return to_numpy(read_wav_py(rx::as_string(py::str(path)))); },
+          py::arg("path"));
     m.def("receive_wav", [](const py::object& path, const py::object& q, const py::object& start_unix,
                             const py::object& spec, const py::object& estimator) {
-        const std::string p = rx::as_string(py::str(path));
+        // the reference's order: the file read, then int(q) and
+        // float(start_unix), then receive_slot's spec and estimator
+        const std::vector<double> x = read_wav_py(rx::as_string(py::str(path)));
         const std::int64_t qi = rx::as_int(q);
         std::optional<double> su;
         if (!start_unix.is_none()) su = rx::as_double(start_unix);
         const std::vector<fr::FrameSpec> sel = selection(spec);
         const std::string est = rx::as_string(estimator);
         std::vector<types::PassResult> r;
-        try {
+        {
             py::gil_scoped_release nogil;
-            r = rc::receive_wav(p, qi, su, sel, est);
-        } catch (const wav::ReadError& e) {
-            raise_os_error(e);
+            const fe::Capture cap = rc::capture_from_audio(x, qi, su);
+            rc::SlotOptions opt;
+            opt.estimator = est;
+            r = rc::receive_slot(rc::CaptureRef(&cap), sel, opt);
         }
         return passes_py(r);
     }, py::arg("path"), py::arg("q"), py::arg("start_unix"), py::arg("spec"), py::arg("estimator"));

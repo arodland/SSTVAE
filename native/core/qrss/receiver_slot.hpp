@@ -261,7 +261,7 @@ frontend::Capture capture_from_audio(std::span<const double> x8k, std::int64_t q
 
 // capture_from_wav(path, q, start_unix): a slot capture from a WAV, read as
 // sstvae.wavio.read_wav reads it (wavread.hpp; wav::ReadError when the file
-// cannot be read, std::invalid_argument for a format it does not take).
+// cannot be read, wav::FormatError for a file the reference refuses).
 frontend::Capture capture_from_wav(const std::string& path, std::int64_t q,
                                    std::optional<double> start_unix = std::nullopt);
 

@@ -72,10 +72,12 @@ Capture capture_from_audio(std::span<const double> audio_8k, std::int64_t q,
 Capture capture_from_audio(std::span<const float> audio_8k, std::int64_t q,
                            std::optional<double> start_unix = std::nullopt);
 
-// The same from a WAV file, read as sstvae.wavio.read_wav reads it: PCM
-// (8-32 bit) or float, any rate (resampled to 8 kHz), channels averaged.
-// wav::ReadError (a std::runtime_error with errno) when the file cannot be
-// read; std::invalid_argument for a WAV it does not take.
+// The same from a WAV file, read as sstvae.wavio.read_wav reads it
+// (scipy.io.wavfile.read's walk, wavread.hpp): PCM 1-64 bit or float
+// 16/32/64, RIFF, RIFX or RF64, any rate (resampled to 8 kHz), channels
+// averaged. wav::ReadError (a std::runtime_error with errno) when the file
+// cannot be read; wav::FormatError (a std::invalid_argument, the
+// reference's exception class and text) for a WAV the reference refuses.
 Capture capture_from_wav(const std::string& path, std::int64_t q, std::optional<double> start_unix = std::nullopt);
 
 // receive_slot's arguments, the reference's names.

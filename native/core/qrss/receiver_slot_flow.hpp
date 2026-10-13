@@ -198,9 +198,11 @@ std::vector<A3Line> a3_lines(P& p, const std::vector<typename P::Det>& cands) {
     return out;
 }
 
-// _owned(d, found, a3)
-template <class P>
-bool owned(P& p, const typename P::Det& d, const std::vector<typename P::Det>& found, std::span<const A3Line> a3) {
+// _owned(d, found, a3), `lines()` giving a3's lines: called once for each
+// preamble-found signal d falls inside, as the reference's comprehension
+// walks a3 once for each (and only for those)
+template <class P, class Lines>
+bool owned_by(P& p, const typename P::Det& d, const std::vector<typename P::Det>& found, Lines&& lines) {
     if (!p.method_is(d, "tbd") || p.old_gating()) return false;
     const double z = p.a3_z(d);
     if (!std::isfinite(z)) return false;
@@ -216,6 +218,7 @@ bool owned(P& p, const typename P::Det& d, const std::vector<typename P::Det>& f
         const double c = p.centre(g);
         bool any = false;
         double top = 0.0;   // max(own): the first, replaced by anything larger
+        const auto& a3 = lines();
         for (const A3Line& l : a3) {
             if (std::abs(l.line - p.f_hz(g)) < rr::MERGE_HZ || std::abs(l.centre - c) < rr::MERGE_HZ) {
                 if (!any || l.z > top) top = l.z;
@@ -225,6 +228,12 @@ bool owned(P& p, const typename P::Det& d, const std::vector<typename P::Det>& f
         if (any && z <= top) return true;
     }
     return false;
+}
+
+// _owned(d, found, a3)
+template <class P>
+bool owned(P& p, const typename P::Det& d, const std::vector<typename P::Det>& found, std::span<const A3Line> a3) {
+    return owned_by(p, d, found, [a3]() { return a3; });
 }
 
 // _suspect_neighbour(p, out)

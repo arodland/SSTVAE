@@ -279,11 +279,11 @@ struct Stub {
     std::vector<types::Detection> cands;
     std::map<double, double> z;
     double resid = 1.0;
-    std::vector<std::string> log;
+    std::vector<std::string> log{};
     double clock = 0.0;
     int now_calls = 0;
-    std::map<double, types::PassResult> passes;   // receive_pass: f -> pass (absent: None)
-    std::vector<types::Detection> detected;       // detect's answer
+    std::map<double, types::PassResult> passes{};   // receive_pass: f -> pass (absent: None)
+    std::vector<types::Detection> detected{};     // detect's answer
 
     std::optional<types::Detection> verified(const char* who, const types::Detection& d) {
         log.push_back(std::string(who) + " " + num(d.f_hz));
@@ -979,8 +979,85 @@ void test_wavread() {
         throws<std::invalid_argument>([&] { wav::read_wav(write_tmp("adpcm.wav", wav_bytes(w, std::string(8, '\0')))); },
                                       "a format tag it does not take");
     }
+    // scipy's own walk and refusals (tests/test_qrss_native_receiver_slot.py
+    // holds every corner against scipy; these are the C++ side alone)
+    auto format_error = [](const std::string& bytes, const std::string& name, wav::FormatError::Kind kind,
+                           const std::string& text) {
+        try {
+            wav::read_wav(write_tmp(name, bytes));
+            check::fail(name, "did not throw");
+        } catch (const wav::FormatError& e) {
+            check::is_true(e.kind == kind, name + ": the reference's exception class");
+            check::equal(std::string(e.what()), text, name + ": the reference's text");
+        }
+    };
+    {
+        std::string riff = wav_bytes({}, std::string(4, '\0'));
+        riff[28] = 1;   // nAvgBytesPerSec 0x3e01, not 8000 * 2
+        format_error(riff, "rate.wav", wav::FormatError::Kind::value,
+                     "WAV header is invalid: nAvgBytesPerSec must equal product of nSamplesPerSec and nBlockAlign, "
+                     "but file has nSamplesPerSec = 8000, nBlockAlign = 2, and nAvgBytesPerSec = 15873");
+        WavSpec w;
+        w.tag = 7;
+        format_error(wav_bytes(w, ""), "mulaw.wav", wav::FormatError::Kind::value,
+                     "Unknown wave file format: MULAW. Supported formats: PCM, IEEE_FLOAT");
+        w.tag = 0x1234;
+        format_error(wav_bytes(w, ""), "x1234.wav", wav::FormatError::Kind::value,
+                     "Unknown wave file format: 0x1234. Supported formats: PCM, IEEE_FLOAT");
+        format_error(std::string("RIFF\x04\x00\x00\x00WAVE", 12), "nofmt.wav", wav::FormatError::Kind::unbound_local,
+                     "cannot access local variable 'fs' where it is not associated with a value");
+        format_error(std::string("RIFF\x00\x00", 6), "short.wav", wav::FormatError::Kind::struct_error,
+                     "unpack requires a buffer of 4 bytes");
+        format_error("it's not", "quote.wav", wav::FormatError::Kind::value,
+                     "File format b\"it's\" not understood. Only 'RIFF', 'RIFX', and 'RF64' supported.");
+        WavSpec z;
+        z.channels = 2;
+        z.container = 0;
+        format_error(wav_bytes(z, "ab"), "zero.wav", wav::FormatError::Kind::zero_division,
+                     "integer division or modulo by zero");
+        WavSpec n9;
+        n9.container = 9;
+        n9.bits = 64;
+        format_error(wav_bytes(n9, std::string(9, '\1')), "i9.wav", wav::FormatError::Kind::type,
+                     "data type '<i9' not understood");
+    }
+    {
+        // 48-bit, left-justified in int64; 8-bit in a 2-byte container read
+        // as that many single bytes (scipy's)
+        WavSpec w;
+        w.bits = 48;
+        w.container = 6;
+        const auto x = wav::read_wav(write_tmp("i48.wav", wav_bytes(w, std::string("\x00\x00\x00\x00\x00\x40", 6))));
+        eqv(x, (std::vector<double>{static_cast<double>(std::int64_t{1} << 62) / 9223372036854775807.0}),
+            "48-bit / 2**63 - 1, left-justified in int64");
+        WavSpec u;
+        u.bits = 8;
+        u.container = 2;
+        const auto y = wav::read_wav(write_tmp("u8in2.wav", wav_bytes(u, std::string("\xff\x00\x80\x00", 4))));
+        eqv(y, (std::vector<double>{1.0, 0.0}), "8-bit in a 2-byte container: the first n bytes, unsigned");
+    }
+    {
+        // the last data chunk wins; an unknown chunk is a WavFileWarning
+        std::string riff = wav_bytes({}, std::string("\x01\x00", 2));
+        riff += "abcd";
+        put32(riff, 1);
+        riff += std::string("x\0", 2);
+        riff += "data";
+        put32(riff, 2);
+        riff += std::string("\x02\x00", 2);
+        const std::uint32_t size = static_cast<std::uint32_t>(riff.size() - 8);
+        for (int k = 0; k < 4; ++k) riff[4 + k] = static_cast<char>(size >> (8 * k));
+        std::vector<wav::Warning> ws;
+        const auto x = wav::read_wav(write_tmp("two.wav", riff), &ws);
+        eqv(x, (std::vector<double>{2.0 / 32767.0}), "the last data chunk");
+        check::is_true(ws == std::vector<wav::Warning>{{wav::Warning::Kind::wav_file,
+                                                        "Chunk (non-data) not understood, skipping it."}},
+                       "an unknown chunk: scipy's warning");
+    }
+    throws<wav::FormatError>([] { wav::read_wav(std::string("a.wav\0b", 7)); }, "a NUL in the path");
     for (const char* n : {"i16.wav", "u8.wav", "i24.wav", "i32.wav", "f32.wav", "st.wav", "r16.wav", "text.wav",
-                          "adpcm.wav", "missing-dir"}) {
+                          "adpcm.wav", "missing-dir", "rate.wav", "mulaw.wav", "x1234.wav", "nofmt.wav", "short.wav",
+                          "quote.wav", "zero.wav", "i9.wav", "i48.wav", "u8in2.wav", "two.wav"}) {
         std::error_code ec;
         std::filesystem::remove(std::filesystem::temp_directory_path() / (tmp_prefix() + n), ec);
     }
