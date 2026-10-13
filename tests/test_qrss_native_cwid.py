@@ -2,21 +2,28 @@
 sstvae/qrss/cwid.py, held side by side in one process.
 
 - The reader: `read_ml` (text equal, Z and the margin to 1e-9) and `read`
-  on a few thousand seeded per-unit LLR stacks built as
-  tests/test_qrss_cwid.py builds them (+-mu keying of a call in unit
-  noise, 1-4 rows, 1-D too), from signal far over the read threshold down
-  to noise; its dynamic programme `_dp` / `_trace` and the alphabet
-  `_patterns` exactly.
-- The windows: `_unit_sums`, `window_soft`, `window_llr` (both keyings
-  for CE) and `keying_type` on the Python tracker's own TrackResults of
-  CE and L passes (tests/qrss_demod_tracks.py), and with a channel given
-  in place of the track's z_d. float32 outputs to 1e-10 relative before
-  the cast -- in practice one float32 ulp on a rare unit, measured below.
+  on 1800 seeded per-unit LLR stacks built as tests/test_qrss_cwid.py
+  builds them (+-mu keying of a call in unit noise, 1-4 rows, 1-D too),
+  from signal far over the read threshold down to noise (180 of them with
+  the margin, a programme per character read); its dynamic programme
+  `_dp` / `_trace` and the alphabet `_patterns` exactly.
+- The windows: `_unit_sums` (1e-10), `window_soft`, `window_llr` (both
+  keyings for CE, within one float32 ulp) and `keying_type` (equal) on
+  the Python tracker's own TrackResults of CE and L passes
+  (tests/qrss_demod_tracks.py), and with a channel given in place of the
+  track's z_d.
 - `match` to 1e-10, `decode_units` exactly (calls, random flags, every
-  refusal), `_ln_i0`, `_combine`, and the reference's errors.
+  refusal), `_ln_i0` (see its test), `_combine`, and the reference's
+  errors.
 - The caller: `receiver._cw_result` (keying_type, window_soft, read of
   window_llr, match) on the SHORT tracks with cwid's rows assigned over
   the reference's names: the same CwIdResult.
+
+Measured (2026-10-13): everything but `_ln_i0` bit-identical -- read_ml's
+Z and margin, the unit sums, every window value on every track (0 ulps),
+and match, whose np.dot is OpenBLAS's SkylakeX ddot here (its order and
+fused multiply-adds are reproduced; another BLAS kernel would leave an
+ulp, which the 1e-10 allows).
 """
 
 import math
