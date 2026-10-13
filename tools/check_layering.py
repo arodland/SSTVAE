@@ -92,8 +92,9 @@ RULES = [
         re.compile(r'^\s*#\s*include\s*[<"](QtNetwork|QNetwork)', re.M),
     ),
     (
-        "core/qrss/ must not depend on Qt at all (QtCore included): it links no Qt",
-        lambda p: p.parts[:2] == ("core", "qrss"),
+        "core/qrss/ and core/math/ must not depend on Qt at all (QtCore included): "
+        "they link no Qt",
+        lambda p: p.parts[:2] in (("core", "qrss"), ("core", "math")),
         re.compile(r'^\s*#\s*include\s*[<"](Qt[A-Za-z]*/|Q[A-Z][A-Za-z]*>|Qt[A-Z][A-Za-z]*>)', re.M),
     ),
     (
@@ -160,7 +161,8 @@ def main() -> int:
     for rel, tool in (("core/config.hpp", "tools/gen_config_header.py"),
                       ("core/qrss/config.hpp", "tools/gen_qrss_config_header.py"),
                       ("core/qrss/tables.hpp", "tools/gen_qrss_config_header.py"),
-                      ("core/qrss/tables.cpp", "tools/gen_qrss_config_header.py")):
+                      ("core/qrss/tables.cpp", "tools/gen_qrss_config_header.py"),
+                      ("core/qrss/rx_config.hpp", "tools/gen_qrss_rx_config.py")):
         generated = NATIVE / rel
         if generated.exists():
             head = generated.read_text(encoding="utf-8")[:200]

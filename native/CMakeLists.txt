@@ -216,8 +216,12 @@ sstvae_picture_library(SSTVAE_JP2 libopenjp2 LIBOPENJP2 "JPEG 2000" "libopenjp2-
 # rounds once where numpy rounds twice. GCC on x86-64 does not contract
 # without -mfma, and MSVC's /fp:precise never does.
 if(SSTVAE_BUILD_QRSS)
+  # core/math/ is the receiver's numpy/scipy numerics (median, interp,
+  # polyfit, lstsq, eigh, make_lsq_spline), held to numpy's rounding and
+  # so built with the same flags.
   file(GLOB _qrss_sources CONFIGURE_DEPENDS
-       ${CMAKE_CURRENT_SOURCE_DIR}/core/qrss/*.cpp)
+       ${CMAKE_CURRENT_SOURCE_DIR}/core/qrss/*.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/core/math/*.cpp)
   add_library(sstvae_qrss STATIC ${_qrss_sources})
   target_link_libraries(sstvae_qrss PUBLIC sstvae_core)
   set_target_properties(sstvae_qrss PROPERTIES POSITION_INDEPENDENT_CODE ON)
