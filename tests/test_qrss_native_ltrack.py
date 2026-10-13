@@ -98,11 +98,11 @@ def leaves(native, Ln):
     return t, tb
 
 
-def _record(name, snr, cfg=(), lead_in=0.0):
+def _record(name, snr, cfg=(), lead_in=0.0, seed=1):
     """The Python receiver on one L pass, every track_l and refine_timing_l
     call recorded (arguments and a copy of what was passed and returned)."""
     spec = lframe.get(name)
-    _, sim = l_scenario(name, snr, 1, lead_in=lead_in, cfg=cfg)
+    _, sim = l_scenario(name, snr, seed, lead_in=lead_in, cfg=cfg)
     prep = RX.prepare(frontend.Capture(sim.fe, Q_TEST, sim.t0_index))
     det = dataclasses.replace(flat_det(1500.0, WAVEFORM_L), lead_in_s=lead_in)
     calls, rcalls = [], []
@@ -651,7 +651,12 @@ def _receive_agrees(g, r, what):
     assert g is not None, what
     assert g.uid.rsplit("_", 1)[0] == r.uid.rsplit("_", 1)[0], what
     assert (g.q, g.frame, g.waveform, g.estimator) == (r.q, r.frame, r.waveform, r.estimator), what
-    assert g.header == r.header and g.cw == r.cw, what
+    assert g.header == r.header and (g.cw is None) == (r.cw is None), what
+    if r.cw is not None:
+        # z_match sums float32 soft values computed from round A's track, which
+        # agrees to ~1e-10, not bit for bit: one float32 rounding flip moves it ~1e-9
+        assert (g.cw.text, g.cw.keying, g.cw.agrees) == (r.cw.text, r.cw.keying, r.cw.agrees), what
+        assert abs(g.cw.z_match - r.cw.z_match) <= 1e-6 * max(abs(r.cw.z_match), 1.0), what
     assert abs(g.f_hz - r.f_hz) <= 1e-6, what
     for f, tol in (("z", 1e-6), ("w", 1e-6), ("hdr_llr", 1e-4), ("psi", 1e-6)):
         a, b = np.asarray(getattr(g, f)), np.asarray(getattr(r, f))
@@ -770,3 +775,273 @@ def test_refine_timing_l_quadratic(Ln, row):
         _timing_agrees(c, r, spec, dg)
         kept += r is not None and r.cov[2, 2] > 0
     assert kept > 0, "gamma's branch reached"
+
+
+# --- review probes ------------------------------------------------------------------------------
+#
+# Inputs the receivers' own calls above do not reach: a blanker that
+# erases (impulses: psi and psi_pl under PSI_MIN inside the frame) on a
+# fading path, the joint receiver's gate V (receiver._gate -> verify_l ->
+# track_l), a lead-in claimed where there is none, and randomised edits
+# of the model's inputs, the gain tracks, the timing and the positions.
+
+def _rough_cfg(rate_hz, crash_per_min, preset):
+    from sstvae.qrss.channel import Impulses
+
+    return tuple(sorted((("impulses", Impulses(rate_hz=rate_hz, amp_db=40.0, crash_per_min=crash_per_min)),
+                         ("preset", preset))))
+
+
+@pytest.fixture(scope="module")
+def rough_tiny(Ln):
+    """l-tiny at -6 dB on a moderate (0.5 Hz, 1 ms) Watterson path with
+    clicks and crashes: the blanker erases ~2.6% of the capture."""
+    return _record("l-tiny", -6.0, _rough_cfg(1.0, 3.0, "moderate"), seed=2)
+
+
+def _erases(p):
+    """The property the rough fixtures are for: symbols in the frame whose
+    psi and psi_pl are under PSI_MIN, in every tracker run."""
+    for _a, _k, tr in p.calls:
+        frm = tr.pos >= 0
+        assert np.any(tr.psi[frm] < T.PSI_MIN) and np.any(tr.psi_pl[frm] < T.PSI_MIN)
+
+
+def test_probe_blanked_fading_pass(native, Ln, row, leaves, rough_tiny, monkeypatch):
+    """Erased symbols on a fading path: track_l on the receiver's calls to
+    1e-9, the swap test bit for bit, refine_timing_l's calls, and the whole
+    receive_pass on every row."""
+    from qrss_native.ltrack import rows
+
+    p = rough_tiny
+    _erases(p)
+    assert len(p.calls) >= 2 and any(k.get("withhold_known") for _a, k, _r in p.calls)
+    t, tb = leaves
+    worst = {}
+    for i, (a, k, ref) in enumerate(p.calls):
+        g = row["track_l"](*a, **k)
+        _track_agrees(g, ref, f"rough/{i}", worst)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(LT, "pilot_filter", row["pilot_filter"])
+            mp.setattr(LT, "refine_timing_l", row["refine_timing_l"])
+            mp.setattr(LT, "_smooth", t["_smooth"])
+            mp.setattr(LT, "freq_path_spline", tb["freq_path_spline"])
+            mp.setattr(T, "_recenter", t["_recenter"])
+            h = LT.track_l(*a, **k)
+        _same_track(g, h, f"rough/{i} swapped")
+    for i, (tr, a, k, out) in enumerate(p.rcalls):
+        _timing_agrees(row["refine_timing_l"](tr, *a, **k), out, p.spec, f"rough refine {i}")
+    table = {name: fn for (_t, name), fn in rows(native.qrss).items()}
+    used: dict = {}
+    for name, fn in _counted(table, used).items():
+        monkeypatch.setattr(LT, name, fn)
+    got = RX.receive_pass(p.prep, p.spec, p.det, return_tracks=True)
+    _receive_agrees(got[0], p.pr, "rough")
+    assert {"track_l", "make_classes_l", "report_l"} <= set(used), sorted(used)
+
+
+def test_probe_joint_gate_on_the_rows(native, Ln, monkeypatch):
+    """The joint receiver on l-tiny at -12 dB, (TINY, L_TINY): receiver._gate
+    runs verify_l, whose withheld track_l is the row's, then receive_pass's
+    round A. The same pass as the reference's, each row reached from its
+    caller (counted per caller)."""
+    from qrss_native.ltrack import rows
+
+    _, sim = l_scenario("l-tiny", -12.0, 1)
+    cap = frontend.Capture(sim.fe, Q_TEST, sim.t0_index)
+    seen: list = []
+    orig_gate, orig_track = RX._gate, LT.track_l
+
+    def gate(*a, **k):
+        seen.append("gate")
+        try:
+            return orig_gate(*a, **k)
+        finally:
+            seen.append("/gate")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(RX, "_gate", gate)
+        ref = RX.receive_slot(cap, (frame.TINY, lframe.L_TINY), budget_s=None)
+    assert len(ref) == 1 and ref[0].frame == "l-tiny"
+    table = {name: fn for (_t, name), fn in rows(native.qrss).items()}
+    used: dict = {}
+    for name, fn in _counted(table, used).items():
+        monkeypatch.setattr(LT, name, fn)
+    inner = LT.track_l
+    where: list = []
+
+    def track_l(*a, **k):
+        where.append(("gate" if seen and seen[-1] == "gate" else "pass", bool(k.get("withhold_known"))))
+        return inner(*a, **k)
+
+    monkeypatch.setattr(LT, "track_l", track_l)
+    monkeypatch.setattr(RX, "_gate", gate)
+    seen.clear()
+    got = RX.receive_slot(cap, (frame.TINY, lframe.L_TINY), budget_s=None)
+    assert len(got) == len(ref) == 1
+    _receive_agrees(got[0], ref[0], "joint")
+    assert ("gate", True) in where and ("pass", False) in where, where
+    assert used.get("track_l", 0) == len(where) and "report_l" in used, (used, where)
+
+
+def test_probe_lead_claimed_where_there_is_none(Ln, row, passes):
+    """A lead-in claimed on a pass without one: _lead_supported_l refuses it
+    (the reference's lead_in_s comes back 0) and the row agrees."""
+    for name in ("l-tiny", "l-short"):
+        a, k, ref = passes[name].calls[-1]
+        for lead in (2.0, 5.0, 9.5):
+            kw = dict(k, lead_in_s=lead, refine=False, outer=0)
+            r = LT.track_l(*a, **kw)
+            assert r.lead_in_s == 0.0, (name, lead)
+            _track_agrees(row["track_l"](*a, **kw), r, f"{name} claimed {lead}")
+            assert row["_lead_supported_l"](a[0], ref.z_d, ref.timing, ref.spec, lead) is \
+                LT._lead_supported_l(a[0], ref.z_d, ref.timing, ref.spec, lead) is False
+
+
+def _edited(tr, rng):
+    """A copy of tr with its measurements scrambled: psi and psi_pl under
+    PSI_MIN, at 0 and around 1; m, m_pl, N, N_pl rescaled; NaN-free."""
+    t2 = copy.copy(tr)
+    n = len(tr.pos)
+    pick = rng.random(n)
+    t2.psi = np.where(pick < 0.15, rng.uniform(0.0, 0.7, n), np.where(pick < 0.2, 0.0, tr.psi))
+    pick = rng.random(n)
+    t2.psi_pl = np.where(pick < 0.15, rng.uniform(0.0, 0.7, n), np.where(pick < 0.2, 1.0, tr.psi_pl))
+    t2.m = tr.m * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    t2.m_pl = tr.m_pl * rng.uniform(0.2, 3.0, n) * np.exp(2j * np.pi * rng.random(n))
+    t2.N = tr.N * rng.uniform(0.3, 3.0, n)
+    t2.N_pl = tr.N_pl * rng.uniform(0.3, 3.0, n)
+    t2.c_pl = tr.c_pl * rng.uniform(0.0, 2.0, n)
+    return t2
+
+
+def test_probe_model_randomised(Ln, row, passes):
+    """_Model's streams, fused, pu_initial and _fit_delta bit for bit on
+    scrambled measurements, random deltas, masks and local powers."""
+    rng = np.random.default_rng(20261013)
+    n_meas = n_pl = 0
+    for label, call in [(f"{n}/{i}", c) for n, p in passes.items() for i, c in enumerate(p.calls)]:
+        spec, cl, wk, key, lead, n_lead = _model_args(call)
+        for rep in range(3):
+            base = _edited(call[2], rng)
+            tr_r, tr_g = copy.copy(base), copy.copy(base)
+            mr = LT._Model(tr_r, spec, cl, wk, key, lead, n_lead)
+            mg = row["_Model"](tr_g, spec, cl, wk, key, lead, n_lead)
+            n = len(base.pos)
+            pu = call[2].pu * rng.uniform(0.1, 10.0, n)
+            mask = rng.random(n) < 0.7
+            for kw in ({}, dict(delta=complex(*rng.standard_normal(2))), dict(data=False),
+                       dict(pilot=False), dict(delta=complex(*rng.standard_normal(2)), data_mask=mask),
+                       dict(data=False, pilot=False)):
+                for (x, y), (xr, yr) in zip(mg.streams(pu, **kw), mr.streams(pu, **kw)):
+                    _same(x, xr, f"{label} streams {kw}")
+                    _same(y, yr, f"{label} streams {kw}")
+                for x, y in zip(mg.fused(pu, **kw), mr.fused(pu, **kw)):
+                    _same(x, y, f"{label} fused {kw}")
+            (_, Rd), (_, Rp) = mr.streams(pu)
+            n_meas += int(np.sum(np.isfinite(Rd)))
+            n_pl += int(np.sum(np.isfinite(Rp)))
+            assert mg.pu_initial() == mr.pu_initial(), label
+            v = call[2].u * (1.0 + 0.2 * (rng.standard_normal(n) + 1j * rng.standard_normal(n)))
+            Pv = np.abs(call[2].P * rng.uniform(0.0, 4.0, n))
+            for d0 in (1.0 + 0.0j, complex(*rng.standard_normal(2)), 1e-3 + 2e-3j):
+                r = LT._fit_delta(mr, v, Pv, pu, d0)
+                g = row["_fit_delta"](mg, v, Pv, pu, d0)
+                assert g == r and type(g) is type(r), (label, g, r)
+    assert n_meas > 0 and n_pl > 0
+
+
+def test_probe_pu_local_and_hold_ends_randomised(Ln, row, passes):
+    rng = np.random.default_rng(5)
+    for label, tr in _tracks(passes):
+        n = len(tr.u)
+        for rep in range(4):
+            u = tr.u * np.exp(rng.standard_normal(n)) * np.exp(2j * np.pi * rng.random(n))
+            P = np.abs(tr.P) * np.exp(3.0 * rng.standard_normal(n))
+            P[rng.random(n) < 0.01] = 1e30           # a runaway extrapolation, capped
+            meas = rng.random(n) < (0.5 if rep < 3 else 0.0)
+            (lg, gg), (lr, gr) = row["_pu_local"](u, P, meas), LT._pu_local(u, P, meas)
+            assert rel(lg, lr) <= 1e-13 and abs(gg - gr) <= 1e-13 * gr, label
+            R = np.where(rng.random(n) < 0.3, np.inf, rng.uniform(0.1, 2.0, n))
+            R[: rng.integers(0, n // 3)] = np.inf
+            R[n - rng.integers(1, n // 3):] = np.inf
+            for args in ((u, P, R), (u.real.copy(), P, R)):
+                g, r = row["_hold_ends"](*args), LT._hold_ends(*args)
+                _same(g[0], r[0], label)
+                _same(g[1], r[1], label)
+                assert g[0] is not args[0] and g[1] is not args[1]
+
+
+def test_probe_data_mf_randomised(Ln, row, passes):
+    """data_mix and data_mf bit for bit under random timings (clock errors to
+    +-250 ppm, gamma up to +-40 samples) and position sets, dense and sparse."""
+    rng = np.random.default_rng(11)
+    for label, tr in _tracks(passes)[:3]:
+        n_pos = tr.spec.n_pos
+        for rep in range(6):
+            tm = dataclasses.replace(tr.timing, tau0=tr.timing.tau0 + rng.uniform(-30, 30),
+                                     ppm=rng.uniform(-250, 250), gamma=rng.uniform(-40, 40) * (rep % 2))
+            k = int(rng.integers(1, 400))
+            pos = np.sort(rng.uniform(-SPAN - 5, n_pos + 5, k)) if rep % 3 else \
+                rng.choice(tr.pos, k).astype(np.float64)
+            _same(row["data_mf"](tr.z_d, tr.chan, tm, pos, n_pos), LT.data_mf(tr.z_d, tr.chan, tm, pos, n_pos),
+                  f"{label} data_mf {rep}")
+            idx = rng.integers(0, len(tr.z_d), 300)
+            _same(row["data_mix"](tr.z_d, tr.chan, tm, n_pos, idx), LT.data_mix(tr.z_d, tr.chan, tm, n_pos, idx),
+                  f"{label} data_mix {rep}")
+        for tp in (rng.uniform(-300, len(tr.z_d) + 300, 500), np.arange(-5.0, 20.0), np.array([len(tr.z_d) - 1.0])):
+            assert _scaled(row["pilot_filter"](tr.z_d, tp), LT.pilot_filter(tr.z_d, tp)) <= 1e-12, label
+
+
+def test_probe_refine_timing_l_randomised(Ln, row, passes):
+    """refine_timing_l from random starting timings around the receiver's,
+    with and without a gain track handed in: the same None outcomes, the
+    timing to 1e-6 CH samples (no near-threshold case seen)."""
+    rng = np.random.default_rng(17)
+    n_none = n_some = n_grad = 0
+    for name, p in passes.items():
+        tr = p.calls[-1][2]
+        sl = tr.spec.n_pos * L_T_SYM * CH_FS
+        for rep in range(6):
+            t2 = copy.copy(tr)
+            t2.timing = dataclasses.replace(tr.timing, tau0=tr.timing.tau0 + rng.uniform(-6, 6),
+                                            ppm=tr.timing.ppm + rng.uniform(-6, 6) / sl * 1e6)
+            kw = [{}, dict(iters=int(rng.integers(1, 5))),
+                  dict(u_ref=tr.u_pl * (1 + 0.1 * rng.standard_normal(len(tr.pos))), P_ref=tr.P_pl),
+                  dict(u_ref=tr.u)][rep % 4]
+            r, g = _outcome(LT.refine_timing_l, t2, **kw), _outcome(row["refine_timing_l"], t2, **kw)
+            assert r[0] == g[0] == "ok", (r, g)
+            _timing_agrees(g[1], r[1], tr.spec, (name, rep))
+            n_none += r[1] is None
+            n_some += r[1] is not None
+            n_grad += r[1] is not None and not np.any(r[1].cov)
+    assert n_some > 0, (n_none, n_some, n_grad)
+
+
+def test_probe_track_l_from_threads(Ln, row, passes):
+    """The row's track_l, refine_timing_l and report_l from four Python
+    threads at once (the binding releases the GIL around the C++): each
+    result bit for bit the serial one, so no state is shared between calls."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    calls = passes["l-tiny"].calls
+    serial = [row["track_l"](*a, **k) for a, k, _r in calls]
+    rt = [row["refine_timing_l"](s) for s in serial]
+
+    def one(i):
+        a, k, _r = calls[i % len(calls)]
+        g = row["track_l"](*a, **k)
+        return i, g, row["refine_timing_l"](g), row["report_l"](g, 0.8, False)
+
+    with ThreadPoolExecutor(4) as ex:
+        out = list(ex.map(one, range(4 * len(calls))))
+    for i, g, t, rep in out:
+        j = i % len(calls)
+        _same_track(g, serial[j], f"thread {i}")
+        assert (t is None) == (rt[j] is None), i
+        if t is not None:
+            assert (t.tau0, t.ppm, t.gamma, t.z) == (rt[j].tau0, rt[j].ppm, rt[j].gamma, rt[j].z), i
+        want = row["report_l"](serial[j], 0.8, False)
+        for f in dataclasses.fields(want):        # z_ref is NaN on a withheld track
+            x, y = getattr(rep, f.name), getattr(want, f.name)
+            assert x == y or (x != x and y != y), (i, f.name, x, y)
