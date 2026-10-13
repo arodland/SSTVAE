@@ -130,8 +130,18 @@ def scen(Tt):
         det = flat_det(1500.0)
         chan = RX.channel_for(prep, spec, det)
         chan.noise_psd_at(0.0)
-        v = T.verify(chan, CH_FS, spec, det)
-        out[label] = SimpleNamespace(spec=spec, sim=sim, prep=prep, det=det, chan=chan, v=v)
+        tracked = []                         # fit=... of each verify_track gate V ran
+        orig = T.verify_track
+
+        def spy(*a, _orig=orig, _calls=tracked, **k):
+            _calls.append(k.get("fit", True))
+            return _orig(*a, **k)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(T, "verify_track", spy)
+            v = T.verify(chan, CH_FS, spec, det)
+        out[label] = SimpleNamespace(spec=spec, sim=sim, prep=prep, det=det, chan=chan, v=v,
+                                     tracked=tracked)
     assert out["noise"].v is None
     assert all(s.v is not None for k, s in out.items() if k != "noise"), \
         [k for k, s in out.items() if s.v is None]
@@ -487,19 +497,12 @@ def test_verify(row, scen):
 
 def test_verify_noise_tries_the_runners_up(row, scen):
     """The noise capture is refused only after every base and the coarse
-    statistic's runners-up were tracked (the reference's calls counted)."""
-    s = scen["noise"]
-    calls = []
-    orig = T.verify_track
-
-    def spy(*a, **k):
-        calls.append(k.get("fit", True))
-        return orig(*a, **k)
-
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(T, "verify_track", spy)
-        assert T.verify(s.chan, CH_FS, s.spec, s.det) is None
+    statistic's runners-up were tracked (the reference's calls, counted in
+    the fixture); a signal is accepted on the first."""
+    calls = scen["noise"].tracked
     assert len(calls) > 3 and calls.count(False) == len(calls) - 3, calls
+    assert scen["tiny-6"].tracked == [True]
+    s = scen["noise"]
     assert row["verify"](s.chan, CH_FS, s.spec, s.det) is None
 
 
