@@ -10,9 +10,14 @@
 // values (0.0 and -0.0) is returned, and what a NaN does to the order,
 // are scipy's. Where scipy leaves the fast path (a window wider than the
 // array would need, lim2 < 0 with more than one element) its generic
-// filter selects the same rank from the reflected window; that is done
-// here with a sort of the reflected window, which agrees for ordered
-// (NaN-free) data.
+// filter (ni_filters.c NI_RankFilter) quickselects the rank from the
+// reflected window in a double buffer; NI_Select is copied too, so the
+// choice between equal values is again scipy's. The one case that cannot
+// be scipy's to the bit is lim2 == 0 (window 2 n + 1 for n elements):
+// scipy's fast path primes its heap with a read one past the array's end
+// there, so its tie-breaking depends on whatever memory follows; the
+// generic filter's answer is used, which is the same value (the sign of
+// a zero aside) whenever scipy's heap survived that read.
 //
 // "reflect" is ndimage's half-sample symmetric extension
 // (d c b a | a b c d | d c b a). Thread-safe: no state.

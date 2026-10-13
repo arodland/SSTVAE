@@ -26,6 +26,7 @@
 #include "math/special.hpp"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 

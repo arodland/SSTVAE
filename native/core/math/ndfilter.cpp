@@ -138,6 +138,42 @@ void rank_filter_reflect(const T* in_arr, int rank, int arr_len, int win_len, T*
     }
 }
 
+// ni_filters.c's NI_Select: Hoare-partition quickselect on the window as
+// the generic filter lays it out (footprint order, in double), pivot the
+// first element. Which of two equal values (0.0 and -0.0) it returns, and
+// what a NaN does, follow from this exact sequence of comparisons and
+// swaps, so it is copied rather than replaced by std::nth_element.
+double ni_select(double* buffer, std::int64_t min, std::int64_t max, std::int64_t rank) {
+    for (;;) {
+        if (min == max) return buffer[min];
+        const double x = buffer[min];
+        std::int64_t ii = min - 1;
+        std::int64_t jj = max + 1;
+        for (;;) {
+            do
+                jj--;
+            while (buffer[jj] > x);
+            do
+                ii++;
+            while (buffer[ii] < x);
+            if (ii < jj) {
+                const double t = buffer[ii];
+                buffer[ii] = buffer[jj];
+                buffer[jj] = t;
+            } else {
+                break;
+            }
+        }
+        ii = jj - min + 1;
+        if (rank < ii) {
+            max = jj;  // NI_Select(buffer, min, jj, rank)
+        } else {
+            min = jj + 1;  // NI_Select(buffer, jj + 1, max, rank - ii)
+            rank -= ii;
+        }
+    }
+}
+
 // ndimage's "reflect" index for position i of an array of n > 0.
 std::int64_t reflect_index(std::int64_t i, std::int64_t n) {
     const std::int64_t period = 2 * n;
@@ -169,17 +205,23 @@ std::vector<T> median_filter_impl(std::span<const T> x, int size) {
         rank_filter_reflect(x.data(), rank, arr_len, size, out.data());
         return out;
     }
-    // scipy's generic filter (_nd_image.rank_filter) where lim2 < 0: the
-    // rank-th value of the reflected window. lim2 == 0 also comes here:
-    // scipy's fast path then primes its heap with in_arr[arr_len], one past
-    // the end (a read out of bounds whose value is overwritten before the
-    // first output), which this does not reproduce.
-    std::vector<T> win(static_cast<std::size_t>(size));
+    // scipy's generic filter (_nd_image.rank_filter, NI_RankFilter) where
+    // lim2 < 0: the window, reflected, copied into a double buffer in
+    // footprint order and NI_Select'ed, the result cast back to T.
+    // lim2 == 0 also comes here: scipy's fast path then primes its heap
+    // with in_arr[arr_len], one past the end -- a read out of bounds whose
+    // value is evicted before the first output, but whose comparisons have
+    // already shaped the heap, so which of two equal values (or, for a NaN
+    // read, whether the heap is still a heap) depends on memory past the
+    // array. That is not reproducible; the generic filter's answer is the
+    // value scipy gives whenever its heap stayed valid, and the same bits
+    // except possibly for the sign of a zero.
+    std::vector<double> win(static_cast<std::size_t>(size));
     for (std::int64_t i = 0; i < arr_len; ++i) {
         for (int k = 0; k < size; ++k)
-            win[static_cast<std::size_t>(k)] = x[static_cast<std::size_t>(reflect_index(i - lim + k, arr_len))];
-        std::nth_element(win.begin(), win.begin() + rank, win.end());
-        out[static_cast<std::size_t>(i)] = win[static_cast<std::size_t>(rank)];
+            win[static_cast<std::size_t>(k)] =
+                static_cast<double>(x[static_cast<std::size_t>(reflect_index(i - lim + k, arr_len))]);
+        out[static_cast<std::size_t>(i)] = static_cast<T>(ni_select(win.data(), 0, size - 1, rank));
     }
     return out;
 }

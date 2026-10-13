@@ -16,6 +16,7 @@
 
 #include "qrss/rx_types.hpp"
 
+#include <algorithm>
 #include <complex>
 #include <memory>
 #include <span>
