@@ -14,9 +14,12 @@ The contract, and what was measured (2026-10-13, these passes):
   derotate (given the same path values), known_symbols, make_classes,
   remove_spread, _window_unknown, _kf_forward, kalman_rts, select_q (the
   same element of the grid), _measurements, _pu_initial, erase;
-- templates to 1e-10 relative: measured c 1 ulp, sf 13 ulps (2.4e-15),
-  numpy's SIMD exp of a real array not being libm's; _lowpass (scipy's
-  FFT convolution) and _smooth (np.convolve through BLAS ddot) to rounding;
+- templates: c to 1e-10 relative (measured 3e-16), sf to 1e-9 elementwise
+  and 1e-14 of its scale (measured 1.9e-10 where v is small: numpy's SIMD
+  exp of a real array is an ulp from libm's, and 1 - e^-v cancels);
+  _lowpass (scipy's FFT convolution) to 1e-12 -- a complex64 input 1e-6,
+  scipy transforming it in single precision where the C++ stays in double
+  -- and _smooth (np.convolve through BLAS ddot) to 1e-13;
 - track(): the same q, keying, lead-in and outcome of every decision; the
   path and timing to 1e-9 Hz / 1e-6 CH samples; z_d, m, c, N, psi to 1e-9
   relative (measured 2.5e-10 -- the re-centred spline, refitted by the
