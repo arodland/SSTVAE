@@ -446,3 +446,152 @@ def test_baseband_object(nat, short_bb):
 
 def test_to_data_centre(nat, short_bb):
     _same(nat.to_data_centre(short_bb), ref.to_data_centre(short_bb))
+
+
+# --- review probes: edges, rates, custom frames ----------------------------------------------
+
+def test_window_keying_without_windows(nat):
+    """With no windows a (192,) mask broadcasts to (0, 192), and the reference
+    looks at none of its values: a mask holding a 2 is accepted there (the
+    port refused it until the review)."""
+    spec = LF.get("l-tiny")
+    cases = [np.full(L_CW_WINDOW, 2), np.full(L_CW_WINDOW, 0.5), np.zeros((0, L_CW_WINDOW)) + 3,
+             np.full(L_CW_WINDOW - 1, 2), np.ones((1, L_CW_WINDOW)), morse.keying_units(CALL)]
+    for c in cases:
+        a, b = _outcome(nat.window_keying, c, spec), _outcome(ref.window_keying, c, spec)
+        assert a[0] == b[0], c
+        if a[0] == "ok":
+            _same(a[1], b[1])
+        else:
+            assert a == b
+    tau = np.linspace(-200, 3000, 4001)
+    bad = np.full(L_CW_WINDOW, 2)
+    _same(nat.cw_turns(tau, spec, bad), ref.cw_turns(tau, spec, bad))
+    _same(nat.pilot(tau, spec, bad, 2.0), ref.pilot(tau, spec, bad, 2.0))
+
+
+def _edges(spec, lead):
+    """Every tau where a branch of the pilot changes, its neighbours either
+    side, and the non-finite values."""
+    lo, hi = ref.keyed_span_pos(spec, lead)
+    r = ref.KEY_RAMP_S / L_T_SYM
+    pts = [lo, hi, lo - r, hi + r, spec.keyed_start_pos, 0.0, -1e300, 1e300, np.nan, np.inf, -np.inf]
+    for p in spec.win_start_pos:
+        x0 = p - 0.5
+        pts += [x0, x0 + L_CW_WINDOW, x0 + ref.ID_RAMP_UNITS, x0 + L_CW_WINDOW - ref.ID_RAMP_UNITS,
+                p, x0 + 0.5, x0 + 1.5, x0 + L_CW_WINDOW - 0.5]
+    pts = np.array(pts, dtype=np.float64)
+    return np.concatenate([pts, np.nextafter(pts, np.inf), np.nextafter(pts, -np.inf)])
+
+
+@pytest.mark.parametrize("name", L_NAMES)
+def test_pilot_at_its_edges(nat, name):
+    spec = LF.get(name)
+    k = morse.keying_units(CALL)
+    for lead in (0.0, 3.0, 10.0):
+        tau = _edges(spec, lead)
+        for kk in (None, k) if spec.n_win else (None,):
+            _same(nat.pilot(tau, spec, kk, lead), ref.pilot(tau, spec, kk, lead))
+            _same(nat.cw_turns(tau, spec, kk), ref.cw_turns(tau, spec, kk))
+        _same(nat.id_weight(tau, spec, lead), ref.id_weight(tau, spec, lead))
+    for t in (5.0, -3.0, float(spec.win_start_pos[0]) if spec.n_win else 7.0):   # 0-d
+        a, b = nat.cw_turns(t, spec, k), ref.cw_turns(t, spec, k)
+        assert type(a) is type(b) and a.shape == b.shape == ()
+        _same(a, b)
+        a, b = nat.id_weight(t, spec, 2.0), ref.id_weight(t, spec, 2.0)
+        assert type(a) is type(b) and a.shape == b.shape == ()
+        _same(a, b)
+
+
+def test_composite_at_every_rate(nat):
+    """data_grid and composite on every rate dividing 16 kHz the reference
+    accepts, from 1 Hz (one sample per 16000 grid steps) to 16 kHz (one per
+    step), at random windows in and around the frame."""
+    rng = np.random.default_rng(21)
+    k = morse.keying_units(CALL)
+    for name in ("l-tiny", "l-short"):
+        spec = LF.get(name)
+        sym = _sym(spec, 22)
+        kk = k if spec.n_win else None
+        for fs in (16000, 8000, 4000, 2000, 1000, 500, 250, 125, 100, 64, 50, 16, 1):
+            G = 16000 // fs
+            for _ in range(2):
+                n0 = int(rng.integers(-20 * fs, spec.n_pos * 970 // G + 5 * fs))
+                n = int(rng.integers(1, min(12000, 30 * fs) + 2))
+                lead = float(rng.choice([0.0, 1.5, 10.0]))
+                _same(nat.data_grid(fs, n0, n, sym, spec), ref.data_grid(fs, n0, n, sym, spec))
+                _same(nat.composite(sym, spec, fs, n0, n, keying=kk, lead_in_s=lead),
+                      ref.composite(sym, spec, fs, n0, n, keying=kk, lead_in_s=lead))
+
+
+def _custom_frames():
+    n_sym = LF.get("l-tiny").n_sym
+    pre, hdr = LF.L_N_PRE, LF.L_N_HDR
+    return [LF.LFrameSpec("end", n_hdr=0, n_data=1024, cw_after=(n_sym,)),   # keyed_end_pos a float
+            LF.LFrameSpec("adjacent", n_hdr=0, n_data=1024, cw_after=(pre + 1, pre + 2, n_sym)),
+            LF.LFrameSpec("after-header", n_data=1024, cw_after=(pre + hdr + 1,)),
+            LF.LFrameSpec("minimal", n_hdr=0, n_data=2, cw_after=(pre + 1,)),
+            LF.LFrameSpec("bare", n_data=1024, hdr_rho=0.0, cw_after=())]
+
+
+def test_custom_frames(nat):
+    """Frames no preset has: a window ending the frame (a float keyed_end_pos),
+    windows back to back, one right after the header, a one-symbol payload."""
+    k = morse.keying_units("K1ABC")
+    for i, spec in enumerate(_custom_frames()):
+        sym = _sym(spec, 30 + i)
+        kk = k if spec.n_win else None
+        _same(nat.at_positions(sym, spec), ref.at_positions(sym, spec))
+        for lead in (0.0, 4.0):
+            a, b = nat.keyed_span_pos(spec, lead), ref.keyed_span_pos(spec, lead)
+            assert a == b and [type(x) for x in a] == [type(x) for x in b], spec.name
+            A = ref.frame_baseband(sym, spec, keying=kk, lead_in_s=lead)
+            B = nat.frame_baseband(sym, spec, keying=kk, lead_in_s=lead)
+            assert (B.n0, B.z.shape) == (A.n0, A.z.shape), spec.name
+            np.testing.assert_array_equal(B.z == 0, A.z == 0)
+            assert np.max(np.abs(B.z - A.z)) <= 1e-13, spec.name
+            tau = ref.tau_grid(250, A.n0, len(A.z))
+            _same(nat.pilot(tau, spec, kk, lead), ref.pilot(tau, spec, kk, lead))
+            _same(nat.composite(sym, spec, 250, A.n0, len(A.z), keying=kk, lead_in_s=lead),
+                  ref.composite(sym, spec, 250, A.n0, len(A.z), keying=kk, lead_in_s=lead))
+            _same(nat.resample(A, FS, A.n0 * 32 - 600, len(A.z) * 32 + 1200),
+                  ref.resample(A, FS, A.n0 * 32 - 600, len(A.z) * 32 + 1200))
+
+
+def test_full_frame_with_blank_windows(nat):
+    """L_FULL, a 10 s lead-in and one mask per window with every other window
+    blank (a window with no key-down units adds nothing, not even its total)."""
+    spec = LF.get("l-full")
+    per = np.zeros((spec.n_win, L_CW_WINDOW), dtype=np.uint8)
+    for w in range(0, spec.n_win, 2):
+        per[w] = morse.keying_units(("K1ABC", "W1AW/9", "VE3XYZ")[w % 3])
+    sym = _sym(spec, 40)
+    a = ref.frame_baseband(sym, spec, keying=per, lead_in_s=10.0)
+    b = nat.frame_baseband(sym, spec, keying=per, lead_in_s=10.0)
+    assert (b.n0, b.z.shape) == (a.n0, a.z.shape)
+    np.testing.assert_array_equal(b.z == 0, a.z == 0)
+    assert np.max(np.abs(b.z - a.z)) <= 1e-13
+    tau = ref.tau_grid(250, a.n0, len(a.z))
+    _same(nat.pilot(tau, spec, per, 10.0), ref.pilot(tau, spec, per, 10.0))
+    _same(nat.cw_turns(tau, spec, per), ref.cw_turns(tau, spec, per))
+
+
+def test_resample_random_windows(nat, short_bb):
+    """Random output windows at every interpolation factor the callers use and
+    a few more (64 = 16 kHz), and the windows whose first or last output just
+    reaches the frame's first or last sample."""
+    bb = short_bb
+    D = ref.INTERP_HALF
+    rng = np.random.default_rng(23)
+    last = bb.n0 + len(bb.z) - 1
+    for fs_out in (16000, 8000, 4000, 2000, 500, 250):
+        up = fs_out // bb.fs
+        for _ in range(5):
+            i0 = int(rng.integers((bb.n0 - 40) * up, (last + 40) * up))
+            m = int(rng.integers(0, 3000))
+            _same(nat.resample(bb, fs_out, i0, m), ref.resample(bb, fs_out, i0, m))
+        for i0 in (up * bb.n0 - D - 2, up * bb.n0 - D - 1, up * bb.n0 - D, up * bb.n0 + D,
+                   up * last + D - 1, up * last + D, up * last + D + 1, up * last - D):
+            for m in (1, 2, up + 1):
+                _same(nat.resample(bb, fs_out, i0 - m + 1, m), ref.resample(bb, fs_out, i0 - m + 1, m))
+                _same(nat.resample(bb, fs_out, i0, m), ref.resample(bb, fs_out, i0, m))

@@ -84,7 +84,10 @@ double sum_im(const std::vector<cd>& z) {
 
 double sum_pow(const std::vector<cd>& z) {
     std::vector<double> r(z.size());
-    for (std::size_t i = 0; i < z.size(); ++i) r[i] = std::pow(lw::np_abs(z[i]), 2.0);
+    for (std::size_t i = 0; i < z.size(); ++i) {
+        const double a = lw::np_abs(z[i]);   // np.abs(z) ** 2: numpy squares
+        r[i] = a * a;
+    }
     return qrss::npsum::sum(std::span<const double>(r));
 }
 
@@ -217,6 +220,10 @@ static void test_keying() {
     bad.values[10] = 2.0;
     refuses([&] { lw::window_keying(&bad, shrt); }, "keying must be 0/1 of shape (192,) or (2, 192), not (2, 192)",
             "a 2 in the mask");
+    // No windows: the mask broadcasts to (0, 192) and none of its values is
+    // looked at, so the reference accepts even this one.
+    const auto none = lw::window_keying(&bad, fr::get_l("l-tiny"));
+    check::is_true(none.has_value() && none->empty(), "a frame without windows takes any (192,) mask");
 }
 
 static void test_pilot() {

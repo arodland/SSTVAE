@@ -61,7 +61,10 @@ void require_l(const frame::FrameSpec& spec, std::string_view what) {
 // --- ce.py's helpers, on L's own symbol (ce._hann_int, _ramp_envelope,
 // _turns_to_phasor) ---------------------------------------------------------------
 
-const double FOUR_PI_SQ = 4 * std::pow(PI, 2.0);   // 4 * np.pi ** 2 (Python float pow)
+// 4 * np.pi ** 2. Python's ** is libm's pow, which is not x*x everywhere
+// (glibc's differs on ~0.1% of doubles); for pi it is, so the product is
+// written out and no libm's pow is trusted with a format constant.
+const double FOUR_PI_SQ = 4 * (PI * PI);
 
 // ce._hann_int: R(y), the integral of the Hann CDF centred on 0 with unit width.
 double hann_int(double y) {
@@ -114,7 +117,9 @@ double a_pilot() {
 
 double a_clip() {
     static const double v =
-        std::sqrt(1.0 + std::pow(a_pilot(), 2.0)) * std::pow(10.0, config::L_CLIP_HEADROOM_DB / 20);
+        // A_PILOT ** 2 is libm's pow(x, 2) in the reference, which equals
+        // x*x for this x (pinned by the ctest); 10 ** 0.0 is exactly 1.
+        std::sqrt(1.0 + a_pilot() * a_pilot()) * std::pow(10.0, config::L_CLIP_HEADROOM_DB / 20);
     return v;
 }
 
@@ -273,7 +278,9 @@ std::optional<std::vector<std::uint8_t>> window_keying(const Keying* keying, con
     const bool one = shape.size() == 1;
     if (one) shape = {spec.n_win(), keying->shape[0]};
     bool ok = shape.size() == 2 && shape[0] == spec.n_win() && shape[1] == CW;
-    if (ok) {
+    // The reference tests the values of the broadcast array: with no windows
+    // a (192,) mask broadcasts to (0, 192) and none of its values is looked at.
+    if (ok && shape[0] > 0) {
         for (double v : keying->values)
             if (v != 0 && v != 1) {
                 ok = false;
