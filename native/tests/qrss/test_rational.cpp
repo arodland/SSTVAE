@@ -177,6 +177,16 @@ static void test_parse() {
                                   "repr escapes");
     throws<qrss::ZeroDivision>([] { Rational::parse("-5/0"); }, "Fraction(-5, 0)", "x/0");
     throws<qrss::ZeroDivision>([] { Rational::parse("-0/0"); }, "Fraction(0, 0)", "0/0");
+    // A zero denominator names the numerator whatever its size.
+    throws<qrss::ZeroDivision>([] { Rational::parse("-0099999999999999999999/0_0"); },
+                               "Fraction(-99999999999999999999, 0)", "a wide x/0");
+    // int() refuses more than 4300 digits (sys.get_int_max_str_digits()),
+    // leading zeros counted and underscores not, before any arithmetic.
+    throws<std::invalid_argument>([] { Rational::parse("1." + std::string(4301, '0')); },
+                                  "Exceeds the limit (4300 digits) for integer string conversion: value has 4301 "
+                                  "digits; use sys.set_int_max_str_digits() to increase the limit",
+                                  "a 4301-digit fraction part");
+    is(Rational::parse(std::string(4299, '0') + "7"), 7, 1, "4300 digits are allowed");
     bool threw = false;
     try {
         Rational::parse("1e30");
@@ -256,6 +266,13 @@ static void test_arithmetic() {
         threw = true;
     }
     check::is_true(threw, "an int64 overflow throws");
+    // CPython's _add forms t = 2n before dividing by gcd(t, g) = 2; the sum
+    // itself fits:  Fraction(n, d) + Fraction(n, d) -> Fraction(n, d // 2).
+    const Rational h(-8365203145079561419LL, 5798721460512834880LL);
+    is(h + h, -8365203145079561419LL, 2899360730256417440LL, "n/d + n/d past int64 in t only");
+    is(h - Rational(8365203145079561419LL, 5798721460512834880LL), -8365203145079561419LL, 2899360730256417440LL,
+       "and as a subtraction");
+    is(Rational(big, 2) + Rational(-big, 2), 0, 1, "opposite terms past int64 cancel");
 }
 
 int main() {

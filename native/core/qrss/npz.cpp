@@ -3,10 +3,13 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <fstream>
 #include <iterator>
 #include <limits>
 #include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "qrss/crc32.hpp"
 
@@ -36,6 +39,23 @@ const DTypeInfo& info(DType t) {
 }
 
 [[noreturn]] void bad(const std::string& what) { throw std::invalid_argument(what); }
+
+// Header text in a message: np.load decodes the header as Latin-1, so do
+// the same into UTF-8, which keeps every message valid UTF-8 (a Python
+// caller reads it as str) whatever bytes the file held.
+std::string latin1(std::string_view s) {
+    std::string out;
+    for (const char ch : s) {
+        const auto c = static_cast<unsigned char>(ch);
+        if (c < 0x80) {
+            out.push_back(ch);
+        } else {
+            out.push_back(static_cast<char>(0xC0 | (c >> 6)));
+            out.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+        }
+    }
+    return out;
+}
 
 std::size_t checked_product(const std::vector<std::size_t>& shape, std::size_t item) {
     std::size_t n = item;
@@ -81,6 +101,116 @@ bool sig_at(std::span<const std::uint8_t> b, std::size_t at, const char* sig) {
     return at <= b.size() && b.size() - at >= 4 && std::memcmp(b.data() + at, sig, 4) == 0;
 }
 
+// --- zip member names, as zipfile decodes them -----------------------------------------
+
+// bytes.decode("utf-8"): strict, so no overlong forms, surrogates or code
+// points past U+10FFFF.
+bool valid_utf8(std::string_view s) {
+    const auto* b = reinterpret_cast<const unsigned char*>(s.data());
+    const std::size_t n = s.size();
+    std::size_t i = 0;
+    auto cont = [&](std::size_t k, unsigned lo = 0x80, unsigned hi = 0xBF) {
+        return k < n && b[k] >= lo && b[k] <= hi;
+    };
+    while (i < n) {
+        const unsigned c = b[i];
+        if (c < 0x80) {
+            i += 1;
+        } else if (c >= 0xC2 && c <= 0xDF) {
+            if (!cont(i + 1)) return false;
+            i += 2;
+        } else if (c >= 0xE0 && c <= 0xEF) {
+            const unsigned lo = c == 0xE0 ? 0xA0 : 0x80, hi = c == 0xED ? 0x9F : 0xBF;
+            if (!cont(i + 1, lo, hi) || !cont(i + 2)) return false;
+            i += 3;
+        } else if (c >= 0xF0 && c <= 0xF4) {
+            const unsigned lo = c == 0xF0 ? 0x90 : 0x80, hi = c == 0xF4 ? 0x8F : 0xBF;
+            if (!cont(i + 1, lo, hi) || !cont(i + 2) || !cont(i + 3)) return false;
+            i += 4;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Python's cp437 codec, bytes 0x80..0xFF (0x00..0x7F are ASCII).
+constexpr std::array<std::uint16_t, 128> CP437_HIGH = {
+    0x00C7, 0x00FC, 0x00E9, 0x00E2, 0x00E4, 0x00E0, 0x00E5, 0x00E7,
+    0x00EA, 0x00EB, 0x00E8, 0x00EF, 0x00EE, 0x00EC, 0x00C4, 0x00C5,
+    0x00C9, 0x00E6, 0x00C6, 0x00F4, 0x00F6, 0x00F2, 0x00FB, 0x00F9,
+    0x00FF, 0x00D6, 0x00DC, 0x00A2, 0x00A3, 0x00A5, 0x20A7, 0x0192,
+    0x00E1, 0x00ED, 0x00F3, 0x00FA, 0x00F1, 0x00D1, 0x00AA, 0x00BA,
+    0x00BF, 0x2310, 0x00AC, 0x00BD, 0x00BC, 0x00A1, 0x00AB, 0x00BB,
+    0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x2561, 0x2562, 0x2556,
+    0x2555, 0x2563, 0x2551, 0x2557, 0x255D, 0x255C, 0x255B, 0x2510,
+    0x2514, 0x2534, 0x252C, 0x251C, 0x2500, 0x253C, 0x255E, 0x255F,
+    0x255A, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256C, 0x2567,
+    0x2568, 0x2564, 0x2565, 0x2559, 0x2558, 0x2552, 0x2553, 0x256B,
+    0x256A, 0x2518, 0x250C, 0x2588, 0x2584, 0x258C, 0x2590, 0x2580,
+    0x03B1, 0x00DF, 0x0393, 0x03C0, 0x03A3, 0x03C3, 0x00B5, 0x03C4,
+    0x03A6, 0x0398, 0x03A9, 0x03B4, 0x221E, 0x03C6, 0x03B5, 0x2229,
+    0x2261, 0x00B1, 0x2265, 0x2264, 0x2320, 0x2321, 0x00F7, 0x2248,
+    0x00B0, 0x2219, 0x00B7, 0x221A, 0x207F, 0x00B2, 0x25A0, 0x00A0,
+};
+
+// A zip name as zipfile reads it, in UTF-8: the bytes decoded as UTF-8
+// when the entry's flag bit 11 says so, otherwise as cp437 (zipfile's
+// default, np.load passing no metadata_encoding). Invalid UTF-8 is
+// zipfile's UnicodeDecodeError.
+std::string decode_zip_name(std::span<const std::uint8_t> raw, bool utf8) {
+    if (utf8) {
+        std::string s(raw.begin(), raw.end());
+        if (!valid_utf8(s)) bad("npz: a file name flagged UTF-8 is not valid UTF-8");
+        return s;
+    }
+    std::string out;
+    for (const std::uint8_t c : raw) {
+        if (c < 0x80) {
+            out.push_back(static_cast<char>(c));
+            continue;
+        }
+        const std::uint32_t cp = CP437_HIGH[c - 0x80u];   // all below U+10000
+        if (cp < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        } else {
+            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        }
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+    return out;
+}
+
+// zipfile._sanitize_filename: a name ends at its first NUL, and on
+// Windows (os.sep "\\") a backslash is read as "/".
+std::string sanitize_zip_name(std::string s) {
+    const std::size_t nul = s.find('\0');
+    if (nul != std::string::npos) s.resize(nul);
+#ifdef _WIN32
+    std::replace(s.begin(), s.end(), '\\', '/');
+#endif
+    return s;
+}
+
+// A zip offset as zipfile holds it, a Python int: the central directory's
+// offset (up to 2^64 - 1 in a zip64 field) plus the prepended-data shift
+// (negative when bytes are missing), so it lies in (-2^64, 2^65). A low
+// word and a carry hold that exactly; ordering and equality are what the
+// "Overlapped entries" check needs.
+struct Wide {
+    int hi = 0;
+    std::uint64_t lo = 0;
+    friend bool operator==(const Wide&, const Wide&) = default;
+    friend bool operator<(const Wide& a, const Wide& b) { return a.hi != b.hi ? a.hi < b.hi : a.lo < b.lo; }
+};
+Wide wide_add(std::uint64_t a, std::uint64_t b) { return {a + b < a ? 1 : 0, a + b}; }
+Wide wide_add(std::uint64_t a, std::int64_t c) {
+    if (c >= 0) return wide_add(a, static_cast<std::uint64_t>(c));
+    const std::uint64_t m = std::uint64_t(0) - static_cast<std::uint64_t>(c);
+    return {a < m ? -1 : 0, a - m};
+}
+
 // --- the .npy header: a Python literal dict ---------------------------------------------
 
 struct Value {
@@ -91,11 +221,22 @@ struct Value {
     std::vector<std::pair<Value, Value>> entries;   // Dict
 };
 
+// The header as np.load reads it, with ast.literal_eval -- and so with
+// Python's tokenizer deciding what separates the tokens. Anything this
+// accepts, np.load accepts with the same value; a few spellings np.load
+// also accepts are refused here (string prefixes, adjacent strings, hex
+// or octal integers, backslash continuations, "-(5)", and string escapes
+// beyond \n \t \r \0 \\ \' \" and \xNN -- an octal \141 among them),
+// none of which numpy writes.
 class Literal {
 public:
     explicit Literal(std::string_view s) : s_(s) {}
 
     Value parse() {
+        // literal_eval strips leading spaces and tabs, and the line the
+        // value starts on is then a line like any other.
+        while (i_ < s_.size() && (s_[i_] == ' ' || s_[i_] == '\t')) ++i_;
+        line_start();
         Value v = value();
         space();
         if (i_ != s_.size()) fail("trailing text");
@@ -104,12 +245,40 @@ public:
 
 private:
     [[noreturn]] void fail(const char* why) const {
-        bad(std::string("npy: cannot parse header (") + why + "): " + std::string(s_));
+        bad(std::string("npy: cannot parse header (") + why + "): " + latin1(s_));
     }
+    // What Python's tokenizer skips between tokens: spaces, tabs and form
+    // feeds, '#' comments, and line breaks ("\r\n", "\r" or "\n"). Never
+    // '\v', which Python refuses. Outside brackets a line break ends a
+    // logical line, and the next one goes through line_start().
     void space() {
-        while (i_ < s_.size() && (s_[i_] == ' ' || s_[i_] == '\t' || s_[i_] == '\n' || s_[i_] == '\r' ||
-                                  s_[i_] == '\f' || s_[i_] == '\v'))
+        const std::size_t n = s_.size();
+        for (;;) {
+            while (i_ < n && (s_[i_] == ' ' || s_[i_] == '\t' || s_[i_] == '\f')) ++i_;
+            if (i_ < n && s_[i_] == '#')
+                while (i_ < n && s_[i_] != '\n' && s_[i_] != '\r') ++i_;
+            if (!(i_ < n && (s_[i_] == '\n' || s_[i_] == '\r'))) return;
+            if (s_[i_] == '\r' && i_ + 1 < n && s_[i_ + 1] == '\n') ++i_;
             ++i_;
+            if (depth_ == 0) line_start();
+        }
+    }
+    // A line outside brackets that is not blank (only whitespace or a
+    // comment, then a line break) must not be indented: Python's
+    // "unexpected indent", which a whitespace-only last line with no line
+    // break also is. Columns as the tokenizer counts them: tabs to the next
+    // multiple of 8, and a form feed back to 0.
+    void line_start() {
+        const std::size_t n = s_.size();
+        std::size_t col = 0;
+        for (; i_ < n; ++i_) {
+            if (s_[i_] == ' ') ++col;
+            else if (s_[i_] == '\t') col = (col / 8 + 1) * 8;
+            else if (s_[i_] == '\f') col = 0;
+            else break;
+        }
+        const bool blank = i_ < n && (s_[i_] == '#' || s_[i_] == '\n' || s_[i_] == '\r');
+        if (!blank && col > 0) fail("unexpected indent");
     }
     bool eat(char c) {
         space();
@@ -137,6 +306,7 @@ private:
         } else if (c == '(' || c == '[') {
             const char close = c == '(' ? ')' : ']';
             ++i_;
+            ++depth_;
             v.kind = c == '(' ? Value::Tuple : Value::List;
             bool comma = false;
             while (!eat(close)) {
@@ -144,10 +314,12 @@ private:
                 v.items.push_back(value());
                 comma = eat(',');
             }
+            --depth_;
             // "(x)" is x itself, not a tuple.
             if (c == '(' && v.items.size() == 1 && !comma) return v.items[0];
         } else if (c == '{') {
             ++i_;
+            ++depth_;
             v.kind = Value::Dict;
             bool comma = false;
             while (!eat('}')) {
@@ -166,6 +338,7 @@ private:
                 if (!replaced) v.entries.emplace_back(std::move(k), std::move(val));
                 comma = eat(',');
             }
+            --depth_;
         } else if (word("True")) {
             v.kind = Value::Bool;
             v.flag = true;
@@ -174,20 +347,27 @@ private:
         } else if (word("None")) {
             v.kind = Value::None;
         } else if (c == '-' || c == '+' || std::isdigit(static_cast<unsigned char>(c))) {
+            // literal_eval takes one sign on a number, never two ("--5").
             bool neg = false;
-            while (i_ < s_.size() && (s_[i_] == '-' || s_[i_] == '+')) {
-                neg ^= s_[i_] == '-';
+            if (c == '-' || c == '+') {
+                neg = c == '-';
                 ++i_;
                 space();
             }
-            if (!(i_ < s_.size() && std::isdigit(static_cast<unsigned char>(s_[i_])))) fail("bad number");
+            const auto digit = [&](std::size_t k) {
+                return k < s_.size() && std::isdigit(static_cast<unsigned char>(s_[k])) != 0;
+            };
+            if (!digit(i_)) fail("bad number");
+            // Python's decinteger: nonzerodigit (["_"] digit)* | "0"+ (["_"] "0")*.
             std::string digits;
-            while (i_ < s_.size() && (std::isdigit(static_cast<unsigned char>(s_[i_])) || s_[i_] == '_')) {
-                if (s_[i_] != '_') digits += s_[i_];
-                ++i_;
+            for (;;) {
+                digits += s_[i_++];
+                if (i_ < s_.size() && s_[i_] == '_' && digit(i_ + 1)) ++i_;
+                if (!digit(i_)) break;
             }
-            if (i_ < s_.size() && (s_[i_] == '.' || s_[i_] == 'e' || s_[i_] == 'E' || s_[i_] == 'j' ||
-                                   s_[i_] == 'J' || s_[i_] == 'x' || s_[i_] == 'X'))
+            if (digits[0] == '0' && digits.find_first_not_of('0') != std::string::npos)
+                fail("leading zeros in decimal integer literals are not permitted");
+            if (i_ < s_.size() && (std::isalnum(static_cast<unsigned char>(s_[i_])) || s_[i_] == '_' || s_[i_] == '.'))
                 fail("only decimal integers are expected");
             v.kind = Value::Int;
             v.text = (neg ? "-" : "") + digits;
@@ -231,6 +411,7 @@ private:
 
     std::string_view s_;
     std::size_t i_ = 0;
+    int depth_ = 0;   // open brackets
 };
 
 constexpr std::size_t MAX_HEADER_SIZE = 10000;   // numpy's _MAX_HEADER_SIZE
@@ -292,6 +473,7 @@ constexpr std::uint64_t ZIP64_LIMIT = (std::uint64_t(1) << 31) - 1;
 constexpr std::size_t ZIP_FILECOUNT_LIMIT = 0xffff;
 constexpr std::uint32_t EXTERNAL_ATTR = 0600u << 16;
 constexpr std::uint32_t VERSION_ZIP64 = 45;
+constexpr std::uint32_t MAX_EXTRACT_VERSION = 63;   // zipfile's: newer archives are refused
 constexpr std::uint32_t CREATE_SYSTEM_UNIX = 3;
 constexpr std::size_t SIZE_FILE_HEADER = 30, SIZE_CENTRAL_DIR = 46, SIZE_END = 22, SIZE_END64 = 56,
                       SIZE_END64_LOCATOR = 20, MAX_COMMENT = 0xffff;
@@ -304,12 +486,22 @@ std::string_view descr(DType t) { return info(t).descr; }
 std::size_t itemsize(DType t) { return info(t).size; }
 
 std::optional<DType> from_descr(std::string_view d) {
+    // np.dtype(d) for a kind and size: the byte order is '<', '=' (native,
+    // which is little-endian here), '|' or absent; a one-byte type has none,
+    // so any prefix -- '>' too -- means the same. '?' is bool. A
+    // multi-byte '>' is big-endian and unsupported, and so is every other
+    // spelling np.dtype takes ('d', 'float64', a subarray "2f8", ...).
+    char order = '=';
+    if (!d.empty() && (d[0] == '<' || d[0] == '>' || d[0] == '=' || d[0] == '|')) {
+        order = d[0];
+        d.remove_prefix(1);
+    }
+    if (d == "?") d = "b1";
     for (const auto& x : DTYPES)
-        if (d == x.descr) return x.t;
-    // A one-byte type has no byte order; numpy writes '|', but any prefix means the same.
-    if (d.size() == 3 && (d[0] == '<' || d[0] == '>' || d[0] == '=') &&
-        (d.substr(1) == "i1" || d.substr(1) == "u1" || d.substr(1) == "b1"))
-        return from_descr(std::string("|") + std::string(d.substr(1)));
+        if (d == std::string_view(x.descr).substr(1)) {
+            if (order == '>' && x.size > 1) return std::nullopt;
+            return x.t;
+        }
     return std::nullopt;
 }
 
@@ -369,7 +561,7 @@ std::int64_t one_int(const Array& a) {
     std::memcpy(&v, a.bytes.data(), sizeof(T));
     if constexpr (std::is_same_v<T, std::uint64_t>) {
         if (v > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
-            bad("npz: value does not fit int64");
+            throw std::overflow_error("npz: value does not fit int64");
     }
     return static_cast<std::int64_t>(v);
 }
@@ -408,7 +600,7 @@ std::vector<double> Array::to_double() const {
 }
 
 std::int64_t Array::to_int64() const {
-    if (size() != 1) bad("npz: expected one value, the array has " + std::to_string(size()));
+    if (ndim() != 0) bad("npz: only 0-dimensional arrays can be converted to an integer, not shape " + shape_repr(shape));
     switch (dtype) {
         case DType::i1: return one_int<std::int8_t>(*this);
         case DType::u1: return one_int<std::uint8_t>(*this);
@@ -419,30 +611,46 @@ std::int64_t Array::to_int64() const {
         case DType::i8: return one_int<std::int64_t>(*this);
         case DType::u8: return one_int<std::uint64_t>(*this);
         case DType::b1: return bytes[0] ? 1 : 0;
-        default: bad("npz: expected an integer array, not " + std::string(descr(dtype)));
+        case DType::f2:
+        case DType::f4:
+        case DType::f8: {
+            const double v = to_double()[0];   // exact for every float dtype
+            if (std::isnan(v)) bad("cannot convert float NaN to integer");
+            if (std::isinf(v)) throw std::overflow_error("cannot convert float infinity to integer");
+            const double t = std::trunc(v);
+            // [-2^63, 2^63): both ends are exact doubles.
+            if (!(t >= -0x1p63 && t < 0x1p63)) throw std::overflow_error("npz: value does not fit int64");
+            return static_cast<std::int64_t>(t);
+        }
+        case DType::c8:
+        case DType::c16: bad("npz: a complex array has no integer value");
     }
+    bad("npz: unknown dtype");
 }
 
 // --- Npz -----------------------------------------------------------------------------------
 
 void Npz::add(std::string name, Array a) {
-    if (name.empty()) bad("npz: empty member name");
+    // np.savez(f, **{"": a}) writes ".npy", which np.load reads back as "",
+    // so an empty name is a name. A NUL (which zipfile would cut the name
+    // at, ".npy" and all) and bytes that are not UTF-8 (a Python str always
+    // is, and np.load could not read the name back) are refused.
     if (name.find('\0') != std::string::npos) bad("npz: member name contains NUL");
+    if (!valid_utf8(name)) bad("npz: member name is not valid UTF-8");
     if (contains(name)) bad("npz: duplicate member " + name);
     if (a.bytes.size() != checked_product(a.shape, itemsize(a.dtype)))
         bad("npz: member " + name + " has " + std::to_string(a.bytes.size()) + " bytes for shape " +
             shape_repr(a.shape) + " of " + std::string(descr(a.dtype)));
+    index_.emplace(name, members_.size());
     members_.emplace_back(std::move(name), std::move(a));
 }
 
-bool Npz::contains(std::string_view name) const {
-    return std::any_of(members_.begin(), members_.end(), [&](const auto& m) { return m.first == name; });
-}
+bool Npz::contains(std::string_view name) const { return index_.count(std::string(name)) != 0; }
 
 const Array& Npz::at(std::string_view name) const {
-    for (const auto& m : members_)
-        if (m.first == name) return m.second;
-    throw std::out_of_range(std::string(name) + " is not a file in the archive");
+    const auto it = index_.find(std::string(name));
+    if (it == index_.end()) throw std::out_of_range(std::string(name) + " is not a file in the archive");
+    return members_[it->second].second;
 }
 
 std::vector<std::string> Npz::files() const {
@@ -518,7 +726,7 @@ Array parse_npy(std::span<const std::uint8_t> f) {
         if (k.text == "descr") v_descr = &v;
         else if (k.text == "fortran_order") v_fortran = &v;
         else if (k.text == "shape") v_shape = &v;
-        else bad("npy: header does not contain the correct keys (" + k.text + ")");
+        else bad("npy: header does not contain the correct keys (" + latin1(k.text) + ")");
     }
     if (!v_descr || !v_fortran || !v_shape || d.entries.size() != 3)
         bad("npy: header does not contain the correct keys");
@@ -527,21 +735,47 @@ Array parse_npy(std::span<const std::uint8_t> f) {
     if (v_descr->kind != Value::Str)
         bad("npy: descr is not a supported dtype (structured or object arrays are not supported)");
     const std::optional<DType> t = from_descr(v_descr->text);
-    if (!t) bad("npy: dtype '" + v_descr->text + "' is not supported");
+    if (!t) bad("npy: dtype '" + latin1(v_descr->text) + "' is not supported");
 
     Array a;
     a.dtype = *t;
+    // numpy's limits on a shape: at most 64 dimensions, each an int (a
+    // bool passes the header check, isinstance(True, int), and then fails
+    // the reshape), none negative (-0 is 0), none past npy_intp, and the
+    // nonzero ones times the item size within npy_intp -- checked even
+    // when another dimension is 0 and the array holds nothing.
+    constexpr std::size_t NPY_MAXDIMS = 64;
+    if (v_shape->items.size() > NPY_MAXDIMS)
+        bad("npy: maximum supported dimension for an ndarray is currently 64, found " +
+            std::to_string(v_shape->items.size()));
+    constexpr std::uint64_t INTP_MAX = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    std::uint64_t nonzero_bytes = itemsize(a.dtype);
+    bool empty = false;
     for (const Value& x : v_shape->items) {
-        if (x.kind == Value::Bool) {   // isinstance(True, int) in Python
-            a.shape.push_back(x.flag ? 1 : 0);
+        if (x.kind == Value::Bool) bad("npy: an integer is required (a bool dimension)");
+        if (x.kind != Value::Int) bad("npy: shape is not valid");
+        const bool minus = !x.text.empty() && x.text[0] == '-';
+        const std::string_view digits = std::string_view(x.text).substr(minus ? 1 : 0);
+        const std::size_t lead = digits.find_first_not_of('0');
+        const std::string_view sig = lead == std::string_view::npos ? std::string_view() : digits.substr(lead);
+        if (sig.empty()) {
+            a.shape.push_back(0);
+            empty = true;
             continue;
         }
-        if (x.kind != Value::Int) bad("npy: shape is not valid");
-        if (!x.text.empty() && x.text[0] == '-') bad("npy: negative dimensions are not allowed");
-        if (x.text.size() > 18) bad("npy: dimension too large");
-        a.shape.push_back(static_cast<std::size_t>(std::stoull(x.text)));
+        if (minus) bad("npy: negative dimensions are not allowed");
+        std::uint64_t v = 0;
+        for (const char c : sig) {
+            const auto d = static_cast<std::uint64_t>(c - '0');
+            if (v > (INTP_MAX - d) / 10) bad("npy: Maximum allowed dimension exceeded");
+            v = v * 10 + d;
+        }
+        if (nonzero_bytes > INTP_MAX / v)
+            bad("npy: array is too big; `arr.size * arr.dtype.itemsize` is larger than the maximum possible size.");
+        nonzero_bytes *= v;
+        a.shape.push_back(static_cast<std::size_t>(v));
     }
-    const std::size_t nbytes = checked_product(a.shape, itemsize(a.dtype));
+    const std::size_t nbytes = empty ? 0 : static_cast<std::size_t>(nonzero_bytes);
     if (f.size() - at < nbytes)
         bad("npy: EOF reading array data, expected " + std::to_string(nbytes) + " bytes got " +
             std::to_string(f.size() - at));
@@ -664,6 +898,13 @@ std::vector<std::uint8_t> npz_bytes(const Npz& z, DosTime stamp) {
 }
 
 Npz parse_npz(std::span<const std::uint8_t> f) {
+    // np.load decides by the first bytes: a zip local header or an (empty
+    // archive's) end record is an npz; anything else is a .npy file or
+    // pickled data, which allow_pickle=False refuses. zipfile alone would
+    // accept data prepended to an archive, and np.load never gets that far.
+    if (f.empty()) bad("npz: file is empty (np.load: no data left in file)");
+    if (!sig_at(f, 0, "PK\x03\x04") && !sig_at(f, 0, "PK\x05\x06"))
+        bad("npz: file does not start like a zip archive (np.load would read it as .npy or pickled data)");
     // zipfile._EndRecData: the end record is last, unless a comment follows it.
     std::size_t end_at = std::string::npos;
     if (f.size() >= SIZE_END && sig_at(f, f.size() - SIZE_END, "PK\x05\x06") && f[f.size() - 2] == 0 &&
@@ -678,39 +919,64 @@ Npz parse_npz(std::span<const std::uint8_t> f) {
             }
         if (end_at == std::string::npos || f.size() - end_at < SIZE_END) bad("npz: file is not a zip file");
     }
-    if (get16(f, end_at + 4, "end record") != 0 || get16(f, end_at + 6, "end record") != 0)
-        bad("npz: zipfiles that span multiple disks are not supported");
+    // (zipfile reads no disk numbers from this record, only from a zip64 locator.)
     std::uint64_t cd_size = get32(f, end_at + 12, "end record");
     std::uint64_t cd_offset = get32(f, end_at + 16, "end record");
-    bool zip64 = false;
-    // zipfile._EndRecData64: a locator right before the end record means a
-    // zip64 end record right before that.
+    std::uint64_t location = end_at;   // zipfile's endrec[_ECD_LOCATION]
+    // zipfile._EndRecData64 (CPython 3.13): a zip64 locator right before the
+    // end record points at a zip64 end record, which must sit right after
+    // the central directory it describes. Every value comes from the file,
+    // so each is checked before it is used as an offset: a record claiming
+    // a directory of 2^64 - 1 bytes is corrupt, never an empty archive.
     if (end_at >= SIZE_END64_LOCATOR && sig_at(f, end_at - SIZE_END64_LOCATOR, "PK\x06\x07")) {
         const std::size_t loc = end_at - SIZE_END64_LOCATOR;
         if (get32(f, loc + 4, "zip64 locator") != 0 || get32(f, loc + 16, "zip64 locator") > 1)
             bad("npz: zipfiles that span multiple disks are not supported");
-        if (loc < SIZE_END64 || !sig_at(f, loc - SIZE_END64, "PK\x06\x06"))
-            bad("npz: zip64 end record missing");
-        const std::size_t e64 = loc - SIZE_END64;
-        cd_size = get64(f, e64 + 40, "zip64 end record");
-        cd_offset = get64(f, e64 + 48, "zip64 end record");
-        zip64 = true;
+        const std::uint64_t reloff = get64(f, loc + 8, "zip64 locator");
+        if (loc < SIZE_END64 || reloff > loc - SIZE_END64)
+            bad("npz: corrupt zip64 end of central directory locator");
+        const std::size_t offset = loc - SIZE_END64;
+        std::size_t at = static_cast<std::size_t>(reloff);
+        std::uint64_t extrasz = offset - reloff;   // zip64 extensible data
+        if (!sig_at(f, at, "PK\x06\x06") && reloff != offset) {
+            at = offset;   // data prepended to the archive: assume no extensible data
+            extrasz = 0;
+        }
+        if (!sig_at(f, at, "PK\x06\x06")) bad("npz: zip64 end of central directory record not found");
+        const std::uint64_t sz = get64(f, at + 4, "zip64 end record");
+        const std::uint64_t dirsize = get64(f, at + 40, "zip64 end record");
+        const std::uint64_t diroffset = get64(f, at + 48, "zip64 end record");
+        // diroffset + dirsize == reloff and sz + 12 == 56 + extrasz, without overflow.
+        if (dirsize > reloff || diroffset != reloff - dirsize || sz != SIZE_END64 - 12 + extrasz)
+            bad("npz: corrupt zip64 end of central directory record");
+        cd_size = dirsize;
+        cd_offset = diroffset;
+        location = offset - extrasz;
     }
-    // Data prepended to the archive ("concat") shifts every offset.
-    const std::int64_t concat = static_cast<std::int64_t>(end_at) - static_cast<std::int64_t>(cd_size) -
-                                static_cast<std::int64_t>(cd_offset) -
-                                (zip64 ? static_cast<std::int64_t>(SIZE_END64 + SIZE_END64_LOCATOR) : 0);
-    const std::int64_t start_dir = static_cast<std::int64_t>(cd_offset) + concat;
-    if (start_dir < 0 || static_cast<std::uint64_t>(start_dir) + cd_size > f.size())
-        bad("npz: bad offset for central directory");
+    // Data prepended to the archive ("concat") shifts every offset. Both
+    // sizes are now at most the file's (32-bit fields, or checked above), so
+    // none of this can overflow.
+    if (cd_size > location) bad("npz: bad offset for central directory");
+    const std::uint64_t start_dir = location - cd_size;
+    const std::int64_t concat = static_cast<std::int64_t>(start_dir) - static_cast<std::int64_t>(cd_offset);
 
-    Npz z;
-    std::vector<std::pair<std::string, Array>> members;
+    // The central directory first (zipfile._RealGetContents), then the
+    // members np.load reads, each through its local header (ZipFile.open).
+    struct Entry {
+        std::string orig;              // the name as the directory spells it (orig_filename)
+        std::string filename;          // as namelist() reports it: sanitized, or a 0x7075 field's
+        std::uint32_t flags, method, crc;
+        std::uint64_t csize, size;     // compress size; the bytes the member holds
+        Wide header;                   // the local header's position in f
+        Wide end;                      // where the next member (or the directory) starts
+    };
+    std::vector<Entry> entries;
     std::size_t p = static_cast<std::size_t>(start_dir);
-    const std::size_t cd_end = p + static_cast<std::size_t>(cd_size);
+    const std::size_t cd_end = static_cast<std::size_t>(location);
     while (p < cd_end) {
         if (cd_end - p < SIZE_CENTRAL_DIR) bad("npz: truncated central directory");
         if (!sig_at(f, p, "PK\x01\x02")) bad("npz: bad magic number for central directory");
+        const std::uint32_t extract_version = f[p + 6];
         const std::uint32_t flags = get16(f, p + 8, "central directory");
         const std::uint32_t method = get16(f, p + 10, "central directory");
         const std::uint32_t crc = get32(f, p + 16, "central directory");
@@ -720,19 +986,28 @@ Npz parse_npz(std::span<const std::uint8_t> f) {
         const std::size_t elen = get16(f, p + 30, "central directory");
         const std::size_t clen = get16(f, p + 32, "central directory");
         std::uint64_t offset = get32(f, p + 42, "central directory");
+        // The name, extra field and comment are read as zipfile reads them:
+        // whatever of their declared lengths the directory still holds.
         const std::size_t name_at = p + SIZE_CENTRAL_DIR;
-        if (cd_end - name_at < nlen + elen + clen) bad("npz: truncated central directory");
-        const std::string name(reinterpret_cast<const char*>(f.data() + name_at), nlen);
-        // zipfile._decodeExtra: the zip64 field holds, in order, whichever
-        // of the sizes and the offset are 0xFFFFFFFF here.
-        for (std::size_t x = name_at + nlen; x + 4 <= name_at + nlen + elen;) {
+        const std::size_t extra_at = std::min(name_at + nlen, cd_end);
+        const std::size_t extra_end = std::min(name_at + nlen + elen, cd_end);
+        const std::span<const std::uint8_t> raw = f.subspan(name_at, extra_at - name_at);
+        const std::string orig = decode_zip_name(raw, (flags & 0x800u) != 0);
+        std::string filename = sanitize_zip_name(orig);
+        if (extract_version > MAX_EXTRACT_VERSION)
+            bad("npz: zip file version " + std::to_string(extract_version / 10) + "." +
+                std::to_string(extract_version % 10) + " is not supported");
+        // zipfile._decodeExtra.
+        for (std::size_t x = extra_at; x + 4 <= extra_end;) {
             const std::uint32_t tp = get16(f, x, "extra field"), ln = get16(f, x + 2, "extra field");
-            if (x + 4 + ln > name_at + nlen + elen) bad("npz: corrupt extra field");
+            if (x + 4 + ln > extra_end) bad("npz: corrupt extra field");
+            const std::size_t q0 = x + 4, qend = q0 + ln;
             if (tp == 1) {
-                std::size_t q = x + 4;
-                const std::size_t qend = q + ln;
+                // zip64: in order, whichever of the sizes and the offset
+                // are 0xFFFFFFFF in the fixed fields.
+                std::size_t q = q0;
                 auto next = [&](const char* what) {
-                    if (qend - q < 8) bad(std::string("npz: corrupt zip64 extra field (") + what + ")");
+                    if (qend - q < 8) bad(std::string("npz: corrupt zip64 extra field (") + what + " not found)");
                     const std::uint64_t v = get64(f, q, "zip64 extra");
                     q += 8;
                     return v;
@@ -740,47 +1015,96 @@ Npz parse_npz(std::span<const std::uint8_t> f) {
                 if (usize == 0xffffffffu) usize = next("file size");
                 if (csize == 0xffffffffu) csize = next("compress size");
                 if (offset == 0xffffffffu) offset = next("header offset");
+            } else if (tp == 0x7075) {
+                // Info-ZIP Unicode Path: version 1 and the CRC-32 of the
+                // raw name it replaces, then that name in UTF-8.
+                if (ln < 5) bad("npz: corrupt unicode path extra field (0x7075)");
+                if (f[q0] == 1 && get32(f, q0 + 1, "extra field") == crc32(raw)) {
+                    const std::string up(reinterpret_cast<const char*>(f.data() + q0 + 5), ln - 5);
+                    if (!valid_utf8(up)) bad("npz: corrupt unicode path extra field (0x7075): invalid utf-8 bytes");
+                    if (!up.empty()) filename = sanitize_zip_name(up);   // empty: zipfile only warns
+                }
             }
-            x += 4 + ln;
+            x = qend;
         }
         p = name_at + nlen + elen + clen;
+        // A stored member is min(compress size, file size) bytes: ZipExtFile
+        // stops at whichever runs out first (and checks the CRC of those).
+        entries.push_back({orig, std::move(filename), flags, method, crc, csize, std::min(csize, usize),
+                           wide_add(offset, concat), {}});
+    }
+    // zipfile: each member must end before the next one's local header (or
+    // the central directory) starts -- its "Overlapped entries" check, with
+    // its order: sorted by offset, walked from the end, so of two entries
+    // at one offset the later one is checked against the next header and
+    // the earlier one only warned about (CPython 3.13).
+    {
+        std::vector<std::size_t> order(entries.size());
+        for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+        std::stable_sort(order.begin(), order.end(),
+                         [&](std::size_t a, std::size_t b) { return entries[a].header < entries[b].header; });
+        Wide end{0, start_dir};
+        for (std::size_t k = order.size(); k-- > 0;) {
+            entries[order[k]].end = end;
+            end = entries[order[k]].header;
+        }
+    }
 
-        if (flags & 0x1u) bad("npz: member " + name + " is encrypted");
-        if (method != 0)
-            bad("npz: member " + name + " is compressed (method " + std::to_string(method) +
-                "); only np.savez's stored members are supported, not np.savez_compressed");
-        if (csize != usize) bad("npz: member " + name + " has different stored and file sizes");
-        // The local header: its own name and extra lengths, never its sizes.
-        const std::uint64_t lh = offset + static_cast<std::uint64_t>(concat);
-        if (lh > f.size() || f.size() - lh < SIZE_FILE_HEADER) bad("npz: truncated file header");
-        if (!sig_at(f, static_cast<std::size_t>(lh), "PK\x03\x04")) bad("npz: bad magic number for file header");
-        const std::size_t lnlen = get16(f, static_cast<std::size_t>(lh) + 26, "file header");
-        const std::size_t lelen = get16(f, static_cast<std::size_t>(lh) + 28, "file header");
-        const std::size_t lname = static_cast<std::size_t>(lh) + SIZE_FILE_HEADER;
+    // ZipFile.open and the read, for one entry.
+    auto read_member = [&](const Entry& e) -> Array {
+        const std::string& name = e.orig;
+        if (e.header.hi != 0 || e.header.lo > f.size() || f.size() - e.header.lo < SIZE_FILE_HEADER)
+            bad("npz: truncated file header for " + name);
+        const auto lh = static_cast<std::size_t>(e.header.lo);
+        if (!sig_at(f, lh, "PK\x03\x04")) bad("npz: bad magic number for file header");
+        const std::uint32_t lflags = get16(f, lh + 6, "file header");
+        const std::size_t lnlen = get16(f, lh + 26, "file header");
+        const std::size_t lelen = get16(f, lh + 28, "file header");
+        const std::size_t lname = lh + SIZE_FILE_HEADER;
+        // (Past the end, zipfile's name or data comes up short: a mismatch
+        // or an EOF, so refused either way.)
         if (f.size() - lname < lnlen + lelen) bad("npz: truncated file header");
-        if (std::string_view(reinterpret_cast<const char*>(f.data() + lname), lnlen) != name)
+        if (e.flags & 0x20u) bad("npz: member " + name + " is compressed patched data (flag bit 5)");
+        if (e.flags & 0x40u) bad("npz: member " + name + " uses strong encryption (flag bit 6)");
+        if (decode_zip_name(f.subspan(lname, lnlen), (lflags & 0x800u) != 0) != name)
             bad("npz: file name in directory and header differ: " + name);
         const std::size_t data_at = lname + lnlen + lelen;
-        if (f.size() - data_at < csize) bad("npz: truncated member " + name);
-        const std::span<const std::uint8_t> data = f.subspan(data_at, static_cast<std::size_t>(csize));
-        if (crc32(data) != crc) bad("npz: bad CRC-32 for file " + name);
-        // np.load's NpzFile names a member "x.npy" as "x".
-        std::string key = name;
-        if (key.size() >= 4 && key.compare(key.size() - 4, 4, ".npy") == 0) key.resize(key.size() - 4);
+        // An entry whose end is its own start shares its offset with
+        // another; zipfile only warns about those.
+        if (e.end < wide_add(static_cast<std::uint64_t>(data_at), e.csize) && !(e.end == e.header))
+            bad("npz: overlapped entries: " + name + " (possible zip bomb)");
+        if (e.flags & 0x1u) bad("npz: member " + name + " is encrypted");
+        if (e.method != 0)
+            bad("npz: member " + name + " is compressed (method " + std::to_string(e.method) +
+                "); only np.savez's stored members are supported, not np.savez_compressed");
+        if (f.size() - data_at < e.size) bad("npz: truncated member " + name);
+        const std::span<const std::uint8_t> data = f.subspan(data_at, static_cast<std::size_t>(e.size));
+        if (crc32(data) != e.crc) bad("npz: bad CRC-32 for file " + name);
         if (data.size() < 6 || std::memcmp(data.data(), MAGIC.data(), MAGIC.size()) != 0)
             bad("npz: member " + name + " is not a .npy array");
-        Array a = parse_npy(data);
-        // zipfile keeps the last of repeated names.
-        bool replaced = false;
-        for (auto& m : members)
-            if (m.first == key) {
-                m.second = std::move(a);
-                replaced = true;
-                break;
-            }
-        if (!replaced) members.emplace_back(std::move(key), std::move(a));
+        return parse_npy(data);
+    };
+
+    // np.load's NpzFile: its files are the names without ".npy", in
+    // archive order; a key reads the member named exactly that if there is
+    // one, else the one named key + ".npy" (and zipfile's NameToInfo keeps
+    // the last entry of a repeated name). Only those members are read,
+    // which is what reading every key of np.load's result does.
+    std::unordered_map<std::string, std::size_t> by_name;
+    for (std::size_t i = 0; i < entries.size(); ++i) by_name[entries[i].filename] = i;
+    std::vector<std::string> keys;
+    std::unordered_set<std::string> seen;
+    for (const Entry& e : entries) {
+        std::string key = e.filename;
+        if (key.size() >= 4 && key.compare(key.size() - 4, 4, ".npy") == 0) key.resize(key.size() - 4);
+        if (seen.insert(key).second) keys.push_back(std::move(key));
     }
-    for (auto& [k, a] : members) z.add(std::move(k), std::move(a));
+    Npz z;
+    for (const std::string& key : keys) {
+        const auto exact = by_name.find(key);
+        const std::size_t i = exact != by_name.end() ? exact->second : by_name.at(key + ".npy");
+        z.add(key, read_member(entries[i]));
+    }
     return z;
 }
 

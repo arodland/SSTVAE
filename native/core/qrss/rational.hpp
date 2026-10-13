@@ -10,9 +10,11 @@
 // str(Fraction) and Fraction(str).
 //
 // The one difference is range: Python's integers are unbounded and these
-// are int64. Anything that would leave int64 -- an operand, an
-// intermediate product, a parsed numerator before reduction -- throws
-// std::overflow_error instead of answering. The numerator is kept in
+// are int64. Anything that would leave int64 -- an operand, the result, a
+// parsed numerator or denominator before reduction -- throws
+// std::overflow_error instead of answering. Arithmetic refuses only a
+// result outside int64: + and - form CPython's intermediate exactly (in
+// 128 bits), and * and / cancel before they multiply, as CPython does. The numerator is kept in
 // [-(2^63 - 1), 2^63 - 1] so negation never overflows. Within that, no
 // answer differs: in the 300-2700 Hz carrier band every double's exact
 // fraction has a denominator of at most 2^44, and from_double_limited
@@ -62,7 +64,9 @@ public:
     // std::invalid_argument "Invalid literal for Fraction: '<text>'" otherwise.
     // `text` is UTF-8. Whitespace is Python's (str.isspace, Unicode
     // included); digits are ASCII only, where Python also takes other
-    // Unicode decimal digits. A value that leaves int64 -- even one that
+    // Unicode decimal digits. A digit group longer than Python's int()
+    // takes (4300 digits, sys.get_int_max_str_digits()'s default) is its
+    // std::invalid_argument. A value that leaves int64 -- even one that
     // only an unreduced intermediate would -- is std::overflow_error.
     static Rational parse(std::string_view text);
 

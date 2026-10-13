@@ -138,21 +138,28 @@ std::complex<T> sum(std::span<const std::complex<T>> z) {
 inline std::complex<double> sum(std::span<const std::complex<double>> z) { return sum<double>(z); }
 inline std::complex<float> sum(std::span<const std::complex<float>> z) { return sum<float>(z); }
 
-// np.sum(x, dtype=Acc) where x's dtype is not Acc: the buffered reduction,
+// np.sum(x, dtype=Acc). Where x's dtype is not Acc, the buffered reduction:
 // From cast to Acc (a C++ static_cast, which is numpy's cast for every
 // pairing used here: float32 -> float64 exact, float64 -> float32 rounded
 // to nearest even, integers and bool -> float64) BUFSIZE values at a time.
+// Where it is Acc already there is nothing to cast, numpy does not buffer,
+// and np.sum(x, dtype=x.dtype) is np.sum(x): one pairwise sum, not chunks
+// (chunking it differs from numpy from 8193 values on).
 template <typename Acc, typename From>
 Acc sum_as(std::span<const From> x) {
     static_assert(std::is_floating_point_v<Acc>);
-    std::vector<Acc> buf(x.size() < BUFSIZE ? x.size() : BUFSIZE);
-    Acc res = Acc(0);
-    for (std::size_t i0 = 0; i0 < x.size(); i0 += BUFSIZE) {
-        const std::size_t m = (x.size() - i0 < BUFSIZE) ? x.size() - i0 : BUFSIZE;
-        for (std::size_t j = 0; j < m; ++j) buf[j] = static_cast<Acc>(x[i0 + j]);
-        res += pairwise_sum(buf.data(), m);
+    if constexpr (std::is_same_v<Acc, From>) {
+        return sum<Acc>(x);
+    } else {
+        std::vector<Acc> buf(x.size() < BUFSIZE ? x.size() : BUFSIZE);
+        Acc res = Acc(0);
+        for (std::size_t i0 = 0; i0 < x.size(); i0 += BUFSIZE) {
+            const std::size_t m = (x.size() - i0 < BUFSIZE) ? x.size() - i0 : BUFSIZE;
+            for (std::size_t j = 0; j < m; ++j) buf[j] = static_cast<Acc>(x[i0 + j]);
+            res += pairwise_sum(buf.data(), m);
+        }
+        return res;
     }
-    return res;
 }
 
 // np.mean(x) for float64 x.
@@ -168,7 +175,7 @@ inline float mean(std::span<const float> x) {
 
 // np.mean(x) where numpy sums in float64 through a cast: an integer or
 // bool array (numpy's default dtype for those), or np.mean(x32,
-// dtype=np.float64).
+// dtype=np.float64). For float64 x it is np.mean(x), as numpy's is.
 template <typename From>
 double mean_as_double(std::span<const From> x) {
     return sum_as<double>(x) / static_cast<double>(x.size());

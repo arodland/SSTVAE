@@ -211,7 +211,7 @@ void bind(py::module_& q) {
         if (dtype == "float64") return run(double{});
         if (dtype == "float32") return run(float{});
         throw py::value_error("np_sum_as: dtype must be 'float64' or 'float32'");
-    }, py::arg("x"), py::arg("dtype"), "np.sum(x, dtype=dtype) where x's dtype differs (buffered cast)");
+    }, py::arg("x"), py::arg("dtype"), "np.sum(x, dtype=dtype): a buffered cast where x's dtype differs, np.sum(x) where not");
 
     m.def("np_mean_as_double", [](const py::array& x) -> py::array {
         auto a = exact<float>(x, "np_mean_as_double");

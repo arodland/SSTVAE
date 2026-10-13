@@ -31,6 +31,8 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include "qrss/npz.hpp"
@@ -307,6 +309,71 @@ static void test_refusals() {
     npz::Npz dup;
     dup.add("a", Array::scalar(1.0));
     throws<std::invalid_argument>([&] { dup.add("a", Array::scalar(2.0)); }, "npz: duplicate member a", "duplicate");
+    throws<std::invalid_argument>([&] { dup.add("\xff", Array::scalar(2.0)); }, "npz: member name is not valid UTF-8",
+                                  "a name a Python str could not hold");
+
+    // np.load reads only a file that starts like a zip archive; data
+    // prepended to one (which zipfile alone would skip) is refused.
+    std::vector<std::uint8_t> junk = {'j', 'u', 'n', 'k'};
+    junk.insert(junk.end(), f.begin(), f.end());
+    throws<std::invalid_argument>([&] { npz::parse_npz(junk); }, "npz: file does not start like a zip archive",
+                                  "prepended data");
+    throws<std::invalid_argument>([] { npz::parse_npz(std::vector<std::uint8_t>{}); }, "npz: file is empty",
+                                  "empty file");
+
+    // A zip64 end record claiming a central directory of 2^64 - 1 bytes is
+    // corrupt (zipfile: "Corrupt zip64 end of central directory record"),
+    // never an empty archive:
+    //   body + pack("<4sQ2H2L4Q", b"PK\x06\x06", 44, 45, 45, 0, 0, 1, 1, 2**64 - 1, 0)
+    //        + pack("<4sLQL", b"PK\x06\x07", 0, len(body), 1) + end
+    npz::Npz one;
+    one.add("a", Array::of(std::vector<std::int64_t>{0, 1, 2, 3}));
+    const auto good = npz::npz_bytes(one);
+    std::vector<std::uint8_t> z64(good.begin(), good.end() - 22);
+    const std::uint64_t body = z64.size();
+    auto le = [&](std::uint64_t v, int n) {
+        for (int i = 0; i < n; ++i) z64.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+    };
+    for (const char c : std::string_view("PK\x06\x06")) z64.push_back(static_cast<std::uint8_t>(c));
+    for (const auto& [v, n] : {std::pair<std::uint64_t, int>{44, 8}, {45, 2}, {45, 2}, {0, 4}, {0, 4}, {1, 8}, {1, 8},
+                               {~std::uint64_t(0), 8}, {0, 8}})
+        le(v, n);
+    for (const char c : std::string_view("PK\x06\x07")) z64.push_back(static_cast<std::uint8_t>(c));
+    le(0, 4);
+    le(body, 8);
+    le(1, 4);
+    z64.insert(z64.end(), good.end() - 22, good.end());
+    throws<std::invalid_argument>([&] { npz::parse_npz(z64); }, "npz: corrupt zip64 end of central directory record",
+                                  "zip64 record with a 2^64 - 1 byte directory");
+}
+
+static void test_names_and_int() {
+    // np.savez(f, **{"": a}) writes ".npy", and np.load reads it back as "".
+    npz::Npz z;
+    z.add("", Array::of(std::vector<std::int64_t>{0, 1}));
+    const npz::Npz back = npz::parse_npz(npz::npz_bytes(z));
+    check::is_true(back.files() == std::vector<std::string>{""}, "an empty member name");
+
+    // int(a), as numpy 2.5: only a 0-d array, floats truncated.
+    check::equal(Array::scalar(-2.7).to_int64(), std::int64_t(-2), "int(np.float64(-2.7))");
+    check::equal(Array::scalar(2.9f).to_int64(), std::int64_t(2), "int(np.float32(2.9))");
+    check::equal(Array::scalar(qrss::half::Half{0x3e00}).to_int64(), std::int64_t(1), "int(np.float16(1.5))");
+    check::equal(Array::of_bools(std::vector<std::uint8_t>{1}, std::vector<std::size_t>{}).to_int64(), std::int64_t(1),
+                 "int(np.bool_(True))");
+    throws<std::invalid_argument>([] { (void)Array::of(std::vector<std::int64_t>{5}).to_int64(); },
+                                  "npz: only 0-dimensional arrays can be converted to an integer, not shape (1,)",
+                                  "int(np.array([5])) is a TypeError");
+    throws<std::invalid_argument>([] { (void)Array::scalar(std::nan("")).to_int64(); },
+                                  "cannot convert float NaN to integer", "int(nan)");
+    throws<std::overflow_error>([] { (void)Array::scalar(-HUGE_VAL).to_int64(); },
+                                "cannot convert float infinity to integer", "int(-inf)");
+    throws<std::overflow_error>([] { (void)Array::scalar(0x1p63).to_int64(); }, "npz: value does not fit int64",
+                                "int(2.0**63) is past int64");
+    check::equal(Array::scalar(-0x1p63).to_int64(), std::numeric_limits<std::int64_t>::min(), "int(-2.0**63)");
+    throws<std::overflow_error>([] { (void)Array::scalar<std::uint64_t>(std::uint64_t(1) << 63).to_int64(); },
+                                "npz: value does not fit int64", "a uint64 past int64");
+    throws<std::invalid_argument>([] { (void)Array::scalar(std::complex<double>(1, 0)).to_int64(); },
+                                  "npz: a complex array has no integer value", "int() of a complex");
 }
 
 int main() {
@@ -316,6 +383,7 @@ int main() {
         test_fortran_order();
         test_round_trips();
         test_refusals();
+        test_names_and_int();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;

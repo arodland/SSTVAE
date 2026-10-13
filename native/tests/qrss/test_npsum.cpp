@@ -97,6 +97,12 @@ static void test_structure() {
     check::equal(npsum::sum_as<double>(std::span<const float>(f)), 7936.0, "buffered chunks of 8192");
     std::vector<double> fd(f.begin(), f.end());
     check::equal(npsum::sum(fd), 7808.0, "unbuffered: one tree");
+    // With nothing to cast numpy does not buffer, so np.sum(x,
+    // dtype=x.dtype) is np.sum(x):
+    //   np.sum(f.astype(np.float64), dtype=np.float64) -> 7808.0
+    check::equal(npsum::sum_as<double>(std::span<const double>(fd)), 7808.0, "same dtype: one tree");
+    check::equal(npsum::sum_as<float>(std::span<const float>(f)), npsum::sum(std::span<const float>(f)),
+                 "same dtype, float32: np.sum");
     const std::vector<std::uint8_t> bits = {1, 0, 1, 1};
     check::equal(npsum::mean_as_double(std::span<const std::uint8_t>(bits)), 0.75, "mean of a mask");
 }

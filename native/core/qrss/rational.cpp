@@ -368,7 +368,33 @@ Rational Rational::parse(std::string_view text) {
     skip_space(text, i);
     if (i != n) return invalid();
 
+    // Fraction(str) calls int() on each digit group, in this order, and
+    // int() of more decimal digits than sys.get_int_max_str_digits() (4300
+    // unless the process changed it; underscores not counted, leading
+    // zeros counted) is a ValueError before any arithmetic happens.
+    const auto int_limit = [](const std::string& digits) {
+        constexpr std::size_t MAX_STR_DIGITS = 4300;
+        if (digits.size() > MAX_STR_DIGITS)
+            throw std::invalid_argument("Exceeds the limit (4300 digits) for integer string conversion: value has " +
+                                        std::to_string(digits.size()) +
+                                        " digits; use sys.set_int_max_str_digits() to increase the limit");
+    };
+    int_limit(num_digits);
     if (has_den) {
+        int_limit(den_digits);
+    } else {
+        int_limit(dec_digits);
+        int_limit(exp_digits);
+    }
+
+    if (has_den) {
+        // A zero denominator is ZeroDivisionError("Fraction(<num>, 0)")
+        // whatever the numerator's size; -0 prints as 0.
+        if (den_digits.find_first_not_of('0') == std::string::npos) {
+            const std::size_t lead = num_digits.find_first_not_of('0');
+            const std::string shown = lead == std::string::npos ? "0" : (neg ? "-" : "") + num_digits.substr(lead);
+            throw ZeroDivision("Fraction(" + shown + ", 0)");
+        }
         const std::int64_t num = to_int64(num_digits.empty() ? "0" : num_digits);
         const std::int64_t den = to_int64(den_digits);
         return Rational(neg ? -num : num, den);   // ZeroDivision "Fraction(num, 0)" for /0
@@ -543,19 +569,79 @@ std::int64_t Rational::round() const {
 
 Rational Rational::operator-() const { return Rational(-num_, den_, Coprime{}); }
 
-// CPython's _add and _sub: the gcd of the denominators keeps the products small.
+namespace {
+
+// An unsigned 128-bit value, as two words (MSVC has no __int128): enough
+// for the numerator CPython's _add forms before it divides by g2.
+struct U128 {
+    std::uint64_t hi = 0, lo = 0;
+};
+
+U128 umul(std::uint64_t a, std::uint64_t b) {
+    const std::uint64_t a0 = a & 0xffffffffu, a1 = a >> 32, b0 = b & 0xffffffffu, b1 = b >> 32;
+    const std::uint64_t p00 = a0 * b0, p01 = a0 * b1, p10 = a1 * b0, p11 = a1 * b1;
+    const std::uint64_t mid = (p00 >> 32) + (p01 & 0xffffffffu) + (p10 & 0xffffffffu);
+    return {p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32), (mid << 32) | (p00 & 0xffffffffu)};
+}
+
+bool uless(const U128& a, const U128& b) { return a.hi != b.hi ? a.hi < b.hi : a.lo < b.lo; }
+
+// a + b and a - b (a >= b); the operands here are below 2^126, so the sum
+// cannot wrap.
+U128 uadd(const U128& a, const U128& b) { return {a.hi + b.hi + (a.lo + b.lo < a.lo ? 1u : 0u), a.lo + b.lo}; }
+U128 usub(const U128& a, const U128& b) { return {a.hi - b.hi - (a.lo < b.lo ? 1u : 0u), a.lo - b.lo}; }
+
+// a // m into q, returning a % m, for 0 < m < 2^63 (so r << 1 cannot wrap).
+std::uint64_t udivmod(const U128& a, std::uint64_t m, U128& q) {
+    q = {};
+    std::uint64_t r = 0;
+    for (int i = 127; i >= 0; --i) {
+        const std::uint64_t bit = i >= 64 ? (a.hi >> (i - 64)) & 1u : (a.lo >> i) & 1u;
+        r = (r << 1) | bit;
+        if (r >= m) {
+            r -= m;
+            if (i >= 64) q.hi |= std::uint64_t(1) << (i - 64);
+            else q.lo |= std::uint64_t(1) << i;
+        }
+    }
+    return r;
+}
+
+}  // namespace
+
+// CPython's _add and _sub, for every gcd g of the denominators (its g == 1
+// branch is the same arithmetic with s = da):
+//   s = da // g;  t = na * (db // g) + nb * s;  g2 = gcd(t, g)
+//   result = t // g2 / (s * (db // g2)), already in lowest terms.
+// t is formed exactly, in 128 bits: it can pass int64 while t // g2 does
+// not (n/d + n/d with d even), and only the result's range is a limit.
 static Rational add_sub(const Rational& a, const Rational& b, bool minus) {
     const std::int64_t na = a.num(), da = a.den();
-    const std::int64_t nb = minus ? -b.num() : b.num(), db = b.den();
+    const std::int64_t nb = minus ? -b.num() : b.num(), db = b.den();   // num() >= -(2^63 - 1)
     const char* where = minus ? "Fraction subtraction" : "Fraction addition";
     const std::int64_t g = gcd(da, db);
-    if (g == 1)
-        return Rational(add(mul(na, db, where), mul(da, nb, where), where), mul(da, db, where));
     const std::int64_t s = da / g;
-    const std::int64_t t = add(mul(na, db / g, where), mul(nb, s, where), where);
-    const std::int64_t g2 = gcd(t, g);
-    if (g2 == 1) return Rational(t, mul(s, db, where));
-    return Rational(t / g2, mul(s, db / g2, where));
+    const U128 x = umul(uabs(na), static_cast<std::uint64_t>(db / g));
+    const U128 y = umul(uabs(nb), static_cast<std::uint64_t>(s));
+    const bool xneg = na < 0, yneg = nb < 0;
+    U128 t;
+    bool neg;
+    if (xneg == yneg) {
+        t = uadd(x, y);
+        neg = xneg;
+    } else if (uless(x, y)) {
+        t = usub(y, x);
+        neg = yneg;
+    } else {
+        t = usub(x, y);
+        neg = xneg;
+    }
+    U128 q;
+    const std::uint64_t g2 = std::gcd(udivmod(t, static_cast<std::uint64_t>(g), q), static_cast<std::uint64_t>(g));
+    udivmod(t, g2, q);
+    if (q.hi != 0 || q.lo > static_cast<std::uint64_t>(I64_MAX)) overflow(where);
+    const auto num = static_cast<std::int64_t>(q.lo);
+    return Rational(neg ? -num : num, mul(s, db / static_cast<std::int64_t>(g2), where));
 }
 
 Rational operator+(const Rational& a, const Rational& b) { return add_sub(a, b, false); }

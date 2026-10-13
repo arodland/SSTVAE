@@ -30,8 +30,14 @@
 //
 // Not supported, and refused with std::invalid_argument rather than read
 // wrongly: np.savez_compressed (deflate), big-endian dtypes, structured or
-// object dtypes, encrypted or multi-disk archives, members that are not
-// .npy arrays. Malformed input is std::invalid_argument; I/O failure is
+// object dtypes, dtype spellings other than a kind-and-size code (np.dtype
+// also reads "d", "float64", a subarray "2f8"), encrypted or multi-disk
+// archives, and members that are not .npy arrays (np.load hands those
+// back as bytes). As np.load, a file that does not begin with a zip local
+// header or end record is refused, though zipfile alone would read past
+// prepended data. parse_npz reads every member np.load would, at once, so
+// one that np.load would refuse only when it is read refuses the archive.
+// Malformed input is std::invalid_argument; I/O failure is
 // std::runtime_error.
 
 #ifndef SSTVAE_QRSS_NPZ_HPP
@@ -47,6 +53,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -62,7 +69,8 @@ enum class DType : std::uint8_t { f2, f4, f8, c8, c16, i1, u1, i2, u2, i4, u4, i
 // numpy's dtype.str: "<f8", "|u1", ...
 std::string_view descr(DType t);
 std::size_t itemsize(DType t);
-// The dtype a descr names, or nullopt when unsupported.
+// The dtype a descr names, or nullopt when unsupported: numpy's kind and
+// size codes with any byte-order prefix np.dtype reads as little-endian.
 std::optional<DType> from_descr(std::string_view d);
 
 template <typename T>
@@ -135,9 +143,14 @@ struct Array {
     // dtype (float16 exactly, integers by C++'s conversion, which rounds
     // to nearest like numpy's). Complex dtypes are refused.
     std::vector<double> to_double() const;
-    // int(a) for a one-element integer or bool array, as Python reads the
-    // .qrsp scalars. std::invalid_argument for anything else (and for a
-    // uint64 above 2^63 - 1).
+    // int(a) for a 0-d array, as Python reads the .qrsp scalars: integers
+    // and bools as they are, floats truncated toward zero. Like numpy 2.5,
+    // only a 0-d array converts -- int(np.array([5])) is a TypeError there
+    // -- so any other shape is std::invalid_argument, as is a complex
+    // dtype and a NaN ("cannot convert float NaN to integer"). Infinity
+    // ("cannot convert float infinity to integer") and a value outside
+    // int64 (a uint64 above 2^63 - 1, a float past +-2^63, both of which
+    // Python answers with a wide int) are std::overflow_error.
     std::int64_t to_int64() const;
 
     void check_dtype(DType want) const;
@@ -149,7 +162,8 @@ private:
 // The members of an .npz, in archive order, by name without ".npy".
 class Npz {
 public:
-    // Appends; std::invalid_argument if the name is taken or empty.
+    // Appends; std::invalid_argument if the name is taken, holds a NUL or
+    // is not UTF-8. An empty name is allowed, as np.savez allows it.
     void add(std::string name, Array a);
     bool contains(std::string_view name) const;
     // std::out_of_range "<name> is not a file in the archive" (numpy's
@@ -161,6 +175,7 @@ public:
 
 private:
     std::vector<std::pair<std::string, Array>> members_;
+    std::unordered_map<std::string, std::size_t> index_;   // name -> position in members_
 };
 
 // A DOS timestamp as zip stores it.
@@ -173,7 +188,12 @@ struct DosTime {
 std::vector<std::uint8_t> npy_bytes(const Array& a);
 Array parse_npy(std::span<const std::uint8_t> file);
 
-// np.savez to a buffer / np.load of one.
+// np.savez to a buffer / np.load of one. parse_npz returns what reading
+// every key of np.load's NpzFile returns: the member names as zipfile
+// decodes them (UTF-8 when flagged, else cp437; cut at a NUL), without
+// ".npy", in first-appearance order; a key whose exact name is also a
+// member reads that member, and a repeated name reads its last entry.
+// Members no key reaches are not read, as np.load never opens them.
 std::vector<std::uint8_t> npz_bytes(const Npz& z, DosTime stamp = {});
 Npz parse_npz(std::span<const std::uint8_t> file);
 

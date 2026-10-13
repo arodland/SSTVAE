@@ -196,6 +196,63 @@ def test_sum_of_strided_input(nat):
     assert same_bits(nat.np_sum(view), np.asarray(np.sum(view)))
 
 
+def test_sum_as_the_same_dtype_is_np_sum(nat):
+    # Nothing to cast, so numpy does not buffer: np.sum(x, dtype=x.dtype)
+    # is one pairwise tree, not 8192-value chunks (they differ from 8193).
+    for n in CAST_LENGTHS:
+        v, w = _values(n, 8000 + n)
+        assert same_bits(nat.np_sum_as(w, "float64"), np.asarray(np.sum(w, dtype=np.float64))), n
+        w32 = w.astype(np.float32)
+        assert same_bits(nat.np_sum_as(w32, "float32"), np.asarray(np.sum(w32, dtype=np.float32))), n
+    f = np.ones(8193)
+    f[0], f[8192] = 2.0 ** 60, -(2.0 ** 60)
+    assert np.sum(f, dtype=np.float64) == 7808.0 == nat.np_sum_as(f, "float64")
+
+
+def test_sum_and_mean_edge_values(nat):
+    # Signed zeros (the identity is +0), empty arrays, infinities and NaN,
+    # float32 overflow, and views numpy walks backwards or with a stride.
+    for n in list(range(0, 20)) + [127, 128, 129, 300]:
+        for dt in (np.float64, np.float32):
+            x = np.full(n, -0.0, dt)
+            assert same_bits(nat.np_sum(x), np.asarray(np.sum(x))), (dt, n)
+            if n:
+                assert same_bits(nat.np_mean(x), np.asarray(np.mean(x))), (dt, n)
+        c = np.full(n, complex(-0.0, -0.0))
+        assert same_bits(nat.np_sum(c), np.asarray(np.sum(c))), n
+    for dt in (np.complex128, np.complex64):
+        assert same_bits(nat.np_sum(np.zeros(0, dt)), np.asarray(np.sum(np.zeros(0, dt))))
+    rng = np.random.default_rng(23)
+    with np.errstate(all="ignore"):
+        for dt in (np.float64, np.float32):
+            with pytest.warns(RuntimeWarning, match="Mean of empty slice"):
+                w = np.asarray(np.mean(np.zeros(0, dt)))
+            g = nat.np_mean(np.zeros(0, dt))
+            assert g.dtype == w.dtype and np.isnan(g) and np.isnan(w)
+            for n in [1, 5, 8, 9, 100, 129, 1000, 50600]:
+                x = rng.standard_normal(n).astype(dt)
+                x[rng.integers(0, n)] = np.inf
+                assert same_bits(nat.np_sum(x), np.asarray(np.sum(x))), (dt, n)
+                x[rng.integers(0, n)] = -np.inf
+                g, w = nat.np_sum(x), np.asarray(np.sum(x))
+                assert g.dtype == w.dtype and (same_bits(g, w) or (np.isnan(g) and np.isnan(w))), (dt, n)
+        for n in [10, 200, 50600]:
+            x = np.full(n, 3e37, np.float32)
+            assert same_bits(nat.np_sum(x), np.asarray(np.sum(x))), n
+            assert same_bits(nat.np_mean(x), np.asarray(np.mean(x))), n
+    for n in [1000, 50600, 300001]:
+        x = rng.standard_normal(n) * 10.0 ** rng.uniform(-8, 8, n)
+        for v in (x[::-1], x[::2], x[1::3], x[::-7]):
+            assert same_bits(nat.np_sum(v), np.asarray(np.sum(v))), (n, v.strides)
+            assert same_bits(nat.np_mean(v), np.asarray(np.mean(v))), (n, v.strides)
+            v32 = v.astype(np.float32)
+            assert same_bits(nat.np_sum(v32), np.asarray(np.sum(v32))), n
+        c = x + 1j * x[::-1]
+        for v in (c[::-1], c[::3]):
+            assert same_bits(nat.np_sum(v), np.asarray(np.sum(v))), n
+            assert same_bits(nat.np_sum(v.astype(np.complex64)), np.asarray(np.sum(v.astype(np.complex64)))), n
+
+
 def test_prepare_segment_reproduced(nat):
     # picture.prepare_segment's arithmetic, done with the port's sum and
     # float16: the stored, hashed, transmitted values.
@@ -297,7 +354,10 @@ PARSE_OK = ["3/2", " -35/4 ", "3.1415", "-47e-2", "1_000", "1.e5", ".5", "+.5e-3
 PARSE_BAD = ["1._5", "1__2", "1_", "1e5/2", "1.5/2", "nan", "inf", "1 . 5", "", " ", "/2", ".", "e5", "1/",
              "1/-2", "--1", "0x10", "1/2/3", "'a'", "\x01\t", "1/2 3", "+", "1e", "1e+", "1.5e-_3",
              "_1", "1\u200b", "\xa01/2/3", "1/2\u2028x", "\U000e0001x", "\u00e91", "1'\"",
-             "\x85\x9f", "1\ufeff2", "\u30001\u3000\u3000/"]
+             "\x85\x9f", "1\ufeff2", "\u30001\u3000\u3000/",
+             # int()'s 4300-digit limit, group by group, leading zeros counted, underscores not
+             "1." + "0" * 4301, "0" * 4301 + "1", "1e" + "9" * 4301, "0e" + "9" * 4301, "1/" + "0" * 4301,
+             "1" * 4301 + "/7", "0." + "1" * 4301, "1e-" + "0" * 4301, "1_" * 4300 + "1"]
 
 
 @pytest.mark.parametrize("text", PARSE_OK)
@@ -317,13 +377,20 @@ def test_parse_refuses_as_fraction(nat, text):
     assert str(got.value) == str(want.value)
 
 
-@pytest.mark.parametrize("text", ["5/0", "-5/0", "0/0", " 7 / 0 "])
+@pytest.mark.parametrize("text", ["5/0", "-5/0", "0/0", " 7 / 0 ", "-0099999999999999999999/0_0", "-000/00"])
 def test_parse_zero_denominator(nat, text):
     with pytest.raises(ZeroDivisionError) as want:
         Fraction(text)
     with pytest.raises(ZeroDivisionError) as got:
         nat.Rational.parse(text)
     assert str(got.value) == str(want.value)
+
+
+def test_parse_digit_limit_boundary(nat):
+    for text in ["0" * 4299 + "7", "0_" * 4299 + "7", "7e-" + "0" * 4299 + "1", "1." + "0" * 4300]:
+        want = Fraction(text)
+        r = nat.Rational.parse(text)
+        assert (r.numerator, r.denominator) == (want.numerator, want.denominator), text[:20]
 
 
 def test_parse_beyond_int64_is_refused(nat):
@@ -400,6 +467,64 @@ def test_zero_division_and_range(nat):
         nat.Rational(big, 3) * nat.Rational(big, 5)
     assert (nat.Rational(big - 1, big) > nat.Rational(big - 2, big - 1)) == \
         (Fraction(big - 1, big) > Fraction(big - 2, big - 1))
+    # The sum's numerator before its last cancellation passes int64; the
+    # sum does not (Python's _add forms t = 2n, then divides by g2 = 2).
+    n, d = -8365203145079561419, 5798721460512834880
+    r = nat.Rational(n, d) + nat.Rational(n, d)
+    assert (r.numerator, r.denominator) == (n, d // 2)
+    r = nat.Rational(n, d) - nat.Rational(-n, d)
+    assert (r.numerator, r.denominator) == (n, d // 2)
+
+
+def test_wide_range_fuzz(nat):
+    # Numerators and denominators of every width up to int64, against
+    # Fraction: limit_denominator, from_float_limited over every exponent,
+    # comparison, arithmetic (or OverflowError only when the exact result
+    # does not fit), float, rounding and str.
+    import random
+    rnd = random.Random(7)
+    M = 2 ** 63 - 1
+    R = nat.Rational
+
+    def rint(bits):
+        return max(-M, rnd.choice([-1, 1]) * rnd.getrandbits(bits))
+
+    def dens():
+        return rnd.choice([1, 2, 3, 10, 1000, 1 << 16, 1 << 20, 10 ** 6, rnd.getrandbits(rnd.randint(1, 63)) or 1, M])
+
+    for _ in range(5000):
+        n, d, md = rint(rnd.randint(1, 63)), rnd.getrandbits(rnd.randint(1, 63)) or 1, dens()
+        g, w = R(n, d).limit_denominator(md), Fraction(n, d).limit_denominator(md)
+        assert (g.numerator, g.denominator) == (w.numerator, w.denominator), (n, d, md)
+    for _ in range(5000):
+        x = np.uint64(rnd.getrandbits(64)).view(np.float64).item()
+        if not math.isfinite(x):
+            continue
+        md = dens()
+        w = Fraction(x).limit_denominator(md)
+        try:
+            g = R.from_float_limited(x, md)
+        except OverflowError:
+            assert abs(w.numerator) > M, (x.hex(), md)
+            continue
+        assert (g.numerator, g.denominator) == (w.numerator, w.denominator), (x.hex(), md)
+    for _ in range(5000):
+        a = (rint(63) or 1, rnd.getrandbits(63) or 1)
+        b = a if rnd.random() < 0.3 else (rint(63) or 1, rnd.getrandbits(63) or 1)
+        ra, rb, fa, fb = R(*a), R(*b), Fraction(*a), Fraction(*b)
+        assert ((ra < rb), (ra <= rb), (ra == rb), (ra > rb), (ra >= rb)) == \
+            ((fa < fb), (fa <= fb), (fa == fb), (fa > fb), (fa >= fb)), (a, b)
+        for op in ("__add__", "__sub__", "__mul__", "__truediv__"):
+            w = getattr(fa, op)(fb)
+            try:
+                g = getattr(ra, op)(rb)
+            except OverflowError:
+                assert abs(w.numerator) > M or w.denominator > M, (op, a, b)
+                continue
+            assert (g.numerator, g.denominator) == (w.numerator, w.denominator), (op, a, b)
+        assert float(ra) == float(fa) and str(ra) == str(fa), a
+        assert (int(ra), math.floor(ra), math.ceil(ra), round(ra)) == \
+            (int(fa), math.floor(fa), math.ceil(fa), round(fa)), a
 
 
 # --- np.save / np.savez / np.load -----------------------------------------------------------
@@ -533,6 +658,330 @@ def test_files_both_ways(nat, tmp_path):
     assert same_bits(np.load(tmp_path / "cpp.npy"), arrays["z"])
     assert nat.npz_to_int64(arrays["version"]) == 1
     assert nat.npz_to_double(np.arange(3, dtype=np.float16)).tolist() == [0.0, 1.0, 2.0]
+
+
+
+# --- np.load's edges, against np.load itself --------------------------------------------------
+
+
+def _npy(a) -> bytes:
+    buf = io.BytesIO()
+    np.save(buf, a)
+    return buf.getvalue()
+
+
+def _zip(members) -> bytes:
+    import warnings
+    buf = io.BytesIO()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")   # "Duplicate name", deliberately
+        with zipfile.ZipFile(buf, "w") as zf:
+            for name, data in members:
+                zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def _np_load_all(data: bytes):
+    """Every key of np.load's NpzFile, or None where np.load refuses (or
+    returns raw bytes for a member that is not .npy, which the port refuses)."""
+    import warnings
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with np.load(io.BytesIO(data), allow_pickle=False) as z:
+                out = {k: z[k] for k in z.files}
+    except Exception:
+        return None
+    return out if all(isinstance(v, np.ndarray) for v in out.values()) else None
+
+
+def _agrees(nat, data: bytes, label=""):
+    want = _np_load_all(data)
+    try:
+        got = nat.parse_npz(data)
+    except ValueError:
+        got = None
+    assert (got is None) == (want is None), (label, "np.load" if want is not None else "port", "alone reads it")
+    if want is not None:
+        _same_arrays(got, want)
+    return got
+
+
+def _flags(data: bytes, clear=0, set_=0, local=True, central=True) -> bytes:
+    d = bytearray(data)
+    for sig, off, on in ((b"PK\x03\x04", 6, local), (b"PK\x01\x02", 8, central)):
+        i = d.find(sig)
+        while on and i >= 0:
+            f = int.from_bytes(d[i + off:i + off + 2], "little")
+            d[i + off:i + off + 2] = ((f & ~clear) | set_).to_bytes(2, "little")
+            i = d.find(sig, i + 4)
+    return bytes(d)
+
+
+def _unicode_path(up: bytes, version=1, crc=None) -> bytes:
+    zi = zipfile.ZipInfo("x.npy")
+    zi.extra = (0x7075).to_bytes(2, "little") + (5 + len(up)).to_bytes(2, "little") + bytes([version]) + \
+        (zlib.crc32(b"x.npy") if crc is None else crc).to_bytes(4, "little") + up
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(zi, _npy(np.arange(3)))
+    return buf.getvalue()
+
+
+_A, _B = _npy(np.arange(3)), _npy(np.arange(3, dtype=np.uint16))
+
+
+def _shadowed_bad_crc():
+    d = bytearray(_zip([("a.npy", _A), ("a.npy", _B)]))
+    d[d.index(b"\x93NUMPY") + 130] ^= 1   # the first entry, which NameToInfo replaces
+    return bytes(d)
+
+
+def _nul_name():
+    d = bytearray(_zip([("abXd.npy", _A)]))
+    for k in [m for m in range(len(d)) if d[m:m + 4] == b"abXd"]:
+        d[k + 2] = 0
+    return bytes(d)
+
+
+NPZ_EDGES = {
+    # NpzFile: a key reads the member named exactly that, else key + ".npy";
+    # a repeated name reads its last entry; only those are ever opened.
+    "exact name beats .npy": lambda: _zip([("b", _A), ("b.npy", _B)]),
+    "exact name beats .npy, later": lambda: _zip([("b.npy", _B), ("b", _A)]),
+    "repeated name, last wins": lambda: _zip([("a.npy", _A), ("a.npy", _B)]),
+    "a.npy and a.npy.npy": lambda: _zip([("a.npy", _A), ("a.npy.npy", _B)]),
+    "a shadowed entry is never read": _shadowed_bad_crc,
+    "empty key": lambda: _savez({"": np.arange(2)}),
+    # zipfile's names: UTF-8 when flagged, cp437 when not, cut at NUL.
+    "unicode names": lambda: _savez({"é€😀": np.arange(2), "x": np.zeros(1)}),
+    "cp437 name": lambda: _flags(_zip([("é.npy", _A)]), clear=0x800),
+    "flag only in the directory": lambda: _flags(_zip([("é.npy", _A)]), clear=0x800, central=False),
+    "invalid UTF-8": lambda: _zip([("é.npy", _A)]).replace("é".encode(), b"\xff\xfe"),
+    "NUL in a name": _nul_name,
+    "unicode path field": lambda: _unicode_path(b"y.npy"),
+    "unicode path, wrong crc": lambda: _unicode_path(b"y.npy", crc=1),
+    "unicode path, empty": lambda: _unicode_path(b""),
+    "unicode path, version 2": lambda: _unicode_path(b"y.npy", version=2),
+    "unicode path, invalid UTF-8": lambda: _unicode_path(b"\xff.npy"),
+    "unicode path with NUL": lambda: _unicode_path(b"z\x00q.npy"),
+    # np.load decides by the first bytes, before zipfile would skip any.
+    "prepended data": lambda: b"junk" + _savez({"a": np.arange(3)}),
+    "prepended local header": lambda: b"PK\x03\x04" + _savez({"a": np.arange(3)}),
+    "empty file": lambda: b"",
+    "an empty archive": lambda: _savez({}),
+    "end record only": lambda: b"PK\x05\x06",
+}
+
+
+@pytest.mark.parametrize("case", list(NPZ_EDGES))
+def test_npz_edges_match_np_load(nat, case):
+    _agrees(nat, NPZ_EDGES[case](), case)
+
+
+def _with_zip64_end(data: bytes, dirsize=None, diroffset=None, sz=44, count=None) -> bytes:
+    """`data` with a zip64 end record and locator before its end record."""
+    import struct
+    end, body = data[-22:], data[:-22]
+    n, cd_size, cd_off = struct.unpack("<HII", end[10:20])
+    z64 = struct.pack("<4sQ2H2L4Q", b"PK\x06\x06", sz, 45, 45, 0, 0, n if count is None else count,
+                      n if count is None else count, cd_size if dirsize is None else dirsize,
+                      cd_off if diroffset is None else diroffset)
+    loc = struct.pack("<4sLQL", b"PK\x06\x07", 0, len(body), 1)
+    return body + z64 + loc + end
+
+
+def test_zip64_end_records(nat):
+    good = _savez({"a": np.arange(4), "b": np.ones(3, np.float32)})
+    assert set(_agrees(nat, _with_zip64_end(good), "valid zip64 end")) == {"a", "b"}
+    for kw in ({"dirsize": 2 ** 64 - 1, "diroffset": 0}, {"dirsize": 0, "diroffset": 2 ** 64 - 5},
+               {"diroffset": 1}, {"sz": 45}, {"dirsize": 10 ** 6}):
+        data = _with_zip64_end(good, **kw)
+        assert _np_load_all(data) is None, kw
+        with pytest.raises(ValueError, match="zip64 end of central directory"):
+            nat.parse_npz(data)
+
+
+def test_npz_mutations_match_np_load(nat):
+    # Bytes changed, words set to 0 / 0xFFFFFFFF, runs deleted, in np.savez
+    # files: whatever np.load reads the port reads alike, and whatever
+    # np.load refuses the port refuses.
+    import random
+    rnd = random.Random(1)
+    seeds = [_savez({"a": np.arange(10, dtype=np.int64)}),
+             _savez({"x": np.float16(1.5), "y": np.zeros((2, 3), np.complex64), "z": np.array([True, False])}),
+             _savez({"m": np.frombuffer(b'{"a": 1}', np.uint8), "s": np.ones((3, 0, 2), np.float32)})]
+    for it in range(10000):
+        d = bytearray(rnd.choice(seeds))
+        for _ in range(rnd.randint(1, 3)):
+            op, i = rnd.random(), rnd.randrange(len(d))
+            if op < 0.6:
+                d[i] = rnd.randrange(256)
+            elif op < 0.8:
+                d[i:i + 4] = rnd.choice([b"\xff\xff\xff\xff", b"\x00\x00\x00\x00"])
+            else:
+                del d[i:i + rnd.randint(1, 8)]
+        _agrees(nat, bytes(d), it)
+
+
+def _npy_text(text: str, version=(1, 0), data=bytes(range(128))) -> bytes:
+    import struct
+    h = text.encode("latin1")
+    size = struct.pack("<H", len(h)) if version == (1, 0) else struct.pack("<I", len(h))
+    return b"\x93NUMPY" + bytes(version) + size + h + data
+
+
+_D = "'descr': '<f8', 'fortran_order': False"
+NPY_HEADERS = [
+    # Shapes: numpy's integers and limits.
+    "{%s, 'shape': (2,), }" % _D, "{%s, 'shape': (-0,), }" % _D, "{%s, 'shape': (- 0, 5), }" % _D,
+    "{%s, 'shape': (-00,), }" % _D, "{%s, 'shape': (+2,), }" % _D, "{%s, 'shape': (1_0,), }" % _D,
+    "{%s, 'shape': (1__0,), }" % _D, "{%s, 'shape': (007,), }" % _D, "{%s, 'shape': (000,), }" % _D,
+    "{%s, 'shape': (0_0,), }" % _D, "{%s, 'shape': (--5,), }" % _D, "{%s, 'shape': (-1,), }" % _D,
+    "{%s, 'shape': (True,), }" % _D, "{%s, 'shape': (False, 2), }" % _D, "{%s, 'shape': (2), }" % _D,
+    "{%s, 'shape': [2], }" % _D, "{%s, 'shape': (2.0,), }" % _D, "{%s, 'shape': (1e1,), }" % _D,
+    "{%s, 'shape': (0, 1152921504606846975)}" % _D, "{%s, 'shape': (0, 1152921504606846976)}" % _D,
+    "{'descr': '|u1', 'fortran_order': False, 'shape': (0, 9223372036854775807)}",
+    "{'descr': '|u1', 'fortran_order': False, 'shape': (0, 9223372036854775808)}",
+    "{'descr': '|u1', 'fortran_order': False, 'shape': (0, 4611686018427387904, 2)}",
+    "{'descr': '|u1', 'fortran_order': False, 'shape': (1, 0, 99999999999999999999)}",
+    "{%s, 'shape': (%s,)}" % (_D, ", ".join(["1"] * 64)), "{%s, 'shape': (%s,)}" % (_D, ", ".join(["0"] * 65)),
+    # The dict: keys, values, repeats, escapes.
+    "{'descr': '<f8', 'fortran_order': 0, 'shape': (2,), }",
+    "{'descr': '<i8', 'descr': '<f8', 'fortran_order': False, 'shape': (2,), }",
+    "{'descr': '<f8', 'fortran_order': False, 'sh\\x61pe': (2,), }",
+    "{'descr': '<f8', 'fortran_order': False, 'shape': (2,), 'x': 1}",
+    "{'descr': '<f8', 'fortran_order': False}", "{'descr': \"<f8\", 'fortran_order': False, 'shape': (2,)}",
+    "{'descr': '<f8', 'fortran_order': False, 'shape': (2,),,}", "{'descr': '<f8', 'fortran_order': False, 'shape': (,)}",
+    "{'descr': '<f8', 'fortran_order': False, 'shape': ()} {}", "{'descr': '<f8', 'fortran_order': False, 'shape': (2,)};",
+    # Python's tokenizer between the tokens.
+    "{%s, 'shape': (2,), } # comment\n" % _D, "  \t{%s, 'shape': (2,), }\n" % _D, "\n {%s, 'shape': (2,), }" % _D,
+    "{%s,\n   'shape': (2,),\n}\n" % _D, "{%s, 'shape': (2,), }\n  " % _D, "{%s, 'shape': (2,), }\n  \n" % _D,
+    "{%s, 'shape': (2,), }\n  # c\n" % _D, "{%s, 'shape': (2,), }\v" % _D, "{%s, 'shape': (2,), }\f" % _D,
+    "{%s,\r\n 'shape': (2,)}\r\n" % _D, "{%s, 'shape': (2,), }\r" % _D, "{%s, 'shape': (\n2\n,\n)}" % _D,
+    "{%s, 'shape': (2,), }\x00" % _D, "{'descr': '<f8', 'fortran_order': False, 'shape': (2,)}\t",
+    "{'descr': '<f8', 'fortran_order': False, 'shape': (2,)}\\\n",
+    # descr spellings np.dtype reads as these types.
+] + ["{'descr': '%s', 'fortran_order': False, 'shape': (2,)}" % d
+     for d in ["u1", "<u1", ">u1", "=u1", "f8", "=f8", "|f8", "b1", "?", "|?", "=c16", "|c16", "i8", "<u8", "f2"]]
+# (">f8", big-endian, np.load reads and the port refuses: test_refusals.)
+
+
+@pytest.mark.parametrize("version", [(1, 0), (3, 0)])
+def test_npy_headers_match_np_load(nat, version):
+    import warnings
+    for text in NPY_HEADERS:
+        data = _npy_text(text, version)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                want = np.load(io.BytesIO(data), allow_pickle=False)
+        except Exception:
+            want = None
+        try:
+            got = nat.parse_npy(data)
+        except ValueError:
+            got = None
+        assert (got is None) == (want is None), (text, "np.load" if want is not None else "port", "alone reads it")
+        if want is not None:
+            assert same_bits(got, np.ascontiguousarray(want) if want.ndim else want), text
+
+
+def test_npy_header_mutations(nat):
+    # Header text mutated in place: nothing np.load refuses is read, and
+    # what both read is the same array. The port refuses a few spellings
+    # np.load takes (string prefixes, subarray and structured descrs, hex).
+    import random
+    import re
+    import struct
+    import warnings
+    rnd = random.Random(3)
+    arrays = [np.arange(5.0), np.zeros((2, 2), np.int8), np.float64(3),
+              np.asfortranarray(np.arange(6, dtype=np.int16).reshape(2, 3)), np.array([True, False]),
+              np.zeros((2, 0, 3), np.complex64)]
+    alphabet = list("{}()[]',: \"TrueFalseNone0123456789-+_<|f2c8i1u8b1shapedescrfortran_order\n\t\\x\r\f\v#")
+    refused = 0
+    for _ in range(10000):
+        data = bytearray(_npy(rnd.choice(arrays)))
+        hlen = struct.unpack("<H", data[8:10])[0]
+        for _ in range(rnd.randint(1, 3)):
+            i = 10 + rnd.randrange(hlen)
+            if rnd.random() < 0.7:
+                data[i] = ord(rnd.choice(alphabet))
+            else:
+                j = 10 + rnd.randrange(hlen)
+                data[i], data[j] = data[j], data[i]
+        data = bytes(data)
+        header = data[10:10 + hlen].decode("latin1")
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                want = np.load(io.BytesIO(data), allow_pickle=False)
+        except Exception:
+            want = None
+        try:
+            got = nat.parse_npy(data)
+            why = None
+        except ValueError as e:
+            got, why = None, str(e)
+        if want is None:
+            assert got is None, header
+        elif got is None:
+            refused += 1
+            assert re.search(r"[rRuUbBfF]['\"]", header) or "is not supported" in why, (header, why)
+        else:
+            assert same_bits(got, np.ascontiguousarray(want) if want.ndim else want), header
+    assert refused < 200
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="zipfile records create_system 0 on Windows, the port 3")
+def test_writer_names_as_np_savez(nat):
+    # An empty key, non-ASCII keys (UTF-8, flag bit 11) and a key ending
+    # ".npy" are written as np.savez writes them.
+    arrays = {"": np.arange(2), "é€😀": np.zeros(1, np.float32), "x.npy": np.ones(2, np.int16), "a": np.int64(7)}
+    assert nat.npz_bytes(arrays) == _savez(arrays)
+    _same_arrays(nat.parse_npz(nat.npz_bytes(arrays)), {k: np.asarray(v) for k, v in arrays.items()})
+    with pytest.raises(ValueError, match="NUL"):
+        nat.npz_bytes({"a\x00b": np.arange(2)})
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="zipfile records create_system 0 on Windows, the port 3")
+def test_more_members_than_a_zip_end_record_counts(nat):
+    # Past 65535 members zipfile writes a zip64 end record and locator;
+    # the port writes the same file and reads it back (about 3 s, most of
+    # it np.savez).
+    arrays = {f"a{i}": np.int8(i % 100) for i in range(65536)}
+    data = _savez(arrays)
+    assert b"PK\x06\x06" in data[-200:] and nat.npz_bytes(arrays) == data
+    got = nat.parse_npz(data)
+    assert len(got) == 65536 and nat.npz_to_int64(got["a65535"]) == 35
+
+
+def test_npz_int64_conversion(nat):
+    # int(a) as numpy 2.5 gives it: 0-d only, floats truncated toward zero.
+    for v in [np.int64(-5), np.uint8(200), np.bool_(True), np.float64(-2.7), np.float32(2.9), np.float16(1.5),
+              np.float64(-(2.0 ** 63)), np.uint64(2 ** 63 - 1), np.int8(-128)]:
+        assert nat.npz_to_int64(np.asarray(v)) == int(v), v
+    for bad in [np.array([5]), np.zeros((1, 1), np.int64), np.zeros(0, np.int64)]:
+        with pytest.raises(TypeError):
+            int(bad)
+        with pytest.raises(ValueError, match="only 0-dimensional"):
+            nat.npz_to_int64(bad)
+    with pytest.raises(ValueError, match="cannot convert float NaN to integer"):
+        int(np.float64("nan"))
+    with pytest.raises(ValueError, match="cannot convert float NaN to integer"):
+        nat.npz_to_int64(np.asarray(np.float32("nan")))
+    for inf in (np.float64("inf"), np.float16("-inf")):
+        with pytest.raises(OverflowError, match="cannot convert float infinity to integer"):
+            int(inf)
+        with pytest.raises(OverflowError, match="cannot convert float infinity to integer"):
+            nat.npz_to_int64(np.asarray(inf))
+    # Python answers these with a wide int; the port's int64 cannot.
+    for wide in (np.uint64(2 ** 63), np.float64(2.0 ** 63)):
+        with pytest.raises(OverflowError):
+            nat.npz_to_int64(np.asarray(wide))
+    with pytest.raises(ValueError, match="complex"):
+        nat.npz_to_int64(np.asarray(np.complex64(1)))
 
 
 # --- the two QRSS formats -------------------------------------------------------------------
