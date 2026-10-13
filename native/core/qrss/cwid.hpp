@@ -140,9 +140,9 @@ struct Dp {
     std::vector<std::int64_t> back;   // [kmax][n1][2]
 };
 // gains: n_chars rows of n + 1; lens: each character's length. forbid
-// (character, start) is excluded. max_chars < 0 is numpy's "negative
-// dimensions" ValueError, 0 its IndexError; gains of another length than
-// n + 1 std::invalid_argument.
+// (character, start) is excluded. max_chars < -1 is numpy's "negative
+// dimensions" ValueError, -1 and 0 its IndexError (best[1] of 0 or 1
+// rows); gains of another length than n + 1 std::invalid_argument.
 Dp dp(const std::vector<std::vector<double>>& gains, std::span<const std::int64_t> lens, std::int64_t n,
       std::int64_t max_chars, std::optional<std::pair<std::int64_t, std::int64_t>> forbid = std::nullopt);
 

@@ -22,7 +22,7 @@
 // a stand-in all work). A frame without windows returns before anything
 // of the track is read, and keying_type of an L frame too, as in the
 // reference. Unit values are 1-D or 2-D (rows of 176); other ranks
-// NotImplementedError (0-D numpy's AxisError).
+// NotImplementedError (0-D the reference's IndexError).
 
 #include "qrss/rx_types.hpp"
 
@@ -163,11 +163,9 @@ py::array windows(const py::object& ch, const py::object& track, const py::objec
 cw::Combined combined_of(const py::object& o) {
     py::array a = py::array::ensure(rx::np_module().attr("asarray")(o, py::arg("dtype") = "float64"));
     if (!a) throw py::error_already_set();
-    if (a.ndim() == 0) {
-        py::object axis_error = rx::np_module().attr("exceptions").attr("AxisError");
-        PyErr_SetObject(axis_error.ptr(), axis_error(0, 0).ptr());
-        throw py::error_already_set();
-    }
+    // A 0-d value: numpy's sum(axis=0) accepts it, and the reference's
+    // s.shape[0] is what refuses it.
+    if (a.ndim() == 0) throw py::index_error("tuple index out of range");
     if (a.ndim() > 2) not_implemented("unit values of rank " + std::to_string(a.ndim()));
     const std::vector<double> v = rx::vec<double>(a);
     if (a.ndim() == 1) return cw::combine(v, 1, v.size(), true);

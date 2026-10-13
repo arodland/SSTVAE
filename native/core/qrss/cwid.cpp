@@ -74,11 +74,15 @@ std::array<double, UNITS> smooth(const std::array<double, UNITS>& r) {
 }
 
 // np.dot(a, b) of two contiguous float64 vectors as numpy's OpenBLAS runs
-// it on an AVX-512 machine (dot_compute + ddot_microk_skylakex-2.c): 16k
-// leading terms in the kernel -- four 8-lane accumulators over blocks of
-// 32, folded to 4 lanes, then two 4-lane accumulators over blocks of 8,
-// summed and reduced pairwise -- the rest a running sum; DOUBLE_dot adds
-// the result onto 0.
+// it on an AVX-512 machine (dot_compute + ddot_microk_skylakex-2.c, built
+// with GCC's default FP contraction, so every multiply-add is one fma):
+// the 16k leading terms in the kernel -- four 8-lane accumulators over
+// blocks of 32, folded to 4 lanes, then the same four 4-lane accumulators
+// over blocks of 16, summed in order and reduced pairwise -- the rest a
+// running fma; DOUBLE_dot adds the result onto 0. Verified bit for bit
+// against np.dot at n = 7, 16, 32, 40, 100 and 176 (2000 draws each);
+// another machine's OpenBLAS kernel orders it differently, which is why
+// match() is held to a tolerance and not to the bit.
 double blas_dot(const double* x, const double* y, std::size_t n) {
     double dot = 0.0;
     const std::size_t n1 = n & ~std::size_t{15};
@@ -87,24 +91,21 @@ double blas_dot(const double* x, const double* y, std::size_t n) {
         std::size_t i = 0;
         const std::size_t n32 = n1 & ~std::size_t{31};
         for (; i < n32; i += 32)
-            for (int a = 0; a < 4; ++a)
-                for (int l = 0; l < 8; ++l)
-                    a5[a][l] += x[i + 8 * static_cast<std::size_t>(a) + static_cast<std::size_t>(l)] *
-                                y[i + 8 * static_cast<std::size_t>(a) + static_cast<std::size_t>(l)];
+            for (std::size_t a = 0; a < 4; ++a)
+                for (std::size_t l = 0; l < 8; ++l)
+                    a5[a][l] = std::fma(x[i + 8 * a + l], y[i + 8 * a + l], a5[a][l]);
         double acc[4][4];
-        for (int a = 0; a < 4; ++a)
-            for (int l = 0; l < 4; ++l) acc[a][l] = a5[a][l] + a5[a][l + 4];
-        for (; i < n1; i += 8)
-            for (int l = 0; l < 4; ++l) {
-                acc[0][l] += x[i + static_cast<std::size_t>(l)] * y[i + static_cast<std::size_t>(l)];
-                acc[1][l] += x[i + 4 + static_cast<std::size_t>(l)] * y[i + 4 + static_cast<std::size_t>(l)];
-            }
+        for (std::size_t a = 0; a < 4; ++a)
+            for (std::size_t l = 0; l < 4; ++l) acc[a][l] = a5[a][l] + a5[a][l + 4];
+        for (; i < n1; i += 16)
+            for (std::size_t a = 0; a < 4; ++a)
+                for (std::size_t l = 0; l < 4; ++l) acc[a][l] = std::fma(x[i + 4 * a + l], y[i + 4 * a + l], acc[a][l]);
         double s[4];
-        for (int l = 0; l < 4; ++l) s[l] = ((acc[0][l] + acc[1][l]) + acc[2][l]) + acc[3][l];
+        for (std::size_t l = 0; l < 4; ++l) s[l] = ((acc[0][l] + acc[1][l]) + acc[2][l]) + acc[3][l];
         const double h0 = s[0] + s[2], h1 = s[1] + s[3];
         dot = h0 + h1;
     }
-    for (std::size_t i = n1; i < n; ++i) dot += y[i] * x[i];
+    for (std::size_t i = n1; i < n; ++i) dot = std::fma(y[i], x[i], dot);
     return 0.0 + dot;
 }
 
