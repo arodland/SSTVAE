@@ -8,16 +8,21 @@ sstvae/qrss/cwid.py, held side by side in one process.
   the margin, a programme per character read); its dynamic programme
   `_dp` / `_trace` and the alphabet `_patterns` exactly.
 - The windows: `_unit_sums` (1e-10), `window_soft`, `window_llr` (both
-  keyings for CE, within one float32 ulp) and `keying_type` (equal) on
-  the Python tracker's own TrackResults of CE and L passes
+  keyings for CE; the bar's 1e-10 before the float32 cast read as at
+  most one float32 ulp in at most 1e-4 of the values) and `keying_type`
+  (equal) on the Python tracker's own TrackResults of CE and L passes
   (tests/qrss_demod_tracks.py), and with a channel given in place of the
   track's z_d.
 - `match` to 1e-10, `decode_units` exactly (calls, random flags, every
-  refusal), `_ln_i0` (see its test), `_combine`, and the reference's
-  errors.
+  refusal), `_ln_i0` (see its test), `_combine` (row-major stacks of up
+  to 200 rows exactly, and a column-major one refused, since numpy sums
+  that in another order), and the reference's errors.
 - The caller: `receiver._cw_result` (keying_type, window_soft, read of
   window_llr, match) on the SHORT tracks with cwid's rows assigned over
-  the reference's names: the same CwIdResult.
+  the reference's names, every one of them seen to run: the same
+  CwIdResult. And `receiver.receive_pass` of a SHORT CE pass and an
+  L_SHORT one the same way (slow): the same cw, round B's tracking from
+  its cw_known, and the same latents.
 
 Measured (2026-10-13): everything but `_ln_i0` bit-identical -- read_ml's
 Z and margin, the unit sums, every window value on every track (0 ulps),
@@ -211,7 +216,7 @@ def test_match(C):
         r, g = cwid.match(soft, call), C.match(soft, call)
         assert type(g) is type(r) is float
         worst = max(worst, _rel(g, r))
-    assert worst <= 1e-10, worst                  # measured 4.6e-16 (np.dot's order, emulated)
+    assert worst <= 1e-10, worst                  # measured 0: np.dot's order and FMAs, emulated
     s = rng.standard_normal((2, 176))
     for call in ("", "k1abc", "K1ABC!", "ABCDEFGHI", "0000000", 5):
         r, g = _outcome(cwid.match, s, call), _outcome(C.match, s, call)
@@ -289,8 +294,10 @@ def tracks(C):
 
 def test_windows_on_tracks(C, tracks):
     """window_soft / window_llr / _unit_sums / keying_type on every CE and
-    L track: float32 outputs within one ulp (1e-10 relative before the
-    cast), _unit_sums to 1e-10, keying_type equal."""
+    L track: float32 outputs within one ulp, in at most 1e-4 of the
+    values (1e-10 relative before the cast can move a value across a
+    float32 rounding boundary, rarely), _unit_sums to 1e-10, keying_type
+    equal. Measured here: all of it bit-identical."""
     worst = {"sums": 0.0, "ulps": 0, "units": 0, "n": 0}
     for label, tr in tracks.items():
         spec = _spec_of(label)
@@ -311,7 +318,7 @@ def test_windows_on_tracks(C, tracks):
         for call in (None, D.CALL, "VE3XYZ7"):
             assert C.keying_type(None, tr, spec, call) == cwid.keying_type(None, tr, spec, call), (label, call)
     assert worst["sums"] <= 1e-10, worst
-    assert worst["units"] <= 0.001 * worst["n"], worst
+    assert worst["units"] <= 1e-4 * worst["n"], worst
     print("windows", worst)
 
 
@@ -363,10 +370,23 @@ def test_cw_result_on_the_cpp(C, native, tracks, monkeypatch):
         return [RX._cw_result(tracks[lb], _spec_of(lb), h) for lb in labels for h in hdrs]
 
     ref = run()
+    calls = {}
+
+    def counted(name, fn):
+        def f(*a, **k):
+            calls[name] = calls.get(name, 0) + 1
+            return fn(*a, **k)
+        return f
+
     for (target, name), fn in rows(native.qrss).items():
         assert target == "sstvae.qrss.cwid"
-        monkeypatch.setattr(cwid, name, fn)
+        monkeypatch.setattr(cwid, name, counted(name, fn))
     got = run()
+    # every function _cw_result calls ran on the C++ (read_ml only inside
+    # the C++ read, never back through Python)
+    assert {n: calls.get(n, 0) > 0 for n in ("keying_type", "window_soft", "window_llr", "read", "match")} \
+        == dict.fromkeys(("keying_type", "window_soft", "window_llr", "read", "match"), True), calls
+    assert "read_ml" not in calls and "_unit_sums" not in calls, calls
     for (r, rk), (g, gk) in zip(ref, got):
         assert (g.text, g.keying, g.agrees) == (r.text, r.keying, r.agrees), (r, g)
         assert type(g.z_match) is float and _rel(g.z_match, r.z_match) <= 1e-10, (r, g)
@@ -374,3 +394,79 @@ def test_cw_result_on_the_cpp(C, native, tracks, monkeypatch):
         if rk is not None:
             assert np.array_equal(gk[0], rk[0]) and gk[1] == rk[1]
     assert any(r.text == D.CALL for r, _ in ref)
+
+
+# --- review probes -----------------------------------------------------------------------------
+
+def test_combine_many_rows_and_layouts(C):
+    """_combine's s.sum(axis=0) over stacks of 9 to 200 rows, where
+    numpy's order starts to matter: a row-major stack (float32 or
+    float64, reversed, strided or a broadcast row) is summed row by row
+    from row 0 as the C++ does -- equal bytes, and read_ml / read / match
+    of it equal too. A column-major stack numpy sums pairwise down each
+    column, which is another number from 8 rows up: the C++ refuses it
+    (NotImplementedError) rather than answer differently."""
+    rng = np.random.default_rng(31)
+    n_diff = 0
+    for n in (2, 9, 17, 40, 200):
+        a = rng.standard_normal((n, 176)) * 10.0 ** rng.uniform(-3, 3, (n, 176))
+        mu = 0.3 * a.std()
+        a = a + mu * (keying_units("K1ABC")[cwid.CALL_UNITS] * 2.0 - 1.0)
+        row_major = {"C": a, "C32": a.astype(np.float32), "rev": a[::-1], "revcols": a[:, ::-1],
+                     "step": np.repeat(a, 2, axis=0)[::2], "bcast": np.broadcast_to(a[0], (n, 176))}
+        for k, x in row_major.items():
+            (rs, rn), (gs, gn) = cwid._combine(x), C._combine(x)
+            assert gn == rn == n and gs.dtype == rs.dtype and np.array_equal(gs, rs), (n, k)
+            assert C.read_ml(x, margin=True) == cwid.read_ml(x, margin=True), (n, k)
+            assert C.read(x) == cwid.read(x) and C.match(x, "K1ABC") == cwid.match(x, "K1ABC"), (n, k)
+        for k, x in {"F": np.asfortranarray(a), "F32": np.asfortranarray(a.astype(np.float32)),
+                     "T": np.ascontiguousarray(a.T).T}.items():
+            for fn in (C._combine, C.read_ml, C.read, lambda v: C.match(v, "K1ABC")):
+                with pytest.raises(NotImplementedError, match="column-major"):
+                    fn(x)
+            n_diff += not np.array_equal(cwid._combine(x)[0], cwid._combine(np.ascontiguousarray(x))[0])
+    assert n_diff >= 6, n_diff                    # the refusal is not hiding an equal answer
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("which", ["ce-short", "l-short"])
+def test_receive_pass_on_the_cpp(C, native, monkeypatch, which):
+    """receiver.receive_pass of a SHORT CE pass (-9 dB) and an L_SHORT one
+    (-6 dB), once on the reference and once with every cwid row assigned
+    over the reference's names: the same cw (text, keying, agrees,
+    z_match to 1e-10), and -- since round B tracks with the keying
+    cw_known hands it -- the same header, latents and weights. ~10 s."""
+    from qrss_native.cwid import rows
+    from sstvae.qrss import frontend
+    from sstvae.qrss import receiver as RX
+    from qrss_fakes import L_CALL, l_scenario
+    from sstvae.qrss.constants import WAVEFORM_L
+
+    if which == "ce-short":
+        spec, sim = D._ce_sim("short", -9.0, 3)
+        det, call = D.flat_det(1500.0), D.CALL
+    else:
+        spec = lframe.L_SHORT
+        _, sim = l_scenario("l-short", -6.0, 2)
+        det, call = D.flat_det(1500.0, WAVEFORM_L), L_CALL
+    prep = RX.prepare(frontend.Capture(sim.fe, D.Q_TEST, sim.t0_index))
+
+    ref = RX.receive_pass(prep, spec, det)
+    calls = {}
+    for (_, name), fn in rows(native.qrss).items():
+        def counted(*a, _n=name, _f=fn, **k):
+            calls[_n] = calls.get(_n, 0) + 1
+            return _f(*a, **k)
+        monkeypatch.setattr(cwid, name, counted)
+    got = RX.receive_pass(prep, spec, det)
+    assert calls.get("window_soft") and calls.get("window_llr") and calls.get("read"), calls
+    assert ref is not None and got is not None and ref.cw is not None
+    r, g = ref.cw, got.cw
+    assert (g.text, g.keying, g.agrees) == (r.text, r.keying, r.agrees), (r, g)
+    assert type(g.z_match) is float and _rel(g.z_match, r.z_match) <= 1e-10, (r, g)
+    assert g.text == call and g.agrees, g
+    assert got.header == ref.header
+    for f in ("z", "w", "hdr_llr", "psi"):
+        a, b = getattr(got, f), getattr(ref, f)
+        assert np.asarray(a).dtype == np.asarray(b).dtype and np.array_equal(a, b, equal_nan=True), f
+    assert got.uid == ref.uid and got.f_hz == ref.f_hz

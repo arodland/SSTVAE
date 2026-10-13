@@ -22,6 +22,16 @@ The callers: `track_before_detect` and `acquire` (one frame and a CE + L
 tuple) on CE and L SHORT captures and on noise, with the rows of
 tests/qrss_native/acquire_tbd.py and acquire_stats.py assigned over
 acquire's names -- the same Acquisition, field for field.
+
+Review probes (end of file): `track_before_detect` on 14 random captures
+(TINY, L_TINY, SHORT; complex64 and complex128; fractional t0; tones,
+drifting tones and L-like pilots with sidebands; random candidates,
+bands, pfa, all_hits and shape specs) against its row, hits field for
+field; `shape_z`, `l_pilot_bins`, `_bins_path` and the Viterbi (one
+channel and a stacked three) at FULL size (896 and 2500 frames, float32
+and float64), bit for bit; a whole FULL slot through
+`track_before_detect` (slow, ~12 s); and a spy that the joint `acquire`
+A/B really ran the C++.
 """
 
 import dataclasses
@@ -427,3 +437,158 @@ def test_acquire_on_the_cpp(N, native, captures, monkeypatch):
     _deep(ref, got, "acquire", worst)
     assert ref[0].tbd and ref[0].preamble and ref[2].tbd and ref[4].tbd
     print("worst", worst)
+
+
+# --- review probes (2026-10-13): sizes, layouts and callers the tests above miss -------------
+
+def _synthetic_capture(spec, t0, rng, tones=(), l_signals=(), noise=1.0, dtype=np.complex64):
+    """A capture covering every A3 frame of `spec` (plus a little), complex
+    noise of variance `noise`, steady tones (f_audio, amplitude, drift Hz/min)
+    and L-like signals (pilot f_audio, pilot amplitude, data amplitude: a
+    pilot tone with band-limited noise 3.1-22 Hz below it)."""
+    from sstvae.qrss.constants import FE_CENTER_HZ
+
+    t = A.tbd_frame_starts(spec, None, t0, FE_FS)
+    n = int(t0 + (t[-1] + A.STFT_FRAME_S) * FE_FS) + 37
+    x = math.sqrt(noise / 2) * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    k = np.arange(n)
+    ts = (k - t0) / FE_FS
+    def phasor(turns):                                    # np.exp of complex is slow at 7 M
+        ph = 2 * np.pi * (turns - np.floor(turns))
+        return np.cos(ph) + 1j * np.sin(ph)
+
+    for f, a, drift in tones:
+        x += a * phasor((f - FE_CENTER_HZ) * ts + drift / 120.0 * ts * ts)
+    m = 1 << int(n - 1).bit_length()                      # one power-of-two FFT per signal
+    fr = np.fft.fftfreq(m, 1.0 / FE_FS) + FE_CENTER_HZ
+    for f, a_pilot, a_data in l_signals:
+        x += a_pilot * phasor((f - FE_CENTER_HZ) * ts)
+        band = np.flatnonzero((fr > f - 22.0) & (fr < f - 3.1))
+        X = np.zeros(m, dtype=np.complex128)
+        X[band] = rng.standard_normal(len(band)) + 1j * rng.standard_normal(len(band))
+        d = np.fft.ifft(X)[:n]
+        x += a_data * d / np.sqrt(np.mean(np.abs(d) ** 2))
+    return x.astype(dtype)
+
+
+def _hits_same(r, g, what):
+    """Every field equal (p_value to gumbel_p's few 1e-16), in order."""
+    worst = {"p_value": 0.0, "f_hz": 0.0}
+    assert len(g) == len(r), (what, len(r), len(g))
+    _deep(r, g, what, worst)
+    return worst
+
+
+def test_track_before_detect_random_captures(N, native):
+    """A3 on random TINY- and SHORT-length captures: fractional t0, tones
+    and L-like signals anywhere in (and past) the band, A1-like candidates
+    in and out of it, other bands and pfas, every shape_specs a caller
+    passes (none, CE, L, both): the reference's hits, field for field and
+    in order, with the C++ row's TbdHits."""
+    from qrss_native.acquire_tbd import rows
+
+    tbd = rows(native.qrss)[("sstvae.qrss.acquire", "track_before_detect")]
+    rng = np.random.default_rng(21)
+    shapes = (None, (frame.TINY,), (lframe.L_TINY,), (frame.TINY, lframe.L_TINY),
+              (lframe.L_SHORT, frame.SHORT))
+    n_hits = n_l = n_wf = 0
+    for i in range(14):
+        spec = (frame.TINY, lframe.L_TINY, frame.SHORT)[i % 3] if i % 5 else frame.TINY
+        t0 = float(rng.uniform(0, 20)) * FE_FS + float(rng.uniform(0, 1))
+        tones = [(float(rng.uniform(200, 2800)), float(rng.uniform(0.02, 0.3)),
+                  float(rng.uniform(-2, 2))) for _ in range(int(rng.integers(0, 4)))]
+        ls = [(float(rng.uniform(400, 2600)), float(rng.uniform(0.05, 0.3)),
+               float(rng.uniform(0.1, 0.6))) for _ in range(int(rng.integers(0, 3)))]
+        x = _synthetic_capture(spec, t0, rng, tones, ls,
+                               dtype=np.complex64 if i % 4 else np.complex128)
+        cands = [CarrierCandidate(float(f), 0.0, 0.0)
+                 for f in rng.uniform(150, 2850, int(rng.integers(0, 6)))]
+        cands += [CarrierCandidate(f, 0.0, 0.0) for f, _, _ in tones[:1]]
+        band = (A.BAND_HZ, (700.0, 2100.0), (1000, 1301))[i % 3]
+        kw = {"all_hits": bool(i % 2), "pfa": (A.TBD_PFA, 0.5, 1e-6)[i % 3], "band_hz": band}
+        sh = shapes[i % len(shapes)]
+        if sh is not None:
+            kw["shape_specs"] = sh
+        r = A.track_before_detect(x, t0, spec, cands, **kw)
+        g = tbd(x, t0, spec, cands, **kw)
+        _hits_same(r, g, f"case {i}")
+        n_hits += len(r)
+        n_l += sum(h.l_path is not None for h in r)
+        n_wf += sum(h.waveform is not None for h in r)
+    assert n_hits > 60 and n_l > 10 and n_wf > 5, (n_hits, n_l, n_wf)
+
+
+def test_full_size_pieces(N):
+    """FULL-pass sizes (896 frames, and past), where numpy's float64 sum of
+    float32 emissions runs over several 8192-element buffers: shape_z,
+    l_pilot_bins, _bins_path and the Viterbi (one channel and a stack)
+    stay bit-exact."""
+    rng = np.random.default_rng(22)
+    for dtype in (np.float32, np.float64):
+        for n in (896, 2500):
+            nb = 700
+            E = _grid(rng, n, nb, dtype)
+            E[:, 350] += dtype(1.0)
+            E[:, 262:338] += dtype(0.3)
+            E[rng.integers(0, n, n // 20)] = -1.0
+            bins = np.clip(350 + rng.integers(-3, 4, n), 0, nb - 1)
+            keep = rng.random(n) < 0.95
+            for kp in (None, keep):
+                r, g = A.shape_z(E, bins, kp), N.shape_z(E, bins, kp)
+                _same(np.array(g), np.array(r), f"shape_z {dtype} {n}")
+            f = 1000.0 + 0.25 * np.arange(nb)
+            t = -10.0 + 2.0 * np.arange(n)
+            _same(N.l_pilot_bins(E, f, t, np.array([1e-4, 1080.0]), keep),
+                  A.l_pilot_bins(E, f, t, np.array([1e-4, 1080.0]), keep), f"l_pilot_bins {n}")
+            _same_path(A._bins_path(E, f, t, bins), N._bins_path(E, f, t, bins), f"_bins_path {n}")
+            (rp, rz), (gp, gz) = A.tbd_viterbi(E[:, 190:511]), N.tbd_viterbi(E[:, 190:511])
+            _same(gp, rp, "path")
+            _same(gz, rz, "Z")
+            st = np.stack([E[:, c - 160:c + 161] for c in (160, 350, 539)])
+            (rp, rz), (gp, gz) = A.tbd_viterbi(st), N.tbd_viterbi(st)
+            _same(gp, rp, "stacked paths")
+            _same(gz, rz, "stacked Z")
+
+
+@pytest.mark.slow
+def test_track_before_detect_full_slot(N, native):
+    """A3 over a whole FULL slot (896 frames, 7 M FE samples) with the
+    joint shape test (FULL + L_FULL): a drifting carrier, an L-like signal
+    and noise, every channel's hit -- the same hits as the reference's.
+    Slow (about 12 s, most of it building the capture and the reference's
+    4.5 s); `test_full_size_pieces` holds the same sizes in the fast tier."""
+    from qrss_native.acquire_tbd import rows
+
+    tbd = rows(native.qrss)[("sstvae.qrss.acquire", "track_before_detect")]
+    rng = np.random.default_rng(23)
+    t0 = 12 * FE_FS + 0.25
+    x = _synthetic_capture(frame.FULL, t0, rng, tones=[(1234.5, 0.03, 0.8)],
+                           l_signals=[(1777.0, 0.03, 0.06)])
+    kw = {"all_hits": True, "shape_specs": (frame.FULL, lframe.L_FULL)}
+    r = A.track_before_detect(x, t0, frame.FULL, [CarrierCandidate(1234.5, 0.0, 0.0)], **kw)
+    g = tbd(x, t0, frame.FULL, [CarrierCandidate(1234.5, 0.0, 0.0)], **kw)
+    _hits_same(r, g, "FULL")
+    assert r[0].n_frames == 896 and len(r) > 30
+    assert any(abs(h.f_hz - 1234.5) < 1.0 for h in r)                 # a bare carrier: no shape
+    assert any(abs(h.f_hz - 1777.0) < 1.0 and h.waveform == WAVEFORM_L for h in r)
+
+
+def test_the_a_b_ran_the_cpp(N, native, captures, monkeypatch):
+    """The whole-caller A/B above compares acquire() with itself unless the
+    rows really replace the reference: count the native calls it makes."""
+    calls = {}
+    a = native.qrss.acquire_tbd
+    for name in ("track_before_detect", "_hit_to_detection", "frame_map"):
+        fn = getattr(a, name)
+
+        def spy(*args, _fn=fn, _name=name, **kw):
+            calls[_name] = calls.get(_name, 0) + 1
+            return _fn(*args, **kw)
+        monkeypatch.setattr(a, name, spy)
+    _apply(native, monkeypatch)
+    cap, spec = captures["l"]
+    joint = A.acquire(cap, (frame.SHORT, lframe.L_SHORT), preprocessed=True)
+    joint.detections((frame.SHORT, lframe.L_SHORT))
+    assert joint.tbd
+    for name in ("track_before_detect", "_hit_to_detection", "frame_map"):
+        assert calls.get(name, 0) > 0, (name, calls)          # TbdHit.f_hz: inside the C++

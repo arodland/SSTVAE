@@ -22,7 +22,8 @@
 // a stand-in all work). A frame without windows returns before anything
 // of the track is read, and keying_type of an L frame too, as in the
 // reference. Unit values are 1-D or 2-D (rows of 176); other ranks
-// NotImplementedError (0-D the reference's IndexError).
+// NotImplementedError (0-D the reference's IndexError), and so is a 2-D
+// stack in column-major order, which numpy sums in another order.
 
 #include "qrss/rx_types.hpp"
 
@@ -30,6 +31,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <span>
 #include <string>
@@ -167,6 +169,16 @@ cw::Combined combined_of(const py::object& o) {
     // s.shape[0] is what refuses it.
     if (a.ndim() == 0) throw py::index_error("tuple index out of range");
     if (a.ndim() > 2) not_implemented("unit values of rank " + std::to_string(a.ndim()));
+    // numpy's s.sum(axis=0) runs its inner loop along the axis with the
+    // smaller stride: row by row from 0 (what the core does) for a
+    // row-major stack -- reversed, strided or a broadcast row included --
+    // but a pairwise sum down each column for a column-major one, which
+    // differs from 8 rows up. No caller makes one (window_llr's rows and
+    // their stacks are row-major); refused rather than answered
+    // differently.
+    if (a.ndim() == 2 && a.shape(0) > 1 && a.shape(1) > 1 && a.strides(0) != 0 &&
+        std::abs(a.strides(0)) < std::abs(a.strides(1)))
+        not_implemented("unit values in column-major order");
     const std::vector<double> v = rx::vec<double>(a);
     if (a.ndim() == 1) return cw::combine(v, 1, v.size(), true);
     return cw::combine(v, static_cast<std::size_t>(a.shape(0)), static_cast<std::size_t>(a.shape(1)), false);
