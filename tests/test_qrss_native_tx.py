@@ -6,9 +6,9 @@ WHT and assembled from exact tables, so CE (float64) and L (complex128)
 symbols agree bit for bit -- every preset of both waveforms, from both
 kinds of source, at three slots, with and without use_int8. slot_samples
 is one ceil of the same float expression; check_pilot and every refusal
-are compared by type and text. transmit_audio stays Python (the CE and L
-audio are not ported yet). The adapters in tests/qrss_native/tx.py (what
---native-qrss installs) are used here.
+are compared by type and text. The pass's audio (transmit_audio, PassAudio
+and the WAV writers) is test_qrss_native_tx_audio.py's. The adapters in
+tests/qrss_native/tx.py (what --native-qrss installs) are used here.
 """
 
 import dataclasses

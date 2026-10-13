@@ -1,7 +1,8 @@
-"""sstvae.qrss.tx (the slot functions) -> sstvae_native.qrss.tx
-(native/core/qrss/tx). transmit_audio and _transmit_audio_l stay Python
-until the CE and L audio are ported; they reach these through the
-module's globals, so they run on the native slots.
+"""sstvae.qrss.tx -> sstvae_native.qrss.tx (native/core/qrss/tx): the slot
+functions and the pass's audio, transmit_audio and _transmit_audio_l
+(natively a PassAudio rendered whole). With these in place qrss_transmit.py
+and every test that transmits run on the C++ transmitter, so
+test_qrss_smoke.py is the C++-transmit -> Python-receive chain.
 
 Sources and headers are the reference's dataclasses, passed through. The
 one HeaderFields that comes back (a beacon file's own, from
@@ -30,4 +31,6 @@ def rows(q):
         (t, "slot_keying"): n.slot_keying,
         (t, "slot_samples"): n.slot_samples,
         (t, "check_pilot"): n.check_pilot,
+        (t, "transmit_audio"): n.transmit_audio,
+        (t, "_transmit_audio_l"): n._transmit_audio_l,
     }

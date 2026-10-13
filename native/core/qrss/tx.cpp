@@ -17,6 +17,7 @@
 #include "qrss/lwave.hpp"
 #include "qrss/morse.hpp"
 #include "qrss/precoder.hpp"
+#include "qrss/wav.hpp"
 
 namespace sstvae::qrss::tx {
 
@@ -254,9 +255,13 @@ Carrier::Carrier(double hz, std::optional<Rational> exact, std::string shown)
 
 Rational Carrier::fraction() const { return exact_ ? *exact_ : ce::carrier_fraction(hz_); }
 
+void check_ook(const frame::FrameSpec& spec, std::optional<bool> ook) {
+    if (spec.waveform() == frame::Waveform::L && ook.value_or(false)) refuse(L_OOK);
+}
+
 void check_pass_carrier(const frame::FrameSpec& spec, const Carrier& carrier, std::optional<bool> ook) {
+    check_ook(spec, ook);
     if (spec.waveform() == frame::Waveform::L) {
-        if (ook.value_or(false)) refuse(L_OOK);
         check_pilot(carrier.hz(), carrier.shown());
     } else {
         ce::check_carrier(carrier.hz(), carrier.shown());
@@ -278,12 +283,12 @@ PassAudio::PassAudio(const Source& src, const PassSpec& pass) : PassAudio(plan_p
 PassAudio::PassAudio(const PassPlan& plan, std::uint64_t q)
     : spec_(plan.pass.spec), l_(plan.waveform_l), amplitude_(plan.pass.amplitude) {
     const PassSpec& pass = plan.pass;
-    const Symbols sym = assemble_symbols(plan.slot, spec_, q);
+    Symbols sym = assemble_symbols(plan.slot, spec_, q);
     if (l_) {
         // lwave.frame_baseband(sym, spec, keying=keying, lead_in_s=lead_in_s),
         // which takes the symbols as complex128 (a CE frame's too, to fail
         // where the reference does, in lwave).
-        std::vector<cplx> s = sym.l;
+        std::vector<cplx> s = std::move(sym.l);
         if (sym.waveform != frame::Waveform::L) s.assign(sym.ce.begin(), sym.ce.end());
         std::optional<lwave::Keying> k;
         if (plan.keying) k = lwave::Keying::units(*plan.keying);
@@ -302,7 +307,8 @@ PassAudio::PassAudio(const PassPlan& plan, std::uint64_t q)
     step_ = t < 1.0 ? 1 : (t >= 0x1p63 ? std::numeric_limits<std::int64_t>::max() : static_cast<std::int64_t>(t));
     if (n_ < 0) refuse("negative dimensions are not allowed");   // np.empty(n)
     if (!l_) {
-        vals_ = ce::at_positions(sym.ce, spec_);
+        sym_ = std::move(sym.ce);
+        vals_ = ce::at_positions(sym_, spec_);
         std::tie(lo_, hi_) = ce::keyed_span_pos(spec_, pass.lead_in_s);
         ramp_ = CE_RAMP_S / config::T_SYM;
         ook_ = plan.ook;
@@ -318,45 +324,54 @@ PassAudio::PassAudio(const PassPlan& plan, std::uint64_t q)
 }
 
 void PassAudio::ce_baseband(std::int64_t a, std::int64_t b, cplx* z) const {
-    const std::int64_t L = ce::grid_step(config::FS);
-    const double t_num = config::T_NUM;
-    // tau of sample i: the 16 kHz grid index of t0 + (i - n_pre)/8000, in
-    // int64 (numpy's, wrapping), over 485 -- ce.baseband's exact path.
+    // The reference's chunk holding samples [a, b): transmit_audio's
+    // (from i0 = base), then ce.baseband's 2^18 within it ([c0, c1)).
+    const std::int64_t base = (a / step_) * step_;
+    const std::int64_t m_k = std::min(step_, n_ - base);
+    const std::int64_t j = (a - base) / BB_CHUNK;
+    const std::int64_t c0 = base + j * BB_CHUNK;
+    const std::int64_t c1 = base + std::min((j + 1) * BB_CHUNK, m_k);
+    // ce.baseband(sym, spec, FS, (i0 - n_pre) / FS, m, ...): start_s, then
+    // n0 = round(start_s * fs) and the exact path when start_s * fs is
+    // within 1e-9 of it.
+    const double start_s = static_cast<double>(base - n_pre_) / FS_D;   // int / int, correctly rounded
+    const double x = start_s * FS_D;
+    const double r = std::nearbyint(x);
+    const bool exact = std::fabs(x - r) < 1e-9;
+    const std::int64_t n0 = exact ? static_cast<std::int64_t>(r) : 0;
+    const auto L = static_cast<std::uint64_t>(ce::grid_step(config::FS));
+    // tau of sample i (the chunk's sample i - base): on the exact path the
+    // 16 kHz grid index (n0 + i - base) * 2 in int64 (numpy's, wrapping),
+    // over 485; else (start_s + (i - base) / fs) * time_scale / T_SYM.
     auto tau_of = [&](std::int64_t i) {
-        const auto g = static_cast<std::uint64_t>(i - n_pre_) * static_cast<std::uint64_t>(L);
-        return static_cast<double>(static_cast<std::int64_t>(g)) / t_num;
+        if (exact) {
+            const auto g = static_cast<std::uint64_t>(n0 + (i - base)) * L;
+            return static_cast<double>(static_cast<std::int64_t>(g)) / static_cast<double>(config::T_NUM);
+        }
+        return (start_s + static_cast<double>(i - base) / FS_D) * 1.0 / config::T_SYM;
     };
+    if (tau_of(c1 - 1) < lo_ - ramp_ || tau_of(c0) >= hi_ + ramp_) {
+        std::fill(z, z + (b - a), cplx(0.0, 0.0));   // unkeyed: stays zero
+        return;
+    }
+    // (env * a) * _turns_to_phasor(phi / (2 pi) + theta), as ce.baseband.
+    const std::int64_t len = b - a;
+    std::vector<double> tau(static_cast<std::size_t>(len));
+    for (std::int64_t k = 0; k < len; ++k) tau[static_cast<std::size_t>(k)] = tau_of(a + k);
+    std::vector<double> phi;
+    if (exact) {
+        phi = ce::grid_sum(config::FS, n0 + (a - base), len, vals_, ce::pulse_table());
+        for (double& v : phi) v = ce::BETA_F * v;   // phase_grid: _BETA * _grid_sum(...)
+    } else {
+        phi = ce::phase_at(tau, sym_, spec_);
+    }
     const ce::Keying* keying = keying_ ? &*keying_ : nullptr;
-    std::vector<double> tau;
-    for (std::int64_t i = a; i < b;) {
-        // The reference's chunk holding sample i: transmit_audio's step,
-        // then ce.baseband's 2^18 within it.
-        const std::int64_t base = (i / step_) * step_;
-        const std::int64_t m_k = std::min(step_, n_ - base);
-        const std::int64_t j = (i - base) / BB_CHUNK;
-        const std::int64_t c0 = base + j * BB_CHUNK;
-        const std::int64_t c1 = base + std::min((j + 1) * BB_CHUNK, m_k);
-        const std::int64_t stop = std::min(b, c1);
-        cplx* out = z + (i - a);
-        if (tau_of(c1 - 1) < lo_ - ramp_ || tau_of(c0) >= hi_ + ramp_) {
-            std::fill(out, out + (stop - i), cplx(0.0, 0.0));   // unkeyed: stays zero
-            i = stop;
-            continue;
-        }
-        // (env * a) * _turns_to_phasor(phi / (2 pi) + theta), as ce.baseband.
-        const std::int64_t len = stop - i;
-        tau.resize(static_cast<std::size_t>(len));
-        for (std::int64_t k = 0; k < len; ++k) tau[static_cast<std::size_t>(k)] = tau_of(i + k);
-        const std::vector<double> g = ce::grid_sum(config::FS, i - n_pre_, len, vals_, ce::pulse_table());
-        const ce::CwPhase cw = ce::cw_phase_turns(tau, spec_, keying, ook_);
-        for (std::size_t k = 0; k < static_cast<std::size_t>(len); ++k) {
-            const double amp = ce::ramp_envelope(tau[k], lo_, hi_, ramp_) * cw.a[k];
-            const double phi = ce::BETA_F * g[k];
-            const cplx e = ce::turns_to_phasor(phi / TWO_PI + cw.theta[k]);
-            // (amp + 0j) * e, numpy's complex product
-            out[k] = cplx(amp * e.real() - 0.0 * e.imag(), amp * e.imag() + 0.0 * e.real());
-        }
-        i = stop;
+    const ce::CwPhase cw = ce::cw_phase_turns(tau, spec_, keying, ook_);
+    for (std::size_t k = 0; k < static_cast<std::size_t>(len); ++k) {
+        const double amp = ce::ramp_envelope(tau[k], lo_, hi_, ramp_) * cw.a[k];
+        const cplx e = ce::turns_to_phasor(phi[k] / TWO_PI + cw.theta[k]);
+        // (amp + 0j) * e, numpy's complex product
+        z[k] = cplx(amp * e.real() - 0.0 * e.imag(), amp * e.imag() + 0.0 * e.real());
     }
 }
 
@@ -371,10 +386,19 @@ void PassAudio::render_any(std::int64_t i0, std::span<T> out) const {
         const std::int64_t len = std::min(BLOCK, m - a);
         const std::int64_t s0 = i0 + a;
         z.resize(static_cast<std::size_t>(len));
-        if (l_)
+        if (l_) {
             lwave::resample_into(bb_, bb_n0_, bb_fs_, config::FS, s0 - n_pre_, z);   // lwave.resample(bb, FS, i0 - n_pre, m)
-        else
-            ce_baseband(s0, s0 + len, z.data());
+        } else {
+            for (std::int64_t i = s0; i < s0 + len;) {
+                // up to the end of the reference's piece holding sample i
+                const std::int64_t base = (i / step_) * step_;
+                const std::int64_t m_k = std::min(step_, n_ - base);
+                const std::int64_t c1 = base + std::min(((i - base) / BB_CHUNK + 1) * BB_CHUNK, m_k);
+                const std::int64_t stop = std::min(s0 + len, c1);
+                ce_baseband(i, stop, z.data() + (i - s0));
+                i = stop;
+            }
+        }
         const std::vector<double> audio = ce::to_audio(z, config::FS, carrier_.num(), carrier_.den(), amplitude_, s0);
         for (std::size_t k = 0; k < audio.size(); ++k) out[static_cast<std::size_t>(a) + k] = static_cast<T>(audio[k]);
     }
@@ -407,6 +431,42 @@ std::vector<double> transmit_audio(const Source& src, const PassSpec& pass) {
     std::vector<double> out(static_cast<std::size_t>(audio.size()));
     audio.render(0, out);
     return out;
+}
+
+void write_wav(const PassAudio& audio, const std::string& path, bool float32, double peak) {
+    constexpr std::int64_t WAV_BLOCK = std::int64_t(1) << 16;
+    const std::int64_t n = audio.size();
+    std::vector<double> x;
+    if (float32) {
+        wav::Writer w(path, wav::Format::Float32, n);
+        std::vector<float> f;
+        for (std::int64_t a = 0; a < n; a += WAV_BLOCK) {
+            f.resize(static_cast<std::size_t>(std::min(WAV_BLOCK, n - a)));
+            audio.render(a, std::span<float>(f));
+            w.write(std::span<const float>(f));
+        }
+        w.close();
+        return;
+    }
+    // np.max(np.abs(x)) first (an empty pass is numpy's refusal, before the
+    // file is opened), then the samples.
+    if (n == 0) wav::peak_of(std::span<const double>());
+    double m = 0.0;
+    for (std::int64_t a = 0; a < n; a += WAV_BLOCK) {
+        x.resize(static_cast<std::size_t>(std::min(WAV_BLOCK, n - a)));
+        audio.render(a, std::span<double>(x));
+        m = wav::peak_of(x, m);
+    }
+    wav::Writer w(path, wav::Format::Int16, n);
+    std::vector<std::int16_t> q;
+    for (std::int64_t a = 0; a < n; a += WAV_BLOCK) {
+        x.resize(static_cast<std::size_t>(std::min(WAV_BLOCK, n - a)));
+        audio.render(a, std::span<double>(x));
+        q.resize(x.size());
+        for (std::size_t i = 0; i < x.size(); ++i) q[i] = wav::to_int16(x[i], m, peak);
+        w.write(std::span<const std::int16_t>(q));
+    }
+    w.close();
 }
 
 }  // namespace sstvae::qrss::tx
