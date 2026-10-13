@@ -93,7 +93,7 @@ void bind(py::module_& q) {
         }
         replace_m(mf, track);
         const bool cal = rx::as_bool(calibrate_kappa);
-        const Track t = read_track(track, CE_CLASSES | CE_TEMPLATE);
+        const Track t = read_track(track, CE_CLASSES | (cal ? CE_TEMPLATE : 0u));   // c: calibrate's alone
         const std::uint64_t qv = q_of(qq);
         const Estimator e = estimator_of(estimator);
         const dm::Extraction ex = dm::extract(t.view(), s, qv, e.name, cal, e.shown);

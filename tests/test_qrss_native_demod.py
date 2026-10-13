@@ -334,3 +334,28 @@ def test_probe_argument_forms(dm):
         for x, z in zip(a, b):
             assert np.asarray(z).dtype == np.asarray(x).dtype, label
             assert np.asarray(z).tobytes() == np.asarray(x).tobytes(), label
+
+
+@pytest.mark.parametrize("name", ("tiny", "short"))
+def test_probe_template_c_read_as_calibrate_reads_it(dm, name):
+    """tr.c is read by calibrate alone, as `tr.c[g].imag`: absent is an
+    AttributeError, None and a list TypeErrors (the port had read all three
+    as an empty template and failed with an IndexError), a real or short
+    array as numpy indexes it; extract without calibration never reads it."""
+    spec = frame.get(name)
+    for label in ("absent", "None", "list", "tuple", "dict", "short", "empty", "real"):
+        tr = D.synth(spec, spec.hdr_rho)
+        if label == "absent":
+            del tr.c
+        else:
+            tr.c = {"None": None, "list": list(tr.c), "tuple": tuple(tr.c), "dict": {}, "short": tr.c[:100],
+                    "empty": np.zeros(0, complex), "real": tr.c.real.copy()}[label]
+        for call in (lambda m: m.calibrate(tr), lambda m: m.extract(None, tr, spec, 5),
+                     lambda m: m.extract(None, tr, spec, 5, calibrate_kappa=False)):
+            a, b = P.outcome(lambda: call(demod)), P.outcome(lambda: call(dm))
+            if P.same_refusal(a, b):
+                continue
+            if isinstance(a, tuple) and len(a) == 2:
+                assert b == a, label
+            else:
+                P.same_extract(a, b)

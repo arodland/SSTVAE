@@ -13,7 +13,9 @@
 //   tr.pos, tr.m, tr.u, tr.P, tr.N, tr.psi as np.asarray arrays;
 // - CE's classes: tr.classes (an AttributeError if absent, as demod's
 //   data_estimates), then float(getattr(classes, "spread_rho", 0.0) or 0.0);
-// - CE's template tr.c where calibrate reads it (empty when absent);
+// - CE's template tr.c only where calibrate reads it, and as it reads it
+//   (tr.c[g].imag: an AttributeError when absent, a TypeError for None
+//   or a list); extract without calibration never touches it;
 // - L's getattr(tr, "meas", None) -- an empty mask is not None: it fails
 //   its first index, as numpy's does -- and getattr(getattr(tr,
 //   "classes", None), "hdr_bits", None), the bits as the reference reads
@@ -59,7 +61,7 @@ inline py::object opt_field(const py::handle& o, const char* name) {
 enum Need : unsigned {
     BASE = 0,
     CE_CLASSES = 1,   // tr.classes, its spread_rho
-    CE_TEMPLATE = 2,  // tr.c, if present
+    CE_TEMPLATE = 2,  // tr.c, as calibrate reads it (tr.c[g].imag)
     L_MEAS = 4,       // getattr(tr, "meas", None)
     L_HDR = 8,        // classes' hdr_bits, if any
 };
@@ -145,9 +147,16 @@ inline Track read_track(const py::handle& tr, fr::FrameSpec spec, unsigned need)
         if (rho.is_none()) rho = py::float_(0.0);
         t.spread_rho = rx::as_bool(rho) ? rx::as_double(rho) : 0.0;
     }
-    if (need & CE_TEMPLATE) {
-        const py::object c = opt_field(tr, "c");
-        if (!c.is_none()) t.c = rx::vec<cd>(c);
+    if (need & CE_TEMPLATE && t.spec.waveform() == fr::Waveform::CE && fr::layout(t.spec)->ref.size() >= 16) {
+        // calibrate's `tr.c[g].imag` with g an int64 array: tr.c is a
+        // plain attribute (AttributeError when absent), and only what an
+        // integer array indexes will do (None and a list are TypeErrors).
+        const py::object c = rx::field(tr, "c");
+        const py::object g0 = rx::np_module().attr("zeros")(0, py::arg("dtype") = "int64");
+        const py::object probe = py::reinterpret_steal<py::object>(PyObject_GetItem(c.ptr(), g0.ptr()));
+        if (!probe) throw py::error_already_set();
+        (void)probe.attr("imag");
+        t.c = rx::vec<cd>(c);
     }
     if (need & L_MEAS) {
         const py::object meas = opt_field(tr, "meas");
