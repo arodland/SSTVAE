@@ -50,6 +50,11 @@ std::vector<cdouble> fft(std::span<const double> x, std::optional<std::int64_t> 
 
 std::vector<cdouble> ifft(std::span<const cdouble> x, std::optional<std::int64_t> n) { return c2c(x, n, false); }
 
+void fft_inplace(std::span<cdouble> data) {
+    const std::size_t npts = points(std::nullopt, data.size());
+    c2c_inplace(data.data(), npts, 1.0, true);
+}
+
 std::vector<cdouble> rfft(std::span<const double> x, std::optional<std::int64_t> n) {
     const std::size_t npts = points(n, x.size());
     const std::size_t nout = npts / 2 + 1;

@@ -146,6 +146,16 @@ std::vector<Cx> solve3(double A[3][3], std::vector<Cx> b) {
 
 bool finite(Cx a) { return std::isfinite(a.r) && std::isfinite(a.i); }
 
+// `dxr[0]**2` in CubicSpline.__init__ squares an np.float64 *scalar*, and
+// numpy's scalar power calls libm pow, which is not x*x for every x (about
+// 1 in 1200 uniform draws differ by an ulp; an array's ** 2 does square).
+// GCC folds pow(x, 2.0) into x*x, so the exponent is read through a
+// volatile to keep the call.
+double scalar_square(double x) {
+    volatile double two = 2.0;
+    return std::pow(x, two);
+}
+
 }  // namespace
 
 CubicSpline::CubicSpline(std::span<const double> x, std::span<const std::complex<double>> y) {
@@ -202,7 +212,7 @@ CubicSpline::CubicSpline(std::span<const double> x, std::span<const std::complex
                 du[0] = real(x[2] - x[0]);
                 const double dd = x[2] - x[0];
                 const Cx t1 = mul(real((dx[0] + 2 * dd) * dx[1]), slope[0]);
-                const Cx t2 = mul(real(dx[0] * dx[0]), slope[1]);
+                const Cx t2 = mul(real(scalar_square(dx[0])), slope[1]);
                 b[0] = np_div(add(t1, t2), real(dd));
             }
             // not-a-knot end
@@ -210,7 +220,7 @@ CubicSpline::CubicSpline(std::span<const double> x, std::span<const std::complex
                 d[n - 1] = real(dx[n - 3]);
                 dl[n - 2] = real(x[n - 1] - x[n - 3]);
                 const double dd = x[n - 1] - x[n - 3];
-                const Cx t1 = mul(real(dx[n - 2] * dx[n - 2]), slope[n - 3]);
+                const Cx t1 = mul(real(scalar_square(dx[n - 2])), slope[n - 3]);
                 const Cx t2 = mul(real((2 * dd + dx[n - 2]) * dx[n - 3]), slope[n - 2]);
                 b[n - 1] = np_div(add(t1, t2), real(dd));
             }

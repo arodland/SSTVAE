@@ -49,6 +49,11 @@ std::vector<std::complex<double>> rfft(std::span<const double> x, std::optional<
 // numpy.
 std::vector<double> irfft(std::span<const std::complex<double>> x, std::optional<std::int64_t> n = std::nullopt);
 
+// np.fft.fft of data, in place (forward, unscaled): the transform numpy
+// applies to each row once its input is copied in, for callers that
+// reuse one buffer across many frames.
+void fft_inplace(std::span<std::complex<double>> data);
+
 // np.fft.fft(a, n, axis=1) of a row-major rows x cols matrix: rows x n.
 std::vector<std::complex<double>> fft_rows(std::span<const std::complex<double>> a, std::size_t rows,
                                            std::size_t cols, std::optional<std::int64_t> n = std::nullopt);
