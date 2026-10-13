@@ -22,8 +22,9 @@
 // (demod::np::cdiv), and Python's sum() of the kappa estimates.
 //
 // The track is a demod::TrackView (its meas is the tracker's mask, empty
-// for None; hdr_bits the classes' known header bits, nullopt while
-// unknown). Refusals: frame::WrongWaveform (Python's AssertionError,
+// for None unless meas_given says an empty mask was given, which then
+// fails its first index as numpy does; hdr_bits the classes' known header
+// bits, nullopt while unknown). Refusals: frame::WrongWaveform (Python's AssertionError,
 // "<what> is L's; 'short' is waveform 0: use demod's") from
 // kappa_estimates_l, calibrate_l and extract_l on a CE frame.
 

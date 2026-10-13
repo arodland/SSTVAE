@@ -14,8 +14,10 @@
 // - CE's classes: tr.classes (an AttributeError if absent, as demod's
 //   data_estimates), then float(getattr(classes, "spread_rho", 0.0) or 0.0);
 // - CE's template tr.c where calibrate reads it (empty when absent);
-// - L's getattr(tr, "meas", None) and getattr(getattr(tr, "classes",
-//   None), "hdr_bits", None).
+// - L's getattr(tr, "meas", None) -- an empty mask is not None: it fails
+//   its first index, as numpy's does -- and getattr(getattr(tr,
+//   "classes", None), "hdr_bits", None), the bits as the reference reads
+//   them (hdr_bits_of below).
 //
 // A dict (the C++ -> Python direction's records) is read by key. The grid
 // index of a position is p - tr.pos[0], which is what TrackResult.gi and
@@ -26,12 +28,14 @@
 #include "qrss/rx_types.hpp"
 
 #include <complex>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "qrss/config.hpp"
 #include "qrss/demod.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/pytext.hpp"
@@ -60,6 +64,39 @@ enum Need : unsigned {
     L_HDR = 8,        // classes' hdr_bits, if any
 };
 
+// classes.hdr_bits as the reference reads them, lazily: data_estimates_l
+// takes np.asarray(bits) only on a frame with the spread copy, and
+// frame.spread_signs then np.asarray(b, float64), refusing any shape but
+// (2474,) ("hdr_bits must be 2474 values of 0/1") and computing 1 - 2b
+// from whatever values it holds. The core carries the bits as uint8 0/1
+// (trackbase's LClasses), so 2,474 values of exactly 0/1 -- any dtype --
+// go through exactly, and anything else (another shape, values that are
+// not 0/1, NaN, what numpy cannot convert) goes as no bits at all: the
+// core's spread_signs then refuses it with that text exactly where the
+// reference reads it, and never where the reference ignores the bits (a
+// frame without the spread copy). Values other than 0/1 of the right
+// shape are thus refused where the reference computes with them -- a
+// deviation, but a refusal, never a different number (a uint8 cast had
+// turned -1 into 255 and 0.5 into 0).
+inline std::vector<std::uint8_t> hdr_bits_of(const py::handle& bits) {
+    std::vector<double> v;
+    try {
+        const py::object np = rx::np_module();
+        const py::array b = np.attr("asarray")(np.attr("asarray")(bits), py::arg("dtype") = "float64");
+        if (b.ndim() != 1 || b.shape(0) != sstvae::qrss::config::N_HDR_BITS) return {};
+        v = from_numpy<double>(b);
+    } catch (py::error_already_set& e) {
+        if (e.matches(PyExc_ValueError) || e.matches(PyExc_TypeError)) return {};
+        throw;
+    }
+    std::vector<std::uint8_t> out(v.size());
+    for (std::size_t i = 0; i < v.size(); ++i) {
+        if (v[i] != 0.0 && v[i] != 1.0) return {};
+        out[i] = v[i] == 1.0 ? 1 : 0;
+    }
+    return out;
+}
+
 // The arrays a TrackView points into, owned.
 struct Track {
     fr::FrameSpec spec;
@@ -67,6 +104,7 @@ struct Track {
     std::vector<cd> m, u, c;
     std::vector<double> P, N, psi;
     std::vector<std::uint8_t> meas;
+    bool meas_given = false;
     double spread_rho = 0.0;
     std::optional<std::vector<std::uint8_t>> hdr_bits;
 
@@ -81,6 +119,7 @@ struct Track {
         v.N = N;
         v.psi = psi;
         v.meas = meas;
+        v.meas_given = meas_given;
         v.spread_rho = spread_rho;
         if (hdr_bits) v.hdr_bits = std::span<const std::uint8_t>(*hdr_bits);
         return v;
@@ -92,7 +131,7 @@ inline fr::FrameSpec track_spec(const py::handle& tr) { return rx::spec(rx::fiel
 
 // The rest of the track, after its spec (`spec`), per `need`.
 inline Track read_track(const py::handle& tr, fr::FrameSpec spec, unsigned need) {
-    Track t{std::move(spec), {}, {}, {}, {}, {}, {}, {}, {}, 0.0, std::nullopt};
+    Track t{std::move(spec), {}, {}, {}, {}, {}, {}, {}, {}, false, 0.0, std::nullopt};
     t.pos = rx::vec<std::int64_t>(rx::field(tr, "pos"));
     t.m = rx::vec<cd>(rx::field(tr, "m"));
     t.u = rx::vec<cd>(rx::field(tr, "u"));
@@ -112,11 +151,19 @@ inline Track read_track(const py::handle& tr, fr::FrameSpec spec, unsigned need)
     }
     if (need & L_MEAS) {
         const py::object meas = opt_field(tr, "meas");
-        if (!meas.is_none()) t.meas = rx::vec_bool(meas);
+        if (!meas.is_none()) {   // np.asarray(meas, dtype=bool)[gi], lazily
+            const py::array a = rx::np_module().attr("asarray")(meas, py::arg("dtype") = "bool");
+            // Only a 1-D mask indexes as the reference's does; any other
+            // shape goes as an empty one, which fails its first index
+            // (IndexError where numpy's message would name the 0-d array,
+            // or 2-D rows -- never a value numpy would not give).
+            if (a.ndim() == 1) t.meas = from_numpy<std::uint8_t>(a.attr("view")("uint8"));
+            t.meas_given = true;
+        }
     }
     if (need & L_HDR) {
         const py::object bits = opt_field(opt_field(tr, "classes"), "hdr_bits");
-        if (!bits.is_none()) t.hdr_bits = rx::vec<std::uint8_t>(bits);
+        if (!bits.is_none()) t.hdr_bits = hdr_bits_of(bits);
     }
     return t;
 }

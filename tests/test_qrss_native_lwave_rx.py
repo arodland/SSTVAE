@@ -13,6 +13,7 @@ diagnostic and stays Python.)
 import numpy as np
 import pytest
 
+import qrss_demod_probes as P
 from qrss_native import require
 from sstvae.qrss import lwave
 
@@ -72,3 +73,23 @@ def test_refusals(lr):
                   lambda: lr.matched_filter(z, 250, 0, [1], 0), ValueError)
     _raises_alike(lambda: lwave.matched_filter([], 250, 0, [1]), lambda: lr.matched_filter([], 250, 0, [1]),
                   IndexError)
+
+
+# ---- adversarial probes (review stage) ----------------------------------------------
+
+@pytest.mark.parametrize("label,args", P.mf_cases(2), ids=lambda v: v if isinstance(v, str) else "")
+def test_probe_matched_filter_argument_forms(lr, label, args):
+    P.check_mf_case(lwave.matched_filter, lr.matched_filter, args)
+
+
+def test_probe_matched_filter_full_pass(lr):
+    """An l-full pass's whole grid at 250 Hz (int64 index arithmetic at full size)."""
+    from sstvae.qrss import lframe
+    spec = lframe.get("l-full")
+    rng = np.random.default_rng(12)
+    pos = np.arange(-8, spec.n_pos + 8)
+    n0 = int(np.floor((pos[0] - 10) * 970 / 64))
+    n = int(np.ceil((pos[-1] + 10) * 970 / 64)) - n0
+    z = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    a, b = lwave.matched_filter(z, 250, n0, pos), lr.matched_filter(z, 250, n0, pos)
+    assert b.dtype == a.dtype and b.tobytes() == a.tobytes()

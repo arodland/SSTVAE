@@ -14,6 +14,7 @@ through the module.
 import numpy as np
 import pytest
 
+import qrss_demod_probes as P
 from qrss_native import require
 from sstvae.qrss import picture, render
 
@@ -112,3 +113,28 @@ def test_refusals(rd):
     _raises_alike(lambda: render.reference_w(ok, 3), lambda: rd.reference_w(ok, 3), IndexError)
     _raises_alike(lambda: render.reference_w(ok[:5], 0), lambda: rd.reference_w(ok[:5], 0),
                   ValueError)
+
+
+# ---- adversarial probes (review stage) ----------------------------------------------
+
+def test_probe_extreme_accumulators(rd):
+    """Random accumulators with denormal, float32-edge and huge W, -0.0, and S
+    up to 1e300: latents that overflow float32 (S/W past 3.4e38) become inf
+    by the same cast, the rest bit-identical; float64 and float32 stores,
+    every mode."""
+    rng = np.random.default_rng(5)
+    for trial in range(6):
+        W = rng.exponential(1, (NG, GL)) * (rng.random((NG, GL)) < 0.7)
+        S = rng.standard_normal((NG, GL)) * rng.choice([1, 1e30, 1e300], (NG, GL))
+        k = rng.integers(0, NG * GL, 200)
+        W.flat[k] = rng.choice([5e-324, 1e-310, 1.4e-45, 1e-40, 3.4e38, 1e300, -0.0], 200)
+        mode = trial % 3
+        for dt in (np.float64, np.float32):
+            Sd, Wd = S.astype(dt), W.astype(dt)
+            a = P.outcome(lambda: render.decoder_planes(Sd, Wd, mode))
+            b = P.outcome(lambda: rd.decoder_planes(Sd, Wd, mode))
+            if P.same_refusal(a, b):                     # 1e300 is inf in float32: refused
+                continue
+            _bits_equal(b[0], a[0])
+            _bits_equal(b[1], a[1])
+            assert rd.reference_w(Wd, mode) == render.reference_w(Wd, mode)

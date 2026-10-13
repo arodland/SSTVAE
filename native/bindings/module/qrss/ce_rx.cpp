@@ -27,6 +27,7 @@
 #include "qrss/ce_rx.hpp"
 #include "qrss/config.hpp"
 #include "qrss/frame.hpp"
+#include "qrss/demod_rx.hpp"
 #include "qrss/mf_rx.hpp"
 #include "qrss/rx_types.hpp"
 
@@ -105,6 +106,7 @@ py::array shaped(const std::vector<cd>& v, const std::vector<std::int64_t>& shap
 
 void bind(py::module_& q) {
     rx::register_translators();
+    demod_rx::register_wrong_waveform();   // an L frame's AssertionError
     py::module_ m = q.def_submodule("ce_rx", "Port of sstvae.qrss.ce, the receive side the receiver uses");
 
     m.def("mean_template", [](const py::object& tau_pos, const py::object& mu, const py::object& nu,
@@ -113,6 +115,7 @@ void bind(py::module_& q) {
         const Doubles tau = doubles(tau_pos);
         const fr::FrameSpec s = rx::spec(spec);
         const std::vector<double> mv = checked(mu, s, "sym");
+        cr::require_ce_layout(s);   // frame.layout, between at_positions' two shape checks
         const std::vector<double> nv = checked(nu, s, "var");
         std::optional<double> lo;
         if (!keyed_from_pos.is_none()) lo = rx::as_double(keyed_from_pos);
@@ -132,6 +135,7 @@ void bind(py::module_& q) {
         ce::grid_step(f);
         const fr::FrameSpec s = rx::spec(spec);
         const std::vector<double> mv = checked(mu, s, "sym");
+        cr::require_ce_layout(s);
         const std::vector<double> nv = checked(nu, s, "var");
         const auto k = keying_of(keying, s);
         return to_numpy(cr::mean_template_grid(f, a, b, mv, nv, s, ptr(k), rx::as_bool(ook)));

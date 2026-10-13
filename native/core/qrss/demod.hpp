@@ -93,7 +93,9 @@ struct TrackView {
     std::span<const double> P;
     std::span<const double> N;
     std::span<const double> psi;
-    std::span<const std::uint8_t> meas;       // 0/1 per grid position; empty is None
+    std::span<const std::uint8_t> meas;       // 0/1 per grid position; empty is None ...
+    bool meas_given = false;                  // ... unless this says an empty mask was given
+                                              // (np.asarray(meas)[gi] then raises IndexError)
     double spread_rho = 0.0;                  // float(getattr(classes, "spread_rho", 0) or 0)
     std::optional<std::span<const std::uint8_t>> hdr_bits;   // L's classes.hdr_bits; nullopt is None
 };

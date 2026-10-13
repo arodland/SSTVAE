@@ -189,7 +189,8 @@ std::vector<std::pair<double, double>> kappa_estimates_l(const TrackView& tr) {
                 const double u2 = sq(lwave::np_abs(tr.u[demod::np::index(gi[i], tr.u.size())]));
                 const double psi = tr.psi[demod::np::index(gi[i], tr.psi.size())];
                 const double P_ = P / (u2 * (psi * psi));
-                const bool meas = !tr.meas.empty() && tr.meas[demod::np::index(gi[i], tr.meas.size())] != 0;
+                const bool meas = (tr.meas_given || !tr.meas.empty()) &&
+                                  tr.meas[demod::np::index(gi[i], tr.meas.size())] != 0;
                 pm[i] = meas ? P_ : 0.0;
             }
             const double p_m = math::mean(pm);

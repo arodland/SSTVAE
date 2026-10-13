@@ -14,6 +14,7 @@
 //   ce._mean_template_grid(250, 2000, 5, mu, nu, frame.TINY)
 
 #include <complex>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
@@ -120,6 +121,17 @@ static void test_mean_template() {
                                   "sym has shape (3,), expected (1753,)", "mu's length");
     throws<std::invalid_argument>([&] { (void)cr::mean_template(tau, mu, std::vector<double>(3), spec); },
                                   "var has shape (3,), expected (1753,)", "nu's length");
+    // An L frame fails the reference's CE layout assertion (frame.layout,
+    // reached from at_positions after mu's shape check and before nu's).
+    const auto& lshort = fr::get_l("l-short");
+    const auto& ltiny = fr::get_l("l-tiny");
+    const std::vector<double> mul(static_cast<std::size_t>(lshort.n_sym())), mut(static_cast<std::size_t>(ltiny.n_sym()));
+    throws<fr::WrongWaveform>([&] { (void)cr::mean_template(tau, mul, std::vector<double>(3), lshort); },
+                              "1237 header slots for 2474 bits", "an L frame, before nu's shape");
+    throws<fr::WrongWaveform>([&] { (void)cr::mean_template_grid(250, 0, 4, mut, mut, ltiny); },
+                              "512 data slots for 1024 latents", "an L frame with no header");
+    throws<std::invalid_argument>([&] { (void)cr::mean_template(tau, std::vector<double>(3), nu, lshort); },
+                                  "sym has shape (3,), expected (3834,)", "mu's shape is checked first");
 }
 
 int main() {

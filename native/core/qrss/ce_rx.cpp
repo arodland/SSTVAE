@@ -94,10 +94,36 @@ std::vector<T> mf_impl(std::span<const T> z, std::int64_t step, std::int64_t n0,
 
 }  // namespace
 
+// CE's layout, whose slot counts an L frame never fits: its header has
+// 1,237 non-reference symbols for 2,474 bits and its data half as many
+// symbols as latents. (An L frame with no data and no header would pass
+// the reference's assertions and be laid out as CE; none exists, and that
+// one is refused too.)
+void require_ce_layout(const FrameSpec& spec) {
+    if (spec.waveform() == frame::Waveform::CE) return;
+    const std::int64_t n_sym = spec.n_sym(), n_pre = spec.n_pre(), n_hdr = spec.n_hdr();
+    std::int64_t hdr_nonref = 0, data = 0;
+    for (std::int64_t s = 0; s < n_sym; ++s) {
+        const std::int64_t j = s - n_pre;
+        const bool is_ref = j >= 0 && j % config::REF_PERIOD == 0;
+        if (is_ref) continue;
+        if (s >= n_pre && s < n_pre + n_hdr) ++hdr_nonref;
+        if (s >= n_pre + n_hdr) ++data;
+    }
+    if (n_hdr && hdr_nonref != config::N_HDR_BITS + 1)
+        throw frame::WrongWaveform(std::to_string(hdr_nonref) + " header slots for " +
+                                   std::to_string(config::N_HDR_BITS) + " bits");
+    if (data != spec.n_data())
+        throw frame::WrongWaveform(std::to_string(data) + " data slots for " + std::to_string(spec.n_data()) +
+                                   " latents");
+    throw frame::WrongWaveform("ce.mean_template is CE's; " + frame::py_repr(spec.name()) + " is waveform 1");
+}
+
 std::vector<cplx> mean_template(std::span<const double> tau, std::span<const double> mu, std::span<const double> nu,
                                 const FrameSpec& spec, const ce::Keying* keying, bool ook,
                                 std::optional<double> keyed_from_pos) {
     check_shape(spec, mu.size(), "sym");
+    require_ce_layout(spec);
     check_shape(spec, nu.size(), "var");
     const auto [phi, v] = ce::phase_at(tau, mu, nu, spec);
     const double lo = keyed_from_pos ? *keyed_from_pos : spec.keyed_start_pos();
@@ -115,6 +141,7 @@ std::vector<cplx> mean_template_grid(std::int64_t fs, std::int64_t n0, std::int6
     for (std::size_t i = 0; i < count; ++i)
         tau[i] = static_cast<double>((n0 + static_cast<std::int64_t>(i)) * step) / static_cast<double>(config::T_NUM);
     check_shape(spec, mu.size(), "sym");
+    require_ce_layout(spec);
     std::vector<double> phi = ce::phase_grid(fs, n0, n, mu, spec);
     check_shape(spec, nu.size(), "var");
     std::vector<double> v = ce::var_grid(fs, n0, n, nu, spec);

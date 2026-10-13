@@ -26,8 +26,9 @@
 //   rather than bitwise wherever v != 0.
 //
 // Refusals are ce.hpp's (std::invalid_argument with the reference's
-// ValueError texts: the sym/var shapes, fs, a keying), plus numpy's
-// IndexError text for a matched filter over an empty z.
+// ValueError texts: the sym/var shapes, fs, a keying), frame::WrongWaveform
+// for an L frame given to the mean template (require_ce_layout), plus
+// numpy's IndexError text for a matched filter over an empty z.
 
 #ifndef SSTVAE_QRSS_CE_RX_HPP
 #define SSTVAE_QRSS_CE_RX_HPP
@@ -45,6 +46,13 @@ namespace sstvae::qrss::ce_rx {
 
 using cplx = std::complex<double>;
 using frame::FrameSpec;
+
+// frame.layout(spec) as the reference reaches it, from at_positions right
+// after mu's shape check: an L frame is frame::WrongWaveform with the text
+// of the assertion Python fails there ("1237 header slots for 2474 bits",
+// or for a frame with no header "512 data slots for 1024 latents"). Both
+// mean templates call it between mu's and nu's checks, as the reference.
+void require_ce_layout(const FrameSpec& spec);
 
 // mean_template(tau_pos, mu, nu, spec, keying, ook, keyed_from_pos): the
 // mean waveform at each tau (symbols from t0). mu and nu hold n_sym values

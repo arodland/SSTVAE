@@ -17,6 +17,7 @@ Contract 1e-12 (absolute, the values being O(1)); measured 2026-10-13:
 import numpy as np
 import pytest
 
+import qrss_demod_probes as P
 from qrss_native import require
 from sstvae.qrss import ce, frame, morse
 
@@ -138,3 +139,95 @@ def test_mean_template_refusals(cr):
     ms, ns_ = _symbols(short, 6)
     _raises_alike(lambda: ce.mean_template([0.0], ms, ns_, short, np.ones((2, 5))),
                   lambda: cr.mean_template([0.0], ms, ns_, short, np.ones((2, 5))), ValueError)
+
+
+# ---- adversarial probes (review stage) ----------------------------------------------
+
+@pytest.mark.parametrize("label,args", P.mf_cases(), ids=lambda v: v if isinstance(v, str) else "")
+def test_probe_matched_filter_argument_forms(cr, label, args):
+    P.check_mf_case(ce.matched_filter, cr.matched_filter, args)
+
+
+def test_probe_matched_filter_refuses_2d_pos(cr):
+    """A 2-D pos: the reference fails a broadcast; the port refuses it outright
+    (both ValueError; a flattened read had returned values)."""
+    z = np.ones(500)
+    with pytest.raises(ValueError):
+        ce.matched_filter(z, 250, 0, [[1, 2], [3, 4]])
+    with pytest.raises(ValueError):
+        cr.matched_filter(z, 250, 0, [[1, 2], [3, 4]])
+
+
+def test_probe_matched_filter_full_pass(cr):
+    """A FULL pass's whole grid at 250 Hz, positions -8 .. n_pos + 8 (int64
+    index arithmetic at full size), real and complex."""
+    spec = frame.get("full")
+    rng = np.random.default_rng(11)
+    pos = np.arange(-8, spec.n_pos + 8)
+    n0 = int(np.floor((pos[0] - 10) * 485 / 64))
+    n = int(np.ceil((pos[-1] + 10) * 485 / 64)) - n0
+    z = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    for zz in (z, z.real.copy()):
+        a, b = ce.matched_filter(zz, 250, n0, pos), cr.matched_filter(zz, 250, n0, pos)
+        assert b.dtype == a.dtype and b.tobytes() == a.tobytes()
+
+
+@pytest.mark.parametrize("name", ("medium", "full", "short-v1", "full-spreadonly"))
+def test_probe_mean_template_presets(cr, name):
+    """Every other preset, at sparse times through the whole frame and a
+    lead-in, and non-finite times (NaN, +-inf, 1e300)."""
+    spec = frame.get(name)
+    mu, nu = _symbols(spec, 12)
+    rng = np.random.default_rng(13)
+    tau = np.concatenate([rng.uniform(-40.0, spec.n_pos + 40.0, 4000),
+                          [np.nan, np.inf, -np.inf, 1e300, -1e300, 2.0**62, -0.0, 0.5, -0.5]])
+    keying = morse.keying_units(CALL) if spec.n_win else None
+    for kf in (None, -30.25):
+        a = P.outcome(lambda: ce.mean_template(tau, mu, nu, spec, keying, keyed_from_pos=kf))
+        b = cr.mean_template(tau, mu, nu, spec, keying, keyed_from_pos=kf)
+        P.rel(b.real, a.real, tol=np.inf)                 # the same non-finite values
+        P.rel(b.imag, a.imag, tol=np.inf)
+        fin = np.isfinite(a)
+        _close(b[fin], a[fin])
+
+
+def test_probe_mean_template_non_finite_symbols(cr):
+    """NaN/inf in mu or nu and negative nu: the same non-finite pattern in the
+    closed form, the rest to 1e-12 relative."""
+    spec = frame.get("tiny")
+    mu, nu = _symbols(spec, 14)
+    tau = np.linspace(-20, spec.n_pos + 5, 30001)
+    for what in ("mu nan", "mu inf", "nu inf", "nu nan", "nu negative"):
+        m2, n2 = mu.copy(), nu.copy()
+        if what == "mu nan":
+            m2[100] = np.nan
+        elif what == "mu inf":
+            m2[100] = np.inf
+        elif what == "nu inf":
+            n2[100] = np.inf
+        elif what == "nu nan":
+            n2[100] = np.nan
+        else:
+            n2[100:110] = -5.0
+        a = P.outcome(lambda: ce.mean_template(tau, m2, n2, spec))
+        b = P.outcome(lambda: cr.mean_template(tau, m2, n2, spec))
+        P.rel(b.real, a.real, what)
+        P.rel(b.imag, a.imag, what)
+
+
+def test_probe_mean_template_refuses_an_l_frame(cr):
+    """ce's mean template on an L frame: Python's frame.layout fails its
+    assertion (after mu's shape check, before nu's); the port had laid it
+    out as L and returned values."""
+    from sstvae.qrss import lframe
+    for name in lframe.PRESETS:
+        spec = lframe.get(name)
+        mu, nu = np.zeros(spec.n_sym), np.ones(spec.n_sym)
+        _raises_alike(lambda: ce.mean_template([0.0, 1.0], mu, nu, spec),
+                      lambda: cr.mean_template([0.0, 1.0], mu, nu, spec), AssertionError)
+        _raises_alike(lambda: ce.mean_template([0.0], mu, nu[:3], spec),
+                      lambda: cr.mean_template([0.0], mu, nu[:3], spec), AssertionError)
+        _raises_alike(lambda: ce.mean_template([0.0], mu[:3], nu, spec),
+                      lambda: cr.mean_template([0.0], mu[:3], nu, spec), ValueError)
+        _raises_alike(lambda: ce._mean_template_grid(250, -50, 100, mu, nu, spec),
+                      lambda: cr._mean_template_grid(250, -50, 100, mu, nu, spec), AssertionError)

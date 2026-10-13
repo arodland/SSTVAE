@@ -28,6 +28,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import qrss_demod_probes as P
 import qrss_demod_tracks as D
 from qrss_native import require
 from sstvae.qrss import demod, frame, lframe
@@ -233,3 +234,103 @@ def test_all_erased_block(dm):
         a, b = demod.block_estimate(y, s2, Q, est), dm.block_estimate(y, s2, Q, est)
         for x, z in zip(a, b):
             assert np.array_equal(z, x)
+
+
+# ---- adversarial probes (review stage) ----------------------------------------------
+# Inputs the tracker never produces, to try to break the port: random stub
+# tracks on every preset (lead-ins, extra trailing positions, exact-zero and
+# denormal spectra), non-finite grids, block lengths around every pairwise
+# and chunk boundary, and the argument forms the bindings must accept as
+# the reference does. Measured bit-identical throughout (2026-10-13); the
+# assertions are the bars.
+
+CE_PRESETS = ("tiny", "short", "medium", "full", "short-v1", "full-spreadonly")
+
+
+@pytest.mark.parametrize("name", CE_PRESETS)
+def test_probe_random_tracks(dm, name):
+    spec = frame.get(name)
+    rng = np.random.default_rng(sum(map(ord, name)))
+    for rho in (0.0, spec.hdr_rho):
+        for nasty in (False, True):
+            tr = P.random_track(spec, rng, lead=int(rng.integers(0, 300)), extra=int(rng.integers(0, 50)),
+                                spread_rho=rho, nasty=nasty)
+            ka, kb = P.outcome(lambda: demod.calibrate(tr)), P.outcome(lambda: dm.calibrate(tr))
+            assert kb[1] is ka[1]
+            P.same_kappa(kb[0], ka[0])
+            for est in ("joint", "plain"):
+                P.same_extract(P.outcome(lambda: demod.extract(None, tr, spec, 77, est)),
+                               P.outcome(lambda: dm.extract(None, tr, spec, 77, est)))
+
+
+@pytest.mark.parametrize("what", P.EDGES)
+def test_probe_edge_tracks(dm, what):
+    """NaN/inf in u, psi, P, N, m; no position at or after t0; all-zero u or psi."""
+    spec = frame.get("short")
+    tr = P.edge_track(spec, np.random.default_rng(len(what)), what)
+    a = P.outcome(lambda: demod.extract(None, tr, spec, 3))
+    b = P.outcome(lambda: dm.extract(None, tr, spec, 3))
+    if not P.same_refusal(a, b):
+        P.same_extract(a, b)
+    a, b = P.outcome(lambda: demod.calibrate(tr)), P.outcome(lambda: dm.calibrate(tr))
+    if not P.same_refusal(a, b):
+        assert b[1] is a[1]
+        P.same_kappa(b[0], a[0])
+    a, b = P.outcome(lambda: demod.data_estimates(tr)), P.outcome(lambda: dm.data_estimates(tr))
+    if not P.same_refusal(a, b):
+        P.rel(b[0], a[0])
+        P.rel(b[1], a[1])
+        assert b[2] == a[2]
+
+
+def test_probe_block_estimate_lengths(dm):
+    """Every length to 69 and around 128/256/4096, a FULL pass's 50600; s2 with
+    erasures, NaN, negative and 1e300 entries."""
+    rng = np.random.default_rng(99)
+    for n in list(range(70)) + [127, 128, 129, 255, 256, 257, 1000, 4095, 4096, 4097, 50600]:
+        y = rng.standard_normal(n) * 3
+        s2 = P.nasty_s2(rng, n)
+        for est in ("joint", "plain"):
+            a = P.outcome(lambda: demod.block_estimate(y, s2, 5, est))
+            b = P.outcome(lambda: dm.block_estimate(y, s2, 5, est))
+            if not P.same_refusal(a, b):
+                P.f32(b[0], a[0], ("z", n, est))
+                P.f32(b[1], a[1], ("v", n, est))
+
+
+def test_probe_argument_forms(dm):
+    rng = np.random.default_rng(3)
+    spec = frame.get("short")
+    y = rng.standard_normal(spec.n_data)
+    s2 = rng.exponential(1, spec.n_data)
+    lspec = lframe.get("l-short")
+    yl, s2l = rng.standard_normal(lspec.n_data), rng.exponential(1, lspec.n_data)
+    calls = [
+        ("np.str_ estimator", lambda m: m.block_estimate(y, s2, 5, np.str_("plain"))),
+        ("q np.uint64", lambda m: m.block_estimate(y, s2, np.uint64(2**63 + 5))),
+        ("q 2**64-1", lambda m: m.block_estimate(y, s2, 2**64 - 1)),
+        ("q -1", lambda m: m.block_estimate(y, s2, -1)),
+        ("q 2**64", lambda m: m.block_estimate(y, s2, 2**64)),
+        ("lists", lambda m: m.block_estimate(list(y[:64]), list(s2[:64]), 5)),
+        ("empty", lambda m: m.block_estimate([], [], 5)),
+        ("one", lambda m: m.block_estimate([0.3], [0.5], 5)),
+        ("float32", lambda m: m.block_estimate(y.astype(np.float32), s2.astype(np.float32), 5)),
+        ("spread_llr on an L spec", lambda m: m.spread_llr(yl, s2l, lspec)),
+    ]
+    tr = P.random_track(spec, rng, spread_rho=0.054)
+    calls += [
+        ("symbol_estimates list idx", lambda m: m.symbol_estimates(tr, [0, 5, -1, 300])),
+        ("symbol_estimates empty idx", lambda m: m.symbol_estimates(tr, [])),
+        ("symbol_estimates past the end", lambda m: m.symbol_estimates(tr, [spec.n_sym])),
+        ("extract keywords", lambda m: m.extract(None, tr, spec, 5, estimator="plain", calibrate_kappa=0)),
+    ]
+    for label, call in calls:
+        a, b = P.outcome(lambda: call(demod)), P.outcome(lambda: call(dm))
+        if P.same_refusal(a, b):
+            continue
+        if isinstance(a, tuple) and len(a) == 4 and isinstance(a[3], dict):
+            P.same_extract(a, b)
+            continue
+        for x, z in zip(a, b):
+            assert np.asarray(z).dtype == np.asarray(x).dtype, label
+            assert np.asarray(z).tobytes() == np.asarray(x).tobytes(), label

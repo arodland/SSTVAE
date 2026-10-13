@@ -28,6 +28,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import qrss_demod_probes as P
 import qrss_demod_tracks as D
 from qrss_native import require
 from sstvae.qrss import frame, ldemod, lframe
@@ -204,3 +205,143 @@ def test_refusals(ld):
     tr = D.synth(lframe.get("l-short"))
     _raises_alike(lambda: ldemod.extract_l(None, tr, tr.spec, Q, "bad"),
                   lambda: ld.extract_l(None, tr, tr.spec, Q, "bad"), ValueError)
+
+
+# ---- adversarial probes (review stage) ----------------------------------------------
+# What the tracker never produces: random stub tracks on every L preset
+# (lead-ins, extra trailing positions, exact-zero and denormal spectra),
+# the header known and unknown, the measured-reference mask on and off;
+# non-finite grids; and the forms of classes.hdr_bits and tr.meas the
+# bindings must read as the reference does. Measured bit-identical
+# (2026-10-13); the assertions are the bars.
+
+
+def _same_kappa_estimates(eb, ea):
+    assert len(eb) == len(ea)
+    for (k1, v1), (k2, v2) in zip(ea, eb):
+        P.same_kappa(k2, k1)
+        P.same_kappa(v2, v1)
+
+
+@pytest.mark.parametrize("name", lframe.PRESETS)
+def test_probe_random_tracks(ld, name):
+    spec = lframe.get(name)
+    rng = np.random.default_rng(sum(map(ord, name)))
+    for known in (False, True):
+        for nasty, meas in ((False, True), (True, False), (True, True)):
+            bits = (rng.random(2474) < 0.5).astype(np.uint8) if known else None
+            tr = P.random_track(spec, rng, lead=int(rng.integers(0, 300)), extra=int(rng.integers(0, 50)),
+                                spread_rho=0.0 if known else spec.hdr_rho, hdr_bits=bits, meas=meas,
+                                nasty=nasty)
+            _same_kappa_estimates(P.outcome(lambda: ld.kappa_estimates_l(tr)),
+                                  P.outcome(lambda: ldemod.kappa_estimates_l(tr)))
+            for est in ("joint", "plain"):
+                P.same_extract(P.outcome(lambda: ldemod.extract_l(None, tr, spec, 99, est)),
+                               P.outcome(lambda: ld.extract_l(None, tr, spec, 99, est)))
+
+
+@pytest.mark.parametrize("what", P.EDGES)
+def test_probe_edge_tracks(ld, what):
+    spec = lframe.get("l-short")
+    tr = P.edge_track(spec, np.random.default_rng(len(what)), what)
+    a = P.outcome(lambda: ldemod.extract_l(None, tr, spec, 3))
+    b = P.outcome(lambda: ld.extract_l(None, tr, spec, 3))
+    if not P.same_refusal(a, b):
+        P.same_extract(a, b)
+    a, b = P.outcome(lambda: ldemod.calibrate_l(tr)), P.outcome(lambda: ld.calibrate_l(tr))
+    if not P.same_refusal(a, b):
+        assert b[1] is a[1]
+        P.same_kappa(b[0], a[0])
+    a, b = P.outcome(lambda: ldemod.kappa_estimates_l(tr)), P.outcome(lambda: ld.kappa_estimates_l(tr))
+    if not P.same_refusal(a, b):
+        _same_kappa_estimates(b, a)
+
+
+def _hdr_forms():
+    kb = D.known_bits()
+    return {"uint8": kb, "list": list(map(int, kb)), "bool": kb.astype(bool), "float": kb.astype(float),
+            "int64": kb.astype(np.int64), "tuple": tuple(kb), "2-D": kb.reshape(2, -1), "short": kb[:10],
+            "str": "0" * 2474, "scalar": 1}
+
+
+@pytest.mark.parametrize("name", ("l-short", "l-tiny"))
+def test_probe_hdr_bits_forms(ld, name):
+    """Any dtype of 2474 values 0/1 is taken exactly; another shape is refused
+    where the reference reads the bits (with its text), and ignored where it
+    does not (l-tiny has no spread copy). A 2-D array of 2474 bits used to
+    be flattened and accepted."""
+    spec = lframe.get(name)
+    for label, bits in _hdr_forms().items():
+        tr = D.synth(spec, spec.hdr_rho, bits, True)
+        for fn in ("data_estimates_l", "kappa_estimates_l", "calibrate_l"):
+            a = P.outcome(lambda: getattr(ldemod, fn)(tr))
+            b = P.outcome(lambda: getattr(ld, fn)(tr))
+            if P.same_refusal(a, b):
+                continue
+            if fn == "data_estimates_l":
+                P.rel(b[0], a[0], label)
+                P.rel(b[1], a[1], label)
+                assert b[2] == a[2], label
+            else:
+                assert b == a, (label, fn)
+        a = P.outcome(lambda: ldemod.extract_l(None, tr, spec, 5))
+        b = P.outcome(lambda: ld.extract_l(None, tr, spec, 5))
+        if not P.same_refusal(a, b):
+            P.same_extract(a, b)
+
+
+def test_probe_hdr_bits_that_are_not_0_1_are_refused(ld):
+    """The documented deviation: the reference computes 1 - 2b from any value;
+    the port refuses, with the reference's own text, rather than give a
+    different number (a uint8 cast had read -1 as 255 and 0.5 as 0)."""
+    spec = lframe.get("l-short")
+    kb = D.known_bits()
+    for bits in (np.where(kb == 1, 2, 0), -kb.astype(np.int8), kb * 0.5, np.where(kb == 1, np.nan, 0.0)):
+        tr = D.synth(spec, spec.hdr_rho, bits, True)
+        ldemod.data_estimates_l(tr)                     # the reference computes ...
+        with pytest.raises(ValueError, match="hdr_bits must be 2474 values of 0/1"):
+            ld.data_estimates_l(tr)                     # ... the port refuses
+
+
+def test_probe_meas_forms(ld):
+    """meas read lazily by np.asarray(meas, bool)[gi]: None reads as unmeasured,
+    an empty mask (not None) and a short one fail their first index, a long
+    one, ints and floats are read as numpy reads them."""
+    spec = lframe.get("l-short")
+    base = D.synth(spec, spec.hdr_rho, D.known_bits(), True)
+    m = np.asarray(base.meas)
+    n = len(base.pos)
+    for label, meas in (("None", None), ("short", m[: n // 2]), ("long", np.concatenate([m, m])),
+                        ("ints", m.astype(int) * 3), ("floats", m * 0.5), ("list", list(m)),
+                        ("empty", np.zeros(0, bool))):
+        tr = copy.copy(base)
+        tr.meas = meas
+        for fn in ("kappa_estimates_l", "calibrate_l"):
+            a = P.outcome(lambda: getattr(ldemod, fn)(tr))
+            b = P.outcome(lambda: getattr(ld, fn)(tr))
+            if not P.same_refusal(a, b):
+                assert b == a, (label, fn)
+    for meas in (np.stack([m, m]), True):               # other shapes: refused, as by numpy
+        tr = copy.copy(base)
+        tr.meas = meas
+        with pytest.raises(IndexError):
+            ldemod.calibrate_l(tr)
+        with pytest.raises(IndexError):
+            ld.calibrate_l(tr)
+
+
+def test_probe_argument_forms(ld):
+    spec = lframe.get("l-short")
+    rng = np.random.default_rng(8)
+    tr = P.random_track(spec, rng, spread_rho=0.054)
+    lay = lframe.layout(spec)
+    for gain in (np.float32(0.881), 1, True, np.float64(0.5)):
+        a, b = ldemod.symbol_estimates_l(tr, lay.ref, gain), ld.symbol_estimates_l(tr, lay.ref, gain)
+        assert b[0].tobytes() == a[0].tobytes() and b[1].tobytes() == a[1].tobytes()
+    for idx in ([0, 5, -1, 300], [], np.array([spec.n_sym])):
+        a = P.outcome(lambda: ldemod.symbol_estimates_l(tr, idx, 0.5))
+        b = P.outcome(lambda: ld.symbol_estimates_l(tr, idx, 0.5))
+        if not P.same_refusal(a, b):
+            assert b[0].tobytes() == a[0].tobytes() and b[1].tobytes() == a[1].tobytes()
+    P.same_extract(ldemod.extract_l(None, tr, spec, 5, estimator=np.str_("plain"), calibrate_kappa=0),
+                   ld.extract_l(None, tr, spec, 5, estimator=np.str_("plain"), calibrate_kappa=0))
