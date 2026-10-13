@@ -94,7 +94,7 @@ def _presets():
 
 def render_config() -> str:
     from sstvae.qrss import constants as k
-    from sstvae.qrss import morse, polar, sequences
+    from sstvae.qrss import morse, polar, precoder, sequences
 
     lines: list[str] = []
     w = lines.append
@@ -165,6 +165,9 @@ def render_config() -> str:
     for i in range(0, len(info), 12):
         w("    " + ", ".join(map(str, info[i:i + 12])) + ",\n")
     w("}};\n")
+
+    w("\n// --- precoder (sstvae/qrss/precoder.py) ---\n")
+    w(f"inline constexpr int PRECODER_BLOCK = {int(precoder.BLOCK)};\n")
 
     w("\n// --- Morse (sstvae/qrss/morse.py), in the table's own order ---\n")
     w("struct MorseCode {\n    char ch;\n    std::string_view code;\n};\n")

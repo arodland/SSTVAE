@@ -27,11 +27,12 @@
 #include <span>
 #include <vector>
 
+#include "qrss/config.hpp"
+
 namespace sstvae::qrss::precoder {
 
-// precoder.BLOCK. Not yet emitted by tools/gen_qrss_config_header.py;
-// tests/test_qrss_native_precoder.py checks it against the reference.
-inline constexpr std::size_t BLOCK = 64;
+// precoder.BLOCK, from the generated config.
+inline constexpr std::size_t BLOCK = static_cast<std::size_t>(config::PRECODER_BLOCK);
 static_assert((BLOCK & (BLOCK - 1)) == 0, "block_sizes takes the remainder's bits");
 
 // [BLOCK] * (n / BLOCK) plus the binary decomposition of n % BLOCK,

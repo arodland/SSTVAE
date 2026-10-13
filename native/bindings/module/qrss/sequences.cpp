@@ -16,7 +16,16 @@ namespace {
 
 namespace seq = sstvae::qrss::sequences;
 
-std::size_t count(const py::int_& n) {
+// int(x), as the reference applies to its counts and q: PyNumber_Long, so
+// numpy integers (and anything else int() takes) are accepted.
+py::int_ as_int(const py::object& x) {
+    PyObject* r = PyNumber_Long(x.ptr());
+    if (!r) throw py::error_already_set();
+    return py::reinterpret_steal<py::int_>(r);
+}
+
+std::size_t count(const py::object& nv) {
+    const py::int_ n = as_int(nv);
     if (n < py::int_(0)) throw py::value_error("n must be >= 0, not " + py::str(n).cast<std::string>());
     return n.cast<std::size_t>();
 }
@@ -28,7 +37,7 @@ std::string as_bytes(const py::object& b) {
 void bind(py::module_& q) {
     py::module_ m = q.def_submodule("sequences", "Port of sstvae.qrss.sequences");
 
-    m.def("sha_bits", [](const py::object& domain, const py::int_& n, const py::object& prefix) {
+    m.def("sha_bits", [](const py::object& domain, const py::object& n, const py::object& prefix) {
         const std::string d = as_bytes(domain), p = as_bytes(prefix);
         auto bits = seq::sha_bits(d, count(n), std::span<const std::uint8_t>(
                                                    reinterpret_cast<const std::uint8_t*>(p.data()), p.size()));
@@ -56,17 +65,18 @@ void bind(py::module_& q) {
     }, py::arg("bits"));
 
     m.def("preamble_ce", [] { return to_numpy(seq::preamble_ce(), false); });
-    m.def("references_ce", [](const py::int_& n_ref) {
+    m.def("references_ce", [](const py::object& n_ref) {
         return to_numpy(seq::references_ce(count(n_ref)), false);
     }, py::arg("n_ref"));
     m.def("preamble_l", [] { return to_numpy(seq::preamble_l(), false); });
-    m.def("references_l", [](const py::int_& n_ref) {
+    m.def("references_l", [](const py::object& n_ref) {
         return to_numpy(seq::references_l(count(n_ref)), false);
     }, py::arg("n_ref"));
-    m.def("spread_whitener", [](const py::int_& n) {
+    m.def("spread_whitener", [](const py::object& n) {
         return to_numpy(seq::spread_whitener(count(n)), false);
     }, py::arg("n"));
-    m.def("scrambler", [](const py::int_& qv, const py::int_& n) {
+    m.def("scrambler", [](const py::object& qo, const py::object& n) {
+        const py::int_ qv = as_int(qo);
         const std::uint64_t q64 = to_u64(qv, "q must fit in uint64, not " + py::str(qv).cast<std::string>());
         return to_numpy(seq::scrambler(q64, count(n)));
     }, py::arg("q"), py::arg("n"));

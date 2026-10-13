@@ -86,10 +86,19 @@ def qrss(native):
     return q
 
 
+# Set by apply(): the reference is then partly the C++ itself, so a parity
+# test (tests/test_qrss_native_*.py) would compare native with native.
+ACTIVE: str | None = None
+
+
 def require(native, module: str):
-    """`native.qrss.<module>` for a parity test, skipping when not built."""
+    """`native.qrss.<module>` for a parity test, skipping when not built,
+    and under --native-qrss (where the reference is no longer Python)."""
     import pytest
 
+    if ACTIVE is not None:
+        pytest.skip(f"parity tests compare with the Python reference; "
+                    f"--native-qrss={ACTIVE} has substituted it")
     q = getattr(native, "qrss", None)
     if q is None or not hasattr(q, module):
         pytest.skip(f"sstvae_native.qrss.{module} not built")
@@ -99,7 +108,9 @@ def require(native, module: str):
 def apply(native, stage: str) -> Report:
     if stage not in STAGES:
         raise LookupError(f"unknown stage {stage!r}; one of {', '.join(STAGES)}")
+    global ACTIVE
     q = qrss(native)
+    ACTIVE = stage
     upto = STAGES[: STAGES.index(stage) + 1]
     report = Report(stage=stage)
     reference = _import_reference()

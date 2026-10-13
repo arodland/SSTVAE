@@ -132,6 +132,9 @@ inline constexpr std::array<int, 142> POLAR_INFO_SET{{
     2038, 2039, 2040, 2041, 2042, 2043, 2044, 2045, 2046, 2047,
 }};
 
+// --- precoder (sstvae/qrss/precoder.py) ---
+inline constexpr int PRECODER_BLOCK = 64;
+
 // --- Morse (sstvae/qrss/morse.py), in the table's own order ---
 struct MorseCode {
     char ch;
