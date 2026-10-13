@@ -16,7 +16,9 @@ namespace sstvae::qrss::simfile {
 
 namespace {
 
-[[noreturn]] void bad_zip(const std::string& why) { throw Error("zipfile.BadZipFile", "simfile: " + why); }
+// zipfile.BadZipFile: zip_error with zipfile's own words, bad_zip with this port's.
+[[noreturn]] void zip_error(const std::string& text) { throw Error("zipfile.BadZipFile", text); }
+[[noreturn]] void bad_zip(const std::string& why) { zip_error("simfile: " + why); }
 
 bool sig_at(std::span<const std::uint8_t> b, std::size_t at, const char* sig) {
     return at <= b.size() && b.size() - at >= 4 && std::memcmp(b.data() + at, sig, 4) == 0;
@@ -42,16 +44,16 @@ std::unordered_map<std::string, std::span<const std::uint8_t>> members(std::span
             end_at = p;
             break;
         }
-    if (end_at == std::string::npos) bad_zip("File is not a zip file");
+    if (end_at == std::string::npos) zip_error("File is not a zip file");
     if (end_at >= 20 && sig_at(f, end_at - 20, "PK\x06\x07"))
         bad_zip("a zip64 archive (over 2 GiB or 65535 members) is not read here");
     const std::uint64_t n_entries = le(f, end_at + 10, 2);
     const std::uint64_t cd_size = le(f, end_at + 12, 4);
     const std::uint64_t cd_offset = le(f, end_at + 16, 4);
-    if (cd_size > end_at) bad_zip("Bad offset for central directory");
+    if (cd_size > end_at) zip_error("Bad offset for central directory");
     // zipfile's "concat": bytes before the archive shift every offset.
     const std::uint64_t start_dir = end_at - cd_size;
-    if (cd_offset > start_dir) bad_zip("Bad offset for central directory");
+    if (cd_offset > start_dir) zip_error("Bad offset for central directory");
     const std::uint64_t concat = start_dir - cd_offset;
 
     std::unordered_map<std::string, std::span<const std::uint8_t>> out;
@@ -59,7 +61,7 @@ std::unordered_map<std::string, std::span<const std::uint8_t>> members(std::span
     std::uint64_t seen = 0;
     while (p < end_at) {
         if (end_at - p < SIZE_CENTRAL || !sig_at(f, p, "PK\x01\x02"))
-            bad_zip("Bad magic number for central directory");
+            zip_error("Bad magic number for central directory");
         const auto flags = le(f, p + 8, 2), method = le(f, p + 10, 2);
         const auto crc = static_cast<std::uint32_t>(le(f, p + 16, 4));
         std::uint64_t csize = le(f, p + 20, 4), usize = le(f, p + 24, 4);
@@ -95,7 +97,7 @@ std::unordered_map<std::string, std::span<const std::uint8_t>> members(std::span
         // follows its own name and extra field.
         if (offset > f.size() - std::min<std::uint64_t>(f.size(), concat)) bad_zip("Bad local header offset");
         const std::size_t h = static_cast<std::size_t>(offset + concat);
-        if (!sig_at(f, h, "PK\x03\x04")) bad_zip("Bad magic number for file header");
+        if (!sig_at(f, h, "PK\x03\x04")) zip_error("Bad magic number for file header");
         const std::size_t hn = le(f, h + 26, 2), he = le(f, h + 28, 2);
         if (h + SIZE_LOCAL + hn > f.size() ||
             std::memcmp(f.data() + h + SIZE_LOCAL, name.data(), std::min(hn, name.size())) != 0 || hn != nlen)
@@ -105,7 +107,7 @@ std::unordered_map<std::string, std::span<const std::uint8_t>> members(std::span
         if (data_at > f.size() || f.size() - data_at < size) bad_zip("member " + name + " is truncated");
         const std::span<const std::uint8_t> data = f.subspan(static_cast<std::size_t>(data_at),
                                                              static_cast<std::size_t>(size));
-        if (crc32(data) != crc) bad_zip("Bad CRC-32 for file " + name);
+        if (crc32(data) != crc) zip_error("Bad CRC-32 for file '" + name + "'");
         out[name] = data;   // a repeated name: zipfile keeps the last
     }
     if (seen != n_entries) bad_zip("the end record's member count disagrees with the central directory");

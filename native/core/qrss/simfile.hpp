@@ -22,8 +22,11 @@
 // walk can go and this reads through npz::parse_npz.
 //
 // Not reproduced: zipfile's handling of damaged archives (refused here with
-// the class np.load would raise, zipfile.BadZipFile, and this file's own
-// words); and members of other dtypes or shapes than the simulator writes:
+// the class np.load would raise, zipfile.BadZipFile, in zipfile's words for
+// "File is not a zip file", the bad magic numbers and offsets and a bad
+// CRC-32, else in this file's own, "simfile: ..."); compressed and zip64
+// archives, which zipfile reads and np.savez does not write for a slot;
+// and members of other dtypes or shapes than the simulator writes:
 // `fe` must be complex64[n] (anything else is refused rather than read the
 // way the reference would feed it to the receiver), `frame` a str.
 
