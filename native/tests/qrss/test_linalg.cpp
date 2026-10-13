@@ -64,6 +64,12 @@ static void test_lstsq() {
     check::equal(math::lstsq(dg, ones, 1e-12).rank, 2, "rcond 1e-12");
     check::equal(math::lstsq(dg, ones, -1.0).rank, 2, "rcond < 0: eps");
     check::equal(math::lstsq(dg, ones, 2.0).rank, 2, "rcond >= 1: eps");
+    // ... and that eps is DLAMCH's, 2^-53: 1.5e-16 sits between it and DBL_EPSILON
+    const Matrix dg2(2, 2, {1.0, 0, 0, 1.5e-16});
+    const std::vector<double> ones2 = {1.0, 1.0};
+    check::equal(math::lstsq(dg2, ones2, -1.0).rank, 2, "rcond < 0: eps is 2^-53");
+    check::equal(math::lstsq(dg2, ones2, 0.0).rank, 2, "rcond 0: eps is 2^-53");
+    check::equal(math::lstsq(dg2, ones2, 1.0).rank, 2, "rcond 1: eps is 2^-53");
     throws<math::LinAlgError>(
         [] { math::lstsq(Matrix(2, 2, {std::nan(""), 1.0, 0.0, 1.0}), std::vector<double>{1.0, 1.0}); },
         "SVD did not converge in Linear Least Squares", "NaN in A");

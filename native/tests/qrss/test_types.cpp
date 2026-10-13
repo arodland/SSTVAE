@@ -98,6 +98,12 @@ static void test_pass_uid() {
     check::equal(types::pass_uid(7, 1500.25, z), std::string("7_1500250_c537cb1d"), "pass_uid");
     check::equal(types::pass_uid(0, 0.0025, z), std::string("0_2_c537cb1d"), "pass_uid rounds half to even");
     check::equal(types::pass_uid(-3, -1234.5675, z), std::string("-3_-1234568_c537cb1d"), "negative");
+    // Python's round() is an unbounded int: past int64 it is still written in full
+    check::equal(types::pass_uid(1, 1e17, z), std::string("1_100000000000000000000_c537cb1d"), "past int64");
+    check::equal(types::pass_uid(1, -9223372036854775.808, z), std::string("1_-9223372036854775808_c537cb1d"),
+                 "INT64_MIN");
+    check::equal(types::pass_uid(1, 1e300, z).substr(0, 30), std::string("1_1000000000000000000161765076"),
+                 "1e303, exactly");
     throws<std::invalid_argument>([&] { types::pass_uid(1, std::nan(""), z); },
                                   "cannot convert float NaN to integer", "NaN f_hz");
     throws<std::overflow_error>([&] { types::pass_uid(1, HUGE_VAL, z); },

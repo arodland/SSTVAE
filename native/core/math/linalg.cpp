@@ -257,7 +257,7 @@ LstsqResult lstsq(const Matrix& a, std::span<const double> b, std::optional<doub
     }
     out.s = s;
     double r = rcond ? *rcond : EPS * static_cast<double>(std::max(m, n));
-    if (r <= 0.0 || r >= 1.0) r = EPS;   // dlalsd's RCND
+    if (r <= 0.0 || r >= 1.0) r = EPS / 2;   // dlalsd's RCND: DLAMCH('Epsilon'), the unit roundoff 2^-53
     const double tol = r * s[0];
     std::vector<bool> keep(k);
     for (std::size_t i = 0; i < k; ++i) keep[i] = (k == 1) ? (s[i] != 0.0) : (s[i] > tol);

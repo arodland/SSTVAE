@@ -205,6 +205,10 @@ def test_lstsq_edges(nm):
     a = np.diag([1.0, 1e-9, 1e-17])
     for rc in (1e-8, 1e-12, -1.0, 2.0):
         assert nm.lstsq(a, np.ones(3), rc)[2] == np.linalg.lstsq(a, np.ones(3), rcond=rc)[2]
+    # ... whose eps is DLAMCH's 2^-53, not np.finfo's 2^-52: 1.5e-16 sits between them
+    a = np.diag([1.0, 1.5e-16])
+    for rc in (-1.0, 0.0, 1.0, 2.3e-16):
+        assert nm.lstsq(a, np.ones(2), rc)[2] == np.linalg.lstsq(a, np.ones(2), rcond=rc)[2], rc
 
 
 def test_solve_and_inv_match_numpy(nm):
@@ -388,6 +392,19 @@ def test_bspline_eval_and_derivative(nm):
     want = _outcome(interpolate.BSpline(t, c, 3).derivative, 1)
     got = _outcome(nm.bspline_derivative, t, c, 3, 1)
     assert got[0] == want[0] and (got[0] == "ok" or got[1] == want[1]), (got, want)
+    # splder's errstate(invalid, divide): an infinite coefficient over a zero-width
+    # span is inf/0, an exact inf with no divide-by-zero flag, so it passes; inf - inf
+    # and 0/0 raise; a NaN passes quietly
+    for c in ([1, 2, 3, 1, np.inf, 1, 2, 3], [1, 2, 3, np.inf, 1, 1, 2, 3], [1, 2, 3, np.nan, 1, 1, 2, 3],
+              [1, 2, 3, 1, 1, 1, 2, 3], [1, 2, 3, np.inf, np.inf, 1, 2, 3]):
+        c = np.array(c, float)
+        want = _outcome(interpolate.BSpline(t, c, 3).derivative, 1)
+        got = _outcome(nm.bspline_derivative, t, c, 3, 1)
+        assert got[0] == want[0], (c, got, want)
+        if got[0] == "ok":
+            _same(got[1][1], want[1].c)
+        else:
+            assert got[1] == want[1], (c, got, want)
 
 
 def test_dlartg_bit_exact(nm):

@@ -11,9 +11,9 @@
 // decision a caller can branch on:
 //
 // * lstsq's rank: singular values s_i > rcond * max(s) count, with gelsd's
-//   (dlalsd's) rule that rcond <= 0 or >= 1 means eps, and that a
-//   one-column or one-row problem has rank 1 unless its one singular value
-//   is exactly 0. rcond nullopt is numpy's default, eps * max(m, n). The
+//   (dlalsd's) rule that rcond <= 0 or >= 1 means LAPACK's eps, 2^-53
+//   (half of DBL_EPSILON), and that a one-column or one-row problem has
+//   rank 1 unless its one singular value is exactly 0. rcond nullopt is numpy's default, eps * max(m, n). The
 //   solution is the minimum-norm one. A non-finite value in `a` is
 //   LinAlgError "SVD did not converge in Linear Least Squares" (numpy's
 //   gelsd fails there); a non-finite value in `b` makes every coefficient

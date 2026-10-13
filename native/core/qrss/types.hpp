@@ -124,9 +124,10 @@ struct EmPrior {
 };
 
 // pass_uid(q, f_hz, z): f"{q}_{round(f_hz*1000)}_{sha8 of z's float32 bytes}".
-// round is Python's (half to even); a NaN or infinite f_hz is
-// std::invalid_argument / std::overflow_error as int() of it is in Python
-// (ValueError / OverflowError), and so is a millihertz count outside int64.
+// round is Python's (half to even, an unbounded int: a millihertz count
+// past int64 is still written out in full); a NaN or infinite f_hz is
+// std::invalid_argument / std::overflow_error as round() of it is in
+// Python (ValueError / OverflowError).
 std::string pass_uid(std::int64_t q, double f_hz, std::span<const float> z);
 
 // Everything one pass of one signal delivered.

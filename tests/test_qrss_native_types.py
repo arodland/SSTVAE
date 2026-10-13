@@ -151,6 +151,7 @@ def test_pass_uid(nt):
     z = rng.standard_normal(100).astype(np.float32)
     for q in (0, 1, Q_TEST, -5, 2 ** 40):
         for f in (1500.25, 0.0, -0.0, 1e-4, 0.0005, 0.0015, 0.0025, 2.5e-3, 1234.5675, -2.0005, 1e12,
+                  1e17, 1e300, -1e300, 9223372036854775.808, -9223372036854775.808,
                   *rng.uniform(0, 3000, 50), *(np.arange(0, 20) + 0.5) / 1000):
             assert nt.pass_uid(q, float(f), z) == qt.pass_uid(q, float(f), z), (q, f)
     # z is hashed as float32, whatever it arrived as

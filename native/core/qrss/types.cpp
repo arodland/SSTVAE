@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iterator>
@@ -18,15 +19,19 @@ namespace {
 
 using pyjson::Value;
 
-// int(round(x)) for a float, as Python: half to even, ValueError for NaN,
-// OverflowError for infinity (and here for anything outside int64).
-std::int64_t py_round_int(double x) {
+// str(round(x)) for a float x: Python's round() is half to even and returns
+// an unbounded int, so a millihertz count past int64 is still its exact
+// decimal (printf's "%.0f" of an integral double is exact, and has no
+// locale-dependent separator); NaN and inf raise what int() of them raises.
+std::string py_round_str(double x) {
     if (std::isnan(x)) throw std::invalid_argument("cannot convert float NaN to integer");
     if (std::isinf(x)) throw std::overflow_error("cannot convert float infinity to integer");
     const double r = std::nearbyint(x);   // default rounding mode: to nearest, ties to even
-    if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0))
-        throw std::overflow_error("int(round(" + std::to_string(x) + ")) does not fit in int64");
-    return static_cast<std::int64_t>(r);
+    if (r >= -9223372036854775808.0 && r < 9223372036854775808.0)
+        return std::to_string(static_cast<std::int64_t>(r));
+    char buf[400];
+    std::snprintf(buf, sizeof buf, "%.0f", r);
+    return buf;
 }
 
 Value opt_string(const std::optional<std::string>& s) { return s ? Value::string(*s) : Value::null(); }
@@ -103,7 +108,7 @@ std::optional<std::string> opt_str(const Value& d, const char* key) {
 std::string pass_uid(std::int64_t q, double f_hz, std::span<const float> z) {
     const auto* p = reinterpret_cast<const std::uint8_t*>(z.data());
     const std::string hex = util::to_hex(util::sha256(std::span<const std::uint8_t>(p, z.size() * sizeof(float))));
-    return std::to_string(q) + "_" + std::to_string(py_round_int(f_hz * 1000)) + "_" + hex.substr(0, 8);
+    return std::to_string(q) + "_" + py_round_str(f_hz * 1000) + "_" + hex.substr(0, 8);
 }
 
 std::string PassResult::meta_json() const {

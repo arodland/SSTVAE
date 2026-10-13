@@ -8,8 +8,10 @@
 // keeps the distinction:
 //
 //   Python ValueError     -> std::invalid_argument (pybind11's default mapping)
-//   Python TypeError      -> math::TypeError (an std::invalid_argument, so a
-//                            caller that only knows "bad input" still catches it)
+//   Python TypeError      -> math::TypeError (an std::logic_error, deliberately
+//                            not an std::invalid_argument: `catch
+//                            (std::invalid_argument&)` is the C++ spelling of
+//                            `except ValueError`, which a TypeError escapes)
 //   np.linalg.LinAlgError -> math::LinAlgError (std::runtime_error)
 //   Python IndexError     -> std::out_of_range (pybind11's default mapping)
 //
@@ -30,8 +32,8 @@ struct LinAlgError : std::runtime_error {
 
 // Python's TypeError where numpy raises one for a bad argument
 // (np.polyfit's "expected non-empty vector for x").
-struct TypeError : std::invalid_argument {
-    using std::invalid_argument::invalid_argument;
+struct TypeError : std::logic_error {
+    using std::logic_error::logic_error;
 };
 
 }  // namespace sstvae::math

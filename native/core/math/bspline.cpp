@@ -181,11 +181,13 @@ BSpline BSpline::derivative(int nu) const {
             const double diff = cc[1 + i] - cc[i];
             const double num = diff * kk;
             // np.errstate(invalid='raise', divide='raise'): an operation that
-            // makes a NaN out of non-NaN operands (inf - inf, 0/0) or divides
-            // a non-NaN by zero raises; NaN operands pass quietly.
+            // makes a NaN out of non-NaN operands (inf - inf, 0/0, inf/inf)
+            // or divides a finite number by zero raises (IEEE's
+            // divide-by-zero flag: inf/0 is an exact inf and raises
+            // nothing); NaN operands pass quietly.
             const bool invalid = (std::isnan(diff) && !std::isnan(cc[1 + i]) && !std::isnan(cc[i])) ||
                                  (std::isnan(dt) && !std::isnan(tt[nk + 1 + i]) && !std::isnan(tt[1 + i])) ||
-                                 (dt == 0.0 && !std::isnan(num)) || (std::isinf(num) && std::isinf(dt));
+                                 (dt == 0.0 && std::isfinite(num)) || (std::isinf(num) && std::isinf(dt));
             if (invalid)
                 throw std::invalid_argument("The spline has internal repeated knots and is not differentiable " +
                                             std::to_string(nu) + " times");
