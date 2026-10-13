@@ -375,12 +375,16 @@ void PassAudio::ce_baseband(std::int64_t a, std::int64_t b, cplx* z) const {
     }
 }
 
+void PassAudio::check_block(std::int64_t i0, std::int64_t m) const {
+    if (i0 < 0 || i0 > n_ || m < 0 || m > n_ - i0)
+        throw std::out_of_range("PassAudio: samples " + str(i0) + ".." + str(i0) + " + " + str(m) +
+                                " are outside the pass, 0.." + str(n_));
+}
+
 template <typename T>
 void PassAudio::render_any(std::int64_t i0, std::span<T> out) const {
     const auto m = static_cast<std::int64_t>(out.size());
-    if (i0 < 0 || i0 > n_ || m > n_ - i0)
-        throw std::out_of_range("PassAudio: samples " + str(i0) + ".." + str(i0) + " + " + str(m) +
-                                " are outside the pass, 0.." + str(n_));
+    check_block(i0, m);
     std::vector<cplx> z;
     for (std::int64_t a = 0; a < m; a += BLOCK) {
         const std::int64_t len = std::min(BLOCK, m - a);

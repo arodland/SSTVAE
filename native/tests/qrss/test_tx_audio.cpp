@@ -35,6 +35,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "qrss/beaconfile.hpp"
@@ -260,6 +261,15 @@ static void test_ce(const pc::StoredPicture& sp, const bfm::BeaconFile& bf) {
         check::equal(refusal([&] { pa.render(546000, std::span<double>(mid)); }).substr(0, 23),
                      std::string("IndexError: PassAudio: "), "A: render past the end");
         check::equal(refusal([&] { pa.seek(-1); }).substr(0, 23), std::string("IndexError: PassAudio: "), "A: seek -1");
+        // check_block: render's range check, before a caller allocates m samples
+        pa.check_block(0, pa.size());
+        pa.check_block(pa.size(), 0);
+        for (const auto& [i0, m] : {std::pair<std::int64_t, std::int64_t>{0, pa.size() + 1},
+                                    {5, std::numeric_limits<std::int64_t>::max()},
+                                    {pa.size(), std::numeric_limits<std::int64_t>::max() - pa.size()},
+                                    {-1, 1}, {0, -1}})
+            check::equal(refusal([&] { pa.check_block(i0, m); }).substr(0, 23), std::string("IndexError: PassAudio: "),
+                         "A: check_block(" + std::to_string(i0) + ", " + std::to_string(m) + ")");
         pa.seek(pa.size());
         check::equal(pa.position(), pa.size(), "A: seek to the end");
     }

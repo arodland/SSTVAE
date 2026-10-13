@@ -262,8 +262,12 @@ public:
     const frame::FrameSpec& spec() const { return spec_; }
     bool waveform_l() const { return l_; }
     const Rational& carrier() const { return carrier_; }   // what the audio is mixed to
-    std::int64_t chunk() const { return step_; }           // the reference's chunk, in samples
+    std::int64_t chunk() const { return step_; }           // the reference's chunk, in samples (at most size(), at least 1)
 
+    // std::out_of_range unless samples [i0, i0 + m) lie inside [0, size()):
+    // render's own check, for a caller that sizes a buffer from m (the
+    // binding checks before it allocates).
+    void check_block(std::int64_t i0, std::int64_t m) const;
     // Samples [i0, i0 + out.size()) of the pass, float64, or rounded once to
     // float32 (numpy's astype). std::out_of_range unless inside [0, size()).
     void render(std::int64_t i0, std::span<double> out) const;

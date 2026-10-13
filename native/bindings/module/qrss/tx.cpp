@@ -193,6 +193,7 @@ bool is_float32(const py::handle& dtype) {
 
 py::array render_block(const txm::PassAudio& audio, std::int64_t i0, std::int64_t m, bool f32) {
     if (m < 0) throw py::value_error("negative dimensions are not allowed");
+    audio.check_block(i0, m);   // IndexError before the buffer is allocated, not MemoryError
     if (f32) {
         py::array_t<float> out(static_cast<py::ssize_t>(m));
         float* p = out.mutable_data();

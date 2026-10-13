@@ -45,12 +45,22 @@ def _libm_trig() -> bool:
             and np.array_equal(np.sin(x), [math.sin(v) for v in x]))
 
 
+def _fma(x: float, y: float, z: float) -> float:
+    """x * y + z rounded once: math.fma, which is new in Python 3.13 (CI runs
+    3.12), else exactly in rationals (Fraction's float() rounds once).
+    Finite arguments only, which is all the probe below passes."""
+    f = getattr(math, "fma", None)
+    if f is not None:
+        return f(x, y, z)
+    return float(Fraction(x) * Fraction(y) + Fraction(z))
+
+
 def _fused_cmul() -> bool:
     """numpy's complex multiply forms Re as fma(ar, br, -(ai*bi)), as the C++ does."""
     rng = np.random.default_rng(1)
     a = rng.standard_normal(4096) + 1j * rng.standard_normal(4096)
     b = np.exp(1j * rng.uniform(0, 2 * np.pi, 4096))
-    want = [math.fma(p.real, q.real, -(p.imag * q.imag)) for p, q in zip(a, b)]
+    want = [_fma(p.real, q.real, -(p.imag * q.imag)) for p, q in zip(a, b)]
     return np.array_equal((a * b).real, want)
 
 
@@ -224,6 +234,49 @@ def test_argument_forms(nat, src):
         _check(got, want, L_TOL if is_l else CE_TOL, EXACT_CE and not is_l, what)
 
 
+def test_edge_arguments(nat, src):
+    """Review probes, all on tiny passes: a float carrier whose fraction has a
+    six-digit denominator (period 7.7e9 samples) and an exact Fraction past
+    2^20; an odd n_pre (every chunk and 2^18 piece starts off an even 16 kHz
+    grid index); the band edges, L's lowest pilot to the last bit; the
+    longest lead-in; numpy float32 scalars for every float argument (each
+    float()ed by the reference before numpy sees it, so float64); int
+    amplitude and pre_s; a long unkeyed tail."""
+    from sstvae.qrss.constants import CARRIER_BAND_HZ, L_EDGE_HZ, L_PILOT_HZ
+
+    sp, h, bf, fsk = src["sp"], src["h"], src["ook"], src["fsk"]
+    f32 = np.float32
+    l_low = Fraction(CARRIER_BAND_HZ[0]).limit_denominator() + L_PILOT_HZ + L_EDGE_HZ
+    cases = [
+        (sp, 1500.1234567, dict(spec=TINY, segment=1, header=h, ook=True)),
+        (fsk, 1500.1234567, dict(spec=LTINY)),
+        (bf, Fraction(1500 * 1048583 + 1, 1048583), dict(spec=TINY)),
+        (sp, 1500, dict(spec=TINY, segment=1, header=h, pre_s=12.000125, chunk_s=7.3)),
+        (fsk, 1500, dict(spec=LTINY, pre_s=12.000125, chunk_s=7.3, lead_in_s=10)),
+        (bf, 2650, dict(spec=TINY, lead_in_s=10, ook=False)),
+        (bf, 300.0, dict(spec=TINY)),
+        (bf, 2700, dict(spec=TINY)),
+        (fsk, l_low, dict(spec=LTINY)),
+        (fsk, float(l_low), dict(spec=LTINY)),
+        (fsk, math.nextafter(float(l_low), 0.0), dict(spec=LTINY)),
+        (bf, 1500, dict(spec=TINY, pre_s=f32(12.5), post_s=f32(3.3), lead_in_s=f32(3.3))),
+        (bf, 1500, dict(spec=TINY, amplitude=f32(0.3), chunk_s=f32(7.3))),
+        (fsk, 1500, dict(spec=LTINY, pre_s=f32(12.5), amplitude=f32(0.3), lead_in_s=f32(1.1))),
+        (bf, 1500, dict(spec=TINY, amplitude=1, pre_s=12, post_s=60)),
+    ]
+    for s_, car, kw in cases:
+        what = (car, kw)
+        is_l = kw["spec"].waveform == WAVEFORM_L
+        want = _outcome(ref.transmit_audio, s_, Q_TEST, car, **kw)
+        got = _outcome(nat.transmit_audio, s_, Q_TEST, car, **kw)
+        assert got[0] == want[0], (what, want[:3], got[:3])
+        if want[0] == "raise":
+            assert got[1:] == want[1:], (what, want, got)
+            continue
+        assert len(want[1]) == ref.slot_samples(kw["spec"], kw.get("pre_s", 12.0), kw.get("post_s", 3.0))
+        _check(got[1], want[1], L_TOL if is_l else CE_TOL, EXACT_CE and not is_l, what)
+
+
 def test_refusals(nat, ad, src):
     """Every refusal: the same exception type and text, from transmit_audio,
     the --native-qrss adapter and the PassAudio constructor alike."""
@@ -357,6 +410,13 @@ def test_pass_audio_bounds(nat, src):
     assert len(p.read(10)) == 0
     with pytest.raises(ValueError):
         p.render(0, 4, "int16")
+    # a block past the end is IndexError before any buffer is allocated
+    # (it was numpy's MemoryError, or "array is too big", for a huge m)
+    for i0, m in ((0, 10**15), (5, 2**62), (n, 2**63 - 1 - n), (-2**62, 2**62)):
+        with pytest.raises(IndexError):
+            p.render(i0, m)
+        with pytest.raises(IndexError):
+            p.render(i0, m, "float32")
 
 
 def test_long_frame_closed_form(nat, src):
