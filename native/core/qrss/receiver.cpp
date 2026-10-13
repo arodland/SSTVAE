@@ -10,6 +10,7 @@
 #include <type_traits>
 
 #include "math/npstats.hpp"
+#include "qrss/ce.hpp"
 #include "qrss/cwid.hpp"
 #include "qrss/demod.hpp"
 #include "qrss/ldemod.hpp"
@@ -298,14 +299,19 @@ struct Rounds {
         track::TrackArgs t;
         t.classes = track::make_classes(spec, &hb, prior);
         if (known) {
-            t.keying = known->units;
+            // the tracker's own window_keying of the (192,) mask: every window alike
+            t.keying = ce::window_keying(std::span<const std::uint8_t>(known->units), spec);
             t.ook = known->ook;
         }
         t.timing = tr.timing;
         t.freq = tr.freq;
         t.outer = 1;
         t.noise_psd = s.noise_psd;
-        return std::make_shared<track::TrackResult>(track::track(chan, spec, det, t));
+        auto out = std::make_shared<track::TrackResult>(track::track(chan, spec, det, t));
+        // the result keeps cw_known's own mask, as _keying_tuple hands it on:
+        // the (192,) units, not the per-window expansion the templates used
+        if (known) out->keying = known->units;
+        return out;
     }
 
     demod::Extraction extract(const track::TrackResult& tr, const FrameSpec& spec, std::int64_t q) const {
