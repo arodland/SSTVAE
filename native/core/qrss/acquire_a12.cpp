@@ -960,6 +960,32 @@ Templates templates(std::span<const double> df_hz, const PreambleKind& kind) {
 
 namespace {
 
+// acc[t] += p[t] * w for t < n, complex, unfused, each element on its own:
+// four at a time so the compiler can pair them into vector lanes (the
+// arithmetic per element is the scalar loop's).
+void mac(double* __restrict accr, double* __restrict acci, const double* __restrict pr,
+         const double* __restrict pi, double wr, double wi, std::size_t n) {
+    std::size_t t = 0;
+    for (; t + 4 <= n; t += 4) {
+        const double r0 = pr[t] * wr - pi[t] * wi, i0 = pr[t] * wi + pi[t] * wr;
+        const double r1 = pr[t + 1] * wr - pi[t + 1] * wi, i1 = pr[t + 1] * wi + pi[t + 1] * wr;
+        const double r2 = pr[t + 2] * wr - pi[t + 2] * wi, i2 = pr[t + 2] * wi + pi[t + 2] * wr;
+        const double r3 = pr[t + 3] * wr - pi[t + 3] * wi, i3 = pr[t + 3] * wi + pi[t + 3] * wr;
+        accr[t] += r0;
+        accr[t + 1] += r1;
+        accr[t + 2] += r2;
+        accr[t + 3] += r3;
+        acci[t] += i0;
+        acci[t + 1] += i1;
+        acci[t + 2] += i2;
+        acci[t + 3] += i3;
+    }
+    for (; t < n; ++t) {
+        accr[t] += pr[t] * wr - pi[t] * wi;
+        acci[t] += pr[t] * wi + pi[t] * wr;
+    }
+}
+
 Sums sums(const A2Channel& chan, std::span<const double> df_hz, double tau_s, bool want_var) {
     const PreambleKind& kind = chan.kind;
     const Templates T = templates(df_hz, kind);
@@ -981,29 +1007,45 @@ Sums sums(const A2Channel& chan, std::span<const double> df_hz, double tau_s, bo
     s.taus.resize(n_tau);
     const double shift = static_cast<double>(k0) - chan.t0_ch;
     if (n_tau > 0 && n > 0 && nm == 0) throw std::out_of_range("index -1 is out of bounds for axis 0 with size 0");
-    std::vector<cd> mx(ck);
-    for (std::size_t ti = 0; ti < n_tau; ++ti) {
-        const std::int64_t tau = r0 + static_cast<std::int64_t>(ti);
-        s.taus[ti] = static_cast<double>(tau) + shift;
-        for (std::size_t c = 0; c < nc; ++c) {
+    for (std::size_t ti = 0; ti < n_tau; ++ti) s.taus[ti] = static_cast<double>(r0 + static_cast<std::int64_t>(ti)) + shift;
+    // S[f, tau, c] = sum_q W[f, c, q] m[clip(k0 + tau + off[c, q])]: the einsum's
+    // sum over symbols, each cell's terms added in turn from 0 (the
+    // reference's is a BLAS zgemm, whose order is the BLAS's: agrees to
+    // rounding). For one (c, q) the samples of consecutive taus are
+    // consecutive in m, so the sum runs as a correlation along tau, every
+    // cell keeping its own sequential order.
+    std::vector<double> mre(m.size()), mim(m.size());
+    for (std::size_t i = 0; i < m.size(); ++i) {
+        mre[i] = m[i].real();
+        mim[i] = m[i].imag();
+    }
+    std::vector<double> ar(n_tau), ai(n_tau), gr(n_tau), gi(n_tau);
+    for (std::size_t c = 0; c < nc; ++c) {
+        for (std::size_t f = 0; f < n_df; ++f) {
+            std::fill(ar.begin(), ar.end(), 0.0);
+            std::fill(ai.begin(), ai.end(), 0.0);
+            const cd* w = T.W.data() + f * n + c * ck;
             for (std::size_t q = 0; q < ck; ++q) {
-                const std::int64_t k = std::clamp<std::int64_t>(k0 + tau + off[c * ck + q], 0, nm - 1);
-                mx[q] = m[static_cast<std::size_t>(k)];
-            }
-            for (std::size_t f = 0; f < n_df; ++f) {
-                // the einsum's sum over symbols, in turn (the reference's is a
-                // BLAS zgemm, whose order is the BLAS's: agrees to rounding)
-                const cd* w = T.W.data() + f * n + c * ck;
-                double ar = 0.0, ai = 0.0;
-                for (std::size_t q = 0; q < ck; ++q) {
-                    const double mr = mx[q].real(), mi = mx[q].imag(), wr = w[q].real(), wi = w[q].imag();
-                    const double re = mr * wr - mi * wi;
-                    const double im = mr * wi + mi * wr;
-                    ar += re;
-                    ai += im;
+                const double wr = w[q].real(), wi = w[q].imag();
+                const std::int64_t base = k0 + r0 + off[c * ck + q];
+                const double* pr = nullptr;
+                const double* pi = nullptr;
+                if (base >= 0 && base + static_cast<std::int64_t>(n_tau) <= nm) {
+                    pr = mre.data() + base;
+                    pi = mim.data() + base;
+                } else {   // past either end: np.clip's index, gathered
+                    for (std::size_t t = 0; t < n_tau; ++t) {
+                        const auto k = static_cast<std::size_t>(
+                            std::clamp<std::int64_t>(base + static_cast<std::int64_t>(t), 0, nm - 1));
+                        gr[t] = mre[k];
+                        gi[t] = mim[k];
+                    }
+                    pr = gr.data();
+                    pi = gi.data();
                 }
-                s.S[(f * n_tau + ti) * nc + c] = cd(0.0 + ar, 0.0 + ai);
+                mac(ar.data(), ai.data(), pr, pi, wr, wi, n_tau);
             }
+            for (std::size_t t = 0; t < n_tau; ++t) s.S[(f * n_tau + t) * nc + c] = cd(0.0 + ar[t], 0.0 + ai[t]);
         }
     }
     // var = local[clip(k0 + tau + round(mean(off per chunk)))] * norm
