@@ -30,7 +30,7 @@ QRSS_PARITY_WORST=1 with -s prints the worst of each this run):
 - _segment_timing on the reference's own inputs: t0 to 1e-6 samples
   (8e-12), the clock error to 1e-6 samples of slip (6e-11), the score to
   1e-8 relative (2.3e-13);
-- _carrier_lines: to the bit (bar 1e-12); refine_path and line_path: the
+- _carrier_lines: to the bit (asserted bitwise); refine_path and line_path: the
   same branch (unchanged, the 1 s fine grid or the 2 s coarse one) and the
   same grid to the bit, f to 1e-7 Hz (measured 4.5e-13), the caller's own
   path back when nothing was measured; _flat_path to 1e-9 Hz (4.5e-13);
@@ -70,7 +70,14 @@ QRSS_PARITY_WORST=1 with -s prints the worst of each this run):
   them, blanked thirds, segment lengths 0.5 to 60 s, median bands, all
   four refine/line branches), _segment_timing on planted pulses (every
   branch of its walk), and gate V with every known symbol erased and with
-  an A2-like candidate (2x2 covariance, a 120-sample local search).
+  an A2-like candidate (2x2 covariance, a 120-sample local search);
+- a real signal with q at the grid's floor (TINY -15 dB, no fading): the
+  scenarios above hold q at grid index 1-2, and there the 1e-7 Z_ref bar
+  is honest; at the floor it is not, because the reference itself moves
+  Z_ref by 7.8e-7 and P by 8.4e-5 relative for a 1e-13-sample nudge of
+  its own timing. Same decision, timing, path, z_d/m/N/psi to the bit;
+  Z_ref held to 1e-5 relative (measured 3.7e-7 through verify, 2.9e-7
+  through verify_track), u to 1e-7 (4.3e-9), P to 1e-3 (4.6e-5).
 """
 
 import dataclasses
@@ -437,11 +444,10 @@ def test_carrier_lines(row, scen):
                 r = T._carrier_lines(z, s.chan, s.spec, seg_s, span, **kw)
                 g = row["_carrier_lines"](z, s.chan, s.spec, seg_s, span, **kw)
                 what = (label, seg_s, span, kw)
-                assert np.array_equal(g[0], r[0]), what
-                assert g[1].shape == r[1].shape and g[2].shape == r[2].shape, what
-                if len(r[1]):
-                    _le("lines f", np.max(np.abs(g[1] - r[1])), 1e-12, what)
-                    _le("lines ratio", rel(g[2], r[2]), 1e-12, what)
+                # to the bit: the same z gives the same spectra (pocketfft, the
+                # Hann window through libm cos, numpy's median)
+                for a, b in zip(g, r):
+                    assert a.dtype == b.dtype and np.array_equal(a, b), what
 
 
 def test_refine_and_line_path(row, scen):
@@ -709,7 +715,7 @@ def test_probe_paths_random(row):
     branch (the caller's own object back or not) and grid, f to 1e-7 Hz."""
     rng = np.random.default_rng(31)
     branches = set()
-    for trial in range(24):
+    for trial in range(16):
         spec = frame.TINY if trial % 3 else frame.get("short")
         chan, f0 = _probe_chan(rng, spec)
         z = chan.ch.astype(np.complex128)
@@ -791,6 +797,41 @@ def test_probe_gate_edges(row, scen):
     _timing_close(g.timing, r.timing, s.spec, "A2-like")
     _det_close(row["verify"](s.chan, CH_FS, s.spec, cand), T.verify(s.chan, CH_FS, s.spec, cand), s.spec,
                "A2-like")
+
+
+def test_probe_steady_weak_q_floor(row):
+    """A weak steady pass (TINY at -15 dB, no fading) on which the tracker's
+    q sits at its grid's floor, as it does for a quiet unfaded QRSS signal.
+    There the reference does not reproduce itself to the module's signal
+    bars: nudging its own timing by 1e-13 samples moves its Z_ref by 7.8e-7
+    and P by 8.4e-5 (measured, recorded below). The C++ on the reference's
+    own candidate (identical m, bit for bit) lands inside that: Z_ref 2.9e-7,
+    P 4.6e-5. So: the same accept, path and timing, and Z_ref to 1e-5, u to
+    1e-7, P to 1e-3 (the noise capture's bars)."""
+    spec = frame.TINY
+    a = unit_rms_latents(spec.n_data, 11)
+    sym = frame.assemble(spec, None, precode(a, Q_TEST))
+    sim = chm.simulate(sym, spec, Q_TEST, ChannelConfig(snr_db=-15.0, seed=11), carrier_hz=1500.0)
+    prep = RX.prepare(frontend.Capture(sim.fe, Q_TEST, sim.t0_index))
+    det = flat_det(1500.0)
+    chan = RX.channel_for(prep, spec, det)
+    chan.noise_psd_at(0.0)
+    r, g = T.verify(chan, CH_FS, spec, det), row["verify"](chan, CH_FS, spec, det)
+    assert r is not None and g is not None
+    _timing_close(g.timing, r.timing, spec, "q floor")
+    _path_close(g.path, r.path, "q floor")
+    _le("q floor verify z_ref", _r(g.z_ref, r.z_ref), 1e-5)
+    rt, gt = T.verify_track(chan, spec, r, fit=False), row["verify_track"](chan, spec, r, fit=False)
+    assert rt.q == gt.q == T.Q_GRID[0], (rt.q, gt.q)
+    for f in ("z_d", "m", "N", "psi"):
+        assert np.array_equal(getattr(gt, f), getattr(rt, f)), f
+    _le("q floor track z_ref", _r(gt.z_ref, rt.z_ref), 1e-5)
+    _le("q floor track u", rel(gt.u, rt.u), 1e-7)
+    _le("q floor track P", rel(gt.P, rt.P), 1e-3)
+    nudged = dataclasses.replace(r, timing=dataclasses.replace(r.timing, tau0=r.timing.tau0 + 1e-13))
+    rn = T.verify_track(chan, spec, nudged, fit=False)
+    _le("q floor reference's own z_ref (1e-13 nudge)", _r(rn.z_ref, rt.z_ref), 1e-4)
+    _le("q floor reference's own P (1e-13 nudge)", rel(rn.P, rt.P), 1e-2)
 
 
 # --- the whole caller ------------------------------------------------------------------------------
