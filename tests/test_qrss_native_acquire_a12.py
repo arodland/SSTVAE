@@ -178,6 +178,12 @@ def test_numpys_float32_log(N):
     # the reference's call: one float32 at a time
     for v in (np.float32(0.3), np.float32(17.25), np.float32(1e-9)):
         assert N._log_f32(np.array([v]))[0] == np.log(v)
+    # every float32 in [0.5, 2): every mantissa through the polynomial, on
+    # both sides of the sqrt(1/2) split (other binades only add e ln 2;
+    # all 2^31 non-negative floats were compared once, 0 differences)
+    x = np.arange(0x3F000000, 0x40000000, dtype=np.uint32).view(np.float32)
+    got, ref = N._log_f32(x), np.log(x)
+    assert np.array_equal(got.view(np.uint32), ref.view(np.uint32)), np.count_nonzero(got != ref)
 
 
 # --- A1 ------------------------------------------------------------------------------------------
@@ -266,6 +272,50 @@ def test_a1_refusals_and_errors(N, caps):
     bad = dataclasses.replace(cs, stat=cs.stat.astype(np.float64))
     with pytest.raises(NotImplementedError):          # a statistic carrier_line_stats never makes
         N.carrier_lines(x, t0, stats=bad)
+
+
+@pytest.fixture(scope="module")
+def crowd():
+    """A crowded band: four CE signals, one drifting fast, two 10 Hz apart,
+    blanked and normalised together: (fe, t0_index, [(f, drift)])."""
+    rng = np.random.default_rng(29)
+    z = TA._clean()
+    sigs = ((900.3, -12.0, 2.0), (1650.0, -16.0, 0.0), (1660.4, -18.0, -1.0), (2410.7, -14.0, 0.6))
+    x, t0 = None, None
+    for f, snr, drift in sigs:
+        xi, t0 = TA._capture(f, snr, shift_s=0.4, seed=int(rng.integers(1 << 30)), drift=drift, z=z,
+                             preprocess=False)
+        x = xi.astype(np.complex128) if x is None else x + xi
+    x = (x / 2).astype(np.complex64)
+    x, keep = frontend.blank(x)
+    x, _ = frontend.normalise(x, keep)
+    return x, t0, [(f, d) for f, _s, d in sigs]
+
+
+def test_a1_probe_crowded_band(N, crowd):
+    """Probe: A1 on a crowded band (a fast drift that must keep its drifted
+    line, neighbours inside the 10 Hz separation) and at shifted t0s, bit
+    for bit; the drifted-line branch is exercised, not only the straight."""
+    fe, t0, sigs = crowd
+    drifted = 0
+    for dt in (0.0, 0.3 * FE_FS, -1.7 * FE_FS):
+        ref = A.carrier_line_stats(fe, t0 + dt)
+        got = _stats(N.carrier_line_stats(fe, t0 + dt))
+        _same(got.stat, ref.stat, f"crowd stat {dt}")
+        for opts in ({}, {"max_cands": 2}, {"min_sep_hz": 12.0}, {"min_sep_hz": 0.25, "max_cands": 40},
+                     {"pfa": 0.3, "max_cands": 64}):
+            r = A.carrier_lines(fe, t0 + dt, stats=ref, **opts)
+            g = [_cand(d) for d in N.carrier_lines(fe, t0 + dt, stats=ref, **opts)]
+            _cands_same(r, g, f"crowd lines {dt} {opts}")
+            drifted += sum(c.drift_hz_per_min != 0.0 for c in r)
+        lines = A.carrier_lines(fe, t0 + dt, stats=ref)
+        for f, _d in sigs:
+            for off in (0.0, 0.7, -1.9, 2.0, 2.0001):
+                _cand_same(A.hint_line(ref, f + off), _cand(N.hint_line(ref, f + off)), f"crowd hint {f + off}")
+        for sep in (A.A2_ALIAS_HZ, 3.0):
+            _cands_same(A.pilot_lines(ref, lines, sep_hz=sep),
+                        [_cand(d) for d in N.pilot_lines(ref, lines, sep_hz=sep)], f"crowd pilots {sep}")
+    assert drifted >= 3, drifted
 
 
 # --- A2 ------------------------------------------------------------------------------------------
@@ -416,6 +466,37 @@ def test_preamble_search_p_is_numpys_on_its_own_arrays(N, caps):
                 assert hit["cell_lam"] == float(lam[i, j]) and hit["n_groups"] == k
 
 
+def test_a2_probe_random_cells(N, caps, crowd):
+    """Probe: preamble_search at random lines -- near the signals, anywhere
+    in the band, drifting, with t0 moved so the search window runs off the
+    start of the capture -- in both kinds: every decision the same and the
+    hit within the bar. Measured worst: f_hz 2.3e-13 Hz, tau0_s 6.6e-14 s."""
+    rng = np.random.default_rng(31)
+    fe_c, t0_c, sigs = crowd
+    scenes = [("ce", *caps["ce"], [1650.0]), ("l", *caps["l"], [1203.4]),
+              ("crowd", fe_c, t0_c, [f for f, _d in sigs])]
+    worst = {}
+    n_pass = n_all = 0
+    for what, fe, t0, fs in scenes:
+        for trial in range(4):
+            if trial < 2:
+                f = float(rng.choice(fs)) + rng.uniform(-0.6, 0.6)
+            else:
+                f = rng.uniform(400.0, 2600.0)
+            drift = 0.0 if trial % 2 == 0 else rng.uniform(-2.5, 2.5)
+            t0x = t0 + rng.uniform(-3.0, 3.0) * FE_FS if trial != 3 else rng.uniform(0.0, 4.0) * FE_FS
+            c = CarrierCandidate(f, drift, 0.0)
+            for rk, nk in ((A.CE_PRE, N.CE_PRE), (A.L_PRE, N.L_PRE)):
+                ref = A.preamble_search(fe, t0x, c, kind=rk)
+                got = _hit(N.preamble_search(fe, t0x, c, kind=nk))
+                for k, v in _hit_close(ref, got, f"probe {what} {trial} {rk.name}").items():
+                    worst[k] = max(worst.get(k, 0.0), v)
+                n_pass += ref.passed
+                n_all += 1
+    assert 2 <= n_pass <= n_all - 2, (n_pass, n_all)  # passed and failed cells both compared
+    assert worst["f_hz"] < 1e-9 and worst["tau0_s"] < 1e-9, worst
+
+
 def test_fine_sums_coherent_phase_line(N, caps, native):
     from scipy.interpolate import CubicSpline
 
@@ -495,6 +576,26 @@ def test_lead_in_span(N, monkeypatch):
         assert r == g, (r, g)
 
 
+def test_lead_in_probe(N):
+    """Probe: lead_in_span at random keying ends, offsets, drifts and
+    thresholds about a 10 s lead-in (CE and L), the same span every time,
+    lead-ins found and missed both among them."""
+    rng = np.random.default_rng(37)
+    x, t0 = TA._capture(1650.0, -17.0, shift_s=0.3, seed=11, z=TA._clean("short", 40.0, 10.0))
+    xl, t0l = TL._capture(TL._l_clean(lead_in_s=10.0), 1203.4, -17.0, shift_s=-0.2, seed=12)
+    spans = []
+    for fe, t0x, f, tau0, t_sym in ((x, t0, 1650.0, 0.3, A.T_SYM), (xl, t0l, 1203.4, -0.2, A.L_T_SYM)):
+        for i in range(8):
+            df = rng.normal(0.0, 0.05) if i % 2 == 0 else rng.uniform(-0.8, 0.8)   # odd: often a miss
+            args = (fe, t0x + rng.uniform(-2.0, 2.0), f + df, rng.uniform(-0.5, 0.5),
+                    tau0 + rng.uniform(-3.0, 1.0))
+            kw = {"t_sym": t_sym, "z_min": rng.uniform(2.0, 12.0)}
+            ref, got = A.lead_in_span(*args, **kw), N.lead_in_span(*args, **kw)
+            assert type(got) is type(ref) is float and got == ref, (args[1:], kw, ref, got)
+            spans.append(ref)
+    assert min(spans) < 3.0 and max(spans) >= 6.0, spans
+
+
 def test_to_detection(N, caps):
     fe, t0 = caps["ce"]
     hit = A.preamble_search(fe, t0, CarrierCandidate(1650.0, 0.0, 0.0))
@@ -517,12 +618,30 @@ def test_to_detection(N, caps):
 
 # --- the callers, on the C++ ---------------------------------------------------------------------
 
+_COUNTED = ("carrier_line_stats", "carrier_lines", "hint_line", "pilot_lines", "_a2_input",
+            "preamble_search", "lead_in_span", "to_detection")
+
+
 def _apply_rows(native, monkeypatch):
+    """Assign this module's rows and acquire_stats' over acquire's names;
+    returns {native function: calls}, counted on the native module itself
+    (the rows look its functions up at call time), so a caller that kept
+    running the reference shows up as a zero."""
     from qrss_native import acquire_a12, acquire_stats
 
-    for mod in (acquire_stats, acquire_a12):
-        for (target, attr), fn in mod.rows(native.qrss).items():
+    counts = dict.fromkeys(_COUNTED, 0)
+    mod = native.qrss.acquire_a12
+    for name in _COUNTED:
+        def counted(*a, _fn=getattr(mod, name), _name=name, **kw):
+            counts[_name] += 1
+            return _fn(*a, **kw)
+        monkeypatch.setattr(mod, name, counted)
+    for rows in (acquire_stats.rows(native.qrss), acquire_a12.rows(native.qrss)):
+        for (target, attr), fn in rows.items():
             monkeypatch.setattr(_owner(target), attr, fn)
+        for (target, attr), fn in rows.items():
+            assert getattr(_owner(target), attr) is fn, (target, attr)
+    return counts
 
 
 def _acq_close(r, g, what):
@@ -563,14 +682,16 @@ def test_acquire_end_to_end_on_the_cpp(N, caps, native, monkeypatch):
         return out
 
     ref = run()
-    _apply_rows(native, monkeypatch)
-    assert A.carrier_line_stats is not ref and A.CE_PRE.mf_taps is not None
+    counts = _apply_rows(native, monkeypatch)
     got = run()
     n_hits = 0
     for (what, spec_set, _h, _l), r, g in zip(runs, ref, got):
         _acq_close(r, g, f"{what} {getattr(spec_set, 'name', 'joint')}")
         n_hits += len(r.preamble)
     assert n_hits >= 3                         # passed hits were compared, not only empty lists
+    # every A1/A2 entry point acquire() reaches ran as the C++
+    assert all(counts[k] > 0 for k in _COUNTED if k != "to_detection"), counts
+    assert counts["preamble_search"] >= 20, counts
 
 
 def test_receive_pass_on_the_cpp(native, monkeypatch):
@@ -589,8 +710,9 @@ def test_receive_pass_on_the_cpp(native, monkeypatch):
         return dets, (RX.receive_pass(prep, spec, dets[0]) if dets else None)
 
     rdets, rp = run()
-    _apply_rows(native, monkeypatch)
+    counts = _apply_rows(native, monkeypatch)
     gdets, gp = run()
+    assert counts["carrier_lines"] and counts["preamble_search"] and counts["to_detection"], counts
     assert len(rdets) == len(gdets) >= 1
     for a, b in zip(rdets, gdets):
         assert (a.method, a.waveform) == (b.method, b.waveform)
@@ -599,8 +721,10 @@ def test_receive_pass_on_the_cpp(native, monkeypatch):
             assert abs(a.timing.tau0 - b.timing.tau0) <= 1e-6 * CH_FS
     assert (rp is None) == (gp is None) and rp is not None
     assert rp.header == gp.header and rp.cw == gp.cw            # TINY: no header, no windows
-    assert (rp.uid, rp.frame, rp.waveform, rp.estimator, rp.em_round, rp.f_mix_hz) == \
-        (gp.uid, gp.frame, gp.waveform, gp.estimator, gp.em_round, gp.f_mix_hz)
+    # not uid: it hashes the float32 z, which a 1e-13 Hz move of the
+    # detection may change in its last bit (cpp-port-plan 4.1)
+    assert (rp.frame, rp.waveform, rp.estimator, rp.em_round, rp.f_mix_hz) == \
+        (gp.frame, gp.waveform, gp.estimator, gp.em_round, gp.f_mix_hz)
     assert abs(gp.f_hz - rp.f_hz) <= 1e-7 and abs(gp.timing.tau0 - rp.timing.tau0) <= 1e-6 * CH_FS
     for f in ("z", "w", "hdr_llr", "psi"):
         a, b = getattr(rp, f), getattr(gp, f)

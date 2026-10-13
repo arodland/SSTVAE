@@ -567,7 +567,12 @@ double lead_in_impl(std::span<const S> fe, double t0_index, double f_hz, double 
         const double n_ind = static_cast<double>(sel.size()) / sps;
         const double q = py_max(n_ind, 1.0) * sigma2 / 2;
         if (q < 0) throw std::invalid_argument("math domain error");
-        const double z = np::abs(npsum::sum(std::span<const cd>(sel))) / sps / std::sqrt(q);
+        // abs(np.sum(...)): Python's builtin abs of an np.complex128 scalar is
+        // numpy's scalar math, npy_cabs, i.e. libm's hypot -- not the
+        // absolute ufunc's larger * sqrt(1 + r^2) (np::abs), which is 1 ulp
+        // from it in about a quarter of windows.
+        const cd s = npsum::sum(std::span<const cd>(sel));
+        const double z = std::hypot(s.real(), s.imag()) / sps / std::sqrt(q);
         if (z <= z_min) break;
         span = static_cast<double>(k + 1) * rxa::LEAD_WIN_S;
     }

@@ -50,6 +50,14 @@
 //   in the order numpy adds the Fortran-ordered S that _preamble_sums
 //   builds (SumOrder::Sequential), so on the same S its p is the
 //   reference's to the bit.
+// * lead_in_span's window statistic is to rounding too: its matched filter
+//   is an oaconvolve of complex data with real taps, and scipy transforms
+//   real taps with ducc0's real-input FFT, which numpy's pocketfft (that
+//   math/convolve.hpp follows) does not reproduce bit for bit at every
+//   length (~21% of samples bit-equal, 6e-16 relative). The span is the
+//   same away from z == z_min. Its |sum| is libm's hypot, as Python's
+//   builtin abs() of an np.complex128 is (numpy's scalar math), not the
+//   absolute ufunc's formula that np.abs of an array uses.
 //
 // Errors are the reference's: std::invalid_argument for ValueError,
 // std::out_of_range for IndexError, std::overflow_error for OverflowError,
