@@ -231,8 +231,18 @@ tk::VerifyArgs verify_args(const py::object& fit, const py::object& tau_range, c
     return a;
 }
 
+// The same doubles bit for bit (a NaN z or covariance entry included: with
+// fit=False the reference hands back cand.timing itself whatever it holds,
+// and a == comparison would call a NaN timing a new one).
+bool same_bits(double a, double b) { return std::memcmp(&a, &b, sizeof a) == 0; }
 bool same_timing(const types::Timing& a, const types::Timing& b) {
-    return a.tau0 == b.tau0 && a.ppm == b.ppm && a.gamma == b.gamma && a.z == b.z && a.cov == b.cov;
+    if (!(same_bits(a.tau0, b.tau0) && same_bits(a.ppm, b.ppm) && same_bits(a.gamma, b.gamma) &&
+          same_bits(a.z, b.z) && a.cov.rows == b.cov.rows && a.cov.cols == b.cov.cols &&
+          a.cov.data.size() == b.cov.data.size()))
+        return false;
+    for (std::size_t i = 0; i < a.cov.data.size(); ++i)
+        if (!same_bits(a.cov.data[i], b.cov.data[i])) return false;
+    return true;
 }
 
 py::object fit_timing_l_py(const py::object& ch, const py::object& ch_fs, const py::object& path,

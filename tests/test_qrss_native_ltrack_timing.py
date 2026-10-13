@@ -57,6 +57,17 @@ scenarios (2026-10-13; QRSS_PARITY_WORST=1 with -s prints them):
   kept in turn so that what they call is the C++);
 - the reference's refusals, type and text: a CE frame, a malformed erase
   span.
+
+The review probes (2026-10-13) go where the scenarios do not: random
+fit_grid_l inputs against the reference's direct path [1.3e-15], a capture
+starting inside the blind search (the straddle at x's start, which the
+receiver's padding rules out: test_receiver_channel_holds_every_lag),
+random _segment_timing_l cuts [7.3e-12 in t0, 4.3e-11 of slip], a CE
+signal heard under an L hypothesis (the resid_ratio cut), erasures, four
+threads, the preamble detection's 2x2 cov, and a candidate whose timing
+holds NaN: verify_track_l(fit=False) must hand back the candidate's own
+Timing object, as the reference does, which the binding's float `==`
+missed for NaN until this review (it now compares bits).
 """
 
 import dataclasses
@@ -682,6 +693,259 @@ def test_erase_span_refusals(row, scen):
             r = _outcome(getattr(LT, fn), *args, fit=False, erase_s=bad)
             g = _outcome(row[fn], *args, fit=False, erase_s=bad)
             assert r[0] != "ok" and g == r, (fn, bad, r, g)
+
+
+# --- review probes ------------------------------------------------------------------------------
+
+def test_receiver_channel_holds_every_lag(scen, blind):
+    """The C++ correlates by the direct gather, the reference's blind search
+    by an FFT, and the two differ only for a term whose interpolation pair
+    straddles an end of x (the FFT path keeps the half inside; probed in
+    test_probe_fit_timing_l_unpadded). The receiver's L channel
+    (`channel_for`) is zero-padded past every lag the blind search tries
+    at every clock error, with whole samples to spare, so no such term
+    arises there: this pins that precondition."""
+    for label, b in blind.items():
+        tr = b.got[1]
+        kn = LT.known_symbols_l(scen[label].spec)
+        reach = float(kn.pos.max()) * SPS * (1 + tr["nd"] * tr["step"]) + tr["frac0"]
+        first = tr["base"] + float(kn.pos.min()) * SPS * (1 - tr["nd"] * tr["step"])
+        last = tr["base"] + tr["nlag"] - 1 + reach + 1      # the pair's second sample
+        assert first >= 1.0, (label, first)
+        assert last <= len(b.z_d) - 2, (label, last, len(b.z_d))
+
+
+def test_probe_fit_timing_l_unpadded(Lt, row):
+    """A capture whose frame starts inside the blind search (t0_index -50.5):
+    the reference's FFT path keeps half of each term straddling x[0] and its
+    direct path drops it, as the C++ does. The C++ grid is the reference's
+    direct path to rounding there (the structural difference in
+    ltrack_timing.hpp, which the receiver's padding keeps away); with the
+    capture padded the two paths and the C++ agree, timings too."""
+    rng = np.random.default_rng(2)
+    spec = lframe.L_TINY
+    z = rng.standard_normal(30000) + 1j * rng.standard_normal(30000)
+    kn = LT.known_symbols_l(spec)
+    for pad in (0, 2000):
+        t0 = -50.5 + pad
+        zp = np.concatenate([np.zeros(pad, dtype=np.complex128), z])
+        ref, grids, segs = _ref_fit(None, CH_FS, None, spec, t0_index=t0, z_d=zp)
+        g, tr = Lt._fit_timing_l_trace(None, CH_FS, None, spec, t0_index=t0, z_d=zp)
+        assert tr["base"] == (-678 if not pad else 2000 - 678)
+        deltas = np.arange(-tr["nd"], tr["nd"] + 1) * tr["step"]
+        for lp_i, Z in enumerate(grids):
+            sg = next(sg for p, sg in zip(tr["peaks"], segs) if p["lp"] == lp_i)
+            norm = _norm(sg.sig2, kn)
+            G = Lt._fit_grid_l(sg.x, kn, tr["base"], tr["nlag"], tr["frac0"], deltas, SPS, norm)
+            D = _direct_grid(sg.x, kn, tr["base"], tr["nlag"], tr["frac0"], deltas, norm)
+            _le("unpadded grid vs direct", np.max(np.abs(G - D)) / np.max(np.abs(D)), 1e-13, (pad, lp_i))
+            gap = np.max(np.abs(Z - D)) / np.max(np.abs(D))
+            if pad:
+                _le("padded grid vs FFT", np.max(np.abs(G - Z)) / np.max(np.abs(Z)), 1e-12, (pad, lp_i))
+            else:
+                assert gap > 1e-3, gap                  # the straddling terms: structural
+        if pad:
+            _peaks_close(tr, segs, spec, "padded")
+            _timing_close(_rx.to_ref(g[0]), ref, spec, "padded")
+
+
+def _direct_grid(x, kn, base, nlag, frac0, deltas, norm):
+    """fit_timing_l's direct path (nlag <= 64) restated for any nlag."""
+    pos = np.asarray(kn.pos, dtype=np.float64)
+    a = np.asarray(kn.val, dtype=np.complex128)
+    lags = np.arange(nlag)
+    lagph = LT._lag_phase(lags)
+    out = np.empty((len(deltas), nlag))
+    for i, d in enumerate(deltas):
+        o = pos * SPS * (1 + d) + frac0
+        idx = base + o[:, None] + lags[None, :]
+        i0 = np.floor(idx).astype(np.int64)
+        f = idx - i0
+        ok = (i0 >= 0) & (i0 + 1 < len(x))
+        i0c = np.clip(i0, 0, len(x) - 2)
+        v = (x[i0c] * (1 - f) + x[i0c + 1] * f) * ok
+        out[i] = (lagph * ((np.conj(a) * LT._clock_phase(pos, d)) @ v)).real / norm
+    return out
+
+
+def test_probe_fit_grid_l_random(Lt):
+    """The grid on random inputs against the reference's direct path: x of
+    random length (shorter than the template's span too), a base before x
+    or past it, random fractions and clock errors, complex and real known
+    symbols, one symbol, none."""
+    rng = np.random.default_rng(11)
+    kn_l = LT.known_symbols_l(lframe.L_TINY)
+    span = int(kn_l.pos.max() * SPS) + 1
+    for trial in range(24):
+        k = int(rng.integers(0, 4))
+        if k == 0:
+            kn = kn_l
+        elif k == 1:
+            sel = np.sort(rng.choice(len(kn_l.pos), int(rng.integers(1, 40)), replace=False))
+            kn = T._Known(pos=kn_l.pos[sel], val=kn_l.val[sel])
+        elif k == 2:
+            kn = T._Known(pos=kn_l.pos[::4], val=np.sign(kn_l.val.real[::4]) + 0.0)
+        else:
+            kn = T._Known(pos=kn_l.pos[:1], val=kn_l.val[:1])
+        nx = int(rng.integers(span // 2, span + 400))
+        x = rng.standard_normal(nx) + 1j * rng.standard_normal(nx)
+        base = int(rng.integers(-80, 300))
+        nlag = int(rng.integers(1, 120))
+        frac0 = float(rng.uniform(0, 1))
+        nd = int(rng.integers(0, 4))
+        deltas = np.arange(-nd, nd + 1) * float(rng.uniform(1e-5, 3e-4))
+        norm = float(rng.uniform(0.5, 4.0))
+        ref = _direct_grid(x, kn, base, nlag, frac0, deltas, norm)
+        got = Lt._fit_grid_l(x, kn, base, nlag, frac0, deltas, SPS, norm)
+        assert got.shape == ref.shape, trial
+        scale = max(np.max(np.abs(ref)), 1e-300)
+        _le("grid random", np.max(np.abs(got - ref)) / scale, 1e-13, (trial, k, nx, base, nlag))
+    # no known symbol: every cell 0
+    empty = T._Known(pos=np.zeros(0, dtype=np.int64), val=np.zeros(0, dtype=np.complex128))
+    got = Lt._fit_grid_l(x, empty, 0, 5, 0.25, np.zeros(1), SPS, 1.0)
+    assert got.shape == (1, 5) and not np.any(got)
+
+
+def test_probe_segment_timing_l_random(row, scen, blind):
+    """_segment_timing_l on the reference's own statistic, perturbed: x cut
+    short (late segments fall off its end), cut at the front (early ones
+    before it), extra noise, the start and slip moved, real known symbols,
+    segment lengths from 4 s to 300 s."""
+    rng = np.random.default_rng(7)
+    for label in ("tiny-12", "short-12"):
+        spec, s = scen[label].spec, blind[label].ref[2][0]
+        for trial in range(10):
+            mode = trial % 4
+            x, cut = s.x, 0
+            if mode == 1:
+                x = s.x[:int(len(s.x) * rng.uniform(0.4, 0.95))]
+            elif mode == 2:
+                cut = int(s.t0abs + rng.uniform(-200, 600))
+                x = s.x[cut:]
+            elif mode == 3:
+                x = s.x + (rng.standard_normal(len(s.x)) + 1j * rng.standard_normal(len(s.x))) * \
+                    math.sqrt(s.sig2) * rng.uniform(0.2, 1.0)
+            kn = s.kn if trial % 5 != 4 else T._Known(pos=s.kn.pos, val=np.sign(s.kn.val.real) + 0.0)
+            args = (x, s.sig2, kn, s.t0abs + rng.uniform(-4, 4) - cut, s.delta + rng.uniform(-1e-4, 1e-4),
+                    SPS, spec.n_pos, s.n_ref - cut, float(rng.choice([4.0, 7.0, 13.0, 20.0, 33.0, 300.0])))
+            r, g = LT._segment_timing_l(*args), row["_segment_timing_l"](*args)
+            what = (label, trial, mode)
+            _le("segment random t0", abs(g[0] - r[0]), 1e-6, what)
+            _le("segment random slip", _slip(g[1] - r[1], spec), 1e-6, what)
+            _le("segment random score", abs(g[2] - r[2]) / max(abs(r[2]), 1e-4), 1e-8, what)
+
+
+def test_probe_nan_timing_keeps_its_identity(row, scen):
+    """verify_track_l(fit=False) hands back cand.timing itself, whatever it
+    holds: a NaN z or covariance entry too (the binding compared timings
+    with ==, which a NaN fails, so the row returned a copy)."""
+    s = scen["tiny-6"]
+    for tm in (dataclasses.replace(s.v.timing, z=float("nan")),
+               dataclasses.replace(s.v.timing, cov=np.diag([np.nan, 0.0, 0.0])),
+               dataclasses.replace(s.v.timing, cov=np.diag([4.0, 0.0]))):
+        cand = dataclasses.replace(s.v, timing=tm)
+        r = LT.verify_track_l(s.chan, s.spec, cand, fit=False)
+        g = row["verify_track_l"](s.chan, s.spec, cand, fit=False)
+        assert r.timing is tm and g.timing is tm
+        _track_close(g, r, ("nan timing", tm.z, tm.cov.shape))
+        g = row["verify_track_l"](s.chan, s.spec, cand)           # fitted: a new timing
+        assert g.timing is not tm
+
+
+def test_probe_erasures(row, scen):
+    """Gate V with spans erased: everything (Z_ref 0, R 1, refused), the
+    preamble only, the lead and the frame's first seconds."""
+    s = scen["tiny-6"]
+    cand = dataclasses.replace(s.det, timing=s.v.timing)
+    for es in ([(-100.0, 1e4)], [(0.0, 5.0)], [(-30.0, 0.5)], [(20.0, 21.0), (19.0, 30.0)]):
+        r = LT.verify_track_l(s.chan, s.spec, s.v, fit=False, erase_s=es)
+        g = row["verify_track_l"](s.chan, s.spec, s.v, fit=False, erase_s=es)
+        _track_close(g, r, ("erase", es))
+        if es[0][1] > 1e3:
+            assert r.z_ref == g.z_ref == 0.0 and r.resid_ratio == g.resid_ratio == 1.0
+        _det_close(row["verify_l"](s.chan, CH_FS, s.spec, cand, fit=False, erase_s=es),
+                   LT.verify_l(s.chan, CH_FS, s.spec, cand, fit=False, erase_s=es), s.spec, ("erase", es))
+    assert LT.verify_l(s.chan, CH_FS, s.spec, cand, fit=False, erase_s=[(-100.0, 1e4)]) is None
+
+
+def test_probe_threads(native, row, scen):
+    """The row releases the GIL: gate V from four threads at once is the
+    serial result bit for bit."""
+    import threading
+
+    s = scen["tiny-12"]
+    want = row["verify_track_l"](s.chan, s.spec, s.v, fit=False)
+    out, errs = [None] * 4, []
+
+    def run(k):
+        try:
+            out[k] = row["verify_track_l"](s.chan, s.spec, s.v, fit=False)
+        except Exception as e:                  # pragma: no cover - reported below
+            errs.append(e)
+
+    th = [threading.Thread(target=run, args=(k,)) for k in range(4)]
+    for t in th:
+        t.start()
+    for t in th:
+        t.join()
+    assert not errs, errs
+    for g in out:
+        assert g.z_ref == want.z_ref and g.resid_ratio == want.resid_ratio
+        for f in ARRAYS:
+            _same(getattr(g, f), getattr(want, f), f)
+
+
+def test_probe_ce_signal_under_l(row):
+    """A CE TINY signal at -6 dB gated as L (the slow test_a_ce_signal_is_not_l
+    of test_qrss_ltrack, against the C++): the pilot taken on its carrier
+    and 22 Hz above it, R well over 1 and the deciding factor (Z_ref times
+    sqrt(R) over Z_ACCEPT, Z_ref under it), the same in both; verify_l
+    refuses it at the carrier after every base and runner-up."""
+    from qrss_demod_tracks import _ce_sim
+
+    spec = lframe.L_TINY
+    _, sim = _ce_sim("tiny", -6.0, 1)
+    prep = RX.prepare(frontend.Capture(sim.fe, Q_TEST, sim.t0_index))
+    for off in (0.0, 22.0):
+        det = flat_det(1500.0 + off, WAVEFORM_L)
+        chan = RX.channel_for(prep, spec, det)
+        chan.noise_psd_at(0.0)
+        r = LT.verify_track_l(chan, spec, det)
+        g = row["verify_track_l"](chan, spec, det)
+        _track_close(g, r, ("CE under L", off))
+        _timing_close(g.timing, r.timing, spec, ("CE under L", off))
+        assert r.resid_ratio > 5.0, r.resid_ratio
+        for tr in (r, g):
+            assert tr.z_ref * math.sqrt(tr.resid_ratio) > 6.0 > 1.5 * tr.z_ref, (off, tr.z_ref)
+        if off == 0.0:
+            assert LT.verify_l(chan, CH_FS, spec, det) is None
+            assert row["verify_l"](chan, CH_FS, spec, det) is None
+
+
+@pytest.mark.slow
+def test_probe_preamble_candidates(row):
+    """Acquisition's own L candidates (receiver.candidates: a preamble one,
+    whose Timing carries A2's 2x2 covariance and lambda as z, and a blind
+    one) through gate V, and the preamble one with a 40-sample tau0 sd, so
+    that gate V's local search spans 321 lags and the reference correlates
+    it by FFT."""
+    for name, snr, seed in (("l-tiny", -9.0, 21), ("l-short", -9.0, 3)):
+        spec = lframe.get(name)
+        _, sim = l_scenario(name, snr, seed)
+        prep = RX.prepare(frontend.Capture(sim.fe, Q_TEST, sim.t0_index))
+        dets = RX.candidates(prep, spec)
+        assert {d.method for d in dets} >= {"preamble"}, [d.method for d in dets]
+        for d in dets[:3]:
+            chan = RX.channel_for(prep, spec, d)
+            chan.noise_psd_at(0.0)
+            cands = [d]
+            if d.timing is not None:
+                assert d.timing.cov.shape == (2, 2)
+                cands.append(dataclasses.replace(d, timing=dataclasses.replace(d.timing,
+                                                                               cov=np.diag([1600.0, 0.0]))))
+            for c in cands:
+                what = (name, c.method, None if c.timing is None else c.timing.cov[0, 0])
+                _det_close(row["verify_l"](chan, CH_FS, spec, c), LT.verify_l(chan, CH_FS, spec, c), spec, what)
 
 
 # --- the whole caller ------------------------------------------------------------------------------

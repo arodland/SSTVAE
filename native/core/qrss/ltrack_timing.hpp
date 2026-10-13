@@ -28,11 +28,17 @@
 //   real and imaginary parts of x), so the sum over k runs in k order where
 //   the reference's direct path is BLAS zgemv's order and its FFT path a
 //   transform: the grid agrees to rounding. One structural exception, as
-//   CE's: a term whose interpolation pair straddles the end of x counts 0
-//   here and in the reference's direct path, while its FFT path keeps the
-//   half inside. The receiver's captures are zero-padded past both ends of
-//   every lag searched (receiver.channel_for pads L as it pads CE), so no
-//   such term arises there. A non-finite sample of x is the other: numpy's
+//   CE's: a term whose interpolation pair straddles either end of x (its
+//   pair x[-1], x[0] or x[len - 1], x[len]) counts 0 here and in the
+//   reference's direct path, while its FFT path keeps the half inside --
+//   measured 1.4% of the grid's scale at such cells on a capture starting
+//   inside the blind search. The receiver's captures are zero-padded past
+//   both ends of every lag searched (receiver.channel_for pads L as it
+//   pads CE: the channel spans about 13.5 s before t0, against the blind
+//   search's 2.5 s, and 3 s past its farthest lag at 260 ppm of slip after
+//   the frame, zero-filled where the capture does not reach), so no such
+//   term arises there (test_receiver_channel_holds_every_lag pins that). A
+//   non-finite sample of x is the other: numpy's
 //   complex `v * ok` makes both parts NaN where either is not finite, the
 //   four real gathers keep the finite part (a capture holding inf or NaN).
 // * _segment_timing_l's correlations are BLAS products there (to
