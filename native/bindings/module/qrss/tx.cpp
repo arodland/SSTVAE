@@ -14,6 +14,7 @@
 
 #include <complex>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -55,7 +56,9 @@ std::optional<std::int64_t> segment_arg(const txm::Source& s, const py::handle& 
         if (segment.ptr() == own.ptr()) return bf->segment;
         const int eq = PyObject_RichCompareBool(segment.ptr(), own.ptr(), Py_EQ);
         if (eq < 0) throw py::error_already_set();
-        return eq ? bf->segment : bf->segment + 1;    // + 1: any segment but the file's
+        // Any segment but the file's (without overflowing a clamped int64).
+        if (eq) return bf->segment;
+        return bf->segment == std::numeric_limits<std::int64_t>::max() ? bf->segment - 1 : bf->segment + 1;
     }
     return int64_of(segment);
 }

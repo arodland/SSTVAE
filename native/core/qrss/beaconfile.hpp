@@ -61,7 +61,7 @@ static_assert(LATENT_OFFSET == 366, "the latents start at byte 366");
 static_assert(config::CW_UNITS % 8 == 0, "the keying mask is whole bytes");
 
 // beaconfile.file_size: bytes in a beacon file of n latents (50,970 for a
-// full segment).
+// full segment). std::overflow_error past int64 (Python's int has no limit).
 std::int64_t file_size(std::int64_t n_latents = picture::SENT);
 
 // beaconfile.BeaconFile: one segment as a beacon sends it. The integers are

@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -114,6 +115,19 @@ static void test_bytes(const pc::StoredPicture& sp) {
     digest_is(bf.hdr_bits, "278bcfcaad06f54296abb06016a3cf7504705360db598b260647b863ab0d4d0e", "hdr_bits");
     digest_is(bf.latents_i8, "325b0d7b82164d13927a286d3f35bd1d4b2499f5c1242567160c4c63addbcec0", "latents_i8");
     check::equal(bfm::file_size(1), std::int64_t(371), "file_size(1)");
+    // The int64 edge: the largest count that fits, and the first that does
+    // not, refused rather than wrapped (Python's int has no edge at all).
+    constexpr std::int64_t top = std::numeric_limits<std::int64_t>::max();
+    check::equal(bfm::file_size(top - 370), top, "file_size at the int64 edge");
+    bool refused = false;
+    try {
+        (void)bfm::file_size(top - 369);
+    } catch (const std::overflow_error&) {
+        refused = true;
+    }
+    check::is_true(refused, "file_size past int64 is std::overflow_error");
+    check::equal(bfm::file_size(std::numeric_limits<std::int64_t>::min()), std::numeric_limits<std::int64_t>::min() + 370,
+                 "file_size at the bottom of int64");
     // A file of fewer latents than a segment holds is valid.
     bfm::BeaconFile part = bf;
     part.latents_i8.resize(1000);

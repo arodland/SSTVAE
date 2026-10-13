@@ -217,3 +217,109 @@ def test_check_pilot(nat):
               np.nextafter(300 + edge, 0), 322.6, 322.7, 2700, 2700.0001, 299, 300, 0, -5,
               float("nan"), float("inf"), "1500", np.float64(1500.5), np.int64(2000), 4000):
         _same_outcome(ref.check_pilot, nat.check_pilot, f)
+
+
+# --- review probes -------------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def sources_c():
+    """A mode-C picture and its segment-2 FSK beacon file."""
+    sp = picture.StoredPicture.from_latents(synthetic_full_latents(5), 0x1234, 2)
+    return sp, beaconfile.from_picture(sp, 2, _header(sp, 2))
+
+
+def _all_specs():
+    return [*frame.PRESETS.values(), *frame.LEGACY.values(), *frame.PROTOTYPES.values(),
+            *lframe.PRESETS.values()]
+
+
+def test_every_preset_at_the_q_extremes(nat, sources_c):
+    """Every preset (legacy and prototypes too) at q = 0 and 2^64 - 1, every
+    segment of a .qrsp with its header, and the beacon file either way."""
+    sp, bf = sources_c
+    for spec in _all_specs():
+        for q in (0, (1 << 64) - 1):
+            for seg in range(3):
+                _same_outcome(ref.slot_symbols, nat.slot_symbols, sp, q, spec, segment=seg,
+                              header=_header(sp, seg))
+            _same_outcome(ref.slot_symbols, nat.slot_symbols, bf, q, spec)
+            _same_outcome(ref.slot_symbols, nat.slot_symbols, bf, q, spec, use_int8=True)
+
+
+def test_frames_outside_the_presets(nat, sources_c):
+    """Frames a caller can build: one data latent, an odd count, spread-only
+    headers, a window mid-data, and an L frame of two latents."""
+    sp, bf = sources_c
+    specs = [frame.FrameSpec(name="c1", n_hdr=0, n_data=1, cw_after=()),
+             frame.FrameSpec(name="c2", n_hdr=0, n_data=7, cw_after=(), hdr_rho=0.25),
+             frame.FrameSpec(name="c3", n_data=50600, cw_after=()),
+             frame.FrameSpec(name="c4", n_data=12345, cw_after=(5000,)),
+             lframe.LFrameSpec(name="l1", n_hdr=0, n_data=2, cw_after=()),
+             lframe.LFrameSpec(name="l2", n_data=50600, cw_after=()),
+             lframe.LFrameSpec(name="l3", n_hdr=0, n_data=2468, cw_after=(), hdr_rho=0.3)]
+    for spec in specs:
+        _same_outcome(ref.slot_symbols, nat.slot_symbols, sp, Q_TEST, spec, segment=1,
+                      header=_header(sp, 1))
+        _same_outcome(ref.slot_symbols, nat.slot_symbols, sp, Q_TEST, spec, segment=1)
+        _same_outcome(ref.slot_symbols, nat.slot_symbols, bf, Q_TEST, spec, use_int8=True)
+        _same_outcome(ref.slot_samples, nat.slot_samples, spec)
+
+
+def test_headers_q_and_segments_in_other_forms(nat, ad, sources_c):
+    sp, bf = sources_c
+    rep = dataclasses.replace
+    h = _header(sp, 1)
+    for hh in (rep(h, version=1), rep(h, reserved=1), rep(h, version=7), rep(h, grid=None),
+               rep(h, grid="fn42"), rep(h, callsign="A"), rep(h, callsign=""), rep(h, callsign="K1ABC/PX"),
+               rep(h, mode=np.int64(2)), rep(h, picture_id=np.uint32(sp.picture_id))):
+        _same_outcome(ref.slot_symbols, nat.slot_symbols, sp, Q_TEST, frame.SHORT, segment=1, header=hh)
+        _same_outcome(ref._segment_and_header, ad["_segment_and_header"], sp, 1, hh)
+        _same_outcome(ref._segment_and_header, ad["_segment_and_header"], bf, None, hh)
+        _same_outcome(ref.slot_keying, nat.slot_keying, sp, hh)
+    for q in (np.uint64(5), True, 1.9, Fraction(7, 2), "5", -0.5, float("nan"), float("inf"), 1 << 64,
+              np.int8(-1)):
+        _same_outcome(ref.slot_symbols, nat.slot_symbols, bf, q, frame.TINY)
+    for seg in (None, 0, 1, 2, -1, 3, 1.5, "1", np.int64(2)):
+        for u in (None, True, False, 1, 0, np.True_, "x", ""):
+            _same_outcome(ref.slot_air_latents, nat.slot_air_latents, sp, seg, u)
+            _same_outcome(ref.slot_air_latents, nat.slot_air_latents, bf, seg, u)
+    for seg in (2, np.int64(2), 2.0, 1 << 70, -(1 << 70), None):
+        _same_outcome(ref._segment_and_header, ad["_segment_and_header"], bf, seg, None)
+
+
+def test_slot_samples_other_argument_types(nat):
+    specs = [frame.PRESETS["full"], frame.PRESETS["tiny"], lframe.PRESETS["l-short"]]
+    for spec in specs:
+        for pre in (np.float64(12.0), np.int64(3), 0.1, Fraction(1, 7), 1e-300):
+            for fs in (8000, np.int64(8000), 0, -8000, 1e-300, Fraction(16000, 3), np.float64(44100)):
+                _same_outcome(ref.slot_samples, nat.slot_samples, spec, pre, 3.0, fs)
+
+
+def test_check_pilot_other_values(nat):
+    edge = float(L_PILOT_HZ + L_EDGE_HZ)
+    for f in (np.float32(1500.5), Fraction(1, 3), True, 1e400, "nan", "inf", " 1500 ", "1_500", 2700,
+              2699.99999, 300 + edge, np.nextafter(300 + edge, 1e9), -0.0, np.longdouble(1500),
+              1500 + 0j):
+        _same_outcome(ref.check_pilot, nat.check_pilot, f)
+
+
+def test_slots_at_random(nat, ad):
+    """Random pictures, segments, callsigns, presets and slots, from a .qrsp
+    and from its beacon file."""
+    rng = np.random.default_rng(31)
+    specs = [s for s in _all_specs() if s.n_data <= 4096 * 4]
+    for i in range(4):
+        mode = int(rng.integers(0, 3))
+        sp = picture.StoredPicture.from_latents(
+            rng.standard_normal(3 * picture.GROUP_LATENTS) * rng.uniform(0.1, 10),
+            int(rng.integers(0, 1 << 16)), mode)
+        seg = int(rng.integers(0, mode + 1))
+        call = "".join(rng.choice(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/"), int(rng.integers(1, 9))))
+        h = _header(sp, seg, call=call, grid=None if i % 2 else "JO62")
+        bf = beaconfile.from_picture(sp, seg, h, ook=bool(i % 2))
+        spec = specs[int(rng.integers(0, len(specs)))]
+        q = int(rng.integers(0, 1 << 63)) * 2 + int(rng.integers(0, 2))
+        _same_outcome(ref.slot_symbols, nat.slot_symbols, sp, q, spec, segment=seg, header=h)
+        _same_outcome(ref.slot_symbols, nat.slot_symbols, bf, q, spec)
+        _same_outcome(ref._segment_and_header, ad["_segment_and_header"], bf, None, None)
+        _same_outcome(ref.slot_keying, nat.slot_keying, bf)

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -60,7 +61,12 @@ std::string tuple4(std::int64_t a, std::int64_t b, std::int64_t c, std::int64_t 
 
 }  // namespace
 
-std::int64_t file_size(std::int64_t n_latents) { return static_cast<std::int64_t>(LATENT_OFFSET) + n_latents + 4; }
+std::int64_t file_size(std::int64_t n_latents) {
+    constexpr auto extra = static_cast<std::int64_t>(LATENT_OFFSET) + 4;
+    if (n_latents > std::numeric_limits<std::int64_t>::max() - extra)
+        throw std::overflow_error("beaconfile: a file of " + str(n_latents) + " latents does not fit int64");
+    return extra + n_latents;
+}
 
 header::HeaderFields BeaconFile::header_fields() const {
     header::HeaderFields h;

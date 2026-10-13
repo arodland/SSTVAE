@@ -328,3 +328,117 @@ def test_c_beacon_reads_a_native_file(nat, ad, sp, c_exe, ook, tmp_path):
 def test_header_pad_is_the_only_slack(sp):
     """N_HDR_BITS is not a whole number of bytes, so the pad test above is real."""
     assert N_HDR_BITS % 8 != 0
+
+
+# --- review probes -------------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def sp_c():
+    """A mode-C picture, so segment 2 and the mode byte's top value are covered."""
+    return picture.StoredPicture.from_latents(synthetic_full_latents(9), 0x0F0F, 2)
+
+
+def test_from_bytes_field_values_under_a_valid_crc(ad, sp_c):
+    """Every value class of every header byte, CRC redone: magic quoting,
+    callsign bytes Python's repr escapes, every grid code class, latent
+    counts, flags and reserved, scale, version, waveform, mode, segment,
+    lengths around the minimum, and the argument types bytes() reads."""
+    good = ref.BeaconFile.to_bytes(ref.from_picture(sp_c, 2, _header(sp_c, 2)))
+    body = bytearray(good[:-4])
+    from_bytes = ad["from_bytes"].__func__
+
+    def edit(off, val):
+        b = bytearray(body)
+        b[off:off + len(val)] = val
+        return _recrc(bytes(b))
+
+    datas = [m + good[4:] for m in (b"'AB\"", b"'ABC", b"\"ABC", b"\\\t\n\r", b"\x7f\x80\xff\x00",
+                                    b"QRS\x00", b"qrsb")]
+    datas += [edit(14, c) for c in (b"K1\x00ABC  ", b"K1'ABC  ", b"K1\"ABC  ", b"K1\\ABC  ",
+                                    b"K1\tABC  ", b"K1\x7fABC  ", b"K1'\"ABC ", b"ABCDEFGH",
+                                    b" K1ABC  ", b"K1ABC/P\x00", b"K1\x80'ABC ")]
+    datas += [edit(22, struct.pack("<H", g)) for g in (0, 1, 32399, 32400, 32766, 32767, 32768, 65535)]
+    datas += [edit(24, struct.pack("<I", n)) for n in (2 ** 32 - 1, 50601, 50600, 1)]
+    datas += [edit(30, bytes([fl, r])) for fl in (0x01, 0x02, 0x80, 0xFF) for r in (0, 1, 255)]
+    datas += [edit(28, struct.pack("<H", v)) for v in (0, 65535, 276)]
+    datas += [edit(4, bytes([v])) for v in (0, 255)] + [edit(5, bytes([255]))]
+    datas += [edit(6, bytes([v])) for v in (3, 255)] + [edit(7, bytes([3]))]
+    for n in (0, 1, 369, 370, 371, len(good) - 1, len(good) + 1):
+        d = (good * 2)[:n]
+        datas += [d, _recrc(d[:-4]) if n >= 4 else d]
+    datas += [bytearray(good), memoryview(good), np.frombuffer(good, np.uint8), "abc", 5, None, [256]]
+    for d in datas:
+        _same_outcome(ref.BeaconFile.from_bytes, lambda x: from_bytes(ref.BeaconFile, x), d)
+
+
+def test_check_on_other_field_types(ad, sp_c, tmp_path):
+    """check / to_bytes / header_fields on dataclasses holding other types:
+    bits as bool, int, complex or out of range, latents of another dtype or
+    shape, grids and callsigns the header refuses, fields out of range."""
+    import warnings
+    bf = ref.from_picture(sp_c, 2, _header(sp_c, 2), ook=True)
+    rep = dataclasses.replace
+    k, b, lat = bf.keying, bf.hdr_bits, bf.latents_i8
+    cases = [rep(bf, keying=k.astype(bool)), rep(bf, keying=k.astype(np.int64) * 2),
+             rep(bf, keying=k.astype(np.complex128)), rep(bf, keying=k + 1j),
+             rep(bf, keying=k.astype(np.int64) + 256), rep(bf, hdr_bits=b.astype(bool)),
+             rep(bf, hdr_bits=b.astype(np.float32)), rep(bf, latents_i8=lat.astype(np.uint8)),
+             rep(bf, latents_i8=lat[::2]), rep(bf, latents_i8=np.int8(3)), rep(bf, grid="fn42"),
+             rep(bf, grid="AR99"), rep(bf, grid="RR99"), rep(bf, callsign="K1ABC/P\x00"),
+             rep(bf, callsign="K1ÄBC"), rep(bf, picture_id=-1), rep(bf, picture_id=1 << 32),
+             rep(bf, codec_id=1 << 16), rep(bf, mode=-1), rep(bf, segment=-1),
+             rep(bf, mode=3, segment=3), rep(bf, ook=0), rep(bf, ook=np.True_),
+             rep(bf, latents_i8=np.full(50600, 127, np.int8)), rep(bf, latents_i8=np.zeros(50601, np.int8)),
+             rep(bf, mode=np.int64(2), segment=np.uint8(2), picture_id=np.uint32(bf.picture_id))]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")       # the complex casts
+        for i, c in enumerate(cases):
+            _same_outcome(ref.BeaconFile.check, ad["check"], c)
+            _same_outcome(ref.BeaconFile.to_bytes, ad["to_bytes"], c)
+            _same_outcome(ref.BeaconFile.header_fields, ad["header_fields"], c)
+
+
+def test_from_picture_other_arguments(ad, sp_c):
+    rep = dataclasses.replace
+    h = _header(sp_c, 2)
+    for args in ((sp_c, 2, h), (sp_c, 2, rep(h, grid=None)), (sp_c, 0, _header(sp_c, 0, call="A")),
+                 (sp_c, 1, _header(sp_c, 1, call="ABCDEFGH")), (sp_c, 1, _header(sp_c, 1, call="00000000")),
+                 (sp_c, 2, rep(h, version=1)), (sp_c, 2, rep(h, reserved=1)), (sp_c, 2, rep(h, version=3)),
+                 (sp_c, 2, h, np.True_), (sp_c, 2, h, "x"), (sp_c, 2, h, 0), (sp_c, 3, h), (sp_c, 2.7, h),
+                 (sp_c, 2, rep(h, callsign="K1ABC/P\x00")), (sp_c, 2, rep(h, grid="")),
+                 (sp_c, 2, rep(h, picture_id=float(sp_c.picture_id))),
+                 (sp_c, 2, rep(h, segment=np.int64(2)))):
+        _same_outcome(ref.from_picture, ad["from_picture"], *args)
+
+
+def test_file_size_any_int(nat):
+    for n in (2 ** 63 - 1, 2 ** 63 - 371, 2 ** 63 - 370, 2 ** 63 - 369, 2 ** 70, -2 ** 63,
+              -2 ** 63 + 1, -2 ** 70, True, 3.9, "12"):
+        _same_outcome(ref.file_size, nat.file_size, n)
+
+
+def test_beacon_files_at_random(ad, tmp_path):
+    """Random pictures, segments, callsigns, grids and keying: the same bytes,
+    and each implementation reads the other's file back to the same fields."""
+    rng = np.random.default_rng(21)
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/"
+    for i in range(5):
+        mode = int(rng.integers(0, 3))
+        sp_r = picture.StoredPicture.from_latents(
+            rng.standard_normal(3 * picture.GROUP_LATENTS) * rng.uniform(0.1, 10),
+            int(rng.integers(0, 1 << 16)), mode)
+        seg = int(rng.integers(0, mode + 1))
+        call = "".join(rng.choice(list(alphabet), int(rng.integers(1, 9))))
+        grid = None if i % 3 == 0 else (chr(65 + int(rng.integers(0, 18))) + chr(65 + int(rng.integers(0, 18)))
+                                        + str(int(rng.integers(0, 100))).zfill(2))
+        h = _header(sp_r, seg, call=call, grid=grid)
+        ook = bool(i % 2)
+        want = _outcome(ref.from_picture, sp_r, seg, h, ook)
+        got = _outcome(ad["from_picture"], sp_r, seg, h, ook)
+        assert want[0] == got[0] and (want[0] == "ok" or want[1:] == got[1:]), (call, want, got)
+        if want[0] != "ok":
+            continue
+        _same_bf(want[1], got[1])
+        data = ref.BeaconFile.to_bytes(want[1])
+        assert ad["to_bytes"](got[1]) == data
+        _same_bf(ref.BeaconFile.from_bytes(data), ad["from_bytes"].__func__(ref.BeaconFile, data))

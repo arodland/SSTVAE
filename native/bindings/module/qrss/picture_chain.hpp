@@ -14,8 +14,10 @@
 
 #pragma once
 
+#include <complex>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -203,6 +205,17 @@ inline std::vector<std::uint8_t> bits_of(const py::handle& obj) {
     const py::array a = numpy().attr("asarray")(obj);
     if (a.ndim() != 1) return {};
     const char kind = a.dtype().kind();
+    if (kind == 'c') {
+        // np.array_equal compares a complex value with a bit as 1+0j == 1.
+        auto v = py::array_t<std::complex<double>, py::array::c_style | py::array::forcecast>::ensure(a);
+        if (!v) throw py::error_already_set();
+        std::vector<std::uint8_t> out(static_cast<std::size_t>(v.size()));
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            const std::complex<double> x = v.data()[i];
+            out[i] = x.imag() != 0.0 ? 2 : x.real() == 0.0 ? 0 : x.real() == 1.0 ? 1 : 2;
+        }
+        return out;
+    }
     if (kind != 'b' && kind != 'i' && kind != 'u' && kind != 'f') {
         // np.array_equal would compare these elementwise; nothing of another
         // kind equals a bit vector here.
@@ -306,9 +319,12 @@ inline sstvae::qrss::tx::Source source_of(const py::handle& src) {
     throw py::type_error("source must be a StoredPicture or a BeaconFile, not " + str_of(py::type::of(src)));
 }
 
-// bytes(data), as the reference's from_bytes reads its argument.
+// bytes(data), as the reference's from_bytes reads its argument -- the
+// builtin itself, so an int is that many zero bytes and a str is bytes()'s
+// own TypeError (PyBytes_FromObject refuses both, with other texts).
 inline std::vector<std::uint8_t> bytes_of(const py::handle& data) {
-    const py::bytes b = py::reinterpret_borrow<py::bytes>(steal(PyBytes_FromObject(data.ptr())));
+    const py::bytes b = PyBytes_CheckExact(data.ptr()) ? py::reinterpret_borrow<py::bytes>(data)
+                                                       : py::bytes(builtin("bytes")(data));
     char* p = nullptr;
     py::ssize_t n = 0;
     if (PyBytes_AsStringAndSize(b.ptr(), &p, &n) != 0) throw py::error_already_set();

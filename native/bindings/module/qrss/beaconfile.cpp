@@ -9,6 +9,7 @@
 #include "qrss/registry.hpp"
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -30,8 +31,17 @@ void bind(py::module_& q) {
     m.attr("HDR_BYTES") = bfm::HDR_BYTES;
     m.attr("LATENT_OFFSET") = bfm::LATENT_OFFSET;
 
-    m.def("file_size", [](const py::object& n_latents) { return bfm::file_size(int64_of(n_latents)); },
-          py::arg("n_latents") = pc::SENT);
+    // LATENT_OFFSET + int(n_latents) + 4: the C++ in int64, Python's own
+    // ints past it (the reference's int has no limit).
+    m.def("file_size", [](const py::object& n_latents) -> py::object {
+        const py::int_ n = py::reinterpret_borrow<py::int_>(steal(PyNumber_Long(n_latents.ptr())));
+        const std::int64_t v = clamp_i64(n);
+        if (v < std::numeric_limits<std::int64_t>::max() - static_cast<std::int64_t>(bfm::LATENT_OFFSET + 4) &&
+            v > std::numeric_limits<std::int64_t>::min())
+            return py::int_(bfm::file_size(v));
+        return steal(PyNumber_Add(steal(PyNumber_Add(py::int_(bfm::LATENT_OFFSET).ptr(), n.ptr())).ptr(),
+                                  py::int_(4).ptr()));
+    }, py::arg("n_latents") = pc::SENT);
 
     // BeaconFile.header_fields(self) -> HeaderFields' eight fields.
     m.def("header_fields", [](const py::object& self) { return header_tuple(beacon_of(self).header_fields()); },
