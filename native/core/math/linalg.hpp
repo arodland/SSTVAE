@@ -23,7 +23,10 @@
 //   transformed right-hand side: the same number to rounding).
 // * solve and inv: LinAlgError "Singular matrix" exactly when elimination
 //   meets an exact zero pivot (getrf's info > 0); NaN propagates without
-//   an error, as numpy's does.
+//   an error, as numpy's does -- though not always to the same entries:
+//   OpenBLAS's dscal by 1/NaN leaves a zero a zero, so numpy solves
+//   [[nan, 1], [0, 1]] x = [1, 1] as [nan, 1] where plain elimination
+//   (this) gives [nan, nan].
 // * eigh / eigvalsh read the lower triangle only (UPLO='L'); eigenvalues
 //   ascending. A NaN or infinity in the lower triangle of a matrix larger
 //   than 1x1 makes every eigenvalue (and eigenvector entry) NaN, which is

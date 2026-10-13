@@ -462,7 +462,7 @@ const Value* Value::find(std::string_view key) const {
 
 const Value& Value::at(std::string_view key) const {
     const Value* v = find(key);
-    if (!v) throw std::out_of_range("KeyError: " + frame::py_repr(key));
+    if (!v) throw KeyError(std::string(key), "KeyError: " + frame::py_repr(key));
     return *v;
 }
 

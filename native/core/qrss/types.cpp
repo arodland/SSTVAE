@@ -192,6 +192,39 @@ PassResult PassResult::from_npz(const npz::Npz& z) {
     check_utf8(text);
     const Value meta = pyjson::loads(text);
     PassResult p;
+    // the arrays, as Python's load reads them before any meta field
+    p.z = vector_member<float>(z, "z", npz::DType::f4, "float32");
+    p.w = vector_member<float>(z, "w", npz::DType::f4, "float32");
+    p.hdr_llr = vector_member<float>(z, "hdr_llr", npz::DType::f4, "float32");
+    p.ch = vector_member<std::complex<float>>(z, "ch", npz::DType::c8, "complex64");
+    p.psi = vector_member<float>(z, "psi", npz::DType::f4, "float32");
+    const npz::Array& cov = z.at("timing_cov");
+    if (cov.dtype != npz::DType::f8)
+        throw std::invalid_argument("PassResult member timing_cov is " + std::string(npz::descr(cov.dtype)) +
+                                    ", not float64");
+    if (cov.size() == 0) {
+        p.timing.cov = math::Matrix();
+    } else if (cov.ndim() == 2) {
+        p.timing.cov = math::Matrix(cov.shape[0], cov.shape[1], cov.values<double>());
+    } else {
+        throw std::invalid_argument("PassResult member timing_cov has " + std::to_string(cov.ndim()) +
+                                    " dimensions, not 2");
+    }
+    // meta["header"] first, then the rest in the constructor call's order, as
+    // Python's load reads them (so a file missing several keys names the same one)
+    const Value& h = meta.at("header");
+    if (!h.is_null()) {
+        header::HeaderFields f;
+        f.callsign = h.at("callsign").as_string("callsign");
+        f.grid = opt_str(h, "grid");
+        f.picture_id = integer(h, "picture_id");
+        f.mode = integer(h, "mode");
+        f.segment = integer(h, "segment");
+        f.codec_id = integer(h, "codec_id");
+        f.version = integer(h, "version");
+        f.reserved = integer(h, "reserved");
+        p.header = std::move(f);
+    }
     p.uid = meta.at("uid").as_string("uid");
     p.q = integer(meta, "q");
     p.frame = meta.at("frame").as_string("frame");
@@ -213,19 +246,6 @@ PassResult PassResult::from_npz(const npz::Npz& z) {
     p.report.kappa = num(rep, "kappa");
     p.report.slip_free = flag(rep, "slip_free");
     p.report.suspect = flag(rep, "suspect");
-    const Value& h = meta.at("header");
-    if (!h.is_null()) {
-        header::HeaderFields f;
-        f.callsign = h.at("callsign").as_string("callsign");
-        f.grid = opt_str(h, "grid");
-        f.picture_id = integer(h, "picture_id");
-        f.mode = integer(h, "mode");
-        f.segment = integer(h, "segment");
-        f.codec_id = integer(h, "codec_id");
-        f.version = integer(h, "version");
-        f.reserved = integer(h, "reserved");
-        p.header = std::move(f);
-    }
     const Value& c = meta.at("cw");
     if (!c.is_null()) {
         CwIdResult r;
@@ -242,23 +262,6 @@ PassResult PassResult::from_npz(const npz::Npz& z) {
     p.estimator = meta.at("estimator").as_string("estimator");
     p.em_round = integer(meta, "em_round");
 
-    p.z = vector_member<float>(z, "z", npz::DType::f4, "float32");
-    p.w = vector_member<float>(z, "w", npz::DType::f4, "float32");
-    p.hdr_llr = vector_member<float>(z, "hdr_llr", npz::DType::f4, "float32");
-    p.ch = vector_member<std::complex<float>>(z, "ch", npz::DType::c8, "complex64");
-    p.psi = vector_member<float>(z, "psi", npz::DType::f4, "float32");
-    const npz::Array& cov = z.at("timing_cov");
-    if (cov.dtype != npz::DType::f8)
-        throw std::invalid_argument("PassResult member timing_cov is " + std::string(npz::descr(cov.dtype)) +
-                                    ", not float64");
-    if (cov.size() == 0) {
-        p.timing.cov = math::Matrix();
-    } else if (cov.ndim() == 2) {
-        p.timing.cov = math::Matrix(cov.shape[0], cov.shape[1], cov.values<double>());
-    } else {
-        throw std::invalid_argument("PassResult member timing_cov has " + std::to_string(cov.ndim()) +
-                                    " dimensions, not 2");
-    }
     return p;
 }
 

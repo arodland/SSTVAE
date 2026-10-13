@@ -25,7 +25,8 @@
 // Errors raise the reference's Python types: register_translators()
 // (called by every binding that uses this header; idempotent) maps
 // math::LinAlgError to numpy.linalg.LinAlgError, math::TypeError to
-// TypeError and qrss::ZeroDivision to ZeroDivisionError; pybind11 already
+// TypeError, qrss::ZeroDivision to ZeroDivisionError and pyjson::KeyError
+// (a missing key in a PassResult's meta) to KeyError; pybind11 already
 // maps std::invalid_argument, std::out_of_range and std::overflow_error to
 // ValueError, IndexError and OverflowError.
 
@@ -53,6 +54,7 @@
 #include "math/linalg.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/header.hpp"
+#include "qrss/pyjson.hpp"
 #include "qrss/rational.hpp"
 #include "qrss/trackbase.hpp"
 #include "qrss/types.hpp"
@@ -78,6 +80,8 @@ inline py::object fraction_class() {
     return *c;
 }
 
+inline py::str to_str(std::string_view s);
+
 inline void register_translators() {
     static const bool done = [] {
         py::register_local_exception_translator([](std::exception_ptr p) {
@@ -91,6 +95,8 @@ inline void register_translators() {
                 PyErr_SetString(PyExc_TypeError, e.what());
             } catch (const sstvae::qrss::ZeroDivision& e) {
                 PyErr_SetString(PyExc_ZeroDivisionError, e.what());
+            } catch (const sstvae::qrss::pyjson::KeyError& e) {
+                PyErr_SetObject(PyExc_KeyError, to_str(e.key()).ptr());
             }
         });
         return true;

@@ -26,12 +26,24 @@
 
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 namespace sstvae::qrss::pyjson {
+
+// A dict lookup of an absent key (Python's KeyError): what() is
+// "KeyError: '<key>'", key() the key itself.
+class KeyError : public std::out_of_range {
+public:
+    KeyError(std::string key, const std::string& what) : std::out_of_range(what), key_(std::move(key)) {}
+    const std::string& key() const { return key_; }
+
+private:
+    std::string key_;
+};
 
 class Value {
 public:
@@ -61,7 +73,7 @@ public:
     const std::vector<std::string>& keys() const;
     const std::vector<Value>& values() const;
     const Value* find(std::string_view key) const;
-    // std::out_of_range "KeyError: '<key>'" when absent.
+    // KeyError (a std::out_of_range) when absent.
     const Value& at(std::string_view key) const;
     // d[key] = v: replaces in place, or appends.
     void set(std::string key, Value v);

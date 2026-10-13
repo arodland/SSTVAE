@@ -25,7 +25,15 @@
 // and psi must be 1-D float32, ch 1-D complex64 and timing_cov float64
 // with two dimensions (or no elements) -- std::invalid_argument naming the
 // member otherwise -- where Python's load hands back whatever the file
-// holds. Integer JSON fields must fit int64.
+// holds. Integer JSON fields must fit int64. meta must be UTF-8
+// (std::invalid_argument, as Python's UnicodeDecodeError is a ValueError)
+// and JSON (std::invalid_argument in json's words); a missing key is
+// pyjson::KeyError (Python's KeyError), looked up in the order Python's
+// load reads them -- the arrays, meta["header"], then the constructor's
+// keyword order -- so a file missing several names the same one. A
+// missing key inside timing/report/header/cw is a KeyError here where
+// Python's `Timing(**meta["timing"])` raises TypeError; an extra key is
+// ignored here and a TypeError there.
 
 #ifndef SSTVAE_QRSS_TYPES_HPP
 #define SSTVAE_QRSS_TYPES_HPP
