@@ -180,7 +180,18 @@ std::string str_member(std::span<const std::uint8_t> m) {
     if (d == std::string::npos || e == d + 3 || e >= header.size() || header[e] != '\'' ||
         header.find("'<U", e) != std::string::npos)
         throw Error("ValueError", "simfile: the frame member is not a str array");
-    const std::size_t chars = std::stoul(header.substr(d + 3, e - d - 3));
+    // The width's digits, read here rather than by std::stoul (32 bits on
+    // Windows, std::out_of_range past that) and never multiplied past what
+    // the member's data could hold: a width beyond it is a short member.
+    const std::string width = header.substr(d + 3, e - d - 3);
+    const std::size_t avail = m.size() - data_at, room = avail / 4;
+    std::size_t chars = 0;
+    bool fits = true;
+    for (const char ch : width) {
+        const auto digit = static_cast<std::size_t>(ch - '0');
+        fits = fits && digit <= room && chars <= (room - digit) / 10;   // chars * 10 + digit <= room
+        if (fits) chars = chars * 10 + digit;
+    }
     header.replace(d, e + 1 - d, "'<u4'");
     // The rewritten .npy (version 1.0 or 2.0 framing for the new length),
     // then parse_npy: the header's keys, shape and fortran_order checked.
@@ -196,9 +207,22 @@ std::string str_member(std::span<const std::uint8_t> m) {
     npy.insert(npy.end(), m.begin() + static_cast<std::ptrdiff_t>(data_at), m.end());
     const npz::Array shape = array(npy);
     if (shape.ndim() != 0) throw Error("ValueError", "simfile: the frame member is not a 0-d str array");
-    if (m.size() - data_at < 4 * chars)
-        throw Error("ValueError", "npy: EOF reading array data, expected " + std::to_string(4 * chars) +
-                                      " bytes got " + std::to_string(m.size() - data_at));
+    if (!fits) {
+        // 4 * width, in decimal, without the overflow.
+        std::string bytes;
+        unsigned carry = 0;
+        for (auto it = width.rbegin(); it != width.rend(); ++it) {
+            const unsigned v = 4u * static_cast<unsigned>(*it - '0') + carry;
+            bytes.insert(bytes.begin(), static_cast<char>('0' + v % 10));
+            carry = v / 10;
+        }
+        if (carry) bytes.insert(bytes.begin(), static_cast<char>('0' + carry));
+        bytes.erase(0, std::min(bytes.find_first_not_of('0'), bytes.size() - 1));
+        // numpy's format._read_bytes text (a width numpy has no dtype for,
+        // past 2^31 bytes, is its "descr is not a valid dtype descriptor")
+        throw Error("ValueError", "EOF: reading array data, expected " + bytes + " bytes got " +
+                                      std::to_string(avail));
+    }
     std::vector<std::uint32_t> cps(chars);
     for (std::size_t i = 0; i < chars; ++i) cps[i] = static_cast<std::uint32_t>(le(m, data_at + 4 * i, 4));
     while (!cps.empty() && cps.back() == 0) cps.pop_back();

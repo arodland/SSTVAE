@@ -252,6 +252,7 @@ def inputs(tmp_path_factory):
     os.replace(d / "array.npy", d / "array.npz")
     _resave(f["ce.npz"], d / "bogus-frame.npz", frame=np.str_("bogus"))
     _resave(f["ce.npz"], d / "v1.npz", frame=np.str_("short-v1"))
+    _resave(f["ce.npz"], d / "q-negative.npz", q=np.int64(-5))
     with np.load(f["ce.npz"]) as z:
         fe = z["fe"]
     rng = np.random.default_rng(7)
@@ -262,7 +263,7 @@ def inputs(tmp_path_factory):
     data[data.index(fe[:4].tobytes())] ^= 0x01        # a bit of fe's data: zipfile's CRC check
     (d / "bad-crc.npz").write_bytes(bytes(data))
     for k in ("empty.npz", "garbage.npz", "text.wav", "array.npz", "bogus-frame.npz", "v1.npz", "noise.npz",
-              "not-zip.npz", "bad-crc.npz"):
+              "not-zip.npz", "bad-crc.npz", "q-negative.npz"):
         f[k] = d / k
     return sp, f
 
@@ -373,12 +374,18 @@ def _refusal_cases(f) -> list[Case]:
         c("npz-not-zip", "x.npz", files={"x.npz": f["not-zip.npz"]}),
         c("npz-bad-crc", "x.npz", files={"x.npz": f["bad-crc.npz"]}),
         c("wav-text", "x.wav", "--slot", SLOT, files={"x.wav": f["text.wav"]}, only_class=True),
+        # A slot before 1970 (q < 0), from --slot and from the .npz: the
+        # reference's descrambler refuses q outside uint64 at the first
+        # detection it demodulates, where the native one would wrap it.
+        c("slot-before-1970", "ce.npz", "--slot", "1969-12-31T23:45Z"),
+        c("npz-q-negative", "x.npz", files={"x.npz": f["q-negative.npz"]}),
     ]
 
 
 def test_refusals(cli, inputs, tmp_path):
-    """Every refusal a user can hit before the receive: the same exit
-    status and message (a usage error's by its last line)."""
+    """Every refusal a user can hit before the receive, and the one inside
+    it (a slot before 1970): the same exit status and message (a usage
+    error's by its last line)."""
     _, f = inputs
     cases = _refusal_cases(f)
     results = run_cases(cases, tmp_path, cli)
@@ -393,6 +400,8 @@ def test_refusals(cli, inputs, tmp_path):
     assert results["npz-no-twin"][1].err == "frame short-v1 has no L twin; add --just-ce\n"
     assert _last_line(results["both-just"][1].err) == ("sstvae-qrss receive: error: argument --just-l: "
                                                        "not allowed with argument --just-ce")
+    assert results["slot-before-1970"][1] == Run(1, "", "ValueError: q must fit in uint64, not -1\n")
+    assert results["npz-q-negative"][1] == Run(1, "", "ValueError: q must fit in uint64, not -5\n")
 
 
 def test_store_is_refused(cli, inputs, tmp_path):
@@ -576,7 +585,13 @@ def decimal_comma_locale(tmp_path_factory):
 def test_report_ignores_a_decimal_comma_locale(cli, inputs, decimal_comma_locale):
     """The report, under de_DE (decimal comma), is the C locale's byte for
     byte: every number is formatted by frame::py_format, and --start's
-    seconds are read by the slot parser, not strtod."""
+    seconds are read by the slot parser, not strtod. Only a build with the
+    model fetcher adopts the environment's locale (QCoreApplication runs
+    setlocale(LC_ALL, "")); without it the program never leaves "C" and
+    this holds by construction. Even there it pins the behaviour, not
+    either layer: main puts LC_NUMERIC back to "C" and py_format maps the
+    locale's point to '.', and taking out the reset alone still passes
+    (measured), as would a plain snprintf behind the reset."""
     _, f = inputs
     args = [cli, "receive", f["ce.npz"], "--no-store", "--start", "2025-10-01T00:00:00.5Z"]
     with ThreadPoolExecutor(max_workers=2) as pool:

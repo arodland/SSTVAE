@@ -3,7 +3,9 @@
 // qrss_simulate.py's .npz form and broken ones, each with what the
 // reference makes of it -- the receiver's part of the Sim, or the
 // exception's class and str(). Two files the reference reads are refused
-// here on purpose (simfile.hpp): complex128 fe, and np.savez_compressed.
+// here on purpose (simfile.hpp): complex128 fe, and np.savez_compressed;
+// and one the reference refuses with another text (a str width numpy has
+// no dtype for).
 
 #include <bit>
 #include <complex>
@@ -43,6 +45,9 @@ static const Deviation DEVIATIONS[] = {
      "simfile: fe is <c16 of 1 dimensions, not complex64 (n,) as qrss_simulate.py writes it"},
     {"compressed", "zipfile.BadZipFile",
      "simfile: member fe.npy is compressed (np.savez_compressed), which is not read here"},
+    // numpy has no dtype for the width (and says so); the port finds the
+    // member short of it, without forming 4 * width (2^64) or allocating it.
+    {"frame_huge", "ValueError", "EOF: reading array data, expected 18446744073709551616 bytes got 20"},
 };
 
 static void test_pins() {

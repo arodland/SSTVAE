@@ -74,6 +74,12 @@ def cases() -> list[tuple[str, bytes]]:
         ("npy", _npy()),
         ("not_zip", b"PK\x03\x04" + bytes(range(64))),
         ("bad_crc", _flipped()),
+        # A frame member whose str width is past its data ('<U99' and '<U6'
+        # over five characters, and a width whose byte count overflows 64
+        # bits).
+        ("frame_wide", _frame_width("99")),
+        ("frame_one_over", _frame_width("6")),
+        ("frame_huge", _frame_width("4611686018427387904")),
         # The reference reads these; the port refuses them (simfile.hpp).
         ("fe_c16", savez(**sim_members(fe=np.array([1 + 2j, 3j], np.complex128)))),
         ("compressed", _compressed()),
@@ -93,6 +99,30 @@ def _flipped() -> bytes:
     at = bytes(data).index(np.array([1 + 2j], np.complex64).tobytes())
     data[at] ^= 0x01
     return bytes(data)
+
+
+def _frame_width(width: str) -> bytes:
+    """sim_ce's members, the frame's .npy rewritten by hand to declare a
+    str of `width` characters over the five of "short"."""
+    import zipfile
+
+    members = sim_members(frame="short", optional=False)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for k, v in members.items():
+            if k == "frame":
+                hdr = "{'descr': '<U%s', 'fortran_order': False, 'shape': (), }" % width
+                hdr += " " * ((64 - (10 + len(hdr) + 1) % 64) % 64) + "\n"
+                npy = b"\x93NUMPY\x01\x00" + len(hdr).to_bytes(2, "little") + hdr.encode() + "short".encode("utf-32-le")
+            else:
+                one = io.BytesIO()
+                np.save(one, np.asanyarray(v))
+                npy = one.getvalue()
+            # As np.savez writes a member: ZipFile.open's default 1980
+            # timestamp (writestr's is the clock's), zip64 extra forced.
+            with z.open(k + ".npy", "w", force_zip64=True) as fh:
+                fh.write(npy)
+    return buf.getvalue()
 
 
 def _compressed() -> bytes:

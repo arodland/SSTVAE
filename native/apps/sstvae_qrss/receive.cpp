@@ -483,6 +483,15 @@ int run(const std::string& prog, const std::vector<std::string>& argv, std::ostr
     } catch (const std::invalid_argument& e) {
         return uncaught(err, "ValueError", e.what());
     }
+    // A slot before 1970 (q < 0, from --slot or the .npz): the reference's
+    // demod.extract / ldemod.extract_l descramble with sequences.scrambler(q),
+    // which refuses q outside uint64, so its receive_slot raises at the first
+    // detection that reaches demodulation -- every pass returned has, and
+    // every receive_pass that gets that far returns a pass -- while the
+    // native demodulators take q as uint64 and would descramble with 2^64 + q.
+    // Same outcome: no signal found as there, a pass found is that ValueError.
+    if (cap.q < 0 && !passes.empty())
+        return uncaught(err, "ValueError", "q must fit in uint64, not " + std::to_string(cap.q));
     if (passes.empty()) {
         std::string names;
         for (const fr::FrameSpec& s : receiver::frames(std::span<const fr::FrameSpec>(rc.frames)))
