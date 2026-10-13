@@ -21,7 +21,7 @@
 //   _path_of(f_hz, drift_hz_per_min, dur) -> FreqPath as a dict
 //   TbdHit's methods, over any object with its fields:
 //   _hit_f_hz(hit), _hit_line(hit), _hit_passed(hit), _hit_to_detection(hit, waveform=None)
-//   _np_log_f32(x)   numpy's float32 log as reproduced here (for the parity test)
+//   _np_log_f32(x)   numpy's float32 log (math/nplog.hpp), for the parity test
 //
 // Records come back as rx_types.hpp's "__type__" dicts ("TbdHit" with a
 // FreqPath "path" and an optional "l_path"); the rows turn them into the
@@ -48,6 +48,7 @@
 #include <utility>
 #include <vector>
 
+#include "math/nplog.hpp"
 #include "qrss/acquire_tbd.hpp"
 
 namespace sstvae_bindings::qrss {
@@ -436,7 +437,7 @@ void bind(py::module_& q) {
 
     m.def("_np_log_f32", [](const py::object& x) {
         std::vector<float> v = rx::vec<float>(x);
-        for (float& e : v) e = aq::np_log_f32(e);
+        for (float& e : v) e = sstvae::math::np::log_f32(e);
         return to_numpy(v);
     }, py::arg("x"));
 }

@@ -32,8 +32,8 @@
 // Exactness. Bit-exact: the frame starts, every Viterbi path and Z, the
 // channel centres, shape_frames, shape_z and l_pilot_bins on float32
 // emissions (numpy's pairwise and buffered sums), and bins_path on float32
-// emissions -- its log is numpy's float32 SIMD log, reproduced here
-// (np_log_f32). To a tolerance: path_line, and so TbdHit.f_hz and the
+// emissions -- its log is numpy's float32 SIMD log, reproduced in
+// math/nplog.hpp (np::log_f32). To a tolerance: path_line, and so TbdHit.f_hz and the
 // pilot line l_pilot_bins follows, go through math::polyfit (an SVD that
 // is not LAPACK's: ~1e-15 relative); gumbel_p calls numpy's SIMD exp and
 // expm1 (acquire_stats.hpp); bins_path on float64 emissions takes libm's
@@ -84,10 +84,6 @@ struct UnboundLocal : std::logic_error {
 struct NotPorted : std::logic_error {
     using std::logic_error::logic_error;
 };
-
-// numpy's float32 np.log on an x86-64 with AVX2/AVX-512 (its SIMD kernel,
-// which is not libm's logf): a rational approximation on the mantissa.
-float np_log_f32(float x);
 
 // Frame start times (s after t0) covering [t0 - 10 s, end of keying + 2 s],
 // limited, given n_fe, to frames lying wholly inside a capture of n_fe

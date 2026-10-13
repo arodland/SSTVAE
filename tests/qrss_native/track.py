@@ -17,9 +17,9 @@ which `symbol_mf` recognises and uses without a copy. `track` hands back
 the caller's own objects where the reference would: the capture, the
 classes, the path and timing when the run kept them, and spec.
 
-Not rows (ported with them by the next lane): fit_timing,
-_segment_timing, _parabola, verify, _carrier_lines, refine_path,
-line_path, _flat_path, verify_track, genie_track. `_layout_of` is a row
+fit_timing, _segment_timing, _parabola, verify, verify_track,
+_carrier_lines, refine_path, line_path and _flat_path are rows in
+tests/qrss_native/track_timing.py; genie_track (a test aid) stays Python. `_layout_of` is a row
 in Python: it only dispatches to `frame.layout` / `lframe.layout`, which
 are whatever those modules hold (the C++ under their own rows).
 """

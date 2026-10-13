@@ -10,6 +10,7 @@
 #include <tuple>
 #include <type_traits>
 
+#include "math/nplog.hpp"
 #include "math/npstats.hpp"
 #include "qrss/npsum.hpp"
 #include "qrss/rational.hpp"
@@ -101,7 +102,7 @@ std::size_t np_argmax(const double* x, std::size_t n) {
 
 // The log numpy computes for the element type: its float32 SIMD kernel,
 // or (float64, where numpy calls SVML) libm's.
-inline float elem_log(float x) { return np_log_f32(x); }
+inline float elem_log(float x) { return math::np::log_f32(x); }
 inline double elem_log(double x) { return std::log(x); }
 
 // np.sum(rows of E gathered, dtype=np.float64) over a C-ordered 2-D
@@ -118,48 +119,6 @@ TbdPath viterbi_grid(const Grid<T>& E, int max_step, double cost) {
 }
 
 }  // namespace
-
-float np_log_f32(float x) {
-    constexpr float P0 = 0.000000000000000000000e+00f;
-    constexpr float P1 = 9.999999999999998702752e-01f;
-    constexpr float P2 = 2.112677543073053063722e+00f;
-    constexpr float P3 = 1.480000633576506585156e+00f;
-    constexpr float P4 = 3.808837741388407920751e-01f;
-    constexpr float P5 = 2.589979117907922693523e-02f;
-    constexpr float Q0 = 1.000000000000000000000e+00f;
-    constexpr float Q1 = 2.612677543073109236779e+00f;
-    constexpr float Q2 = 2.453006071784736363091e+00f;
-    constexpr float Q3 = 9.864942958519418960339e-01f;
-    constexpr float Q4 = 1.546476374983906719538e-01f;
-    constexpr float Q5 = 5.875095403124574342950e-03f;
-    constexpr float LOGE2 = 0.693147180559945309417232121458176568F;
-    constexpr float SQRT1_2 = 0.707106781186547524400844362104849039F;
-    if (std::isnan(x)) return std::numeric_limits<float>::quiet_NaN();
-    if (x < 0.0f) return -std::numeric_limits<float>::quiet_NaN();
-    if (x == 0.0f) return -std::numeric_limits<float>::infinity();
-    if (std::isinf(x)) return x;
-    // getexp + 1 and getmant in [0.5, 1): frexp's split, denormals included
-    int e = 0;
-    float m = std::frexp(x, &e);
-    float ex = static_cast<float>(e);
-    if (m <= SQRT1_2) {
-        m = m + m;
-        ex = ex - 1.0f;
-    }
-    m = m - 1.0f;
-    float num = std::fmaf(P5, m, P4);
-    num = std::fmaf(num, m, P3);
-    num = std::fmaf(num, m, P2);
-    num = std::fmaf(num, m, P1);
-    num = std::fmaf(num, m, P0);
-    float den = std::fmaf(Q5, m, Q4);
-    den = std::fmaf(den, m, Q3);
-    den = std::fmaf(den, m, Q2);
-    den = std::fmaf(den, m, Q1);
-    den = std::fmaf(den, m, Q0);
-    const float poly = num / den;
-    return std::fmaf(ex, LOGE2, poly);
-}
 
 // --- frames ---------------------------------------------------------------------
 

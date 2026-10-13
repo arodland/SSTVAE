@@ -6,9 +6,9 @@
 // (ChanCapture, PathFn, MfTable, Classes, TrackResult, ...) are
 // trackbase.hpp's; the noise floor is chan.hpp's.
 //
-// Not here (ported with them): fit_timing, _segment_timing, _parabola,
-// verify, verify_track, refine_path, line_path, _carrier_lines,
-// _flat_path, genie_track.
+// Not here: fit_timing, _segment_timing, _parabola, verify, verify_track,
+// refine_path, line_path, _carrier_lines and _flat_path are
+// track_timing.hpp's; genie_track (a test aid) is not ported.
 //
 // Python is normative. What agrees to the bit with the reference on the
 // same inputs, and what does not:
