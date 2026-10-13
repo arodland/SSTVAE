@@ -623,12 +623,14 @@ Classes make_classes(const FrameSpec& spec, const frame::HdrBits* hdr_bits, cons
         c.known[i] = 1;
     }
     if (hdr_bits && spec.n_hdr()) {
-        std::vector<double> v;
-        if (hdr_bits->one_d)
-            for (const double b : hdr_bits->values) v.push_back(1.0 - 2.0 * b);
-        else
+        // a shape that is not 1-D broadcasts when only leading unit axes stand in its way:
+        // its caller has flattened it to 1 or n values (the spread copy still refuses it)
+        const std::size_t nv = hdr_bits->values.size();
+        if (!hdr_bits->one_d && nv != 1 && nv != lay->hdr_bits.size())
             throw std::invalid_argument("shape mismatch: value array could not be broadcast to indexing result of shape (" +
                                         std::to_string(lay->hdr_bits.size()) + ",)");
+        std::vector<double> v;
+        for (const double b : hdr_bits->values) v.push_back(1.0 - 2.0 * b);
         assign_at(c.mu, lay->hdr_bits, v);
         for (const std::int64_t i : lay->hdr_bits) {
             c.nu[static_cast<std::size_t>(i)] = 0.0;

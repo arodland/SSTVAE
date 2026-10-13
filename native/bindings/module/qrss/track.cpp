@@ -224,6 +224,41 @@ std::optional<fr::HdrBits> bits_f64(const py::object& obj) {
 
 const fr::HdrBits* ptr(const std::optional<fr::HdrBits>& b) { return b ? &*b : nullptr; }
 
+std::string shape_str(const py::array& a) {        // numpy's "(2,2474)", "(5,)", "()"
+    std::string s = "(";
+    for (py::ssize_t i = 0; i < a.ndim(); ++i) s += (i ? "," : "") + std::to_string(a.shape(i));
+    return s + (a.ndim() == 1 ? ",)" : ")");
+}
+
+// make_classes' mu[lay.hdr_bits] = 1 - 2 bits for header bits that are not 1-D: numpy
+// broadcasts a shape whose only obstacle is leading unit axes, and refuses any other with
+// its own message. A broadcastable one is handed on flattened (one_d stays false, so the
+// spread copy refuses it as the reference's spread_signs does).
+std::optional<fr::HdrBits> classes_bits(const fr::FrameSpec& spec, const py::object& obj) {
+    std::optional<fr::HdrBits> b = bits_f64(obj);
+    if (!b || b->one_d || !spec.n_hdr()) return b;
+    const py::array a = numpy().attr("asarray")(obj, py::arg("dtype") = "float64");
+    py::ssize_t lead = 0;
+    while (lead < a.ndim() && a.shape(lead) == 1) ++lead;
+    const std::size_t n = fr::layout(spec)->hdr_bits.size();
+    const bool ok = lead == a.ndim() ||
+                    (lead + 1 == a.ndim() && static_cast<std::size_t>(a.shape(lead)) == n);
+    if (!ok)
+        raise(PyExc_ValueError, "shape mismatch: value array of shape " + shape_str(a) +
+                                    " could not be broadcast to indexing result of shape (" + std::to_string(n) + ",)");
+    b->values = rx::vec<double>(numpy().attr("ravel")(a));
+    return b;
+}
+
+// known_symbols' np.concatenate([val, 1 - 2 bits]) refuses bits that are not 1-D.
+void check_known_bits(const fr::FrameSpec& spec, const py::object& obj) {
+    if (obj.is_none() || !spec.n_hdr()) return;
+    const py::array a = numpy().attr("asarray")(obj, py::arg("dtype") = "float64");
+    if (a.ndim() == 1) return;
+    raise(PyExc_ValueError, "all the input arrays must have same number of dimensions, but the array at index 0 has 1 "
+                            "dimension(s) and the array at index 1 has " + std::to_string(a.ndim()) + " dimension(s)");
+}
+
 std::optional<types::EmPrior> prior_of(const py::object& o) {
     if (o.is_none()) return std::nullopt;
     return types::EmPrior{rx::vec<double>(rx::field(o, "x_hat")), rx::vec<double>(rx::field(o, "v"))};
@@ -273,19 +308,26 @@ std::optional<ce::Keying> keying_of(const py::handle& keying, const fr::FrameSpe
     return ce::window_keying(std::span<const double>(v), shape, spec);
 }
 
-// _keying_tuple(cw_known): (None or np.asarray(k, uint8), bool(ook)).
-std::pair<py::object, bool> keying_tuple(const py::object& cw_known) {
-    if (cw_known.is_none()) return {py::none(), false};
+// `a, b = obj` as CPython 3.13 unpacks it, refusals and messages included.
+std::pair<py::object, py::object> unpack2(const py::handle& obj) {
+    if (!py::isinstance<py::iterable>(obj))
+        raise(PyExc_TypeError, std::string("cannot unpack non-iterable ") + Py_TYPE(obj.ptr())->tp_name + " object");
     py::list items;
-    for (const py::handle h : py::reinterpret_borrow<py::iterable>(py::iter(cw_known))) {
+    for (const py::handle h : py::reinterpret_borrow<py::iterable>(py::iter(obj))) {
         items.append(h);
         if (items.size() > 2) raise(PyExc_ValueError, "too many values to unpack (expected 2)");
     }
     if (items.size() < 2)
         raise(PyExc_ValueError, "not enough values to unpack (expected 2, got " + std::to_string(items.size()) + ")");
-    const py::object k = items[0];
+    return {items[0], items[1]};
+}
+
+// _keying_tuple(cw_known): (None or np.asarray(k, uint8), bool(ook)).
+std::pair<py::object, bool> keying_tuple(const py::object& cw_known) {
+    if (cw_known.is_none()) return {py::none(), false};
+    const auto [k, ook] = unpack2(cw_known);
     py::object arr = k.is_none() ? py::object(py::none()) : numpy().attr("asarray")(k, py::arg("dtype") = "uint8");
-    return {arr, rx::as_bool(items[1])};
+    return {arr, rx::as_bool(ook)};
 }
 
 // --- tables -----------------------------------------------------------------------
@@ -399,10 +441,16 @@ py::object derotate_py(const py::object& chan, const py::object& fn) {
         }
     } else {
         // any other callable, evaluated by Python (f(t) - mix broadcasts)
+        // -- like the reference, a result of another length is NOT broadcast: its cumsum
+        // has that length and np.interp over the n capture indices refuses it (with no
+        // capture at all, the product with the empty CH broadcasts a single value away).
         const tk::PathEval eval = [&fn](std::span<const double> t) {
-            std::vector<double> f = rx::vec<double>(fn(to_numpy(t)));
-            if (f.size() == 1 && t.size() != 1) f.assign(t.size(), f[0]);
-            return f;
+            std::vector<double> f = rx::vec<double>(numpy().attr("ravel")(fn(to_numpy(t))));
+            if (f.size() == t.size()) return f;
+            if (!t.empty()) raise(PyExc_ValueError, "fp and xp are not of the same length.");
+            if (f.size() == 1) return std::vector<double>{};
+            raise(PyExc_ValueError,
+                  "operands could not be broadcast together with shapes (0,) (" + std::to_string(f.size()) + ",) ");
         };
         const std::vector<cd> v = rx::vec<cd>(ch);
         out = tk::derotate(std::span<const cd>(v), grid, eval);
@@ -476,8 +524,12 @@ py::object kf_forward_py(const py::object& mu, const py::object& R, const py::ob
     const std::vector<double> r = rx::vec<double>(R);
     const double qq = rx::as_double(q), pu = rx::as_double(Pu);
     if (!rx::as_bool(store)) {
-        py::gil_scoped_release nogil;
-        return py::float_(tk::kf_forward(m, r, qq, pu));
+        double ll = 0.0;
+        {
+            py::gil_scoped_release nogil;     // (the float is built with the GIL held again)
+            ll = tk::kf_forward(m, r, qq, pu);
+        }
+        return py::float_(ll);
     }
     tk::KfPass p;
     {
@@ -644,9 +696,11 @@ void bind(py::module_& q) {
         const double h = rx::as_double(hz), f = rx::as_double(fs);
         if (kind_of(x) == 'c') {
             const std::vector<cd> v = rx::vec<cd>(x);
-            py::gil_scoped_release nogil;
-            const std::vector<cd> out = tk::lowpass(std::span<const cd>(v), h, f);
-            py::gil_scoped_acquire gil;
+            std::vector<cd> out;
+            {
+                py::gil_scoped_release nogil;
+                out = tk::lowpass(std::span<const cd>(v), h, f);
+            }
             return to_numpy(out);
         }
         const std::vector<double> v = rx::vec<double>(x);
@@ -666,13 +720,14 @@ void bind(py::module_& q) {
         const fr::FrameSpec s = rx::spec(spec);
         tk::ce_only(s, "track.known_symbols", "lframe.layout's known_idx/known_val");
         const auto b = bits_f64(hdr_bits);
+        check_known_bits(s, hdr_bits);
         return rx::to_py(tk::known_symbols(s, ptr(b)));
     }, py::arg("spec"), py::arg("hdr_bits") = py::none());
 
     m.def("make_classes", [](const py::object& spec, const py::object& hdr_bits, const py::object& prior) {
         const fr::FrameSpec s = rx::spec(spec);
         tk::ce_only(s, "track.make_classes", "ltrack.make_classes_l");
-        const auto b = bits_f64(hdr_bits);
+        const auto b = classes_bits(s, hdr_bits);
         const auto p = prior_of(prior);
         return rx::to_py(tk::make_classes(s, ptr(b), p ? &*p : nullptr));
     }, py::arg("spec"), py::arg("hdr_bits") = py::none(), py::arg("prior") = py::none());
@@ -809,13 +864,8 @@ void bind(py::module_& q) {
         tk::TrackResult t = read_track(tr, spec_of_track(tr), want);
         std::vector<std::pair<double, double>> sp;
         for (const py::handle h : py::reinterpret_borrow<py::iterable>(py::iter(spans))) {
-            py::list ab;
-            for (const py::handle x : py::reinterpret_borrow<py::iterable>(py::iter(h))) ab.append(x);
-            if (ab.size() != 2)
-                raise(PyExc_ValueError, ab.size() > 2 ? "too many values to unpack (expected 2)"
-                                                      : "not enough values to unpack (expected 2, got " +
-                                                            std::to_string(ab.size()) + ")");
-            sp.emplace_back(rx::as_double(ab[0]), rx::as_double(ab[1]));
+            const auto [a, b] = unpack2(h);
+            sp.emplace_back(rx::as_double(a), rx::as_double(b));
         }
         tk::erase(t, sp);
         py::object psi = to_numpy(t.psi);
