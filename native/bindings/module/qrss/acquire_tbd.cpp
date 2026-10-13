@@ -171,42 +171,11 @@ std::vector<double> cand_freqs(const py::handle& cands) {
     return out;
 }
 
-py::object opt_int(const std::optional<std::int64_t>& v) {
-    return v ? py::object(py::int_(*v)) : py::object(py::none());
-}
-
-std::optional<std::int64_t> opt_int_of(const py::handle& o) {
-    if (o.is_none()) return std::nullopt;
-    return rx::as_int(o);
-}
-
-// --- TbdHit -----------------------------------------------------------------
-
-py::dict hit_to_py(const aq::TbdHit& h) {
-    py::dict d = rx::typed("TbdHit");
-    d["path"] = rx::to_py(h.path);
-    d["z"] = h.z;
-    d["p_value"] = h.p_value;
-    d["n_frames"] = h.n_frames;
-    d["centre_hz"] = h.centre_hz;
-    d["shape_z"] = h.shape_z;
-    d["above_z"] = h.above_z;
-    d["waveform"] = opt_int(h.waveform);
-    d["l_path"] = h.l_path ? py::object(rx::to_py(*h.l_path)) : py::object(py::none());
-    d["l_shape_z"] = h.l_shape_z;
-    d["l_above_z"] = h.l_above_z;
-    return d;
-}
-
-// The fields TbdHit's methods read, from any object (or dict) with them.
-aq::TbdHit hit_of(const py::handle& o, bool full) {
+// TbdHit's line and f_hz read the path alone (to_detection reads the whole
+// hit, rx_types.hpp's tbd_hit).
+aq::TbdHit path_hit(const py::handle& o) {
     aq::TbdHit h;
     h.path = rx::freq_path(rx::field(o, "path"));
-    if (!full) return h;
-    h.z = rx::as_double(rx::field(o, "z"));
-    h.waveform = opt_int_of(rx::field(o, "waveform"));
-    const py::object lp = rx::field(o, "l_path");
-    if (!lp.is_none()) h.l_path = rx::freq_path(lp);
     return h;
 }
 
@@ -354,7 +323,7 @@ py::list track_before_detect(const py::object& fe, double t0_index, const py::ob
         });
     }
     py::list out;
-    for (const aq::TbdHit& h : hits) out.append(hit_to_py(h));
+    for (const aq::TbdHit& h : hits) out.append(rx::to_py(h));
     return out;
 }
 
@@ -390,10 +359,10 @@ void bind(py::module_& q) {
         return py::make_tuple(r.first, r.second);
     }, py::arg("E"), py::arg("bins"), py::arg("keep") = py::none(), py::arg("df_hz") = 1.0 / rxa::STFT_FRAME_S,
        py::arg("fs") = FS);
-    m.def("shape_waveform", [](double z1, double za) { return opt_int(aq::shape_waveform(z1, za)); },
+    m.def("shape_waveform", [](double z1, double za) { return rx::opt_int_py(aq::shape_waveform(z1, za)); },
           py::arg("z1"), py::arg("z_above"));
     m.def("_shape_verdict", [](const py::object& v, const py::object& w) {
-        return opt_int(aq::shape_verdict(opt_int_of(v), opt_int_of(w)));
+        return rx::opt_int_py(aq::shape_verdict(rx::opt_int(v), rx::opt_int(w)));
     }, py::arg("v"), py::arg("w"));
     m.def("track_before_detect", &track_before_detect, py::arg("fe"), py::arg("t0_index"), py::arg("spec"),
           py::arg("cands") = py::tuple(), py::arg("fs") = FS, py::kw_only(), py::arg("pfa") = rxa::TBD_PFA,
@@ -426,13 +395,13 @@ void bind(py::module_& q) {
     m.def("_path_of", [](double f_hz, double drift, double dur) { return rx::to_py(aq::path_of(f_hz, drift, dur)); },
           py::arg("f_hz"), py::arg("drift_hz_per_min"), py::arg("dur"));
 
-    m.def("_hit_line", [](const py::object& hit) { return to_numpy(hit_of(hit, false).line()); }, py::arg("self"));
-    m.def("_hit_f_hz", [](const py::object& hit) { return hit_of(hit, false).f_hz(); }, py::arg("self"));
+    m.def("_hit_line", [](const py::object& hit) { return to_numpy(path_hit(hit).line()); }, py::arg("self"));
+    m.def("_hit_f_hz", [](const py::object& hit) { return path_hit(hit).f_hz(); }, py::arg("self"));
     m.def("_hit_passed", [](const py::object& hit) {
         return rx::as_double(rx::field(hit, "p_value")) < rxa::TBD_PFA;
     }, py::arg("self"));
     m.def("_hit_to_detection", [](const py::object& hit, const py::object& waveform) {
-        return rx::to_py(hit_of(hit, true).to_detection(opt_int_of(waveform)));
+        return rx::to_py(rx::tbd_hit(hit).to_detection(rx::opt_int(waveform)));
     }, py::arg("self"), py::arg("waveform") = py::none());
 
     m.def("_np_log_f32", [](const py::object& x) {

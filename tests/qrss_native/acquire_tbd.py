@@ -1,8 +1,9 @@
 """sstvae.qrss.acquire's A3 (track-before-detect) -> sstvae_native.qrss.acquire_tbd
 (native/core/qrss/acquire_tbd), with frame_map and _path_of.
 
-The C++ returns TbdHits and FreqPaths as "__type__" dicts; the adapters
-here build the reference's own `acquire.TbdHit` and `types.FreqPath`, so
+The C++ returns TbdHits and FreqPaths as "__type__" dicts (rx_types.hpp's
+shared converters); `_rx.to_ref` builds the reference's own
+`acquire.TbdHit` and `types.FreqPath`, so
 acquire()'s arbitration (and every test) handles exactly the objects it
 always did. TbdHit's methods -- `f_hz`, `line`, `passed`, `to_detection`
 -- become the C++'s, reading the hit's fields, so a hit built in Python
@@ -21,22 +22,12 @@ directly.
 STAGE = "rx"
 
 
-def _tbd_hit(d):
-    from sstvae.qrss import acquire
-
-    from . import _rx
-
-    f = {k: v for k, v in d.items() if k != "__type__"}
-    f["path"] = _rx.to_ref(f["path"])
-    f["l_path"] = _rx.to_ref(f["l_path"])
-    return acquire.TbdHit(**f)
-
-
 def rows(q):
     from . import _rx
 
     a = q.acquire_tbd
     native_shape_frames = a.shape_frames
+    to_ref = _rx.to_ref
 
     def track_before_detect(fe, t0_index, spec, cands=(), fs=None, *, pfa=None, band_hz=None,
                             all_hits=False, shape_specs=None):
@@ -52,19 +43,24 @@ def rows(q):
         sf = acquire.shape_frames
         if sf is not native_shape_frames:
             kw["_shape_frames"] = sf
-        return [_tbd_hit(d) for d in a.track_before_detect(fe, t0_index, spec, cands, **kw)]
+        return to_ref(a.track_before_detect(fe, t0_index, spec, cands, **kw))
 
     def _bins_path(E, f, t, bins):
-        return _rx.to_ref(a._bins_path(E, f, t, bins))
+        return to_ref(a._bins_path(E, f, t, bins))
 
     def _path_of(f_hz, drift_hz_per_min, dur):
-        return _rx.to_ref(a._path_of(f_hz, drift_hz_per_min, dur))
+        return to_ref(a._path_of(f_hz, drift_hz_per_min, dur))
 
     def to_detection(self, waveform=None):
-        return _rx.to_ref(a._hit_to_detection(self, waveform))
+        return to_ref(a._hit_to_detection(self, waveform))
 
     def line(self):
         return a._hit_line(self)
+
+    # The native acquire() (tests/qrss_native/acquire.py) calls the C++ stage
+    # directly while acquire's attribute is one of these.
+    for fn in (track_before_detect, _bins_path, _path_of, to_detection, line):
+        fn.__qrss_native__ = True
 
     m = "sstvae.qrss.acquire"
     hit = m + ".TbdHit"

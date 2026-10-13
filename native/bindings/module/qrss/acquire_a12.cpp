@@ -23,7 +23,8 @@
 //   to_detection(hit, duration_s=1800.0) -> Detection
 //   _log_f32(x): numpy's float32 log (math/nplog.hpp), for the parity test
 //
-// Arguments are read the way the reference reads them: a CarrierStats, an
+// Arguments are read the way the reference reads them, by rx_types.hpp's
+// shared converters (which also write the records): a CarrierStats, an
 // _A2Input, an _A2Channel, a PreambleKind and a PreambleHit may each be
 // the reference's dataclass or the dict (or class) this module returns; a
 // kind of None is CE's. _preamble_sums hands S and Lambda back
@@ -105,11 +106,6 @@ std::array<double, 2> pair_of(const py::handle& o) {
     return {v[0], v[1]};
 }
 
-py::array read_only(py::array a) {
-    a.attr("setflags")(py::arg("write") = false);
-    return a;
-}
-
 template <typename T>
 py::array grid(const std::vector<T>& v, std::vector<py::ssize_t> shape, bool fortran = false) {
     py::array_t<T> out(shape);
@@ -118,144 +114,11 @@ py::array grid(const std::vector<T>& v, std::vector<py::ssize_t> shape, bool for
     return out;
 }
 
-// --- PreambleKind -----------------------------------------------------------------
-
-aq::PreambleKind kind_of(const py::handle& o) {
-    if (o.is_none()) return aq::ce_pre();
-    if (py::isinstance<aq::PreambleKind>(o)) return o.cast<const aq::PreambleKind&>();
-    aq::PreambleKind k;
-    k.waveform = rx::as_int(rx::field(o, "waveform"));
-    py::array seq = as_array(rx::field(o, "seq"));
-    k.real = seq.dtype().kind() != 'c';
-    k.seq = rx::vec<cd>(seq);
-    k.t_sym = rx::as_double(rx::field(o, "t_sym"));
-    k.chunk = rx::as_int(rx::field(o, "chunk"));
-    k.data_offset_hz = rx::as_double(rx::field(o, "data_offset_hz"));
-    k.phase_offset = rx::as_double(rx::field(o, "phase_offset"));
-    k.mf_taps = rx::vec<double>(rx::field(o, "mf_taps"));
-    return k;
-}
-
-py::array seq_array(const aq::PreambleKind& k) {
-    if (k.real) {
-        std::vector<double> re(k.seq.size());
-        for (std::size_t i = 0; i < re.size(); ++i) re[i] = k.seq[i].real();
-        return read_only(to_numpy(re));
-    }
-    return read_only(to_numpy(k.seq));
-}
-
-// --- records -------------------------------------------------------------------------
-
-aq::CarrierStats carrier_stats(const py::handle& o) {
-    aq::CarrierStats cs;
-    py::array st = as_array(rx::field(o, "stat"));
-    if (st.ndim() != 2) not_implemented("stat must be 2-D (n_drift, n_bin)");
-    if (dtype_of(st) != "float32") not_implemented("stat must be float32, as carrier_line_stats makes it");
-    cs.stat.rows = static_cast<std::size_t>(st.shape(0));
-    cs.stat.cols = static_cast<std::size_t>(st.shape(1));
-    cs.stat.data = rx::vec<float>(st);
-    cs.f_hz = rx::vec<double>(rx::field(o, "f_hz"));
-    cs.drifts = rx::vec<double>(rx::field(o, "drifts"));
-    cs.M = rx::as_int(rx::field(o, "M"));
-    return cs;
-}
-
-py::dict to_py(const aq::CarrierStats& cs) {
-    py::dict d = rx::typed("CarrierStats");
-    d["stat"] = grid(cs.stat.data, {static_cast<py::ssize_t>(cs.stat.rows), static_cast<py::ssize_t>(cs.stat.cols)});
-    d["f_hz"] = to_numpy(cs.f_hz);
-    d["drifts"] = to_numpy(cs.drifts);
-    d["M"] = cs.M;
-    return d;
-}
-
-// A line refined from an A1 cell: the reference's f_hz is float(f_hz[b]) +
-// off * df, df an element difference of the f_hz array, so an np.float64.
-py::object cell_to_py(const sstvae::qrss::types::CarrierCandidate& c) {
-    py::object d = rx::to_py(c);
-    d["f_hz"] = rx::np_module().attr("float64")(c.f_hz);
-    return d;
-}
-
-py::list to_py(const std::vector<sstvae::qrss::types::CarrierCandidate>& v) {
+// A1 cells as records (rx_types.hpp's cell_to_py: np.float64 f_hz).
+py::list cells_to_py(const std::vector<sstvae::qrss::types::CarrierCandidate>& v) {
     py::list out;
-    for (const auto& c : v) out.append(cell_to_py(c));
+    for (const auto& c : v) out.append(rx::cell_to_py(c));
     return out;
-}
-
-aq::A2Input a2_input_of(const py::handle& o) {
-    aq::A2Input in;
-    in.y = rx::vec<cd>(rx::field(o, "y"));
-    in.t0_ch = rx::as_double(rx::field(o, "t0_ch"));
-    const py::object fm = rx::field(o, "f_mix");
-    if (!fm.is_none()) in.f_mix = rx::rational(fm);
-    return in;
-}
-
-py::dict to_py(const aq::A2Input& in) {
-    py::dict d = rx::typed("_A2Input");
-    d["y"] = to_numpy(in.y);
-    d["t0_ch"] = in.t0_ch;
-    d["f_mix"] = rx::to_py(in.f_mix);
-    return d;
-}
-
-aq::A2Channel chan_of(const py::handle& o) {
-    aq::A2Channel c;
-    c.m = rx::vec<cd>(rx::field(o, "m"));
-    c.t0_ch = rx::as_double(rx::field(o, "t0_ch"));
-    c.sigma2 = rx::as_double(rx::field(o, "sigma2"));
-    const py::object fm = rx::field(o, "f_mix");
-    if (!fm.is_none()) c.f_mix = rx::rational(fm);
-    const py::object loc = rx::field(o, "local");
-    if (!loc.is_none()) c.local = rx::vec<double>(loc);
-    c.kind = kind_of(rx::field(o, "kind"));
-    return c;
-}
-
-// The channel as a record; `kind` is the caller's own object (the
-// reference's _A2Channel holds the PreambleKind it was made for).
-py::dict to_py(const aq::A2Channel& c, const py::object& kind) {
-    py::dict d = rx::typed("_A2Channel");
-    d["m"] = to_numpy(c.m);
-    d["t0_ch"] = c.t0_ch;
-    d["sigma2"] = c.sigma2;
-    d["f_mix"] = rx::to_py(c.f_mix);
-    d["local"] = c.local ? py::object(to_numpy(*c.local)) : py::object(py::none());
-    d["kind"] = kind;
-    return d;
-}
-
-py::dict to_py(const aq::PreambleHit& h) {
-    py::dict d = rx::typed("PreambleHit");
-    d["f_hz"] = h.f_hz;
-    d["drift_hz_per_min"] = h.drift_hz_per_min;
-    d["tau0_s"] = h.tau0_s;
-    d["phase"] = h.phase;
-    d["lam"] = h.lam;
-    d["cell_lam"] = h.cell_lam;
-    d["p_value"] = h.p_value;
-    d["passed"] = h.passed;
-    d["n_groups"] = h.n_groups;
-    d["f_mix"] = h.f_mix ? rx::to_py(*h.f_mix) : py::object(py::none());
-    d["tau0_sd_s"] = h.tau0_sd_s;
-    d["chunk_sums"] = h.chunk_sums ? py::object(to_numpy(*h.chunk_sums)) : py::object(py::none());
-    d["lead_in_s"] = h.lead_in_s;
-    d["waveform"] = h.waveform;
-    return d;
-}
-
-aq::PreambleHit hit_of(const py::handle& o) {
-    aq::PreambleHit h;
-    h.f_hz = rx::as_double(rx::field(o, "f_hz"));
-    h.drift_hz_per_min = rx::as_double(rx::field(o, "drift_hz_per_min"));
-    h.tau0_s = rx::as_double(rx::field(o, "tau0_s"));
-    h.lam = rx::as_double(rx::field(o, "lam"));
-    h.tau0_sd_s = rx::as_double(rx::field(o, "tau0_sd_s"));
-    h.lead_in_s = rx::as_double(rx::field(o, "lead_in_s"));
-    h.waveform = rx::as_int(rx::field(o, "waveform"));
-    return h;
 }
 
 // --- splines and callbacks ----------------------------------------------------------
@@ -295,7 +158,7 @@ py::dict carrier_line_stats(const py::object& fe, double t0_index, double fs, co
         cs = f.is32 ? aq::carrier_line_stats(f.f32, t0_index, fs, sp, dv, bh)
                     : aq::carrier_line_stats(f.f64, t0_index, fs, sp, dv, bh);
     }
-    return to_py(cs);
+    return rx::to_py(cs);
 }
 
 py::list carrier_lines(const py::object& fe, double t0_index, double fs, double pfa, std::int64_t max_cands,
@@ -308,9 +171,9 @@ py::list carrier_lines(const py::object& fe, double t0_index, double fs, double 
         cs = f.is32 ? aq::carrier_line_stats(f.f32, t0_index, fs, rxa::A1_SPAN_S, rxa::A1_DRIFTS, bh)
                     : aq::carrier_line_stats(f.f64, t0_index, fs, rxa::A1_SPAN_S, rxa::A1_DRIFTS, bh);
     } else {
-        cs = carrier_stats(stats);
+        cs = rx::carrier_stats(stats);
     }
-    return to_py(aq::carrier_lines(cs, fs, pfa, max_cands, min_sep_hz));
+    return cells_to_py(aq::carrier_lines(cs, fs, pfa, max_cands, min_sep_hz));
 }
 
 std::vector<sstvae::qrss::types::CarrierCandidate> lines_of(const py::object& lines) {
@@ -331,7 +194,7 @@ py::dict a2_input(const py::object& fe, double t0_index, double f_audio_hz, doub
         in = f.is32 ? aq::a2_input(f.f32, t0_index, f_audio_hz, drift, fs)
                     : aq::a2_input(f.f64, t0_index, f_audio_hz, drift, fs);
     }
-    return to_py(in);
+    return rx::to_py(in);
 }
 
 py::object kind_or_ce(const py::object& kind, const py::object& ce) { return kind.is_none() ? ce : kind; }
@@ -372,12 +235,12 @@ void bind(py::module_& q) {
 
     py::class_<aq::PreambleKind, std::shared_ptr<aq::PreambleKind>>(m, "PreambleKind")
         .def_property_readonly("waveform", [](const aq::PreambleKind& k) { return k.waveform; })
-        .def_property_readonly("seq", &seq_array)
+        .def_property_readonly("seq", &rx::seq_array)
         .def_property_readonly("t_sym", [](const aq::PreambleKind& k) { return k.t_sym; })
         .def_property_readonly("chunk", [](const aq::PreambleKind& k) { return k.chunk; })
         .def_property_readonly("data_offset_hz", [](const aq::PreambleKind& k) { return k.data_offset_hz; })
         .def_property_readonly("phase_offset", [](const aq::PreambleKind& k) { return k.phase_offset; })
-        .def_property_readonly("mf_taps", [](const aq::PreambleKind& k) { return read_only(to_numpy(k.mf_taps)); })
+        .def_property_readonly("mf_taps", [](const aq::PreambleKind& k) { return rx::read_only(to_numpy(k.mf_taps)); })
         .def_property_readonly("n_chunks", &aq::PreambleKind::n_chunks)
         .def_property_readonly("name", &aq::PreambleKind::name);
     const py::object ce = py::cast(std::make_shared<aq::PreambleKind>(aq::ce_pre()));
@@ -411,16 +274,16 @@ void bind(py::module_& q) {
           py::arg("stats") = py::none());
     m.def("hint_line", [](const py::object& cs, double f_hz, double fs, double pfa, double span_hz) {
         bool refined = false;
-        const auto c = aq::hint_line(carrier_stats(cs), f_hz, fs, pfa, span_hz, &refined);
-        return refined ? cell_to_py(c) : py::object(rx::to_py(c));
+        const auto c = aq::hint_line(rx::carrier_stats(cs), f_hz, fs, pfa, span_hz, &refined);
+        return refined ? py::object(rx::cell_to_py(c)) : py::object(rx::to_py(c));
     }, py::arg("cs"), py::arg("f_hz"), py::arg("fs") = fe_fs, py::kw_only(), py::arg("pfa") = rxa::A1_PFA,
        py::arg("span_hz") = rxa::HINT_SPAN_HZ);
     m.def("_cell_line", [](const py::object& cs, std::int64_t b, std::int64_t d, double v) {
-        return cell_to_py(aq::cell_line(carrier_stats(cs), b, d, v));
+        return rx::cell_to_py(aq::cell_line(rx::carrier_stats(cs), b, d, v));
     }, py::arg("cs"), py::arg("b"), py::arg("d"), py::arg("v"));
     m.def("pilot_lines", [](const py::object& cs, const py::object& lines, double sep_hz) {
         const auto lv = lines_of(lines);
-        return to_py(aq::pilot_lines(carrier_stats(cs), lv, sep_hz));
+        return cells_to_py(aq::pilot_lines(rx::carrier_stats(cs), lv, sep_hz));
     }, py::arg("cs"), py::arg("lines"), py::kw_only(), py::arg("sep_hz") = rxa::A2_ALIAS_HZ);
 
     // --- A2 filters
@@ -432,41 +295,41 @@ void bind(py::module_& q) {
     m.def("_a2_input", &a2_input, py::arg("fe"), py::arg("t0_index"), py::arg("f_audio_hz"),
           py::arg("drift_hz_per_min") = 0.0, py::arg("fs") = fe_fs);
     m.def("_a2_mf", [ce](const py::object& inp, const py::object& kind) {
-        const aq::A2Input in = a2_input_of(inp);
-        const aq::PreambleKind k = kind_of(kind);
+        const aq::A2Input in = rx::a2_input_of(inp);
+        const aq::PreambleKind k = rx::preamble_kind_of(kind);
         aq::A2Channel c;
         {
             py::gil_scoped_release nogil;
             c = aq::a2_mf(in, k);
         }
-        return to_py(c, kind_or_ce(kind, ce));
+        return rx::to_py(c, kind_or_ce(kind, ce));
     }, py::arg("inp"), py::arg("kind") = py::none());
     m.def("preamble_channel", [ce](const py::object& fe, double t0_index, double f_audio_hz, double drift, double fs,
                                    const py::object& kind) {
         const Fe f = fe_of(fe);
-        const aq::PreambleKind k = kind_of(kind);
+        const aq::PreambleKind k = rx::preamble_kind_of(kind);
         aq::A2Channel c;
         {
             py::gil_scoped_release nogil;
             c = f.is32 ? aq::preamble_channel(f.f32, t0_index, f_audio_hz, drift, fs, k)
                        : aq::preamble_channel(f.f64, t0_index, f_audio_hz, drift, fs, k);
         }
-        return to_py(c, kind_or_ce(kind, ce));
+        return rx::to_py(c, kind_or_ce(kind, ce));
     }, py::arg("fe"), py::arg("t0_index"), py::arg("f_audio_hz"), py::arg("drift_hz_per_min") = 0.0,
        py::arg("fs") = fe_fs, py::kw_only(), py::arg("kind") = py::none());
 
     // --- A2 templates and sums
-    m.def("_chunks", [](const py::object& kind) { return chunks_to_py(aq::chunks(kind_of(kind))); }, py::arg("kind"));
+    m.def("_chunks", [](const py::object& kind) { return chunks_to_py(aq::chunks(rx::preamble_kind_of(kind))); }, py::arg("kind"));
     m.def("_norm", [](const py::object& b) { return to_numpy(aq::norm(chunks_of(b))); }, py::arg("b"));
     m.def("_templates", [](const py::object& df_hz, const py::object& kind) {
         const std::vector<double> df = rx::vec<double>(df_hz);
-        const aq::Templates T = aq::templates(df, kind_of(kind));
+        const aq::Templates T = aq::templates(df, rx::preamble_kind_of(kind));
         py::array W = grid(T.W, {static_cast<py::ssize_t>(df.size()), static_cast<py::ssize_t>(T.b.nc),
                                  static_cast<py::ssize_t>(T.b.ck)});
         return py::make_tuple(chunks_to_py(T.b), W, to_numpy(T.norm));
     }, py::arg("df_hz"), py::arg("kind") = py::none());
     m.def("preamble_lambda", [](const py::object& chan, const py::object& df_hz, double tau_s) {
-        const aq::A2Channel c = chan_of(chan);
+        const aq::A2Channel c = rx::a2_channel_of(chan);
         const std::vector<double> df = rx::vec<double>(df_hz);
         aq::Sums s;
         {
@@ -476,7 +339,7 @@ void bind(py::module_& q) {
         return sums_to_py(s, false);
     }, py::arg("chan"), py::arg("df_hz") = df_default, py::arg("tau_s") = rxa::A2_TAU_S);
     m.def("_preamble_sums", [](const py::object& chan, const py::object& df_hz, double tau_s) {
-        const aq::A2Channel c = chan_of(chan);
+        const aq::A2Channel c = rx::a2_channel_of(chan);
         const std::vector<double> df = rx::vec<double>(df_hz);
         aq::Sums s;
         {
@@ -487,12 +350,12 @@ void bind(py::module_& q) {
     }, py::arg("chan"), py::arg("df_hz") = df_default, py::arg("tau_s") = rxa::A2_TAU_S);
     m.def("_fine_sums", [](const py::object& spline, const py::object& chan, double tau, double df, double rate) {
         const Spline s = spline_of(spline);
-        const auto [S, n] = aq::fine_sums(s.fn, chan_of(chan), tau, df, rate);
+        const auto [S, n] = aq::fine_sums(s.fn, rx::a2_channel_of(chan), tau, df, rate);
         return py::make_tuple(to_numpy(S), to_numpy(n));
     }, py::arg("spline"), py::arg("chan"), py::arg("tau"), py::arg("df"), py::arg("rate") = 0.0);
     m.def("_coherent", [](const py::object& spline, const py::object& chan, double tau, double df, double rate) {
         const Spline s = spline_of(spline);
-        return aq::coherent(s.fn, chan_of(chan), tau, df, rate);
+        return aq::coherent(s.fn, rx::a2_channel_of(chan), tau, df, rate);
     }, py::arg("spline"), py::arg("chan"), py::arg("tau"), py::arg("df"), py::arg("rate"));
     m.def("_phase_line", [](const py::object& S, double dt) {
         bool fitted = false;
@@ -506,10 +369,10 @@ void bind(py::module_& q) {
     m.def("preamble_search", [](const py::object& fe, double t0_index, const py::object& cand, double fs, double pfa,
                                 const py::object& kind, const py::object& inp) {
         const auto c = rx::carrier_candidate(cand);
-        const aq::PreambleKind k = kind_of(kind);
+        const aq::PreambleKind k = rx::preamble_kind_of(kind);
         aq::PreambleHit h;
         if (!inp.is_none()) {
-            const aq::A2Input in = a2_input_of(inp);
+            const aq::A2Input in = rx::a2_input_of(inp);
             py::gil_scoped_release nogil;
             h = aq::preamble_search(in, c, pfa, k);
         } else {
@@ -518,7 +381,7 @@ void bind(py::module_& q) {
             h = f.is32 ? aq::preamble_search(f.f32, t0_index, c, fs, pfa, k)
                        : aq::preamble_search(f.f64, t0_index, c, fs, pfa, k);
         }
-        return to_py(h);
+        return rx::to_py(h);
     }, py::arg("fe"), py::arg("t0_index"), py::arg("cand"), py::arg("fs") = fe_fs, py::kw_only(),
        py::arg("pfa") = rxa::A2_PFA, py::arg("kind") = py::none(), py::arg("inp") = py::none());
 
@@ -543,7 +406,7 @@ void bind(py::module_& q) {
        py::arg("t_sym") = cfg::T_SYM, py::arg("_noise_psd") = py::none());
 
     m.def("to_detection", [](const py::object& hit, double duration_s) {
-        return rx::to_py(hit_of(hit).to_detection(duration_s));
+        return rx::to_py(rx::preamble_hit(hit).to_detection(duration_s));
     }, py::arg("hit"), py::arg("duration_s") = 1800.0);
 
     m.def("_log_f32", [](const py::object& x) {

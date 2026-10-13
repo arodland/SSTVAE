@@ -22,6 +22,12 @@
 // tests/qrss_native/_rx.py's `to_ref` turns such a tree back into the
 // reference's dataclasses.
 //
+// The acquisition's records (acquire.py: "CarrierStats", "PreambleKind",
+// "PreambleHit", "_A2Input", "_A2Channel", "TbdHit", "Acquisition") are
+// here too, shared by the acquire_a12, acquire_tbd and acquire bindings.
+// A line refined from an A1 cell carries its f_hz as an np.float64, as the
+// reference's does (`cell_to_py`).
+//
 // Errors raise the reference's Python types: register_translators()
 // (called by every binding that uses this header; idempotent) maps
 // math::LinAlgError to numpy.linalg.LinAlgError, math::TypeError to
@@ -52,6 +58,7 @@
 #include "math/bspline.hpp"
 #include "math/errors.hpp"
 #include "math/linalg.hpp"
+#include "qrss/acquire.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/header.hpp"
 #include "qrss/pyjson.hpp"
@@ -763,6 +770,281 @@ inline py::dict to_py(const track::TrackResult& tr) {
 inline std::unique_ptr<track::TrackResult> any_track_result(const py::handle& o) {
     if (has_field(o, "m_pl")) return std::make_unique<track::LTrackResult>(ltrack_result(o));
     return std::make_unique<track::TrackResult>(track_result(o));
+}
+
+// --- the acquisition's records (acquire_a12.hpp, acquire_tbd.hpp, acquire.hpp) ---------
+
+namespace acq = sstvae::qrss::acquire;
+
+// NotImplementedError: an input the native code does not take (one the
+// reference never makes).
+[[noreturn]] inline void not_implemented(const std::string& what) {
+    PyErr_SetString(PyExc_NotImplementedError, ("native: " + what).c_str());
+    throw py::error_already_set();
+}
+
+// np.asarray(o), as it is.
+inline py::array np_array(const py::handle& o) {
+    py::array a = py::array::ensure(np_module().attr("asarray")(o));
+    if (!a) throw py::error_already_set();
+    return a;
+}
+
+inline py::array read_only(py::array a) {
+    a.attr("setflags")(py::arg("write") = false);
+    return a;
+}
+
+// CarrierStats: stat as carrier_line_stats makes it, float32 (n_drift,
+// n_bin); another dtype or rank is NotImplementedError.
+inline acq::CarrierStats carrier_stats(const py::handle& o) {
+    acq::CarrierStats cs;
+    py::array st = np_array(field(o, "stat"));
+    if (st.ndim() != 2) not_implemented("stat must be 2-D (n_drift, n_bin)");
+    if (py::str(st.attr("dtype")).cast<std::string>() != "float32")
+        not_implemented("stat must be float32, as carrier_line_stats makes it");
+    cs.stat.rows = static_cast<std::size_t>(st.shape(0));
+    cs.stat.cols = static_cast<std::size_t>(st.shape(1));
+    cs.stat.data = vec<float>(st);
+    cs.f_hz = vec<double>(field(o, "f_hz"));
+    cs.drifts = vec<double>(field(o, "drifts"));
+    cs.M = as_int(field(o, "M"));
+    return cs;
+}
+
+inline py::dict to_py(const acq::CarrierStats& cs) {
+    py::dict d = typed("CarrierStats");
+    py::array_t<float> st(std::vector<py::ssize_t>{static_cast<py::ssize_t>(cs.stat.rows),
+                                                   static_cast<py::ssize_t>(cs.stat.cols)});
+    std::copy(cs.stat.data.begin(), cs.stat.data.end(), st.mutable_data());
+    d["stat"] = st;
+    d["f_hz"] = arr(cs.f_hz);
+    d["drifts"] = arr(cs.drifts);
+    d["M"] = cs.M;
+    return d;
+}
+
+// A line refined from an A1 cell (carrier_lines, _cell_line, pilot_lines,
+// a refined hint_line): the reference's f_hz is float(f_hz[b]) + off * df,
+// df an element difference of an array, so an np.float64.
+inline py::dict cell_to_py(const types::CarrierCandidate& c) {
+    py::dict d = to_py(c);
+    d["f_hz"] = np_module().attr("float64")(c.f_hz);
+    return d;
+}
+
+inline std::vector<types::CarrierCandidate> carrier_candidates(const py::handle& o) {
+    std::vector<types::CarrierCandidate> out;
+    for (const py::handle c : py::reinterpret_borrow<py::iterable>(o)) out.push_back(carrier_candidate(c));
+    return out;
+}
+
+// PreambleKind: the native class (sstvae_native.qrss.acquire_a12's), the
+// reference's (or a dict of its fields); None is CE's.
+inline acq::PreambleKind preamble_kind_of(const py::handle& o) {
+    if (o.is_none()) return acq::ce_pre();
+    if (py::isinstance<acq::PreambleKind>(o)) return o.cast<const acq::PreambleKind&>();
+    acq::PreambleKind k;
+    k.waveform = as_int(field(o, "waveform"));
+    py::array seq = np_array(field(o, "seq"));
+    k.real = seq.dtype().kind() != 'c';
+    k.seq = vec<std::complex<double>>(seq);
+    k.t_sym = as_double(field(o, "t_sym"));
+    k.chunk = as_int(field(o, "chunk"));
+    k.data_offset_hz = as_double(field(o, "data_offset_hz"));
+    k.phase_offset = as_double(field(o, "phase_offset"));
+    k.mf_taps = vec<double>(field(o, "mf_taps"));
+    return k;
+}
+
+// The kind's sequence as the reference holds it: float64 for CE's real
+// +-1, complex128 for L's; read-only.
+inline py::array seq_array(const acq::PreambleKind& k) {
+    if (k.real) {
+        std::vector<double> re(k.seq.size());
+        for (std::size_t i = 0; i < re.size(); ++i) re[i] = k.seq[i].real();
+        return read_only(arr(re));
+    }
+    return read_only(arr(k.seq));
+}
+
+inline py::dict to_py(const acq::PreambleKind& k) {
+    py::dict d = typed("PreambleKind");
+    d["waveform"] = k.waveform;
+    d["seq"] = seq_array(k);
+    d["t_sym"] = k.t_sym;
+    d["chunk"] = k.chunk;
+    d["data_offset_hz"] = k.data_offset_hz;
+    d["phase_offset"] = k.phase_offset;
+    d["mf_taps"] = read_only(arr(k.mf_taps));
+    return d;
+}
+
+inline acq::PreambleHit preamble_hit(const py::handle& o) {
+    acq::PreambleHit h;
+    h.f_hz = as_double(field(o, "f_hz"));
+    h.drift_hz_per_min = as_double(field(o, "drift_hz_per_min"));
+    h.tau0_s = as_double(field(o, "tau0_s"));
+    h.phase = as_double(field(o, "phase"));
+    h.lam = as_double(field(o, "lam"));
+    h.cell_lam = as_double(field(o, "cell_lam"));
+    h.p_value = as_double(field(o, "p_value"));
+    h.passed = as_bool(field(o, "passed"));
+    h.n_groups = as_int(field(o, "n_groups"));
+    const py::object fm = field(o, "f_mix");
+    if (!fm.is_none()) h.f_mix = rational(fm);
+    h.tau0_sd_s = as_double(field(o, "tau0_sd_s"));
+    h.chunk_sums = opt_vec<std::complex<double>>(field(o, "chunk_sums"));
+    h.lead_in_s = as_double(field(o, "lead_in_s"));
+    h.waveform = as_int(field(o, "waveform"));
+    return h;
+}
+
+inline py::dict to_py(const acq::PreambleHit& h) {
+    py::dict d = typed("PreambleHit");
+    d["f_hz"] = h.f_hz;
+    d["drift_hz_per_min"] = h.drift_hz_per_min;
+    d["tau0_s"] = h.tau0_s;
+    d["phase"] = h.phase;
+    d["lam"] = h.lam;
+    d["cell_lam"] = h.cell_lam;
+    d["p_value"] = h.p_value;
+    d["passed"] = h.passed;
+    d["n_groups"] = h.n_groups;
+    d["f_mix"] = h.f_mix ? to_py(*h.f_mix) : py::object(py::none());
+    d["tau0_sd_s"] = h.tau0_sd_s;
+    d["chunk_sums"] = opt_arr(h.chunk_sums);
+    d["lead_in_s"] = h.lead_in_s;
+    d["waveform"] = h.waveform;
+    return d;
+}
+
+inline std::vector<acq::PreambleHit> preamble_hits(const py::handle& o) {
+    std::vector<acq::PreambleHit> out;
+    for (const py::handle h : py::reinterpret_borrow<py::iterable>(o)) out.push_back(preamble_hit(h));
+    return out;
+}
+
+inline acq::A2Input a2_input_of(const py::handle& o) {
+    acq::A2Input in;
+    in.y = vec<std::complex<double>>(field(o, "y"));
+    in.t0_ch = as_double(field(o, "t0_ch"));
+    const py::object fm = field(o, "f_mix");
+    if (!fm.is_none()) in.f_mix = rational(fm);
+    return in;
+}
+
+inline py::dict to_py(const acq::A2Input& in) {
+    py::dict d = typed("_A2Input");
+    d["y"] = arr(in.y);
+    d["t0_ch"] = in.t0_ch;
+    d["f_mix"] = to_py(in.f_mix);
+    return d;
+}
+
+inline acq::A2Channel a2_channel_of(const py::handle& o) {
+    acq::A2Channel c;
+    c.m = vec<std::complex<double>>(field(o, "m"));
+    c.t0_ch = as_double(field(o, "t0_ch"));
+    c.sigma2 = as_double(field(o, "sigma2"));
+    const py::object fm = field(o, "f_mix");
+    if (!fm.is_none()) c.f_mix = rational(fm);
+    const py::object loc = field(o, "local");
+    if (!loc.is_none()) c.local = vec<double>(loc);
+    c.kind = preamble_kind_of(field(o, "kind"));
+    return c;
+}
+
+// The channel as a record. `kind` is the object to hold as its kind (the
+// reference's _A2Channel keeps the PreambleKind it was made for: pass the
+// caller's own); None writes c.kind as a "PreambleKind" record.
+inline py::dict to_py(const acq::A2Channel& c, const py::object& kind) {
+    py::dict d = typed("_A2Channel");
+    d["m"] = arr(c.m);
+    d["t0_ch"] = c.t0_ch;
+    d["sigma2"] = c.sigma2;
+    d["f_mix"] = to_py(c.f_mix);
+    d["local"] = opt_arr(c.local);
+    d["kind"] = kind.is_none() ? py::object(to_py(c.kind)) : kind;
+    return d;
+}
+
+// An optional int (TbdHit.waveform, a shape verdict): None or int.
+inline std::optional<std::int64_t> opt_int(const py::handle& o) {
+    if (o.is_none()) return std::nullopt;
+    return as_int(o);
+}
+
+inline py::object opt_int_py(const std::optional<std::int64_t>& v) {
+    return v ? py::object(py::int_(*v)) : py::object(py::none());
+}
+
+inline acq::TbdHit tbd_hit(const py::handle& o) {
+    acq::TbdHit h;
+    h.path = freq_path(field(o, "path"));
+    h.z = as_double(field(o, "z"));
+    h.p_value = as_double(field(o, "p_value"));
+    h.n_frames = as_int(field(o, "n_frames"));
+    h.centre_hz = as_double(field(o, "centre_hz"));
+    h.shape_z = as_double(field(o, "shape_z"));
+    h.above_z = as_double(field(o, "above_z"));
+    h.waveform = opt_int(field(o, "waveform"));
+    const py::object lp = field(o, "l_path");
+    if (!lp.is_none()) h.l_path = freq_path(lp);
+    h.l_shape_z = as_double(field(o, "l_shape_z"));
+    h.l_above_z = as_double(field(o, "l_above_z"));
+    return h;
+}
+
+inline py::dict to_py(const acq::TbdHit& h) {
+    py::dict d = typed("TbdHit");
+    d["path"] = to_py(h.path);
+    d["z"] = h.z;
+    d["p_value"] = h.p_value;
+    d["n_frames"] = h.n_frames;
+    d["centre_hz"] = h.centre_hz;
+    d["shape_z"] = h.shape_z;
+    d["above_z"] = h.above_z;
+    d["waveform"] = opt_int_py(h.waveform);
+    d["l_path"] = h.l_path ? py::object(to_py(*h.l_path)) : py::object(py::none());
+    d["l_shape_z"] = h.l_shape_z;
+    d["l_above_z"] = h.l_above_z;
+    return d;
+}
+
+inline std::vector<acq::TbdHit> tbd_hits(const py::handle& o) {
+    std::vector<acq::TbdHit> out;
+    for (const py::handle h : py::reinterpret_borrow<py::iterable>(o)) out.push_back(tbd_hit(h));
+    return out;
+}
+
+inline acq::Acquisition acquisition(const py::handle& o) {
+    acq::Acquisition a;
+    a.lines = carrier_candidates(field(o, "lines"));
+    a.preamble = preamble_hits(field(o, "preamble"));
+    a.tbd = tbd_hits(field(o, "tbd"));
+    a.hinted = carrier_candidates(field(o, "hinted"));
+    a.pilots = carrier_candidates(field(o, "pilots"));
+    return a;
+}
+
+// lines and pilots are A1 cells (np.float64 f_hz); a hint that A2 did not
+// pass is written with a float f_hz (the reference's is an np.float64 when
+// hint_line refined it, of the same value).
+inline py::dict to_py(const acq::Acquisition& a) {
+    py::dict d = typed("Acquisition");
+    py::list lines, preamble, tbd, hinted, pilots;
+    for (const auto& c : a.lines) lines.append(cell_to_py(c));
+    for (const auto& h : a.preamble) preamble.append(to_py(h));
+    for (const auto& h : a.tbd) tbd.append(to_py(h));
+    for (const auto& c : a.hinted) hinted.append(to_py(c));
+    for (const auto& c : a.pilots) pilots.append(cell_to_py(c));
+    d["lines"] = lines;
+    d["preamble"] = preamble;
+    d["tbd"] = tbd;
+    d["hinted"] = hinted;
+    d["pilots"] = pilots;
+    return d;
 }
 
 }  // namespace sstvae_bindings::qrss::rx

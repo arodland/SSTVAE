@@ -8,8 +8,10 @@ The C++ hands records to Python as plain dicts with a "__type__" key
 (native/bindings/module/qrss/rx_types.hpp); `to_ref` turns such a tree
 into the reference's own classes -- `types.Timing`, `types.PassResult`,
 `header.HeaderFields`, `track.ChanCapture`, `track.TrackResult`,
-`ltrack.LTrackResult`, ... -- so a substituted function returns exactly
-what the reference's callers expect. A native FrameSpec becomes the
+`ltrack.LTrackResult`, the acquisition's `acquire.CarrierStats`,
+`PreambleKind`, `PreambleHit`, `_A2Input`, `_A2Channel`, `TbdHit` and
+`Acquisition`, ... -- so a substituted function returns exactly what the
+reference's callers expect. A native FrameSpec becomes the
 reference's spec (the module's own preset object when equal to one), and
 a native PathFn a `NativePathFn`.
 """
@@ -200,6 +202,36 @@ def _simple(name):
     return lambda d: getattr(_types(), name)(**_fields(d))
 
 
+# --- the acquisition's records (acquire.py) ---------------------------------------------------
+
+def _acquire():
+    from sstvae.qrss import acquire
+
+    return acquire
+
+
+def _acquire_simple(name):
+    return lambda d: getattr(_acquire(), name)(**_fields(d))
+
+
+def _a2_channel(d):
+    f = _fields(d)
+    f["kind"] = to_ref(f["kind"])
+    return _acquire()._A2Channel(**f)
+
+
+def _tbd_hit(d):
+    f = _fields(d)
+    f["path"] = to_ref(f["path"])
+    f["l_path"] = to_ref(f["l_path"])
+    return _acquire().TbdHit(**f)
+
+
+def _acquisition(d):
+    f = {k: to_ref(v) for k, v in _fields(d).items()}
+    return _acquire().Acquisition(**f)
+
+
 _CONVERT = {
     "Timing": _timing,
     "FreqPath": _freq_path,
@@ -217,6 +249,13 @@ _CONVERT = {
     "LClasses": _lclasses,
     "TrackResult": _track_result,
     "LTrackResult": _track_result,
+    "CarrierStats": _acquire_simple("CarrierStats"),
+    "PreambleKind": _acquire_simple("PreambleKind"),
+    "PreambleHit": _acquire_simple("PreambleHit"),
+    "_A2Input": _acquire_simple("_A2Input"),
+    "_A2Channel": _a2_channel,
+    "TbdHit": _tbd_hit,
+    "Acquisition": _acquisition,
 }
 
 

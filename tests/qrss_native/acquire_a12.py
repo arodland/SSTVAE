@@ -47,22 +47,9 @@ def rows(q):
         fn = frontend.noise_psd
         return None if fn is native_noise_psd else fn
 
-    # --- records -------------------------------------------------------------------------
+    # --- records (rx_types.hpp's shared converters; _rx.to_ref builds the dataclasses) ------
 
-    def _fields(d):
-        return {k: v for k, v in d.items() if k != "__type__"}
-
-    def _stats(d):
-        return A.CarrierStats(**_fields(d))
-
-    def _input(d):
-        return A._A2Input(**_fields(d))
-
-    def _channel(d):
-        return A._A2Channel(**_fields(d))
-
-    def _hit(d):
-        return A.PreambleHit(**_fields(d))
+    to_ref = _rx.to_ref
 
     def _read_only(x):
         x = np.array(x)
@@ -80,7 +67,7 @@ def rows(q):
 
     def carrier_line_stats(fe, t0_index, fs=A.FE_FS, *, span_s=A.A1_SPAN_S, drifts=A.A1_DRIFTS,
                            band_hz=A.BAND_HZ):
-        return _stats(a.carrier_line_stats(fe, t0_index, fs, span_s=span_s, drifts=drifts,
+        return to_ref(a.carrier_line_stats(fe, t0_index, fs, span_s=span_s, drifts=drifts,
                                            band_hz=band_hz))
 
     def carrier_lines(fe, t0_index, fs=A.FE_FS, *, pfa=A.A1_PFA, max_cands=A.A1_MAX_CANDS,
@@ -100,13 +87,13 @@ def rows(q):
     # --- A2 -------------------------------------------------------------------------------
 
     def preamble_channel(fe, t0_index, f_audio_hz, drift_hz_per_min=0.0, fs=A.FE_FS, *, kind=CE):
-        return _channel(a.preamble_channel(fe, t0_index, f_audio_hz, drift_hz_per_min, fs, kind=kind))
+        return to_ref(a.preamble_channel(fe, t0_index, f_audio_hz, drift_hz_per_min, fs, kind=kind))
 
     def _a2_input(fe, t0_index, f_audio_hz, drift_hz_per_min=0.0, fs=A.FE_FS):
-        return _input(a._a2_input(fe, t0_index, f_audio_hz, drift_hz_per_min, fs))
+        return to_ref(a._a2_input(fe, t0_index, f_audio_hz, drift_hz_per_min, fs))
 
     def _a2_mf(inp, kind=CE):
-        return _channel(a._a2_mf(inp, kind))
+        return to_ref(a._a2_mf(inp, kind))
 
     def _templates(df_hz, kind=CE):
         return a._templates(df_hz, kind)
@@ -121,7 +108,7 @@ def rows(q):
         return a._fine_sums(spline, chan, tau, df, rate)
 
     def preamble_search(fe, t0_index, cand, fs=A.FE_FS, *, pfa=A.A2_PFA, kind=CE, inp=None):
-        return _hit(a.preamble_search(fe, t0_index, cand, fs, pfa=pfa, kind=kind, inp=inp))
+        return to_ref(a.preamble_search(fe, t0_index, cand, fs, pfa=pfa, kind=kind, inp=inp))
 
     def to_detection(self, duration_s=1800.0):
         return _rx.to_ref(a.to_detection(self, duration_s))
@@ -132,6 +119,14 @@ def rows(q):
                      z_min=A.LEAD_Z, t_sym=A.T_SYM):
         return a.lead_in_span(fe, t0_index, f_hz, drift_hz_per_min, tau0_s, fs, z_min=z_min,
                               t_sym=t_sym, _noise_psd=_noise_psd())
+
+    # The native acquire() (tests/qrss_native/acquire.py) calls the C++ stage
+    # directly while acquire's attribute is one of these, and the attribute
+    # (a test's replacement) otherwise.
+    for fn in (carrier_line_stats, carrier_lines, hint_line, _cell_line, pilot_lines, preamble_channel,
+               _a2_input, _a2_mf, _templates, preamble_lambda, _preamble_sums, _fine_sums,
+               preamble_search, to_detection, lead_in_span):
+        fn.__qrss_native__ = True
 
     t = "sstvae.qrss.acquire"
     return {
