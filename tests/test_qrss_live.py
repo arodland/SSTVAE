@@ -669,7 +669,16 @@ def test_the_end_of_slot_receive_runs_in_its_own_process(tmp_path):
         here, heard = live.finish_receive(x, ok, origin, q, TINY, cfg.estimator, [])
         ((_, there, heard2),) = got[0]
         assert heard == heard2 and len(here) == len(there) == 1
-        assert np.array_equal(here[0].z, there[0].z) and np.array_equal(here[0].w, there[0].w)
+        import qrss_native
+        if qrss_native.ACTIVE is None:
+            assert np.array_equal(here[0].z, there[0].z) and np.array_equal(here[0].w, there[0].w)
+        else:
+            # Under --native-qrss this process runs the C++ rows while the
+            # spawned child imports the Python reference, so the two passes
+            # agree to the port's tolerance (the tracker's rounding moves a
+            # few float32 latents by an ulp), not bit for bit.
+            np.testing.assert_allclose(here[0].z, there[0].z, rtol=1e-4, atol=1e-5)
+            np.testing.assert_allclose(here[0].w, there[0].w, rtol=1e-4, atol=1e-5)
         # a child that dies is replaced
         L._proc._proc.kill()
         L._proc._proc.join(10.0)

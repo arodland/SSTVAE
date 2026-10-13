@@ -21,10 +21,10 @@ the reference would: the capture, the classes, the keying array, the path,
 timing and z_d when the run kept them, and spec. `_q_near` slices the
 caller's grid, as the reference does (its elements, not copies).
 
-Not rows here (the coarse timing and gate V, another lane): `_lag_phase`,
-`_clock_phase`, `fit_timing_l`, `_segment_timing_l`, `refine_path_l`,
-`verify_track_l`, `resid_ratio`, `verify_l`; `genie_track_l` (a test aid)
-stays Python, over these rows.
+The coarse timing and gate V (`_lag_phase`, `_clock_phase`,
+`fit_timing_l`, `_segment_timing_l`, `refine_path_l`, `verify_track_l`,
+`resid_ratio`, `verify_l`) are tests/qrss_native/ltrack_timing.py's rows;
+`genie_track_l` (a test aid) stays Python, over these rows.
 """
 
 STAGE = "rx"

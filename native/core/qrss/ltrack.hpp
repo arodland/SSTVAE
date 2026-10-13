@@ -8,9 +8,9 @@
 // derotate, symbol_mf, psi_at, smooth and recenter are track.hpp's (what
 // ltrack.py imports from track.py).
 //
-// Not here: fit_timing_l, _segment_timing_l, _lag_phase, _clock_phase,
-// refine_path_l, verify_track_l, resid_ratio and verify_l (the coarse
-// timing and gate V, another lane); genie_track_l (a test aid) is not
+// The coarse timing and gate V (fit_timing_l, _segment_timing_l,
+// _lag_phase, _clock_phase, refine_path_l, verify_track_l, resid_ratio,
+// verify_l) are ltrack_timing.hpp's; genie_track_l (a test aid) is not
 // ported.
 //
 // Python is normative. What agrees to the bit with the reference on the
