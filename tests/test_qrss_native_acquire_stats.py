@@ -58,6 +58,9 @@ def test_scalars(Q):
         for n in (0, 1, 2, 3, 5, 76, 321, 1000):
             _same(np.array(Q._band_cov(n, fs)), np.array(A._band_cov(n, fs)), f"band_cov {n} {fs}")
     _same(np.array(Q.a1_gamma(7)), np.array(A.a1_gamma(7)), "a1_gamma default fs")
+    for name, args in (("a1_gamma", (11,)), ("a1_gamma", (1, 500)), ("tbd_gumbel", (31,)), ("_band_cov", (5,))):
+        r, g = getattr(A, name)(*args), getattr(Q, name)(*args)
+        assert [type(v) for v in g] == [type(v) for v in r], (name, r, g)   # np.float64 vs float
     _same(np.array(Q._band_cov(9)), np.array(A._band_cov(9)), "band_cov default fs")
     _same_scalar(Q.a2_threshold(), A.a2_threshold(), "a2_threshold()")
     for pfa in (1e-9, 1e-7, 1e-4, 0.3):

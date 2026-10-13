@@ -208,6 +208,13 @@ py::list scales_to_py(const std::vector<aq::Scale>& st, std::size_t n_df, std::s
 
 py::tuple pair(const std::pair<double, double>& p) { return py::make_tuple(p.first, p.second); }
 
+// a1_gamma's (M * M / var, var / M) are np.float64 in Python (var is one);
+// tbd_gumbel's and _band_cov's are float(...)'d there.
+py::tuple np_pair(const std::pair<double, double>& p) {
+    const py::object f64 = rx::np_module().attr("float64");
+    return py::make_tuple(f64(p.first), f64(p.second));
+}
+
 void bind(py::module_& q) {
     rx::register_translators();
     py::module_ m = q.def_submodule("acquire_stats", "acquire.py's shared statistics (native/core/qrss/acquire_stats)");
@@ -228,7 +235,7 @@ void bind(py::module_& q) {
           py::arg("rows") = py::none());
     m.def("_parabola", &parabola, py::arg("ym"), py::arg("y0"), py::arg("yp"));
 
-    m.def("a1_gamma", [](std::int64_t M, double fs) { return pair(aq::a1_gamma(M, fs)); }, py::arg("M"),
+    m.def("a1_gamma", [](std::int64_t M, double fs) { return np_pair(aq::a1_gamma(M, fs)); }, py::arg("M"),
           py::arg("fs") = static_cast<double>(cfg::FE_FS));
     m.def("a1_threshold", [](std::int64_t M, double pfa, double fs) { return aq::a1_threshold(M, pfa, fs); },
           py::arg("M"), py::arg("pfa") = rxa::A1_PFA, py::arg("fs") = static_cast<double>(cfg::FE_FS));
