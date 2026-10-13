@@ -399,7 +399,7 @@ def test_to_audio_chunked_and_refusals(nat):
     parts = np.concatenate([nat.to_audio(z[i:i + 4097], 8000, 15003, 10, 0.5, 777 + i)
                             for i in range(0, len(z), 4097)])
     _same(parts, whole, "to_audio in chunks with the running count")
-    for den in (0, -10):
+    for den in (0, -10, 2 ** 61):
         _raises_alike(lambda: nat.to_audio(z, 8000, 1500, den), lambda: C.to_audio(z, 8000, 1500, den))
     _same(nat.to_audio(z[:0], 8000, 1500), C.to_audio(z[:0], 8000, 1500), "empty")
 
@@ -446,3 +446,204 @@ def test_carrier_fraction(nat):
     for c in ("abc", "1/0", float("nan"), float("inf"), None, "", [1500], Decimal("nan"),
               np.longdouble(1500.3), np.float32(1500.5), "3/-7", "0x10", "1,5", "\ud800"):
         _raises_alike(lambda: nat.carrier_fraction(c), lambda: C.carrier_fraction(c))
+
+
+# --- review probes: randomised sweeps and the callers' own call shapes --------------
+
+MID = F.FrameSpec("mid", n_data=1024, cw_after=(4000,))               # a window not at the end
+ADJ = F.FrameSpec("adjacent", n_data=2048, cw_after=(3400, 3401))     # two windows one symbol apart
+NOHDR = F.FrameSpec("nohdr", n_hdr=0, n_data=1024, cw_after=(661, 1753))
+CALLS = ["K1ABC/P", "W1AW", "N0CALL", "E", "T", "0000000"]
+
+
+def test_baseband_random_sweep(nat):
+    """Random frames, rates, starts (on and off the grid), clocks, keyings, lead-ins,
+    ramps and chunks: the reference's answer, bit for bit where its trig is libm's."""
+    rng = np.random.default_rng(2026)
+    specs = [S, T, EDGE, MID, ADJ, NOHDR, F.MEDIUM, F.FULL]
+    divisors = [16000, 8000, 4000, 3200, 2000, 1000, 500, 250, 125, 64]
+    for _ in range(160):
+        spec = specs[rng.integers(len(specs))]
+        sym = rng.standard_normal(spec.n_sym)
+        fs = int(rng.choice(divisors + [3000, 6000]))
+        end_s = spec.keyed_end_pos * T_SYM
+        kind = rng.integers(3)
+        if kind == 0:                                            # on the grid
+            start_s = int(rng.integers(int(-12 * fs), int(end_s * fs))) / fs
+        elif kind == 1:                                          # the transmitter's chunk starts
+            fs = 8000
+            start_s = (int(rng.integers(0, int((end_s + 12) * fs))) - 96000) / 8000
+        else:                                                    # anywhere
+            start_s = float(rng.uniform(-12, end_s))
+        n = int(rng.integers(1, min(40000, 1 + int(fs * 40))))
+        kw = {}
+        if rng.random() < 0.3:
+            kw["time_scale"] = float(1 + rng.normal() * 2e-5)
+        if rng.random() < 0.3:
+            kw["lead_in_s"] = float(rng.choice([0.0, LEAD_IN_MAX_S, rng.uniform(0, LEAD_IN_MAX_S)]))
+        if rng.random() < 0.7:
+            if rng.random() < 0.5 or spec.n_win == 0:
+                kw["keying"] = morse.keying_units(CALLS[rng.integers(len(CALLS))])
+            else:
+                kw["keying"] = np.stack([morse.keying_units(CALLS[rng.integers(len(CALLS))])
+                                         for _ in range(spec.n_win)])
+        if rng.random() < 0.4:
+            kw["ook"] = True
+        if rng.random() < 0.3:
+            kw["ramp_s"] = float(rng.choice([0.0, 0.01, 0.2]))
+        if rng.random() < 0.3:
+            kw["chunk"] = int(rng.choice([997, 4096, 65536]))
+        if kw.get("time_scale", 1.0) != 1.0 or kind == 2 or 16000 % fs:
+            n = min(n, 8000)                                     # the closed form is the slow path
+        got = nat.baseband(sym, spec, fs, start_s, n, **kw)
+        want = C.baseband(sym, spec, fs, start_s, n, **kw)
+        _close(got, want, 1e-12, LIBM, f"baseband {spec.name} fs={fs} start_s={start_s!r} n={n} {sorted(kw)}")
+
+
+def test_transmit_loop(nat):
+    """tx.transmit_audio's CE loop: baseband then to_audio per chunk, with the
+    running sample count, at a step that divides nothing."""
+    exact = LIBM and FUSED
+    for spec, kw, carrier in [(T, dict(keying=K), 1500.3), (T, dict(ook=True, lead_in_s=2.0), 1200),
+                              (EDGE, dict(keying=K), 2650), (EDGE, dict(keying=K, ook=True), "1834.7")]:
+        sym = _sym(spec, seed=3)
+        num, den = C.carrier_fraction(carrier)
+        assert nat.carrier_fraction(carrier) == (num, den)
+        n_pre = 12 * 8000
+        a, b = (0, 320000) if spec is T else (1_500_000, 1_820_000)   # TINY whole; EDGE's last window
+        outs = []
+        for impl in (nat, C):
+            parts = []
+            for i0 in range(a, b, 12345):
+                m = min(12345, b - i0)
+                z = impl.baseband(sym, spec, 8000, (i0 - n_pre) / 8000, m, **kw)
+                parts.append(impl.to_audio(z, 8000, num, den, 0.5, n0=i0))
+            outs.append(np.concatenate(parts))
+        _close(outs[0], outs[1], 1e-12, exact, f"transmit loop {spec.name} {sorted(kw)} {carrier}")
+        assert np.count_nonzero(outs[1]) > 0
+
+
+def test_channel_source_calls(nat):
+    """channel.transmit_source's CE calls: FE_FS chunks from t0 - pre_s, with and
+    without a clock offset (the closed form)."""
+    sym = _sym(S, seed=4)
+    for scale in (1.0, 1 + 3e-6, 1 - 2.5e-5):
+        for a in (0, 16384 * 7, 16384 * 60, 16384 * 66):
+            start_s = -12.0 + a / 4000
+            kw = dict(keying=K, lead_in_s=1.5, time_scale=scale)
+            got = nat.baseband(sym, S, 4000, start_s, 4096, **kw)
+            want = C.baseband(sym, S, 4000, start_s, 4096, **kw)
+            _close(got, want, 1e-12, LIBM, f"FE source scale={scale} a={a}")
+
+
+def test_to_audio_random_carriers(nat):
+    """Carriers as the app sends them (floats through carrier_fraction, den up to
+    2^20), odd lengths, every running count a slot can reach."""
+    rng = np.random.default_rng(77)
+    exact = LIBM and FUSED
+    for _ in range(300):
+        c = float(rng.uniform(300, 2700)) if rng.random() < 0.6 else round(float(rng.uniform(300, 2700)), 1)
+        num, den = C.carrier_fraction(c)
+        assert nat.carrier_fraction(c) == (num, den), c
+        n = int(rng.choice([1, 2, 3, 5, 7, 8, 9, 31, 1001, 4099]))
+        z = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+        n0 = int(rng.choice([0, 1, 79999, int(rng.integers(0, 20_000_000))]))   # a FULL slot is < 1.5e7
+        amp = float(rng.uniform(0.05, 1.0))
+        _close(nat.to_audio(z, 8000, num, den, amp, n0), C.to_audio(z, 8000, num, den, amp, n0),
+               1e-12, exact, f"to_audio {num}/{den} n={n} n0={n0}")
+
+
+@pytest.mark.parametrize("spec", [S, EDGE, MID, ADJ, NOHDR], ids=lambda s: s.name)
+def test_cw_phase_turns_unit_edges(nat, spec):
+    """Times exactly on unit and window boundaries and an ulp either side."""
+    rng = np.random.default_rng(31)
+    keyings = [None, np.ones(CW_UNITS, np.uint8), np.zeros(CW_UNITS, bool), morse.keying_units("K1ABC/P"),
+               (rng.random((spec.n_win, CW_UNITS)) < 0.5).astype(np.uint8)]
+    edges = []
+    for p in spec.win_start_pos:
+        u = np.arange(-2, CW_UNITS + 3, dtype=np.float64)
+        b = (p - 0.5) + 2 * u
+        edges += [b, np.nextafter(b, -np.inf), np.nextafter(b, np.inf), b + 1.0]
+    tau = np.sort(np.concatenate(edges))
+    for k in keyings:
+        for ook in (False, True):
+            for t in (tau, rng.permutation(tau)):
+                got_th, got_a = nat.cw_phase_turns(t, spec, k, ook=ook)
+                want_th, want_a = C.cw_phase_turns(t, spec, k, ook=ook)
+                _same(got_a, want_a, f"a {spec.name} ook={ook}")
+                _close(got_th, want_th, 1e-12, LIBM, f"theta {spec.name} ook={ook}")
+
+
+def test_phase_at_edges(nat):
+    """The singular offsets and an ulp around them, d = +-1/2, and the edges of
+    the reach (centre -9 and n_pos + 8)."""
+    rng = np.random.default_rng(41)
+    for spec in (T, NOHDR):
+        sym = _sym(spec)
+        var = rng.uniform(0, 1, spec.n_sym)
+        k = np.arange(-12, spec.n_pos + 12, dtype=np.float64)
+        third = 1 / 3
+        for o in (0.0, third, -third, np.nextafter(third, 1), np.nextafter(third, 0), third + 1e-10,
+                  0.5, -0.5, np.nextafter(0.5, 0), np.nextafter(-0.5, 0), 1e-13, -1e-13, 1e-9):
+            got, gv = nat.phase_at(k + o, sym, spec, var=var)
+            want, wv = C.phase_at(k + o, sym, spec, var=var)
+            _close(got, want, 1e-12, LIBM, f"phase_at {spec.name} offset {o!r}")
+            _close(gv, wv, 1e-12, LIBM, f"phase_at v {spec.name} offset {o!r}")
+        n_pos = spec.n_pos
+        edge = np.concatenate([np.linspace(-9.6, -7.4, 2001), np.linspace(n_pos + 6.4, n_pos + 8.6, 2001),
+                               [-9.5, np.nextafter(-9.5, -10), n_pos + 8.5, np.nextafter(n_pos + 8.5, 0),
+                                np.inf, -np.inf, 1e300, -0.0]])
+        got, gv = nat.phase_at(edge, sym, spec, var=var)
+        with np.errstate(invalid="ignore"):                      # the reference casts inf to int64
+            want, wv = C.phase_at(edge, sym, spec, var=var)
+        _close(got, want, 1e-12, LIBM, "phase_at at the reach")
+        _close(gv, wv, 1e-12, LIBM, "phase_at v at the reach")
+
+
+def test_carrier_fraction_strings(nat):
+    """Fraction's grammar: what the C++ parses must be what Fraction parses, and
+    anything else goes to Fraction for its own answer or text."""
+    cands = ["1500.3e2", "1e-3", "1e", "e3", "1.5/2", "1/2e3", "-", "+", "1__0", "_1", "1_", "1.e3", "1.", ".",
+             "-.5", "+.5", "1.5_0", "1_0e1_0", "1e_10", "1/+3", "+1/3", "1/3_3", "1/_3", "1 /3", "1/ 3", "(1/3)",
+             "  ", "inf", "nan", "infinity", "1e3.5", "0", "-0", "0/5", "00012", "0x1", "1j", "1500\x00",
+             " 1500", "1500 ", "\x0b1500\x0c", "1e400", "1e-400", "9223372036854775807",
+             "9223372036854775808", "-9223372036854775808", "1/9223372036854775808", "1.0000000000000000001",
+             "1500.30000", "1E3", "1e+03", "1500.3.3", "1/2/3", "1e3e3", "--1", "+-1", "1.5e+",
+             "0.00000095367431640625", "1048577/1048576", "1048576/1048577", "3/1048577", "1.5E3/2"]
+    for c in cands + [-2 ** 63, 2 ** 63 - 1, -2 ** 63 - 1, 5e-324, 1 / 1048577, 2.0 ** 53 + 2, -0.0]:
+        try:
+            want = C.carrier_fraction(c)
+        except Exception:                                        # noqa: BLE001 -- compared below
+            _raises_alike(lambda: nat.carrier_fraction(c), lambda: C.carrier_fraction(c))
+            continue
+        got = nat.carrier_fraction(c)
+        assert got == want and [type(v) for v in got] == [type(v) for v in want], (c, got, want)
+
+
+def test_far_from_t0(nat):
+    """Sample numbers far past any frame: the reference's zeros (Python ints never
+    overflow), its OverflowError where numpy's int64 sample numbers cannot hold
+    round(start_s * fs), and no refusal where the closed form never needs them."""
+    sym = _sym(T)
+    for start_s in (1e15, -1e15, 2.0 ** 62 / 8000, 2.0 ** 63 / 8000, -(2.0 ** 63) / 8000, 1e20, -1e20):
+        for fs, n, kw in [(8000, 500, {}), (8000, 0, {}), (8000, 100, dict(time_scale=1.0001)), (3000, 100, {})]:
+            try:
+                want = C.baseband(sym, T, fs, start_s, n, **kw)
+            except OverflowError:
+                _raises_alike(lambda: nat.baseband(sym, T, fs, start_s, n, **kw),
+                              lambda: C.baseband(sym, T, fs, start_s, n, **kw))
+                continue
+            _same(nat.baseband(sym, T, fs, start_s, n, **kw), want, f"baseband from {start_s!r} at {fs}")
+    vals = C.at_positions(sym, T)
+    for n0 in (2 ** 62, -2 ** 62, 10 ** 15, -(10 ** 15), 2 ** 63 - 10, -2 ** 63 + 10):
+        for fs in (16000, 8000, 1):
+            _same(nat._grid_sum(fs, n0, 64, vals, C.PULSE_TABLE), C._grid_sum(fs, n0, 64, vals, C.PULSE_TABLE),
+                  f"_grid_sum fs={fs} n0={n0}")
+
+
+def test_mulmod_refuses_outside_its_range(nat):
+    for a, b, m in [(1, 2, 0), (1, 2, -7), (-1, 2, 7), (2, -8, 7)]:
+        with pytest.raises(ValueError, match="a, b >= 0 and m > 0"):
+            nat._mulmod(a, b, m)
+    for a, b, m in [(7, 2, 7), (2 ** 63 - 1, 2 ** 63 - 1, 2 ** 63 - 25), (2 ** 63 - 1, 3, 5)]:
+        assert nat._mulmod(a, b, m) == (a * b) % m

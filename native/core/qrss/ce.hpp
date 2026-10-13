@@ -223,9 +223,16 @@ struct BasebandOptions {
 // fs dividing 16000 -- 0 is ZeroDivision, as 16000 % 0 -- and start_s
 // within 1e-9 of that rate's sample grid), and the keyed span [lo, hi)
 // (LeadInRefusal).
+//
+// A round(start_s * fs) past int64 is no refusal here: the reference's
+// Python int only fails where the exact path builds its int64 sample
+// numbers, so `n0_overflows` defers that to the first chunk baseband
+// synthesizes (std::overflow_error, numpy's text), and the closed form,
+// which never uses n0, is unaffected.
 struct BasebandPlan {
     std::int64_t n0 = 0;
     bool exact = false;
+    bool n0_overflows = false;   // round(start_s * fs) is outside int64 (n0 is then 0)
     double lo = 0.0, hi = 0.0;
 };
 BasebandPlan baseband_plan(const FrameSpec& spec, double fs, double start_s, const BasebandOptions& opt = {});
@@ -247,7 +254,8 @@ std::vector<std::complex<double>> baseband(std::span<const double> sym, const Fr
 std::vector<double> to_audio(std::span<const std::complex<double>> z, std::int64_t fs, std::int64_t num,
                              std::int64_t den = 1, double amplitude = 0.5, std::int64_t n0 = 0);
 
-// (n * num) mod period for 0 <= n, num < period, with no 128-bit type.
+// (a * b) mod m for a, b >= 0 and m > 0 (to_audio passes a, b < m), with no
+// 128-bit type.
 std::int64_t mulmod(std::int64_t a, std::int64_t b, std::int64_t m);
 
 // check_carrier: the carrier in Hz, or "carrier {shown} Hz is outside the

@@ -483,6 +483,29 @@ void test_baseband() {
     check::is_true(!ce::baseband_plan(T, 3000, 0.0).exact, "3 kHz does not divide 16 kHz: closed form");
     check::equal(ce::baseband_plan(T, 8000, -0.24254).n0, std::int64_t(-1940), "n0 rounds start_s * fs");
 
+    // Far from t0. round(start_s * fs) past int64 is the reference's
+    // OverflowError only where the exact path builds int64 sample numbers
+    // (np.arange); the closed form and n = 0 never do. Below that, any frame
+    // is out of reach: zeros (the reference's Python ints never overflow).
+    {
+        const auto far = ce::baseband_plan(T, 8000, 1e20);
+        check::is_true(far.n0_overflows && far.exact, "1e20 s at 8 kHz: exact, n0 past int64");
+        check::is_true(!ce::baseband_plan(T, 8000, -0.24254).n0_overflows, "n0 in range");
+        check::equal(refusal([&] { ce::baseband(sym_t, T, 8000, 1e20, 10, plain); }),
+                     std::string("Python int too large to convert to C long"), "exact path past int64");
+        check::equal(ce::baseband(sym_t, T, 8000, 1e20, 0, plain).size(), std::size_t(0), "n = 0 builds nothing");
+        ce::BasebandOptions o;
+        o.time_scale = 1.0001;
+        check::is_true(ce::baseband(sym_t, T, 8000, 1e20, 100, o) == std::vector<cplx>(100),
+                       "the closed form far from t0 is silence, not a refusal");
+        check::is_true(ce::baseband(sym_t, T, 8000, 1e15, 100, plain) == std::vector<cplx>(100),
+                       "1e15 s on the exact path is silence");
+        const auto vals = ce::at_positions(sym_t, T);
+        for (const std::int64_t n0 : {std::int64_t(1) << 62, -(std::int64_t(1) << 62), std::int64_t(1000000000000000)})
+            check::is_true(ce::grid_sum(16000, n0, 64, vals, ce::pulse_table()) == std::vector<double>(64, 0.0),
+                           "grid_sum far from t0 is zeros, n0 = " + std::to_string(n0));
+    }
+
     // Chunk invariance, bit for bit: the chunk only decides where the work splits.
     check::current_step = "baseband chunks";
     for (const std::int64_t chunk : {std::int64_t(1) << 12, std::int64_t(7), std::int64_t(100003)}) {

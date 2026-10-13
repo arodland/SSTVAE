@@ -218,7 +218,11 @@ std::optional<sstvae::qrss::Rational> fraction_of(const py::handle& x) {
         const long long v = PyLong_AsLongLongAndOverflow(i.ptr(), &overflow);
         if (v == -1 && PyErr_Occurred()) throw py::error_already_set();
         if (overflow != 0) return std::nullopt;
-        return ce::carrier_fraction(static_cast<std::int64_t>(v));
+        try {
+            return ce::carrier_fraction(static_cast<std::int64_t>(v));
+        } catch (const std::exception&) {
+            return std::nullopt;   // -2^63, which Rational refuses and Fraction takes
+        }
     }
     return std::nullopt;
 }
@@ -436,7 +440,13 @@ void bind(py::module_& q) {
         return py::make_tuple(py::object(f.attr("numerator")), py::object(f.attr("denominator")));
     }, py::arg("carrier_hz"));
 
-    m.def("_mulmod", &ce::mulmod, py::arg("a"), py::arg("b"), py::arg("m"));
+    // A test hook (the reference has no _mulmod): (a * b) % m for a, b >= 0 and
+    // m > 0, checked here because ce::mulmod divides by m and takes its
+    // operands as unsigned.
+    m.def("_mulmod", [](std::int64_t a, std::int64_t b, std::int64_t mod) {
+        if (mod <= 0 || a < 0 || b < 0) raise(PyExc_ValueError, "_mulmod needs a, b >= 0 and m > 0");
+        return ce::mulmod(a, b, mod);
+    }, py::arg("a"), py::arg("b"), py::arg("m"));
 }
 
 const Registrar reg("ce", 30, &bind);

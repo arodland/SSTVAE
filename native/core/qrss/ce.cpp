@@ -258,6 +258,11 @@ std::vector<double> grid_sum(std::int64_t fs, std::int64_t n0, std::int64_t n, s
                              std::span<const double> table) {
     const int64_t L = grid_step(fs);
     if (n <= 0) return {};
+    // Samples this far from t0 are nowhere near any frame at any rate (a
+    // frame spans < 2^40 grid steps), and the reference's Python ints give
+    // zeros there; the bound keeps every product below int64's range.
+    constexpr int64_t FAR = std::numeric_limits<int64_t>::max() / (4 * GRID_FS);
+    if (n0 > FAR || n0 < -FAR || n > FAR) return std::vector<double>(static_cast<std::size_t>(n), 0.0);
     const auto n_pos = static_cast<int64_t>(vals.size());
     // The positions that can reach samples [n0, n0 + n): the reference's
     // local window [p_lo, p_hi), clipped to the frame.
@@ -455,13 +460,15 @@ BasebandPlan baseband_plan(const FrameSpec& spec, double fs, double start_s, con
     if (std::isnan(x)) throw std::invalid_argument("cannot convert float NaN to integer");
     if (std::isinf(x)) throw std::overflow_error("cannot convert float infinity to integer");
     const double r = std::nearbyint(x);
-    if (!(std::fabs(r) < 0x1p63)) throw std::overflow_error("baseband: round(start_s * fs) is out of int64 range");
-    plan.n0 = static_cast<int64_t>(r);
+    // [-2^63, 2^63): what np.arange(n0, ..., dtype=np.int64) takes.
+    plan.n0_overflows = !(r >= -0x1p63 && r < 0x1p63);
+    plan.n0 = plan.n0_overflows ? 0 : static_cast<int64_t>(r);
     // time_scale == 1.0 and int(fs) == fs and GRID_FS % int(fs) == 0 and |x - n0| < 1e-9
+    // (x - n0 is float - int in Python: n0 converts exactly, being r).
     if (opt.time_scale == 1.0 && std::trunc(fs) == fs && std::fabs(fs) < 0x1p62) {
         const auto fs_i = static_cast<int64_t>(fs);
         if (fs_i == 0) throw ZeroDivision("integer modulo by zero");
-        plan.exact = floor_mod(GRID_FS, fs_i) == 0 && std::fabs(x - static_cast<double>(plan.n0)) < 1e-9;
+        plan.exact = floor_mod(GRID_FS, fs_i) == 0 && std::fabs(x - r) < 1e-9;
     }
     std::tie(plan.lo, plan.hi) = keyed_span_pos(spec, opt.lead_in_s);
     return plan;
@@ -490,10 +497,17 @@ std::vector<std::complex<double>> baseband(std::span<const double> sym, const Fr
         const int64_t m = std::min(opt.chunk, n - i0);
         tau.resize(static_cast<std::size_t>(m));
         if (exact) {
-            const int64_t L = grid_step(fs_i);
+            // np.arange(n0 + i0, n0 + i0 + m, dtype=np.int64) * _grid_step(fs): the
+            // start must be an int64 (numpy's OverflowError otherwise), and
+            // numpy's int64 product wraps, as the unsigned one here does.
+            if (plan.n0_overflows || n0 > std::numeric_limits<int64_t>::max() - i0)
+                throw std::overflow_error("Python int too large to convert to C long");
+            const auto L = static_cast<std::uint64_t>(grid_step(fs_i));
+            const auto first = static_cast<std::uint64_t>(n0 + i0);
             for (int64_t i = 0; i < m; ++i)
                 tau[static_cast<std::size_t>(i)] =
-                    static_cast<double>((n0 + i0 + i) * L) / static_cast<double>(T_NUM);
+                    static_cast<double>(static_cast<int64_t>((first + static_cast<std::uint64_t>(i)) * L)) /
+                    static_cast<double>(T_NUM);
         } else {
             for (int64_t i = 0; i < m; ++i)
                 tau[static_cast<std::size_t>(i)] =
@@ -540,8 +554,9 @@ std::vector<double> to_audio(std::span<const std::complex<double>> z_in, std::in
         z = resampled;
     }
     if (den <= 0) throw std::invalid_argument("carrier_hz_den must be positive");
+    // period = den * 8000 is a Python int there, and numpy refuses it past int64.
     if (den > std::numeric_limits<int64_t>::max() / config::FS)
-        throw std::overflow_error("to_audio: carrier_hz_den * 8000 is out of int64 range");
+        throw std::overflow_error("Python int too large to convert to C long");
     const int64_t period = den * config::FS;
     const int64_t nm = floor_mod(num, period);
     const double dp = static_cast<double>(period);
