@@ -45,6 +45,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -308,6 +309,27 @@ static void test_review_probes() {
     pair_is(acq::a1_gamma(3037000500), 0x1.56fbe7c0f11bap+31, 0x1.0e38e38e24c69p+0, "a1_gamma(3037000500)");
     pair_is(acq::a1_gamma((std::int64_t(1) << 40) + 1), 0x1.e50d7943604f7p+39, 0x1.0e38e38e38d55p+0,
             "a1_gamma(2^40 + 1)");
+    // band_cov's cache from several threads at once, with more fs than it
+    // holds (8): every answer the serial one, whatever was evicted when
+    std::vector<double> fss;
+    for (int i = 0; i < 13; ++i) fss.push_back(250.0 + 37.5 * i);
+    std::vector<std::pair<double, double>> serial;
+    for (const double fs : fss) serial.push_back(acq::band_cov(9, fs));
+    std::vector<int> bad(8, 0);
+    std::vector<std::thread> pool;
+    for (int t = 0; t < 8; ++t)
+        pool.emplace_back([&, t] {
+            for (int rep = 0; rep < 6; ++rep)
+                for (std::size_t i = 0; i < fss.size(); ++i) {
+                    const std::size_t j = (i * (t + 2) + rep) % fss.size();
+                    if (acq::band_cov(9, fss[j]) != serial[j]) ++bad[static_cast<std::size_t>(t)];
+                }
+        });
+    for (auto& th : pool) th.join();
+    int nbad = 0;
+    for (const int b : bad) nbad += b;
+    check::equal(nbad, 0, "band_cov from 8 threads through an evicting cache");
+
     // a negative local_bins: np.ones(w)'s refusal
     acq::Grid32 E(4, 9);
     for (auto& v : E.data) v = 1.0f;

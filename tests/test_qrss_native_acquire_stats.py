@@ -233,12 +233,27 @@ def test_errors_match(Q):
         ("preamble_scales", (S, v, (0,))),
         ("preamble_p", (S, v, (0,))),
         ("preamble_p", (S, v, ())),
+        # review probes: the reference's own order of refusals
+        ("spectrogram", (x10, 500, np.array([0.0]), None, 0)),
+        ("spectrogram", (x10, 500, np.array([]), None, 0)),
+        ("spectrogram", (x10, np.nan, np.array([0.0]), None, 0)),
+        ("spectrogram", (x10, -1.0, np.array([0.0]))),
+        ("spectrogram", (x10, 500, 0.0)),
+        ("spectrogram", (x10, 500, np.array([0.0]), np.int64(3))),
+        ("spectrogram", (x10, 500, 0.0, np.int64(3))),
+        ("spectral_shape", (E, -4)),
+        ("spectral_shape", (E, 2 ** 40)),
+        ("cfar_normalise", (E, -1)),
+        ("cfar_normalise", (E, 0.5)),
+        ("cfar_normalise", (E, 2 ** 40)),
     ]
     for name, args in cases:
         r, g = _outcome(getattr(A, name), *args), _outcome(getattr(Q, name), *args)
         assert r[0] == g[0], (name, r, g)
         if r[0] != "ok":
             assert r[1] == g[1], (name, r, g)
+        else:
+            _same(g[1], r[1], name)
 
 
 # --- Review probes: non-finite and odd inputs, the receiver's real shapes,

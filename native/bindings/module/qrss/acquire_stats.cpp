@@ -79,20 +79,31 @@ py::array matrix_2d(const py::object& o, const char* what) {
 }
 
 py::object spectrogram(const py::object& x, double fs, const py::object& starts, const py::object& bins,
-                       int /*chunk*/) {
+                       const py::object& chunk_o) {
     py::array xa = as_array(x);
     if (xa.ndim() != 1) not_implemented("x must be 1-D");
+    (void)aq::frame_window(fs);   // a NaN/inf/negative fs fails first, as _frame_len/frame_window do
     py::array sa = py::array::ensure(rx::np_module().attr("asarray")(starts, py::arg("dtype") = "float64"));
     if (!sa) throw py::error_already_set();
-    if (sa.ndim() == 0) throw py::type_error("len() of unsized object");
-    if (sa.ndim() != 1) not_implemented("starts must be 1-D");
-    const std::vector<double> st = rx::vec<double>(sa);
     std::optional<std::vector<std::int64_t>> bv;
     if (!bins.is_none()) {
+        (void)py::len(bins);                     // nb = len(bins): its TypeError, in its words
         py::array ba = as_array(bins);
+        if (ba.ndim() != 1) not_implemented("bins must be 1-D");
         if (dtype_of(ba) == "bool") not_implemented("a boolean bins mask");
         bv = rx::vec<std::int64_t>(ba);
     }
+    // np.round of a 0-d array is a numpy scalar, so len(starts) is asked
+    // of an np.int64
+    if (sa.ndim() == 0) throw py::type_error("object of type 'numpy.int64' has no len()");
+    if (sa.ndim() != 1) not_implemented("starts must be 1-D");
+    const std::vector<double> st = rx::vec<double>(sa);
+    // the reference's chunk loop, range(0, len(starts), chunk): 0 is
+    // range()'s refusal; a negative step would leave its np.empty output
+    // unwritten, which there is no defined answer to copy.
+    const std::int64_t chunk = rx::as_int(chunk_o);
+    if (chunk == 0) throw py::value_error("range() arg 3 must not be zero");
+    if (chunk < 0 && !st.empty()) not_implemented("a negative chunk");
     std::optional<std::span<const std::int64_t>> bs;
     if (bv) bs = std::span<const std::int64_t>(*bv);
     if (dtype_of(xa) == "complex64") {
