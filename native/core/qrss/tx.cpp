@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
-#include <cstdio>
 #include <limits>
 #include <numbers>
 #include <span>
@@ -28,11 +27,7 @@ std::string str(std::int64_t v) { return std::to_string(v); }
 [[noreturn]] void refuse(const std::string& what) { throw std::invalid_argument(what); }
 
 // Python's format(x, "g") for the band edges in the refusals ("300").
-std::string fmt_g(double x) {
-    char buf[32];
-    std::snprintf(buf, sizeof buf, "%g", x);
-    return buf;
-}
+std::string fmt_g(double x) { return frame::py_format(x, "%g"); }
 
 // float(L_PILOT_HZ + L_EDGE_HZ): the exact sum, divided once (as
 // Fraction.__float__ divides its numerator by its denominator).
@@ -158,9 +153,8 @@ double check_pilot(double carrier_hz, const std::optional<std::string>& shown) {
     const double low = f - pilot_to_data_edge_hz();
     const double lo = config::CARRIER_BAND_HZ[0];
     if (low < lo) {
-        char buf[64];
-        std::snprintf(buf, sizeof buf, "%.1f", low);
-        refuse("an L pilot at " + text + " Hz puts the data down to " + buf + " Hz, below the " + fmt_g(lo) +
+        refuse("an L pilot at " + text + " Hz puts the data down to " + frame::py_format(low, "%.1f") +
+               " Hz, below the " + fmt_g(lo) +
                " Hz receivers search");
     }
     return f;
@@ -234,10 +228,9 @@ PassPlan plan_common(const Source& src, const PassSpec& pass, bool l_path) {
     // -lo * spec.t_sym + ramp > pre_s
     const double before = -lo * spec.t_sym();
     if (before + (l_path ? lwave::KEY_RAMP_S : CE_RAMP_S) > pass.pre_s) {
-        char buf[64];
-        std::snprintf(buf, sizeof buf, "%.2f", before);
         refuse("pre_s = " + pass.shown.pre_s.value_or(frame::py_repr(pass.pre_s)) +
-               " s does not cover the keying start (" + buf + " s before t0 plus the ramp)");
+               " s does not cover the keying start (" + frame::py_format(before, "%.2f") +
+               " s before t0 plus the ramp)");
     }
     plan.keying = std::move(sh.keying);
     plan.slot = plan_symbols(src, spec, sh.segment, sh.header);

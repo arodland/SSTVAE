@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 #include <limits>
 #include <numbers>
 #include <numeric>
@@ -104,11 +103,7 @@ double rrc_with(const Consts& k, double tau) {
 
 std::string str(int64_t v) { return std::to_string(v); }
 
-std::string fmt_g(double v) {
-    char buf[64];
-    std::snprintf(buf, sizeof buf, "%g", v);
-    return buf;
-}
+std::string fmt_g(double v) { return frame::py_format(v, "%g"); }
 
 // p(tau)/c over the 17 offsets j of one d: ce._pulse_offsets, element-wise.
 void offsets_into(const Consts& k, double d, bool square, double* out) {

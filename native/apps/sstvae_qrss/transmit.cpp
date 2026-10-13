@@ -20,7 +20,6 @@
 // opened, so a refusal leaves no file.
 
 #include <cstdint>
-#include <cstdio>
 #include <optional>
 #include <ostream>
 #include <stdexcept>
@@ -98,13 +97,9 @@ ArgParser parser(const std::string& prog) {
     return ap;
 }
 
-// Python's f"{x:g}" and f"{x:.1f}" for a finite float (C's %g and %.1f;
-// LC_NUMERIC is "C", main.cpp).
-std::string fmt(const char* spec, double x) {
-    char buf[64];
-    std::snprintf(buf, sizeof buf, spec, x);
-    return buf;
-}
+// Python's f"{x:g}" and f"{x:.1f}" for a finite float (C's %g and %.1f,
+// with '.' for the point whatever LC_NUMERIC says).
+std::string fmt(const char* spec, double x) { return fr::py_format(x, spec); }
 
 int run(const std::string& prog, const std::vector<std::string>& argv, std::ostream& out, std::ostream& err) {
     int status = 0;

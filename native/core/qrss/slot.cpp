@@ -22,6 +22,10 @@ constexpr int MINYEAR = 1, MAXYEAR = 9999;
 constexpr std::int64_t US_PER_S = 1000000;
 constexpr std::int64_t US_PER_DAY = 86400 * US_PER_S;
 constexpr std::int64_t QUARTER_US = 900 * US_PER_S;
+// timedelta's limit on its days, and a C int's range (datetime's own
+// conversion of a days count), for quarter_hour_start's refusals.
+constexpr std::int64_t MAX_DELTA_DAYS = 999999999;
+constexpr std::int64_t INT32_MIN_V = -2147483647 - 1, INT32_MAX_V = 2147483647;
 
 // --- the calendar (Modules/_datetimemodule.c) ------------------------------------------
 
@@ -286,6 +290,9 @@ std::optional<IsoTime> fromisoformat_cp(std::u32string s) {
         if (is_surrogate(c)) return std::nullopt;
         put_utf8(utf8, c);
     }
+    // At least 7 bytes, as 7 code points are (said again so the compiler
+    // sees the separator search's reads of [4] and [5] are in bounds).
+    if (utf8.size() < 7) return std::nullopt;
     const char* dt_ptr = utf8.c_str();
     std::ptrdiff_t len = static_cast<std::ptrdiff_t>(utf8.size());
     const std::ptrdiff_t separator_location = find_isoformat_datetime_separator(dt_ptr, len);
@@ -414,7 +421,17 @@ std::int64_t quarter_hour_count(const UtcTime& t) {
 std::int64_t parse_slot(std::string_view text) { return quarter_hour_count(parse_utc(text)); }
 
 UtcTime quarter_hour_start(std::int64_t q) {
-    // _EPOCH + timedelta(seconds=900 q): years 1..9999 only.
+    // _EPOCH + timedelta(seconds=900 q). The timedelta first: its days,
+    // floor(900 q / 86400) = floor(q / 96), must fit a C int
+    // (PyLong_AsInt) and then 999999999 (check_delta_day_range); then
+    // the sum must land in years 1..9999.
+    std::int64_t days_q = q / 96;
+    if (q % 96 != 0 && q < 0) --days_q;
+    if (days_q < INT32_MIN_V || days_q > INT32_MAX_V)
+        throw std::overflow_error("Python int too large to convert to C int");
+    if (days_q < -MAX_DELTA_DAYS || days_q > MAX_DELTA_DAYS)
+        throw std::overflow_error("days=" + std::to_string(days_q) + "; must have magnitude <= " +
+                                  std::to_string(MAX_DELTA_DAYS));
     constexpr std::int64_t MIN_Q = (std::int64_t(1) - EPOCH_ORD) * 86400 / 900;              // 0001-01-01
     constexpr std::int64_t MAX_Q = (std::int64_t(3652059) + 1 - EPOCH_ORD) * 86400 / 900 - 1;  // 9999-12-31T23:45
     if (q < MIN_Q || q > MAX_Q) throw std::overflow_error("date value out of range");

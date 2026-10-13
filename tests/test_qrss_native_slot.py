@@ -173,11 +173,20 @@ def test_quarter_hour_start(nat):
         got, want = nat.quarter_hour_start(q), ref.quarter_hour_start(q)
         assert same_datetime(got, want), q
         assert nat.quarter_hour_count(got) == ref.quarter_hour_count(want)
-    for q in (281558112, -69039553):
-        with pytest.raises(OverflowError, match="date value out of range"):
-            ref.quarter_hour_start(q)
-        with pytest.raises(OverflowError, match="date value out of range"):
-            nat.quarter_hour_start(q)
+    # Past years 1..9999 the refusal's text depends on how far: the date,
+    # then timedelta's day limit, then its days past a C int.
+    big = 2**31 * 96
+    for q in (281558112, -69039553, 95999999999, 96000000095, -95999999999, -96000000000, big - 1, -big,
+              big, -big - 1, 2**63 - 1, -2**63, 2**63, -2**63 - 1, 10**30, 1.5e300):
+        want, got = outcome_any(ref.quarter_hour_start, q), outcome_any(nat.quarter_hour_start, q)
+        assert want[0] == "OverflowError" and got == want, (q, got, want)
+
+
+def outcome_any(f, *a):
+    try:
+        return ("ok", f(*a))
+    except Exception as e:
+        return (type(e).__name__, str(e))
 
 
 def test_slot_iso(nat):

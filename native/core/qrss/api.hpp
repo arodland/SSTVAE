@@ -29,6 +29,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -102,14 +103,28 @@ using Encoder = codec::Encoder;
 // (images::fit, cover and centre crop), to [0, 1] (images::to_array), the
 // encoder, StoredPicture.from_latents. A 640x480 picture is not resized,
 // so it gives what qrss_encode.py gives for the same pixels saved as PNG.
-// Refusals are picture.py's (mode, codec ID) as std::invalid_argument.
+// Refusals are picture.py's (mode, codec ID) as std::invalid_argument,
+// then (also std::invalid_argument) no encoder (a codec not loaded) or a
+// picture that is empty or whose rgb is not width x height x 3 bytes.
 picture::StoredPicture encode_picture(const images::Picture& picture, std::int64_t mode, std::int64_t codec_id,
                                       const Encoder& encode);
 
+// A file that could not be read: the path and errno, and Python's OSError
+// text ("[Errno 2] No such file or directory: 'pic.qrsp'"; a directory is
+// "[Errno 21] Is a directory: ...").
+struct ReadError : std::runtime_error {
+    ReadError(const std::string& path, int err);
+    std::string path;
+    int err;
+};
+
 // qrss_transmit.py's input: a beacon file when it starts with the beacon
 // magic, else a stored picture. std::invalid_argument for a file that is
-// neither (beaconfile's and picture.load_qrsp's ValueError texts),
-// std::runtime_error when it cannot be read.
+// neither -- beaconfile's texts for a damaged beacon file, load_qrsp's
+// for a stored picture with a bad member, and the native npz reader's
+// ("npz: file is empty", "npz: file does not start like a zip archive
+// ...") where the script would end in numpy's or zipfile's exception --
+// and ReadError when it cannot be read.
 Source read_source(const std::string& path);
 
 // --- one pass --------------------------------------------------------------------------------

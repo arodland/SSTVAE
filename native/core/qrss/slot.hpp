@@ -85,12 +85,16 @@ std::int64_t quarter_hour_count(const UtcTime& t);
 // sequences.parse_slot: quarter_hour_count(parse_utc(text)).
 std::int64_t parse_slot(std::string_view text);
 
-// sequences.quarter_hour_start: the UTC time of quarter hour q (std::
-// overflow_error "date value out of range" outside years 1..9999).
+// sequences.quarter_hour_start: the UTC time of quarter hour q. Outside
+// years 1..9999 std::overflow_error with Python's text, which depends on
+// how far: timedelta's days (q // 96) past a C int, "Python int too large
+// to convert to C int"; past 999999999, "days=<d>; must have magnitude <=
+// 999999999"; else "date value out of range".
 UtcTime quarter_hour_start(std::int64_t q);
 
 // The quarter hour as the app's sender writes it on a qrss_transmit.py
-// command line: "2026-10-10T03:00Z" (UTC, to the minute).
+// command line: "2026-10-10T03:00Z" (UTC, to the minute); quarter_hour_start's
+// std::overflow_error outside years 1..9999.
 std::string slot_iso(std::int64_t q);
 
 }  // namespace sstvae::qrss::slot

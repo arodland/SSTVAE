@@ -77,7 +77,9 @@ void bind(py::module_& q) {
         try {
             qq = qi.cast<std::int64_t>();
         } catch (const py::cast_error&) {
-            throw std::overflow_error("date value out of range");
+            // |q| >= 2^63: its days, q // 96, are past a C int (timedelta's
+            // own refusal, before any date is formed).
+            throw std::overflow_error("Python int too large to convert to C int");
         }
         return to_datetime(sl::quarter_hour_start(qq));
     }, py::arg("q"));

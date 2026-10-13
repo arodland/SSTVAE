@@ -41,6 +41,7 @@ from sstvae.qrss import beaconfile, frame, frontend, lframe, picture, sequences
 from sstvae.qrss import tx as ref_tx
 from sstvae.qrss.constants import CARRIER_BAND_HZ, LEAD_IN_MAX_S
 from sstvae.qrss.header import HeaderFields
+from test_qrss_native_cli import decimal_comma_locale  # noqa: F401 (a fixture)
 from test_qrss_native_tx_audio import EXACT_CE
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -287,6 +288,39 @@ def test_slot_of_refuses_what_is_not_a_quarter_hour(api):
         with pytest.raises(ValueError, match="QRSS passes start on a quarter hour"):
             api.slot_of(t)
     assert api.slot_of(0.0) == 0 and api.slot_of(-900.0) == -1
+
+
+def test_refusals_ignore_a_decimal_comma_locale(api, inputs, outcomes, decimal_comma_locale, monkeypatch):
+    """The app runs under QApplication, whose setlocale(LC_ALL, "") gives
+    printf the environment's decimal point; the script's texts never use
+    the locale. Before the fix an L pilot refusal read "287,9 Hz" in de_DE."""
+    import locale
+
+    monkeypatch.setenv("LOCPATH", str(decimal_comma_locale))
+    old = locale.setlocale(locale.LC_NUMERIC)
+    try:
+        locale.setlocale(locale.LC_NUMERIC, "de_DE.UTF-8")
+        assert locale.localeconv()["decimal_point"] == ","
+        sp = picture.load_qrsp(inputs["qrsp"])
+        assert api.problem(sp, Q_TEST, callsign="K1ABC", frame="tiny", waveform="L", freq_hz=310.0) == (
+            "an L pilot at 310.0 Hz puts the data down to 287.9 Hz, below the 300 Hz receivers search")
+        for case in CASES:
+            src_name, q, kw = case
+            want = outcomes[_id(case)]
+            if want[0] == "refused":
+                assert api.problem(inputs[src_name], q, **kw) == want[1], case
+    finally:
+        locale.setlocale(locale.LC_NUMERIC, old)
+
+
+def test_read_source_says_why_a_file_cannot_be_read(api, tmp_path):
+    """open(path, "rb")'s OSError text, as the script's traceback ends."""
+    for path in (tmp_path / "missing.qrsp", tmp_path, tmp_path / "it's here.bin"):
+        with pytest.raises(OSError) as want:
+            open(path, "rb").read()
+        with pytest.raises(RuntimeError) as got:
+            api.read_source(str(path))
+        assert str(got.value) == str(want.value)
 
 
 def test_read_source_is_the_scripts(api, inputs):

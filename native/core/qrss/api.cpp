@@ -3,10 +3,13 @@
 
 #include "qrss/api.hpp"
 
+#include <cerrno>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
-#include <fstream>
-#include <iterator>
+#include <cstdio>
+#include <cstring>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -19,6 +22,7 @@
 #include "images/images.hpp"
 #include "qrss/beaconfile.hpp"
 #include "qrss/header.hpp"
+#include "qrss/pytext.hpp"
 #include "qrss/slot.hpp"
 
 namespace sstvae::qrss::api {
@@ -77,14 +81,42 @@ picture::StoredPicture encode_picture(const images::Picture& pic, std::int64_t m
     picture::check_mode(mode);
     picture::check_codec_id(codec_id);
     if (!encode) throw std::invalid_argument("encode_picture: no encoder");
+    // A picture whose pixels are not width x height x 3 would be read out
+    // of bounds by the resize.
+    if (pic.width <= 0 || pic.height <= 0)
+        throw std::invalid_argument("encode_picture: an empty picture (" + std::to_string(pic.width) + "x" +
+                                    std::to_string(pic.height) + ")");
+    const std::uint64_t bytes = static_cast<std::uint64_t>(pic.width) * static_cast<std::uint64_t>(pic.height) * 3;
+    if (pic.rgb.size() != bytes)
+        throw std::invalid_argument("encode_picture: a " + std::to_string(pic.width) + "x" +
+                                    std::to_string(pic.height) + " picture needs " + std::to_string(bytes) +
+                                    " bytes of RGB, not " + std::to_string(pic.rgb.size()));
     return codec::encode_picture(images::to_array(images::fit(pic)), mode, codec_id, encode);
 }
 
+ReadError::ReadError(const std::string& p, int e)
+    : std::runtime_error("[Errno " + std::to_string(e) + "] " + std::strerror(e) + ": " + pytext::repr(p)),
+      path(p),
+      err(e) {}
+
 Source read_source(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) throw std::runtime_error(path + ": cannot open");
-    const std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    if (f.bad()) throw std::runtime_error(path + ": cannot read");
+    // open(path, "rb").read(), with its OSError's errno: a stream would say
+    // nothing useful (libstdc++ throws "basic_filebuf::underflow error
+    // reading the file" for a directory).
+    errno = 0;
+    const std::unique_ptr<std::FILE, int (*)(std::FILE*)> f(std::fopen(path.c_str(), "rb"), &std::fclose);
+    if (!f) throw ReadError(path, errno ? errno : EIO);
+    std::vector<std::uint8_t> data;
+    std::vector<std::uint8_t> buf(std::size_t(1) << 16);
+    for (;;) {
+        errno = 0;
+        const std::size_t n = std::fread(buf.data(), 1, buf.size(), f.get());
+        data.insert(data.end(), buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(n));
+        if (n < buf.size()) {
+            if (std::ferror(f.get())) throw ReadError(path, errno ? errno : EIO);
+            break;
+        }
+    }
     const std::string_view magic = config::BEACON_MAGIC;
     if (data.size() >= magic.size() && std::string_view(reinterpret_cast<const char*>(data.data()), magic.size()) == magic)
         return beaconfile::BeaconFile::from_bytes(data);

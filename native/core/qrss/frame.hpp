@@ -151,6 +151,12 @@ FrameSpec plain(const FrameSpec& spec);
 std::string py_repr(std::string_view s);
 // Python's repr of a float (0.054, 1e-05, nan), for the refusal texts.
 std::string py_repr(double v);
+// Python's format(v, spec) for one printf conversion of a float ("%g",
+// "%.1f", "%.2f"): printf's digits, with '.' as the decimal point whatever
+// LC_NUMERIC says. Python never reads the locale here; a Qt program has
+// set it from the environment (setlocale(LC_ALL, "")), where printf alone
+// writes "287,9" in de_DE.
+std::string py_format(double v, const char* printf_spec);
 // A numpy shape as Python prints the tuple: (3,), (), (2, 3).
 std::string shape_repr(std::span<const std::int64_t> shape);
 

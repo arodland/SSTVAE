@@ -117,7 +117,7 @@ std::optional<std::vector<std::uint8_t>> slot_keying(const Source& src,
 // keying + post_s: ceil((pre_s + keyed_end_pos * t_sym + post_s) * fs).
 // A NaN is std::invalid_argument and an infinity (or a count past int64)
 // std::overflow_error, as math.ceil refuses them.
-std::int64_t slot_samples(const frame::FrameSpec& spec, double pre_s = 12.0, double post_s = 3.0,
+std::int64_t slot_samples(const frame::FrameSpec& spec, double pre_s = config::TX_PRE_S, double post_s = config::TX_POST_S,
                           double fs = config::FS);
 
 // tx.check_pilot: an L pilot in Hz, or std::invalid_argument when the
@@ -173,7 +173,7 @@ double check_pilot(double carrier_hz, const std::optional<std::string>& shown = 
 // would (`shown`). For an L frame it is the pilot.
 class Carrier {
 public:
-    Carrier() : Carrier(1500) {}   // the reference's default, the int 1500
+    Carrier() : Carrier(config::TX_CARRIER_HZ) {}   // the reference's default, the int 1500
     Carrier(double hz);            // NOLINT(google-explicit-constructor): a Python float
     template <std::integral I>
         requires(!std::same_as<I, bool>)
@@ -204,10 +204,10 @@ struct PassSpec {
     std::optional<header::HeaderFields> header;     // a stored picture's header (its callsign keys the windows)
     double lead_in_s = 0.0;                         // plain carrier before the preamble, 0..10 s
     std::optional<bool> ook;                        // CE: on-off keyed windows (unset: the source's choice)
-    double pre_s = 12.0;                            // audio before t0: whole samples, covering the keying
-    double post_s = 3.0;                            // audio after the keying ends
-    double amplitude = 0.5;                         // peak of a unit-power baseband
-    double chunk_s = 120.0;                         // the reference's piece size (see above)
+    double pre_s = config::TX_PRE_S;                // audio before t0 (12): whole samples, covering the keying
+    double post_s = config::TX_POST_S;              // audio after the keying ends (3)
+    double amplitude = config::TX_AMPLITUDE;        // peak of a unit-power baseband (0.5)
+    double chunk_s = config::TX_CHUNK_S;            // the reference's piece size (120; see above)
     // How a refusal quotes an argument -- Python's f-string of what the
     // caller passed (the binding's). Unset: the value as Python's float repr.
     struct Shown {

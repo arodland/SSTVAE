@@ -234,6 +234,31 @@ std::string py_repr(double v) {
     return v < 0 ? "-" + out : out;
 }
 
+std::string py_format(double v, const char* printf_spec) {
+    const int n = std::snprintf(nullptr, 0, printf_spec, v);
+    if (n < 0) throw std::invalid_argument(std::string("py_format: bad conversion ") + printf_spec);
+    std::string buf(static_cast<std::size_t>(n) + 1, '\0');
+    std::snprintf(buf.data(), buf.size(), printf_spec, v);
+    buf.resize(static_cast<std::size_t>(n));
+    // printf of a float writes only a sign, digits, an exponent, inf/nan and
+    // the locale's decimal point (no grouping without the ' flag): every
+    // other byte run is that point, which may be several bytes ("٫").
+    std::string out;
+    bool in_point = false;
+    for (const char c : buf) {
+        const bool ascii_word = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                                c == '+' || c == '-';
+        if (ascii_word) {
+            out += c;
+            in_point = false;
+        } else if (!in_point) {
+            out += '.';
+            in_point = true;
+        }
+    }
+    return out;
+}
+
 std::string shape_repr(std::span<const std::int64_t> shape) {
     std::string out = "(";
     for (std::size_t k = 0; k < shape.size(); ++k) {

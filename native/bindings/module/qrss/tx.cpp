@@ -41,6 +41,7 @@ namespace sstvae_bindings::qrss {
 namespace {
 
 using namespace picture_chain;
+namespace qcfg = sstvae::qrss::config;
 namespace fr = sstvae::qrss::frame;
 namespace txm = sstvae::qrss::tx;
 namespace wavm = sstvae::qrss::wav;
@@ -260,7 +261,7 @@ void bind(py::module_& q) {
     m.def("slot_samples", [](const py::object& spec, const py::object& pre_s, const py::object& post_s,
                              const py::object& fs) {
         return txm::slot_samples(spec_of(spec), float_of(pre_s), float_of(post_s), float_of(fs));
-    }, py::arg("spec"), py::arg("pre_s") = 12.0, py::arg("post_s") = 3.0,
+    }, py::arg("spec"), py::arg("pre_s") = qcfg::TX_PRE_S, py::arg("post_s") = qcfg::TX_POST_S,
        py::arg("fs") = sstvae::qrss::config::FS);
 
     m.def("check_pilot", [](const py::object& carrier_hz) {
@@ -285,10 +286,10 @@ void bind(py::module_& q) {
                                const py::object& post_s, const py::object& amplitude, const py::object& chunk_s) {
         return render_all(*make_pass({src, qv, carrier_hz, spec, segment, header, lead_in_s, ook, pre_s, post_s,
                                       amplitude, chunk_s}, false));
-    }, py::arg("src"), py::arg("q"), py::arg("carrier_hz") = 1500, py::kw_only(), py::arg("spec") = full,
+    }, py::arg("src"), py::arg("q"), py::arg("carrier_hz") = qcfg::TX_CARRIER_HZ, py::kw_only(), py::arg("spec") = full,
        py::arg("segment") = py::none(), py::arg("header") = py::none(), py::arg("lead_in_s") = 0.0,
-       py::arg("ook") = py::none(), py::arg("pre_s") = 12.0, py::arg("post_s") = 3.0, py::arg("amplitude") = 0.5,
-       py::arg("chunk_s") = 120.0);
+       py::arg("ook") = py::none(), py::arg("pre_s") = qcfg::TX_PRE_S, py::arg("post_s") = qcfg::TX_POST_S,
+       py::arg("amplitude") = qcfg::TX_AMPLITUDE, py::arg("chunk_s") = qcfg::TX_CHUNK_S);
 
     m.def("_transmit_audio_l", [](const py::object& src, const py::object& qv, const py::object& carrier_hz,
                                   const py::object& spec, const py::object& segment, const py::object& header,
@@ -309,10 +310,10 @@ void bind(py::module_& q) {
                  return make_pass({src, qv, carrier_hz, spec, segment, header, lead_in_s, ook, pre_s, post_s,
                                    amplitude, chunk_s}, false);
              }),
-             py::arg("src"), py::arg("q"), py::arg("carrier_hz") = 1500, py::kw_only(), py::arg("spec") = full,
+             py::arg("src"), py::arg("q"), py::arg("carrier_hz") = qcfg::TX_CARRIER_HZ, py::kw_only(), py::arg("spec") = full,
              py::arg("segment") = py::none(), py::arg("header") = py::none(), py::arg("lead_in_s") = 0.0,
-             py::arg("ook") = py::none(), py::arg("pre_s") = 12.0, py::arg("post_s") = 3.0,
-             py::arg("amplitude") = 0.5, py::arg("chunk_s") = 120.0)
+             py::arg("ook") = py::none(), py::arg("pre_s") = qcfg::TX_PRE_S, py::arg("post_s") = qcfg::TX_POST_S,
+             py::arg("amplitude") = qcfg::TX_AMPLITUDE, py::arg("chunk_s") = qcfg::TX_CHUNK_S)
         .def("__len__", [](const txm::PassAudio& a) { return a.size(); })
         .def_property_readonly("size", &txm::PassAudio::size, "tx.slot_samples(spec, pre_s, post_s)")
         .def_property_readonly("n_pre", &txm::PassAudio::n_pre, "samples before t0")

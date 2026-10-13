@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #include "check.hpp"
 #include "qrss/slot.hpp"
@@ -133,13 +134,30 @@ void test_start_and_iso() {
     // Years 1..9999 only, as datetime.
     check::equal(sl::slot_iso(-69039552), std::string("0001-01-01T00:00Z"), "first quarter hour");
     check::equal(sl::slot_iso(281558111), std::string("9999-12-31T23:45Z"), "last quarter hour");
-    bool threw = false;
-    try {
-        sl::quarter_hour_start(281558112);
-    } catch (const std::overflow_error& e) {
-        threw = std::string(e.what()) == "date value out of range";
+    // Further out, timedelta refuses first, with its own texts (Python 3.13's
+    // sequences.quarter_hour_start at each boundary).
+    const std::pair<std::int64_t, const char*> refused[] = {
+        {281558112, "date value out of range"},
+        {-69039553, "date value out of range"},
+        {95999999999, "date value out of range"},
+        {96000000095, "days=1000000000; must have magnitude <= 999999999"},
+        {-95999999999, "days=-1000000000; must have magnitude <= 999999999"},
+        {206158430207, "days=2147483647; must have magnitude <= 999999999"},
+        {-206158430208, "days=-2147483648; must have magnitude <= 999999999"},
+        {206158430208, "Python int too large to convert to C int"},
+        {-206158430209, "Python int too large to convert to C int"},
+        {INT64_MAX, "Python int too large to convert to C int"},
+        {INT64_MIN, "Python int too large to convert to C int"},
+    };
+    for (const auto& [q, text] : refused) {
+        std::string got = "(no refusal)";
+        try {
+            sl::quarter_hour_start(q);
+        } catch (const std::overflow_error& e) {
+            got = e.what();
+        }
+        check::equal(got, std::string(text), "quarter_hour_start(" + std::to_string(q) + ")");
     }
-    check::is_true(threw, "past 9999 is out of range");
 }
 
 }  // namespace

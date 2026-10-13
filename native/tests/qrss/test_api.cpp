@@ -30,6 +30,7 @@
 #include "qrss/beaconfile.hpp"
 #include "qrss/header.hpp"
 #include "qrss/picture.hpp"
+#include "qrss/pytext.hpp"
 #include "qrss/tx.hpp"
 
 using namespace sstvae;
@@ -283,7 +284,22 @@ void test_read_source() {
         f << "QRSB....";
     }
     throws<std::invalid_argument>([&] { api::read_source((dir / "bad.bin").string()); }, "a short beacon");
-    throws<std::runtime_error>([&] { api::read_source((dir / "nope").string()); }, "a missing file");
+    // An unreadable path: Python's OSError text, with the errno.
+    auto read_error = [&](const std::string& path) -> std::string {
+        try {
+            api::read_source(path);
+        } catch (const api::ReadError& e) {
+            return std::to_string(e.err) + " " + e.what();
+        }
+        return "(read)";
+    };
+    const std::string nope = (dir / "nope").string();
+    check::equal(read_error(nope), "2 [Errno 2] No such file or directory: " + sstvae::qrss::pytext::repr(nope),
+                 "a missing file");
+#ifndef _WIN32
+    // POSIX opens a directory and fails the read (Python: at open()).
+    check::equal(read_error(dir.string()), "21 [Errno 21] Is a directory: '" + dir.string() + "'", "a directory");
+#endif
     std::filesystem::remove_all(dir);
 }
 
@@ -292,8 +308,10 @@ void test_encode_picture() {
     images::Picture small(320, 240);
     for (std::size_t i = 0; i < small.rgb.size(); ++i) small.rgb[i] = static_cast<std::uint8_t>((i * 7) % 251);
     images::ImageArray seen;
+    int calls = 0;
     const api::Encoder stub = [&](const images::ImageArray& img) {
         seen = img;
+        ++calls;
         return closed_form_latents();
     };
     const pc::StoredPicture sp = api::encode_picture(small, 2, 0xBEEF, stub);
@@ -316,6 +334,24 @@ void test_encode_picture() {
     throws<std::invalid_argument>([&] { api::encode_picture(full, 3, 1, stub); }, "mode 3");
     throws<std::invalid_argument>([&] { api::encode_picture(full, 0, 1 << 16, stub); }, "codec ID");
     throws<std::invalid_argument>([&] { api::encode_picture(full, 0, 1, api::Encoder()); }, "no encoder");
+    // A picture whose pixels are not width x height x 3 never reaches the
+    // resize (which would read past them), nor the encoder.
+    const int calls_before = calls;
+    images::Picture short_rgb(640, 480);
+    short_rgb.rgb.resize(100);
+    images::Picture empty;
+    images::Picture zero_wide(0, 480);
+    for (const auto* p : {&short_rgb, &empty, &zero_wide})
+        throws<std::invalid_argument>([&] { api::encode_picture(*p, 0, 1, stub); }, "a malformed picture");
+    std::string text;
+    try {
+        api::encode_picture(short_rgb, 0, 1, stub);
+    } catch (const std::invalid_argument& e) {
+        text = e.what();
+    }
+    check::equal(text, std::string("encode_picture: a 640x480 picture needs 921600 bytes of RGB, not 100"),
+                 "the refusal says what is wrong");
+    check::equal(calls, calls_before, "no encode for a malformed picture");
 }
 
 }  // namespace
