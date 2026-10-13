@@ -37,12 +37,21 @@ def _libm_trig() -> bool:
             and np.array_equal(np.sin(x), [math.sin(v) for v in x]))
 
 
+def _fma(x: float, y: float, z: float) -> float:
+    """x * y + z rounded once: math.fma, which is new in Python 3.13 (CI's
+    Python jobs run 3.12), else the same through exact rationals."""
+    f = getattr(math, "fma", None)
+    if f is not None:
+        return f(x, y, z)
+    return float(Fraction(x) * Fraction(y) + Fraction(z))
+
+
 def _fused_cmul() -> bool:
     """numpy's complex multiply forms Re as fma(ar, br, -(ai*bi)), as the C++ does."""
     rng = np.random.default_rng(1)
     a = rng.standard_normal(4096) + 1j * rng.standard_normal(4096)
     b = np.exp(1j * rng.uniform(0, 2 * np.pi, 4096))
-    want = [math.fma(p.real, q.real, -(p.imag * q.imag)) for p, q in zip(a, b)]
+    want = [_fma(p.real, q.real, -(p.imag * q.imag)) for p, q in zip(a, b)]
     return np.array_equal((a * b).real, want)
 
 

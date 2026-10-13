@@ -4,7 +4,7 @@ StoredPicture stays the reference's dataclass: the native functions take
 any object with its attributes and return its fields as a dict, and the
 adapters here make the dataclass. Its methods are replaced by plain
 functions (a native function assigned to a class does not bind as a
-method). `codec_id_from_onnx` is codec glue and is not ported.
+method). `codec_id_from_onnx` needs the codec build; its row is in codec.py.
 """
 
 STAGE = "tx"
