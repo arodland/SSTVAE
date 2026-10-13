@@ -12,12 +12,17 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <deque>
+#include <exception>
 #include <future>
+#include <map>
 #include <utility>
 
 #include "audio/wavio.hpp"
 #include "images/images.hpp"
+#include "qrss/codec/api.hpp"
 
 namespace sstvae::gui::qrss_tx {
 
@@ -38,7 +43,7 @@ std::vector<double> plan(double now, int passes, double prep_s) {
     std::vector<double> out;
     if (passes <= 0) return out;
     const double audio_start = T0_OFFSET_S - AUDIO_LEAD_S;   // -11 s from the quarter hour
-    double slot = std::ceil((now + prep_s - audio_start) / 900.0) * 900.0;
+    double slot = std::ceil((now + prep_s - audio_start) / qrss::api::SLOT_S) * qrss::api::SLOT_S;
     for (int k = 0; k < passes; ++k) out.push_back(slot + k * PASS_SPACING_S);
     return out;
 }
@@ -52,6 +57,13 @@ QString slot_iso(double slot) {
                                          QTimeZone::utc())
         .toString(QStringLiteral("yyyy-MM-ddTHH:mmZ"));
 }
+
+Backend backend() {
+    const char* v = std::getenv("SSTVAE_QRSS_BACKEND");
+    return v && std::strcmp(v, "python") == 0 ? Backend::Python : Backend::Native;
+}
+
+const char* backend_name(Backend b) { return b == Backend::Python ? "python" : "C++"; }
 
 std::optional<Tools> find_tools() {
     QString dir = QString::fromLocal8Bit(qgetenv("SSTVAE_QRSS_DIR"));
@@ -236,15 +248,160 @@ void Chain::close() {
     parts_.clear();
 }
 
+qrss::api::PassRequest pass_request(const Request& request, const Pass& pass) {
+    namespace api = qrss::api;
+    api::PassRequest r;
+    r.q = api::slot_of(pass.slot);
+    r.waveform = api::waveform_named(request.waveform).value_or(api::Waveform::CE);
+    // The scripts were handed --freq with one decimal; the same number
+    // here, parsed as Python parses it, so the two backends agree.
+    r.freq_hz = QString::number(request.freq_hz, 'f', 1).toDouble();
+    r.callsign = QString::fromStdString(request.callsign).toUpper().toStdString();
+    if (is_locator(request.grid)) {
+        r.grid = QString::fromStdString(request.grid.substr(0, 4)).toUpper().toStdString();
+    }
+    r.segment = pass.segment;
+    return r;
+}
+
+namespace {
+
+// The codec's encoder, opened once (it builds an onnxruntime session and
+// may fetch the model) and shared by every run after.
+std::shared_ptr<const qrss::api::OpenEncoder> shared_encoder(std::string* error) {
+    static std::mutex mutex;
+    static std::shared_ptr<const qrss::api::OpenEncoder> encoder;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!encoder) {
+        try {
+            encoder = std::make_shared<const qrss::api::OpenEncoder>(qrss::api::open_encoder(std::nullopt));
+        } catch (const std::exception& e) {
+            *error = std::string("could not open the encoder: ") + e.what();
+            return nullptr;
+        }
+    }
+    return encoder;
+}
+
+class NativeMaker final : public Maker {
+public:
+    std::string encode(std::size_t index, const Request& picture) override {
+        std::string error;
+        const auto encoder = shared_encoder(&error);
+        if (!encoder) return error;
+        const std::optional<int> mode = qrss::api::mode_index(picture.mode);
+        if (!mode) return "unknown QRSS mode '" + picture.mode + "'";
+        try {
+            qrss::api::Source src =
+                qrss::api::encode_picture(picture.picture, *mode, encoder->codec_id, encoder->encode);
+            std::lock_guard<std::mutex> lock(mutex_);
+            sources_.insert_or_assign(index, std::move(src));
+        } catch (const std::exception& e) {
+            return e.what();
+        }
+        return {};
+    }
+
+    std::vector<double> make(std::size_t index, const Request& picture, const Pass& pass,
+                             std::string* error) override {
+        const qrss::api::Source* src = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto it = sources_.find(index);
+            if (it != sources_.end()) src = &it->second;   // map nodes stay put
+        }
+        if (!src) {
+            *error = "the picture was not encoded";
+            return {};
+        }
+        try {
+            const std::vector<float> audio = qrss::api::pass_audio(*src, pass_request(picture, pass));
+            return std::vector<double>(audio.begin(), audio.end());
+        } catch (const std::exception& e) {
+            *error = e.what();
+            return {};
+        }
+    }
+
+private:
+    std::mutex mutex_;
+    std::map<std::size_t, qrss::api::Source> sources_;
+};
+
+class ScriptMaker final : public Maker {
+public:
+    ScriptMaker(tx::TxEngine& engine, Tools tools, Runner runner)
+        : tools_(std::move(tools)), runner_(std::move(runner)) {
+        if (!runner_) {
+            runner_ = [&engine](const QStringList& argv, QString* out) {
+                return default_runner(argv, out, engine);
+            };
+        }
+    }
+
+    bool valid() const { return tmp_.isValid(); }
+
+    std::string encode(std::size_t index, const Request& picture) override {
+        const QString png = tmp_.filePath(QStringLiteral("picture%1.png").arg(index));
+        const QString qrsp = qrsp_of(index);
+        images::save_png(picture.picture, png.toStdString());
+        QString out;
+        const bool ok = runner_(encode_args(tools_, png, qrsp, picture.mode), &out);
+        QFile::remove(png);
+        if (!ok) return out.isEmpty() ? std::string("failed") : out.toStdString();
+        return {};
+    }
+
+    std::vector<double> make(std::size_t index, const Request& picture, const Pass& pass,
+                             std::string* error) override {
+        const QString wav = tmp_.filePath(QStringLiteral("pass-%1-%2.wav")
+                                              .arg(index)
+                                              .arg(static_cast<qint64>(std::llround(pass.slot))));
+        QString output;
+        if (!runner_(transmit_args(tools_, qrsp_of(index), wav, pass.slot, pass.segment, picture),
+                     &output)) {
+            *error = output.toStdString();
+            return {};
+        }
+        std::vector<double> w = audio::read_wav(wav.toStdString());
+        QFile::remove(wav);
+        return w;
+    }
+
+private:
+    QString qrsp_of(std::size_t index) const {
+        return tmp_.filePath(QStringLiteral("picture%1.qrsp").arg(index));
+    }
+
+    Tools tools_;
+    Runner runner_;
+    QTemporaryDir tmp_;
+};
+
+}  // namespace
+
+std::unique_ptr<Maker> native_maker() { return std::make_unique<NativeMaker>(); }
+
+std::unique_ptr<Maker> script_maker(tx::TxEngine& engine, const Tools& tools, Runner runner) {
+    return std::make_unique<ScriptMaker>(engine, tools, std::move(runner));
+}
+
 bool run(tx::TxEngine& engine, const Request& request, const Tools& tools,
          const std::function<void(const std::string&)>& on_error, Clock clock, Runner runner) {
+    ScriptMaker maker(engine, tools, std::move(runner));
+    if (!maker.valid()) {
+        // As run() reports any failure: to the operator and the engine.
+        on_error("QRSS: no temporary directory");
+        engine.report(tx::TxPhase::Failed, "QRSS: no temporary directory");
+        return false;
+    }
+    return run(engine, request, maker, on_error, std::move(clock));
+}
+
+bool run(tx::TxEngine& engine, const Request& request, Maker& maker,
+         const std::function<void(const std::string&)>& on_error, Clock clock) {
     if (!clock) {
         clock = [] { return static_cast<double>(QDateTime::currentMSecsSinceEpoch()) / 1000.0; };
-    }
-    if (!runner) {
-        runner = [&engine](const QStringList& argv, QString* out) {
-            return default_runner(argv, out, engine);
-        };
     }
     // However the run ends, nothing more may join it.
     struct CloseChain {
@@ -265,30 +422,20 @@ bool run(tx::TxEngine& engine, const Request& request, const Tools& tools,
     const std::string why = problem(request);
     if (!why.empty()) return fail(why);
 
-    QTemporaryDir tmp;
-    if (!tmp.isValid()) return fail("QRSS: no temporary directory");
-
     // Each picture in the run: its own mode, carrier and stored picture.
     // The first is the request's; any others joined through the chain.
     struct Picture {
         Request request;    // its picture, mode and carrier; the rest the run's
-        QString qrsp;
         bool encoded = false;
     };
     std::deque<Picture> pictures;
-    pictures.push_back({request, {}, false});
+    pictures.push_back({request, false});
     pictures.front().request.chain.reset();
-    // Encode picture i; empty on success, else the tool's output.
+    // Encode picture i; empty on success, else why not.
     auto encode = [&](std::size_t i) -> std::string {
         Picture& p = pictures[i];
         if (p.encoded) return {};
-        const QString png = tmp.filePath(QStringLiteral("picture%1.png").arg(i));
-        p.qrsp = tmp.filePath(QStringLiteral("picture%1.qrsp").arg(i));
-        images::save_png(p.request.picture, png.toStdString());
-        QString out;
-        const bool ok = runner(encode_args(tools, png, p.qrsp, p.request.mode), &out);
-        QFile::remove(png);
-        if (!ok) return out.isEmpty() ? std::string("failed") : out.toStdString();
+        if (std::string out = maker.encode(i, p.request); !out.empty()) return out;
         p.encoded = true;
         return {};
     };
@@ -340,18 +487,12 @@ bool run(tx::TxEngine& engine, const Request& request, const Tools& tools,
             *error = "encoding the next picture: " + out;
             return std::vector<double>();
         }
-        const Picture& p = pictures[s.picture];
-        const QString wav = tmp.filePath(QStringLiteral("pass%1.wav").arg(k));
-        QString output;
-        if (!runner(transmit_args(tools, p.qrsp, wav, s.pass.slot, s.pass.segment, p.request),
-                    &output)) {
-            *error = output.toStdString();
-            return std::vector<double>();
+        std::vector<double> w = maker.make(s.picture, pictures[s.picture].request, s.pass, error);
+        if (w.empty()) {
+            if (error->empty()) *error = "no audio";
+            return w;
         }
-        std::vector<double> w =
-            tx::condition_for_output(audio::read_wav(wav.toStdString()), request.tx.level);
-        QFile::remove(wav);
-        return w;
+        return tx::condition_for_output(w, request.tx.level);
     };
     // Until the first key, every message says when that is: a run
     // getting ready must not read as one on the air.
@@ -394,7 +535,7 @@ bool run(tx::TxEngine& engine, const Request& request, const Tools& tools,
             r.mode = part->mode;
             r.waveform = part->waveform;
             r.freq_hz = part->freq_hz;
-            pictures.push_back({std::move(r), {}, false});
+            pictures.push_back({std::move(r), false});
             for (const Pass& p : part->passes) passes.push_back({pictures.size() - 1, p});
         }
         std::string next_error;

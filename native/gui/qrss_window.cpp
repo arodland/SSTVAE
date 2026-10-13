@@ -36,6 +36,7 @@
 #include "flow_layout.hpp"
 #include "image_viewer.hpp"
 #include "qrss_spectrogram.hpp"
+#include "qrss_tx.hpp"
 #include "rx/ringbuffer.hpp"
 
 namespace sstvae::gui {
@@ -50,7 +51,7 @@ constexpr int PICTURE_H = 180;
 constexpr qint64 MAX_BACKLOG_BYTES = 4 << 20;
 constexpr int LOG_LINES = 400;
 // A QRSS pass, from its quarter hour: what a tile's red covers.
-constexpr double PASS_S = 1782.7;
+constexpr double PASS_S = qrss_tx::PASS_S;
 // What the listener appends to a headerless tile's note; the Provisional
 // column says it instead.
 const QString GUESS_NOTE =

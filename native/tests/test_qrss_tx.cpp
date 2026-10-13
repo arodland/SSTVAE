@@ -1,7 +1,8 @@
 // QRSS sending from the app (gui/qrss_tx.*): which quarter hours the
-// passes take, what the two scripts are asked for, and the sequence --
-// encode, make the pass, key it on its start -- against a stub runner,
-// a stub player and a clock that starts just before a quarter hour.
+// passes take, what the C++ transmitter and the two scripts are asked
+// for, and the sequence -- encode, make the pass, key it on its start --
+// against a stub maker or runner, a stub player and a clock that starts
+// just before a quarter hour.
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -11,10 +12,13 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <thread>
@@ -85,6 +89,99 @@ void test_problems_and_args() {
                      .toStdString(),
                  std::string("py /repo/qrss_encode.py a.png p.qrsp --mode C"),
                  "qrss_tx/args: the encode");
+}
+
+void test_pass_request() {
+    qrss_tx::Request r;
+    r.callsign = "ag7ew";
+    r.waveform = "L";
+    r.freq_hz = 1234.56;
+    r.grid = "cn85qm";
+    const qrss::api::PassRequest p = qrss_tx::pass_request(r, {Q + 1800.0, 1});
+    check::is_true(p.q == qrss::api::slot_of(Q + 1800.0) && p.segment == 1,
+                   "qrss_tx/pass_request: the pass's slot and group");
+    check::is_true(p.waveform == qrss::api::Waveform::L, "qrss_tx/pass_request: the waveform");
+    check::is_true(p.freq_hz == 1234.6,
+                   "qrss_tx/pass_request: the carrier to 0.1 Hz, as the script was given it");
+    check::is_true(p.callsign == std::optional<std::string>("AG7EW") &&
+                       p.grid == std::optional<std::string>("CN85"),
+                   "qrss_tx/pass_request: callsign and locator in capitals");
+    check::is_true(p.frame == "full" && p.lead_in_s == 0.0 && !p.ook,
+                   "qrss_tx/pass_request: a whole pass, no extras");
+    r.grid = "nowhere";
+    check::is_true(!qrss_tx::pass_request(r, {Q, 0}).grid,
+                   "qrss_tx/pass_request: a grid that is not a locator is left out");
+
+    // The C++ transmitter is the default; the scripts only when asked.
+    ::unsetenv("SSTVAE_QRSS_BACKEND");
+    check::is_true(qrss_tx::backend() == qrss_tx::Backend::Native,
+                   "qrss_tx/backend: C++ unless asked otherwise");
+    ::setenv("SSTVAE_QRSS_BACKEND", "python", 1);
+    check::is_true(qrss_tx::backend() == qrss_tx::Backend::Python,
+                   "qrss_tx/backend: SSTVAE_QRSS_BACKEND=python runs the scripts");
+    ::unsetenv("SSTVAE_QRSS_BACKEND");
+
+    std::string error;
+    check::is_true(qrss_tx::native_maker()->make(0, r, {Q, 0}, &error).empty() && !error.empty(),
+                   "qrss_tx/native: a picture not encoded makes no audio, and says so");
+}
+
+// run() through a Maker, as the app sends with the C++ transmitter: one
+// encode per picture, one make per pass, the output level applied.
+void test_run_through_a_maker() {
+    struct Stub final : qrss_tx::Maker {
+        std::vector<std::string> calls;
+        std::string encode(std::size_t i, const qrss_tx::Request& p) override {
+            calls.push_back("encode " + std::to_string(i) + " " + p.mode);
+            return {};
+        }
+        std::vector<double> make(std::size_t i, const qrss_tx::Request&, const qrss_tx::Pass& pass,
+                                 std::string*) override {
+            calls.push_back("make " + std::to_string(i) + " " + std::to_string(pass.segment));
+            return std::vector<double>(600, 0.25);
+        }
+    } maker;
+    QElapsedTimer since;
+    since.start();
+    const double prep = 0.2;
+    const double start = Q - 11.0 - prep - 0.5;
+    double jump = 0.0;
+    std::mutex mu;
+    auto clock = [&] {
+        std::lock_guard<std::mutex> lock(mu);
+        return start + since.elapsed() / 1000.0 + jump;
+    };
+    double peak = 0.0;
+    int played = 0;
+    tx::TxEngine engine(
+        [](bool) {},
+        [&](const std::string&, std::span<const double> wave, int,
+            const std::function<void(double)>&, const std::function<bool()>&,
+            const std::function<void(const std::string&)>&) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            std::lock_guard<std::mutex> lock(mu);
+            for (double v : wave) peak = std::max(peak, std::abs(v));
+            ++played;
+            jump += (Q - 11.0 + 1800.0 * played - 2.0) - (start + since.elapsed() / 1000.0 + jump);
+            return true;
+        },
+        [](const images::ImageArray&) { return std::vector<double>(); });
+    qrss_tx::Request r;
+    r.picture = images::Picture(16, 12);
+    r.callsign = "AG7EW";
+    r.mode = "B";
+    r.prep_s = prep;
+    r.tx.ptt_lead_s = 0.0;
+    r.tx.ptt_tail_s = 0.0;
+    r.tx.level = 0.5;
+    std::vector<std::string> errors;
+    const bool ok = qrss_tx::run(engine, r, maker,
+                                 [&](const std::string& e) { errors.push_back(e); }, clock);
+    check::is_true(ok && errors.empty(), "qrss_tx/maker: mode B sent");
+    check::is_true(maker.calls == std::vector<std::string>{"encode 0 B", "make 0 0", "make 0 1"},
+                   "qrss_tx/maker: encoded once, then each pass made");
+    check::is_true(played == 2 && std::abs(peak - 0.5) < 1e-9,
+                   "qrss_tx/maker: both passes played, at the output level");
 }
 
 struct Rig {
@@ -259,7 +356,7 @@ void test_pass_lists_are_checked() {
     check::is_true(!qrss_tx::problem(r).empty(), "qrss_tx/passes: mode A has no part 2");
     r.passes = {{Q + 60.0, 0}};
     check::is_true(!qrss_tx::problem(r).empty(), "qrss_tx/passes: off the quarter hour");
-    check::is_true(qrss_tx::audio_start(Q) == Q - 11.0 && qrss_tx::audio_end(Q) == Q + 1786.7,
+    check::is_true(qrss_tx::audio_start(Q) == Q - 11.0 && qrss_tx::audio_end(Q) == Q + 4.0 + qrss::api::PASS_S,
                    "qrss_tx/passes: a pass's audio runs from 11 s before its quarter hour");
 }
 
@@ -388,6 +485,10 @@ int main(int argc, char** argv) {
     test_plan();
     check::current_step = "problems and args";
     test_problems_and_args();
+    check::current_step = "pass request";
+    test_pass_request();
+    check::current_step = "run through a maker";
+    test_run_through_a_maker();
     check::current_step = "run keys the pass on its start";
     test_run_keys_the_pass_on_its_start();
     check::current_step = "passes back to back";

@@ -1,21 +1,23 @@
-// Sending a picture as QRSSTVAE CE from the desktop app.
+// Sending a picture as QRSSTVAE from the desktop app.
 //
-// The QRSSTVAE transmitter is Python (`qrss_encode.py`,
-// `qrss_transmit.py`) and is not ported, so this runs the two scripts
-// and keys their audio through the app's own transmitter (`TxEngine`),
-// which keeps its PTT guarantees: a scope guard and an independent
-// watchdog per pass.
+// The transmitter runs in process: the C++ port of qrss_encode.py and
+// qrss_transmit.py (qrss/api.hpp, qrss/codec/api.hpp), whose audio is
+// bit-exact against the scripts. SSTVAE_QRSS_BACKEND=python runs the two
+// scripts instead, as the app did before the port, for comparing the two;
+// the audio either way is keyed through the app's own transmitter
+// (`TxEngine`), which keeps its PTT guarantees: a scope guard and an
+// independent watchdog per pass.
 //
-// A picture is encoded once into a stored picture (.qrsp). Mode A sends
-// one 50,600-latent group in one pass, B two and C three, one pass per
-// half hour: a pass lasts 1782.7 s from t0 = quarter hour + 1 s, and its
-// audio (qrss_transmit.py's WAV) starts 12 s before t0, so one pass's
-// audio ends about 2 s before the next one's starts. So the first pass's
-// audio is made before it is keyed, and each later pass's is made and
-// read in while the one before it plays. A scheduled send
-// (gui/qrss_schedule.hpp) hands over its own list of passes, which can
-// repeat the picture back to back for hours; making each pass during
-// the one before keeps that to two passes' audio on disk at a time.
+// A picture is encoded once into a stored picture. Mode A sends one
+// 50,600-latent group in one pass, B two and C three, one pass per half
+// hour: a pass lasts 1782.7 s from t0 = quarter hour + 1 s, and its audio
+// starts 12 s before t0, so one pass's audio ends about 2 s before the
+// next one's starts. So the first pass's audio is made before it is
+// keyed, and each later pass's is made while the one before it plays. A
+// scheduled send (gui/qrss_schedule.hpp) hands over its own list of
+// passes, which can repeat the picture back to back for hours; making
+// each pass during the one before keeps that to two passes' audio in
+// memory at a time.
 // Each pass carries the callsign in its own Morse ID windows (spec
 // 2.7), so the SSTVAE CW ID is not added.
 //
@@ -30,6 +32,7 @@
 #include <QString>
 #include <QStringList>
 
+#include <cstddef>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -39,19 +42,22 @@
 #include <vector>
 
 #include "images/types.hpp"
+#include "qrss/api.hpp"
 #include "tx/engine.hpp"
 
 namespace sstvae::gui::qrss_tx {
 
-inline constexpr double PASS_S = 1782.7;        // FULL frame, t0 to the end
-inline constexpr double AUDIO_LEAD_S = 12.0;    // the WAV starts this long before t0
-inline constexpr double AUDIO_TAIL_S = 3.0;     // and ends this long after the frame
-inline constexpr double T0_OFFSET_S = 1.0;      // t0 = quarter hour + 1 s
-inline constexpr double PASS_SPACING_S = 1800.0;
+// From the transmitter's own constants (qrss/config.hpp, generated from
+// the Python reference), never typed by hand.
+inline constexpr double PASS_S = qrss::api::PASS_S;              // FULL frame, t0 to the end
+inline constexpr double AUDIO_LEAD_S = qrss::api::AUDIO_LEAD_S;  // the audio starts this long before t0
+inline constexpr double AUDIO_TAIL_S = qrss::api::AUDIO_TAIL_S;  // and ends this long after the frame
+inline constexpr double T0_OFFSET_S = qrss::api::T0_OFFSET_S;    // t0 = quarter hour + 1 s
+inline constexpr double PASS_SPACING_S = 2.0 * qrss::api::SLOT_S;
 inline constexpr double PREP_S = 60.0;          // make the first pass's audio this long ahead
-inline constexpr double FREQ_MIN_HZ = 300.0;    // CARRIER_BAND_HZ
-inline constexpr double FREQ_MAX_HZ = 2700.0;
-inline constexpr double FREQ_DEFAULT_HZ = 1500.0;
+inline constexpr double FREQ_MIN_HZ = qrss::api::CARRIER_MIN_HZ;
+inline constexpr double FREQ_MAX_HZ = qrss::api::CARRIER_MAX_HZ;
+inline constexpr double FREQ_DEFAULT_HZ = qrss::api::CARRIER_DEFAULT_HZ;
 
 // The two QRSSTVAE waveforms (docs/qrss/waveform-l.md). "CE": constant
 // envelope, one latent per symbol, about 50 Hz wide. "L": linear, two
@@ -86,7 +92,13 @@ struct Pass {
 // "2026-10-10T03:00Z" for a quarter hour.
 QString slot_iso(double slot);
 
-// Where the QRSS scripts are: $SSTVAE_QRSS_DIR, else the directory
+// Which transmitter makes the audio: the C++ one, unless
+// SSTVAE_QRSS_BACKEND is "python".
+enum class Backend { Native, Python };
+Backend backend();
+const char* backend_name(Backend b);
+
+// Where the QRSS scripts are (the python backend only): $SSTVAE_QRSS_DIR, else the directory
 // holding qrss_transmit.py, looked for beside the executable and up to
 // four directories above it. Python is $SSTVAE_QRSS_PYTHON, else that
 // directory's .venv, else python3.
@@ -151,14 +163,45 @@ std::string problem(const Request& request);
 // The same for a part following a run whose last pass is at `after`.
 std::string problem(const Part& part, double after);
 
+// qrss_transmit.py's arguments for one pass of a request, for the C++
+// transmitter: the slot, waveform, carrier (to 0.1 Hz, as the script's
+// --freq is given), callsign in capitals, grid when it is a locator, and
+// the pass's group.
+qrss::api::PassRequest pass_request(const Request& request, const Pass& pass);
+
 using Clock = std::function<double()>;               // unix seconds
 using Runner = std::function<bool(const QStringList& argv, QString* output)>;
+
+// What makes a run's audio. `run` calls these from its worker thread and
+// from one helper thread, never both at once. Picture `index` is the
+// run's index-th picture (0 the request's, then the chain's).
+class Maker {
+public:
+    virtual ~Maker() = default;
+    // Encode the picture once; empty on success, else why not.
+    virtual std::string encode(std::size_t index, const Request& picture) = 0;
+    // One pass of an encoded picture: float samples at 8 kHz, as the
+    // transmitter writes them (before the output level); empty with
+    // `*error` set when it cannot be made.
+    virtual std::vector<double> make(std::size_t index, const Request& picture, const Pass& pass,
+                                     std::string* error) = 0;
+};
+
+// The C++ transmitter. The encoder (the codec's, from the model cache)
+// is opened on the first encode and kept for the life of the app.
+std::unique_ptr<Maker> native_maker();
+// The scripts, through `runner` (a QProcess that cancelling the engine
+// kills, when empty).
+std::unique_ptr<Maker> script_maker(tx::TxEngine& engine, const Tools& tools, Runner runner = {});
 
 // The whole sequence, on the calling (worker) thread: encode, make the
 // first pass's audio, then key each pass on its start while the next
 // one's audio is made. True when every pass was sent. Errors go to
 // `on_error`; cancelling the engine stops it at the next wait or
 // mid-pass.
+bool run(tx::TxEngine& engine, const Request& request, Maker& maker,
+         const std::function<void(const std::string&)>& on_error, Clock clock = {});
+// The same with the scripts.
 bool run(tx::TxEngine& engine, const Request& request, const Tools& tools,
          const std::function<void(const std::string&)>& on_error,
          Clock clock = {}, Runner runner = {});

@@ -1599,8 +1599,12 @@ std::string TransmitPanel::begin_qrss(const images::Picture& picture, const std:
     if (!problem.empty()) {
         return refuse(tr("Cannot send QRSS"), QString::fromStdString(problem));
     }
-    const std::optional<qrss_tx::Tools> tools = qrss_tx::find_tools();
-    if (!tools) {
+    // The C++ transmitter unless SSTVAE_QRSS_BACKEND=python, which runs
+    // the scripts (for comparing the two).
+    const qrss_tx::Backend backend = qrss_tx::backend();
+    std::optional<qrss_tx::Tools> tools;
+    if (backend == qrss_tx::Backend::Python) tools = qrss_tx::find_tools();
+    if (backend == qrss_tx::Backend::Python && !tools) {
         return refuse(
             tr("QRSS tools not found"),
             tr("QRSS sending runs qrss_encode.py and qrss_transmit.py from the "
@@ -1613,11 +1617,13 @@ std::string TransmitPanel::begin_qrss(const images::Picture& picture, const std:
     const int n_passes = request.passes.empty() ? qrss_tx::passes_for(request.mode)
                                                 : static_cast<int>(request.passes.size());
     app_->log_event("tx", log::Severity::Info,
-                    tr("QRSS %1 mode %2 at %3 Hz: %4 pass(es) of 1782.7 s")
+                    tr("QRSS %1 mode %2 at %3 Hz: %4 pass(es) of %5 s (%6 transmitter)")
                         .arg(QString::fromStdString(request.waveform),
                              QString::fromStdString(request.mode))
                         .arg(request.freq_hz, 0, 'f', 0)
-                        .arg(n_passes));
+                        .arg(n_passes)
+                        .arg(qrss_tx::PASS_S, 0, 'f', 1)
+                        .arg(QString::fromLatin1(qrss_tx::backend_name(backend))));
 
     engine_ = std::make_unique<tx::TxEngine>(
         app_->ptt(),
@@ -1652,12 +1658,18 @@ std::string TransmitPanel::begin_qrss(const images::Picture& picture, const std:
     emit qrssPreparing(tr("Getting ready to send"));
 
     qrss_chain_ = request.chain;
-    thread_ = std::thread([this, request, tools = *tools] {
+    thread_ = std::thread([this, request, tools] {
         bool ok = false;
         try {
-            ok = qrss_tx::run(*engine_, request, tools, [this](const std::string& message) {
+            auto on_error = [this](const std::string& message) {
                 emit errorOccurred(QString::fromStdString(message));
-            });
+            };
+            if (tools) {
+                ok = qrss_tx::run(*engine_, request, *tools, on_error);
+            } else {
+                const std::unique_ptr<qrss_tx::Maker> maker = qrss_tx::native_maker();
+                ok = qrss_tx::run(*engine_, request, *maker, on_error);
+            }
         } catch (const std::exception& e) {
             emit errorOccurred(QString::fromUtf8(e.what()));
         }

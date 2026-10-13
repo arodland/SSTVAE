@@ -98,7 +98,7 @@ void test_the_sends_of_a_schedule() {
                  std::string("CE mode B every 2 hours (alternating hours), until removed"),
                  "schedule/B: described");
     const auto [from, to] = qs::busy(b, 0);
-    check::is_true(from == Q - 11.0 - qs::START_LEAD_S && to == Q + 1800.0 + 1786.7,
+    check::is_true(from == Q - 11.0 - qs::START_LEAD_S && to == Q + 1800.0 + 4.0 + qrss_tx::PASS_S,
                    "schedule/B: busy from the start lead to the end of the second pass");
     check::equal(qs::describe(entry("C", Q, 1, 0)), std::string("CE mode C, once"),
                  "schedule/C: a single send");

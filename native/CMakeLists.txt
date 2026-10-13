@@ -531,7 +531,9 @@ else()
   if(NOT Qt6_FOUND)
     list(APPEND _gui_missing "Qt6 Widgets")
   endif()
-  foreach(_dep sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render)
+  # sstvae_qrss_codec: QRSSTVAE's transmitter (qrss/api.hpp) runs in
+  # process; it exists whenever sstvae_codec does and QRSS is on.
+  foreach(_dep sstvae_codec sstvae_qrss_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render)
     if(NOT TARGET ${_dep})
       list(APPEND _gui_missing ${_dep})
     endif()
@@ -612,8 +614,8 @@ if(_want_gui)
   target_include_directories(sstvae_gui PUBLIC core gui)
   target_include_directories(sstvae_gui PRIVATE third_party/qrcodegen)
   target_link_libraries(sstvae_gui PUBLIC
-    sstvae_core sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render
-    sstvae_fetch
+    sstvae_core sstvae_codec sstvae_qrss_codec sstvae_audio_qt sstvae_rig
+    sstvae_overlay_render sstvae_fetch
     Qt6::Core Qt6::Gui Qt6::Widgets)
 
   add_executable(sstvae-gui WIN32 MACOSX_BUNDLE gui/main.cpp)
