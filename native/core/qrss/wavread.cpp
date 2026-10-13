@@ -12,10 +12,12 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "dsp/dsp.hpp"
 #include "qrss/config.hpp"
+#include "qrss/npsum.hpp"
 
 namespace sstvae::qrss::wav {
 
@@ -97,9 +99,6 @@ std::vector<double> read_wav(const std::string& path) {
     if (!data) unsupported("no data chunk");
     const Fmt& m = *fmt;
     if (m.channels == 0 || m.block_align == 0 || m.block_align % m.channels != 0) unsupported("a bad block alignment");
-    // numpy's mean over 2..8 channels is a running sum; past 8 it sums the
-    // rest pairwise, which nothing here needs
-    if (m.channels > 8) unsupported(std::to_string(m.channels) + " channels (8 at most)");
     const std::size_t bps = m.block_align / m.channels;   // bytes per sample (container)
     const std::size_t n = data_size / bps;                // whole samples, as np.fromfile counts them
     if (n % m.channels != 0) unsupported("a data chunk that is not whole frames");
@@ -149,11 +148,13 @@ std::vector<double> read_wav(const std::string& path) {
     if (m.channels > 1) {
         const std::size_t frames = n / m.channels;
         std::vector<double> mono(frames);
-        for (std::size_t i = 0; i < frames; ++i) {
-            double acc = x[i * m.channels];
-            for (std::size_t c = 1; c < m.channels; ++c) acc += x[i * m.channels + c];
-            mono[i] = acc / static_cast<double>(m.channels);
-        }
+        // data.mean(axis=1) on the C-contiguous (frames, channels) array:
+        // each row's pairwise sum onto 0 (a running sum under 8 channels,
+        // eight accumulators from 8: checked against numpy for 2..9), then
+        // / channels
+        for (std::size_t i = 0; i < frames; ++i)
+            mono[i] = npsum::sum(std::span<const double>(x.data() + i * m.channels, m.channels)) /
+                      static_cast<double>(m.channels);
         x = std::move(mono);
     }
     if (m.rate != static_cast<std::uint32_t>(config::FS)) {

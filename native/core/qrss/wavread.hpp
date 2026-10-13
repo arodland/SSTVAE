@@ -3,8 +3,8 @@
 // maximum in float64 (np.iinfo(dtype).max: 255 for 8-bit, which scipy
 // reads unsigned, 32767, 2147483647 for 16- and 32-bit and for 24-bit,
 // which scipy left-justifies in int32), floats widened, channels averaged
-// (numpy's mean over axis 1: a running sum, then / channels, for up to 8
-// channels -- more is refused), and
+// (numpy's mean over axis 1: each frame's pairwise sum, then / channels),
+// and
 // resample_poly(x, FS / g, rate / g) when the rate is not FS.
 //
 // This is not core/audio/wavio's read_wav: that one goes through dr_wav,

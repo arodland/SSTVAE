@@ -103,6 +103,7 @@ struct Typed {
     using FrameMap = acquire::FrameMap;
     using WKey = std::int64_t;
     using Others = std::vector<double>;
+    using Cands = std::optional<std::vector<Det>>;
     using LiveOnly = bool;
     using Estimator = std::string;
     using Erase = receiver::Erase;
@@ -169,6 +170,8 @@ struct Typed {
     bool spec_is_l(const Spec& sp) const { return sp.waveform() == frame::Waveform::L; }
 
     // arguments
+    static bool given(const Cands& c) { return c.has_value(); }
+    static const std::vector<Det>& listed(const Cands& c) { return *c; }
     Hints ce_hints(const Hints& h) const { return receiver::ce_hints(h); }
     std::vector<double> floats(const Skip& v) const { return v; }
     std::vector<double> centres(const Skip& v) const { return v; }
@@ -276,6 +279,13 @@ struct Typed {
                             const Erase& e, const Hints& h) const {
         if (s.detect) return wrap(s.detect(*prep, specs, true, live_only, m, b, e, h));
         return flow::detect(*this, prep, specs, detect_args(live_only, m, b, e, h));
+    }
+    std::vector<Det> detect_joint(const Prep& prep, const Sel& specs, const flow::DetectArgs<const Typed>& a) const {
+        return flow::detect_joint(*this, prep, specs, a);
+    }
+    std::vector<Pass> receive_slot_joint(const Prep& prep, const Sel& specs,
+                                         const flow::SlotArgs<const Typed>& a) const {
+        return flow::receive_slot_joint(*this, prep, specs, a);
     }
     Prep prepare(const Cap& cap) const { return s.pass.prepare ? s.pass.prepare(cap) : receiver::prepare(cap); }
     std::optional<Pass> receive_pass(const Prep& prep, const Spec& spec, const Det& d, const Estimator& est,

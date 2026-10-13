@@ -28,16 +28,19 @@
 // several slots at once cannot vary per slot.
 //
 // Thread-safe: receive_slot keeps no state between calls and may run on
-// several threads at once (each on its own Capture); nothing it calls
-// writes shared state other than the frame caches, which lock. A call is
+// several threads at once (on one Capture or each on its own: it only
+// reads it); the shared state under it is two caches, each behind its own
+// mutex (frame::layout's, and acquire_stats' band covariance tables), and
+// constant tables built on first use (function-local statics, which C++
+// initialises once, thread-safely). Nothing reads the environment. A call is
 // long -- seconds for SHORT, minutes for a FULL slot with many signals --
 // and not interruptible except through budget_s, which stops gating new
 // candidates once spent (the passes of those already gated are still
 // received).
 //
-// Errors: std::invalid_argument for a selection frames() refuses (two
-// frames of one waveform, a CE frame with a version-1 prototype ...), and
-// whatever the stages raise for a capture they cannot read (an empty one).
+// Errors: std::invalid_argument for frames receiver.frames refuses (two
+// frames of one waveform, or none), and whatever the stages raise for a
+// capture they cannot read (an empty one).
 
 #ifndef SSTVAE_QRSS_RX_API_HPP
 #define SSTVAE_QRSS_RX_API_HPP
@@ -84,7 +87,7 @@ struct ReceiveConfig {
     // Acquisition on the preambles alone (A1 -> A2): no whole-slot search
     // (A3), which is what costs most on a FULL slot.
     bool live_only = false;
-    // receive_pass's estimator: "joint" (the default) or "decoupled".
+    // receive_pass's estimator: "joint" (the default) or "plain".
     std::string estimator = "joint";
     // Spans (a, b), seconds after t0, that were not heard (gate V and the
     // trackers count only the rest).
@@ -100,8 +103,9 @@ struct ReceiveConfig {
     // Expected frequencies (Hz, audio): a bare f for every waveform, or
     // (f, waveform). acquire.acquire's hints.
     std::vector<acquire::Hint> hints;
-    // rules.py's QRSS_OLD_EDGE_NOISE: the noise floor's earlier form
-    // (no front-end response correction at the band edges).
+    // rules.py's QRSS_OLD_EDGE_NOISE: the noise floor's earlier form (near
+    // 300 and 2700 Hz, bins taken partly off the front end's filter skirt,
+    // uncompensated).
     bool old_edge_noise = false;
     // rules.py's QRSS_OLD_GATING: gate every whole-slot candidate, as
     // before a preamble-found signal owned its band.

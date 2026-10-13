@@ -26,13 +26,14 @@
 // A policy P provides (Python's expression in brackets):
 //
 //   types   Det, Pass, Prep, Cap, AcqCap, Sel (a frame or a tuple), Spec
-//           (one frame), Chan, Track, FrameMap, WKey, Others, and the
-//           pass-through argument types LiveOnly, Estimator, Erase, RoundB,
-//           MaxC, Budget, Hints, Skip
+//           (one frame), Chan, Track, FrameMap, WKey, Others, Cands (a list
+//           of Det or None), and the pass-through argument types LiveOnly,
+//           Estimator, Erase, RoundB, MaxC, Budget, Hints, Skip
 //   values  f_hz(d) [float(d.f_hz)], centre(d) [centre_hz(d)],
 //           method_is(d, m) [d.method == m], a3_z(d)
 //           [float(getattr(d, "a3_z", nan))], z_ref(d), tau0(d)
-//           [d.timing.tau0], lead_in(d) [d.lead_in_s], set_lead_in(d, x),
+//           [d.timing.tau0], lead_in(d) [d.lead_in_s], set_lead_in(d, x)
+//           [d.lead_in_s = x, x as lead_in_span returned it],
 //           is_l(d) [getattr(d, "waveform", CE) == L], p_f_hz, p_tau0,
 //           p_z_ref [p.report.z_ref], p_suspect [bool(p.report.suspect)],
 //           p_centre [centre_hz(p)], same_waveform(g, p)
@@ -48,13 +49,17 @@
 //           [maxc is not None and taken >= maxc], others_f(dets, i) /
 //           others_c(dets, i) [tuple(g.f_hz / centre_hz(g) for g in dets
 //           if g is not d)], now() [time.monotonic()], old_gating()
-//           [rules.old(rules.GATING)]
+//           [rules.old(rules.GATING)], given(c) [c is not None], listed(c)
+//           [the list]
 //   stages  capture_of(prep) [frontend.Capture(prep.fe, ...)],
 //           acquire_dets(cap, spec_or_specs, live_only, hints)
 //           [acquire.acquire(...).detections(...)], candidates, detect,
 //           channel_for, verify, verify_l, verify_track (fit=False),
 //           ce_resid_ratio, lead_in_span(prep, v, t_sym or nullopt), gate,
-//           prepare, receive_pass
+//           prepare, receive_pass, and the two the reference reaches through
+//           its module too: detect_joint(prep, specs, DetectArgs)
+//           [_detect_joint], receive_slot_joint(prep, specs, SlotArgs)
+//           [_receive_slot_joint]
 //
 // Header-only because the binding instantiates it; nothing here holds
 // state of its own.
@@ -104,7 +109,8 @@ inline std::vector<double> others_of(std::span<const double> pool, double x0) {
     std::vector<double> out;
     for (const double f : pool)
         if (std::abs(f - x0) >= rr::MERGE_HZ) out.push_back(f);
-    std::sort(out.begin(), out.end());
+    // stable, so of equal values (0.0 and -0.0) the first one put in stays, as in a set
+    std::stable_sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end(), [](double a, double b) { return a == b; }), out.end());
     return out;
 }
@@ -116,14 +122,16 @@ inline bool ghost_of(double f_hz, double tau0, double g_f_hz, double g_tau0, dou
 }
 
 // The k = 1, 2 test of _aliases for d against a kept g, its values read as
-// the reference's `and` reaches them.
+// the reference's `and` reaches them, left operand first.
 template <class FD, class FG, class TD, class TG, class ZD, class ZG>
 bool alias_of(FD fd, FG fg, TD td, TG tg, ZD zd, ZG zg, double t_sym) {
     for (int k = 1; k <= 2; ++k) {
-        if (std::abs(std::abs(fd() - fg()) - static_cast<double>(k) / t_sym) < rr::ALIAS_HZ &&
-            std::abs(td() - tg()) < static_cast<double>(config::CH_FS) * t_sym * (k + 0.5) &&
-            zg() > rr::ALIAS_RATIO * zd())
-            return true;
+        const double f_d = fd(), f_g = fg();
+        if (!(std::abs(std::abs(f_d - f_g) - static_cast<double>(k) / t_sym) < rr::ALIAS_HZ)) continue;
+        const double t_d = td(), t_g = tg();
+        if (!(std::abs(t_d - t_g) < static_cast<double>(config::CH_FS) * t_sym * (k + 0.5))) continue;
+        const double z_g = zg(), z_d = zd();
+        if (z_g > rr::ALIAS_RATIO * z_d) return true;
     }
     return false;
 }
@@ -264,7 +272,7 @@ struct DetectArgs {
     typename P::MaxC max_candidates{};
     typename P::Budget budget_s{};
     typename P::Erase erase_s{};
-    std::optional<std::vector<typename P::Det>> cands;
+    typename P::Cands cands{};   // None: candidates() are found
     typename P::Skip skip_hz{};
     typename P::Hints hints{};
 };
@@ -291,20 +299,16 @@ std::optional<typename P::Det> gate(P& p, const typename P::Prep& prep, const ty
     return v;
 }
 
-template <class P>
-std::vector<typename P::Det> detect_joint(P& p, const typename P::Prep& prep, const typename P::Sel& specs,
-                                          const DetectArgs<P>& a);
-
 // detect(prep, spec, live_only, max_candidates, budget_s, erase_s, cands, skip_hz, hints)
 template <class P>
 std::vector<typename P::Det> detect(P& p, const typename P::Prep& prep, const typename P::Sel& sel,
                                     DetectArgs<P> a) {
     using Det = typename P::Det;
-    if (p.is_joint(sel)) return detect_joint(p, prep, p.frames(sel), a);
+    if (p.is_joint(sel)) return p.detect_joint(prep, p.frames(sel), a);   // (receiver._detect_joint)
     const typename P::Spec spec = p.single(sel);
     a.hints = p.ce_hints(a.hints);
     const std::optional<double> t_end = p.deadline(a.budget_s);
-    const std::vector<Det> cands = a.cands ? *a.cands : p.candidates(prep, spec, a.live_only, a.hints);
+    const std::vector<Det> cands = p.given(a.cands) ? p.listed(a.cands) : p.candidates(prep, spec, a.live_only, a.hints);
     const std::vector<A3Line> a3 = a3_lines(p, cands);
     std::vector<Det> found;
     std::vector<double> hits;
@@ -341,11 +345,13 @@ std::vector<typename P::Det> detect(P& p, const typename P::Prep& prep, const ty
     std::vector<Det> merged;
     for (const std::size_t i : by_z_desc(key)) {
         bool all = true;
-        for (const Det& g : merged)
-            if (!(std::abs(p.f_hz(found[i]) - p.f_hz(g)) >= rr::MERGE_HZ)) {
+        for (const Det& g : merged) {
+            const double a = p.f_hz(found[i]), b = p.f_hz(g);
+            if (!(std::abs(a - b) >= rr::MERGE_HZ)) {
                 all = false;
                 break;
             }
+        }
         if (all) merged.push_back(found[i]);
     }
     return ghosts(p, aliases(p, merged, config::T_SYM), config::T_SYM);
@@ -358,7 +364,8 @@ std::vector<typename P::Det> detect_joint(P& p, const typename P::Prep& prep, co
     using Det = typename P::Det;
     const typename P::FrameMap smap = p.frame_map(specs);
     const std::optional<double> t_end = p.deadline(a.budget_s);
-    const std::vector<Det> cands = a.cands ? *a.cands : p.candidates(prep, specs, a.live_only, a.hints);
+    const std::vector<Det> cands =
+        p.given(a.cands) ? p.listed(a.cands) : p.candidates(prep, specs, a.live_only, a.hints);
     const std::vector<A3Line> a3 = a3_lines(p, cands);
     const std::vector<double> skip = p.centres(a.skip_hz);
     std::vector<double> hits;
@@ -375,6 +382,7 @@ std::vector<typename P::Det> detect_joint(P& p, const typename P::Prep& prep, co
         const std::optional<typename P::Spec> sp = p.smap_get(smap, d);
         if (!sp) continue;   // (a waveform not listened for)
         const double c0 = p.centre(d);
+        // the reference's two comprehensions each call centre_hz(g)
         std::vector<double> known;
         for (const Det& g : found) known.push_back(p.centre(g));
         bool merged = false;
@@ -384,7 +392,7 @@ std::vector<typename P::Det> detect_joint(P& p, const typename P::Prep& prep, co
             if (std::abs(c0 - f) < rr::MERGE_HZ) merged = true;
         if (merged) continue;
         std::vector<double> pool = hits;
-        pool.insert(pool.end(), known.begin(), known.end());
+        for (const Det& g : found) pool.push_back(p.centre(g));
         const std::vector<double> others = others_of(pool, c0);
         std::optional<Det> v = p.gate(prep, *sp, d, others, a.erase_s);
         if (v) found.push_back(*v);
@@ -394,11 +402,14 @@ std::vector<typename P::Det> detect_joint(P& p, const typename P::Prep& prep, co
     std::vector<Det> merged;
     for (const std::size_t i : by_z_desc(key)) {
         bool all = true;
-        for (const Det& g : merged)
-            if (!(std::abs(p.centre(found[i]) - p.centre(g)) >= rr::MERGE_HZ)) {
+        for (const Det& g : merged) {
+            const double a = p.centre(found[i]);
+            const double b = p.centre(g);
+            if (!(std::abs(a - b) >= rr::MERGE_HZ)) {
                 all = false;
                 break;
             }
+        }
         if (all) merged.push_back(found[i]);
     }
     std::vector<Det> out;
@@ -426,7 +437,7 @@ struct SlotArgs {
     typename P::Estimator estimator{};
     typename P::Erase erase_s{};
     typename P::RoundB round_b{};
-    std::optional<std::vector<typename P::Det>> dets;
+    typename P::Cands dets{};    // None: detect() finds them
     typename P::MaxC max_candidates{};
     typename P::Budget budget_s{};
     typename P::Hints hints{};
@@ -440,8 +451,9 @@ std::vector<typename P::Pass> receive_slot_joint(P& p, const typename P::Prep& p
     using Det = typename P::Det;
     using Pass = typename P::Pass;
     const typename P::FrameMap smap = p.frame_map(specs);
-    const std::vector<Det> dets =
-        a.dets ? *a.dets : p.detect(prep, specs, a.live_only, a.max_candidates, a.budget_s, a.erase_s, a.hints);
+    const std::vector<Det> dets = p.given(a.dets) ? p.listed(a.dets)
+                                                  : p.detect(prep, specs, a.live_only, a.max_candidates,
+                                                             a.budget_s, a.erase_s, a.hints);
     std::vector<Pass> out;
     for (std::size_t i = 0; i < dets.size(); ++i) {
         const Det& d = dets[i];
@@ -487,13 +499,14 @@ std::vector<typename P::Pass> receive_slot(P& p, const typename P::Cap& cap, con
     using Pass = typename P::Pass;
     if (p.is_joint(sel)) {
         const typename P::Prep prep = p.prepare(cap);
-        return receive_slot_joint(p, prep, p.frames(sel), a);
+        return p.receive_slot_joint(prep, p.frames(sel), a);   // (receiver._receive_slot_joint)
     }
     const typename P::Spec spec = p.single(sel);
     a.hints = p.ce_hints(a.hints);
     const typename P::Prep prep = p.prepare(cap);
-    const std::vector<Det> dets =
-        a.dets ? *a.dets : p.detect(prep, spec, a.live_only, a.max_candidates, a.budget_s, a.erase_s, a.hints);
+    const std::vector<Det> dets = p.given(a.dets) ? p.listed(a.dets)
+                                                  : p.detect(prep, spec, a.live_only, a.max_candidates,
+                                                             a.budget_s, a.erase_s, a.hints);
     std::vector<Pass> out;
     for (std::size_t i = 0; i < dets.size(); ++i) {
         const Det& d = dets[i];
