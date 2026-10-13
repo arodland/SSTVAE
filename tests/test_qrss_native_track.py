@@ -29,7 +29,10 @@ The contract, and what was measured (2026-10-13, these passes):
   conditioning: a 1-ulp change of Pu_g (np.convolve's BLAS sum against a
   sequential one) moves the reference's P by 8.4e-7 on the TINY gate-V run
   (the diffuse initial velocity covariance, 0.1 Pu, cancelled down to
-  ~q Pu, keeps about seven digits);
+  ~q Pu, keeps about seven digits). numpy's SIMD exp in the templates' sf
+  seeds the same amplification: 2.0e-5 in P on a drifting lead-in pass's
+  gate-V run. Swapping the C++ _smooth and templates into the reference
+  makes its track the C++ one bit for bit, every field of every call;
 - refine_timing: the same None outcomes, timing to 1e-6 CH samples
   (measured 2e-13); z_ref_stat to 1e-8; report's fields to 1e-9 relative,
   the drift as 1e-9 Hz/min absolute (the slope of a near-flat 1500 Hz
@@ -50,7 +53,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from qrss_demod_tracks import HDR, _ce_sim, flat_det, rel, ulps
+from qrss_demod_tracks import CALL, HDR, _ce_sim, flat_det, rel, ulps
 from qrss_helpers import Q_TEST
 from qrss_native import require
 from sstvae.qrss import frame, frontend, header, lframe
@@ -680,3 +683,262 @@ def test_receive_pass_on_the_cpp(native, passes, monkeypatch):
             assert abs(getattr(g.report, f) - getattr(r.report, f)) <= 1e-6 * max(abs(getattr(r.report, f)), 1.0), f
         assert (g.report.slip_free, g.report.suspect) == (r.report.slip_free, r.report.suspect)
         assert len(res[1]) == len(p.tracks), name
+
+
+# --- probes: sizes, inputs and paths the receiver's two passes do not reach ---------------------
+
+def test_symbol_mf_at_full_size(Tn):
+    """FULL's grid (sample indices past 3.5e5 with t0 and a large tau0),
+    random timings with gamma, fractional positions, the CE and L tables,
+    complex128, complex64 and a float32 keep: bit for bit (measured, every
+    trial). Every fifth position, so the whole range is reached cheaply."""
+    rng = np.random.default_rng(7)
+    spec = frame.FULL
+    n = int(spec.n_pos * T_SYM * CH_FS) + 6000
+    z = (rng.standard_normal(n) + 1j * rng.standard_normal(n)) * 10 ** rng.uniform(-3, 3)
+    keep = ((rng.random(n) > 0.05) * rng.uniform(0.5, 1.0, n)).astype(np.float32)
+    lt = T.mf_table(L_T_SYM)
+    for trial in range(4):
+        tm = Timing(tau0=rng.uniform(-300, 300), ppm=rng.uniform(-250, 250), gamma=rng.uniform(-60, 60),
+                    z=0.0, cov=np.zeros((3, 3)))
+        pos = np.arange(-SPAN - 264, spec.n_pos, 5).astype(np.float64)
+        if trial % 2:
+            pos += rng.uniform(-0.5, 0.5, len(pos))
+        kw = dict(t0_index=rng.uniform(1000, 3000), n_pos=spec.n_pos, table=lt if trial >= 2 else None)
+        for zz in (z, z.astype(np.complex64), keep):
+            _same(Tn.symbol_mf(zz, CH_FS, tm, pos, **kw), T.symbol_mf(zz, CH_FS, tm, pos, **kw),
+                  f"trial {trial} {zz.dtype}")
+        _same(Tn.psi_at(keep, tm, pos, **kw), T.psi_at(keep, tm, pos, **kw), f"trial {trial} psi")
+
+
+def test_kalman_fuzz(Tn):
+    """kalman_rts (both modes), select_q and _kf_forward(store) on random
+    gains across twelve decades, with inf, NaN, -inf and zero variances, a
+    NaN measurement, q and Pu of 0: bit for bit, or the same refusal."""
+    rng = np.random.default_rng(11)
+
+    def outcome(f, *a):
+        try:
+            return "ok", f(*a)
+        except Exception as e:                                   # noqa: BLE001  (compared below)
+            return type(e), str(e)
+
+    for trial in range(160):
+        n = int(rng.choice([0, 1, 2, 3, 5, 17, 200, 1200]))
+        mu = (rng.standard_normal(n) + 1j * rng.standard_normal(n)) * 10 ** rng.uniform(-6, 6)
+        R = 10 ** rng.uniform(-8, 4, n)
+        R[rng.random(n) < 0.3] = np.inf
+        if n:
+            for every, arr, v in ((7, R, np.nan), (11, mu, np.nan), (13, R, -np.inf), (17, R, 0.0)):
+                if trial % every == 0:
+                    arr[rng.integers(n)] = v
+        q = float(rng.choice([0.0, 1e-12, 1e-6, 1e-3, 0.5, 10 ** rng.uniform(-14, 0)]))
+        Pu = float(rng.choice([0.0, 1e-30, 1.0, 10 ** rng.uniform(-10, 6)]))
+        what = f"trial {trial} n {n} q {q} Pu {Pu}"
+        for causal in (False, True):
+            r, g = outcome(T.kalman_rts, mu, R, q, Pu, causal), outcome(Tn.kalman_rts, mu, R, q, Pu, causal)
+            assert g[0] == r[0], (what, r, g)
+            if r[0] != "ok":
+                assert g == r, what
+                continue
+            _same(g[1][0], r[1][0], what + " u")
+            _same(g[1][1], r[1][1], what + " P")
+            _same(np.float64(g[1][2]), np.float64(r[1][2]), what + " loglik")
+        r, g = outcome(T.select_q, mu, R, Pu), outcome(Tn.select_q, mu, R, Pu)
+        assert g[0] == r[0] and (r[0] != "ok" or g[1][0] == r[1][0]), (what, r, g)
+        if r[0] == "ok":
+            _same(np.float64(g[1][1]), np.float64(r[1][1]), what + " select_q loglik")
+        r, g = outcome(T._kf_forward, mu, R, q, Pu, True), outcome(Tn._kf_forward, mu, R, q, Pu, True)
+        assert g[0] == r[0], (what, r, g)
+        if r[0] == "ok":
+            _same(np.float64(g[1][0]), np.float64(r[1][0]), what + " forward loglik")
+            for x, y in zip(g[1][1], r[1][1], strict=True):
+                _same(np.asarray(x), np.asarray(y), what + " stored")
+
+
+@pytest.fixture(scope="module")
+def lead_pass(Tn):
+    """A TINY pass with 9 s of keyed lead-in and 1.5 Hz/min of drift at
+    -9 dB, the reference's track calls recorded as in `passes`."""
+    from qrss_helpers import unit_rms_latents
+    from sstvae.qrss import channel as chm, morse
+    from sstvae.qrss.channel import ChannelConfig
+    from sstvae.qrss.precoder import precode
+
+    spec = frame.TINY
+    a = unit_rms_latents(spec.n_data, 1)
+    sym = frame.assemble(spec, header.encode(HDR) if spec.n_hdr else None, precode(a, Q_TEST))
+    sim = chm.simulate(sym, spec, Q_TEST, ChannelConfig(snr_db=-9.0, seed=6, drift_hz_per_min=1.5),
+                       carrier_hz=1500.0, lead_in_s=9.0,
+                       keying=morse.keying_units(CALL) if spec.n_win else None)
+    prep = RX.prepare(frontend.Capture(sim.fe, Q_TEST, sim.t0_index))
+    calls = []
+    orig = T.track
+
+    def spy(*a, **k):
+        tr = orig(*a, **k)
+        calls.append((a, dict(k), copy.copy(tr)))
+        return tr
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(T, "track", spy)
+        res = RX.receive_pass(prep, spec, flat_det(1500.0), return_tracks=True)
+    assert res is not None and calls
+    return SimpleNamespace(spec=spec, prep=prep, calls=calls)
+
+
+def _track_agrees(Tn, g, r, what, spec, worst):
+    """track()'s contract for one call: the decisions equal, the values to
+    rounding, u and P what the reference's last Kalman step makes of the
+    C++ run's own inputs (bit for bit)."""
+    assert g.q == r.q and g.lead_in_s == r.lead_in_s and g.ook == r.ook, what
+    _same(g.pos, r.pos, what)
+    _same(g.meas, r.meas, what)
+    for f in ("z_d", "m", "c", "N", "psi", "u", "P", "pu"):
+        worst[f] = max(worst.get(f, 0.0), rel(getattr(g, f), getattr(r, f)))
+    mu, R, Pu_g = _final_run(g, Tn.templates)
+    u, P, ll = T.kalman_rts(mu, R, g.q, Pu_g)
+    _same(g.u, u, what + " u")
+    _same(g.P, P, what + " P")
+    assert g.loglik == ll, what
+    tm, rt = g.timing, r.timing
+    slip = (tm.ppm - rt.ppm) * 1e-6 * spec.n_pos * T_SYM * CH_FS
+    assert abs(tm.tau0 - rt.tau0) <= 1e-6 and abs(slip) <= 1e-6 and abs(tm.gamma - rt.gamma) <= 1e-6, what
+    t = np.linspace(-30.0, spec.n_pos * T_SYM + 30.0, 2001)
+    assert np.max(np.abs(g.freq(t) - r.freq(t))) <= 1e-9, what
+
+
+def test_track_with_a_lead_in(Tn, row, lead_pass):
+    """The lead-in branch (`_lead_supported` true, the grid extended before
+    the frame, LEAD_IN_MAX_S's clamp) and the receiver's own calls on a
+    drifting capture: the reference's P on the gate-V run sits 2.0e-5 from
+    the C++ (u 2.7e-9, pu 8.9e-8; measured), its own conditioning on an
+    ulp of numpy's SIMD exp in sf, so the bar is the conditional
+    bit-for-bit check (and the swap test below)."""
+    spec = lead_pass.spec
+    worst = {}
+    for i, (a, k, ref) in enumerate(lead_pass.calls):
+        _track_agrees(Tn, row["track"](*a, **k), ref, f"call {i}", spec, worst)
+    a, k, _ = lead_pass.calls[-1]
+    grids = {}
+    for lead in (2.0, 9.0, 12.0):
+        kw = dict(k, lead_in_s=lead)
+        r, g = T.track(*a, **kw), row["track"](*a, **kw)
+        _track_agrees(Tn, g, r, f"lead {lead}", spec, worst)
+        grids[lead] = (r.lead_in_s, len(r.pos))
+    assert grids[9.0][1] > grids[2.0][1] > spec.n_pos + SPAN, grids    # supported, not refused
+    assert grids[12.0] == (10.0, grids[9.0][1]), grids                 # clamped to LEAD_IN_MAX_S
+    for f in ("z_d", "m", "c", "N", "psi"):
+        assert worst[f] <= 1e-9, (f, worst)
+    assert worst["u"] <= 1e-8 and worst["P"] <= 1e-4 and worst["pu"] <= 1e-6, worst
+
+
+def test_track_is_the_reference_up_to_smooth_and_templates(Tn, row, passes, lead_pass):
+    """The reference's track with the C++ `_smooth` and `templates` assigned
+    over its own is the C++ track bit for bit: every array field, q,
+    loglik, df_max and the recentred path, on every recorded call (gate V's
+    withheld runs, rounds A and B, the lead-in pass). So the two seeds named
+    in the module docstring -- np.convolve's BLAS sum and numpy's SIMD exp
+    in sf -- are where the C++ tracker's arrays depart from the reference,
+    and everything downstream of them (the Kalman iterations, recentring's
+    spline refit, the lowpass) is the reference's arithmetic exactly. The
+    one other seed is refine_timing's Newton step, math::solve's LU against
+    OpenBLAS's getrf (the math lane's documented to-rounding linalg): the
+    refined timing to an ulp (measured tau0 1.4e-17, ppm 1.9e-16, the
+    covariance 2e-18 relative), well under the sample grid's own rounding,
+    so the arrays it feeds stay bit for bit."""
+    calls = [(n, i, c) for n, p in passes.items() for i, c in enumerate(p.calls)]
+    calls += [("lead", i, c) for i, c in enumerate(lead_pass.calls)]
+    fields = ("pos", "meas", "z_d", "m", "c", "N", "psi", "u", "P", "pu")
+    for name, i, (a, k, _ref) in calls:
+        what = f"{name} call {i}"
+        g = row["track"](*a, **k)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(T, "_smooth", Tn._smooth)
+            mp.setattr(T, "templates", Tn.templates)
+            h = T.track(*a, **k)
+        for f in fields:
+            _same(getattr(g, f), getattr(h, f), f"{what} {f}")
+        assert (g.q, g.loglik, g.df_max, g.lead_in_s, g.ook) == (h.q, h.loglik, h.df_max, h.lead_in_s, h.ook), what
+        tm, ht = g.timing, h.timing
+        for f in ("tau0", "ppm", "gamma", "z"):
+            assert abs(getattr(tm, f) - getattr(ht, f)) <= 1e-12 * max(abs(getattr(ht, f)), 1.0), (what, f)
+        assert np.max(np.abs(tm.cov - ht.cov)) <= 1e-12 * np.max(np.abs(ht.cov)), what
+        t = np.linspace(-30.0, h.spec.n_pos * T_SYM + 30.0, 2001)
+        _same(g.freq(t), h.freq(t), what + " path")
+
+
+def test_track_round_b_variants(Tn, row, passes):
+    """SHORT's round B (callsign keying, a recentred path) with the keying
+    taken as OOK, the path moved 45 mHz and ramped, the timing moved 1.7
+    samples and 3 ppm, and four outer iterations."""
+    p = passes["short"]
+    a, k, ref = p.calls[-1]
+    assert k.get("cw_known") is not None and k.get("freq") is not None
+    tt = np.linspace(-10.0, p.spec.n_pos * T_SYM + 10.0, 400)
+    off = T.PathFn(tt, k["freq"](tt) + 0.045 + 0.0002 * tt)
+    tm0 = k["timing"]
+    moved = Timing(tau0=tm0.tau0 + 1.7, ppm=tm0.ppm + 3.0, gamma=0.0, z=0.0, cov=np.zeros((3, 3)))
+    worst = {}
+    for what, kw in (("ook", dict(k, cw_known=(k["cw_known"][0], True))),
+                     ("path off, outer 4", dict(k, freq=off, outer=4)),
+                     ("timing moved", dict(k, timing=moved))):
+        r, g = T.track(*a, **kw), row["track"](*a, **kw)
+        _track_agrees(Tn, g, r, what, p.spec, worst)
+    for f in ("z_d", "m", "c", "N", "psi"):
+        assert worst[f] <= 1e-9, (f, worst)
+    assert worst["u"] <= 1e-8 and worst["P"] <= 1e-4 and worst["pu"] <= 1e-6, worst
+
+
+def test_l_receive_pass_on_the_cpp(native, monkeypatch):
+    """receiver.receive_pass on an L TINY pass at -12 dB with every row over
+    track's names and ltrack's from-imports of them: ltrack reaches
+    symbol_mf, psi_at, kalman_rts, select_q, derotate, _smooth, _recenter,
+    erase, z_ref_stat and report through them, and the pass is the
+    reference's (measured: z, w and psi identical, f_hz 2e-13 Hz)."""
+    from qrss_fakes import l_scenario
+    from qrss_native.track import rows
+    from sstvae.qrss.constants import WAVEFORM_L
+
+    spec = lframe.get("l-tiny")
+    _, sim = l_scenario("l-tiny", -12.0, 1)
+    prep = RX.prepare(frontend.Capture(sim.fe, Q_TEST, sim.t0_index))
+    det = flat_det(1500.0, WAVEFORM_L)
+    ref = RX.receive_pass(prep, spec, det, return_tracks=True)
+    assert ref is not None
+    table = rows(native.qrss)
+    used = {}
+
+    def counted(name, fn):
+        def f(*a, **k):
+            used[name] = used.get(name, 0) + 1
+            return fn(*a, **k)
+        return f
+
+    wrapped = {name: counted(name, fn) for (_t, name), fn in table.items()}
+    from_imports = ("derotate", "kalman_rts", "select_q", "_smooth", "_keying_tuple")
+    for name in from_imports:                    # ltrack's own bindings are track's functions
+        assert getattr(LT, name) is getattr(T, name), name
+    for name, fn in wrapped.items():
+        monkeypatch.setattr(T, name, fn)
+    for name in from_imports:
+        monkeypatch.setattr(LT, name, wrapped[name])
+    got = RX.receive_pass(prep, spec, det, return_tracks=True)
+    assert got is not None
+    reached = {"symbol_mf", "psi_at", "kalman_rts", "select_q", "derotate", "_smooth", "_recenter",
+               "erase", "z_ref_stat", "report"}
+    assert reached <= set(used), sorted(set(reached) - set(used))
+    g, r = got[0], ref[0]
+    assert g.uid.rsplit("_", 1)[0] == r.uid.rsplit("_", 1)[0]
+    assert (g.q, g.frame, g.waveform, g.estimator) == (r.q, r.frame, r.waveform, r.estimator)
+    assert g.header == r.header and g.cw == r.cw
+    assert abs(g.f_hz - r.f_hz) <= 1e-6
+    for f in ("z", "w", "hdr_llr", "psi"):
+        x, y = np.asarray(getattr(g, f)), np.asarray(getattr(r, f))
+        assert x.shape == y.shape and x.dtype == y.dtype, f
+        assert x.size == 0 or np.max(np.abs(x.astype(np.float64) - y)) <= 1e-6, f
+    assert abs(g.timing.tau0 - r.timing.tau0) <= 1e-6 and abs(g.timing.ppm - r.timing.ppm) <= 1e-6
+    for f in ("offset_hz", "doppler_hz", "snr2500_db", "z_ref", "kappa"):
+        assert abs(getattr(g.report, f) - getattr(r.report, f)) <= 1e-6 * max(abs(getattr(r.report, f)), 1.0), f
+    assert (g.report.slip_free, g.report.suspect) == (r.report.slip_free, r.report.suspect)
+    assert len(got[1]) == len(ref[1])

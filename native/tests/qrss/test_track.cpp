@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <limits>
 #include <memory>
+#include <numbers>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -278,7 +279,7 @@ static std::shared_ptr<const tk::ChanCapture> synthetic_chan() {
     const auto phi = qrss::ce::phase_grid(250, -3000, 16000, sym, TINY);
     auto chan = std::make_shared<tk::ChanCapture>();
     for (std::int64_t i = 0; i < 16000; ++i) {
-        const double ph = phi[static_cast<std::size_t>(i)] + 2 * M_PI * 0.02 * static_cast<double>(i) / 250;
+        const double ph = phi[static_cast<std::size_t>(i)] + 2 * std::numbers::pi * 0.02 * static_cast<double>(i) / 250;
         const cd z = cd(std::cos(ph), std::sin(ph)) + cd(static_cast<double>((i * 7) % 19 - 9) / 8.0,
                                                          static_cast<double>((i * 3) % 17 - 8) / 8.0);
         chan->ch.emplace_back(static_cast<float>(z.real()), static_cast<float>(z.imag()));
@@ -343,15 +344,21 @@ static void test_synthetic_pass() {
     near(rep.ppm, -40.01153828525125, 1e-9, "report ppm");
     near(rep.snr2500_db, 51.653716702940436, 1e-12, "report snr");
     check::is_true(std::isnan(rep.z_ref) && rep.kappa == 0.9 && rep.slip_free && !rep.suspect, "report flags");
-    // reentrant: two threads tracking the one capture get the one answer
+    // reentrant: threads tracking the one capture get the one answer -- on
+    // the capture whose noise table is already filled, and on a fresh one
+    // whose empty NoisePsdSlot they race to fill
+    const auto fresh = synthetic_chan();
+    check::is_true(!fresh->psd.get(), "a fresh capture has no noise table yet");
     std::vector<std::thread> th;
-    std::vector<std::optional<tk::TrackResult>> out(2);
-    for (int i = 0; i < 2; ++i) th.emplace_back([&, i] { out[static_cast<std::size_t>(i)] = tk::track(chan, TINY, det); });
+    std::vector<std::optional<tk::TrackResult>> out(4);
+    for (int i = 0; i < 4; ++i)
+        th.emplace_back([&, i] { out[static_cast<std::size_t>(i)] = tk::track(i % 2 ? fresh : chan, TINY, det); });
     for (auto& t : th) t.join();
     for (const auto& o : out) {
-        check::is_true(o && o->q == tr.q && o->u == tr.u && o->P == tr.P && o->loglik == tr.loglik,
+        check::is_true(o && o->q == tr.q && o->u == tr.u && o->P == tr.P && o->loglik == tr.loglik && o->N == tr.N,
                        "a concurrent track");
     }
+    check::is_true(fresh->psd.get() != nullptr, "the race filled the fresh capture's table");
     // refusals
     auto none = det;
     none.timing.reset();
