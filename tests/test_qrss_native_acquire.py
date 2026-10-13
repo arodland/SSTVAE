@@ -30,6 +30,7 @@ tests/qrss_native/acquire.py substitutes these under --native-qrss=rx.
 """
 
 import dataclasses
+import itertools
 
 import numpy as np
 import pytest
@@ -461,6 +462,19 @@ def test_acquire_on_the_cpp_more(N, caps, ref):
     assert ref.dropped["l0 band joint"]["drop_band_owned"] >= 1, ref.dropped
 
 
+@pytest.mark.slow
+def test_acquire_raw_complex128_single(N, caps):
+    """One frame on a raw complex128 capture (the C++ blanker after the
+    cast frontend.blank's np.asarray makes), hinted at the CE signal and
+    away from both."""
+    fe, t0 = caps["mixed"]
+    cap = frontend.Capture(fe.astype(np.complex128) * (1 + 1e-9j), 0, t0)
+    kw = {"live_only": True, "hints": (1561.0, 1700.0)}
+    r = A.acquire(cap, frame.SHORT, **kw)
+    _acq_check(r, _rx.to_ref(N.acquire(cap, frame.SHORT, **kw)), "raw complex128")
+    assert r.preamble and r.hinted, r
+
+
 def test_acquire_errors(N, caps):
     fe, t0 = caps["ce"]
     zeros = frontend.Capture(np.zeros(40 * FE_FS, np.complex64), 0, TA.PRE_S * FE_FS)
@@ -480,6 +494,29 @@ def test_acquire_errors(N, caps):
         r = _outcome(A.acquire, c, spec, **kw)
         g = _outcome(lambda *a, **k: _rx.to_ref(N.acquire(*a, **k)), c, spec, **kw)
         assert r[0] != "ok" and r == g, (spec, kw, r, g)
+
+
+def test_acquire_odd_hints(N):
+    """Hints off the band, non-finite, or of numpy types, on the real
+    stages over silence (no line, so every hint is searched): the same
+    hinted lines, or the same error from the stage that meets it."""
+    zeros = frontend.Capture(np.zeros(40 * FE_FS, np.complex64), 0, TA.PRE_S * FE_FS)
+    ok = 0
+    for spec, hints in ((frame.TINY, (float("nan"),)), (frame.TINY, (float("inf"),)),
+                        ((frame.TINY, lframe.L_TINY), ((float("nan"), L),)),
+                        ((lframe.L_TINY,), (-float("inf"),)), (frame.TINY, (-5000.0, 1e9)),
+                        ((frame.TINY, lframe.L_TINY), (1e9, (-5000.0, L), (1500, np.int64(1)))),
+                        (frame.TINY, (np.float64(1500.25), np.int64(1600)))):
+        kw = {"preprocessed": True, "live_only": True, "hints": hints}
+        r = _stub_outcome(A.acquire, zeros, spec, **kw)
+        g = _stub_outcome(_native_acquire, N, zeros, spec, **kw)
+        assert r[0] == g[0], (hints, r, g)
+        if r[0] == "ok":
+            _acq_check(r[1], g[1], f"{hints}")
+            ok += bool(r[1].hinted)
+        else:
+            assert r == g, (hints, r, g)
+    assert ok >= 3, ok
 
 
 # --- the seams ----------------------------------------------------------------------------------
@@ -628,6 +665,261 @@ def test_reference_acquire_with_the_arbitration_rows(N, native, caps, ref, monke
     assert A.live_end_s() == A.A2_TAU_S + A.N_PRE * T_SYM + A._A2_MARGIN_S
     assert counts == {"_hint_items": 2, "drop_symbol_rate_aliases": 3, "drop_band_owned": 2, "merge_hits": 2,
                       "live_end_s": 1}, counts
+
+
+# --- orchestration with every stage stubbed -------------------------------------------------------
+
+_STUBBED = ("carrier_line_stats", "carrier_lines", "pilot_lines", "hint_line", "a1_threshold", "_a2_input",
+            "preamble_search", "lead_in_span", "track_before_detect")
+
+
+def _h(*xs):
+    """A generator seeded by the bits of xs: a stub answers the same
+    question the same way, whichever implementation asks it."""
+    import struct
+    import zlib
+
+    b = b"".join(struct.pack("<d", float(x)) for x in xs)
+    return np.random.default_rng([zlib.crc32(b), *np.frombuffer(b[:8], np.uint32).tolist()])
+
+
+def _v(x):
+    return (type(x).__name__, float(x)) if isinstance(x, (float, np.floating)) else x
+
+
+class _World:
+    """Deterministic stubs for acquire's stages (and the blanker), each
+    logging what it was asked, by value and type. A seed draws the A1
+    lines (crowded about one frequency, its symbol-rate aliases and the
+    L band below it), the pilots, A1's threshold and how often A2 passes;
+    a stage's answer depends only on its question."""
+
+    def __init__(self, seed):
+        r = self.r = np.random.default_rng(seed)
+        self.seed = seed
+        base = float(r.uniform(900.0, 1300.0))
+        self.lines = []
+        for _ in range(int(r.integers(0, 9))):
+            f = [base + r.uniform(-6.0, 6.0), base + r.choice([-2, -1, 1, 2]) / T_SYM,
+                 base + r.choice([-1, 1]) / L_T_SYM, base - r.uniform(3.0, 22.0),
+                 r.uniform(600.0, 2400.0)][int(r.integers(5))]
+            f = float(f) if r.random() < 0.5 else np.float64(f)
+            self.lines.append((f, float(r.choice([0.0, 0.5, -1.5])), float(r.uniform(20.0, 400.0))))
+        self.pilots = [(np.float64(base + r.uniform(3.2, 22.0)), 0.0, float(r.uniform(10.0, 50.0)))
+                       for _ in range(int(r.integers(0, 3)))]
+        self.thr = float(r.choice([28.296115129334837, 25.0, 60.0]))
+        self.p_pass = float(r.uniform(0.2, 0.9))
+        self.log = []
+
+    def blank(self, fe, **k):
+        self.log.append(("blank", fe.dtype.str, len(fe), tuple(sorted(k.items()))))
+        return (fe * 2).astype(np.complex64), np.ones(len(fe), np.float32)
+
+    def normalise(self, fe, keep, **k):
+        self.log.append(("normalise", fe.dtype.str, float(np.abs(fe).sum()), keep.dtype.str,
+                         tuple(sorted(k.items()))))
+        return (fe / 3).astype(np.complex64), np.ones(len(fe), np.float32)
+
+    def carrier_line_stats(self, fe, t0, fs, **k):
+        self.log.append(("stats", fe.dtype.str, float(np.abs(fe).sum()), _v(t0), _v(fs), tuple(sorted(k))))
+        return A.CarrierStats(stat=np.zeros((1, 2), np.float32), f_hz=np.array([1000.0, 1000.25]),
+                              drifts=np.array([0.0]), M=11)
+
+    def carrier_lines(self, fe, t0, fs, **k):
+        self.log.append(("lines", fe.dtype.str, float(np.abs(fe).sum()), _v(t0), _v(fs), tuple(sorted(k)),
+                         k["stats"].M))
+        return [CarrierCandidate(f, d, m) for f, d, m in self.lines]
+
+    def pilot_lines(self, cs, lines, **k):
+        self.log.append(("pilots", cs.M, tuple(_v(c.f_hz) for c in lines), tuple(sorted(k))))
+        return [CarrierCandidate(f, d, m) for f, d, m in self.pilots]
+
+    def hint_line(self, cs, f, fs, **k):
+        self.log.append(("hint", _v(f), _v(fs), tuple(sorted(k))))
+        g = _h(self.seed, f, 1)
+        if g.random() < 0.4:                     # refined: an np.float64, as hint_line's is
+            return CarrierCandidate(np.float64(f + g.uniform(-1.5, 1.5)), float(g.choice([0.0, 1.0])),
+                                    float(g.uniform(30.0, 300.0)))
+        return CarrierCandidate(float(f), 0.0, float(g.choice([0.0, self.thr, g.uniform(5.0, 50.0)])))
+
+    def a1_threshold(self, M, pfa, fs, **k):
+        self.log.append(("thr", M, _v(pfa), _v(fs), tuple(sorted(k))))
+        return self.thr
+
+    def _a2_input(self, fe, t0, f, d=0.0, fs=FE_FS, **k):
+        self.log.append(("input", _v(t0), _v(f), _v(d), _v(fs), tuple(sorted(k))))
+        return ("input", float(f))
+
+    def preamble_search(self, fe, t0, cand, fs=FE_FS, **k):
+        kind = k.get("kind", A.CE_PRE)
+        self.log.append(("search", _v(t0), _v(cand.f_hz), _v(cand.drift_hz_per_min), _v(cand.metric),
+                         cand.waveform, _v(fs), tuple(sorted(k)), kind.waveform, k.get("inp")))
+        g = _h(self.seed, cand.f_hz, kind.waveform, 2)
+        passed = g.random() < self.p_pass
+        p = float(g.choice([0.0, 1e-200, 1e-12, 1e-9])) if passed else float(g.choice([1e-3, 0.2]))
+        lam = float(g.choice([100.0, 30.0, g.uniform(5.0, 600.0)]))       # ties in the sort keys
+        tau = float(g.choice([0.3, 0.3 + g.uniform(-0.1, 0.1), g.uniform(-2.0, 2.0)]))
+        df = float(g.choice([0.0, g.uniform(-0.5, 0.5)]))
+        return A.PreambleHit(f_hz=float(cand.f_hz + df), drift_hz_per_min=float(cand.drift_hz_per_min),
+                             tau0_s=tau, phase=0.1, lam=lam, cell_lam=lam, p_value=p, passed=p < A.A2_PFA,
+                             waveform=kind.waveform)
+
+    def lead_in_span(self, fe, t0, f, drift, tau0, fs, **k):
+        self.log.append(("lead", _v(t0), _v(f), _v(drift), _v(tau0), _v(fs), tuple(sorted(k.items()))))
+        return float(_h(self.seed, f, tau0, 3).integers(0, 4))
+
+    def track_before_detect(self, fe, t0, spec, lines, fs, **k):
+        self.log.append(("tbd", _v(t0), spec.name, tuple(_v(c.f_hz) for c in lines), _v(fs), tuple(sorted(k)),
+                         tuple(s.name for s in k.get("shape_specs", ()))))
+        t = np.array([0.0, 100.0])
+        out = []
+        for i, c in enumerate(lines[:4]):
+            lp = FreqPath(t_s=t, f_hz=np.full(2, c.f_hz + 6.0), weight=np.ones(2)) if i % 2 else None
+            out.append(A.TbdHit(path=FreqPath(t_s=t, f_hz=np.full(2, float(c.f_hz)), weight=np.ones(2)),
+                                z=50.0 + i, p_value=1e-9, n_frames=31, centre_hz=float(c.f_hz),
+                                waveform=[None, CE, L, 5][i], l_path=lp))
+        return out
+
+    def hints(self, joint):
+        """A hint set: at, beside (+-HINT_SPAN_HZ) or away from a line;
+        bare or (f, waveform), including one no frame names; in a tuple, a
+        list, an array or a generator. On one frame a waveform-tagged hint
+        is the reference's TypeError."""
+        r = self.r
+        hs = []
+        for _ in range(int(r.integers(0, 6))):
+            if self.lines and r.random() < 0.6:
+                f = float(self.lines[int(r.integers(len(self.lines)))][0]) + float(
+                    r.choice([0.0, 2.5, -2.5, 2.4999, 3.0, r.uniform(-4.0, 4.0)]))
+            else:
+                f = float(r.uniform(600.0, 2400.0))
+            hs.append((f, int(r.choice([CE, L, 7]))) if joint and r.random() < 0.5 else f)
+        if not joint and hs and r.random() < 0.15:
+            hs[int(r.integers(len(hs)))] = (1500.0, CE) if r.random() < 0.5 else [1500.0, CE]
+        bare = all(isinstance(x, float) for x in hs)
+        how = int(r.integers(4 if bare else 3))
+        return [lambda: tuple(hs), lambda: list(hs), lambda: iter(hs), lambda: np.array(hs)][how]
+
+
+_STUB_SPECS = (frame.TINY, lframe.L_TINY, (frame.TINY, lframe.L_TINY), (frame.TINY,), (lframe.L_TINY,),
+               [lframe.L_TINY, frame.TINY], frame.SHORT, (lframe.L_SHORT, frame.FULL))
+_STUB_CAPS = (frontend.Capture(np.arange(16, dtype=np.complex64) * (1 + 1j), 0, 48000.0),
+              frontend.Capture(np.arange(16, dtype=np.complex128) * (1 + 0.5j), 3, 48000.25),
+              frontend.Capture(np.arange(16, dtype=np.complex64) * (1 - 1j), 0, 24000, fs=2000))
+
+
+def _stub_outcome(fn, *args, **kw):
+    try:
+        return "ok", fn(*args, **kw)
+    except Exception as e:  # noqa: BLE001 -- the reference's own, whatever it is
+        return type(e), str(e)
+
+
+def _native_acquire(N, *args, **kw):
+    return _rx.to_ref(N.acquire(*args, **kw))
+
+
+def _stubbed_case(world, mp, rows_table):
+    """One seed: the reference acquire() over the stubs, then the rows'
+    (the C++ calling the stubs back as seams). Returns both outcomes and
+    call logs, and each one's detections on every frame set."""
+    for name in _STUBBED:
+        mp.setattr(A, name, getattr(world, name))
+    mp.setattr(frontend, "blank", world.blank)
+    mp.setattr(frontend, "normalise", world.normalise)
+    r = world.r
+    spec = _STUB_SPECS[world.seed % len(_STUB_SPECS)]
+    cap = _STUB_CAPS[world.seed % len(_STUB_CAPS)]
+    hints = world.hints(isinstance(spec, (tuple, list)))
+    kw = {"preprocessed": bool(r.random() < 0.6), "live_only": bool(r.random() < 0.5)}
+    out = []
+    for applied in (False, True):
+        if applied:
+            _set_rows(mp, rows_table)
+        world.log = []
+        res = _stub_outcome(A.acquire, cap, spec, hints=hints(), **kw)
+        dets = [res[1].detections(sp) for sp in _STUB_SPECS] if res[0] == "ok" else None
+        out.append((res, world.log, dets))
+    return out
+
+
+def test_acquire_orchestration_stubbed(native, N, monkeypatch):
+    """acquire() single and joint with every stage a deterministic stub, by
+    the rows (the stubs reach the C++ as seams): the same calls in the same
+    order with the same arguments, type for type -- the hint loop's
+    skip / near / A2 / L-offset branches, the arbitration, the lead-ins, A3's
+    frame and shape_specs, fs and t0 passed through, a complex128 or an
+    fs=2000 capture -- and the same Acquisition, its objects the stubs'
+    own; the same detections on every frame set; the same errors."""
+    from qrss_native import acquire as rows_acq
+
+    table = rows_acq.rows(native.qrss)
+    n = {"preamble": 0, "hinted": 0, "tbd": 0, "pilots": 0, "err": 0, "offsets": 0}
+    for seed in range(240):
+        world = _World(seed)
+        with monkeypatch.context() as mp:
+            (ro, rl, rd), (go, gl, gd) = _stubbed_case(world, mp, table)
+        assert len(rl) == len(gl), (seed, rl, gl)
+        for i, (a, b) in enumerate(zip(rl, gl)):
+            assert a == b, (seed, i, a, b)
+        assert ro[0] == go[0], (seed, ro, go)
+        if ro[0] != "ok":
+            assert ro == go, (seed, ro, go)
+            n["err"] += 1
+            continue
+        _acq_check(ro[1], go[1], f"seed {seed}", exact=True)
+        for x, y in zip(ro[1].preamble + ro[1].tbd, go[1].preamble + go[1].tbd):
+            assert type(x) is type(y)
+        for sp, a, b in zip(_STUB_SPECS, rd, gd):
+            _det_check(a, b, f"seed {seed} {sp}")
+        for k in ("preamble", "hinted", "tbd", "pilots"):
+            n[k] += len(getattr(ro[1], k))
+        # an L hint A1 has no line for: A2-L at f and f +- 1 Hz, three searches in a row
+        searches = [e for e in rl if e[0] == "search"]
+        n["offsets"] += sum(1 for a, b in itertools.pairwise(searches)
+                            if a[2][1] - b[2][1] == 1.0 and a[4] == b[4] and a[8] == b[8] == L)
+    assert n["preamble"] >= 300 and n["hinted"] >= 100 and n["tbd"] >= 100 and n["pilots"] >= 50, n
+    assert n["err"] >= 5 and n["offsets"] >= 10, n
+
+
+def test_acquire_threads_with_python_seams(native, N):
+    """The binding releases the GIL and takes it back for each Python
+    seam: four threads acquiring at once over their own stubs give each
+    the serial answer."""
+    import threading
+
+    want, jobs = {}, []
+    for seed in range(40):
+        w = _World(seed)
+        spec = _STUB_SPECS[seed % len(_STUB_SPECS)]
+        cap = _STUB_CAPS[seed % len(_STUB_CAPS)]
+        hints = tuple(w.hints(isinstance(spec, (tuple, list)))())
+        seams = {name: getattr(w, name) for name in _STUBBED + ("blank", "normalise")}
+        w.log = []
+        want[seed] = (_stub_outcome(_native_acquire, N, cap, spec, hints=hints, _seams=seams), list(w.log))
+        jobs.append((seed, w, cap, spec, hints, seams))
+    got, errors = {}, []
+
+    def work(part):
+        try:
+            for seed, w, cap, spec, hints, seams in part:
+                w.log = []
+                got[seed] = (_stub_outcome(_native_acquire, N, cap, spec, hints=hints, _seams=seams), list(w.log))
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+    threads = [threading.Thread(target=work, args=(jobs[i::4],)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60.0)
+    assert not errors and len(got) == len(want), errors
+    for seed, (r, log) in want.items():
+        g, glog = got[seed]
+        assert log == glog and r[0] == g[0], seed
+        if r[0] == "ok":
+            _acq_check(r[1], g[1], f"seed {seed}", exact=True)
+        else:
+            assert r == g, seed
 
 
 # --- receiver, on the C++ (slow) ----------------------------------------------------------------
