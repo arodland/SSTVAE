@@ -9,9 +9,10 @@ that edits them -- or the reference's own `_Model` handed to `_fit_delta`
 -- is read as the reference would read it), `_pu_local`, `_hold_ends`,
 `_lead_supported_l`, `_fit_delta`, `track_l` itself, `refine_timing_l`,
 `report_l` and `known_symbols_l`. ltrack's from-imports of track's names
-(`derotate`, `kalman_rts`, `select_q`, `_smooth`, `_keying_tuple`,
-`_parabola`, `_flat_path`, `freq_path_spline`) are track's rows, found by
-the harness.
+are other files' rows, found by the harness: `derotate`, `kalman_rts`,
+`select_q`, `_smooth` and `_keying_tuple` are track.py's, `_parabola` and
+`_flat_path` track_timing.py's, `PathFn` and `freq_path_spline`
+trackbase.py's.
 
 Results come back as the reference's objects (`_rx.to_ref`). `pilot_table`
 keeps one MfTable, as the reference's cache does; its taps are a read-only

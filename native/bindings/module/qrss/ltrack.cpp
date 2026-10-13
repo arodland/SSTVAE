@@ -38,6 +38,11 @@
 //   report_l(tr, kappa=1.0, suspect=False) -> "TrackReport" dict
 //   known_symbols_l(spec, hdr_bits=None) -> "Known" dict
 //
+// A CE frame where the reference has no _l_only (_distortion,
+// data_templates, _pilot_gain, pilot_wave, _Model, _lead_supported_l)
+// raises what lframe.layout raises on one; a 0-d tau, pilot_wave's
+// TypeError from lwave.pilot's ramp envelope.
+//
 // A track is read as the reference reads it: by attribute (or a dict's
 // key), and only the fields the function uses. The capture's noise table
 // is its `_psd`: when that is still None, `track_l` and `_lead_supported_l`
@@ -103,6 +108,21 @@ py::array shaped(const std::vector<T>& v, const std::vector<py::ssize_t>& shape)
     return out;
 }
 
+// What numpy's elementwise arithmetic hands back: a numpy scalar for a 0-d result.
+template <typename T>
+py::object shaped_result(const std::vector<T>& v, const std::vector<py::ssize_t>& shape) {
+    py::array a = shaped(v, shape);
+    if (shape.empty()) return a.attr("__getitem__")(py::tuple());
+    return a;
+}
+
+// "(a,b,...)" as numpy prints a shape in a broadcasting error.
+std::string shape_text(const std::vector<py::ssize_t>& shape) {
+    std::string s = "(";
+    for (std::size_t i = 0; i < shape.size(); ++i) s += (i ? "," : "") + std::to_string(shape[i]);
+    return s + (shape.size() == 1 ? ",)" : ")");
+}
+
 // `a * b` evaluated by Python: raises exactly what the reference's product
 // with a None operand raises.
 [[noreturn]] void python_product(const py::handle& a, const py::handle& b) {
@@ -112,6 +132,21 @@ py::array shaped(const std::vector<T>& v, const std::vector<py::ssize_t>& shape)
 }
 
 [[noreturn]] void not_subscriptable() { raise(PyExc_TypeError, "'NoneType' object is not subscriptable"); }
+
+// lframe.layout on a CE frame, as the functions without _l_only meet it
+// (_distortion, data_templates, _pilot_gain, pilot_wave, _Model and
+// _lead_supported_l): the header's symbol count is checked first, and a CE
+// FrameSpec has no n_data_payload. Nothing for an L frame.
+const fr::FrameSpec& l_layout(const fr::FrameSpec& s) {
+    if (s.waveform() == fr::Waveform::L) return s;
+    if (const std::int64_t n_hdr = s.n_hdr()) {
+        const std::int64_t slots = n_hdr - (n_hdr + cfg::REF_PERIOD - 1) / cfg::REF_PERIOD;
+        if (slots != cfg::N_HDR_BITS / 2)
+            raise(PyExc_AssertionError,
+                  std::to_string(slots) + " header symbols for " + std::to_string(cfg::N_HDR_BITS) + " bits");
+    }
+    raise(PyExc_AttributeError, "'FrameSpec' object has no attribute 'n_data_payload'");
+}
 
 // --- what the reference reads -------------------------------------------------
 
@@ -359,6 +394,7 @@ py::object model_init_py(const py::object& tr, const py::object& spec, const py:
                          const py::object& withhold_known, const py::object& keying, const py::object& lead,
                          const py::object& n_lead) {
     const fr::FrameSpec s = rx::spec(spec);
+    l_layout(s);
     tk::LTrackResult t(s, nullptr, types::Timing{}, no_path());
     t.pos = rx::vec<std::int64_t>(rx::field(tr, "pos"));
     const tk::LClasses c = classes_lite(classes);
@@ -568,7 +604,7 @@ void bind(py::module_& q) {
                 py::gil_scoped_release nogil;
                 out = lt::pilot_filter(std::span<const cd>(v), t);
             }
-            return shaped(out, pyshape(ta));
+            return shaped_result(out, pyshape(ta));
         }
         const std::vector<double> v = rx::vec<double>(xa);
         std::vector<double> out;
@@ -576,36 +612,110 @@ void bind(py::module_& q) {
             py::gil_scoped_release nogil;
             out = lt::pilot_filter(std::span<const double>(v), t);
         }
-        return shaped(out, pyshape(ta));
+        return shaped_result(out, pyshape(ta));
     }, py::arg("x"), py::arg("tp"));
 
     m.def("data_mix", [](const py::object& z_d, const py::object& chan, const py::object& timing,
-                         const py::object& n_pos, const py::object& idx) {
-        std::optional<std::vector<std::int64_t>> ix;
-        if (!idx.is_none()) ix = rx::vec<std::int64_t>(idx);
+                         const py::object& n_pos, const py::object& idx) -> py::object {
+        // idx is numpy's index: integers of any shape (0-d: a scalar back), or
+        // a boolean mask (below); anything else is numpy's IndexError
+        std::optional<py::array> ia;
+        if (!idx.is_none()) ia = asarray(idx);
         const double t0 = t0_of(chan);
         const types::Timing tm = timing_lite(timing);
         const std::int64_t n = rx::as_int(n_pos);
+        const char kind = ia ? ia->dtype().kind() : 'i';
+        if (kind != 'i' && kind != 'u' && kind != 'b')
+            raise(PyExc_IndexError, "arrays used as indices must be of integer (or boolean) type");
         const std::vector<cd> z = rx::vec<cd>(z_d);
+        if (!ia) {
+            std::vector<cd> out;
+            {
+                py::gil_scoped_release nogil;
+                out = lt::data_mix(z, t0, tm, n);
+            }
+            return to_numpy(out);
+        }
+        if (kind == 'b') {
+            // z_d[mask] * exp(...) with tau read at the mask's own values (0 and
+            // 1), the selected samples broadcast against it, as numpy does
+            if (ia->ndim() > 1)
+                raise(PyExc_IndexError, "too many indices for array: array is 1-dimensional, but " +
+                                            std::to_string(ia->ndim()) + " were indexed");
+            if (ia->ndim() == 0) {
+                // a 0-d mask: z_d[True] is z_d as one row, z_d[False] no rows
+                const bool on = rx::as_bool(*ia);
+                std::vector<cd> out(on ? z.size() : 0);
+                for (std::size_t k = 0; k < out.size(); ++k) {
+                    const std::vector<cd> two{z[k], z[k]};
+                    const std::vector<std::int64_t> at{1};
+                    out[k] = lt::data_mix(two, t0, tm, n, std::span<const std::int64_t>(at))[0];
+                }
+                return shaped(out, {on ? 1 : 0, static_cast<py::ssize_t>(z.size())});
+            }
+            const std::vector<std::uint8_t> mask = rx::vec<std::uint8_t>(numpy().attr("asarray")(*ia, "uint8"));
+            if (mask.size() != z.size())
+                raise(PyExc_IndexError, "boolean index did not match indexed array along axis 0; size of axis is " +
+                                            std::to_string(z.size()) + " but size of corresponding boolean axis is " +
+                                            std::to_string(mask.size()));
+            std::vector<cd> sel;
+            for (std::size_t k = 0; k < mask.size(); ++k)
+                if (mask[k]) sel.push_back(z[k]);
+            const std::size_t a = sel.size(), b = mask.size();
+            if (!(a == b || a == 1 || b == 1))
+                raise(PyExc_ValueError, "operands could not be broadcast together with shapes (" + std::to_string(a) +
+                                            ",) (" + std::to_string(b) + ",) ");
+            std::vector<cd> out(a == 1 ? b : a);
+            for (std::size_t k = 0; k < out.size(); ++k) {
+                // one sample times the phasor at n = mask[k]: the core's own product
+                const cd zk = sel[a == 1 ? 0 : k];
+                const std::vector<cd> two{zk, zk};
+                const std::vector<std::int64_t> at{mask[b == 1 ? 0 : k] ? 1 : 0};
+                out[k] = lt::data_mix(two, t0, tm, n, std::span<const std::int64_t>(at))[0];
+            }
+            return to_numpy(out);
+        }
+        const std::vector<std::int64_t> ix = rx::vec<std::int64_t>(*ia);
         std::vector<cd> out;
         {
             py::gil_scoped_release nogil;
-            if (ix)
-                out = lt::data_mix(z, t0, tm, n, std::span<const std::int64_t>(*ix));
-            else
-                out = lt::data_mix(z, t0, tm, n);
+            out = lt::data_mix(z, t0, tm, n, std::span<const std::int64_t>(ix));
         }
-        return to_numpy(out);
+        return shaped_result(out, pyshape(*ia));
     }, py::arg("z_d"), py::arg("chan"), py::arg("timing"), py::arg("n_pos"), py::arg("idx") = py::none());
 
     m.def("data_mf", [](const py::object& z_d, const py::object& chan, const py::object& timing,
                         const py::object& pos, const py::object& n_pos) {
-        const std::vector<double> p = rx::vec<double>(pos);
-        if (p.empty()) return to_numpy(std::vector<cd>{});
+        const py::array pa = asarray(numpy().attr("asarray")(pos, py::arg("dtype") = "float64"));
+        if (pa.ndim() == 0) raise(PyExc_TypeError, "len() of unsized object");
+        const std::vector<double> p = rx::vec<double>(pa);
+        if (pa.shape(0) == 0) return to_numpy(std::vector<cd>{});
         const double t0 = t0_of(chan);
         const types::Timing tm = timing_lite(timing);
         const std::int64_t n = rx::as_int(n_pos);
         const std::vector<cd> z = rx::vec<cd>(z_d);
+        if (pa.ndim() > 1) {
+            // positions of 2 or more dimensions: zeros (one per row) where no
+            // filter reaches z_d, else numpy's refusal -- the sparse path's
+            // broadcast of floor(tp)[:, None] against the filter's offsets, or
+            // symbol_mf's own (its rows in chunks of 4096), else its einsum's
+            const auto reach = lt::data_mf_reach(z.size(), t0, tm, p, n);
+            const auto rows = static_cast<std::int64_t>(pa.shape(0));
+            if (!reach) return to_numpy(std::vector<cd>(static_cast<std::size_t>(rows), cd(0.0, 0.0)));
+            const std::int64_t half = tk::mf_table(cfg::L_T_SYM).half();
+            const auto last = static_cast<std::int64_t>(pa.shape(pa.ndim() - 1));
+            const auto refuse = [&](std::int64_t r, std::int64_t w) {
+                std::vector<py::ssize_t> sh{static_cast<py::ssize_t>(r), 1};
+                for (py::ssize_t d = 1; d < pa.ndim(); ++d) sh.push_back(pa.shape(d));
+                raise(PyExc_ValueError, "operands could not be broadcast together with shapes " + shape_text(sh) +
+                                            " " + shape_text({1, static_cast<py::ssize_t>(w)}) + " ");
+            };
+            if (rows * (2 * half + 1) < reach->second - reach->first && last != 1 && last != 2 * half + 2)
+                refuse(rows, 2 * half + 2);
+            if (last != 1 && last != 2 * half + 1) refuse(std::min<std::int64_t>(rows, 4096), 2 * half + 1);
+            raise(PyExc_ValueError, "operand has more dimensions than subscripts given in einstein sum, but no "
+                                    "'...' ellipsis provided to broadcast the extra dimensions.");
+        }
         std::vector<cd> out;
         {
             py::gil_scoped_release nogil;
@@ -629,12 +739,14 @@ void bind(py::module_& q) {
         return d;
     }, py::arg("spec"), py::arg("hdr_bits") = py::none(), py::arg("prior") = py::none());
 
-    m.def("_distortion", [](const py::object& spec) { return to_numpy(lt::distortion(rx::spec(spec))); },
-          py::arg("spec"));
+    m.def("_distortion", [](const py::object& spec) {
+        return to_numpy(lt::distortion(l_layout(rx::spec(spec))));
+    }, py::arg("spec"));
 
     m.def("data_templates", [](const py::object& spec, const py::object& grid, const py::object& classes,
                                const py::object& withhold_known) {
         const fr::FrameSpec s = rx::spec(spec);
+        l_layout(s);
         const std::vector<std::int64_t> g = rx::vec<std::int64_t>(grid);
         const tk::LClasses c = classes_lite(classes);
         const lt::DataTemplates t = lt::data_templates(s, g, c, rx::as_bool(withhold_known));
@@ -642,21 +754,27 @@ void bind(py::module_& q) {
     }, py::arg("spec"), py::arg("grid"), py::arg("classes"), py::arg("withhold_known") = false);
 
     m.def("_pilot_gain", [](const py::object& tau, const py::object& spec, const py::object& lead_in_s) {
+        const fr::FrameSpec s = rx::spec(spec);
+        l_layout(s);
         const py::array ta = asarray(numpy().attr("asarray")(tau, py::arg("dtype") = "float64"));
         const std::vector<double> t = rx::vec<double>(ta);
-        const fr::FrameSpec s = rx::spec(spec);
         const double lead = rx::as_double(lead_in_s);
-        return shaped(with_lead(lead_in_s, [&] { return lt::pilot_gain(t, s, lead); }), pyshape(ta));
+        return shaped_result(with_lead(lead_in_s, [&] { return lt::pilot_gain(t, s, lead); }), pyshape(ta));
     }, py::arg("tau"), py::arg("spec"), py::arg("lead_in_s") = 0.0);
 
     m.def("pilot_wave", [](const py::object& tau, const py::object& spec, const py::object& keying,
                            const py::object& lead_in_s) {
+        const fr::FrameSpec s = rx::spec(spec);
+        l_layout(s);
         const py::array ta = asarray(numpy().attr("asarray")(tau, py::arg("dtype") = "float64"));
         const std::vector<double> t = rx::vec<double>(ta);
-        const fr::FrameSpec s = rx::spec(spec);
         const auto k = lkeying(keying);
         const double lead = rx::as_double(lead_in_s);
-        return shaped(with_lead(lead_in_s, [&] { return lt::pilot_wave(t, s, ptr(k), lead); }), pyshape(ta));
+        auto w = with_lead(lead_in_s, [&] { return lt::pilot_wave(t, s, ptr(k), lead); });
+        // a 0-d tau: lwave.pilot's ramp envelope is a numpy scalar, and is assigned into
+        if (ta.ndim() == 0 && lw::KEY_RAMP_S > 0)
+            raise(PyExc_TypeError, "'numpy.float64' object does not support item assignment");
+        return shaped(w, pyshape(ta));
     }, py::arg("tau"), py::arg("spec"), py::arg("keying") = py::none(), py::arg("lead_in_s") = 0.0);
 
     m.def("_q_near_span", [](const py::object& q, const py::object& grid) {
@@ -714,6 +832,7 @@ void bind(py::module_& q) {
             return with_lead(lead, [&] {
                 return lt::lead_supported_l(tk::ChanCapture{}, {}, types::Timing{}, s, l);
             });
+        l_layout(s);   // (the reference meets it at pilot_wave)
         ensure_psd(chan);
         tk::ChanCapture c;
         c.t0_index = t0_of(chan);

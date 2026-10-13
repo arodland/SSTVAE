@@ -405,20 +405,31 @@ std::vector<cplx> data_mix(std::span<const cplx> z_d, double t0_index, const Tim
     return out;
 }
 
-std::vector<cplx> data_mf(std::span<const cplx> z_d, double t0_index, const Timing& timing,
-                          std::span<const double> pos, std::int64_t n_pos) {
+std::optional<std::pair<std::int64_t, std::int64_t>> data_mf_reach(std::size_t n_z, double t0_index,
+                                                                   const Timing& timing, std::span<const double> pos,
+                                                                   std::int64_t n_pos) {
     const track::MfTable& tb = track::mf_table(L_T_SYM);
-    if (pos.empty()) return {};
+    if (pos.empty()) return std::nullopt;
     const std::vector<double> tp = read_times(timing, pos, n_pos, t0_index);
     const auto half = static_cast<double>(tb.half());
-    const auto len = static_cast<double>(z_d.size());
+    const auto len = static_cast<double>(n_z);
     // max(int(math.floor(tp.min())) - half - 1, 0) and min(int(math.ceil(tp.max())) + half + 2, len),
     // exact in doubles wherever they can decide anything (|values| far under 2^53)
     const double lo_f = py_max(py_floor_f(np_min(tp)) - half - 1, 0.0);
     const double hi_f = py_min(py_ceil_f(np_max(tp)) + half + 2, len);
+    if (hi_f <= lo_f) return std::nullopt;
+    return std::pair{static_cast<std::int64_t>(lo_f), static_cast<std::int64_t>(hi_f)};
+}
+
+std::vector<cplx> data_mf(std::span<const cplx> z_d, double t0_index, const Timing& timing,
+                          std::span<const double> pos, std::int64_t n_pos) {
+    const track::MfTable& tb = track::mf_table(L_T_SYM);
+    if (pos.empty()) return {};
+    const auto reach = data_mf_reach(z_d.size(), t0_index, timing, pos, n_pos);
+    if (!reach) return std::vector<cplx>(pos.size(), cplx(0.0, 0.0));
+    const std::vector<double> tp = read_times(timing, pos, n_pos, t0_index);
     std::vector<cplx> zz(z_d.size(), cplx(0.0, 0.0));
-    if (hi_f <= lo_f) return std::vector<cplx>(pos.size(), cplx(0.0, 0.0));
-    const auto lo = static_cast<std::int64_t>(lo_f), hi = static_cast<std::int64_t>(hi_f);
+    const auto [lo, hi] = *reach;
     const std::int64_t width = 2 * tb.half() + 1;
     std::vector<std::int64_t> idx;
     if (static_cast<std::int64_t>(pos.size()) * width < hi - lo) {

@@ -107,6 +107,13 @@ std::vector<cplx> data_mix(std::span<const cplx> z_d, double t0_index, const typ
 // std::overflow_error for infinity).
 std::vector<cplx> data_mf(std::span<const cplx> z_d, double t0_index, const types::Timing& timing,
                           std::span<const double> pos, std::int64_t n_pos);
+// data_mf's reach: the [lo, hi) of a z_d of n_z samples its filters read at
+// `pos` (nullopt for no positions, or hi <= lo, where data_mf gives zeros);
+// a non-finite read-out time refused as data_mf refuses it. data_mf mixes
+// only the samples the filters reach when len(pos) (2 half + 1) < hi - lo.
+std::optional<std::pair<std::int64_t, std::int64_t>> data_mf_reach(std::size_t n_z, double t0_index,
+                                                                   const types::Timing& timing,
+                                                                   std::span<const double> pos, std::int64_t n_pos);
 
 // --- classes and templates ---------------------------------------------------------
 
