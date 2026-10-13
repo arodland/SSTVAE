@@ -112,15 +112,19 @@ py::tuple unpack2(const py::handle& h) {
 }
 
 // One frame's hints (acquire's single path): a number each; a (f, w) pair
-// is kept as a waveform hint, which the core refuses as the reference does.
-std::vector<aq::Hint> single_hints(const py::handle& hints) {
+// is kept as a waveform hint, which the core refuses as the reference does
+// (its TypeError names a tuple; `pair` is the first pair's own type, "list"
+// for a list, for the binding to name instead).
+std::vector<aq::Hint> single_hints(const py::handle& hints, std::string& pair) {
     std::vector<aq::Hint> out;
     for (const py::handle h : py::reinterpret_borrow<py::iterable>(hints)) {
         aq::Hint x;
-        if (is_seq(h))
+        if (is_seq(h)) {
             x.waveform = cfg::WAVEFORM_CE;
-        else
+            if (pair.empty()) pair = py::isinstance<py::list>(h) ? "list" : "tuple";
+        } else {
             x.f_hz = rx::as_double(h);
+        }
         out.push_back(x);
     }
     return out;
@@ -547,10 +551,18 @@ py::dict acquire(const py::object& cap, const py::object& spec, bool live_only, 
     } else {
         const rx::frame::FrameSpec sp = rx::spec(spec);
         ctx.spec_objs = {spec};
-        const aq::AcquireOptions opt = options(live_only, preprocessed, single_hints(hints));
-        a = run(ctx, preprocessed, [&](auto fe, double t0, double fs, const aq::AcquireSeams& s) {
-            return aq::acquire(fe, t0, fs, sp, opt, s);
-        });
+        std::string pair;
+        const aq::AcquireOptions opt = options(live_only, preprocessed, single_hints(hints, pair));
+        try {
+            a = run(ctx, preprocessed, [&](auto fe, double t0, double fs, const aq::AcquireSeams& s) {
+                return aq::acquire(fe, t0, fs, sp, opt, s);
+            });
+        } catch (const sstvae::math::TypeError& e) {
+            std::string msg = e.what();
+            const std::size_t at = msg.rfind("'tuple'");
+            if (pair == "list" && at != std::string::npos) msg.replace(at, 7, "'list'");
+            throw py::type_error(msg);
+        }
     }
     return result(ctx, a);
 }
