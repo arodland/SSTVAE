@@ -70,6 +70,8 @@ jobs:
         run: python tools/gen_golden_vectors.py --check
       - name: QRSS constants and tables match sstvae/qrss
         run: python tools/gen_qrss_config_header.py --check
+      - name: QRSS receiver constants match sstvae/qrss
+        run: python tools/gen_qrss_rx_config.py --check
       # Encoding check only: it compares the generated C++ against
       # sstvae/modem/interleaver_perms.npy, which is the frozen on-air
       # format. It does NOT re-derive from numpy -- see
@@ -107,6 +109,8 @@ jobs:
         run: |
           python tools/gen_config_header.py || true
           python tools/gen_golden_vectors.py || true
+          python tools/gen_qrss_config_header.py || true
+          python tools/gen_qrss_rx_config.py || true
           git diff --stat
           git diff -- native/core/config.hpp native/tests/golden/manifest.json
 

@@ -253,4 +253,32 @@ inline constexpr int INTERP_HALF = 240;
 // not emitted: _M (ndarray), PULSE_TABLE (ndarray)
 }  // namespace lwave
 
+// --- sstvae/qrss/live.py ---
+namespace live {
+inline constexpr int FE_DECIM = 2;
+inline constexpr int ALIGN = 16;
+inline constexpr int HALO = 128;
+inline constexpr double RESYNC_S = 0x1.0000000000000p+0;  // 1.0
+inline constexpr double STAMP_HOLD_S = 0x1.4000000000000p+2;  // 5.0
+inline constexpr double EARLY_WINDOW_S = 0x1.e000000000000p+4;  // 30.0
+inline constexpr double RING_S = 0x1.0680000000000p+11;  // 2100.0
+inline constexpr double SILENCE_LEVEL = 0x1.0000000000000p-24;  // 5.960464477539063e-08
+inline constexpr double SILENCE_S = 0x1.0000000000000p+0;  // 1.0
+inline constexpr double MERGE_HZ = 0x1.4000000000000p+2;  // 5.0
+inline constexpr int PREAMBLE_S = 20;
+inline constexpr double CAPTURE_MARGIN_S = 0x1.0000000000000p+1;  // 2.0
+inline constexpr double FINISH_SEARCH_MIN_HEARD = 0x1.0000000000000p-1;  // 0.5
+inline constexpr int FINISH_MAX_CANDIDATES = 12;
+inline constexpr double FINISH_BUDGET_S = 0x1.6800000000000p+7;  // 180.0
+inline constexpr double HEADERLESS_MAX_SNR_DB = -0x1.8000000000000p+2;  // -6.0
+inline constexpr double RECOVER_HOURS = 0x1.8000000000000p+1;  // 3.0
+inline constexpr std::string_view GUESS_NOTE = "no header yet: picture assumes the first pass of a mode A send";
+inline constexpr std::string_view DIAL_FILE = "dial_changes.jsonl";
+inline constexpr std::string_view LOG_FILE = "listener.log";
+inline constexpr int LOG_FILE_BYTES = 2000000;
+inline constexpr std::array<double, 2> DIAL_GUARD_S{0x1.0000000000000p+1, 0x1.9000000000000p+5};  // (2.0, 50.0)
+inline constexpr double L_BELOW_HZ = 0x1.611aeb6a1847dp+4;  // 22.069072164948455
+inline constexpr std::array<NamedValue, 2> WAVEFORM_OF_{{NamedValue{"CE", 0.0}, NamedValue{"L", 0x1.0000000000000p+0}}};  // {'CE': 0.0, 'L': 1.0}
+}  // namespace live
+
 }  // namespace sstvae::qrss::rxconfig

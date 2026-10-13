@@ -63,12 +63,11 @@ inline constexpr double FE_SKIRT_DB = rxconfig::frontend::FE_SKIRT_DB;
 inline constexpr int F_MIX_DEN = rxconfig::frontend::F_MIX_DEN;
 static_assert(FE_DECIM == config::FS / config::FE_FS, "the front end halves the audio rate");
 
-// live.py's StreamFE block rules (stage 3's module, so not yet in
-// rx_config.hpp): audio blocks start on multiples of ALIGN (to_baseband's
-// 16-sample phasor table, FCENTER/FS = 3/16) and carry HALO samples of
-// context each side (the FE FIR is 255 taps).
-inline constexpr std::int64_t ALIGN = 16;
-inline constexpr std::int64_t HALO = 128;
+// live.py's StreamFE block rules: audio blocks start on multiples of ALIGN
+// (to_baseband's 16-sample phasor table, FCENTER/FS = 3/16) and carry HALO
+// samples of context each side (the FE FIR is 255 taps).
+inline constexpr std::int64_t ALIGN = rxconfig::live::ALIGN;
+inline constexpr std::int64_t HALO = rxconfig::live::HALO;
 
 // _FE_TAPS: signal.firwin(255, 1250.0, fs=8000, window=("kaiser", 8.0)),
 // through filters::firwin (bitwise scipy's; computed once).
