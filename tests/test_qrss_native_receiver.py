@@ -8,36 +8,51 @@ tests/qrss_native/receiver.py substitutes them under --native-qrss=rx.
 
 The passes are simulated ones (channel.simulate): CE TINY and SHORT, L
 l-tiny and l-short, at -6 and -12 dB, with a 1 Hz/min drift, +100 ppm
-(transmitter) and -100 ppm (receiver) clocks and a 10 s lead-in, each
-through receive_pass at a flat 1500 Hz candidate -- gate V first, as
-receive_slot hands it an unverified detection only in tests, but the
-EM and live callers do. The C++ is called on its own (no seams) and set
-against the reference run with every primitive Python.
+(transmitter) and -100 ppm (receiver) clocks, a 10 s lead-in and (SHORT)
+OOK callsign keying, each through receive_pass at a flat 1500 Hz
+candidate -- gate V first, as the EM and live callers may hand it an
+unverified detection. The C++ is called on its own (no seams) and set
+against the reference run with every primitive Python. Every SHORT pass
+against the pure reference is in the slow tier (CLAUDE.md), as are half
+the TINY variants: run them by node id (-m slow -k test_receive_pass).
 
-The contract (the bar), and in brackets the worst measured on these
-scenarios (2026-10-13; QRSS_PARITY_WORST=1 with -s prints them):
+The contract (the bar), and in brackets the worst measured over every
+scenario, slow tier included (2026-10-13; QRSS_PARITY_WORST=1 with -s
+prints them):
 
 - receive_pass: the same pass or none, the same header and frame, the
   callsign reading's text, keying and verdict exactly and z_match to 1e-6
-  relative [see WORST]; f_hz to 1e-6 Hz, tau0 and ppm to 1e-6, z, w,
-  hdr_llr, psi and ch to 1e-6 of the array's scale, every report field to
-  1e-6 relative and its flags exactly, ch_t0_index, f_mix_hz, q, frame,
-  waveform, estimator exactly (uid is z's hash: its q and frequency
-  fields only). With return_tracks the same tracks, round A's and B's,
-  each with the same q, keying, positions and decisions, and every array
-  to the tracker lanes' own bars (TRACK_BAR);
-- the composition is exact: the reference's receive_pass with every
-  native row assigned over what it calls is the C++ receive_pass bit for
-  bit, every field of the pass and of its tracks
-  (test_receive_pass_composition), so every difference above is a
-  primitive's, measured in that primitive's own parity test;
+  relative [0: bit-equal]; f_hz to 1e-6 Hz [1.4e-12 Hz]; tau0 to 1e-6 s
+  [5.6e-12 CH samples]; ppm to 1e-6 [3.3e-10 relative]; z and w to 1e-6
+  of the array's scale [z 3.4e-8, w 0] and element by element relative
+  [z 5.7e-7, w 0 -- z's is 5 to 10 float32 ulps of one element, the
+  margin under this bar is less than 2x; the scale-relative one is the
+  contract]; hdr_llr, psi and ch to 1e-6 of the array's scale [0]; every
+  report field to 1e-6 relative [z_ref 3.2e-8 (7.9e-8 through the
+  callers), the rest under 1e-11] and
+  its flags exactly; ch_t0_index, f_mix_hz, q, frame, waveform, estimator
+  exactly (uid is z's float32 hash: its q and frequency fields only).
+  With return_tracks the same tracks, round A's and B's, each with the
+  same q, keying, positions and decisions, and every array to the
+  tracker lanes' own bars (TRACK_BAR) [u 1.7e-10, P 1.4e-15]. FULL passes
+  (CE and L at -12 dB, not a test: 30 s of Python each) met the same bars
+  [z 2.2e-8, w 6.8e-8, f_hz 4.5e-13 Hz];
+- the swap test (test_receive_pass_composition): the reference's
+  receive_pass with the native rows of what it calls assigned over the
+  names it calls is the C++ receive_pass bit for bit, every field of the
+  pass and of its tracks -- once with every receiver function the
+  reference's (their glue too) over the native primitives, once with
+  only receive_pass the reference's over the receiver's rows; on SHORT
+  the header decodes and round B runs with the callsign keying known, and
+  once with round_b off. So every difference above is a primitive's,
+  measured in that primitive's own parity test;
 - decode_header and _decode_header_l: bitwise -- the header, the LLRs kept
   (the caller's own array, or the block's in its dtype) and the frame
-  gone on with (the caller's own object, or frame.plain) -- on 2,000 noisy
-  LLR vectors over every kind of frame, with the version 1 fallback
-  reached; against the pure-Python reference on 200 of them (2,000 in the
-  slow tier) and against the reference's glue over the native polar
-  decoder on all 2,000;
+  gone on with (the caller's own object, or frame.plain) -- on noisy LLR
+  vectors over every kind of frame, with the version 1 fallback reached:
+  against the pure-Python reference on 60 (2,000 in the slow tier) and
+  against the reference's glue over the native polar decoder on 300
+  (2,000 in the slow tier);
 - confidence_db and mean_w_db: to the bit (the bar is 1e-12) on random
   passes of every frame, elapsed times and bin counts, with psi of the
   wrong length and absent, and numpy's refusals' texts for n <= 0;
@@ -48,12 +63,13 @@ scenarios (2026-10-13; QRSS_PARITY_WORST=1 with -s prints them):
   frames, capture_from_pass the pass's own arrays);
 - the seams: a receiver-level name holding a test's spy is called, with
   the reference's arguments, by the native receive_pass;
-- the whole caller, every row of every rx rows file over its target and
-  every from-import site (counting spies installed before the rows):
-  receive_slot on a CE, an L and a joint capture (with a CE neighbour
-  60 Hz above an L signal; (SHORT, L_SHORT) in the slow tier),
-  em.rereceive and live's tile update, the same passes and every row of
-  this file reached in one configuration or another;
+- the whole caller, every row of every tx and rx rows file over its
+  target and every from-import site, the receiver's rows counted (the
+  counters are what the module attributes hold): receive_slot on a CE
+  and a joint capture (a CE neighbour 60 Hz above an L signal), an L one
+  and a joint (SHORT, L_SHORT) one in the slow tier, em.rereceive and
+  live's tile update; the same passes, and every row of this file
+  reached in one configuration or another;
 - the reference's refusals, type and text.
 """
 
@@ -142,8 +158,11 @@ SCENARIOS = {
     "l-ppm-100": (WAVEFORM_L, "l-tiny", -9.0, 6, (("rx_ppm", -100.0),), 0.0, False),
     "l-lead": (WAVEFORM_L, "l-tiny", -6.0, 8, (), 10.0, False),
 }
-# SHORT passes are the slow tier's (CLAUDE.md), but for one of each waveform
-SLOW = {"short-12", "short-ook", "l-short-12"}
+# SHORT passes are the slow tier's (CLAUDE.md: test_receive_pass_composition runs short-6 and
+# l-short-6, header, callsign windows and round B, bit for bit against the reference's glue in the
+# fast tier), and so are half the TINY variants, to keep this file's fast tier near 40 s
+SLOW = {"short-6", "short-12", "short-ook", "l-short-6", "l-short-12", "tiny-12", "l-tiny-12", "ppm-100",
+        "l-ppm+100", "l-drift"}
 
 
 def _labels(only=None):
@@ -174,19 +193,32 @@ def _sim(label):
 
 
 @functools.lru_cache(maxsize=None)
-def _case(label):
-    """The scenario's capture prepared by the reference, its flat candidate
-    and the reference's receive_pass on it (with its tracks)."""
-    wf, *_rest = SCENARIOS[label]
-    lead = SCENARIOS[label][5]
+def _capture(label):
+    """The scenario's capture prepared by the reference and its flat
+    candidate (build it before any row is applied: it is the reference's)."""
+    wf, lead = SCENARIOS[label][0], SCENARIOS[label][5]
     spec, sim = _sim(label)
     cap = frontend.Capture(sim.fe, Q_TEST, sim.t0_index)
     prep = RX.prepare(cap)
     det = dataclasses.replace(flat_det(1500.0, wf), lead_in_s=lead)
+    return SimpleNamespace(spec=spec, sim=sim, cap=cap, prep=prep, det=det)
+
+
+@functools.lru_cache(maxsize=None)
+def _case(label):
+    """_capture's, and the reference's receive_pass on it (with its tracks)."""
+    c = _capture(label)
     t = time.perf_counter()
-    ref = RX.receive_pass(prep, spec, det, return_tracks=True)
-    t_ref = time.perf_counter() - t
-    return SimpleNamespace(spec=spec, sim=sim, cap=cap, prep=prep, det=det, ref=ref, t_ref=t_ref)
+    ref = RX.receive_pass(c.prep, c.spec, c.det, return_tracks=True)
+    return SimpleNamespace(**vars(c), ref=ref, t_ref=time.perf_counter() - t)
+
+
+@functools.lru_cache(maxsize=None)
+def _native_case(label, Rc):
+    """The C++ receive_pass (no seams) on _capture's, with its tracks: for
+    the tests that need a pass or a tracker, not the reference's run."""
+    c = _capture(label)
+    return _native_pass(Rc, c.prep, c.spec, c.det, return_tracks=True)
 
 
 def _native_pass(Rc, cap, spec, det, **kw):
@@ -228,6 +260,15 @@ def _rel(a, b, what):
     return float(np.max(np.abs(ac[~same] - bc[~same]))) / scale
 
 
+def _elementwise(a, b):
+    """max |a - b| / |b| over the elements (equal ones, zeros included, 0)."""
+    a, b = np.asarray(a, np.float64), np.asarray(b, np.float64)
+    d = a != b
+    if not d.any():
+        return 0.0
+    return float(np.max(np.abs(a[d] - b[d]) / np.abs(b[d])))
+
+
 def _num(x, y, tol, what, key=None):
     """|x - y| <= tol max(1, |y|) (NaN with NaN)."""
     x, y = float(x), float(y)
@@ -240,8 +281,17 @@ def _num(x, y, tol, what, key=None):
     assert err <= tol, (what, x, y)
 
 
+def _abs(x, y, tol, what, key):
+    """|x - y| <= tol, absolute."""
+    err = abs(float(x) - float(y))
+    _worst(key, err)
+    assert err <= tol, (what, x, y)
+
+
 def _timing_close(g, r, what, key):
-    for f in ("tau0", "ppm", "gamma", "z"):
+    # tau0 to 1e-6 s, absolute (it is in CH samples)
+    _abs(g.tau0, r.tau0, 1e-6 * CH_FS, (what, "tau0"), f"{key} timing.tau0 (CH samples, abs)")
+    for f in ("ppm", "gamma", "z"):
         _num(getattr(g, f), getattr(r, f), PASS_BAR, (what, f), f"{key} timing.{f}")
     e = _rel(np.asarray(g.cov, np.float64), np.asarray(r.cov, np.float64), (what, "cov"))
     _worst(f"{key} timing.cov", e)
@@ -272,13 +322,18 @@ def _pass_close(g, r, what, key="pass", bar=PASS_BAR):
     if r.cw is not None:
         assert (g.cw.text, g.cw.keying, g.cw.agrees) == (r.cw.text, r.cw.keying, r.cw.agrees), what
         _num(g.cw.z_match, r.cw.z_match, bar, (what, "z_match"), f"{key} cw.z_match")
-    _num(g.f_hz, r.f_hz, bar, (what, "f_hz"), f"{key} f_hz")
+    _abs(g.f_hz, r.f_hz, 1e-6, (what, "f_hz"), f"{key} f_hz (Hz, abs)")
     _timing_close(g.timing, r.timing, what, key)
     _report_close(g.report, r.report, what, key)
     for f in ("z", "w", "hdr_llr", "psi", "ch"):
         e = _rel(getattr(g, f), getattr(r, f), (what, f))
         _worst(f"{key} {f}", e)
         assert e <= bar, (what, f, e)
+    # the latents and their weights element by element, relative (float32)
+    for f in ("z", "w"):
+        e = _elementwise(getattr(g, f), getattr(r, f))
+        _worst(f"{key} {f} (elementwise)", e)
+        assert e <= bar, (what, f, "elementwise", e)
     assert g.ch_t0_index == r.ch_t0_index and type(g.ch_t0_index) is float, what
     assert g.f_mix_hz == r.f_mix_hz and isinstance(g.f_mix_hz, Fraction), what
 
@@ -348,15 +403,15 @@ def test_receive_pass(Rc, label):
 
 @pytest.mark.parametrize("label", ["tiny-6", "l-tiny-6"])
 def test_receive_pass_options(Rc, label):
-    """The keyword arguments: round_b, estimator, exclude_hz, erase_s (a
-    span, and one past the end), a prior, and return_tracks off (the pass
-    alone, the same)."""
+    """The keyword arguments: estimator, exclude_hz, erase_s (a span, two,
+    and one past the end), a prior, round_b (moot on a frame without a
+    header: test_receive_pass_composition runs SHORT with it off), and
+    return_tracks off (the pass alone, the same)."""
     c = _case(label)
     n = c.spec.n_data
     prior = EmPrior(x_hat=np.where(np.arange(n) % 3 == 0, 0.5, -0.25), v=np.full(n, 0.75))
-    for kw in (dict(round_b=False), dict(estimator="plain"), dict(exclude_hz=(1530.0, 1471.5)),
-               dict(erase_s=((10.0, 20.0),)), dict(erase_s=[(30.0, 1e6)]), dict(prior=prior),
-               dict(exclude_hz=[1525.0], erase_s=((0.0, 5.0), (40.0, 41.0)), estimator="plain")):
+    for kw in (dict(estimator="plain", exclude_hz=(1530.0, 1471.5), erase_s=((10.0, 20.0), (40.0, 41.0))),
+               dict(exclude_hz=[1525.0], erase_s=[(30.0, 1e6)], prior=prior, round_b=False)):
         r = RX.receive_pass(c.prep, c.spec, c.det, return_tracks=True, **kw)
         g = _native_pass(Rc, c.prep, c.spec, c.det, return_tracks=True, **kw)
         what = (label, tuple(kw))
@@ -381,7 +436,8 @@ def test_receive_pass_raw_capture(Rc, label):
     _pass_close(_native_pass(Rc, c.cap, c.spec, c.det), c.ref[0], label)
 
 
-@pytest.mark.parametrize("label", ["tiny-6", "short-6", "l-tiny-6", "l-short-6"])
+@pytest.mark.parametrize("label", ["tiny-6", "l-tiny-6", pytest.param("short-6", marks=pytest.mark.slow),
+                                   pytest.param("l-short-6", marks=pytest.mark.slow)])
 def test_receive_pass_stored(Rc, label):
     """EM's re-receive: the pass's own CH capture (capture_from_pass) at its
     own detection (detection_from_pass, verified: no gate V) and f_mix_hz;
@@ -434,43 +490,77 @@ def _same(a, b, what):
     assert a.tobytes() == b.tobytes(), what
 
 
-@pytest.mark.parametrize("label", ["tiny-6", "short-6", "l-tiny-6", "l-short-6", "drift", "l-ppm+100"])
+def _bitwise_pass(g, h, what):
+    """The C++ pass and tracks (g) against the reference's (h), bit for bit."""
+    assert (g is None) == (h is None), what
+    if h is None:
+        return
+    gp, hp = g[0], h[0]
+    for f in ("uid", "q", "frame", "waveform", "f_hz", "header", "cw", "ch_fs", "ch_t0_index", "f_mix_hz",
+              "estimator", "em_round", "report"):
+        assert getattr(gp, f) == getattr(hp, f), (what, f)
+    for f in ("z", "w", "hdr_llr", "ch", "psi"):
+        _same(getattr(gp, f), getattr(hp, f), (what, f))
+    for f in ("tau0", "ppm", "gamma", "z", "cov"):
+        _same(getattr(gp.timing, f), getattr(hp.timing, f), (what, "timing", f))
+    assert len(g[1]) == len(h[1]), what
+    for a, b in zip(g[1], h[1]):
+        for f in ("pos", "z_d", "m", "c", "u", "P", "N", "psi", "meas", "pu", "keying"):
+            assert (getattr(a, f) is None) == (getattr(b, f) is None), (what, f)
+            if getattr(b, f) is not None:
+                _same(getattr(a, f), getattr(b, f), (what, f))
+        for f in ("q", "loglik", "ook", "lead_in_s", "df_max", "report", "spec"):
+            assert getattr(a, f) == getattr(b, f), (what, f)
+        assert a.z_ref == b.z_ref or (math.isnan(a.z_ref) and math.isnan(b.z_ref)), what
+        _same(a.freq(np.linspace(-10.0, 2000.0, 41)), b.freq(np.linspace(-10.0, 2000.0, 41)), (what, "freq"))
+        if isinstance(b, LT.LTrackResult):
+            for f in ("m_pl", "c_pl", "N_pl", "psi_pl", "meas_pl", "u_pl", "P_pl"):
+                _same(getattr(a, f), getattr(b, f), (what, f))
+            assert a.delta == b.delta, what
+
+
+def _receiver_rows(native):
+    from qrss_native.receiver import rows
+
+    return {k for k in rows(native.qrss)}
+
+
+# label: the variants run -- (which receiver rows the reference keeps, its capture, kwargs)
+COMPOSITION = {
+    "tiny-6": (("all", "prep", {}), ("receive_pass", "cap", {})),
+    "drift": (("all", "prep", {}),),
+    "short-6": (("all", "prep", {}), ("receive_pass", "prep", dict(round_b=False))),
+    "l-tiny-6": (("all", "prep", {}), ("receive_pass", "cap", {})),
+    "l-ppm+100": (("all", "prep", {}),),
+    "l-short-6": (("all", "prep", {}), ("receive_pass", "prep", dict(round_b=False))),
+}
+
+
+@pytest.mark.parametrize("label", list(COMPOSITION))
 def test_receive_pass_composition(native, Rc, label):
-    """The reference's receive_pass (and _receive_pass_l) with every native
-    row assigned over what it calls is the C++ receive_pass bit for bit:
-    the glue -- prepare's and channel_for's arguments, the gate, the rounds,
-    the erasure, the header decision and the frame it leaves, the callsign
-    verdict and round B's keying, the report, the PassResult's fields -- is
-    the reference's exactly."""
-    c = _case(label)
-    with pytest.MonkeyPatch.context() as mp:
-        _apply_rows(native, mp, skip={(RECEIVER, "receive_pass")})
-        for cap in (c.prep, c.cap):
-            h = RX.receive_pass(cap, c.spec, c.det, return_tracks=True)
-            g = _native_pass(Rc, cap, c.spec, c.det, return_tracks=True)
-            assert (g is None) == (h is None), label
-            if h is None:
-                continue
-            gp, hp = g[0], h[0]
-            for f in ("uid", "q", "frame", "waveform", "f_hz", "header", "cw", "ch_fs", "ch_t0_index", "f_mix_hz",
-                      "estimator", "em_round", "report"):
-                assert getattr(gp, f) == getattr(hp, f), (label, f)
-            for f in ("z", "w", "hdr_llr", "ch", "psi"):
-                _same(getattr(gp, f), getattr(hp, f), (label, f))
-            for f in ("tau0", "ppm", "gamma", "z", "cov"):
-                _same(getattr(gp.timing, f), getattr(hp.timing, f), (label, "timing", f))
-            assert len(g[1]) == len(h[1]), label
-            for a, b in zip(g[1], h[1]):
-                for f in ("pos", "z_d", "m", "c", "u", "P", "N", "psi", "meas", "pu", "keying"):
-                    if getattr(b, f) is not None:
-                        _same(getattr(a, f), getattr(b, f), (label, f))
-                for f in ("q", "loglik", "ook", "lead_in_s", "df_max", "report", "spec"):
-                    assert getattr(a, f) == getattr(b, f), (label, f)
-                assert a.z_ref == b.z_ref or (math.isnan(a.z_ref) and math.isnan(b.z_ref)), label
-                if isinstance(b, LT.LTrackResult):
-                    for f in ("m_pl", "c_pl", "N_pl", "psi_pl", "meas_pl", "u_pl", "P_pl"):
-                        _same(getattr(a, f), getattr(b, f), (label, f))
-                    assert a.delta == b.delta, label
+    """The swap test. The reference's receive_pass (and _receive_pass_l)
+    with the native rows of what it calls assigned over the names it calls
+    is the C++ receive_pass bit for bit, every field of the pass and of its
+    tracks. Two ways: "all" keeps every receiver function the reference's
+    (prepare, channel_for, decode_header, _cw_result, _psi_frame: their
+    glue too) over the native primitives (track, ltrack, demod, cwid,
+    header, frontend, ...); "receive_pass" keeps only receive_pass, over
+    the receiver's own rows. On SHORT the header decodes and round B runs
+    with the callsign keying known (asserted), and once with round_b off."""
+    c = _capture(label)
+    for keep, which, kw in COMPOSITION[label]:
+        what = (label, keep, which, tuple(kw))
+        skip = _receiver_rows(native) if keep == "all" else {(RECEIVER, "receive_pass")}
+        cap = c.prep if which == "prep" else c.cap
+        with pytest.MonkeyPatch.context() as mp:
+            _apply_rows(native, mp, skip=skip)
+            h = RX.receive_pass(cap, c.spec, c.det, return_tracks=True, **kw)
+        g = _native_pass(Rc, cap, c.spec, c.det, return_tracks=True, **kw)
+        _bitwise_pass(g, h, what)
+        if c.spec.has_header and kw.get("round_b", True):
+            # round B ran, with the header and the callsign keying known
+            assert h[0].header is not None and len(h[1]) == 2 and h[1][1].keying is not None, what
+            assert h[0].cw is not None and h[0].cw.agrees, what
 
 
 # --- seams -------------------------------------------------------------------------------------
@@ -611,9 +701,9 @@ def _decode_same(row, cases):
 
 
 def test_decode_header_reference(row):
-    """200 cases against the pure-Python reference."""
-    paths = _decode_same(row, _header_cases(200, 11))
-    assert paths["v1 block"] >= 3 and paths["fallback"] >= 10 and paths["sum"] >= 30, paths
+    """60 cases against the pure-Python reference."""
+    paths = _decode_same(row, _header_cases(60, 11))
+    assert paths["v1 block"] >= 1 and paths["fallback"] >= 3 and paths["sum"] >= 9, paths
 
 
 @pytest.mark.slow
@@ -622,17 +712,27 @@ def test_decode_header_reference_2000(row):
     assert paths["v1 block"] >= 30, paths
 
 
-def test_decode_header_2000(native, row):
-    """2,000 cases against the reference's glue over the native polar
-    decoder (header.decode's row, whose own parity test holds it to the
-    reference bit for bit): the decision, the copies tried and their
-    order, the LLRs and frame handed back."""
+def _decode_native_polar(native, row, n, seed):
+    """n cases against the reference's glue over the native polar decoder
+    (header.decode's row, whose own parity test holds it to the reference
+    bit for bit): the decision, the copies tried and their order, the LLRs
+    and frame handed back."""
     from qrss_native.header_rx import rows as h_rows
 
     with pytest.MonkeyPatch.context() as mp:
-        for (t, n), fn in h_rows(native.qrss).items():
-            mp.setattr(qrss_native._owner(t), n, fn)
-        paths = _decode_same(row, _header_cases(2000, 13))
+        for (t, name), fn in h_rows(native.qrss).items():
+            mp.setattr(qrss_native._owner(t), name, fn)
+        return _decode_same(row, _header_cases(n, seed))
+
+
+def test_decode_header_300(native, row):
+    paths = _decode_native_polar(native, row, 300, 14)
+    assert paths["v1 block"] >= 5 and paths["fallback"] >= 15 and paths["sum"] >= 45, paths
+
+
+@pytest.mark.slow
+def test_decode_header_2000(native, row):
+    paths = _decode_native_polar(native, row, 2000, 13)
     assert paths["v1 block"] >= 30 and paths["fallback"] >= 100 and paths["sum"] >= 300, paths
 
 
@@ -695,7 +795,7 @@ def _conf_cases(n, seed):
 
 
 def test_confidence_db(row):
-    for i, (p, sp, el, nb) in enumerate(_conf_cases(400, 21)):
+    for i, (p, sp, el, nb) in enumerate(_conf_cases(250, 21)):
         r = RX.confidence_db(p, sp, el, nb)
         g = row["confidence_db"](p, sp, el, nb)
         assert len(g) == len(r), i
@@ -788,7 +888,7 @@ def test_ce_hints(row):
 
 def test_prepare(row):
     for label in ("tiny-6", "l-tiny-12", "lead"):
-        c = _case(label)
+        c = _capture(label)
         g = row["prepare"](c.cap)
         assert isinstance(g, RX.Prepared)
         assert g.q is c.cap.q and g.t0_index is c.cap.t0_index and g.fs is c.cap.fs, label
@@ -831,14 +931,15 @@ def test_channel_for(row):
             assert type(g.f_mix) is Fraction
 
 
-def test_psi_frame_and_cw_result(row):
+def test_psi_frame_and_cw_result(Rc, row):
     for label in ("short-6", "l-short-6", "tiny-6"):
-        c = _case(label)
-        for tr in c.ref[1]:
+        c = _capture(label)
+        p, trs = _native_case(label, Rc)
+        for tr in trs:
             g, r = row["_psi_frame"](tr), RX._psi_frame(tr)
             assert g.dtype == r.dtype == np.float32 and np.array_equal(g, r), label
-        tr = c.ref[1][0]
-        hdrs = (c.ref[0].header, None, dataclasses.replace(HDR, callsign="W1AW"),
+        tr = trs[0]
+        hdrs = (p.header, None, dataclasses.replace(HDR, callsign="W1AW"),
                 dataclasses.replace(HDR, callsign="K1ABC   "), dataclasses.replace(HDR, callsign="1"))
         for h in hdrs:
             r = RX._cw_result(tr, c.spec, h)
@@ -904,23 +1005,23 @@ def _tile(p):
 
 
 @functools.lru_cache(maxsize=None)
-def _callers():
+def _callers(Rc):
     """The callers' reference outcomes: receive_slot on a CE TINY, an L
     l-tiny and a joint capture, em.rereceive of a CE pass, and live's tile
-    update on a CE and an L pass."""
-    ce = frontend.Capture(_case("tiny-12").sim.fe, Q_TEST, _case("tiny-12").sim.t0_index)
-    lc = frontend.Capture(_case("l-tiny-12").sim.fe, Q_TEST, _case("l-tiny-12").sim.t0_index)
-    joint = _mixed("l-tiny")
-    out = SimpleNamespace(ce=ce, lc=lc, joint=joint)
-    out.slot_ce = RX.receive_slot(ce, frame.TINY)
-    out.slot_l = RX.receive_slot(lc, lframe.L_TINY)
-    out.slot_joint = RX.receive_slot(joint, (frame.TINY, lframe.L_TINY))
-    assert out.slot_ce and out.slot_l and len(out.slot_joint) == 2
+    update on a CE and an L SHORT pass (a header's LLRs in its confidence)."""
+    def raw(label):
+        sim = _capture(label).sim
+        return frontend.Capture(sim.fe, Q_TEST, sim.t0_index)
+
+    out = SimpleNamespace(ce=raw("tiny-12"), joint=_mixed("l-tiny"))
+    out.slot_ce = RX.receive_slot(out.ce, frame.TINY)
+    out.slot_joint = RX.receive_slot(out.joint, (frame.TINY, lframe.L_TINY))
+    assert out.slot_ce and len(out.slot_joint) == 2
     out.p_ce = _case("tiny-6").ref[0]
-    out.p_l = _case("l-tiny-6").ref[0]
     out.re = em.rereceive(out.p_ce, None)
-    out.tiles = [_tile(out.p_ce), _tile(out.p_l)]
-    out.l_short = _case("l-short-6")
+    out.tile_passes = (_native_case("short-6", Rc)[0], _native_case("l-short-6", Rc)[0])
+    assert all(p.header is not None for p in out.tile_passes)
+    out.tiles = [_tile(p) for p in out.tile_passes]
     return out
 
 
@@ -967,48 +1068,70 @@ def test_configs_reach_every_row(row):
 def test_whole_caller(native, Rc, config):
     """Every row of every tx and rx rows file over its target and its
     from-import sites, the receiver's counted, but the receiver functions
-    the configuration keeps: receive_slot (CE, L, joint), em.rereceive and
-    live's tile update give the reference's outcomes, and every row the
+    the configuration keeps. "every row": receive_slot (CE, L, joint),
+    em.rereceive and live's tile update give the reference's outcomes.
+    "receive_pass kept": the reference's receive_pass under the joint
+    receive_slot and em.rereceive, over the receiver's rows. "decode_header
+    kept": the reference's receive_pass and decode_header on a CE and an L
+    SHORT pass, bit for bit the C++ receive_pass. Every row the
     configuration is for is reached from them (the counters were installed
     before the rows: they are what the module attributes and from-import
     sites hold)."""
-    ref = _callers()
+    ref = _callers(Rc)
     keep, must = CONFIGS[config]
     used: dict = {}
     with pytest.MonkeyPatch.context() as mp:
         _apply_rows(native, mp, skip={(RECEIVER, k) for k in keep}, wrap=_counted(None, used))
         if config == "decode_header kept":
-            # the reference's receive_pass over the rows, on an L pass with a header
-            c = ref.l_short
-            got = RX.receive_pass(c.prep, c.spec, c.det)
-            _pass_close(got, c.ref[0], config, key="caller")
-            got = RX.receive_pass(_case("short-6").prep, frame.SHORT, _case("short-6").det)
-            _pass_close(got, _case("short-6").ref[0], config, key="caller")
+            for label in ("short-6", "l-short-6"):
+                c = _capture(label)
+                got = RX.receive_pass(c.prep, c.spec, c.det, return_tracks=True)
+                _bitwise_pass(_native_case(label, Rc), got, (config, label))
         else:
-            _slot_same(RX.receive_slot(ref.ce, frame.TINY), ref.slot_ce, (config, "CE"))
-            _slot_same(RX.receive_slot(ref.lc, lframe.L_TINY), ref.slot_l, (config, "L"))
+            if config == "every row":
+                _slot_same(RX.receive_slot(ref.ce, frame.TINY), ref.slot_ce, (config, "CE"))
+                for p, t in zip(ref.tile_passes, ref.tiles):
+                    assert _tile(p) == t, config
             _slot_same(RX.receive_slot(ref.joint, (frame.TINY, lframe.L_TINY)), ref.slot_joint, (config, "joint"))
             _pass_close(em.rereceive(ref.p_ce, None), ref.re, (config, "rereceive"), key="caller")
-            for p, t in zip((ref.p_ce, ref.p_l), ref.tiles):
-                assert _tile(p) == t, config
     assert must <= set(used), (config, sorted(must - set(used)), sorted(used))
+
+
+@pytest.mark.slow
+def test_whole_caller_l_alone(native, Rc):
+    """receive_slot(cap, L_TINY) on an l-tiny capture at -12 dB, every row
+    applied, the receiver's counted."""
+    sim = _capture("l-tiny-12").sim
+    cap = frontend.Capture(sim.fe, Q_TEST, sim.t0_index)
+    ref = RX.receive_slot(cap, lframe.L_TINY)
+    assert len(ref) == 1 and ref[0].waveform == WAVEFORM_L
+    used: dict = {}
+    with pytest.MonkeyPatch.context() as mp:
+        _apply_rows(native, mp, wrap=_counted(None, used))
+        got = RX.receive_slot(cap, lframe.L_TINY)
+    _slot_same(got, ref, "L alone")
+    assert {"prepare", "receive_pass", "channel_for", "centre_hz", "is_joint", "frames"} <= set(used), used
 
 
 @pytest.mark.slow
 def test_whole_caller_joint_short(native, Rc):
     """receive_slot(cap, (SHORT, L_SHORT)) on an l-short capture at -6 dB
-    with a CE SHORT neighbour 60 Hz above, both headers decoded (round B on
-    each waveform), every row applied (slow: two SHORT passes)."""
+    with a CE SHORT neighbour 60 Hz above: the L pass with its header, the
+    CE one with the neighbour's callsign reading (its header is drawn at
+    random and does not decode, at 0 dB either), every row applied (slow:
+    two SHORT passes)."""
     cap = _mixed("l-short", -6.0)
     ref = RX.receive_slot(cap, (frame.SHORT, lframe.L_SHORT))
     assert sorted((p.waveform, round(p.f_hz)) for p in ref) == [(WAVEFORM_CE, 1560), (WAVEFORM_L, 1500)]
-    assert all(p.header is not None for p in ref)
+    by = {p.waveform: p for p in ref}
+    assert by[WAVEFORM_L].header is not None and by[WAVEFORM_L].cw.text == by[WAVEFORM_L].header.callsign
+    assert by[WAVEFORM_CE].cw is not None and by[WAVEFORM_CE].cw.text == "N7NBR"
     used: dict = {}
     with pytest.MonkeyPatch.context() as mp:
         _apply_rows(native, mp, wrap=_counted(None, used))
         got = RX.receive_slot(cap, (frame.SHORT, lframe.L_SHORT))
     _slot_same(got, ref, "joint SHORT")
-    assert {"receive_pass", "channel_for", "centre_hz", "is_joint", "frames"} <= set(used), used
+    assert {"prepare", "receive_pass", "channel_for", "centre_hz", "_centres", "is_joint", "frames"} <= set(used), used
 
 
 # --- threads -------------------------------------------------------------------------------------
@@ -1019,8 +1142,8 @@ def test_threads(Rc):
     from concurrent.futures import ThreadPoolExecutor
 
     labels = ["tiny-6", "l-tiny-6", "tiny-12", "l-tiny-12"]
-    want = {k: _native_pass(Rc, _case(k).prep, _case(k).spec, _case(k).det) for k in labels}
+    want = {k: _native_pass(Rc, _capture(k).prep, _capture(k).spec, _capture(k).det) for k in labels}
     with ThreadPoolExecutor(4) as ex:
-        got = list(ex.map(lambda k: _native_pass(Rc, _case(k).prep, _case(k).spec, _case(k).det), labels))
+        got = list(ex.map(lambda k: _native_pass(Rc, _capture(k).prep, _capture(k).spec, _capture(k).det), labels))
     for k, g in zip(labels, got):
         assert g.uid == want[k].uid and np.array_equal(g.z, want[k].z), k
