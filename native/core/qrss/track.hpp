@@ -27,10 +27,15 @@
 //   convolution), _smooth (np.convolve sums through BLAS ddot), np.angle
 //   (numpy's SIMD arctan2), polyfit and the linear algebra (math/linalg's
 //   Jacobi and LU for LAPACK). So `track`, `refine_timing`, `_recenter`
-//   and `report` agree to ~1e-12 relative; every decision they take is the
+//   and `report` agree to rounding, and every decision they take is the
 //   reference's (the same q, the same Newton branch, the same breaks) on
 //   any input whose deciding values are not within rounding of a
-//   threshold.
+//   threshold. How far "rounding" carries: m, c, N, psi ~1e-11; u ~1e-9
+//   and P up to ~1e-6 relative on real passes, because the Kalman pass
+//   amplifies an ulp in the process noise Pu (the smoother's mean, a BLAS
+//   sum) about 1e9-fold -- its diffuse initial velocity variance cancels
+//   down to q Pu. On the inputs the C++ run measured, the reference's own
+//   kalman_rts returns this run's u, P and loglik to the bit.
 //
 // Errors are the reference's types: frame::WrongWaveform for a CE-only
 // function given an L frame ("track.X is CE's; 'name' is waveform 1: use
