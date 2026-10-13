@@ -1,7 +1,7 @@
-// The transmit pipeline, the slot part: what one pass of a stored picture
-// or a beacon file sends in slot q, for waveform CE and waveform L (design
-// section 3). Port of sstvae/qrss/tx.py (the reference) without
-// transmit_audio, which lands with the CE and L audio (ce, lwave).
+// The transmit pipeline: what one pass of a stored picture or a beacon
+// file sends in slot q, and its 8 kHz audio, for waveform CE and waveform
+// L (design section 3). Port of sstvae/qrss/tx.py (the reference), with
+// transmit_audio as a streaming PassAudio (below).
 //
 // A format module. A pass of segment g in slot q sends
 //
@@ -24,9 +24,11 @@
 #define SSTVAE_QRSS_TX_HPP
 
 #include <complex>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <variant>
 #include <vector>
@@ -36,6 +38,7 @@
 #include "qrss/frame.hpp"
 #include "qrss/header.hpp"
 #include "qrss/picture.hpp"
+#include "qrss/rational.hpp"
 
 namespace sstvae::qrss::tx {
 
@@ -122,6 +125,167 @@ std::int64_t slot_samples(const frame::FrameSpec& spec, double pre_s = 12.0, dou
 // below the pilot) would leave it. `shown` is the carrier as the refusal
 // quotes it (default: Python's repr of the double).
 double check_pilot(double carrier_hz, const std::optional<std::string>& shown = std::nullopt);
+
+// --- the pass's audio: tx.transmit_audio, streamed ----------------------------------
+//
+// One pass of a stored picture or a beacon file in slot q as 8 kHz audio:
+// sample 0 is t0 - pre_s (the quarter hour + 1 s - pre_s) and the last is
+// pre_s + the keyed frame + post_s later (slot_samples). Waveform CE is
+// ce.baseband mixed to the carrier by ce.to_audio; waveform L is the whole
+// frame through the clipper (lwave.frame_baseband, at 250 Hz), interpolated
+// to 8 kHz (lwave.resample) and mixed to the pilot the same way.
+//
+// PassAudio produces any block of that audio on request, so a 30-minute
+// pass is never held in memory: CE holds its position values (a few
+// hundred KB) and evaluates every sample in closed form; L holds its
+// clipped 250 Hz frame (7 MB for l-full), built when the PassAudio is.
+// Every sample is computed on its own, so the audio does not depend on how
+// it is asked for -- any block size gives the same bits, and
+// transmit_audio is one render of the whole pass.
+//
+// How close to the reference: each sample is the reference's own
+// arithmetic (ce.baseband and ce.to_audio, lwave.resample), so CE is bit
+// for bit where ce's are (numpy's float64 sin/cos are libm's and its
+// complex multiply fused -- the reference platform) and within 1e-12
+// elsewhere; L carries the clipper's FFT rounding, within 1e-9. The
+// reference makes its audio in chunk_s pieces and ce.baseband in 2^18-sample
+// ones within those, leaving a chunk wholly outside the keyed span (and its
+// ramps) as +0; PassAudio reproduces that chunking for those zeros, so even
+// their signs are the reference's.
+
+// The carrier a pass is sent on, as transmit_audio's carrier_hz takes it:
+// a float (an --freq value; the audio is mixed to
+// Fraction(f).limit_denominator(2^20), ce.carrier_fraction), an integer, or
+// an exact Rational (a Fraction, taken as it is). The band checks test
+// float(carrier_hz) (`hz`), and a refusal quotes it as Python's str() would
+// (`shown`). For an L frame it is the pilot.
+class Carrier {
+public:
+    Carrier() : Carrier(1500) {}   // the reference's default, the int 1500
+    Carrier(double hz);            // NOLINT(google-explicit-constructor): a Python float
+    template <std::integral I>
+        requires(!std::same_as<I, bool>)
+    Carrier(I hz) : Carrier(static_cast<double>(hz), Rational(hz), std::to_string(hz)) {}  // NOLINT
+    Carrier(const Rational& hz);   // NOLINT(google-explicit-constructor): a Fraction
+    // Any other form (the binding's str or numpy scalar): float(carrier_hz),
+    // its exact fraction -- needed only once hz is inside the band, so it
+    // may be left unset outside it -- and its text. An unset fraction is
+    // the float's (ce.carrier_fraction(hz)).
+    Carrier(double hz, std::optional<Rational> exact, std::string shown);
+
+    double hz() const { return hz_; }
+    const std::string& shown() const { return shown_; }
+    // ce.carrier_fraction(carrier_hz): what the audio is mixed to.
+    Rational fraction() const;
+
+private:
+    double hz_ = 1500.0;
+    std::optional<Rational> exact_;
+    std::string shown_;
+};
+
+// One pass, as transmit_audio's arguments describe it.
+struct PassSpec {
+    std::uint64_t q = 0;                            // the slot (quarter-hour count): the scrambler
+    Carrier carrier;                                // Hz; L's pilot (default the int 1500)
+    frame::FrameSpec spec = frame::get("full");     // CE or L, which picks the waveform
+    std::optional<std::int64_t> segment;            // a stored picture's (default 0); a beacon file's own
+    std::optional<header::HeaderFields> header;     // a stored picture's header (its callsign keys the windows)
+    double lead_in_s = 0.0;                         // plain carrier before the preamble, 0..10 s
+    std::optional<bool> ook;                        // CE: on-off keyed windows (unset: the source's choice)
+    double pre_s = 12.0;                            // audio before t0: whole samples, covering the keying
+    double post_s = 3.0;                            // audio after the keying ends
+    double amplitude = 0.5;                         // peak of a unit-power baseband
+    double chunk_s = 120.0;                         // the reference's piece size (the zeros' signs; see above)
+    // How a refusal quotes an argument -- Python's str() of what the caller
+    // passed (the binding's). Unset: the value as Python's float repr.
+    struct Shown {
+        std::optional<std::string> segment, lead_in_s, pre_s;
+    } shown;
+};
+
+// The checks transmit_audio makes before it looks at the source, in its
+// order: an L frame refuses on-off keying ("waveform L keys its callsign
+// windows by FSK of its pilot; ..."), then the carrier is checked
+// (check_pilot for L, ce.check_carrier for CE).
+void check_pass_carrier(const frame::FrameSpec& spec, const Carrier& carrier, std::optional<bool> ook);
+
+// Everything transmit_audio settles before it needs q (the reference
+// converts q only when it precodes): the checks, then what the frame sends.
+struct PassPlan {
+    PassSpec pass;                                     // pass.q is not used
+    bool waveform_l = false;                           // the L path (lwave), else CE (ce)
+    SlotPlan slot;                                     // the first n_data air latents, the header bits
+    std::optional<std::vector<std::uint8_t>> keying;   // the callsign's CW_UNITS keying, or none
+    bool ook = false;                                  // CE: the windows on-off keyed
+};
+
+// transmit_audio up to its symbols, every refusal in the reference's order:
+// check_pass_carrier; the source's segment and header (_segment_and_header);
+// L: a beacon file that keys on and off; a frame with windows and no
+// callsign; pre_s not a whole number of samples; the lead-in (0..10 s);
+// pre_s not covering the keying start and its ramp; and slot_symbols'
+// own (n_data, a .qrsp without a header).
+PassPlan plan_pass(const Source& src, const PassSpec& pass);
+// tx._transmit_audio_l's entry: the L path whatever the frame, and no ook
+// check (it takes no ook). A CE frame fails where the reference's does,
+// in lwave (frame::WrongWaveform).
+PassPlan plan_pass_l(const Source& src, const PassSpec& pass);
+
+class PassAudio {
+public:
+    // The pass of `plan` in slot q: its symbols, then (L) its clipped frame,
+    // then the rest of the reference's checks -- slot_samples (NaN/inf
+    // post_s), chunk_s (int(chunk_s * 8000): NaN, inf), a negative length
+    // ("negative dimensions are not allowed") and, for a pass of any
+    // length, the keying's shape (ce.window_keying) and a carrier
+    // denominator past int64 / 8000.
+    PassAudio(const PassPlan& plan, std::uint64_t q);
+    // plan_pass(src, pass) in slot pass.q.
+    PassAudio(const Source& src, const PassSpec& pass);
+
+    std::int64_t size() const { return n_; }       // tx.slot_samples(spec, pre_s, post_s)
+    std::int64_t n_pre() const { return n_pre_; }  // samples before t0: round(pre_s * 8000)
+    std::int64_t position() const { return pos_; }
+    const frame::FrameSpec& spec() const { return spec_; }
+    bool waveform_l() const { return l_; }
+    const Rational& carrier() const { return carrier_; }   // what the audio is mixed to
+    std::int64_t chunk() const { return step_; }           // the reference's chunk, in samples
+
+    // Samples [i0, i0 + out.size()) of the pass, float64, or rounded once to
+    // float32 (numpy's astype). std::out_of_range unless inside [0, size()).
+    void render(std::int64_t i0, std::span<double> out) const;
+    void render(std::int64_t i0, std::span<float> out) const;
+    // The next samples from position(), up to out.size() of them (fewer at
+    // the end, none past it); returns how many and moves on by that much.
+    std::size_t read(std::span<double> out);
+    std::size_t read(std::span<float> out);
+    // Move position() to i, 0 <= i <= size() (std::out_of_range otherwise).
+    void seek(std::int64_t i);
+
+private:
+    template <typename T>
+    void render_any(std::int64_t i0, std::span<T> out) const;
+    // The CE baseband at samples [a, b), one reference chunk or part of one.
+    void ce_baseband(std::int64_t a, std::int64_t b, std::complex<double>* z) const;
+
+    frame::FrameSpec spec_;
+    bool l_ = false;
+    std::int64_t n_ = 0, n_pre_ = 0, step_ = 1, pos_ = 0;
+    Rational carrier_;
+    double amplitude_ = 0.5;
+    // CE
+    std::vector<double> vals_;              // the symbols at their positions (ce.at_positions)
+    std::optional<std::vector<std::uint8_t>> keying_;   // (n_win, 192), ce.window_keying
+    bool ook_ = false;
+    double lo_ = 0.0, hi_ = 0.0, ramp_ = 0.0;            // keyed span and ramp, in symbols
+    // L
+    std::vector<std::complex<double>> bb_;  // the clipped frame at 250 Hz from bb_n0_
+    std::int64_t bb_n0_ = 0, bb_fs_ = 0;
+};
+
+// tx.transmit_audio: the whole pass, float64[slot_samples] (one render).
+std::vector<double> transmit_audio(const Source& src, const PassSpec& pass);
 
 }  // namespace sstvae::qrss::tx
 
