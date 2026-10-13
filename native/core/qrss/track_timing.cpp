@@ -4,6 +4,7 @@
 #include "qrss/track_timing.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -223,7 +224,7 @@ SSTVAE_ALWAYS_INLINE void gather_impl(double* acc, const double* xp, std::size_t
 }
 
 #if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
-#define SSTVAE_AVX2_CLONE 1
+#define SSTVAE_GATHER_CLONE 1
 bool cpu_has_avx2() {
     static const bool has = [] {
         __builtin_cpu_init();
@@ -231,6 +232,8 @@ bool cpu_has_avx2() {
     }();
     return has;
 }
+// (An AVX-512F clone of the same loop measured no faster on an AVX-512
+// Xeon, eight-wide or four-wide, and an AVX-512 clock is the slower one.)
 __attribute__((target("avx2"))) void gather_avx2(double* acc, const double* xp, std::size_t n, double a, double w0,
                                                  double w1) {
     gather_impl(acc, xp, n, a, w0, w1);
@@ -238,7 +241,7 @@ __attribute__((target("avx2"))) void gather_avx2(double* acc, const double* xp, 
 #endif
 
 void gather(double* acc, const double* xp, std::size_t n, double a, double w0, double w1) {
-#ifdef SSTVAE_AVX2_CLONE
+#ifdef SSTVAE_GATHER_CLONE
     if (cpu_has_avx2()) {
         gather_avx2(acc, xp, n, a, w0, w1);
         return;
@@ -314,6 +317,8 @@ std::vector<double> fit_grid(std::span<const double> x, const Known& known, std:
                               std::isfinite(x[static_cast<std::size_t>(nx - 2)]) &&
                               std::isfinite(x[static_cast<std::size_t>(nx - 1)]);
     const auto based = static_cast<double>(base);
+    constexpr double TWO50 = 1125899906842624.0;
+    constexpr std::uint64_t EXP_MASK = 0x7ff0000000000000ULL, EXP_ONE = 0x0010000000000000ULL;
     std::vector<double> acc(nl);
     for (std::size_t i = 0; i < deltas.size(); ++i) {
         std::fill(acc.begin(), acc.end(), 0.0);
@@ -322,23 +327,39 @@ std::vector<double> fit_grid(std::span<const double> x, const Known& known, std:
             const double o = static_cast<double>(known.pos[k]) * sps * s + frac0;
             const double y = based + o;   // idx = y + j
             const double ak = a[k];
-            std::size_t j_fast = 0;       // y + j exact for j < j_fast
-            if (edges_finite && y >= 1.0 && y < 4503599627370496.0) {
-                const double B = std::ldexp(1.0, std::ilogb(y) + 1);
-                const double room = std::ceil(B - y);   // B - y is exact (y >= B / 2)
-                j_fast = room >= static_cast<double>(nl) ? nl : static_cast<std::size_t>(room);
+            if (!edges_finite) {
+                for (std::size_t j = 0; j < nl; ++j) acc[j] += ak * term_at(x, y + static_cast<double>(j));
+                continue;
             }
-            if (j_fast > 0) {
-                // floor(y + j) = floor(y) + j and f = y - floor(y) for all of them
-                const double fy = std::floor(y);
-                const auto i0b = static_cast<std::int64_t>(fy);
-                const double f = y - fy;
-                // valid while i0b + j + 1 < nx
-                const std::int64_t lim = nx - 1 - i0b;
-                const std::size_t j_ok = lim <= 0 ? 0 : std::min<std::size_t>(j_fast, static_cast<std::size_t>(lim));
-                if (j_ok > 0) gather(acc.data(), x.data() + i0b, j_ok, ak, 1.0 - f, f);
+            // Runs of lags over which y + j (rounded, as the reference adds
+            // it) is idx + (j - j0): within one binade of ulp <= 1/4 the
+            // rounding of y + j is the same for every integer j, so floor
+            // steps by one and f is constant -- a contiguous gather. A term
+            // outside x is a finite value times 0 and is skipped.
+            std::size_t j = 0;
+            while (j < nl) {
+                const double idx = y + static_cast<double>(j);
+                if (!(idx >= 1.0 && idx < TWO50)) {
+                    if (idx < 1.0) {   // below x, or its first sample: one at a time
+                        acc[j] += ak * term_at(x, idx);
+                        ++j;
+                        continue;
+                    }
+                    for (; j < nl; ++j) acc[j] += ak * term_at(x, y + static_cast<double>(j));
+                    break;
+                }
+                // B = 2^(e + 1) for idx in [2^e, 2^(e + 1)): idx's exponent bits, plus one
+                const double B = std::bit_cast<double>((std::bit_cast<std::uint64_t>(idx) & EXP_MASK) + EXP_ONE);
+                const double room = std::ceil(B - idx);   // B - idx is exact (idx >= B / 2)
+                const std::size_t run = room >= static_cast<double>(nl - j) ? nl - j : static_cast<std::size_t>(room);
+                const double fl = std::floor(idx);
+                const auto i0 = static_cast<std::int64_t>(fl);
+                const double f = idx - fl;
+                const std::int64_t lim = nx - 1 - i0;   // valid while i0 + (j' - j) + 1 < len(x)
+                const std::size_t n_ok = lim <= 0 ? 0 : std::min<std::size_t>(run, static_cast<std::size_t>(lim));
+                if (n_ok > 0) gather(acc.data() + j, x.data() + i0, n_ok, ak, 1.0 - f, f);
+                j += run;
             }
-            for (std::size_t j = j_fast; j < nl; ++j) acc[j] += ak * term_at(x, y + static_cast<double>(j));
         }
         double* row = Z.data() + i * nl;
         for (std::size_t j = 0; j < nl; ++j) row[j] = acc[j] / norm;
