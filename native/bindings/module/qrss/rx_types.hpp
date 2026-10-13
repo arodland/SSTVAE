@@ -25,6 +25,8 @@
 // The acquisition's records (acquire.py: "CarrierStats", "PreambleKind",
 // "PreambleHit", "_A2Input", "_A2Channel", "TbdHit", "Acquisition") are
 // here too, shared by the acquire_a12, acquire_tbd and acquire bindings.
+// So are the receiver's: its "Prepared" capture, and the raw
+// frontend.Capture it is made from (`prepared`, `capture`, `is_prepared`).
 // A line refined from an A1 cell carries its f_hz as an np.float64, as the
 // reference's does (`cell_to_py`).
 //
@@ -61,8 +63,10 @@
 #include "qrss/acquire.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/header.hpp"
+#include "qrss/frontend.hpp"
 #include "qrss/pyjson.hpp"
 #include "qrss/rational.hpp"
+#include "qrss/receiver.hpp"
 #include "qrss/trackbase.hpp"
 #include "qrss/types.hpp"
 
@@ -1045,6 +1049,60 @@ inline py::dict to_py(const acq::Acquisition& a) {
     d["hinted"] = hinted;
     d["pilots"] = pilots;
     return d;
+}
+
+// --- the receiver's records (receiver.hpp) ---------------------------------------------
+
+namespace rcv = sstvae::qrss::receiver;
+
+// Whether `o` is the receiver's Prepared (its class, or a "Prepared" dict):
+// receiver.prepare passes one through, as isinstance(cap, Prepared) does.
+inline bool is_prepared(const py::handle& o) { return type_name(o) == "Prepared"; }
+
+// A capture's samples as the native records hold them (complex64). At the
+// CH rate the reference uses them as they are, so anything but complex64
+// there is NotImplementedError rather than a silent rounding; at the FE
+// rate it casts them to complex64 itself (frontend.blank, make_chan).
+inline std::vector<std::complex<float>> capture_fe(const py::handle& fe, std::int64_t fs, const char* what) {
+    if (fs == sstvae::qrss::config::CH_FS) {
+        const py::array a = np_array(fe);
+        const std::string dt = py::str(a.attr("dtype")).cast<std::string>();
+        if (dt != "complex64")
+            not_implemented(std::string(what) + " at the CH rate with samples of dtype " + dt + " (complex64 only)");
+    }
+    return vec<std::complex<float>>(fe);
+}
+
+// receiver.Prepared: fe, keep (None: none), q, t0_index, fs.
+inline rcv::Prepared prepared(const py::handle& o) {
+    rcv::Prepared p;
+    p.fs = as_int(field(o, "fs"));
+    p.fe = capture_fe(field(o, "fe"), p.fs, "a Prepared capture");
+    p.keep = opt_vec<float>(field(o, "keep"));
+    p.q = as_int(field(o, "q"));
+    p.t0_index = as_double(field(o, "t0_index"));
+    return p;
+}
+
+inline py::dict to_py(const rcv::Prepared& p) {
+    py::dict d = typed("Prepared");
+    d["fe"] = arr(p.fe);
+    d["keep"] = opt_arr(p.keep);
+    d["q"] = p.q;
+    d["t0_index"] = p.t0_index;
+    d["fs"] = p.fs;
+    return d;
+}
+
+// frontend.Capture: fe, q, t0_index, fs.
+inline sstvae::qrss::frontend::Capture capture(const py::handle& o) {
+    sstvae::qrss::frontend::Capture c;
+    const std::int64_t fs = as_int(field(o, "fs"));
+    c.fs = static_cast<int>(fs);
+    c.fe = capture_fe(field(o, "fe"), fs, "a capture");
+    c.q = as_int(field(o, "q"));
+    c.t0_index = as_double(field(o, "t0_index"));
+    return c;
 }
 
 }  // namespace sstvae_bindings::qrss::rx

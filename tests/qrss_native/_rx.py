@@ -10,7 +10,8 @@ into the reference's own classes -- `types.Timing`, `types.PassResult`,
 `header.HeaderFields`, `track.ChanCapture`, `track.TrackResult`,
 `ltrack.LTrackResult`, the acquisition's `acquire.CarrierStats`,
 `PreambleKind`, `PreambleHit`, `_A2Input`, `_A2Channel`, `TbdHit` and
-`Acquisition`, ... -- so a substituted function returns exactly what the
+`Acquisition`, the receiver's `receiver.Prepared`, ... -- so a
+substituted function returns exactly what the
 reference's callers expect. A native FrameSpec becomes the
 reference's spec (the module's own preset object when equal to one), and
 a native PathFn a `NativePathFn`.
@@ -232,6 +233,14 @@ def _acquisition(d):
     return _acquire().Acquisition(**f)
 
 
+# --- the receiver's records (receiver.py) -----------------------------------------------------
+
+def _prepared(d):
+    from sstvae.qrss import receiver
+
+    return receiver.Prepared(**_fields(d))
+
+
 _CONVERT = {
     "Timing": _timing,
     "FreqPath": _freq_path,
@@ -256,6 +265,7 @@ _CONVERT = {
     "_A2Channel": _a2_channel,
     "TbdHit": _tbd_hit,
     "Acquisition": _acquisition,
+    "Prepared": _prepared,
 }
 
 
