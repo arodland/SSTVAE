@@ -243,6 +243,26 @@ if(SSTVAE_BUILD_CODEC)
     ${SSTVAE_ONNXRUNTIME_INCLUDE})
 endif()
 
+# --- QRSSTVAE codec glue ------------------------------------------------------
+# The two places a stored picture meets the codec on the transmit side: the
+# codec ID read from an artifact's metadata and the encode of an image file
+# (core/qrss/codec/, plan stage 1 item 16). A library of its own so that
+# sstvae_qrss, its ctests and the rest of the CLI build without onnxruntime;
+# it reads the metadata through onnxruntime itself, hence the direct link.
+# Declared here, before add_subdirectory(tests), so tests can key on the
+# target.
+if(TARGET sstvae_qrss AND TARGET sstvae_codec)
+  file(GLOB _qrss_codec_sources CONFIGURE_DEPENDS
+       ${CMAKE_CURRENT_SOURCE_DIR}/core/qrss/codec/*.cpp)
+  add_library(sstvae_qrss_codec STATIC ${_qrss_codec_sources})
+  target_link_libraries(sstvae_qrss_codec PUBLIC sstvae_qrss sstvae_codec PRIVATE onnxruntime)
+  target_include_directories(sstvae_qrss_codec SYSTEM PRIVATE ${SSTVAE_ONNXRUNTIME_INCLUDE})
+  set_target_properties(sstvae_qrss_codec PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  if(NOT MSVC)
+    target_compile_options(sstvae_qrss_codec PRIVATE -ffp-contract=off)
+  endif()
+endif()
+
 # Put the onnxruntime runtime where `target` can find it.
 #
 # A function rather than the one POST_BUILD it started as: sstvae-decode
@@ -680,6 +700,40 @@ if(SSTVAE_BUILD_CODEC)
     target_compile_definitions(sstvae-decode PRIVATE SSTVAE_HAVE_FETCH)
   endif()
   sstvae_onnxruntime_copy_runtime(sstvae-decode)
+endif()
+
+# sstvae-qrss: the QRSSTVAE command line (encode, beacon, transmit, ...),
+# argument for argument the qrss_*.py CLIs. One executable, one file per
+# subcommand registering itself (apps/sstvae_qrss/subcommand.hpp), globbed,
+# so a new subcommand (transmit.cpp is next) needs no edit here. Those that
+# need the codec (onnxruntime) are listed below and compiled in only when
+# the codec glue exists; main.cpp names them as "built without the codec"
+# otherwise.
+if(TARGET sstvae_qrss)
+  file(GLOB _qrss_cli_sources CONFIGURE_DEPENDS
+       ${CMAKE_CURRENT_SOURCE_DIR}/apps/sstvae_qrss/*.cpp)
+  set(_qrss_cli_codec_only encode.cpp)
+  if(NOT TARGET sstvae_qrss_codec)
+    foreach(_f ${_qrss_cli_codec_only})
+      list(REMOVE_ITEM _qrss_cli_sources ${CMAKE_CURRENT_SOURCE_DIR}/apps/sstvae_qrss/${_f})
+    endforeach()
+  endif()
+  add_executable(sstvae-qrss ${_qrss_cli_sources})
+  target_link_libraries(sstvae-qrss PRIVATE sstvae_qrss)
+  target_include_directories(sstvae-qrss PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/apps)
+  if(NOT MSVC)
+    target_compile_options(sstvae-qrss PRIVATE -ffp-contract=off)
+  endif()
+  if(TARGET sstvae_qrss_codec)
+    target_link_libraries(sstvae-qrss PRIVATE sstvae_qrss_codec)
+    target_compile_definitions(sstvae-qrss PRIVATE SSTVAE_HAVE_QRSS_CODEC)
+    # As sstvae-decode: without it, --model and a warm cache still work.
+    if(TARGET sstvae_fetch)
+      target_link_libraries(sstvae-qrss PRIVATE sstvae_fetch Qt6::Core)
+      target_compile_definitions(sstvae-qrss PRIVATE SSTVAE_HAVE_FETCH)
+    endif()
+    sstvae_onnxruntime_copy_runtime(sstvae-qrss)
+  endif()
 endif()
 
 # The soundcard path's only real test. `core/audio/qt/` is device
