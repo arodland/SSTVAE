@@ -217,17 +217,20 @@ double bin_width(const CarrierStats& cs) {
 types::CarrierCandidate line_of(const CarrierStats& cs, std::int64_t b_in, std::int64_t d_in, double v,
                                 double exc_rel) {
     const std::size_t nd = cs.stat.rows, nb = cs.stat.cols;
-    const std::size_t d0 = straight_drift(cs.drifts);
+    const auto d0 = static_cast<std::int64_t>(straight_drift(cs.drifts));
+    const std::size_t i0 = index(d0, nd);           // cs.stat[d0, b]: axis 0 checked first
     const std::size_t b = index(b_in, nb, 1);
-    std::size_t d = index(d_in, nd);
-    if (v - static_cast<double>(cs.stat(index(static_cast<std::int64_t>(d0), nd), b)) < exc_rel) d = d0;
-    const std::span<const float> row = cs.stat.row(index(static_cast<std::int64_t>(d), nd));
+    // d is indexed only when it survives (the reference never reads a drift
+    // it replaces by the straight one)
+    std::int64_t d = d_in;
+    if (v - static_cast<double>(cs.stat(i0, b)) < exc_rel) d = d0;
+    const std::span<const float> row = cs.stat.row(index(d, nd));
     double off = 0.0;
     if (0 < b_in && b_in < static_cast<std::int64_t>(nb) - 1) off = log_parabola(row, static_cast<std::size_t>(b_in));
     types::CarrierCandidate c;
     const double df = bin_width(cs);
     c.f_hz = cs.f_hz[index(b_in, cs.f_hz.size())] + off * df;
-    c.drift_hz_per_min = cs.drifts[index(static_cast<std::int64_t>(d), cs.drifts.size())];
+    c.drift_hz_per_min = cs.drifts[index(d, cs.drifts.size())];
     c.metric = v;
     return c;
 }
@@ -1084,7 +1087,8 @@ double coherent(const SplineFn& spline, const A2Channel& chan, double tau, doubl
     return std::pow(a, two) / (chan.sigma2 * npsum::sum(std::span<const double>(nrm)));
 }
 
-std::tuple<double, double, double> phase_line(std::span<const cd> S, double dt) {
+std::tuple<double, double, double> phase_line(std::span<const cd> S, double dt, bool* fitted) {
+    if (fitted != nullptr) *fitted = false;
     const std::size_t n = S.size() > 0 ? S.size() - 1 : 0;
     std::vector<double> g(n), w(n);
     const double two_pi_dt = 2 * PI * dt;
@@ -1095,6 +1099,7 @@ std::tuple<double, double, double> phase_line(std::span<const cd> S, double dt) 
     }
     const double wsum = npsum::sum(std::span<const double>(w));
     if (wsum <= 0) return {0.0, 0.0, INF};
+    if (fitted != nullptr) *fitted = true;
     std::vector<double> t(n);
     for (std::size_t i = 0; i < n; ++i) t[i] = (static_cast<double>(i) + 1.0) * dt;
     const double tb = sm::average(t, w);

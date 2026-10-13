@@ -274,8 +274,10 @@ std::pair<std::vector<cd>, std::vector<double>> fine_sums(const SplineFn& spline
                                                           double df, double rate = 0.0);
 // _coherent(spline, chan, tau, df, rate).
 double coherent(const SplineFn& spline, const A2Channel& chan, double tau, double df, double rate);
-// _phase_line(S, dt): (a, b, sd_b).
-std::tuple<double, double, double> phase_line(std::span<const cd> S, double dt);
+// _phase_line(S, dt): (a, b, sd_b). `fitted`, when given, says whether the
+// line was fitted (the reference's a is then an np.float64) rather than
+// returned as (0.0, 0.0, inf) for want of weight.
+std::tuple<double, double, double> phase_line(std::span<const cd> S, double dt, bool* fitted = nullptr);
 
 // --- A2: the search -------------------------------------------------------------
 

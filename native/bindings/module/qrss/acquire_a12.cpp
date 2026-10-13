@@ -495,8 +495,11 @@ void bind(py::module_& q) {
         return aq::coherent(s.fn, chan_of(chan), tau, df, rate);
     }, py::arg("spline"), py::arg("chan"), py::arg("tau"), py::arg("df"), py::arg("rate"));
     m.def("_phase_line", [](const py::object& S, double dt) {
-        const auto [a, b, sd] = aq::phase_line(rx::vec<cd>(S), dt);
-        return py::make_tuple(a, b, sd);
+        bool fitted = false;
+        const auto [a, b, sd] = aq::phase_line(rx::vec<cd>(S), dt, &fitted);
+        // a - b * tb, tb an np.average: an np.float64 once a line is fitted
+        const py::object first = fitted ? rx::np_module().attr("float64")(a) : py::object(py::float_(a));
+        return py::make_tuple(first, b, sd);
     }, py::arg("S"), py::arg("dt"));
 
     // --- A2 search
