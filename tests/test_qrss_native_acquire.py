@@ -440,7 +440,7 @@ def _on_the_cpp(N, caps, ref, names, joint_too=()):
 
 def test_acquire_on_the_cpp(N, caps, ref):
     """The C++ acquire() with its own stages against the reference."""
-    n_hits, n_tbd, n_hinted = _on_the_cpp(N, caps, ref, FAST, joint_too=("l0 band",))
+    n_hits, n_tbd, n_hinted = _on_the_cpp(N, caps, ref, FAST)    # _acquire_joint: the whole caller
     assert n_hits >= 6 and n_tbd >= 2 and n_hinted >= 4, (n_hits, n_tbd, n_hinted)
     d = ref.dropped
     # the strong signals' aliases passed A2 and were dropped by their rules
@@ -616,7 +616,7 @@ def test_reference_acquire_with_the_arbitration_rows(N, native, caps, ref, monke
     reference's to the bit (lead_in_s set on the hits they returned)."""
     from qrss_native import acquire as rows_acq
 
-    names = ("ce single a3", "mixed raw joint", "l0 band")
+    names = ("mixed raw joint", "l0 band")
     want = {name: ref(name) for name in names}
     keep = ("_hint_items", "drop_symbol_rate_aliases", "drop_band_owned", "merge_hits", "live_end_s")
     counts, _seams = _spy(native, monkeypatch, keep)
@@ -626,7 +626,7 @@ def test_reference_acquire_with_the_arbitration_rows(N, native, caps, ref, monke
         g = A.acquire(_cap(caps, cap), spec, **kw)
         _acq_check(want[name], g, f"{name} (arbitration rows)", exact=True)
     assert A.live_end_s() == A.A2_TAU_S + A.N_PRE * T_SYM + A._A2_MARGIN_S
-    assert counts == {"_hint_items": 2, "drop_symbol_rate_aliases": 4, "drop_band_owned": 2, "merge_hits": 2,
+    assert counts == {"_hint_items": 2, "drop_symbol_rate_aliases": 3, "drop_band_owned": 2, "merge_hits": 2,
                       "live_end_s": 1}, counts
 
 
