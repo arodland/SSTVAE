@@ -2,9 +2,13 @@
 // The subcommands are the files beside this one (subcommand.hpp says how
 // they register and what each one promises).
 
+#include <clocale>
 #include <cstdint>
 #include <cstdio>
+#include <exception>
 #include <iostream>
+#include <new>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -39,6 +43,15 @@ constexpr NotBuilt NOT_BUILT[] = {
     {"decode", "not in this build yet; use qrss_decode.py"},
 };
 
+// The Python class an escaped exception would most likely have been.
+const char* python_class(const std::exception& e) {
+    if (dynamic_cast<const std::invalid_argument*>(&e)) return "ValueError";
+    if (dynamic_cast<const std::overflow_error*>(&e)) return "OverflowError";
+    if (dynamic_cast<const std::out_of_range*>(&e)) return "IndexError";
+    if (dynamic_cast<const std::bad_alloc*>(&e)) return "MemoryError";
+    return "RuntimeError";
+}
+
 void overview(std::ostream& os) {
     os << "usage: " << PROG << " <command> [arguments]\n\n"
        << "QRSSTVAE from the command line: each command takes the arguments of\n"
@@ -61,6 +74,11 @@ int main(int argc, char** argv) {
     int qt_argc = 1;
     char* qt_argv[] = {argv[0], nullptr};
     QCoreApplication app(qt_argc, qt_argv);
+    // QCoreApplication runs setlocale(LC_ALL, "") on Unix, and Python never
+    // touches LC_NUMERIC: put it back, or under a decimal-comma locale strtod
+    // reads "--freq 1500.3" as 1500 and snprintf writes "1500,3" where the
+    // script prints "1500.3" (Qt's documented remedy).
+    std::setlocale(LC_NUMERIC, "C");
     sstvae::checkpoint::install_qt_fetcher([](std::int64_t got, std::int64_t total) {
         if (total <= 0) return;
         std::fprintf(stderr, "\rfetching model: %lld / %lld KB", static_cast<long long>(got / 1024),
@@ -89,8 +107,18 @@ int main(int argc, char** argv) {
         overview(std::cerr);
         return 2;
     }
-    const int status = sub->run(std::string(PROG) + " " + sub->name,
-                                std::vector<std::string>(args.begin() + 1, args.end()), std::cout, std::cerr);
+    int status = 1;
+    try {
+        status = sub->run(std::string(PROG) + " " + sub->name, std::vector<std::string>(args.begin() + 1, args.end()),
+                          std::cout, std::cerr);
+    } catch (const std::exception& e) {
+        // A subcommand ends every path the script can take itself; this is
+        // the backstop for one it missed. The script would end in a
+        // traceback and exit 1, never in std::terminate's abort.
+        std::cout.flush();
+        std::cerr << python_class(e) << ": " << e.what() << "\n";
+        return 1;
+    }
     std::cout.flush();
     return status;
 }

@@ -35,8 +35,10 @@ std::string dest_of(const std::string& flag) {
 
 bool starts_with(const std::string& s, const std::string& p) { return s.compare(0, p.size(), p) == 0; }
 
-// argparse's _negative_number_matcher: '^-\d+$|^-\d*\.\d+$'.
-bool negative_number(const std::string& s) {
+// argparse's _negative_number_matcher: '^-\d+$|^-\d*\.\d+$' (ASCII digits;
+// re's `$` also matches before one final newline).
+bool negative_number(std::string s) {
+    if (!s.empty() && s.back() == '\n') s.pop_back();
     if (s.size() < 2 || s[0] != '-') return false;
     std::size_t i = 1;
     std::size_t before = 0;
@@ -246,20 +248,22 @@ std::optional<Args> ArgParser::parse(const std::vector<std::string>& args, std::
             if (exact) {
                 t.kind = Token::option;
                 t.matches.push_back({*exact, a.substr(0, eq), a.substr(eq + 1), true});
-            } else if (a[1] == '-') {
-                // allow_abbrev: every option string the part before '=' prefixes.
-                const std::string prefix = a.substr(0, eq);
-                std::optional<std::string> explicit_arg;
-                if (eq != std::string::npos) explicit_arg = a.substr(eq + 1);
-                for (std::size_t k = 0; k < actions_.size(); ++k)
-                    for (const std::string& f : actions_[k].flags)
-                        if (starts_with(f, prefix)) t.matches.push_back({k, f, explicit_arg, eq != std::string::npos});
-                t.kind = Token::option;
-            } else if (a.size() > 2 && a[1] == 'h') {
-                // "-hX": -h with X as its explicit argument (only -h is short here).
-                t.kind = Token::option;
-                t.matches.push_back({0, "-h", a.substr(2), false});
             } else {
+                // _get_option_tuples (allow_abbrev): every option string the
+                // part before '=' prefixes. A single-dash argument also
+                // matches the short option of its first two characters, with
+                // the rest as its explicit argument ("-hX"). "-=..." prefixes
+                // every option, so it is ambiguous, as there.
+                const std::string prefix = a.substr(0, eq);
+                const bool sep = eq != std::string::npos;
+                std::optional<std::string> explicit_arg;
+                if (sep) explicit_arg = a.substr(eq + 1);
+                const bool single = a[1] != '-';
+                for (std::size_t k = 0; k < actions_.size(); ++k)
+                    for (const std::string& f : actions_[k].flags) {
+                        if (single && f == a.substr(0, 2)) t.matches.push_back({k, f, a.substr(2), false});
+                        else if (starts_with(f, prefix)) t.matches.push_back({k, f, explicit_arg, sep});
+                    }
                 t.kind = Token::option;
             }
             if (t.matches.empty() && (negative_number(a) || a.find(' ') != std::string::npos))
@@ -290,14 +294,28 @@ std::optional<Args> ArgParser::parse(const std::vector<std::string>& args, std::
         status = 2;
     };
 
+    // Which arguments a positional took, for the '--' below.
+    std::vector<bool> to_positional(tokens.size(), false);
+
     try {
         for (std::size_t i = 0; i < tokens.size(); ++i) {
             const Token& t = tokens[i];
-            if (t.kind == Token::dashdash) continue;
+            if (t.kind == Token::dashdash) {
+                // argparse drops the '--' only where a positional's pattern
+                // (-*A-*) takes it: straight after a positional's value, or
+                // before the value of a positional still to fill. Otherwise
+                // it is an unrecognized argument like any other ("a b --opt
+                // x --" refuses "--"; everything after it is a value anyway).
+                const bool taken = (i > 0 && to_positional[i - 1]) ||
+                                   (positional_index(next_positional) && i + 1 < tokens.size());
+                if (!taken) extras.push_back(args[i]);
+                continue;
+            }
             if (t.kind == Token::value) {
                 if (const auto k = positional_index(next_positional)) {
                     ++next_positional;
                     seen[*k] = true;
+                    to_positional[i] = true;
                     result.values_[actions_[*k].dest] = args[i];
                 } else {
                     extras.push_back(args[i]);

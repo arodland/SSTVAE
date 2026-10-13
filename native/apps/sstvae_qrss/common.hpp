@@ -68,8 +68,10 @@ bool is_file(const std::string& path);
 // picture.load_qrsp(path) as a script that does not catch its exceptions
 // sees it: the file read whole (OsError), np.load's view of what is not an
 // .npz (EOFError for an empty file, the pickle refusal for anything else,
-// a TypeError for an .npy), and load_qrsp's own ValueErrors with their
-// texts (`path` quoted as given). A damaged archive is zipfile.BadZipFile
+// a TypeError for an .npy), int() of a member that is no scalar number
+// (numpy's TypeError for an array, OverflowError for infinity, ValueError
+// for NaN, TypeError for a complex), and load_qrsp's own ValueErrors with
+// their texts (`path` quoted as given). A damaged archive is zipfile.BadZipFile
 // (a damaged member header numpy's ValueError) with the native parser's
 // words, not zipfile's. PyError for all of them.
 picture::StoredPicture load_qrsp(const std::string& path);

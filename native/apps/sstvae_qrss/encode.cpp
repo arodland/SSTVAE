@@ -7,7 +7,9 @@
 //   --codec-id: int(text, 16) (an uncaught ValueError), then
 //       SystemExit("--codec-id must be 16 bits, not <text>")
 //   else: resolve_onnx("encoder", --model, --precision) (its SystemExits),
-//       codec_id_from_onnx(enc) (onnxruntime's exception, uncaught), None ->
+//       codec_id_from_onnx(enc) (onnxruntime's exception or, for an
+//       "encoder" that is a directory of neither part, FileNotFoundError,
+//       uncaught), None ->
 //       SystemExit("<enc> carries no sstvae.source_sha256 metadata; ...")
 //   load_codec(--model, precision=...): a .pt model is the torch backend,
 //       which refuses any precision: an uncaught ValueError
@@ -112,6 +114,9 @@ int run(const std::string& prog, const std::vector<std::string>& argv, std::ostr
             return system_exit(err, e.what());
         } catch (const qc::OrtError& e) {
             return uncaught(err, "onnxruntime.capi.onnxruntime_pybind11_state." + e.python_class(), e.what());
+        } catch (const qc::NoModelFile& e) {
+            // The encoder resolved to a directory holding neither part.
+            return uncaught(err, "FileNotFoundError", e.what());
         }
         if (!found)
             return system_exit(err, enc + " carries no sstvae.source_sha256 metadata; pass --codec-id HEX so "

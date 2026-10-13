@@ -8,9 +8,13 @@
 //   (`--opt V` or `--opt=V`) or none (store_true); `-h`/`--help`;
 // - every argument classified before any is consumed, as argparse does: an
 //   exact option, `--opt=V`, a unique prefix of a long option (allow_abbrev;
-//   "ambiguous option: --m could match --model, --mode" for several), a
-//   negative number or anything containing a space as a value, any other
-//   `-x` as an unknown option; everything after the first `--` a value;
+//   "ambiguous option: --m could match --model, --mode" for several, raised
+//   when that argument is reached), a negative number or anything containing
+//   a space as a value, any other `-x` as an unknown option; everything after
+//   the first `--` a value;
+// - that first `--` dropped only where a positional takes it (next to a
+//   positional's value): after the positionals are filled it is an
+//   unrecognized argument, so "in out --callsign K --" refuses "--";
 // - an option's value must be the next argument and must not look like an
 //   option ("argument --model: expected one argument"); a store_true given
 //   one is "ignored explicit argument 'x'";

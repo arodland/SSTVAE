@@ -1,9 +1,11 @@
 #include "qrss/pynum.hpp"
 
+#include <clocale>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -186,6 +188,13 @@ std::optional<double> py_float(std::string_view text) {
     if (k != body.size()) return std::nullopt;
     // Validated, so strtod reads the whole of it (its hex, inf and nan forms
     // never reach here); it rounds correctly and overflows to +-inf as float().
+    // strtod's decimal point is LC_NUMERIC's, which a Qt program has set from
+    // the environment ("1,5" in de_DE): spell the point as the locale does.
+    const char* point = std::localeconv()->decimal_point;
+    if (point && std::strcmp(point, ".") != 0 && *point) {
+        const std::size_t dot = t.find('.');
+        if (dot != std::string::npos) t.replace(dot, 1, point);
+    }
     return std::strtod(t.c_str(), nullptr);
 }
 

@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -122,8 +123,18 @@ picture::StoredPicture load_qrsp(const std::string& path) {
     }
     try {
         return picture::from_npz(z, path);
+    } catch (const std::overflow_error& e) {
+        // int() of an infinite float member.
+        throw PyError("OverflowError", e.what());
     } catch (const std::exception& e) {
-        throw PyError("ValueError", e.what());
+        // int() of a member that is no number: numpy's and Python's words.
+        const std::string what = e.what();
+        if (what.rfind("npz: only 0-dimensional arrays", 0) == 0)
+            throw PyError("TypeError", "only 0-dimensional arrays can be converted to Python scalars");
+        if (what.rfind("npz: a complex array", 0) == 0)
+            throw PyError("TypeError",
+                          "int() argument must be a string, a bytes-like object or a real number, not 'complex'");
+        throw PyError("ValueError", what);
     }
 }
 

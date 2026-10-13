@@ -179,6 +179,17 @@ def beacon_inputs(tmp_path_factory):
         np.savez(fh, version=np.int64(picture.QRSP_VERSION), mode=np.int64(0), codec_id=np.int64(0x1234),
                  segs=np.stack(sp.segs).astype(np.float16), picture_id=np.int64(sp.picture_id ^ 1))
     f["wrongid"] = d / "wrongid.qrsp"
+    # Scalars int() cannot read: numpy's TypeError, OverflowError and
+    # Python's TypeError for a complex, as the tracebacks name them.
+    good = picture.StoredPicture.from_latents(synthetic_full_latents(4), 0xD1D8, 1)
+    fields = dict(version=np.int64(picture.QRSP_VERSION), mode=np.int64(1), codec_id=np.int64(0xD1D8),
+                  segs=np.stack(good.segs).astype(np.float16), picture_id=np.int64(good.picture_id))
+    for key, field_name, value in (("v1d", "version", np.array([1, 1])), ("vinf", "version", np.float64("inf")),
+                                   ("vcplx", "version", np.complex128(1)), ("mode1d", "mode", np.array([1])),
+                                   ("vfloat", "version", np.float64(1.5))):
+        with open(d / f"{key}.qrsp", "wb") as fh:
+            np.savez(fh, **{**fields, field_name: value})
+        f[key] = d / f"{key}.qrsp"
     return f
 
 
@@ -244,6 +255,23 @@ def _beacon_cases(f) -> list[Case]:
         bad_input("in-nosegs", "nosegs"),
         bad_input("in-badzip", "badzip", only_class=True),
         bad_input("in-wrongid", "wrongid"),
+        bad_input("in-version-1d", "v1d"),
+        bad_input("in-version-inf", "vinf"),
+        bad_input("in-version-complex", "vcplx"),
+        bad_input("in-mode-1d", "mode1d"),
+        bad_input("in-version-float", "vfloat"),
+        Case("in-isdir", "qrss_beacon.py", "beacon", ["indir", "out.bin", "--callsign", "K1ABC"], {},
+             dirs=["indir"], output="out.bin"),
+        # argparse drops '--' only where a positional takes it.
+        ok("dashdash-trailing", "in.qrsp", "out.bin", "--callsign", "K1ABC", "--"),
+        ok("dashdash-trailing-value", "in.qrsp", "out.bin", "--callsign", "K1ABC", "--", "x"),
+        ok("dashdash-before-last", "in.qrsp", "--callsign", "K1ABC", "--", "out.bin"),
+        ok("dashdash-after-last", "--callsign", "K1ABC", "in.qrsp", "out.bin", "--"),
+        ok("dashdash-only-after-option", "in.qrsp", "--callsign", "K1ABC", "--"),
+        ok("dash-equals", "in.qrsp", "out.bin", "--callsign", "K1ABC", "-=x"),
+        ok("seg-newline", "in.qrsp", "out.bin", "--callsign", "K1ABC", "--segment", "-1\n"),
+        ok("call-unicode", "in.qrsp", "out.bin", "--callsign", "K\u00c4B"),
+        ok("call-trailing-space", "in.qrsp", "out.bin", "--callsign", "K1ABC "),
     ]
 
 
@@ -254,7 +282,8 @@ def beacon_runs(cli, beacon_inputs, tmp_path_factory):
 
 
 @pytest.mark.parametrize("name", [c.name for c in _beacon_cases({k: Path("x") for k in (
-    "m0", "m1", "empty", "garbage", "npy", "nosegs", "badzip", "wrongid")})])
+    "m0", "m1", "empty", "garbage", "npy", "nosegs", "badzip", "wrongid", "v1d", "vinf", "vcplx", "mode1d",
+    "vfloat")})])
 def test_beacon_matches_the_script(beacon_runs, name):
     cases, runs = beacon_runs
     py, nat = runs[name]
@@ -271,6 +300,10 @@ def test_beacon_cases_cover_each_ending(beacon_runs):
     assert rcs["no-args"] == 2 and rcs["seg-x"] == 2
     assert rcs["seg-2"] == 1 and "Traceback" not in runs["seg-2"][0].err
     assert rcs["in-missing"] == 1 and "FileNotFoundError" in runs["in-missing"][0].err
+    assert rcs["dashdash-trailing"] == 2 and runs["dashdash-trailing"][0].err.endswith("arguments: --\n")
+    assert rcs["dashdash-after-last"] == 0 and rcs["dashdash-before-last"] == 0
+    assert "TypeError: only 0-dimensional" in runs["in-version-1d"][0].err
+    assert "OverflowError" in runs["in-version-inf"][0].err
 
 
 def test_beacon_help(cli):
@@ -359,6 +392,17 @@ def _encode_cases(f) -> list[Case]:
         c("model-pt-id", "scene.png", "out.qrsp", "--model", "x.pt", "--codec-id", "d1d8"),
         c("model-pt-dir", "scene.png", "out.qrsp", "--model", "dir.pt"),
         c("out-nodir", "scene.png", "nodir/out.qrsp", "--model", "m"),
+        c("model-missing-encoder", "scene.png", "out.qrsp", "--model", "nope-encoder-fp16.onnx"),
+        c("model-missing-sibling", "scene.png", "out.qrsp", "--model", "nope-decoder-fp16.onnx"),
+        c("model-decoder-fp32", "scene.png", "out.qrsp", "--model", "m/v5-decoder-fp16.onnx", "--precision", "fp32"),
+        c("model-not-an-encoder", "scene.png", "out.qrsp", "--model", "nometa", "--codec-id", "1234"),
+        c("model-garbage-id", "scene.png", "out.qrsp", "--model", "garb", "--codec-id", "12"),
+        c("codec-id-spaces", "scene.png", "out.qrsp", "--model", "m", "--codec-id", " +0x_d1d8 "),
+        c("image-slash", "scene.png/", "out.qrsp", "--model", "m"),
+        c("dashdash-trailing", "scene.png", "out.qrsp", "--model", "m", "--"),
+        # The glob takes a directory so named: codec_id_from_onnx then looks
+        # inside it and raises FileNotFoundError (the native aborted here).
+        c("model-encoder-is-dir", "scene.png", "out.qrsp", "--model", "dd", dirs=["dd/v9-encoder-fp16.onnx"]),
     ]
 
 
@@ -455,3 +499,54 @@ def test_py_float_matches_float(native, text):
         assert np.isnan(got) and np.signbit(got) == np.signbit(want)
     else:
         assert got == want and np.signbit(got) == np.signbit(want)
+
+
+@pytest.fixture(scope="module")
+def decimal_comma_locale(tmp_path_factory):
+    """A de_DE.UTF-8 locale compiled into a temporary LOCPATH (glibc), or a
+    skip: its LC_NUMERIC writes 1.5 as "1,5"."""
+    import shutil
+
+    if shutil.which("localedef") is None or not Path("/usr/share/i18n/locales/de_DE").is_file():
+        pytest.skip("no localedef or no de_DE locale source")
+    d = tmp_path_factory.mktemp("locale")
+    r = subprocess.run(["localedef", "-i", "de_DE", "-f", "UTF-8", str(d / "de_DE.UTF-8")],
+                       capture_output=True, text=True, timeout=120)
+    if not (d / "de_DE.UTF-8").exists():
+        pytest.skip(f"localedef failed: {r.stderr.strip()}")
+    return d
+
+
+def test_py_float_ignores_a_decimal_comma_locale(native, decimal_comma_locale, monkeypatch):
+    """sstvae-qrss runs under QCoreApplication, whose setlocale(LC_ALL, "")
+    hands strtod the environment's decimal point; float() always reads '.'.
+    Before the fix "1500.3" read as 1500.0 under de_DE."""
+    import locale
+
+    n = require(native, "pynum")
+    monkeypatch.setenv("LOCPATH", str(decimal_comma_locale))
+    old = locale.setlocale(locale.LC_NUMERIC)
+    try:
+        locale.setlocale(locale.LC_NUMERIC, "de_DE.UTF-8")
+        assert locale.localeconv()["decimal_point"] == ","
+        for text in ("1500.3", "-0.5e1", ".25", "5.", "1_0.5", "1e3", "inf"):
+            assert n.py_float(text) == float(text), text
+        assert n.py_float("1,5") is None
+    finally:
+        locale.setlocale(locale.LC_NUMERIC, old)
+
+
+def test_the_cli_runs_under_a_decimal_comma_locale(cli, beacon_inputs, decimal_comma_locale, tmp_path):
+    """Under a decimal-comma locale the beacon file and its line are what
+    the C locale gives. A smoke test only: neither encode nor beacon reads
+    or prints a float, so main.cpp's LC_NUMERIC reset (after Qt's
+    setlocale) is exercised here but only a float-taking subcommand
+    (transmit's --freq) can show it doing anything."""
+    outs = []
+    for i, env_extra in enumerate(({}, {"LOCPATH": str(decimal_comma_locale), "LC_ALL": "de_DE.UTF-8"})):
+        out = tmp_path / f"b{i}.bin"
+        r = subprocess.run([str(cli), "beacon", str(beacon_inputs["m1"]), str(out), "--callsign", "K1ABC"],
+                           capture_output=True, text=True, timeout=60, env={**os.environ, **env_extra})
+        assert r.returncode == 0 and r.stderr == "", r
+        outs.append((r.stdout.replace(str(out), "OUT"), out.read_bytes()))
+    assert outs[0] == outs[1]

@@ -41,8 +41,8 @@ std::string invalid_int_literal(std::string_view text, int base);
 
 // float(text): surrounding whitespace, one sign, "inf", "infinity" or "nan"
 // in any case, or decimal digits with an optional point and exponent and
-// single underscores between digits. Correctly rounded (strtod in the C
-// locale, which is the one a program that never calls setlocale runs in).
+// single underscores between digits. Correctly rounded (strtod), and '.'
+// is the point whatever LC_NUMERIC says.
 // nullopt where Python raises ValueError.
 std::optional<double> py_float(std::string_view text);
 

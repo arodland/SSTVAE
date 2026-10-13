@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -28,6 +29,7 @@
 #include "check.hpp"
 #include "common.hpp"
 #include "qrss/beaconfile.hpp"
+#include "qrss/npz.hpp"
 #include "qrss/picture.hpp"
 #include "qrss_check.hpp"
 #include "subcommand.hpp"
@@ -144,21 +146,26 @@ void test_argparse() {
         err = e.str();
         return a;
     };
+    // The "p: error: ..." line, or a note that the parse succeeded.
+    auto error_line = [](const std::string& e) {
+        const std::size_t at = e.find("p: error: ");
+        return at == std::string::npos ? "(no error)" + e : e.substr(at);
+    };
     int status = 0;
     std::string err;
     check::is_true(!parse({"x", "--mod", "m"}, status, err), "ambiguous");
     check::equal(status, 2, "ambiguous: status");
-    check::equal(err.substr(err.find("p: error: ")),
+    check::equal(error_line(err),
                  std::string("p: error: ambiguous option: --mod could match --model, --mode\n"), "ambiguous: text");
     parse({"x", "--mode", "D"}, status, err);
-    check::equal(err.substr(err.find("p: error: ")),
+    check::equal(error_line(err),
                  std::string("p: error: argument --mode: invalid choice: 'D' (choose from 'A', 'B', 'C')\n"),
                  "choices");
     parse({"x", "--level", "1.2.3"}, status, err);
-    check::equal(err.substr(err.find("p: error: ")),
+    check::equal(error_line(err),
                  std::string("p: error: argument --level: invalid float value: '1.2.3'\n"), "type=float");
     parse({"x", "--mo=B"}, status, err);
-    check::equal(err.substr(err.find("p: error: ")),
+    check::equal(error_line(err),
                  std::string("p: error: ambiguous option: --mo=B could match --model, --mode\n"),
                  "ambiguous with a value");
     auto a = parse({"--mode=B", "--lo", "--", "-x"}, status, err);
@@ -175,8 +182,32 @@ void test_argparse() {
                    "a negative number and a value with a space are values");
     // argparse's negative-number pattern is ^-\d+$|^-\d*\.\d+$: "-2e1" is an option.
     parse({"x", "--level", "-2e1"}, status, err);
-    check::equal(err.substr(err.find("p: error: ")),
+    check::equal(error_line(err),
                  std::string("p: error: argument --level: expected one argument\n"), "-2e1 is not a number");
+
+    // '--' is dropped only where a positional takes it (argparse's -*A-*);
+    // once the positionals are filled it is an unrecognized argument.
+    // Outcomes from CPython 3.13's argparse on this parser.
+    parse({"x", "--loud", "--"}, status, err);
+    check::equal(error_line(err), std::string("p: error: unrecognized arguments: --\n"),
+                 "a trailing -- after the positionals");
+    parse({"x", "--loud", "--", "y"}, status, err);
+    check::equal(error_line(err), std::string("p: error: unrecognized arguments: -- y\n"),
+                 "-- and a value after the positionals");
+    parse({"x", "--", "y"}, status, err);
+    check::equal(error_line(err), std::string("p: error: unrecognized arguments: y\n"),
+                 "-- straight after a positional's value");
+    a = parse({"--loud", "x", "--"}, status, err);
+    check::is_true(a.has_value() && *a->text("image") == "x", "-- after the positional's value is its");
+    a = parse({"--loud", "--", "--"}, status, err);
+    check::is_true(a.has_value() && *a->text("image") == "--", "a second -- is a value");
+    parse({"x", "-="}, status, err);
+    check::equal(error_line(err),
+                 std::string("p: error: ambiguous option: -= could match -h, --help, --model, --mode, --level, "
+                             "--loud\n"),
+                 "-= prefixes every option");
+    a = parse({"x", "--level", "-2\n"}, status, err);
+    check::is_true(a.has_value() && *a->real("level") == -2.0, "re's $ matches before a final newline");
 
     std::ostringstream o, e;
     check::is_true(!ap.parse({"x", "-h"}, o, e, status), "help");
@@ -235,6 +266,9 @@ void test_beacon(const TempDir& t) {
     expect(run("beacon", {in, out, "--callsign", "K1ABC", "--segment", "99999999999999999999"}), 1, "",
            "segment must be 0..1, not 99999999999999999999\n", "a segment past int64");
     check::is_true(!exists(out), "no file for a refusal");
+    expect(run("beacon", {in, out, "--callsign", "K1ABC", "--"}), 2, "", usage_error("unrecognized arguments: --"),
+           "a trailing -- once the positionals are filled");
+    check::is_true(!exists(out), "no file for a usage error");
     const Result bad_call = run("beacon", {in, out, "--callsign", "K1ABC!"});
     check::equal(bad_call.status, 1, "bad callsign: a SystemExit");
     check::is_true(bad_call.err.find("Traceback") == std::string::npos && !bad_call.err.empty(),
@@ -247,6 +281,30 @@ void test_beacon(const TempDir& t) {
     std::ofstream(empty).close();
     expect(run("beacon", {empty, out, "--callsign", "K1ABC"}), 1, "", "EOFError: No data left in file\n",
            "empty input");
+    // A .qrsp whose scalars int() cannot read: the class is numpy's or
+    // Python's, as the traceback's last line names it (numpy 2.5.3).
+    auto with_version = [&](const std::string& name, sstvae::qrss::npz::Array v) {
+        const sstvae::qrss::npz::Npz good = pc::qrsp_npz(sp);
+        sstvae::qrss::npz::Npz z;
+        for (const auto& [member, a] : good.members()) z.add(member, member == "version" ? v : a);
+        const std::string p = t / name;
+        sstvae::qrss::npz::save_npz(p, z);
+        return p;
+    };
+    namespace npz = sstvae::qrss::npz;
+    expect(run("beacon", {with_version("v1d.qrsp", npz::Array::of(std::vector<std::int64_t>{1, 1})), out,
+                          "--callsign", "K1ABC"}),
+           1, "", "TypeError: only 0-dimensional arrays can be converted to Python scalars\n", "a 1-d version");
+    const double inf = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    expect(run("beacon", {with_version("vinf.qrsp", npz::Array::scalar<double>(inf)), out, "--callsign", "K1ABC"}),
+           1, "", "OverflowError: cannot convert float infinity to integer\n", "an infinite version");
+    expect(run("beacon", {with_version("vnan.qrsp", npz::Array::scalar<double>(nan)), out, "--callsign", "K1ABC"}),
+           1, "", "ValueError: cannot convert float NaN to integer\n", "a NaN version");
+    expect(run("beacon", {with_version("v2.qrsp", npz::Array::scalar<std::int64_t>(2)), out, "--callsign",
+                          "K1ABC"}),
+           1, "", "ValueError: " + (t / "v2.qrsp") + ": .qrsp version 2, expected 1\n", "version 2");
+    check::is_true(!exists(out), "no file for a malformed picture");
     expect(run("beacon", {in, t / "nodir/x.bin", "--callsign", "K1ABC"}), 1, "",
            "FileNotFoundError: [Errno 2] No such file or directory: '" + (t / "nodir/x.bin") + "'\n",
            "unwritable output");
@@ -291,6 +349,14 @@ void test_encode(const TempDir& t) {
            "--model an empty directory");
     expect(run("encode", {png, out, "--model", "x.pt", "--codec-id", "d1d8"}), 1, "",
            "ValueError: precision applies to the ONNX backend only\n", "a .pt with a precision");
+    // resolve_onnx's glob takes a directory named like the encoder, and
+    // codec_id_from_onnx then finds neither part inside it: the reference's
+    // uncaught FileNotFoundError (this used to escape as std::terminate).
+    fs::create_directories(t.path / "dd" / "v9-encoder-fp16.onnx");
+    expect(run("encode", {png, out, "--model", t / "dd"}), 1, "",
+           "FileNotFoundError: no *-encoder-fp16.onnx or *-decoder-fp16.onnx in " + (t / "dd/v9-encoder-fp16.onnx") +
+               "\n",
+           "an encoder that is a directory");
     const Result unreadable = run("encode", {png, out, "--model", t / "m", "--codec-id", "d1d8"});
     check::equal(unreadable.status, 1, "an unreadable image: status");
     check::is_true(unreadable.err.rfind(png + ": ", 0) == 0, "an unreadable image: '<image>: <reason>'");
