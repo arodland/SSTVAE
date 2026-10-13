@@ -52,6 +52,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -67,6 +68,10 @@ namespace sstvae::qrss::track {
 
 using cplx = std::complex<double>;
 
+// _ce_only: frame::WrongWaveform "{what} is CE's; {spec.name!r} is waveform
+// {n}: use {instead}" unless spec is a CE frame.
+void ce_only(const frame::FrameSpec& spec, std::string_view what, std::string_view instead);
+
 // --- derotation ---------------------------------------------------------------
 
 // A frequency path evaluated at many times (audio Hz at receiver times).
@@ -76,6 +81,11 @@ using PathEval = std::function<std::vector<double>(std::span<const double>)>;
 // (in turns, the running sum interpolated at the fractional t0 index).
 std::vector<cplx> derotate(const ChanCapture& chan, const PathFn& fn);
 std::vector<cplx> derotate(const ChanCapture& chan, const PathEval& fn);
+// The same over samples `ch` held at double precision (what
+// chan.ch.astype(complex128) gives for a capture whose CH is not complex64),
+// on grid's fs, t0_index and f_mix (grid.ch is not read).
+std::vector<cplx> derotate(std::span<const cplx> ch, const ChanCapture& grid, const PathFn& fn);
+std::vector<cplx> derotate(std::span<const cplx> ch, const ChanCapture& grid, const PathEval& fn);
 
 // --- the symbol matched filter --------------------------------------------------
 

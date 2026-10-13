@@ -47,12 +47,6 @@ constexpr std::int64_t MF_RES = rt::MF_RES;
 constexpr std::int64_t SPAN = config::SPAN;
 constexpr std::int64_t I64_MIN = std::numeric_limits<std::int64_t>::min();
 
-// _ce_only: CE's model on an L frame gives plausible, wrong numbers.
-void ce_only(const FrameSpec& spec, std::string_view what, std::string_view instead) {
-    if (spec.waveform() == frame::Waveform::CE) return;
-    throw frame::WrongWaveform(std::string(what) + " is CE's; " + pytext::repr(spec.name()) + " is waveform " +
-                               std::to_string(static_cast<int>(spec.waveform())) + ": use " + std::string(instead));
-}
 
 // --- Python's scalar semantics -------------------------------------------------
 
@@ -412,12 +406,20 @@ std::size_t np_argmin(std::span<const double> x) {
 
 }  // namespace
 
+// _ce_only: CE's model on an L frame gives plausible, wrong numbers.
+void ce_only(const FrameSpec& spec, std::string_view what, std::string_view instead) {
+    if (spec.waveform() == frame::Waveform::CE) return;
+    throw frame::WrongWaveform(std::string(what) + " is CE's; " + pytext::repr(spec.name()) + " is waveform " +
+                               std::to_string(static_cast<int>(spec.waveform())) + ": use " + std::string(instead));
+}
+
 // --- derotation ---------------------------------------------------------------
 
 namespace {
 
-std::vector<cplx> derotate_with(const ChanCapture& chan, const std::vector<double>& f) {
-    const std::size_t n = chan.ch.size();
+template <typename Sample>
+std::vector<cplx> derotate_with(std::span<const Sample> ch, const ChanCapture& chan, const std::vector<double>& f) {
+    const std::size_t n = ch.size();
     if (f.size() != n) broadcast_error(f.size(), n);
     const double mix = chan.mix_audio_hz();
     const auto fs = static_cast<double>(chan.fs);
@@ -439,14 +441,14 @@ std::vector<cplx> derotate_with(const ChanCapture& chan, const std::vector<doubl
         const double x = cum[i] - c0;
         const double turns = x - std::floor(x);
         const cplx e = exp_i(-TWO_PI * turns);
-        const cplx z(static_cast<double>(chan.ch[i].real()), static_cast<double>(chan.ch[i].imag()));
+        const cplx z(static_cast<double>(ch[i].real()), static_cast<double>(ch[i].imag()));
         out[i] = np::mul(z, e);
     }
     return out;
 }
 
-std::vector<double> chan_times(const ChanCapture& chan) {
-    std::vector<double> t(chan.ch.size());
+std::vector<double> chan_times(const ChanCapture& chan, std::size_t n) {
+    std::vector<double> t(n);
     for (std::size_t i = 0; i < t.size(); ++i) t[i] = chan.t_s(static_cast<double>(i));
     return t;
 }
@@ -454,11 +456,21 @@ std::vector<double> chan_times(const ChanCapture& chan) {
 }  // namespace
 
 std::vector<cplx> derotate(const ChanCapture& chan, const PathFn& fn) {
-    return derotate_with(chan, fn(chan_times(chan)));
+    const std::span<const std::complex<float>> ch(chan.ch);
+    return derotate_with(ch, chan, fn(chan_times(chan, ch.size())));
 }
 
 std::vector<cplx> derotate(const ChanCapture& chan, const PathEval& fn) {
-    return derotate_with(chan, fn(chan_times(chan)));
+    const std::span<const std::complex<float>> ch(chan.ch);
+    return derotate_with(ch, chan, fn(chan_times(chan, ch.size())));
+}
+
+std::vector<cplx> derotate(std::span<const cplx> ch, const ChanCapture& grid, const PathFn& fn) {
+    return derotate_with(ch, grid, fn(chan_times(grid, ch.size())));
+}
+
+std::vector<cplx> derotate(std::span<const cplx> ch, const ChanCapture& grid, const PathEval& fn) {
+    return derotate_with(ch, grid, fn(chan_times(grid, ch.size())));
 }
 
 // --- the symbol matched filter --------------------------------------------------
