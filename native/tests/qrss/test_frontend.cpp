@@ -164,6 +164,26 @@ static void test_stream() {
     check::is_true(expect > 19000, "StreamFE produced all but the pending tail");
     check::is_true(worst <= 1e-6, "StreamFE equals the batch conversion (" + std::to_string(worst) + ")");
     check::equal(*s.next_index(), std::int64_t{40000}, "next_index follows the stream");
+    // the whole recording in one push: dozens of blocks out of one call,
+    // consumed from an offset (the prefix is dropped once, at the end)
+    fe::StreamFE w(1000);
+    std::int64_t wexpect = fe::HALO / 2;
+    double wworst = 0.0;
+    bool wcontig = true;
+    for (const auto& c : w.push(0, std::span<const double>(x))) {
+        wcontig = wcontig && c.index == wexpect;
+        for (std::size_t i = 0; i < c.fe.size(); ++i) {
+            const auto j = static_cast<std::size_t>(c.index) + i;
+            wworst = std::max(wworst, static_cast<double>(std::abs(c.fe[i] - batch[j])));
+        }
+        wexpect = c.index + static_cast<std::int64_t>(c.fe.size());
+    }
+    check::is_true(wcontig && wexpect > 19000, "one long push yields every block, contiguous");
+    check::is_true(wworst <= 1e-6, "one long push equals the batch conversion (" + std::to_string(wworst) + ")");
+    check::equal(*w.a0() + static_cast<std::int64_t>(w.pending().size()), std::int64_t{40000},
+                 "one long push keeps a0 and the pending tail in step");
+    check::is_true(static_cast<std::int64_t>(w.pending().size()) < 2 * fe::HALO + fe::ALIGN,
+                   "one long push leaves less than a block pending");
     // a gap restarts the stream on the ALIGN grid
     fe::StreamFE r;
     r.push(0, std::span<const double>(x.data(), 100));

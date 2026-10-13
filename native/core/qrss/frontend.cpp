@@ -833,22 +833,33 @@ std::vector<StreamFE::Chunk> StreamFE::push(std::int64_t a, std::span<const doub
         pend_.insert(pend_.end(), x.begin(), x.end());
     }
     std::vector<Chunk> out;
-    while (static_cast<std::int64_t>(pend_.size()) >= 2 * HALO + ALIGN) {
-        const std::int64_t n =
-            std::min(block_, floordiv(static_cast<std::int64_t>(pend_.size()) - 2 * HALO, ALIGN) * ALIGN);
-        const std::vector<cf> fe =
-            audio_to_fe(std::span<const double>(pend_.data(), static_cast<std::size_t>(n + 2 * HALO)));
-        const std::int64_t k0 = floordiv(HALO, FE_DECIM);
-        const std::int64_t m = floordiv(n, FE_DECIM);
-        Chunk c;
-        c.index = floordiv(*a0_ + HALO, FE_DECIM);
-        const auto lo = static_cast<std::size_t>(std::min<std::int64_t>(k0, static_cast<std::int64_t>(fe.size())));
-        const auto hi = static_cast<std::size_t>(std::min<std::int64_t>(k0 + m, static_cast<std::int64_t>(fe.size())));
-        c.fe.assign(fe.begin() + static_cast<std::ptrdiff_t>(lo), fe.begin() + static_cast<std::ptrdiff_t>(hi));
-        out.push_back(std::move(c));
-        pend_.erase(pend_.begin(), pend_.begin() + static_cast<std::ptrdiff_t>(n));
-        *a0_ += n;
+    // consume from an offset and drop the consumed prefix once: Python's
+    // pend[n:] is a view, and erasing per block made one long push (a
+    // whole recording replayed) quadratic in its length
+    std::size_t off = 0;
+    const auto drop_consumed = [&] { pend_.erase(pend_.begin(), pend_.begin() + static_cast<std::ptrdiff_t>(off)); };
+    try {
+        while (static_cast<std::int64_t>(pend_.size() - off) >= 2 * HALO + ALIGN) {
+            const std::int64_t left = static_cast<std::int64_t>(pend_.size() - off);
+            const std::int64_t n = std::min(block_, floordiv(left - 2 * HALO, ALIGN) * ALIGN);
+            const std::vector<cf> fe =
+                audio_to_fe(std::span<const double>(pend_.data() + off, static_cast<std::size_t>(n + 2 * HALO)));
+            const std::int64_t k0 = floordiv(HALO, FE_DECIM);
+            const std::int64_t m = floordiv(n, FE_DECIM);
+            Chunk c;
+            c.index = floordiv(*a0_ + HALO, FE_DECIM);
+            const auto lo = static_cast<std::size_t>(std::min<std::int64_t>(k0, static_cast<std::int64_t>(fe.size())));
+            const auto hi = static_cast<std::size_t>(std::min<std::int64_t>(k0 + m, static_cast<std::int64_t>(fe.size())));
+            c.fe.assign(fe.begin() + static_cast<std::ptrdiff_t>(lo), fe.begin() + static_cast<std::ptrdiff_t>(hi));
+            out.push_back(std::move(c));
+            off += static_cast<std::size_t>(n);
+            *a0_ += n;
+        }
+    } catch (...) {
+        drop_consumed();   // a0 and pend stay in step, as Python's do
+        throw;
     }
+    drop_consumed();
     return out;
 }
 

@@ -736,6 +736,23 @@ def test_stream_fe_random(nf, seed):
         pos += n
 
 
+
+@pytest.mark.parametrize("block", [16, 8000])
+def test_stream_fe_one_long_push(nf, block):
+    """Hundreds of blocks out of a single push (a recording replayed whole),
+    then a short follow-on: the C++ consumes from an offset and drops the
+    prefix once, where it used to erase per block (quadratic in the push)."""
+    x = _noise(41, 8000 * 40 + 777)
+    ref, nat = live.StreamFE(block), nf.StreamFE(block)
+    for a, xs in ((3, x[3:]), (3 + len(x) - 3, x[:500])):
+        r_out, n_out = ref.push(a, xs), nat.push(a, xs)
+        assert len(n_out) == len(r_out) and [i for i, _ in n_out] == [i for i, _ in r_out]
+        if r_out:
+            _fe_close(np.concatenate([np.asarray(f) for _, f in n_out]),
+                      np.concatenate([f for _, f in r_out]))
+        assert (nat.a0, nat.next_index) == (ref.a0, ref.next_index)
+        _same(nat.pend, ref.pend)
+
 def test_calc_oa_lens_sweep(cv):
     """scipy's block arithmetic for every overlap the receiver's filters
     could have (lambertw to the bit, so ceil() never lands differently)."""
