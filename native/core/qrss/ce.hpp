@@ -71,8 +71,8 @@ inline constexpr std::size_t N_OFFSETS = 2 * config::SPAN + 1;                  
 // ce.py's own constants (not in constants.py, so not generated): on-off
 // keying follows the Morse in units 5..183 of a window (design 2.7, D14),
 // and FSK keys one cycle per unit below the carrier.
-inline constexpr int OOK_FIRST_KEYED_UNIT = 5;
-inline constexpr int OOK_LAST_KEYED_UNIT = 183;
+inline constexpr int OOK_FIRST_KEYED_UNIT = config::CE_OOK_FIRST_KEYED_UNIT;
+inline constexpr int OOK_LAST_KEYED_UNIT = config::CE_OOK_LAST_KEYED_UNIT;
 inline constexpr double FSK_SHIFT_HZ = -1.0 / (config::CW_UNIT * config::T_SYM);   // -16.495 Hz
 
 // float(ALPHA), float(BETA) and BETA**2 as the reference computes them.

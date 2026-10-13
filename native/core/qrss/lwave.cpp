@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "dsp/fft.hpp"
+#include "qrss/ce.hpp"
 #include "qrss/filters.hpp"
 #include "qrss/npsum.hpp"
 #include "qrss/tables.hpp"
@@ -58,38 +59,10 @@ void require_l(const frame::FrameSpec& spec, std::string_view what) {
     frame::require_waveform(spec, frame::Waveform::L, what);
 }
 
-// --- ce.py's helpers, on L's own symbol (ce._hann_int, _ramp_envelope,
-// _turns_to_phasor) ---------------------------------------------------------------
-
-// 4 * np.pi ** 2. Python's ** is libm's pow, which is not x*x everywhere
-// (glibc's differs on ~0.1% of doubles); for pi it is, so the product is
-// written out and no libm's pow is trusted with a format constant.
-const double FOUR_PI_SQ = 4 * (PI * PI);
-
-// ce._hann_int: R(y), the integral of the Hann CDF centred on 0 with unit width.
-double hann_int(double y) {
-    if (y < -0.5) return 0.0;
-    if (y > 0.5) return y;
-    const double a = y + 0.5;
-    return (a * a) / 2 - (std::cos((2 * PI) * y) + 1) / FOUR_PI_SQ;
-}
-
-// ce._ramp_envelope at one tau: 1 on [lo, hi), raised-cosine ramps of `ramp`
-// symbols outside it, 0 beyond.
-double ramp_envelope(double tau, double lo, double hi, double ramp) {
-    double env = (tau >= lo && tau < hi) ? 1.0 : 0.0;
-    if (ramp > 0) {
-        if (tau >= lo - ramp && tau < lo) env = 0.5 * (1 - std::cos(PI * (tau - (lo - ramp)) / ramp));
-        if (tau >= hi && tau < hi + ramp) env = 0.5 * (1 + std::cos(PI * (tau - hi) / ramp));
-    }
-    return env;
-}
-
-// ce._turns_to_phasor: exp(j 2 pi turns), the turns reduced to [0, 1) first.
-cplx turns_to_phasor(double turns) {
-    const double ang = (2 * PI) * (turns - std::floor(turns));
-    return {std::cos(ang), std::sin(ang)};
-}
+// ce.py's helpers on L's own symbol, shared with CE so the two cannot drift.
+using ce::hann_int;
+using ce::ramp_envelope;
+using ce::turns_to_phasor;
 
 // numpy's float power with a scalar exponent: its loop's fast paths, then pow.
 double np_power(double x, double k) {

@@ -75,11 +75,11 @@ inline constexpr int CLIP_FS = config::CH_FS;                                   
 // lwave.py's own module constants, which tools/gen_qrss_config_header.py
 // does not emit yet (see the port's shared_changes_needed); the parity test
 // holds each against the reference's value.
-inline constexpr double L_AVG_POWER = 0.63;     // the clipped data's average power, before 1/A_id
-inline constexpr int ID_RAMP_UNITS = 8;         // pilot level ramps over units 0..7 and 184..191
-inline constexpr double KEY_RAMP_S = 0.05;      // keying ramps outside the keyed span
-inline constexpr int INTERP_HALF = 240;         // interpolator taps either side at 8 kHz
-inline constexpr double MARGIN_S = 4.0;         // frame_baseband's default margin
+inline constexpr double L_AVG_POWER = config::L_AVG_POWER;     // the clipped data's average power, before 1/A_id
+inline constexpr int ID_RAMP_UNITS = config::L_ID_RAMP_UNITS;         // pilot level ramps over units 0..7 and 184..191
+inline constexpr double KEY_RAMP_S = config::L_KEY_RAMP_S;      // keying ramps outside the keyed span
+inline constexpr int INTERP_HALF = config::L_INTERP_HALF;         // interpolator taps either side at 8 kHz
+inline constexpr double MARGIN_S = config::L_MARGIN_S;         // frame_baseband's default margin
 
 // Derived exactly as the reference derives them (sqrt and pow, both
 // correctly rounded or libm's, and numpy's pairwise sum for G0).

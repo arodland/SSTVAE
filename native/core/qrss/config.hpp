@@ -181,4 +181,21 @@ inline constexpr std::array<MorseCode, 37> MORSE{{
     {'/', "-..-."},
 }};
 
+// --- module constants (picture.py, beaconfile.py, ce.py, lwave.py) ---
+// Defined in those modules rather than constants.py; the C++ modules take
+// them from here so no copy is typed by hand.
+inline constexpr std::array<std::string_view, 3> MODE_NAMES{"A", "B", "C"};
+inline constexpr int QRSP_VERSION = 1;
+inline constexpr int BEACON_FILE_VERSION = 1;
+inline constexpr int BEACON_FLAG_OOK = 1;
+inline constexpr int BEACON_HEAD_BYTES = 32;
+inline constexpr int CE_OOK_FIRST_KEYED_UNIT = 5;
+inline constexpr int CE_OOK_LAST_KEYED_UNIT = 183;
+inline constexpr int L_ID_RAMP_UNITS = 8;
+inline constexpr int L_INTERP_HALF = 240;
+inline constexpr std::string_view BEACON_MAGIC = "QRSB";
+inline constexpr double L_AVG_POWER = 0x1.428f5c28f5c29p-1;  // 0.63
+inline constexpr double L_KEY_RAMP_S = 0x1.999999999999ap-5;  // 0.05
+inline constexpr double L_MARGIN_S = 0x1.0000000000000p+2;  // 4.0
+
 }  // namespace sstvae::qrss::config

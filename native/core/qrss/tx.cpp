@@ -7,6 +7,7 @@
 #include <string>
 #include <utility>
 
+#include "qrss/ce.hpp"
 #include "qrss/morse.hpp"
 #include "qrss/precoder.hpp"
 
@@ -23,17 +24,6 @@ std::string fmt_g(double x) {
     char buf[32];
     std::snprintf(buf, sizeof buf, "%g", x);
     return buf;
-}
-
-// ce.check_carrier: the carrier in Hz, refused outside CARRIER_BAND_HZ.
-// (ce.py's own function; tx.check_pilot is its only caller in this module.
-// When native/core/qrss/ce lands this should call ce::check_carrier.)
-double check_carrier(double f, const std::string& shown) {
-    const double lo = config::CARRIER_BAND_HZ[0], hi = config::CARRIER_BAND_HZ[1];
-    if (!(std::isfinite(f) && lo <= f && f <= hi))
-        refuse("carrier " + shown + " Hz is outside the " + fmt_g(lo) + "-" + fmt_g(hi) +
-               " Hz audio band that receivers search");
-    return f;
 }
 
 // float(L_PILOT_HZ + L_EDGE_HZ): the exact sum, divided once (as
@@ -156,7 +146,7 @@ std::int64_t slot_samples(const frame::FrameSpec& spec, double pre_s, double pos
 
 double check_pilot(double carrier_hz, const std::optional<std::string>& shown) {
     const std::string text = shown.value_or(frame::py_repr(carrier_hz));
-    const double f = check_carrier(carrier_hz, text);
+    const double f = ce::check_carrier(carrier_hz, text);
     const double low = f - pilot_to_data_edge_hz();
     const double lo = config::CARRIER_BAND_HZ[0];
     if (low < lo) {

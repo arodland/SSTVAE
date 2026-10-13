@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "framing/interleaver_table.hpp"   // brings SSTVAE's config.hpp
+#include "qrss/config.hpp"
 #include "qrss/half.hpp"
 #include "qrss/npz.hpp"
 
@@ -49,10 +50,10 @@ inline constexpr int GROUP_LATENTS = ::sstvae::config::GROUP_LATENTS;           
 inline constexpr int SENT = ::sstvae::config::TRANSMIT_LATENTS_PER_GROUP;        // 50,600
 inline constexpr int N_GROUPS = ::sstvae::config::LATENT_GROUPS;                 // 3
 // picture.MODE_NAMES: mode m sends groups 0..m.
-inline constexpr std::array<std::string_view, 3> MODE_NAMES{"A", "B", "C"};
+inline constexpr auto MODE_NAMES = ::sstvae::qrss::config::MODE_NAMES;
 static_assert(MODE_NAMES.size() == static_cast<std::size_t>(N_GROUPS), "one mode per group count");
 // picture.QRSP_VERSION.
-inline constexpr std::int64_t QRSP_VERSION = 1;
+inline constexpr std::int64_t QRSP_VERSION = ::sstvae::qrss::config::QRSP_VERSION;
 
 using half::Half;
 // One group's stored values: float16[GROUP_LATENTS], canonical order.

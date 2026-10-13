@@ -177,6 +177,30 @@ def render_config() -> str:
         w(f"    {{'{ch}', \"{code}\"}},\n")
     w("}};\n")
 
+    w("\n// --- module constants (picture.py, beaconfile.py, ce.py, lwave.py) ---\n")
+    w("// Defined in those modules rather than constants.py; the C++ modules take\n"
+      "// them from here so no copy is typed by hand.\n")
+    from sstvae.qrss import beaconfile, ce, lwave, picture
+    names = tuple(picture.MODE_NAMES)
+    w(f"inline constexpr std::array<std::string_view, {len(names)}> MODE_NAMES{{"
+      f"{', '.join(_cstr(n.encode()) for n in names)}}};\n")
+    for cname, v in [("QRSP_VERSION", picture.QRSP_VERSION),
+                     ("BEACON_FILE_VERSION", beaconfile.FILE_VERSION),
+                     ("BEACON_FLAG_OOK", beaconfile.FLAG_OOK),
+                     ("BEACON_HEAD_BYTES", beaconfile.HEAD_BYTES),
+                     ("CE_OOK_FIRST_KEYED_UNIT", ce.OOK_FIRST_KEYED_UNIT),
+                     ("CE_OOK_LAST_KEYED_UNIT", ce.OOK_LAST_KEYED_UNIT),
+                     ("L_ID_RAMP_UNITS", lwave.ID_RAMP_UNITS),
+                     ("L_INTERP_HALF", lwave.INTERP_HALF)]:
+        assert isinstance(v, int) and not isinstance(v, bool), cname
+        w(f"inline constexpr int {cname} = {v};\n")
+    w(f"inline constexpr std::string_view BEACON_MAGIC = {_cstr(beaconfile.MAGIC)};\n")
+    import inspect
+    margin = inspect.signature(lwave.frame_baseband).parameters["margin_s"].default
+    for cname, v in [("L_AVG_POWER", lwave.L_AVG_POWER), ("L_KEY_RAMP_S", lwave.KEY_RAMP_S),
+                     ("L_MARGIN_S", margin)]:
+        w(f"inline constexpr double {cname} = {_hex(float(v))};  // {float(v)!r}\n")
+
     w("\n}  // namespace sstvae::qrss::config\n")
     return "".join(lines)
 

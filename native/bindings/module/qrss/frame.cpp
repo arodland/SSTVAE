@@ -27,9 +27,11 @@ namespace {
 namespace fr = sstvae::qrss::frame;
 namespace cfg = sstvae::qrss::config;
 
+// Imported once and never destroyed: a static py::module_ would be released
+// after the interpreter has finalized, which aborts a plain script at exit.
 py::module_ numpy() {
-    static py::module_ np = py::module_::import("numpy");
-    return np;
+    static py::module_* np = new py::module_(py::module_::import("numpy"));
+    return *np;
 }
 
 // A frame name between Python and the C++: UTF-8 with lone surrogates passed

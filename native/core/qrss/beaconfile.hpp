@@ -50,10 +50,10 @@
 namespace sstvae::qrss::beaconfile {
 
 // beaconfile.MAGIC, FILE_VERSION, FLAG_OOK and the layout's sizes.
-inline constexpr std::string_view MAGIC = "QRSB";
-inline constexpr int FILE_VERSION = 1;
-inline constexpr int FLAG_OOK = 0x01;
-inline constexpr std::size_t HEAD_BYTES = 32;                                    // struct "<4sBBBBIH8sHIHBB"
+inline constexpr std::string_view MAGIC = config::BEACON_MAGIC;
+inline constexpr int FILE_VERSION = config::BEACON_FILE_VERSION;
+inline constexpr int FLAG_OOK = config::BEACON_FLAG_OOK;
+inline constexpr std::size_t HEAD_BYTES = config::BEACON_HEAD_BYTES;  // struct "<4sBBBBIH8sHIHBB"
 inline constexpr std::size_t KEYING_BYTES = config::CW_UNITS / 8;                // 24
 inline constexpr std::size_t HDR_BYTES = (config::N_HDR_BITS + 7) / 8;           // 310
 inline constexpr std::size_t LATENT_OFFSET = HEAD_BYTES + KEYING_BYTES + HDR_BYTES;
