@@ -94,15 +94,28 @@ std::optional<std::pair<double, double>> band_of(const py::object& o) {
     return std::make_pair(rx::as_double(s[0]), rx::as_double(s[1]));
 }
 
+[[noreturn]] void raise(PyObject* type, const std::string& what) {
+    PyErr_SetString(type, what.c_str());
+    throw py::error_already_set();
+}
+
+// erase_s as the reference's erase reads it: nothing when falsy, else
+// `for a, b in spans` with CPython 3.13's refusals and messages.
 std::vector<std::pair<double, double>> spans_of(const py::object& o) {
     std::vector<std::pair<double, double>> out;
+    if (!rx::as_bool(o)) return out;
     for (const py::handle h : py::reinterpret_borrow<py::iterable>(py::iter(o))) {
-        py::tuple t = py::tuple(py::reinterpret_borrow<py::object>(h));
-        if (t.size() != 2)
-            throw py::value_error(t.size() < 2 ? "not enough values to unpack (expected 2, got " +
-                                                     std::to_string(t.size()) + ")"
-                                               : "too many values to unpack (expected 2)");
-        out.emplace_back(rx::as_double(t[0]), rx::as_double(t[1]));
+        if (!py::isinstance<py::iterable>(h))
+            raise(PyExc_TypeError, std::string("cannot unpack non-iterable ") + Py_TYPE(h.ptr())->tp_name + " object");
+        py::list items;
+        for (const py::handle x : py::reinterpret_borrow<py::iterable>(py::iter(h))) {
+            items.append(x);
+            if (items.size() > 2) raise(PyExc_ValueError, "too many values to unpack (expected 2)");
+        }
+        if (items.size() < 2)
+            raise(PyExc_ValueError,
+                  "not enough values to unpack (expected 2, got " + std::to_string(items.size()) + ")");
+        out.emplace_back(rx::as_double(items[0]), rx::as_double(items[1]));
     }
     return out;
 }
