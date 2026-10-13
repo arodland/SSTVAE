@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -361,6 +362,21 @@ static void test_layout_cache_threads() {
     check::equal(total, 0, "layouts built from 8 threads");
 }
 
+// py_format is Python's format(v, spec): a width's padding stays spaces
+// (it once read as a locale's decimal point: ".1500.017"), and a NaN of
+// either sign prints unsigned, as Python prints it.
+static void test_py_format() {
+    check::equal(fr::py_format(1500.017, "%9.3f"), std::string(" 1500.017"), "py_format width");
+    check::equal(fr::py_format(-2.5, "%8.1f"), std::string("    -2.5"), "py_format negative width");
+    check::equal(fr::py_format(287.9, "%.1f"), std::string("287.9"), "py_format point");
+    check::equal(fr::py_format(-std::numeric_limits<double>::quiet_NaN(), "%.1f"), std::string("nan"),
+                 "py_format -nan");
+    check::equal(fr::py_format(-std::numeric_limits<double>::quiet_NaN(), "%6.1f"), std::string("   nan"),
+                 "py_format -nan width");
+    check::equal(fr::py_format(-std::numeric_limits<double>::infinity(), "%.1f"), std::string("-inf"),
+                 "py_format -inf");
+}
+
 int main() {
     check::report_crashes_instead_of_prompting();
     try {
@@ -371,6 +387,7 @@ int main() {
         test_names();
         test_refusals();
         test_layout_cache_threads();
+        test_py_format();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;

@@ -315,6 +315,8 @@ struct Rounds {
     }
 
     demod::Extraction extract(const track::TrackResult& tr, const FrameSpec& spec, std::int64_t q) const {
+        // sequences.scrambler's refusal: q keys the scrambler as uint64_be
+        if (q < 0) throw std::invalid_argument("q must fit in uint64, not " + std::to_string(q));
         const auto uq = static_cast<std::uint64_t>(q);
         if (is_l(spec)) return ldemod::extract_l(tr, spec, uq, a.estimator);
         return demod::extract(tr, spec, uq, a.estimator);

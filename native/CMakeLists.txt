@@ -711,6 +711,9 @@ if(TARGET sstvae_qrss)
   endif()
   if(TARGET sstvae_qrss_codec)
     target_link_libraries(sstvae_qrss_cli PUBLIC sstvae_qrss_codec)
+    # receive --image's renderer, outside the glob above (receive.hpp's hook).
+    target_sources(sstvae_qrss_cli PRIVATE
+                   ${CMAKE_CURRENT_SOURCE_DIR}/apps/sstvae_qrss/codec/receive_image.cpp)
   endif()
 
   add_executable(sstvae-qrss apps/sstvae_qrss/main.cpp)

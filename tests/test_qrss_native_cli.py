@@ -332,8 +332,8 @@ def test_dispatch(cli):
     assert r.returncode == 2 and r.stderr.startswith("sstvae-qrss: unknown command 'frobnicate'\n")
     r = subprocess.run([cli, "--help"], capture_output=True, text=True, timeout=60)
     assert any(line.split()[:1] == ["transmit"] and "qrss_transmit.py" in line for line in r.stdout.splitlines())
-    r = subprocess.run([cli, "receive"], capture_output=True, text=True, timeout=60)
-    assert r.returncode == 2 and r.stderr == "sstvae-qrss receive: not in this build yet; use qrss_receive.py\n"
+    r = subprocess.run([cli, "listen"], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 2 and r.stderr == "sstvae-qrss listen: not in this build yet; use qrss_listen.py\n"
 
 
 # --- encode ---------------------------------------------------------------------------------

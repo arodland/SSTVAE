@@ -79,6 +79,20 @@ namespace {
 
 namespace fr = sstvae::qrss::frame;
 
+// The Python class read_wav's refusal is raised as (wavread.hpp), by the
+// name a traceback's last line gives it.
+const char* wav_error_class(wav::FormatError::Kind k) {
+    using K = wav::FormatError::Kind;
+    switch (k) {
+        case K::struct_error: return "struct.error";
+        case K::zero_division: return "ZeroDivisionError";
+        case K::type: return "TypeError";
+        case K::unbound_local: return "UnboundLocalError";
+        case K::value: break;
+    }
+    return "ValueError";
+}
+
 // qrss_receive.py's docstring, its --help description, with the store's
 // paragraph as this port has it.
 constexpr const char* DESCRIPTION =
@@ -302,13 +316,9 @@ bool is_npz(const std::string& normalised) {
 
 // Python's format(x, spec) for a float: printf's digits with '.' for the
 // point, and NaN unsigned (Python prints "nan" / "+nan" whatever its sign bit).
-std::string fmt(const char* spec, double x) {
-    return fr::py_format(std::isnan(x) ? std::numeric_limits<double>::quiet_NaN() : x, spec);
-}
+std::string fmt(const char* spec, double x) { return fr::py_format(x, spec); }
 
-// format(x, "<width><spec>"): right-aligned in `width` columns. Padded here
-// because frame::py_format reads a field width's padding spaces as a
-// locale's decimal point (it gives ".1500.017" for "%9.3f").
+// format(x, "<width><spec>"): right-aligned in `width` columns.
 std::string fmt(const char* spec, double x, std::size_t width) {
     std::string s = fmt(spec, x);
     if (s.size() < width) s.insert(0, width - s.size(), ' ');
@@ -447,6 +457,8 @@ int run(const std::string& prog, const std::vector<std::string>& argv, std::ostr
             cap = api::capture_from_wav(path, *q, start);
         } catch (const wav::ReadError& e) {
             return uncaught(err, OsError(e.err, e.path));
+        } catch (const wav::FormatError& e) {
+            return uncaught(err, wav_error_class(e.kind), e.what());
         } catch (const std::invalid_argument& e) {
             return uncaught(err, "ValueError", e.what());
         }
@@ -486,10 +498,9 @@ int run(const std::string& prog, const std::vector<std::string>& argv, std::ostr
     // A slot before 1970 (q < 0, from --slot or the .npz): the reference's
     // demod.extract / ldemod.extract_l descramble with sequences.scrambler(q),
     // which refuses q outside uint64, so its receive_slot raises at the first
-    // detection that reaches demodulation -- every pass returned has, and
-    // every receive_pass that gets that far returns a pass -- while the
-    // native demodulators take q as uint64 and would descramble with 2^64 + q.
-    // Same outcome: no signal found as there, a pass found is that ValueError.
+    // detection that reaches demodulation. receiver::receive_pass refuses it
+    // the same way (the catch above); this is only a backstop, since every
+    // pass returned has been demodulated.
     if (cap.q < 0 && !passes.empty())
         return uncaught(err, "ValueError", "q must fit in uint64, not " + std::to_string(cap.q));
     if (passes.empty()) {

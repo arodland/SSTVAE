@@ -37,7 +37,6 @@ struct NotBuilt {
 };
 constexpr NotBuilt NOT_BUILT[] = {
     {"encode", "built without the codec (SSTVAE_BUILD_CODEC=OFF); use qrss_encode.py, or rebuild with the codec"},
-    {"receive", "not in this build yet; use qrss_receive.py"},
     {"listen", "not in this build yet; use qrss_listen.py"},
     {"decode", "not in this build yet; use qrss_decode.py"},
 };

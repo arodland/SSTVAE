@@ -1165,7 +1165,7 @@ def _callers(Rc):
 
 def _counted(table, used):
     def wrap(key, fn):
-        if key[0] != RECEIVER:
+        if key[0] != RECEIVER or not callable(fn):   # receiver also has constant rows (GHOST_HZ, ...)
             return fn
 
         def f(*a, **k):
