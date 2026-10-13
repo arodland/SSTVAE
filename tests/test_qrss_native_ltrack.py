@@ -7,10 +7,12 @@ l-short pass at -6 dB through `receiver.receive_pass`, with spies on
 `ltrack.track_l` and `ltrack.refine_timing_l` recording every call (gate
 V's withheld runs, round A, round B with the header and callsign known,
 and the refinements inside them) and what each returned. The rows are
-then fed exactly those arguments. The slow tier adds the same at -12 dB
-with +1 Hz/min drift and +100 ppm on the receiver's clock (l-short) and
-at -6 dB with -1.5 Hz/min and -100 ppm on the sender's (l-tiny), a pass
-with a 9 s lead-in, and l-medium's quadratic-timing branch.
+then fed exactly those arguments, and an l-tiny pass at -6 dB with a 9 s
+lead-in (the one configuration reaching _lead_supported_l) is received
+on the rows. The slow tier adds the same at -12 dB with +1 Hz/min drift
+and +100 ppm on the receiver's clock (l-short) and at -6 dB with
+-1.5 Hz/min and -100 ppm on the sender's (l-tiny), and l-medium's
+quadratic-timing branch.
 
 The contract, and what was measured (2026-10-13, these passes):
 
@@ -39,7 +41,10 @@ The contract, and what was measured (2026-10-13, these passes):
   reached (counting spies installed before the rows), in three
   configurations: every row; every row but track_l (the reference's
   tracker run over the rows' pieces); the leaves alone;
-- the reference's refusals, type and text.
+- the reference's refusals, type and text; and numpy's own semantics at
+  the edges: a numpy scalar for a 0-d tau, index or tp, an index's or a
+  position array's own shape, a boolean mask, a CE frame (the
+  AttributeError / AssertionError lframe.layout raises on one).
 
 tests/qrss_native/ltrack.py substitutes these under --native-qrss=rx.
 """
@@ -286,6 +291,7 @@ def test_pilot_filter(Ln, row, passes):
             _same_error(r, g, repr(x))
 
 
+@pytest.mark.filterwarnings("ignore:invalid value encountered:RuntimeWarning")  # the reference on a NaN position
 def test_data_mix_and_mf(Ln, row, passes):
     rng = np.random.default_rng(3)
     for label, tr in _tracks(passes):
@@ -725,7 +731,6 @@ def test_track_l_with_drift_and_clock_errors(Ln, row, leaves, hard_passes):
     assert all(v <= 1e-9 for v in worst.values()), worst
 
 
-@pytest.mark.slow
 def test_lead_in_pass(native, Ln, row, monkeypatch):
     """A 9 s lead-in claimed by the detection: _lead_supported_l keeps it,
     the grid starts before the frame, and the receiver on the rows is the
