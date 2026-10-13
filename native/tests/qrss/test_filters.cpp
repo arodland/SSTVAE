@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <stdexcept>
@@ -163,6 +164,22 @@ static void test_upfirdn() {
               "6e1eb5dfff91768b7c16dc9bb79182cd5bfa6bc86f871179b65cb9d6f9070c2b", "signal shorter than a phase");
 
     check::equal(flt::upfirdn_output_len(1, 0, 3, 1), std::int64_t(-2), "_output_len floors");
+    check::equal(flt::upfirdn_output_len(-5, 1, 1, -3), std::int64_t(3), "_output_len floors a negative divisor");
+    // Cython wraps the int64 arithmetic and raises on the two divisions C traps on
+    check::equal(flt::upfirdn_output_len(INT64_MIN + 2, 1, 1, -1), INT64_MIN, "_output_len wraps as Cython's does");
+    bool zero = false, overflow = false;
+    try {
+        flt::upfirdn_output_len(1, 1, 1, 0);
+    } catch (const std::domain_error&) {
+        zero = true;
+    }
+    try {
+        flt::upfirdn_output_len(INT64_MIN + 1, 1, 1, -1);
+    } catch (const std::overflow_error&) {
+        overflow = true;
+    }
+    check::is_true(zero, "_output_len refuses down == 0 rather than trapping");
+    check::is_true(overflow, "_output_len refuses INT64_MIN // -1 rather than trapping");
     refuses([] { flt::upfirdn<double>(std::vector<double>{1.0}, std::vector<double>{}, 3, 1); },
             "negative dimensions are not allowed", "empty x, up 3");
     refuses([] { flt::upfirdn<double>(std::vector<double>{}, std::vector<double>{1.0}); },

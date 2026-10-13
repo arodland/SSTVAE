@@ -420,7 +420,16 @@ std::vector<double> firwin(std::int64_t numtaps, std::span<const double> cutoff_
 // --- upfirdn ---------------------------------------------------------------------------
 
 std::int64_t upfirdn_output_len(std::int64_t len_h, std::int64_t in_len, std::int64_t up, std::int64_t down) {
-    return floor_div(((in_len - 1) * up + len_h) - 1, down) + 1;
+    // Cython's int64 arithmetic: the products and sums wrap, the floor
+    // division refuses what C cannot do (a zero divisor, INT64_MIN // -1).
+    // Signed overflow is undefined in C++, so the wrapping is done unsigned.
+    using U = std::uint64_t;
+    const auto num = static_cast<std::int64_t>((static_cast<U>(in_len) - 1) * static_cast<U>(up) +
+                                               static_cast<U>(len_h) - 1);
+    if (down == 0) throw std::domain_error("integer division or modulo by zero");
+    if (down == -1 && num == std::numeric_limits<std::int64_t>::min())
+        throw std::overflow_error("value too large to perform division");
+    return static_cast<std::int64_t>(static_cast<U>(floor_div(num, down)) + 1);
 }
 
 template <typename T>

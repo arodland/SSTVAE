@@ -114,7 +114,10 @@ inline std::vector<double> firwin(std::int64_t numtaps, double cutoff,
 
 // scipy's _output_len: ceil(((in_len - 1) * up + len_h) / down), by floor
 // division, so it is negative for some empty inputs (which upfirdn refuses
-// as numpy refuses a negative dimension).
+// as numpy refuses a negative dimension). In int64 that wraps, as Cython's
+// does; down == 0 throws std::domain_error and INT64_MIN // -1
+// std::overflow_error (Cython's ZeroDivisionError and OverflowError)
+// rather than trapping.
 std::int64_t upfirdn_output_len(std::int64_t len_h, std::int64_t in_len, std::int64_t up,
                                 std::int64_t down);
 

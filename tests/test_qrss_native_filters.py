@@ -15,9 +15,12 @@ Skips when the extension is not built; `pytest --native-qrss=tx` (and
 code.
 """
 
+from fractions import Fraction
+
 import numpy as np
 import pytest
 from scipy import signal, special
+from scipy.signal._upfirdn import _output_len
 
 from qrss_native import require
 from sstvae.qrss import acquire, ce, cwid, frame, frontend, lframe, lwave
@@ -541,3 +544,190 @@ def test_acquire_notch_and_cwid_ln_i0(nat, monkeypatch):
     monkeypatch.setattr(cwid, "special", Overlay(special, i0e=nat.i0e))
     same(acquire._notch_taps(), want, "_notch_taps")
     same(cwid._ln_i0(x), want_ln, "_ln_i0")
+
+
+# --- review probes: the edges a first port gets wrong ----------------------------------------
+
+def agree(ref, nat_call, what=""):
+    """Both return the same thing, or both raise the same exception and text."""
+    try:
+        want = ref()
+    except Exception as e:                                       # noqa: BLE001
+        with pytest.raises(type(e)) as got:
+            nat_call()
+        assert str(got.value) == str(e), what
+        return None
+    got = nat_call()
+    assert type(got) is type(want), f"{what}: {type(got)} != {type(want)}"
+    same(got, want, what)
+    return got
+
+
+def test_output_len_refuses_as_cython_does_rather_than_trapping(nat):
+    """down == 0 and INT64_MIN // -1 were a SIGFPE (the whole process) before."""
+    raises_same(lambda: _output_len(1, 1, 1, 0), lambda: nat._output_len(1, 1, 1, 0))
+    raises_same(lambda: _output_len(-2**63 + 1, 1, 1, -1), lambda: nat._output_len(-2**63 + 1, 1, 1, -1))
+    rng = np.random.default_rng(21)
+    big = [0, 1, -1, 2**62, -2**63, 2**63 - 1, -2**63 + 2]
+    for _ in range(3000):
+        a = [int(v) if rng.uniform() < 0.7 else big[int(rng.integers(0, len(big)))]
+             for v in rng.integers(-2**40, 2**40, 4)]
+        if a[3] == 0 or rng.uniform() < 0.3:
+            a[3] = int(rng.integers(1, 100)) * (1 if rng.uniform() < 0.8 else -1)
+        if a[3] == -1 and a[0] == -2**63 + 1:
+            continue
+        assert nat._output_len(*a) == _output_len(*a), a
+
+
+@pytest.mark.filterwarnings("ignore::numpy.exceptions.ComplexWarning")    # both warn, as float() of a complex does
+@pytest.mark.parametrize("dtype", [np.float64, np.float32, np.complex128, np.complex64])
+def test_upfirdn_cval_conversion(nat, dtype):
+    """cval goes through Cython's float/complex conversion: its texts, its narrowing."""
+    h = np.array([1.0, 2.0, -0.5])
+    x = np.ones(3, dtype)
+    for cval in (1j, "a", None, np.array(2.0), np.array([2.0]), Fraction(1, 3), np.complex64(1 + 1j),
+                 1e300, -0.0, np.float32(0.1), True, 2**1100, np.nan):
+        agree(lambda: signal.upfirdn(h, x, 2, 1, cval=cval), lambda: nat.upfirdn(h, x, 2, 1, cval=cval),
+              f"cval={cval!r} {np.dtype(dtype)}")
+        agree(lambda: signal.resample_poly(x, 3, 2, cval=cval), lambda: nat.resample_poly(x, 3, 2, cval=cval),
+              f"resample_poly cval={cval!r} {np.dtype(dtype)}")
+
+
+def test_upfirdn_complex_infinities_and_strided_inputs(nat):
+    h = np.array([1.0, 2.0, -0.5])
+    for x in (np.array([np.inf + 1j * np.inf, 1 + 0j]), np.array([np.inf + 0j, np.nan + 1j]),
+              np.array([complex(np.inf, np.nan), 1j * np.inf]), np.array([complex(-np.inf, 0.0), -0.0j])):
+        with np.errstate(invalid="ignore"):
+            for up, down in ((2, 1), (1, 1), (3, 2)):
+                same(nat.upfirdn(h, x, up, down), signal.upfirdn(h, x, up, down), f"{x} {up}/{down}")
+                same(nat.upfirdn(h + 0j, x, up, down), signal.upfirdn(h + 0j, x, up, down), f"{x} {up}/{down}")
+    x = (np.arange(40.0) + 1j * np.arange(40.0))[::-3]
+    same(nat.upfirdn(h, x, 3, 2), signal.upfirdn(h, x, 3, 2))
+    same(nat.upfirdn(h[::-1], x.real, 3, 2), signal.upfirdn(h[::-1], x.real, 3, 2))
+    xb = np.arange(12.0).astype(">f8")
+    same(nat.upfirdn(h, xb, 2, 3), signal.upfirdn(h, xb, 2, 3))
+    xf = np.asfortranarray(np.arange(24.0).reshape(4, 6))
+    same(nat.upfirdn(h, xf, 2, 3, axis=0), signal.upfirdn(h, xf, 2, 3, axis=0))
+
+
+@pytest.mark.parametrize("name", ["hann", "hamming", "kaiser"])
+def test_window_lengths_scipy_accepts_and_refuses(nat, name):
+    """M is checked by _len_guards, M <= 1 is np.ones(M), and only then is sym read."""
+    extra = (6.0,) if name == "kaiser" else ()
+    ref, got = getattr(signal.windows, name), getattr(nat, name)
+    for M in (5.0, 1.0, 0.0, np.float64(5), np.float32(4), np.int8(5), np.uint64(7), Fraction(5), Fraction(1),
+              "5", None, 2.5, -1.0, np.nan, np.inf, True, np.True_, np.array(5), np.array(1), np.array(True),
+              np.array(5.0), 10**20):
+        for sym in (True, False):
+            agree(lambda: ref(M, *extra, sym=sym), lambda: got(M, *extra, sym=sym), f"{name}({M!r}, sym={sym})")
+    for sym in (0, 1, None, "", "x", np.bool_(False), np.array(True), np.array([1, 2])):
+        for M in (5, 1, 0):
+            agree(lambda: ref(M, *extra, sym=sym), lambda: got(M, *extra, sym=sym), f"{name}({M}, sym={sym!r})")
+
+
+def test_kaiser_beta_is_read_as_scipy_reads_it(nat):
+    """Lazily (not at all for M <= 1), through numpy's multiply and then i0's own type rules."""
+    from decimal import Decimal
+    for beta in (np.array(5.0), np.float32(2.5), np.float16(2.5), np.int8(3), 3, True, np.inf, -np.inf, np.nan,
+                 1e300, -4.0, 1j, Fraction(3), np.longdouble(2), np.complex64(1), np.array(2, dtype=object), "5",
+                 2**1100, -2**70, np.uint64(2**64 - 1), Decimal(3), np.timedelta64(3, "s"), np.datetime64(1, "s"),
+                 np.bytes_(b"3"), [3.0], (3.0,), np.array([2.0]), None, object()):
+        for M in (9, 8, 2, 1, 0):
+            with np.errstate(invalid="ignore", over="ignore"):
+                agree(lambda: signal.windows.kaiser(M, beta), lambda: nat.kaiser(M, beta), f"kaiser({M}, {beta!r})")
+                agree(lambda: signal.get_window(("kaiser", beta), max(M, 1)),
+                      lambda: nat.get_window(("kaiser", beta), max(M, 1)), f"get_window(kaiser {beta!r}, {M})")
+
+
+def test_get_window_lengths_and_names(nat):
+    G = signal.get_window
+    for Nx in (np.int64(8), np.uint8(8), 8.0, Fraction(8), np.True_, True, 1, "8", None, 10**20, np.array(8)):
+        agree(lambda: G("hann", Nx), lambda: nat.get_window("hann", Nx), f"hann {Nx!r}")
+        agree(lambda: G(("kaiser", 3.0), Nx), lambda: nat.get_window(("kaiser", 3.0), Nx), f"kaiser {Nx!r}")
+    for fb in (np.True_, 1, None):
+        agree(lambda: G("hann", 8, fftbins=fb), lambda: nat.get_window("hann", 8, fftbins=fb), f"fftbins={fb!r}")
+    for w in (np.array(5.0), "5", b"hann", ("kaiser", np.array(4.0)), ["kaiser", 4.0], ("hann_periodic",),
+              ("kaiser_symmetric", 3.0), ("ksr_periodic", 3), 1j, True, np.inf, np.nan, -5.0, np.str_("hann"),
+              ("",), "", ("hann",)):
+        for n in (1, 2, 9):
+            with np.errstate(invalid="ignore"):
+                agree(lambda: G(w, n), lambda: nat.get_window(w, n), f"get_window({w!r}, {n})")
+
+
+FIRWIN_PROBES = [
+    ((31, 1e-320), {}), ((31, 5e-324), {}), ((31, [1e-320, 0.5]), {}), ((31, [0.2, np.nan]), {}),
+    ((31, [np.nan, 0.2]), {}),
+    ((31, 0.2), dict(fs=np.float32(3.0))), ((31, 0.2), dict(fs=3)), ((31, 0.2), dict(fs="4")),
+    ((31, 0.2), dict(fs=None)), ((31, 0.2), dict(fs=0.0)), ((31, 0.2), dict(fs=-2.0)), ((31, 0.2), dict(fs=np.inf)),
+    ((31, 0.2), dict(fs=[2.0])),
+    ((1, 0.2), {}), ((2, 0.2), {}), ((2, 0.2), dict(pass_zero=False)), ((3, 0.2), dict(pass_zero=False)),
+    # the Kaiser beta, read only when the window is made with more than one tap
+    ((31, 0.2), dict(window=("kaiser", np.array(5.0)))), ((31, 0.2), dict(window=("kaiser", Fraction(5)))),
+    ((31, 0.2), dict(window=("kaiser", np.longdouble(5)))), ((31, 0.2), dict(window=("kaiser", np.float16(5)))),
+    ((31, 0.2), dict(window=("kaiser", -3.0))), ((31, 0.2), dict(window=("kaiser", np.nan))),
+    ((31, 0.2), dict(window=("kaiser", np.inf))), ((31, 0.2), dict(window=("kaiser", 800.0))),
+    ((31, 0.2), dict(window=("kaiser", 1e10))), ((31, 0.2), dict(window=("kaiser", 1 + 0j))),
+    ((31, 0.2), dict(window=("kaiser", True))), ((1, 0.2), dict(window=("kaiser", "x"))),
+    ((1, 0.2), dict(window=("kaiser", 1j))), ((0, 0.2), dict(window=("kaiser", "x"))),
+    ((True, 0.2), dict(window=("kaiser", "x"))), ((31, 2.0), dict(window=("kaiser", 1j))),
+    ((31, 0.2), dict(window=np.array(5.0))), ((31, 0.2), dict(window=Fraction(5))), ((31, 0.2), dict(window=None)),
+    ((31, 0.2), dict(window=["hann"])), ((31, 0.2), dict(window=("hann",))), ((31, 0.2), dict(window=("",))),
+    ((31, 0.2), dict(window="")), ((31, 0.2), dict(window=np.str_("hann"))),
+    ((31, 0.2), dict(window=("kaiser", 5.0, "x"))),
+    ((31, 0.2), dict(width=np.float32(0.1))), ((31, 0.2), dict(width=0.0)), ((31, 0.2), dict(width=-0.1)),
+    ((31, 0.2), dict(width=np.nan)), ((31, 0.2), dict(width=10.0)), ((31, 0.2), dict(width=0.05, window=("kaiser", 5.0))),
+    ((31, 0.2), dict(scale=0)), ((31, 0.2), dict(scale=np.array([1, 2]))), ((31, 0.2), dict(scale="")),
+    # pass_zero is compared by `in` and `==`, so a 0-d array or an np.str_ names a filter type too
+    ((31, [0.2, 0.5]), dict(pass_zero=np.str_("bandpass"))), ((31, 0.2), dict(pass_zero=None)),
+    ((31, 0.2), dict(pass_zero=np.array("lowpass"))), ((31, 0.2), dict(pass_zero=np.array(["lowpass", "x"]))),
+    ((31, 2.0), dict(pass_zero=np.array(["lowpass", "x"]))), ((31, 0.2), dict(pass_zero=np.array("highpass"))),
+    # numtaps that is not a Python int: scipy's own error, in scipy's order
+    ((31.0, 0.2), {}), ((np.float64(31), 0.2), {}), ((Fraction(31), 0.2), {}), (("31", 0.2), {}), ((None, 0.2), {}),
+    ((np.nan, 0.2), {}), ((np.inf, 0.2), {}), ((-np.inf, 0.2), {}), ((1e300, 0.2), {}), ((-1e300, 0.2), {}),
+    ((1j, 0.2), {}), ((-5.5, 0.2), {}), (("31", 0.2), dict(pass_zero=False)), ((None, 0.2), dict(width=0.1)),
+    ((np.array([5, 7]), 0.2), {}), ((np.array(31), 0.2), {}), ((np.array(31.0), 0.2), {}), ((np.uint8(31), 0.2), {}),
+    ((np.bool_(True), 0.2), {}), ((np.bool_(False), 0.2), {}), ((np.True_, 0.2), dict(width=0.1)),
+    ((2**70, 0.2), {}), ((2**70, 0.2), dict(pass_zero=False)), ((2**70 + 1, 0.2), dict(pass_zero=False)),
+    ((-2**70, 0.2), {}), ((2**70, 2.0), {}), ((31.0, 0.2), dict(width=0.1)), ((30.0, [0.2, 0.4]), {}),
+    ((np.nan, 0.2), dict(pass_zero=False)), ((np.inf, 0.2), dict(pass_zero=False)),
+    ((31, "0.2"), {}), ((31, 0.2 + 0j), {}), ((31, [0.2, "0.3"]), {}), ((31, np.float32(0.2)), {}),
+    ((31, np.array([[0.2]])), {}), ((31, np.array(0.2)), {}),
+    ((31, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]), dict(pass_zero=False)),
+    ((30, [0.1, 0.2, 0.3, 0.4, 0.5]), dict(pass_zero=False)),
+    ((31, [0.1, 0.9]), dict(pass_zero="bandstop", scale=True)), ((31, 0.9), dict(pass_zero="highpass")),
+    ((31, 1000.0), dict(fs=8000, window="hamming_periodic")),
+]
+
+
+@pytest.mark.parametrize("args,kw", FIRWIN_PROBES)
+def test_firwin_probes(nat, args, kw):
+    with np.errstate(invalid="ignore", over="ignore", divide="ignore"):
+        agree(lambda: signal.firwin(*args, **kw), lambda: nat.firwin(*args, **kw), f"firwin{args}{kw}")
+
+
+def test_resample_poly_reads_a_kaiser_beta_as_firwin_does(nat):
+    x = np.random.default_rng(0).standard_normal(50)
+    for w in (("kaiser", np.array(5.0)), ("kaiser", 1j), ("kaiser", Fraction(3)), ("kaiser", np.float32(4.5))):
+        agree(lambda: signal.resample_poly(x, 3, 2, window=w), lambda: nat.resample_poly(x, 3, 2, window=w), f"{w!r}")
+    agree(lambda: signal.resample_poly(x, 3, 2, window=("kaiser", 1j), padtype="x"),
+          lambda: nat.resample_poly(x, 3, 2, window=("kaiser", 1j), padtype="x"))
+
+
+@pytest.mark.parametrize("name", ["i0", "i0e"])
+def test_i0_keeps_the_input_s_memory_layout(nat, name):
+    """A ufunc's output follows its input's order (K): Fortran stays Fortran."""
+    for x in (np.asfortranarray(np.arange(6.0).reshape(2, 3)), np.arange(12.0).reshape(3, 4)[:, ::2],
+              np.arange(6, dtype=np.float32).reshape(2, 3).T, np.arange(5.0)[::-1],
+              np.arange(24.0).reshape(2, 3, 4).transpose(2, 0, 1), np.arange(8.0).reshape(2, 4)[::-1]):
+        g, w = getattr(nat, name)(x), getattr(special, name)(x)
+        same(g, w, f"{name} {x.shape} {x.strides}")
+        assert g.strides == w.strides, (g.strides, w.strides)
+
+
+def test_the_documented_deviations_are_what_they_say(nat):
+    """Not scipy's behaviour; pinned so a change to either is noticed."""
+    for beta in (np.array([[2.0]]), [2.0, 3.0], []):      # scipy broadcasts these over the window, or refuses
+        with pytest.raises(NotImplementedError, match="shape"):
+            nat.kaiser(9, beta)
+    with pytest.raises(ValueError, match="Maximum allowed size exceeded"):
+        nat.hann(2**63)
