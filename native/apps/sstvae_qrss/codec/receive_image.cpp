@@ -1,8 +1,11 @@
 // sstvae-qrss receive --image: qrss_receive.py's render_pass, the codec half
 // of the receive subcommand (receive.hpp's hook). Compiled only with the
 // codec glue (sstvae_qrss_codec): it is outside apps/sstvae_qrss/*.cpp's
-// glob, and native/CMakeLists.txt adds it to sstvae_qrss_cli when that
-// library exists.
+// glob, so it is built only where native/CMakeLists.txt adds it to
+// sstvae_qrss_cli inside `if(TARGET sstvae_qrss_codec)`:
+//     target_sources(sstvae_qrss_cli PRIVATE
+//                    ${CMAKE_CURRENT_SOURCE_DIR}/apps/sstvae_qrss/codec/receive_image.cpp)
+// Without that line the subcommand refuses --image (receive.cpp).
 //
 // render_pass(p, image, model, precision), step by step:
 //   no header                      "image: no header decoded, cannot place the latents"
