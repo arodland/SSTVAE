@@ -136,3 +136,25 @@ def test_refusals_match_numpy(nf):
         nf.ifft(np.ones((2, 3), complex))
     with pytest.raises(NotImplementedError):
         nf.fft(np.ones(4, np.clongdouble))
+
+
+def test_large_and_nonfinite(nf):
+    """Review probe: lengths past what the receiver's frames use (2^19, the
+    Mersenne prime 2^19 - 1 through Bluestein), many 16000-point STFT rows
+    through one cached plan, and inf/NaN samples, which pocketfft spreads the same way
+    in both (numpy's warnings aside)."""
+    rng = np.random.default_rng(5)
+    for n in (2 ** 19, 2 ** 19 - 1, 3 * 5 * 7 * 11 * 13 * 17):
+        a = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+        _same(nf.fft(a), np.fft.fft(a), f"fft {n}")
+        _same(nf.ifft(a), np.fft.ifft(a), f"ifft {n}")
+        r = rng.standard_normal(n)
+        _same(nf.rfft(r), np.fft.rfft(r), f"rfft {n}")
+        _same(nf.irfft(np.fft.rfft(r), n), np.fft.irfft(np.fft.rfft(r), n), f"irfft {n}")
+    m = rng.standard_normal((64, 16000)) + 1j * rng.standard_normal((64, 16000))
+    _same(nf.fft(m), np.fft.fft(m), "STFT rows")       # every row the same plan, as a FULL pass's 896
+    a = rng.standard_normal(1000) + 1j * rng.standard_normal(1000)
+    a[[3, 500]] = [complex(np.inf, 0), complex(0, np.nan)]
+    with np.errstate(invalid="ignore"):
+        g, w = nf.fft(a), np.fft.fft(a)
+    assert np.array_equal(np.isnan(g), np.isnan(w)) and np.array_equal(g[~np.isnan(g)], w[~np.isnan(w)])

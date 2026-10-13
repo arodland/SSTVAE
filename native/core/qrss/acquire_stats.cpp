@@ -12,6 +12,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 #include "math/ndfilter.hpp"
 #include "math/npfft.hpp"
@@ -35,7 +36,17 @@ double scalar_square(double x) {
 }
 
 // Python's round(x) to an int: half to even.
-std::int64_t py_round(double x) { return static_cast<std::int64_t>(std::nearbyint(x)); }
+// int(round(x)) of a NaN or an infinity is round()'s ValueError or
+// OverflowError, in its words; past int64 (an fs no frame could hold) it
+// is OverflowError here where Python would go on to fail allocating.
+std::int64_t py_round(double x) {
+    if (std::isnan(x)) throw std::invalid_argument("cannot convert float NaN to integer");
+    if (std::isinf(x)) throw std::overflow_error("cannot convert float infinity to integer");
+    const double r = std::nearbyint(x);
+    if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0))
+        throw std::overflow_error("Python int too large to convert to C int64");
+    return static_cast<std::int64_t>(r);
+}
 
 // np.round(v).astype(np.int64): what x86-64's conversion gives for NaN,
 // infinities and values past int64 is INT64_MIN.
@@ -43,6 +54,22 @@ std::int64_t round_to_int64(double v) {
     const double r = std::nearbyint(v);
     if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0)) return std::numeric_limits<std::int64_t>::min();
     return static_cast<std::int64_t>(r);
+}
+
+// One windowed sample of the frame, as numpy forms `x * w` and then
+// hands it to np.fft.fft. Complex x (complex64 widened exactly): numpy's
+// complex128 product with w promoted to w + 0j, (re*w - im*0, re*0 +
+// im*w) -- the same value as (re*w, im*w) for finite samples, but an inf
+// makes NaNs where numpy's does. Real x: a real product, promoted to
+// complex by the FFT (imaginary part exactly 0).
+template <typename S>
+cdouble windowed(S v, double wk) {
+    if constexpr (std::is_floating_point_v<S>) {
+        return cdouble(static_cast<double>(v) * wk, 0.0);
+    } else {
+        const double re = static_cast<double>(v.real()), im = static_cast<double>(v.imag());
+        return cdouble(re * wk - im * 0.0, re * 0.0 + im * wk);
+    }
 }
 
 template <typename S>
@@ -67,19 +94,18 @@ Grid32 spectrogram_impl(std::span<const S> x, double fs, std::span<const double>
     }
     const auto n = static_cast<std::int64_t>(x.size());
     std::vector<cdouble> fr(static_cast<std::size_t>(L));
+    const cdouble zero = windowed(S{}, 1.0);   // np.where's 0, windowed: 0 + 0j
     for (std::size_t i = 0; i < starts.size(); ++i) {
         const std::int64_t st = round_to_int64(starts[i]);
         for (std::int64_t k = 0; k < L; ++k) {
-            // idx = st + k, in int64 as numpy adds (no overflow for the
-            // starts a capture can have; INT64_MIN + k stays negative).
-            const std::int64_t idx = st + k;
+            // idx = st + k is in x iff st >= -k and st < n - k, asked
+            // without forming st + k (numpy's int64 sum wraps past
+            // INT64_MAX to a negative index, which is out of range too).
             const double wk = w[static_cast<std::size_t>(k)];
-            if (idx >= 0 && idx < n) {
-                const S v = x[static_cast<std::size_t>(idx)];
-                fr[static_cast<std::size_t>(k)] =
-                    cdouble(static_cast<double>(v.real()) * wk, static_cast<double>(v.imag()) * wk);
+            if (st >= -k && st < n - k) {
+                fr[static_cast<std::size_t>(k)] = windowed(x[static_cast<std::size_t>(st + k)], wk);
             } else {
-                fr[static_cast<std::size_t>(k)] = cdouble(0.0 * wk, 0.0 * wk);
+                fr[static_cast<std::size_t>(k)] = cdouble(zero.real() * wk, zero.imag() * wk);
             }
         }
         sstvae::math::fft_inplace(fr);
@@ -119,8 +145,9 @@ std::vector<double> spectral_shape_impl(const Grid<T>& Pn, int local_bins,
     }
     const std::int64_t len = static_cast<std::int64_t>(nbins);
     const std::int64_t w = len > 2 ? std::min<std::int64_t>(local_bins | 1, 2 * (len / 2) - 1) : 1;
-    if (w < 1 || w % 2 == 0 || w > std::numeric_limits<int>::max())
-        throw std::invalid_argument("spectral_shape: median window " + std::to_string(w) + " is not odd and positive");
+    // A negative local_bins leaves w negative: median_filter's footprint,
+    // np.ones(w), refuses it. (w is odd by construction.)
+    if (w < 1) throw std::invalid_argument("negative dimensions are not allowed");
     std::vector<double> sh = sstvae::math::median_filter(std::span<const double>(lvl), static_cast<int>(w));
     for (double& v : sh)
         if (!(v > 0)) v = 1.0;
@@ -172,6 +199,10 @@ std::shared_ptr<const BandCovTables> band_cov_tables(double fs) {
     static std::mutex mu;
     static std::map<double, std::shared_ptr<const BandCovTables>> cache;
     static std::vector<double> order;   // insertion order, for a bound of 8
+    // A NaN fs is round()'s ValueError, as frame_window raises it first in
+    // the reference; asked before the lookup, since NaN compares equivalent
+    // to every key and std::map would return another fs's tables.
+    (void)frame_len(fs);
     {
         std::lock_guard<std::mutex> lock(mu);
         const auto it = cache.find(fs);
@@ -231,6 +262,11 @@ Grid32 spectrogram(std::span<const std::complex<double>> x, double fs, std::span
     return spectrogram_impl(x, fs, starts, bins);
 }
 
+Grid32 spectrogram(std::span<const double> x, double fs, std::span<const double> starts,
+                   std::optional<std::span<const std::int64_t>> bins) {
+    return spectrogram_impl(x, fs, starts, bins);
+}
+
 BandBins band_bins(double fs, std::array<double, 2> band_hz, double centre_hz) {
     const std::int64_t L = frame_len(fs);
     std::vector<double> f = sstvae::math::fftfreq(L, 1.0 / fs);
@@ -284,8 +320,11 @@ std::pair<double, double> a1_gamma(std::int64_t M, double fs) {
         for (std::int64_t i = 0; i < L; ++i) sq[static_cast<std::size_t>(i)] = w[static_cast<std::size_t>(i)] * w[static_cast<std::size_t>(i)];
         rho = scalar_square(npsum::sum(std::span<const double>(prod)) / npsum::sum(std::span<const double>(sq)));
     }
-    const double var = static_cast<double>(M) + static_cast<double>(2 * (M - 1)) * rho;
-    return {static_cast<double>(M * M) / var, var / static_cast<double>(M)};
+    const double var = static_cast<double>(M) + (2.0 * (static_cast<double>(M) - 1.0)) * rho;
+    // Python's exact M * M, rounded once to float64: the same as the double
+    // product for any |M| < 2^53 (M is exact), without int64 overflow.
+    const double Md = static_cast<double>(M);
+    return {(Md * Md) / var, var / Md};
 }
 
 double a1_threshold(std::int64_t M, double pfa, double fs) {
@@ -299,7 +338,8 @@ double a2_threshold(double pfa, std::int64_t n_chunks, std::int64_t n_scales) {
 }
 
 std::vector<Scale> preamble_scales(std::span<const std::complex<double>> S, std::size_t n_df, std::size_t n_tau,
-                                   std::size_t nc, std::span<const double> var, std::span<const int> scales) {
+                                   std::size_t nc, std::span<const double> var, std::span<const int> scales,
+                                   SumOrder order) {
     if (S.size() != n_df * n_tau * nc)
         throw std::invalid_argument("preamble_scales: S holds " + std::to_string(S.size()) + " values, not " +
                                     std::to_string(n_df * n_tau * nc));
@@ -354,14 +394,30 @@ std::vector<Scale> preamble_scales(std::span<const std::complex<double>> S, std:
         for (std::size_t cell = 0; cell < n_df * n_tau; ++cell) {
             const double* base = sn.data() + 2 * cell * nc;
             for (std::size_t q = 0; q < k; ++q) {
-                // Sg = sum over the run of g: pairwise onto 0 + 0j.
-                double rr = 0.0, ri = 0.0;
-                npsum::pairwise_sum_complex(rr, ri, base + 2 * q * g, 2 * g);
-                const double sr = 0.0 + rr, si = 0.0 + ri;
+                // Sg = sum over the run of g, onto 0 + 0j: pairwise, or
+                // one term at a time (see SumOrder).
+                double sr = 0.0, si = 0.0;
+                if (order == SumOrder::Pairwise) {
+                    double rr = 0.0, ri = 0.0;
+                    npsum::pairwise_sum_complex(rr, ri, base + 2 * q * g, 2 * g);
+                    sr = sr + rr;
+                    si = si + ri;
+                } else {
+                    for (std::size_t e = 0; e < g; ++e) {
+                        sr = sr + base[2 * (q * g + e)];
+                        si = si + base[2 * (q * g + e) + 1];
+                    }
+                }
                 const double a = lwave::np_abs(cdouble(sr, si));
                 mag2[q] = a * a;
             }
-            sc.lam[cell] = npsum::sum(std::span<const double>(mag2)) / static_cast<double>(gi);
+            double total = 0.0;
+            if (order == SumOrder::Pairwise) {
+                total = npsum::sum(std::span<const double>(mag2));
+            } else {
+                for (const double m : mag2) total = total + m;
+            }
+            sc.lam[cell] = total / static_cast<double>(gi);
         }
         out.push_back(std::move(sc));
     }
@@ -369,9 +425,9 @@ std::vector<Scale> preamble_scales(std::span<const std::complex<double>> S, std:
 }
 
 PreambleP preamble_p(std::span<const std::complex<double>> S, std::size_t n_df, std::size_t n_tau, std::size_t nc,
-                     std::span<const double> var, std::span<const int> scales) {
+                     std::span<const double> var, std::span<const int> scales, SumOrder order) {
     PreambleP r;
-    r.st = preamble_scales(S, n_df, n_tau, nc, var, scales);
+    r.st = preamble_scales(S, n_df, n_tau, nc, var, scales, order);
     const std::size_t cells = n_df * n_tau;
     const std::size_t ns = r.st.size();
     if (ns == 0) throw std::invalid_argument("need at least one array to stack");

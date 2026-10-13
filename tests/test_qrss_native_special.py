@@ -135,3 +135,23 @@ def test_cephes_pieces(sp):
     _same(sp.zeta(zx, zq), _ref(special.zeta, zx, zq), "zeta")
     _same(sp.zeta(3.0, np.array([0.0, -1.0, -1.5, 1e-300])),
           _ref(special.zeta, 3.0, np.array([0.0, -1.0, -1.5, 1e-300])), "zeta, q <= 0")
+
+
+def test_random_fuzz(sp):
+    """Review probe: log-uniform a over 1e-4..1e5 and x about it, integer a
+    about its mean, and the inverses over q from 1e-300 to 1, bit for bit."""
+    rng = np.random.default_rng(9)
+    n = 20000
+    a = 10 ** rng.uniform(-4, 5, n)
+    x = a * 10 ** rng.uniform(-3, 1, n)
+    _same(sp.gammaincc(a, x), _ref(special.gammaincc, a, x), "gammaincc random")
+    _same(sp.gammainc(a, x), _ref(special.gammainc, a, x), "gammainc random")
+    ai = rng.integers(1, 1000, n).astype(float)
+    xi = np.abs(ai + 3 * np.sqrt(ai) * rng.standard_normal(n))
+    _same(sp.gammaincc(ai, xi), _ref(special.gammaincc, ai, xi), "gammaincc integer a")
+    q = 10 ** rng.uniform(-300, 0, n)
+    aq = 10 ** rng.uniform(-3, 4, n)
+    _same(sp.gammainccinv(aq, q), _ref(special.gammainccinv, aq, q), "gammainccinv random")
+    _same(sp.gammaincinv(aq, q), _ref(special.gammaincinv, aq, q), "gammaincinv random")
+    u = rng.uniform(0, 1, n)
+    _same(sp.gammainccinv(aq, u), _ref(special.gammainccinv, aq, u), "gammainccinv uniform q")

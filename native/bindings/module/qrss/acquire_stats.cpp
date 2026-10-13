@@ -27,6 +27,8 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstdlib>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -97,13 +99,33 @@ py::object spectrogram(const py::object& x, double fs, const py::object& starts,
         const std::vector<std::complex<float>> xv = rx::vec<std::complex<float>>(xa);
         return grid_to_py(aq::spectrogram(std::span<const std::complex<float>>(xv), fs, st, bs));
     }
-    const std::vector<std::complex<double>> xv = rx::vec<std::complex<double>>(xa);
-    return grid_to_py(aq::spectrogram(std::span<const std::complex<double>>(xv), fs, st, bs));
+    if (xa.dtype().kind() == 'c') {
+        const std::vector<std::complex<double>> xv = rx::vec<std::complex<double>>(xa);
+        return grid_to_py(aq::spectrogram(std::span<const std::complex<double>>(xv), fs, st, bs));
+    }
+    // Real input: numpy windows it as a real product and fft promotes the
+    // result to complex (v*w + 0j), which is not the complex product an
+    // inf or NaN sample would get through the complex overload.
+    const std::vector<double> xv = rx::vec<double>(xa);
+    return grid_to_py(aq::spectrogram(std::span<const double>(xv), fs, st, bs));
 }
 
+// local_bins as an int: the reference only ever uses it as int(lb) | 1
+// against a window of at most n_bins, so a value past int's range clamps
+// to INT_MAX (odd, so the min picks the same window) or INT_MIN (still
+// negative: the same refusal) rather than wrapping.
+int bins_int(const py::object& o) {
+    const std::int64_t v = rx::as_int(o);
+    return static_cast<int>(std::clamp<std::int64_t>(v, std::numeric_limits<int>::min(),
+                                                     std::numeric_limits<int>::max()));
+}
+
+// cfar_normalise's `if local_bins:` is Python truth, then int(lb) | 1: a
+// true value whose int is 0 (0.5) is the window of 1.
 std::optional<int> opt_bins(const py::object& o) {
-    if (o.is_none()) return std::nullopt;
-    return static_cast<int>(rx::as_int(o));
+    if (!rx::as_bool(o)) return std::nullopt;
+    const int v = bins_int(o);
+    return v == 0 ? 1 : v;
 }
 
 py::object cfar_normalise(const py::object& P, const py::object& local_bins) {
@@ -112,7 +134,8 @@ py::object cfar_normalise(const py::object& P, const py::object& local_bins) {
     return grid_to_py(aq::cfar_normalise(grid_from_py<double>(a), opt_bins(local_bins)));
 }
 
-py::object spectral_shape(const py::object& Pn, int local_bins, const py::object& rows) {
+py::object spectral_shape(const py::object& Pn, const py::object& local_bins_o, const py::object& rows) {
+    const int local_bins = bins_int(local_bins_o);
     py::array a = matrix_2d(Pn, "Pn");
     std::optional<std::vector<std::uint8_t>> rv;
     if (!rows.is_none()) rv = rx::vec_bool(rows);
@@ -179,7 +202,31 @@ struct SVar {
     std::vector<std::complex<double>> S;
     std::vector<double> var;
     std::size_t n_df, n_tau, nc;
+    aq::SumOrder order;
 };
+
+// The order numpy adds preamble_scales' runs and groups in (aq::SumOrder):
+// pairwise when Sn = S / np.sqrt(var)[None] is allocated with its chunk
+// axis innermost, one term at a time otherwise. numpy's iterator chooses
+// that layout from the operands' strides alone, so it is read off the
+// same division on the 2x2x2 corner of S (and 2x2 of var), which keeps
+// their strides, dtypes and broadcasting; an axis of length 1 has no say.
+aq::SumOrder sum_order(const py::object& S, const py::object& var) {
+    py::module_ np = rx::np_module();
+    py::array s = py::array::ensure(np.attr("asarray")(S));
+    py::array v = py::array::ensure(np.attr("asarray")(var));
+    if (!s || !v) throw py::error_already_set();
+    const py::slice c2(0, 2, 1);
+    py::object d = np.attr("sqrt")(v[py::make_tuple(c2, c2)]);
+    py::array sn = py::array::ensure(np.attr("true_divide")(s[py::make_tuple(c2, c2, c2)],
+                                                            d[py::make_tuple(py::none(), py::ellipsis())]));
+    if (!sn) throw py::error_already_set();
+    if (s.shape(2) < 2) return aq::SumOrder::Pairwise;   // one chunk: nothing to add
+    const auto inner = std::abs(sn.strides(2));
+    for (py::ssize_t a = 0; a < 2; ++a)
+        if (s.shape(a) > 1 && std::abs(sn.strides(a)) < inner) return aq::SumOrder::Sequential;
+    return aq::SumOrder::Pairwise;
+}
 
 SVar s_var(const py::object& S, const py::object& var) {
     py::array sa = py::array::ensure(rx::np_module().attr("asarray")(S, py::arg("dtype") = "complex128"));
@@ -188,7 +235,7 @@ SVar s_var(const py::object& S, const py::object& var) {
     if (sa.ndim() != 3 || va.ndim() != 2 || va.shape(0) != sa.shape(1) || va.shape(1) != sa.shape(2))
         not_implemented("S must be [n_df, n_tau, n_chunk] and var [n_tau, n_chunk]");
     return {rx::vec<std::complex<double>>(sa), rx::vec<double>(va), static_cast<std::size_t>(sa.shape(0)),
-            static_cast<std::size_t>(sa.shape(1)), static_cast<std::size_t>(sa.shape(2))};
+            static_cast<std::size_t>(sa.shape(1)), static_cast<std::size_t>(sa.shape(2)), sum_order(S, var)};
 }
 
 std::vector<int> scale_list(const py::object& scales) {
@@ -249,12 +296,13 @@ void bind(py::module_& q) {
     m.def("preamble_scales", [](const py::object& S, const py::object& var, const py::object& scales) {
         const SVar sv = s_var(S, var);
         const std::vector<int> sc = scale_list(scales);
-        return scales_to_py(aq::preamble_scales(sv.S, sv.n_df, sv.n_tau, sv.nc, sv.var, sc), sv.n_df, sv.n_tau);
+        return scales_to_py(aq::preamble_scales(sv.S, sv.n_df, sv.n_tau, sv.nc, sv.var, sc, sv.order), sv.n_df,
+                            sv.n_tau);
     }, py::arg("S"), py::arg("var"), py::arg("scales") = default_scales);
     m.def("preamble_p", [](const py::object& S, const py::object& var, const py::object& scales) {
         const SVar sv = s_var(S, var);
         const std::vector<int> sc = scale_list(scales);
-        const aq::PreambleP r = aq::preamble_p(sv.S, sv.n_df, sv.n_tau, sv.nc, sv.var, sc);
+        const aq::PreambleP r = aq::preamble_p(sv.S, sv.n_df, sv.n_tau, sv.nc, sv.var, sc, sv.order);
         const py::tuple shape = py::make_tuple(sv.n_df, sv.n_tau);
         py::array p = to_numpy(r.p).attr("reshape")(shape);
         py::array best = to_numpy(r.best).attr("astype")(rx::np_module().attr("intp")).attr("reshape")(shape);

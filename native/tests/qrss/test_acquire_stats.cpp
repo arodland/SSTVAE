@@ -57,6 +57,8 @@
 using namespace sstvae;
 namespace acq = sstvae::qrss::acquire;
 
+static std::span<const int> rxa_scales() { return sstvae::qrss::rxconfig::acquire::A2_SCALES; }
+
 template <typename T>
 static void append(std::vector<std::uint8_t>& out, const T& v) {
     const auto* p = reinterpret_cast<const std::uint8_t*>(&v);
@@ -231,12 +233,95 @@ static void test_errors() {
                                "integer division or modulo by zero", "preamble_scales, scale 0");
 }
 
+// The review's probes. The sequential digest is, with S and var built as
+// in the digest above:
+//   out = b""
+//   for k, lam in A.preamble_scales(np.asfortranarray(S), var):
+//       out += np.int64(k).tobytes() + lam.tobytes()
+//   sha256(out)
+// (a Fortran-ordered S, as _preamble_sums' einsum makes it, is summed one
+// term at a time by numpy; 43, 0, 31 and 57 cells of the four scales then
+// differ from the C-ordered S's pairwise sums).
+static void test_review_probes() {
+    const std::size_t nd = 21, nt = 7, nc = 10, N = nd * nt * nc;
+    const auto zs = qrss_testgen::splitmix(901, 2 * N);
+    std::vector<std::complex<double>> S(N);
+    for (std::size_t i = 0; i < N; ++i)
+        S[i] = {(qrss_testgen::unit(zs[i]) - 0.5) * 3.0, (qrss_testgen::unit(zs[N + i]) - 0.5) * 3.0};
+    for (std::size_t c = 0; c < nc; ++c) S[(4 * nt + 3) * nc + c] += 10.0;
+    const auto zv = qrss_testgen::splitmix(902, nt * nc);
+    std::vector<double> var(nt * nc);
+    for (std::size_t i = 0; i < var.size(); ++i) var[i] = qrss_testgen::unit(zv[i]) * 2.0 + 0.5;
+    const auto seq = acq::preamble_scales(S, nd, nt, nc, var, rxa_scales(), acq::SumOrder::Sequential);
+    std::vector<std::uint8_t> out;
+    for (const auto& sc : seq) {
+        append(out, sc.k);
+        append_all(out, sc.lam);
+    }
+    check::equal(util::to_hex(util::sha256(std::span<const std::uint8_t>(out))),
+                 std::string("bbaa76400ed67400d18d929cc9e468229e90d8b28579b5cced362cb0cce39cdc"),
+                 "preamble_scales, numpy's sequential order (a Fortran-ordered S)");
+    const auto pw = acq::preamble_scales(S, nd, nt, nc, var);
+    const std::size_t expect_diff[4] = {43, 0, 31, 57};
+    for (std::size_t s = 0; s < 4; ++s) {
+        std::size_t diff = 0;
+        for (std::size_t c = 0; c < pw[s].lam.size(); ++c) diff += pw[s].lam[c] != seq[s].lam[c];
+        check::equal(diff, expect_diff[s], "cells where the two orders differ, scale " + std::to_string(s));
+    }
+    const auto ps = acq::preamble_p(S, nd, nt, nc, var, rxa_scales(), acq::SumOrder::Sequential);
+    bool same = true;
+    for (std::size_t s = 0; same && s < 4; ++s) same = ps.st[s].lam == seq[s].lam;
+    check::is_true(same, "preamble_p passes its order on");
+
+    // An inf sample: real input stays a real product (inf, NaN alternate
+    // across bins); complex input takes numpy's complex product (all NaN).
+    const std::size_t n = 4000;
+    const auto z = qrss_testgen::splitmix(900, n);
+    std::vector<double> xr(n);
+    for (std::size_t i = 0; i < n; ++i) xr[i] = qrss_testgen::unit(z[i]) - 0.5;
+    xr[1500] = INFINITY;
+    std::vector<std::complex<double>> xc(xr.begin(), xr.end());
+    const std::vector<double> st = {0.0, 1000.0, 2000.0};
+    const std::vector<std::int64_t> bins = {0, 1, 2, -1};
+    const auto Pr = acq::spectrogram(std::span<const double>(xr), 500, st, std::span<const std::int64_t>(bins));
+    const auto Pc = acq::spectrogram(std::span<const std::complex<double>>(xc), 500, st,
+                                     std::span<const std::int64_t>(bins));
+    check::is_true(std::isinf(Pr(0, 0)) && std::isnan(Pr(0, 1)) && std::isinf(Pr(1, 2)) && std::isnan(Pr(1, 3)),
+                   "real input with an inf: inf and NaN bins, as numpy's");
+    bool all_nan = true;
+    for (std::size_t i = 0; i < 2; ++i)
+        for (std::size_t j = 0; j < 4; ++j) all_nan = all_nan && std::isnan(Pc(i, j));
+    check::is_true(all_nan, "complex input with an inf: every bin NaN, as numpy's");
+    check::equal(Pr(2, 1), Pc(2, 1), "a finite frame is the same either way");
+    check::equal(Pr(2, 1), 87.24764f, "a finite frame's bin 1");
+
+    // int(round(fs)) of a NaN/inf fs is round()'s error, and a NaN fs is
+    // not answered from the band_cov cache (NaN is equivalent to every key)
+    (void)acq::band_cov(5, 4000.0);
+    throws<std::invalid_argument>([] { (void)acq::frame_len(NAN); }, "cannot convert float NaN to integer",
+                                  "frame_len(NaN)");
+    throws<std::overflow_error>([] { (void)acq::frame_len(INFINITY); }, "cannot convert float infinity to integer",
+                                "frame_len(inf)");
+    throws<std::invalid_argument>([] { (void)acq::band_cov(5, NAN); }, "cannot convert float NaN to integer",
+                                  "band_cov(5, NaN) with a table cached");
+    // M * M past int64 is Python's exact product, rounded
+    pair_is(acq::a1_gamma(3037000500), 0x1.56fbe7c0f11bap+31, 0x1.0e38e38e24c69p+0, "a1_gamma(3037000500)");
+    pair_is(acq::a1_gamma((std::int64_t(1) << 40) + 1), 0x1.e50d7943604f7p+39, 0x1.0e38e38e38d55p+0,
+            "a1_gamma(2^40 + 1)");
+    // a negative local_bins: np.ones(w)'s refusal
+    acq::Grid32 E(4, 9);
+    for (auto& v : E.data) v = 1.0f;
+    throws<std::invalid_argument>([&] { (void)acq::spectral_shape(E, -4); }, "negative dimensions are not allowed",
+                                  "spectral_shape, negative local_bins");
+}
+
 int main() {
     try {
         test_digest();
         test_scalars();
         test_edges();
         test_errors();
+        test_review_probes();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;

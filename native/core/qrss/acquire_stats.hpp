@@ -79,10 +79,17 @@ std::vector<double> frame_window(double fs);
 // |FFT(w * frame)|^2 for frames starting at round(starts[i]) (half to
 // even; samples outside x count 0), keeping the fftfreq bins `bins`
 // (negative indices count from the end, as numpy's; all L bins when
-// absent). complex64 input is widened exactly, as numpy's `* w` does.
+// absent). complex64 input is widened exactly, as numpy's `* w` does,
+// and windowed by numpy's complex product with w promoted to w + 0j
+// (re*w - im*0, re*0 + im*w), so a non-finite sample spreads NaN exactly
+// as numpy's does (an inf real part makes a NaN imaginary one). Real
+// input (float64, or float32 widened) is windowed as a real product and
+// promoted to complex afterwards, as np.fft.fft promotes it.
 Grid32 spectrogram(std::span<const std::complex<float>> x, double fs, std::span<const double> starts,
                    std::optional<std::span<const std::int64_t>> bins = std::nullopt);
 Grid32 spectrogram(std::span<const std::complex<double>> x, double fs, std::span<const double> starts,
+                   std::optional<std::span<const std::int64_t>> bins = std::nullopt);
+Grid32 spectrogram(std::span<const double> x, double fs, std::span<const double> starts,
                    std::optional<std::span<const std::int64_t>> bins = std::nullopt);
 
 // band_bins(fs, band_hz, centre_hz): the fftfreq indices of a 4 s frame
@@ -136,12 +143,24 @@ struct Scale {
     std::vector<double> lam;
 };
 
+// How numpy adds up preamble_scales' runs (sum over g) and groups (sum
+// over k), which is a property of the arrays' memory layout, not of the
+// values: when Sn = S / sqrt(var)[None] comes out with its chunk axis
+// innermost in memory, each reduction is one call of numpy's pairwise sum
+// (onto 0); otherwise the iterator puts the chunk axis outside and adds
+// one term at a time, ((0 + a0) + a1) + ..., which differs in the last
+// bit from 8 terms up (runs of g >= 5 complex, k >= 9 groups). The S
+// acquire._preamble_sums builds (an einsum output) is Fortran-ordered and
+// takes the sequential order; a C-ordered S the pairwise one.
+enum class SumOrder { Pairwise, Sequential };
+
 // preamble_scales(S, var, scales): S complex128[n_df, n_tau, nc] and var
 // float64[n_tau, nc], row-major. Each scale g >= 1 (0 is ZeroDivision,
 // negative std::invalid_argument).
 std::vector<Scale> preamble_scales(std::span<const std::complex<double>> S, std::size_t n_df, std::size_t n_tau,
                                    std::size_t nc, std::span<const double> var,
-                                   std::span<const int> scales = rxa::A2_SCALES);
+                                   std::span<const int> scales = rxa::A2_SCALES,
+                                   SumOrder order = SumOrder::Pairwise);
 
 // preamble_p(S, var, scales): per cell the best scale's gammaincc(k,
 // Lambda_k) times the number of scales, capped at 1 (NaN stays NaN), the
@@ -153,7 +172,8 @@ struct PreambleP {
     std::vector<Scale> st;
 };
 PreambleP preamble_p(std::span<const std::complex<double>> S, std::size_t n_df, std::size_t n_tau, std::size_t nc,
-                     std::span<const double> var, std::span<const int> scales = rxa::A2_SCALES);
+                     std::span<const double> var, std::span<const int> scales = rxa::A2_SCALES,
+                     SumOrder order = SumOrder::Pairwise);
 
 // tbd_gumbel(n_frames): (mu, beta) of A3's Z on noise, interpolated in
 // sqrt(n_frames) through the committed table (extrapolated outside it).
