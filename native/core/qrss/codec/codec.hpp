@@ -29,6 +29,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "checkpoint/checkpoint.hpp"
 #include "qrss/codec/encode.hpp"
@@ -38,24 +39,13 @@ namespace sstvae::qrss::codec {
 
 // --- Python's text conventions these refusals need --------------------------
 
-// Python's int(text, base) for base 10 or 16: surrounding ASCII whitespace,
-// one sign, base 16's optional 0x/0X, single underscores between digits (and
-// after 0x). nullopt where Python raises ValueError. Python's int has no
-// limit, so the value is given as its canonical decimal text (str(int(...)))
-// and, when it fits, as an int64. ASCII only: the Unicode digits and spaces
-// Python also accepts are refused here.
-struct PyInt {
-    std::string decimal;                // str() of the value: "-418", "0"
-    std::optional<std::int64_t> value;  // when it fits in int64
-};
-std::optional<PyInt> py_int(std::string_view text, int base);
-
-// Python's "invalid literal for int() with base 16: 'xyz'" for `text`.
-std::string invalid_int_literal(std::string_view text, int base);
-
 // str(pathlib.PurePosixPath(text)): "." for "", '.' components and repeated
 // or trailing slashes dropped, exactly two leading slashes kept.
 std::string pathlib_str(std::string_view text);
+
+// PurePosixPath(text).suffix: the name's last ".xyz", "" for none (".onnx"
+// and "a." have none).
+std::string pathlib_suffix(std::string_view text);
 
 // --- locating the model ---------------------------------------------------------
 

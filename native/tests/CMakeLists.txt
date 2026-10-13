@@ -405,3 +405,34 @@ if(TARGET sstvae_qrss)
     set_tests_properties(qrss_core_${_mod} PROPERTIES TIMEOUT 120)
   endforeach()
 endif()
+
+# The codec glue (native/core/qrss/codec): only with SSTVAE's codec, so not
+# in the glob above, which every build compiles. Writes the ONNX models it
+# reads; checks the v5 artifacts too when they are on this machine.
+if(TARGET sstvae_qrss_codec)
+  add_executable(test_qrss_core_codec qrss/codec/test_codec.cpp)
+  target_link_libraries(test_qrss_core_codec PRIVATE sstvae_qrss_codec)
+  target_include_directories(test_qrss_core_codec PRIVATE
+                             ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/qrss)
+  if(NOT MSVC)
+    target_compile_options(test_qrss_core_codec PRIVATE -ffp-contract=off)
+  endif()
+  sstvae_onnxruntime_copy_runtime(test_qrss_core_codec)
+  add_test(NAME qrss_core_codec COMMAND test_qrss_core_codec)
+  set_tests_properties(qrss_core_codec PROPERTIES TIMEOUT 120)
+endif()
+
+# sstvae-qrss's subcommands, run in-process from the CLI's object library
+# (whichever it holds: encode only with the codec).
+if(TARGET sstvae_qrss_cli)
+  add_executable(test_qrss_core_cli qrss/cli/test_cli.cpp)
+  target_link_libraries(test_qrss_core_cli PRIVATE sstvae_qrss_cli)
+  target_include_directories(test_qrss_core_cli PRIVATE
+                             ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/qrss)
+  if(NOT MSVC)
+    target_compile_options(test_qrss_core_cli PRIVATE -ffp-contract=off)
+  endif()
+  sstvae_onnxruntime_copy_runtime(test_qrss_core_cli)
+  add_test(NAME qrss_core_cli COMMAND test_qrss_core_cli)
+  set_tests_properties(qrss_core_cli PROPERTIES TIMEOUT 120)
+endif()

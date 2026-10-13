@@ -15,6 +15,7 @@
 
 #include "codec/codec.hpp"
 #include "images/images.hpp"
+#include "qrss/pynum.hpp"
 #include "qrss/pytext.hpp"
 
 namespace sstvae::qrss::codec {
@@ -22,39 +23,6 @@ namespace sstvae::qrss::codec {
 namespace fs = std::filesystem;
 
 namespace {
-
-// Python's whitespace as int() strips it from an ASCII string: str.isspace()
-// (0x09-0x0D, 0x1C-0x1F, 0x20), which int() maps to ' ' and then strips.
-bool py_space(char c) {
-    const auto u = static_cast<unsigned char>(c);
-    return u == 0x20 || (u >= 0x09 && u <= 0x0D) || (u >= 0x1C && u <= 0x1F);
-}
-
-int digit_value(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'z') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
-    return 99;
-}
-
-// UTF-8 of one code point (repr() output only ever holds valid ones).
-void put_utf8(std::string& out, char32_t cp) {
-    if (cp < 0x80) {
-        out += static_cast<char>(cp);
-    } else if (cp < 0x800) {
-        out += static_cast<char>(0xC0 | (cp >> 6));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else if (cp < 0x10000) {
-        out += static_cast<char>(0xE0 | (cp >> 12));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    } else {
-        out += static_cast<char>(0xF0 | (cp >> 18));
-        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        out += static_cast<char>(0x80 | (cp & 0x3F));
-    }
-}
 
 bool ends_with(std::string_view s, std::string_view tail) {
     return s.size() >= tail.size() && s.compare(s.size() - tail.size(), tail.size(), tail) == 0;
@@ -199,78 +167,12 @@ Ort::Env& ort_env() {
 
 // --- Python's text conventions --------------------------------------------------------
 
-std::optional<PyInt> py_int(std::string_view text, int base) {
-    if (base != 10 && base != 16) throw std::invalid_argument("py_int: base must be 10 or 16");
-    std::size_t i = 0, n = text.size();
-    while (i < n && py_space(text[i])) ++i;
-    while (n > i && py_space(text[n - 1])) --n;
-    bool negative = false;
-    if (i < n && (text[i] == '+' || text[i] == '-')) negative = text[i++] == '-';
-    if (base == 16 && i + 1 < n && text[i] == '0' && (text[i + 1] == 'x' || text[i + 1] == 'X')) {
-        i += 2;
-        if (i < n && text[i] == '_') ++i;   // one underscore may follow the prefix
-    }
-    std::vector<int> digits;
-    bool after_underscore = false;
-    for (; i < n; ++i) {
-        const char c = text[i];
-        if (c == '_') {
-            if (digits.empty() || after_underscore) return std::nullopt;
-            after_underscore = true;
-            continue;
-        }
-        const int d = digit_value(c);
-        if (d >= base) return std::nullopt;
-        digits.push_back(d);
-        after_underscore = false;
-    }
-    if (digits.empty() || after_underscore) return std::nullopt;
-
-    // The value in decimal, schoolbook (Python ints have no limit).
-    std::vector<int> dec{0};   // little-endian decimal digits
-    for (const int d : digits) {
-        int carry = d;
-        for (int& x : dec) {
-            const int v = x * base + carry;
-            x = v % 10;
-            carry = v / 10;
-        }
-        while (carry) {
-            dec.push_back(carry % 10);
-            carry /= 10;
-        }
-    }
-    while (dec.size() > 1 && dec.back() == 0) dec.pop_back();
-    const bool zero = dec.size() == 1 && dec[0] == 0;
-    PyInt out;
-    if (negative && !zero) out.decimal = "-";
-    for (auto it = dec.rbegin(); it != dec.rend(); ++it) out.decimal += static_cast<char>('0' + *it);
-    // int64 when it fits: |v| <= 2^63 - 1, or exactly -2^63.
-    unsigned long long mag = 0;
-    bool fits = dec.size() <= 19;
-    if (fits) {
-        for (auto it = dec.rbegin(); it != dec.rend(); ++it) mag = mag * 10 + static_cast<unsigned>(*it);
-        fits = negative ? mag <= 9223372036854775808ULL : mag <= 9223372036854775807ULL;
-    }
-    if (fits) {
-        if (!negative) out.value = static_cast<std::int64_t>(mag);
-        else out.value = mag == 9223372036854775808ULL ? INT64_MIN : -static_cast<std::int64_t>(mag);
-    }
-    return out;
-}
-
-std::string invalid_int_literal(std::string_view text, int base) {
-    // "%.200R": the repr, cut to 200 characters.
-    const std::u32string cps = pytext::decode(pytext::repr(text));
-    std::string shown;
-    for (std::size_t k = 0; k < cps.size() && k < 200; ++k) put_utf8(shown, cps[k]);
-    return "invalid literal for int() with base " + std::to_string(base) + ": " + shown;
-}
-
 std::string pathlib_str(std::string_view text) {
     const auto [root, parts] = split_path(text);
     return join_path(root, parts);
 }
+
+std::string pathlib_suffix(std::string_view text) { return path_suffix(pathlib_str(text)); }
 
 // --- locating the model ------------------------------------------------------------------
 
@@ -356,7 +258,7 @@ std::optional<std::int64_t> codec_id_of_sha(std::string_view sha) {
         if (cps[k] >= 0x80) return std::nullopt;   // see py_int: ASCII only
         head += static_cast<char>(cps[k]);
     }
-    const std::optional<PyInt> v = py_int(head, 16);
+    const std::optional<pynum::PyInt> v = pynum::py_int(head, 16);
     if (!v) return std::nullopt;
     return v->value;   // four hex digits always fit
 }
