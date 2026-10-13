@@ -2,7 +2,7 @@
 
 The receiver's modules lean on a handful of numpy/scipy numerics; the
 port has its own (core/math), and this holds them against the libraries
-they stand in for: median, mean, interp and polyval to the bit; polyfit,
+they stand in for: median, mean, average, interp and polyval to the bit; polyfit,
 lstsq, solve, inv, eigh and eigvalsh to ~1e-12 (LAPACK's blocking and
 summation orders are not reproduced, so the last bits differ);
 make_lsq_spline to ~1e-10 of its coefficients, with scipy's refusals
@@ -89,6 +89,36 @@ def test_median_and_mean_bit_exact(nm, dtype):
             want_med, want_mean = np.median(x), np.mean(x)
         _same(nm.median(x), want_med)
         _same(nm.mean(x), want_mean)
+
+
+def test_average_bit_exact(nm):
+    """np.average(a, weights=w), as track/ltrack's timing fit and acquire's
+    drift fit call it: pairwise sums of a * w and of w."""
+    rng = np.random.default_rng(12)
+    for x in _arrays(4):
+        for w in (rng.uniform(0, 5, len(x)), rng.uniform(16, 900, len(x)), np.round(rng.uniform(0, 3, len(x)))):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                try:
+                    want = ("ok", np.average(x, weights=w))
+                except ZeroDivisionError as e:
+                    want = (ZeroDivisionError, str(e))
+            try:
+                got = ("ok", nm.average(x, w))
+            except ZeroDivisionError as e:
+                got = (ZeroDivisionError, str(e))
+            assert got[0] == want[0], (x, w, got, want)
+            if got[0] == "ok":
+                _same(got[1], want[1])
+            else:
+                assert got[1] == want[1]
+    # a NaN weight sum is not zero: it passes through
+    _same(nm.average([1.0, 2.0], [np.nan, 1.0]), np.average([1.0, 2.0], weights=[np.nan, 1.0]))
+    with pytest.raises(TypeError) as want:
+        np.average([1.0, 2.0], weights=[1.0])
+    with pytest.raises(TypeError) as got:
+        nm.average([1.0, 2.0], [1.0])
+    assert str(got.value) == str(want.value)
 
 
 # --- interp -------------------------------------------------------------------------------------

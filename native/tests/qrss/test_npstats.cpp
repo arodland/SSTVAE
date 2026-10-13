@@ -1,6 +1,6 @@
 // native/core/math/npstats against numpy: median, mean, interp and polyval
-// through one pinned digest (bitwise), polyfit against pinned values, and
-// the refusals. tests/test_qrss_native_math.py compares against numpy
+// through one pinned digest (bitwise), polyfit and average against pinned
+// values, and the refusals. tests/test_qrss_native_math.py compares against numpy
 // directly. The digest:
 //
 //   out = io.BytesIO()
@@ -31,6 +31,7 @@
 #include "infra_testgen.hpp"
 #include "math/errors.hpp"
 #include "math/npstats.hpp"
+#include "qrss/rational.hpp"
 #include "qrss_check.hpp"
 #include "util/sha256.hpp"
 
@@ -143,11 +144,36 @@ static void test_polyfit() {
     check::equal(math::polyval(std::vector<double>{2.0, -1.0, 0.5}, 3.0), (2.0 * 3.0 - 1.0) * 3.0 + 0.5, "polyval");
 }
 
+static void test_average() {
+    // np.average([1.0, 2.0, 4.0], weights=[1.0, 2.0, 0.5]) == 2.0
+    check::equal(math::average(std::vector<double>{1.0, 2.0, 4.0}, std::vector<double>{1.0, 2.0, 0.5}), 2.0,
+                 "weighted average");
+    throws<qrss::ZeroDivision>(
+        [] { math::average(std::vector<double>{1.0, 2.0}, std::vector<double>{1.0, -1.0}); },
+        "Weights sum to zero, can't be normalized", "weights summing to zero");
+    throws<qrss::ZeroDivision>([] { math::average(std::vector<double>{}, std::vector<double>{}); },
+                               "Weights sum to zero, can't be normalized", "empty");
+    check::is_true(std::isnan(math::average(std::vector<double>{1.0, 2.0}, std::vector<double>{std::nan(""), 1.0})),
+                   "a NaN weight sum passes through");
+    throws<math::TypeError>([] { math::average(std::vector<double>{1.0, 2.0}, std::vector<double>{1.0}); },
+                            "Axis must be specified when shapes of a and weights differ.", "length mismatch");
+    // a TypeError is not a ValueError: `catch (std::invalid_argument&)` is `except ValueError`
+    bool caught_as_value_error = false;
+    try {
+        math::polyfit(std::vector<double>{}, std::vector<double>{}, 1);
+    } catch (const std::invalid_argument&) {
+        caught_as_value_error = true;
+    } catch (const math::TypeError&) {
+    }
+    check::is_true(!caught_as_value_error, "math::TypeError is not an std::invalid_argument");
+}
+
 int main() {
     try {
         test_digest();
         test_edges();
         test_polyfit();
+        test_average();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;

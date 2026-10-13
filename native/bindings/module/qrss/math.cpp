@@ -1,10 +1,11 @@
 // sstvae_native.qrss.math: bindings of native/core/math (numpy's median,
-// mean, interp, polyfit, polyval and linalg routines, scipy's
+// mean, average, interp, polyfit, polyval and linalg routines, scipy's
 // make_lsq_spline and BSpline), for the parity tests. The receiver's
 // modules call these from C++; nothing in the reference is substituted by
 // them directly.
 //
 //   median(x), mean(x)              float32 input stays float32 (a numpy scalar)
+//   average(a, weights)             float64
 //   interp(x, xp, fp, left=None, right=None)
 //   polyfit(x, y, deg, rcond=None, w=None), polyval(p, x)
 //   lstsq(a, b, rcond=None) -> (x, residuals, rank, s)
@@ -14,7 +15,7 @@
 //   dlartg(f, g) -> (c, s, r)
 //
 // Errors are numpy's and scipy's types (rx_types.hpp's translators):
-// numpy.linalg.LinAlgError, ValueError, TypeError.
+// numpy.linalg.LinAlgError, ValueError, TypeError, ZeroDivisionError.
 
 #include "qrss/rx_types.hpp"
 
@@ -86,6 +87,11 @@ void bind(py::module_& q) {
         return stat(x, static_cast<double (*)(std::span<const double>)>(&sm::mean),
                     static_cast<float (*)(std::span<const float>)>(&sm::mean));
     }, py::arg("x"));
+
+    m.def("average", [](const py::object& a, const py::object& w) {
+        const std::vector<double> av = rx::vec<double>(a), wv = rx::vec<double>(w);
+        return rx::np_module().attr("float64")(sm::average(av, wv));
+    }, py::arg("a"), py::arg("weights"));
 
     m.def("interp", [](const py::object& x, const py::object& xp, const py::object& fp, const py::object& left,
                        const py::object& right) {

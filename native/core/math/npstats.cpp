@@ -10,6 +10,7 @@
 #include "math/errors.hpp"
 #include "math/linalg.hpp"
 #include "qrss/npsum.hpp"
+#include "qrss/rational.hpp"
 
 namespace sstvae::math {
 
@@ -115,6 +116,15 @@ float median(std::span<const float> x) { return median_of(x); }
 
 double mean(std::span<const double> x) { return npsum::mean(x); }
 float mean(std::span<const float> x) { return npsum::mean(x); }
+
+double average(std::span<const double> a, std::span<const double> w) {
+    if (a.size() != w.size()) throw TypeError("Axis must be specified when shapes of a and weights differ.");
+    const double scl = npsum::sum(w);
+    if (scl == 0.0) throw qrss::ZeroDivision("Weights sum to zero, can't be normalized");
+    std::vector<double> aw(a.size());
+    for (std::size_t i = 0; i < a.size(); ++i) aw[i] = a[i] * w[i];
+    return npsum::sum(std::span<const double>(aw)) / scl;
+}
 
 double interp(double x, std::span<const double> xp, std::span<const double> fp, std::optional<double> left,
               std::optional<double> right) {

@@ -209,8 +209,6 @@ def test_pathfn_refusals(tb, args):
     got = _outcome(tb.PathFn, *args)
     assert got[0] == want[0], (got, want)
     if got[0] != "ok":
-        if got[0] is OverflowError:
-            return                                     # the C++'s text names int64
         assert got[1] == want[1]
 
 

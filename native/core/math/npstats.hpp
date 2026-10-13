@@ -1,9 +1,9 @@
 // numpy's statistics and 1-D fitting as the QRSSTVAE receiver calls them:
-// np.median, np.mean, np.interp, np.polyfit and np.polyval on 1-D float
-// arrays (numpy 2.5, the version tests/ pins).
+// np.median, np.mean, np.average, np.interp, np.polyfit and np.polyval on
+// 1-D float arrays (numpy 2.5, the version tests/ pins).
 //
-// Bit-exact against numpy: median, mean, interp and polyval (the same
-// operations in the same order, no FMA -- core/math is built with
+// Bit-exact against numpy: median, mean, average, interp and polyval (the
+// same operations in the same order, no FMA -- core/math is built with
 // -ffp-contract=off). polyfit is numpy's algorithm (Vandermonde columns by
 // repeated multiplication, weighting, column scaling, lstsq at numpy's
 // rcond, unscaling) over linalg.hpp's lstsq, which is a Jacobi SVD rather
@@ -50,6 +50,14 @@ float median(std::span<const float> x);
 // float32: float32(float64(sum32) / n), numpy's two roundings.
 double mean(std::span<const double> x);
 float mean(std::span<const float> x);
+
+// np.average(a, weights=w) of 1-D float64 arrays: the pairwise sum of
+// a * w over the pairwise sum of w, numpy's arithmetic. Lengths that
+// differ are math::TypeError "Axis must be specified when shapes of a and
+// weights differ."; a weight sum equal to 0 (empty arrays included; a NaN
+// sum passes) is qrss::ZeroDivision (rational.hpp's, Python's
+// ZeroDivisionError) "Weights sum to zero, can't be normalized".
+double average(std::span<const double> a, std::span<const double> w);
 
 // np.interp(x, xp, fp, left, right) for real float64 arrays (no period).
 // xp is expected increasing, as numpy expects it; nothing checks it.
