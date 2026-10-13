@@ -15,6 +15,7 @@
 
 #include <pybind11/complex.h>
 
+#include <algorithm>
 #include <complex>
 #include <cstdint>
 #include <optional>

@@ -112,7 +112,16 @@ double py_pow(double x, double y);
 cplx cdiv(cplx a, cplx b);
 // x[i] with numpy's index rules for an axis of `size` (negative from the
 // end); std::out_of_range "index I is out of bounds for axis 0 with size N".
-std::size_t index(std::int64_t i, std::size_t size);
+// Inline: it runs once per element of every gather (a third of extract's
+// time while it was a call).
+[[noreturn]] void index_error(std::int64_t i, std::size_t size);
+inline std::size_t index(std::int64_t i, std::size_t size) {
+    const auto n = static_cast<std::int64_t>(size);
+    const std::int64_t j = i < 0 ? i + n : i;
+    if (j < 0 || j >= n) [[unlikely]]
+        index_error(i, size);
+    return static_cast<std::size_t>(j);
+}
 // The grid indices of stream symbols `stream_idx`: layout.pos[idx] -
 // int(tr.pos[0]), as signed numbers (an array indexed by them checks each
 // with `index`).

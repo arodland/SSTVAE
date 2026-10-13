@@ -110,13 +110,9 @@ cplx cdiv(cplx a, cplx b) {
     return {(ar * rat + ai) * scl, (ai * rat - ar) * scl};
 }
 
-std::size_t index(std::int64_t i, std::size_t size) {
-    const auto n = static_cast<std::int64_t>(size);
-    const std::int64_t j = i < 0 ? i + n : i;
-    if (j < 0 || j >= n)
-        throw std::out_of_range("index " + std::to_string(i) + " is out of bounds for axis 0 with size " +
-                                std::to_string(size));
-    return static_cast<std::size_t>(j);
+void index_error(std::int64_t i, std::size_t size) {
+    throw std::out_of_range("index " + std::to_string(i) + " is out of bounds for axis 0 with size " +
+                            std::to_string(size));
 }
 
 std::vector<std::int64_t> grid_of(const TrackView& tr, std::span<const std::int64_t> stream_idx) {

@@ -13,6 +13,7 @@
 
 #include "qrss/registry.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <span>
 #include <vector>
