@@ -36,7 +36,9 @@ prints them):
   same q, keying, positions and decisions, and every array to the
   tracker lanes' own bars (TRACK_BAR) [u 1.7e-10, P 1.4e-15]. FULL passes
   (CE and L at -12 dB, not a test: 30 s of Python each) met the same bars
-  [z 2.2e-8, w 6.8e-8, f_hz 4.5e-13 Hz];
+  [z 2.2e-8, w 6.8e-8, f_hz 4.5e-13 Hz; re-measured at seed 3 in review,
+  header decoded and round B run: z 2.4e-8 (element by element 4.1e-7 on
+  L, 1.2e-7 on CE), w 0, f_hz 6.8e-13 Hz, u 3.3e-10];
 - the swap test (test_receive_pass_composition): the reference's
   receive_pass with the native rows of what it calls assigned over the
   names it calls is the C++ receive_pass bit for bit, every field of the
@@ -46,6 +48,13 @@ prints them):
   the header decodes and round B runs with the callsign keying known, and
   once with round_b off. So every difference above is a primitive's,
   measured in that primitive's own parity test;
+- the edges (2026-10-13 review): a version 1 transmission received as
+  SHORT (decoded as version 1, gone on with frame.plain) and as SHORT_V1,
+  to the bars above and through the swap test bit for bit (slow tier);
+  everything from 0, 2, 10 or 50% of a TINY / l-tiny pass on erased, at
+  its verified and an unverified detection, likewise (slow tier); noise
+  alone refused by both; and with every row in place the native
+  receive_pass is handed no seams (the whole pass stays in C++);
 - decode_header and _decode_header_l: bitwise -- the header, the LLRs kept
   (the caller's own array, or the block's in its dtype) and the frame
   gone on with (the caller's own object, or frame.plain) -- on noisy LLR
@@ -55,7 +64,8 @@ prints them):
   (2,000 in the slow tier);
 - confidence_db and mean_w_db: to the bit (the bar is 1e-12) on random
   passes of every frame, elapsed times and bin counts, with psi of the
-  wrong length and absent, and numpy's refusals' texts for n <= 0;
+  wrong length and absent, an infinity, a NaN or 1e308 in w and the
+  header LLRs, and numpy's refusals' texts for n <= 0;
 - prepare, channel_for, _psi_frame, _cw_result, detection_from_pass,
   capture_from_pass, frames, is_joint, _single, centre_hz, _centres and
   _ce_hints on the receiver's own inputs, the objects they hand back
@@ -77,7 +87,6 @@ import dataclasses
 import functools
 import math
 import os
-import sys
 import time
 from fractions import Fraction
 from types import SimpleNamespace
@@ -457,6 +466,93 @@ def test_receive_pass_stored(Rc, label):
     _pass_close(_native_pass(Rc, prep, c.spec, det), RX.receive_pass(prep, c.spec, det), (label, "default mix"))
 
 
+@functools.lru_cache(maxsize=None)
+def _v1_capture():
+    """A version 1 SHORT transmission (SHORT_V1, its header version 1, OOK
+    callsign keying) at -6 dB, prepared by the reference."""
+    hdr1 = dataclasses.replace(HDR, version=1)
+    tx = frame.SHORT_V1
+    a = unit_rms_latents(tx.n_data, 1)
+    sym = frame.assemble(tx, header.encode(hdr1), precode(a, Q_TEST))
+    sim = chm.simulate(sym, tx, Q_TEST, ChannelConfig(snr_db=-6.0, seed=1), carrier_hz=1500.0,
+                       keying=morse.keying_units(CALL))
+    cap = frontend.Capture(sim.fe, Q_TEST, sim.t0_index)
+    return hdr1, RX.prepare(cap)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("rx_spec", ["short", "short-v1"])
+def test_receive_pass_v1(Rc, rx_spec):
+    """A version 1 transmission received as SHORT (the block decodes it as
+    version 1 and the pass goes on with frame.plain, round B in the legacy
+    frame) and as SHORT_V1: the same pass, the same tracks, each track's
+    spec the reference's own object."""
+    hdr1, prep = _v1_capture()
+    spec = frame.get(rx_spec)
+    det = flat_det(1500.0, WAVEFORM_CE)
+    ref = RX.receive_pass(prep, spec, det, return_tracks=True)
+    got = _native_pass(Rc, prep, spec, det, return_tracks=True)
+    assert ref is not None and ref[0].header == hdr1 and ref[0].frame == "short-v1", rx_spec
+    _pass_close(got[0], ref[0], rx_spec)
+    _tracks_close(got[1], ref[1], rx_spec)
+    assert len(ref[1]) == 2 and all(a.spec is b.spec for a, b in zip(got[1], ref[1])), rx_spec
+
+
+@pytest.mark.slow
+def test_receive_pass_v1_composition(native, Rc):
+    """The swap test on test_receive_pass_v1's SHORT reception: frame.plain's
+    road through the reference's glue is the C++'s, bit for bit."""
+    hdr1, prep = _v1_capture()
+    det = flat_det(1500.0, WAVEFORM_CE)
+    for keep in ("all", "receive_pass"):
+        skip = _receiver_rows(native) if keep == "all" else {(RECEIVER, "receive_pass")}
+        with pytest.MonkeyPatch.context() as mp:
+            _apply_rows(native, mp, skip=skip)
+            h = RX.receive_pass(prep, frame.SHORT, det, return_tracks=True)
+        g = _native_pass(Rc, prep, frame.SHORT, det, return_tracks=True)
+        assert h[0].frame == "short-v1" and h[0].header == hdr1, keep
+        _bitwise_pass(g, h, ("v1", keep))
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("label", ["tiny-6", "l-tiny-6"])
+def test_receive_pass_erase_most(native, Rc, label):
+    """live's view early in a pass: everything from 0, 2, 10 or 50% of the
+    transmission on erased, at the pass's own verified detection and at the
+    unverified flat one -- the same pass or none, and the swap test bit for
+    bit."""
+    c = _case(label)
+    v = RX.detection_from_pass(c.ref[0])
+    dur = c.spec.keyed_end_pos * c.spec.t_sym
+    for frac in (0.0, 0.02, 0.1, 0.5):
+        for d in (v, c.det):
+            erase = [(frac * dur, dur + 600.0)]
+            what = (label, frac, d.timing is None)
+            r = RX.receive_pass(c.prep, c.spec, d, erase_s=erase, return_tracks=True)
+            g = _native_pass(Rc, c.prep, c.spec, d, erase_s=erase, return_tracks=True)
+            assert (g is None) == (r is None), what
+            if r is None:
+                continue
+            _pass_close(g[0], r[0], what)
+            _tracks_close(g[1], r[1], what)
+            with pytest.MonkeyPatch.context() as mp:
+                _apply_rows(native, mp, skip=_receiver_rows(native))
+                h = RX.receive_pass(c.prep, c.spec, d, erase_s=erase, return_tracks=True)
+            _bitwise_pass(g, h, what)
+
+
+def test_receive_pass_noise(Rc):
+    """Noise alone, at the flat candidate: refused, by both."""
+    rng = np.random.default_rng(4)
+    spec = frame.TINY
+    n = int(spec.keyed_end_pos * spec.t_sym * 4000) + 4000 * 40
+    fe = ((rng.standard_normal(n) + 1j * rng.standard_normal(n)) / math.sqrt(2)).astype(np.complex64)
+    prep = RX.prepare(frontend.Capture(fe, Q_TEST, 4000.0 * 20))
+    det = flat_det(1500.0, WAVEFORM_CE)
+    assert RX.receive_pass(prep, spec, det) is None
+    assert _native_pass(Rc, prep, spec, det) is None
+
+
 def _apply_rows(native, mp, skip=(), wrap=None):
     """Every row of every tx and rx rows file over its target and every
     from-import site in sstvae.qrss, but those in `skip` ((target, name)
@@ -616,6 +712,26 @@ def test_seam_prepare_replaced(row, monkeypatch):
     got = row["receive_pass"](c.cap, c.spec, c.det)
     assert seen == [c.cap]
     _pass_close(got, c.ref[0], "prepare replaced")
+
+
+def test_no_seams_under_full_rows(native, Rc):
+    """With every row in place (the --native-qrss=rx run) the row's
+    receive_pass hands the C++ no seams: each module attribute holds the
+    native row, so the whole pass stays in C++."""
+    seen = []
+    orig = Rc.receive_pass
+
+    def spy(*a, **k):
+        seen.append(k.get("_seams"))
+        return orig(*a, **k)
+
+    with pytest.MonkeyPatch.context() as mp:
+        _apply_rows(native, mp)
+        mp.setattr(Rc, "receive_pass", spy)
+        for label in ("tiny-6", "l-tiny-6"):
+            c = _capture(label)
+            RX.receive_pass(c.prep, c.spec, c.det)
+    assert seen == [None, None], seen
 
 
 # --- decode_header ------------------------------------------------------------------------------
@@ -846,6 +962,28 @@ def test_mean_w_db(row):
         p = SimpleNamespace(w=w)
         r, g = RX.mean_w_db(p), row["mean_w_db"](p)
         assert (math.isnan(r) and math.isnan(g)) or r == g, (w[:3], r, g)
+
+
+def test_confidence_db_nonfinite(row):
+    """An infinity, a NaN, minus infinity or 1e308 (whose bin sums
+    overflow) in w and in a header LLR: the same bins, NaN where NaN."""
+    spec = frame.SHORT
+    for bad in (np.inf, np.nan, -np.inf, 1e308):
+        w = np.ones(spec.n_data)
+        w[100] = bad
+        with np.errstate(over="ignore"):   # 1e308 in float32: an infinity, deliberately
+            p = make_pass_result(np.zeros(spec.n_data), w=w, waveform=WAVEFORM_CE, hdr=HDR, hdr_es_n0_db=0.0)
+            p.w = w if bad == 1e308 else w.astype(np.float32)
+            llr = np.asarray(p.hdr_llr, np.float32).copy()
+            llr[7] = bad
+        p.hdr_llr = llr
+        r, g = RX.confidence_db(p), row["confidence_db"](p)
+        assert len(g) == len(r), bad
+        for x, y in zip(g, r):
+            assert (x is None) == (y is None), bad
+            assert y is None or (math.isnan(x) and math.isnan(y)) or x == y, (bad, x, y)
+        r, g = RX.mean_w_db(p), row["mean_w_db"](p)
+        assert (math.isnan(r) and math.isnan(g)) or r == g, (bad, r, g)
 
 
 # --- the small functions -------------------------------------------------------------------------
