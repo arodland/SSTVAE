@@ -93,11 +93,14 @@ inline double abs2(cplx z) {
     const double a = np::abs(z);
     return a * a;
 }
-// np.exp(-2j * np.pi * t) for a float t: (cos, sin) of -(2 pi t) through
-// libm (a purely imaginary argument; -2j * np.pi is (-0.0, -2 pi), and its
-// product with (t, 0) has the imaginary part -(2 pi) t exactly rounded).
+// np.exp(-2j * np.pi * t) for a float t: (cos, sin) of the imaginary part
+// through libm. CPython (3.13) multiplies -2j (-0.0, -2) by the float pi as
+// by (pi, 0), so -2j * np.pi is (+0.0, -2 pi); numpy's product of that with
+// (t, 0) is (+0.0, 0 * 0 + (-2 pi) t): the + 0.0 makes t = 0 give +0.0, not
+// -0.0, and sin keeps the sign. (CPython 3.14's mixed-mode rule scales both
+// parts instead, (-0.0, -2 pi), which would make it -0.0.)
 inline cplx exp_neg_i(double t) {
-    const double y = -TWO_PI * t;
+    const double y = 0.0 + -TWO_PI * t;
     return {std::cos(y), std::sin(y)};
 }
 

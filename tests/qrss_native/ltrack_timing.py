@@ -20,9 +20,9 @@ STAGE = "rx"
 
 
 def rows(q):
-    from . import _rx
-
     from sstvae.qrss.ltrack import SEG_TIMING_S
+
+    from . import _rx
 
     t = q.ltrack_timing
 
