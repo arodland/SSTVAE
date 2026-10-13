@@ -288,6 +288,80 @@ double py_min(const std::vector<double>& v) {
 
 double median_of(std::vector<double>&& v) { return math::median(std::span<const double>(v)); }
 
+// The non-NaN values of p[lo, lo + w) in ascending order, for windows that
+// only ever move forward (running_median's and normalise's): each move
+// merges the samples entering and drops those leaving, rather than
+// selecting from scratch -- O(w) per window instead of nth_element's
+// several passes. Order statistics are the window's whatever the
+// algorithm, so the medians are numpy's to the bit. A float equal to
+// another (only +0 / -0 could differ) is dropped in its place, which no
+// median can tell apart.
+class SlidingSorted {
+public:
+    explicit SlidingSorted(std::span<const float> p) : p_(p) {}
+
+    void move_to(std::int64_t lo, std::int64_t w) {
+        if (!started_ || lo < lo_ || lo >= lo_ + w_ || w != w_) {
+            rebuild(lo, w);
+            return;
+        }
+        if (lo == lo_) return;
+        collect(lo_, lo, del_, -1);          // leaving
+        collect(lo_ + w_, lo + w, add_, +1);  // entering
+        std::sort(del_.begin(), del_.end());
+        std::sort(add_.begin(), add_.end());
+        tmp_.clear();
+        std::size_t j = 0, k = 0;
+        for (const float x : s_) {
+            if (j < del_.size() && x == del_[j]) {
+                ++j;
+                continue;
+            }
+            while (k < add_.size() && add_[k] < x) tmp_.push_back(add_[k++]);
+            tmp_.push_back(x);
+        }
+        while (k < add_.size()) tmp_.push_back(add_[k++]);
+        s_.swap(tmp_);
+        lo_ = lo;
+    }
+
+    const std::vector<float>& sorted() const { return s_; }
+    std::int64_t nans() const { return nan_; }
+
+private:
+    void rebuild(std::int64_t lo, std::int64_t w) {
+        s_.clear();
+        nan_ = 0;
+        for (std::int64_t i = lo; i < lo + w; ++i) {
+            const float v = p_[static_cast<std::size_t>(i)];
+            if (std::isnan(v))
+                ++nan_;
+            else
+                s_.push_back(v);
+        }
+        std::sort(s_.begin(), s_.end());
+        lo_ = lo;
+        w_ = w;
+        started_ = true;
+    }
+
+    void collect(std::int64_t a, std::int64_t b, std::vector<float>& out, int sign) {
+        out.clear();
+        for (std::int64_t i = a; i < b; ++i) {
+            const float v = p_[static_cast<std::size_t>(i)];
+            if (std::isnan(v))
+                nan_ += sign;
+            else
+                out.push_back(v);
+        }
+    }
+
+    std::span<const float> p_;
+    std::vector<float> s_, tmp_, add_, del_;
+    std::int64_t lo_ = 0, w_ = 0, nan_ = 0;
+    bool started_ = false;
+};
+
 constexpr double LN2 = 0.6931471805599453;   // math.log(2)
 
 }  // namespace
@@ -343,9 +417,19 @@ RunningMedian running_median(std::span<const float> p, double fs, double win_s, 
         return out;
     }
     out.medians.resize(out.centres.size());
+    SlidingSorted win(p);
+    const auto half = static_cast<std::size_t>(w / 2);
     for (std::size_t i = 0; i < out.centres.size(); ++i) {
         const std::int64_t start = std::clamp<std::int64_t>(out.centres[i] - floordiv(w, 2), 0, n - w);
-        out.medians[i] = math::median(p.subspan(static_cast<std::size_t>(start), static_cast<std::size_t>(w)));
+        win.move_to(start, w);
+        if (win.nans() > 0) {   // np.median: NaN for a window holding one
+            out.medians[i] = std::numeric_limits<float>::quiet_NaN();
+            continue;
+        }
+        // np.median's middle one or two values through np.mean (as math::median)
+        const auto& s = win.sorted();
+        const float mid[2] = {w % 2 ? s[half] : s[half - 1], s[half]};
+        out.medians[i] = math::mean(std::span<const float>(mid, w % 2 ? 1 : 2));
     }
     return out;
 }
@@ -422,17 +506,13 @@ Normalised normalise(std::span<const cf> fe, std::optional<std::span<const float
         if (keep && (*keep)[i] < 1.0f) p[i] = nan;
     }
     std::vector<double> ok_centres, ok_med;
-    std::vector<float> buf;
-    buf.reserve(static_cast<std::size_t>(w));
+    SlidingSorted win(p);
     const std::int64_t need = std::max<std::int64_t>(1, int_of(std::trunc(min_kept * static_cast<double>(w))));
     const float inf = std::numeric_limits<float>::infinity();
     for (std::int64_t c = floordiv(hop, 2); c < n; c += hop) {
         const std::int64_t start = std::clamp<std::int64_t>(c - floordiv(w, 2), 0, n - w);
-        buf.clear();
-        for (std::int64_t j = start; j < start + w; ++j) {
-            const float v = p[static_cast<std::size_t>(j)];
-            if (!std::isnan(v)) buf.push_back(v);
-        }
+        win.move_to(start, w);
+        const auto& buf = win.sorted();
         const auto cnt = static_cast<std::int64_t>(buf.size());
         float med;
         if (cnt == 0) {
@@ -440,13 +520,8 @@ Normalised normalise(std::span<const cf> fe, std::optional<std::span<const float
         } else {
             // the middle of the kept count, as the reference's sort with the
             // unkept ones at +inf picks it
-            const std::int64_t c_ = cnt;
-            const auto i_lo = static_cast<std::size_t>((c_ - 1) / 2), i_hi = static_cast<std::size_t>(c_ / 2);
-            std::nth_element(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(i_hi), buf.end());
-            const float hi = buf[i_hi];
-            const float lo = i_lo == i_hi ? hi
-                                          : *std::max_element(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(i_hi));
-            med = 0.5f * (lo + hi);
+            const auto i_lo = static_cast<std::size_t>((cnt - 1) / 2), i_hi = static_cast<std::size_t>(cnt / 2);
+            med = 0.5f * (buf[i_lo] + buf[i_hi]);
         }
         if (cnt >= need) {
             ok_centres.push_back(static_cast<double>(c));

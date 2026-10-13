@@ -17,6 +17,7 @@
 #include "qrss/rx_types.hpp"
 
 #include <complex>
+#include <cstddef>
 #include <cstdint>
 #include <numbers>
 #include <optional>
@@ -100,7 +101,11 @@ void bind(py::module_& qrss) {
             py::gil_scoped_release nogil;
             h = sm::freqz(bv, f, fs);
         }
-        return py::make_tuple(to_numpy(f), to_numpy(h));
+        // scipy hands back its own w: 2 pi f / fs, then times fs / (2 pi)
+        std::vector<double> wr(f.size());
+        for (std::size_t i = 0; i < f.size(); ++i)
+            wr[i] = (2 * std::numbers::pi * f[i] / fs) * (fs / (2 * std::numbers::pi));
+        return py::make_tuple(to_numpy(wr), to_numpy(h));
     }, py::arg("b"), py::arg("worN"), py::arg("fs") = 2 * std::numbers::pi);
 
     m.def("maximum_filter1d", [](const py::object& input, std::int64_t size) {

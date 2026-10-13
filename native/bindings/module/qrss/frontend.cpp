@@ -199,8 +199,23 @@ py::array channelise_keep_py(const py::object& keep, const py::object& fs_in, co
     return to_numpy(out);
 }
 
-py::array noise_psd_py(const py::object& ch, std::int64_t fs, const py::object& exclude_hz, double win_s,
-                       const py::object& band_hz, double guard_hz, std::int64_t fs_in, const py::object& audio_hz) {
+// A sample rate: an int, or a float holding one (the reference's arithmetic
+// with an integral float is its arithmetic with the int). TypeError for a
+// fractional rate, which the C++ does not take.
+std::int64_t int_rate(const py::handle& o, const char* name) {
+    if (py::isinstance<py::float_>(o)) {
+        const double d = o.cast<double>();
+        if (std::isfinite(d) && d == std::trunc(d) && std::fabs(d) < 9.0e15) return static_cast<std::int64_t>(d);
+        throw py::type_error(std::string(name) + " must be a whole number of Hz, not " +
+                             py::repr(o).cast<std::string>());
+    }
+    return as_index(o);
+}
+
+py::array noise_psd_py(const py::object& ch, const py::object& fs_obj, const py::object& exclude_hz, double win_s,
+                       const py::object& band_hz, double guard_hz, const py::object& fs_in_obj,
+                       const py::object& audio_hz) {
+    const std::int64_t fs = int_rate(fs_obj, "fs"), fs_in = int_rate(fs_in_obj, "fs_in");
     const auto v = rx::vec<cf>(ch);
     std::vector<double> ex;
     for (const py::handle h : py::reinterpret_borrow<py::iterable>(exclude_hz)) ex.push_back(rx::as_double(h));
