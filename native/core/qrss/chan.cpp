@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "math/npcomplex.hpp"
 #include "math/npstats.hpp"
 #include "qrss/config.hpp"
 #include "qrss/frontend.hpp"
@@ -141,8 +142,9 @@ NoisePsd compute_table(const ChanCapture& c, const NoisePsdFn& fn) {
             } else {
                 std::int64_t cnt = 0;
                 for (std::int64_t k = lo; k < hi; ++k) {
-                    const cf v = c.ch[static_cast<std::size_t>(k)];
-                    cnt += (v.real() != 0.0f || v.imag() != 0.0f) ? 1 : 0;   // np.abs(ch) > 0
+                    // np.abs(ch) > 0: false for a NaN part (|NaN| is NaN),
+                    // which a plain "nonzero" test would count
+                    cnt += math::np::abs(c.ch[static_cast<std::size_t>(k)]) > 0.0f ? 1 : 0;
                 }
                 frac = static_cast<double>(cnt) / static_cast<double>(hi - lo);
             }

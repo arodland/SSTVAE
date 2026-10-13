@@ -83,11 +83,17 @@ def _ulps32(a, b, floor):
 
 
 def _fe_close(a, b):
+    """The plan's bar for audio_to_fe/StreamFE: complex64, at most 1e-5 of
+    the samples (rounded up) not bit-identical, and those one ulp apart
+    (parts far below the signal's scale, where an ulp is under the
+    arithmetic's own rounding, within one ulp of the scale instead)."""
     assert a.dtype == b.dtype == np.complex64 and a.shape == b.shape
     if a.size:
         scale = max(float(np.max(np.abs(a))), 1e-30)
-        assert float(np.max(np.abs(a.astype(np.complex128) - b))) <= 1e-5 * scale
-        assert _ulps32(a, b, 1e-3 * scale) <= 1
+        differ = int(np.count_nonzero(a.view(np.uint64) != b.view(np.uint64)))
+        assert differ <= int(np.ceil(1e-5 * a.size)), (differ, a.size)
+        assert float(np.max(np.abs(a.astype(np.complex128) - b))) <= 2.0**-23 * scale
+        assert _ulps32(a, b, 1e-6 * scale) <= 1
 
 
 def _raises_same(fa, fb):
@@ -360,8 +366,8 @@ def test_mix_phasor_edges(nf):
 def _ch_close(a, b):
     assert a[0].dtype == b[0].dtype == np.complex64 and a[0].shape == b[0].shape
     assert isinstance(a[1], Fraction) and a[1] == b[1]
-    if b[0].size:
-        np.testing.assert_allclose(a[0], b[0], rtol=1e-6, atol=1e-6 * float(np.max(np.abs(b[0]))))
+    if b[0].size:   # rtol 1e-6 sample by sample (no absolute floor: it would excuse small samples)
+        np.testing.assert_allclose(a[0], b[0], rtol=1e-6, atol=0)
 
 
 @pytest.mark.parametrize("fs_in,fs_out", [(4000, 250), (4000, 4000), (8000, 250), (4000, 500), (250, 250)])
@@ -608,3 +614,158 @@ def test_maximum_filter1d(cv):
             u = rng.integers(0, 255, n).astype(np.uint8)
             _same(cv.maximum_filter1d(u, size), ndimage.maximum_filter1d(u, size))
     _raises_same(lambda: ndimage.maximum_filter1d(np.ones(3, np.uint8), 0), lambda: cv.maximum_filter1d(np.ones(3, np.uint8), 0))
+
+
+# --- review probes (randomised and long inputs) ----------------------------------------------
+
+def test_audio_to_fe_a_full_slot(nf):
+    """A FULL pass's worth of audio (15 min 5 s at 8 kHz, 3.6M FE samples):
+    thousands of oaconvolve blocks, batched in the C++ (a batch boundary
+    carries the overlap), against the bar -- at most 1e-5 of the samples
+    one ulp apart, the rest identical."""
+    n = FS * 905
+    x = _noise(905, n) * 0.25 + 0.05 * np.sin(2 * np.pi * 812.4 * np.arange(n) / FS)
+    _fe_close(nf.audio_to_fe(x), F.audio_to_fe(x))
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_front_end_chain_random(nf, seed):
+    """blank -> normalise -> channelise / channelise_keep on random streams:
+    impulses and bursts at random places, zero stretches, an inf or a NaN,
+    random blanker and AGC settings, a keep with fractional values."""
+    rng = np.random.default_rng(1000 + seed)
+    n = int(rng.choice([rng.integers(101, 3000), rng.integers(3000, 60000)]))
+    fe = ((rng.standard_normal(n) + 1j * rng.standard_normal(n)) * rng.uniform(0.01, 30)).astype(np.complex64)
+    for _ in range(int(rng.integers(0, 8))):
+        i = int(rng.integers(0, n))
+        fe[i:i + int(rng.integers(1, 60))] *= np.float32(rng.uniform(5, 200))
+    if rng.random() < 0.3:
+        fe[: int(rng.integers(0, n))] = 0
+    if rng.random() < 0.2:
+        fe[int(rng.integers(0, n))] = np.complex64(complex(np.inf, 0.0))
+    if rng.random() < 0.2:
+        fe[int(rng.integers(0, n))] = np.complex64(complex(np.nan, 1.0))
+    kw = dict(k_sigma=float(rng.uniform(2, 8)), guard_ms=float(rng.choice([0.0, 0.25, 2.0, 7.3])),
+              taper_ms=float(rng.choice([0.0, 0.25, 1.0, 3.3])))
+    if rng.random() < 0.5:
+        kw.update(win_s=float(rng.uniform(0.05, 2.0)), hop_s=float(rng.uniform(0.001, 0.2)))
+    with np.errstate(invalid="ignore", over="ignore"):
+        ref = F.blank(fe, **kw)
+    got = nf.blank(fe, **kw)
+    _same(got[0], ref[0])
+    _same(got[1], ref[1])
+    bfe, keep = ref
+    if rng.random() < 0.3:
+        keep = keep.copy()
+        keep[rng.random(n) < 0.2] = np.float32(rng.uniform(0, 1))
+    kw2 = dict(win_ms=float(rng.uniform(1, 400)), hop_ms=float(rng.uniform(0.25, 50)),
+               min_kept=float(rng.uniform(0, 1)))
+    for k in (keep, None):
+        with np.errstate(invalid="ignore", over="ignore"):
+            ref = F.normalise(bfe, k, **kw2)
+        got = nf.normalise(bfe, k, **kw2)
+        _same(got[0], ref[0])
+        _same(got[1], ref[1])
+    nfe = ref[0]
+    f, n0 = float(rng.uniform(-1250, 1250)), int(rng.integers(-10**9, 10**9))
+    a, b = nf.channelise(nfe, FE_FS, f, CH_FS, n0=n0), F.channelise(nfe, FE_FS, f, CH_FS, n0=n0)
+    assert a[1] == b[1]
+    _same(a[0], b[0])                              # equal in practice, inside the rtol 1e-6 bar
+    _same(nf.channelise_keep(keep), F.channelise_keep(keep))
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_noise_psd_random(nf, seed, monkeypatch):
+    """noise_psd over random channels, rates, neighbours, bands, guards and
+    windows, under both rules: within rtol 1e-9 (equal in practice), and
+    refusing alike."""
+    rng = np.random.default_rng(2000 + seed)
+    for _ in range(60):
+        n = int(rng.choice([rng.integers(1, 3000), rng.integers(3000, 12000)]))
+        fs = int(rng.choice([250, 250, 250, 500, 300, 4000]))
+        ch = ((rng.standard_normal(n) + 1j * rng.standard_normal(n)) * 0.7).astype(np.complex64)
+        if rng.random() < 0.4:
+            ch += (3 * np.exp(2j * np.pi * rng.uniform(-125, 125) * np.arange(n) / fs)).astype(np.complex64)
+        ex = rng.uniform(-130, 130, int(rng.integers(0, 4)))
+        if rng.random() < 0.5:
+            ex = tuple(float(v) for v in ex)
+        kw = {}
+        if rng.random() < 0.8:
+            kw["audio_hz"] = float(rng.choice([rng.uniform(280, 460), rng.uniform(2540, 2720), rng.uniform(300, 2700)]))
+        if rng.random() < 0.3:
+            kw["guard_hz"] = float(rng.uniform(5, 60))
+        if rng.random() < 0.3:
+            kw["band_hz"] = tuple(sorted(float(v) for v in rng.uniform(50, 125, 2)))
+        if rng.random() < 0.3:
+            kw["win_s"] = float(rng.uniform(0.01, 12))
+        if rng.random() < 0.5:
+            monkeypatch.setenv(rules.EDGE_NOISE, "1")
+        else:
+            monkeypatch.delenv(rules.EDGE_NOISE, raising=False)
+        try:
+            ref = F.noise_psd(ch, fs, ex, **kw)
+        except ValueError:
+            _raises_same(lambda: F.noise_psd(ch, fs, ex, **kw), lambda: nf.noise_psd(ch, fs, ex, **kw))
+            continue
+        got = nf.noise_psd(ch, fs, ex, **kw)
+        assert got.dtype == ref.dtype == np.float32 and got.shape == ref.shape
+        np.testing.assert_allclose(got, ref, rtol=1e-9, atol=0)
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_stream_fe_random(nf, seed):
+    """Random push sizes, gaps and restarts (backwards too), negative
+    starts and odd block sizes: chunk indices, samples and state."""
+    rng = np.random.default_rng(3000 + seed)
+    block = int(rng.choice([8000, 16, 17, 1000, 333, -5, 0, 100000]))
+    x = rng.standard_normal(150000)
+    ref, nat = live.StreamFE(block), nf.StreamFE(block)
+    assert nat.block == ref.block
+    pos = int(rng.integers(-1000, 1000))
+    for step in range(30):
+        n = int(rng.choice([0, 1, 5, 15, 16, 17, 255, 256, 257, 271, 3000, 8000, 9000]))
+        if rng.random() < 0.15:
+            pos += int(rng.integers(-50, 300))
+        xs = x[(step * 4999) % 100000:(step * 4999) % 100000 + n]
+        r_out, n_out = ref.push(pos, xs), nat.push(pos, xs)
+        assert [i for i, _ in n_out] == [i for i, _ in r_out], (block, pos, n)
+        for (_, fr), (_, fn) in zip(r_out, n_out):
+            _fe_close(np.asarray(fn), fr)
+        assert (nat.a0, nat.next_index) == (ref.a0, ref.next_index)
+        _same(nat.pend, ref.pend)
+        pos += n
+
+
+def test_calc_oa_lens_sweep(cv):
+    """scipy's block arithmetic for every overlap the receiver's filters
+    could have (lambertw to the bit, so ceil() never lands differently)."""
+    from scipy.signal._signaltools import _calc_oa_lens
+
+    for s2 in range(2, 3001):
+        for s1 in (10**7, 4 * s2 + 1, 2 * s2 + 1):
+            assert cv.calc_oa_lens(s1, s2) == tuple(_calc_oa_lens(s1, s2)), (s1, s2)
+            assert cv.calc_oa_lens(s2, s1) == tuple(_calc_oa_lens(s2, s1)), (s2, s1)
+
+
+@pytest.mark.parametrize("n1,n2", [(300000, 255), (255, 300000), (400000, 121), (200000, 2001)])
+@pytest.mark.parametrize("kinds", ["cr", "rc", "cc", "rr"])
+def test_convolve_many_blocks(cv, n1, n2, kinds):
+    """More blocks than one batch of the C++'s (the overlap carried across
+    batches), the long operand either side."""
+    a = _noise(n1 + 5, n1, complex_=kinds[0] == "c").astype(np.complex128 if kinds[0] == "c" else np.float64)
+    b = _noise(n2 + 6, n2, complex_=kinds[1] == "c").astype(np.complex128 if kinds[1] == "c" else np.float64)
+    for mode in ("same", "full"):
+        x, y = cv.oaconvolve(a, b, mode), signal.oaconvolve(a, b, mode=mode)
+        assert x.dtype == y.dtype and x.shape == y.shape
+        assert np.max(np.abs(x - y)) <= 1e-13 * np.max(np.abs(y))
+
+
+def test_maximum_filter1d_random(cv):
+    rng = np.random.default_rng(5)
+    for _ in range(40):
+        n = int(rng.integers(1, 5000))
+        x = rng.random(n) < rng.uniform(0, 0.3)
+        size = int(rng.choice([1, 2, 3, 9, 17, 33, int(rng.integers(1, 3 * n + 2))]))
+        _same(cv.maximum_filter1d(x, size), ndimage.maximum_filter1d(x, size))
+        u = rng.integers(0, 256, n).astype(np.uint8)
+        _same(cv.maximum_filter1d(u, size), ndimage.maximum_filter1d(u, size))

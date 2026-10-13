@@ -24,6 +24,7 @@
 #include <complex>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -240,6 +241,18 @@ static void test_edges() {
     throws<std::invalid_argument>([&] { track::noise_psd_at(n, 0.0, none); }, "array of sample points is empty",
                                   "no window");
     check::is_true(n.psd.get() && n.psd.get()->t_s.empty(), "the empty table is cached all the same");
+    // np.abs(ch) > 0 is false for a NaN sample: a window of NaNs is padding
+    // (the reference: [2, 3, 4] from the seam reads [3.5, 3, 4])
+    track::ChanCapture q;
+    q.ch.assign(250 * 25, cf(1, 0));
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    std::fill(q.ch.begin(), q.ch.begin() + 2400, cf(nan, 0));
+    std::fill(q.ch.begin() + 2600, q.ch.begin() + 2800, cf(0, nan));
+    const track::NoisePsdFn three = [](std::span<const cf>, std::int64_t, std::span<const double>, double,
+                                       std::optional<double>) { return std::vector<float>{2.0f, 3.0f, 4.0f}; };
+    (void)track::noise_psd_at(q, 0.0, three);
+    check::is_true(q.psd.get() && q.psd.get()->psd == std::vector<double>{3.5, 3.0, 4.0},
+                   "a NaN sample is not a number for the padding fraction");
 }
 
 int main() {

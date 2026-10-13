@@ -53,7 +53,7 @@ def _chan_same(got, ref):
     assert isinstance(got, track.ChanCapture)
     assert got.ch.dtype == ref.ch.dtype == np.complex64 and got.ch.shape == ref.ch.shape
     if ref.ch.size:
-        np.testing.assert_allclose(got.ch, ref.ch, rtol=1e-6, atol=1e-6 * float(np.max(np.abs(ref.ch))))
+        np.testing.assert_allclose(got.ch, ref.ch, rtol=1e-6, atol=0)   # sample by sample, no floor
     assert got.fs == ref.fs and isinstance(got.f_mix, Fraction) and got.f_mix == ref.f_mix
     assert got.t0_index == ref.t0_index
     assert (got.keep is None) == (ref.keep is None)
@@ -211,3 +211,59 @@ def test_noise_floor_of_silence(nc):
     ref = copy.deepcopy(cap)
     assert nc.noise_floor(cap) == ref.noise_floor() == 1e-30
     _same(cap._psd[1], ref._psd[1])
+
+
+# --- review probes ------------------------------------------------------------------------------
+
+def test_padding_fraction_counts_nan_as_the_reference_does(nc):
+    """`np.abs(ch) > 0` is False for a NaN sample, so a window of NaNs is
+    "mostly padding" and takes the others' median -- which a plain nonzero
+    test would not do (seen only through a noise_psd that reads finite
+    values off such a channel, as a replaced one can)."""
+    def spy(ch, fs, **kw):
+        return np.array([2.0, 3.0, 4.0], np.float32)
+
+    ch = np.ones(CH_FS * 25, np.complex64)
+    ch[:2400] = np.complex64(complex(np.nan, 0.0))         # window 0: 4% numbers
+    ch[2600:2800] = np.complex64(complex(0.0, np.nan))     # window 1: 92% numbers
+    cap = track.ChanCapture(ch=ch, fs=CH_FS, t0_index=0.0, f_mix=Fraction(-4679, 4))
+    ref = copy.deepcopy(cap)
+    got = nc.noise_psd_at(cap, [5.0, 15.0, 22.0], spy)
+    orig = frontend.noise_psd
+    frontend.noise_psd = spy
+    try:
+        want = ref.noise_psd_at([5.0, 15.0, 22.0])
+    finally:
+        frontend.noise_psd = orig
+    np.testing.assert_array_equal(got, want)
+    np.testing.assert_array_equal(cap._psd[1], ref._psd[1])
+    assert ref._psd[1][0] == 3.5                           # the median of the good windows
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_make_chan_and_noise_floor_random(nc, capture, seed, monkeypatch):
+    """make_chan over random spans, offsets, frequencies and neighbours
+    (inside, across and off either end of the capture), then the noise
+    table, under both rules."""
+    fe, keep = capture
+    rng = np.random.default_rng(4000 + seed)
+    for _ in range(6):
+        t0 = float(rng.uniform(-len(fe) / 2, 1.5 * len(fe)))
+        lo = float(rng.uniform(-60, 60))
+        hi = lo + float(rng.uniform(0, 90))
+        f = float(rng.uniform(280, 2720))
+        ex = tuple(float(v) for v in rng.uniform(200, 2800, int(rng.integers(0, 4))))
+        k = keep if rng.random() < 0.7 else None
+        ref = track.make_chan(fe, k, t0, FE_FS, f, lo, hi, ex)
+        got = _make(nc, fe, k, t0, FE_FS, f, lo, hi, ex)
+        _chan_same(got, ref)
+        if not ref.ch.size:
+            continue
+        if rng.random() < 0.5:
+            monkeypatch.setenv(rules.EDGE_NOISE, "1")
+        else:
+            monkeypatch.delenv(rules.EDGE_NOISE, raising=False)
+        t = rng.uniform(lo - 5, hi + 5, 9)
+        a, b = copy.deepcopy(ref), copy.deepcopy(ref)
+        np.testing.assert_allclose(nc.noise_psd_at(b, t), a.noise_psd_at(t), rtol=1e-9, atol=0)
+        assert nc.noise_floor(b) == pytest.approx(a.noise_floor(), rel=1e-9, abs=0)
