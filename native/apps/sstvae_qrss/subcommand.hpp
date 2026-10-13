@@ -7,7 +7,7 @@
 //
 //   encode.cpp     qrss_encode.py    (only with the codec: SSTVAE_BUILD_CODEC)
 //   beacon.cpp     qrss_beacon.py
-//   transmit.cpp   qrss_transmit.py  (next: tx.transmit_audio's lane)
+//   transmit.cpp   qrss_transmit.py
 //   receive.cpp, listen.cpp, decode.cpp later (plan stages 2c and 3)
 //
 // The contract each one keeps with its Python script: the same argument

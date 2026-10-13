@@ -198,4 +198,18 @@ inline constexpr double L_AVG_POWER = 0x1.428f5c28f5c29p-1;  // 0.63
 inline constexpr double L_KEY_RAMP_S = 0x1.999999999999ap-5;  // 0.05
 inline constexpr double L_MARGIN_S = 0x1.0000000000000p+2;  // 4.0
 
+// --- a pass's timing (frontend.slot_t0, tx.transmit_audio's defaults, frame.FULL) ---
+// Slot q's quarter hour is SLOT_S * q (unix seconds) and its t0 T0_OFFSET_S
+// later; a pass's audio starts TX_PRE_S before t0 and ends TX_POST_S after
+// the keying. FULL_DURATION_S is the FULL frame's, t0 to its end, the same
+// for CE and L. For the app (qrss/api.hpp), so no copy is typed by hand.
+inline constexpr int SLOT_S = 900;
+inline constexpr int T0_OFFSET_S = 1;
+inline constexpr int TX_CARRIER_HZ = 1500;
+inline constexpr double TX_PRE_S = 0x1.8000000000000p+3;  // 12.0
+inline constexpr double TX_POST_S = 0x1.8000000000000p+1;  // 3.0
+inline constexpr double TX_AMPLITUDE = 0x1.0000000000000p-1;  // 0.5
+inline constexpr double TX_CHUNK_S = 0x1.e000000000000p+6;  // 120.0
+inline constexpr double FULL_DURATION_S = 0x1.bdab666666666p+10;  // 1782.678125
+
 }  // namespace sstvae::qrss::config

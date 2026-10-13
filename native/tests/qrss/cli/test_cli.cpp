@@ -8,7 +8,11 @@
 // "sstvae-qrss <sub>" in place of "qrss_<sub>.py". encode is checked only
 // up to the model (its refusals of arguments, image and --model), since a
 // successful encode needs the published artifact; tests/test_qrss_native_cli.py
-// runs both programs side by side, the encode included.
+// runs both programs side by side, the encode included. transmit is held
+// to the sha256 of what qrss_transmit.py wrote for the same picture at
+// slot 2025-10-01T00:00Z (q=1954752): a .qrsp and an OOK segment-1 beacon
+// file, CE and L, int16 and float, plus its refusals, each of which must
+// leave no output file behind.
 
 #include <cmath>
 #include <cstdint>
@@ -29,6 +33,7 @@
 #include "check.hpp"
 #include "common.hpp"
 #include "qrss/beaconfile.hpp"
+#include "qrss/header.hpp"
 #include "qrss/npz.hpp"
 #include "qrss/picture.hpp"
 #include "qrss_check.hpp"
@@ -363,6 +368,97 @@ void test_encode(const TempDir& t) {
     check::is_true(!exists(out), "no output for any refusal");
 }
 
+// --- transmit ------------------------------------------------------------------------------
+
+void test_transmit(const TempDir& t) {
+    namespace bfm = sstvae::qrss::beaconfile;
+    const pc::StoredPicture sp = closed_form_picture();
+    const std::string pic = t / "tx.qrsp";
+    pc::save_qrsp(pic, sp);
+    sstvae::qrss::header::HeaderFields h;
+    h.callsign = "K1ABC/P";
+    h.grid = std::string("FN42");
+    h.picture_id = sp.picture_id;
+    h.mode = sp.mode;
+    h.segment = 1;
+    h.codec_id = sp.codec_id;
+    const std::string seg1 = t / "tx-seg1.bin";
+    bfm::write(seg1, bfm::from_picture(sp, 1, h, true));
+
+    const std::string slot = "2025-10-01T00:00Z";
+    struct Case {
+        std::string input;
+        std::vector<std::string> extra;
+        const char* line;
+        const char* digest;
+    };
+    // hashlib.sha256 of the WAV qrss_transmit.py wrote, and its stdout after "wrote <out>: ".
+    const Case cases[] = {
+        {pic,
+         {"--callsign", "K1ABC/P", "--frame", "tiny", "--float"},
+         "slot q=1954752, waveform CE, frame tiny (53.1 s), K1ABC/P (FSK callsign windows), carrier 1500 Hz, "
+         "68.3 s of audio starting 12 s before t0",
+         "46202a2e720b3d49bd29c1f2027b9608942fafeef6e2a3ef1c4daf6fe5c60089"},
+        {pic,
+         {"--callsign", "K1ABC/P", "--frame", "tiny", "--waveform", "L", "--lead-in", "2.5"},
+         "slot q=1954752, waveform L, frame l-tiny (53.2 s), K1ABC/P (FSK callsign windows), pilot 1500 Hz, "
+         "2.5 s lead-in, 68.6 s of audio starting 12 s before t0",
+         "a5faee5c8a1a9aa64adae26c8899098995b2d73ed5d76432c257e6f228d023d1"},
+        {pic,
+         {"--callsign", "K1ABC/P", "--frame", "short", "--grid", "FN42", "--segment", "1", "--ook", "--freq",
+          "1234.5"},
+         "slot q=1954752, waveform CE, frame short (255.8 s), K1ABC/P (OOK callsign windows), carrier 1234.5 Hz, "
+         "270.8 s of audio starting 12 s before t0",
+         "74f01cf22ef2f63c6ceb10405fa3215b7f9d67005a8aed3490e1622415cd53ca"},
+        {seg1,
+         {"--frame", "tiny", "--float"},
+         "slot q=1954752, waveform CE, frame tiny (53.1 s), K1ABC/P (OOK callsign windows), carrier 1500 Hz, "
+         "68.3 s of audio starting 12 s before t0",
+         "1dd8331f27eac768d252f286038ec7c3d035b45534deefaa6eb23dfb7a99c1f1"},
+    };
+    int k = 0;
+    for (const Case& c : cases) {
+        const std::string out = t / ("tx" + std::to_string(k++) + ".wav");
+        std::vector<std::string> args{c.input, out, "--slot", slot};
+        args.insert(args.end(), c.extra.begin(), c.extra.end());
+        expect(run("transmit", args), 0, "wrote " + out + ": " + c.line + "\n", "", c.line);
+        qrss_check::digest_is(slurp(out), c.digest, std::string("transmit audio: ") + c.line);
+    }
+
+    // The refusals, as qrss_transmit.py words them; none may leave a file.
+    const std::string out = t / "refused.wav";
+    struct Refusal {
+        std::string input;
+        std::vector<std::string> extra;
+        std::string err;
+    };
+    const Refusal refusals[] = {
+        {pic,
+         {"--slot", "2025-10-01T00:05Z", "--callsign", "K1ABC"},
+         "--slot '2025-10-01T00:05Z': 2025-10-01T00:05:00+00:00 is not on a quarter hour\n"},
+        {pic,
+         {"--slot", "nope", "--callsign", "K1ABC"},
+         "--slot 'nope': not an ISO 8601 time; expected e.g. 2026-10-09T06:00Z\n"},
+        {pic, {"--slot", slot}, "a .qrsp needs --callsign: every pass sends it in the header and in the callsign windows\n"},
+        {pic,
+         {"--slot", slot, "--callsign", "K1ABC", "--waveform", "L", "--ook"},
+         "--ook is waveform CE's: waveform L keys its callsign windows by FSK of its pilot\n"},
+        {pic, {"--slot", "1969-12-31T23:45Z", "--callsign", "K1ABC"}, "q must fit in uint64, not -1\n"},
+        {seg1, {"--slot", slot, "--callsign", "K1ABC"}, "the beacon file is for K1ABC/P, not K1ABC\n"},
+        {pic, {"--slot", slot, "--callsign", "K1ABC", "--segment", "2"}, "segment must be 0..1, not 2\n"},
+        {pic,
+         {"--slot", slot, "--callsign", "K1ABC", "--freq", "100"},
+         "carrier 100.0 Hz is outside the 300-2700 Hz audio band that receivers search\n"},
+        {pic, {"--slot", slot, "--callsign", "K1ABC", "--lead-in", "11"}, "lead-in must be 0 to 10 s, not 11.0\n"},
+    };
+    for (const Refusal& r : refusals) {
+        std::vector<std::string> args{r.input, out};
+        args.insert(args.end(), r.extra.begin(), r.extra.end());
+        expect(run("transmit", args), 1, "", r.err, "transmit refusal: " + r.err);
+        check::is_true(!exists(out), "no file for a refusal: " + r.err);
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -371,6 +467,7 @@ int main() {
         test_registry();
         test_argparse();
         test_beacon(t);
+        test_transmit(t);
         test_encode(t);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());

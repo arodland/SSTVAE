@@ -201,6 +201,25 @@ def render_config() -> str:
                      ("L_MARGIN_S", margin)]:
         w(f"inline constexpr double {cname} = {_hex(float(v))};  // {float(v)!r}\n")
 
+    w("\n// --- a pass's timing (frontend.slot_t0, tx.transmit_audio's defaults, frame.FULL) ---\n")
+    w("// Slot q's quarter hour is SLOT_S * q (unix seconds) and its t0 T0_OFFSET_S\n"
+      "// later; a pass's audio starts TX_PRE_S before t0 and ends TX_POST_S after\n"
+      "// the keying. FULL_DURATION_S is the FULL frame's, t0 to its end, the same\n"
+      "// for CE and L. For the app (qrss/api.hpp), so no copy is typed by hand.\n")
+    from sstvae.qrss import frame, frontend, lframe, tx
+    slot_s, t0_offset = frontend.slot_t0(1) - frontend.slot_t0(0), frontend.slot_t0(0)
+    params = inspect.signature(tx.transmit_audio).parameters
+    full_s = frame.FULL.duration_s
+    assert lframe.get("l-full").duration_s == full_s, "CE and L FULL frames last the same"
+    for cname, v in [("SLOT_S", slot_s), ("T0_OFFSET_S", t0_offset),
+                     ("TX_CARRIER_HZ", params["carrier_hz"].default)]:
+        assert isinstance(v, int) and not isinstance(v, bool), cname
+        w(f"inline constexpr int {cname} = {v};\n")
+    for cname, v in [("TX_PRE_S", params["pre_s"].default), ("TX_POST_S", params["post_s"].default),
+                     ("TX_AMPLITUDE", params["amplitude"].default),
+                     ("TX_CHUNK_S", params["chunk_s"].default), ("FULL_DURATION_S", full_s)]:
+        w(f"inline constexpr double {cname} = {_hex(float(v))};  // {float(v)!r}\n")
+
     w("\n}  // namespace sstvae::qrss::config\n")
     return "".join(lines)
 

@@ -1,12 +1,16 @@
-"""`sstvae-qrss encode` and `beacon` (native/apps/sstvae_qrss) against
-qrss_encode.py and qrss_beacon.py, run side by side.
+"""`sstvae-qrss encode`, `beacon` and `transmit` (native/apps/sstvae_qrss)
+against qrss_encode.py, qrss_beacon.py and qrss_transmit.py, run side by
+side, and the C++ chain into Python's receiver (C++ encode and transmit,
+then sstvae.qrss.receiver: plan item 19).
 
 Each case runs the script and the subcommand with the same arguments, in
 two directories holding the same input files, and compares:
 
 - the exit status;
 - stdout, exactly (the "wrote ..." line);
-- the output file, byte for byte, or that neither run left one;
+- the output file, byte for byte, or that neither run left one (a
+  transmit WAV: its header byte for byte and its samples as the tx
+  parity tests hold them -- see _same_wav);
 - stderr by how the script ended. A refusal (SystemExit) exactly. A usage
   error by its message, the text after "error: " on argparse's last line
   ("the following arguments are required: ...") -- the usage line above it
@@ -79,6 +83,7 @@ class Case:
     dirs: list[str] = field(default_factory=list)          # empty directories to make
     output: str | None = None        # the file a success writes
     only_class: bool = False         # an uncaught exception's class, not its text
+    audio: str | None = None         # a transmit WAV: "ce" or "l" (see _same_wav)
 
 
 @dataclass
@@ -132,7 +137,10 @@ def _last_line(text: str) -> str:
 def check(case: Case, py: Run, nat: Run):
     assert nat.rc == py.rc, (py, nat)
     assert nat.out == py.out, (py, nat)
-    assert nat.output == py.output, "output files differ"
+    if case.audio is not None:
+        _same_wav(case.audio, py.output, nat.output)
+    else:
+        assert nat.output == py.output, "output files differ"
     assert "Traceback" not in nat.err
     if py.rc == 0:
         assert nat.err == py.err
@@ -322,9 +330,10 @@ def test_dispatch(cli):
     assert r.returncode == 0 and "beacon" in r.stdout and "qrss_beacon.py" in r.stdout
     r = subprocess.run([cli, "frobnicate"], capture_output=True, text=True, timeout=60)
     assert r.returncode == 2 and r.stderr.startswith("sstvae-qrss: unknown command 'frobnicate'\n")
-    r = subprocess.run([cli, "transmit"], capture_output=True, text=True, timeout=60)
-    if r.returncode == 2 and "not in this build yet" in r.stderr:
-        assert r.stderr == "sstvae-qrss transmit: not in this build yet; use qrss_transmit.py\n"
+    r = subprocess.run([cli, "--help"], capture_output=True, text=True, timeout=60)
+    assert any(line.split()[:1] == ["transmit"] and "qrss_transmit.py" in line for line in r.stdout.splitlines())
+    r = subprocess.run([cli, "receive"], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 2 and r.stderr == "sstvae-qrss receive: not in this build yet; use qrss_receive.py\n"
 
 
 # --- encode ---------------------------------------------------------------------------------
@@ -448,6 +457,368 @@ def test_encode_an_unreadable_picture(cli, encode_inputs, tmp_path):
     assert py.rc == nat.rc == 1 and py.out == nat.out == ""
     assert py.output is None and nat.output is None
     assert py.err.startswith("bad.png: ") and nat.err.startswith("bad.png: ") and "Traceback" not in nat.err
+
+
+# --- transmit -------------------------------------------------------------------------------
+#
+# The WAVs: the header byte for byte, and the samples as the tx parity
+# tests hold the audio (tests/test_qrss_native_tx_audio.py) -- waveform CE
+# bit for bit where numpy's trig and complex multiply are the C library's
+# and fused (this platform; EXACT_CE), else within 1e-12; L within 1e-9,
+# the clipper's FFT rounding. So a --float file is byte-identical, or (L,
+# or CE elsewhere) differs by at most the float64 tolerance plus one
+# float32 rounding; an int16 file is normalised by the pass's own peak and
+# rounded, so it may differ by one LSB where a sample sits on a rounding
+# boundary. Measured here: every CE file byte-identical; L int16
+# byte-identical; L --float within one float32 ulp on a few samples.
+
+from test_qrss_native_tx_audio import EXACT_CE  # noqa: E402
+
+SLOT = "2025-10-01T00:00Z"   # Q_TEST
+
+
+def _wav_parts(data: bytes) -> tuple[bytes, np.ndarray]:
+    """(the bytes before the samples, the samples) of scipy's mono WAV."""
+    i = data.index(b"data") + 8
+    tag = int.from_bytes(data[20:22], "little")
+    return data[:i], np.frombuffer(data[i:], np.int16 if tag == 1 else np.float32)
+
+
+def _same_wav(kind: str, py: bytes | None, nat: bytes | None):
+    assert (py is None) == (nat is None), "only one run wrote the WAV"
+    if py is None or py == nat:
+        return
+    assert not (kind == "ce" and EXACT_CE), "a CE WAV differs where the audio is bit for bit"
+    hp, xp = _wav_parts(py)
+    hn, xn = _wav_parts(nat)
+    assert hn == hp and xn.shape == xp.shape, "WAV headers differ"
+    if xp.dtype == np.int16:
+        assert np.max(np.abs(xn.astype(np.int32) - xp)) <= 1
+    else:
+        tol = (1e-12 if kind == "ce" else 1e-9) + np.spacing(np.abs(xp)).astype(np.float64)
+        assert np.all(np.abs(xn.astype(np.float64) - xp) <= tol)
+
+
+@pytest.fixture(scope="module")
+def transmit_inputs(beacon_inputs, tmp_path_factory):
+    from sstvae.qrss import beaconfile
+    from sstvae.qrss.header import HeaderFields
+
+    d = tmp_path_factory.mktemp("transmit-in")
+    f = dict(beacon_inputs)
+    sp = picture.load_qrsp(beacon_inputs["m1"])
+    h = HeaderFields(callsign="K1ABC", grid="FN42", picture_id=sp.picture_id, mode=sp.mode, segment=1,
+                     codec_id=sp.codec_id)
+    for key, ook in (("fsk", False), ("ook", True)):
+        beaconfile.write(d / f"{key}.bin", beaconfile.from_picture(sp, 1, h, ook=ook))
+        f[key] = d / f"{key}.bin"
+    data = bytearray((d / "fsk.bin").read_bytes())
+    data[-1] ^= 0xFF
+    (d / "badcrc.bin").write_bytes(bytes(data))
+    f["badcrc"] = d / "badcrc.bin"
+    (d / "short.bin").write_bytes(beaconfile.MAGIC + bytes(12))
+    f["shortbin"] = d / "short.bin"
+    (d / "three.bin").write_bytes(beaconfile.MAGIC[:3])
+    f["three"] = d / "three.bin"
+    return f
+
+
+def _transmit_cases(f) -> list[Case]:
+    pic = {"in.qrsp": f["m1"]}
+
+    def tx(name, *args, files=None, audio="ce", only_class=False, dirs=()):
+        return Case(name, "qrss_transmit.py", "transmit", list(args), pic if files is None else files, list(dirs),
+                    output="out.wav", only_class=only_class, audio=audio)
+
+    def q(name, *extra, audio="ce", files=None, slot=SLOT):
+        """in.qrsp out.wav --slot SLOT --callsign K1ABC, then `extra`."""
+        return tx(name, "in.qrsp", "out.wav", "--slot", slot, "--callsign", "K1ABC", *extra, audio=audio,
+                  files=files)
+
+    def b(name, key, *extra, audio="ce"):
+        return tx(name, "in.bin", "out.wav", "--slot", SLOT, *extra, files={"in.bin": f[key]}, audio=audio)
+
+    def bad_input(name, key, only_class=False):
+        return tx(name, "in.qrsp", "out.wav", "--slot", SLOT, "--callsign", "K1ABC", "--frame", "tiny",
+                  files={"in.qrsp": f[key]}, only_class=only_class)
+
+    return [
+        # what gets written
+        q("ce-tiny-float", "--frame", "tiny", "--float"),
+        q("ce-tiny-int16", "--frame", "tiny"),
+        q("l-tiny-float", "--frame", "tiny", "--waveform", "L", "--float", audio="l"),
+        q("l-tiny-int16", "--frame", "tiny", "--waveform", "L", audio="l"),
+        q("ce-short-seg1", "--frame", "short", "--grid", "FN42", "--segment", "1", "--float"),
+        q("ce-short-ook", "--frame", "short", "--ook"),
+        q("l-short-float", "--frame", "short", "--waveform", "L", "--grid", "fn42", "--float", audio="l"),
+        q("ce-medium", "--frame", "medium", "--float"),
+        q("ce-full-int16"),
+        q("l-full-float", "--waveform", "L", "--float", audio="l"),
+        q("mode-a", "--frame", "tiny", "--float", files={"in.qrsp": f["m0"]}),
+        b("bin-fsk", "fsk", "--frame", "short", "--float"),
+        b("bin-ook", "ook", "--frame", "short"),
+        b("bin-same-call", "fsk", "--callsign", "K1ABC", "--frame", "tiny", "--float"),
+        b("bin-segment-ignored", "fsk", "--segment", "7", "--grid", "XX", "--frame", "tiny", "--float"),
+        b("bin-l", "fsk", "--waveform", "L", "--frame", "short", "--float", audio="l"),
+        b("bin-ook-flag", "ook", "--ook", "--frame", "tiny", "--float"),
+        q("lead-in", "--frame", "tiny", "--lead-in", "2.5", "--float"),
+        q("lead-in-l", "--frame", "tiny", "--lead-in", "10", "--waveform", "L", "--float", audio="l"),
+        q("lead-in-negzero", "--frame", "tiny", "--lead-in=-0", "--float"),
+        q("lead-in-tiny", "--frame", "tiny", "--lead-in", "1e-7", "--float"),
+        q("freq-decimal", "--frame", "tiny", "--freq", "1500.3", "--float"),
+        q("freq-exp", "--frame", "tiny", "--freq", "1.2345e3", "--float"),
+        q("freq-l", "--frame", "tiny", "--freq", "700", "--waveform", "L", "--float", audio="l"),
+        q("freq-edge", "--frame", "tiny", "--freq", "2700", "--float"),
+        q("slot-offset", "--frame", "tiny", "--float", slot="2025-10-01T02:00+02:00"),
+        q("slot-lower", "--frame", "tiny", "--float", slot=" 2025-10-01t00:00z "),
+        q("slot-week", "--frame", "tiny", "--float", slot="2025-W40-3T00:00Z"),
+        q("slot-badbyte-sep", "--frame", "tiny", "--float", slot="2025-10-01\udcff00:00Z"),
+        tx("abbrev", "--wave", "L", "--fra", "tiny", "--call", "K1ABC", "--sl", SLOT, "--fl", "in.qrsp", "out.wav",
+           audio="l"),
+        tx("ambiguous", "--fr", "tiny", "--callsign", "K1ABC", "--slot", SLOT, "in.qrsp", "out.wav"),
+        tx("equals", "in.qrsp", "out.wav", "--slot=" + SLOT, "--callsign=K1ABC", "--frame=tiny", "--float"),
+        # refusals: --slot
+        q("slot-off", "--frame", "tiny", slot="2025-10-01T00:07Z"),
+        q("slot-seconds", "--frame", "tiny", slot="2025-10-01T00:00:00.5Z"),
+        q("slot-naive", "--frame", "tiny", slot="2025-10-01T00:00"),
+        q("slot-garbage", "--frame", "tiny", slot="tomorrow"),
+        q("slot-quote", "--frame", "tiny", slot="it's"),
+        q("slot-badbyte-end", "--frame", "tiny", slot="2025-10-01T00:00Z\udcff"),
+        q("slot-1969", "--frame", "tiny", slot="1969-12-31T23:45Z"),
+        tx("slot-1969-callsign", "in.qrsp", "out.wav", "--slot", "1969-12-31T23:45Z", "--callsign", "K1ABC!"),
+        tx("slot-1969-bin-l", "in.bin", "out.wav", "--slot", "1969-12-31T23:45Z", "--waveform", "L",
+           files={"in.bin": f["ook"]}),
+        tx("slot-missing", "in.qrsp", "out.wav", "--callsign", "K1ABC"),
+        tx("slot-before-file", "nope.qrsp", "out.wav", "--slot", "x"),
+        # --ook with L, before the input is opened
+        q("l-ook", "--waveform", "L", "--ook"),
+        tx("l-ook-no-input", "nope.qrsp", "out.wav", "--slot", SLOT, "--waveform", "L", "--ook"),
+        # a stored picture's header
+        tx("no-callsign", "in.qrsp", "out.wav", "--slot", SLOT),
+        q("grid-bad", "--frame", "tiny", "--grid", "XX"),
+        q("grid-empty", "--frame", "tiny", "--grid", ""),
+        tx("call-bad", "in.qrsp", "out.wav", "--slot", SLOT, "--callsign", "K1ABC!"),
+        tx("call-long", "in.qrsp", "out.wav", "--slot", SLOT, "--callsign", "K1ABCDEFG"),
+        tx("call-lower", "in.qrsp", "out.wav", "--slot", SLOT, "--callsign", "k1abc", "--frame", "tiny"),
+        tx("call-empty", "in.qrsp", "out.wav", "--slot", SLOT, "--callsign", ""),
+        tx("call-unicode", "in.qrsp", "out.wav", "--slot", SLOT, "--callsign", "KÄB"),
+        q("seg-2", "--segment", "2"),
+        q("seg-neg", "--segment=-1"),
+        q("seg-huge", "--segment", "99999999999999999999999"),
+        q("seg-huge-freq", "--segment", "99999999999999999999999", "--freq", "100"),
+        q("seg-huge-l-pilot", "--segment", "-99999999999999999999999", "--freq", "310", "--waveform", "L"),
+        tx("seg-huge-no-call", "in.qrsp", "out.wav", "--slot", SLOT, "--segment", "99999999999999999999999"),
+        q("seg-x", "--segment", "x"),
+        # the carrier and the lead-in
+        q("freq-low", "--freq", "100"),
+        q("freq-high", "--freq", "2700.5"),
+        q("freq-nan", "--freq", "nan"),
+        q("freq-inf", "--freq", "-inf"),
+        q("freq-l-low", "--freq", "310", "--waveform", "L"),
+        q("freq-text", "--freq", "1500Hz"),
+        q("lead-in-11", "--lead-in", "11"),
+        q("lead-in-neg", "--lead-in=-1"),
+        q("lead-in-nan", "--lead-in", "nan"),
+        b("bin-freq-low", "fsk", "--freq", "299.9"),
+        # a beacon file
+        b("bin-other-call", "fsk", "--callsign", "W1AW"),
+        b("bin-empty-call", "fsk", "--callsign", ""),
+        b("bin-ook-fsk", "fsk", "--ook"),
+        b("bin-ook-l", "ook", "--waveform", "L", "--frame", "tiny"),
+        b("bin-badcrc", "badcrc"),
+        b("bin-short", "shortbin"),
+        b("bin-three", "three"),
+        # the command line
+        q("frame-bad", "--frame", "huge"),
+        q("waveform-bad", "--waveform", "ce"),
+        tx("no-args"),
+        q("unknown", "--bogus"),
+        # the input and the output
+        tx("in-missing", "nope.qrsp", "out.wav", "--slot", SLOT, "--callsign", "K1ABC"),
+        tx("in-isdir", "indir", "out.wav", "--slot", SLOT, "--callsign", "K1ABC", files={}, dirs=["indir"]),
+        Case("out-nodir", "qrss_transmit.py", "transmit",
+             ["in.qrsp", "nodir/out.wav", "--slot", SLOT, "--callsign", "K1ABC", "--frame", "tiny"], pic,
+             output="nodir/out.wav"),
+        Case("out-isdir", "qrss_transmit.py", "transmit",
+             ["in.qrsp", "outdir", "--slot", SLOT, "--callsign", "K1ABC", "--frame", "tiny"], pic, dirs=["outdir"]),
+        bad_input("in-empty", "empty"),
+        bad_input("in-garbage", "garbage"),
+        bad_input("in-npy", "npy"),
+        bad_input("in-nosegs", "nosegs"),
+        bad_input("in-badzip", "badzip", only_class=True),
+        bad_input("in-wrongid", "wrongid"),
+        bad_input("in-version-1d", "v1d"),
+        bad_input("in-version-inf", "vinf"),
+        bad_input("in-version-complex", "vcplx"),
+        bad_input("in-mode-1d", "mode1d"),
+        bad_input("in-version-float", "vfloat"),
+    ]
+
+
+_TRANSMIT_KEYS = ("m0", "m1", "empty", "garbage", "npy", "nosegs", "badzip", "wrongid", "v1d", "vinf", "vcplx",
+                  "mode1d", "vfloat", "fsk", "ook", "badcrc", "shortbin", "three")
+
+
+@pytest.fixture(scope="module")
+def transmit_runs(cli, transmit_inputs, tmp_path_factory):
+    cases = _transmit_cases(transmit_inputs)
+    return {c.name: c for c in cases}, run_cases(cases, tmp_path_factory.mktemp("transmit-runs"), cli)
+
+
+@pytest.mark.parametrize("name", [c.name for c in _transmit_cases({k: Path("x") for k in _TRANSMIT_KEYS})])
+def test_transmit_matches_the_script(transmit_runs, name):
+    cases, runs = transmit_runs
+    py, nat = runs[name]
+    check(cases[name], py, nat)
+
+
+def test_transmit_cases_cover_each_ending(transmit_runs):
+    _, runs = transmit_runs
+    for name in ("ce-tiny-float", "l-tiny-int16", "ce-full-int16", "l-full-float", "bin-fsk", "bin-l",
+                 "slot-badbyte-sep", "abbrev"):
+        py, _ = runs[name]
+        assert py.rc == 0 and py.output is not None and py.out.startswith("wrote out.wav: slot q="), (name, py)
+    assert "2.5 s lead-in" in runs["lead-in"][0].out and "lead-in" not in runs["lead-in-negzero"][0].out
+    assert "(OOK callsign windows)" in runs["bin-ook"][0].out and "pilot 700 Hz" in runs["freq-l"][0].out
+    assert "carrier 1500.3 Hz" in runs["freq-decimal"][0].out
+    refused = {"slot-off": "is not on a quarter hour", "slot-naive": "give the time zone",
+               "slot-1969": "q must fit in uint64, not -1", "l-ook": "--ook is waveform CE's",
+               "no-callsign": "a .qrsp needs --callsign", "seg-huge": "segment must be 0..1, not 9999",
+               "seg-huge-freq": "carrier 100.0 Hz is outside", "freq-l-low": "an L pilot at 310.0 Hz",
+               "lead-in-11": "lead", "bin-other-call": "the beacon file is for K1ABC, not W1AW",
+               "bin-ook-fsk": "keys its callsign windows FSK", "bin-ook-l": "on and off",
+               "bin-badcrc": "CRC-32 mismatch", "in-wrongid": "", "l-ook-no-input": "--ook is waveform CE's"}
+    for name, text in refused.items():
+        py, _ = runs[name]
+        assert py.rc == 1 and py.output is None and "Traceback" not in py.err and text in py.err, (name, py)
+    for name in ("in-missing", "out-nodir", "in-empty", "in-version-1d"):
+        py, _ = runs[name]
+        assert py.rc == 1 and "Traceback" in py.err and runs[name][0].output is None, (name, py)
+    assert runs["frame-bad"][0].rc == 2 and runs["slot-missing"][0].rc == 2
+
+
+def test_transmit_help(cli):
+    r = subprocess.run([cli, "transmit", "--help"], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and r.stderr == ""
+    assert r.stdout.startswith("usage: sstvae-qrss transmit [-h] --slot SLOT [--callsign CALLSIGN] [--grid GRID] "
+                               "[--segment SEGMENT] [--freq FREQ] [--waveform {CE,L}] [--lead-in LEAD_IN] [--ook] "
+                               "[--frame {full,medium,short,tiny}] [--float] input output\n")
+    for flag in ("--slot", "--callsign", "--grid", "--segment", "--freq", "--waveform", "--lead-in", "--ook",
+                 "--frame", "--float", "(0-10)"):
+        assert flag in r.stdout
+
+
+# --- the C++ chain into Python's receiver (plan item 19) ------------------------------------
+#
+# sstvae-qrss encode makes the stored picture and sstvae-qrss transmit the
+# passes; Python reads both files and receives the audio through its
+# channel simulator at -6 dB (what test_qrss_smoke.py does with its own
+# transmitter's audio: a noiseless recording sends the receiver after every
+# grating lobe). A TINY pass has no header, so the header comes from SHORT
+# passes; the picture from what the passes carry, decoded by the v5 codec.
+
+CHAIN_SNR_DB = -6.0
+
+
+def _receive(wav: Path, spec, q: int, seed: int):
+    from sstvae import wavio
+    from sstvae.qrss import channel as chm
+    from sstvae.qrss import frontend
+    from sstvae.qrss import receiver as RX
+    from sstvae.qrss.channel import ChannelConfig
+
+    audio = wavio.read_wav(str(wav))
+    sim = chm.simulate_audio(audio, spec, q, ChannelConfig(snr_db=CHAIN_SNR_DB, seed=seed))
+    return RX.receive_slot(frontend.Capture(sim.fe, q, sim.t0_index), spec)
+
+
+@pytest.fixture(scope="module")
+def chain(cli, encode_inputs, tmp_path_factory):
+    """The C++ CLI's stored picture and its passes, CE and L, TINY and SHORT."""
+    if not _has_encode(cli):
+        pytest.skip("sstvae-qrss built without the codec")
+    d = tmp_path_factory.mktemp("chain")
+    for name, src in encode_inputs.items():
+        (d / name).parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(Path(src).resolve(), d / name)
+
+    def run(*args):
+        r = subprocess.run([str(cli), *args], cwd=d, capture_output=True, text=True, timeout=180)
+        assert r.returncode == 0 and r.stderr == "", r
+        return r.stdout
+
+    enc = run("encode", "scene.png", "pic.qrsp", "--model", "m", "--mode", "B")
+    wavs = {}
+    for wf, frame_name, extra in (("CE", "tiny", ()), ("L", "tiny", ()), ("CE", "short", ("--grid", "FN42")),
+                                  ("L", "short", ("--grid", "FN42", "--segment", "1"))):
+        out = f"{wf}-{frame_name}.wav"
+        run("transmit", "pic.qrsp", out, "--slot", SLOT, "--callsign", "K1ABC", "--waveform", wf, "--frame",
+            frame_name, "--float", *extra)
+        wavs[wf, frame_name] = d / out
+    return d, enc, picture.load_qrsp(d / "pic.qrsp"), wavs
+
+
+@pytest.mark.codec
+@pytest.mark.parametrize("wf", ["CE", "L"])
+def test_chain_header(chain, wf):
+    """A SHORT pass from the C++ transmitter: Python's receiver reads its
+    header (callsign, grid, the C++ encoder's picture ID) and callsign windows."""
+    from qrss_helpers import Q_TEST
+    from sstvae.qrss import frame, lframe
+    from sstvae.qrss.header import HeaderFields
+
+    _, enc, sp, wavs = chain
+    assert enc.endswith(f", picture ID {sp.id_hex}\n")
+    segment = 1 if wf == "L" else 0
+    spec = lframe.get("l-short") if wf == "L" else frame.SHORT
+    passes = _receive(wavs[wf, "short"], spec, Q_TEST, seed=3)
+    assert len(passes) == 1, [p.f_hz for p in passes]
+    p = passes[0]
+    assert p.header == HeaderFields(callsign="K1ABC", grid="FN42", picture_id=sp.picture_id, mode=sp.mode,
+                                    segment=segment, codec_id=sp.codec_id)
+    assert p.cw is not None and p.cw.text == "K1ABC" and p.cw.agrees
+
+
+@pytest.mark.codec
+@pytest.mark.parametrize("wf", ["CE", "L"])
+def test_chain_picture(chain, wf, tmp_path):
+    """A TINY pass from the C++ transmitter: Python's receiver hears the
+    C++ encoder's latents, and the v5 decoder draws from them what it draws
+    from the latents themselves."""
+    from qrss_helpers import Q_TEST, latent_snr_db, load_codec
+    from sstvae.qrss import frame, lframe, render, tx
+    from sstvae.qrss.store import Store
+
+    _, _, sp, wavs = chain
+    spec = lframe.get("l-tiny") if wf == "L" else frame.TINY
+    passes = _receive(wavs[wf, "tiny"], spec, Q_TEST, seed=4)
+    assert len(passes) == 1, [p.f_hz for p in passes]
+    p = passes[0]
+    sent = tx.slot_air_latents(sp, 0)[:spec.n_data]
+    snr = latent_snr_db(p.z, sent)
+    assert snr > 6.0, snr   # measured 8.7 (CE) and 9.9 dB (L) at -6 dB
+
+    st = Store(tmp_path / "store")
+    st.add_pass(p)
+    acc = st.attach(("K1ABC", int(sp.picture_id)), p.uid, 0, "test", mode=sp.mode, codec_id=sp.codec_id)
+    codec = load_codec("fp16")
+    got = np.asarray(render.render(codec, acc.S, acc.W, acc.mode), dtype=np.float64)
+    # The same latents, noiseless: what a perfect channel would have drawn.
+    S = np.zeros_like(acc.S)
+    W = np.zeros_like(acc.W)
+    canon = picture.air_to_canonical(0)[:spec.n_data]
+    W[0, canon] = 1e6
+    S[0, canon] = 1e6 * sent
+    want = np.asarray(render.render(codec, S, W, acc.mode), dtype=np.float64)
+    # A TINY pass is 1024 of the group's 52,800 latents, so both pictures
+    # are mostly what the decoder draws from nothing: compare what the
+    # latents add to that.
+    blank = np.asarray(render.render(codec, np.zeros_like(S), np.zeros_like(W), acc.mode), dtype=np.float64)
+    rho = np.corrcoef((got - blank).ravel(), (want - blank).ravel())[0, 1]
+    psnr = 10 * np.log10(255.0 ** 2 / np.mean((got - want) ** 2))
+    print(f"chain {wf}: latent SNR {snr:.1f} dB, picture {psnr:.1f} dB from the noiseless one, "
+          f"what the latents add correlates {rho:.3f}")
+    assert got.shape == (480, 640, 3) and rho > 0.9
 
 
 # --- int() and float() ---------------------------------------------------------------------

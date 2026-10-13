@@ -29,15 +29,14 @@ constexpr const char* PROG = "sstvae-qrss";
 
 // Subcommands this build does not have, and why: the codec-only ones in a
 // build without the codec, and the ones not ported yet. A registered
-// subcommand of the same name always wins, so a lane that adds one (the
-// transmit lane: transmit.cpp) need not touch this table.
+// subcommand of the same name always wins, so a lane that adds one (a
+// receive.cpp) need not touch this table.
 struct NotBuilt {
     std::string_view name;
     std::string_view why;
 };
 constexpr NotBuilt NOT_BUILT[] = {
     {"encode", "built without the codec (SSTVAE_BUILD_CODEC=OFF); use qrss_encode.py, or rebuild with the codec"},
-    {"transmit", "not in this build yet; use qrss_transmit.py"},
     {"receive", "not in this build yet; use qrss_receive.py"},
     {"listen", "not in this build yet; use qrss_listen.py"},
     {"decode", "not in this build yet; use qrss_decode.py"},

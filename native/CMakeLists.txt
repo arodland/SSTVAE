@@ -680,8 +680,8 @@ endif()
 # --- the QRSSTVAE command line --------------------------------------------------
 # sstvae-qrss: one executable, argument for argument the qrss_*.py CLIs
 # (apps/sstvae_qrss/subcommand.hpp). Each subcommand is a file that
-# registers itself, globbed, so a new one (transmit.cpp is next) needs no
-# edit here. They are an OBJECT library so the ctest can run them
+# registers itself, globbed, so a new one needs no edit here. They are an
+# OBJECT library so the ctest can run them
 # in-process and every registration is linked (a static library would
 # drop the unreferenced ones). The codec-only subcommands are compiled in
 # only with the codec glue; main.cpp names them as "built without the
