@@ -250,6 +250,7 @@ PassbandStore::PassbandStore(std::string root, StoreOptions opt)
       per_hour_(0),
       pack_(opt.pack),
       clock_(std::move(opt.clock)) {
+    if (root_.empty()) root_ = ".";   // (Path("") is ".")
     std::error_code ec;
     if (!rawfile::make_dirs(root_, ec)) throw FileError(ec, root_);
     const std::string meta = join(root_, "meta.json");

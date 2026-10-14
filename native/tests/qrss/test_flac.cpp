@@ -23,6 +23,7 @@
 
 #include "qrss/flac.hpp"
 #include "qrss_check.hpp"
+#include "util/fileio.hpp"
 #include "util/md5.hpp"
 
 #define CHECK(c) sstvae::check::is_true((c), std::string(#c) + " (line " + std::to_string(__LINE__) + ")")
@@ -182,7 +183,7 @@ void test_partial_reads(const std::filesystem::path& dir) {
     // a small file through the file reader: every offset over two block
     // boundaries, and every length up to a block and a half at a few
     const auto x = noise(2 * 3 * 4096 + 2 * 77, 900.0, 21);
-    const std::string path = (dir / "partial.flac").string();
+    const std::string path = sstvae::util::path_text(dir / "partial.flac");
     std::size_t at = 0;
     const flac::Source src = [&](std::uint64_t first, std::size_t n, std::int16_t* out) {
         CHECK(first * 2 == at);
@@ -197,7 +198,7 @@ void test_partial_reads(const std::filesystem::path& dir) {
     for (int seek : {1, 0}) {
         std::string p2 = path;
         if (!seek) {
-            p2 = (dir / "partial_noseek.flac").string();
+            p2 = sstvae::util::path_text(dir / "partial_noseek.flac");
             o.seek_every_frames = 0;
             at = 0;
             flac::encode_file(p2, 4000, 2, x.size() / 2, src, o);
@@ -244,7 +245,7 @@ void test_damage(const std::filesystem::path& dir) {
         }
     CHECK(f2 != std::string::npos);
     bytes[f2 + 400] = static_cast<char>(bytes[f2 + 400] ^ 0x10);
-    const std::string path = (dir / "damaged.flac").string();
+    const std::string path = sstvae::util::path_text(dir / "damaged.flac");
     {
         std::FILE* f = std::fopen(path.c_str(), "wb");
         std::fwrite(bytes.data(), 1, bytes.size(), f);
@@ -261,7 +262,7 @@ void test_damage(const std::filesystem::path& dir) {
     }
     CHECK(threw);
     // not FLAC at all
-    const std::string junk = (dir / "junk.flac").string();
+    const std::string junk = sstvae::util::path_text(dir / "junk.flac");
     {
         std::FILE* f = std::fopen(junk.c_str(), "wb");
         std::fputs("RIFF not a flac file at all, sorry", f);
@@ -287,14 +288,14 @@ void test_cancel(const std::filesystem::path& dir) {
     };
     bool cancelled = false;
     try {
-        flac::encode_file((dir / "cancel.flac").string(), 4000, 2, x.size() / 2, src, {}, &stop);
+        flac::encode_file(sstvae::util::path_text(dir / "cancel.flac"), 4000, 2, x.size() / 2, src, {}, &stop);
     } catch (const flac::Cancelled&) {
         cancelled = true;
     }
     CHECK(cancelled && calls == 3);
     bool source_failed = false;
     try {
-        flac::encode_file((dir / "fail.flac").string(), 4000, 2, 100, [](auto, auto, auto) { return false; });
+        flac::encode_file(sstvae::util::path_text(dir / "fail.flac"), 4000, 2, 100, [](auto, auto, auto) { return false; });
     } catch (const std::runtime_error&) {
         source_failed = true;
     }

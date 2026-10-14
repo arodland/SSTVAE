@@ -451,7 +451,7 @@ public:
     explicit FileSink(const std::string& path) : path_(path) {
         std::error_code ec;
         f_ = rawfile::RawFile::open(path, rawfile::Mode::Truncate, ec);
-        if (!f_.is_open()) throw std::system_error(ec, path);
+        if (!f_.is_open()) throw rawfile::FileError(ec, path);
         buf_.reserve(1 << 20);
     }
     void write(const std::uint8_t* p, std::size_t n) override {
@@ -461,7 +461,7 @@ public:
     void patch(std::uint64_t at, const std::uint8_t* p, std::size_t n) override {
         flush();
         std::error_code ec;
-        if (!f_.write_at(at, p, n, ec)) throw std::system_error(ec, path_);
+        if (!f_.write_at(at, p, n, ec)) throw rawfile::FileError(ec, path_);
     }
     void finish() override {
         flush();
@@ -472,7 +472,7 @@ private:
     void flush() {
         if (buf_.empty()) return;
         std::error_code ec;
-        if (!f_.write_at(at_, buf_.data(), buf_.size(), ec)) throw std::system_error(ec, path_);
+        if (!f_.write_at(at_, buf_.data(), buf_.size(), ec)) throw rawfile::FileError(ec, path_);
         at_ += buf_.size();
         buf_.clear();
     }
@@ -826,9 +826,9 @@ Reader::Reader(const std::string& path) : impl_(std::make_unique<Impl>()) {
     impl_->what = path;
     std::error_code ec;
     impl_->stream.file = rawfile::RawFile::open(path, rawfile::Mode::Read, ec);
-    if (!impl_->stream.file.is_open()) throw std::system_error(ec, path);
+    if (!impl_->stream.file.is_open()) throw rawfile::FileError(ec, path);
     const auto sz = impl_->stream.file.size(ec);
-    if (!sz) throw std::system_error(ec, path);
+    if (!sz) throw rawfile::FileError(ec, path);
     impl_->stream.size = *sz;
     impl_->open();
 }

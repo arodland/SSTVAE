@@ -82,6 +82,7 @@
 #include <vector>
 
 #include "qrss/frontend.hpp"
+#include "qrss/rawfile.hpp"
 #include "qrss/rx_config.hpp"
 
 namespace sstvae::qrss::passband {
@@ -109,16 +110,8 @@ std::vector<Range> merge_ranges(std::vector<Range> rs);
 inline constexpr std::int64_t HOUR_MAX = (std::int64_t{1} << 62) / 3600;
 std::optional<std::int64_t> hour_of_name(std::string_view name);
 
-// An OSError: errno (or a Windows error), and the file it concerns.
-class FileError : public std::system_error {
-public:
-    FileError(std::error_code ec, std::string path)
-        : std::system_error(ec, path), path_(std::move(path)) {}
-    const std::string& path() const { return path_; }
-
-private:
-    std::string path_;
-};
+// An OSError naming its file (rawfile.hpp).
+using FileError = rawfile::FileError;
 
 // round(x) as Python's round() of a float gives an int (half to even);
 // std::invalid_argument / std::overflow_error for NaN / infinity, in its words.

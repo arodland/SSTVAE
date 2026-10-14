@@ -78,27 +78,27 @@ DirLock::~DirLock() { close(); }
 
 std::optional<DirLock> DirLock::try_acquire(const std::string& dir) {
     std::error_code ec;
-    if (!rawfile::make_dirs(dir, ec)) throw std::system_error(ec, dir);
+    if (!rawfile::make_dirs(dir, ec)) throw rawfile::FileError(ec, dir);
     DirLock l;
     l.path_ = lock_path(dir);
     const std::optional<std::wstring> w = util::wide_of(l.path_);
     if (!w || l.path_.find('\0') != std::string::npos)
-        throw std::system_error(std::make_error_code(std::errc::invalid_argument), l.path_);
+        throw rawfile::FileError(std::make_error_code(std::errc::invalid_argument), l.path_);
     // "a+": read and append, created if absent; shared as the C runtime shares a file
     HANDLE h = ::CreateFileW(w->c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE)
-        throw std::system_error(std::error_code(static_cast<int>(::GetLastError()), std::system_category()), l.path_);
+        throw rawfile::FileError(std::error_code(static_cast<int>(::GetLastError()), std::system_category()), l.path_);
     l.h_ = h;
     OVERLAPPED ov{};   // byte 0
     if (!::LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) return std::nullopt;
     LARGE_INTEGER zero{};
     if (!::SetFilePointerEx(h, zero, nullptr, FILE_BEGIN) || !::SetEndOfFile(h))
-        throw std::system_error(std::error_code(static_cast<int>(::GetLastError()), std::system_category()), l.path_);
+        throw rawfile::FileError(std::error_code(static_cast<int>(::GetLastError()), std::system_category()), l.path_);
     const std::string line = pid_line();
     DWORD done = 0;
     if (!::WriteFile(h, line.data(), static_cast<DWORD>(line.size()), &done, nullptr) || done != line.size())
-        throw std::system_error(std::error_code(static_cast<int>(::GetLastError()), std::system_category()), l.path_);
+        throw rawfile::FileError(std::error_code(static_cast<int>(::GetLastError()), std::system_category()), l.path_);
     return l;
 }
 
@@ -119,30 +119,30 @@ long long DirLock::native_handle() const { return h_ ? reinterpret_cast<long lon
 
 std::optional<DirLock> DirLock::try_acquire(const std::string& dir) {
     std::error_code ec;
-    if (!rawfile::make_dirs(dir, ec)) throw std::system_error(ec, dir);
+    if (!rawfile::make_dirs(dir, ec)) throw rawfile::FileError(ec, dir);
     DirLock l;
     l.path_ = lock_path(dir);
     if (l.path_.find('\0') != std::string::npos)
-        throw std::system_error(std::make_error_code(std::errc::invalid_argument), l.path_);
+        throw rawfile::FileError(std::make_error_code(std::errc::invalid_argument), l.path_);
     int fd = -1;
     do {
         fd = ::open(l.path_.c_str(), O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
     } while (fd < 0 && errno == EINTR);
-    if (fd < 0) throw std::system_error(std::error_code(errno, std::generic_category()), l.path_);
+    if (fd < 0) throw rawfile::FileError(std::error_code(errno, std::generic_category()), l.path_);
     l.fd_ = fd;
     int r = 0;
     do {
         r = ::flock(fd, LOCK_EX | LOCK_NB);
     } while (r != 0 && errno == EINTR);
     if (r != 0) return std::nullopt;   // (l closes the file)
-    if (::ftruncate(fd, 0) != 0) throw std::system_error(std::error_code(errno, std::generic_category()), l.path_);
+    if (::ftruncate(fd, 0) != 0) throw rawfile::FileError(std::error_code(errno, std::generic_category()), l.path_);
     const std::string line = pid_line();
     std::size_t put = 0;
     while (put < line.size()) {
         const ssize_t n = ::write(fd, line.data() + put, line.size() - put);
         if (n < 0) {
             if (errno == EINTR) continue;
-            throw std::system_error(std::error_code(errno, std::generic_category()), l.path_);
+            throw rawfile::FileError(std::error_code(errno, std::generic_category()), l.path_);
         }
         put += static_cast<std::size_t>(n);
     }

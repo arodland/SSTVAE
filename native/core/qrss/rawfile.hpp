@@ -30,8 +30,20 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 
 namespace sstvae::qrss::rawfile {
+
+// An OSError: errno (or a Windows error), and the file it concerns (UTF-8),
+// for the stores' callers to raise as Python's OSError naming that file.
+class FileError : public std::system_error {
+public:
+    FileError(std::error_code ec, std::string path) : std::system_error(ec, path), path_(std::move(path)) {}
+    const std::string& path() const { return path_; }
+
+private:
+    std::string path_;
+};
 
 enum class Mode {
     Read,        // existing file, read only
