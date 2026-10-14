@@ -4,6 +4,7 @@
 #include "qrss/flac.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cerrno>
 #include <cstring>
 #include <limits>
@@ -141,21 +142,14 @@ inline std::uint32_t zigzag(std::int32_t r) {
 }
 
 // Bits for a two's-complement field holding every value in [lo, hi].
+// (lo <= 0 <= hi: a residual's range always holds 0.)
 int signed_bits(std::int64_t lo, std::int64_t hi) {
     if (lo == 0 && hi == 0) return 0;
-    int b = 1;
-    while (!(lo >= -(std::int64_t{1} << (b - 1)) && hi <= (std::int64_t{1} << (b - 1)) - 1)) ++b;
-    return b;
+    const std::uint64_t mag = static_cast<std::uint64_t>(std::max<std::int64_t>(hi, lo < 0 ? ~lo : 0));
+    return 1 + static_cast<int>(std::bit_width(mag));
 }
 
-int bit_length(std::uint64_t v) {
-    int b = 0;
-    while (v) {
-        ++b;
-        v >>= 1;
-    }
-    return b;
-}
+int bit_length(std::uint64_t v) { return static_cast<int>(std::bit_width(v)); }
 
 constexpr int SUB_CONSTANT = 0, SUB_VERBATIM = 1, SUB_FIXED = 2;
 
@@ -169,11 +163,58 @@ struct Subframe {
     std::vector<std::int32_t> residual;
 };
 
-struct PartitionStats {
-    std::vector<std::uint64_t> s;   // sum(u >> k), k = 0..kcap
-    std::uint64_t count = 0;
-    std::int64_t lo = 0, hi = 0;    // residual range
+// Buffers one stream reuses for every subframe it plans and writes.
+struct Scratch {
+    std::vector<std::int32_t> r;           // a residual
+    std::vector<std::uint32_t> u;          // its zigzag
+    std::vector<std::uint64_t> s, s_up;    // [partition][k - wlo]: sum(u >> k)
+    std::vector<std::uint64_t> cnt, cnt_up;
+    std::vector<std::int64_t> lo, hi, lo_up, hi_up;
 };
+
+// sum(u[i] >> k) over [a, b)
+std::uint64_t shifted_sum(const std::uint32_t* u, int a, int b, int k) {
+    std::uint64_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    int i = a;
+    for (; i + 4 <= b; i += 4) {
+        s0 += u[i] >> k;
+        s1 += u[i + 1] >> k;
+        s2 += u[i + 2] >> k;
+        s3 += u[i + 3] >> k;
+    }
+    for (; i < b; ++i) s0 += u[i] >> k;
+    return s0 + s1 + s2 + s3;
+}
+
+// The lowest Rice parameter in [0, kmax] with the fewest bits for the
+// zigzagged residual u[a, b); the bits (parameter field excluded) go in
+// `bits`. The cost sum(u >> k) + count (k + 1) is convex in k -- its step
+// count - sum(ceil((u >> k) / 2)) never decreases -- so a walk from the
+// mean's estimate stops on exactly the parameter an exhaustive search
+// finds, ties to the lowest included.
+int best_rice(const std::uint32_t* u, int a, int b, int kmax, std::uint64_t& bits) {
+    const std::uint64_t count = static_cast<std::uint64_t>(b - a);
+    auto cost = [&](int k) { return shifted_sum(u, a, b, k) + count * static_cast<std::uint64_t>(k + 1); };
+    const std::uint64_t s0 = shifted_sum(u, a, b, 0);
+    int k = count ? std::min(std::max(bit_length(s0 / count) - 1, 0), kmax) : 0;
+    std::uint64_t c = cost(k);
+    bool moved = false;
+    while (k > 0) {
+        const std::uint64_t d = cost(k - 1);
+        if (d > c) break;
+        --k;
+        c = d;
+        moved = true;
+    }
+    while (!moved && k < kmax) {
+        const std::uint64_t d = cost(k + 1);
+        if (d >= c) break;
+        ++k;
+        c = d;
+    }
+    bits = c;
+    return k;
+}
 
 // Cheapest coding of one partition: (bits after the parameter field,
 // parameter or -1 for an escape, raw bits for the escape).
@@ -183,60 +224,81 @@ struct PartChoice {
     int raw;
 };
 
-PartChoice best_partition(const PartitionStats& p, int kcap, int kmax_method) {
-    PartChoice best{std::numeric_limits<std::uint64_t>::max(), 0, 0};
-    const int top = std::min(kcap, kmax_method);
-    for (int k = 0; k <= top; ++k) {
-        const std::uint64_t b = p.s[static_cast<std::size_t>(k)] + p.count * static_cast<std::uint64_t>(k + 1);
-        if (b < best.bits) best = {b, k, 0};
-    }
-    const int raw = signed_bits(p.lo, p.hi);
+// The escape against a Rice cost already found.
+PartChoice with_escape(PartChoice best, std::uint64_t count, std::int64_t lo, std::int64_t hi) {
+    const int raw = signed_bits(lo, hi);
     if (raw <= 31) {
-        const std::uint64_t b = 5 + p.count * static_cast<std::uint64_t>(raw);
+        const std::uint64_t b = 5 + count * static_cast<std::uint64_t>(raw);
         if (b < best.bits) best = {b, -1, raw};
     }
     return best;
 }
 
-// The partition order and parameter width with the fewest bits for a
-// FIXED residual of a block of n samples, order p; the residual section's
-// bits (method and order fields included) go in `bits`.
-void plan_residual(const std::vector<std::int32_t>& r, int n, int p, int max_porder, int& porder_out,
-                   int& method_out, std::uint64_t& bits_out) {
+// The partition order and parameter width with the fewest bits for the
+// FIXED residual in sc.r of a block of n samples, order p; the residual
+// section's bits (method and order fields included) go in `bits`.
+void plan_residual(Scratch& sc, int n, int p, int max_porder, int& porder_out, int& method_out,
+                   std::uint64_t& bits_out) {
     int rmax = 0;
     while (rmax < max_porder && (n % (1 << (rmax + 1))) == 0 && (n >> (rmax + 1)) > p) ++rmax;
-    std::uint32_t umax = 0;
-    for (const std::int32_t v : r) umax = std::max(umax, zigzag(v));
-    const int kcap = std::min(bit_length(umax), 30);
+    const std::size_t m = sc.r.size();
+    sc.u.resize(m);
+    for (std::size_t i = 0; i < m; ++i) sc.u[i] = zigzag(sc.r[i]);
+    const std::uint32_t* u = sc.u.data();
+    const std::int32_t* r = sc.r.data();
     const int parts = 1 << rmax;
     const int s = n >> rmax;
-    std::vector<PartitionStats> level(static_cast<std::size_t>(parts));
+    const auto P = static_cast<std::size_t>(parts);
+    sc.cnt.resize(P);
+    sc.lo.resize(P);
+    sc.hi.resize(P);
+    // Each finest partition's own best parameter. The best for a union of
+    // partitions (every coarser order) lies between its parts' best, the
+    // costs being convex, so these bound the parameters worth costing at
+    // every order; 14, method 0's ceiling, joins them for a window above it.
+    int wlo = 30, whi = 0;
     for (int j = 0; j < parts; ++j) {
         const int a = j == 0 ? 0 : j * s - p;
         const int b = (j + 1) * s - p;
-        PartitionStats& st = level[static_cast<std::size_t>(j)];
-        st.s.assign(static_cast<std::size_t>(kcap) + 1, 0);
-        st.count = static_cast<std::uint64_t>(b - a);
         std::int64_t lo = 0, hi = 0;
         for (int i = a; i < b; ++i) {
-            lo = std::min<std::int64_t>(lo, r[static_cast<std::size_t>(i)]);
-            hi = std::max<std::int64_t>(hi, r[static_cast<std::size_t>(i)]);
+            lo = std::min<std::int64_t>(lo, r[i]);
+            hi = std::max<std::int64_t>(hi, r[i]);
         }
-        st.lo = lo;
-        st.hi = hi;
-        for (int k = 0; k <= kcap; ++k) {
-            std::uint64_t sum = 0;
-            for (int i = a; i < b; ++i) sum += zigzag(r[static_cast<std::size_t>(i)]) >> k;
-            st.s[static_cast<std::size_t>(k)] = sum;
-        }
+        sc.lo[static_cast<std::size_t>(j)] = lo;
+        sc.hi[static_cast<std::size_t>(j)] = hi;
+        sc.cnt[static_cast<std::size_t>(j)] = static_cast<std::uint64_t>(b - a);
+        std::uint64_t bits = 0;
+        const int k = best_rice(u, a, b, 30, bits);
+        wlo = std::min(wlo, k);
+        whi = std::max(whi, k);
+    }
+    wlo = std::min(wlo, 14);
+    const auto K = static_cast<std::size_t>(whi - wlo + 1);
+    sc.s.resize(P * K);
+    for (int j = 0; j < parts; ++j) {
+        const int a = j == 0 ? 0 : j * s - p;
+        const int b = (j + 1) * s - p;
+        for (std::size_t kk = 0; kk < K; ++kk)
+            sc.s[static_cast<std::size_t>(j) * K + kk] = shifted_sum(u, a, b, wlo + static_cast<int>(kk));
     }
     std::uint64_t best = std::numeric_limits<std::uint64_t>::max();
+    std::size_t nparts = P;
     for (int lev = rmax;; --lev) {
         for (int method = 0; method < 2; ++method) {
             std::uint64_t total = 2 + 4;
             const int pw = method == 0 ? 4 : 5;
-            const int kmax_m = method == 0 ? 14 : 30;
-            for (const PartitionStats& st : level) total += pw + best_partition(st, kcap, kmax_m).bits;
+            const int top = std::min(whi, method == 0 ? 14 : 30);
+            for (std::size_t j = 0; j < nparts; ++j) {
+                const std::uint64_t* sj = sc.s.data() + j * K;
+                const std::uint64_t count = sc.cnt[j];
+                PartChoice c{std::numeric_limits<std::uint64_t>::max(), 0, 0};
+                for (int k = wlo; k <= top; ++k) {
+                    const std::uint64_t bk = sj[k - wlo] + count * static_cast<std::uint64_t>(k + 1);
+                    if (bk < c.bits) c = {bk, k, 0};
+                }
+                total += pw + with_escape(c, count, sc.lo[j], sc.hi[j]).bits;
+            }
             if (total < best) {
                 best = total;
                 porder_out = lev;
@@ -244,39 +306,75 @@ void plan_residual(const std::vector<std::int32_t>& r, int n, int p, int max_por
             }
         }
         if (lev == 0) break;
-        std::vector<PartitionStats> up(level.size() / 2);
-        for (std::size_t j = 0; j < up.size(); ++j) {
-            const PartitionStats& x = level[2 * j];
-            const PartitionStats& y = level[2 * j + 1];
-            PartitionStats& z = up[j];
-            z.s.resize(x.s.size());
-            for (std::size_t k = 0; k < x.s.size(); ++k) z.s[k] = x.s[k] + y.s[k];
-            z.count = x.count + y.count;
-            z.lo = std::min(x.lo, y.lo);
-            z.hi = std::max(x.hi, y.hi);
+        const std::size_t up = nparts / 2;
+        sc.s_up.resize(up * K);
+        sc.cnt_up.resize(up);
+        sc.lo_up.resize(up);
+        sc.hi_up.resize(up);
+        for (std::size_t j = 0; j < up; ++j) {
+            for (std::size_t kk = 0; kk < K; ++kk)
+                sc.s_up[j * K + kk] = sc.s[2 * j * K + kk] + sc.s[(2 * j + 1) * K + kk];
+            sc.cnt_up[j] = sc.cnt[2 * j] + sc.cnt[2 * j + 1];
+            sc.lo_up[j] = std::min(sc.lo[2 * j], sc.lo[2 * j + 1]);
+            sc.hi_up[j] = std::max(sc.hi[2 * j], sc.hi[2 * j + 1]);
         }
-        level = std::move(up);
+        sc.s.swap(sc.s_up);
+        sc.cnt.swap(sc.cnt_up);
+        sc.lo.swap(sc.lo_up);
+        sc.hi.swap(sc.hi_up);
+        nparts = up;
     }
     bits_out = best;
+}
+
+// FIXED predictor residual of order P at sample i (i >= P).
+template <int P>
+inline std::int32_t fixed_at(const std::int32_t* x, int i) {
+    if constexpr (P == 0) return x[i];
+    else if constexpr (P == 1) return x[i] - x[i - 1];
+    else if constexpr (P == 2) return x[i] - 2 * x[i - 1] + x[i - 2];
+    else if constexpr (P == 3) return x[i] - 3 * x[i - 1] + 3 * x[i - 2] - x[i - 3];
+    else return x[i] - 4 * x[i - 1] + 6 * x[i - 2] - 4 * x[i - 3] + x[i - 4];
+}
+
+template <int P>
+std::uint64_t fixed_abs_sum(const std::int32_t* x, int from, int n) {
+    std::uint64_t e = 0;
+    for (int i = from; i < n; ++i) {
+        const std::int64_t v = fixed_at<P>(x, i);
+        e += static_cast<std::uint64_t>(v < 0 ? -v : v);
+    }
+    return e;
+}
+
+template <int P>
+void fixed_fill(const std::int32_t* x, int n, std::int32_t* r) {
+    for (int i = P; i < n; ++i) r[i - P] = fixed_at<P>(x, i);
 }
 
 // FIXED predictor residual of order p (x has n samples; residual n - p).
 void fixed_residual(const std::int32_t* x, int n, int p, std::vector<std::int32_t>& r) {
     r.resize(static_cast<std::size_t>(n - p));
-    for (int i = p; i < n; ++i) {
-        std::int32_t e;
-        switch (p) {
-            case 0: e = x[i]; break;
-            case 1: e = x[i] - x[i - 1]; break;
-            case 2: e = x[i] - 2 * x[i - 1] + x[i - 2]; break;
-            case 3: e = x[i] - 3 * x[i - 1] + 3 * x[i - 2] - x[i - 3]; break;
-            default: e = x[i] - 4 * x[i - 1] + 6 * x[i - 2] - 4 * x[i - 3] + x[i - 4]; break;
-        }
-        r[static_cast<std::size_t>(i - p)] = e;
+    switch (p) {
+        case 0: fixed_fill<0>(x, n, r.data()); break;
+        case 1: fixed_fill<1>(x, n, r.data()); break;
+        case 2: fixed_fill<2>(x, n, r.data()); break;
+        case 3: fixed_fill<3>(x, n, r.data()); break;
+        default: fixed_fill<4>(x, n, r.data()); break;
     }
 }
 
-Subframe plan_subframe(const std::int32_t* x, int n, int bps, const EncodeOptions& opt) {
+std::uint64_t fixed_abs(const std::int32_t* x, int from, int n, int p) {
+    switch (p) {
+        case 0: return fixed_abs_sum<0>(x, from, n);
+        case 1: return fixed_abs_sum<1>(x, from, n);
+        case 2: return fixed_abs_sum<2>(x, from, n);
+        case 3: return fixed_abs_sum<3>(x, from, n);
+        default: return fixed_abs_sum<4>(x, from, n);
+    }
+}
+
+Subframe plan_subframe(const std::int32_t* x, int n, int bps, const EncodeOptions& opt, Scratch& sc) {
     Subframe sf;
     bool constant = true;
     for (int i = 1; i < n && constant; ++i) constant = x[i] == x[0];
@@ -291,23 +389,32 @@ Subframe plan_subframe(const std::int32_t* x, int n, int bps, const EncodeOption
     // predicts (libFLAC's FLAC__fixed_compute_best_predictor rule).
     const int maxp = std::min(opt.max_fixed_order, n - 1);
     if (maxp < 0) return sf;
-    int best_p = 0;
-    std::uint64_t best_e = std::numeric_limits<std::uint64_t>::max();
-    std::vector<std::int32_t> r;
-    for (int p = 0; p <= maxp; ++p) {
-        fixed_residual(x, n, p, r);
-        std::uint64_t e = 0;
-        for (std::size_t i = static_cast<std::size_t>(maxp - p); i < r.size(); ++i)
-            e += static_cast<std::uint64_t>(r[i] < 0 ? -static_cast<std::int64_t>(r[i]) : r[i]);
-        if (e < best_e) {
-            best_e = e;
-            best_p = p;
+    std::uint64_t e[5] = {0, 0, 0, 0, 0};
+    if (maxp == 4) {
+        // all five orders in one pass, each difference from the last one's
+        std::int32_t l0 = x[3], l1 = x[3] - x[2], l2 = l1 - (x[2] - x[1]), l3 = l2 - ((x[2] - x[1]) - (x[1] - x[0]));
+        for (int i = 4; i < n; ++i) {
+            const std::int32_t d0 = x[i], d1 = d0 - l0, d2 = d1 - l1, d3 = d2 - l2, d4 = d3 - l3;
+            l0 = d0;
+            l1 = d1;
+            l2 = d2;
+            l3 = d3;
+            e[0] += static_cast<std::uint32_t>(d0 < 0 ? -d0 : d0);
+            e[1] += static_cast<std::uint32_t>(d1 < 0 ? -d1 : d1);
+            e[2] += static_cast<std::uint32_t>(d2 < 0 ? -d2 : d2);
+            e[3] += static_cast<std::uint32_t>(d3 < 0 ? -d3 : d3);
+            e[4] += static_cast<std::uint32_t>(d4 < 0 ? -d4 : d4);
         }
+    } else {
+        for (int p = 0; p <= maxp; ++p) e[p] = fixed_abs(x, maxp, n, p);
     }
-    fixed_residual(x, n, best_p, r);
+    int best_p = 0;
+    for (int p = 1; p <= maxp; ++p)
+        if (e[p] < e[best_p]) best_p = p;
+    fixed_residual(x, n, best_p, sc.r);
     int porder = 0, method = 0;
     std::uint64_t rbits = 0;
-    plan_residual(r, n, best_p, opt.max_partition_order, porder, method, rbits);
+    plan_residual(sc, n, best_p, opt.max_partition_order, porder, method, rbits);
     const std::uint64_t fbits = 8 + static_cast<std::uint64_t>(best_p) * static_cast<std::uint64_t>(bps) + rbits;
     if (fbits < sf.bits) {
         sf.type = SUB_FIXED;
@@ -315,12 +422,12 @@ Subframe plan_subframe(const std::int32_t* x, int n, int bps, const EncodeOption
         sf.porder = porder;
         sf.method = method;
         sf.bits = fbits;
-        sf.residual = std::move(r);
+        sf.residual = sc.r;
     }
     return sf;
 }
 
-void write_subframe(BitWriter& w, const Subframe& sf, const std::int32_t* x, int n, int bps) {
+void write_subframe(BitWriter& w, const Subframe& sf, const std::int32_t* x, int n, int bps, Scratch& sc) {
     if (sf.type == SUB_CONSTANT) {
         w.put(0x00, 8);
         w.put_signed(x[0], bps);
@@ -341,36 +448,28 @@ void write_subframe(BitWriter& w, const Subframe& sf, const std::int32_t* x, int
     const int pw = sf.method == 0 ? 4 : 5;
     const int esc = sf.method == 0 ? 15 : 31;
     const int kmax_m = sf.method == 0 ? 14 : 30;
+    const std::int32_t* r = sf.residual.data();
+    sc.u.resize(sf.residual.size());
+    for (std::size_t i = 0; i < sf.residual.size(); ++i) sc.u[i] = zigzag(r[i]);
+    const std::uint32_t* u = sc.u.data();
     for (int j = 0; j < parts; ++j) {
         const int a = j == 0 ? 0 : j * s - sf.order;
         const int b = (j + 1) * s - sf.order;
-        PartitionStats st;
-        std::uint32_t umax = 0;
         std::int64_t lo = 0, hi = 0;
         for (int i = a; i < b; ++i) {
-            const std::int32_t v = sf.residual[static_cast<std::size_t>(i)];
-            umax = std::max(umax, zigzag(v));
-            lo = std::min<std::int64_t>(lo, v);
-            hi = std::max<std::int64_t>(hi, v);
+            lo = std::min<std::int64_t>(lo, r[i]);
+            hi = std::max<std::int64_t>(hi, r[i]);
         }
-        const int kcap = std::min(bit_length(umax), 30);
-        st.s.assign(static_cast<std::size_t>(kcap) + 1, 0);
-        for (int k = 0; k <= kcap; ++k) {
-            std::uint64_t sum = 0;
-            for (int i = a; i < b; ++i) sum += zigzag(sf.residual[static_cast<std::size_t>(i)]) >> k;
-            st.s[static_cast<std::size_t>(k)] = sum;
-        }
-        st.count = static_cast<std::uint64_t>(b - a);
-        st.lo = lo;
-        st.hi = hi;
-        const PartChoice c = best_partition(st, kcap, kmax_m);
+        PartChoice c{0, 0, 0};
+        c.k = best_rice(u, a, b, kmax_m, c.bits);
+        c = with_escape(c, static_cast<std::uint64_t>(b - a), lo, hi);
         if (c.k < 0) {
             w.put(static_cast<std::uint32_t>(esc), pw);
             w.put(static_cast<std::uint32_t>(c.raw), 5);
-            for (int i = a; i < b; ++i) w.put_signed(sf.residual[static_cast<std::size_t>(i)], c.raw);
+            for (int i = a; i < b; ++i) w.put_signed(r[i], c.raw);
         } else {
             w.put(static_cast<std::uint32_t>(c.k), pw);
-            for (int i = a; i < b; ++i) w.rice(zigzag(sf.residual[static_cast<std::size_t>(i)]), c.k);
+            for (int i = a; i < b; ++i) w.rice(u[i], c.k);
         }
     }
 }
@@ -527,6 +626,7 @@ EncodeStats encode_stream(Sink& sink, int fs, int channels, std::uint64_t total,
     std::vector<std::int16_t> pcm(static_cast<std::size_t>(bs) * static_cast<std::size_t>(channels));
     std::vector<std::int32_t> ch[4];
     for (auto& c : ch) c.resize(static_cast<std::size_t>(bs));
+    Scratch sc;
     std::vector<std::uint8_t> frame;
     frame.reserve(static_cast<std::size_t>(bs) * 4 + 64);
     std::uint64_t at = 0;   // bytes of frames written so far
@@ -549,10 +649,10 @@ EncodeStats encode_stream(Sink& sink, int fs, int channels, std::uint64_t total,
         const std::int32_t* data[2] = {ch[0].data(), channels == 2 ? ch[1].data() : nullptr};
         int bps[2] = {16, 16};
         if (channels == 1) {
-            sfs[0] = plan_subframe(ch[0].data(), n, 16, opt);
+            sfs[0] = plan_subframe(ch[0].data(), n, 16, opt, sc);
         } else {
-            Subframe l = plan_subframe(ch[0].data(), n, 16, opt);
-            Subframe r = plan_subframe(ch[1].data(), n, 16, opt);
+            Subframe l = plan_subframe(ch[0].data(), n, 16, opt, sc);
+            Subframe r = plan_subframe(ch[1].data(), n, 16, opt, sc);
             if (!opt.stereo_decorrelation) {
                 sfs[0] = std::move(l);
                 sfs[1] = std::move(r);
@@ -562,8 +662,8 @@ EncodeStats encode_stream(Sink& sink, int fs, int channels, std::uint64_t total,
                     ch[2][static_cast<std::size_t>(i)] = (a + b) >> 1;   // mid (arithmetic shift: floor)
                     ch[3][static_cast<std::size_t>(i)] = a - b;          // side, 17 bits
                 }
-                Subframe m = plan_subframe(ch[2].data(), n, 16, opt);
-                Subframe s = plan_subframe(ch[3].data(), n, 17, opt);
+                Subframe m = plan_subframe(ch[2].data(), n, 16, opt, sc);
+                Subframe s = plan_subframe(ch[3].data(), n, 17, opt, sc);
                 const std::uint64_t cost[4] = {l.bits + r.bits, l.bits + s.bits, s.bits + r.bits, m.bits + s.bits};
                 int best = 0;
                 for (int k = 1; k < 4; ++k)
@@ -627,7 +727,7 @@ EncodeStats encode_stream(Sink& sink, int fs, int channels, std::uint64_t total,
         {
             BitWriter w(frame);
             for (int c = 0; c < channels; ++c) {
-                write_subframe(w, sfs[c], data[c], n, bps[c]);
+                write_subframe(w, sfs[c], data[c], n, bps[c], sc);
                 const int t = sfs[c].type == SUB_FIXED ? 2 + sfs[c].order : sfs[c].type;
                 ++stats.subframes[static_cast<std::size_t>(t)];
             }

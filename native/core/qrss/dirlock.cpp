@@ -78,7 +78,8 @@ DirLock::~DirLock() { close(); }
 
 std::optional<DirLock> DirLock::try_acquire(const std::string& dir) {
     std::error_code ec;
-    if (!rawfile::make_dirs(dir, ec)) throw rawfile::FileError(ec, dir);
+    std::string failed;
+    if (!rawfile::make_dirs(dir, ec, &failed)) throw rawfile::FileError(ec, failed);
     DirLock l;
     l.path_ = lock_path(dir);
     const std::optional<std::wstring> w = util::wide_of(l.path_);
@@ -119,7 +120,8 @@ long long DirLock::native_handle() const { return h_ ? reinterpret_cast<long lon
 
 std::optional<DirLock> DirLock::try_acquire(const std::string& dir) {
     std::error_code ec;
-    if (!rawfile::make_dirs(dir, ec)) throw rawfile::FileError(ec, dir);
+    std::string failed;
+    if (!rawfile::make_dirs(dir, ec, &failed)) throw rawfile::FileError(ec, failed);
     DirLock l;
     l.path_ = lock_path(dir);
     if (l.path_.find('\0') != std::string::npos)

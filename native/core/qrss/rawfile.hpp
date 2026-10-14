@@ -105,9 +105,12 @@ std::optional<std::string> read_all(const std::string& path, std::error_code& ec
 // temporary is removed again when the move fails. False with `ec` set.
 bool write_replace(const std::string& tmp, const std::string& path, std::string_view data, std::error_code& ec);
 
-// mkdir -p (Path.mkdir(parents=True, exist_ok=True)): false with `ec` set
-// when `dir` cannot be made or exists as something other than a directory.
-bool make_dirs(const std::string& dir, std::error_code& ec);
+// mkdir -p, as Path.mkdir(parents=True, exist_ok=True) does it: false
+// with `ec` set when `dir` cannot be made or exists as something other
+// than a directory (EEXIST), and `failed` (when given) naming the path
+// whose mkdir failed -- `dir` or one of its parents, as the reference's
+// OSError does.
+bool make_dirs(const std::string& dir, std::error_code& ec, std::string* failed = nullptr);
 
 // The calling process's id and thread's id, as os.getpid() and
 // threading.get_ident() give them (pthread_self / GetCurrentThreadId),

@@ -369,30 +369,48 @@ bool write_replace(const std::string& tmp, const std::string& path, std::string_
     return true;
 }
 
-bool make_dirs(const std::string& dir, std::error_code& ec) {
-    ec.clear();
-    const auto p = util::fs_path(dir);
-    if (!p) {
-        ec = errno_code(EINVAL);
-        return false;
-    }
-    std::filesystem::create_directories(*p, ec);
-    if (ec) {
-        // exist_ok: an existing directory is fine (create_directories
-        // reports EEXIST for some races); anything else is not.
-        std::error_code e2;
-        if (std::filesystem::is_directory(*p, e2)) {
-            ec.clear();
-            return true;
+namespace {
+
+// Path.mkdir(parents=True, exist_ok=True), step for step: mkdir; on
+// ENOENT the parent first, then mkdir again; any other failure is fine
+// only when a directory is there now. `failed` names the path whose mkdir
+// failed, as the OSError the reference raises does.
+bool make_dirs_at(const std::filesystem::path& p, std::error_code& ec, std::string& failed) {
+    std::error_code e;
+    std::filesystem::create_directory(p, e);   // (no error when a directory is there already)
+    if (!e) return true;
+    if (e == std::errc::no_such_file_or_directory) {
+        const std::filesystem::path parent = p.parent_path();
+        if (parent.empty() || parent == p) {
+            ec = e;
+            failed = util::path_text(p);
+            return false;
         }
-        return false;
+        if (!make_dirs_at(parent, ec, failed)) return false;
+        e.clear();
+        std::filesystem::create_directory(p, e);
+        if (!e) return true;
     }
     std::error_code e2;
-    if (!std::filesystem::is_directory(*p, e2)) {
-        ec = errno_code(EEXIST);
-        return false;
-    }
-    return true;
+    if (std::filesystem::is_directory(p, e2)) return true;
+    ec = e;
+    failed = util::path_text(p);
+    return false;
+}
+
+}  // namespace
+
+bool make_dirs(const std::string& dir, std::error_code& ec, std::string* failed) {
+    ec.clear();
+    const auto p = util::fs_path(dir);
+    std::string where = dir;
+    bool ok = false;
+    if (!p)
+        ec = errno_code(EINVAL);
+    else
+        ok = make_dirs_at(*p, ec, where);
+    if (!ok && failed) *failed = where;
+    return ok;
 }
 
 }  // namespace sstvae::qrss::rawfile
