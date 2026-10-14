@@ -31,7 +31,10 @@
 // option. Nothing here is a format the project defines -- it is FLAC.
 //
 // Thread safety: free functions with no shared state; a Reader is one
-// open file and one decoder, used by one thread at a time. encode_file
+// open file and one decoder, used by one thread at a time. Opening a
+// Reader takes a process-wide mutex for dr_flac's metadata parse, which
+// writes the library's CPU-feature globals (on ARM on every open), so
+// two threads may open readers at once. encode_file
 // blocks for the whole encode (a full 4 kHz stereo hour: about a second,
 // see the notes) and polls `cancel` once per frame.
 

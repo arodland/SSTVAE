@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <system_error>
 #include <utility>
 
@@ -887,7 +888,18 @@ struct Reader::Impl {
     }
 
     void open() {
-        dec = drflac_open_with_metadata(on_read, on_seek, on_tell, on_meta, &stream, nullptr);
+        {
+            // dr_flac writes its CPU-feature globals in every open
+            // (drflac__init_cpu_caps: on x86 the first open only, on ARM
+            // every one), so opens are serialised: the packer verifying a
+            // FLAC and a reader opening a packed hour never write them at
+            // once. (On ARM a decode on one thread may still read the flag
+            // another thread's open rewrites with the same value; dr_flac
+            // marks that function no_sanitize("thread") for it.)
+            static std::mutex open_mu;
+            std::lock_guard lk(open_mu);
+            dec = drflac_open_with_metadata(on_read, on_seek, on_tell, on_meta, &stream, nullptr);
+        }
         if (!dec) throw std::runtime_error(what + ": not a FLAC file (or a damaged one)");
         info.channels = dec->channels;
         info.sample_rate = static_cast<int>(dec->sampleRate);
