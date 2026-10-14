@@ -428,23 +428,26 @@ void test_stop_with_a_receive_held() {
     check::is_true(paced, "held: the session keeps up with the pushes");
     check::is_true(latch->wait_entered(30.0), "held: the receive started");
 
-    // push() goes on while the receive is held (0.1 s chunks, short of the slot's end)
+    // push() goes on while the receive is held (0.05 s chunks, short of the
+    // slot's end: past it, the slot's finish would run beside the stop below
+    // and, on a loaded machine, log after "audio ended")
     check::current_step = "held: pushing while the receive is held";
     std::vector<double> lat;
     double t = clk.t->load();
     for (int j = 0; j < 200; ++j) {
-        t += 0.1;
+        t += 0.05;
         clk.t->store(t);
-        const std::vector<float> x = audio(qcfg::FS / 10, 1000 + j);
+        const std::vector<float> x = audio(qcfg::FS / 20, 1000 + j);
         const steady::time_point a = steady::now();
         s->push(x);
         lat.push_back(since(a));
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     std::sort(lat.begin(), lat.end());
-    std::printf("push() during a receive: p50 %.1f us, p95 %.1f us, max %.1f us (%zu pushes of 0.1 s)\n",
+    std::printf("push() during a receive: p50 %.1f us, p95 %.1f us, max %.1f us (%zu pushes of 0.05 s)\n",
                 lat[lat.size() / 2] * 1e6, lat[lat.size() * 95 / 100] * 1e6, lat.back() * 1e6, lat.size());
     check::is_true(lat.back() < 0.25, "held: push() never waits on the receive");
+    check::is_true(clk.t->load() < tiny_end() - 1.0, "held: the clock is still short of the slot's end");
 
     // a second listener on the same tiles is refused; on the same store it runs without one
     check::current_step = "held: a second session";
@@ -486,7 +489,10 @@ void test_stop_with_a_receive_held() {
     check::is_true(lock_free(root / "state") && lock_free(root / "store") && lock_free(root / "store" / "passband"),
                    "held: every lock released with the receive still held");
     check::is_true(!listening(root / "state"), "held: state.json not listening (the session's thread was waiting)");
-    check::is_true(ends_with(last_log_line(root / "state"), " audio ended"), "held: audio ended");
+    {
+        const std::string ll = last_log_line(root / "state");
+        check::is_true(ends_with(ll, " audio ended"), "held: audio ended (the last line: " + ll + ")");
+    }
     check::is_true(!s->push(audio(100, 2)), "held: push() after stop() is refused");
 
     // the same directories are free for a new session at once
