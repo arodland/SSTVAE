@@ -55,6 +55,8 @@
 #include "qrss/acquire.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/frontend.hpp"
+#include "qrss/receiver.hpp"
+#include "qrss/receiver_slot.hpp"
 #include "qrss/types.hpp"
 
 namespace sstvae::qrss::api {
@@ -118,6 +120,25 @@ struct ReceiveConfig {
 // round_b=, max_candidates=, budget_s=, hints=): every signal received,
 // strongest first as the receiver orders them.
 std::vector<types::PassResult> receive_slot(const Capture& capture, const ReceiveConfig& config = {});
+
+// The same over a capture prepared already (blanked and normalised, holes
+// filled: live.capture_prepare's), which the receiver takes as it is, as
+// receiver.receive_slot(prep, ...) does. dets: receive these signals
+// instead of detecting (receive_slot's dets=, in that order).
+std::vector<types::PassResult> receive_slot(const receiver::Prepared& prep, const ReceiveConfig& config,
+                                            std::optional<std::vector<types::Detection>> dets = std::nullopt);
+
+// receiver.detect(prep, frames, live_only=, max_candidates=, budget_s=,
+// erase_s=, hints=, skip_hz=): the verified detections, strongest first.
+// skip_hz: the frequencies (CE) or band centres (joint) of signals known
+// already. config's estimator and round_b are not used.
+std::vector<types::Detection> detect(const receiver::Prepared& prep, const ReceiveConfig& config,
+                                     std::span<const double> skip_hz = {});
+
+// The slot receiver's seams for a config: every noise table the stages
+// fill with its EDGE_NOISE rule, gate V's ownership with its GATING rule,
+// the rest the C++ (what receive_slot and detect above use).
+receiver::SlotSeams slot_seams(const ReceiveConfig& config);
 
 }  // namespace sstvae::qrss::api
 

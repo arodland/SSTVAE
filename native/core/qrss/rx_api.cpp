@@ -5,6 +5,7 @@
 #include <complex>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "qrss/receiver.hpp"
@@ -25,7 +26,7 @@ Capture capture_from_wav(const std::string& path, std::int64_t q, std::optional<
     return receiver::capture_from_wav(path, q, start_unix);
 }
 
-std::vector<types::PassResult> receive_slot(const Capture& capture, const ReceiveConfig& config) {
+receiver::SlotSeams slot_seams(const ReceiveConfig& config) {
     const bool old_edge = config.old_edge_noise;
     receiver::SlotSeams seams;
     // every noise table the stages fill, with the EDGE_NOISE rule this call's
@@ -48,6 +49,12 @@ std::vector<types::PassResult> receive_slot(const Capture& capture, const Receiv
         return frontend::noise_psd(ch, fs, {}, 10.0, o);
     };
     seams.old_gating = config.old_gating;
+    return seams;
+}
+
+namespace {
+
+receiver::SlotOptions slot_options(const ReceiveConfig& config) {
     receiver::SlotOptions opt;
     opt.live_only = config.live_only;
     opt.estimator = config.estimator;
@@ -56,7 +63,33 @@ std::vector<types::PassResult> receive_slot(const Capture& capture, const Receiv
     opt.max_candidates = config.max_candidates;
     opt.budget_s = config.budget_s;
     opt.hints = config.hints;
-    return receiver::receive_slot(receiver::CaptureRef(&capture), config.frames, opt, seams);
+    return opt;
+}
+
+}  // namespace
+
+std::vector<types::PassResult> receive_slot(const Capture& capture, const ReceiveConfig& config) {
+    return receiver::receive_slot(receiver::CaptureRef(&capture), config.frames, slot_options(config),
+                                  slot_seams(config));
+}
+
+std::vector<types::PassResult> receive_slot(const receiver::Prepared& prep, const ReceiveConfig& config,
+                                            std::optional<std::vector<types::Detection>> dets) {
+    receiver::SlotOptions opt = slot_options(config);
+    opt.dets = std::move(dets);
+    return receiver::receive_slot(receiver::CaptureRef(&prep), config.frames, opt, slot_seams(config));
+}
+
+std::vector<types::Detection> detect(const receiver::Prepared& prep, const ReceiveConfig& config,
+                                     std::span<const double> skip_hz) {
+    receiver::DetectOptions opt;
+    opt.live_only = config.live_only;
+    opt.max_candidates = config.max_candidates;
+    opt.budget_s = config.budget_s;
+    opt.erase_s = config.erase_s;
+    opt.skip_hz.assign(skip_hz.begin(), skip_hz.end());
+    opt.hints = config.hints;
+    return receiver::detect(prep, config.frames, opt, slot_seams(config));
 }
 
 }  // namespace sstvae::qrss::api
