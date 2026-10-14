@@ -773,6 +773,8 @@ std::exception_ptr Session::error() const {
 const std::string& Session::state_dir() const { return c_->state; }
 std::optional<std::string> Session::store_root() const { return c_->root; }
 std::optional<std::string> Session::passband_dir() const { return c_->pb_dir; }
+std::shared_ptr<store::Store> Session::store() const { return c_->store; }
+std::shared_ptr<passband::PassbandStore> Session::passband() const { return c_->passband; }
 const live::LiveConfig& Session::config() const { return c_->cfg; }
 std::vector<live::Tile> Session::tiles() const { return c_->listener->tiles(); }
 std::vector<std::string> Session::lines() const { return c_->listener->lines(); }

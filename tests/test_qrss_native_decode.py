@@ -29,10 +29,22 @@ the two outputs agree up to it exactly. With the codec half both load the
 v5 decoder from $QRSSTVAE_MODEL_DIR (qrss_helpers.model_dir) and every
 case is compared in full.
 
---em and --retro are not ported: the subcommand refuses them, as an
-argparse error, where the script would begin them (on --key, once the
-picture is found); on --pass both say they are ignored. That refusal is
-checked by itself (test_em_and_retro_are_refused).
+--em and --retro (native/core/qrss/em_api, over em_refine and em_search)
+are compared twice. On the stores above, whose passes keep no capture,
+EM re-receives nothing and --retro finds no passband store (or an empty
+one), so every line, refusal and the picture are compared as above
+(exactly). On a store of passes received from their captures
+(test_decode_em_retro_side_by_side: a genie FULL member, two TINY members
+at -15 dB received from simulated captures, and a passband store holding
+one more TINY pass at -24 dB that only the template search finds), the
+re-receives and the find are the two implementations' own arithmetic:
+the same lines with every number within one unit of its last printed
+digit (1.1 of it), the passes the retro search adds named "<new>" (their
+uid hashes the received z; uids are never compared across
+implementations), the same files under those names, and the picture
+within the decoded-picture bar of wave 9a (PSNR over 30 dB against the
+script's). test_decode_em_reverse runs the script's --em on a store the
+subcommand refined, against the store the script refined itself.
 
 The binary is $SSTVAE_QRSS_CLI, else `sstvae-qrss` beside the module's
 build directory ($SSTVAE_NATIVE_MODULE_DIR/..); everything skips without
@@ -40,7 +52,9 @@ it. The Python runs start in parallel: each costs a second of imports.
 """
 
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -55,11 +69,10 @@ from qrss_fakes import make_header, make_pass_result, synthetic_picture
 from qrss_helpers import Q_TEST, REPO_ROOT, codec_skip, model_dir
 from qrss_native import _store as H
 from qrss_native import require
-from sstvae.qrss import frame, lframe, picture
+from sstvae.qrss import frame, frontend, lframe, picture, tx
 from sstvae.qrss.constants import WAVEFORM_L
 from sstvae.qrss.store import canonical_index
 
-EM_RETRO = "--em and --retro are not in this build yet; use qrss_decode.py"
 NO_MODELS = ": expected a .pt checkpoint, a .onnx artifact, or a directory containing the exported .onnx files\n"
 
 
@@ -336,6 +349,8 @@ def _pixels(path: Path) -> np.ndarray:
 def check(case: Case, py: Run, nat: Run, py_dir: Path, nat_dir: Path, renders: bool):
     assert "Traceback" not in nat.err
     assert _tree(nat_dir) == _tree(py_dir)
+    for meta in py_dir.rglob("meta.json"):      # a passband store --retro opened (and so made)
+        assert (nat_dir / meta.relative_to(py_dir)).read_bytes() == meta.read_bytes(), meta
     if not renders and py.rc == 1 and (py.err.endswith(NO_MODELS) or py.err.startswith("no *-decoder-")):
         # the script reached render.load (resolve_onnx refused the model
         # directory); the subcommand refuses the picture there
@@ -393,6 +408,38 @@ def _cases(info: dict, store: str) -> list[Case]:
         c("pass-full", "out.png", "--pass", passes + info["full"] + ".npz", "--precision", "fp16"),
         c("pass-no-header", "out.png", "--pass", passes + info["nohdr"] + ".npz"),
         c("key-missing", "out.png", "--key", "K1ABC/P:1", "--store", "st", "--em", "2", "--retro"),
+        # --em over members that keep no capture: nothing re-received, the
+        # history two equal entries (an L member says nothing: it has no
+        # capture either); a pass file that is gone ends EM where the
+        # script's load_pass does
+        c("key-a-em-1", "out.png", "--key", kA, "--store", "st", "--em", "1"),
+        c("key-a-em-plus", "out.png", "--key", kA, "--store", "st", "--em", "+2", "--precision", "fp16"),
+        c("key-a-em-underscore", "out.png", "--key", kA, "--store", "st", "--em", "1_0", "--precision", "fp16"),
+        c("key-a-em-huge", "out.png", "--key", kA, "--store", "st", "--em", "9" * 30, "--precision", "fp16"),
+        c("key-full-em", "out.png", "--key", kF, "--store", "st", "--em", "2", "--old-edge-noise"),
+        c("key-b-em", "out.png", "--key", kB, "--store", "st", "--em", "1"),
+        # --retro's refusals in the script's order (the picture, the
+        # passband directory, the frame), and an empty passband store
+        c("key-a-retro", "out.png", "--key", kA, "--store", "st", "--retro"),
+        c("key-a-retro-nope", "out.png", "--key", kA, "--store", "st", "--retro", "--passband", "nope"),
+        c("key-a-retro-empty-pb", "out.png", "--key", kA, "--store", "st", "--retro", "--passband", ""),
+        c("key-a-retro-file", "out.png", "--key", kA, "--store", "st", "--retro", "--passband",
+          passes + info["short"] + ".npz"),
+        c("key-a-retro-l-nodir", "out.png", "--key", kA, "--store", "st", "--retro", "--frame", "l-short"),
+        c("key-a-retro-l", "out.png", "--key", kA, "--store", "st", "--retro", "--passband", "st/acc",
+          "--frame", "l-short"),
+        c("key-a-retro-l-bogus", "out.png", "--key", kA, "--store", "st", "--retro", "--passband", "st/acc/",
+          "--frame", "l-"),
+        c("key-a-retro-bogus", "out.png", "--key", kA, "--store", "st", "--retro", "--passband", "./st/acc",
+          "--frame", "Short"),
+        c("key-a-retro-quote", "out.png", "--key", kA, "--store", "st", "--retro", "--passband", "st/acc",
+          "--frame", "it's"),
+        c("key-a-retro-frame-empty", "out.png", "--key", kA, "--store", "st", "--retro", "--passband", "st/acc",
+          "--frame", ""),
+        c("key-a-retro-pb", "out.png", "--key", kA, "--store", "st", "--retro", "--passband", "pb", "--frame",
+          "full-v1", "--precision", "fp16", dirs=["pb"]),
+        c("key-a-retro-pb-em", "out.png", "--key", kA, "--store", "st", "--retro", "--passband", "pb//", "--frame",
+          "tiny", "--em", "1", "--precision", "fp16", dirs=["pb"]),
         # the render step's own refusals: the model, the output's directory
         c("pass-no-model", "out.png", "--pass", passes + info["short"] + ".npz", "--model", "nomodels"),
         c("key-no-model", "out.png", "--key", kF, "--store", "st", "--model", "st/acc"),
@@ -538,6 +585,20 @@ def test_decode_side_by_side(cli, stores, models, renders, tmp_path, writer):
     assert out["list"].count("picture ") == 4, out["list"]
     assert out["pass-l"].startswith("--em and --retro need an accumulator (--key); ignored for a single pass\n"
                                     f"pass {stores[writer][1]['lpass']}: L l-short frame, mean W ")
+    for name in ("key-a-em-1", "key-a-em-plus", "key-a-em-underscore", "key-a-em-huge", "key-full-em"):
+        line = out[name].splitlines()[0]
+        assert re.fullmatch(r"EM: mean W ([+-]\d+\.\d\d) -> \1 dB \(no change\); W is the receiver's own estimate, "
+                            r"and a re-receive can raise it by more than the picture gains", line), (name, line)
+    assert out["key-a-retro-pb"].startswith("retro: 0 passes found\npicture K1ABC/P "), out["key-a-retro-pb"]
+    assert out["key-a-retro-pb-em"].startswith("retro: 0 passes found\nEM: mean W "), out["key-a-retro-pb-em"]
+    err = {name: results[f"{writer}-{name}"][0].err for name in
+           ("key-a-retro", "key-a-retro-empty-pb", "key-a-retro-l-bogus", "key-a-retro-bogus", "key-a-retro-quote",
+            "key-b-em")}
+    assert err["key-a-retro"] == err["key-a-retro-empty-pb"] == "--retro: no passband store at st/passband\n"
+    assert err["key-a-retro-l-bogus"] == "--frame 'l-': --retro searches for CE passes only\n"
+    assert err["key-a-retro-bogus"] == "--frame 'Short': not one of full, medium, short, tiny\n"
+    assert err["key-a-retro-quote"] == "--frame \"it's\": not one of full, medium, short, tiny\n"
+    assert "FileNotFoundError: [Errno 2] No such file or directory: " in err["key-b-em"], err["key-b-em"]
     if renders:
         assert out["key-a"].endswith("wrote out.png\n") and out["key-x-any"].endswith("wrote out.png\n")
         assert results[f"{writer}-key-x"][0].rc == 1
@@ -581,21 +642,174 @@ def test_decode_edited_accumulators(cli, stores, models, renders, tmp_path):
         "ValueError: Unknown format code 'f' for object of type 'str'\n")
 
 
-def test_em_and_retro_are_refused(cli, stores, tmp_path):
-    """--em ROUNDS > 0 or --retro on a picture that exists: an argparse
-    error naming qrss_decode.py, before the accumulator is read (the
-    script would print the EM or retro lines first); --em 0 or negative
-    decodes as without. On --pass both are ignored, as the script says."""
-    root, info = stores["cpp"]
-    kA = _key("K1ABC/P", info["pidA"])
-    env = dict(os.environ, COLUMNS="200")
-    for extra in (["--em", "1"], ["--em", "+2"], ["--retro"], ["--em", "3", "--retro"],
-                  ["--retro", "--passband", "nope", "--frame", "l-short"], ["--em", "1_0"]):
-        r = _run([cli, "decode", "out.png", "--key", kA, "--store", str(root), *extra], tmp_path, env)
-        assert r.rc == 2 and r.out == "", (extra, r)
-        assert r.err.startswith("usage: sstvae-qrss decode [-h] [--key KEY | --pass PASS_FILE | --list] "), r.err
-        assert r.err.endswith(f"\nsstvae-qrss decode: error: {EM_RETRO}\n"), r.err
-    assert not (tmp_path / "out.png").exists()
+# --- EM and retro on passes received from their captures -------------------------------------
+
+EM_SNR = -15.0           # the TINY members (test_qrss_em's P4 smoke), received at the nominal timing
+RETRO_SNR = -24.0        # the TINY pass only the passband store holds (the template search's find)
+Q_RETRO = Q_TEST + 50
+PICTURE_BAR = 30.0       # dB PSNR, C++ picture against the script's (wave 9a's decoded-picture bar)
+_UID = re.compile(r"\b\d+_\d+_[0-9a-f]{8}\b")
+_FLOAT = re.compile(r"[-+]?\d+\.\d+")
+WORST: dict = {}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _print_worst():
+    yield
+    if WORST:
+        print("\nworst:", ", ".join(f"{k} {v:.3g}" for k, v in sorted(WORST.items())))
+
+
+def _em_world():
+    """(header, genie FULL member at +5 dB, two TINY members received by the
+    reference from their simulated captures, the retro capture)."""
+    import test_qrss_em as te
+
+    sp, h = te.picture_and_header()
+    genie = make_pass_result(tx.slot_air_latents(sp, 0)[:frame.FULL.n_data], 10 ** 0.5, hdr=h, decoded=True, seed=1)
+    members = []
+    for i in range(2):
+        q = Q_TEST + 7 * i
+        p = te.forced_pass(te.simulate_pass(frame.TINY, EM_SNR, q, 300 + i, "quiet"), frame.TINY, q)
+        assert p is not None and p.ch is not None and len(p.ch), i
+        members.append(p)
+    sim = te.simulate_pass(frame.TINY, RETRO_SNR, Q_RETRO, 20, "quiet")
+    return h, genie, members, frontend.Capture(sim.fe, Q_RETRO, sim.t0_index)
+
+
+@pytest.fixture(scope="module")
+def em_stores(native, tmp_path_factory):
+    """{"em-py": (root, info), "em-cpp": (root, info)}: the picture's
+    accumulator (the genie member and the two TINY members, segment 0) in a
+    store written by each implementation, the retro capture in its
+    STORE/passband (written by the reference's PassbandStore in both)."""
+    require(native, "store")
+    from sstvae.qrss.store import Store as PyStore
+
+    h, genie, members, cap = _em_world()
+    key = (h.callsign, int(h.picture_id))
+    base = tmp_path_factory.mktemp("decode-em-stores")
+    out = {}
+    for name, cls in (("em-py", PyStore), ("em-cpp", H.store_class(native.qrss))):
+        root = base / name
+        st = cls(root, clock=lambda: CLOCK)
+        for p in (genie, *members):
+            st.add_pass(p)
+            st.attach(key, p.uid, 0, "header" if p is genie else "test", mode=h.mode, codec_id=h.codec_id)
+        frontend.PassbandStore(root / "passband").write_capture(cap, expire=False)
+        out[name] = (root, {"key": _key(*key), "uids": {genie.uid, *(p.uid for p in members)}})
+    assert _tree(out["em-py"][0]) == _tree(out["em-cpp"][0])
+    return out
+
+
+def _masked(text: str, known: set) -> str:
+    """`text` with every pass uid it does not know named "<new>"."""
+    return _UID.sub(lambda m: m.group(0) if m.group(0) in known else "<new>", text)
+
+
+def _close_text(got: str, want: str, known: set, what) -> None:
+    """The same text up to new uids, every decimal number within 1.1 units of
+    its last printed digit (integers, hex and the rest exactly)."""
+    got, want = _masked(got, known), _masked(want, known)
+    assert _FLOAT.sub("#", got) == _FLOAT.sub("#", want), (what, got, want)
+    for x, y in zip(_FLOAT.findall(got), _FLOAT.findall(want)):
+        unit = 10.0 ** -len(y.split(".")[1])
+        err = abs(float(x) - float(y))
+        what_key = "printed number (units of the last digit)"
+        WORST[what_key] = max(WORST.get(what_key, 0.0), err / unit)
+        assert err <= 1.1 * unit, (what, x, y, got, want)
+
+
+def _psnr(a: np.ndarray, b: np.ndarray) -> float:
+    mse = float(np.mean((a.astype(np.float64) - b.astype(np.float64)) ** 2))
+    return math.inf if mse == 0 else 10 * math.log10(255.0 ** 2 / mse)
+
+
+def check_close(case: Case, py: Run, nat: Run, py_dir: Path, nat_dir: Path, renders: bool, known: set):
+    """check() for runs whose numbers are each implementation's own (see the
+    module docstring)."""
+    assert "Traceback" not in nat.err and "Traceback" not in py.err, (py.err, nat.err)
+    assert [_masked(x, known) for x in _tree(nat_dir)] == [_masked(x, known) for x in _tree(py_dir)], case.name
+    _close_text(nat.out, py.out, known, (case.name, "stdout"))
+    if not renders:
+        assert py.rc == 1 and (py.err.endswith(NO_MODELS) or py.err.startswith("no *-decoder-")), py
+        assert (nat.rc, nat.err) == (1, _no_renderer(case.output)), nat
+        return
+    assert (nat.rc, nat.err) == (py.rc, py.err) == (0, ""), (py, nat)
+    psnr = _psnr(_pixels(nat_dir / case.output), _pixels(py_dir / case.output))
+    print(f"{case.name}: picture PSNR {psnr:.1f} dB (C++ against the script)")
+    WORST["picture, -PSNR (dB)"] = max(WORST.get("picture, -PSNR (dB)", -math.inf), -psnr)
+    assert psnr > PICTURE_BAR, (case.name, psnr)
+
+
+def _em_cases(info: dict, store: str) -> list[Case]:
+    k = info["key"]
+
+    def c(name, *args, **kw):
+        return Case(f"{store}-{name}", list(args), store=store, **kw)
+
+    return [
+        c("em1", "out.png", "--key", k, "--store", "st", "--em", "1"),
+        c("em2", "out.png", "--key", k, "--store", "st", "--em", "2", "--precision", "fp16"),
+        c("retro", "out.png", "--key", k, "--store", "st", "--retro", "--frame", "tiny", "--precision", "fp16"),
+        c("retro-em", "out.png", "--key", k, "--store", "st", "--retro", "--passband", "st/passband/", "--frame",
+          "tiny", "--em", "1", "--old-edge-noise", "--precision", "fp16"),
+        # --frame full (the default): the TINY capture covers too little of it to be searched
+        c("retro-full", "out.png", "--key", k, "--store", "st", "--retro", "--em", "-3", "--precision", "fp16"),
+    ]
+
+
+@pytest.mark.parametrize("writer", ["em-py", "em-cpp"])
+def test_decode_em_retro_side_by_side(cli, em_stores, models, renders, tmp_path, writer):
+    """--em 1 and 2 and --retro (with and without --em after it) on the
+    store each implementation wrote: the same lines, numbers within their
+    printed precision, the same files, the picture within the bar."""
+    info = em_stores[writer][1]
+    cases = _em_cases(info, writer)
+    results = run_cases(cases, tmp_path, cli, em_stores, models)
+    for case in cases:
+        py, nat, py_dir, nat_dir = results[case.name]
+        check_close(case, py, nat, py_dir, nat_dir, renders, info["uids"])
+    out = {c.name.split("-", 2)[2]: _masked(results[c.name][0].out, info["uids"]) for c in cases}
+    # what the cases are for: both members re-received each round, the find attached by corr
+    em1 = out["em1"].splitlines()
+    assert sum(ln.startswith("round 1 pass ") for ln in em1) == 2, out["em1"]
+    assert any(ln.startswith("EM: mean W ") and " -> " in ln for ln in em1), out["em1"]
+    assert sum(ln.startswith("round 2 pass ") for ln in out["em2"].splitlines()) in (0, 2), out["em2"]
+    assert f"retro: slot q={Q_RETRO}: Z " in out["retro"] and " by corr\n" in out["retro"], out["retro"]
+    assert "retro: 1 pass found\n" in out["retro"] and "4 passes" in out["retro"], out["retro"]
+    assert "    <new>  CE tiny  segment 0  by corr" in out["retro"], out["retro"]
+    assert sum(ln.startswith("round 1 pass ") for ln in out["retro-em"].splitlines()) == 3, out["retro-em"]
+    assert out["retro-full"].startswith("retro: 0 passes found\npicture K1ABC "), out["retro-full"]
+
+
+def test_decode_em_reverse(cli, em_stores, models, renders, tmp_path):
+    """The script's --em on the store the subcommand refined, against the
+    store the script refined itself: the passes the C++ wrote are read
+    and re-received alike (the same lines within their printed precision,
+    every member at EM round 2, the pictures within the bar)."""
+    info = em_stores["em-py"][1]
+    k = info["key"]
+    first = Case("first", ["out.png", "--key", k, "--store", "st", "--em", "1", "--precision", "fp16"], store="em-py")
+    py, nat, py_dir, nat_dir = run_cases([first], tmp_path, cli, em_stores, models)["first"]
+    check_close(first, py, nat, py_dir, nat_dir, renders, info["uids"])
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    env["QRSSTVAE_MODEL_DIR"] = models
+    args = [sys.executable, str(REPO_ROOT / "qrss_decode.py"), "again.png", "--key", k, "--store", "st", "--em", "1",
+            "--precision", "fp16"]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        a, b = pool.submit(_run, args, py_dir, env), pool.submit(_run, args, nat_dir, env)
+        on_py, on_nat = a.result(), b.result()
+    _close_text(on_nat.out, on_py.out, info["uids"], "the script on the C++-refined store")
+    assert (on_nat.rc, on_nat.err) == (on_py.rc, on_py.err), (on_py, on_nat)
+    assert _tree(nat_dir) == _tree(py_dir)
+    assert on_nat.out.count("  EM round 2\n") == 2 and on_nat.out.count("  EM round 0\n") == 1, on_nat.out
+    if renders:
+        assert on_py.rc == 0
+        psnr = _psnr(_pixels(nat_dir / "again.png"), _pixels(py_dir / "again.png"))
+        print(f"the script's second round on the C++-refined store: picture PSNR {psnr:.1f} dB")
+        assert psnr > PICTURE_BAR, psnr
 
 
 def test_png_only(cli, stores, models, renders, tmp_path):

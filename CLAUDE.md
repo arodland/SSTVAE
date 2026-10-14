@@ -36,6 +36,11 @@ rationale lives in the plan history.
   passband,live}.py`; `QRSS_LIVE_NOISE=cpp` makes the live rows fill
   holes with the C++ noise generator instead of numpy's (same
   distribution, different draws, so whole-pipeline comparisons loosen).
+  Stage 4's are `test_qrss_native_{em,em_refine,em_search,decode}.py`:
+  `sstvae-qrss decode --em N` and `--retro` are C++ now (through
+  `native/core/qrss/em_api.hpp`, the app's calls), and
+  `native/tests/qrss/test_em_chain.cpp` runs encode, listen, --retro and
+  --em with no Python at all in the codec tree.
   Run the parity files in groups of about ten: together they are over
   ten minutes of fast tier on 4 CPUs.
 - Slow gate: `pytest -m slow` (~2 min) — the listener state machine and
