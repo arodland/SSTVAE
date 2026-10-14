@@ -3,7 +3,6 @@
 #include "qrss/store.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -11,7 +10,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <limits>
+#include <iterator>
+#include <map>
 #include <stdexcept>
 #include <system_error>
 #include <unordered_set>
@@ -30,6 +30,7 @@
 #include "qrss/associate.hpp"
 #include "qrss/config.hpp"
 #include "qrss/npsum.hpp"
+#include "qrss/pynum.hpp"
 #include "qrss/pypath.hpp"
 #include "qrss/pytext.hpp"
 #include "util/fileio.hpp"
@@ -54,13 +55,6 @@ const char* type_name(const Value& v) {
         case Value::Kind::Object: return "dict";
     }
     return "object";
-}
-
-std::string strip(const std::string& s) {
-    std::size_t a = 0, b = s.size();
-    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
-    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
-    return s.substr(a, b - a);
 }
 
 // str(v), as an f-string formats a JSON value.
@@ -138,7 +132,21 @@ long process_id() {
     throw FileError(verb, path, err);
 }
 
-int code_of(const std::error_code& ec) { return ec.value() ? ec.value() : EIO; }
+// The errno of a std::filesystem error, for FileError (whose binding raises
+// the OSError subclass errno names). On Windows ec is a Win32 code
+// (system_category), not an errno -- ERROR_ACCESS_DENIED is 5, EIO's number --
+// so it goes through the category's portable condition first.
+int code_of(const std::error_code& ec) {
+    if (!ec) return EIO;
+    if (ec.category() == std::generic_category()) return ec.value();
+    const std::error_condition c = ec.default_error_condition();
+    if (c.category() == std::generic_category() && c.value()) return c.value();
+#ifdef _WIN32
+    return EIO;
+#else
+    return ec.value();
+#endif
+}
 
 std::vector<std::uint8_t> read_file(const std::string& path) {
     util::File f = util::open_file(path, "rb");
@@ -328,6 +336,32 @@ Value key_list(const Key& k) {
     return Value::array({Value::string(k.callsign), Value::integer(k.picture_id)});
 }
 
+// The mutex of the store at `root` (made already), shared by every Store open
+// on it in this process: keyed by the canonical path, so "a/../s", "./s"
+// and a symlink to s are one store. Leaked, as a function-local static that
+// Stores destroyed during static destruction may still reach.
+std::shared_ptr<std::recursive_mutex> root_mutex(const std::string& root) {
+    static std::mutex* const reg_mu = new std::mutex;
+    static auto* const reg = new std::map<std::filesystem::path, std::weak_ptr<std::recursive_mutex>>;
+    std::filesystem::path key;
+    if (const auto p = util::fs_path(root)) {
+        std::error_code ec;
+        key = std::filesystem::canonical(*p, ec);
+        if (ec) key = std::filesystem::absolute(*p, ec).lexically_normal();
+        if (ec) key = *p;
+    }
+    const std::lock_guard<std::mutex> lk(*reg_mu);
+    for (auto it = reg->begin(); it != reg->end();)
+        it = it->second.expired() ? reg->erase(it) : std::next(it);
+    auto& slot = (*reg)[key];
+    auto mu = slot.lock();
+    if (!mu) {
+        mu = std::make_shared<std::recursive_mutex>();
+        slot = mu;
+    }
+    return mu;
+}
+
 }  // namespace
 
 // --- conversions shared with associate ------------------------------------------------------
@@ -346,28 +380,11 @@ std::int64_t py_int(const Value& v) {
             return static_cast<std::int64_t>(t);
         }
         case Value::Kind::String: {
-            std::string s = strip(v.as_string());
-            std::string digits;
-            std::size_t i = 0;
-            bool neg = false;
-            if (i < s.size() && (s[i] == '+' || s[i] == '-')) neg = s[i++] == '-';
-            bool ok = i < s.size();
-            for (; i < s.size() && ok; ++i) {
-                if (std::isdigit(static_cast<unsigned char>(s[i]))) {
-                    digits += s[i];
-                } else if (s[i] == '_' && !digits.empty() && i + 1 < s.size() &&
-                           std::isdigit(static_cast<unsigned char>(s[i + 1]))) {
-                    continue;
-                } else {
-                    ok = false;
-                }
-            }
-            if (!ok || digits.empty())
-                throw std::invalid_argument("invalid literal for int() with base 10: " + pytext::repr(v.as_string()));
-            errno = 0;
-            const long long r = std::strtoll(((neg ? "-" : "") + digits).c_str(), nullptr, 10);
-            if (errno == ERANGE) throw std::overflow_error("int() of " + digits + " does not fit int64");
-            return r;
+            // int(str): pynum's rules (ASCII, whatever the C locale says)
+            const auto parsed = pynum::py_int(v.as_string(), 10);
+            if (!parsed) throw std::invalid_argument(pynum::invalid_int_literal(v.as_string(), 10));
+            if (!parsed->value) throw std::overflow_error("int() of " + parsed->decimal + " does not fit int64");
+            return *parsed->value;
         }
         default:
             throw math::TypeError(std::string("int() argument must be a string, a bytes-like object or a real "
@@ -381,23 +398,10 @@ double py_float(const Value& v) {
         case Value::Kind::Float: return v.as_double();
         case Value::Kind::Bool: return v.as_bool() ? 1.0 : 0.0;
         case Value::Kind::String: {
-            const std::string s = strip(v.as_string());
-            std::string t;
-            for (char c : s)
-                if (c != '_') t += c;
-            std::size_t used = 0;
-            double r = 0.0;
-            try {
-                r = std::stod(t, &used);
-            } catch (const std::out_of_range&) {
-                used = t.size();
-                r = (t.find('-') == 0 ? -1.0 : 1.0) * std::numeric_limits<double>::infinity();
-            } catch (const std::exception&) {
-                used = 0;
-            }
-            if (s.empty() || used != t.size() || s.find("__") != std::string::npos)
-                throw std::invalid_argument("could not convert string to float: " + pytext::repr(v.as_string()));
-            return r;
+            // float(str): pynum's rules ('.' the point whatever LC_NUMERIC
+            // says; no hex; an underflow is 0, an overflow inf)
+            if (const auto f = pynum::py_float(v.as_string())) return *f;
+            throw std::invalid_argument("could not convert string to float: " + pytext::repr(v.as_string()));
         }
         default:
             throw math::TypeError(std::string("float() argument must be a string or a real number, not '") +
@@ -437,6 +441,30 @@ bool contains(const Value& c, std::string_view s) {
 
 // --- module functions ---------------------------------------------------------------------
 
+#ifndef _WIN32
+namespace {
+
+// pwd.getpwuid(os.getuid()).pw_dir, through the reentrant call (a Store may
+// be opened on several threads at once); nullopt when there is no entry.
+std::optional<std::string> passwd_home() {
+    long hint = ::sysconf(_SC_GETPW_R_SIZE_MAX);
+    std::vector<char> buf(hint > 0 ? static_cast<std::size_t>(hint) : 4096);
+    for (;;) {
+        passwd pw{};
+        passwd* out = nullptr;
+        const int rc = ::getpwuid_r(::getuid(), &pw, buf.data(), buf.size(), &out);
+        if (rc == ERANGE && buf.size() < (std::size_t(1) << 20)) {
+            buf.resize(buf.size() * 2);
+            continue;
+        }
+        if (rc == 0 && out && out->pw_dir) return std::string(out->pw_dir);
+        return std::nullopt;
+    }
+}
+
+}  // namespace
+#endif
+
 std::string default_root() {
     if (const std::string e = env("QRSSTVAE_HOME"); !e.empty()) return pathlib(e);
     std::string home;
@@ -452,8 +480,8 @@ std::string default_root() {
 #else
     if (has_env("HOME")) {
         home = env("HOME");
-    } else if (const passwd* pw = ::getpwuid(::getuid()); pw && pw->pw_dir) {
-        home = pw->pw_dir;
+    } else if (const auto dir = passwd_home()) {
+        home = *dir;
     } else {
         home = "~";
     }
@@ -648,6 +676,7 @@ Store::Store(std::optional<std::string> root, Seams seams)
         if (ec) file_error("cannot create", path, code_of(ec));
         if (!util::is_dir(path)) file_error("cannot create", path, EEXIST);
     }
+    mu_ = root_mutex(root_);
 }
 
 std::string Store::dir(const char* name) const { return join(root_, name); }

@@ -58,7 +58,13 @@
 // every call returns values (Accumulator, PassInfo, a shared_ptr to an
 // immutable ZW), never a reference into guarded state. The mutex is held
 // for the whole of a call, file I/O included: a call blocks while another
-// thread's call runs. What a call costs: reading a pass is ~1 ms per MB
+// thread's call runs. It is the root's, not the object's: every Store open
+// on one directory in this process shares it (by its canonical path), since
+// two would otherwise write the same ".<name>.<pid>.tmp" at once and lose
+// each other's read-modify-write of an accumulator. Their caches are still
+// their own, as two processes' are (store.py's): a pass rewritten through one
+// Store (add_pass, update_pass) is read stale by another that has it cached
+// (pass_zw, pass_info) until that one forgets it -- open one Store per root. What a call costs: reading a pass is ~1 ms per MB
 // (a full pass is about 1 MB, with its narrow capture), an accumulator
 // rebuild ~1 ms per member once its passes are cached (ZW_CACHE of them),
 // writing an accumulator ~2 MB of npz plus fsync (milliseconds on a local
@@ -266,7 +272,7 @@ public:
 
     // A lock on the store for a transaction of several calls (the calls
     // themselves lock it too; the mutex is recursive).
-    std::unique_lock<std::recursive_mutex> hold() const { return std::unique_lock<std::recursive_mutex>(mu_); }
+    std::unique_lock<std::recursive_mutex> hold() const { return std::unique_lock<std::recursive_mutex>(*mu_); }
 
     // --- passes ---
     // root/passes/<uid>.npz; std::invalid_argument "bad pass uid '<uid>'"
@@ -356,7 +362,8 @@ private:
 
     std::string root_;
     Seams seams_;
-    mutable std::recursive_mutex mu_;
+    // The root's mutex, shared with every other Store open on it (THREADS).
+    std::shared_ptr<std::recursive_mutex> mu_;
     // (z, w) LRU: front is the least recently used.
     std::list<std::pair<std::string, ZWPtr>> zw_;
     std::unordered_map<std::string, std::list<std::pair<std::string, ZWPtr>>::iterator> zw_index_;

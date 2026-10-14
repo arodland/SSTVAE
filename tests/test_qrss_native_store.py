@@ -41,7 +41,11 @@ The contract (the bar), and in brackets what was measured (2026-10-14):
 - **threads**: eight threads hammering one C++ Store (attach, detach,
   merge, the provisional clusters, due, reads) raise nothing, and every
   accumulator they leave is what its members and parts sum to (the
-  reference's rebuild of it, bit for bit);
+  reference's rebuild of it, bit for bit); two C++ Stores open on one
+  directory (spelled two ways) in two threads share its lock -- no
+  temporary file collides, no attach is lost;
+- **expiry at the cutoff**: an accumulator, a cluster and an orphan pass
+  exactly at it are kept and a ulp older dropped, as in the reference;
 - **em.py's store use, whole**: em_prior, known_header, em_refine (a
   deterministic re-receive stub) and template_search, every row of this
   lane in place with counting spies installed before the rows: the same
@@ -562,6 +566,40 @@ def test_interop_both_ways(NStore, tmp_path):
     H.compare_trees(tmp_path / "py-base", tmp_path / "cpp-base")
 
 
+def _expiry(cls, root):
+    """expire() at each of its three cutoffs exactly (kept: the reference
+    drops only what is older) and a ulp past it (dropped)."""
+    P, K, _ = _passes()
+    clk = Clock(1.76e9)
+    st = cls(root, clock=clk)
+    r = Rec(root)
+    for n in ("A0", "B1", "D1", "E0"):
+        st.add_pass(P[n])
+    st.attach(K["A"], P["A0"].uid, 0, "header", mode=2)        # updated 1.76e9
+    clk.t += 50.0
+    st.prov_add(P["D1"].uid)                                     # updated 1.76e9 + 50
+    week = 7 * S.DAY_S
+    edges = sorted({1.76e9, 1.76e9 + 50.0, S.slot_time(P["E0"].q), S.slot_time(P["B1"].q)})
+    for e in edges:
+        r(f"expire at {e}", st.expire, e + week)
+        r(f"expire past {e}", st.expire, float(np.nextafter(e + week, np.inf)))
+        r(f"left {e}", lambda: (st.open_keys(), st.pass_uids(), [c["cluster"] for c in st.prov_clusters()]))
+    r("expire days", st.expire, 1.76e9 + 50.0 + 0.5 * S.DAY_S, 0.5)
+    return r.out
+
+
+def test_expire_at_the_cutoff(NStore, tmp_path):
+    """An accumulator, a cluster and an orphan pass each exactly at the
+    cutoff are kept and a ulp older is dropped, as in the reference."""
+    a = _expiry(S.Store, tmp_path / "py")
+    b = _expiry(NStore, tmp_path / "cpp")
+    assert_same(a, b)
+    nothing = norm({"acc": [], "prov": [], "passes": []}, str(tmp_path / "py"))
+    assert all(x[1:] == ("ok", nothing) for x in a if x[0].startswith("expire at"))
+    assert all(x[1] == "ok" and x[2] != nothing for x in a if x[0].startswith("expire past"))
+    H.compare_trees(tmp_path / "py", tmp_path / "cpp")
+
+
 # --- the seams -------------------------------------------------------------------------------------------
 
 def test_clock_seam(NStore, tmp_path):
@@ -719,6 +757,49 @@ def test_threads_hammer_one_store(NStore, tmp_path):
     assert len(held) == len(set(held))                 # a pass belongs to one accumulator
     lines = (tmp_path / "s" / "log.jsonl").read_text().splitlines()
     assert all(line.startswith('{"time": ') and line.endswith("}") for line in lines)
+
+
+def test_two_stores_one_root(NStore, tmp_path):
+    """Two C++ Stores open on one directory (spelled two ways) used from two
+    threads: they share the root's lock, so neither trips over the other's
+    temporary file or loses the other's update of the accumulator both
+    attach to. (Two reference Stores would; it claims no thread safety.)"""
+    P, K, _ = _passes()
+    root = tmp_path / "s"
+    (tmp_path / "x").mkdir()
+    a = NStore(root, clock=Clock())
+    b = NStore(tmp_path / "x" / ".." / "s", clock=Clock())
+    names = [["A0", "A1", "A2"], ["B1", "B2", "C0"]]
+    for n in names[0] + names[1]:
+        a.add_pass(P[n])
+    a.create(K["A"], 2, 0)
+    errors = []
+
+    def work(st, mine):
+        try:
+            for _ in range(10):
+                for n in mine:
+                    st.attach(K["A"], P[n].uid, 0, "corr")
+                for n in mine:
+                    st.detach(K["A"], P[n].uid)
+            for n in mine:
+                st.attach(K["A"], P[n].uid, 0, "corr")
+        except Exception as e:  # noqa: BLE001
+            errors.append(repr(e))
+
+    threads = [threading.Thread(target=work, args=(st, mine)) for st, mine in zip((a, b), names)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    ref = S.Store(root, clock=Clock())
+    acc = ref.accumulator(K["A"])
+    assert sorted(acc.uids) == sorted(P[n].uid for n in names[0] + names[1])
+    S0, W0 = acc.S.copy(), acc.W.copy()
+    acc.rebuild(ref)
+    assert np.array_equal(acc.S, S0) and np.array_equal(acc.W, W0)
+    assert not [f for d in ("acc", "passes", "prov") for f in os.listdir(root / d) if f.startswith(".")]
 
 
 # --- em.py's store use, whole ---------------------------------------------------------------------------

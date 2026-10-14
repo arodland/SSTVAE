@@ -4,8 +4,9 @@
 // replayed through the C++ store, with each op's result and, at each tree
 // checkpoint, the SHA-256 of every file the store holds pinned from the
 // reference -- so the round trip through files is byte for byte store.py's;
-// the reference's refusals; the clock, replace and cache-size seams; and
-// threads sharing one Store. tests/test_qrss_native_store.py checks the
+// the reference's refusals; expiry exactly at its cutoff; the clock,
+// replace and cache-size seams; threads sharing one Store, and two Stores
+// sharing one root. tests/test_qrss_native_store.py checks the
 // same against Python directly, both ways.
 //
 //   PYTHONPATH=. python native/tests/qrss/gen_store_pins.py   # store_pins.hpp
@@ -218,6 +219,42 @@ static void test_clock_seam() {
     check::is_true(std::abs(sys.now() - wall) < 5.0, "the default clock is the system clock");
 }
 
+// expire() drops what is older than the cutoff: an accumulator, a
+// cluster or an orphan pass exactly at it stays, one a ulp older goes.
+static void test_expire_cutoff() {
+    check::current_step = "expire cutoff";
+    const std::string root = fresh_root("expire");
+    Cleanup cleanup{root};
+    double t = 1760000000.0;
+    qs::Store st(root, qs::Store::Seams{[&] { return t; }, {}, {}});
+    auto passes = ss::make_passes();
+    for (const char* n : {"a0", "b0", "b0b"}) st.add_pass(passes.at(n).pass);
+    const qs::Key key = ss::key_a();
+    st.attach(key, passes.at("a0").pass.uid, 0, "header", 2);   // updated t
+    const double acc_t = t;
+    t += 50.0;
+    const std::string cluster = st.prov_add(passes.at("b0b").pass.uid);   // updated t + 50
+    const double week = 7 * qs::DAY_S;
+    auto none = [](const qs::Expired& e) { return e.acc.empty() && e.prov.empty() && e.passes.empty(); };
+    auto past = [](double x) { return std::nextafter(x, 1e300); };
+    check::is_true(none(st.expire(acc_t + week)), "an accumulator at the cutoff stays");
+    qs::Expired e = st.expire(past(acc_t + week));
+    check::is_true(e.acc.size() == 1 && e.prov.empty(), "a ulp older it goes");
+    check::is_true(e.passes == std::vector<std::string>{passes.at("a0").pass.uid}, "and its old pass with it");
+    check::is_true(none(st.expire(t + week)), "a cluster at the cutoff stays");
+    e = st.expire(past(t + week));
+    check::is_true(e.acc.empty() && e.prov.size() == 1 && e.prov[0].as_string() == cluster && e.passes.empty(),
+                   "a ulp older it goes, its newer pass kept");
+    for (const char* n : {"b0", "b0b"}) {
+        const double slot = qs::slot_time(passes.at(n).pass.q);
+        check::is_true(none(st.expire(slot + week)), std::string("orphan ") + n + " at the cutoff stays");
+        e = st.expire(past(slot + week));
+        check::is_true(e.passes == std::vector<std::string>{passes.at(n).pass.uid},
+                       std::string("orphan ") + n + " a ulp older goes");
+    }
+    check::is_true(st.pass_uids().empty() && st.open_keys().empty() && st.prov_clusters().empty(), "all gone");
+}
+
 static void test_replace_seam() {
     check::current_step = "replace";
     const std::string root = fresh_root("replace");
@@ -413,6 +450,72 @@ static void test_threads() {
     check::equal(hammer, N_LOG, "every log line written whole");
 }
 
+// Two Stores open on one directory (the second spelled through "..") in
+// two threads: they share the root's mutex, so neither trips over the
+// other's ".<name>.<pid>.tmp" nor loses the other's read-modify-write of the
+// accumulator they both attach to; one Store on another root is not held up.
+static void test_two_stores_one_root() {
+    check::current_step = "two stores";
+    const std::string root = fresh_root("two");
+    Cleanup cleanup{root};
+    auto passes = ss::make_passes();
+    const qs::Store::Seams seams{[] { return store_pins::T0; }, {}, {}};
+    qs::Store a(root, seams);
+    qs::Store b(root + "/../" + fs::path(root).filename().string(), seams);
+    check::is_true(a.root() != b.root(), "two spellings of one root");
+    const qs::Key key = ss::key_a();
+    const std::vector<std::vector<std::string>> mine = {{"a0", "a0f", "a0g"}, {"b0", "b0b", "x0"}};
+    for (const auto& names : mine)
+        for (const auto& n : names) a.add_pass(passes.at(n).pass);
+    a.create(key, 2, 0xD1D8);
+    std::vector<std::string> errors;
+    std::mutex errors_mu;
+    auto work = [&](qs::Store& st, const std::vector<std::string>& names) {
+        try {
+            for (int round = 0; round < 12; ++round) {
+                for (const auto& n : names) st.attach(key, passes.at(n).pass.uid, 0, "corr", 2);
+                for (const auto& n : names) st.detach(key, passes.at(n).pass.uid);
+            }
+            for (const auto& n : names) st.attach(key, passes.at(n).pass.uid, 0, "corr", 2);
+        } catch (const std::exception& e) {
+            const std::lock_guard<std::mutex> lock(errors_mu);
+            errors.push_back(e.what());
+        }
+    };
+    std::thread ta([&] { work(a, mine[0]); });
+    std::thread tb([&] { work(b, mine[1]); });
+    ta.join();
+    tb.join();
+    for (const auto& e : errors) check::fail("two stores", e);
+    qs::Store c(root, seams);
+    qs::Accumulator acc = c.accumulator(key);
+    check::equal(acc.members.size(), std::size_t(6), "every pass of both threads attached");
+    const std::vector<float> S0 = acc.S, W0 = acc.W;
+    acc.rebuild(c);
+    check::is_true(acc.S == S0 && acc.W == W0, "and the arrays are its members summed");
+    int leftovers = 0;
+    for (const auto& d : {"acc", "passes", "prov"})
+        for (const auto& e : fs::directory_iterator(fs::path(root) / d))
+            if (e.path().filename().string()[0] == '.') ++leftovers;
+    check::equal(leftovers, 0, "no temporary file left");
+
+    // another root's Store is not serialised behind this one's transaction
+    const std::string other = fresh_root("two_other");
+    Cleanup cleanup_other{other};
+    qs::Store o(other, seams);
+    std::atomic<bool> held{false}, done{false};
+    std::thread holder([&] {
+        const auto lk = a.hold();
+        held = true;
+        while (!done) std::this_thread::yield();
+    });
+    while (!held) std::this_thread::yield();
+    o.create(qs::Key{"N0CALL", 1}, 0, 0);   // would wait forever on a shared mutex
+    check::is_true(o.has_accumulator(qs::Key{"N0CALL", 1}), "another root works while this one is held");
+    done = true;
+    holder.join();
+}
+
 int main() {
     check::report_crashes_instead_of_prompting();
     check::Watchdog watchdog(600.0, "qrss_core_store");
@@ -420,9 +523,11 @@ int main() {
         test_session();
         test_errors_and_values();
         test_clock_seam();
+        test_expire_cutoff();
         test_replace_seam();
         test_zw_cache_seam();
         test_threads();
+        test_two_stores_one_root();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s (in %s)\n", e.what(), check::current_step.load());
         return 1;
