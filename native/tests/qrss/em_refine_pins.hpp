@@ -161,6 +161,32 @@ inline constexpr double RR_SHORT_NOPRIOR_PATH_T[] = {-0x1.481357df545edp+3, 0x1.
 inline constexpr std::size_t RR_SHORT_NOPRIOR_PATH_T_N = 2;
 inline constexpr double RR_SHORT_NOPRIOR_PATH_F_SUM = 0x1.9456fee195070p+18;
 
+// the SHORT pass relabelled version 1 (frame short-v1), HDR (version 2) given: the pass's version is encoded
+inline constexpr double RR_SHORT_V1_F[] = {0x1.77021f8f71daap+10, -0x1.3eff2bfd0e4bfp+1, -0x1.2bdd540d002dap+2, 0x0.0p+0, 0x1.e71c58844f68cp+6};
+inline constexpr std::size_t RR_SHORT_V1_F_N = 5;
+inline constexpr double RR_SHORT_V1_REPORT[] = {0x1.77021f8f71daap+10, 0x1.e850ec30de0c0p-5, 0x1.2b8d273df8cf4p-6, 0x1.28d4562e09fe8p+0, -0x1.2bdd540d002dap+2, -0x1.27f264ab03fbfp+3, 0x1.541e907db0ab8p+6, 0x1.88130c4399823p+0};
+inline constexpr std::size_t RR_SHORT_V1_REPORT_N = 8;
+inline constexpr std::int64_t RR_SHORT_V1_FLAGS = 1;
+inline constexpr std::int64_t RR_SHORT_V1_NZ = 4096;
+inline constexpr double RR_SHORT_V1_Z_AT[] = {0x1.7b95700000000p-3, 0x1.6137660000000p-1, 0x1.6b7f2c0000000p+0, 0x1.1ee1720000000p-1, 0x1.3c3f900000000p+0, -0x1.88f0620000000p+0};
+inline constexpr std::size_t RR_SHORT_V1_Z_AT_N = 6;
+inline constexpr double RR_SHORT_V1_W_AT[] = {0x1.46e7380000000p+1, 0x1.46e7380000000p+1, 0x1.46e7380000000p+1, 0x1.5e90ee0000000p+1, 0x1.2f13f20000000p+1, 0x1.5341e00000000p+1};
+inline constexpr std::size_t RR_SHORT_V1_W_AT_N = 6;
+inline constexpr double RR_SHORT_V1_Z_SUM = -0x1.3f307b8116fe0p+10;
+inline constexpr double RR_SHORT_V1_W_SUM = 0x1.5195ce3000000p+13;
+inline constexpr double RR_SHORT_V1_PSI_SUM = 0x1.07b0000000000p+13;
+inline constexpr std::int64_t RR_SHORT_V1_NLLR = 2474;
+inline constexpr double RR_SHORT_V1_LLR_ABS = 0x1.cee3ef38b2400p+13;
+inline constexpr const char* RR_SHORT_V1_ESTIMATOR = "joint";
+inline constexpr std::int64_t RR_SHORT_V1_EM_ROUND = 2;
+inline constexpr std::int64_t RR_SHORT_V1_HDR = 1;
+inline constexpr double RR_SHORT_V1_MEAN_W_DB = 0x1.0d8d0cc1ebdddp+2;
+inline constexpr std::int64_t RR_SHORT_V1_PATH_N = 276;
+inline constexpr double RR_SHORT_V1_PATH_T[] = {-0x1.481436bfcb17ep+3, 0x1.08bf5e4a01a74p+8};
+inline constexpr std::size_t RR_SHORT_V1_PATH_T_N = 2;
+inline constexpr double RR_SHORT_V1_PATH_F_SUM = 0x1.9457061345dbep+18;
+inline constexpr std::int64_t RR_SHORT_V1_HDR_VERSION = 1;
+
 // em_refine(store, KEY, rounds=3): the history, the log, each member's em_round and mean W after
 inline constexpr double EMR_HIST[] = {0x1.81d96801e2082p+3, 0x1.8fdafbcbb63dap+3, 0x1.8ee1c31b07de4p+3};
 inline constexpr std::size_t EMR_HIST_N = 3;

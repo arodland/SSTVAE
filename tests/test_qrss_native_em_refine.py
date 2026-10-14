@@ -405,6 +405,24 @@ def test_rereceive(Er, row, label, variant):
         _pass_close(row["rereceive"](p, *args, None, 2, path=kw["path"], split=split), ref, (label, "no path"))
 
 
+@pytest.mark.slow
+def test_rereceive_version1(Er, row):
+    """A SHORT pass whose header says version 1 (frame short-v1: no spread
+    header copy) given the version-2 header: both re-label the header with
+    the pass's version before encoding its known bits, and agree."""
+    p = _pass("short-6")
+    assert p.header is not None
+    v1 = dataclasses.replace(p, header=dataclasses.replace(p.header, version=1))
+    assert em.pass_spec(v1) is frame.SHORT_V1 and _hdr().version == 2
+    args = (v1, _prior("short-6"), _hdr(), _cw(), None, 2)
+    kw = {"path": _ref_path("short-6"), "return_path": True}
+    ref, ref_path = em.rereceive(*args, **kw)
+    got, got_path = row["rereceive"](*args, **kw)
+    assert ref.header.version == 1 == got.header.version and got.frame == ref.frame
+    _pass_close(got, ref, ("short-6", "version 1"))
+    _path_close(got_path, ref_path, ("short-6", "version 1", "path"), "rereceive path", tol=1e-6, t_tol=1e-6)
+
+
 def test_rereceive_estimator_and_round(Er, row):
     """estimator "plain" against the pass's "joint"; a falsy estimator is the
     pass's own; em_round None keeps the pass's."""
@@ -559,25 +577,28 @@ def test_em_refine_options(Er, NStore, tmp_path, tol_db, rounds, kw):
 
 
 def test_em_refine_refusals_and_skips(Er, NStore, tmp_path):
-    """A key with no accumulator; members without a capture; an L member."""
+    """A key with no accumulator; members without a capture; an L member,
+    logged in round 1 only (tol_db -inf: three rounds run)."""
     h = _hdr()
     key = te.key_of(h)
     a = te.air(frame.SHORT)
     synth = [make_pass_result(a, 0.5 + s, seed=s, hdr=h, hdr_es_n0_db=-16.0) for s in range(3)]
     pl = dataclasses.replace(make_pass_result(a, 1.0, seed=7, waveform=WAVEFORM_L, hdr=h, decoded=True),
                              ch=np.ones(16, np.complex64))
-    for name, passes, lines in (("synthetic", synth, 0), ("with L", synth + [pl], 1)):
+    for name, passes, lines, tol in (("synthetic", synth, 0, em.EM_TOL_DB), ("with L", synth + [pl], 1, em.EM_TOL_DB),
+                                     ("with L, three rounds", synth + [pl], 1, -math.inf)):
         root = tmp_path / name
         _base_store(root / "base", passes, h)
         shutil.copytree(root / "base", root / "py")
         shutil.copytree(root / "base", root / "cpp")
         lr, lg = [], []
-        hr = em.em_refine(S.Store(root / "py", clock=tm.Clock()), key, 3, log=lr.append)
-        hg = Er.em_refine(NStore(root / "cpp", clock=tm.Clock()), key, 3, log=lg.append)
+        hr = em.em_refine(S.Store(root / "py", clock=tm.Clock()), key, 3, tol, log=lr.append)
+        hg = Er.em_refine(NStore(root / "cpp", clock=tm.Clock()), key, 3, tol, log=lg.append)
         assert lg == lr and len(lr) == lines, (name, lr, lg)
         if lines:
             assert lr == [f"pass {pl.uid}: waveform L, not re-received (EM is CE-only)"]
-        assert len(hg) == len(hr) == 2 and hr[0] == hr[1], (hr, hg)
+        n_hist = 4 if tol == -math.inf else 2      # nothing re-received: no gain, stopped after round 1
+        assert len(hg) == len(hr) == n_hist and len(set(hr)) == 1, (hr, hg)
         for g, r in zip(hg, hr):
             assert g == r or abs(g - r) <= 4 * math.ulp(r), (hg, hr)
         H.compare_trees(root / "py", root / "cpp")
@@ -602,7 +623,11 @@ def _sha(x):
     return hashlib.sha256(np.ascontiguousarray(x).tobytes()).hexdigest()[:16]
 
 
-def _seam_run(tmp, passes, h):
+def _seam_run(tmp, members, key, mode, codec_id, wrap=False, rounds=3, tol_db=em.EM_TOL_DB):
+    """em.em_refine over `members` ((segment, pass) pairs) with em.rereceive
+    replaced by a deterministic spy (wrapped with functools.wraps of what
+    em.rereceive held, if `wrap`, as a decorator-style spy would be):
+    (history, the spy's calls, the log)."""
     calls = []
 
     def rereceive(p, prior, hdr, cw, estimator=None, r=1, path=None, return_path=False):
@@ -614,32 +639,59 @@ def _seam_run(tmp, passes, h):
         return (new, pth) if return_path else new
 
     st = S.Store(tmp, clock=tm.Clock())                       # whichever Store the module holds
-    for p in passes:
+    for g, p in members:
         st.add_pass(p)
-        st.attach(te.key_of(h), p.uid, 0, "test", mode=h.mode, codec_id=h.codec_id)
+        st.attach(key, p.uid, g, "test", mode=mode, codec_id=codec_id)
     em_rr = em.rereceive
-    em.rereceive = rereceive
+    em.rereceive = functools.wraps(em_rr)(rereceive) if wrap else rereceive
     try:
         lines = []
-        hist = em.em_refine(st, te.key_of(h), rounds=3, log=lines.append)
+        hist = em.em_refine(st, key, rounds=rounds, tol_db=tol_db, log=lines.append)
     finally:
         em.rereceive = em_rr
     return hist, calls, lines
 
 
-def test_em_refine_seam(native, Er, tmp_path, monkeypatch):
+def _seam_members(case):
+    """(members, key, mode, codec_id) of a seam case: three passes of the
+    test picture in segment 0; or a mode 2 picture with members in every
+    segment, their headers decoded, soft (summed per segment) or too weak,
+    so each member's known header is its own segment's."""
+    ch = np.exp(1j * np.arange(16) / 3.0).astype(np.complex64)
+    if case != "segments":
+        h = _hdr()
+        a = te.air(frame.SHORT)
+        return ([(0, dataclasses.replace(make_pass_result(a, 0.5, seed=s, hdr=h, hdr_es_n0_db=-16.0), ch=ch))
+                 for s in range(3)], te.key_of(h), h.mode, h.codec_id)
+    from qrss_fakes import make_header, synthetic_picture
+
+    from sstvae.qrss import tx
+
+    sp = synthetic_picture(3, mode=2)
+    hs = [make_header(sp, g, callsign=CALL) for g in range(3)]
+    members = []
+    for s, (g, decoded, es) in enumerate(((0, True, -10.0), (0, False, -10.0), (1, False, -6.0),
+                                          (1, False, None), (2, False, -30.0))):
+        a = tx.slot_air_latents(sp, g)[:frame.SHORT.n_data]
+        p = make_pass_result(a, 0.5 + s, seed=s, hdr=hs[g], decoded=decoded, hdr_es_n0_db=es)
+        members.append((g, dataclasses.replace(p, ch=ch)))
+    return members, te.key_of(hs[0]), sp.mode, sp.codec_id
+
+
+@pytest.mark.parametrize("case", ["mode0", "segments", "wrapped"])
+def test_em_refine_seam(native, Er, tmp_path, monkeypatch, case):
     """em_refine through the rows with em.rereceive replaced: the C++ calls
     the replacement as the reference does, with the same priors (bit for
-    bit), headers, keying and paths, and stores what it returns."""
+    bit), headers (each member's own segment's), keying and paths, and
+    stores what it returns. "wrapped": the spy carries functools.wraps of
+    the row it replaces (and so the row's marker), and is still the one
+    called."""
     from qrss_native import em as rows_em
     from qrss_native import em_refine as rows_er
 
-    h = _hdr()
-    a = te.air(frame.SHORT)
-    ch = np.exp(1j * np.arange(16) / 3.0).astype(np.complex64)
-    passes = [dataclasses.replace(make_pass_result(a, 0.5, seed=s, hdr=h, hdr_es_n0_db=-16.0), ch=ch)
-              for s in range(3)]
-    ref = _seam_run(tmp_path / "py", passes, h)
+    members, key, mode, codec_id = _seam_members(case)
+    kw = {"wrap": case == "wrapped", "tol_db": -math.inf if case == "segments" else em.EM_TOL_DB}
+    ref = _seam_run(tmp_path / "py", members, key, mode, codec_id, **kw)
     with monkeypatch.context() as mp:
         H.apply_store_rows(native, mp)
         reference = qrss_native._import_reference()
@@ -656,8 +708,11 @@ def test_em_refine_seam(native, Er, tmp_path, monkeypatch):
                 if hit is not None and hit[0] is v:
                     mp.setattr(m, k, hit[1])
         assert getattr(em.em_refine, "__qrss_native__", False)
-        got = _seam_run(tmp_path / "cpp", passes, h)
+        assert getattr(em.rereceive, "__qrss_native__", False)
+        got = _seam_run(tmp_path / "cpp", members, key, mode, codec_id, **kw)
     assert got[1] == ref[1] and len(ref[1]) >= 3, (got[1], ref[1])
+    if case == "segments":       # every member is handed its own segment's header
+        assert len({c[4] for c in ref[1]}) == 3 and len(ref[1]) == 15, ref[1]
     assert got[2] == ref[2]
     assert len(got[0]) == len(ref[0])
     for g, r in zip(got[0], ref[0]):

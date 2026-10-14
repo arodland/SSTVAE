@@ -144,9 +144,11 @@ struct RereceiveArgs {
 //     with a track whose templates leave that parity's reference out (the
 //     report, z_ref, header LLRs and psi from the even-parity run). z_ref is
 //     p's own, hdr_llr p's when the frame carries a spread header copy.
-// Hooks: a cancel poll after the path is measured and before each tracker
-// run (em::Cancelled; nothing is written here, so nothing is left half done).
-// Blocks for the path (unless given) and two or three tracker runs.
+// Hooks: a cancel poll before the path is measured (when it is not given),
+// after it, and before each tracker run of the two-round branch; the
+// receive_pass branch is polled before it starts, not between its own two
+// rounds (em::Cancelled; nothing is written here, so nothing is left half
+// done). Blocks for the path (unless given) and two or three tracker runs.
 Rereceived rereceive(const types::PassResult& p, const std::optional<types::EmPrior>& prior,
                      const RereceiveArgs& args = {}, const Hooks& hooks = {});
 
@@ -191,14 +193,16 @@ struct EmRefineArgs {
 //   log       the reference's lines, as above;
 //   progress  (done, total, "round <r> pass <uid>") after each pass is
 //             re-received and stored; total = rounds x the members with a
-//             capture and a CE frame (counted once before round 1, from the
-//             members then: a pass that cannot be read counts, as the round
-//             will meet its error); when the rounds stop early (tol_db) one
-//             last call (done, done, "converged after round <r>") says the
-//             rest will not run; with no eligible member, or rounds <= 0, no
-//             call at all;
+//             capture and a CE frame (a pass that cannot be read counts, as
+//             the round will meet its error), counted again at each round's
+//             start as done + the rounds left x the members then, and never
+//             lowered: a member attached meanwhile (a listener writing the
+//             same store) raises it, so done never runs past it; when the
+//             rounds stop early (tol_db) one last call (done, done,
+//             "converged after round <r>") says the rest will not run; with
+//             no eligible member, or rounds <= 0, no call at all;
 //   cancel    polled before each member is loaded, and inside rereceive
-//             (after the path, before each tracker run): em::Cancelled. Every
+//             (around the path, before each tracker run): em::Cancelled. Every
 //             pass re-received before it is stored and its accumulators
 //             rebuilt; the one in flight is not stored.
 // The store's KeyError for a key with no accumulator, before anything else.

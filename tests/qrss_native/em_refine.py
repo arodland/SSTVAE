@@ -37,12 +37,14 @@ def rows(q):
     to_ref = _rx.to_ref
 
     def _native(fn):
-        return getattr(fn, "__qrss_native__", False)
+        # a row, not a spy wrapping one: functools.wraps copies the row's
+        # __dict__ (the flag with it) onto the wrapper and adds __wrapped__
+        return getattr(fn, "__qrss_native__", False) and not hasattr(fn, "__wrapped__")
 
     def seams():
         """What em_refine is to call in Python: rereceive, unless the
         attribute is this file's row."""
-        if _native(E.rereceive):
+        if E.rereceive is rereceive or _native(E.rereceive):
             return None
         fn = E.rereceive
 

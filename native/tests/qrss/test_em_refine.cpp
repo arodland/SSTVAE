@@ -417,6 +417,19 @@ void test_rereceive(const Fixture& fx) {
     check::current_step = "rereceive SHORT no prior";
     as.split = true;
     check_pass(em::rereceive(fx.short_, std::nullopt, as), PASS_PINS(RR_SHORT_NOPRIOR), "rereceive(SHORT, None)");
+    // a version 1 pass (frame short-v1) given a version 2 header: the known
+    // bits are the pass's version's
+    check::current_step = "rereceive SHORT version 1";
+    types::PassResult v1 = fx.short_;
+    check::is_true(v1.header.has_value(), "SHORT: a header to relabel");
+    if (v1.header) {
+        v1.header->version = 1;
+        check::equal(em::pass_spec(v1).name(), std::string("short-v1"), "SHORT relabelled: frame short-v1");
+        const em::Rereceived r1 = em::rereceive(v1, pr_s, as);
+        check_pass(r1, PASS_PINS(RR_SHORT_V1), "rereceive(SHORT version 1, HDR version 2)");
+        if (r1.pass && r1.pass->header)
+            check::equal(r1.pass->header->version, P::RR_SHORT_V1_HDR_VERSION, "SHORT version 1: the pass's header");
+    }
 
     // cancel: before any tracker run (the path is given, so the first poll
     // is the first thing rereceive does after reading the capture)
@@ -662,6 +675,78 @@ void test_seams(const Fixture& fx) {
     check::equal(qs::py_int(acc.members[0].at("em_round")), std::int64_t{2}, "seams: member 0 stored");
     check::equal(qs::py_int(acc.members[1].at("em_round")), std::int64_t{0}, "seams: member 1 never stored");
     check::equal(qs::py_int(acc.members[3].at("em_round")), std::int64_t{0}, "seams: no capture, skipped");
+
+    // an L member (EM is CE-only): skipped every round, said so in round 1
+    // alone, and not counted in the progress total
+    check::current_step = "em_refine L member";
+    const fs::path dl = fresh_dir("lmember");
+    Cleanup cleanup_l{dl};
+    qs::Store sl(util::path_text(dl / "qrss"), clock_t0());
+    types::PassResult pl = fx.tiny[1];
+    pl.frame = "l-tiny";
+    pl.waveform = cfg::WAVEFORM_L;
+    pl.q = P::Q + 50;
+    pl.uid = types::pass_uid(pl.q, pl.f_hz, pl.z);
+    fill(sl, {fx.tiny[0], pl});
+    std::vector<std::string> llog;
+    std::vector<std::int64_t> ltotals;
+    em::Hooks hl;
+    hl.log = [&](const std::string& s) { llog.push_back(s); };
+    hl.progress = [&](std::int64_t, std::int64_t t, const std::string&) { ltotals.push_back(t); };
+    em::EmSeams same;
+    same.rereceive = [](const types::PassResult& p, const types::EmPrior&, const std::optional<hd::HeaderFields>&,
+                        const std::optional<rc::CwKnown>&, const std::optional<std::string>&, std::int64_t r,
+                        const std::optional<types::FreqPath>&) {
+        em::Rereceived out;
+        types::PassResult np = p;
+        np.em_round = r;
+        out.pass = std::move(np);
+        return out;
+    };
+    em::EmRefineArgs a3;
+    a3.rounds = 3;
+    a3.tol_db = -std::numeric_limits<double>::infinity();
+    const std::vector<double> hl3 = em::em_refine(sl, KEY, a3, hl, same);
+    check::equal(hl3.size(), std::size_t{4}, "L member: three rounds run");
+    const std::string lline = "pass " + pl.uid + ": waveform L, not re-received (EM is CE-only)";
+    check::equal(static_cast<std::int64_t>(std::count(llog.begin(), llog.end(), lline)), std::int64_t{1},
+                 "L member: said once, in round 1");
+    check::equal(llog.size(), std::size_t{4}, "L member: the CE member's three lines and the L line");
+    if (llog.size() == 4) check::equal(llog[1], lline, "L member: after round 1's CE line");
+    check::equal(ltotals.size(), std::size_t{3}, "L member: progress for the CE member alone");
+    for (const std::int64_t t : ltotals) check::equal(t, std::int64_t{3}, "L member: total = 3 rounds x 1");
+    check::equal(sl.load_pass(pl.uid).em_round, std::int64_t{0}, "L member: never stored");
+
+    // a member attached while EM runs (a listener writing the same store):
+    // round 2 re-receives it, and the progress total grows so that done
+    // never runs past it
+    check::current_step = "em_refine member attached meanwhile";
+    const fs::path da = fresh_dir("attach");
+    Cleanup cleanup_a{da};
+    qs::Store sa(util::path_text(da / "qrss"), clock_t0());
+    fill(sa, {fx.tiny[0]});
+    std::vector<std::pair<std::int64_t, std::int64_t>> aprog;
+    em::Hooks ha;
+    ha.progress = [&](std::int64_t d, std::int64_t t, const std::string&) { aprog.emplace_back(d, t); };
+    em::EmSeams attach = same;
+    bool attached = false;
+    attach.rereceive = [&](const types::PassResult& p, const types::EmPrior& prior,
+                           const std::optional<hd::HeaderFields>& hdr, const std::optional<rc::CwKnown>& cw,
+                           const std::optional<std::string>& est, std::int64_t r,
+                           const std::optional<types::FreqPath>& path) {
+        if (!attached) {
+            attached = true;
+            fill(sa, {fx.tiny[1]});
+        }
+        return same.rereceive(p, prior, hdr, cw, est, r, path);
+    };
+    em::EmRefineArgs a2;
+    a2.rounds = 2;
+    a2.tol_db = -std::numeric_limits<double>::infinity();
+    (void)em::em_refine(sa, KEY, a2, ha, attach);
+    const std::vector<std::pair<std::int64_t, std::int64_t>> want_prog{{1, 2}, {2, 3}, {3, 3}};
+    check::is_true(aprog == want_prog, "attached meanwhile: progress (1, 2), (2, 3), (3, 3)");
+    check::equal(sa.load_pass(fx.tiny[1].uid).em_round, std::int64_t{2}, "attached meanwhile: re-received in round 2");
 }
 
 }  // namespace

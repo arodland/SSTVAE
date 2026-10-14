@@ -4,6 +4,7 @@
 
 #include "qrss/em_refine.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -125,6 +126,7 @@ Rereceived rereceive(const PassResult& p, const std::optional<EmPrior>& prior, c
     Detection det = receiver::detection_from_pass(p);
     const std::shared_ptr<const track::ChanCapture> chan =
         std::make_shared<const track::ChanCapture>(receiver::channel_for(prep, spec, det, {}, p.f_mix_hz));
+    if (!args.path) check_cancel(hooks);   // pass_path is a second or so of a FULL pass's work
     det.path = args.path ? *args.path : pass_path(p, chan);
     const std::int64_t rnd = args.em_round ? *args.em_round : p.em_round;
     check_cancel(hooks);
@@ -279,18 +281,22 @@ std::vector<double> em_refine(store::Store& st, const store::Key& key, const EmR
         }
         cw_known = known_keying(st, acc, call);
     }
-    // the progress total: rounds x the members a round re-receives
+    // the progress total: rounds x the members a round re-receives, counted
+    // again at each round's start (from the passes done and the rounds left)
+    // and never lowered, so a member a listener attaches meanwhile raises it
+    // rather than running `done` past it
     std::int64_t total = 0;
-    if (hooks.progress && args.rounds > 0) {
-        std::int64_t n = 0;
-        for (const std::string& uid : acc.uids())
-            if (eligible(st, uid)) ++n;
-        total = args.rounds * n;
-    }
     std::int64_t done = 0;
     std::map<std::string, std::optional<FreqPath>> paths;
     for (std::int64_t r = 1; r < args.rounds + 1; ++r) {
-        for (const std::string& uid : acc.uids()) {   // list(acc.uids): the round's start
+        const std::vector<std::string> uids = acc.uids();   // list(acc.uids): the round's start
+        if (hooks.progress) {
+            std::int64_t n = 0;
+            for (const std::string& uid : uids)
+                if (eligible(st, uid)) ++n;
+            total = std::max(total, done + (args.rounds - r + 1) * n);
+        }
+        for (const std::string& uid : uids) {
             check_cancel(hooks);
             const PassResult p = st.load_pass(uid);
             if (p.ch.empty()) continue;

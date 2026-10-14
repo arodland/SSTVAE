@@ -39,7 +39,10 @@ exactly):
     unkeyed) with the formula prior prior_from(S, W, q) (S = 2 a + 0.25
     noise-free offsets, W = 2: exact in both), the header and the callsign
     keying (keying_units("K1ABC"), FSK): split, no split, and with no
-    prior (one track, no split);
+    prior (one track, no split); and split again with the pass's header
+    relabelled version 1 (its frame is then short-v1, no spread copy) and
+    the header given as version 2, which rereceive re-labels with the
+    pass's version before encoding the known bits;
   * em_refine(store, key, rounds=3) on the three TINY passes: the history,
     the log lines (their numbers to 0.011 dB, printed to 0.01), each
     member's em_round and mean W afterwards; and with rounds=0;
@@ -258,6 +261,13 @@ with tempfile.TemporaryDirectory() as tmp:
         prior = kw.pop("prior")
         out, pth = em.rereceive(short, prior, HDR, cw, None, 2, return_path=True, **kw)
         pin_pass(tag, out, pth)
+    note("the SHORT pass relabelled version 1 (frame short-v1), HDR (version 2) given: the pass's version is encoded")
+    v1 = dataclasses.replace(short, header=dataclasses.replace(short.header, version=1))
+    assert em.pass_spec(v1) is frame.SHORT_V1
+    out, pth = em.rereceive(v1, pr_s, HDR, cw, None, 2, return_path=True)
+    assert out.header.version == 1 and out.frame == "short"
+    pin_pass("RR_SHORT_V1", out, pth)
+    num("RR_SHORT_V1_HDR_VERSION", out.header.version)
 
     note("em_refine(store, KEY, rounds=3): the history, the log, each member's em_round and mean W after")
     log: list[str] = []
