@@ -1085,9 +1085,11 @@ class TbdHit:
         1 Hz off the line: before the signal keys (and in deep fades) the
         path wanders on noise and carries ~no weight.
 
-        Fitted once per hit: the arbitration and the detections read it
-        thousands of times over a FULL slot's hits, and a hit's path is
-        never changed once it is made (a new path is a new hit).
+        Fitted once per hit: A3's dedup, the arbitration and the
+        detections each read it again (measured 8 fits for 3 hits on an
+        L SHORT slot, 9 for 3 on a CE FULL one, ~0.16 ms a fit), and a
+        hit's path is never changed once it is made (a new path is a new
+        hit).
         """
         return float(np.polyval(self.line(), 0.0))
 

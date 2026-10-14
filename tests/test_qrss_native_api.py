@@ -14,6 +14,11 @@ Python module, so the reference here is the scripts themselves:
   1e-12, and within 1e-9 for L, plus one float32 spacing either way. The
   source may be the file's path or the dataclass read from it, with the
   same result.
+  A slot before 1970 is the exception: the script's --slot parser
+  refuses it (sequences.parse_slot) before it looks at anything else,
+  while the API takes q as a number. Its order is the script's from
+  before that parser refused, every other refusal first and q last, in
+  the words of sequences.scrambler, which the script reached with it.
 - The constants (PASS_S, AUDIO_LEAD_S, AUDIO_TAIL_S, T0_OFFSET_S, the
   carrier band, ...) are compared with where the reference keeps them,
   and the slot helpers with sequences/frontend/tx.
@@ -174,9 +179,35 @@ def _id(case):
 
 @pytest.fixture(scope="module")
 def outcomes(script, inputs, tmp_path_factory):
-    """The script's outcome for every case, run once."""
+    """The script's outcome for every case, run once, and for a slot
+    before 1970 also for the same request at Q_TEST (see `_want`)."""
     d = tmp_path_factory.mktemp("api-out")
-    return {_id(c): _run_script(script, _argv(inputs[c[0]], str(d / "out.wav"), c[1], c[2])) for c in CASES}
+    cases = CASES + [(s, Q_TEST, kw) for s, q, kw in CASES if q < 0]
+    return {_id(c): _run_script(script, _argv(inputs[c[0]], str(d / "out.wav"), c[1], c[2])) for c in cases}
+
+
+def _want(outcomes, case):
+    """What the API must say for a case: the script's outcome, except that
+    for q < 0 the script's --slot parser refuses the slot before anything
+    else is looked at (`test_the_script_refuses_a_slot_before_1970`). The
+    API keeps the order the script had before that: the request's own
+    refusal if it has one, else sequences.scrambler's for the q."""
+    src, q, kw = case
+    if q >= 0:
+        return outcomes[_id(case)]
+    at = outcomes[_id((src, Q_TEST, kw))]
+    if at[0] == "refused":
+        return at
+    with pytest.raises(ValueError) as e:
+        sequences.scrambler(q, 1)
+    return ("refused", str(e.value))
+
+
+def test_the_script_refuses_a_slot_before_1970(outcomes):
+    for case in CASES:
+        if case[1] < 0:
+            iso = _iso(case[1])
+            assert outcomes[_id(case)] == ("refused", f"--slot {iso!r}: slot {iso} is before 1970-01-01T00:00Z")
 
 
 def _sources(inputs, name):
@@ -189,7 +220,7 @@ def _sources(inputs, name):
 @pytest.mark.parametrize("case", CASES, ids=_id)
 def test_problem_and_audio_match_the_script(api, inputs, outcomes, case):
     src_name, q, kw = case
-    want = outcomes[_id(case)]
+    want = _want(outcomes, case)
     for src in _sources(inputs, src_name):
         text = api.problem(src, q, **kw)
         if want[0] == "refused":
@@ -204,10 +235,12 @@ def test_problem_and_audio_match_the_script(api, inputs, outcomes, case):
 
 def test_the_cases_cover_each_ending(outcomes):
     """Every case reached the end it was written for (the refusals are distinct)."""
-    ok = [k for k, v in outcomes.items() if v[0] == "ok"]
-    refused = {v[1] for v in outcomes.values() if v[0] == "refused"}
+    wants = [_want(outcomes, c) for c in CASES]
+    ok = [w for w in wants if w[0] == "ok"]
+    refused = {w[1] for w in wants if w[0] == "refused"}
     assert len(ok) == 9
     assert len(refused) >= 15, refused
+    assert "q must fit in uint64, not -1" in refused
 
 
 def test_the_audio_is_transmit_audio(api, inputs):
@@ -307,7 +340,7 @@ def test_refusals_ignore_a_decimal_comma_locale(api, inputs, outcomes, decimal_c
             "an L pilot at 310.0 Hz puts the data down to 287.9 Hz, below the 300 Hz receivers search")
         for case in CASES:
             src_name, q, kw = case
-            want = outcomes[_id(case)]
+            want = _want(outcomes, case)
             if want[0] == "refused":
                 assert api.problem(inputs[src_name], q, **kw) == want[1], case
     finally:
