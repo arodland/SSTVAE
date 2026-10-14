@@ -275,9 +275,13 @@ std::string ArgParser::help() const {
         else line += std::string(column - line.size(), ' ');
         return line + wrap(help, column, column, width) + "\n";
     };
-    out += "\npositional arguments:\n";
-    for (const Action& a : actions_)
-        if (a.positional) out += row(a.metavar(), a.spec.help);
+    // argparse leaves out a section with nothing in it (qrss_listen.py has
+    // no positional)
+    if (std::any_of(actions_.begin(), actions_.end(), [](const Action& a) { return a.positional; })) {
+        out += "\npositional arguments:\n";
+        for (const Action& a : actions_)
+            if (a.positional) out += row(a.metavar(), a.spec.help);
+    }
     out += "\noptions:\n";
     for (const Action& a : actions_) {
         if (a.positional) continue;

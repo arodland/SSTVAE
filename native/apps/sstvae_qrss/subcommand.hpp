@@ -8,7 +8,10 @@
 //   encode.cpp     qrss_encode.py    (only with the codec: SSTVAE_BUILD_CODEC)
 //   beacon.cpp     qrss_beacon.py
 //   transmit.cpp   qrss_transmit.py
-//   receive.cpp, listen.cpp, decode.cpp later (plan stages 2c and 3)
+//   receive.cpp    qrss_receive.py   (--no-store only; --image with the codec)
+//   decode.cpp     qrss_decode.py    (--em and --retro not yet; pictures with the codec)
+//   listen.cpp     qrss_listen.py    (pictures with the codec; qrss/listen_api.hpp
+//                                     is the same listener in process)
 //
 // The contract each one keeps with its Python script: the same argument
 // names, defaults and choices (argparse.hpp parses them argparse's way and
