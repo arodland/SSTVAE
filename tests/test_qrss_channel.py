@@ -453,6 +453,15 @@ def test_npz_refuses_what_save_npz_never_writes(tmp_path):
         with open(ok, "wb") as f:
             np.savez(f, **{**members, member: value})
         assert getattr(ch.load_npz(ok), member) == int(value)
+    # complex64 in the other byte order (a big-endian host's save_npz) is
+    # complex64 too: read, in this host's order
+    be = tmp_path / "ok-fe-swapped.npz"
+    swapped = sim.fe.astype(np.dtype(np.complex64).newbyteorder("S"))
+    with open(be, "wb") as f:
+        np.savez(f, **{**members, "fe": swapped})
+    back = ch.load_npz(be).fe
+    assert back.dtype == np.complex64 and back.dtype.isnative
+    np.testing.assert_array_equal(back, sim.fe)
 
 
 def test_reproducible_from_seed():

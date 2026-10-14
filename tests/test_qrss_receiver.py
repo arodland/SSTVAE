@@ -188,11 +188,12 @@ def _plain_json_fields(p):
     return out
 
 
-def test_pass_fields_are_plain_json():
+def test_pass_fields_are_plain_json(monkeypatch):
     """json.dumps takes every field a pass hands a sidecar or the store as
     it stands, cw.agrees included: a bool, not the np.bool_ a comparison
-    with cwid's np.float64 Z makes."""
-    p, *_ = received(snr=-15.0)
+    with cwid's np.float64 Z makes. (The -6 dB pass is test_qrss_smoke's,
+    shared through `received`'s cache.)"""
+    p, trs, *_ = received(snr=-6.0)
     assert p.cw is not None and p.header is not None
     assert type(p.cw.agrees) is bool and p.cw.agrees is True
     fields = _plain_json_fields(p)
@@ -201,7 +202,7 @@ def test_pass_fields_are_plain_json():
         assert not isinstance(v, np.bool_), k
     assert json.loads(json.dumps(fields))["cw.agrees"] is True
     # another header's call, and no header (_cw_result asked directly)
-    tr = received(snr=-15.0)[1][-1]
+    tr = trs[-1]
     other = dataclasses.replace(p.header, callsign="W1AW")
     cw, _ = RX._cw_result(tr, frame.SHORT, other)
     assert type(cw.agrees) is bool, cw
@@ -209,12 +210,28 @@ def test_pass_fields_are_plain_json():
     cw, _ = RX._cw_result(tr, frame.SHORT, None)
     assert cw.agrees is None
     json.dumps(dataclasses.asdict(cw))
+    # the branch a numpy comparison reaches: nothing read with confidence,
+    # so the match against the header's call decides (z > Z_ACCEPT). A
+    # read is what a strong pass always has, so it is taken away here, and
+    # the match is handed back as a numpy scalar (cwid.match returns a
+    # float today, which is why the pass above cannot show the np.bool_;
+    # agrees must be a bool whatever z is). Only the reference's
+    # _cw_result sees the stubs: a native row reads and matches itself.
+    match = RX.cwid.match
+    monkeypatch.setattr(RX.cwid, "read", lambda *a, **k: None)
+    monkeypatch.setattr(RX.cwid, "match", lambda *a, **k: np.float64(match(*a, **k)))
+    cw, _ = RX._cw_result(tr, frame.SHORT, p.header)
+    if RX._cw_result.__module__ == RX.__name__:
+        assert cw.text is None and cw.z_match > RX.Z_ACCEPT, cw
+    assert type(cw.agrees) is bool and cw.agrees is True, cw
+    json.dumps(dataclasses.asdict(cw))
 
 
 def test_cli_checks_the_image_before_receiving(tmp_path, monkeypatch):
     """qrss_receive.py refuses an --image it could not save, before the
     input is read: a missing directory, or an extension Pillow names no
-    format by. A name it can save goes on to the receive."""
+    format by, or by one Pillow can read but not write. A name it can save
+    goes on to the receive."""
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("qrss_receive", REPO / "qrss_receive.py")
@@ -241,7 +258,9 @@ def test_cli_checks_the_image_before_receiving(tmp_path, monkeypatch):
             (tmp_path / "pic.xyz", None, f"--image {tmp_path / 'pic.xyz'}: unknown image file extension '.xyz' "
                                          "(Pillow names its formats by the extension)"),
             (tmp_path / "pic", None, f"--image {tmp_path / 'pic'}: unknown image file extension '' "
-                                     "(Pillow names its formats by the extension)")):
+                                     "(Pillow names its formats by the extension)"),
+            (tmp_path / "pic.PSD", None, f"--image {tmp_path / 'pic.PSD'}: Pillow reads PSD (.psd) but "
+                                         "cannot write it")):
         with pytest.raises(SystemExit) as e:
             main("--image", str(image), *(["--slot", slot] if slot else []))
         assert str(e.value) == want, (image, slot)

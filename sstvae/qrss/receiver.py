@@ -242,8 +242,9 @@ def _cw_result(tr: track.TrackResult, spec: FrameSpec, hdr) -> tuple[CwIdResult 
     if call is not None:
         z = cwid.match(soft, call)
         # a confident read of another call disagrees, whatever the match; a
-        # Python bool (z > Z_ACCEPT on cwid's np.float64 is an np.bool_, which
-        # json.dumps refuses wherever a sidecar or the store writes the pass)
+        # Python bool whatever z's type (cwid.match returns a float, but
+        # z > Z_ACCEPT on a numpy scalar is an np.bool_, which json.dumps
+        # refuses wherever a sidecar or the store writes the pass)
         agrees = bool((text == call) or (text is None and z > Z_ACCEPT))
         known = (keying_units(call), ook) if z > Z_ACCEPT else None
     else:

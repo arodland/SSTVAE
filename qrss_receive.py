@@ -40,8 +40,9 @@ unless --no-store. The slot's whole front-end stream is also kept in the
 --no-passband or --no-store), where `qrss_decode.py --retro` later
 template-searches it for passes too weak to detect now. --image renders the single pass (FULL frames with a
 decoded header only) with the codec (--model DIR, --precision); a name
-the picture could not be saved under (no such directory, or an extension
-Pillow names no format by) is refused before the receive.
+the picture could not be saved under (no such directory, an extension
+Pillow names no format by, or one of a format it only reads) is refused
+before the receive.
 """
 
 import argparse
@@ -74,16 +75,20 @@ def parse_time(s: str) -> float:
 def check_image(image: Path) -> None:
     """Refuse an --image the picture could not be saved under, before the
     receive (minutes of work on a FULL slot, then Image.save's error): its
-    directory missing, or an extension Pillow names no format by (the one
-    Image.save looks the format up by)."""
+    directory missing, an extension Pillow names no format by (the one
+    Image.save looks the format up by), or one of a format Pillow only
+    reads."""
     if not image.parent.is_dir():
         raise SystemExit(f"--image {image}: {image.parent}: no such directory")
     from PIL import Image
 
     ext = os.path.splitext(os.fspath(image))[1].lower()
-    if ext not in Image.registered_extensions():
+    fmt = Image.registered_extensions().get(ext)
+    if fmt is None:
         raise SystemExit(f"--image {image}: unknown image file extension {ext!r} "
                          "(Pillow names its formats by the extension)")
+    if fmt.upper() not in Image.SAVE:      # .psd, .xpm, ...: Image.save's KeyError
+        raise SystemExit(f"--image {image}: Pillow reads {fmt} ({ext}) but cannot write it")
 
 
 def load_capture(path: Path, q: int | None, start: float | None):

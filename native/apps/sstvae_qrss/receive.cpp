@@ -385,17 +385,26 @@ int run(const std::string& prog, const std::vector<std::string>& argv, std::ostr
     if (const auto& im = args->text("image")) {
         // check_image's first refusal: the directory the picture would be
         // saved in, str(Path(image).parent) as pathlib prints it, missing
-        // (the extension is receive_image.cpp's refusal, PNG only).
+        // (the extension is receive_image.cpp's refusal, PNG only). On
+        // Windows a backslash separates too, as it does for WindowsPath
+        // (which would print it where this prints '/'): split on '/' alone,
+        // C:\no\pic.png would have '.' for its directory and pass.
         {
             const std::string& t = *im;
+#ifdef _WIN32
+            const auto is_sep = [](char c) { return c == '/' || c == '\\'; };
+#else
+            const auto is_sep = [](char c) { return c == '/'; };
+#endif
             // posixpath.splitroot: "//" kept as the root only when exactly two
-            const std::size_t rlen =
-                t.empty() || t[0] != '/' ? 0 : (t.size() > 1 && t[1] == '/' && !(t.size() > 2 && t[2] == '/')) ? 2 : 1;
+            const std::size_t rlen = t.empty() || !is_sep(t[0]) ? 0
+                                     : (t.size() > 1 && is_sep(t[1]) && !(t.size() > 2 && is_sep(t[2]))) ? 2
+                                                                                                          : 1;
             const std::string root = t.substr(0, rlen);
             std::vector<std::string> parts;   // without empty and '.' components
             std::string cur;
             for (std::size_t k = rlen; k <= t.size(); ++k) {
-                if (k == t.size() || t[k] == '/') {
+                if (k == t.size() || is_sep(t[k])) {
                     if (!cur.empty() && cur != ".") parts.push_back(cur);
                     cur.clear();
                 } else {

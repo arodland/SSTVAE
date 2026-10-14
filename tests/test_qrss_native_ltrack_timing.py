@@ -140,15 +140,18 @@ def scen(Lt):
         tracked = []
         orig = LT.verify_track_l
 
-        def spy(*a, _orig=orig, _calls=tracked, **k):
+        cands = []                           # ... and the candidate it was handed
+
+        def spy(*a, _orig=orig, _calls=tracked, _cands=cands, **k):
             _calls.append(k.get("fit", True))
+            _cands.append(a[2])
             return _orig(*a, **k)
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(LT, "verify_track_l", spy)
             v = LT.verify_l(chan, CH_FS, spec, det)
         out[label] = SimpleNamespace(spec=spec, sim=sim, prep=prep, det=det, chan=chan, v=v,
-                                     tracked=tracked)
+                                     tracked=tracked, cands=cands)
     assert out["noise"].v is None
     assert all(s.v is not None for k, s in out.items() if k != "noise"), \
         [k for k, s in out.items() if s.v is None]
@@ -605,6 +608,19 @@ def test_verify_l_noise_tries_the_runners_up(row, scen):
     assert scen["tiny-6"].tracked == [True]
     s = scen["noise"]
     assert row["verify_l"](s.chan, CH_FS, s.spec, s.det) is None
+    # the line's timings are the coarse fit's own answers there: n_best 1's
+    # first (the timing verify_track fitted itself before the grid was
+    # shared), then n_best V's runners-up (its first skipped, as before)
+    assert [c.timing for c in s.cands[:2]] == [None, None]
+    line = s.cands[2].path
+    assert all(c.path is line and c.timing is not None for c in s.cands[2:])
+    fn = T.freq_path_spline(line)
+    kw = dict(t0_index=s.chan.t0_index, z_d=T.derotate(s.chan, fn))
+    want = [LT.fit_timing_l(s.chan, CH_FS, fn, s.spec, **kw)]
+    want += LT.fit_timing_l(s.chan, CH_FS, fn, s.spec, n_best=T.V_TIMING_TRIES, **kw)[1:]
+    assert len(want) == len(s.cands) - 2, (len(want), len(s.cands))
+    for k, (c, w) in enumerate(zip(s.cands[2:], want)):
+        _timing_same(c.timing, w, ("noise line try", k))
 
 
 def _track_close(g, r, what):

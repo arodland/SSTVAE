@@ -932,9 +932,13 @@ def load_npz(path) -> Sim:
             time_scale=float(d["truth_time_scale"]),
             u_data=d["truth_u_data"] if "truth_u_data" in d else None)
         fe = d["fe"]
-        if fe.dtype != np.complex64 or fe.ndim != 1:
+        # complex64 in either byte order: '>c8' is what save_npz writes on a
+        # big-endian host, and np.load reads it anywhere (the native reader
+        # refuses every big-endian member, test_qrss_native_infra).
+        if fe.dtype.newbyteorder("=") != np.complex64 or fe.ndim != 1:
             raise ValueError(f"simfile: fe is {fe.dtype.str} of {fe.ndim} dimensions, not complex64 "
                              "(n,) as qrss_simulate.py writes it")
+        fe = fe.astype(np.complex64, copy=False)
         fs = int(d["fs"])
         if fs <= 0:
             raise ValueError(f"simfile: fs {fs} is not a sample rate")
