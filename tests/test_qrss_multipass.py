@@ -25,6 +25,7 @@ Deviations from the design, both measured here:
 
 import io
 import json
+import math
 import os
 
 import numpy as np
@@ -932,15 +933,28 @@ _MALFORMED_ACC = {
                                  "members": [{"segment": None, "uid": uid}]},
     "segment=list": lambda uid: {"callsign": "X", "picture_id": 1, "mode": 2,
                                  "members": [{"segment": [0], "uid": uid}]},
+    # (a row is due from each of these but for its one bad value)
+    "callsign=int": lambda uid: {"callsign": 5, "picture_id": 1, "mode": 2,
+                                 "members": [{"segment": 0, "uid": uid}]},
+    "callsign=null": lambda uid: {"callsign": None, "picture_id": 1, "mode": 2,
+                                  "members": [{"segment": 0, "uid": uid}]},
+    "segment=inf": lambda uid: {"callsign": "X", "picture_id": 1, "mode": 2,
+                                "members": [{"segment": math.inf, "uid": uid}]},
+    "mode=inf": lambda uid: {"callsign": "X", "picture_id": 1, "mode": math.inf,
+                             "members": [{"segment": 0, "uid": uid}]},
+    "picture_id=-inf": lambda uid: {"callsign": "X", "picture_id": -math.inf, "mode": 2,
+                                    "members": [{"segment": 0, "uid": uid}]},
 }
 
 
 @pytest.mark.parametrize("case", list(_MALFORMED_ACC))
 def test_due_hides_only_a_malformed_accumulator(store, case):
     """An accumulator JSON whose values are not the types it holds (a hand
-    edit) gives no due rows and hides nothing else: its TypeError escaped
-    due() -- except (OSError, KeyError, ValueError) -- and with it every
-    other accumulator's rows."""
+    edit) gives no due rows and hides nothing else: its TypeError (or the
+    OverflowError of int() of an infinity) escaped due() -- except
+    (OSError, KeyError, ValueError) -- and with it every other
+    accumulator's rows; a callsign that is no string gave rows keyed by
+    it, where the C++ store passes the file over."""
     sp = synthetic_picture(21, mode=2)
     p0 = make_pass_result(_air(sp, 0), 1.0, seed=1, q=Q_TEST, f_hz=1205.47)
     store.add_pass(p0)

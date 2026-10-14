@@ -465,8 +465,9 @@ class Store:
 
         An accumulator that cannot be read through (being written, a
         member's pass expired, or a hand-edited file whose values are not
-        the types it holds) contributes no rows at all, not the ones it
-        gave before failing.
+        the types it holds -- a callsign that is no string, a number
+        int() cannot take, an infinite one included) contributes no rows
+        at all, not the ones it gave before failing.
         """
         out = []
         for j in sorted((self.root / "acc").glob("*.json")):
@@ -478,11 +479,14 @@ class Store:
                     k, info = int(m["segment"]), self.pass_info(m["uid"])
                     for g in range(k + 1, int(meta["mode"]) + 1):
                         if g not in have and info["q"] + 2 * (g - k) == int(q):
-                            rows.append(dict(key=(meta["callsign"], int(meta["picture_id"])),
+                            call = meta["callsign"]
+                            if not isinstance(call, str):
+                                raise TypeError(f"callsign {call!r} is not a str")
+                            rows.append(dict(key=(call, int(meta["picture_id"])),
                                              segment=g, f_hz=info["f_hz"], q=info["q"],
                                              waveform=info["waveform"],
                                              frame=info["frame"]))
-            except (OSError, KeyError, ValueError, TypeError):
+            except (OSError, KeyError, ValueError, TypeError, OverflowError):
                 continue                  # (an accumulator being written, or a pass expired)
             out.extend(rows)
         return out

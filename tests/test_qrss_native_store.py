@@ -516,6 +516,17 @@ def _malformed(uid):
                       "members": [{"segment": 0, "uid": uid}]},
         "segment=null": {"callsign": "X", "picture_id": 1, "mode": 2,
                          "members": [{"segment": None, "uid": uid}]},
+        # (a row is due from each of these but for its one bad value)
+        "callsign=int": {"callsign": 5, "picture_id": 1, "mode": 2,
+                         "members": [{"segment": 0, "uid": uid}]},
+        "segment=inf": {"callsign": "X", "picture_id": 1, "mode": 2,
+                        "members": [{"segment": math.inf, "uid": uid}]},
+        "mode=inf": {"callsign": "X", "picture_id": 1, "mode": math.inf,
+                     "members": [{"segment": 0, "uid": uid}]},
+        "picture_id=-inf": {"callsign": "X", "picture_id": -math.inf, "mode": 2,
+                            "members": [{"segment": 0, "uid": uid}]},
+        # (an integer past int64: TypeError there, the C++ reader's OverflowError here)
+        "members=10**20": {"callsign": "X", "picture_id": 1, "mode": 2, "members": 10**20},
     }
 
 

@@ -959,6 +959,8 @@ std::vector<Due> Store::due(std::int64_t q) {
             continue;
         } catch (const math::TypeError&) {        // TypeError: a hand-edited file whose
             continue;                             // values are not the types it holds
+        } catch (const std::overflow_error&) {    // OverflowError: int() of an infinity, or
+            continue;                             // (here) an integer past int64 in the file
         }
         out.insert(out.end(), std::make_move_iterator(rows.begin()), std::make_move_iterator(rows.end()));
     }

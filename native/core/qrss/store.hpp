@@ -320,7 +320,13 @@ public:
     std::vector<Key> open_keys() const;
     // The later passes of pictures partly received that are due in slot q
     // (store.py's `due`; an accumulator that cannot be read through gives no
-    // rows at all).
+    // rows at all: a file being written, a member's pass expired, or a hand
+    // edit whose values are not the types it holds -- OSError, KeyError,
+    // ValueError, TypeError and OverflowError there, this one's FileError,
+    // KeyError, std::invalid_argument, math::TypeError and
+    // std::overflow_error). One deviation: an integer past int64 anywhere in
+    // the file (pyjson's limit) hides the file, where store.py reads it and
+    // may still give its rows.
     std::vector<Due> due(std::int64_t q);
     // The key of the accumulator holding pass `uid`.
     std::optional<Key> find_member(std::string_view uid) const;

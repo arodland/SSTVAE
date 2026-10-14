@@ -645,8 +645,9 @@ static void test_reference_fixes() {
 
 // due: an accumulator JSON whose values are not the types it holds (a hand
 // edit) hides only itself -- store.py's except (OSError, KeyError,
-// ValueError, TypeError); a null mode or segment was a TypeError out of
-// py_int, which escaped due() and with it every other accumulator's rows.
+// ValueError, TypeError, OverflowError); a null mode or segment was a
+// TypeError out of py_int, and an infinite one py_int's std::overflow_error,
+// which escaped due() and with it every other accumulator's rows.
 static void test_due_hides_a_malformed_accumulator() {
     check::current_step = "due: a malformed accumulator";
     const std::string root = fresh_root("due_malformed");
@@ -670,6 +671,14 @@ static void test_due_hides_a_malformed_accumulator() {
         {"mode=null", R"({"callsign": "X", "picture_id": 1, "mode": null, "members": [{"segment": 0, "uid": )" + uid + "}]}"},
         {"segment=null", R"({"callsign": "X", "picture_id": 1, "mode": 2, "members": [{"segment": null, "uid": )" + uid + "}]}"},
         {"segment=[0]", R"({"callsign": "X", "picture_id": 1, "mode": 2, "members": [{"segment": [0], "uid": )" + uid + "}]}"},
+        // (a row is due from each of these but for its one bad value: an
+        // infinity is int()'s OverflowError, an integer past int64 the
+        // reader's, and a callsign that is no string store.py's TypeError)
+        {"callsign=5", R"({"callsign": 5, "picture_id": 1, "mode": 2, "members": [{"segment": 0, "uid": )" + uid + "}]}"},
+        {"segment=Infinity", R"({"callsign": "X", "picture_id": 1, "mode": 2, "members": [{"segment": Infinity, "uid": )" + uid + "}]}"},
+        {"mode=Infinity", R"({"callsign": "X", "picture_id": 1, "mode": Infinity, "members": [{"segment": 0, "uid": )" + uid + "}]}"},
+        {"picture_id=-Infinity", R"({"callsign": "X", "picture_id": -Infinity, "mode": 2, "members": [{"segment": 0, "uid": )" + uid + "}]}"},
+        {"members=10**20", R"({"callsign": "X", "picture_id": 1, "mode": 2, "members": 100000000000000000000})"},
     };
     const fs::path bad = fs::path(root) / "acc" / "AAA_00000001.json";   // (sorted before the good one)
     for (const auto& [what, text] : cases) {

@@ -128,8 +128,10 @@ void test_failures(const fs::path& dir) {
     } catch (const qrss::rawfile::FileError& e) {
         check::is_true(e.code().category() == std::generic_category(), "an errno");
         check::equal(e.code().value(), ENOENT, "ENOENT");
-        check::is_true(e.path().find("/nope/.x.png.") != std::string::npos && e.path().size() > 4 &&
-                           e.path().substr(e.path().size() - 4) == ".tmp",
+        // (either separator: on Windows the path is built with '\\')
+        const bool beside = e.path().find("/nope/.x.png.") != std::string::npos ||
+                            e.path().find("\\nope\\.x.png.") != std::string::npos;
+        check::is_true(beside && e.path().size() > 4 && e.path().substr(e.path().size() - 4) == ".tmp",
                        "names the temporary: " + e.path());
     }
     // the target is a directory: the move fails, the temporary is removed
