@@ -29,9 +29,10 @@ std::optional<std::string> opt_path(const py::handle& v) {
 }
 
 py::object opt_str(const std::optional<std::string>& s) {
-    return s ? py::object(py::str(PyUnicode_DecodeUTF8(s->data(), static_cast<py::ssize_t>(s->size()), "replace"),
-                                  false))
-             : py::object(py::none());
+    if (!s) return py::none();
+    PyObject* o = PyUnicode_DecodeUTF8(s->data(), static_cast<py::ssize_t>(s->size()), "replace");
+    if (o == nullptr) throw py::error_already_set();
+    return py::reinterpret_steal<py::str>(o);
 }
 
 void bind(py::module_& q) {
