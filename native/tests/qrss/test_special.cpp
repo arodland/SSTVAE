@@ -23,6 +23,11 @@
 //   out.write(special.zeta(unit(splitmix(301, 64)) * 20.0 + 1.01,
 //                          unit(splitmix(302, 64)) * 50.0 + 0.01).tobytes())
 //   sha256(out.getvalue())
+//
+// And the tails under em.py's template statistic, against em_pins.hpp
+// (gen_em_pins.py, which has the formulas): ndtri and norm.isf through
+// one digest (bit for bit), CPython's math.lgamma through another, and
+// gamma.logsf as a table to 1e-12 relative, with the edges scipy defines.
 
 #include <cmath>
 #include <cstdint>
@@ -32,6 +37,7 @@
 #include <string>
 #include <vector>
 
+#include "em_pins.hpp"
 #include "infra_testgen.hpp"
 #include "math/special.hpp"
 #include "qrss_check.hpp"
@@ -113,11 +119,98 @@ static void test_pinned() {
                  "gammainccinv(121 / (11 + 20/36), 1e-4)");
 }
 
+// gen_em_pins.ndtri_inputs / ndtri_digest
+static void test_ndtri_isf() {
+    std::vector<double> q;
+    for (const int j : em_pins::NDTRI_J)
+        for (const double u : units(400 + static_cast<std::uint64_t>(j), 32)) q.push_back(u * std::ldexp(1.0, -j));
+    for (const double u : units(450, 64)) q.push_back(1.0 - u);
+    for (const double v : em_pins::NDTRI_SUBNORMAL) q.push_back(v);
+    std::vector<std::uint8_t> out;
+    for (const double v : q) append(out, math::ndtri(v));
+    for (const double v : q) append(out, math::norm_isf(v));
+    check::equal(util::to_hex(util::sha256(std::span<const std::uint8_t>(out))), std::string(em_pins::NDTRI_DIGEST),
+                 "ndtri / norm_isf digest");
+
+    const double inf = std::numeric_limits<double>::infinity();
+    // scipy: ndtri(0) = -inf, ndtri(1) = inf, ndtri(0.5) = 0, ndtri(-0.1) = ndtri(1.1) = ndtri(nan) = nan;
+    // norm.isf(0) = inf, isf(1) = -inf, isf(0.5) = +0.0, nan outside [0, 1]
+    check::equal(math::ndtri(0.0), -inf, "ndtri(0)");
+    check::equal(math::ndtri(1.0), inf, "ndtri(1)");
+    check::equal(math::ndtri(0.5), 0.0, "ndtri(0.5)");
+    for (const double bad : {-0.1, 1.1, std::numeric_limits<double>::quiet_NaN()}) {
+        check::is_true(std::isnan(math::ndtri(bad)), "ndtri outside [0, 1] is nan");
+        check::is_true(std::isnan(math::norm_isf(bad)), "norm_isf outside [0, 1] is nan");
+    }
+    check::equal(math::norm_isf(0.0), inf, "norm_isf(0)");
+    check::equal(math::norm_isf(1.0), -inf, "norm_isf(1)");
+    check::is_true(math::norm_isf(0.5) == 0.0 && !std::signbit(math::norm_isf(0.5)), "norm_isf(0.5) is +0.0");
+    // float(stats.norm.isf(1e-6)).hex()
+    check::equal(math::norm_isf(1e-6), 0x1.30381a9799f7ep+2, "norm_isf(1e-6)");
+}
+
+// gen_em_pins.lgamma_inputs / lgamma_digest
+static void test_py_lgamma() {
+    std::vector<double> xs = units(500, 256);
+    for (double& v : xs) v = v * 60.0 - 20.0;
+    for (const double v : units(501, 64)) xs.push_back(v * 2e6);
+    for (const double v : units(502, 64)) xs.push_back(v * 1e-3);
+    for (int i = 1; i <= 200; ++i) xs.push_back(static_cast<double>(i) * 0.5 + 0.25);
+    std::vector<std::uint8_t> out;
+    for (const double v : xs) append(out, math::py_lgamma(v));
+    check::equal(util::to_hex(util::sha256(std::span<const std::uint8_t>(out))), std::string(em_pins::LGAMMA_DIGEST),
+                 "math.lgamma digest");
+    const double inf = std::numeric_limits<double>::infinity();
+    // math.lgamma: nan for nan, inf for +-inf, 0 for 1 and 2; where Python
+    // raises (a pole, an overflow) this returns inf
+    check::is_true(std::isnan(math::py_lgamma(std::numeric_limits<double>::quiet_NaN())), "lgamma(nan)");
+    check::equal(math::py_lgamma(inf), inf, "lgamma(inf)");
+    check::equal(math::py_lgamma(-inf), inf, "lgamma(-inf)");
+    check::equal(math::py_lgamma(1.0), 0.0, "lgamma(1)");
+    check::equal(math::py_lgamma(2.0), 0.0, "lgamma(2)");
+    check::equal(math::py_lgamma(0.0), inf, "lgamma(0): Python's ValueError");
+    check::equal(math::py_lgamma(-3.0), inf, "lgamma(-3): Python's ValueError");
+    check::equal(math::py_lgamma(1e308), inf, "lgamma(1e308): Python's OverflowError");
+    // float(math.lgamma(0.5)).hex() = log(sqrt(pi))
+    check::equal(math::py_lgamma(0.5), 0x1.250d048e7a1c0p-1, "lgamma(0.5)");
+}
+
+static void test_gamma_logsf() {
+    double worst = 0.0;
+    for (const em_pins::LogSf& r : em_pins::GAMMA_LOGSF) {
+        const double got = math::gamma_logsf(r.x, r.a);
+        char what[128];
+        std::snprintf(what, sizeof what, "gamma.logsf(%a, %a)", r.x, r.a);
+        if (r.logsf == 0.0 || std::isinf(r.logsf)) {
+            check::equal(got, r.logsf, what);
+            continue;
+        }
+        const double rel = std::abs(got - r.logsf) / std::abs(r.logsf);
+        if (rel > worst) worst = rel;
+        check::is_true(rel <= 1e-12, std::string(what) + " to 1e-12");
+    }
+    std::printf("gamma_logsf: worst relative error against scipy %.3g over %zu values\n", worst,
+                std::size(em_pins::GAMMA_LOGSF));
+    const double inf = std::numeric_limits<double>::infinity(), nan = std::numeric_limits<double>::quiet_NaN();
+    // scipy: nan for a <= 0 or a nan x; 0 for x <= 0; -inf at x = inf
+    check::is_true(std::isnan(math::gamma_logsf(1.0, 0.0)), "gamma.logsf(1, a=0) is nan");
+    check::is_true(std::isnan(math::gamma_logsf(1.0, -2.0)), "gamma.logsf(1, a=-2) is nan");
+    check::is_true(std::isnan(math::gamma_logsf(nan, 3.0)), "gamma.logsf(nan, 3) is nan");
+    check::equal(math::gamma_logsf(0.0, 3.0), 0.0, "gamma.logsf(0, 3)");
+    check::equal(math::gamma_logsf(-5.0, 3.0), 0.0, "gamma.logsf(-5, 3)");
+    check::equal(math::gamma_logsf(-inf, 3.0), 0.0, "gamma.logsf(-inf, 3)");
+    check::equal(math::gamma_logsf(inf, 3.0), -inf, "gamma.logsf(inf, 3)");
+    check::equal(math::gamma_logsf(4800.0, 300.0), -inf, "gamma.logsf(4800, 300): gammaincc underflows");
+}
+
 int main() {
     try {
         test_digest();
         test_edges();
         test_pinned();
+        test_ndtri_isf();
+        test_py_lgamma();
+        test_gamma_logsf();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;

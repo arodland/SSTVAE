@@ -33,6 +33,7 @@
 #include <utility>
 #include <vector>
 
+#include "qrss/em.hpp"
 #include "qrss/pyjson.hpp"
 #include "qrss/pynum.hpp"
 #include "qrss/store.hpp"
@@ -97,8 +98,9 @@ PictureKey parse_key(std::string_view s);
 std::string member_wave(store::Store& store, const pyjson::Value& uid);
 
 // em.acc_mean_w_db(acc): 10 log10 of the mean W over the latents heard
-// (W > 0), -inf when none is.
-double acc_mean_w_db(const store::Accumulator& acc);
+// (W > 0), -inf when none is. It lives in qrss/em.hpp (em.py's own) and is
+// re-exported here for the callers that knew it as decode's.
+using em::acc_mean_w_db;
 
 // acc_lines(acc, store): the summary line, one line per segment, one per
 // member (with its member_wave when `store` is given). PyException

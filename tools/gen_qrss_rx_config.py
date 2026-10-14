@@ -57,7 +57,7 @@ BANNER = ("// GENERATED FILE -- DO NOT EDIT.\n"
           "// Regenerate with: python tools/gen_qrss_rx_config.py\n")
 
 MODULES = ("track", "ltrack", "frontend", "acquire", "demod", "ldemod", "cwid", "receiver",
-           "render", "rules", "ce", "lwave", "live", "store", "associate")
+           "render", "rules", "ce", "lwave", "live", "store", "associate", "em")
 
 MAX_ARRAY = 256
 

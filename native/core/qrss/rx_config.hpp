@@ -307,4 +307,19 @@ inline constexpr double HDR_AGREE_Z = 0x1.8000000000000p+1;  // 3.0
 inline constexpr double HDR_OTHER_FLIP = 0x1.3333333333333p-2;  // 0.3
 }  // namespace associate
 
+// --- sstvae/qrss/em.py ---
+namespace em {
+inline constexpr int EM_ROUNDS = 3;
+inline constexpr double EM_TOL_DB = 0x1.999999999999ap-5;  // 0.05
+inline constexpr double TS_CHUNK_S = 0x1.0000000000000p+1;  // 2.0
+inline constexpr int TS_NFFT = 2048;
+inline constexpr double TS_DF_HZ = 0x1.0000000000000p+0;  // 1.0
+inline constexpr double TS_TAU_S = 0x1.4000000000000p+1;  // 2.5
+inline constexpr int TS_PPM_STEPS = 2;
+inline constexpr double TS_SLIP_SAMPLES = 0x1.0000000000000p+1;  // 2.0
+inline constexpr double TS_CH_REACH_HZ = 0x1.9000000000000p+6;  // 100.0
+inline constexpr double RETRO_MIN_COVERAGE = 0x1.ccccccccccccdp-1;  // 0.9
+inline constexpr double RETRO_SAME_HZ = 0x1.0000000000000p+0;  // 1.0
+}  // namespace em
+
 }  // namespace sstvae::qrss::rxconfig

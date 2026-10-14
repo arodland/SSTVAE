@@ -145,8 +145,10 @@
 
 #include "qrss/listener.hpp"
 #include "qrss/live.hpp"
+#include "qrss/passband.hpp"
 #include "qrss/source.hpp"
 #include "qrss/sources.hpp"
+#include "qrss/store.hpp"
 
 namespace sstvae::qrss::listen {
 
@@ -334,6 +336,15 @@ public:
     // listener had it).
     std::optional<std::string> store_root() const;
     std::optional<std::string> passband_dir() const;
+    // The store and the passband store themselves, when this session holds
+    // them (null otherwise), for a caller that works on the same store in
+    // process -- em_api.hpp's refine and retro, a picture list -- so it
+    // shares the session's caches and its in-process locks (see em_api.hpp,
+    // "SHARING THE STORE"). Any thread; the objects are thread-safe
+    // (store.hpp, passband.hpp) and stay valid while a pointer is held,
+    // the session ended or not.
+    std::shared_ptr<store::Store> store() const;
+    std::shared_ptr<passband::PassbandStore> passband() const;
     const live::LiveConfig& config() const;
     // The listener's tiles (newest slot first) and its last log lines.
     std::vector<live::Tile> tiles() const;

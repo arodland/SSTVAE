@@ -516,10 +516,15 @@ Accumulator Accumulator::empty(Key key, std::int64_t mode, std::int64_t codec_id
     return a;
 }
 
+std::string member_uid(const Value& uid) {
+    if (uid.kind() != Value::Kind::String) throw std::invalid_argument("bad pass uid " + pyjson::repr(uid));
+    return uid.as_string();
+}
+
 std::vector<std::string> Accumulator::uids() const {
     std::vector<std::string> out;
     out.reserve(members.size());
-    for (const Value& m : members) out.push_back(m.at("uid").as_string("a member's uid"));
+    for (const Value& m : members) out.push_back(member_uid(m.at("uid")));
     return out;
 }
 
@@ -552,7 +557,7 @@ Accumulator::Sums Accumulator::sums(Store& store, std::optional<std::string_view
     }
     for (const Value& m : members) {
         if (uid_matches(m.at("uid"), skip)) continue;
-        const ZWPtr zw = store.pass_zw(m.at("uid").as_string("a member's uid"));
+        const ZWPtr zw = store.pass_zw(member_uid(m.at("uid")));
         const auto idx = canonical_index(py_int(m.at("segment")), static_cast<std::int64_t>(zw->z.size()));
         const std::size_t base = static_cast<std::size_t>(py_int(m.at("segment"))) * GROUP_LATENTS;
         for (std::size_t i = 0; i < idx.size(); ++i) {
@@ -944,7 +949,7 @@ std::vector<Due> Store::due(std::int64_t q) {
             for (const Value& m : meta.at("members").items()) have.insert(py_int(m.at("segment")));
             for (const Value& m : meta.at("members").items()) {
                 const std::int64_t k = py_int(m.at("segment"));
-                const PassInfo info = pass_info(m.at("uid").as_string("a member's uid"));
+                const PassInfo info = pass_info(member_uid(m.at("uid")));
                 for (std::int64_t g = k + 1; g < py_int(meta.at("mode")) + 1; ++g) {
                     if (!have.count(g) && info.q + 2 * (g - k) == q)
                         rows.push_back(Due{Key{meta.at("callsign").as_string("callsign"), py_int(meta.at("picture_id"))},
@@ -1042,7 +1047,7 @@ std::optional<Value> Store::twin(const Accumulator& acc, std::int64_t q, double 
     const auto lk = hold();
     for (const Value& m : acc.members) {
         if (uid_matches(m.at("uid"), uid) || py_int(m.at("segment")) != segment) continue;
-        const PassInfo o = pass_info(m.at("uid").as_string("a member's uid"));
+        const PassInfo o = pass_info(member_uid(m.at("uid")));
         double f_o = o.f_hz, f = f_hz;
         if (waveform && o.waveform != *waveform) {
             constexpr double off = rxconfig::receiver::L_EXCLUDE_OFFSET_HZ;

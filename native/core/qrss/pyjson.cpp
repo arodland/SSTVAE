@@ -13,6 +13,7 @@
 
 #include "qrss/frame.hpp"
 #include "qrss/pynum.hpp"
+#include "qrss/pytext.hpp"
 
 namespace sstvae::qrss::pyjson {
 
@@ -549,6 +550,28 @@ bool Value::operator==(const Value& o) const {
         case Kind::Object: return keys_ == o.keys_ && items_ == o.items_;
     }
     return false;
+}
+
+std::string repr(const Value& v) {
+    switch (v.kind()) {
+        case Value::Kind::Null: return "None";
+        case Value::Kind::Bool: return v.as_bool() ? "True" : "False";
+        case Value::Kind::Int: return std::to_string(v.as_int());
+        case Value::Kind::Float: return frame::py_repr(v.as_double());
+        case Value::Kind::String: return pytext::repr(std::string_view(v.as_string()));
+        case Value::Kind::Array: {
+            std::string out = "[";
+            for (std::size_t k = 0; k < v.items().size(); ++k) out += (k ? ", " : "") + repr(v.items()[k]);
+            return out + "]";
+        }
+        case Value::Kind::Object: {
+            std::string out = "{";
+            for (std::size_t k = 0; k < v.keys().size(); ++k)
+                out += (k ? ", " : "") + pytext::repr(std::string_view(v.keys()[k])) + ": " + repr(v.values()[k]);
+            return out + "}";
+        }
+    }
+    return "?";
 }
 
 std::string dumps(const Value& v) {

@@ -9,7 +9,8 @@
 //   beacon.cpp     qrss_beacon.py
 //   transmit.cpp   qrss_transmit.py
 //   receive.cpp    qrss_receive.py   (--no-store only; --image with the codec)
-//   decode.cpp     qrss_decode.py    (--em and --retro not yet; pictures with the codec)
+//   decode.cpp     qrss_decode.py    (pictures with the codec; qrss/em_api.hpp is
+//                                     --em and --retro in process)
 //   listen.cpp     qrss_listen.py    (pictures with the codec; qrss/listen_api.hpp
 //                                     is the same listener in process)
 //
