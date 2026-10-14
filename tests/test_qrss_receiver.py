@@ -46,6 +46,7 @@ Deviations (see also the module docstrings of `track`, `demod`, `cwid`):
 
 import dataclasses
 import functools
+import json
 import math
 import subprocess
 import sys
@@ -170,6 +171,90 @@ def test_r2_steady_loss_and_pass_contents():
     assert truth_timing_err_T(p, sim, frame.SHORT) < 0.02
     assert np.all(np.isfinite(p.z)) and np.all(p.w > 0)
     assert p.z.dtype == np.float32 and p.w.dtype == np.float32 and len(p.hdr_llr) == 2474
+
+
+def _plain_json_fields(p):
+    """Every scalar a sidecar or the store writes from a pass, by name, as
+    the pass holds it (no _jsonable on the way)."""
+    out = {k: getattr(p, k) for k in ("uid", "q", "frame", "waveform", "f_hz", "ch_fs", "ch_t0_index",
+                                      "estimator", "em_round")}
+    out["f_mix_hz"] = str(p.f_mix_hz)
+    for k in ("tau0", "ppm", "gamma", "z"):
+        out[f"timing.{k}"] = getattr(p.timing, k)
+    for k in ("report", "header", "cw"):
+        v = getattr(p, k)
+        if v is not None:
+            out.update({f"{k}.{a}": b for a, b in dataclasses.asdict(v).items()})
+    return out
+
+
+def test_pass_fields_are_plain_json():
+    """json.dumps takes every field a pass hands a sidecar or the store as
+    it stands, cw.agrees included: a bool, not the np.bool_ a comparison
+    with cwid's np.float64 Z makes."""
+    p, *_ = received(snr=-15.0)
+    assert p.cw is not None and p.header is not None
+    assert type(p.cw.agrees) is bool and p.cw.agrees is True
+    fields = _plain_json_fields(p)
+    for k, v in fields.items():
+        json.dumps(v)                      # TypeError names the field's type
+        assert not isinstance(v, np.bool_), k
+    assert json.loads(json.dumps(fields))["cw.agrees"] is True
+    # another header's call, and no header (_cw_result asked directly)
+    tr = received(snr=-15.0)[1][-1]
+    other = dataclasses.replace(p.header, callsign="W1AW")
+    cw, _ = RX._cw_result(tr, frame.SHORT, other)
+    assert type(cw.agrees) is bool, cw
+    json.dumps(dataclasses.asdict(cw))
+    cw, _ = RX._cw_result(tr, frame.SHORT, None)
+    assert cw.agrees is None
+    json.dumps(dataclasses.asdict(cw))
+
+
+def test_cli_checks_the_image_before_receiving(tmp_path, monkeypatch):
+    """qrss_receive.py refuses an --image it could not save, before the
+    input is read: a missing directory, or an extension Pillow names no
+    format by. A name it can save goes on to the receive."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("qrss_receive", REPO / "qrss_receive.py")
+    qr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(qr)
+
+    class Read(Exception):
+        pass
+
+    def load_capture(path, q, start):
+        raise Read(path)
+
+    monkeypatch.setattr(qr, "load_capture", load_capture)
+
+    def main(*argv):
+        monkeypatch.setattr(sys, "argv", ["qrss_receive.py", str(tmp_path / "x.npz"), "--no-store", *argv])
+        qr.main()
+
+    for image, slot, want in (
+            (tmp_path / "no" / "pic.png", None, f"--image {tmp_path / 'no' / 'pic.png'}: {tmp_path / 'no'}: "
+                                                "no such directory"),
+            (tmp_path / "no" / "pic.png", "yesterday", f"--image {tmp_path / 'no' / 'pic.png'}: "
+                                                       f"{tmp_path / 'no'}: no such directory"),
+            (tmp_path / "pic.xyz", None, f"--image {tmp_path / 'pic.xyz'}: unknown image file extension '.xyz' "
+                                         "(Pillow names its formats by the extension)"),
+            (tmp_path / "pic", None, f"--image {tmp_path / 'pic'}: unknown image file extension '' "
+                                     "(Pillow names its formats by the extension)")):
+        with pytest.raises(SystemExit) as e:
+            main("--image", str(image), *(["--slot", slot] if slot else []))
+        assert str(e.value) == want, (image, slot)
+    for name in ("pic.png", "pic.PNG", "pic.jpg"):
+        with pytest.raises(Read):
+            main("--image", str(tmp_path / name))
+    # a relative name in the current directory has a parent too ('.')
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(Read):
+        main("--image", "pic.png")
+    # the slot is still read before the input
+    with pytest.raises(SystemExit, match="slot 1969-12-31T23:45Z is before 1970-01-01T00:00Z"):
+        main("--slot", "1969-12-31T23:45Z")
 
 
 @pytest.mark.slow

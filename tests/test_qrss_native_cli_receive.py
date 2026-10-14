@@ -253,17 +253,19 @@ def inputs(tmp_path_factory):
     _resave(f["ce.npz"], d / "bogus-frame.npz", frame=np.str_("bogus"))
     _resave(f["ce.npz"], d / "v1.npz", frame=np.str_("short-v1"))
     _resave(f["ce.npz"], d / "q-negative.npz", q=np.int64(-5))
+    _resave(f["ce.npz"], d / "fs-zero.npz", fs=np.int64(0))
     with np.load(f["ce.npz"]) as z:
         fe = z["fe"]
     rng = np.random.default_rng(7)
     noise = ((rng.standard_normal(fe.size) + 1j * rng.standard_normal(fe.size)) * np.std(fe) / np.sqrt(2))
     _resave(f["ce.npz"], d / "noise.npz", fe=noise.astype(np.complex64))
+    _resave(f["ce.npz"], d / "fe-c16.npz", fe=fe.astype(np.complex128))
     (d / "not-zip.npz").write_bytes(b"PK\x03\x04" + bytes(range(64)))
     data = bytearray(f["ce.npz"].read_bytes())
     data[data.index(fe[:4].tobytes())] ^= 0x01        # a bit of fe's data: zipfile's CRC check
     (d / "bad-crc.npz").write_bytes(bytes(data))
     for k in ("empty.npz", "garbage.npz", "text.wav", "array.npz", "bogus-frame.npz", "v1.npz", "noise.npz",
-              "not-zip.npz", "bad-crc.npz", "q-negative.npz"):
+              "not-zip.npz", "bad-crc.npz", "q-negative.npz", "fs-zero.npz", "fe-c16.npz"):
         f[k] = d / k
     return sp, f
 
@@ -274,7 +276,8 @@ def _receive_cases(f, image: bool) -> list[Case]:
     img = ["--image", "out/pic.png"] if image else []
     return [
         Case("ce-npz", ["ce.npz", "--slot", SLOT], {"ce.npz": f["ce.npz"]}),
-        Case("ce-wav", ["ce-rx.wav", "--slot", SLOT, "--frame", "short", *img], {"ce-rx.wav": f["ce-rx.wav"]}),
+        Case("ce-wav", ["ce-rx.wav", "--slot", SLOT, "--frame", "short", *img], {"ce-rx.wav": f["ce-rx.wav"]},
+             dirs=["out"]),
     ]
 
 
@@ -374,18 +377,24 @@ def _refusal_cases(f) -> list[Case]:
         c("npz-not-zip", "x.npz", files={"x.npz": f["not-zip.npz"]}),
         c("npz-bad-crc", "x.npz", files={"x.npz": f["bad-crc.npz"]}),
         c("wav-text", "x.wav", "--slot", SLOT, files={"x.wav": f["text.wav"]}, only_class=True),
-        # A slot before 1970 (q < 0), from --slot and from the .npz: the
-        # reference's descrambler refuses q outside uint64 at the first
-        # detection it demodulates, where the native one would wrap it.
+        # A slot before 1970 (q < 0), from --slot and from the .npz, refused
+        # where it is read (parse_slot and load_npz), as are an .npz's other
+        # members save_npz never writes.
         c("slot-before-1970", "ce.npz", "--slot", "1969-12-31T23:45Z"),
         c("npz-q-negative", "x.npz", files={"x.npz": f["q-negative.npz"]}),
+        c("npz-fs-zero", "x.npz", files={"x.npz": f["fs-zero.npz"]}),
+        c("npz-fe-c16", "x.npz", files={"x.npz": f["fe-c16.npz"]}),
+        # --image's directory, checked before anything is read (with or
+        # without the codec half: the directory comes first)
+        c("image-no-dir", "ce.npz", "--image", "nodir/pic.png"),
+        c("image-no-dir-missing-input", "nope.npz", "--image", "a/b/pic.png", files={}, dirs=["a"]),
+        c("image-no-dir-bad-slot", "ce.npz", "--slot", "yesterday", "--image", "nodir/pic.png"),
     ]
 
 
 def test_refusals(cli, inputs, tmp_path):
-    """Every refusal a user can hit before the receive, and the one inside
-    it (a slot before 1970): the same exit status and message (a usage
-    error's by its last line)."""
+    """Every refusal a user can hit before the receive: the same exit
+    status and message (a usage error's by its last line)."""
     _, f = inputs
     cases = _refusal_cases(f)
     results = run_cases(cases, tmp_path, cli)
@@ -400,8 +409,18 @@ def test_refusals(cli, inputs, tmp_path):
     assert results["npz-no-twin"][1].err == "frame short-v1 has no L twin; add --just-ce\n"
     assert _last_line(results["both-just"][1].err) == ("sstvae-qrss receive: error: argument --just-l: "
                                                        "not allowed with argument --just-ce")
-    assert results["slot-before-1970"][1] == Run(1, "", "ValueError: q must fit in uint64, not -1\n")
-    assert results["npz-q-negative"][1] == Run(1, "", "ValueError: q must fit in uint64, not -5\n")
+    assert results["slot-before-1970"][1] == Run(
+        1, "", "--slot '1969-12-31T23:45Z': slot 1969-12-31T23:45Z is before 1970-01-01T00:00Z\n")
+    assert results["npz-q-negative"][1] == Run(
+        1, "", "ValueError: simfile: q -5 is a quarter hour before 1970-01-01T00:00Z\n")
+    assert results["npz-fs-zero"][1] == Run(1, "", "ValueError: simfile: fs 0 is not a sample rate\n")
+    assert results["npz-fe-c16"][1] == Run(
+        1, "", "ValueError: simfile: fe is <c16 of 1 dimensions, not complex64 (n,) as qrss_simulate.py "
+        "writes it\n")
+    for name, image in (("image-no-dir", "nodir/pic.png"), ("image-no-dir-missing-input", "a/b/pic.png"),
+                        ("image-no-dir-bad-slot", "nodir/pic.png")):
+        parent = image.rsplit("/", 1)[0]
+        assert results[name][1] == Run(1, "", f"--image {image}: {parent}: no such directory\n"), name
 
 
 def test_store_is_refused(cli, inputs, tmp_path):
@@ -443,6 +462,7 @@ def test_image_without_the_codec_half(cli, tmp_path):
     (with it, test_receive_side_by_side runs --image)."""
     if _renders(cli):
         pytest.skip("this sstvae-qrss renders --image")
+    (tmp_path / "out").mkdir()
     r = _run([cli, "receive", "nope.npz", "--no-store", "--image", "out/pic.png"], tmp_path)
     assert r == Run(1, "", NO_RENDERER)
 
@@ -452,6 +472,7 @@ def test_image_names_png_only(cli, tmp_path):
     front rather than written as PNG under a name that says otherwise."""
     if not _renders(cli):
         pytest.skip("this sstvae-qrss has no --image")
+    (tmp_path / "x").mkdir()
     for name, ok in (("a.png", True), ("A.PNG", True), ("x/b.apng", True), ("a.jpg", False), ("png", False),
                      (".png", False), ("a.png.bmp", False)):
         r = _run([cli, "receive", "nope.npz", "--no-store", "--image", name], tmp_path)

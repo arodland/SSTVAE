@@ -34,6 +34,10 @@ scenarios (2026-10-13; QRSS_PARITY_WORST=1 with -s prints them):
 - refine_path_l: the same branch, the same grid, f to 1e-7 Hz [6.8e-13],
   the caller's own path back when nothing was measured;
 - resid_ratio: to the bit on the same track;
+- _fit_timing_tries_l (verify_l's blind whole-frame line takes its best
+  timing and the runners-up from one coarse grid, 2026-10-14): in each
+  implementation exactly fit_timing_l's n_best 1 and n_best V answers, to
+  the bit; the C++ pair against the reference's to fit_timing_l's bars;
 - verify_l: the same accept/reject in every scenario (noise refused after
   the runners-up), the same path, the timing as above, Z_ref to 1e-8
   relative [1.6e-12];
@@ -362,6 +366,61 @@ def test_fit_timing_l_blind(Lt, row, scen, blind):
         _timing_close(g1, r1, spec, f"{label} n_best 1")
 
 
+def _timing_same(g, r, what):
+    """Two timings to the bit, type for type."""
+    for f in ("tau0", "ppm", "gamma", "z"):
+        a, b = getattr(r, f), getattr(g, f)
+        assert type(b) is type(a) and (a == b or (a != a and b != b)), (what, f, a, b)
+    assert g.cov.dtype == r.cov.dtype and np.array_equal(g.cov, r.cov), what
+
+
+def test_fit_timing_tries_l(row, scen, blind):
+    """verify_l's blind whole-frame line: one coarse grid gives the best
+    timing and the runners-up. In each implementation _fit_timing_tries_l
+    is (fit_timing_l n_best 1, fit_timing_l n_best n) to the bit; the C++
+    pair is the reference's to fit_timing_l's bars. The noise scenario is
+    the one whose best is not the first of the n_best list (so the two
+    answers are not one list's head and tail)."""
+    V = T.V_TIMING_TRIES
+    assert V > 1
+    split = set()
+    for label, b in blind.items():
+        s = scen[label]
+        spec = s.spec
+        for n_best, kw in ((V, {}), (3, {}), (2, dict(ppm_range=50.0)), (1, {})):
+            kw = dict(t0_index=s.chan.t0_index, z_d=b.z_d, **kw)
+            what = (label, n_best, kw.get("ppm_range"))
+            for name, fit_timing, tries in (("reference", LT.fit_timing_l, LT._fit_timing_tries_l),
+                                            ("native", row["fit_timing_l"], row["_fit_timing_tries_l"])):
+                best, tms = tries(s.chan, CH_FS, b.fn, spec, None, None, n_best=n_best, **kw)
+                _timing_same(best, fit_timing(s.chan, CH_FS, b.fn, spec, n_best=1, **kw), (name, what))
+                want = fit_timing(s.chan, CH_FS, b.fn, spec, n_best=n_best, **kw)
+                if n_best == 1:
+                    _timing_same(tms, want, (name, what))
+                else:
+                    assert type(tms) is list and len(tms) == len(want) >= 1, (name, what)
+                    for k, (g, r) in enumerate(zip(tms, want)):
+                        _timing_same(g, r, (name, what, k))
+                    # not necessarily tms[0]: a carrier estimate's runner-up can
+                    # outscore every estimate's first peak once refined (the L
+                    # noise scenario), and verify still skips tms[0], as it did
+                    if (tms[0].tau0, tms[0].ppm) != (best.tau0, best.ppm):
+                        split.add((name, label, n_best))
+                if name == "reference":
+                    ref = (best, tms)
+                else:
+                    _timing_close(best, ref[0], spec, (what, "best"))
+                    pairs = zip(tms, ref[1]) if n_best > 1 else [(tms, ref[1])]
+                    for k, (g, r) in enumerate(pairs):
+                        _timing_close(g, r, spec, (what, k))
+    assert {("reference", "noise", V), ("native", "noise", V)} <= split, split
+    # its refusal is fit_timing_l's
+    r = _outcome(LT._fit_timing_tries_l, None, CH_FS, None, frame.TINY, t0_index=0.0)
+    g = _outcome(row["_fit_timing_tries_l"], None, CH_FS, None, frame.TINY, t0_index=0.0)
+    assert r[0] is AssertionError and g[:2] == r[:2], (r, g)
+    assert _outcome(LT.fit_timing_l, None, CH_FS, None, frame.TINY, t0_index=0.0)[:2] == r[:2]
+
+
 def test_fit_timing_l_local(Lt, row, scen, blind):
     """tau0_init: the reference's direct path (nlag <= 64), grids compared;
     a known-symbol set given as tmpl_fn (complex, and real), and a tmpl_fn
@@ -536,9 +595,13 @@ def test_verify_l(row, scen):
 def test_verify_l_noise_tries_the_runners_up(row, scen):
     """The noise capture is refused only after every base and the coarse
     statistic's runners-up were tracked (the reference's calls, counted in
-    the fixture); a signal is accepted on the first."""
+    the fixture); a signal is accepted on the first. The two refined bases
+    fit their timing (fit=True); the whole-frame line's best timing and
+    its runners-up come from one grid (_fit_timing_tries_l) and are
+    tracked as given (fit=False)."""
     calls = scen["noise"].tracked
-    assert len(calls) > 3 and calls.count(False) == len(calls) - 3, calls
+    assert len(calls) == 2 + T.V_TIMING_TRIES and calls[:2] == [True, True], calls
+    assert calls.count(False) == len(calls) - 2, calls
     assert scen["tiny-6"].tracked == [True]
     s = scen["noise"]
     assert row["verify_l"](s.chan, CH_FS, s.spec, s.det) is None
@@ -628,7 +691,7 @@ def _native_primitives(native, mp, *, gate=False):
     if gate:
         mp.setattr(T, "line_path", table[(TRACK, "line_path")])
         mp.setattr(LT, "_flat_path", table[(TRACK, "_flat_path")])
-        for name in ("verify_track_l", "refine_path_l"):
+        for name in ("verify_track_l", "refine_path_l", "_fit_timing_tries_l"):
             mp.setattr(LT, name, table[(LTRACK, name)])
 
 

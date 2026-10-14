@@ -1117,6 +1117,19 @@ def test_refusals(row):
         det = flat_det(1500.0, wf)
         r, g = _outcome(RX.receive_pass, None, spec, det), _outcome(row["receive_pass"], None, spec, det)
         assert r[0] is ValueError and g == r, (r, g)
+    # the reference's _receive_pass_l (which the C++ folds into receive_pass)
+    # refuses a frame that is not L, or a detection of another waveform,
+    # with receive_pass's own refusal: of the detection's waveform on the
+    # frame, else (a CE detection on a CE frame) of an L detection on it
+    lkw = dict(exclude_hz=(), f_mix_hz=None, round_b=True, return_tracks=False, erase_s=())
+    for spec, wf, as_wf in ((frame.TINY, WAVEFORM_L, WAVEFORM_L), (frame.TINY, WAVEFORM_CE, WAVEFORM_L),
+                            (frame.SHORT, 5, 5), (lframe.L_TINY, WAVEFORM_CE, WAVEFORM_CE),
+                            (frame.get("short-v1"), WAVEFORM_CE, WAVEFORM_L)):
+        r = _outcome(RX._receive_pass_l, None, spec, flat_det(1500.0, wf), None, "joint", **lkw)
+        want = _outcome(RX.receive_pass, None, spec, flat_det(1500.0, as_wf))
+        g = _outcome(row["receive_pass"], None, spec, flat_det(1500.0, as_wf))
+        assert r[0] is ValueError and r == want == g, (spec.name, wf, r, want, g)
+        assert f"frame {spec.name!r}" in r[1], r
     c = _case("tiny-6")
     v = RX.detection_from_pass(c.ref[0])
     for kw in (dict(erase_s=[(1.0, 2.0, 3.0)]), dict(erase_s=[(1.0,)]), dict(erase_s=[1.0]),

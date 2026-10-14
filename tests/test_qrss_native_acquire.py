@@ -178,10 +178,20 @@ def test_hint_items(N):
             for (rf, rw), (gf, gw) in zip(r, g):
                 assert type(gf) is float and gf == rf and gw == rw and all(type(x) is int for x in gw), (r, g)
     for bad in (((1, 2, 3),), ((1,),), ("abc",), (("abc", 1),), ((1.0, None),), (None,), ((1.0, "x"),),
-                (1500.0, [1.0, 2.0, 3.0]), ({1: 2},)):
+                (1500.0, [1.0, 2.0, 3.0]), ({1: 2},), ((float("nan"), None),), ((float("inf"), "x"),),
+                (float("nan"), (1.0, 2.0, 3.0))):
         r, g = _outcome(A._hint_items, bad, specs), _outcome(N._hint_items, bad, specs)
         assert r == g, (bad, r, g)
         assert r[0] != "ok" or bad == ({1: 2},), (bad, r)
+    # a hint at no frequency (nan, +-inf), bare or paired, is read and dropped
+    nan, inf = float("nan"), float("inf")
+    for hints, want in (((nan,), []), ((inf, -inf), []), (((nan, CE), (inf, L)), []),
+                        ((1500.0, nan, (1400.0, L), (-inf, CE)), [(1500.0, [CE, L]), (1400.0, [L])]),
+                        ((np.float32("nan"), "nan", ("-inf", "1"), [np.float64(np.inf), 0], 1210), [(1210.0, [CE, L])]),
+                        (((nan, 7), (1300.0, 7)), [(1300.0, [])])):
+        r, g = A._hint_items(hints, specs), N._hint_items(hints, specs)
+        assert r == g == want, (hints, r, g)
+        assert all(type(f) is float for f, _ in g), g
 
 
 def test_arbitration_crafted(N):
@@ -499,7 +509,8 @@ def test_acquire_errors(N, caps):
 def test_acquire_odd_hints(N):
     """Hints off the band, non-finite, or of numpy types, on the real
     stages over silence (no line, so every hint is searched): the same
-    hinted lines, or the same error from the stage that meets it."""
+    hinted lines, or the same error from the stage that meets it. A
+    non-finite hint is dropped before A2 by both: no line, no error."""
     zeros = frontend.Capture(np.zeros(40 * FE_FS, np.complex64), 0, TA.PRE_S * FE_FS)
     ok = 0
     for spec, hints in ((frame.TINY, (float("nan"),)), (frame.TINY, (float("inf"),)),
@@ -516,7 +527,39 @@ def test_acquire_odd_hints(N):
             ok += bool(r[1].hinted)
         else:
             assert r == g, (hints, r, g)
+        finite = [h for h in hints if np.isfinite(h[0] if isinstance(h, tuple) else h)]
+        if not finite:
+            assert r[0] == "ok" and not r[1].hinted and not r[1].preamble, (hints, r)
     assert ok >= 3, ok
+
+
+def test_non_finite_hints_are_dropped(N, caps, ref):
+    """A hint at nan or +-inf (bare, paired with a waveform, a numpy
+    scalar or a string), mixed in among good ones, is dropped before A2 by
+    both implementations: the acquisition, and the detections made from
+    it, are the ones without it -- the reference's to the bit, the C++'s
+    its own without it to the bit (and the reference's to wave 5's bar)."""
+    nan, inf = float("nan"), float("inf")
+    junk = {"mixed raw joint": (nan, (inf, L), (-inf, CE), ("nan", "1"), np.float32("nan"), [np.float64(nan), 7]),
+            "ce0 single aliases": (nan, inf, np.float64(-np.inf), "nan")}
+    for name, bad in junk.items():
+        cap, spec, kw = RUNS[name]
+        good = tuple(kw["hints"])
+        r0 = ref(name)
+        assert r0.preamble, name
+        mixed = (bad[0], *good[:1], *bad[1:3], *good[1:], *bad[3:])
+        kw2 = {**kw, "hints": mixed}
+        r = A.acquire(_cap(caps, cap), spec, **kw2)
+        _acq_check(r0, r, f"{name} reference", exact=True)
+        g0 = _rx.to_ref(N.acquire(_cap(caps, cap), spec, **kw))
+        g = _rx.to_ref(N.acquire(_cap(caps, cap), spec, **kw2))
+        _acq_check(g0, g, f"{name} native", exact=True)
+        _acq_check(r0, g, f"{name} native vs reference")
+        for sp in SPEC_SETS:
+            _det_check(r0.detections(sp), r.detections(sp), f"{name} {sp} reference")
+            _det_check(_rx.to_ref(N._detections(g0, sp)), _rx.to_ref(N._detections(g, sp)), f"{name} {sp} native")
+            _det_check(r0.detections(sp), _rx.to_ref(N._detections(g, sp)), f"{name} {sp} native vs reference",
+                       hit_tol=1e-7, raw=True)
 
 
 # --- the seams ----------------------------------------------------------------------------------

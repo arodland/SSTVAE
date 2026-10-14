@@ -127,6 +127,20 @@ def test_receive_pass_refuses_a_detection_of_the_other_waveform():
         RX.receive_pass(None, SHORT, _det(1509.5, L))
 
 
+def test_receive_pass_l_refuses_a_frame_that_is_not_l():
+    """_receive_pass_l, handed a CE frame (or a detection of the other
+    waveform), refuses with receive_pass's own message -- not an error from
+    deep inside ltrack's layout."""
+    kw = dict(exclude_hz=(), f_mix_hz=None, round_b=True, return_tracks=False, erase_s=())
+    for spec, d, as_wf in ((SHORT, _det(1509.5, L), L), (SHORT, _det(1500.0, CE), L),
+                           (L_SHORT, _det(1500.0, CE), CE)):
+        with pytest.raises(ValueError) as want:
+            RX.receive_pass(None, spec, _det(1500.0, as_wf))
+        with pytest.raises(ValueError) as got:
+            RX._receive_pass_l(None, spec, d, None, "joint", **kw)
+        assert str(got.value) == str(want.value) and "twin" in str(got.value), (spec.name, d.waveform)
+
+
 # --- the joint detect and receive (stubs) ------------------------------------------------------
 
 def test_joint_detect_merges_by_centre_and_ghosts_per_waveform(monkeypatch):
@@ -589,6 +603,11 @@ def test_a_blind_l_tiny_pass_at_minus_12():
     assert len(ps) == 1
     p = ps[0]
     assert (p.waveform, p.frame, p.header, p.cw) == (L, "l-tiny", None, None)
+    # every field a sidecar or the store writes, as plain JSON
+    for k in ("uid", "q", "frame", "waveform", "f_hz", "ch_fs", "ch_t0_index", "estimator", "em_round"):
+        json.dumps(getattr(p, k))
+    json.dumps(dataclasses.asdict(p.report))
+    json.dumps({k: getattr(p.timing, k) for k in ("tau0", "ppm", "gamma", "z")})
     assert abs(p.f_hz - 1500.0) < 0.05
     snr = latent_snr_db(p.z, a)
     print(f"l-tiny -12 dB: latent {snr:.2f} dB, W {RX.mean_w_db(p):+.2f} dB, "

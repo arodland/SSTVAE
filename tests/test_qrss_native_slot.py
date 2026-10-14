@@ -191,5 +191,27 @@ def outcome_any(f, *a):
 
 def test_slot_iso(nat):
     for q in (Q_TEST, 0, -1, 1990585, -69039552, 281558111):
-        assert nat.slot_iso(q) == ref.quarter_hour_start(q).isoformat()[:16] + "Z"
-        assert nat.parse_slot(nat.slot_iso(q)) == q
+        iso = nat.slot_iso(q)
+        assert iso == ref.quarter_hour_start(q).isoformat()[:16] + "Z"
+        if q >= 0:
+            assert nat.parse_slot(iso) == q
+        else:
+            # a slot before 1970 is refused where it is read, by both
+            want = ("ValueError", f"slot {iso} is before 1970-01-01T00:00Z")
+            assert outcome(nat.parse_slot, iso) == outcome(ref.parse_slot, iso) == want
+
+
+@pytest.mark.parametrize("text, when", [
+    ("1969-12-31T23:45Z", "1969-12-31T23:45Z"),
+    ("1969-12-31T19:45-04:00", "1969-12-31T23:45Z"),
+    ("1970-01-01T00:45+01:00", "1969-12-31T23:45Z"),
+    ("0001-01-01T01:00+00:00", "0001-01-01T01:00Z"),
+    # the quarter hour's own start is out of datetime's range: the input, as read
+    ("0001-01-01T00:00+01:00", "0001-01-01T00:00:00+01:00"),
+])
+def test_parse_slot_before_1970(nat, text, when):
+    want = ("ValueError", f"slot {when} is before 1970-01-01T00:00Z")
+    assert outcome(ref.parse_slot, text) == want
+    assert outcome(nat.parse_slot, text) == want
+    # the epoch itself is the first slot
+    assert nat.parse_slot("1970-01-01T00:00Z") == ref.parse_slot("1970-01-01T00:00Z") == 0

@@ -142,6 +142,29 @@ def test_report_drift():
     assert abs(p.report.offset_hz - 1500.0) < 0.05
 
 
+def test_known_symbols_refuses_a_header_make_classes_refuses():
+    """known_symbols takes the header's values from make_classes, so a
+    header of the wrong length is make_classes' ValueError rather than a
+    _Known whose pos and val differ in length; a frame without header
+    symbols (TINY) does not read the bits at all."""
+    from sstvae.qrss import header
+    from test_qrss_receiver import HDR
+
+    bits = header.encode(HDR)
+    for name in ("short", "short-v1", "full"):
+        spec = frame.get(name)
+        k = T.known_symbols(spec, bits)
+        assert len(k.pos) == len(k.val) == len(T.known_symbols(spec).pos) + len(bits)
+        for bad in (bits[:-1], np.concatenate([bits, [0]]), bits[:100]):
+            with pytest.raises(ValueError) as want:
+                T.make_classes(spec, bad)
+            with pytest.raises(ValueError) as got:
+                T.known_symbols(spec, bad)
+            assert str(got.value) == str(want.value), (name, len(bad))
+    k = T.known_symbols(frame.TINY, bits[:-1])
+    assert len(k.pos) == len(k.val) == len(T.known_symbols(frame.TINY).pos)
+
+
 @pytest.mark.slow
 def test_z_ref_on_noise_is_standard_normal():
     """Gate V's statistic at a fixed timing on noise-only TINY channels."""

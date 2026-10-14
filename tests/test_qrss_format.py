@@ -258,6 +258,24 @@ def test_quarter_hour_count():
         sequences.quarter_hour_count(datetime(2025, 10, 1))      # naive
 
 
+def test_parse_slot_refuses_a_slot_before_1970():
+    """A quarter hour before the epoch (q < 0) is refused where it is read,
+    in one message naming it, rather than by the descrambler at the first
+    detection (receive_pass keeps its own refusal as a backstop)."""
+    assert sequences.parse_slot("1970-01-01T00:00Z") == 0
+    assert sequences.parse_slot("1970-01-01T01:00+01:00") == 0
+    for text, when in (("1969-12-31T23:45Z", "1969-12-31T23:45Z"),
+                       ("1969-12-31T19:45-04:00", "1969-12-31T23:45Z"),
+                       ("1900-01-01T00:00Z", "1900-01-01T00:00Z"),
+                       ("0001-01-01T00:00+01:00", "0001-01-01T00:00:00+01:00")):
+        with pytest.raises(ValueError) as e:
+            sequences.parse_slot(text)
+        assert str(e.value) == f"slot {when} is before 1970-01-01T00:00Z", text
+    # off the quarter hour is still that refusal, before 1970 or not
+    with pytest.raises(ValueError, match="is not on a quarter hour"):
+        sequences.parse_slot("1969-12-31T23:50Z")
+
+
 # --- F5: picture store and IDs -------------------------------------------------------
 
 

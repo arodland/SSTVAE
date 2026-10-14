@@ -682,7 +682,7 @@ def test_transmit_cases_cover_each_ending(transmit_runs):
     assert "(OOK callsign windows)" in runs["bin-ook"][0].out and "pilot 700 Hz" in runs["freq-l"][0].out
     assert "carrier 1500.3 Hz" in runs["freq-decimal"][0].out
     refused = {"slot-off": "is not on a quarter hour", "slot-naive": "give the time zone",
-               "slot-1969": "q must fit in uint64, not -1", "l-ook": "--ook is waveform CE's",
+               "slot-1969": "slot 1969-12-31T23:45Z is before 1970-01-01T00:00Z", "l-ook": "--ook is waveform CE's",
                "no-callsign": "a .qrsp needs --callsign", "seg-huge": "segment must be 0..1, not 9999",
                "seg-huge-freq": "carrier 100.0 Hz is outside", "freq-l-low": "an L pilot at 310.0 Hz",
                "lead-in-11": "lead", "bin-other-call": "the beacon file is for K1ABC, not W1AW",

@@ -139,7 +139,7 @@ def _same_error(r, g, what=""):
 
 
 def _same_outcome(r, g, what=""):
-    """Both raised alike, or both returned equal records (a short header is not refused)."""
+    """Both raised alike, or both returned equal records."""
     if r[0] != "ok":
         return _same_error(r, g, what)
     assert g[0] == "ok", (what, g)
@@ -286,17 +286,27 @@ def test_known_symbols_and_classes(Tn, row):
             _same(k_g.val, k_r.val, f"{name} known val")
             for pr in (None, prior):
                 _classes_same(row["make_classes"](spec, b, pr), T.make_classes(spec, b, pr), name)
-    # header bits of other shapes: a short header is not refused by known_symbols (its pos and
-    # val then differ in length, as the reference's do); leading unit axes broadcast in
-    # make_classes unless the spread copy refuses them
+    # header bits of other shapes: where the frame carries header symbols, known_symbols takes
+    # their values from make_classes, so it refuses what make_classes refuses (a short header
+    # among them) with the same ValueError; leading unit axes broadcast in make_classes unless
+    # the spread copy refuses them
     for name in ("short", "short-v1", "full-spreadonly", "tiny"):
         spec = frame.get(name)
-        for bad in (bits[:-1], np.zeros((2, 2474)), np.zeros((1, 2474)), np.zeros((2474, 1)),
-                    np.zeros((1, 1)), 3.0):
-            _same_outcome(_outcome(T.make_classes, spec, bad), _outcome(row["make_classes"], spec, bad),
-                          f"{name} bits {np.shape(bad)}")
-            _same_outcome(_outcome(T.known_symbols, spec, bad), _outcome(row["known_symbols"], spec, bad),
-                          f"{name} bits {np.shape(bad)}")
+        for bad in (bits[:-1], np.concatenate([bits, [0]]), np.zeros((2, 2474)), np.zeros((1, 2474)),
+                    np.zeros((2474, 1)), np.zeros((1, 1)), 3.0):
+            mc = _outcome(T.make_classes, spec, bad)
+            _same_outcome(mc, _outcome(row["make_classes"], spec, bad), f"{name} bits {np.shape(bad)}")
+            ks = _outcome(T.known_symbols, spec, bad)
+            _same_outcome(ks, _outcome(row["known_symbols"], spec, bad), f"{name} bits {np.shape(bad)}")
+            if spec.n_hdr:
+                assert ks[:2] == mc[:2] if mc[0] != "ok" else ks[0] == "ok", (name, np.shape(bad), ks, mc)
+    for name in ("short", "short-v1"):
+        spec = frame.get(name)
+        for bad in (bits[:-1], np.concatenate([bits, [0]])):
+            want = _outcome(T.make_classes, spec, bad)
+            assert want[0] is ValueError, want
+            assert _outcome(T.known_symbols, spec, bad)[:2] == want[:2]
+            assert _outcome(row["known_symbols"], spec, bad)[:2] == want[:2]
     spec = frame.SHORT
     pr = EmPrior(x_hat=np.zeros(spec.n_data + 1), v=np.zeros(spec.n_data))
     _same_error(_outcome(T.make_classes, spec, None, pr), _outcome(Tn.make_classes, spec, None, pr), "prior")

@@ -422,6 +422,39 @@ def test_npz_round_trip(tmp_path):
     assert back.truth.noise_var_fe == sim.truth.noise_var_fe
 
 
+def test_npz_refuses_what_save_npz_never_writes(tmp_path):
+    """A sample rate that is none, a quarter hour before 1970 and an fe of
+    another type or shape: a ValueError naming the member (the texts
+    native/core/qrss/simfile.cpp gives), not a failure deep in the receiver."""
+    sim = ch.simulate(carrier_sym(), TINY, Q_TEST, ChannelConfig(), carrier_hz=CARRIER)
+    p = tmp_path / "s.npz"
+    ch.save_npz(p, sim)
+    with np.load(p, allow_pickle=False) as d:
+        members = {k: d[k] for k in d.files}
+    fe_msg = "simfile: fe is {} of {} dimensions, not complex64 (n,) as qrss_simulate.py writes it"
+    for member, value, message in (
+            ("fs", np.int64(0), "simfile: fs 0 is not a sample rate"),
+            ("fs", np.int64(-4000), "simfile: fs -4000 is not a sample rate"),
+            ("fs", np.float64(0.5), "simfile: fs 0 is not a sample rate"),
+            ("q", np.int64(-1), "simfile: q -1 is a quarter hour before 1970-01-01T00:00Z"),
+            ("fe", sim.fe.astype(np.complex128), fe_msg.format(np.dtype(np.complex128).str, 1)),
+            ("fe", sim.fe.real.copy(), fe_msg.format(np.dtype(np.float32).str, 1)),
+            ("fe", sim.fe.reshape(1, -1), fe_msg.format(np.dtype(np.complex64).str, 2)),
+            ("fe", np.complex64(1 + 1j), fe_msg.format(np.dtype(np.complex64).str, 0))):
+        bad = tmp_path / f"bad-{member}.npz"
+        with open(bad, "wb") as f:
+            np.savez(f, **{**members, member: value})
+        with pytest.raises(ValueError) as e:
+            ch.load_npz(bad)
+        assert str(e.value) == message, (member, value)
+    # the boundaries still read: the epoch's own quarter hour, fs 1
+    for member, value in (("q", np.int64(0)), ("fs", np.int64(1))):
+        ok = tmp_path / f"ok-{member}.npz"
+        with open(ok, "wb") as f:
+            np.savez(f, **{**members, member: value})
+        assert getattr(ch.load_npz(ok), member) == int(value)
+
+
 def test_reproducible_from_seed():
     cfg = ChannelConfig(snr_db=-5.0, preset="moderate", wander_rms_hz=0.2,
                         impulses=Impulses(rate_hz=2.0), neighbours=(Neighbour(-60, 3),), seed=7)

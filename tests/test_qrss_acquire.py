@@ -632,3 +632,22 @@ def test_a_hint_searches_a_preamble_a1_did_not_offer(monkeypatch):
     assert [d.method for d in dets] == ["preamble", "hint"]
     assert dets[1].timing is None and abs(dets[1].f_hz - 2000.0) < 2.5
     assert np.allclose(dets[1].path.f_hz, dets[1].f_hz)       # (no drift on noise)
+    # a hint at no frequency (a history's or a caller's arithmetic can make
+    # one) is dropped before A2, bare or paired, single or joint: the same
+    # acquisition as without it, not an error from the stage that meets it
+    nan, inf = float("nan"), float("inf")
+
+    def key(a, sp):
+        return ([(h.f_hz, h.tau0_s, h.phase, h.lam, h.p_value, h.waveform) for h in a.preamble],
+                list(a.hinted), list(a.lines), len(a.tbd),
+                [(d.method, d.f_hz, d.waveform, None if d.timing is None else d.timing.tau0)
+                 for d in a.detections(sp)])
+
+    junk = A.acquire(cap, spec, live_only=True, hints=(nan, 1188.6, inf, 2000.0, np.float64(-inf)))
+    assert key(junk, spec) == key(acq, spec)
+    assert key(A.acquire(cap, spec, live_only=True, hints=(nan,)), spec) == \
+        key(A.acquire(cap, spec, live_only=True), spec)
+    joint = A.acquire(cap, (spec,), live_only=True, hints=(1188.6, (2000.0, 0)))
+    assert [round(c.f_hz) for c in joint.hinted] == [2000]
+    junk = A.acquire(cap, (spec,), live_only=True, hints=((nan, 0), 1188.6, inf, (2000.0, 0), ("-inf", "0")))
+    assert key(junk, (spec,)) == key(joint, (spec,))

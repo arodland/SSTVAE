@@ -267,7 +267,8 @@ def test_pass_length(api, frame_name):
 
 
 @pytest.mark.parametrize("text", ["2025-10-01T00:00Z", "2026-10-09T06:15:00+00:00", "2026-10-09T08:45+02:00",
-                                  "2025-10-01T00:05Z", "nope", "2025-10-01T00:00"])
+                                  "2025-10-01T00:05Z", "nope", "2025-10-01T00:00", "1969-12-31T23:45Z",
+                                  "1970-01-01T00:00Z"])
 def test_parse_slot_is_sequences(api, text):
     try:
         want = ("ok", sequences.parse_slot(text))
