@@ -273,12 +273,14 @@ QrssTile::QrssTile(QWidget* parent) : QWidget(parent) {
 void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
     const QString call = t.value(QStringLiteral("callsign")).toString();
     const QString grid = t.value(QStringLiteral("grid")).toString();
-    const double f_hz = t.value(QStringLiteral("f_hz")).toDouble();
+    // Any number in a tile can be null (the listener writes a NaN or an
+    // infinity so): unknown, never 0.
+    const QJsonValue f_hz = t.value(QStringLiteral("f_hz"));
     const QString status = t.value(QStringLiteral("status")).toString();
     if (!call.isEmpty()) {
         title_->setText(grid.isEmpty() ? call : call + QStringLiteral("  ") + grid);
     } else {
-        title_->setText(tr("Signal at %1 Hz").arg(f_hz, 0, 'f', 1));
+        title_->setText(tr("Signal at %1").arg(number_or(f_hz, 1, tr(" Hz"), tr("? Hz"))));
     }
 
     const double progress = t.value(QStringLiteral("progress")).toDouble();
@@ -293,7 +295,7 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
     // Where it is: the dial plus the audio offset (USB), as an operator
     // would say it ("10.141 MHz + 1500 Hz", Jeff, 2026-10-10); the offset
     // alone when the dial is unknown (no rig control: null).
-    QString where = tr("%1 Hz").arg(f_hz, 0, 'f', 0);
+    QString where = number_or(f_hz, 0, tr(" Hz"), tr("? Hz"));
     if (const QJsonValue dial = t.value(QStringLiteral("dial_hz")); dial.isDouble()) {
         QString mhz = QString::number(dial.toDouble() / 1e6, 'f', 6);
         while (mhz.endsWith(QLatin1Char('0'))) mhz.chop(1);
@@ -851,10 +853,12 @@ void QrssWindow::reload() {
     QStringList on_air;
     for (const QJsonValue& v : slot_list) {
         const QJsonObject s = v.toObject();
+        const QJsonValue progress = s.value(QStringLiteral("progress"));
         on_air << tr("%1 at %2%")
-                      .arg(hhmm(s.value(QStringLiteral("slot_utc")).toString()))
-                      .arg(static_cast<int>(
-                          std::lround(100.0 * s.value(QStringLiteral("progress")).toDouble())));
+                      .arg(hhmm(s.value(QStringLiteral("slot_utc")).toString()),
+                           progress.isDouble()
+                               ? QString::number(std::lround(100.0 * progress.toDouble()))
+                               : QStringLiteral("?"));
     }
     if (!on_air.isEmpty()) parts << tr("Slots on the air: %1").arg(on_air.join(QStringLiteral(", ")));
     const QString busy = st.value(QStringLiteral("busy")).toString();

@@ -206,6 +206,31 @@ void test_tiles_follow_the_state_file() {
     check::equal(w.tile_count(), 1, "qrss/tiles: a torn state file changes nothing");
 }
 
+// The listener writes every NaN or infinity in a tile as null, so any
+// number can be: the tile stays, and says "unknown" rather than 0.
+void test_null_numbers() {
+    QTemporaryDir dir;
+    gui::QrssWindow w;
+    w.set_state_dir(dir.path());
+    QJsonObject t = tile_json(QStringLiteral("n"), 0.0, QString(), 0.0, QString(), 0);
+    for (const char* key : {"f_hz", "snr_db", "mean_w_db", "progress", "heard", "received",
+                            "image_rev", "dial_hz", "z_ref", "q"}) {
+        t[QLatin1String(key)] = QJsonValue();
+    }
+    t[QStringLiteral("confidence")] = QJsonArray{QJsonValue(), 3.0};
+    write_state(dir.path(), QJsonArray{t}, 1'000'000);
+    w.reload();
+    gui::QrssTile* n = w.tile(QStringLiteral("n"));
+    check::is_true(n != nullptr, "qrss/null: a tile with null numbers is still shown");
+    if (!n) return;
+    check::equal(n->title().toStdString(), std::string("Signal at ? Hz"),
+                 "qrss/null: an unknown frequency is not 0 Hz");
+    check::is_true(n->weight_text().isEmpty(), "qrss/null: no weight shown");
+    check::is_true(n->details().contains(QStringLiteral("? Hz")) &&
+                       !n->details().contains(QStringLiteral(" 0 Hz")),
+                   "qrss/null: nor in the details");
+}
+
 void test_the_confidence_band() {
     QTemporaryDir dir;
     gui::QrssWindow w;
@@ -900,6 +925,7 @@ int main(int argc, char** argv) {
     qputenv("QT_QPA_PLATFORM", "offscreen");
     const QApplication app(argc, argv);
     test_tiles_follow_the_state_file();
+    test_null_numbers();
     test_the_confidence_band();
     test_audio_reaches_the_listener_once();
     test_the_qrss_tab();
