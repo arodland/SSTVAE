@@ -43,11 +43,12 @@
 // returns (the reference's synchronous mode: what its tests drive). Either
 // way a receive holds the lock only to copy what it needs (the slot's
 // detections and candidates, the hints, the dial) and to apply what it
-// found: the capture's read and preparation, the receivers, the store's
-// association, the codec's first load and every picture run without it, so
-// feed() and step() never wait on a receive. A picture is applied only if
-// no newer update of its tile came in meanwhile (a per-tile generation), so
-// a slow render never draws over a newer one.
+// found: the capture's read and preparation, the store's due passes (the
+// hints), the receivers, the store's association, the codec's first load and
+// every picture run without it, so feed() and step() never wait on a receive
+// (nor on the store, whose own lock an association holds throughout). A
+// picture is applied only if no newer update of its tile came in meanwhile
+// (a per-tile generation), so a slow render never draws over a newer one.
 //
 // What blocks, and for how long:
 //   feed          the lock, for the front end of one chunk, a ring write and
@@ -77,9 +78,7 @@
 //     constructor);
 //   * idle() is exact: a worker takes a job and says it is busy in one step
 //     (the reference's worker took it from the queue, then set _busy, so
-//     idle() could read true in between and a replay ran ahead of a receive);
-//   * two passes applied to one tile in one receive draw it once (the later
-//     pass's picture; the reference drew both, so image_rev counts one more).
+//     idle() could read true in between and a replay ran ahead of a receive).
 
 #ifndef SSTVAE_QRSS_LISTENER_HPP
 #define SSTVAE_QRSS_LISTENER_HPP
@@ -322,6 +321,14 @@ public:
 private:
     struct Rec;           // a slot, and what the listener keeps beside it
     struct RenderJob;
+    // store.due(q) as _hints reads it, taken without the listener's lock
+    // (the store's own lock is held by an association for its whole
+    // transaction, and feed() must not wait on that): the passes due, or
+    // the text of the exception the store raised.
+    struct DueRead {
+        std::vector<store::Due> due;
+        std::optional<std::string> error;
+    };
     struct Job {
         bool finish = false;
         std::shared_ptr<Rec> s;
@@ -418,7 +425,8 @@ private:
                    const std::optional<std::string>& frame);
     bool takes(Tile& t, const types::PassResult& p);
     void keep(Rec& s, const types::Detection& d);
-    std::vector<acquire::Hint> hints_locked(std::int64_t q, std::optional<std::int64_t> dial);
+    DueRead read_due(std::int64_t q) const;
+    std::vector<acquire::Hint> hints_locked(std::int64_t q, std::optional<std::int64_t> dial, const DueRead& due);
     void known_header_in_place(Rec& s, types::PassResult& p, std::optional<std::int64_t> dial);
     bool plausible(const Rec& s, const types::PassResult& p, std::optional<std::int64_t> dial) const;
     std::optional<RenderJob> update_tile(Tile& t, const types::PassResult& p, double heard,

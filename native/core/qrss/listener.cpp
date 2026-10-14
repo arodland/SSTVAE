@@ -351,6 +351,14 @@ void lower_priority() {
 #endif
 }
 
+// str(e) of the exception the port raises in place of e (the reference's
+// f"...: {e}"): what() itself, but a KeyError's is its key's repr alone.
+std::string py_str_of(const std::exception& e) {
+    std::string what = e.what();
+    if (dynamic_cast<const pyjson::KeyError*>(&e) && what.rfind("KeyError: ", 0) == 0) what.erase(0, 10);
+    return what;
+}
+
 }  // namespace
 
 // --- errors ---------------------------------------------------------------------------------
@@ -370,12 +378,7 @@ std::string error_name(const std::exception& e) {
     return "RuntimeError";
 }
 
-std::string error_text(const std::exception& e) {
-    std::string what = e.what();
-    // pyjson's KeyError says "KeyError: '<key>'" itself
-    if (dynamic_cast<const pyjson::KeyError*>(&e) && what.rfind("KeyError: ", 0) == 0) what.erase(0, 10);
-    return error_name(e) + ": " + what;
-}
+std::string error_text(const std::exception& e) { return error_name(e) + ": " + py_str_of(e); }
 
 // --- the listener's records -------------------------------------------------------------------
 
@@ -1267,25 +1270,39 @@ void LiveListener::keep(Rec& r, const Detection& d) {
     dets = std::move(out);
 }
 
-std::vector<acquire::Hint> LiveListener::hints_locked(std::int64_t q, std::optional<std::int64_t> dial) {
+LiveListener::DueRead LiveListener::read_due(std::int64_t q) const {
+    DueRead out;
+    if (!store_) return out;
+    try {
+        out.due = store_->due(q);
+    } catch (const std::exception& e) {   // never lose the slot over the store
+        out.error = py_str_of(e);
+    }
+    return out;
+}
+
+std::vector<acquire::Hint> LiveListener::hints_locked(std::int64_t q, std::optional<std::int64_t> dial,
+                                                      const DueRead& stored) {
     struct Due {
         double f;
         std::int64_t w;
         std::optional<std::int64_t> was;
     };
     std::vector<Due> due;   // (f_hz, waveform, the dial it was heard on)
-    if (store_) {
+    if (stored.error) {
+        log_locked("hints: " + *stored.error);
+    } else {
         try {
             std::vector<Due> got;
-            for (const store::Due& d : store_->due(q)) {
+            for (const store::Due& d : stored.due) {
                 Value rec = Value::object();
                 rec.set("frame", d.frame);
                 rec.set("waveform", Value::integer(d.waveform));
                 got.push_back({d.f_hz, due_waveform(rec), dial_.dial_at(static_cast<double>(slot_t0(d.q)), seams_.dial_guard)});
             }
             due = std::move(got);
-        } catch (const std::exception& e) {   // never lose the slot over the store
-            log_locked(std::string("hints: ") + e.what());
+        } catch (const std::exception& e) {
+            log_locked("hints: " + py_str_of(e));
         }
     }
     for (const Tile& t : tiles_locked()) {
@@ -1326,10 +1343,11 @@ std::vector<acquire::Hint> LiveListener::hints_locked(std::int64_t q, std::optio
 }
 
 std::vector<acquire::Hint> LiveListener::hints(std::int64_t q, std::optional<std::int64_t> dial) {
+    const DueRead due = read_due(q);
     std::vector<acquire::Hint> out;
     {
         Lock lk(mu_);
-        out = hints_locked(q, dial);
+        out = hints_locked(q, dial, due);
     }
     deliver();
     return out;
@@ -1442,7 +1460,7 @@ void LiveListener::render(const RenderJob& job) {
     try {
         err = renderer->load(codec_id, [this](const std::string& m) { log(m); });
     } catch (const std::exception& e) {
-        err = std::string(e.what()).empty() ? error_name(e) : std::string(e.what());
+        err = py_str_of(e).empty() ? error_name(e) : py_str_of(e);
     }
     if (err) {
         {
@@ -1471,7 +1489,7 @@ void LiveListener::render(const RenderJob& job) {
         try {
             mismatch = renderer->check(codec_id);
         } catch (const std::exception& e) {
-            mismatch = std::string(e.what());
+            mismatch = py_str_of(e);
         }
     }
     bool weight = false;
@@ -1516,7 +1534,7 @@ void LiveListener::render(const RenderJob& job) {
             try {
                 pic = renderer->render(S, W, mode, codec_id);
             } catch (const std::exception& e) {
-                failed = std::string(e.what());
+                failed = py_str_of(e);
             }
         }
     }
@@ -1566,12 +1584,13 @@ void LiveListener::render(const RenderJob& job) {
 std::vector<Detection> LiveListener::candidates_for(const std::shared_ptr<Rec>& s, const receiver::Prepared& prep,
                                                     std::span<const std::uint8_t> ok, std::int64_t origin) {
     const std::int64_t q = s->s.q;
+    const DueRead due = read_due(q);   // (the store's lock, never under the listener's)
     std::vector<acquire::Hint> hints;
     bool need = false;
     std::vector<Detection> cands;
     {
         Lock lk(mu_);
-        hints = hints_locked(q, dial_.dial_at(static_cast<double>(slot_t0(q)), seams_.dial_guard));
+        hints = hints_locked(q, dial_.dial_at(static_cast<double>(slot_t0(q)), seams_.dial_guard), due);
         need = !s->s.cands || !subset(hints, s->s.hints);
         if (need && !hints.empty() && !set_equal(hints, s->s.hints)) {
             std::string where;
@@ -1613,23 +1632,23 @@ std::vector<Detection> LiveListener::candidates_for(const std::shared_ptr<Rec>& 
 void LiveListener::refresh(const std::shared_ptr<Rec>& s) {
     const std::int64_t q = s->s.q;
     const std::int64_t t0 = slot_t0(q);
-    double t_start = 0.0;
+    double t_start = 0.0, elapsed = 0.0, progress = 0.0;
     {
         Lock lk(mu_);
         if (s->s.done || s->applying) return;   // (a final refresh queued behind a finish that has run)
         t_start = clock_locked();
+        elapsed = now_ - static_cast<double>(t0);
+        // the tile's progress is when its audio was read, not when the
+        // receive returned: taken before the read (which runs without the
+        // lock), so audio fed meanwhile only adds to what the read holds
+        progress = progress_locked(q);
     }
     const SlotRead rd = capture_read(ring_, q, sel_);
     dial_.refresh();
-    double elapsed = 0.0, progress = 0.0;
     std::optional<std::int64_t> dial;
     DialEpochs heard_by_dial;
     {
         Lock lk(mu_);
-        elapsed = now_ - static_cast<double>(t0);
-        // the tile's progress is when its audio was read, not when the
-        // receive returned
-        progress = progress_locked(q);
         dial = dial_.dial_at(static_cast<double>(t0), seams_.dial_guard);
         heard_by_dial = dial_.by_dial(static_cast<double>(t0) - static_cast<double>(rd.origin) / FE_FS_D,
                                       static_cast<double>(t0) + static_cast<double>(rd.x.size()) / FE_FS_D, seams_.dial_guard);
@@ -1733,6 +1752,7 @@ void LiveListener::finish(const std::shared_ptr<Rec>& s) {
     }
     const SlotRead rd = reader ? capture_read(reader, q, sel_) : capture_read(ring_, q, sel_);
     dial_.refresh();
+    const DueRead due = read_due(q);   // (the store's lock, never under the listener's)
     DialEpochs dials;
     std::optional<std::int64_t> first;
     std::vector<acquire::Hint> hints;
@@ -1741,7 +1761,7 @@ void LiveListener::finish(const std::shared_ptr<Rec>& s) {
         dials = dial_.by_dial(static_cast<double>(t0) - static_cast<double>(rd.origin) / FE_FS_D,
                               static_cast<double>(t0) + static_cast<double>(rd.x.size()) / FE_FS_D, seams_.dial_guard);
         first = dial_.dial_at(static_cast<double>(t0), seams_.dial_guard);
-        hints = hints_locked(q, first);
+        hints = hints_locked(q, first, due);
     }
     deliver();
     struct Result {
@@ -1801,7 +1821,7 @@ void LiveListener::finish(const std::shared_ptr<Rec>& s) {
                                : std::string("stored (provisional)");
                     stored = true;
                 } catch (const std::exception& e) {   // never lose the tile over the store
-                    note = std::string("store failed: ") + e.what();
+                    note = "store failed: " + py_str_of(e);
                 }
             }
             std::optional<RenderJob> job;

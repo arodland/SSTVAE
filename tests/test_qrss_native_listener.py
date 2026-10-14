@@ -18,9 +18,12 @@ The contract (the bar):
   waveform switch of one signal, ghosts of a neighbouring slot, the
   headerless SNR cut, hints moved by a USB dial change, a slot heard on two
   dials, a refused preamble checked again and acquisition kept once final,
-  a late join's hint search, recover and backfill from the passband
-  store, provisional pictures and the redraw a header brings, resync and
-  early audio, digital silence as holes, and run()'s replay to its end;
+  a late join's hint search, a later pass due (said once, the hints
+  passed to acquisition) and a store whose due passes or association
+  raise (the text logged or noted is str(e)), recover and backfill from
+  the passband store, provisional pictures and the redraw a header
+  brings, resync and early audio, digital silence as holes, and run()'s
+  replay to its end;
 - an exception in a live refresh, where the two differ by design: the
   C++ logs it once per slot and message and retries the slot (its `done`
   stays false), where the reference's synchronous listener raises it out
@@ -349,6 +352,66 @@ def test_late_join_searches_a_hint_only(LN, native, tmp_path, monkeypatch):
     assert [c[:2] for c in out["py"]["hint"]["calls"]] == [("detect", [1600.0]), ("receive", [1600.0])]
 
 
+def test_a_later_pass_due_through_the_refresh(LN, native, tmp_path, monkeypatch):
+    """test_a_later_pass_is_listened_for_where_it_is_due through the live
+    refresh: the hint an earlier slot's tile gives reaches acquisition, said
+    once ("a later pass is due at"), CE and joint; and a store whose
+    accumulator cannot be read says "hints: <str(e)>" and the tiles' hint
+    still stands."""
+    def scenario(side):
+        calls = []
+
+        joint = []
+
+        def candidates(prep, spec, live_only=False, hints=()):
+            calls.append(("cand", prep.q, live_only, list(hints)))
+            fs = [1500.0] + [h[0] if joint[0] else h for h in hints]
+            return [_Det(f, CE, 20.0) if joint[0] else _Det(f) for f in fs]
+
+        def detect(prep, spec, live_only=False, *, cands=None, hints=(), **kw):
+            calls.append(("detect", [c.f_hz for c in cands or ()], list(hints), sorted(kw)))
+            return list(cands or ())
+
+        side.mp.setattr(RX, "candidates", candidates)
+        side.mp.setattr(RX, "detect", detect)
+        side.mp.setattr(RX, "receive_slot", lambda *a, dets=None, **k: calls.append(
+            ("receive", [d.f_hz for d in dets or ()])) or [])
+        q = Q_TEST
+        out = {}
+        # (an accumulator whose structure is not a dict of lists of dicts
+        # raises TypeError out of the reference's store.due, where the C++
+        # store skips it: the two part there, in the store, not here)
+        bad = ({"mode": 2, "members": [{"segment": None, "uid": "x"}]},)
+        for name, ws, acc in (("ce", None, None), ("joint", (CE, L_), None),
+                              *((f"bad{k}", None, b) for k, b in enumerate(bad))):
+            joint[:] = [ws is not None]
+            d = side.root / name
+            _seed_done_tiles(d, [_part1(q - 2, 1600.0), _part1(q - 4, 1720.0, "C")])
+            store = None
+            if acc is not None:
+                store = side.store(f"store_{name}")
+                (side.root / f"store_{name}" / "acc" / "KC2G_00000011.json").write_text(json.dumps(acc))
+            L = side.listener(name, cfg=live.LiveConfig(spec=TINY, waveforms=ws, refresh_s=5.0,
+                                                         render=False), store=store)
+            t0 = slot_t0(q)
+            L.feed(_hiss(66 * FS), t0 + 50.0)
+            steps = [L.step(t) for t in (t0 + 26.0, t0 + 31.0, t0 + 50.0)]
+            out[name] = dict(calls=list(calls), steps=steps, snap=snapshot(L, d))
+            calls.clear()
+        return out
+
+    out = both(native, tmp_path, monkeypatch, scenario)
+    check(out)
+    py = out["py"]
+    assert any("a later pass is due at 1600.0, 1720.0 Hz" in ln for ln in py["ce"]["snap"]["lines"])
+    assert any("a later pass is due at 1600.0 Hz (CE), 1720.0 Hz (CE)" in ln
+               for ln in py["joint"]["snap"]["lines"])
+    assert [c[3] for c in py["ce"]["calls"] if c[0] == "cand"][0] == [1600.0, 1720.0]
+    lines = [ln.split(" ", 1)[1] for ln in py["bad0"]["snap"]["lines"]]
+    assert "hints: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'" in lines
+    assert any("a later pass is due at 1600.0, 1720.0 Hz" in ln for ln in lines)
+
+
 def test_a_slot_heard_on_two_dials(LN, native, tmp_path, monkeypatch):
     """test_a_slot_heard_on_two_dials_is_received_on_each: live on the dial
     the slot started on, the end of the slot once per dial."""
@@ -571,6 +634,42 @@ def test_passes_filed_in_the_store(LN, native, tmp_path, monkeypatch):
     check(out)
     _store.compare_trees(tmp_path / "py" / "store", tmp_path / "cpp" / "store")
     assert (tmp_path / "py" / "store" / "acc").is_dir()
+
+
+def test_a_store_that_fails_keeps_the_tile(LN, native, tmp_path, monkeypatch):
+    """A pass whose association raises (each listener's own associate, over
+    an accumulator of its picture that has lost a field): the tile is kept,
+    complete, noted "store failed: <str(e)>" -- a KeyError's text its key's
+    repr alone, as str() gives it."""
+    from qrss_fakes import make_header, make_pass_result, synthetic_picture
+
+    from sstvae.qrss.store import key_name
+
+    sp = synthetic_picture(6, mode=1)
+
+    def scenario(side):
+        q = Q_TEST
+        hdr = make_header(sp, segment=0)
+        p = make_pass_result(picture.air_values(sp.segs[0], 0), 2.0, seed=4, q=q, f_hz=1500.0, hdr=hdr,
+                             decoded=True, hdr_es_n0_db=3.0)
+        side.mp.setattr(RX, "candidates", lambda *a, **k: [])
+        side.mp.setattr(RX, "detect", lambda *a, **k: [_Det(1500.0)])
+        side.mp.setattr(RX, "receive_slot", lambda *a, **k: [p])
+        store = side.store()
+        acc = side.root / "store" / "acc" / (key_name((hdr.callsign, hdr.picture_id)) + ".json")
+        acc.write_text(json.dumps({"mode": 1, "codec_id": sp.codec_id}))
+        L = side.listener(cfg=live.LiveConfig(spec=TINY, render=False), store=store)
+        t0 = slot_t0(q)
+        end = t0 + live.frame_seconds(TINY) + PB_TAIL_S + 0.5
+        L.feed(_hiss(int((end - t0 + 15) * FS)), end)
+        for t in (t0 + 26.0, end):
+            L.step(t)
+        return dict(snap=snapshot(L, side.root / "live"))
+
+    out = both(native, tmp_path, monkeypatch, scenario)
+    check(out)
+    (t,) = out["py"]["snap"]["tiles"]
+    assert t["status"] == "complete" and t["note"] == "store failed: 'callsign'", t["note"]
 
 
 def test_recover_and_backfill_from_the_passband_store(LN, native, tmp_path, monkeypatch):
@@ -918,9 +1017,15 @@ def test_the_codec_renderer_draws_the_references_pictures(LN, native, tmp_path, 
 
     from sstvae.qrss import render
 
+    from sstvae import checkpoint
+
     try:
         ref_codec = render.load("fp32")
         have = render.decoder_codec_id(ref_codec)
+        # the C++ is handed the file the reference loaded: its own cache
+        # (SSTVAE_MODEL_CACHE) is not huggingface_hub's, and the artifact
+        # compared must be one
+        decoder = checkpoint.resolve_onnx("decoder", render.model_dir(), "fp32")
     except BaseException as e:      # noqa: BLE001 - no model to compare with
         if os.environ.get("SSTVAE_REQUIRE_CODEC"):
             raise
@@ -949,7 +1054,7 @@ def test_the_codec_renderer_draws_the_references_pictures(LN, native, tmp_path, 
             L = live.LiveListener(d, cfg, log=lambda m: None)
         else:
             L = _listener.listener(native, d, cfg, log=lambda m: None, clock=lambda: CLOCK,
-                                   renderer=LN.ListenerRenderer(cfg.precision, cfg.model))
+                                   renderer=LN.ListenerRenderer(cfg.precision, decoder))
         L.feed(_hiss(76 * FS), t0 + 60.0)
         L.step(t0 + 26.0)
         snaps[kind] = snapshot(L, d)

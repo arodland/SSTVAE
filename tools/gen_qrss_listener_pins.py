@@ -146,6 +146,21 @@ SCENARIOS = [
          receive=[[pas(1500.0, n=-1)], [pas(1500.0, n=-1, header=dict(HDR, segment=1))],
                   [pas(1500.0, n=-1)]],
          finish=[[[pas(1500.0, n=-1)], 1.0]]),
+    # a later pass due (an earlier slot's tile), through the live refresh's
+    # acquisition: said once, the hints passed on, CE and joint
+    *(dict(name=f"due_hint_{name}",
+           cfg=dict(spec="tiny", refresh_s=5.0, **({} if ws is None else {"waveforms": ws})),
+           state={"tiles": [dict(id=f"p{Q - 2 * k}_{f}", q=Q - 2 * k, slot_utc="", frame="tiny", f_hz=f,
+                                 status="complete", mode=m, segment=0, callsign="KC2G",
+                                 updated=float(slot_t0(Q)))
+                            for k, f, m in ((1, 1600.0, "B"), (2, 1720.0, "C"))]},
+           feeds=[[66 * FS, 8, T0 + 50.0]],
+           steps=[T0 + 26.0, T0 + 31.0, T0 + 36.0, END],
+           candidates=[[det(1500.0, wf), det(1600.0, wf, method="hint"), det(1720.0, wf)]],
+           detect=[[det(1500.0, wf), det(1720.0, wf)]],
+           receive=[[pas(1500.0, waveform=wf), pas(1720.0, waveform=wf, header=dict(HDR, segment=2))]],
+           finish=[[[pas(1500.0, waveform=wf), pas(1600.0, waveform=wf)], 1.0]])
+      for name, ws, wf in (("ce", None, None), ("joint", [WAVEFORM_CE, WAVEFORM_L], WAVEFORM_CE))),
 ]
 
 

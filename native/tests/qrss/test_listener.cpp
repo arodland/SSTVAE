@@ -23,7 +23,10 @@
 //     applied, and runs nothing queued; a second close() returns at once;
 //   * an exception in a live receive: logged once, the slot received again
 //     at its next refresh (the reference retired it);
-//   * run() replaying a source to its end.
+//   * run() replaying a source to its end;
+//   * feed() and step() while another thread holds the store (as an
+//     association does, for its whole transaction) and a live receive wants
+//     the store's due passes: the receive waits, feed() and step() must not.
 
 #include <algorithm>
 #include <atomic>
@@ -64,6 +67,7 @@
 #include "qrss/pyjson.hpp"
 #include "qrss/render.hpp"
 #include "qrss/source.hpp"
+#include "qrss/store.hpp"
 
 using namespace sstvae;
 namespace lv = sstvae::qrss::live;
@@ -846,6 +850,62 @@ void test_run_replays_to_the_end() {
     }
 }
 
+// A live receive reads the store's due passes (its hints) while another
+// thread holds the store -- the end-of-slot worker's association holds it
+// for a whole transaction, writes and fsync included. The receive waits for
+// the store; feed() and step() must not wait for the receive (a store read
+// under the listener's lock made both wait out the whole association).
+void test_the_store_is_never_waited_on_under_the_lock() {
+    Step step("store: feeding while another thread holds the store");
+    const fs::path d = fresh_dir("store_held");
+    auto st = std::make_shared<sstvae::qrss::store::Store>((d / "store").string());
+    std::mutex mu;
+    std::condition_variable cv;
+    bool held = false, release = false;
+    std::thread holder([&] {
+        const auto lk_store = st->hold();
+        std::unique_lock<std::mutex> lk(mu);
+        held = true;
+        cv.notify_all();
+        cv.wait_for(lk, std::chrono::seconds(8), [&] { return release; });
+    });
+    {
+        std::unique_lock<std::mutex> lk(mu);
+        check::is_true(cv.wait_for(lk, std::chrono::seconds(30), [&] { return held; }), "store: held");
+    }
+    std::atomic<int> receives{0};
+    lv::LiveListener L((d / "live").string(), tiny_config(true), st, nullptr,
+                       quick_stubs(std::chrono::milliseconds(0), &receives));
+    L.feed(audio(static_cast<std::int64_t>(46.0 * qcfg::FS), 3), t0() + 30.0);
+    L.step(t0() + 30.0);
+    // the refresh is taken, and has had the time to reach the store
+    for (int k = 0; k < 3000 && !L.busy(); ++k) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    check::current_step = "store: feeding and stepping while the store is held";
+    double worst = 0.0;
+    for (int k = 0; k < 8; ++k) {
+        const auto a = std::chrono::steady_clock::now();
+        L.feed(audio(qcfg::FS / 4, 60 + k), t0() + 30.0 + 0.25 * (k + 1));
+        L.step(t0() + 30.0 + 0.25 * (k + 1));
+        (void)L.tiles();
+        worst = std::max(worst, std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count());
+    }
+    const bool waiting = receives.load() == 0;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        release = true;
+    }
+    cv.notify_all();
+    holder.join();
+    check::is_true(waiting, "store: the receive waits for the store");
+    check::is_true(worst < 1.0, "store: feed() and step() did not wait for it (worst " + std::to_string(worst) + " s)");
+    check::is_true(L.wait_idle(60.0), "store: the receive returns once it is released");
+    check::equal(receives.load(), 1, "store: and receives");
+    const std::optional<lv::Tile> t = tile_of(L, "1954752-1500");
+    check::is_true(t.has_value(), "store: its tile");
+    L.close();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -866,6 +926,7 @@ int main(int argc, char** argv) {
         test_close_with_a_receive_in_flight();
         test_destructor_with_a_receive_in_flight();
         test_run_replays_to_the_end();
+        test_the_store_is_never_waited_on_under_the_lock();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL (%s): %s\n", check::current_step.load(), e.what());
         return 1;
