@@ -52,15 +52,16 @@
 // read through it, and a Store serialises its own calls (store.hpp):
 // each store call holds the store's mutex for that one call, never across
 // two, and nothing here holds it across slow work of its own. What blocks,
-// and for how long: em_prior reads every other member's (z, w) (from the
-// store's cache, else ~1 ms per MB of pass file, about 1 MB per FULL pass)
-// and sums them (~1 ms per member); known_header reads each member's light
-// metadata (cached after the first read) and may run one polar list
-// decode per segment (~10 ms each); known_keying loads every member's full
-// pass (~1 ms per MB each, a FULL pass with its capture about 1 MB). The
-// rest are arithmetic on their arguments (microseconds; template_z's
-// gamma tail well under a millisecond). Every result is a value, never a
-// reference into the store.
+// and for how long (measured 2026-10-14 on six FULL members, warm page
+// cache): em_prior reads every other member's (z, w) (0.4 MB each for
+// FULL; from the store's cache after the first read) and sums them, about
+// 3 ms in all; known_header reads each member's light metadata (cached
+// after the first read) and may run one polar list decode per segment
+// (~1.3 ms each), about 1.5 ms; known_keying loads every member's whole
+// pass file, its 250 Hz capture included (~3.6 MB for FULL, ~5 ms each),
+// about 30 ms. The rest are arithmetic on their arguments (microseconds;
+// template_z's gamma tail well under a millisecond). Every result is a
+// value, never a reference into the store.
 //
 // THE HOOKS (Hooks, Cancelled, check_cancel) are what the long calls built
 // on this file take -- em_refine and retro_detect, which run for minutes on

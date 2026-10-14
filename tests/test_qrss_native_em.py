@@ -248,6 +248,9 @@ def test_known_header(row, NStore, tmp_path):
     decoded1 = make_pass_result(a[:4096], 0.5, seed=30, hdr=h1, decoded=True)
     decoded1_seg1 = make_pass_result(a[:4096], 0.5, seed=31, hdr=dataclasses.replace(h1, segment=1), decoded=True)
     foreign = make_pass_result(a[:4096], 0.5, seed=32, hdr=h2, decoded=True)          # another picture's header
+    # ... decoded, and its LLRs, which still join the soft sum (only a matching
+    # decoded header ends the search)
+    foreign_llr_decoded = make_pass_result(a[:4096], 0.5, seed=33, hdr=h2, decoded=True, hdr_es_n0_db=-3.0)
     foreign_llr = [make_pass_result(a[:4096], 0.5, seed=40 + s, hdr=h2, hdr_es_n0_db=-6.0) for s in range(2)]
     nothing = [make_pass_result(a[:4096], 0.5, seed=50 + s) for s in range(2)]
     tiny = make_pass_result(a[:1024], 0.5, seed=60)
@@ -264,6 +267,7 @@ def test_known_header(row, NStore, tmp_path):
         "foreign": [(foreign, 0)],
         "foreign-llr": [(p, 0) for p in foreign_llr],
         "foreign+soft": [(foreign, 0)] + [(p, 0) for p in weak],
+        "foreign-decoded-llr+soft": [(foreign_llr_decoded, 0)] + [(p, 0) for p in weak],
         "nothing": [(p, 0) for p in nothing] + [(tiny, 0)],
         "strong-after-weak": [(weak[0], 1), (strong, 0)],
     }

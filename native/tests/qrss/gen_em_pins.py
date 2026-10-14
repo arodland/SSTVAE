@@ -4,7 +4,8 @@ check the C++ port of sstvae/qrss/em.py's shared pieces (and the special
 functions under its tail statistics) against, with no Python at test time.
 
   * special: ndtri and norm.isf (scipy 1.18.1) on q = u 2^-j, j = 0, 40, ...,
-    1000, and on 1 - u (u = unit(splitmix(400 + j, 32)), infra_testgen.hpp),
+    1000, on 1 - u (u = unit(splitmix(400 + j, 32)), infra_testgen.hpp) and
+    on NDTRI_SUBNORMAL (subnormal tails, the smallest normal, 0.5),
     through one SHA-256 of both arrays' bytes (bit for bit: cephes' ndtri
     calls only the C library's log and sqrt); math.lgamma (CPython's own
     Lanczos) on four ranges the same way; gamma.logsf(x, a) as a table of
@@ -108,11 +109,14 @@ def sha(*arrays):
 # --- special ----------------------------------------------------------------------------------
 
 NDTRI_J = list(range(0, 1001, 40))
+# subnormal and smallest-normal tail probabilities, and 0.5 exactly
+NDTRI_SUBNORMAL = [5e-324, 1e-320, 1e-310, 2.2250738585072014e-308, 0.5]
 
 
 def ndtri_inputs():
     qs = [unit(splitmix(400 + j, 32)) * 2.0 ** -j for j in NDTRI_J]
     qs.append(1.0 - unit(splitmix(450, 64)))
+    qs.append(np.array(NDTRI_SUBNORMAL))
     return np.concatenate(qs)
 
 
@@ -502,6 +506,7 @@ def main():
         "",
         "// --- special ---",
         f"inline constexpr int NDTRI_J[] = {{{', '.join(str(j) for j in NDTRI_J)}}};",
+        f"inline constexpr double NDTRI_SUBNORMAL[] = {{{', '.join(float(v).hex() for v in NDTRI_SUBNORMAL)}}};",
         f"inline constexpr const char* NDTRI_DIGEST = {cstr(ndtri_digest())};",
         f"inline constexpr const char* LGAMMA_DIGEST = {cstr(lgamma_digest())};",
         "struct LogSf { double x, a, logsf; };",

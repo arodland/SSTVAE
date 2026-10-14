@@ -125,6 +125,7 @@ static void test_ndtri_isf() {
     for (const int j : em_pins::NDTRI_J)
         for (const double u : units(400 + static_cast<std::uint64_t>(j), 32)) q.push_back(u * std::ldexp(1.0, -j));
     for (const double u : units(450, 64)) q.push_back(1.0 - u);
+    for (const double v : em_pins::NDTRI_SUBNORMAL) q.push_back(v);
     std::vector<std::uint8_t> out;
     for (const double v : q) append(out, math::ndtri(v));
     for (const double v : q) append(out, math::norm_isf(v));

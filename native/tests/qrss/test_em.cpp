@@ -42,6 +42,7 @@
 #include "qrss/store.hpp"
 #include "qrss/types.hpp"
 #include "qrss_check.hpp"
+#include "util/fileio.hpp"
 #include "util/sha256.hpp"
 
 using namespace sstvae;
@@ -105,19 +106,22 @@ std::uint32_t h32(std::uint64_t in) {
     return x;
 }
 
-std::string fresh_root(const std::string& name) {
+// A fresh directory under the temporary one; the store's root (UTF-8, as the
+// Store takes it: util::path_text, never path::string(), which goes through
+// the ANSI code page on Windows) is its "qrss".
+fs::path fresh_dir(const std::string& name) {
     const fs::path p = fs::temp_directory_path() /
                        ("sstvae_test_em_" + name + "_" +
                         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     fs::remove_all(p);
-    return (p / "qrss").string();
+    return p;
 }
 
 struct Cleanup {
-    std::string root;
+    fs::path dir;
     ~Cleanup() {
         std::error_code ec;
-        fs::remove_all(fs::path(root).parent_path(), ec);
+        fs::remove_all(dir, ec);
     }
 };
 
@@ -317,8 +321,9 @@ void test_scenarios() {
     for (const em_pins::Scenario& sc : em_pins::SCENARIOS) {
         const std::string name = sc.name;
         check::current_step = sc.name;
-        const std::string root = fresh_root(name);
-        Cleanup cleanup{root};
+        const fs::path dir = fresh_dir(name);
+        Cleanup cleanup{dir};
+        const std::string root = util::path_text(dir / "qrss");
         qs::Store::Seams seams;
         seams.clock = [] { return em_pins::T0; };
         qs::Store st(root, seams);

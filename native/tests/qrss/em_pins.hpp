@@ -13,7 +13,8 @@ inline constexpr double NAN_ = std::numeric_limits<double>::quiet_NaN();
 
 // --- special ---
 inline constexpr int NDTRI_J[] = {0, 40, 80, 120, 160, 200, 240, 280, 320, 360, 400, 440, 480, 520, 560, 600, 640, 680, 720, 760, 800, 840, 880, 920, 960, 1000};
-inline constexpr const char* NDTRI_DIGEST = "514028728eda5f13aa3ad48eeffe455dcd7d65956982cbc73eb075d12e762dd8";
+inline constexpr double NDTRI_SUBNORMAL[] = {0x0.0000000000001p-1022, 0x0.00000000007e8p-1022, 0x0.012688b70e62bp-1022, 0x1.0000000000000p-1022, 0x1.0000000000000p-1};
+inline constexpr const char* NDTRI_DIGEST = "f8032f9d4ff07e3ceb0a7968df9b1c09bba95ba9a79ed4b38f795a882e93d5dc";
 inline constexpr const char* LGAMMA_DIGEST = "c2bfb2684291406d0c72a28cbc66556d549c456ad4c62b633b5276a57c8b3bf7";
 struct LogSf { double x, a, logsf; };
 inline const LogSf GAMMA_LOGSF[] = {

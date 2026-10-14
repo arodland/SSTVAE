@@ -56,7 +56,10 @@ inline std::shared_ptr<py::object> held_object(py::object o) {
 
 struct PyHooks {
     em::Hooks hooks;
-    py::object cancel_owner;   // the CancelFlag em::Hooks::cancel points into (None: none)
+    // The CancelFlag em::Hooks::cancel points into (None: none), held like the
+    // callables (released with the GIL taken), so a PyHooks may be destroyed
+    // on any thread, with or without the GIL, as the comment above promises.
+    std::shared_ptr<py::object> cancel_owner;
 };
 
 // em::Hooks from Python's log / progress / cancel (see above). TypeError for
@@ -80,7 +83,7 @@ inline PyHooks hooks_from_py(const py::object& log, const py::object& progress, 
             (*fn)(done, total, rx::to_str(what));
         };
     }
-    out.cancel_owner = cancel;
+    out.cancel_owner = held_object(cancel);
     if (!cancel.is_none()) {
         if (!py::isinstance<CancelFlag>(cancel)) throw py::type_error("cancel must be a CancelFlag or None");
         out.hooks.cancel = &cancel.cast<CancelFlag&>().flag;
