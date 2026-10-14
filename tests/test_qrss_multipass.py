@@ -916,6 +916,85 @@ def test_due_gives_nothing_from_an_accumulator_it_cannot_read(store):
     assert store.due(Q_TEST + 4) == []                # (a cached pass is checked against its file)
 
 
+_MALFORMED_ACC = {
+    "members=5": lambda uid: {"callsign": "X", "picture_id": 1, "mode": 2, "members": 5},
+    "meta=[1,2]": lambda uid: [1, 2],
+    "meta=str": lambda uid: "str",
+    "meta=null": lambda uid: None,
+    "members=dict": lambda uid: {"callsign": "X", "picture_id": 1, "mode": 2,
+                                 "members": {"segment": 0}},
+    "member=int": lambda uid: {"callsign": "X", "picture_id": 1, "mode": 2, "members": [5]},
+    "uid=int": lambda uid: {"callsign": "X", "picture_id": 1, "mode": 2,
+                            "members": [{"segment": 0, "uid": 5}]},
+    "mode=null": lambda uid: {"callsign": "X", "picture_id": 1, "mode": None,
+                              "members": [{"segment": 0, "uid": uid}]},
+    "segment=null": lambda uid: {"callsign": "X", "picture_id": 1, "mode": 2,
+                                 "members": [{"segment": None, "uid": uid}]},
+    "segment=list": lambda uid: {"callsign": "X", "picture_id": 1, "mode": 2,
+                                 "members": [{"segment": [0], "uid": uid}]},
+}
+
+
+@pytest.mark.parametrize("case", list(_MALFORMED_ACC))
+def test_due_hides_only_a_malformed_accumulator(store, case):
+    """An accumulator JSON whose values are not the types it holds (a hand
+    edit) gives no due rows and hides nothing else: its TypeError escaped
+    due() -- except (OSError, KeyError, ValueError) -- and with it every
+    other accumulator's rows."""
+    sp = synthetic_picture(21, mode=2)
+    p0 = make_pass_result(_air(sp, 0), 1.0, seed=1, q=Q_TEST, f_hz=1205.47)
+    store.add_pass(p0)
+    store.attach(("KC2G", sp.picture_id), p0.uid, 0, "header", mode=2, codec_id=sp.codec_id)
+    want = store.due(Q_TEST + 2)
+    assert [r["segment"] for r in want] == [1]
+    # (sorted before the good one, so the good one is read after it fails)
+    bad = store.root / "acc" / "AAA_00000001.json"
+    bad.write_text(json.dumps(_MALFORMED_ACC[case](p0.uid)))
+    assert store.due(Q_TEST + 2) == want
+
+
+def test_a_dotted_callsign_keeps_its_whole_file_name(store):
+    """An accumulator's files are <key_name>.json and .npz whatever the
+    callsign: with_suffix read "K1.AB_00000001"'s ".AB_00000001" as a
+    suffix and replaced it, so ("K1.AB", 1) and ("K1.CD", 1) were one
+    accumulator, K1.json."""
+    jp, npz = store._acc_paths(("K1.AB", 1))
+    assert (jp.name, npz.name) == ("K1.AB_00000001.json", "K1.AB_00000001.npz")
+    assert jp.parent == store.root / "acc"
+    store.create(("K1.AB", 1), 0, 0)
+    assert not store.has_accumulator(("K1.CD", 1))
+    store.create(("K1.CD", 1), 2, 0)
+    assert store.accumulator(("K1.AB", 1)).mode == 0
+    assert store.accumulator(("K1.CD", 1)).mode == 2
+    assert sorted(p.name for p in (store.root / "acc").iterdir()) == [
+        "K1.AB_00000001.json", "K1.AB_00000001.npz", "K1.CD_00000001.json", "K1.CD_00000001.npz"]
+    assert store.open_keys() == [("K1.AB", 1), ("K1.CD", 1)]
+
+
+def test_pass_cache_sees_a_rewrite_of_the_same_size_and_mtime(store):
+    """A pass rewritten with the same size and its mtime put back (a
+    rewrite inside one mtime tick on a coarse file system) is read again:
+    the signature carries the inode -- a file moved into place is a new
+    one -- and the change time, not only (mtime_ns, size)."""
+    sp = synthetic_picture(31)
+    p = make_pass_result(_air(sp, 0), 0.5, seed=1)
+    store.add_pass(p)
+    path = store.root / "passes" / f"{p.uid}.npz"
+    z0, w0 = store.pass_zw(p.uid)
+    assert store.pass_info(p.uid)["em_round"] == 0
+    st = os.stat(path)
+    better = make_pass_result(_air(sp, 0), 2.0, seed=9, em_round=1)
+    p.z, p.w, p.em_round = better.z, better.w, 1
+    Store(store.root, clock=store.clock).add_pass(p)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    st2 = os.stat(path)
+    assert (st2.st_size, st2.st_mtime_ns) == (st.st_size, st.st_mtime_ns)
+    z, w = store.pass_zw(p.uid)
+    np.testing.assert_array_equal(w, better.w.astype(np.float64))
+    assert not np.array_equal(w, w0)
+    assert store.pass_info(p.uid)["em_round"] == 1
+
+
 def test_merge_log_says_accepted_as_a_bool(store):
     """merge's log line writes "accepted" as true/false whatever the
     statistic's type (an np.bool_ was written 1.0 through default=float)."""

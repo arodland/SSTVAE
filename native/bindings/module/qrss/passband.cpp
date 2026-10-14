@@ -52,6 +52,7 @@
 #include "qrss/flac.hpp"
 #include "qrss/frontend.hpp"
 #include "qrss/passband.hpp"
+#include "util/fileio.hpp"
 
 namespace sstvae_bindings::qrss {
 namespace {
@@ -64,14 +65,10 @@ using cf = std::complex<float>;
 
 // --- errors -----------------------------------------------------------------------
 
-int errno_of(const std::error_code& ec) {
-    const std::error_condition c = ec.default_error_condition();
-    if (c.category() == std::generic_category()) return c.value();
-    return EIO;   // (a Windows error with no errno: still an OSError)
-}
-
+// (a FileError's code is an errno already, rawfile.hpp; util::errno_of is
+// the one mapping either way)
 [[noreturn]] void raise_os(const std::error_code& ec, const std::string& path_bytes) {
-    fspath::raise_os_error(errno_of(ec), fspath::fs_text(path_bytes));
+    fspath::raise_os_error(sstvae::util::errno_of(ec), fspath::fs_text(path_bytes));
 }
 
 // fn(), with the store's file errors raised as OSError naming the file.

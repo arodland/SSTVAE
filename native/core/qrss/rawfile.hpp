@@ -34,11 +34,16 @@
 
 namespace sstvae::qrss::rawfile {
 
-// An OSError: errno (or a Windows error), and the file it concerns (UTF-8),
-// for the stores' callers to raise as Python's OSError naming that file.
+// An OSError: an errno, and the file it concerns (UTF-8), for the stores'
+// callers to raise as Python's OSError naming that file. The code is always
+// an errno (generic_category): whatever `ec` is made from -- a Win32 code
+// from rawfile.cpp or std::filesystem on Windows -- goes through
+// util::errno_of once, here (ERROR_ACCESS_DENIED is EACCES, not 5, which is
+// EIO's number), so every catch site reads the errno Python's own OSError
+// carries; EIO when `ec` is no error at all.
 class FileError : public std::system_error {
 public:
-    FileError(std::error_code ec, std::string path) : std::system_error(ec, path), path_(std::move(path)) {}
+    FileError(std::error_code ec, std::string path);
     const std::string& path() const { return path_; }
 
 private:
@@ -97,12 +102,20 @@ private:
 // conversion), so values compare with Python's own for the same file.
 std::optional<std::int64_t> mtime_ns(const std::string& path, std::error_code& ec);
 
-// (os.stat(path).st_mtime_ns, st_size) from one stat: what a cache of a
-// file's contents is checked against (store.py's _signature). nullopt with
-// `ec` set when it cannot be stat'ed.
+// (os.stat(path).st_mtime_ns, st_size, st_ino, st_ctime_ns) from one stat:
+// what a cache of a file's contents is checked against (store.py's
+// _signature). The inode and the change time are what see a rewrite that
+// keeps the size inside one mtime tick (or puts the mtime back): a file
+// moved into place is a new inode, and any write or os.utime moves the
+// change time. On Windows the file index from GetFileInformationByHandle and
+// FILE_BASIC_INFO's ChangeTime, as ns since 1970. Compared only with another
+// signature of this implementation, never with Python's. nullopt with `ec`
+// set when it cannot be stat'ed.
 struct Signature {
     std::int64_t mtime_ns = 0;
     std::uint64_t size = 0;
+    std::uint64_t ino = 0;
+    std::int64_t ctime_ns = 0;
     bool operator==(const Signature&) const = default;
 };
 std::optional<Signature> signature(const std::string& path, std::error_code& ec);

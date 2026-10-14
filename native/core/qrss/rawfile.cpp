@@ -42,6 +42,9 @@ std::error_code win_code(DWORD e) { return {static_cast<int>(e), std::system_cat
 
 }  // namespace
 
+FileError::FileError(std::error_code ec, std::string path)
+    : std::system_error(util::errno_code_of(ec), path), path_(std::move(path)) {}
+
 RawFile::~RawFile() { close(); }
 
 #ifdef _WIN32
@@ -198,9 +201,22 @@ std::optional<Signature> signature(const std::string& path, std::error_code& ec)
         ec = errno_code(EINVAL);
         return std::nullopt;
     }
-    WIN32_FILE_ATTRIBUTE_DATA a;
-    if (!::GetFileAttributesExW(w->c_str(), GetFileExInfoStandard, &a)) {
+    // (a handle for its attributes only, every share mode: it never stands
+    // in the way of a writer, a rename or a delete)
+    HANDLE h = ::CreateFileW(w->c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
         ec = win_code(::GetLastError());
+        return std::nullopt;
+    }
+    BY_HANDLE_FILE_INFORMATION a;
+    FILE_BASIC_INFO b;
+    const bool ok = ::GetFileInformationByHandle(h, &a) &&
+                    ::GetFileInformationByHandleEx(h, FileBasicInfo, &b, sizeof b);
+    const DWORD err = ok ? 0 : ::GetLastError();
+    ::CloseHandle(h);
+    if (!ok) {
+        ec = win_code(err);
         return std::nullopt;
     }
     const std::uint64_t t = (static_cast<std::uint64_t>(a.ftLastWriteTime.dwHighDateTime) << 32) |
@@ -208,6 +224,8 @@ std::optional<Signature> signature(const std::string& path, std::error_code& ec)
     Signature s;
     s.mtime_ns = (static_cast<std::int64_t>(t) - 116444736000000000LL) * 100;
     s.size = (static_cast<std::uint64_t>(a.nFileSizeHigh) << 32) | a.nFileSizeLow;
+    s.ino = (static_cast<std::uint64_t>(a.nFileIndexHigh) << 32) | a.nFileIndexLow;
+    s.ctime_ns = (static_cast<std::int64_t>(b.ChangeTime.QuadPart) - 116444736000000000LL) * 100;
     return s;
 }
 
@@ -358,10 +376,13 @@ std::optional<Signature> signature(const std::string& path, std::error_code& ec)
     Signature s;
 #if defined(__APPLE__)
     s.mtime_ns = static_cast<std::int64_t>(st.st_mtimespec.tv_sec) * 1000000000LL + st.st_mtimespec.tv_nsec;
+    s.ctime_ns = static_cast<std::int64_t>(st.st_ctimespec.tv_sec) * 1000000000LL + st.st_ctimespec.tv_nsec;
 #else
     s.mtime_ns = static_cast<std::int64_t>(st.st_mtim.tv_sec) * 1000000000LL + st.st_mtim.tv_nsec;
+    s.ctime_ns = static_cast<std::int64_t>(st.st_ctim.tv_sec) * 1000000000LL + st.st_ctim.tv_nsec;
 #endif
     s.size = static_cast<std::uint64_t>(st.st_size);
+    s.ino = static_cast<std::uint64_t>(st.st_ino);
     return s;
 }
 

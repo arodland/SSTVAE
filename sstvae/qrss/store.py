@@ -126,10 +126,14 @@ def _tmp_name(path: Path) -> Path:
     return path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
 
 
-def _signature(path: Path) -> tuple[int, int]:
-    """(st_mtime_ns, st_size): what a cached read of `path` is checked against."""
+def _signature(path: Path) -> tuple[int, int, int, int]:
+    """(st_mtime_ns, st_size, st_ino, st_ctime_ns): what a cached read of
+    `path` is checked against. The inode and the change time see a rewrite
+    that keeps the size inside one mtime tick, or puts the mtime back: a file
+    moved into place is a new inode, and every write or os.utime moves the
+    change time."""
     st = os.stat(path)
-    return st.st_mtime_ns, st.st_size
+    return st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns
 
 
 def _atomic_write(path: Path, write) -> None:
@@ -277,7 +281,7 @@ class Store:
     and for `expire`; tests pass a fake one.
 
     A pass's cached (z, w) and light metadata are kept with the file's
-    signature (mtime_ns, size), taken before it is read, and read again
+    signature (mtime_ns, size, inode, ctime_ns), taken before it is read, and read again
     when the file no longer has it: another process (qrss_decode.py's EM)
     may rewrite a pass under a running listener, whose next rebuild would
     otherwise write the old values back.
@@ -290,7 +294,7 @@ class Store:
             (self.root / d).mkdir(parents=True, exist_ok=True)
         self._zw: OrderedDict[str, tuple[np.ndarray, np.ndarray]] = OrderedDict()
         self._light: dict[str, dict] = {}
-        self._sig: dict[tuple[str, str], tuple[int, int]] = {}   # ("zw"|"light", uid) -> signature
+        self._sig: dict[tuple[str, str], tuple[int, ...]] = {}   # ("zw"|"light", uid) -> signature
 
     # --- passes ---
 
@@ -390,8 +394,10 @@ class Store:
     # --- accumulators ---
 
     def _acc_paths(self, key) -> tuple[Path, Path]:
+        # (stem.name + suffix, not with_suffix: a dotted callsign's stem
+        # "K1.AB_00000001" has a suffix of its own, which with_suffix replaces)
         stem = self.root / "acc" / key_name(key)
-        return stem.with_suffix(".json"), stem.with_suffix(".npz")
+        return stem.parent / (stem.name + ".json"), stem.parent / (stem.name + ".npz")
 
     def has_accumulator(self, key) -> bool:
         return self._acc_paths(key)[0].exists()
@@ -457,8 +463,9 @@ class Store:
         q, waveform and frame, so the caller listens for the same waveform
         at the same frequency.
 
-        An accumulator that cannot be read through (being written, or a
-        member's pass expired) contributes no rows at all, not the ones it
+        An accumulator that cannot be read through (being written, a
+        member's pass expired, or a hand-edited file whose values are not
+        the types it holds) contributes no rows at all, not the ones it
         gave before failing.
         """
         out = []
@@ -475,7 +482,7 @@ class Store:
                                              segment=g, f_hz=info["f_hz"], q=info["q"],
                                              waveform=info["waveform"],
                                              frame=info["frame"]))
-            except (OSError, KeyError, ValueError):
+            except (OSError, KeyError, ValueError, TypeError):
                 continue                  # (an accumulator being written, or a pass expired)
             out.extend(rows)
         return out

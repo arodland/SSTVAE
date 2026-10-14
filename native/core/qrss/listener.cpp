@@ -21,7 +21,9 @@
 #include "images/images.hpp"
 #include "math/errors.hpp"
 #include "qrss/picture.hpp"
+#include "qrss/png.hpp"
 #include "qrss/pyjson.hpp"
+#include "qrss/rawfile.hpp"
 #include "util/fileio.hpp"
 
 #if defined(_WIN32)
@@ -170,14 +172,6 @@ std::string text_mode(const std::string& s) {
     return out;
 #else
     return s;
-#endif
-}
-
-long process_id() {
-#if defined(_WIN32)
-    return static_cast<long>(::_getpid());
-#else
-    return static_cast<long>(::getpid());
 #endif
 }
 
@@ -765,7 +759,10 @@ void LiveListener::write_state(bool listening) {
         st.set("finished", std::move(fin));
         text = pyjson::dumps(st, 1, false);
     }
-    const std::string tmp = dir_ + "/state.json." + std::to_string(process_id()) + ".tmp";
+    // (store.py's _tmp_name: the thread's id beside the process's, so two
+    // threads writing the state at once never share a temporary)
+    const std::string tmp = dir_ + "/.state.json." + std::to_string(rawfile::process_id()) + "." +
+                            std::to_string(rawfile::thread_ident()) + ".tmp";
     write_file(tmp, text_mode(text));
     replace_or_throw(tmp, dir_ + "/state.json");
 }
@@ -1547,9 +1544,10 @@ void LiveListener::render(const RenderJob& job) {
             const auto g = render_gen_.find(job.tile_id);
             if (g == render_gen_.end() || g->second != job.gen) return;   // a newer update draws its own
         }
-        const std::string tmp = dir_ + "/tiles/." + job.tile_id + "." + std::to_string(process_id()) + ".png.tmp";
-        images::save_png(*pic, tmp);
-        replace_or_throw(tmp, dir_ + "/" + rel);
+        // (through util/fileio.hpp, to "tiles/.<id>.png.<pid>.<thread id>.tmp"
+        // and moved into place: images::save_png's narrow fopen cannot open a
+        // name outside the ANSI code page on Windows)
+        png::write_png(*pic, dir_ + "/" + rel);
     }
     Lock lk(mu_);
     const auto g = render_gen_.find(job.tile_id);

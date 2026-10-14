@@ -124,22 +124,6 @@ bool uid_matches(const Value& v, std::optional<std::string_view> uid) {
     throw FileError(verb, path, err);
 }
 
-// The errno of a std::filesystem error, for FileError (whose binding raises
-// the OSError subclass errno names). On Windows ec is a Win32 code
-// (system_category), not an errno -- ERROR_ACCESS_DENIED is 5, EIO's number --
-// so it goes through the category's portable condition first.
-int code_of(const std::error_code& ec) {
-    if (!ec) return EIO;
-    if (ec.category() == std::generic_category()) return ec.value();
-    const std::error_condition c = ec.default_error_condition();
-    if (c.category() == std::generic_category() && c.value()) return c.value();
-#ifdef _WIN32
-    return EIO;
-#else
-    return ec.value();
-#endif
-}
-
 std::vector<std::uint8_t> read_file(const std::string& path) {
     util::File f = util::open_file(path, "rb");
     if (!f) file_error("cannot open", path, errno);
@@ -284,12 +268,12 @@ void remove_or_throw(const std::string& path, bool missing_ok) {
     std::error_code ec;
     if (util::remove_file(path, ec)) return;
     if (missing_ok && ec == std::errc::no_such_file_or_directory) return;
-    file_error("cannot remove", path, code_of(ec));
+    file_error("cannot remove", path, util::errno_of(ec));
 }
 
 void default_replace(const std::string& from, const std::string& to) {
     std::error_code ec;
-    if (!util::replace_file(from, to, ec)) file_error("cannot replace", from, code_of(ec));
+    if (!util::replace_file(from, to, ec)) file_error("cannot replace", from, util::errno_of(ec));
 }
 
 std::string env(const char* name) {
@@ -663,7 +647,7 @@ Store::Store(std::optional<std::string> root, Seams seams)
         if (!p) file_error("cannot create", path, EINVAL);
         std::error_code ec;
         std::filesystem::create_directories(*p, ec);
-        if (ec) file_error("cannot create", path, code_of(ec));
+        if (ec) file_error("cannot create", path, util::errno_of(ec));
         if (!util::is_dir(path)) file_error("cannot create", path, EEXIST);
     }
     mu_ = root_mutex(root_);
@@ -733,7 +717,7 @@ void Store::forget(const std::string& uid) {
 rawfile::Signature Store::signature(const std::string& path) const {
     std::error_code ec;
     const auto sig = rawfile::signature(path, ec);
-    if (!sig) file_error("cannot stat", path, code_of(ec));
+    if (!sig) file_error("cannot stat", path, util::errno_of(ec));
     return *sig;
 }
 
@@ -973,6 +957,8 @@ std::vector<Due> Store::due(std::int64_t q) {
             continue;
         } catch (const std::invalid_argument&) {   // ValueError
             continue;
+        } catch (const math::TypeError&) {        // TypeError: a hand-edited file whose
+            continue;                             // values are not the types it holds
         }
         out.insert(out.end(), std::make_move_iterator(rows.begin()), std::make_move_iterator(rows.end()));
     }

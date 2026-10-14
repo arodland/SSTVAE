@@ -37,6 +37,8 @@
 #include "qrss/codec/decode.hpp"
 #include "qrss/codec/render.hpp"
 #include "qrss/decode.hpp"
+#include "qrss/png.hpp"
+#include "qrss/rawfile.hpp"
 #include "util/fileio.hpp"
 
 namespace sstvae::qrss::cli {
@@ -84,7 +86,14 @@ int render_picture(const qrss::decode::Planes& planes, std::int64_t codec_id,
         const std::string path = qc::pathlib_str(req.output);
         errno = 0;
         if (!util::open_file(path, "wb")) return uncaught(err, OsError(errno ? errno : EIO, path));
-        images::save_png(pic, path);
+        // The bytes through util/fileio.hpp (images::save_png's narrow fopen
+        // cannot open a name outside the ANSI code page on Windows): the same
+        // PNG, by way of a temporary sibling moved into place.
+        try {
+            png::write_png(pic, path);
+        } catch (const rawfile::FileError& e) {
+            return uncaught(err, OsError(e.code().value(), path));
+        }
         out << "wrote " << path << "\n";
         return 0;
     } catch (const checkpoint::CheckpointError& e) {

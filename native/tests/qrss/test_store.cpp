@@ -11,6 +11,7 @@
 //
 //   PYTHONPATH=. python native/tests/qrss/gen_store_pins.py   # store_pins.hpp
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -30,6 +31,7 @@
 
 #include "qrss/associate.hpp"
 #include "qrss/pyjson.hpp"
+#include "qrss/rawfile.hpp"
 #include "qrss/store.hpp"
 #include "qrss_check.hpp"
 #include "store_pins.hpp"
@@ -580,6 +582,25 @@ static void test_reference_fixes() {
     fs::last_write_time(ppath, fs::last_write_time(ppath) + std::chrono::seconds(1));
     check::equal(st.pass_zw(a0.uid)->w[0], 100.0, "the new file's (z, w)");
     check::equal(st.pass_info(a0.uid).em_round, std::int64_t(1), "and its info");
+    // ... and so is one that keeps the size and has its mtime put back: a
+    // file moved into place is a new inode with a new change time
+    {
+        const auto mtime = fs::last_write_time(ppath);
+        const std::uintmax_t size = fs::file_size(ppath);
+        std::error_code ec;
+        const auto before = qrss::rawfile::signature(ppath.string(), ec);
+        qs::Store other(root, qs::Store::Seams{[] { return store_pins::T0; }, {}, {}});
+        auto alt = passes.at("a0e").pass;   // a0e's uid, meta and shapes, with w = 50
+        std::fill(alt.w.begin(), alt.w.end(), 50.0f);
+        other.add_pass(alt);
+        fs::last_write_time(ppath, mtime);
+        check::equal(fs::file_size(ppath), size, "the rewrite keeps the size");
+        const auto after = qrss::rawfile::signature(ppath.string(), ec);
+        check::is_true(before && after && before->mtime_ns == after->mtime_ns && before->size == after->size,
+                       "and the mtime");
+        check::is_true(before && after && before->ino != after->ino, "a new inode");
+    }
+    check::equal(st.pass_zw(a0.uid)->w[0], 50.0, "same size and mtime: the new file's (z, w)");
 
     // a new cluster never writes over one of the same name
     const auto& b0 = passes.at("b0").pass;
@@ -622,6 +643,52 @@ static void test_reference_fixes() {
 #endif
 }
 
+// due: an accumulator JSON whose values are not the types it holds (a hand
+// edit) hides only itself -- store.py's except (OSError, KeyError,
+// ValueError, TypeError); a null mode or segment was a TypeError out of
+// py_int, which escaped due() and with it every other accumulator's rows.
+static void test_due_hides_a_malformed_accumulator() {
+    check::current_step = "due: a malformed accumulator";
+    const std::string root = fresh_root("due_malformed");
+    Cleanup cleanup{root};
+    auto passes = ss::make_passes();
+    qs::Store st(root, qs::Store::Seams{[] { return store_pins::T0; }, {}, {}});
+    const auto& b0 = passes.at("b0").pass;
+    st.add_pass(b0);
+    st.attach(qs::Key{"OK", 1}, b0.uid, 0, "corr", 2);
+    const std::size_t want = st.due(b0.q + 2).size();
+    check::equal(want, std::size_t(1), "the good accumulator's row");
+    const std::string uid = "\"" + b0.uid + "\"";
+    const std::vector<std::pair<const char*, std::string>> cases = {
+        {"members=5", R"({"callsign": "X", "picture_id": 1, "mode": 2, "members": 5})"},
+        {"meta=[1,2]", "[1, 2]"},
+        {"meta=\"str\"", R"("str")"},
+        {"meta=null", "null"},
+        {"members={...}", R"({"callsign": "X", "picture_id": 1, "mode": 2, "members": {"segment": 0}})"},
+        {"a member that is an int", R"({"callsign": "X", "picture_id": 1, "mode": 2, "members": [5]})"},
+        {"a uid that is an int", R"({"callsign": "X", "picture_id": 1, "mode": 2, "members": [{"segment": 0, "uid": 5}]})"},
+        {"mode=null", R"({"callsign": "X", "picture_id": 1, "mode": null, "members": [{"segment": 0, "uid": )" + uid + "}]}"},
+        {"segment=null", R"({"callsign": "X", "picture_id": 1, "mode": 2, "members": [{"segment": null, "uid": )" + uid + "}]}"},
+        {"segment=[0]", R"({"callsign": "X", "picture_id": 1, "mode": 2, "members": [{"segment": [0], "uid": )" + uid + "}]}"},
+    };
+    const fs::path bad = fs::path(root) / "acc" / "AAA_00000001.json";   // (sorted before the good one)
+    for (const auto& [what, text] : cases) {
+        {
+            std::ofstream f(bad, std::ios::binary);
+            f << text;
+        }
+        std::size_t got = 0;
+        bool threw = false;
+        try {
+            got = st.due(b0.q + 2).size();
+        } catch (const std::exception& e) {
+            threw = true;
+            check::fail(std::string(what) + ": due() threw", e.what());
+        }
+        if (!threw) check::equal(got, want, std::string(what) + ": hides only itself");
+    }
+}
+
 int main() {
     check::report_crashes_instead_of_prompting();
     check::Watchdog watchdog(600.0, "qrss_core_store");
@@ -633,6 +700,7 @@ int main() {
         test_replace_seam();
         test_zw_cache_seam();
         test_reference_fixes();
+        test_due_hides_a_malformed_accumulator();
         test_threads();
         test_two_stores_one_root();
     } catch (const std::exception& e) {

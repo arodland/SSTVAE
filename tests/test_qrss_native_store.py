@@ -63,6 +63,7 @@ import copy
 import dataclasses
 import functools
 import hashlib
+import json
 import math
 import os
 import random
@@ -497,6 +498,80 @@ def test_scripted_sequence(NStore, tmp_path):
     justified = H.compare_trees(tmp_path / "py-mid", tmp_path / "cpp-mid")
     H.compare_trees(tmp_path / "py", tmp_path / "cpp")
     print(f"scripted sequence: {len(a)} operations, mean_w_db last-place differences {justified}")
+
+
+# --- dotted callsigns, malformed accumulators, the cache signature ---------------------------------------
+
+def _malformed(uid):
+    """Accumulator JSONs whose values are not the types they hold (a hand edit)."""
+    return {
+        "members=5": {"callsign": "X", "picture_id": 1, "mode": 2, "members": 5},
+        "meta=[1,2]": [1, 2],
+        "meta=str": "str",
+        "meta=null": None,
+        "members=dict": {"callsign": "X", "picture_id": 1, "mode": 2, "members": {"segment": 0}},
+        "member=int": {"callsign": "X", "picture_id": 1, "mode": 2, "members": [5]},
+        "uid=int": {"callsign": "X", "picture_id": 1, "mode": 2, "members": [{"segment": 0, "uid": 5}]},
+        "mode=null": {"callsign": "X", "picture_id": 1, "mode": None,
+                      "members": [{"segment": 0, "uid": uid}]},
+        "segment=null": {"callsign": "X", "picture_id": 1, "mode": 2,
+                         "members": [{"segment": None, "uid": uid}]},
+    }
+
+
+def _odd_files(cls, root):
+    P, K, X = _passes()
+    st = cls(root, clock=Clock())
+    r = Rec(root)
+    acc_dir = Path(root) / "acc"
+    for key in (("K1.AB", 1), ("K1.CD", 1), ("K1.AB/P", 2), ("W1.X.Y", 0xABC), ("dot.", 3)):
+        r("paths " + key[0], st._acc_paths, key)
+    r("create K1.AB", st.create, ("K1.AB", 1), 0, 0)
+    r("has K1.CD", st.has_accumulator, ("K1.CD", 1))
+    r("create K1.CD", st.create, ("K1.CD", 1), 2, 0)
+    r("create W1.X.Y", st.create, ("W1.X.Y", 0xABC), 1, 7)
+    r("accumulator K1.AB", st.accumulator, ("K1.AB", 1))
+    r("files", lambda: sorted(p.name for p in acc_dir.iterdir()))
+    r("open_keys", st.open_keys)
+    r("add_pass", st.add_pass, P["A0"])
+    r("attach", st.attach, K["A"], P["A0"].uid, 0, "header", mode=2)
+    r("due good", lambda: [st.due(q) for q in range(Q_TEST, Q_TEST + 6)])
+    for case, meta in _malformed(P["A0"].uid).items():
+        (acc_dir / "AAA_00000001.json").write_text(json.dumps(meta))
+        r("due " + case, lambda: [st.due(q) for q in range(Q_TEST, Q_TEST + 6)])
+    (acc_dir / "AAA_00000001.json").unlink()
+    # a pass rewritten with the same size and its mtime put back
+    path = Path(root) / "passes" / f"{P['A0'].uid}.npz"
+    r("pass_zw", lambda: st.pass_zw(P["A0"].uid)[1][:4].tolist())
+    before = os.stat(path)
+    cls(root, clock=Clock()).add_pass(dataclasses.replace(P["A0"], w=(P["A0"].w * 2).astype(np.float32),
+                                                          em_round=1))
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = os.stat(path)
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+    r("pass_zw rewritten", lambda: st.pass_zw(P["A0"].uid)[1][:4].tolist())
+    r("pass_info rewritten", lambda: st.pass_info(P["A0"].uid)["em_round"])
+    return r.out
+
+
+def test_dotted_callsigns_malformed_accumulators_and_rewrites(NStore, tmp_path):
+    """Both implementations name a dotted callsign's accumulator files
+    <key_name>.json/.npz (store.py's with_suffix cut "K1.AB_00000001" to
+    "K1"), give due rows past an accumulator JSON of the wrong types (a
+    TypeError escaped store.py's due, a null mode or segment the C++'s), and
+    read again a pass rewritten with the same size and mtime (the inode and
+    change time in the signature); the same results and the same files."""
+    a = _odd_files(S.Store, tmp_path / "py")
+    b = _odd_files(NStore, tmp_path / "cpp")
+    assert_same(a, b)
+    files = dict((x[0], x[2]) for x in a)["files"]
+    assert files == ("list", ["K1.AB_00000001.json", "K1.AB_00000001.npz", "K1.CD_00000001.json",
+                              "K1.CD_00000001.npz", "W1.X.Y_00000abc.json", "W1.X.Y_00000abc.npz"])
+    assert all(x[1] == "ok" for x in a if x[0].startswith("due")), [x for x in a if x[1] != "ok"]
+    due = dict((x[0], x[2]) for x in a)
+    assert all(due["due " + c] == due["due good"] for c in _malformed("u")), "a malformed one hides only itself"
+    assert dict((x[0], x[2]) for x in a)["pass_info rewritten"] == ("int", "1")
+    H.compare_trees(tmp_path / "py", tmp_path / "cpp")
 
 
 # --- interop ---------------------------------------------------------------------------------------------

@@ -62,11 +62,11 @@
 // on one directory in this process shares it (by its canonical path), since
 // two would otherwise lose each other's read-modify-write of an accumulator.
 // Their caches are still their own, as two processes' are (store.py's), and
-// each cached pass is kept with its file's signature (mtime_ns, size), taken
-// before the read and checked at every use: a pass rewritten by another Store
-// or another process (qrss_decode.py's EM) is read again rather than served
-// stale (a rewrite inside one mtime tick that keeps the size is not seen, as
-// in store.py). What a call costs: a stat per cached read; reading a pass is ~1 ms per MB
+// each cached pass is kept with its file's signature (mtime_ns, size, inode,
+// ctime_ns), taken before the read and checked at every use: a pass rewritten
+// by another Store or another process (qrss_decode.py's EM) is read again
+// rather than served stale, a rewrite that keeps the size and the mtime
+// included (a new inode, a new change time), as in store.py. What a call costs: a stat per cached read; reading a pass is ~1 ms per MB
 // (a full pass is about 1 MB, with its narrow capture), an accumulator
 // rebuild ~1 ms per member once its passes are cached (ZW_CACHE of them),
 // writing an accumulator ~2 MB of npz plus fsync (milliseconds on a local
@@ -368,7 +368,7 @@ private:
     void write_atomic(const std::string& path, std::span<const std::uint8_t> data, bool sync) const;
     void write_json(const std::string& path, const pyjson::Value& v) const;
     void forget(const std::string& uid);
-    // os.stat(path)'s (mtime_ns, size); FileError when it cannot be stat'ed.
+    // os.stat(path)'s (mtime_ns, size, ino, ctime_ns); FileError when it cannot be stat'ed.
     rawfile::Signature signature(const std::string& path) const;
     std::string dir(const char* name) const;
 

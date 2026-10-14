@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "check.hpp"
+#include "qrss/rawfile.hpp"
 #include "util/fileio.hpp"
 
 using namespace sstvae;
@@ -49,6 +50,28 @@ void test_errno_of() {
     check::is_true(c.category() == std::generic_category() && c.value() == EACCES, "errno_code_of: generic EACCES");
 }
 
+// rawfile::FileError (the passband store's, the FLAC packer's, the directory
+// lock's OSError) carries an errno whatever it is made from: a Win32 code
+// reaching a binding as 5 would be an OSError saying EIO for an access denied.
+void test_file_error() {
+    using qrss::rawfile::FileError;
+    const FileError a(std::error_code(5, fake_win32), "/x/fe_1.i16");
+    check::is_true(a.code().category() == std::generic_category(), "a Win32-style code becomes an errno");
+    check::equal(a.code().value(), EACCES, "ERROR_ACCESS_DENIED -> EACCES");
+    check::equal(a.path(), std::string("/x/fe_1.i16"), "the path");
+    check::is_true(a.code() == std::errc::permission_denied, "compares as EACCES");
+    const FileError b(std::error_code(2, fake_win32), "p");
+    check::is_true(b.code() == std::errc::no_such_file_or_directory, "ERROR_FILE_NOT_FOUND -> ENOENT (is_missing)");
+    check::equal(FileError(std::error_code(1234, fake_win32), "p").code().value(), EIO, "no errno: EIO");
+    check::equal(FileError(std::make_error_code(std::errc::no_space_on_device), "p").code().value(), ENOSPC,
+                 "an errno stays");
+    check::equal(FileError(std::error_code(), "p").code().value(), EIO, "no error at all: EIO, never 0");
+#ifndef _WIN32
+    check::equal(FileError(std::error_code(EROFS, std::system_category()), "p").code().value(), EROFS,
+                 "POSIX system_category: its errno");
+#endif
+}
+
 void test_replace_file() {
     namespace fs = std::filesystem;
     const fs::path dir = fs::temp_directory_path() / ("sstvae_fileio_" + std::to_string(std::rand()));
@@ -78,6 +101,7 @@ void test_replace_file() {
 int main() {
     try {
         test_errno_of();
+        test_file_error();
         test_replace_file();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
