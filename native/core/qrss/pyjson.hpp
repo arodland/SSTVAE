@@ -68,11 +68,15 @@ public:
     double as_double(std::string_view what = "value") const;
     const std::string& as_string(std::string_view what = "value") const;
     const std::vector<Value>& items() const;
+    // A list's items to change in place (the store edits members and clusters).
+    std::vector<Value>& items();
 
     // dict access, in insertion order.
     const std::vector<std::string>& keys() const;
     const std::vector<Value>& values() const;
     const Value* find(std::string_view key) const;
+    // The value of `key` to change in place, or null when absent.
+    Value* find(std::string_view key);
     // KeyError (a std::out_of_range) when absent.
     const Value& at(std::string_view key) const;
     // d[key] = v: replaces in place, or appends.
@@ -94,6 +98,19 @@ private:
 
 // json.dumps(v)
 std::string dumps(const Value& v);
+// json.dumps(v, indent=indent, sort_keys=sort_keys), byte for byte, for an
+// int indent (the store writes indent=1, sort_keys=True). With an indent
+// (0 included: newlines and no spaces; a negative one is 0, as ' ' * n is
+// '') every non-empty list and dict puts each item on a line of its own,
+// indented by `indent` spaces per level, the item separator becomes ","
+// and the key separator stays ": " (json's defaults once indent is set);
+// an empty one is still "[]" / "{}". Without one the separators are
+// json.dumps' defaults, ", " and ": ". sort_keys orders each dict's items
+// by key as Python's str comparison does (code points, which UTF-8 bytes
+// compared unsigned preserve, surrogates included); otherwise insertion
+// order. Every key is a str here, so sorting never meets the TypeError
+// that mixed key types raise in Python.
+std::string dumps(const Value& v, std::optional<int> indent, bool sort_keys);
 // json.loads(text); text is UTF-8.
 Value loads(std::string_view text);
 

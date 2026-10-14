@@ -6,11 +6,13 @@
 //               "s": "\u00e9\U0001f600\n\"\\\x7f\u2028", "o": {}, "l": []})
 
 #include <cmath>
+#include <optional>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "pyjson_pins.hpp"
 #include "qrss/pyjson.hpp"
 #include "qrss_check.hpp"
 
@@ -86,9 +88,30 @@ static void test_refusals() {
     }
 }
 
+// json.dumps(value, indent=i, sort_keys=s) against Python's text, pinned by
+// gen_pyjson_pins.py (the store's accumulator and cluster JSON among them):
+// each case's value read back from its default dumps, then laid out every way.
+static void test_indent_and_sort_keys() {
+    for (const pyjson_pins::Case& c : pyjson_pins::CASES) {
+        const Value v = qrss::pyjson::loads(c.input);
+        check::equal(qrss::pyjson::dumps(v), std::string(c.input), std::string(c.name) + ": default dumps");
+        for (int k = 0; k < pyjson_pins::N_LAYOUTS; ++k) {
+            const pyjson_pins::Layout& lay = pyjson_pins::LAYOUTS[k];
+            const std::string what = std::string(c.name) + ": indent=" +
+                                     (lay.indent ? std::to_string(*lay.indent) : std::string("None")) +
+                                     ", sort_keys=" + (lay.sort_keys ? "True" : "False");
+            check::equal(qrss::pyjson::dumps(v, lay.indent, lay.sort_keys), std::string(c.want[k]), what);
+        }
+    }
+    // dumps(v, None, False) is dumps(v)
+    const Value s = sample();
+    check::equal(qrss::pyjson::dumps(s, std::nullopt, false), qrss::pyjson::dumps(s), "no indent, unsorted");
+}
+
 int main() {
     try {
         test_dumps_loads();
+        test_indent_and_sort_keys();
         test_refusals();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());

@@ -1,11 +1,15 @@
 #include "qrss/pyjson.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "qrss/frame.hpp"
 #include "qrss/pynum.hpp"
@@ -101,7 +105,19 @@ void dump_string(std::string& out, std::string_view s) {
     out += '"';
 }
 
-void dump(std::string& out, const Value& v) {
+// How dump lays a value out: json.dumps' indent, separators and sort_keys.
+struct Layout {
+    bool indented = false;
+    std::size_t indent = 0;   // spaces per level when indented
+    bool sort_keys = false;
+};
+
+void newline(std::string& out, const Layout& lay, std::size_t level) {
+    out += '\n';
+    out.append(lay.indent * level, ' ');
+}
+
+void dump_scalar(std::string& out, const Value& v) {
     switch (v.kind()) {
         case Value::Kind::Null: out += "null"; return;
         case Value::Kind::Bool: out += v.as_bool() ? "true" : "false"; return;
@@ -117,29 +133,59 @@ void dump(std::string& out, const Value& v) {
             return;
         }
         case Value::Kind::String: dump_string(out, v.as_string()); return;
-        case Value::Kind::Array: {
-            out += '[';
-            bool first = true;
-            for (const Value& e : v.items()) {
-                if (!first) out += ", ";
-                first = false;
-                dump(out, e);
-            }
-            out += ']';
-            return;
-        }
-        case Value::Kind::Object: {
-            out += '{';
-            for (std::size_t k = 0; k < v.keys().size(); ++k) {
-                if (k) out += ", ";
-                dump_string(out, v.keys()[k]);
-                out += ": ";
-                dump(out, v.values()[k]);
-            }
-            out += '}';
-            return;
-        }
+        case Value::Kind::Array:
+        case Value::Kind::Object: return;   // (dump's)
     }
+}
+
+// json.encoder's _iterencode_list and _iterencode_dict: an empty container
+// is "[]" / "{}" whatever the layout; otherwise each item follows a
+// newline and the next level's indent when indented, and the closing
+// bracket a newline and this level's.
+void dump(std::string& out, const Value& v, const Layout& lay, std::size_t level) {
+    const char* sep = lay.indented ? "," : ", ";
+    if (v.kind() == Value::Kind::Array) {
+        const std::vector<Value>& items = v.items();
+        if (items.empty()) {
+            out += "[]";
+            return;
+        }
+        out += '[';
+        for (std::size_t k = 0; k < items.size(); ++k) {
+            if (k) out += sep;
+            if (lay.indented) newline(out, lay, level + 1);
+            dump(out, items[k], lay, level + 1);
+        }
+        if (lay.indented) newline(out, lay, level);
+        out += ']';
+        return;
+    }
+    if (v.kind() == Value::Kind::Object) {
+        const std::vector<std::string>& keys = v.keys();
+        if (keys.empty()) {
+            out += "{}";
+            return;
+        }
+        std::vector<std::size_t> order(keys.size());
+        for (std::size_t k = 0; k < order.size(); ++k) order[k] = k;
+        // sorted(dct.items()): the keys are unique, so only they are
+        // compared, and std::string compares bytes unsigned, which for
+        // UTF-8 is Python's code point order.
+        if (lay.sort_keys)
+            std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return keys[a] < keys[b]; });
+        out += '{';
+        for (std::size_t k = 0; k < order.size(); ++k) {
+            if (k) out += sep;
+            if (lay.indented) newline(out, lay, level + 1);
+            dump_string(out, keys[order[k]]);
+            out += ": ";
+            dump(out, v.values()[order[k]], lay, level + 1);
+        }
+        if (lay.indented) newline(out, lay, level);
+        out += '}';
+        return;
+    }
+    dump_scalar(out, v);
 }
 
 // --- loads ------------------------------------------------------------------
@@ -443,6 +489,11 @@ const std::vector<Value>& Value::items() const {
     return items_;
 }
 
+std::vector<Value>& Value::items() {
+    if (kind_ != Kind::Array) wrong("value", "list", kind_);
+    return items_;
+}
+
 const std::vector<std::string>& Value::keys() const {
     if (kind_ != Kind::Object) wrong("value", "dict", kind_);
     return keys_;
@@ -458,6 +509,10 @@ const Value* Value::find(std::string_view key) const {
     for (std::size_t k = 0; k < keys_.size(); ++k)
         if (keys_[k] == key) return &items_[k];
     return nullptr;
+}
+
+Value* Value::find(std::string_view key) {
+    return const_cast<Value*>(static_cast<const Value*>(this)->find(key));
 }
 
 const Value& Value::at(std::string_view key) const {
@@ -498,7 +553,17 @@ bool Value::operator==(const Value& o) const {
 
 std::string dumps(const Value& v) {
     std::string out;
-    dump(out, v);
+    dump(out, v, Layout{}, 0);
+    return out;
+}
+
+std::string dumps(const Value& v, std::optional<int> indent, bool sort_keys) {
+    Layout lay;
+    lay.indented = indent.has_value();
+    lay.indent = indent && *indent > 0 ? static_cast<std::size_t>(*indent) : 0;
+    lay.sort_keys = sort_keys;
+    std::string out;
+    dump(out, v, lay, 0);
     return out;
 }
 

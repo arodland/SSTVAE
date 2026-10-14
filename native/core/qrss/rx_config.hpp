@@ -281,4 +281,29 @@ inline constexpr double L_BELOW_HZ = 0x1.611aeb6a1847dp+4;  // 22.06907216494845
 inline constexpr std::array<NamedValue, 2> WAVEFORM_OF_{{NamedValue{"CE", 0.0}, NamedValue{"L", 0x1.0000000000000p+0}}};  // {'CE': 0.0, 'L': 1.0}
 }  // namespace live
 
+// --- sstvae/qrss/store.py ---
+namespace store {
+inline constexpr int N_GROUPS = 3;
+inline constexpr int GROUP_LATENTS = 52800;
+inline constexpr int SENT = 50600;
+inline constexpr double DAY_S = 0x1.5180000000000p+16;  // 86400.0
+inline constexpr int SLOT_S = 900;
+inline constexpr int ZW_CACHE = 128;
+inline constexpr double SAME_PASS_HZ = 0x1.4000000000000p+2;  // 5.0
+}  // namespace store
+
+// --- sstvae/qrss/associate.py ---
+namespace associate {
+inline constexpr double T_ACCEPT = 0x1.8000000000000p+2;  // 6.0
+inline constexpr double RHO_MIN = 0x1.0000000000000p-1;  // 0.5
+inline constexpr double KURTOSIS = 0x1.8000000000000p+1;  // 3.0
+inline constexpr double VALIDATE_MEDIAN_W = 0x1.999999999999ap-4;  // 0.1
+inline constexpr double HDR_REJECT_T = 0x1.8000000000000p+1;  // 3.0
+inline constexpr double HDR_REJECT_EXPECT = 0x1.0000000000000p+3;  // 8.0
+inline constexpr double PAIR_HZ = 0x1.4000000000000p+3;  // 10.0
+inline constexpr double PAIR_DAYS = 0x1.c000000000000p+2;  // 7.0
+inline constexpr double HDR_AGREE_Z = 0x1.8000000000000p+1;  // 3.0
+inline constexpr double HDR_OTHER_FLIP = 0x1.3333333333333p-2;  // 0.3
+}  // namespace associate
+
 }  // namespace sstvae::qrss::rxconfig
