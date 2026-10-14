@@ -110,6 +110,7 @@ from sstvae.qrss.precoder import precode
 from sstvae.qrss.types import EmPrior
 
 RECEIVER = "sstvae.qrss.receiver"
+EM = "sstvae.qrss.em"
 WORST: dict = {}
 
 # the tracker lanes' bars (tests/test_qrss_native_track.py, ltrack.py): the
@@ -1232,7 +1233,11 @@ def test_whole_caller(native, Rc, config):
     keep, must = CONFIGS[config]
     used: dict = {}
     with pytest.MonkeyPatch.context() as mp:
-        _apply_rows(native, mp, skip={(RECEIVER, k) for k in keep}, wrap=_counted(None, used))
+        # em.rereceive and em.pass_path stay the reference's: they are the
+        # callers here, reaching the receiver's rows (their own rows are
+        # test_qrss_native_em_refine.py's).
+        _apply_rows(native, mp, skip={(RECEIVER, k) for k in keep} | {(EM, "rereceive"), (EM, "pass_path")},
+                    wrap=_counted(None, used))
         if config == "decode_header kept":
             for label in ("short-6", "l-short-6"):
                 c = _capture(label)
