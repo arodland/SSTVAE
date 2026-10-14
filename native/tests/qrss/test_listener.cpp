@@ -15,9 +15,10 @@
 //   * two threads feeding and stepping (and a third reading the tiles and
 //     writing state.json) while the background workers receive;
 //   * feed(), step() and the readers while a receive is in flight, which
-//     must never wait on it (the receive is held until they are done: a
-//     lock held across it would deadlock the test, and the watchdog names
-//     the step);
+//     must never wait on it (the receive is held until they are done: with
+//     a lock held across it they would wait out the stub's 60 s and the
+//     test fails "released, not timed out", the step named meanwhile);
+//     feed()'s latency then is printed (the measurement the port reports);
 //   * close() with a receive in flight: it waits for the receive, which is
 //     applied, and runs nothing queued; a second close() returns at once;
 //   * an exception in a live receive: logged once, the slot received again
