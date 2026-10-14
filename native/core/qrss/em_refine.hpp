@@ -55,15 +55,18 @@
 // values, never references into the store. The hooks and seams are called on
 // the calling thread, never with a lock held.
 //
-// What blocks, and for how long (measured 2026-10-14, one core, RelWithDebInfo;
-// Python's figures beside them in the lane's report): pass_path runs
-// line_path, refine_path and two verify_tracks on the pass's capture (TINY
-// ~0.2 s, SHORT ~0.6 s, FULL a few s); rereceive adds two (no split, or the
-// receive_pass branch) or three (split) tracker runs and extractions (TINY
-// ~0.4 s, SHORT ~1.5 s, FULL ~10 s in all); em_refine is up to rounds x
-// (members with a capture) of those, plus one store update per pass (a pass
-// file rewrite and an accumulator rebuild, milliseconds to tens of
-// milliseconds). Run em_refine on a worker thread, never the GUI's.
+// What blocks, and for how long (measured 2026-10-14, RelWithDebInfo, one
+// thread, simulated passes at -6 dB; Python's time in brackets): pass_path
+// runs line_path, refine_path and two verify_tracks on the pass's capture
+// (TINY 0.05 s [0.21], SHORT 0.19 s [0.94], FULL 1.1 s [6.1]); rereceive
+// adds two tracker runs and extractions (the receive_pass branch, or no
+// split) or three (split): with the path given TINY 0.06 s [0.36], SHORT
+// 0.3-1.0 s [2.6-4.9], FULL 3.2-4.2 s [17-23], measuring its own SHORT
+// 1.2 s [6.7], FULL 5.0 s [29]; em_refine is up to rounds x (members with
+// a capture) of those plus one store update per pass (a pass file rewrite
+// and an accumulator rebuild, milliseconds): one round over three TINY
+// passes 0.31 s [1.7], over two SHORT 2.0 s [10.2]. Run em_refine on a
+// worker thread, never the GUI's.
 
 #ifndef SSTVAE_QRSS_EM_REFINE_HPP
 #define SSTVAE_QRSS_EM_REFINE_HPP

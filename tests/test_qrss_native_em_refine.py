@@ -15,8 +15,11 @@ The contract (the bar), and in brackets what was measured (2026-10-14):
   two candidates' Z_ref are not within 1e-7 of each other, both candidate
   paths with the times and weights bit for bit and the frequencies within
   1e-7 Hz, both Z_ref within 1e-7 of their scale (the track lanes' path
-  and Z_ref bars), and the path chosen [worst printed]; a caller's channel
-  given its noise table, as the reference's object is;
+  and Z_ref bars; 1e-5 at the tracker's q grid floor, TINY at -15 dB
+  without fading, as the track lane holds it there), and the path chosen
+  [Z_ref 9.7e-12 (5.0e-7 at the floor), the candidates' frequencies
+  1.4e-12 Hz, the path chosen 9.1e-12 Hz; the same branch in every case];
+  a caller's channel given its noise table, as the reference's object is;
 - **rereceive**, with the reference's prior and path injected, split and
   not, with and without a header, with and without the callsign keying,
   on the receive_pass branch (no header, or TINY, a frame without one) and
@@ -25,14 +28,19 @@ The contract (the bar), and in brackets what was measured (2026-10-14):
   f_hz to 1e-6 Hz, tau0 to 1e-6 s, the timing's and report's numbers to
   1e-6 relative, the covariance to 1e-4, uid, header, cw, q, frame,
   estimator and em_round equal -- and the path it ended on within 1e-6 s
-  and 1e-6 Hz [worst printed];
+  and 1e-6 Hz [z and w bit for bit on TINY, 7.3e-10 of their scale on
+  SHORT (1.7e-7 elementwise: a float32 ulp or two), psi equal, hdr_llr
+  6.7e-14, f_hz 3.0e-12 Hz, tau0 4.7e-12 CH samples, the timing's and
+  report's numbers 1.0e-10, the covariance 8.6e-11, the path 2.1e-11 Hz
+  and 2.8e-14 s];
 - **em_refine**, the whole caller, A/B on two copies of one store of 2 and
   3 passes (TINY in the fast tier, SHORT in the slow one): the same number
-  of rounds, the history within 0.05 dB per entry [worst printed], the
+  of rounds, the history within 0.05 dB per entry [1.8e-15 dB], the
   same passes re-received in the same order, the log lines the same text
-  with their numbers within 0.011 dB (printed to 0.01), and every stored
-  pass's z and w within 1e-5 of their scale after the rounds [worst
-  printed];
+  with their numbers within 0.011 dB (printed to 0.01) [the same text],
+  and every stored pass's z and w within 1e-5 of their scale after the
+  rounds [z 1.0e-8 on TINY, bit for bit on SHORT; w bit for bit; the
+  accumulator's S 4.4e-9, W bit for bit];
 - **refusals and edges**: a key with no accumulator (the same KeyError
   text), an accumulator whose members keep no capture (history of two
   equal entries, nothing logged, the same files), an L member (the
@@ -48,7 +56,14 @@ The contract (the bar), and in brackets what was measured (2026-10-14):
   pass with total = rounds x eligible members and the early-stop call;
   a cancel set from the progress hook stops the loop at the next poll with
   em.Cancelled and leaves a store whose every file loads, the passes
-  stored before it updated and the rest untouched.
+  stored before it updated and the rest untouched;
+- **threads**: the GIL released while em_refine runs (the log callback
+  taking it back), and two calls at once on copies of one store giving the
+  sequential call's history, log and files.
+
+C++ against Python wall time (the binding, this file's passes): rereceive
+0.18-0.28 of the reference's, em_refine 0.19-0.22 (one round over three
+TINY passes 0.31 s against 1.7 s; a FULL rereceive 5.0 s against 29 s).
 
 The same functions on a pinned TINY fixture, without Python, are
 native/tests/qrss/test_em_refine.cpp's (pins from
@@ -125,12 +140,7 @@ CASES = {
     "short-6": ("short", -6.0, 1, "quiet"),
     "short-12d": ("short", -12.0, 2, "disturbed"),
 }
-SLOW = {"short-12d"}
 CALL = te.CALL
-
-
-def _labels(only):
-    return [pytest.param(k, marks=pytest.mark.slow) if k in SLOW else k for k in only]
 
 
 @functools.cache
@@ -289,7 +299,8 @@ def _ref_trace(p):
 Z_REF_BAR = {"tiny-15": 1e-5}
 
 
-@pytest.mark.parametrize("label", _labels(["tiny-6", "tiny-12d", "tiny-15", "short-6", "short-12d"]))
+@pytest.mark.parametrize("label", ["tiny-6", "tiny-12d", "tiny-15",
+                                   *(pytest.param(k, marks=pytest.mark.slow) for k in ("short-6", "short-12d"))])
 def test_pass_path(Er, row, label):
     """The same candidates, Z_ref and branch; the same path chosen."""
     p = _pass(label)
@@ -354,8 +365,7 @@ VARIANTS = {
 # ("plain", "prior") is the slow tier's, TINY covering it in the fast one.
 FAST = {("tiny-6", v) for v in VARIANTS} | {("tiny-12d", "prior"), ("tiny-12d", "hdr-split"),
                                              ("tiny-15", "own-path"),
-                                             ("short-6", "hdr-split-cw"), ("short-6", "hdr-nosplit-cw"),
-                                             ("short-6", "hdr-noprior-cw")}
+                                             ("short-6", "hdr-split-cw"), ("short-6", "hdr-nosplit-cw")}
 
 
 def _rr_params():
@@ -503,7 +513,8 @@ def _ab(tmp_path, NStore, Er, passes, rounds=3, tol_db=em.EM_TOL_DB, **kw):
     t = time.perf_counter()
     hg = Er.em_refine(NStore(tmp_path / "cpp", clock=tm.Clock()), key, rounds, tol_db, log=lg.append, **kw)
     t_cpp = time.perf_counter() - t
-    _worst("time em_refine C++/Python", t_cpp / t_ref)
+    if any(_LINE.match(x) for x in lr):   # a call that re-received something (not rounds 0)
+        _worst("time em_refine C++/Python", t_cpp / t_ref)
     return (hr, lr), (hg, lg), key
 
 
@@ -715,6 +726,41 @@ def test_em_refine_cancel(native, Er, NStore, tmp_path):
     with pytest.raises(native.qrss.em.Cancelled):
         Er.em_refine(st, key, 3, cancel=flag2)
     assert st.load_pass(acc_uids[1]).em_round == 0
+
+
+def test_em_refine_threads(Er, NStore, tmp_path):
+    """The GIL is released while em_refine runs (the main thread keeps
+    running Python meanwhile; the log callback takes it back on the worker),
+    and two calls on two copies of one store at once give the sequential
+    call's history and log."""
+    import threading
+
+    _hook_store(tmp_path / "base", NStore)
+    for name in ("seq", "t0", "t1"):
+        shutil.copytree(tmp_path / "base" / "s", tmp_path / name)
+    key = te.key_of(_hdr())
+    want_lines = []
+    want = Er.em_refine(NStore(tmp_path / "seq", clock=tm.Clock()), key, 2, -math.inf, log=want_lines.append)
+    out = {}
+
+    def run(name):
+        lines = []
+        out[name] = (Er.em_refine(NStore(tmp_path / name, clock=tm.Clock()), key, 2, -math.inf,
+                                  log=lines.append), lines)
+
+    workers = [threading.Thread(target=run, args=(n,)) for n in ("t0", "t1")]
+    for w in workers:
+        w.start()
+    ticks = 0
+    while any(w.is_alive() for w in workers):
+        ticks += 1
+        time.sleep(0.001)
+    for w in workers:
+        w.join()
+    assert ticks > 20, ticks   # ~0.3 s of C++: the main thread was not held off
+    for name in ("t0", "t1"):
+        assert out[name] == (want, want_lines), name
+    H.compare_trees(tmp_path / "t0", tmp_path / "t1")
 
 
 def test_rows_signatures(row):
