@@ -279,6 +279,7 @@ inline constexpr int LOG_FILE_BYTES = 2000000;
 inline constexpr std::array<double, 2> DIAL_GUARD_S{0x1.0000000000000p+1, 0x1.9000000000000p+5};  // (2.0, 50.0)
 inline constexpr double L_BELOW_HZ = 0x1.611aeb6a1847dp+4;  // 22.069072164948455
 inline constexpr std::array<NamedValue, 2> WAVEFORM_OF_{{NamedValue{"CE", 0.0}, NamedValue{"L", 0x1.0000000000000p+0}}};  // {'CE': 0.0, 'L': 1.0}
+// not emitted: _TILE_KINDS (dict)
 }  // namespace live
 
 // --- sstvae/qrss/store.py ---
