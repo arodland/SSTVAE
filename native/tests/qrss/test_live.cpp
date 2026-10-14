@@ -484,9 +484,14 @@ void test_finish_decisions() {
     check::is_true(lv::finish_branch(NaN, true, true) == B::Nothing, "branch: NaN heard");
 
     const qrss::api::ReceiveConfig c = lv::finish_config({fr::get("tiny")}, "plain");
-    check::is_true(c.max_candidates == std::optional<std::int64_t>(lv::FINISH_MAX_CANDIDATES), "finish_config candidates");
-    check::is_true(c.budget_s == std::optional<double>(lv::FINISH_BUDGET_S), "finish_config budget");
     check::equal(c.estimator, std::string("plain"), "finish_config estimator");
+    check::is_true(c.frames.size() == 1 && c.frames[0].name() == "tiny", "finish_config frames");
+    // the budgets are finish_receive's own (the reference's constants), not the config's
+    const lv::FinishOptions fo;
+    check::is_true(fo.max_candidates == std::optional<std::int64_t>(lv::FINISH_MAX_CANDIDATES),
+                   "FinishOptions candidates");
+    check::is_true(fo.budget_s == std::optional<double>(lv::FINISH_BUDGET_S), "FinishOptions budget");
+    check::equal(fo.min_heard, lv::FINISH_SEARCH_MIN_HEARD, "FinishOptions min_heard");
 
     qrss::types::Detection d;
     d.f_hz = 1000.0;

@@ -716,8 +716,6 @@ api::ReceiveConfig finish_config(std::vector<frame::FrameSpec> frames, std::stri
     api::ReceiveConfig c;
     c.frames = std::move(frames);
     c.estimator = std::move(estimator);
-    c.max_candidates = FINISH_MAX_CANDIDATES;
-    c.budget_s = FINISH_BUDGET_S;
     return c;
 }
 
@@ -746,6 +744,8 @@ FinishResult finish_receive(std::span<const cf> x, std::span<const std::uint8_t>
             c.live_only = false;
             c.erase_s = cap.erase;
             c.round_b = true;
+            c.max_candidates = opt.max_candidates;
+            c.budget_s = opt.budget_s;
             c.hints.assign(hints.begin(), hints.end());
             out.passes = api::receive_slot(cap.prep, c);
             break;
@@ -756,6 +756,8 @@ FinishResult finish_receive(std::span<const cf> x, std::span<const std::uint8_t>
                 api::ReceiveConfig c = config;
                 c.live_only = true;
                 c.erase_s = cap.erase;
+                c.max_candidates = opt.max_candidates;
+                c.budget_s = opt.budget_s;
                 c.hints.assign(hints.begin(), hints.end());
                 const std::vector<double> known = known_hz(dets, receiver::is_joint(config.frames));
                 const std::vector<types::Detection> more = api::detect(cap.prep, c, known);

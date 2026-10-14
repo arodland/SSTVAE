@@ -59,7 +59,7 @@
 //                       tenth of a second per ten minutes heard) and the noise
 //   finish_receive      a slot's receive: seconds (TINY) to minutes (FULL);
 //                       the whole-slot search stops gating new candidates
-//                       after the config's budget_s
+//                       after FinishOptions::budget_s (FINISH_BUDGET_S)
 // None of them holds a lock while it calls a seam.
 //
 // Errors are the reference's where it has one: std::invalid_argument for
@@ -326,20 +326,30 @@ FinishGate finish_gate(std::span<const std::uint8_t> ok, std::int64_t origin, do
                        bool have_hints, double min_heard = FINISH_SEARCH_MIN_HEARD);
 
 // Its second, on the share heard capture_prepare measured: Search (the
-// whole-slot search, with the config's candidate and time budgets) when at
+// whole-slot search, with FinishOptions' candidate and time budgets) when at
 // least min_heard was heard; else Known (the dets, plus a live-only detect
 // at the hints when there are any) when there are dets or hints and
 // anything was heard; else Nothing.
 enum class FinishBranch { Search, Known, Nothing };
 FinishBranch finish_branch(double heard, bool have_dets, bool have_hints, double min_heard = FINISH_SEARCH_MIN_HEARD);
 
-// What finish_receive hands the receiver, from the listener's config:
-// frames (the selection), estimator, and the reference's
-// FINISH_MAX_CANDIDATES and FINISH_BUDGET_S as max_candidates and budget_s.
+// A ReceiveConfig for finish_receive from the listener's: frames (the
+// selection) and estimator (the rules, old_edge_noise and old_gating, are
+// the receiver's defaults: set them on the result). The search's budgets
+// are not the config's: they are FinishOptions'.
 api::ReceiveConfig finish_config(std::vector<frame::FrameSpec> frames, std::string estimator = "joint");
 
+// finish_receive's own knobs, the reference's constants by default. The
+// candidate and time budgets are here rather than in the ReceiveConfig
+// because the reference's finish_receive always applies them, whatever the
+// listener's receives use: a config passed in with none (the default
+// ReceiveConfig, or the live receives') must not turn the end-of-slot
+// search on a busy band into an unbounded one, which ran for longer than a
+// slot before FINISH_MAX_CANDIDATES existed. nullopt: no limit.
 struct FinishOptions {
     double min_heard = FINISH_SEARCH_MIN_HEARD;
+    std::optional<std::int64_t> max_candidates = FINISH_MAX_CANDIDATES;
+    std::optional<double> budget_s = FINISH_BUDGET_S;
     std::optional<std::int64_t> seed;   // the noise's seed; nullopt: q
     PrepareSeams seams;                 // the noise and the front end (empty: the C++)
 };
@@ -352,14 +362,14 @@ struct FinishResult {
 // finish_receive(x, ok, origin, q, spec, estimator, dets, hints): the
 // end-of-slot receive of slot q from its capture_read (`ok` already
 // restricted to one dial). `config` is the listener's: its frames are the
-// selection, its estimator, max_candidates and budget_s the search's
-// (finish_config), its old_edge_noise and old_gating the receiver's rules;
-// live_only, erase_s, round_b and hints are set here per call, as the
-// reference passes them:
+// selection, its estimator the passes', its old_edge_noise and old_gating
+// the receiver's rules (finish_config); live_only, erase_s, round_b, hints,
+// max_candidates and budget_s are set here per call, as the reference
+// passes them (the budgets opt's, whatever the config holds):
 //   Search: receive_slot(prep, sel, estimator, erase_s=erase,
-//           max_candidates=, budget_s=, hints=hints)
+//           max_candidates=opt, budget_s=opt, hints=hints)
 //   Known:  more = detect(prep, sel, live_only=True, erase_s=erase,
-//           hints=hints, skip_hz=known, max_candidates=, budget_s=) when
+//           hints=hints, skip_hz=known, max_candidates=opt, budget_s=opt) when
 //           there are hints (known: the dets' f_hz, their band centres for
 //           a joint selection); receive_slot(prep, sel, estimator,
 //           erase_s=erase, dets=dets + more)

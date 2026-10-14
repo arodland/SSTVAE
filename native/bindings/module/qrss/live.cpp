@@ -506,8 +506,8 @@ py::tuple finish_typed(const py::object& x, const py::object& ok, const py::obje
     lv::FinishOptions opt;
     opt.min_heard = convert([&] { return typed_number(k.min_heard); });
     api::ReceiveConfig config = lv::finish_config(sel, rx::as_string(estimator));
-    config.max_candidates = convert([&] { return typed_int(k.max_candidates); });
-    config.budget_s = convert([&] { return typed_number(k.budget_s); });
+    opt.max_candidates = convert([&] { return typed_int(k.max_candidates); });
+    opt.budget_s = convert([&] { return typed_number(k.budget_s); });
     const py::module_ rules = py::module_::import("sstvae.qrss.rules");
     config.old_edge_noise = truth(rules.attr("old")(rules.attr("EDGE_NOISE")));
     config.old_gating = truth(rules.attr("old")(rules.attr("GATING")));

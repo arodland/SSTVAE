@@ -850,6 +850,14 @@ def _finish_cases():
         dets = det_sets[int(rng.integers(len(det_sets)))]
         hints = hint_sets[int(rng.integers(len(hint_sets)))]
         yield k, x, ok, origin, spec, dets, hints
+    # the search's threshold exactly: half the frame heard searches, one
+    # sample less does not (nothing known either way)
+    n = 4000
+    x = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(np.complex64)
+    for k, heard in ((300, n // 2), (301, n // 2 - 1)):
+        ok = np.zeros(n, bool)
+        ok[:heard] = True
+        yield k, x, ok, 0, TINY, (), ()
 
 
 def test_finish_receive_stubbed(Lv, row, monkeypatch):
@@ -965,6 +973,29 @@ def test_finish_receive_typed(native, Lv, label, part):
     """finish_receive in C++ whole (typed, asserted) on the real receivers:
     the reference's passes to receive_pass's bars and its share heard."""
     _finish_typed(native, label, part)
+
+
+def test_finish_receive_typed_budgets(Lv, monkeypatch):
+    """The end-of-slot search's budgets are live's FINISH_* at the call,
+    handed to the C++ as finish_receive's own (FinishOptions), whatever a
+    config holds: with no candidate allowed the whole-slot search verifies
+    nothing, typed (the reference's receiver never reached) as in the
+    reference."""
+    r = _finish_ref("ce-tiny", False)
+    assert r.passes
+    reached = []
+    orig = RX.receive_slot
+
+    def spy(*a, **k):
+        reached.append(k.get("max_candidates"))
+        return orig(*a, **k)
+    monkeypatch.setattr(RX, "receive_slot", spy)
+    monkeypatch.setattr(live, "FINISH_MAX_CANDIDATES", 0)
+    ref = live.finish_receive(r.x, r.ok, r.origin, r.q, r.spec, "joint", [], [])
+    assert reached == [0] and ref == ([], 1.0), (reached, ref)
+    got = Lv.finish_receive(r.x, r.ok, r.origin, r.q, r.spec, "joint", [], [], _live.numpy_noise, True)
+    assert reached == [0], reached               # typed: in C++ whole
+    assert got == ([], 1.0), got
 
 
 # --- the whole caller: LiveListener -------------------------------------------------------------------
