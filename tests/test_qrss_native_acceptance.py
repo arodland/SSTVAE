@@ -40,9 +40,10 @@ keeps the list honest (every sstvae module the receiver, render and the
 simulator import is pinned or excused in the tool's NOT_PINNED).
 
 Times, C++ receive against the Python receive of the same capture (the
-tool prints the latter), 4 shared CPUs: TINY 0.7-1.2 s against 1.0-1.7 s,
-SHORT 1.5-2.0 s against 3.7-4.5 s, the joint SHORT neighbour slot 3.2 s
-against 7.0 s. The file runs in about 25 s.
+tool prints the latter), 4 shared CPUs, over three runs each: TINY
+0.7-1.2 s against 1.0-2.9 s, SHORT 1.5-2.0 s against 3.7-5.1 s, the joint
+SHORT neighbour slot 2.9-3.2 s against 6.9-7.0 s -- the C++ 1.5 to 2.6
+times faster, most on the longer slots. The file runs in about 25 s.
 """
 
 from __future__ import annotations
