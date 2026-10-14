@@ -9,7 +9,7 @@
   "sstvae/qrss/cwid.py": "b3f872133086f2ecdd3bb7aa2286d7d4fc9b15491d2586f6ff5f8b30a1ad63ce",
   "sstvae/qrss/demod.py": "05ac92ed24777cce7a06a372555e21925c0542d180cca13658ca25b6a833ad7c",
   "sstvae/qrss/frame.py": "a8c790096853d5734885f301da9a0cc1b1f0b7500a1e93fa371bd275f2441eb5",
-  "sstvae/qrss/frontend.py": "79e8652195960d14f8b73d91268db4eb5db5a92a1df5522cb3ea6756460fed57",
+  "sstvae/qrss/frontend.py": "b7f69fec80ed75a89ce25920ae895ade25443159eac1094402d68a88270650b3",
   "sstvae/qrss/header.py": "4648fe6449d0fcd21e368c58af45670eb87c3255b7b16493ae844e0e711a90f2",
   "sstvae/qrss/ldemod.py": "0ee8aaf618cb606c2162616413371e6d6d5783d322a2b777ee214aaab589941b",
   "sstvae/qrss/lframe.py": "5a6bb1d4e669dc3e0710afbe0c1767e389aa69e3ab4beb671df1aa0818d90a75",

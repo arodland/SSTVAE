@@ -558,6 +558,29 @@ def test_expire_deletes_stale_temporaries(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == sorted(["meta.json"] + keep_old + fresh)
 
 
+def test_expire_leaves_a_temporary_it_cannot_remove(tmp_path):
+    """The stale-temporary sweep is housekeeping: a temporary it cannot
+    remove (here a directory of that name, empty or not; on Windows a file
+    another process holds open) is left for the next expire, never raised
+    out of expire() or out of the write() that called it."""
+    import os
+    import time
+
+    store = frontend.PassbandStore(tmp_path, fs=40)
+    full, empty, stale = tmp_path / "fe_1.flac.1.2.tmp", tmp_path / "meta.json.3.tmp", tmp_path / "fe_2.i16.4.5.tmp"
+    full.mkdir()
+    (full / "x").write_bytes(b"x")
+    empty.mkdir()
+    stale.write_bytes(b"x")
+    t = time.time() - 7200.0
+    for p in (full, empty, stale):
+        os.utime(p, (t, t))
+    assert store.expire(now=0.0) == []
+    assert full.is_dir() and (full / "x").exists() and empty.is_dir() and not stale.exists()
+    store.write(time.time(), np.ones(4, np.complex64))     # (expire on: the sweep runs again)
+    assert full.is_dir() and empty.is_dir()
+
+
 def test_hour_names_are_ascii_digits_and_nothing_after():
     """_HOUR_RE takes ASCII digits only and no final newline (\\d took other
     scripts' digits, $ a trailing newline: names no writer makes)."""

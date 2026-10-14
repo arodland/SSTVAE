@@ -22,8 +22,10 @@
 // threads of one -- share one. expire() also deletes the store's
 // temporaries whose mtime is more than an hour old by the wall clock
 // (PB_TMP_AGE_S; never the store's clock, which may be a replay's): what a
-// process killed mid-pack or mid-write leaves. Raw hours are written and
-// read in place by positioned I/O.
+// process killed mid-pack or mid-write leaves. That sweep is best effort:
+// one it cannot stat or remove is left for the next expire, never thrown
+// out of the write that called it. Raw hours are written and read in place
+// by positioned I/O.
 //
 // Samples are quantised exactly as the reference does it: x as complex64,
 // then per part rint(float32(part) * float32(scale)) in float32 (NEP 50),
@@ -208,7 +210,8 @@ public:
     std::vector<std::int64_t> raw_hours() const;
     // Delete hours that ended more than keep_hours before `now` (the
     // clock's time when absent); the hours deleted. Also deletes the
-    // store's temporaries older than PB_TMP_AGE_S by the wall clock.
+    // store's temporaries older than PB_TMP_AGE_S by the wall clock, best
+    // effort (one that cannot be stat'ed or removed is skipped silently).
     std::vector<std::int64_t> expire(std::optional<double> now = std::nullopt);
 
     // Pack raw hour `hour` into FLAC; false (raw file kept) when it could

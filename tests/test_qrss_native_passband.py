@@ -371,26 +371,39 @@ def test_a_short_raw_hour(P, tmp_path):
 def test_stale_temporaries(P, tmp_path):
     """expire() deletes the store's temporaries whose mtime is over an hour
     old by the wall clock (whatever `now` says), and nothing else: the same
-    files left in both roots."""
+    files left in both roots. Every kind (.flac, .i16, fe_<h>.json,
+    meta.json; one id or two) is there both stale and fresh, and two stale
+    temporaries are directories, which the sweep leaves without raising."""
     import time
 
     ra, rb = tmp_path / "py", tmp_path / "cc"
     ref, got = frontend.PassbandStore(ra, fs=40), P.PassbandStore(rb, fs=40)
-    names = ["fe_1.flac.123.tmp", "fe_1.i16.5.6.tmp", "meta.json.7.8.tmp", "fe_2.json.9.10.tmp",
-             "fe_3.flac.11.12.tmp", "notes.1.tmp", "fe_1.wav.1.tmp", "fe_1.flac.tmp", "fe_1.flac.x.tmp",
-             "fe_1.flac.1.2.3.tmp", "fe_.flac.1.tmp", "meta.json.1.tmp.tmp", "fe_٣.flac.1.tmp",
-             "fe_12.i16.0.tmp", "fe_4.json.1.2.tmp", "fe_5.flac.6.tmp"]
-    ages = {n: (7200.0, 3700.0, 3500.0, 10.0)[i % 4] for i, n in enumerate(names)}
+    stale = {"fe_1.flac.123.tmp": 7200.0, "fe_1.i16.5.6.tmp": 3700.0, "meta.json.7.8.tmp": 7200.0,
+             "fe_2.json.9.10.tmp": 3700.0, "fe_12.i16.0.tmp": 7200.0, "fe_4.json.1.tmp": 7200.0,
+             "meta.json.1.tmp": 3700.0, "fe_9.flac.1.2.tmp": 3601.0}
+    fresh = {"fe_3.flac.11.12.tmp": 3500.0, "fe_5.flac.6.tmp": 10.0, "fe_6.i16.1.2.tmp": 3500.0,
+             "fe_7.i16.3.tmp": 10.0, "meta.json.3.4.tmp": 3500.0, "meta.json.5.tmp": 10.0,
+             "fe_7.json.5.tmp": 3500.0, "fe_8.json.6.7.tmp": 10.0}
+    other = {n: 7200.0 for n in ("notes.1.tmp", "fe_1.wav.1.tmp", "fe_1.flac.tmp", "fe_1.flac.x.tmp",
+                                  "fe_1.flac.1.2.3.tmp", "fe_.flac.1.tmp", "meta.json.1.tmp.tmp",
+                                  "fe_\u0663.flac.1.tmp", "fe_1.json.1.tmp.x", "xfe_1.flac.1.tmp",
+                                  "fe_1.i16.1.TMP")}
+    dirs = {"fe_10.flac.1.2.tmp": 7200.0, "meta.json.9.tmp": 7200.0}
     now = time.time()
     for r in (ra, rb):
-        for n in names:
+        for n, age in {**stale, **fresh, **other}.items():
             (r / n).write_bytes(b"x")
-            os.utime(r / n, (now - ages[n], now - ages[n]))
+            os.utime(r / n, (now - age, now - age))
+        for n, age in dirs.items():
+            (r / n).mkdir()
+            if n.startswith("fe_"):
+                (r / n / "x").write_bytes(b"x")
+            os.utime(r / n, (now - age, now - age))
     for when in (0.0, 1e12):
         assert got.expire(when) == ref.expire(when) == []
         assert sorted(p.name for p in ra.iterdir()) == sorted(p.name for p in rb.iterdir())
-    gone = {"fe_1.flac.123.tmp", "fe_1.i16.5.6.tmp", "fe_3.flac.11.12.tmp", "fe_12.i16.0.tmp"}   # (ours, over the hour)
-    assert sorted(p.name for p in ra.iterdir()) == sorted({"meta.json", *names} - gone)
+    assert sorted(p.name for p in ra.iterdir()) == sorted({"meta.json", *fresh, *other, *dirs})
+    assert (ra / "fe_10.flac.1.2.tmp" / "x").exists() and (rb / "fe_10.flac.1.2.tmp" / "x").exists()
 
 
 # --- across implementations -------------------------------------------------------------------------

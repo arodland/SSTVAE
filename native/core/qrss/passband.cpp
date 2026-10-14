@@ -668,7 +668,11 @@ std::vector<std::int64_t> PassbandStore::expire(std::optional<double> when) {
         }
     }
     // the store's temporaries older than an hour by the wall clock (left by
-    // a process killed mid-pack or mid-write: none takes that long)
+    // a process killed mid-pack or mid-write: none takes that long). Only
+    // housekeeping: one that cannot be stat'ed or removed (a directory of
+    // that name, a file held open on Windows) is left for the next expire,
+    // never thrown out of the write that called this (frontend.py's
+    // `except OSError`).
     const double old = wall_clock() - PB_TMP_AGE_S;
     std::error_code ec;
     const std::vector<std::string> names = util::list_dir(root_, ec);
@@ -677,11 +681,8 @@ std::vector<std::int64_t> PassbandStore::expire(std::optional<double> when) {
         if (!is_temporary(n)) continue;
         const std::string p = join(root_, n);
         const auto mt = rawfile::mtime_ns(p, ec);
-        if (!mt) {
-            if (is_missing(ec)) continue;
-            throw FileError(ec, p);
-        }
-        if (static_cast<double>(*mt) / 1e9 < old) remove_missing_ok(p);   // (st_mtime < time.time() - 3600)
+        if (!mt) continue;
+        if (static_cast<double>(*mt) / 1e9 < old) util::remove_file(p, ec);   // (st_mtime < time.time() - 3600)
     }
     return gone;
 }

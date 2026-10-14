@@ -780,7 +780,11 @@ class PassbandStore:
         """Delete hours that ended more than keep_hours before `now`; return
         them. Also deletes the store's temporaries whose mtime is more than
         an hour old by the wall clock (not `now`, a stream's time): left by
-        a process killed mid-pack or mid-write, since none takes that long."""
+        a process killed mid-pack or mid-write, since none takes that long.
+        That sweep is housekeeping: a temporary it cannot stat or remove (a
+        directory of that name, a file another process holds open on
+        Windows) is left for the next expire, never raised out of the write
+        that called it."""
         now = time.time() if now is None else float(now)
         gone = []
         for hour in self.hours():
@@ -796,7 +800,7 @@ class PassbandStore:
                 try:
                     if p.stat().st_mtime < old:
                         p.unlink()
-                except FileNotFoundError:
+                except OSError:
                     pass
         return gone
 

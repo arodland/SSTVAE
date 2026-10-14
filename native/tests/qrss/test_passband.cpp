@@ -522,6 +522,28 @@ void test_reference_fixes(const std::filesystem::path& dir) {
     for (const std::string& n : stale) CHECK(!exists(s.root() + "/" + n));
     for (const std::string& n : other) CHECK(exists(s.root() + "/" + n));
     for (const std::string& n : fresh) CHECK(exists(s.root() + "/" + n));
+
+    // ... best effort: a stale temporary it cannot remove (a directory of that name, empty or not;
+    // on Windows a file another process holds open) is left for the next expire, never thrown
+    // out of expire() or the write that called it
+    const std::vector<std::string> dirs = {"fe_1.flac.1.2.tmp", "meta.json.3.tmp"};
+    for (const std::string& n : dirs) {
+        std::error_code ec;
+        const std::filesystem::path d = sstvae::util::fs_path(s.root() + "/" + n).value();
+        CHECK(std::filesystem::create_directory(d, ec) && !ec);
+        if (&n == &dirs.front()) CHECK(rawfile::write_replace(s.root() + "/" + n + "/x.x", s.root() + "/" + n + "/x", "x", ec));
+        std::filesystem::last_write_time(d, when);
+    }
+    bool threw = false;
+    try {
+        CHECK(s.expire(0.0).empty());
+        s.write_at(HOUR0 * s.per_hour(), std::vector<cf>(4, cf(1.0f, 0.0f)));   // (expire on: the sweep again)
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(!threw);
+    for (const std::string& n : dirs) CHECK(exists(s.root() + "/" + n));
+    CHECK(exists(s.root() + "/" + dirs.front() + "/x"));
 }
 
 void test_dirlock(const std::filesystem::path& dir) {
