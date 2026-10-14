@@ -16,10 +16,14 @@
 //                      lossless; written by ours (flac.hpp) or soundfile
 //
 // Every file is written to a temporary sibling and moved into place
-// (os.replace), with the reference's temporary names: "<name>.<pid>.
-// <thread ident>.tmp" for the JSON files, "fe_<hour>.flac.<pid>.tmp" while
-// packing and "fe_<hour>.i16.<pid>.tmp" while unpacking. Raw hours are
-// written and read in place by positioned I/O.
+// (os.replace), with the reference's temporary names, "<name>.<pid>.
+// <thread ident>.tmp" (the JSON files; fe_<hour>.flac while packing,
+// fe_<hour>.i16 while unpacking), so no two writers -- processes, or
+// threads of one -- share one. expire() also deletes the store's
+// temporaries whose mtime is more than an hour old by the wall clock
+// (PB_TMP_AGE_S; never the store's clock, which may be a replay's): what a
+// process killed mid-pack or mid-write leaves. Raw hours are written and
+// read in place by positioned I/O.
 //
 // Samples are quantised exactly as the reference does it: x as complex64,
 // then per part rint(float32(part) * float32(scale)) in float32 (NEP 50),
@@ -32,24 +36,23 @@
 //
 // Packing (`pack`): an hour is packed PB_PACK_AFTER_S after it ends, by the
 // stream's own time (a write's end), on a thread of its own, at most one
-// at a time and checked for at most every 60 s; pack_hour encodes, decodes
-// the result back and compares it sample for sample with the raw file,
-// and only then (under the store's lock) renames it into place and
-// deletes the raw file -- refusing if the raw file's mtime moved, or an
-// in-process write reached the hour, meanwhile. Unlike the reference,
-// packing needs nothing installed (the encoder is ours), so `pack` is
-// honoured as given.
+// at a time and checked for at most every 60 s; pack_hour encodes, syncs
+// the result to the device, decodes it back and compares it sample for
+// sample with the raw file, and only then (under the store's lock)
+// renames it into place and deletes the raw file -- refusing if the raw
+// file's mtime moved, or an in-process write reached the hour (a count
+// per hour, which a file system's coarse mtime cannot hide), meanwhile;
+// all as the reference does it. Unlike the reference, packing needs
+// nothing installed (the encoder is ours), so `pack` is honoured as given.
 //
-// Durability differs from the reference's in two places, both on purpose.
-// The packed FLAC is synced to the device before it replaces the raw hour
-// (soundfile's is not: a power cut within the page cache's writeback delay
-// of a pack can leave an empty FLAC and no raw file there). A raw write is
-// not synced (the reference's mm.flush() is msync(MS_SYNC), a device write
-// per call on POSIX, which the listener's audio feed should not wait on):
-// after a power cut the index may name samples that read back as zeros.
-// A raw hour found shorter than an hour (a crash between its creation and
-// its sizing) is grown back to size by the next write into it, as numpy's
-// memmap "r+" does; until then reads of it raise ValueError, as there.
+// Durability differs from the reference's in one place, on purpose: a raw
+// write is not synced (the reference's mm.flush() is msync(MS_SYNC), a
+// device write per call on POSIX, which the listener's audio feed should
+// not wait on), so after a power cut the index may name samples that read
+// back as zeros. A raw hour found shorter than an hour (a crash between
+// its creation and its sizing) reads as unwritten past its end, and the
+// next write into it grows it back to size, as numpy's memmap "r+" does.
+// A store refuses fs <= 0 (ValueError), from its arguments or meta.json.
 //
 // Threads: every public call may be made from any thread. A recursive
 // mutex covers each write into an hour (data and index) against a pack's
@@ -67,8 +70,7 @@
 //   - pack_hour: 1.4 s for a full hour of band noise on a desktop (encode
 //     1.0, decode and compare the rest; soundfile's path takes 1.0 s), a
 //     third of a second for a mostly unwritten one, outside the lock, then
-//     a rename under it. Two pack_hour calls run
-//     one after the other (the reference's would share a temporary name).
+//     a rename under it. Two pack_hour calls run one after the other.
 //   - ~PassbandStore: asks a running packer to stop (it checks once per
 //     FLAC frame) and joins it: a few milliseconds.
 
@@ -106,6 +108,7 @@ inline constexpr double PB_PACK_AFTER_S = rxconfig::frontend::PB_PACK_AFTER_S;
 inline constexpr double PB_LEAD_S = rxconfig::frontend::PB_LEAD_S;
 inline constexpr double PB_TAIL_S = rxconfig::frontend::PB_TAIL_S;
 inline constexpr double PB_PACK_CHECK_S = 60.0;   // _maybe_pack's "at most every 60 s"
+inline constexpr double PB_TMP_AGE_S = 3600.0;    // expire's "temporaries older than an hour"
 
 // frontend.slot_t0: unix time of slot q's nominal t0, 900 q + 1.
 // std::overflow_error past int64.
@@ -115,11 +118,10 @@ std::int64_t slot_t0(std::int64_t q);
 using Range = std::array<std::int64_t, 2>;
 std::vector<Range> merge_ranges(std::vector<Range> rs);
 
-// The hour a file name names (_HOUR_RE: "fe_<digits>.i16" or ".flac", a
-// final newline allowed as `$` allows it); nullopt for any other name.
-// ASCII digits only (Python's \d also takes other scripts' digits), and
-// no hour past HOUR_MAX (2^62 / 3600, some 10^11 years), so that hour
-// arithmetic cannot overflow; the reference's ints would take either.
+// The hour a file name names (_HOUR_RE: "fe_<ASCII digits>.i16" or
+// ".flac", and nothing after); nullopt for any other name. No hour past
+// HOUR_MAX (2^62 / 3600, some 10^11 years), so that hour arithmetic
+// cannot overflow; the reference's int would take one.
 inline constexpr std::int64_t HOUR_MAX = (std::int64_t{1} << 62) / 3600;
 std::optional<std::int64_t> hour_of_name(std::string_view name);
 
@@ -165,7 +167,8 @@ public:
     // Makes `root` (mkdir -p); reads meta.json when there is one (fs and
     // scale from it, as the files were written), else writes it from
     // `opt`. FileError for a root that cannot be made, std::invalid_argument
-    // (ValueError) for unparsable JSON, pyjson::KeyError for a key missing.
+    // (ValueError) for unparsable JSON or an fs <= 0 (before meta.json is
+    // written), pyjson::KeyError for a key missing.
     explicit PassbandStore(std::string root, StoreOptions opt = {});
     ~PassbandStore();
     PassbandStore(const PassbandStore&) = delete;
@@ -185,13 +188,14 @@ public:
     void write_at(std::int64_t n0, std::span<const cf> x, bool expire = true);
 
     // complex64 samples [round(t_start fs), round(t_end fs)); zeros, with
-    // mask 0, where nothing was written.
+    // mask 0, where nothing was written (past the end of a short file too).
     Masked read(double t_start, double t_end) const;
 
     // A slot capture's raw FE stream: (unix time of its first sample, gain).
-    // A capture whose peak would use more than half the int16 range is
-    // stored attenuated by a power of 2. std::invalid_argument when its fs
-    // is not the store's.
+    // A capture whose peak (over its finite samples) would use more than
+    // half the int16 range is stored attenuated by a power of 2; a
+    // non-finite sample is stored as write() stores it. std::invalid_argument
+    // when its fs is not the store's.
     Written write_capture(const frontend::Capture& cap, bool expire = true);
     // Slot q read back, t0 - lead_s to t0 + dur_s + tail_s; coverage is the
     // fraction of [t0, t0 + dur_s) written. Unwritten ends are trimmed.
@@ -203,7 +207,8 @@ public:
     std::vector<std::int64_t> hours() const;
     std::vector<std::int64_t> raw_hours() const;
     // Delete hours that ended more than keep_hours before `now` (the
-    // clock's time when absent); the hours deleted.
+    // clock's time when absent); the hours deleted. Also deletes the
+    // store's temporaries older than PB_TMP_AGE_S by the wall clock.
     std::vector<std::int64_t> expire(std::optional<double> now = std::nullopt);
 
     // Pack raw hour `hour` into FLAC; false (raw file kept) when it could

@@ -24,8 +24,8 @@
 // (imported from sstvae.qrss.frontend, which --native-qrss never replaces),
 // as its callers (em._from_passband, em.retro_detect) read its fields.
 // Errors: OSError (FileNotFoundError, ...) for a file that cannot be made,
-// opened or written, naming it; ValueError, IndexError, OverflowError,
-// ZeroDivisionError and KeyError where the reference raises them; a FLAC
+// opened or written, naming it; ValueError (an fs <= 0 among them),
+// IndexError, OverflowError and KeyError where the reference raises them; a FLAC
 // hour that does not decode is RuntimeError, as soundfile's errors are.
 // The I/O runs with the GIL released; no Python object is touched there.
 

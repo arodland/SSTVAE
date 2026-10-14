@@ -50,6 +50,14 @@ std::string slurp(const std::string& path) {
 
 bool exists(const std::string& p) { return sstvae::util::exists(p); }
 
+// No temporary ("*.tmp") left in `dir`.
+bool no_tmp(const std::string& dir) {
+    std::error_code ec;
+    for (const std::string& n : sstvae::util::list_dir(dir, ec))
+        if (n.size() >= 4 && n.compare(n.size() - 4, 4, ".tmp") == 0) return false;
+    return !ec;
+}
+
 template <typename E, typename F>
 bool throws(F&& f) {
     try {
@@ -95,8 +103,9 @@ void test_free() {
 
     CHECK(pb::hour_of_name("fe_12.i16") == 12);
     CHECK(pb::hour_of_name("fe_007.flac") == 7);
-    CHECK(pb::hour_of_name("fe_12.i16\n") == 12);   // `$` before a final newline
+    CHECK(!pb::hour_of_name("fe_12.i16\n"));   // (\Z: nothing after, a newline included)
     CHECK(!pb::hour_of_name("fe_12.i16\n\n"));
+    CHECK(!pb::hour_of_name("fe_\xd9\xa1\xd9\xa2.i16"));   // (Arabic-Indic digits: ASCII only)
     CHECK(!pb::hour_of_name("fe_12.json"));
     CHECK(!pb::hour_of_name("fe_.i16"));
     CHECK(!pb::hour_of_name("xfe_1.i16"));
@@ -239,7 +248,7 @@ void test_pack(const std::filesystem::path& dir) {
     rawfile::RawFile f = rawfile::RawFile::open(s.flac_path(HOUR0), rawfile::Mode::Read, ec);
     CHECK(f.is_open() && f.size(ec).value_or(1 << 30) < 0.1 * 3600 * 4000 * 4);
     f.close();
-    CHECK(!exists(s.flac_path(HOUR0) + "." + std::to_string(rawfile::process_id()) + ".tmp"));
+    CHECK(no_tmp(s.root()));
     // a write into a packed hour unpacks it and keeps what was there
     s.write(t_a + 95.0, std::vector<cf>(x.begin(), x.begin() + 4000), false);
     CHECK(exists(s.raw_path(HOUR0)) && !exists(s.flac_path(HOUR0)));
@@ -273,7 +282,7 @@ void test_packer_thread(const std::filesystem::path& dir) {
         t.write((HOUR0 + 1) * 3600.0 + pb::PB_PACK_AFTER_S + 1.0, x);
     }
     pb::PassbandStore t(path_text(dir / "packer2"));
-    CHECK(!exists(t.flac_path(HOUR0) + "." + std::to_string(rawfile::process_id()) + ".tmp"));
+    CHECK(no_tmp(t.root()));
     CHECK(t.hours().size() == 2);
 }
 
@@ -399,7 +408,7 @@ void test_pack_write_meanwhile(const std::filesystem::path& dir) {
         mode = m;
         CHECK(!s.pack_hour(HOUR0));
         CHECK(exists(s.raw_path(HOUR0)) && !exists(s.flac_path(HOUR0)));
-        CHECK(!exists(s.flac_path(HOUR0) + "." + std::to_string(rawfile::process_id()) + ".tmp"));
+        CHECK(no_tmp(s.root()));
         const pb::Masked r = s.read(HOUR0 * 3600.0 + 1000 / 40.0, HOUR0 * 3600.0 + 1001 / 40.0);
         CHECK(r.x.size() == 1 && r.mask[0] == 1 && r.x[0] == (m == 1 ? cf(0.75f, -0.75f) : cf(0.5f, -0.5f)));
     }
@@ -411,20 +420,19 @@ void test_pack_write_meanwhile(const std::filesystem::path& dir) {
 
 void test_short_raw_hour(const std::filesystem::path& dir) {
     // A raw hour left short (a crash between its creation and its sizing):
-    // reads refuse it as numpy's mmap does, a write grows it back to size.
+    // reads give what it holds and the rest as unwritten (a final partial
+    // pair too), a pack refuses it, a write grows it back to size.
     pb::StoreOptions opt;
     opt.fs = 40;
     pb::PassbandStore s(path_text(dir / "short"), opt);
     std::error_code ec;
-    CHECK(rawfile::write_replace(s.raw_path(HOUR0) + ".x", s.raw_path(HOUR0), std::string(100, '\1'), ec));
-    CHECK(rawfile::write_replace(s.index_path(HOUR0) + ".x", s.index_path(HOUR0), "[[0, 10]]", ec));
-    std::string what;
-    try {
-        s.read(HOUR0 * 3600.0, HOUR0 * 3600.0 + 1.0);
-    } catch (const std::invalid_argument& e) {
-        what = e.what();
-    }
-    CHECK(what == "mmap length is greater than file size");
+    CHECK(rawfile::write_replace(s.raw_path(HOUR0) + ".x", s.raw_path(HOUR0), std::string(102, '\1'), ec));
+    CHECK(rawfile::write_replace(s.index_path(HOUR0) + ".x", s.index_path(HOUR0), "[[0, 40]]", ec));
+    pb::Masked h = s.read(HOUR0 * 3600.0, HOUR0 * 3600.0 + 1.0);   // 25 pairs and half of one
+    CHECK(h.x.size() == 40 && std::count(h.mask.begin(), h.mask.end(), std::uint8_t{1}) == 25);
+    CHECK(h.mask[24] == 1 && h.mask[25] == 0 && h.x[24] == cf(257.0f / 8192.0f, 257.0f / 8192.0f));
+    CHECK(h.x[25] == cf(0.0f, 0.0f) && h.x[39] == cf(0.0f, 0.0f));
+    CHECK(!s.pack_hour(HOUR0) && exists(s.raw_path(HOUR0)) && no_tmp(s.root()));
     s.write(HOUR0 * 3600.0 + 5.0, std::vector<cf>(4, cf(1.0f, 1.0f)), false);
     rawfile::RawFile f = rawfile::RawFile::open(s.raw_path(HOUR0), rawfile::Mode::Read, ec);
     CHECK(f.is_open() && f.size(ec).value_or(0) == static_cast<std::uint64_t>(s.per_hour()) * 4);
@@ -433,6 +441,87 @@ void test_short_raw_hour(const std::filesystem::path& dir) {
     CHECK(r.x[0] == cf(257.0f / 8192.0f, 257.0f / 8192.0f) && r.x[30] == cf(0.0f, 0.0f));   // (0x0101 kept)
     CHECK(r.x[200] == cf(1.0f, 1.0f) && r.mask[200] == 1 && r.mask[100] == 0);
     CHECK(s.pack_hour(HOUR0));
+}
+
+// The reference fixes of 2026-10-14, in step with frontend.PassbandStore's.
+void test_reference_fixes(const std::filesystem::path& dir) {
+    // fs <= 0 is refused, from the arguments or meta.json, before meta.json is written
+    for (const int fs : {0, -40}) {
+        pb::StoreOptions bad;
+        bad.fs = fs;
+        const std::string root = path_text(dir / ("rate" + std::to_string(fs)));
+        std::string what;
+        try {
+            pb::PassbandStore s(root, bad);
+        } catch (const std::invalid_argument& e) {
+            what = e.what();
+        }
+        CHECK(what == "the passband store's fs must be positive, not " + std::to_string(fs));
+        CHECK(!exists(root + "/meta.json"));
+    }
+    {
+        const std::string root = path_text(dir / "rate_meta");
+        std::error_code ec;
+        CHECK(rawfile::make_dirs(root, ec));
+        CHECK(rawfile::write_replace(root + "/m.x", root + "/meta.json", "{\"fs\": 0, \"scale\": 8192.0}", ec));
+        CHECK(throws<std::invalid_argument>([&] { pb::PassbandStore s(root); }));
+    }
+
+    // write_capture: the gain from the finite samples; a non-finite one stored as write stores it
+    pb::StoreOptions opt;
+    opt.fs = 40;
+    pb::PassbandStore s(path_text(dir / "fixes"), opt);
+    const float inf = std::numeric_limits<float>::infinity(), nan = std::numeric_limits<float>::quiet_NaN();
+    sstvae::qrss::frontend::Capture cap;
+    cap.fs = 40;
+    cap.q = HOUR0 * 4;
+    cap.fe = {cf(inf, 0.0f), cf(nan, 1.0f), cf(0.0f, -inf), cf(0.5f, 0.0f)};
+    pb::Written w = s.write_capture(cap, false);
+    CHECK(w.gain == 1.0);
+    pb::Masked r = s.read(w.t_first, w.t_first + 4 / 40.0);
+    CHECK(r.x[0] == cf(32767.0f / 8192.0f, 0.0f) && r.x[1] == cf(0.0f, 1.0f));
+    CHECK(r.x[2] == cf(0.0f, -32767.0f / 8192.0f) && r.x[3] == cf(0.5f, 0.0f));
+    cap.q += 4;
+    cap.fe = {cf(3.0f, 0.0f), cf(inf, nan), cf(0.25f, 0.0f)};
+    w = s.write_capture(cap, false);
+    CHECK(w.gain == 0.5);   // (3.0 * 8192 > 16383; the infinity is not the peak)
+    r = s.read(w.t_first, w.t_first + 3 / 40.0);
+    CHECK(r.x[0] == cf(1.5f, 0.0f) && r.x[1] == cf(0.0f, 0.0f) && r.x[2] == cf(0.125f, 0.0f));
+
+    // the pack's temporary is named for this process and thread
+    std::vector<std::string> seen;
+    pb::StoreOptions spy;
+    spy.fs = 40;
+    spy.before_swap = [&](std::int64_t) {
+        std::error_code ec;
+        for (const std::string& n : sstvae::util::list_dir(path_text(dir / "tmpname"), ec))
+            if (n.size() > 4 && n.compare(n.size() - 4, 4, ".tmp") == 0) seen.push_back(n);
+    };
+    pb::PassbandStore t(path_text(dir / "tmpname"), spy);
+    t.write_at(HOUR0 * t.per_hour(), std::vector<cf>(100, cf(0.5f, 0.25f)), false);
+    CHECK(t.pack_hour(HOUR0) && no_tmp(t.root()));
+    CHECK((seen == std::vector<std::string>{"fe_" + std::to_string(HOUR0) + ".flac." +
+                                            std::to_string(rawfile::process_id()) + "." +
+                                            std::to_string(rawfile::thread_ident()) + ".tmp"}));
+
+    // expire() deletes the store's temporaries over an hour old by the wall clock, and nothing else
+    const std::vector<std::string> stale = {"fe_1.flac.123.tmp", "fe_1.i16.5.6.tmp", "meta.json.7.8.tmp",
+                                            "fe_2.json.9.10.tmp"};
+    const std::vector<std::string> other = {"notes.1.tmp", "fe_1.wav.1.tmp", "fe_1.flac.tmp", "fe_1.flac.x.tmp",
+                                            "fe_1.flac.1.2.3.tmp", "fe_.flac.1.tmp"};
+    const std::vector<std::string> fresh = {"fe_3.flac.11.12.tmp"};
+    const auto when = std::filesystem::file_time_type::clock::now() - std::chrono::hours(2);
+    for (const auto* names : {&stale, &other, &fresh})
+        for (const std::string& n : *names) {
+            std::error_code ec;
+            const std::string f = s.root() + "/" + n;
+            CHECK(rawfile::write_replace(f + ".x", f, "x", ec));
+            if (names != &fresh) std::filesystem::last_write_time(sstvae::util::fs_path(f).value(), when);
+        }
+    CHECK(s.expire(0.0).empty());   // (by the wall clock, not the time given)
+    for (const std::string& n : stale) CHECK(!exists(s.root() + "/" + n));
+    for (const std::string& n : other) CHECK(exists(s.root() + "/" + n));
+    for (const std::string& n : fresh) CHECK(exists(s.root() + "/" + n));
 }
 
 void test_dirlock(const std::filesystem::path& dir) {
@@ -474,6 +563,7 @@ int main() {
         test_pack_race(dir);
         test_pack_write_meanwhile(dir);
         test_short_raw_hour(dir);
+        test_reference_fixes(dir);
         test_dirlock(dir);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());

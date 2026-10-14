@@ -8,9 +8,11 @@ The contract (the bar):
 - the store's files: the same sequence of writes, reads, captures, packs
   and expiries, drawn at random (hour boundaries, negative hours, gaps,
   clipping, NaN and infinite samples, ties at half an LSB, zero lengths,
-  attenuated captures), through both stores into separate roots, leaves
-  the same files with the same bytes -- every fe_<hour>.i16, every
-  fe_<hour>.json, meta.json -- and no temporary file; a packed hour is the
+  attenuated captures, non-finite ones included), through both stores
+  into separate roots, leaves the same files with the same bytes -- every
+  fe_<hour>.i16, every fe_<hour>.json, meta.json -- and no temporary file;
+  a short raw hour reads alike (what it holds, unwritten past its end);
+  expire() deletes the same stale temporaries; a packed hour is the
   same samples (the two FLAC encoders are not byte-identical: the C++ has
   no LPC). Every result on the way is bitwise the reference's: read's
   samples and mask, capture's Capture (its fe, q, t0_index, fs) and
@@ -106,8 +108,8 @@ def test_constants_and_free_functions(P):
     for name in names:
         m = frontend._HOUR_RE.match(name)
         assert P._hour_of_name(name) == (int(m.group(1)) if m else None), name
-    # (a non-ASCII digit matches the reference's \d; the C++ names hours in ASCII digits only)
-    assert frontend._HOUR_RE.match("fe_١٢.i16") and P._hour_of_name("fe_١٢.i16") is None
+    # (ASCII digits only, in both: \d took the Arabic-Indic ones before 2026-10-14's fix)
+    assert not frontend._HOUR_RE.match("fe_١٢.i16") and P._hour_of_name("fe_١٢.i16") is None
 
 
 # --- the random sequences ---------------------------------------------------------------------------
@@ -309,6 +311,17 @@ def test_refusals(P, tmp_path):
         assert g[0] == r[0] == "raise" and issubclass(g[1], exc) and issubclass(r[1], exc), (meta, g, r)
         if exc is KeyError:
             assert g[1] is r[1] and g[2] == r[2], (meta, g, r)
+    # fs <= 0, given or in meta.json: the same ValueError, and no meta.json written
+    for fs in (0, -40, -1):
+        g = _call(P.PassbandStore, tmp_path / f"cfs{fs}", fs=fs)
+        r = _call(frontend.PassbandStore, tmp_path / f"pfs{fs}", fs=fs)
+        assert g[0] == r[0] == "raise" and g[1] is r[1] is ValueError and g[2] == r[2], (fs, g, r)
+        assert not (tmp_path / f"cfs{fs}" / "meta.json").exists() and not (tmp_path / f"pfs{fs}" / "meta.json").exists()
+    d = tmp_path / "mfs0"
+    d.mkdir()
+    (d / "meta.json").write_text('{"fs": 0, "scale": 8192.0}')
+    g, r = _call(P.PassbandStore, d, fs=40), _call(frontend.PassbandStore, d, fs=40)
+    assert g[0] == r[0] == "raise" and g[1] is r[1] is ValueError and g[2] == r[2], (g, r)
     ref = frontend.PassbandStore(tmp_path / "py", fs=40)
     got = P.PassbandStore(tmp_path / "cc", fs=40)
     x = np.ones(10, np.complex64)
@@ -327,9 +340,10 @@ def test_refusals(P, tmp_path):
 
 def test_a_short_raw_hour(P, tmp_path):
     """A raw hour shorter than an hour (a crash between its creation and its
-    sizing): reads refuse it with the reference's ValueError, a write grows
-    it back to size (numpy's memmap "r+"), keeping what was there, and the
-    two stores are then the same files."""
+    sizing): reads give what it holds and the rest as unwritten (a final
+    partial pair too; they raised ValueError before 2026-10-14's fix), a
+    pack refuses it, a write grows it back to size (numpy's memmap "r+"),
+    keeping what was there, and the two stores are then the same files."""
     _sf()
     ra, rb = tmp_path / "py", tmp_path / "cc"
     ref, got = frontend.PassbandStore(ra, fs=40), P.PassbandStore(rb, fs=40)
@@ -341,6 +355,7 @@ def test_a_short_raw_hour(P, tmp_path):
         span = (h * 3600.0, h * 3600.0 + 2.0)
         _same_result(_call(got.read, *span, return_mask=True), _call(ref.read, *span, return_mask=True), size)
         _same_result(_call(got.capture, h * 4, 1.0), _call(ref.capture, h * 4, 1.0), size)
+        _same_result(_call(got.pack_hour, h), _call(ref.pack_hour, h), ("short", size))
         x = np.full(5, 0.25 - 0.5j, np.complex64)
         _same_result(_call(got.write, h * 3600.0 + 1.0, x, expire=False),
                      _call(ref.write, h * 3600.0 + 1.0, x, expire=False), size)
@@ -351,6 +366,31 @@ def test_a_short_raw_hour(P, tmp_path):
         for r in (ra, rb):
             for p in r.glob("fe_*"):
                 p.unlink()
+
+
+def test_stale_temporaries(P, tmp_path):
+    """expire() deletes the store's temporaries whose mtime is over an hour
+    old by the wall clock (whatever `now` says), and nothing else: the same
+    files left in both roots."""
+    import time
+
+    ra, rb = tmp_path / "py", tmp_path / "cc"
+    ref, got = frontend.PassbandStore(ra, fs=40), P.PassbandStore(rb, fs=40)
+    names = ["fe_1.flac.123.tmp", "fe_1.i16.5.6.tmp", "meta.json.7.8.tmp", "fe_2.json.9.10.tmp",
+             "fe_3.flac.11.12.tmp", "notes.1.tmp", "fe_1.wav.1.tmp", "fe_1.flac.tmp", "fe_1.flac.x.tmp",
+             "fe_1.flac.1.2.3.tmp", "fe_.flac.1.tmp", "meta.json.1.tmp.tmp", "fe_٣.flac.1.tmp",
+             "fe_12.i16.0.tmp", "fe_4.json.1.2.tmp", "fe_5.flac.6.tmp"]
+    ages = {n: (7200.0, 3700.0, 3500.0, 10.0)[i % 4] for i, n in enumerate(names)}
+    now = time.time()
+    for r in (ra, rb):
+        for n in names:
+            (r / n).write_bytes(b"x")
+            os.utime(r / n, (now - ages[n], now - ages[n]))
+    for when in (0.0, 1e12):
+        assert got.expire(when) == ref.expire(when) == []
+        assert sorted(p.name for p in ra.iterdir()) == sorted(p.name for p in rb.iterdir())
+    gone = {"fe_1.flac.123.tmp", "fe_1.i16.5.6.tmp", "fe_3.flac.11.12.tmp", "fe_12.i16.0.tmp"}   # (ours, over the hour)
+    assert sorted(p.name for p in ra.iterdir()) == sorted({"meta.json", *names} - gone)
 
 
 # --- across implementations -------------------------------------------------------------------------

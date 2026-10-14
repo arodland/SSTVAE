@@ -13,7 +13,6 @@
 
 #include "qrss/flac.hpp"
 #include "qrss/pyjson.hpp"
-#include "qrss/rational.hpp"
 #include "qrss/rawfile.hpp"
 #include "util/fileio.hpp"
 
@@ -115,7 +114,9 @@ std::string join(const std::string& root, const std::string& name) {
 
 std::string hour_name(std::int64_t hour, const char* ext) { return "fe_" + std::to_string(hour) + ext; }
 
-// _atomic_write's temporary: "<name>.<pid>.<thread ident>.tmp" beside it.
+// Every temporary's name, _atomic_write's and the pack's and unpack's:
+// "<name>.<pid>.<thread ident>.tmp" beside it, which no other process,
+// nor another thread of this one, writes at the same time.
 std::string atomic_tmp(const std::string& root, const std::string& name) {
     return join(root, name + "." + std::to_string(rawfile::process_id()) + "." +
                           std::to_string(rawfile::thread_ident()) + ".tmp");
@@ -161,10 +162,49 @@ void remove_missing_ok(const std::string& path) {
 
 bool is_missing(const std::error_code& ec) { return ec == std::errc::no_such_file_or_directory; }
 
-// np.memmap(mode="r") of a raw hour shorter than an hour: mmap's ValueError,
-// word for word (the reference's text names no file).
-[[noreturn]] void short_file(const std::string&) {
-    throw std::invalid_argument("mmap length is greater than file size");
+// np.memmap(mode="r") of a raw hour shorter than an hour, as pack_hour
+// opens one: mmap's ValueError (which pack_hour turns into false).
+[[noreturn]] void short_file() { throw std::invalid_argument("mmap length is greater than file size"); }
+
+// time.time(): a temporary's age is its mtime against the wall clock,
+// never the store's clock (a stream's time, which may be a replay's).
+double wall_clock() {
+    const auto d = std::chrono::system_clock::now().time_since_epoch();
+    return std::chrono::duration<double>(d).count();
+}
+
+// frontend._is_temporary: "fe_<digits>.i16|flac|json" or "meta.json",
+// then ".<digits>[.<digits>].tmp" -- the store's own temporaries only.
+bool is_temporary(std::string_view name) {
+    auto digits = [](std::string_view& s) {
+        std::size_t k = 0;
+        while (k < s.size() && s[k] >= '0' && s[k] <= '9') ++k;
+        s.remove_prefix(k);
+        return k > 0;
+    };
+    if (name.substr(0, 9) == "meta.json") {
+        name.remove_prefix(9);
+    } else {
+        if (name.substr(0, 3) != "fe_") return false;
+        name.remove_prefix(3);
+        if (!digits(name)) return false;
+        bool ext = false;
+        for (const std::string_view e : {".i16", ".flac", ".json"})
+            if (name.substr(0, e.size()) == e) {
+                name.remove_prefix(e.size());
+                ext = true;
+                break;
+            }
+        if (!ext) return false;
+    }
+    if (name.substr(0, 1) != ".") return false;
+    name.remove_prefix(1);
+    if (!digits(name)) return false;
+    if (name.substr(0, 1) == "." && name != ".tmp") {
+        name.remove_prefix(1);
+        if (!digits(name)) return false;
+    }
+    return name == ".tmp";
 }
 
 }  // namespace
@@ -186,7 +226,6 @@ std::vector<Range> merge_ranges(std::vector<Range> rs) {
 }
 
 std::optional<std::int64_t> hour_of_name(std::string_view name) {
-    if (!name.empty() && name.back() == '\n') name.remove_suffix(1);   // `$` before a final newline
     if (name.substr(0, 3) != "fe_") return std::nullopt;
     name.remove_prefix(3);
     std::size_t k = 0;
@@ -218,29 +257,28 @@ struct PassbandStore::Hour {
     rawfile::RawFile raw;                    // open when the hour is raw
     std::unique_ptr<flac::Reader> packed;    // else this
 
-    // int16 pairs [lo, hi) into out (2 (hi - lo) values).
-    void read(std::int64_t lo, std::int64_t hi, std::int16_t* out) {
+    // int16 pairs [lo, lo + n) into out (room for 2 (hi - lo) values); n,
+    // which is hi - lo, or less where the file ends first (a raw hour left
+    // short, a FLAC of fewer frames): what is not there was never written.
+    std::size_t read(std::int64_t lo, std::int64_t hi, std::int16_t* out) {
         const std::size_t n = static_cast<std::size_t>(hi - lo);
         if (raw.is_open()) {
             std::error_code ec;
-            const std::size_t want = n * 4;
-            const std::size_t got = raw.read_at(static_cast<std::uint64_t>(lo) * 4, out, want, ec);
+            const std::size_t got = raw.read_at(static_cast<std::uint64_t>(lo) * 4, out, n * 4, ec);
             if (ec) throw FileError(ec, path);
-            if (got != want) short_file(path);
-            return;
+            return got / 4;   // (whole pairs: a final partial one is not a sample)
         }
         const flac::Info& info = packed->info();
         const std::vector<std::int16_t> y = packed->read(static_cast<std::uint64_t>(lo), n);
         const std::size_t nch = static_cast<std::size_t>(info.channels);
         if (nch < 2)
             throw std::out_of_range("index 1 is out of bounds for axis 1 with size " + std::to_string(nch));
-        if (y.size() != n * nch)
-            throw std::invalid_argument(path + ": could not broadcast " + std::to_string(y.size() / nch) +
-                                        " samples into " + std::to_string(n));
-        for (std::size_t i = 0; i < n; ++i) {
+        const std::size_t rows = std::min(n, y.size() / nch);
+        for (std::size_t i = 0; i < rows; ++i) {
             out[2 * i] = y[i * nch];
             out[2 * i + 1] = y[i * nch + 1];
         }
+        return rows;
     }
 };
 
@@ -258,7 +296,8 @@ PassbandStore::PassbandStore(std::string root, StoreOptions opt)
     std::string failed;
     if (!rawfile::make_dirs(root_, ec, &failed)) throw FileError(ec, failed);
     const std::string meta = join(root_, "meta.json");
-    if (util::exists(meta)) {
+    const bool fresh = !util::exists(meta);
+    if (!fresh) {
         const auto text = rawfile::read_all(meta, ec);
         if (!text) throw FileError(ec, meta);
         const pyjson::Value m = pyjson::loads(*text);
@@ -267,7 +306,10 @@ PassbandStore::PassbandStore(std::string root, StoreOptions opt)
         if (fs > std::numeric_limits<int>::max() || fs < std::numeric_limits<int>::min()) too_big("fs");
         fs_ = static_cast<int>(fs);
         scale_ = scale;
-    } else {
+    }
+    // (an hour of no samples: nothing could be stored, and a read would never advance)
+    if (fs_ <= 0) throw std::invalid_argument("the passband store's fs must be positive, not " + std::to_string(fs_));
+    if (fresh) {
         pyjson::Value m = pyjson::Value::object();
         m.set("fs", pyjson::Value::integer(fs_));
         m.set("scale", pyjson::Value::number(scale_));
@@ -328,12 +370,7 @@ std::shared_ptr<PassbandStore::Hour> PassbandStore::open_hour_locked(std::int64_
     std::error_code ec;
     h->path = raw_path(hour);
     h->raw = rawfile::RawFile::open(h->path, rawfile::Mode::Read, ec);
-    if (h->raw.is_open()) {
-        const auto size = h->raw.size(ec);
-        if (!size) throw FileError(ec, h->path);
-        if (*size < static_cast<std::uint64_t>(per_hour_) * 4) short_file(h->path);
-        return h;
-    }
+    if (h->raw.is_open()) return h;   // (a short one reads as unwritten past its end)
     if (!is_missing(ec)) throw FileError(ec, h->path);
     h->path = flac_path(hour);
     if (!util::exists(h->path)) return nullptr;
@@ -359,8 +396,7 @@ void PassbandStore::unpack_locked(std::int64_t hour) {
     if (n > 0 && nch != 1 && nch != 2)
         throw std::invalid_argument(src + ": could not broadcast input array from shape (" + std::to_string(n) +
                                     "," + std::to_string(nch) + ") into shape (" + std::to_string(n) + ",2)");
-    const std::string tmp =
-        join(root_, hour_name(hour, ".i16") + "." + std::to_string(rawfile::process_id()) + ".tmp");
+    const std::string tmp = atomic_tmp(root_, hour_name(hour, ".i16"));
     std::error_code ec;
     try {
         rawfile::RawFile t = rawfile::RawFile::open(tmp, rawfile::Mode::Truncate, ec);
@@ -448,10 +484,6 @@ void PassbandStore::write(double t0, std::span<const cf> x, bool expire) {
 
 void PassbandStore::write_at(std::int64_t n0, std::span<const cf> x, bool expire_) {
     const std::int64_t len = static_cast<std::int64_t>(x.size());
-    if (len > 0) {
-        if (per_hour_ == 0) throw ZeroDivision("integer division or modulo by zero");
-        if (per_hour_ < 0) throw std::invalid_argument("negative dimensions are not allowed");
-    }
     const std::int64_t end = add(n0, len, "sample index");
     std::vector<std::int16_t> q;
     std::int64_t i = 0;
@@ -480,8 +512,6 @@ Masked PassbandStore::read(double t_start, double t_end) const {
     out.x.assign(static_cast<std::size_t>(n), cf(0.0f, 0.0f));
     out.mask.assign(static_cast<std::size_t>(n), 0);
     if (n == 0) return out;
-    if (per_hour_ == 0) throw ZeroDivision("integer division or modulo by zero");
-    if (per_hour_ < 0) throw std::invalid_argument("negative dimensions are not allowed");
     const float s = f32(scale_);
     std::vector<std::int16_t> buf;
     std::int64_t i = 0;
@@ -503,9 +533,9 @@ Masked PassbandStore::read(double t_start, double t_end) const {
                 const std::int64_t lo = std::max(r[0], k), hi = std::min(r[1], k + m);
                 if (lo >= hi) continue;
                 buf.resize(static_cast<std::size_t>(2 * (hi - lo)));
-                h->read(lo, hi, buf.data());
+                const std::size_t rows = h->read(lo, hi, buf.data());
                 const std::size_t at = static_cast<std::size_t>(i + lo - k);
-                for (std::int64_t j = 0; j < hi - lo; ++j) {
+                for (std::size_t j = 0; j < rows; ++j) {
                     out.x[at + j] = dequantise(buf[2 * j], buf[2 * j + 1], s);
                     out.mask[at + j] = 1;
                 }
@@ -520,12 +550,14 @@ Written PassbandStore::write_capture(const frontend::Capture& cap, bool expire_)
     if (cap.fs != fs_)
         throw std::invalid_argument("the store holds " + std::to_string(fs_) + " Hz FE, not a " +
                                     std::to_string(cap.fs) + " Hz capture");
-    // builtin max(max|re|, max|im|), each np.max(initial=0.0) in float32 (NaN propagating)
+    // builtin max(max|re|, max|im|), each np.max(initial=0.0, where=isfinite)
+    // in float32: the finite samples' peak (a non-finite one is stored as
+    // write stores it, NaN as 0 and an infinity clipped)
     float pre = 0.0f, pim = 0.0f;
     for (const cf& v : cap.fe) {
         const float ar = std::fabs(v.real()), ai = std::fabs(v.imag());
-        if (std::isnan(ar) || ar > pre) pre = std::isnan(pre) ? pre : ar;
-        if (std::isnan(ai) || ai > pim) pim = std::isnan(pim) ? pim : ai;
+        if (std::isfinite(ar) && ar > pre) pre = ar;
+        if (std::isfinite(ai) && ai > pim) pim = ai;
     }
     const float best = (pim > pre) ? pim : pre;   // max(a, b): b only when b > a
     const double peak = static_cast<double>(best) * scale_;
@@ -557,7 +589,6 @@ SlotCapture PassbandStore::capture(std::int64_t q, double dur_s, double lead_s, 
     const std::int64_t base = mul(t0, fs_, "sample index");
     const std::int64_t a = sub(base, py_round(lead_s * fs), "sample index");
     const std::int64_t b = add(base, py_round((dur_s + tail_s) * fs), "sample index");
-    if (fs_ == 0) throw ZeroDivision("division by zero");
     Masked r = read(static_cast<double>(a) / fs, static_cast<double>(b) / fs);
     SlotCapture out;
     const auto first = std::find(r.mask.begin(), r.mask.end(), std::uint8_t{1});
@@ -636,6 +667,22 @@ std::vector<std::int64_t> PassbandStore::expire(std::optional<double> when) {
             gone.push_back(hour);
         }
     }
+    // the store's temporaries older than an hour by the wall clock (left by
+    // a process killed mid-pack or mid-write: none takes that long)
+    const double old = wall_clock() - PB_TMP_AGE_S;
+    std::error_code ec;
+    const std::vector<std::string> names = util::list_dir(root_, ec);
+    if (ec) throw FileError(ec, root_);
+    for (const std::string& n : names) {
+        if (!is_temporary(n)) continue;
+        const std::string p = join(root_, n);
+        const auto mt = rawfile::mtime_ns(p, ec);
+        if (!mt) {
+            if (is_missing(ec)) continue;
+            throw FileError(ec, p);
+        }
+        if (static_cast<double>(*mt) / 1e9 < old) remove_missing_ok(p);   // (st_mtime < time.time() - 3600)
+    }
     return gone;
 }
 
@@ -643,8 +690,7 @@ bool PassbandStore::pack_hour(std::int64_t hour) {
     std::lock_guard pk(pack_mu_);
     const std::string raw = raw_path(hour);
     if (!util::exists(raw)) return false;
-    const std::string tmp =
-        join(root_, hour_name(hour, ".flac") + "." + std::to_string(rawfile::process_id()) + ".tmp");
+    const std::string tmp = atomic_tmp(root_, hour_name(hour, ".flac"));
     bool ok = false;
     try {
         std::error_code ec;
@@ -661,7 +707,7 @@ bool PassbandStore::pack_hour(std::int64_t hour) {
         const auto size = f.size(ec);
         if (!size) throw FileError(ec, raw);
         const std::uint64_t per = static_cast<std::uint64_t>(per_hour_);
-        if (*size < per * 4) short_file(raw);
+        if (*size < per * 4) short_file();
         const flac::Source source = [&](std::uint64_t first, std::size_t n, std::int16_t* out) {
             std::error_code e;
             return f.read_at(first * 4, out, n * 4, e) == n * 4 && !e;

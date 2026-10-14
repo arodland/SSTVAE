@@ -456,7 +456,7 @@ def noise_psd(ch, fs: int = CH_FS, exclude_hz=(), win_s: float = 10.0, *,
 
 # --- the 48 h passband store ---------------------------------------------------------------
 
-_HOUR_RE = re.compile(r"^fe_(\d+)\.(?:i16|flac)$")
+_HOUR_RE = re.compile(r"^fe_([0-9]+)\.(?:i16|flac)\Z")
 PB_PACK_AFTER_S = 120.0          # a finished hour is packed (FLAC) this long after it ends
 PB_LEAD_S = 15.0                 # a slot read back starts this long before t0 (lead-in, search margin)
 PB_TAIL_S = 5.0                  # and ends this long after the frame
@@ -465,6 +465,12 @@ PB_TAIL_S = 5.0                  # and ends this long after the frame
 def slot_t0(q: int) -> int:
     """Unix time of slot q's nominal t0: the quarter hour plus 1 s."""
     return 900 * int(q) + 1
+
+
+def _is_temporary(name: str) -> bool:
+    """A temporary the passband store writes and renames: fe_<hour>.flac /
+    .i16 / .json or meta.json, then .<pid>[.<thread id>].tmp."""
+    return re.match(r"(?:fe_[0-9]+\.(?:i16|flac|json)|meta\.json)\.[0-9]+(?:\.[0-9]+)?\.tmp\Z", name) is not None
 
 
 def _soundfile():
@@ -498,7 +504,10 @@ class PassbandStore:
     soundfile hours stay raw (and a packed one cannot be read).
 
     Times are unix seconds (float); sample n of the stream is at n/fs,
-    and a write or read at time t starts at sample round(t*fs).
+    and a write or read at time t starts at sample round(t*fs). A raw
+    hour shorter than an hour (a crash between its creation and its
+    sizing) reads as unwritten past its end, and the next write into it
+    grows it to size. fs must be positive (ValueError).
     """
 
     def __init__(self, root, fs: int = FE_FS, scale: float = 8192.0,
@@ -506,10 +515,13 @@ class PassbandStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         meta = self.root / "meta.json"
-        if meta.exists():
+        fresh = not meta.exists()
+        if not fresh:
             m = json.loads(meta.read_text())
             fs, scale = int(m["fs"]), float(m["scale"])
-        else:
+        if int(fs) <= 0:            # (an hour of no samples: read() would never advance)
+            raise ValueError(f"the passband store's fs must be positive, not {int(fs)}")
+        if fresh:
             _atomic_write(meta, json.dumps({"fs": int(fs), "scale": float(scale)}))
         self.fs = int(fs)
         self.scale = float(scale)               # int16 counts per unit amplitude
@@ -517,6 +529,8 @@ class PassbandStore:
         self.per_hour = 3600 * self.fs
         self.pack = bool(pack) and _soundfile() is not None
         self._lock = threading.RLock()          # a write and a pack's swap of one hour
+        self._pack_lock = threading.Lock()      # one pack_hour at a time
+        self._gen: dict[int, int] = {}          # writes per hour, this process (under _lock)
         self._packer: threading.Thread | None = None
         self._pack_check = 0.0
 
@@ -539,14 +553,15 @@ class PassbandStore:
                          shape=(self.per_hour, 2))
 
     def _read_hour(self, hour: int, lo: int, hi: int) -> np.ndarray | None:
-        """int16 (hi - lo, 2) of hour's samples [lo, hi), raw or packed; None without a file."""
+        """int16 (n, 2) of hour's samples [lo, lo + n), raw or packed; None
+        without a file. n is hi - lo, or less where the file ends first (a
+        raw hour left short, which a write grows to size): never written."""
         for _ in range(2):           # (a pack may swap the files between the two looks)
             try:
-                mm = self._map(hour, write=False)
-                if mm is not None:
-                    out = np.array(mm[lo:hi])
-                    del mm
-                    return out
+                data, _ = self._paths(hour)
+                if data.exists():
+                    y = np.fromfile(data, dtype=np.int16, count=2 * (hi - lo), offset=4 * lo)
+                    return y[:len(y) // 2 * 2].reshape(-1, 2)
                 path = self._flac(hour)
                 if not path.exists():
                     return None
@@ -565,29 +580,41 @@ class PassbandStore:
 
     def pack_hour(self, hour: int) -> bool:
         """Pack raw hour `hour` into FLAC, checked sample for sample before
-        the raw file goes; False (and the raw file kept) if it could not be."""
+        the raw file goes; False (and the raw file kept) if it could not be.
+
+        One at a time (a lock), into a temporary named for this process and
+        thread; the FLAC is synced to the device before it replaces the raw
+        hour. A write meanwhile -- seen by the raw file's mtime, or, where
+        the file system's clock is too coarse for that (FAT's 2 s), by this
+        store's count of its own writes -- leaves the hour raw."""
         sf = _soundfile()
         data, _ = self._paths(hour)
         if sf is None or not data.exists():
             return False
-        before = data.stat().st_mtime_ns
-        tmp = self.root / f"fe_{hour}.flac.{os.getpid()}.tmp"
-        try:
-            mm = np.memmap(data, dtype=np.int16, mode="r", shape=(self.per_hour, 2))
-            sf.write(str(tmp), mm, self.fs, format="FLAC", subtype="PCM_16")
-            y, _ = sf.read(str(tmp), dtype="int16", always_2d=True)
-            same = y.shape == mm.shape and np.array_equal(y, mm)
-            del mm, y
-            with self._lock:
-                if not same or data.stat().st_mtime_ns != before:
-                    return False           # (written to meanwhile: packed again later)
-                os.replace(tmp, self._flac(hour))
-                data.unlink()
-            return True
-        except (OSError, RuntimeError, ValueError):
-            return False
-        finally:
-            tmp.unlink(missing_ok=True)
+        with self._pack_lock:
+            tmp = self.root / f"fe_{hour}.flac.{os.getpid()}.{threading.get_ident()}.tmp"
+            try:
+                before = data.stat().st_mtime_ns
+                with self._lock:
+                    gen = self._gen.get(hour, 0)
+                mm = np.memmap(data, dtype=np.int16, mode="r", shape=(self.per_hour, 2))
+                sf.write(str(tmp), mm, self.fs, format="FLAC", subtype="PCM_16")
+                with open(tmp, "r+b") as f:
+                    os.fsync(f.fileno())
+                y, _ = sf.read(str(tmp), dtype="int16", always_2d=True)
+                same = y.shape == mm.shape and np.array_equal(y, mm)
+                del mm, y
+                with self._lock:
+                    if (not same or data.stat().st_mtime_ns != before
+                            or self._gen.get(hour, 0) != gen):
+                        return False           # (written to meanwhile: packed again later)
+                    os.replace(tmp, self._flac(hour))
+                    data.unlink()
+                return True
+            except (OSError, RuntimeError, ValueError):
+                return False
+            finally:
+                tmp.unlink(missing_ok=True)
 
     def _unpack(self, hour: int) -> None:
         """Turn packed hour `hour` back into a raw file (for a write into it)."""
@@ -597,7 +624,7 @@ class PassbandStore:
             raise RuntimeError(f"{path} is FLAC: writing into it needs the soundfile package")
         y, _ = sf.read(str(path), dtype="int16", always_2d=True)
         data, _ = self._paths(hour)
-        tmp = self.root / f"fe_{hour}.i16.{os.getpid()}.tmp"
+        tmp = self.root / f"fe_{hour}.i16.{os.getpid()}.{threading.get_ident()}.tmp"
         mm = np.memmap(tmp, dtype=np.int16, mode="w+", shape=(self.per_hour, 2))
         mm[:len(y)] = y[:self.per_hour]
         mm.flush()
@@ -655,6 +682,7 @@ class PassbandStore:
                 mm[k:k + m] = q
                 mm.flush()
                 del mm
+                self._gen[hour] = self._gen.get(hour, 0) + 1
                 _, idx = self._paths(hour)
                 _atomic_write(idx, json.dumps(_merge_ranges(self._ranges(hour) + [[k, k + m]])))
             i += m
@@ -683,8 +711,8 @@ class PassbandStore:
                     if y is None:
                         continue
                     q = np.asarray(y, dtype=np.float32) / self.scale
-                    out[i + lo - k:i + hi - k] = q[:, 0] + 1j * q[:, 1]
-                    mask[i + lo - k:i + hi - k] = True
+                    out[i + lo - k:i + lo - k + len(q)] = q[:, 0] + 1j * q[:, 1]
+                    mask[i + lo - k:i + lo - k + len(q)] = True
             i += m
         return (out, mask) if return_mask else out
 
@@ -699,12 +727,14 @@ class PassbandStore:
         peak would use more than half the int16 range is stored attenuated
         by a power of 2 rather than clipped: the receiver undoes any
         constant gain (inverse AGC), and audio from a WAV never needs it.
+        The peak is the finite samples'; a non-finite one is stored as write
+        stores it (NaN as 0, an infinity clipped).
         """
         if int(cap.fs) != self.fs:
             raise ValueError(f"the store holds {self.fs} Hz FE, not a {cap.fs} Hz capture")
         x = np.asarray(cap.fe, dtype=np.complex64)
-        peak = float(max(np.max(np.abs(x.real), initial=0.0),
-                         np.max(np.abs(x.imag), initial=0.0))) * self.scale
+        peak = float(max(np.max(np.abs(x.real), initial=0.0, where=np.isfinite(x.real)),
+                         np.max(np.abs(x.imag), initial=0.0, where=np.isfinite(x.imag)))) * self.scale
         gain = 1.0
         if peak > 16383.0:
             gain = 2.0 ** -math.ceil(math.log2(peak / 16383.0))
@@ -747,14 +777,27 @@ class PassbandStore:
         return sorted(out)
 
     def expire(self, now: float | None = None) -> list[int]:
-        """Delete hours that ended more than keep_hours before `now`; return them."""
+        """Delete hours that ended more than keep_hours before `now`; return
+        them. Also deletes the store's temporaries whose mtime is more than
+        an hour old by the wall clock (not `now`, a stream's time): left by
+        a process killed mid-pack or mid-write, since none takes that long."""
         now = time.time() if now is None else float(now)
         gone = []
         for hour in self.hours():
             if (hour + 1) * 3600 <= now - self.keep_hours * 3600:
                 for p in (*self._paths(hour), self._flac(hour)):
                     p.unlink(missing_ok=True)
+                with self._lock:
+                    self._gen.pop(hour, None)
                 gone.append(hour)
+        old = time.time() - 3600.0
+        for p in self.root.iterdir():
+            if _is_temporary(p.name):
+                try:
+                    if p.stat().st_mtime < old:
+                        p.unlink()
+                except FileNotFoundError:
+                    pass
         return gone
 
 
@@ -762,7 +805,7 @@ def _merge_ranges(rs) -> list[list[int]]:
     out: list[list[int]] = []
     for lo, hi in sorted(rs):
         if out and lo <= out[-1][1]:
-            out[-1][1] = max(out[-1][1], hi)
+            out[-1][1] = max(out[-1][1], int(hi))
         else:
             out.append([int(lo), int(hi)])
     return out

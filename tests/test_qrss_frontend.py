@@ -366,3 +366,210 @@ def test_passband_store_clips_to_int16(tmp_path):
     y = store.read(1000.0, 1000.0 + 3 / FE_FS)
     assert y[0].real == pytest.approx(32767 / 8192) and y[1].imag == pytest.approx(-32767 / 8192)
     assert y[2] == pytest.approx(1 + 1j)
+
+
+# --- reference fixes (2026-10-14, from the C++ port's review) -------------------------------
+
+def _spied(store):
+    """Skip a test that spies on the reference's internals when the store is
+    the C++ one (--native-qrss=rx): native/tests/qrss/test_passband.cpp
+    pins the same behaviour there."""
+    if type(store).__module__ != frontend.__name__:
+        pytest.skip("spies on the Python store's internals")
+
+def test_pack_hour_of_a_raw_hour_that_vanishes(tmp_path, monkeypatch):
+    """A raw hour gone between pack_hour's look and its stat (expired, or
+    packed by another process) is False, not a FileNotFoundError out of
+    the packer thread (which ended that pass of the packer)."""
+    pytest.importorskip("soundfile")
+    from pathlib import Path
+
+    store = frontend.PassbandStore(tmp_path, fs=40)
+    real = Path.exists
+    monkeypatch.setattr(Path, "exists", lambda self, *a, **k: self.name == "fe_7.i16" or real(self, *a, **k))
+    assert store.pack_hour(7) is False
+
+
+def test_pack_hour_runs_one_at_a_time(tmp_path, monkeypatch):
+    """Two pack_hour calls (the packer thread and a direct call) run one
+    after the other, each into a temporary named for its process and
+    thread: they wrote one fe_<hour>.flac.<pid>.tmp, which either could
+    rename into place half written."""
+    sf = pytest.importorskip("soundfile")
+    import os
+    import threading
+    import time
+
+    store = frontend.PassbandStore(tmp_path, fs=40)
+    _spied(store)
+    for h in (490_000, 490_001):
+        store.write(h * 3600.0, np.full(400, 0.25 - 0.5j, np.complex64), expire=False)
+    active, most, names = [0], [0], []
+    real_write, real_replace = sf.write, os.replace
+
+    def write(path, *a, **k):
+        active[0] += 1
+        most[0] = max(most[0], active[0])
+        time.sleep(0.2)
+        try:
+            return real_write(path, *a, **k)
+        finally:
+            active[0] -= 1
+
+    def replace(src, dst):
+        names.append((os.path.basename(src), threading.get_ident()))
+        return real_replace(src, dst)
+    monkeypatch.setattr(sf, "write", write)
+    monkeypatch.setattr(os, "replace", replace)
+    done = []
+    ts = [threading.Thread(target=lambda h=h: done.append(store.pack_hour(h))) for h in (490_000, 490_001)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert done == [True, True] and most[0] == 1
+    assert sorted(n[3:9] for n, _ in names) == ["490000", "490001"]
+    assert all(n == f"fe_{n[3:9]}.flac.{os.getpid()}.{tid}.tmp" for n, tid in names), names
+    assert store.raw_hours() == [] and not list(tmp_path.glob("*.tmp"))
+
+
+def test_pack_hour_sees_a_write_the_mtime_misses(tmp_path, monkeypatch):
+    """A write into the hour after the packed file checked out and before
+    the swap stops the swap even when the raw file's mtime does not move
+    (FAT's 2 s clock): this store counts its own writes. The mtime alone
+    let the swap delete the write with the raw hour."""
+    pytest.importorskip("soundfile")
+    import os
+
+    store = frontend.PassbandStore(tmp_path, fs=40)
+    _spied(store)
+    h = 490_000
+    store.write(h * 3600.0, np.full(400, 0.25 - 0.5j, np.complex64), expire=False)
+    raw = tmp_path / f"fe_{h}.i16"
+    real = np.array_equal
+    fired = []
+
+    def array_equal(a, b, *x, **k):
+        out = real(a, b, *x, **k)
+        if not fired:
+            fired.append(1)
+            st = os.stat(raw)
+            store.write(h * 3600.0 + 5.0, np.full(4, 0.75 + 0.75j, np.complex64), expire=False)
+            os.utime(raw, ns=(st.st_atime_ns, st.st_mtime_ns))
+        return out
+    monkeypatch.setattr(np, "array_equal", array_equal)
+    assert store.pack_hour(h) is False and fired
+    monkeypatch.undo()
+    assert raw.exists() and not (tmp_path / f"fe_{h}.flac").exists()
+    y, m = store.read(h * 3600.0 + 5.0, h * 3600.0 + 5.1, return_mask=True)
+    assert m.all() and np.all(y == 0.75 + 0.75j)
+    assert store.pack_hour(h)                        # (and packed again once nothing writes)
+
+
+def test_packed_flac_is_synced_before_it_replaces_the_raw_hour(tmp_path, monkeypatch):
+    """The FLAC is synced to the device before the rename and the raw
+    hour's deletion: on ext4 a power cut could leave an empty FLAC and no
+    raw file (delayed allocation does not cover a rename to a new name)."""
+    pytest.importorskip("soundfile")
+    import os
+
+    store = frontend.PassbandStore(tmp_path, fs=40)
+    _spied(store)
+    store.write(490_000 * 3600.0, np.full(400, 0.25 - 0.5j, np.complex64), expire=False)
+    events = []
+    real_fsync, real_replace = os.fsync, os.replace
+    monkeypatch.setattr(os, "fsync", lambda fd: (events.append(("fsync", os.fstat(fd).st_ino)), real_fsync(fd))[1])
+    monkeypatch.setattr(os, "replace",
+                        lambda s, d: (events.append(("replace", os.stat(s).st_ino, os.path.basename(d))),
+                                      real_replace(s, d))[1])
+    assert store.pack_hour(490_000)
+    swap = [i for i, e in enumerate(events) if e[0] == "replace" and e[2] == "fe_490000.flac"]
+    assert len(swap) == 1
+    assert ("fsync", events[swap[0]][1]) in events[:swap[0]]
+
+
+def test_a_passband_store_refuses_a_rate_that_is_no_rate(tmp_path):
+    """fs <= 0, given or found in meta.json, is a ValueError naming it (an
+    hour of no samples: read() looped forever), and nothing is written."""
+    for fs in (0, -40):
+        with pytest.raises(ValueError, match=f"fs must be positive, not {fs}"):
+            frontend.PassbandStore(tmp_path / f"a{fs}", fs=fs)
+        assert not (tmp_path / f"a{fs}" / "meta.json").exists()
+    (tmp_path / "m").mkdir()
+    (tmp_path / "m" / "meta.json").write_text('{"fs": 0, "scale": 8192.0}')
+    with pytest.raises(ValueError, match="fs must be positive, not 0"):
+        frontend.PassbandStore(tmp_path / "m", fs=40)
+
+
+def test_write_capture_with_a_non_finite_sample(tmp_path):
+    """A capture's gain comes from its finite samples, and a non-finite one
+    is stored as write stores it (NaN as 0, an infinity clipped): an
+    infinity raised OverflowError out of the gain."""
+    store = frontend.PassbandStore(tmp_path, fs=40, scale=8192.0)
+    fe = np.array([complex(np.inf, 0), complex(np.nan, 1), complex(0, -np.inf), 0.5], np.complex64)
+    with np.errstate(invalid="ignore"):
+        t, gain = store.write_capture(frontend.Capture(fe=fe, q=Q_TEST, t0_index=0.0, fs=40), expire=False)
+    assert gain == 1.0
+    y = store.read(t, t + 4 / 40)
+    assert y[0] == 32767 / 8192 and y[1] == 1j and y[2] == -32767j / 8192 and y[3] == 0.5
+    fe = np.array([3.0, complex(np.inf, np.nan), 0.25], np.complex64)
+    with np.errstate(invalid="ignore"):
+        t, gain = store.write_capture(frontend.Capture(fe=fe, q=Q_TEST + 4, t0_index=0.0, fs=40), expire=False)
+    assert gain == 0.5                                # (3.0 * 8192 > 16383; the infinity is not the peak)
+    y = store.read(t, t + 3 / 40)
+    assert y[0] == 1.5 and y[1] == 0 and y[2] == 0.125     # ((inf + nan j) * 0.5 is nan in both parts)
+
+
+def test_a_short_raw_hour_reads_as_unwritten_past_its_end(tmp_path):
+    """A raw hour shorter than an hour (a crash between its creation and
+    its sizing) reads what it holds, and as unwritten past its end: reads
+    raised ValueError until a write grew it."""
+    store = frontend.PassbandStore(tmp_path, fs=40)
+    h = 490_000
+    (tmp_path / f"fe_{h}.i16").write_bytes(np.full(2 * 25 + 1, 4096, np.int16).tobytes())   # 25 pairs and a half
+    (tmp_path / f"fe_{h}.json").write_text("[[0, 40]]")
+    y, m = store.read(h * 3600.0, h * 3600.0 + 1.0, return_mask=True)
+    assert m[:25].all() and not m[25:].any()
+    assert np.all(y[:25] == 0.5 + 0.5j) and not np.any(y[25:])
+    store.write(h * 3600.0 + 2.0, np.ones(4, np.complex64), expire=False)
+    assert (tmp_path / f"fe_{h}.i16").stat().st_size == store.per_hour * 4
+    y, m = store.read(h * 3600.0, h * 3600.0 + 3.0, return_mask=True)
+    assert m[:25].all() and np.all(y[:25] == 0.5 + 0.5j) and not m[40:80].any() and m[80:84].all()
+    assert np.all(y[80:84] == 1)
+
+
+def test_expire_deletes_stale_temporaries(tmp_path):
+    """expire() deletes the store's temporaries more than an hour old by the
+    wall clock (a packer killed mid-pack left fe_<h>.flac.<pid>.tmp, up to
+    a packed hour in size, for good); fresh ones, and other files, stay."""
+    import os
+    import time
+
+    store = frontend.PassbandStore(tmp_path, fs=40)
+    old = ["fe_1.flac.123.tmp", "fe_1.i16.5.6.tmp", "meta.json.7.8.tmp", "fe_2.json.9.10.tmp"]
+    keep_old = ["notes.1.tmp", "fe_1.wav.1.tmp", "fe_1.flac.tmp", "fe_1.flac.x.tmp"]
+    fresh = ["fe_3.flac.11.12.tmp"]
+    for name in old + keep_old + fresh:
+        (tmp_path / name).write_bytes(b"x")
+    t = time.time() - 7200.0
+    for name in old + keep_old:
+        os.utime(tmp_path / name, (t, t))
+    assert store.expire(now=0.0) == []               # (by the wall clock, not `now`)
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(["meta.json"] + keep_old + fresh)
+
+
+def test_hour_names_are_ascii_digits_and_nothing_after():
+    """_HOUR_RE takes ASCII digits only and no final newline (\\d took other
+    scripts' digits, $ a trailing newline: names no writer makes)."""
+    assert frontend._HOUR_RE.match("fe_12.i16").group(1) == "12"
+    assert frontend._HOUR_RE.match("fe_007.flac").group(1) == "007"
+    for name in ("fe_12.i16\n", "fe_١٢.i16", "fe_１.flac", "fe_12.i16.1.tmp"):
+        assert frontend._HOUR_RE.match(name) is None, name
+
+
+def test_merge_ranges_gives_python_ints():
+    """_merge_ranges gives Python ints whatever it is handed (a numpy hi
+    survived a merge, and json.dumps then refused the index)."""
+    got = frontend._merge_ranges([[np.int64(0), np.int64(5)], [np.int32(3), np.int64(9)], [11, np.int64(12)]])
+    assert got == [[0, 9], [11, 12]] and all(type(v) is int for r in got for v in r)
+    json.dumps(got)
