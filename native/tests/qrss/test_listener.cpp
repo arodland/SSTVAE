@@ -32,7 +32,11 @@
 //     nothing of it lands in listener.log, state.json, tiles/, the store,
 //     the tiles, lines() or the log seam, and close() returns;
 //   * abandon() racing feed(), step(), write_state() and log() on other
-//     threads with the workers busy.
+//     threads with the workers busy;
+//   * abandon() from inside the log seam, on the caller's thread and on the
+//     finish worker: the rest of the lines handed over with that one, a
+//     later feed()'s ring and passband writes, the passband store's packing
+//     and the job's store association all stop there.
 
 #include <algorithm>
 #include <atomic>
@@ -1260,6 +1264,123 @@ void test_abandon_racing() {
     check::is_true(all_logged, "abandon race: and listener.log had it");
 }
 
+bool contains(const std::string& s, const std::string& part) { return s.find(part) != std::string::npos; }
+
+// abandon() from inside the log seam, which a sink may call (the seam is
+// never handed a line with a lock of the listener's held): it returns, the
+// lines handed over with that one never reach the seam, and what the job
+// handing it would do next, it does not. First on the caller's thread, in
+// the middle of the two lines one feed() logs: the second is not handed
+// over; feed() writes neither the ring nor the passband store from then
+// on; and the passband store was told to pack nothing more (an old hour
+// pack_hour would pack stays raw). Then on the finish worker, in the middle
+// of an end-of-slot receive's application, just before the pass's store
+// association: none begins, the store stays as it was, and the receive
+// ends there ("frame over" never said).
+void test_abandon_from_the_log_seam() {
+    {
+        Step step("abandon from the log seam: feed()'s lines, on the caller's thread");
+        const fs::path d = fresh_dir("abandon_seam_feed");
+        namespace pb = sstvae::qrss::passband;
+        pb::StoreOptions po;
+        po.fs = 40;   // (an hour file of 576 kB, which tree() reads whole)
+        auto band = std::make_shared<pb::PassbandStore>((d / "passband").string(), po);
+        const std::int64_t old = static_cast<std::int64_t>(t0()) / 3600 - 3;
+        band->write_at(old * band->per_hour(), std::vector<std::complex<float>>(1000, {0.5f, 0.25f}), false);
+        lv::LiveListener* self = nullptr;
+        std::vector<std::string> seam;   // (the caller's thread alone hands lines over here)
+        lv::Seams s = quick_stubs(std::chrono::milliseconds(0));
+        s.log = [&](const std::string& line) {
+            seam.push_back(line);
+            if (contains(line, " of audio missing")) self->abandon();
+        };
+        lv::LiveListener L((d / "live").string(), tiny_config(false), nullptr, band, s);
+        self = &L;
+        L.feed(audio(2 * qcfg::FS, 31), t0() - 10.0);
+        check::is_true(seam.empty() && !L.abandoned(), "seam abandon, feed: (nothing said yet)");
+        // 5 s later than its samples say, and 2 s of digital silence: two
+        // lines, handed over together
+        L.feed(std::vector<double>(2 * qcfg::FS, 0.0), t0() - 3.0);
+        check::is_true(L.abandoned(), "seam abandon, feed: abandoned from the seam");
+        check::equal(seam.size(), std::size_t{1}, "seam abandon, feed: the second line never reached the seam");
+        check::is_true(!seam.empty() && contains(seam.front(), "5.0 s of audio missing"),
+                       "seam abandon, feed: the first did");
+        const std::vector<std::string> lines = L.lines();
+        check::is_true(lines.size() == 2 && contains(lines.back(), "digital silence"),
+                       "seam abandon, feed: both were logged (before it)");
+        const std::map<std::string, std::string> files = tree(d);
+        check::is_true(files.count("live/listener.log") && contains(files.at("live/listener.log"), "digital silence"),
+                       "seam abandon, feed: listener.log has both");
+        const std::optional<double> end = L.audio_end();
+        const std::optional<std::int64_t> next = L.next_index();
+        L.feed(audio(qcfg::FS / 2, 32), t0() - 2.5);
+        check::is_true(L.audio_end() == end && L.next_index() == next, "seam abandon, feed: a feed after does nothing");
+        check::is_true(tree(d) == files, "seam abandon, feed: the passband store and listener.log unchanged after");
+        check::is_true(!band->pack_hour(old) && fs::exists(fs::path(band->raw_path(old))) &&
+                           !fs::exists(fs::path(band->flac_path(old))),
+                       "seam abandon, feed: the passband store packs nothing more");
+        check::equal(seam.size(), std::size_t{1}, "seam abandon, feed: nothing more to the seam");
+        L.close();
+    }
+    {
+        Step step("abandon from the log seam: on the finish worker, before its store association");
+        const fs::path d = fresh_dir("abandon_seam_finish");
+        auto st = std::make_shared<sstvae::qrss::store::Store>((d / "store").string());
+        std::mutex mu;
+        std::condition_variable cv;
+        bool go = false, timed_out = false;
+        std::mutex smu;
+        std::vector<std::string> seam;
+        lv::LiveListener* self = nullptr;
+        lv::Seams s = quick_stubs(std::chrono::milliseconds(0));
+        s.log = [&](const std::string& line) {
+            {
+                std::lock_guard<std::mutex> lk(smu);
+                seam.push_back(line);
+            }
+            if (contains(line, ": signal at 1700.0 Hz")) self->abandon();
+        };
+        // the end-of-slot receive waits until the caller's thread has done
+        // handing lines over: from then on the worker is the only one to
+        s.finish = [&](std::span<const std::complex<float>>, std::span<const std::uint8_t>, std::int64_t,
+                       std::int64_t, const qrss::api::ReceiveConfig&, std::span<const types::Detection>,
+                       std::span<const aq::Hint>) {
+            {
+                std::unique_lock<std::mutex> lk(mu);
+                if (!cv.wait_for(lk, std::chrono::seconds(60), [&] { return go; })) timed_out = true;
+            }
+            lv::FinishResult r;
+            r.passes = {pass(1700.0)};   // a signal no live receive saw: a new tile, said
+            r.heard = 1.0;
+            return r;
+        };
+        lv::LiveListener L((d / "live").string(), tiny_config(true), st, nullptr, s);
+        self = &L;
+        L.feed(audio(17 * qcfg::FS, 41), t0() + 1.0);
+        L.step(t0() + 1.0);   // the slot starts (no live receive before first_s)
+        L.feed(audio(static_cast<std::int64_t>((tiny_end() - t0() - 1.0) * qcfg::FS), 42), tiny_end());
+        L.step(tiny_end());   // its end-of-slot receive, held
+        const std::map<std::string, std::string> store = tree(d / "store");
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            go = true;
+        }
+        cv.notify_all();
+        for (int k = 0; k < 30000 && !L.abandoned(); ++k) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        check::is_true(L.abandoned(), "seam abandon, finish: abandoned from the seam, on the worker");
+        L.close();   // (the worker has left the job)
+        check::is_true(!timed_out, "seam abandon, finish: released, not timed out");
+        check::is_true(tree(d / "store") == store && st->pass_uids().empty(),
+                       "seam abandon, finish: no store association began");
+        const std::string log = read_text(d / "live" / "listener.log");
+        check::is_true(ends_with_text(log, ": signal at 1700.0 Hz\n") && !contains(log, "frame over"),
+                       "seam abandon, finish: listener.log ends with the line it was abandoned on");
+        std::lock_guard<std::mutex> lk(smu);
+        check::is_true(!seam.empty() && contains(seam.back(), ": signal at 1700.0 Hz"),
+                       "seam abandon, finish: and so does the seam");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1286,6 +1407,7 @@ int main(int argc, char** argv) {
         test_the_store_is_never_waited_on_under_the_lock();
         test_abandon_with_a_receive_held();
         test_abandon_racing();
+        test_abandon_from_the_log_seam();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL (%s): %s\n", check::current_step.load(), e.what());
         return 1;

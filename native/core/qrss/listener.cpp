@@ -552,14 +552,14 @@ void LiveListener::abandon() {
         live_jobs_.clear();
         finish_jobs_.clear();
         sink_queue_.clear();
+        // (a flag, nothing waited for: told at once, so that no hour starts
+        // while the writes below are waited for)
+        if (passband_) passband_->stop_packing();
     }
     idle_cv_.notify_all();   // (the queues emptied: idle may be true now)
-    {
-        // the writes under way outside the lock (a state.json, a picture)
-        std::unique_lock<std::mutex> w(write_mu_);
-        write_cv_.wait(w, [&] { return writing_ == 0; });
-    }
-    if (passband_) passband_->stop_packing();
+    // the writes under way outside the lock (a state.json, a picture)
+    std::unique_lock<std::mutex> w(write_mu_);
+    write_cv_.wait(w, [&] { return writing_ == 0; });
 }
 
 // --- logging ----------------------------------------------------------------------------------

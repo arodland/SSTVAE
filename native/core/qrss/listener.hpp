@@ -354,8 +354,12 @@ public:
     // no cancel flag), so close() still waits for it; and a store
     // association already begun ends on its own, holding the store's lock
     // to the end of its transaction. The readers (tiles, lines, ...) show
-    // the listener as it was. Thread-safe and idempotent; what it waits for
-    // is in the table above (never a receive, the store or the packer).
+    // the listener as it was (busy() until that receive returns).
+    // Thread-safe and idempotent, and it may be called from inside a seam
+    // (the log sink, a receive, the renderer: none of them runs with a lock
+    // of the listener's held), though not from the clock, which does; what
+    // it waits for is in the table above (never a receive, the store or the
+    // packer).
     void abandon();
     // abandon() was called.
     bool abandoned() const { return abandoned_.load(); }
