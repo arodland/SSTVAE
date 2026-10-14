@@ -738,7 +738,8 @@ def check_close(case: Case, py: Run, nat: Run, py_dir: Path, nat_dir: Path, rend
     assert (nat.rc, nat.err) == (py.rc, py.err) == (0, ""), (py, nat)
     psnr = _psnr(_pixels(nat_dir / case.output), _pixels(py_dir / case.output))
     print(f"{case.name}: picture PSNR {psnr:.1f} dB (C++ against the script)")
-    WORST["picture, -PSNR (dB)"] = max(WORST.get("picture, -PSNR (dB)", -math.inf), -psnr)
+    WORST["picture mean squared error (C++ against the script)"] = max(
+        WORST.get("picture mean squared error (C++ against the script)", 0.0), 255.0 ** 2 / 10 ** (psnr / 10))
     assert psnr > PICTURE_BAR, (case.name, psnr)
 
 
@@ -787,7 +788,7 @@ def test_decode_em_reverse(cli, em_stores, models, renders, tmp_path):
     """The script's --em on the store the subcommand refined, against the
     store the script refined itself: the passes the C++ wrote are read
     and re-received alike (the same lines within their printed precision,
-    every member at EM round 2, the pictures within the bar)."""
+    the members re-received again, the pictures within the bar)."""
     info = em_stores["em-py"][1]
     k = info["key"]
     first = Case("first", ["out.png", "--key", k, "--store", "st", "--em", "1", "--precision", "fp16"], store="em-py")
@@ -804,7 +805,8 @@ def test_decode_em_reverse(cli, em_stores, models, renders, tmp_path):
     _close_text(on_nat.out, on_py.out, info["uids"], "the script on the C++-refined store")
     assert (on_nat.rc, on_nat.err) == (on_py.rc, on_py.err), (on_py, on_nat)
     assert _tree(nat_dir) == _tree(py_dir)
-    assert on_nat.out.count("  EM round 2\n") == 2 and on_nat.out.count("  EM round 0\n") == 1, on_nat.out
+    # (each call numbers its rounds from 1: the members say round 1 again)
+    assert on_nat.out.count("  EM round 1\n") == 2 and on_nat.out.count("  EM round 0\n") == 1, on_nat.out
     if renders:
         assert on_py.rc == 0
         psnr = _psnr(_pixels(nat_dir / "again.png"), _pixels(py_dir / "again.png"))
