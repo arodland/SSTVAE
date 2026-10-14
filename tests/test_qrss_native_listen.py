@@ -775,11 +775,17 @@ def _recovering(store_from: Path, root: Path) -> Path:
     return root / "store"
 
 
-def test_eof_with_a_receive_in_flight(cli, tiny, tmp_path):
-    """The end of stdin while the end-of-slot receive of a slot recovered
-    from the passband store runs (a few seconds of TINY CE + L receive):
-    exit within about 2 s, "audio ended" last, state.json not listening,
-    the receive abandoned (its slot not finished), the locks free."""
+@pytest.mark.parametrize("how", ["eof", pytest.param("SIGTERM", marks=pytest.mark.slow)])
+def test_eof_with_a_receive_in_flight(cli, tiny, tmp_path, how):
+    """The end of stdin (or SIGTERM, the app's next step 3 s later) while
+    the end-of-slot receive of a slot recovered from the passband store
+    runs (a few seconds of TINY CE + L receive): exit within about 2 s,
+    and not before the bound's wait for the receive (else nothing was in
+    flight and this tested nothing), "audio ended" ("stopped") last,
+    state.json not listening, the receive abandoned (its slot not
+    finished), the locks free."""
+    import signal
+
     store = _recovering(tiny.base / "nat" / "store" / "passband", tmp_path)
     p = Live([cli, "listen", "--frame", "tiny", "--no-pictures", "--store", store, "--state", "st",
               "--recover-hours", _hours_back()], tmp_path)
@@ -790,16 +796,24 @@ def test_eof_with_a_receive_in_flight(cli, tiny, tmp_path):
         # receive (about 3 s of work); the end of stdin comes a moment into it
         busy = _wait_for(lambda: ((_state(tmp_path / "st") or {}).get("busy") or "").startswith("finish"), 1.5)
         time.sleep(0.2 if busy else 0.0)
-        rc, took = p.end()
+        if how == "eof":
+            rc, took = p.end()
+        else:
+            t = time.monotonic()
+            p.p.send_signal(signal.SIGTERM)
+            rc = p.p.wait(30)
+            took = time.monotonic() - t
+            p._t.join(10)
     finally:
         p.kill()
-    print(f"\nEOF with an end-of-slot receive in flight: exit after {took:.2f} s")
+    print(f"\n{how} with an end-of-slot receive in flight: exit after {took:.2f} s")
     assert rc == 0, p.lines
-    assert took < 2.0
+    assert 1.0 < took < 2.0
     assert not any("frame over" in ln for ln in p.lines), "the receive finished: nothing was in flight"
     s = _state(tmp_path / "st")
     assert s["listening"] is False and Q_TEST not in s["finished"]
-    assert _log(tmp_path / "st")[-1].endswith(" audio ended") and p.lines[-1].endswith(" audio ended")
+    last = " audio ended" if how == "eof" else " stopped"
+    assert _log(tmp_path / "st")[-1].endswith(last) and p.lines[-1].endswith(last)
     from sstvae.qrss.live import dir_lock
 
     for d in (tmp_path / "st", store, store / "passband"):
@@ -827,6 +841,7 @@ def _retired(s: dict | None) -> bool:
             and all(t["status"] == "complete" for t in s["tiles"]))
 
 
+@pytest.mark.slow          # (about 25 s: two recoveries, after the TINY replays)
 def test_recover_across(cli, native, tiny, tmp_path):
     """Each implementation recovers the TINY slot from the other's FLAC
     passband store: the Python-written one packed by Python's pack_hour

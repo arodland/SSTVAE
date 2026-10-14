@@ -49,8 +49,15 @@
 //               is abandoned (a receive in flight: minutes for a FULL slot,
 //               since the receivers take no cancel flag): its results are
 //               dropped, nothing of it reaches the store, tiles/ or the sink,
-//               and the locks are released. Idempotent; a second call waits
-//               for the first one's end (the same bound).
+//               and the locks are released. A receive that does finish
+//               within the bound is kept: its tiles, store passes and log
+//               lines land after "audio ended", and state.json is written
+//               once more (still not listening) so that it shows them.
+//               Idempotent; a second call waits for the first one's end
+//               (the same bound).
+//   backlog     any thread: the samples pushed and not yet taken by the
+//               listener (a size under a mutex). Growing means the listener
+//               is falling behind its audio.
 //   tiles,      any thread: a copy under the listener's lock (microseconds).
 //   lines
 //   ~Session    stop(), then lets go: threads still busy with an abandoned
@@ -64,8 +71,11 @@
 // the locks are released, on the thread that ended the session: the
 // session's own thread for the end of a replay or of a source, the caller's
 // for stop() and interrupt(). It may call stop() (which then returns at
-// once) but must not destroy the session or wait_ended(): ended() turns
-// true once it has returned, so a waiter sees its effects.
+// once) but must not destroy the session or wait_ended(), nor wait on the
+// thread that stops or destroys the session (~Session joins the session's
+// thread, which may be the one running it: a blocking queued call into the
+// GUI thread that is destroying the session deadlocks): ended() turns true
+// once it has returned, so a waiter sees its effects.
 //
 // Abandoning, precisely. The C++ receivers cannot be interrupted, so a stop
 // that finds one running gives up on it: the session wraps the listener's
@@ -102,6 +112,7 @@
 #define SSTVAE_QRSS_LISTEN_API_HPP
 
 #include <condition_variable>
+#include <cstddef>
 #include <deque>
 #include <exception>
 #include <functional>
@@ -193,8 +204,9 @@ struct Options {
     // guard...). Its clock, log and renderer and the two rules are the
     // session's own and are ignored here.
     live::Seams seams;
-    // Pictures (when render): empty, the session runs without them and says
-    // so once (NO_PICTURES_NOTICE).
+    // Pictures (when render): empty, or a factory that makes none, and the
+    // session runs without them (config().render false) and says so once
+    // (NO_PICTURES_NOTICE).
     RendererFactory renderer;
     double stop_bound_s = STOP_BOUND_S;
     std::function<void()> on_ended;
@@ -236,6 +248,8 @@ public:
     std::string name() const override { return name_; }
     // What the clock or the Stamper threw, which ended the stream; null otherwise.
     std::exception_ptr error() const;
+    // Samples queued for next() (what the Stamper still holds not counted).
+    std::size_t backlog() const;
 
 private:
     std::string name_;
@@ -271,6 +285,8 @@ public:
     // Feed the PushSource (see PushSource::push). False when this session
     // has another source, or has stopped.
     bool push(std::span<const float> x);
+    // The PushSource's backlog (PushSource::backlog); 0 for another source.
+    std::size_t backlog() const;
     // The end of the audio (the script's end of stdin), bounded (above).
     void stop();
     // KeyboardInterrupt: "stopped" and state.json not listening, bounded.

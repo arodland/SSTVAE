@@ -203,6 +203,10 @@ struct Latch {
         returned = true;
         cv.notify_all();
     }
+    bool is_entered() {
+        std::lock_guard lk(mu);
+        return entered;
+    }
     bool wait_entered(double s) {
         std::unique_lock lk(mu);
         return cv.wait_for(lk, std::chrono::duration<double>(s), [&] { return entered; });
@@ -276,6 +280,20 @@ std::optional<lv::Tile> tile_of(const ls::Session& s, const std::string& id) {
     return std::nullopt;
 }
 
+// Wait (up to 30 s) until the session has taken everything pushed, so the
+// clock, advanced with each push, never runs ahead of the audio the
+// listener has: a loaded machine (or a sanitizer) otherwise lets the pusher
+// stamp minutes the listener has not read, and its refreshes then come at
+// times the test did not mean.
+bool drained(const ls::Session& s) {
+    const steady::time_point a = steady::now();
+    while (s.backlog() != 0) {
+        if (since(a) > 30.0) return false;
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+    return true;
+}
+
 // A replay's chunks of 0.25 s, stamped from `from` to `to`.
 class ListSource final : public lv::Source {
 public:
@@ -326,15 +344,17 @@ void test_push_from_another_thread() {
     const double end = tiny_end() + 2.0;
     const std::int64_t n_chunks = static_cast<std::int64_t>((end - start) * 4.0);
     std::atomic<int> refused{0};
+    std::atomic<bool> paced{true};
     std::thread pusher([&] {
         for (std::int64_t k = 0; k < n_chunks; ++k) {
             clk.t->store(start + 0.25 * static_cast<double>(k + 1));
             if (!s->push(audio(qcfg::FS / 4, k))) ++refused;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if (!drained(*s)) paced = false;
         }
     });
     pusher.join();
     check::equal(refused.load(), 0, "push: every push taken");
+    check::is_true(paced.load(), "push: the session keeps up with the pushes");
     // the end-of-slot receive (the finish worker) completes the tile
     std::optional<lv::Tile> t;
     const steady::time_point a = steady::now();
@@ -395,12 +415,14 @@ void test_stop_with_a_receive_held() {
     };
     std::unique_ptr<ls::Session> s = ls::Session::start(o, lines.sink());
     std::int64_t k = 0;
-    while (!latch->entered && k < 4 * 120) {
+    bool paced = true;
+    while (!latch->is_entered() && k < 4 * 60) {   // (short of the frame's end, 69 s on)
         clk.t->store(start + 0.25 * static_cast<double>(k + 1));
         s->push(audio(qcfg::FS / 4, k));
         ++k;
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        paced = drained(*s) && paced;
     }
+    check::is_true(paced, "held: the session keeps up with the pushes");
     check::is_true(latch->wait_entered(30.0), "held: the receive started");
 
     // push() goes on while the receive is held (0.1 s chunks, short of the slot's end)
@@ -489,6 +511,53 @@ void test_stop_with_a_receive_held() {
     check::is_true(sink_after_stop >= lines_before, "held: (sanity)");
     check::equal(read_text(root / "state" / "state.json"), state_before, "held: state.json untouched after");
     check::is_true(lock_free(root / "state") && lock_free(root / "store"), "held: the locks stay free");
+}
+
+// stop() while an end-of-slot receive runs that finishes within the bound:
+// kept, and state.json (written after "audio ended") shows it.
+void test_a_receive_that_finishes_within_the_bound() {
+    Step step("finishes: a receive that ends inside the bound");
+    const fs::path root = fresh_dir("finishes");
+    Clock clk;
+    const double start = t0() - 16.0;
+    clk.t->store(start);
+    Lines lines;
+    auto entered = std::make_shared<std::atomic<bool>>(false);
+    ls::Options o = tiny_options(root, clk);
+    o.seams.receive_slot = [](const rcv::Prepared&, auto, const rcv::SlotOptions&) {
+        return std::vector<types::PassResult>{};   // (no live tile: the end-of-slot receive makes it)
+    };
+    o.seams.finish = [entered](std::span<const std::complex<float>>, std::span<const std::uint8_t>, std::int64_t,
+                               std::int64_t, const qrss::api::ReceiveConfig&, std::span<const types::Detection>,
+                               std::span<const aq::Hint>) {
+        entered->store(true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        return finished_at(1500.0);
+    };
+    std::unique_ptr<ls::Session> s = ls::Session::start(o, lines.sink());
+    std::int64_t k = 0;
+    bool paced = true;
+    while (!entered->load() && k < 4 * 120) {
+        clk.t->store(start + 0.25 * static_cast<double>(k + 1));
+        s->push(audio(qcfg::FS / 4, k));
+        ++k;
+        paced = drained(*s) && paced;
+    }
+    check::is_true(paced && entered->load(), "finishes: the end-of-slot receive started");
+    check::is_true(!tile_of(*s, "1954752-1500"), "finishes: no tile before it returns");
+    const steady::time_point b = steady::now();
+    s->stop();
+    const double took = since(b);
+    check::is_true(took < ls::STOP_BOUND_S + 0.4, "finishes: within the bound (" + std::to_string(took) + " s)");
+    check::is_true(s->ended() && !s->abandoned(), "finishes: not abandoned");
+    const pj::Value st = pj::loads(read_text(root / "state" / "state.json"));
+    check::is_true(!st.at("listening").as_bool(), "finishes: state.json not listening");
+    bool complete = false;
+    for (const pj::Value& t : st.at("tiles").items())
+        complete = complete || (t.at("id").as_string() == "1954752-1500" && t.at("status").as_string() == "complete");
+    check::is_true(complete, "finishes: state.json shows the tile the receive completed after audio ended");
+    check::is_true(lines.any_log_ending(" audio ended"), "finishes: audio ended");
+    check::is_true(lock_free(root / "state") && lock_free(root / "store"), "finishes: locks released");
 }
 
 // The same during a replay, where the session's thread itself waits for the receive.
@@ -749,6 +818,7 @@ int main(int argc, char** argv) {
         test_push_from_another_thread();
         test_stop_with_a_receive_held();
         test_stop_a_replay_with_a_receive_held();
+        test_a_receive_that_finishes_within_the_bound();
         test_interrupt();
         test_a_replay_ends_by_itself();
     } catch (const std::exception& e) {

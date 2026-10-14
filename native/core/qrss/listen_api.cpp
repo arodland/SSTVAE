@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <initializer_list>
@@ -368,6 +369,13 @@ std::exception_ptr PushSource::error() const {
     return error_;
 }
 
+std::size_t PushSource::backlog() const {
+    std::lock_guard lk(mu_);
+    std::size_t n = 0;
+    for (const live::Chunk& c : q_) n += c.x.size();
+    return n;
+}
+
 // --- the session ----------------------------------------------------------------------------------
 
 struct Session::Core : std::enable_shared_from_this<Session::Core> {
@@ -627,8 +635,21 @@ void Session::Core::shutdown(int kind, bool on_run_thread) {
     if (!on_run_thread) cv.wait_until(lk, waits, [&] { return run_done; });
     cv.wait_until(lk, waits, [&] { return closer_done; });
     const bool clean = run_done && closer_done;
+    const bool failed = error != nullptr;
     lk.unlock();
-    if (!clean) abandon(on_run_thread);
+    if (!clean) {
+        abandon(on_run_thread);
+    } else if (!failed) {
+        // What the close let finish (a receive in flight at the end of the
+        // audio) landed after the session's thread wrote its last state:
+        // written once more, so state.json shows the tiles listener.log and
+        // the store already have (else the next start would neither list
+        // them nor receive the slot again, its passes being stored).
+        try {
+            listener->write_state(false);
+        } catch (...) {
+        }
+    }
     release_locks();
     lk.lock();
     shut_done = true;
@@ -718,8 +739,12 @@ std::unique_ptr<Session> Session::start(Options opt, Sink sink) {
     s.renderer.reset();
     if (c->cfg.render) {
         std::shared_ptr<live::Renderer> r = opt.renderer ? opt.renderer(c->cfg) : nullptr;
-        if (r) s.renderer = std::make_shared<GuardedRenderer>(std::move(r), g);
-        else no_renderer = !opt.renderer;
+        if (r) {
+            s.renderer = std::make_shared<GuardedRenderer>(std::move(r), g);
+        } else {
+            no_renderer = true;
+            c->cfg.render = false;   // (config() says what the session does)
+        }
     }
     s = guarded_seams(std::move(s), c->cfg, g);
     c->listener = std::make_shared<live::LiveListener>(c->state, c->cfg, c->store, c->passband, std::move(s));
@@ -755,6 +780,8 @@ Session::~Session() {
 }
 
 bool Session::push(std::span<const float> x) { return c_->push ? c_->push->push(x) : false; }
+
+std::size_t Session::backlog() const { return c_->push ? c_->push->backlog() : 0; }
 
 void Session::stop() { c_->shutdown(REQ_END, false); }
 
