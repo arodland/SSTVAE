@@ -13,8 +13,9 @@ The contract (the bar):
   fe_<hour>.i16, every fe_<hour>.json, meta.json -- and no temporary file;
   a short raw hour reads alike (what it holds, unwritten past its end);
   expire() deletes the same stale temporaries; a packed hour is the
-  same samples (the two FLAC encoders are not byte-identical: the C++ has
-  no LPC). Every result on the way is bitwise the reference's: read's
+  same samples (the two FLAC encoders are not byte-identical: each picks
+  its own subframes; tests/test_qrss_native_flac.py holds the C++ one to
+  libFLAC, dr_flac and ffmpeg). Every result on the way is bitwise the reference's: read's
   samples and mask, capture's Capture (its fe, q, t0_index, fs) and
   coverage, write_capture's (time, gain), slots, hours, raw_hours,
   expire, pack_hour; and the refusals, type and text;
@@ -46,11 +47,12 @@ The contract (the bar):
   (_merge_ranges has no caller once the store is native: it is reached
   under a Python store).
 
-Measured (2026-10-14, this machine; not asserted): the C++ packs a full
-hour of band noise in 1.4 s against soundfile's 1.0 s, to 1.21x its size
-(1.31x at a tenth of the level): FIXED predictors only, where libFLAC's
-LPC sees the FE's band edges. A capture holding a signal packs to within
-2% of soundfile's size, white noise to within 0.01%.
+Measured (2026-10-14, this machine; not asserted): the C++ packs a
+simulated passband hour (channel.py transmissions over band noise through
+live.StreamFE) in 0.4-1.5 s of one core against soundfile's 0.4-0.8 s, to
+0.90-0.97x its size: LPC to order 12 with partial_tukey windows, where
+libFLAC level 5 stops at 8 with tukey(0.5) alone (the FIXED-only encoder
+before it: 1.21-1.55x). See tests/test_qrss_native_flac.py.
 """
 
 import filecmp
