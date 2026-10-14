@@ -110,7 +110,9 @@ Shape broadcast(const Shape& a, const Shape& b) {
 }
 
 std::vector<double> flat_as(const py::array& a, const Shape& to) {
-    const py::object b = rx::np_module().attr("broadcast_to")(a, py::tuple(py::cast(to)));
+    py::tuple shape(to.size());
+    for (std::size_t i = 0; i < to.size(); ++i) shape[i] = py::int_(to[i]);
+    const py::object b = rx::np_module().attr("broadcast_to")(a, shape);
     return rx::vec<double>(b);
 }
 
@@ -186,8 +188,21 @@ void bind(py::module_& q) {
     }, py::arg("S"), py::arg("W"));
     m.def("prior_from", [](const py::object& S, const py::object& W, const py::object& q_) {
         const std::vector<double> s = rx::vec<double>(f64(S)), w = rx::vec<double>(f64(W));
-        const std::int64_t qq = rx::as_int(q_);
-        return rx::to_py(nogil([&] { return em::prior_from(s, w, qq); }));
+        // scrambler's q = int(q) and its range check, after lmmse_latents'
+        // refusal (the reference's order)
+        PyObject* qo = PyNumber_Long(q_.ptr());
+        if (!qo) throw py::error_already_set();
+        const py::int_ qi = py::reinterpret_steal<py::int_>(qo);
+        const bool fits = qi >= py::int_(0) && qi < py::int_(1).attr("__lshift__")(64);
+        const std::string refusal = "q must fit in uint64, not " + py::str(qi).cast<std::string>();
+        const std::uint64_t qq = fits ? qi.cast<std::uint64_t>() : 0;
+        return rx::to_py(nogil([&] {
+            if (!fits) {
+                (void)em::lmmse_latents(s, w);
+                throw std::invalid_argument(refusal);
+            }
+            return em::prior_from_u64(s, w, qq);
+        }));
     }, py::arg("S"), py::arg("W"), py::arg("q"));
     m.def("em_prior", [](const store::Accumulator& acc, const py::object& uid, PyStore& s, const py::object& q_,
                          const py::object& spec) {
@@ -209,6 +224,9 @@ void bind(py::module_& q) {
     }, py::arg("store"), py::arg("acc"), py::arg("segment"));
     m.def("known_keying", [](PyStore& s, const store::Accumulator& acc, const py::object& call,
                              const py::object& waveform) -> py::object {
+        // check_callsign refuses anything but a str (ValueError), which the
+        // reference swallows: None
+        if (!call.is_none() && !PyUnicode_Check(call.ptr())) return py::none();
         const std::optional<std::string> c = rx::opt_string(call);
         const std::int64_t wf = rx::as_int(waveform);
         const auto k = nogil([&] { return em::known_keying(core(s), acc, c, wf); });

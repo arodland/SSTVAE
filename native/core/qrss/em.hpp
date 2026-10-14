@@ -163,8 +163,12 @@ struct Lmmse {
 Lmmse lmmse_latents(std::span<const double> S, std::span<const double> W);
 
 // prior_from(S, W, q): EmPrior(x_hat = precode(a, q), v = block_mean(r)).
-// q < 0 is sequences.scrambler's ValueError.
+// q < 0 is sequences.scrambler's ValueError (after lmmse_latents' own
+// refusal, which the reference meets first).
 types::EmPrior prior_from(std::span<const double> S, std::span<const double> W, std::int64_t q);
+// The same for any slot number scrambler takes (0 .. 2^64 - 1): a stored
+// pass's q is an int64, so this is for a caller holding a q past it.
+types::EmPrior prior_from_u64(std::span<const double> S, std::span<const double> W, std::uint64_t q);
 
 // em_prior(acc, uid, store, q, spec): pass `uid`'s soft data symbols from
 // the accumulator without it (acc.loo). std::invalid_argument "pass <uid>

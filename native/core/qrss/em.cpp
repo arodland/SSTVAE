@@ -116,13 +116,20 @@ Lmmse lmmse_latents(std::span<const double> S, std::span<const double> W) {
     return out;
 }
 
-types::EmPrior prior_from(std::span<const double> S, std::span<const double> W, std::int64_t q) {
+types::EmPrior prior_from_u64(std::span<const double> S, std::span<const double> W, std::uint64_t q) {
     const Lmmse l = lmmse_latents(S, W);
-    if (q < 0) throw std::invalid_argument("q must fit in uint64, not " + std::to_string(q));
     types::EmPrior p;
-    p.x_hat = precoder::precode(std::span<const double>(l.a), static_cast<std::uint64_t>(q), l.a.size());
+    p.x_hat = precoder::precode(std::span<const double>(l.a), q, l.a.size());
     p.v = precoder::block_mean(std::span<const double>(l.r), l.r.size());
     return p;
+}
+
+types::EmPrior prior_from(std::span<const double> S, std::span<const double> W, std::int64_t q) {
+    if (q < 0) {
+        (void)lmmse_latents(S, W);   // its refusal first, as the reference's arithmetic comes first
+        throw std::invalid_argument("q must fit in uint64, not " + std::to_string(q));
+    }
+    return prior_from_u64(S, W, static_cast<std::uint64_t>(q));
 }
 
 types::EmPrior em_prior(const store::Accumulator& acc, const std::string& uid, store::Store& store, std::int64_t q,
