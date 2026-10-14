@@ -1280,7 +1280,7 @@ std::vector<acquire::Hint> LiveListener::hints_locked(std::int64_t q, std::optio
                 Value rec = Value::object();
                 rec.set("frame", d.frame);
                 rec.set("waveform", Value::integer(d.waveform));
-                got.push_back({d.f_hz, due_waveform(rec), dial_.dial_at(static_cast<double>(slot_t0(d.q)))});
+                got.push_back({d.f_hz, due_waveform(rec), dial_.dial_at(static_cast<double>(slot_t0(d.q)), seams_.dial_guard)});
             }
             due = std::move(got);
         } catch (const std::exception& e) {   // never lose the slot over the store
@@ -1295,7 +1295,7 @@ std::vector<acquire::Hint> LiveListener::hints_locked(std::int64_t q, std::optio
             if (t.q + 2 * (g - *t.segment) == q) hit = true;
         if (hit)
             due.push_back({t.f_hz, waveform_id(t.waveform),
-                           t.dial_hz ? t.dial_hz : dial_.dial_at(static_cast<double>(slot_t0(t.q)))});
+                           t.dial_hz ? t.dial_hz : dial_.dial_at(static_cast<double>(slot_t0(t.q)), seams_.dial_guard)});
     }
     std::set<std::int64_t> heard_as;
     for (const frame::FrameSpec& s : specs_) heard_as.insert(static_cast<std::int64_t>(s.waveform()));
@@ -1570,7 +1570,7 @@ std::vector<Detection> LiveListener::candidates_for(const std::shared_ptr<Rec>& 
     std::vector<Detection> cands;
     {
         Lock lk(mu_);
-        hints = hints_locked(q, dial_.dial_at(static_cast<double>(slot_t0(q))));
+        hints = hints_locked(q, dial_.dial_at(static_cast<double>(slot_t0(q)), seams_.dial_guard));
         need = !s->s.cands || !subset(hints, s->s.hints);
         if (need && !hints.empty() && !set_equal(hints, s->s.hints)) {
             std::string where;
@@ -1629,9 +1629,9 @@ void LiveListener::refresh(const std::shared_ptr<Rec>& s) {
         // the tile's progress is when its audio was read, not when the
         // receive returned
         progress = progress_locked(q);
-        dial = dial_.dial_at(static_cast<double>(t0));
+        dial = dial_.dial_at(static_cast<double>(t0), seams_.dial_guard);
         heard_by_dial = dial_.by_dial(static_cast<double>(t0) - static_cast<double>(rd.origin) / FE_FS_D,
-                                      static_cast<double>(t0) + static_cast<double>(rd.x.size()) / FE_FS_D);
+                                      static_cast<double>(t0) + static_cast<double>(rd.x.size()) / FE_FS_D, seams_.dial_guard);
     }
     // live, a slot is received on the dial it started on: anything heard on
     // another counts as not heard
@@ -1738,8 +1738,8 @@ void LiveListener::finish(const std::shared_ptr<Rec>& s) {
     {
         Lock lk(mu_);
         dials = dial_.by_dial(static_cast<double>(t0) - static_cast<double>(rd.origin) / FE_FS_D,
-                              static_cast<double>(t0) + static_cast<double>(rd.x.size()) / FE_FS_D);
-        first = dial_.dial_at(static_cast<double>(t0));
+                              static_cast<double>(t0) + static_cast<double>(rd.x.size()) / FE_FS_D, seams_.dial_guard);
+        first = dial_.dial_at(static_cast<double>(t0), seams_.dial_guard);
         hints = hints_locked(q, first);
     }
     deliver();

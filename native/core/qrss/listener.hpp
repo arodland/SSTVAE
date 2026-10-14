@@ -214,6 +214,9 @@ struct Seams {
     bool old_gating = false;
     // Lower the workers' priority (background mode).
     bool low_priority = true;
+    // What the dial log takes off around a dial change (live.DIAL_GUARD_S,
+    // which the reference's tests set at run time).
+    DialGuard dial_guard = DIAL_GUARD_S;
 };
 
 class LiveListener {

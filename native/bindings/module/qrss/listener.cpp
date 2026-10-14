@@ -7,7 +7,7 @@
 //   LiveListener(state_dir, cfg=None, store=None, passband=None, log=None, *,
 //                clock=None, candidates=None, detect=None, receive_slot=None,
 //                finish=None, noise=None, associate=None, renderer=None,
-//                old_edge_noise=None, old_gating=None, low_priority=True)
+//                old_edge_noise=None, old_gating=None, low_priority=True, dial_guard=None)
 //     cfg        a live.LiveConfig (the reference's dataclass); None: LiveConfig()
 //     store      None, or an sstvae_native.qrss.store.Store (the C++ store)
 //     passband   None, a directory, or a passband store (its .root and
@@ -28,6 +28,8 @@
 //                ListenerRenderer), or an object with load(codec_id, warn),
 //                check(codec_id) and render(S, W, mode, codec_id)
 //     old_edge_noise, old_gating  the receiver's rules; None: rules.old(...)
+//     dial_guard (before, after) seconds taken off around a dial change;
+//                None: DIAL_GUARD_S
 //   .feed(x, t_end) .step(now) .write_state(listening=True) .log(msg)
 //   .backfill(now) .recover(now, hours=RECOVER_HOURS) .tiles()
 //   .active_slots(now) ._progress(q) ._interval(q, now) ._hints(q, dial)
@@ -105,6 +107,12 @@ py::object opt_float_py(const std::optional<double>& v) { return v ? py::object(
 py::object opt_str_py(const std::optional<std::string>& v) { return v ? py::object(rx::to_str(*v)) : py::object(py::none()); }
 
 bool has(const py::handle& o, const char* name) { return rx::has_field(o, name); }
+
+py::list int_list(const std::vector<std::int64_t>& v) {
+    py::list out;
+    for (const std::int64_t x : v) out.append(py::int_(x));
+    return out;
+}
 
 // getattr(o, name, None) is not None
 bool present(const py::handle& o, const char* name) { return has(o, name) && !rx::field(o, name).is_none(); }
@@ -324,6 +332,13 @@ std::vector<types::PassResult> passes_of(Shared& sh, const py::handle& o) {
     return out;
 }
 
+// the capture as the reference's receiver.Prepared (what _refresh hands the receiver)
+py::object prep_py(const rcv::Prepared& p) {
+    const py::dict d = rx::to_py(p);
+    return py::module_::import("sstvae.qrss.receiver").attr("Prepared")(
+        "fe"_a = d["fe"], "keep"_a = d["keep"], "q"_a = d["q"], "t0_index"_a = d["t0_index"], "fs"_a = d["fs"]);
+}
+
 // erase spans as _spans gives them: (start, end) of np.float64
 py::list erase_py(const lv::Erase& e) {
     const py::object f64 = rx::np_module().attr("float64");
@@ -410,7 +425,7 @@ lv::Seams seams_of(const std::shared_ptr<Shared>& sh, const py::object& clock, c
         s.candidates = [f, sh](const rcv::Prepared& prep, lv::Selection, std::span<const aq::Hint> hints) {
             return with_gil([&] {
                 const py::tuple hs(Shared::hints_py(hints));
-                return dets_of(*sh, (*f)(rx::to_py(prep), sh->selection, "live_only"_a = true, "hints"_a = hs));
+                return dets_of(*sh, (*f)(prep_py(prep), sh->selection, "live_only"_a = true, "hints"_a = hs));
             });
         };
     }
@@ -422,12 +437,12 @@ lv::Seams seams_of(const std::shared_ptr<Shared>& sh, const py::object& clock, c
                 if (o.cands) cands = sh->dets_py(*o.cands);
                 py::object r;
                 if (o.skip_hz.empty()) {
-                    r = (*f)(rx::to_py(prep), sh->selection, "live_only"_a = o.live_only, "erase_s"_a = erase_py(o.erase_s),
+                    r = (*f)(prep_py(prep), sh->selection, "live_only"_a = o.live_only, "erase_s"_a = erase_py(o.erase_s),
                              "cands"_a = cands);
                 } else {
                     py::list skip;
                     for (const double v : o.skip_hz) skip.append(py::float_(v));
-                    r = (*f)(rx::to_py(prep), sh->selection, "live_only"_a = o.live_only, "erase_s"_a = erase_py(o.erase_s),
+                    r = (*f)(prep_py(prep), sh->selection, "live_only"_a = o.live_only, "erase_s"_a = erase_py(o.erase_s),
                              "cands"_a = cands, "skip_hz"_a = skip);
                 }
                 return dets_of(*sh, r);
@@ -439,7 +454,7 @@ lv::Seams seams_of(const std::shared_ptr<Shared>& sh, const py::object& clock, c
         s.receive_slot = [f, sh](const rcv::Prepared& prep, lv::Selection, const rcv::SlotOptions& o) {
             return with_gil([&] {
                 const py::list dets = o.dets ? sh->dets_py(*o.dets) : py::list();
-                return passes_of(*sh, (*f)(rx::to_py(prep), sh->selection, "estimator"_a = rx::to_str(o.estimator),
+                return passes_of(*sh, (*f)(prep_py(prep), sh->selection, "estimator"_a = rx::to_str(o.estimator),
                                            "erase_s"_a = erase_py(o.erase_s), "round_b"_a = o.round_b,
                                            "dets"_a = dets));
             });
@@ -621,7 +636,7 @@ std::unique_ptr<PyListener> make_listener(const py::object& state_dir, const py:
                                           const py::object& receive_slot, const py::object& finish,
                                           const py::object& noise, const py::object& associate,
                                           const py::object& renderer, const py::object& old_edge_noise,
-                                          const py::object& old_gating, bool low_priority) {
+                                          const py::object& old_gating, bool low_priority, const py::object& dial_guard) {
     auto L = std::make_unique<PyListener>();
     L->dir = py::module_::import("pathlib").attr("Path")(state_dir);
     const std::string dir = fspath::fs_path(L->dir).bytes;
@@ -635,6 +650,11 @@ std::unique_ptr<PyListener> make_listener(const py::object& state_dir, const py:
     std::shared_ptr<pb::PassbandStore> pbs = passband_of(passband);
     lv::Seams seams = seams_of(L->sh, clock, log, candidates, detect, receive_slot, finish, noise, associate, renderer,
                                rule_on(old_edge_noise, "EDGE_NOISE"), rule_on(old_gating, "GATING"), low_priority);
+    if (!dial_guard.is_none()) {
+        const py::tuple g = py::tuple(dial_guard);
+        if (g.size() != 2) throw py::value_error("dial_guard is (before, after) seconds");
+        seams.dial_guard = {rx::as_double(g[0]), rx::as_double(g[1])};
+    }
     L->core = nogil([&] {
         return std::make_unique<lv::LiveListener>(dir, std::move(config), std::move(st_core), std::move(pbs),
                                                   std::move(seams));
@@ -751,7 +771,7 @@ void bind(py::module_& qrss) {
              py::arg("receive_slot") = py::none(), py::arg("finish") = py::none(), py::arg("noise") = py::none(),
              py::arg("associate") = py::none(), py::arg("renderer") = py::none(),
              py::arg("old_edge_noise") = py::none(), py::arg("old_gating") = py::none(),
-             py::arg("low_priority") = true)
+             py::arg("low_priority") = true, py::arg("dial_guard") = py::none())
         .def("feed", [](PyListener& L, const py::object& x, double t_end) {
             const std::vector<double> v = rx::vec<double>(x);
             lv::LiveListener& c = core_of(L);
@@ -776,7 +796,7 @@ void bind(py::module_& qrss) {
         }, py::arg("now"))
         .def("recover", [](PyListener& L, double now, double hours) {
             lv::LiveListener& c = core_of(L);
-            return nogil([&] { return c.recover(now, hours); });
+            return int_list(nogil([&] { return c.recover(now, hours); }));
         }, py::arg("now"), py::arg("hours") = lv::RECOVER_HOURS)
         .def("tiles", [](PyListener& L) {
             lv::LiveListener& c = core_of(L);
@@ -784,7 +804,7 @@ void bind(py::module_& qrss) {
         })
         .def("active_slots", [](PyListener& L, double now) {
             lv::LiveListener& c = core_of(L);
-            return nogil([&] { return c.active_slots(now); });
+            return int_list(nogil([&] { return c.active_slots(now); }));
         }, py::arg("now"))
         .def("_progress", [](PyListener& L, std::int64_t q) {
             lv::LiveListener& c = core_of(L);
