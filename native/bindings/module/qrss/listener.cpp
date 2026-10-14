@@ -17,7 +17,8 @@
 //     candidates, detect, receive_slot
 //                the live receive, called exactly as _refresh calls
 //                receiver.candidates / .detect / .receive_slot (prep is the
-//                C++ capture as a "Prepared" dict; spec is cfg.selection);
+//                C++ capture as the reference's receiver.Prepared; spec is
+//                cfg.selection);
 //                None: the C++ receiver
 //     finish     callable(x, ok, origin, q, spec, estimator, dets, hints) ->
 //                (passes, heard): live.finish_receive's signature; None:
