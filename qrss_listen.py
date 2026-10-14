@@ -175,10 +175,17 @@ def main(argv=None) -> None:
     listener = live.LiveListener(state, cfg, store=store, passband=passband)
 
     if args.wav is not None:
+        # a bad time is the operator's typo, not a traceback (as qrss_receive.py)
         if args.start:
-            start = sequences.parse_utc(args.start).timestamp()
+            try:
+                start = sequences.parse_utc(args.start).timestamp()
+            except ValueError as e:
+                raise SystemExit(f"--start {args.start!r}: {e}") from None
         elif args.slot:
-            start = frontend.slot_t0(sequences.parse_slot(args.slot)) - 12.0
+            try:
+                start = frontend.slot_t0(sequences.parse_slot(args.slot)) - 12.0
+            except ValueError as e:
+                raise SystemExit(f"--slot {args.slot!r}: {e}") from None
         else:
             raise SystemExit("--wav needs --start or --slot")
         if not args.wav.is_file():

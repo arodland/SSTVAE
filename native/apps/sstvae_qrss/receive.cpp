@@ -31,7 +31,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
-#include <filesystem>
 #include <limits>
 #include <optional>
 #include <ostream>
@@ -57,6 +56,7 @@
 #include "qrss/wavread.hpp"
 #include "receive.hpp"
 #include "subcommand.hpp"
+#include "util/fileio.hpp"
 
 namespace sstvae::qrss::cli {
 
@@ -299,8 +299,7 @@ int run(const std::string& prog, const std::vector<std::string>& argv, std::ostr
             };
             const std::string path = joined(parts.size());
             const std::string parent = parts.empty() ? path : joined(parts.size() - 1);
-            std::error_code ec;
-            if (!std::filesystem::is_directory(std::filesystem::path(parent), ec))
+            if (!util::is_dir(parent))   // os.path.isdir: UTF-8 to the wide API on Windows
                 return system_exit(err, "--image " + path + ": " + parent + ": no such directory");
         }
         // render.model_dir(): $QRSSTVAE_MODEL_DIR when --model is absent.
@@ -328,18 +327,20 @@ int run(const std::string& prog, const std::vector<std::string>& argv, std::ostr
     std::optional<std::int64_t> q;
     std::optional<double> start;
     try {
+        // the str sys.argv holds (as transmit's --slot): on POSIX a byte
+        // that is not UTF-8 is an escape there, which no ISO time accepts
         if (const auto& s = args->text("slot"); s && !s->empty()) {
             try {
-                q = slot::parse_slot(*s);
+                q = slot::parse_slot(pypath::fs_str(*s));
             } catch (const std::invalid_argument& e) {
-                return system_exit(err, "--slot " + pytext::repr(*s) + ": " + e.what());
+                return system_exit(err, "--slot " + pytext::repr(pypath::fs_decode(*s)) + ": " + e.what());
             }
         }
         if (const auto& s = args->text("start"); s && !s->empty()) {
             try {
-                start = static_cast<double>(slot::parse_utc(*s).unix_us()) / 1e6;
+                start = static_cast<double>(slot::parse_utc(pypath::fs_str(*s)).unix_us()) / 1e6;
             } catch (const std::invalid_argument& e) {
-                return system_exit(err, "--start " + pytext::repr(*s) + ": " + e.what());
+                return system_exit(err, "--start " + pytext::repr(pypath::fs_decode(*s)) + ": " + e.what());
             }
         }
     } catch (const std::overflow_error& e) {

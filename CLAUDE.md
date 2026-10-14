@@ -13,14 +13,25 @@ rationale lives in the plan history.
   tests included:
   `tests/test_qrss_l{acquire,channel,demod,receiver,track,units,wave}.py`
   and `tests/test_qrss_live_l.py`; it was 6-7 min before every test that
-  receives a SHORT pass, 10-15 s each, moved to `slow`, and an l-short
-  pass is `slow` too).
+  receives a SHORT pass, 10-15 s each at the time, moved to `slow`, and an
+  l-short pass is `slow` too).
   `tests/test_qrss_smoke.py` keeps the chain in the default run:
   one blind TINY pass from transmit audio to rendered picture and one
   SHORT pass at -6 dB (header, callsign windows). `pytest
   --ignore-glob='tests/test_qrss_*'` is the quick SSTVAE check, `pytest
   -k qrss` the QRSS one, and `pytest -m slow -k qrss` its slow tier
   (~120 tests, about 2 hours).
+- QRSS C++ port (`native/core/qrss/`, plan in
+  /mnt/project-files/qrss-build/cpp-port-plan.md): `pytest
+  --native-qrss=tx|rx` substitutes the C++ into the Python suites (needs
+  `SSTVAE_NATIVE_MODULE_DIR=native/build-qrss/python`), and
+  `tests/test_qrss_native_*.py` are the side-by-side parity files.
+  `native/tests/golden_qrss/rx_reference/` and `rx_pins.json` are
+  **generated and committed** by `tools/gen_qrss_rx_reference.py`: when
+  `test_qrss_native_acceptance.py`'s pin test says "Python receiver
+  changed; regenerate references", run `--all` (about a minute of Python)
+  and commit the result, since the pins hash every Python source the
+  C++ receiver mirrors. The acceptance file itself takes ~25 s.
 - Slow gate: `pytest -m slow` (~2 min) — the listener state machine and
   the app's transmit→receive loopback. Run it after touching `sstvae/rx/`.
 - Native port: `tools/build_native.sh --test` (builds `native/`, runs
