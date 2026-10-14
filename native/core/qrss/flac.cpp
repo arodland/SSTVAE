@@ -616,16 +616,17 @@ bool lpc_residual_t(const std::int32_t* x, const T* xs, int n, const T* qs, int 
             const T* xj = xs + i + order - 1 - j;
             for (int t = 0; t < 8; ++t) a[t] += c * xj[t];
         }
-        std::int32_t p[8], v[8], far[8];
+        // (`wide`, not `far`: <windows.h> defines far, near and FAR as macros)
+        std::int32_t p[8], v[8], wide[8];
         std::uint32_t av[8];
         for (int t = 0; t < 8; ++t) p[t] = a[t] >> shift;
-        for (int t = 0; t < 8; ++t) far[t] = (p[t] > PMAX) | (p[t] < -PMAX);
+        for (int t = 0; t < 8; ++t) wide[t] = (p[t] > PMAX) | (p[t] < -PMAX);
         for (int t = 0; t < 8; ++t)
             v[t] = static_cast<std::int32_t>(static_cast<std::uint32_t>(target[i + t]) - static_cast<std::uint32_t>(p[t]));
         for (int t = 0; t < 8; ++t) out[i + t] = v[t];
         for (int t = 0; t < 8; ++t) av[t] = v[t] < 0 ? 0u - static_cast<std::uint32_t>(v[t]) : static_cast<std::uint32_t>(v[t]);
         std::int32_t big = 0;
-        for (int t = 0; t < 8; ++t) big |= far[t];
+        for (int t = 0; t < 8; ++t) big |= wide[t];
         std::uint32_t eb = 0;
         for (int t = 0; t < 8; ++t) eb += av[t];
         if (!big) {
@@ -1248,17 +1249,26 @@ EncodeStats encode_stream(Sink& sink, int fs, int channels, std::uint64_t total,
             frame.push_back(static_cast<std::uint8_t>(fs / 10));
         }
         frame.push_back(crc8(frame.data(), frame.size()));
+        const std::size_t header_bytes = frame.size();
+        std::uint64_t planned = 0;   // the subframes' bits as costed
         {
             BitWriter w(frame);
             for (int c = 0; c < channels; ++c) {
                 const Subframe& sf = *out[c];
                 write_subframe(w, sf, data[c], n, bps[c]);
+                planned += sf.bits;
                 const int t = sf.type == SUB_FIXED ? 2 + sf.order : sf.type == SUB_LPC ? 7 : sf.type;
                 ++stats.subframes[static_cast<std::size_t>(t)];
                 if (sf.type == SUB_LPC) ++stats.lpc_orders[static_cast<std::size_t>(sf.order)];
             }
             w.align();
         }
+        // What was written is what was costed, to the bit. A divergence still
+        // decodes when only a Rice parameter differs (any parameter codes any
+        // value), so no round trip sees it; an escape narrower than its plan
+        // would silently truncate residuals. (The packer then keeps the raw hour.)
+        if (frame.size() != header_bytes + (planned + 7) / 8)
+            throw std::runtime_error("FLAC encoder: frame " + std::to_string(f) + " is not the size it was costed at");
         const std::uint16_t c16 = crc16(frame.data(), frame.size());
         frame.push_back(static_cast<std::uint8_t>(c16 >> 8));
         frame.push_back(static_cast<std::uint8_t>(c16));

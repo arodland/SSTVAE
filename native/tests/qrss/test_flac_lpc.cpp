@@ -98,6 +98,7 @@ struct Parsed {
     std::array<std::uint64_t, 4> stereo{};              // frames by assignment: L/R, L/S, S/R, M/S
     int max_precision = 0;                              // over LPC subframes, as written
     int max_partition_order = 0;
+    std::array<std::uint64_t, 2> methods{};             // residual sections by coding method (4-, 5-bit parameters)
     int max_bound = 0;                                  // max bps + precision + ilog2(order)
     std::int64_t max_sum = 0;                           // max |LPC prediction sum|
 };
@@ -108,6 +109,7 @@ int ilog2(unsigned v) { return static_cast<int>(std::bit_width(v)) - 1; }
 void read_residual(BitReader& br, int n, int p, std::vector<std::int64_t>& r, Parsed& out) {
     const std::uint32_t method = br.bits(2);
     require(method <= 1, "reserved residual method");
+    ++out.methods[method];
     const int porder = static_cast<int>(br.bits(4));
     require(porder <= 8, "partition order above 8 (dr_flac refuses it)");
     out.max_partition_order = std::max(out.max_partition_order, porder);
@@ -324,6 +326,10 @@ Parsed parse(const std::string& s) {
 
 // --- encoding and checking a stream -------------------------------------------------------------
 
+// What every stream check_stream read held, over the whole run: the
+// end of main asserts the rarer paths were reached at all.
+std::array<std::uint64_t, 2> g_methods{};
+
 struct Result {
     Parsed parsed;
     flac::EncodeStats stats;
@@ -344,6 +350,8 @@ Result check_stream(const std::vector<std::int16_t>& x, int ch, const flac::Enco
         return res;
     }
     const Parsed& p = res.parsed;
+    g_methods[0] += p.methods[0];
+    g_methods[1] += p.methods[1];
     const auto ok = [&](bool c, const char* name) { sstvae::check::is_true(c, what + ": " + name); };
     ok(p.pcm == x, "strict decode");
     flac::Info info;
@@ -611,6 +619,33 @@ void test_every_precision() {
     CHECK(r.parsed.max_precision <= 12 && r.parsed.max_precision >= 10);
 }
 
+void test_mid_side() {
+    // L = s + w, R = s - w: loud white noise w that only the side channel
+    // carries, under band noise s that the mid channel carries alone. Mid/side
+    // wins every frame and its mid is coded LPC -- through the int16 copy of
+    // the mid channel the residual kernel reads, which must hold (L + R) >> 1.
+    std::mt19937 g(12);
+    const std::size_t n = 4 * 4096 + 321;
+    const auto sv = resonant(n, 0.06, 0.98, 3000.0, g);
+    std::uniform_int_distribution<int> wd(-15000, 15000);
+    std::vector<std::int16_t> x;
+    for (std::size_t i = 0; i < n; ++i) {
+        const int s = static_cast<int>(clip16(sv[i])), w = wd(g);
+        x.push_back(static_cast<std::int16_t>(std::clamp(s + w, -32768, 32767)));
+        x.push_back(static_cast<std::int16_t>(std::clamp(s - w, -32768, 32767)));
+    }
+    for (int odd : {0, 1}) {
+        // (odd: L + R odd in every sample, so mid drops a bit side carries)
+        std::vector<std::int16_t> y = x;
+        if (odd)
+            for (std::size_t i = 0; i < y.size(); i += 2)
+                if (((y[i] + y[i + 1]) & 1) == 0) y[i] = static_cast<std::int16_t>(y[i] < 32767 ? y[i] + 1 : y[i] - 1);
+        const Result r = check_stream(y, 2, {}, true, odd ? "mid/side, odd sums" : "mid/side");
+        CHECK(r.stats.stereo[3] == r.stats.frames);
+        CHECK(r.stats.subframes[7] >= r.stats.frames);   // (the mid of every frame)
+    }
+}
+
 void test_windows() {
     // Each block holds two different signals, one in each half: the
     // partial_tukey windows see each half alone.
@@ -830,6 +865,12 @@ int main() {
         test_extremes();
         test_fuzz();
         test_refusals();
+        test_mid_side();
+        // both residual codings were written and read (a 5-bit parameter
+        // only where some partition's parameter is above 14)
+        std::printf("residual sections by method: %llu, %llu\n", static_cast<unsigned long long>(g_methods[0]),
+                    static_cast<unsigned long long>(g_methods[1]));
+        CHECK(g_methods[0] > 0 && g_methods[1] > 0);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;

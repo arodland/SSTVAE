@@ -105,8 +105,10 @@ public:
 // truncated), synced to the device before it returns (fsync /
 // FlushFileBuffers: the packer deletes the raw hour once this file is in
 // place). std::system_error on an I/O error, std::invalid_argument
-// for bad parameters, std::runtime_error when the source fails, Cancelled
-// when `cancel` becomes true (the partial file is left for the caller).
+// for bad parameters, std::runtime_error when the source fails (or, an
+// encoder bug, when a frame written is not the size it was costed at),
+// Cancelled when `cancel` becomes true (the partial file is left for the
+// caller).
 EncodeStats encode_file(const std::string& path, int sample_rate, int channels, std::uint64_t total_frames,
                         const Source& source, const EncodeOptions& opt = {},
                         const std::atomic<bool>* cancel = nullptr);
