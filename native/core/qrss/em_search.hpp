@@ -79,21 +79,29 @@
 // files outside its lock (passband.hpp). All results are values.
 //
 // What blocks, and for how long (single-threaded, measured 2026-10-14 on
-// this container: one candidate and one segment unless said otherwise;
-// the cost scales with segments x candidates x (2 ppm_steps + 1)):
+// this container, a shared 4-CPU x86-64 with AVX2; one segment, one
+// candidate and the default 5 clock steps unless said otherwise -- the
+// cost scales with segments x candidates x (2 ppm_steps + 1)):
 //   candidates        loads every member's pass file (~5 ms each for FULL)
-//   template_search   TINY ~0.06 s, SHORT ~0.3 s, FULL ~2.3 s per
-//                     (segment, candidate) after the store reads (see the
-//                     parity file's timing note for the reference's)
+//   template_search   a raw FE Capture: TINY 0.17 s, SHORT 0.88 s, FULL
+//                     6.3 s (receiver::prepare's blanking and normalising
+//                     is ~0.08 / 0.25 / 2.5 s of that); a Prepared: 0.10 /
+//                     0.62 / 3.8 s. The reference: 0.33 / 1.9 / 16.6 s on a
+//                     Capture. The FFTs are ~55% of what is left (pocketfft
+//                     at the library's baseline SIMD width, batched 32
+//                     rows), the rolled products and |C|^2 the rest
 //   receive_template  one tracker run and one demodulation: about what
 //                     receiver::receive_pass's round B costs (0.1 s TINY,
-//                     ~0.5 s SHORT, a few s FULL)
+//                     ~0.5 s SHORT, a few s FULL), plus the search when no
+//                     det is given
 //   retro_detect      one template_search per searchable slot plus one
-//                     receive_template and one associate per find: minutes
-//                     over a full 48 h passband store. It polls hooks.cancel
-//                     before every slot and between candidate hypotheses
-//                     (template_search's poll), so a cancel is honoured
-//                     within one (segment, candidate) search.
+//                     receive_template and one associate per find: 4.9 s
+//                     over seven SHORT slots (five searched, two received;
+//                     the reference 12.1 s), minutes over a full 48 h
+//                     passband store. It polls hooks.cancel before every
+//                     slot and between candidate hypotheses (template_
+//                     search's poll), so a cancel is honoured within one
+//                     (segment, candidate) search.
 
 #ifndef SSTVAE_QRSS_EM_SEARCH_HPP
 #define SSTVAE_QRSS_EM_SEARCH_HPP

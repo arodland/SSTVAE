@@ -7,6 +7,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <map>
 #include <memory>
