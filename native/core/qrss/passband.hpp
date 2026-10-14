@@ -40,6 +40,17 @@
 // packing needs nothing installed (the encoder is ours), so `pack` is
 // honoured as given.
 //
+// Durability differs from the reference's in two places, both on purpose.
+// The packed FLAC is synced to the device before it replaces the raw hour
+// (soundfile's is not: a power cut within the page cache's writeback delay
+// of a pack can leave an empty FLAC and no raw file there). A raw write is
+// not synced (the reference's mm.flush() is msync(MS_SYNC), a device write
+// per call on POSIX, which the listener's audio feed should not wait on):
+// after a power cut the index may name samples that read back as zeros.
+// A raw hour found shorter than an hour (a crash between its creation and
+// its sizing) is grown back to size by the next write into it, as numpy's
+// memmap "r+" does; until then reads of it raise ValueError, as there.
+//
 // Threads: every public call may be made from any thread. A recursive
 // mutex covers each write into an hour (data and index) against a pack's
 // swap, an unpack and expiry, as the reference's RLock does; reads take it
@@ -142,6 +153,11 @@ struct StoreOptions {
     double keep_hours = 48.0;
     bool pack = false;
     Clock clock;   // for expire() without a time; empty: the system clock
+    // Test seam: called by pack_hour (on its thread, no lock held) once the
+    // packed file has decoded to the raw hour, just before the swap's own
+    // checks -- where a write that must stop the swap can be placed
+    // deterministically. Empty: nothing.
+    std::function<void(std::int64_t hour)> before_swap;
 };
 
 class PassbandStore {
@@ -226,6 +242,7 @@ private:
     std::int64_t per_hour_;
     bool pack_;
     Clock clock_;
+    std::function<void(std::int64_t)> before_swap_;
 
     mutable std::recursive_mutex mu_;           // writes, swaps, expiry; index reads
     std::map<std::int64_t, std::uint64_t> gen_; // in-process writes per hour (guarded by mu_)

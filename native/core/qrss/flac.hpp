@@ -77,7 +77,9 @@ public:
 };
 
 // Encodes `total_frames` frames of 16-bit PCM to `path` (created or
-// truncated). std::system_error on an I/O error, std::invalid_argument
+// truncated), synced to the device before it returns (fsync /
+// FlushFileBuffers: the packer deletes the raw hour once this file is in
+// place). std::system_error on an I/O error, std::invalid_argument
 // for bad parameters, std::runtime_error when the source fails, Cancelled
 // when `cancel` becomes true (the partial file is left for the caller).
 EncodeStats encode_file(const std::string& path, int sample_rate, int channels, std::uint64_t total_frames,

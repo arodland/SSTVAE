@@ -564,6 +564,12 @@ public:
     }
     void finish() override {
         flush();
+        // To the device before returning: the packer renames this file into
+        // place and then deletes the raw hour, so a FLAC still in the page
+        // cache at a power cut (ext4's delayed allocation commits a rename to
+        // a new name before the data) would lose the hour outright.
+        std::error_code ec;
+        if (!f_.sync(ec)) throw rawfile::FileError(ec, path_);
         f_.close();
     }
 

@@ -161,8 +161,10 @@ void remove_missing_ok(const std::string& path) {
 
 bool is_missing(const std::error_code& ec) { return ec == std::errc::no_such_file_or_directory; }
 
-[[noreturn]] void short_file(const std::string& path) {
-    throw std::invalid_argument(path + ": mmap length is greater than file size");
+// np.memmap(mode="r") of a raw hour shorter than an hour: mmap's ValueError,
+// word for word (the reference's text names no file).
+[[noreturn]] void short_file(const std::string&) {
+    throw std::invalid_argument("mmap length is greater than file size");
 }
 
 }  // namespace
@@ -249,7 +251,8 @@ PassbandStore::PassbandStore(std::string root, StoreOptions opt)
       keep_hours_(opt.keep_hours),
       per_hour_(0),
       pack_(opt.pack),
-      clock_(std::move(opt.clock)) {
+      clock_(std::move(opt.clock)),
+      before_swap_(std::move(opt.before_swap)) {
     if (root_.empty()) root_ = ".";   // (Path("") is ".")
     std::error_code ec;
     std::string failed;
@@ -345,8 +348,11 @@ std::shared_ptr<PassbandStore::Hour> PassbandStore::open_hour_locked(std::int64_
 
 void PassbandStore::unpack_locked(std::int64_t hour) {
     const std::string src = flac_path(hour);
-    flac::Reader r(src);
-    const flac::Info& info = r.info();
+    // (closed before the FLAC is deleted: on Windows a file still open is only
+    //  marked for deletion, and its name stays taken until the last handle goes)
+    auto reader = std::make_unique<flac::Reader>(src);
+    flac::Reader& r = *reader;
+    const flac::Info info = r.info();
     const std::size_t nch = static_cast<std::size_t>(info.channels);
     const std::uint64_t per = static_cast<std::uint64_t>(per_hour_);
     const std::uint64_t n = std::min<std::uint64_t>(info.frames, per);
@@ -397,6 +403,7 @@ void PassbandStore::unpack_locked(std::int64_t hour) {
         util::remove_file(tmp, ignore);
         throw;
     }
+    reader.reset();
     if (!util::remove_file(src, ec)) throw FileError(ec, src);
 }
 
@@ -415,7 +422,12 @@ void PassbandStore::write_hour_locked(std::int64_t hour, std::int64_t k, const s
         if (!f.is_open()) throw FileError(ec, raw);
         const auto size = f.size(ec);
         if (!size) throw FileError(ec, raw);
-        if (*size < bytes) short_file(raw);
+        // np.memmap(mode="r+") grows a short file to the full hour (one zero
+        // byte at its end; here a hole, the same bytes): a raw hour left
+        // short -- by a crash between its creation and its sizing, which
+        // both implementations can leave -- is healed by the next write
+        // into it, as the reference's is, never refused for the hour.
+        if (*size < bytes && (!f.make_sparse(ec) || !f.set_size(bytes, ec))) throw FileError(ec, raw);
     }
     if (!f.write_at(static_cast<std::uint64_t>(k) * 4, q.data(), q.size() * sizeof(std::int16_t), ec))
         throw FileError(ec, raw);
@@ -672,6 +684,7 @@ bool PassbandStore::pack_hour(std::int64_t hour) {
             }
         }
         f.close();
+        if (same && before_swap_) before_swap_(hour);
         std::lock_guard lk(mu_);
         if (same) {
             const auto after = rawfile::mtime_ns(raw, ec);
@@ -702,8 +715,10 @@ void PassbandStore::maybe_pack(double when) {
         if (static_cast<double>((h + 1) * 3600) + PB_PACK_AFTER_S <= when) due.push_back(h);
     if (due.empty()) return;
     if (packer_.joinable()) packer_.join();   // (finished: packer_running_ is false)
-    packer_running_ = true;
-    packer_started_ = true;
+    // The flags are set once the thread exists (it cannot clear them before:
+    // its last act takes packer_mu_, held here), so a std::thread that fails
+    // to start (std::system_error) leaves no "running" packer behind for
+    // join_packer() to wait on forever.
     packer_ = std::thread([this, due = std::move(due)] {
         for (const std::int64_t h : due) {
             if (closing_.load()) break;
@@ -718,6 +733,8 @@ void PassbandStore::maybe_pack(double when) {
         }
         packer_cv_.notify_all();
     });
+    packer_running_ = true;
+    packer_started_ = true;
 }
 
 bool PassbandStore::packer_started() const {

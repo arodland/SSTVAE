@@ -325,6 +325,34 @@ def test_refusals(P, tmp_path):
     _same_tree(tmp_path / "py", tmp_path / "cc")
 
 
+def test_a_short_raw_hour(P, tmp_path):
+    """A raw hour shorter than an hour (a crash between its creation and its
+    sizing): reads refuse it with the reference's ValueError, a write grows
+    it back to size (numpy's memmap "r+"), keeping what was there, and the
+    two stores are then the same files."""
+    _sf()
+    ra, rb = tmp_path / "py", tmp_path / "cc"
+    ref, got = frontend.PassbandStore(ra, fs=40), P.PassbandStore(rb, fs=40)
+    h = 490_000
+    for size in (0, 4 * 7 + 2, 4 * 3000):
+        for r in (ra, rb):
+            (r / f"fe_{h}.i16").write_bytes(bytes(range(256)) * (size // 256) + bytes(range(size % 256)))
+            (r / f"fe_{h}.json").write_text("[[0, 7]]")
+        span = (h * 3600.0, h * 3600.0 + 2.0)
+        _same_result(_call(got.read, *span, return_mask=True), _call(ref.read, *span, return_mask=True), size)
+        _same_result(_call(got.capture, h * 4, 1.0), _call(ref.capture, h * 4, 1.0), size)
+        x = np.full(5, 0.25 - 0.5j, np.complex64)
+        _same_result(_call(got.write, h * 3600.0 + 1.0, x, expire=False),
+                     _call(ref.write, h * 3600.0 + 1.0, x, expire=False), size)
+        _same_tree(ra, rb, size)
+        _same_result(_call(got.read, *span, return_mask=True), _call(ref.read, *span, return_mask=True), size)
+        _same_result(_call(got.pack_hour, h), _call(ref.pack_hour, h), size)
+        _same_tree(ra, rb, size)
+        for r in (ra, rb):
+            for p in r.glob("fe_*"):
+                p.unlink()
+
+
 # --- across implementations -------------------------------------------------------------------------
 
 def _fill(store, h0, rng):

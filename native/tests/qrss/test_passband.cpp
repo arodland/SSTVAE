@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -312,6 +313,128 @@ void test_threads(const std::filesystem::path& dir) {
     CHECK(ok);
 }
 
+// Packs racing writes into the hour being packed: no write may be lost,
+// whichever way each pack goes (a write the encoder or the check has
+// already passed must stop the swap, which is what pack_hour's mtime and
+// write-count checks are for). Bursts of writes with pauses between them,
+// so some packs land in a pause and swap, and some overlap a burst.
+void test_pack_race(const std::filesystem::path& dir) {
+    pb::StoreOptions opt;
+    opt.fs = 40;   // a 576 kB hour: a pack takes milliseconds
+    pb::PassbandStore s(path_text(dir / "race"), opt);
+    const std::int64_t per = s.per_hour();
+    const cf a(0.5f, 0.25f);
+    std::vector<cf> want(static_cast<std::size_t>(per), a);
+    s.write_at(HOUR0 * per, want, false);
+    std::atomic<bool> stop{false};
+    std::atomic<int> packed{0}, refused{0};
+    std::thread packer([&] {
+        while (!stop.load()) {
+            if (s.pack_hour(HOUR0))
+                packed.fetch_add(1);
+            else
+                refused.fetch_add(1);
+        }
+    });
+    std::mt19937 g(7);
+    int writes = 0;
+    const auto t_end = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+    while (std::chrono::steady_clock::now() < t_end || packed.load() == 0) {
+        const int burst = 1 + static_cast<int>(g() % 300);   // (up to ~10 ms: some overlap a whole pack)
+        for (int b = 0; b < burst; ++b, ++writes) {
+            const std::int64_t k = static_cast<std::int64_t>(g() % static_cast<std::uint32_t>(per));
+            // (exact at scale 8192, and never the background value)
+            const cf v(static_cast<float>(writes % 1000 + 1) / 1024.0f, -static_cast<float>(writes % 777 + 1) / 1024.0f);
+            s.write_at(HOUR0 * per + k, std::vector<cf>{v}, false);
+            want[static_cast<std::size_t>(k)] = v;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(g() % 30));
+        if (std::chrono::steady_clock::now() > t_end + std::chrono::seconds(20)) break;   // (never: a pause swaps)
+    }
+    stop.store(true);
+    packer.join();
+    const pb::Masked r = s.read(static_cast<double>(HOUR0 * 3600), static_cast<double>((HOUR0 + 1) * 3600));
+    std::size_t lost = 0;
+    for (std::size_t k = 0; k < want.size(); ++k)
+        if (r.mask[k] != 1 || r.x[k] != want[k]) ++lost;
+    if (lost || !packed.load() || !refused.load())
+        std::fprintf(stderr, "pack race: %zu of %d writes lost; %d packs, %d refused\n", lost, writes, packed.load(),
+                     refused.load());
+    CHECK(lost == 0);
+    CHECK(packed.load() > 0 && refused.load() > 0);   // (both outcomes were exercised)
+}
+
+// The same, placed deterministically through the before_swap seam: a write
+// after the packed file checked out and before the swap stops the swap,
+// whether it is this store's (counted) or another process's (seen by the
+// raw file's mtime alone). Each check is load-bearing: without the count
+// or without the mtime one of the two cases loses its write (mutation-checked).
+void test_pack_write_meanwhile(const std::filesystem::path& dir) {
+    int mode = 0;   // 0: no write, 1: a write through the store, 2: a write behind its back
+    pb::PassbandStore* self = nullptr;
+    pb::StoreOptions opt;
+    opt.fs = 40;
+    opt.before_swap = [&](std::int64_t hour) {
+        const std::int64_t at = hour * self->per_hour() + 1000;
+        if (mode == 1) {
+            // with the mtime put back afterwards, as a file system with a
+            // coarse clock (FAT's 2 s) leaves it: only the write count sees it
+            const auto p = sstvae::util::fs_path(self->raw_path(hour)).value();
+            const auto t = std::filesystem::last_write_time(p);
+            self->write_at(at, std::vector<cf>{cf(0.75f, -0.75f)}, false);
+            std::filesystem::last_write_time(p, t);
+        } else if (mode == 2) {
+            // (past the file system's coarse timestamp tick, so the mtime moves)
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            std::error_code ec;
+            rawfile::RawFile f = rawfile::RawFile::open(self->raw_path(hour), rawfile::Mode::ReadWrite, ec);
+            const std::int16_t v[2] = {4096, -4096};
+            CHECK(f.is_open() && f.write_at(static_cast<std::uint64_t>(at - hour * self->per_hour()) * 4, v, 4, ec));
+        }
+    };
+    pb::PassbandStore s(path_text(dir / "meanwhile"), opt);
+    self = &s;
+    s.write_at(HOUR0 * s.per_hour(), std::vector<cf>(5000, cf(0.5f, 0.25f)), false);
+    for (int m : {1, 2}) {
+        mode = m;
+        CHECK(!s.pack_hour(HOUR0));
+        CHECK(exists(s.raw_path(HOUR0)) && !exists(s.flac_path(HOUR0)));
+        CHECK(!exists(s.flac_path(HOUR0) + "." + std::to_string(rawfile::process_id()) + ".tmp"));
+        const pb::Masked r = s.read(HOUR0 * 3600.0 + 1000 / 40.0, HOUR0 * 3600.0 + 1001 / 40.0);
+        CHECK(r.x.size() == 1 && r.mask[0] == 1 && r.x[0] == (m == 1 ? cf(0.75f, -0.75f) : cf(0.5f, -0.5f)));
+    }
+    mode = 0;
+    CHECK(s.pack_hour(HOUR0) && !exists(s.raw_path(HOUR0)) && exists(s.flac_path(HOUR0)));
+    const pb::Masked r = s.read(HOUR0 * 3600.0 + 1000 / 40.0, HOUR0 * 3600.0 + 1001 / 40.0);
+    CHECK(r.x.size() == 1 && r.x[0] == cf(0.5f, -0.5f));
+}
+
+void test_short_raw_hour(const std::filesystem::path& dir) {
+    // A raw hour left short (a crash between its creation and its sizing):
+    // reads refuse it as numpy's mmap does, a write grows it back to size.
+    pb::StoreOptions opt;
+    opt.fs = 40;
+    pb::PassbandStore s(path_text(dir / "short"), opt);
+    std::error_code ec;
+    CHECK(rawfile::write_replace(s.raw_path(HOUR0) + ".x", s.raw_path(HOUR0), std::string(100, '\1'), ec));
+    CHECK(rawfile::write_replace(s.index_path(HOUR0) + ".x", s.index_path(HOUR0), "[[0, 10]]", ec));
+    std::string what;
+    try {
+        s.read(HOUR0 * 3600.0, HOUR0 * 3600.0 + 1.0);
+    } catch (const std::invalid_argument& e) {
+        what = e.what();
+    }
+    CHECK(what == "mmap length is greater than file size");
+    s.write(HOUR0 * 3600.0 + 5.0, std::vector<cf>(4, cf(1.0f, 1.0f)), false);
+    rawfile::RawFile f = rawfile::RawFile::open(s.raw_path(HOUR0), rawfile::Mode::Read, ec);
+    CHECK(f.is_open() && f.size(ec).value_or(0) == static_cast<std::uint64_t>(s.per_hour()) * 4);
+    f.close();
+    const pb::Masked r = s.read(HOUR0 * 3600.0, HOUR0 * 3600.0 + 6.0);
+    CHECK(r.x[0] == cf(257.0f / 8192.0f, 257.0f / 8192.0f) && r.x[30] == cf(0.0f, 0.0f));   // (0x0101 kept)
+    CHECK(r.x[200] == cf(1.0f, 1.0f) && r.mask[200] == 1 && r.mask[100] == 0);
+    CHECK(s.pack_hour(HOUR0));
+}
+
 void test_dirlock(const std::filesystem::path& dir) {
     namespace dl = sstvae::qrss::dirlock;
     const std::string d = path_text(dir / "lock" / "deeper");
@@ -348,6 +471,9 @@ int main() {
         test_pack(dir);
         test_packer_thread(dir);
         test_threads(dir);
+        test_pack_race(dir);
+        test_pack_write_meanwhile(dir);
+        test_short_raw_hour(dir);
         test_dirlock(dir);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
