@@ -337,9 +337,15 @@ void test_pack_race(const std::filesystem::path& dir) {
     s.write_at(HOUR0 * per, want, false);
     std::atomic<bool> stop{false};
     std::atomic<int> packed{0}, refused{0};
+    std::atomic<std::int64_t> pack_us{0};   // the longest pack_hour so far, swapped or refused
     std::thread packer([&] {
         while (!stop.load()) {
-            if (s.pack_hour(HOUR0))
+            const auto t0 = std::chrono::steady_clock::now();
+            const bool ok = s.pack_hour(HOUR0);
+            const std::int64_t us =
+                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+            if (us > pack_us.load()) pack_us.store(us);
+            if (ok)
                 packed.fetch_add(1);
             else
                 refused.fetch_add(1);
@@ -357,7 +363,12 @@ void test_pack_race(const std::filesystem::path& dir) {
             s.write_at(HOUR0 * per + k, std::vector<cf>{v}, false);
             want[static_cast<std::size_t>(k)] = v;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(g() % 30));
+        // Pauses scale with what a pack costs on this build (milliseconds
+        // optimized, about twelve times that under ThreadSanitizer, where
+        // a fixed 30 ms never held a whole pack and none swapped in 20 s),
+        // so some pause holds a whole pack whatever the build.
+        const std::int64_t span_ms = std::max<std::int64_t>(30, 3 * pack_us.load() / 1000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(g() % static_cast<std::uint32_t>(span_ms)));
         if (std::chrono::steady_clock::now() > t_end + std::chrono::seconds(20)) break;   // (never: a pause swaps)
     }
     stop.store(true);
