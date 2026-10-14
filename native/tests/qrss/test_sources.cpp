@@ -299,6 +299,23 @@ void test_stream_close_and_timeout() {
     }
     ::close(fds[0]);
     ::close(fds[1]);
+    {
+        // A timeout too long for steady_clock's nanoseconds (1e12 s) waits as
+        // an infinite one does: here for the end, 0.1 s away. Without the
+        // clamp the deadline overflows into the past and next() returns at
+        // once, the stream not ended.
+        int p[2];
+        if (::pipe(p) != 0) throw std::runtime_error("pipe");
+        lv::StreamSource src(lv::InputHandle::from_fd(p[0]));
+        std::thread closer([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            ::close(p[1]);
+        });
+        const bool got = src.next(1e12).has_value();
+        check::is_true(!got && src.eof(), "a 1e12 s timeout waits for the end");
+        closer.join();
+        ::close(p[0]);
+    }
     raises<std::invalid_argument>([] { lv::StreamOptions o; o.chunk_s = 0.0; lv::StreamSource s(lv::InputHandle::from_fd(0), o); },
                                   "chunk_s must make a read of at least one sample", "chunk_s 0");
     raises<std::invalid_argument>([] { lv::StreamOptions o; o.chunk_s = NaN; lv::StreamSource s(lv::InputHandle::from_fd(0), o); },

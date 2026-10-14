@@ -21,6 +21,15 @@
 #include "util/fileio.hpp"
 
 #ifdef _WIN32
+// MSVC's <windows.h> defines min and max as macros in C++ too (MinGW's does
+// not, so the cross compile cannot see it): without NOMINMAX every
+// std::min( below is a syntax error (C2589).
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <io.h>
 #include <windows.h>
 #else
@@ -337,7 +346,10 @@ std::optional<Chunk> StreamSource::next(double timeout_s) {
         throw std::invalid_argument("'timeout' must be a non-negative number");
     std::unique_lock lk(st_->mu);
     auto ready = [&] { return !st_->queue.empty() || st_->ended; };
-    if (std::isinf(timeout_s)) {
+    // Past ~31 years the deadline would overflow steady_clock's int64
+    // nanoseconds (UB; in practice a deadline in the past, so next() would
+    // return at once and a caller asking for "a very long time" would spin).
+    if (timeout_s >= 1e9) {
         st_->cv.wait(lk, ready);
     } else {
         const auto d = std::chrono::duration<double>(timeout_s);

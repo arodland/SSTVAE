@@ -118,17 +118,22 @@ def test_stamper_fuzz(S):
 
 
 def test_stamper_resync_boundary(S):
-    """start - next exactly RESYNC_S * FS (held) and one more (held), one
-    less (out): Python's exact int-against-float comparison."""
-    for d in (-1, 0, 1, int(live.RESYNC_S * FS) - 1, int(live.RESYNC_S * FS),
-              int(live.RESYNC_S * FS) + 1):
+    """A chunk whose start is `d` samples past the end of what went out:
+    out up to and including d == RESYNC_S * FS, held past it (Python's
+    exact `start - next > RESYNC_S * FS`, an int against a float)."""
+    r = int(live.RESYNC_S * FS)
+    for d in (-1, 0, 1, r - 1, r, r + 1, r + 2):
         a, b = live.Stamper(), S.Stamper()
         x = np.arange(100.0)
         for st in (a, b):
             st.push(x, 1000.0)
-        _same_chunks(b.push(x, 1006.0), a.push(x, 1006.0))          # out: hold passed
-        t = (1006.0 * FS + d + 100) / FS
-        _same_chunks(b.push(x, t), a.push(x, t), f"d={d}")
+        first = a.push(x, 1006.0)
+        _same_chunks(b.push(x, 1006.0), first)          # out: the hold has passed
+        nxt = round(first[0][1] * FS) + 1               # the sample after the last out
+        t = (nxt + d + len(x) - 1) / FS                 # so start == nxt + d
+        want = a.push(x, t)
+        assert len(want) == (0 if d > r else 1), (d, want)   # the boundary is the one meant
+        _same_chunks(b.push(x, t), want, f"d={d}")
         _same_chunks(b.flush(), a.flush())
 
 

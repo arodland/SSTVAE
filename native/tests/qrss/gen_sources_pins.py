@@ -42,11 +42,14 @@ def scenarios():
     # times on half-sample boundaries: round() to even
     yield "halves", 0.0, [(3, (k + 0.5) / FS) for k in range(8000, 8040, 3)] + \
         [(1, 2.5 / FS), (1, 3.5 / FS), (1, -0.5 / FS), (1, -1.5 / FS)]
-    # start - next at RESYNC_S * FS exactly, either side
-    for d in (-1, 0, 1):
+    # start - next at RESYNC_S * FS exactly, either side: the first two
+    # chunks go out as one from start 1000 * FS - 99 (the first's), so next
+    # is 1000 * FS + 101, and a chunk of 100 read at (next + r + d + 99) / FS
+    # starts r + d past it (out up to d = 0, held from d = 1)
+    for d in (-1, 0, 1, 2):
         r = int(live.RESYNC_S * FS)
         yield f"resync{d:+d}", live.STAMP_HOLD_S, [
-            (100, 1000.0), (100, 1006.0), (100, (1006.0 * FS + r + d + 100) / FS), (5, 1006.5)]
+            (100, 1000.0), (100, 1006.0), (100, (1000.0 * FS + 101 + r + d + 99) / FS), (5, 1006.5)]
     rng = random.Random(4242)
     for case in range(6):
         heard = rng.uniform(1e9, 2e9)

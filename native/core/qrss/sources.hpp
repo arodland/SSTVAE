@@ -34,8 +34,9 @@
 // read size int(chunk_s * 8000) is not positive, or NaN, is refused
 // (std::invalid_argument) where the reference reads nothing and ends, or
 // raises later; a NaN or negative timeout is refused as queue.get refuses a
-// negative one, and an infinite one waits for the next chunk or the end
-// (queue.get raises OverflowError for it).
+// negative one, and an infinite one (or any from 1e9 s, about 31 years, on:
+// past that the deadline would overflow steady_clock) waits for the next
+// chunk or the end (queue.get raises OverflowError past PY_TIMEOUT_MAX).
 //
 // Threads. Every class here is safe to call from several threads: Stamper
 // and WavSource hold a mutex for each call, StreamSource keeps its queue
