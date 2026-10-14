@@ -242,14 +242,6 @@ std::string member_wave(store::Store& st, const Value& uid) {
     return waveform_name(info.waveform) + " " + (truthy(info.frame) ? py_str(info.frame) : std::string("?"));
 }
 
-double acc_mean_w_db(const store::Accumulator& acc) {
-    std::vector<double> heard;
-    for (const float w : acc.W)
-        if (w > 0) heard.push_back(static_cast<double>(w));
-    if (heard.empty()) return -std::numeric_limits<double>::infinity();
-    return 10.0 * std::log10(npsum::mean(std::span<const double>(heard)));
-}
-
 std::vector<std::string> acc_lines(const store::Accumulator& acc, store::Store* st) {
     // picture.MODE_NAMES[acc.mode]: a tuple of three, negative indices from the end.
     if (acc.mode < -3 || acc.mode > 2) throw PyException("IndexError", "tuple index out of range");
@@ -259,7 +251,7 @@ std::vector<std::string> acc_lines(const store::Accumulator& acc, store::Store* 
                         std::string(1, mode_name) + "  codec " + py_hex(acc.codec_id, 4) + "  " +
                         std::to_string(acc.members.size()) + " passes";
     if (!acc.foreign.empty()) first += ", " + std::to_string(acc.foreign.size()) + " merged";
-    first += "  mean W " + fmt("%+.2f", acc_mean_w_db(acc)) + " dB";
+    first += "  mean W " + fmt("%+.2f", em::acc_mean_w_db(acc)) + " dB";
     out.push_back(std::move(first));
     const std::vector<std::optional<double>> snr = acc.seg_snr_db();
     for (std::size_t g = 0; g < snr.size(); ++g)

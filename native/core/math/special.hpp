@@ -59,6 +59,41 @@ double gamma(double x);
 double erfc(double x);
 double zeta(double x, double q);
 
+// --- stage 4: the template search's tail statistics (em.template_z) ----------
+
+// scipy.special.ndtri(y): x with ndtr(x) = y, xsf's cephes::ndtri (its
+// three rational approximations, the same polevl/p1evl). -inf at 0, +inf
+// at 1, NaN outside [0, 1] and for NaN.
+double ndtri(double y);
+
+// scipy.stats.norm.isf(q) as rv_continuous.isf computes it for norm:
+// -ndtri(q) * 1 + 0 for 0 < q < 1 (so isf(0.5) is +0.0), +inf at q = 0,
+// -inf at q = 1, NaN (norm.badvalue) outside [0, 1] and for NaN.
+double norm_isf(double q);
+
+// scipy.stats.gamma.logsf(x, a) with loc 0 and scale 1, as scipy 1.18.1
+// computes it: gamma_gen has no _logsf of its own, so this is
+// rv_continuous.logsf's argument handling (NaN for a NaN x or a shape
+// that is not > 0; 0 for x <= 0; -inf where x is not inside the open
+// support, i.e. x = +inf) around rv_continuous._logsf, which splits at the
+// median gammaincinv(a, 0.5): log(gammaincc(a, x)) above it,
+// log1p(-gammainc(a, x)) at or below it. -inf where gammaincc underflows
+// to 0 (x a few thousand past a, e.g. a = 300, x = 4800). The logs are the
+// C library's where numpy's are its own SIMD ones on an AVX-512 machine
+// (np.log, and SVML's np.log1p): those differ in the last place for some
+// arguments, so this agrees with scipy to a few ulp, not to the bit.
+double gamma_logsf(double x, double a);
+
+// Python's math.lgamma(x): CPython's own Lanczos approximation
+// (Modules/mathmodule.c m_lgamma, not the C library's lgamma, from which
+// it differs in the last place for about half of all arguments), with its
+// special cases: NaN for NaN, +inf for +-inf, 0 for 1 and 2. Where
+// Python raises -- ValueError "math domain error" at an integer <= 0,
+// OverflowError "math range error" when a finite x overflows -- this
+// returns +inf; the caller that wants Python's exception raises it
+// (em::template_z does).
+double py_lgamma(double x);
+
 }  // namespace sstvae::math
 
 #endif  // SSTVAE_MATH_SPECIAL_HPP
