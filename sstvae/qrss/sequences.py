@@ -172,8 +172,23 @@ def parse_utc(s: str) -> datetime:
 
 
 def parse_slot(s: str) -> int:
-    """q of a quarter hour given as ISO 8601 UTC text, e.g. 2026-10-09T06:00Z (ValueError)."""
-    return quarter_hour_count(parse_utc(s))
+    """q of a quarter hour given as ISO 8601 UTC text, e.g. 2026-10-09T06:00Z (ValueError).
+
+    A quarter hour before 1970 (q < 0) is no slot: the scrambler's seed and
+    the frame clock count from the epoch, and a receive refuses it anyway,
+    after the work of reading the capture. It is refused here, by its UTC
+    time ("slot 1969-12-31T23:45Z is before 1970-01-01T00:00Z"), or by the
+    time as read (its isoformat()) where that UTC time is before year 1.
+    """
+    dt = parse_utc(s)
+    q = quarter_hour_count(dt)
+    if q < 0:
+        try:
+            when = quarter_hour_start(q).isoformat()[:16] + "Z"
+        except OverflowError:
+            when = dt.isoformat()
+        raise ValueError(f"slot {when} is before 1970-01-01T00:00Z")
+    return q
 
 
 def quarter_hour_start(q: int) -> datetime:

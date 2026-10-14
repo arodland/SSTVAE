@@ -250,15 +250,6 @@ std::optional<fr::HdrBits> classes_bits(const fr::FrameSpec& spec, const py::obj
     return b;
 }
 
-// known_symbols' np.concatenate([val, 1 - 2 bits]) refuses bits that are not 1-D.
-void check_known_bits(const fr::FrameSpec& spec, const py::object& obj) {
-    if (obj.is_none() || !spec.n_hdr()) return;
-    const py::array a = numpy().attr("asarray")(obj, py::arg("dtype") = "float64");
-    if (a.ndim() == 1) return;
-    raise(PyExc_ValueError, "all the input arrays must have same number of dimensions, but the array at index 0 has 1 "
-                            "dimension(s) and the array at index 1 has " + std::to_string(a.ndim()) + " dimension(s)");
-}
-
 std::optional<types::EmPrior> prior_of(const py::object& o) {
     if (o.is_none()) return std::nullopt;
     return types::EmPrior{rx::vec<double>(rx::field(o, "x_hat")), rx::vec<double>(rx::field(o, "v"))};
@@ -719,8 +710,7 @@ void bind(py::module_& q) {
     m.def("known_symbols", [](const py::object& spec, const py::object& hdr_bits) {
         const fr::FrameSpec s = rx::spec(spec);
         tk::ce_only(s, "track.known_symbols", "lframe.layout's known_idx/known_val");
-        const auto b = bits_f64(hdr_bits);
-        check_known_bits(s, hdr_bits);
+        const auto b = classes_bits(s, hdr_bits);      // the header as make_classes takes it
         return rx::to_py(tk::known_symbols(s, ptr(b)));
     }, py::arg("spec"), py::arg("hdr_bits") = py::none());
 

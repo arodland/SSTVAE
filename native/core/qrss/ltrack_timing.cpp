@@ -468,9 +468,16 @@ SegmentTiming segment_timing_l(std::span<const cplx> x, double sig2, const Known
     return {t0, d, score};
 }
 
-std::vector<Timing> fit_timing_l(std::span<const cplx> z_d, int ch_fs, const FrameSpec& spec, double t0_index,
-                                 const FitTimingLArgs& args, track::FitTimingTrace* trace) {
-    l_only(spec, "ltrack.fit_timing_l");
+namespace {
+
+struct PeaksL {
+    std::vector<track::TimingPeak> peaks;   // carrier estimate by carrier estimate, rank by rank
+    double sps = 0.0, step = 0.0;
+};
+
+// fit_timing_l's grid search (the reference's _timing_peaks_l).
+PeaksL timing_peaks_l(std::span<const cplx> z_d, int ch_fs, const FrameSpec& spec, double t0_index,
+                      const FitTimingLArgs& args, track::FitTimingTrace* trace) {
     const int fs = ch_fs;
     const Known own = args.known ? Known{} : known_symbols_l(spec);
     const Known& kn = args.known ? *args.known : own;
@@ -508,10 +515,10 @@ std::vector<Timing> fit_timing_l(std::span<const cplx> z_d, int ch_fs, const Fra
     }
     const std::vector<cplx> y = fit_mixed(z_d, n_ref, fs);
 
-    struct Peak {
-        double score, zmax, t0abs, delta;
-    };
-    std::vector<Peak> peaks;
+    PeaksL res;
+    res.sps = sps;
+    res.step = step;
+    std::vector<track::TimingPeak>& peaks = res.peaks;
     const auto nl = static_cast<std::size_t>(nlag);
     const std::size_t nrow = deltas.size();
     const std::int64_t csps = py_ceil(sps);
@@ -568,7 +575,7 @@ std::vector<Timing> fit_timing_l(std::span<const cplx> z_d, int ch_fs, const Fra
             const double delta_in = (static_cast<double>(static_cast<std::int64_t>(i) - nd) + di) * step;
             const double t0abs_in = static_cast<double>(base + static_cast<std::int64_t>(j)) + dj + frac0;
             const SegmentTiming st = segment_timing_l(x, sig2, kn, t0abs_in, delta_in, sps, n_pos, n_ref);
-            peaks.push_back({st.score, Z[i * nl + j], st.t0abs, st.delta});
+            peaks.push_back({kk, st.score, Z[i * nl + j], st.t0abs, st.delta});
             if (trace)
                 trace->peaks.push_back(track::FitPeak{lpi, static_cast<std::int64_t>(i), static_cast<std::int64_t>(j),
                                                       di, dj, Z[i * nl + j], t0abs_in, delta_in, st.t0abs, st.delta,
@@ -579,36 +586,23 @@ std::vector<Timing> fit_timing_l(std::span<const cplx> z_d, int ch_fs, const Fra
             for (std::int64_t q = lo_j; q < hi_j; ++q) Zl[static_cast<std::size_t>(q)] = -INF;
         }
     }
-    // peaks.sort(key=lambda b: -b[0]): stable; a NaN score (only from a
-    // capture holding NaN) is put last here
-    std::stable_sort(peaks.begin(), peaks.end(), [](const Peak& p, const Peak& q) {
-        if (std::isnan(q.score)) return !std::isnan(p.score);
-        if (std::isnan(p.score)) return false;
-        return -p.score < -q.score;
-    });
-    std::vector<Timing> out;
-    std::vector<double> seen;
-    const double sd_ppm = py_sq(step * 1e6);
-    for (const Peak& p : peaks) {
-        bool dup = false;
-        for (const double t : seen)
-            if (std::abs(p.t0abs - t) < sps) {
-                dup = true;
-                break;
-            }
-        if (dup) continue;
-        seen.push_back(p.t0abs);
-        Timing tm;
-        tm.tau0 = p.t0abs - t0_index;
-        tm.ppm = p.delta * 1e6;
-        tm.gamma = 0.0;
-        tm.z = p.zmax;
-        tm.cov = math::Matrix(3, 3, {0.25, 0.0, 0.0, 0.0, sd_ppm, 0.0, 0.0, 0.0, 0.0});
-        out.push_back(std::move(tm));
-    }
-    const std::int64_t keep = args.n_best <= 1 ? 1 : args.n_best;
-    if (static_cast<std::int64_t>(out.size()) > keep) out.resize(static_cast<std::size_t>(keep));
-    return out;
+    return res;
+}
+
+}  // namespace
+
+std::vector<Timing> fit_timing_l(std::span<const cplx> z_d, int ch_fs, const FrameSpec& spec, double t0_index,
+                                 const FitTimingLArgs& args, track::FitTimingTrace* trace) {
+    l_only(spec, "ltrack.fit_timing_l");
+    PeaksL p = timing_peaks_l(z_d, ch_fs, spec, t0_index, args, trace);
+    return track::timings_of(std::move(p.peaks), args.n_best, p.sps, p.step, t0_index);
+}
+
+track::FitTimingTries fit_timing_tries_l(std::span<const cplx> z_d, int ch_fs, const FrameSpec& spec,
+                                         double t0_index, const FitTimingLArgs& args, track::FitTimingTrace* trace) {
+    l_only(spec, "ltrack.fit_timing_l");
+    PeaksL p = timing_peaks_l(z_d, ch_fs, spec, t0_index, args, trace);
+    return track::tries_of(std::move(p.peaks), args.n_best, p.sps, p.step, t0_index);
 }
 
 std::vector<Timing> fit_timing_l(const ChanCapture& chan, int ch_fs, const PathFn& fn, const FrameSpec& spec,
@@ -725,21 +719,30 @@ std::optional<Detection> verify_l(std::shared_ptr<const ChanCapture> chan, const
         va.tau_range = args.tau_range;
         va.erase_s = args.erase_s;
         va.noise_psd = args.noise_psd;
+        // a blind candidate on its whole-frame line: the runners-up of the
+        // coarse timing statistic are tracked too, from the grid that gives
+        // the best timing (fit_timing_tries_l)
+        const bool tries = !base && args.fit && !cand.timing && rt::V_TIMING_TRIES > 1;
+        std::vector<Timing> tms;
+        if (tries) {
+            const PathFn fn = track::freq_path_spline(pth);
+            const std::vector<cplx> z_d = track::derotate(*chan, fn);
+            FitTimingLArgs fa;
+            fa.n_best = rt::V_TIMING_TRIES;
+            track::FitTimingTries ft =
+                fit_timing_tries_l(std::span<const cplx>(z_d), config::CH_FS, spec, chan->t0_index, fa);
+            c2.timing = std::move(ft.best);   // the timing verify_track_l would fit
+            va.fit = false;
+            va.tau_range.reset();
+            tms = std::move(ft.tries);
+        }
         LTrackResult alt = verify_track_l(chan, spec, c2, va);
         if (!tr || alt.z_ref > tr->z_ref) {
             tr = std::move(alt);
             path = pth;
         }
         if (accepted()) break;
-        if (!base && args.fit && !cand.timing && rt::V_TIMING_TRIES > 1) {
-            // a blind candidate on its whole-frame line: the runners-up of the
-            // coarse timing statistic are tracked too
-            const PathFn fn = track::freq_path_spline(pth);
-            const std::vector<cplx> z_d = track::derotate(*chan, fn);
-            FitTimingLArgs fa;
-            fa.n_best = rt::V_TIMING_TRIES;
-            const std::vector<Timing> tms =
-                fit_timing_l(std::span<const cplx>(z_d), config::CH_FS, spec, chan->t0_index, fa);
+        if (tries) {
             track::VerifyArgs vb;
             vb.fit = false;
             vb.erase_s = args.erase_s;

@@ -5,7 +5,10 @@ The coarse timing fit (`fit_timing`, `_segment_timing`, `_parabola`),
 gate V (`verify`, `verify_track`) and the frequency-path measurements
 (`_carrier_lines`, `refine_path`, `line_path`, `_flat_path`). With
 tests/qrss_native/track.py every function of track.py is a row but
-`genie_track` (a test aid that stays Python).
+`genie_track` (a test aid that stays Python) and `_timing_peaks` and
+`_timings`, the grid search and the sort `fit_timing` and
+`_fit_timing_tries` share (ltrack's L versions use `_timings` too), which
+nothing else calls.
 
 `_parabola` is acquire_stats' binding: track's is the same function as
 acquire's, and that binding types its arithmetic as numpy does (float32
@@ -35,6 +38,13 @@ def rows(q):
         return _rx.to_ref(t.fit_timing(ch, ch_fs, path, spec, tmpl_fn, tau0_init, ppm_range,
                                        t0_index=t0_index, tau_range=tau_range, z_d=z_d,
                                        n_best=n_best))
+
+    def _fit_timing_tries(ch, ch_fs, path, spec, tmpl_fn=None, tau0_init=None, ppm_range=250.0, *,
+                          t0_index, tau_range=None, z_d=None, n_best=1):
+        best, tries = t._fit_timing_tries(ch, ch_fs, path, spec, tmpl_fn, tau0_init, ppm_range,
+                                          t0_index=t0_index, tau_range=tau_range, z_d=z_d,
+                                          n_best=n_best)
+        return _rx.to_ref(best), _rx.to_ref(tries)
 
     def verify(ch, ch_fs, spec, cand, *, fit=True, tau_range=None, erase_s=()):
         return _rx.to_ref(t.verify(ch, ch_fs, spec, cand, fit=fit, tau_range=tau_range,
@@ -69,6 +79,7 @@ def rows(q):
     m = "sstvae.qrss.track"
     return {
         (m, "fit_timing"): fit_timing,
+        (m, "_fit_timing_tries"): _fit_timing_tries,
         (m, "_segment_timing"): _segment_timing,
         (m, "_parabola"): q.acquire_stats._parabola,
         (m, "verify"): verify,

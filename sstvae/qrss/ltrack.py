@@ -975,6 +975,31 @@ def fit_timing_l(ch, ch_fs, path, spec, tmpl_fn=None, tau0_init=None,
     segments then refine the line as in CE (`_segment_timing_l`).
     """
     _l_only(spec, "ltrack.fit_timing_l")
+    peaks, sps, step = _timing_peaks_l(ch, ch_fs, path, spec, tmpl_fn, tau0_init, ppm_range,
+                                       t0_index=t0_index, tau_range=tau_range, z_d=z_d,
+                                       n_best=n_best)
+    return T._timings(peaks, n_best, sps, step, t0_index)
+
+
+def _fit_timing_tries_l(ch, ch_fs, path, spec, tmpl_fn=None, tau0_init=None,
+                        ppm_range: float = 250.0, *, t0_index: float, tau_range=None, z_d=None,
+                        n_best: int = 1):
+    """(fit_timing_l(..., n_best=1), fit_timing_l(..., n_best=n_best)) from
+    one correlation grid, for `verify_l` (`track._fit_timing_tries`)."""
+    _l_only(spec, "ltrack.fit_timing_l")
+    peaks, sps, step = _timing_peaks_l(ch, ch_fs, path, spec, tmpl_fn, tau0_init, ppm_range,
+                                       t0_index=t0_index, tau_range=tau_range, z_d=z_d,
+                                       n_best=n_best)
+    first = [p for p in peaks if p[0] == 0]
+    return (T._timings(first, 1, sps, step, t0_index),
+            T._timings(peaks, n_best, sps, step, t0_index))
+
+
+def _timing_peaks_l(ch, ch_fs, path, spec, tmpl_fn, tau0_init, ppm_range: float, *,
+                    t0_index: float, tau_range, z_d, n_best: int):
+    """fit_timing_l's grid search: its peaks, (k, score, Z, t0abs, delta)
+    for the k-th of each carrier estimate in turn (`track._timing_peaks`),
+    and the symbol and clock-error step."""
     fs = int(ch_fs)
     if z_d is None:
         fn = freq_path_spline(path) if isinstance(path, FreqPath) else path
@@ -1057,17 +1082,9 @@ def fit_timing_l(ch, ch_fs, path, spec, tmpl_fn=None, tau0_init=None,
             delta = (i - nd + di) * step
             t0abs, delta, score = _segment_timing_l(x, sig2, kn, base + j + dj + frac0, delta,
                                                     sps, n_pos, n_ref)
-            peaks.append((score, float(Z[i, j]), t0abs, delta))
+            peaks.append((k, score, float(Z[i, j]), t0abs, delta))
             Zl[max(j - int(math.ceil(sps)), 0):j + int(math.ceil(sps)) + 1] = -np.inf
-    peaks.sort(key=lambda b: -b[0])
-    out, seen = [], []
-    for _, zmax, t0abs, delta in peaks:
-        if any(abs(t0abs - t) < sps for t in seen):
-            continue
-        seen.append(t0abs)
-        out.append(Timing(tau0=float(t0abs - t0_index), ppm=float(delta * 1e6), gamma=0.0,
-                          z=zmax, cov=np.diag([0.25, (step * 1e6) ** 2, 0.0])))
-    return out[0] if n_best <= 1 else out[:n_best]
+    return peaks, sps, step
 
 
 def _segment_timing_l(x, sig2, kn: T._Known, t0abs: float, delta: float, sps: float,
@@ -1264,16 +1281,23 @@ def verify_l(ch, ch_fs, spec, cand: Detection, *, fit: bool = True, tau_range=No
     for base in (cand.path, _flat_path(cand.path), None):
         pth = refine_path_l(ch, spec, base) if base is not None else \
             T.line_path(ch, spec, cand.path)
-        alt = verify_track_l(ch, spec, replace(cand, path=pth), fit=fit, tau_range=tau_range,
-                             erase_s=erase_s)
+        # the blind candidate's best timing and runners-up from one grid
+        tries = base is None and fit and cand.timing is None and V_TIMING_TRIES > 1
+        if tries:
+            fn = freq_path_spline(pth)
+            best, tms = _fit_timing_tries_l(ch, CH_FS, fn, spec, None, None,
+                                            t0_index=ch.t0_index, z_d=derotate(ch, fn),
+                                            n_best=V_TIMING_TRIES)
+            alt = verify_track_l(ch, spec, replace(cand, path=pth, timing=best), fit=False,
+                                 erase_s=erase_s)
+        else:
+            alt = verify_track_l(ch, spec, replace(cand, path=pth), fit=fit,
+                                 tau_range=tau_range, erase_s=erase_s)
         if alt is not None and (tr is None or alt.z_ref > tr.z_ref):
             tr, path = alt, pth
         if tr is not None and tr.z_ref > Z_ACCEPT:
             break
-        if base is None and fit and cand.timing is None and V_TIMING_TRIES > 1:
-            fn = freq_path_spline(pth)
-            tms = fit_timing_l(ch, CH_FS, fn, spec, None, None, t0_index=ch.t0_index,
-                               z_d=derotate(ch, fn), n_best=V_TIMING_TRIES)
+        if tries:
             for tm in tms[1:]:
                 alt = verify_track_l(ch, spec, replace(cand, path=pth, timing=tm), fit=False,
                                      erase_s=erase_s)

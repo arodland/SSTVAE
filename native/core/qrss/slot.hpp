@@ -38,6 +38,7 @@
 //   "not an ISO 8601 time; expected e.g. 2026-10-09T06:00Z"
 //   "give the time zone: end it with Z for UTC, e.g. 2026-10-09T06:00Z"
 //   "<isoformat()> is not on a quarter hour"
+//   "slot 1969-12-31T23:45Z is before 1970-01-01T00:00Z" (parse_slot: q < 0)
 
 #ifndef SSTVAE_QRSS_SLOT_HPP
 #define SSTVAE_QRSS_SLOT_HPP
@@ -82,7 +83,10 @@ UtcTime parse_utc(std::string_view text);
 // a quarter hour ("<t.isoformat()> is not on a quarter hour" otherwise).
 std::int64_t quarter_hour_count(const UtcTime& t);
 
-// sequences.parse_slot: quarter_hour_count(parse_utc(text)).
+// sequences.parse_slot: quarter_hour_count(parse_utc(text)), refusing a
+// quarter hour before 1970 (q < 0): "slot <slot_iso(q)> is before
+// 1970-01-01T00:00Z", or with the time's isoformat() where slot_iso
+// overflows (a UTC time before year 1).
 std::int64_t parse_slot(std::string_view text);
 
 // sequences.quarter_hour_start: the UTC time of quarter hour q. Outside

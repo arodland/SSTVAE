@@ -596,10 +596,11 @@ Known known_symbols(const FrameSpec& spec, const frame::HdrBits* hdr_bits) {
     std::vector<std::int64_t> idx = lay->known_idx;
     std::vector<double> val(lay->known_val_ce.begin(), lay->known_val_ce.end());
     if (hdr_bits && spec.n_hdr()) {
-        if (!hdr_bits->one_d)
-            throw std::invalid_argument("all the input arrays must have same number of dimensions");
+        // make_classes' mu at the header bits: its broadcast, and its refusals (a header of
+        // the wrong length is its "shape mismatch", never a val longer or shorter than pos)
+        const Classes c = make_classes(spec, hdr_bits);
         idx.insert(idx.end(), lay->hdr_bits.begin(), lay->hdr_bits.end());
-        for (const double b : hdr_bits->values) val.push_back(1.0 - 2.0 * b);
+        for (const std::int64_t i : lay->hdr_bits) val.push_back(c.mu[static_cast<std::size_t>(i)]);
     }
     Known k;
     k.pos.reserve(idx.size());

@@ -11,10 +11,9 @@ Each case is a small file in qrss_simulate.py's .npz form (np.savez with
 save_npz's keywords, in its order) or a broken one, and what
 channel.load_npz makes of it: the receiver's part of the Sim (fs,
 t0_index, q, the frame's name, fe) or the exception's class and str().
-The ctest reads every file through simfile::parse. Two cases are files the
-reference reads and the port refuses on purpose (complex128 fe, a
-compressed archive); the pins record the reference's success and the test
-its own refusal.
+The ctest reads every file through simfile::parse. One case is a file the
+reference reads and the port refuses on purpose (a compressed archive);
+the pin records the reference's success and the test its own refusal.
 """
 
 from __future__ import annotations
@@ -80,8 +79,18 @@ def cases() -> list[tuple[str, bytes]]:
         ("frame_wide", _frame_width("99")),
         ("frame_one_over", _frame_width("6")),
         ("frame_huge", _frame_width("4611686018427387904")),
-        # The reference reads these; the port refuses them (simfile.hpp).
+        # What save_npz never writes, refused by both (load_npz's ValueErrors).
         ("fe_c16", savez(**sim_members(fe=np.array([1 + 2j, 3j], np.complex128)))),
+        ("fe_f8", savez(**sim_members(fe=np.array([1.0, 2.0])))),
+        ("fe_2d", savez(**sim_members(fe=np.zeros((2, 2), np.complex64)))),
+        ("fe_0d", savez(**sim_members(fe=np.complex64(1 + 1j)))),
+        ("fs_zero", savez(**sim_members(fs=0))),
+        ("fs_negative", savez(**sim_members(fs=-4000, q=-1))),
+        ("fs_fraction", savez(**sim_members(fs=0.75))),
+        ("q_negative", savez(**sim_members(q=-5))),
+        ("q_fraction", savez(**sim_members(q=-0.5))),
+        ("q_zero", savez(**sim_members(q=np.int8(0)))),
+        # The reference reads this; the port refuses it (simfile.hpp).
         ("compressed", _compressed()),
     ]
     return out
@@ -132,29 +141,21 @@ def _compressed() -> bytes:
 
 
 def outcome(data: bytes):
-    from sstvae.qrss import channel
+    from unittest import mock
+
+    from sstvae.qrss import channel, lframe
 
     try:
-        with np.load(io.BytesIO(data), allow_pickle=False) as d:
-            # load_npz without lframe.get_any (the frame's name is the
-            # port's output; the receive subcommand resolves it).
-            for k in ("u", "f_hz", "t_pos_s", "impulse_mask"):
-                d[f"truth_{k}"]
-            float(d["truth_noise_var_fe"])
-            if "truth_agc_gain" in d:
-                d["truth_agc_gain"]
-            float(d["truth_signal_power"])
-            float(d["truth_time_scale"])
-            if "truth_u_data" in d:
-                d["truth_u_data"]
-            sim = (d["fe"], int(d["fs"]), float(d["t0_index"]), int(d["q"]), str(d["frame"]))
+        # channel.load_npz itself, the frame left as its name (the port's
+        # output; the receive subcommand resolves it)
+        with mock.patch.object(lframe, "get_any", str):
+            sim = channel.load_npz(io.BytesIO(data))
     except Exception as e:  # noqa: BLE001 -- the class is the pin
         cls = type(e).__name__
         if type(e).__module__ == "zipfile":
             cls = "zipfile." + cls
         return ("error", cls, str(e))
-    assert channel.load_npz.__doc__   # the reference this mirrors
-    return ("ok",) + sim
+    return ("ok", sim.fe, sim.fs, sim.t0_index, sim.q, sim.spec)
 
 
 def c_str(s: str) -> str:

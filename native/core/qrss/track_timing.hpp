@@ -120,6 +120,37 @@ std::vector<types::Timing> fit_timing(const ChanCapture& chan, int ch_fs, const 
                                       const frame::FrameSpec& spec, double t0_index,
                                       const FitTimingArgs& args = {}, FitTimingTrace* trace = nullptr);
 
+// fit_timing(n_best = 1) and fit_timing(n_best = args.n_best) from one
+// correlation grid (the reference's _fit_timing_tries): gate V's blind
+// candidate tracks the best timing first and the runners-up only when it
+// fails, and the grid is nearly all of either call's cost. Each is that
+// call's result exactly (n_best = 1's peaks are every carrier estimate's
+// first, which a search for more finds first too). The trace is the
+// n_best search's.
+struct FitTimingTries {
+    types::Timing best;                  // fit_timing(..., n_best = 1)
+    std::vector<types::Timing> tries;    // fit_timing(..., n_best)
+};
+FitTimingTries fit_timing_tries(std::span<const std::complex<double>> z_d, int ch_fs, const frame::FrameSpec& spec,
+                                double t0_index, const FitTimingArgs& args = {}, FitTimingTrace* trace = nullptr);
+
+// One peak of the grid search (fit_timing's, or fit_timing_l's): its rank
+// k in its carrier estimate, _segment_timing's score, the grid's Z there
+// and the refined (t0abs, delta).
+struct TimingPeak {
+    std::int64_t k = 0;
+    double score = 0.0, zmax = 0.0, t0abs = 0.0, delta = 0.0;
+};
+// _timings: the timings from the peaks (in the order found), strongest
+// score first (a stable sort, NaN last), one per sps of lag, up to
+// max(1, n_best); cov diag(0.25, (step 1e6)^2, 0).
+std::vector<types::Timing> timings_of(std::vector<TimingPeak> peaks, std::int64_t n_best, double sps, double step,
+                                      double t0_index);
+// _fit_timing_tries' pair from the peaks: timings_of the rank-0 peaks
+// with n_best 1, and of every peak with n_best.
+FitTimingTries tries_of(std::vector<TimingPeak> peaks, std::int64_t n_best, double sps, double step,
+                        double t0_index);
+
 // The statistic fit_timing correlates: Im(MF{z_d conj(LP(z_d))}) with LP
 // the _lowpass at lp_hz and MF the dense symbol MF (_mf_taps), through
 // scipy's oaconvolve "same".

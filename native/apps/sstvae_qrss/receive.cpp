@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <limits>
 #include <optional>
 #include <ostream>
@@ -382,6 +383,36 @@ int run(const std::string& prog, const std::vector<std::string>& argv, std::ostr
         return system_exit(err, STORE_REFUSAL);
     std::optional<receive::ImageRequest> image;
     if (const auto& im = args->text("image")) {
+        // check_image's first refusal: the directory the picture would be
+        // saved in, str(Path(image).parent) as pathlib prints it, missing
+        // (the extension is receive_image.cpp's refusal, PNG only).
+        {
+            const std::string& t = *im;
+            // posixpath.splitroot: "//" kept as the root only when exactly two
+            const std::size_t rlen =
+                t.empty() || t[0] != '/' ? 0 : (t.size() > 1 && t[1] == '/' && !(t.size() > 2 && t[2] == '/')) ? 2 : 1;
+            const std::string root = t.substr(0, rlen);
+            std::vector<std::string> parts;   // without empty and '.' components
+            std::string cur;
+            for (std::size_t k = rlen; k <= t.size(); ++k) {
+                if (k == t.size() || t[k] == '/') {
+                    if (!cur.empty() && cur != ".") parts.push_back(cur);
+                    cur.clear();
+                } else {
+                    cur += t[k];
+                }
+            }
+            const auto joined = [&](std::size_t n) {
+                std::string out = root;
+                for (std::size_t k = 0; k < n; ++k) out += (k ? "/" : "") + parts[k];
+                return out.empty() ? std::string(".") : out;
+            };
+            const std::string path = joined(parts.size());
+            const std::string parent = parts.empty() ? path : joined(parts.size() - 1);
+            std::error_code ec;
+            if (!std::filesystem::is_directory(std::filesystem::path(parent), ec))
+                return system_exit(err, "--image " + path + ": " + parent + ": no such directory");
+        }
         // render.model_dir(): $QRSSTVAE_MODEL_DIR when --model is absent.
         std::optional<std::string> model = args->text("model");
         if (!model) {

@@ -129,7 +129,8 @@ struct Hint {
 
 // _hint_items(hints, specs): (f, waveforms) per hint -- every enabled
 // waveform for a bare f, in the map's order; [w] for (f, w) when w is
-// enabled, else nothing.
+// enabled, else nothing. A hint whose f is not finite is dropped (the
+// reference's _finite_hint), as acquire() drops it before A2.
 std::vector<std::pair<double, std::vector<std::int64_t>>> hint_items(std::span<const Hint> hints,
                                                                      const FrameMap& specs);
 // The same over the enabled waveforms alone (the frame map's keys, in order).
@@ -202,7 +203,7 @@ struct AcquireOptions {
 // acquire(cap, spec): one frame -- CE's acquisition whatever the frame's
 // waveform (only A3's span and the hints' paths follow the frame). A hint
 // with a waveform is the reference's TypeError here (its float() of a
-// tuple).
+// tuple); a bare hint at a non-finite f is dropped before A2.
 Acquisition acquire(std::span<const cf> fe, double t0_index, double fs, const frame::FrameSpec& spec,
                     const AcquireOptions& opt = {}, const AcquireSeams& seams = {});
 Acquisition acquire(std::span<const cd> fe, double t0_index, double fs, const frame::FrameSpec& spec,

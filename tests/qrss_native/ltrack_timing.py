@@ -5,7 +5,9 @@ L's coarse timing fit (`fit_timing_l`, `_segment_timing_l`, the mix's
 phases `_lag_phase` and `_clock_phase`) and gate V (`refine_path_l`,
 `verify_track_l`, `resid_ratio`, `verify_l`). With
 tests/qrss_native/ltrack.py every function of ltrack.py is a row but
-`genie_track_l` (a test aid that stays Python, over these rows).
+`genie_track_l` (a test aid that stays Python, over these rows) and
+`_timing_peaks_l`, the grid search `fit_timing_l` and `_fit_timing_tries_l`
+share, which nothing else calls.
 
 Results come back as the reference's objects (`_rx.to_ref`), and as the
 very objects the reference would return where it returns its argument:
@@ -31,6 +33,13 @@ def rows(q):
         return _rx.to_ref(t.fit_timing_l(ch, ch_fs, path, spec, tmpl_fn, tau0_init, ppm_range,
                                          t0_index=t0_index, tau_range=tau_range, z_d=z_d,
                                          n_best=n_best))
+
+    def _fit_timing_tries_l(ch, ch_fs, path, spec, tmpl_fn=None, tau0_init=None, ppm_range=250.0,
+                            *, t0_index, tau_range=None, z_d=None, n_best=1):
+        best, tries = t._fit_timing_tries_l(ch, ch_fs, path, spec, tmpl_fn, tau0_init, ppm_range,
+                                            t0_index=t0_index, tau_range=tau_range, z_d=z_d,
+                                            n_best=n_best)
+        return _rx.to_ref(best), _rx.to_ref(tries)
 
     def _segment_timing_l(x, sig2, kn, t0abs, delta, sps, n_pos, n_ref, seg_s=SEG_TIMING_S):
         return t._segment_timing_l(x, sig2, kn, t0abs, delta, sps, n_pos, n_ref, seg_s)
@@ -58,6 +67,7 @@ def rows(q):
         (m, "_lag_phase"): t._lag_phase,
         (m, "_clock_phase"): t._clock_phase,
         (m, "fit_timing_l"): fit_timing_l,
+        (m, "_fit_timing_tries_l"): _fit_timing_tries_l,
         (m, "_segment_timing_l"): _segment_timing_l,
         (m, "refine_path_l"): refine_path_l,
         (m, "verify_track_l"): verify_track_l,

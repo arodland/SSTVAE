@@ -27,8 +27,13 @@
 // CRC-32, else in this file's own, "simfile: ..."); compressed and zip64
 // archives, which zipfile reads and np.savez does not write for a slot;
 // and members of other dtypes or shapes than the simulator writes:
-// `fe` must be complex64[n] (anything else is refused rather than read the
-// way the reference would feed it to the receiver), `frame` a str.
+// `frame` must be a str.
+//
+// What save_npz never writes, load_npz refuses as it reads it (ValueError),
+// and so does this: `fe` other than complex64 (n,), "simfile: fe is <descr>
+// of <ndim> dimensions, not complex64 (n,) as qrss_simulate.py writes it";
+// fs <= 0, "simfile: fs <fs> is not a sample rate"; q < 0, "simfile: q <q>
+// is a quarter hour before 1970-01-01T00:00Z".
 
 #ifndef SSTVAE_QRSS_SIMFILE_HPP
 #define SSTVAE_QRSS_SIMFILE_HPP

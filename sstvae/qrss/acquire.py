@@ -1077,13 +1077,17 @@ class TbdHit:
     l_shape_z: float = float("nan")
     l_above_z: float = float("nan")
 
-    @property
+    @functools.cached_property
     def f_hz(self) -> float:
         """Frequency at t0 from a straight line through the path.
 
         Weighted by the emissions, with one pass dropping points more than
         1 Hz off the line: before the signal keys (and in deep fades) the
         path wanders on noise and carries ~no weight.
+
+        Fitted once per hit: the arbitration and the detections read it
+        thousands of times over a FULL slot's hits, and a hit's path is
+        never changed once it is made (a new path is a new hit).
         """
         return float(np.polyval(self.line(), 0.0))
 
@@ -1552,7 +1556,8 @@ def acquire(cap: frontend.Capture, spec, *, live_only: bool = False,
     cell set at A2's false-alarm rate, so a weak signal outside A1's
     strongest A1_MAX_CANDS lines still has its preamble searched. One
     that A2 does not pass is kept in `hinted`, for a gate V that looks
-    over the whole frame.
+    over the whole frame. A hint at a non-finite frequency (nan, +-inf,
+    bare or in an (f, waveform) pair) is dropped before A2 (`_finite_hint`).
 
     spec: one frame -- today's acquisition, CE's, whatever the frame's
     waveform (only the A3 span and the hints' paths follow the frame) --
@@ -1572,6 +1577,8 @@ def acquire(cap: frontend.Capture, spec, *, live_only: bool = False,
     hits = [preamble_search(fe, cap.t0_index, c, cap.fs) for c in lines]
     hinted = []
     for f in hints:
+        if not _finite_hint(f):
+            continue
         if any(h.passed and abs(h.f_hz - f) <= HINT_SPAN_HZ + 0.5 for h in hits):
             continue
         near = [h for h in hits if abs(h.f_hz - f) <= HINT_SPAN_HZ + 0.5]
@@ -1589,16 +1596,31 @@ def acquire(cap: frontend.Capture, spec, *, live_only: bool = False,
     return Acquisition(lines=lines, preamble=pre, tbd=tbd, hinted=hinted)
 
 
+def _finite_hint(f) -> bool:
+    """False for a hint at no frequency (nan, +-inf), which acquire drops
+    before A2: it has no line to search, and a history or a caller's
+    arithmetic can produce one. Anything that is not a number is kept, to
+    fail where it always did."""
+    try:
+        return math.isfinite(float(f))
+    except (TypeError, ValueError):
+        return True
+
+
 def _hint_items(hints, specs: dict) -> list[tuple[float, list[int]]]:
     """(f, waveforms) per hint: a bare frequency means every enabled
-    waveform, (f, waveform) that one (nothing when it is not enabled)."""
+    waveform, (f, waveform) that one (nothing when it is not enabled).
+    A hint whose f is not finite is read (a malformed one still refuses)
+    and dropped (`_finite_hint`)."""
     out = []
     for hnt in hints:
         if isinstance(hnt, (tuple, list)):
             f, w = hnt
-            out.append((float(f), [int(w)] if int(w) in specs else []))
+            item = (float(f), [int(w)] if int(w) in specs else [])
         else:
-            out.append((float(hnt), list(specs)))
+            item = (float(hnt), list(specs))
+        if math.isfinite(item[0]):
+            out.append(item)
     return out
 
 

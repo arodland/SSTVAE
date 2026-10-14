@@ -135,6 +135,12 @@ std::vector<types::Timing> fit_timing_l(std::span<const cplx> z_d, int ch_fs, co
 std::vector<types::Timing> fit_timing_l(const track::ChanCapture& chan, int ch_fs, const track::PathFn& fn,
                                         const frame::FrameSpec& spec, double t0_index,
                                         const FitTimingLArgs& args = {}, track::FitTimingTrace* trace = nullptr);
+// fit_timing_l(n_best = 1) and fit_timing_l(n_best = args.n_best) from one
+// correlation grid, for verify_l (the reference's _fit_timing_tries_l;
+// track::fit_timing_tries).
+track::FitTimingTries fit_timing_tries_l(std::span<const cplx> z_d, int ch_fs, const frame::FrameSpec& spec,
+                                         double t0_index, const FitTimingLArgs& args = {},
+                                         track::FitTimingTrace* trace = nullptr);
 
 // --- gate V --------------------------------------------------------------------------
 

@@ -8,6 +8,8 @@
 //   fit_timing_l(ch, ch_fs, path, spec, tmpl_fn=None, tau0_init=None,
 //                ppm_range=250.0, *, t0_index, tau_range=None, z_d=None, n_best=1)
 //       -> "Timing" dict (n_best <= 1) or a list of them
+//   _fit_timing_tries_l(<fit_timing_l's arguments>)
+//       -> (fit_timing_l(n_best=1), fit_timing_l(n_best)) from one grid
 //   _segment_timing_l(x, sig2, kn, t0abs, delta, sps, n_pos, n_ref,
 //                     seg_s=SEG_TIMING_S) -> (t0abs, delta, score)
 //   refine_path_l(chan, spec, path) -> ("FreqPath" dict, unchanged)
@@ -254,6 +256,20 @@ py::object fit_timing_l_py(const py::object& ch, const py::object& ch_fs, const 
     return timings_py(t, c.args.n_best);
 }
 
+py::object fit_timing_tries_l_py(const py::object& ch, const py::object& ch_fs, const py::object& path,
+                                 const py::object& spec, const py::object& tmpl_fn, const py::object& tau0_init,
+                                 const py::object& ppm_range, const py::object& t0_index,
+                                 const py::object& tau_range, const py::object& z_d, const py::object& n_best) {
+    FitCall c = fit_call(ch, ch_fs, path, spec, tmpl_fn, tau0_init, ppm_range, t0_index, tau_range, z_d, n_best);
+    if (c.known) c.args.known = &*c.known;
+    tk::FitTimingTries t;
+    {
+        py::gil_scoped_release nogil;
+        t = lt::fit_timing_tries_l(std::span<const cd>(c.z_d), c.fs, c.spec, c.t0_index, c.args);
+    }
+    return py::make_tuple(rx::to_py(t.best), timings_py(t.tries, c.args.n_best));
+}
+
 py::object fit_timing_l_trace_py(const py::object& ch, const py::object& ch_fs, const py::object& path,
                                  const py::object& spec, const py::object& tmpl_fn, const py::object& tau0_init,
                                  const py::object& ppm_range, const py::object& t0_index,
@@ -318,6 +334,11 @@ void bind(py::module_& q) {
           py::arg("tmpl_fn") = py::none(), py::arg("tau0_init") = py::none(), py::arg("ppm_range") = 250.0,
           py::kw_only(), py::arg("t0_index"), py::arg("tau_range") = py::none(), py::arg("z_d") = py::none(),
           py::arg("n_best") = 1);
+
+    m.def("_fit_timing_tries_l", &fit_timing_tries_l_py, py::arg("ch"), py::arg("ch_fs"), py::arg("path"),
+          py::arg("spec"), py::arg("tmpl_fn") = py::none(), py::arg("tau0_init") = py::none(),
+          py::arg("ppm_range") = 250.0, py::kw_only(), py::arg("t0_index"), py::arg("tau_range") = py::none(),
+          py::arg("z_d") = py::none(), py::arg("n_best") = 1);
 
     m.def("_fit_timing_l_trace", &fit_timing_l_trace_py, py::arg("ch"), py::arg("ch_fs"), py::arg("path"),
           py::arg("spec"), py::arg("tmpl_fn") = py::none(), py::arg("tau0_init") = py::none(),

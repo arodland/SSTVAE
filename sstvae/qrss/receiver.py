@@ -241,14 +241,26 @@ def _cw_result(tr: track.TrackResult, spec: FrameSpec, hdr) -> tuple[CwIdResult 
     text = cwid.read(cwid.window_llr(None, CH_FS, tr, spec, ook=ook), ook)
     if call is not None:
         z = cwid.match(soft, call)
-        # a confident read of another call disagrees, whatever the match
-        agrees = (text == call) or (text is None and z > Z_ACCEPT)
+        # a confident read of another call disagrees, whatever the match; a
+        # Python bool (z > Z_ACCEPT on cwid's np.float64 is an np.bool_, which
+        # json.dumps refuses wherever a sidecar or the store writes the pass)
+        agrees = bool((text == call) or (text is None and z > Z_ACCEPT))
         known = (keying_units(call), ook) if z > Z_ACCEPT else None
     else:
         z = cwid.match(soft, text) if text else 0.0
         agrees = None
         known = None
     return CwIdResult(text=text, z_match=float(z), keying=kt, agrees=agrees), known
+
+
+def _check_waveform(spec, wf) -> None:
+    """receive_pass's refusal of a detection of waveform wf on a frame of
+    another waveform (ValueError)."""
+    if wf != spec.waveform:
+        raise ValueError(f"a waveform {WAVEFORM_NAMES.get(wf, wf)} detection cannot be "
+                         f"received as frame {spec.name!r} (waveform "
+                         f"{WAVEFORM_NAMES[spec.waveform]}): pass lframe.twin(spec, "
+                         f"det.waveform)")
 
 
 def receive_pass(cap, spec: FrameSpec, det: Detection, prior: EmPrior | None = None,
@@ -275,12 +287,7 @@ def receive_pass(cap, spec: FrameSpec, det: Detection, prior: EmPrior | None = N
     (`_receive_pass_l`). `det` must be of the frame's waveform (the
     acquisition says which, `Detection.waveform`): a ValueError otherwise.
     """
-    wf = getattr(det, "waveform", WAVEFORM_CE)
-    if wf != spec.waveform:
-        raise ValueError(f"a waveform {WAVEFORM_NAMES.get(wf, wf)} detection cannot be "
-                         f"received as frame {spec.name!r} (waveform "
-                         f"{WAVEFORM_NAMES[spec.waveform]}): pass lframe.twin(spec, "
-                         f"det.waveform)")
+    _check_waveform(spec, getattr(det, "waveform", WAVEFORM_CE))
     if spec.waveform == WAVEFORM_L:
         return _receive_pass_l(cap, spec, det, prior, estimator, exclude_hz=exclude_hz,
                                f_mix_hz=f_mix_hz, round_b=round_b,
@@ -328,7 +335,13 @@ def _receive_pass_l(cap, spec, det: Detection, prior: EmPrior | None, estimator:
     keying known. There is no spread removal (L's copy is linear, in
     `make_classes_l`'s data mean), and the keying is FSK: cw_known never
     says OOK. The report quotes SNR2500 on the frame's keyed power
-    (`ltrack.report_l`)."""
+    (`ltrack.report_l`).
+
+    The refusals are receive_pass's: a detection of another waveform than
+    the frame's, and (this receives an L pass) a frame that is not L, which
+    gets receive_pass's refusal of an L detection on it."""
+    _check_waveform(spec, getattr(det, "waveform", WAVEFORM_CE))
+    _check_waveform(spec, WAVEFORM_L)
     prep = prepare(cap)
     chan = channel_for(prep, spec, det, exclude_hz, f_mix_hz)
     if not np.isfinite(det.z_ref) or det.timing is None:

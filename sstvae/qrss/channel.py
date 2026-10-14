@@ -916,7 +916,13 @@ def save_npz(path, sim: Sim) -> None:
 
 
 def load_npz(path) -> Sim:
-    """The `Sim` written by `save_npz` (frame by preset name, either waveform)."""
+    """The `Sim` written by `save_npz` (frame by preset name, either waveform).
+
+    What save_npz never writes is refused as it is read (ValueError naming
+    the member), not left for the receiver to trip over: fe other than
+    complex64 (n,), fs <= 0, q < 0 (a quarter hour before 1970, which no
+    slot is). The texts are the native reader's (native/core/qrss/simfile).
+    """
     with np.load(path, allow_pickle=False) as d:
         truth = Truth(
             **{k: d[f"truth_{k}"] for k in _TRUTH_ARRAYS},
@@ -925,5 +931,16 @@ def load_npz(path) -> Sim:
             signal_power=float(d["truth_signal_power"]),
             time_scale=float(d["truth_time_scale"]),
             u_data=d["truth_u_data"] if "truth_u_data" in d else None)
-        return Sim(fe=d["fe"], fs=int(d["fs"]), t0_index=float(d["t0_index"]),
-                   q=int(d["q"]), spec=lframe.get_any(str(d["frame"])), truth=truth)
+        fe = d["fe"]
+        if fe.dtype != np.complex64 or fe.ndim != 1:
+            raise ValueError(f"simfile: fe is {fe.dtype.str} of {fe.ndim} dimensions, not complex64 "
+                             "(n,) as qrss_simulate.py writes it")
+        fs = int(d["fs"])
+        if fs <= 0:
+            raise ValueError(f"simfile: fs {fs} is not a sample rate")
+        t0_index = float(d["t0_index"])
+        q = int(d["q"])
+        if q < 0:
+            raise ValueError(f"simfile: q {q} is a quarter hour before 1970-01-01T00:00Z")
+        return Sim(fe=fe, fs=fs, t0_index=t0_index, q=q, spec=lframe.get_any(str(d["frame"])),
+                   truth=truth)

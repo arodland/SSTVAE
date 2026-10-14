@@ -202,6 +202,7 @@ Acquisition acquire_one(std::span<const S> fe_in, double t0, double fs, const fr
     for (const auto& c : acq.lines) hits.push_back(st.search(c, nullptr));
     for (const Hint& hint : opt.hints) {
         if (hint.waveform) tuple_hint(!hits.empty());
+        if (!std::isfinite(hint.f_hz)) continue;   // a hint at no frequency: dropped before A2
         const double f = hint.f_hz;
         bool done = false;
         for (const auto& h : hits)
@@ -474,6 +475,7 @@ std::vector<std::pair<double, std::vector<std::int64_t>>> hint_items(std::span<c
     std::vector<std::pair<double, std::vector<std::int64_t>>> out;
     out.reserve(hints.size());
     for (const Hint& h : hints) {
+        if (!std::isfinite(h.f_hz)) continue;   // a hint at no frequency: dropped before A2
         std::vector<std::int64_t> ws;
         if (h.waveform) {
             if (std::find(waveforms.begin(), waveforms.end(), *h.waveform) != waveforms.end())

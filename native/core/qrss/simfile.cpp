@@ -281,8 +281,12 @@ Sim parse(std::span<const std::uint8_t> file) {
                                       "qrss_simulate.py writes it");
     sim.fe = fe.values<std::complex<float>>();
     sim.fs = to_int(array(member(z, "fs")));
+    if (sim.fs <= 0) throw Error("ValueError", "simfile: fs " + std::to_string(sim.fs) + " is not a sample rate");
     sim.t0_index = to_float(array(member(z, "t0_index")));
     sim.q = to_int(array(member(z, "q")));
+    if (sim.q < 0)
+        throw Error("ValueError",
+                    "simfile: q " + std::to_string(sim.q) + " is a quarter hour before 1970-01-01T00:00Z");
     sim.frame = str_member(member(z, "frame"));
     return sim;
 }

@@ -418,7 +418,22 @@ std::int64_t quarter_hour_count(const UtcTime& t) {
     return (us - r) / QUARTER_US;
 }
 
-std::int64_t parse_slot(std::string_view text) { return quarter_hour_count(parse_utc(text)); }
+std::int64_t parse_slot(std::string_view text) {
+    const UtcTime t = parse_utc(text);
+    const std::int64_t q = quarter_hour_count(t);
+    if (q < 0) {
+        // no slot: refused by its UTC time, or the time as read where that
+        // is before year 1 (quarter_hour_start's overflow)
+        std::string when;
+        try {
+            when = slot_iso(q);
+        } catch (const std::overflow_error&) {
+            when = t.isoformat();
+        }
+        throw std::invalid_argument("slot " + when + " is before 1970-01-01T00:00Z");
+    }
+    return q;
+}
 
 UtcTime quarter_hour_start(std::int64_t q) {
     // _EPOCH + timedelta(seconds=900 q). The timedelta first: its days,

@@ -39,10 +39,13 @@ unless --no-store. The slot's whole front-end stream is also kept in the
 48 h passband store (--passband DIR, default STORE/passband; off with
 --no-passband or --no-store), where `qrss_decode.py --retro` later
 template-searches it for passes too weak to detect now. --image renders the single pass (FULL frames with a
-decoded header only) with the codec (--model DIR, --precision).
+decoded header only) with the codec (--model DIR, --precision); a name
+the picture could not be saved under (no such directory, or an extension
+Pillow names no format by) is refused before the receive.
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -66,6 +69,21 @@ def parse_time(s: str) -> float:
         return sequences.parse_utc(s).timestamp()
     except ValueError as e:
         raise SystemExit(f"--start {s!r}: {e}") from None
+
+
+def check_image(image: Path) -> None:
+    """Refuse an --image the picture could not be saved under, before the
+    receive (minutes of work on a FULL slot, then Image.save's error): its
+    directory missing, or an extension Pillow names no format by (the one
+    Image.save looks the format up by)."""
+    if not image.parent.is_dir():
+        raise SystemExit(f"--image {image}: {image.parent}: no such directory")
+    from PIL import Image
+
+    ext = os.path.splitext(os.fspath(image))[1].lower()
+    if ext not in Image.registered_extensions():
+        raise SystemExit(f"--image {image}: unknown image file extension {ext!r} "
+                         "(Pillow names its formats by the extension)")
 
 
 def load_capture(path: Path, q: int | None, start: float | None):
@@ -200,6 +218,8 @@ def parse_args(argv=None):
 def main() -> None:
     args = parse_args()
     rules.apply(args)
+    if args.image is not None:
+        check_image(args.image)
 
     q = parse_slot(args.slot) if args.slot else None
     start = parse_time(args.start) if args.start else None

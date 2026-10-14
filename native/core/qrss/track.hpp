@@ -139,7 +139,9 @@ std::vector<double> mf_taps(double fs = config::CH_FS, double t_sym = config::T_
 // --- known symbols and classes ---------------------------------------------------
 
 // known_symbols: preamble, references and spare (+ the header bits once
-// decoded: their 1 - 2 b). CE only.
+// decoded: their 1 - 2 b, as make_classes' mu holds them -- so a header
+// make_classes refuses, one of the wrong length say, is its error here
+// too). CE only.
 Known known_symbols(const frame::FrameSpec& spec, const frame::HdrBits* hdr_bits = nullptr);
 
 // make_classes: round A (hdr_bits null) or round B classes, `prior` the
