@@ -226,12 +226,9 @@ PictureKey parse_key(std::string_view s) {
 }
 
 std::string member_wave(store::Store& st, const Value& uid) {
-    // store.pass_info(uid): `uid not in self._light`, then _pass_path's
-    // `"/" in uid` -- what each JSON type does there.
-    if (uid.kind() == Value::Kind::Array || uid.kind() == Value::Kind::Object)
-        throw PyException("TypeError", std::string("unhashable type: '") + type_name(uid) + "'");
-    if (uid.kind() != Value::Kind::String)
-        throw PyException("TypeError", std::string("argument of type '") + type_name(uid) + "' is not iterable");
+    // store.pass_info(uid): _pass_path refuses a uid that is no string
+    // (ValueError), which member_wave shows as "?".
+    if (uid.kind() != Value::Kind::String) return "?";
     store::PassInfo info;
     try {
         info = st.pass_info(uid.as_string());

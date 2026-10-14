@@ -231,7 +231,7 @@ _DELETE = object()
 # Accumulator indexes no receiver writes, which the script reads as JSON
 # gives them: an f-string of whatever type is there, its formats' refusals,
 # MODE_NAMES[mode] (negative modes index from the end), member_wave on a
-# uid that is no string.
+# uid that is no string ("?": the store refuses it as a bad uid).
 _EDITS = {
     "mode5": lambda m: m.update(mode=5),
     "mode-1": lambda m: m.update(mode=-1),
@@ -574,7 +574,9 @@ def test_decode_edited_accumulators(cli, stores, models, renders, tmp_path):
                           store=f"edit-{name}"))
     results = _run_and_check(cases, tmp_path, cli, stores, models, renders)
     assert results["mode5-list"][0].err.endswith("IndexError: tuple index out of range\n")
-    assert results["uid-int-list"][0].err.endswith("TypeError: argument of type 'int' is not iterable\n")
+    for name, shown in (("uid-int", "5"), ("uid-null", "None"), ("uid-list", "[1]"), ("uid-dict", "{'a': 1}")):
+        py = results[f"{name}-list"][0]
+        assert py.rc == 0 and f"\n    {shown}  ?  segment " in py.out, (name, py)
     assert results["zref-str-list"][0].err.endswith(
         "ValueError: Unknown format code 'f' for object of type 'str'\n")
 

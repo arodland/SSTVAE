@@ -295,7 +295,9 @@ class Store:
     # --- passes ---
 
     def _pass_path(self, uid: str) -> Path:
-        if "/" in uid or uid.startswith("."):
+        # (a uid that is no string -- a hand-edited accumulator -- is a bad
+        # uid too, not a TypeError or AttributeError out of the test below)
+        if not isinstance(uid, str) or "/" in uid or uid.startswith("."):
             raise ValueError(f"bad pass uid {uid!r}")
         return self.root / "passes" / f"{uid}.npz"
 
