@@ -30,11 +30,12 @@ import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 import pytest
 
+from qrss_codec_fixtures import scene
 from qrss_helpers import Q_TEST, REPO_ROOT, synthetic_full_latents
 from qrss_native import require
 from sstvae import wavio
@@ -64,7 +65,7 @@ def outcome(fn, *args, **kw):
     """("ok", result) or the exception as a comparable tuple."""
     try:
         return ("ok", fn(*args, **kw))
-    except Exception as e:  # noqa: BLE001 -- compared, not swallowed
+    except (Exception, SystemExit) as e:  # noqa: BLE001 -- compared, not swallowed
         return ("raise", type(e), str(e), getattr(e, "errno", None), getattr(e, "filename", None))
 
 
@@ -269,18 +270,88 @@ def test_sources(native, d, name, stored):
 # --- the codec glue (with the codec only) ---------------------------------------------------------
 
 def test_codec_paths(native, d, name):
-    nc = require(native, "codec")
-    npic = require(native, "picture")
+    """The model paths (checkpoint.resolve_onnx, codec_id_from_onnx: a str
+    or a PathLike, made a Path; bytes refused as pathlib refuses them), the
+    pathlib spelling of such a name, and images.load_image (PIL's open:
+    str, bytes or PathLike) at such names."""
+    from PIL import Image
+
+    from sstvae import images
     from sstvae.checkpoint import resolve_onnx
 
+    nc = require(native, "codec")
+    npic = require(native, "picture")
     for part in ("encoder", "decoder"):
         (d / f"m-{part}-fp16.onnx").write_bytes(b"not a model")
     for f in (str(d), d):
         assert nc.resolve_onnx("encoder", f, "fp16") == str(resolve_onnx("encoder", f, "fp16"))
-    assert outcome(nc.resolve_onnx, "encoder", d / "nothing-here", "fp16")[1] is SystemExit
+    for f in (str(d / "nothing-here"), d / "nothing-here"):
+        want = outcome(resolve_onnx, "encoder", f, "fp16")
+        assert want[1] is SystemExit
+        same_raise(outcome(nc.resolve_onnx, "encoder", f, "fp16"), want, type(f))
     a = outcome(npic.codec_id_from_onnx, os.fsencode(d))
     b = outcome(picture.codec_id_from_onnx, os.fsencode(d))
     assert a[:2] == b[:2] == ("raise", TypeError), (a, b)
+    for t in (f"{d}//x/./{name}.onnx/", f"{name}.tar.{name}"):
+        p = PurePosixPath(t)
+        assert (nc._pathlib_str(t), nc._pathlib_suffix(t)) == (str(p), p.suffix), t
+    png = d / f"{name}.png"
+    Image.fromarray(scene()).save(png)
+    want = images.load_image(str(png))
+    for f in forms(png):
+        assert np.array_equal(nc.load_image(f), images.load_image(f)), type(f)
+        assert np.array_equal(nc.load_image(f), want), type(f)
+    # the image layer's refusal names the file as Python decodes names
+    r = outcome(nc.load_image, d / f"{name}-missing.png")
+    assert r[1] is RuntimeError and os.fsdecode(d / f"{name}-missing.png") in r[2], r
+
+
+@pytest.mark.codec
+def test_codec_model_paths(native, d, name):
+    """The v5 model in a directory at such a name (links to the files):
+    codec_id_from_onnx, the encoder found there (qrss/codec's
+    encode_picture, api.open_encoder and its encode_file, the image at such
+    a name too) and the decoder (codec_render.decoder_codec_id), each what
+    the same files give at a plain name. (test_qrss_native_codec.py holds
+    those to the reference; here the reference cannot follow everywhere.)"""
+    import qrss_codec_fixtures as fixtures
+    from PIL import Image
+
+    from sstvae.checkpoint import resolve_onnx
+
+    nc = require(native, "codec")
+    npic = require(native, "picture")
+    api = require(native, "api")
+    v5 = fixtures.v5_dir()
+    m = d / f"{name}-model"
+    m.mkdir()
+    for part in ("encoder", "decoder"):
+        src = Path(resolve_onnx(part, v5, "fp16"))
+        (m / src.name).symlink_to(src)
+    plain = d.parent / "scene.png"
+    Image.fromarray(scene()).save(plain)
+    png = d / f"{name}.png"
+    png.write_bytes(plain.read_bytes())
+    cid = npic.codec_id_from_onnx(str(v5))
+    for f in (str(m), m):
+        assert npic.codec_id_from_onnx(f) == cid
+        # The reference's own onnxruntime session takes the file name as a
+        # strict str (its pybind11 binding), so a name that is not UTF-8 is
+        # its TypeError there; the native opens it.
+        ref = outcome(picture.codec_id_from_onnx, f)
+        assert ref == ("ok", cid) if name == NON_ASCII else ref[1] is TypeError, ref
+    want = nc.encode_picture(str(plain), 0, cid, model=str(v5))
+    for img in forms(png):
+        for model in (str(m), m):
+            got = nc.encode_picture(img, 0, cid, model=model)
+            assert [np.asarray(s).tobytes() for s in got["segs"]] == [np.asarray(s).tobytes() for s in want["segs"]]
+            assert got["picture_id"] == want["picture_id"]
+    enc = api.open_encoder(m)
+    assert enc.onnx_path == str(resolve_onnx("encoder", m, "fp16")) and enc.codec_id == cid
+    for img in forms(png):
+        assert enc.encode_file(img, 0)["picture_id"] == want["picture_id"]
+    cr = native.qrss.codec_render
+    assert cr.decoder_codec_id(m, "fp16") == cr.decoder_codec_id(str(v5), "fp16") == cid
 
 
 # --- sstvae-qrss ----------------------------------------------------------------------------------

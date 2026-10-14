@@ -21,6 +21,7 @@
 
 #include <pybind11/pybind11.h>
 
+#include <cstddef>
 #include <cstring>
 #include <string>
 

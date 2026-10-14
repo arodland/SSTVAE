@@ -117,10 +117,14 @@ void bind(py::module_& q) {
         return translated([&] { return fspath::fs_text(qc::resolve_onnx(part, p, precision)); });
     }, py::arg("part"), py::arg("path") = py::none(), py::arg("precision") = "fp16");
 
-    m.def("_pathlib_str", [](const py::str& text) { return str_from_utf8(qc::pathlib_str(utf8_of(text))); },
-          py::arg("text"));
-    m.def("_pathlib_suffix", [](const py::str& text) { return str_from_utf8(qc::pathlib_suffix(utf8_of(text))); },
-          py::arg("text"));
+    // str(PurePosixPath(text)) and its suffix, on a name's os.fsencode bytes
+    // (a surrogate escape is the byte it stands for), decoded back as names.
+    m.def("_pathlib_str", [](const py::str& text) {
+        return fspath::fs_text(qc::pathlib_str(fspath::fs_path(text).bytes));
+    }, py::arg("text"));
+    m.def("_pathlib_suffix", [](const py::str& text) {
+        return fspath::fs_text(qc::pathlib_suffix(fspath::fs_path(text).bytes));
+    }, py::arg("text"));
 
     // images.load_image(path): (3, 480, 640) float32 in [0, 1]. PIL's
     // Image.open takes a str, bytes or os.PathLike (os.fspath); the image

@@ -45,9 +45,9 @@ prints them):
   the same signals found), the old edge noise rule (a TINY at 350 Hz,
   QRSS_OLD_EDGE_NOISE set: the SNR it reports moves by 0.17 dB, and the
   C++ moves with it), max_candidates, erase_s, the plain estimator
-  without round B, detections handed in (one of them twice); in the slow
-  tier CE SHORT, L l-short and joint (SHORT, L_SHORT), headers and
-  callsigns read, and live_only, a joint max_candidates and hints;
+  without round B, detections handed in (one of them twice), CE SHORT,
+  L l-short and joint (SHORT, L_SHORT), headers and callsigns read, and
+  live_only, a joint max_candidates and hints;
 - the two ways agree bit for bit: with a pass-through spy on track.verify
   (which sends the binding over the Python objects) the joint, the old
   gating and the joint SHORT scenarios give the typed run's passes and
@@ -99,6 +99,17 @@ prints them):
   spy on them: the binding did not quietly fall back), a Python-mode one
   does;
 - threads: four slots received at once, typed, each what it gives alone.
+
+The fast tier (33 s on 4 shared CPUs, 2026-10-14, against 104 s before
+the split) keeps one of each kind: the CE TINY, L l-tiny and joint
+scenarios typed (the joint one over the Python objects too, its spies
+included), and with them the proof that a typed run stays typed;
+qrss_receive.py's whole caller, with every slot row reached; the rules,
+the stubbed orchestration, receive_wav, capture_from_wav and the WAV
+reader. The other scenarios, detections handed in, _ce_resid_ratio on
+real tracks, live.finish_receive, the scenarios' own checks on the
+reference and the threads are the slow tier's (`-m slow`; each 4-12 s,
+the reference's receive_slot most of it).
 """
 
 import copy
@@ -279,6 +290,7 @@ def test_rules_refusals(row):
     assert row["_owned"](d, [g], [(1500.0, 1500.0, 9.0)]) is RX._owned(d, [g], [(1500.0, 1500.0, 9.0)]) is True
 
 
+@pytest.mark.slow
 def test_ce_resid_ratio(row):
     """_ce_resid_ratio on real CE gate-V tracks of the joint capture (the
     reference's tracks): the CE signal (R near 1) and the L signal gated as
@@ -374,11 +386,14 @@ SCENARIOS = {
     "l-short": ("l-short", lframe.L_SHORT, None, ()),
     "joint-short": ("mixed-short", (frame.SHORT, lframe.L_SHORT), None, ()),
 }
-SLOW = {"ce-short", "l-short", "joint-short", "live-only", "joint-max-candidates", "hints"}
+# The fast tier: a typed CE, a typed L and a typed joint slot, the joint one
+# over the Python objects too (each scenario is 4-9 s: the reference's own
+# receive_slot is most of it). The rest are the slow tier's.
+FAST = {"ce-tiny", "l-tiny", "joint"}
 
 
 def _labels():
-    return [pytest.param(k, marks=pytest.mark.slow) if k in SLOW else k for k in SCENARIOS]
+    return [k if k in FAST else pytest.param(k, marks=pytest.mark.slow) for k in SCENARIOS]
 
 
 @functools.lru_cache(maxsize=None)
@@ -531,6 +546,7 @@ def _det_same(a, b, what):
         P._same(getattr(a.path, f), getattr(b.path, f), (what, f))
 
 
+@pytest.mark.slow
 def test_scenarios_reach_the_rules():
     """The scenarios do what their names say, on the reference: the alias
     rule drops the -22 dB neighbour 1/T above, the joint capture holds an L
@@ -554,6 +570,7 @@ def test_scenarios_reach_the_rules():
     assert new[0].report.snr2500_db > edge.passes[0].report.snr2500_db + 0.1
 
 
+@pytest.mark.slow
 def test_receive_slot_dets_given(native, Rs):
     """receive_slot with `dets` (the live view's preamble detections, the
     reference's objects), CE and joint: typed, the reference's passes; one
@@ -1058,6 +1075,7 @@ def _erased_same(got, ref, what):
         P._pass_close(g, r, (what, r.frame), key="slot erased")
 
 
+@pytest.mark.slow
 def test_whole_caller_finish_receive(native, Rs):
     """live.finish_receive on the joint capture, heard whole (the search
     over the slot, with live's candidate and time budgets) and heard for
@@ -1206,6 +1224,7 @@ def test_receive_wav(native, Rs, tmp_path_factory):
 
 # --- threads ---------------------------------------------------------------------------------------
 
+@pytest.mark.slow
 def test_threads(native, Rs):
     """Four slots received at once, typed (the GIL released): each the
     slot alone gives."""
