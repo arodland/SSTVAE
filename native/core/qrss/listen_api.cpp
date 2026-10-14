@@ -513,7 +513,9 @@ void Session::Core::run_body() {
     {
         std::unique_lock<std::timed_mutex> held(run_mu);
         gate->bind(&held);
-        auto stopping = [&] { return guard->abandoned.load() || req.load() == REQ_INTERRUPT; };
+        // (a stop that came first skips the read-back and the recovery: what
+        // they would start, a stop this close behind would only abandon)
+        auto stopping = [&] { return guard->abandoned.load() || req.load() != REQ_NONE; };
         try {
             if (realtime && !stopping()) listener->backfill(now());
             if (realtime && !stopping()) listener->recover(now(), opt.recover_hours);

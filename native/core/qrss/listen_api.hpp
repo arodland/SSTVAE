@@ -41,11 +41,11 @@
 //               queue append. Microseconds; never waits on the listener, and
 //               the queue is unbounded, so nothing is dropped. After stop() it
 //               does nothing and returns false.
-//   stop,       any thread but the sink's and on_ended's callers' own. Ends the
-//   interrupt   audio, waits for the session's thread to write its last state
-//               and for the listener to close, at most stop_bound_s in all,
-//               plus the time to write state.json once if the deadline finds
-//               the session's thread writing it. What has not finished by then
+//   stop,       any thread, not from inside the sink (from on_ended it returns
+//   interrupt   at once). Ends the audio, waits for the session's thread to
+//               write its last state and for the listener to close, at most
+//               stop_bound_s in all, plus the time to write state.json once
+//               if the deadline finds the session's thread writing it. What has not finished by then
 //               is abandoned (a receive in flight: minutes for a FULL slot,
 //               since the receivers take no cancel flag): its results are
 //               dropped, nothing of it reaches the store, tiles/ or the sink,
@@ -53,8 +53,10 @@
 //               within the bound is kept: its tiles, store passes and log
 //               lines land after "audio ended", and state.json is written
 //               once more (still not listening) so that it shows them.
-//               Idempotent; a second call waits for the first one's end
-//               (the same bound).
+//               One that comes before the session's thread has read the
+//               passband store back skips that and recover() (what they would
+//               start, it would only abandon). Idempotent; a second call
+//               waits for the first one's end (the same bound).
 //   backlog     any thread: the samples pushed and not yet taken by the
 //               listener (a size under a mutex). Growing means the listener
 //               is falling behind its audio.
@@ -67,7 +69,10 @@
 // notices) and from the session's and the listener's threads afterwards,
 // one line at a time (never two at once), never with a lock of the
 // listener's held; it must not call stop() or destroy the session. Nothing
-// reaches it once a stop has abandoned work. on_ended is called once, after
+// reaches it once a stop has abandoned work, and an abandoning stop waits
+// for the line being delivered, so the sink must not wait on the thread
+// that stops the session either (a blocking queued call into a GUI thread
+// that is inside stop() deadlocks: queue the line, do not block on it). on_ended is called once, after
 // the locks are released, on the thread that ended the session: the
 // session's own thread for the end of a replay or of a source, the caller's
 // for stop() and interrupt(). It may call stop() (which then returns at
@@ -91,8 +96,12 @@
 // returns (the listener writes its log file itself), and the passband
 // store's packer, if it was packing an hour, finishes that hour (~1.5 s)
 // with its own atomic swap. Neither can collide with a new listener's files
-// beyond that line. (A LiveListener::abandon() would retire both; see the
-// port notes.)
+// beyond that line. One more, not seen in any measurement: a deadline that
+// finds the session's thread neither waiting for audio nor on its last
+// writes (a read-back or a step that outlasts the bound) cannot stop it
+// mid-step, so the state.json write that ends that step lands after the
+// locks go, saying "listening"; the thread stops at its next read. (A
+// LiveListener::abandon() would retire all three; see the port notes.)
 //
 // Departures from the script, each deliberate:
 //   * interrupt() is the script's KeyboardInterrupt, and the CLI sends it on

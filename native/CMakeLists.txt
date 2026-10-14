@@ -711,8 +711,9 @@ if(TARGET sstvae_qrss)
   endif()
   if(TARGET sstvae_qrss_codec)
     target_link_libraries(sstvae_qrss_cli PUBLIC sstvae_qrss_codec)
-    # The subcommands' codec halves (receive --image, decode's picture),
-    # outside the glob above: receive.hpp's and decode.hpp's hooks.
+    # The subcommands' codec halves (receive --image, decode's picture,
+    # listen's tile pictures), outside the glob above: receive.hpp's,
+    # decode.hpp's and listen.hpp's hooks.
     file(GLOB _qrss_cli_codec_sources CONFIGURE_DEPENDS
          ${CMAKE_CURRENT_SOURCE_DIR}/apps/sstvae_qrss/codec/*.cpp)
     target_sources(sstvae_qrss_cli PRIVATE ${_qrss_cli_codec_sources})

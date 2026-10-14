@@ -46,6 +46,7 @@ import os
 import pty
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -118,35 +119,63 @@ def _no_python_env(tmp: Path) -> dict:
     return env
 
 
-def _run(cmd: list, cwd: Path, env: dict | None = None, stdin=subprocess.DEVNULL, timeout=180) -> Run:
-    """Run to the end, with its wall time, CPU time (user + system) and
-    peak RSS (os.wait4's rusage)."""
+# The measured program is forked by this small launcher rather than spawned
+# by pytest: Linux carries the RSS of the process that execs over into the
+# new program's ru_maxrss, so a program pytest spawns reports at least
+# pytest's own RSS (a few hundred MB here, whatever the program used; /bin/true
+# measured 327 MB from a 300 MB parent). Forked from this, the floor is the
+# launcher's ~5 MB. It writes the program's own CPU and peak, and exits as
+# the program did.
+_MEASURE = r"""
+import os, sys
+pid = os.fork()
+if pid == 0:
+    try:
+        os.execv(sys.argv[2], sys.argv[2:])
+    finally:
+        os._exit(127)
+_, status, ru = os.wait4(pid, 0)
+with open(sys.argv[1], "w") as f:
+    f.write(f"{ru.ru_utime + ru.ru_stime} {ru.ru_maxrss}")
+code = os.waitstatus_to_exitcode(status)
+sys.exit(code if code >= 0 else 128 - code)
+"""
+
+
+def _run(cmd: list, cwd: Path, env: dict | None = None, stdin=subprocess.DEVNULL, timeout=180,
+         measure: bool = False) -> Run:
+    """Run to the end, with its wall time and, measuring, its CPU time (user
+    + system) and peak RSS (through _MEASURE)."""
     cwd.mkdir(parents=True, exist_ok=True)
     out_f, err_f = cwd.parent / f".{cwd.name}.out", cwd.parent / f".{cwd.name}.err"
+    ru_f = cwd.parent / f".{cwd.name}.rusage"
+    argv = [str(c) for c in cmd]
+    if measure:
+        argv = [sys.executable, "-I", "-S", "-c", _MEASURE, str(ru_f), shutil.which(argv[0]) or argv[0], *argv[1:]]
     t = time.monotonic()
     with open(out_f, "wb") as o, open(err_f, "wb") as e:
-        p = subprocess.Popen([str(c) for c in cmd], cwd=cwd, env=env if env is not None else _env(), stdin=stdin,
-                             stdout=o, stderr=e)
-        deadline = time.monotonic() + timeout
-        while True:
-            pid, status, ru = os.wait4(p.pid, os.WNOHANG)
-            if pid:
-                break
-            if time.monotonic() > deadline:
-                p.kill()
-                os.wait4(p.pid, 0)
-                raise AssertionError(f"{cmd} did not end within {timeout} s")
-            time.sleep(0.01)
-        p.returncode = os.waitstatus_to_exitcode(status)
+        p = subprocess.Popen(argv, cwd=cwd, env=env if env is not None else _env(), stdin=stdin,
+                             stdout=o, stderr=e, start_new_session=measure)
+        try:
+            p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if measure:
+                os.killpg(p.pid, signal.SIGKILL)
+            p.kill()
+            p.wait()
+            raise AssertionError(f"{cmd} did not end within {timeout} s") from None
     wall = time.monotonic() - t
-    return Run(p.returncode, out_f.read_text(errors="replace"), err_f.read_text(errors="replace"), wall,
-               ru.ru_utime + ru.ru_stime, ru.ru_maxrss / 1024.0)
+    cpu = rss = 0.0
+    if measure:
+        c, r = ru_f.read_text().split()
+        cpu, rss = float(c), int(r) / 1024.0
+    return Run(p.returncode, out_f.read_text(errors="replace"), err_f.read_text(errors="replace"), wall, cpu, rss)
 
 
 def _both(py_cmd, nat_cmd, py_dir: Path, nat_dir: Path, py_env=None, nat_env=None) -> tuple[Run, Run]:
     with ThreadPoolExecutor(2) as ex:
-        a = ex.submit(_run, py_cmd, py_dir, py_env)
-        b = ex.submit(_run, nat_cmd, nat_dir, nat_env)
+        a = ex.submit(_run, py_cmd, py_dir, py_env, measure=True)
+        b = ex.submit(_run, nat_cmd, nat_dir, nat_env, measure=True)
         return a.result(), b.result()
 
 
