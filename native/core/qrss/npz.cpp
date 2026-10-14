@@ -4,7 +4,8 @@
 #include <array>
 #include <cctype>
 #include <cmath>
-#include <fstream>
+#include <cerrno>
+#include <cstdio>
 #include <iterator>
 #include <limits>
 #include <type_traits>
@@ -12,6 +13,7 @@
 #include <unordered_set>
 
 #include "qrss/crc32.hpp"
+#include "util/fileio.hpp"
 
 namespace sstvae::qrss::npz {
 
@@ -452,19 +454,32 @@ std::vector<std::uint8_t> fortran_to_c(const std::vector<std::uint8_t>& f, const
 }
 
 std::vector<std::uint8_t> read_file(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) throw std::runtime_error("cannot open " + path);
-    std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (in.bad()) throw std::runtime_error("cannot read " + path);
+    errno = 0;
+    const util::File f = util::open_file(path, "rb");
+    if (!f) throw FileError("cannot open", path, errno ? errno : EIO);
+    std::vector<std::uint8_t> data;
+    std::vector<std::uint8_t> buf(std::size_t(1) << 16);
+    for (;;) {
+        errno = 0;
+        const std::size_t n = std::fread(buf.data(), 1, buf.size(), f.get());
+        data.insert(data.end(), buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(n));
+        if (n < buf.size()) {
+            if (std::ferror(f.get())) throw FileError("cannot read", path, errno ? errno : EIO);
+            break;
+        }
+    }
     return data;
 }
 
 void write_file(const std::string& path, const std::vector<std::uint8_t>& data) {
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) throw std::runtime_error("cannot write " + path);
-    out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
-    out.close();
-    if (!out) throw std::runtime_error("cannot write " + path);
+    errno = 0;
+    util::File f = util::open_file(path, "wb");
+    if (!f) throw FileError("cannot write", path, errno ? errno : EIO);
+    errno = 0;
+    if (!data.empty() && std::fwrite(data.data(), 1, data.size(), f.get()) != data.size())
+        throw FileError("cannot write", path, errno ? errno : EIO);
+    errno = 0;
+    if (std::fclose(f.release()) != 0) throw FileError("cannot write", path, errno ? errno : EIO);
 }
 
 // --- zip -------------------------------------------------------------------------------

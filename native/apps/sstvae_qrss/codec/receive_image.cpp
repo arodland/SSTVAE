@@ -41,6 +41,7 @@
 #include "qrss/codec/render.hpp"
 #include "qrss/picture.hpp"
 #include "qrss/types.hpp"
+#include "util/fileio.hpp"
 
 namespace sstvae::qrss::cli {
 namespace {
@@ -97,9 +98,7 @@ int render_pass(const types::PassResult& p, const receive::ImageRequest& req, st
         // open(name, "w+b") -- an OSError with errno -- then the encoder.
         const std::string path = qc::pathlib_str(req.image);
         errno = 0;
-        std::FILE* f = std::fopen(path.c_str(), "wb");
-        if (!f) return uncaught(err, OsError(errno ? errno : EIO, path));
-        std::fclose(f);
+        if (!util::open_file(path, "wb")) return uncaught(err, OsError(errno ? errno : EIO, path));
         images::save_png(pic, path);
         out << "image: " << path << "\n";
         return 0;

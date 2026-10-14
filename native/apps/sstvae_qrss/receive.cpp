@@ -22,10 +22,8 @@
 // --no-passband (which only mean anything to the store), this refuses
 // before reading anything rather than receive without storing.
 //
-// --just-ce and --just-l are argparse's mutually exclusive group, which
-// argparse.hpp does not model: the conflict is found here, at the argument
-// argparse would raise it at, and the usage line shows the group as
-// argparse prints it.
+// --just-ce and --just-l are argparse's mutually exclusive group
+// (argparse.hpp's exclusive()), refused and printed as argparse does.
 
 #include <algorithm>
 #include <cmath>
@@ -48,6 +46,7 @@
 #include "common.hpp"
 #include "qrss/config.hpp"
 #include "qrss/frame.hpp"
+#include "qrss/pypath.hpp"
 #include "qrss/pytext.hpp"
 #include "qrss/receiver.hpp"
 #include "qrss/rules.hpp"
@@ -165,6 +164,7 @@ ArgParser parser(const std::string& prog) {
                              "frame shape, either waveform's name for it (default full, or the .npz's own)"));
     ap.flag("--just-ce", "listen for waveform CE only (default: CE and L)");
     ap.flag("--just-l", "listen for waveform L only (default: CE and L)");
+    ap.exclusive({"--just-ce", "--just-l"});
     ap.option("--store", ArgSpec().described("multi-pass store directory"));
     ap.flag("--no-store", "do not store or associate");
     ap.option("--passband", ArgSpec().described("48 h passband store directory (default STORE/passband)"));
@@ -183,131 +183,12 @@ ArgParser parser(const std::string& prog) {
     return ap;
 }
 
-// --- the mutually exclusive group ----------------------------------------------------
-
-constexpr std::string_view GROUP_USAGE_SPLIT = "[--just-ce] [--just-l]";
-constexpr std::string_view GROUP_USAGE = "[--just-ce | --just-l]";
-
-// argparse prints a mutually exclusive group's options as one bracket.
-std::string group_usage(std::string text) {
-    for (std::size_t at = text.find(GROUP_USAGE_SPLIT); at != std::string::npos;
-         at = text.find(GROUP_USAGE_SPLIT, at + GROUP_USAGE.size()))
-        text.replace(at, GROUP_USAGE_SPLIT.size(), GROUP_USAGE);
-    return text;
-}
-
-struct Conflict {
-    std::size_t at;       // the argument argparse raises the conflict at
-    std::string first;    // the group's option seen first ("--just-ce")
-    std::string second;   // the other one, at `at`
-};
-
-// The parser's long options, read off its usage line (and --help, which
-// the usage line shows as -h): what argparse matches an abbreviation
-// against.
-std::vector<std::string> long_flags(const ArgParser& ap) {
-    std::vector<std::string> out = {"--help"};
-    std::istringstream words(ap.usage());
-    for (std::string w; words >> w;) {
-        if (!w.empty() && w.front() == '[') w.erase(0, 1);
-        while (!w.empty() && w.back() == ']') w.pop_back();
-        if (w.rfind("--", 0) == 0 && w.size() > 2) out.push_back(w);
-    }
-    return out;
-}
-
-// Where argparse's take_action raises "not allowed with": the first
-// argument naming the other option of the group once one has been seen.
-// Arguments are classified as argparse does: after the first "--" all are
-// values; "--opt=x" is never a group flag (a store_true given a value is
-// refused before take_action); an exact flag or a unique prefix of one.
-std::optional<Conflict> exclusive_conflict(const std::vector<std::string>& argv,
-                                           const std::vector<std::string>& flags) {
-    std::optional<std::string> seen;
-    for (std::size_t i = 0; i < argv.size(); ++i) {
-        const std::string& a = argv[i];
-        if (a == "--") break;
-        if (a.rfind("--", 0) != 0 || a.find('=') != std::string::npos) continue;
-        std::string hit;
-        if (std::find(flags.begin(), flags.end(), a) != flags.end()) {
-            hit = a;
-        } else {
-            std::vector<std::string> m;
-            for (const std::string& f : flags)
-                if (f.rfind(a, 0) == 0) m.push_back(f);
-            if (m.size() != 1) continue;
-            hit = m.front();
-        }
-        if (hit != "--just-ce" && hit != "--just-l") continue;
-        if (!seen) seen = hit;
-        else if (*seen != hit) return Conflict{i, *seen, hit};
-    }
-    return std::nullopt;
-}
-
-// parse_args with the group: nullopt after help or a usage error (written
-// to out / err, `status` 0 or 2).
-std::optional<Args> parse_args(const ArgParser& ap, const std::string& prog, const std::vector<std::string>& argv,
-                               std::ostream& out, std::ostream& err, int& status) {
-    const std::optional<Conflict> c = exclusive_conflict(argv, long_flags(ap));
-    std::ostringstream o, e;
-    // Up to the conflict, argparse consumes as it would without one: help
-    // and every error raised while consuming come first. Errors raised after
-    // consuming (missing and unrecognized arguments) never come, the conflict
-    // being raised before.
-    const std::vector<std::string> head(argv.begin(), c ? argv.begin() + static_cast<std::ptrdiff_t>(c->at)
-                                                        : argv.end());
-    std::optional<Args> args = ap.parse(head, o, e, status);
-    if (c) {
-        const std::string text = e.str();
-        const bool late = text.find(": error: the following arguments are required: ") != std::string::npos ||
-                          text.find(": error: unrecognized arguments: ") != std::string::npos;
-        if (args || late) {
-            err << group_usage(ap.usage()) << "\n"
-                << prog << ": error: argument " << c->second << ": not allowed with argument " << c->first << "\n";
-            status = 2;
-            return std::nullopt;
-        }
-    }
-    out << group_usage(o.str());
-    err << group_usage(e.str());
-    return args;
-}
-
 // --- paths, as pathlib prints them -------------------------------------------------------
 
-// str(PurePosixPath(text)): "." for nothing, '.' parts and repeated or
-// trailing slashes dropped, exactly two leading slashes kept.
-std::string pathlib_str(std::string_view text) {
-    std::string root;
-    if (!text.empty() && text[0] == '/') {
-        root = text.size() >= 2 && text[1] == '/' && !(text.size() >= 3 && text[2] == '/') ? "//" : "/";
-        text.remove_prefix(root.size() == 2 ? 2 : 1);
-    }
-    std::string out = root;
-    bool first = true;
-    std::size_t i = 0;
-    while (i <= text.size()) {
-        const std::size_t j = std::min(text.find('/', i), text.size());
-        const std::string_view part = text.substr(i, j - i);
-        if (!part.empty() && part != ".") {
-            if (!first) out += '/';
-            out += part;
-            first = false;
-        }
-        i = j + 1;
-    }
-    return out.empty() ? "." : out;
-}
-
-// path.suffix.lower() == ".npz": the last part's final ".npz", in any case,
-// with something before the dot.
-bool is_npz(const std::string& normalised) {
-    const std::size_t slash = normalised.rfind('/');
-    const std::string name = slash == std::string::npos ? normalised : normalised.substr(slash + 1);
-    const std::size_t dot = name.rfind('.');
-    if (dot == std::string::npos || dot == 0 || dot + 1 == name.size()) return false;
-    std::string suffix = name.substr(dot);
+// path.suffix.lower() == ".npz". ASCII lowering is str.lower's here: no
+// other character lowers to one of ".npz"'s.
+bool is_npz(const std::string& path) {
+    std::string suffix = pypath::pathlib_suffix(path);
     std::transform(suffix.begin(), suffix.end(), suffix.begin(),
                    [](char ch) { return ch >= 'A' && ch <= 'Z' ? static_cast<char>(ch - 'A' + 'a') : ch; });
     return suffix == ".npz";
@@ -375,7 +256,7 @@ std::vector<std::string> pass_lines(const types::PassResult& p) {
 int run(const std::string& prog, const std::vector<std::string>& argv, std::ostream& out, std::ostream& err) {
     const ArgParser ap = parser(prog);
     int status = 0;
-    const std::optional<Args> args = parse_args(ap, prog, argv, out, err, status);
+    const std::optional<Args> args = ap.parse(argv, out, err, status);
     if (!args) return status;
 
     // What this port cannot do yet, refused before anything is read.
@@ -466,7 +347,7 @@ int run(const std::string& prog, const std::vector<std::string>& argv, std::ostr
     }
 
     // load_capture
-    const std::string path = pathlib_str(*args->text("input"));
+    const std::string path = pypath::pathlib_str(*args->text("input"));
     if (!is_file(path)) return system_exit(err, path + ": no such file");
     api::Capture cap;
     std::optional<std::string> npz_frame;

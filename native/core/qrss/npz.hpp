@@ -197,9 +197,22 @@ Array parse_npy(std::span<const std::uint8_t> file);
 std::vector<std::uint8_t> npz_bytes(const Npz& z, DosTime stamp = {});
 Npz parse_npz(std::span<const std::uint8_t> file);
 
-// The same, on files. The path is used as given (np.savez would append
-// ".npz" to a name without it; picture.save_qrsp avoids that by passing a
-// file handle, which this matches).
+// A file the four functions below could not open, read or write: what()
+// is "<verb> <path>" ("cannot open x.npz"), and the path (UTF-8, as every
+// path in the port: util/fileio.hpp) and errno travel with it, so a
+// binding can say it in Python's terms.
+struct FileError : std::runtime_error {
+    FileError(const std::string& verb_, const std::string& path_, int err_)
+        : std::runtime_error(verb_ + " " + path_), verb(verb_), path(path_), err(err_) {}
+    std::string verb;
+    std::string path;
+    int err;
+};
+
+// The same, on files (FileError when the file cannot be had). The path is
+// used as given (np.savez would append ".npz" to a name without it;
+// picture.save_qrsp avoids that by passing a file handle, which this
+// matches).
 void save_npy(const std::string& path, const Array& a);
 Array load_npy(const std::string& path);
 void save_npz(const std::string& path, const Npz& z, DosTime stamp = {});

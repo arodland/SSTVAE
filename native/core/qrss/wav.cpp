@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "util/fileio.hpp"
+
 namespace sstvae::qrss::wav {
 
 namespace {
@@ -121,8 +123,9 @@ std::int16_t to_int16(double x, double m, double peak) {
 Writer::Writer(const std::string& path, Format format, std::int64_t n, std::int64_t rate)
     : path_(path), format_(format), n_(n) {
     const std::vector<std::uint8_t> h = header(format, n, rate);
-    f_ = std::fopen(path.c_str(), "wb");
-    if (!f_) throw WriteError(path, errno);
+    errno = 0;
+    f_ = util::open_file(path, "wb").release();
+    if (!f_) throw WriteError(path, errno ? errno : EIO);
     put(h.data(), h.size());
 }
 

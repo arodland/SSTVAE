@@ -24,6 +24,7 @@
 #include "qrss/header.hpp"
 #include "qrss/pytext.hpp"
 #include "qrss/slot.hpp"
+#include "util/fileio.hpp"
 
 namespace sstvae::qrss::api {
 
@@ -104,7 +105,7 @@ Source read_source(const std::string& path) {
     // nothing useful (libstdc++ throws "basic_filebuf::underflow error
     // reading the file" for a directory).
     errno = 0;
-    const std::unique_ptr<std::FILE, int (*)(std::FILE*)> f(std::fopen(path.c_str(), "rb"), &std::fclose);
+    const util::File f = util::open_file(path, "rb");
     if (!f) throw ReadError(path, errno ? errno : EIO);
     std::vector<std::uint8_t> data;
     std::vector<std::uint8_t> buf(std::size_t(1) << 16);

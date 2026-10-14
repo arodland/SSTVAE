@@ -6,18 +6,16 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
-#include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <vector>
 
 #include "qrss/npz.hpp"
 #include "qrss/picture.hpp"
 #include "qrss/pytext.hpp"
+#include "util/fileio.hpp"
 
 namespace sstvae::qrss::cli {
 
@@ -36,13 +34,6 @@ std::string os_error_class(int err) {
         default: return "OSError";
     }
 }
-
-struct FileCloser {
-    void operator()(std::FILE* f) const {
-        if (f) std::fclose(f);
-    }
-};
-using File = std::unique_ptr<std::FILE, FileCloser>;
 
 }  // namespace
 
@@ -63,7 +54,7 @@ OsError::OsError(int err, const std::string& path)
 
 std::vector<std::uint8_t> read_file(const std::string& path) {
     errno = 0;
-    File f(std::fopen(path.c_str(), "rb"));
+    const util::File f = util::open_file(path, "rb");
     if (!f) throw OsError(errno ? errno : EIO, path);
     std::vector<std::uint8_t> out;
     std::uint8_t buf[1 << 16];
@@ -81,7 +72,7 @@ std::vector<std::uint8_t> read_file(const std::string& path) {
 
 void write_file(const std::string& path, std::span<const std::uint8_t> data) {
     errno = 0;
-    File f(std::fopen(path.c_str(), "wb"));
+    util::File f = util::open_file(path, "wb");
     if (!f) throw OsError(errno ? errno : EIO, path);
     errno = 0;
     if (!data.empty() && std::fwrite(data.data(), 1, data.size(), f.get()) != data.size())
@@ -90,10 +81,7 @@ void write_file(const std::string& path, std::span<const std::uint8_t> data) {
     if (std::fclose(f.release()) != 0) throw OsError(errno ? errno : EIO, path);
 }
 
-bool is_file(const std::string& path) {
-    std::error_code ec;
-    return std::filesystem::is_regular_file(std::filesystem::path(path), ec);
-}
+bool is_file(const std::string& path) { return util::is_file(path); }
 
 picture::StoredPicture load_qrsp(const std::string& path) {
     const std::vector<std::uint8_t> data = read_file(path);

@@ -1,7 +1,10 @@
 #include "argparse.hpp"
 
+#include <algorithm>
 #include <cstddef>
+#include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -164,16 +167,90 @@ ArgParser& ArgParser::flag(const std::string& flag, const std::string& help) {
     return *this;
 }
 
+ArgParser& ArgParser::exclusive(const std::vector<std::string>& flags, bool required) {
+    if (flags.empty()) throw std::logic_error("empty mutually exclusive group");
+    Group g;
+    g.required = required;
+    for (const std::string& f : flags) {
+        std::optional<std::size_t> found;
+        for (std::size_t k = 0; k < actions_.size(); ++k)
+            for (const std::string& af : actions_[k].flags)
+                if (af == f) found = k;
+        if (!found) throw std::logic_error("no option " + f + " for a mutually exclusive group");
+        const Action& a = actions_[*found];
+        if (a.positional || a.help) throw std::logic_error(f + ": not an option a group here can hold");
+        // argparse: "mutually exclusive arguments must be optional"
+        if (a.spec.required) throw std::logic_error("mutually exclusive arguments must be optional");
+        if (std::find(g.actions.begin(), g.actions.end(), *found) == g.actions.end()) g.actions.push_back(*found);
+    }
+    std::sort(g.actions.begin(), g.actions.end());
+    groups_.push_back(std::move(g));
+    return *this;
+}
+
 std::string ArgParser::usage() const {
-    std::string out = "usage: " + prog_;
-    for (const Action& a : actions_) {
-        if (a.positional) continue;
+    // HelpFormatter._get_actions_usage_parts_with_split, over optionals then
+    // positionals (each in add order), as _format_usage hands them over.
+    std::vector<std::size_t> order;
+    for (std::size_t k = 0; k < actions_.size(); ++k)
+        if (!actions_[k].positional) order.push_back(k);
+    for (std::size_t k = 0; k < actions_.size(); ++k)
+        if (actions_[k].positional) order.push_back(k);
+
+    // A group is drawn as one only where its options sit together in that
+    // order; keyed by (start, end) as argparse's dict is, a later group
+    // over the same span replacing an earlier one.
+    std::vector<bool> grouped(actions_.size(), false);
+    std::map<std::pair<std::size_t, std::size_t>, std::size_t> inserts;
+    for (std::size_t gi = 0; gi < groups_.size(); ++gi) {
+        const Group& g = groups_[gi];
+        const auto first = std::find(order.begin(), order.end(), g.actions.front());
+        const auto start = static_cast<std::size_t>(first - order.begin());
+        const std::size_t end = start + g.actions.size();
+        if (end > order.size()) continue;
+        if (!std::equal(g.actions.begin(), g.actions.end(), order.begin() + static_cast<std::ptrdiff_t>(start)))
+            continue;
+        for (const std::size_t k : g.actions) grouped[k] = true;
+        inserts[{start, end}] = gi;
+    }
+
+    std::vector<std::optional<std::string>> parts;
+    for (const std::size_t k : order) {
+        const Action& a = actions_[k];
+        if (a.positional) {
+            parts.emplace_back(a.metavar());
+            continue;
+        }
         std::string part = a.flags.front();
         if (!a.store_true) part += " " + a.metavar();
-        out += " " + (a.spec.required ? part : "[" + part + "]");
+        if (!a.spec.required && !grouped[k]) part = "[" + part + "]";
+        parts.emplace_back(part);
     }
-    for (const Action& a : actions_)
-        if (a.positional) out += " " + a.metavar();
+
+    std::set<std::size_t> separated;
+    for (auto it = inserts.rbegin(); it != inserts.rend(); ++it) {
+        const auto [start, end] = it->first;
+        const Group& g = groups_[it->second];
+        std::vector<std::string> group_parts;
+        for (std::size_t i = start; i < end; ++i)
+            if (parts[i]) group_parts.push_back(*parts[i]);
+        const std::size_t size = group_parts.size();
+        std::string open = "[", close = "]";
+        if (g.required) {
+            open = size > 1 ? "(" : "";
+            close = size > 1 ? ")" : "";
+        }
+        group_parts.front() = open + group_parts.front();
+        group_parts.back() += close;
+        for (std::size_t j = 0; j + 1 < size; ++j)
+            if (separated.insert(start + j).second) parts[start + j] = group_parts[j] + " |";
+        parts[start + size - 1] = group_parts.back();
+        for (std::size_t i = start + size; i < end; ++i) parts[i] = std::nullopt;
+    }
+
+    std::string out = "usage: " + prog_;
+    for (const auto& p : parts)
+        if (p) out += " " + *p;
     return out;
 }
 
@@ -279,7 +356,25 @@ std::optional<Args> ArgParser::parse(const std::vector<std::string>& args, std::
         else result.values_[a.dest] = a.spec.default_text;
     }
 
+    // _parse_known_args' action_conflicts: an option's partners in every
+    // group holding it, group by group.
+    std::vector<std::vector<std::size_t>> conflicts(actions_.size());
+    for (const Group& g : groups_)
+        for (const std::size_t k : g.actions)
+            for (const std::size_t other : g.actions)
+                if (other != k) conflicts[k].push_back(other);
+
     std::vector<bool> seen(actions_.size(), false);
+    // seen_non_default_actions: every option taken (an option always counts,
+    // whatever its value).
+    std::vector<bool> taken(actions_.size(), false);
+    auto take = [&](std::size_t k) {
+        taken[k] = true;
+        for (const std::size_t other : conflicts[k])
+            if (taken[other])
+                throw ArgumentError{"argument " + actions_[k].name() + ": not allowed with argument " +
+                                    actions_[other].name()};
+    };
     std::vector<std::string> extras;
     std::size_t next_positional = 0;
     auto positional_index = [&](std::size_t nth) -> std::optional<std::size_t> {
@@ -345,6 +440,7 @@ std::optional<Args> ArgParser::parse(const std::vector<std::string>& args, std::
                         throw ArgumentError{"argument " + a.name() + ": ignored explicit argument " +
                                             pytext::repr(x)};
                 }
+                take(m.action);
                 if (a.help) {
                     out << help();
                     status = 0;
@@ -376,6 +472,7 @@ std::optional<Args> ArgParser::parse(const std::vector<std::string>& args, std::
                                         " (choose from " + choices + ")"};
                 }
             }
+            take(m.action);
             result.values_[a.dest] = value;
         }
 
@@ -386,6 +483,16 @@ std::optional<Args> ArgParser::parse(const std::vector<std::string>& args, std::
             std::string names;
             for (std::size_t k = 0; k < missing.size(); ++k) names += (k ? ", " : "") + missing[k];
             throw ArgumentError{"the following arguments are required: " + names};
+        }
+        for (const Group& g : groups_) {
+            if (!g.required) continue;
+            bool any = false;
+            for (const std::size_t k : g.actions) any = any || taken[k];
+            if (any) continue;
+            std::string names;
+            for (std::size_t j = 0; j < g.actions.size(); ++j)
+                names += (j ? " " : "") + actions_[g.actions[j]].name();
+            throw ArgumentError{"one of the arguments " + names + " is required"};
         }
         if (!extras.empty()) {
             std::string names;

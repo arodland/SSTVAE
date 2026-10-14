@@ -34,18 +34,16 @@
 #include "checkpoint/checkpoint.hpp"
 #include "qrss/codec/encode.hpp"
 #include "qrss/picture.hpp"
+#include "qrss/pypath.hpp"
 
 namespace sstvae::qrss::codec {
 
 // --- Python's text conventions these refusals need --------------------------
 
-// str(pathlib.PurePosixPath(text)): "." for "", '.' components and repeated
-// or trailing slashes dropped, exactly two leading slashes kept.
-std::string pathlib_str(std::string_view text);
-
-// PurePosixPath(text).suffix: the name's last ".xyz", "" for none (".onnx"
-// and "a." have none).
-std::string pathlib_suffix(std::string_view text);
+// str(pathlib.PurePosixPath(text)) and its .suffix: qrss/pypath.hpp's, the
+// one copy the CLI shares, named here as they always were.
+using pypath::pathlib_str;
+using pypath::pathlib_suffix;
 
 // --- locating the model ---------------------------------------------------------
 

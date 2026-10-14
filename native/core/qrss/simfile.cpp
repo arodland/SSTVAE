@@ -2,8 +2,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <iterator>
 #include <string_view>
 #include <unordered_map>
@@ -11,6 +11,7 @@
 
 #include "qrss/crc32.hpp"
 #include "qrss/npz.hpp"
+#include "util/fileio.hpp"
 
 namespace sstvae::qrss::simfile {
 
@@ -292,10 +293,13 @@ Sim parse(std::span<const std::uint8_t> file) {
 }
 
 Sim load(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) throw std::runtime_error("cannot open " + path);
-    const std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (in.bad()) throw std::runtime_error("cannot read " + path);
+    const util::File f = util::open_file(path, "rb");
+    if (!f) throw std::runtime_error("cannot open " + path);
+    std::vector<std::uint8_t> data;
+    std::vector<std::uint8_t> buf(std::size_t(1) << 16);
+    for (std::size_t n; (n = std::fread(buf.data(), 1, buf.size(), f.get())) > 0;)
+        data.insert(data.end(), buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(n));
+    if (std::ferror(f.get())) throw std::runtime_error("cannot read " + path);
     return parse(data);
 }
 

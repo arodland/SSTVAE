@@ -21,9 +21,17 @@
 // - type=int and type=float as int() and float() read text (pynum.hpp),
 //   "invalid int value: 'x'"; choices checked after the type, "invalid
 //   choice: 'Z' (choose from 'A', 'B', 'C')";
+// - mutually exclusive groups of options (add_mutually_exclusive_group):
+//   "argument --b: not allowed with argument --a" raised at the second, once
+//   its value has passed type and choices (take_action); the usage line
+//   shows a group whose options were added one after another as one
+//   bracket, "[--a | --b]" ("(--a | --b)" when required, which a group of
+//   one prints bare), and a required group none of whose options was given
+//   is "one of the arguments --a --b is required";
 // - after the arguments, "the following arguments are required: a, b,
-//   --callsign" in the order the arguments were added, then "unrecognized
-//   arguments: ..." for unknown options and surplus values;
+//   --callsign" in the order the arguments were added, then a required
+//   group's refusal, then "unrecognized arguments: ..." for unknown options
+//   and surplus values;
 // - a refusal is "usage: ..." and "<prog>: error: <message>" on stderr;
 // - -h's single-dash forms: "-hx" is help (argparse reads x as more short
 //   flags, and help exits before an unknown one is reported), "-h=x" and
@@ -38,6 +46,7 @@
 #ifndef SSTVAE_APPS_SSTVAE_QRSS_ARGPARSE_HPP
 #define SSTVAE_APPS_SSTVAE_QRSS_ARGPARSE_HPP
 
+#include <cstddef>
 #include <map>
 #include <optional>
 #include <ostream>
@@ -96,6 +105,12 @@ public:
     ArgParser& option(const std::string& flag, ArgSpec spec = {});
     // action="store_true".
     ArgParser& flag(const std::string& flag, const std::string& help = {});
+    // add_mutually_exclusive_group(required=...) holding these options
+    // (already added; flags as given to option() / flag()). Its options are
+    // the group's in the order they were added, as argparse's are. Refuses
+    // (std::logic_error) what argparse refuses or this does not model: an
+    // empty group, a positional, a required option, an unknown flag.
+    ArgParser& exclusive(const std::vector<std::string>& flags, bool required = false);
 
     // parse_args(args): nullopt after printing help (status 0) or a usage
     // error (status 2) to `out` / `err`; `status` says which.
@@ -116,9 +131,14 @@ private:
         std::string name() const;         // argparse's _get_action_name
         std::string metavar() const;
     };
+    struct Group {
+        std::vector<std::size_t> actions;   // indices into actions_, ascending
+        bool required = false;
+    };
     std::string prog_;
     std::string description_;
     std::vector<Action> actions_;   // add order, -h/--help first
+    std::vector<Group> groups_;     // add order
 };
 
 }  // namespace sstvae::qrss::cli

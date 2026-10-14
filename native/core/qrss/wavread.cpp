@@ -26,6 +26,7 @@
 #include "dsp/dsp.hpp"
 #include "qrss/config.hpp"
 #include "qrss/npsum.hpp"
+#include "util/fileio.hpp"
 
 namespace sstvae::qrss::wav {
 
@@ -545,8 +546,9 @@ FormatError::FormatError(Kind k, const std::string& what) : std::invalid_argumen
 
 std::vector<double> read_wav(const std::string& path, std::vector<Warning>* warnings) {
     if (path.find('\0') != std::string::npos) fail(Kind::value, "embedded null byte");
-    std::unique_ptr<std::FILE, int (*)(std::FILE*)> file(std::fopen(path.c_str(), "rb"), &std::fclose);
-    if (!file) throw ReadError(path, errno);
+    errno = 0;
+    const util::File file = util::open_file(path, "rb");
+    if (!file) throw ReadError(path, errno ? errno : EIO);
     std::vector<std::uint8_t> bytes;
     {
         std::vector<std::uint8_t> buf(std::size_t{1} << 20);

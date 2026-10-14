@@ -3,10 +3,11 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
-#include <filesystem>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -16,11 +17,11 @@
 #include "codec/codec.hpp"
 #include "images/images.hpp"
 #include "qrss/pynum.hpp"
+#include "qrss/pypath.hpp"
 #include "qrss/pytext.hpp"
+#include "util/fileio.hpp"
 
 namespace sstvae::qrss::codec {
-
-namespace fs = std::filesystem;
 
 namespace {
 
@@ -28,86 +29,11 @@ bool ends_with(std::string_view s, std::string_view tail) {
     return s.size() >= tail.size() && s.compare(s.size() - tail.size(), tail.size(), tail) == 0;
 }
 
-// pathlib's split: (root, parts) of an already normalised path string.
-std::pair<std::string, std::vector<std::string>> split_path(std::string_view text) {
-    std::string root;
-    std::string_view rest = text;
-    if (!rest.empty() && rest[0] == '/') {
-        if (rest.size() >= 2 && rest[1] == '/' && !(rest.size() >= 3 && rest[2] == '/')) {
-            root = "//";
-            rest.remove_prefix(2);
-        } else {
-            root = "/";
-            rest.remove_prefix(1);
-        }
-    }
-    std::vector<std::string> parts;
-    std::size_t i = 0;
-    while (i <= rest.size()) {
-        const std::size_t j = std::min(rest.find('/', i), rest.size());
-        const std::string_view part = rest.substr(i, j - i);
-        if (!part.empty() && part != ".") parts.emplace_back(part);
-        i = j + 1;
-    }
-    return {root, parts};
-}
-
-std::string join_path(const std::string& root, const std::vector<std::string>& parts) {
-    std::string out = root;
-    for (std::size_t k = 0; k < parts.size(); ++k) {
-        if (k) out += '/';
-        out += parts[k];
-    }
-    return out.empty() ? "." : out;
-}
-
-// Path(dir) / name, as str() prints it.
-std::string child(const std::string& dir, const std::string& name) {
-    auto [root, parts] = split_path(dir);
-    parts.push_back(name);
-    return join_path(root, parts);
-}
-
-// PurePath.name and .suffix.
-std::string path_name(const std::string& p) {
-    const auto [root, parts] = split_path(p);
-    return parts.empty() ? std::string() : parts.back();
-}
-
-std::string path_suffix(const std::string& p) {
-    const std::string name = path_name(p);
-    const std::size_t dot = name.rfind('.');
-    // A leading dot is not a suffix; neither is a trailing one (".onnx" and
-    // "a." have none).
-    if (dot == std::string::npos || dot == 0 || dot + 1 == name.size()) return {};
-    return name.substr(dot);
-}
-
-// PurePath.with_name(name).
-std::string with_name(const std::string& p, const std::string& name) {
-    auto [root, parts] = split_path(p);
-    if (parts.empty()) throw std::invalid_argument(p + " has an empty name");
-    parts.back() = name;
-    return join_path(root, parts);
-}
-
-bool is_dir(const std::string& p) {
-    std::error_code ec;
-    return fs::is_directory(fs::path(p), ec);
-}
-
-bool exists(const std::string& p) {
-    std::error_code ec;
-    return fs::exists(fs::path(p), ec);
-}
-
 // The names of a directory's entries (pathlib's glob sees them all, dot
 // files and directories included), byte-sorted as Python sorts them.
 std::vector<std::string> entry_names(const std::string& dir) {
-    std::vector<std::string> out;
     std::error_code ec;
-    for (fs::directory_iterator it(fs::path(dir), ec), end; !ec && it != end; it.increment(ec))
-        out.push_back(it->path().filename().string());
+    std::vector<std::string> out = util::list_dir(dir, ec);
     std::sort(out.begin(), out.end());
     return out;
 }
@@ -165,15 +91,6 @@ Ort::Env& ort_env() {
 
 }  // namespace
 
-// --- Python's text conventions --------------------------------------------------------
-
-std::string pathlib_str(std::string_view text) {
-    const auto [root, parts] = split_path(text);
-    return join_path(root, parts);
-}
-
-std::string pathlib_suffix(std::string_view text) { return path_suffix(pathlib_str(text)); }
-
 // --- locating the model ------------------------------------------------------------------
 
 std::string resolve_onnx(std::string_view part_in, const std::optional<std::string>& path,
@@ -184,7 +101,7 @@ std::string resolve_onnx(std::string_view part_in, const std::optional<std::stri
     if (!path) return checkpoint::resolve_onnx(part, {}, precision, fetcher);
 
     const std::string p = pathlib_str(*path);
-    if (is_dir(p)) {
+    if (util::is_dir(p)) {
         const std::string tail = "-" + part + "-" + precision + ".onnx";
         std::vector<std::string> matches, available;
         for (const std::string& name : entry_names(p)) {
@@ -198,13 +115,13 @@ std::string resolve_onnx(std::string_view part_in, const std::optional<std::stri
         if (matches.size() > 1)
             throw ModelError("ambiguous: " + std::to_string(matches.size()) + " candidates for " + part + "/" +
                              precision + " in " + p + " (" + join(matches, ", ") + ")");
-        return child(p, matches.front());
+        return pypath::child(p, matches.front());
     }
 
-    if (path_suffix(p) == ".onnx") {
+    if (pypath::pathlib_suffix(p) == ".onnx") {
         // `-decoder-` is a prefix of `-decoder-grad-`, so a plain substring
         // test would hand back the gradient graph when the decoder was asked.
-        const std::string name = path_name(p);
+        const std::string name = pypath::pathlib_name(p);
         const bool is_grad = name.find("-" + grad + "-") != std::string::npos;
         if (name.find("-" + part + "-") != std::string::npos && is_grad == (part == grad)) return p;
         const std::string other = is_grad ? grad : (part == "encoder" ? "decoder" : "encoder");
@@ -213,8 +130,8 @@ std::string resolve_onnx(std::string_view part_in, const std::optional<std::stri
             throw ModelError("cannot tell which part " + name + " is -- expected a name like v1-" + part + "-" +
                              precision + ".onnx, or pass the directory instead");
         const std::string sibling_name = name.substr(0, at) + "-" + part + "-" + precision + ".onnx";
-        const std::string sibling = with_name(p, sibling_name);
-        if (!exists(sibling))
+        const std::string sibling = pypath::with_name(p, sibling_name);
+        if (!util::exists(sibling))
             throw ModelError("need the " + part + " as well as the " + other + ", but " + sibling_name +
                              " is not next to " + name);
         return sibling;
@@ -234,8 +151,13 @@ std::optional<std::string> source_sha256(const std::string& onnx_path) {
         opts.SetIntraOpNumThreads(1);
         opts.SetInterOpNumThreads(1);
 #ifdef _WIN32
-        const std::wstring wpath(onnx_path.begin(), onnx_path.end());
-        Ort::Session sess(ort_env(), wpath.c_str(), opts);
+        // onnxruntime takes a wide path here: the UTF-8 name as UTF-16, never
+        // widened byte by byte (which turns "\xc3\xa9" into two characters).
+        const std::optional<std::wstring> wpath = util::wide_of(onnx_path);
+        if (!wpath)
+            throw OrtError(3, "NoSuchFile", "[ONNXRuntimeError] : 3 : NO_SUCHFILE : Load model from " + onnx_path +
+                                                " failed: the name is not UTF-8");
+        Ort::Session sess(ort_env(), wpath->c_str(), opts);
 #else
         Ort::Session sess(ort_env(), onnx_path.c_str(), opts);
 #endif
@@ -265,7 +187,7 @@ std::optional<std::int64_t> codec_id_of_sha(std::string_view sha) {
 
 std::optional<std::int64_t> codec_id_from_onnx(const std::string& path_or_dir, std::string_view precision) {
     std::string p = pathlib_str(path_or_dir);
-    if (is_dir(p)) {
+    if (util::is_dir(p)) {
         std::optional<std::string> found;
         for (const char* part : {"encoder", "decoder"}) {
             try {

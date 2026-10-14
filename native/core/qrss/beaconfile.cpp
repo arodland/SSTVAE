@@ -1,8 +1,9 @@
 #include "qrss/beaconfile.hpp"
 
 #include <algorithm>
+#include <cerrno>
+#include <cstddef>
 #include <cstdio>
-#include <fstream>
 #include <iterator>
 #include <limits>
 #include <stdexcept>
@@ -12,6 +13,7 @@
 #include "qrss/crc32.hpp"
 #include "qrss/morse.hpp"
 #include "qrss/pytext.hpp"
+#include "util/fileio.hpp"
 
 namespace sstvae::qrss::beaconfile {
 
@@ -210,18 +212,21 @@ BeaconFile from_picture(const picture::StoredPicture& sp, std::int64_t segment, 
 }
 
 void write(const std::string& path, const BeaconFile& bf) {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);   // opened first, as the reference
+    util::File f = util::open_file(path, "wb");   // opened first, as the reference
     if (!f) throw std::runtime_error("beaconfile: cannot open " + path + " for writing");
     const std::vector<std::uint8_t> data = bf.to_bytes();
-    f.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
-    if (!f) throw std::runtime_error("beaconfile: cannot write " + path);
+    if (std::fwrite(data.data(), 1, data.size(), f.get()) != data.size() || std::fclose(f.release()) != 0)
+        throw std::runtime_error("beaconfile: cannot write " + path);
 }
 
 BeaconFile read(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
+    const util::File f = util::open_file(path, "rb");
     if (!f) throw std::runtime_error("beaconfile: cannot open " + path);
-    std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    if (f.bad()) throw std::runtime_error("beaconfile: cannot read " + path);
+    std::vector<std::uint8_t> data;
+    std::vector<std::uint8_t> buf(std::size_t(1) << 12);
+    for (std::size_t n; (n = std::fread(buf.data(), 1, buf.size(), f.get())) > 0;)
+        data.insert(data.end(), buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(n));
+    if (std::ferror(f.get())) throw std::runtime_error("beaconfile: cannot read " + path);
     return BeaconFile::from_bytes(data);
 }
 
