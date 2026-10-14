@@ -21,9 +21,11 @@
 #include <algorithm>
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 #include "qrss/codec/codec.hpp"
+#include "qrss/fspath.hpp"
 #include "qrss/picture_chain.hpp"
 
 namespace sstvae_bindings::qrss {
@@ -32,20 +34,12 @@ namespace {
 namespace qc = sstvae::qrss::codec;
 using namespace picture_chain;
 
-[[noreturn]] void raise_text(PyObject* type, const std::string& what) {
-    PyErr_SetString(type, what.c_str());
-    throw py::error_already_set();
-}
+// A message naming a file by its bytes, decoded as Python decodes names.
+using fspath::raise_text;
 
-// os.fspath(obj) as a str (pathlib's own TypeError for anything else).
-std::string fspath(const py::handle& obj) {
-    py::object p = py::module_::import("os").attr("fspath")(obj);
-    if (!py::isinstance<py::str>(p))
-        raise_text(PyExc_TypeError,
-                   "argument should be a str or an os.PathLike object where __fspath__ returns a str, not " +
-                       py::repr(py::type::of(p).attr("__name__")).cast<std::string>());
-    return utf8_of(p);
-}
+// Path(obj): a str or os.PathLike (pathlib's own TypeError for anything
+// else, bytes included), as the bytes os.fsencode makes of it.
+std::string fspath(const py::handle& obj) { return fspath::pathlib_path(obj).bytes; }
 
 std::optional<std::string> opt_path(const py::handle& obj) {
     if (obj.is_none()) return std::nullopt;
@@ -75,8 +69,15 @@ auto translated(F&& f) -> decltype(f()) {
         raise_text(PyExc_FileNotFoundError, e.what());
     } catch (const sstvae::checkpoint::CheckpointError& e) {
         // checkpoint.resolve_onnx's SystemExit (ModelError included).
-        PyErr_SetObject(PyExc_SystemExit, py::str(e.what()).ptr());
-        throw py::error_already_set();
+        raise_text(PyExc_SystemExit, e.what());
+    } catch (const std::overflow_error&) {
+        throw;   // pybind11's OverflowError
+    } catch (const std::range_error&) {
+        throw;   // pybind11's ValueError
+    } catch (const std::runtime_error& e) {
+        // the image layer's ("cannot read <path>: ..."): RuntimeError, as
+        // pybind11 raises it, with the name decoded as Python decodes names
+        raise_text(PyExc_RuntimeError, e.what());
     }
 }
 
@@ -113,7 +114,7 @@ void bind(py::module_& q) {
     // native cache, which is not the reference's.
     m.def("resolve_onnx", [](const std::string& part, const py::object& path, const std::string& precision) {
         const auto p = opt_path(path);
-        return translated([&] { return qc::resolve_onnx(part, p, precision); });
+        return translated([&] { return fspath::fs_text(qc::resolve_onnx(part, p, precision)); });
     }, py::arg("part"), py::arg("path") = py::none(), py::arg("precision") = "fp16");
 
     m.def("_pathlib_str", [](const py::str& text) { return str_from_utf8(qc::pathlib_str(utf8_of(text))); },
@@ -121,14 +122,16 @@ void bind(py::module_& q) {
     m.def("_pathlib_suffix", [](const py::str& text) { return str_from_utf8(qc::pathlib_suffix(utf8_of(text))); },
           py::arg("text"));
 
-    // images.load_image(path): (3, 480, 640) float32 in [0, 1].
+    // images.load_image(path): (3, 480, 640) float32 in [0, 1]. PIL's
+    // Image.open takes a str, bytes or os.PathLike (os.fspath); the image
+    // layer's refusals name the file, decoded as Python decodes names.
     m.def("load_image", [](const py::object& path) {
-        const std::string p = fspath(path);
+        const std::string p = fspath::fs_path(path).bytes;
         sstvae::images::ImageArray a;
-        {
+        translated([&] {
             py::gil_scoped_release unlock;
             a = qc::load_image(p);
-        }
+        });
         py::array_t<float> out({py::ssize_t{3}, static_cast<py::ssize_t>(a.height), static_cast<py::ssize_t>(a.width)});
         std::copy(a.chw.begin(), a.chw.end(), out.mutable_data());
         return out;
@@ -138,7 +141,7 @@ void bind(py::module_& q) {
     // the encoder from --model / --precision (None: the native cache).
     m.def("encode_picture", [](const py::object& image, const py::object& mode, const py::object& codec_id,
                                const py::object& model, const std::string& precision) {
-        const std::string img = fspath(image);
+        const std::string img = fspath::fs_path(image).bytes;   // Image.open's argument
         const std::int64_t mm = pc::check_mode(int64_of(mode), str_of(mode));
         const std::int64_t cid = int64_of(codec_id);
         pc::check_codec_id(cid, str_of(codec_id));

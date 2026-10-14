@@ -12,7 +12,9 @@
 //   replace_file on names that are not ASCII and (POSIX) not UTF-8 at all,
 //   in a scratch directory: a name goes to the system as its bytes, and
 //   comes back the same.
-// - pypath against pathlib.PurePosixPath's str, name and suffix.
+// - pypath against pathlib.PurePosixPath's str, name and suffix, and
+//   stderr_text against what the scripts' sys.stderr writes for a message
+//   naming a file whose name is not UTF-8.
 
 #include <cerrno>
 #include <chrono>
@@ -258,6 +260,85 @@ void test_pathlib() {
     check::is_true(threw, "with_name of a path with no name: pathlib's ValueError text");
 }
 
+// --- stderr ------------------------------------------------------------------------------
+
+std::string stderr_once(const std::string& text) {
+    std::string out;
+    const std::size_t used = pypath::stderr_text(text, true, out);
+    if (used != text.size()) check::fail("stderr_text(final) uses every byte", text);
+    return out;
+}
+
+struct StderrFamily {
+    util::Sha256 h;
+    std::size_t streamed_ok = 0, n = 0;
+    void add(const std::string& bytes) {
+        ++n;
+        const std::string out = stderr_once(bytes);
+        std::string rec;
+        rec += static_cast<char>(out.size() & 0xFF);
+        rec += static_cast<char>(out.size() >> 8);
+        h.update(rec + out);
+        // the same bytes in two writes, split anywhere, give the same text
+        bool same = true;
+        for (std::size_t cut = 1; cut < bytes.size(); ++cut) {
+            std::string got;
+            std::string pending = bytes.substr(0, cut);
+            pending.erase(0, pypath::stderr_text(pending, false, got));
+            pending += bytes.substr(cut);
+            pypath::stderr_text(pending, true, got);
+            same = same && got == out;
+        }
+        streamed_ok += same;
+    }
+};
+
+void stderr_family_is(StderrFamily& f, const char* posix, const char* windows, const std::string& what) {
+#ifdef _WIN32
+    const char* digest = windows;
+    (void)posix;
+#else
+    const char* digest = posix;
+    (void)windows;
+#endif
+    check::equal(hex_of(f.h), std::string(digest), what + " stderr digest");
+    check::equal(f.streamed_ok, f.n, what + " stderr in two writes");
+}
+
+void test_stderr() {
+    StderrFamily one_two;
+    for (int a = 0; a < 256; ++a) one_two.add(std::string(1, static_cast<char>(a)));
+    for (int a = 0; a < 256; ++a)
+        for (int b = 0; b < 256; ++b) one_two.add({static_cast<char>(a), static_cast<char>(b)});
+    stderr_family_is(one_two, paths_pins::STDERR_ONE_TWO_POSIX, paths_pins::STDERR_ONE_TWO_WINDOWS, "one and two bytes");
+
+    StderrFamily three;
+    for (int a = 0xE0; a < 0xF0; ++a)
+        for (int b = 0; b < 256; ++b)
+            for (int c = 0; c < 256; ++c) three.add({static_cast<char>(a), static_cast<char>(b), static_cast<char>(c)});
+    stderr_family_is(three, paths_pins::STDERR_THREE_POSIX, paths_pins::STDERR_THREE_WINDOWS, "three bytes");
+
+    StderrFamily four;
+    for (int a = 0xF0; a < 0xF5; ++a)
+        for (int b = 0; b < 256; ++b)
+            for (const unsigned char c : paths_pins::EDGES)
+                for (const unsigned char d : paths_pins::EDGES)
+                    four.add({static_cast<char>(a), static_cast<char>(b), static_cast<char>(c), static_cast<char>(d)});
+    stderr_family_is(four, paths_pins::STDERR_FOUR_POSIX, paths_pins::STDERR_FOUR_WINDOWS, "four bytes");
+
+    // By name, so a failure above has a readable neighbour.
+    check::equal(stderr_once("caf\xC3\xA9 \xE6\x97\xA5.wav"), std::string("caf\xC3\xA9 \xE6\x97\xA5.wav"), "UTF-8 as it is");
+    check::equal(stderr_once("caf\xE9-\xFF\xFE"), std::string("caf\\udce9-\\udcff\\udcfe"), "bytes escaped");
+#ifdef _WIN32
+    check::equal(stderr_once("\xED\xA0\x80"), std::string("\\ud800"), "a lone surrogate (surrogatepass)");
+#else
+    check::equal(stderr_once("\xED\xA0\x80"), std::string("\\udced\\udca0\\udc80"), "a lone surrogate's bytes");
+#endif
+    std::string out;
+    check::equal(pypath::stderr_text("ok \xE6\x97", false, out), std::size_t{3}, "a cut-short sequence waits");
+    check::equal(out, std::string("ok "), "and nothing of it is written");
+}
+
 }  // namespace
 
 int main() {
@@ -267,6 +348,7 @@ int main() {
         test_code_points();
         test_byte_strings();
         test_pathlib();
+        test_stderr();
         dir = scratch_dir();
         test_names(dir);
         test_refusals(dir);

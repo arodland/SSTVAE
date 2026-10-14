@@ -25,10 +25,20 @@ accepted counts, so a disagreement says which family it is in.
 Then str(PurePosixPath(text)), .name and .suffix for the texts in PATHS
 (native/core/qrss/pypath.hpp: how sstvae-qrss and the codec glue spell a
 path as qrss_*.py prints it), as UTF-8.
+
+And pypath::stderr_text, what the scripts' sys.stderr writes for a message
+naming a file by its bytes, over the same three families: each string's
+os.fsdecode encoded as stderr encodes ("utf-8", "backslashreplace"),
+recorded as two length bytes (little-endian) and the bytes. POSIX decodes
+with "surrogateescape"; Windows with "surrogatepass" (PEP 529), and since
+that refuses what is not a surrogate either, the Windows digest escapes the
+rest a byte at a time as "surrogateescape" would (a name sstvae-qrss is
+given on Windows is always UTF-8 but for lone surrogates).
 """
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import sys
 from pathlib import Path, PurePosixPath
@@ -65,6 +75,24 @@ def family(strings) -> tuple[str, int, int]:
         h.update(b"\x01" + bytes([len(u)]) + u)
         ok += 1
     return h.hexdigest(), n, ok
+
+
+def _pass_then_escape(exc: UnicodeDecodeError):
+    b, s = exc.object, exc.start
+    if b[s] == 0xED and s + 2 < len(b) and 0xA0 <= b[s + 1] <= 0xBF and 0x80 <= b[s + 2] <= 0xBF:
+        return chr(((b[s] & 0x0F) << 12) | ((b[s + 1] & 0x3F) << 6) | (b[s + 2] & 0x3F)), s + 3
+    return chr(0xDC00 + b[s]), s + 1
+
+
+codecs.register_error("sstvae_pass_then_escape", _pass_then_escape)
+
+
+def stderr_family(strings, errors: str) -> str:
+    h = hashlib.sha256()
+    for b in strings:
+        out = b.decode("utf-8", errors).encode("utf-8", "backslashreplace")
+        h.update(len(out).to_bytes(2, "little") + out)
+    return h.hexdigest()
 
 
 def one_two():
@@ -121,6 +149,11 @@ def main() -> None:
         lines.append(f'constexpr const char* {name}_DIGEST = "{d}";')
         lines.append(f"constexpr std::size_t {name}_COUNT = {n};")
         lines.append(f"constexpr std::size_t {name}_ACCEPTED = {ok};")
+    lines += ["", "// stderr_text's families: POSIX (surrogateescape), Windows (surrogatepass first)"]
+    for name, make in [("ONE_TWO", one_two), ("THREE", three), ("FOUR", four)]:
+        lines.append(f'constexpr const char* STDERR_{name}_POSIX = "{stderr_family(make(), "surrogateescape")}";')
+        lines.append(f'constexpr const char* STDERR_{name}_WINDOWS = '
+                     f'"{stderr_family(make(), "sstvae_pass_then_escape")}";')
     lines.append("")
     lines.append("constexpr unsigned char EDGES[] = {" + ", ".join(f"0x{e:02X}" for e in EDGES) + "};")
     lines += ["", "// str(PurePosixPath(text)), .name, .suffix", "struct PathPin {",

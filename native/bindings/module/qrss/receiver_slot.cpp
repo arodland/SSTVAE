@@ -65,6 +65,7 @@
 #include "qrss/acquire.hpp"
 #include "qrss/config.hpp"
 #include "qrss/frame.hpp"
+#include "qrss/fspath.hpp"
 #include "qrss/frontend.hpp"
 #include "qrss/receiver.hpp"
 #include "qrss/receiver_slot.hpp"
@@ -655,13 +656,6 @@ py::object receive_slot_py(const py::object& cap, const py::object& spec, const 
     return list_of(fl::receive_slot(p, cap, spec, a));
 }
 
-// ReadError as Python's own OSError (FileNotFoundError for ENOENT, ...)
-[[noreturn]] void raise_os_error(const wav::ReadError& e) {
-    py::object exc = steal(PyObject_CallFunction(PyExc_OSError, "isO", e.err, std::strerror(e.err),
-                                                 rx::to_str(e.path).ptr()));
-    PyErr_SetObject(reinterpret_cast<PyObject*>(Py_TYPE(exc.ptr())), exc.ptr());
-    throw py::error_already_set();
-}
 
 // FormatError as the exception the reference raises (scipy's, numpy's,
 // struct's or Python's own)
@@ -694,15 +688,16 @@ void warn_wav(const std::vector<wav::Warning>& warnings) {
 }
 
 // wavio.read_wav(path) in C++, the GIL released while the file is read:
-// its refusals and warnings as the reference's
-std::vector<double> read_wav_py(const std::string& path) {
+// its refusals and warnings as the reference's (a ReadError is open()'s
+// OSError, naming os.fspath(path) as that does)
+std::vector<double> read_wav_py(const fspath::FsPath& path) {
     std::vector<wav::Warning> warnings;
     std::vector<double> x;
     try {
         py::gil_scoped_release nogil;
-        x = wav::read_wav(path, &warnings);
+        x = wav::read_wav(path.bytes, &warnings);
     } catch (const wav::ReadError& e) {
-        raise_os_error(e);
+        fspath::raise_os_error(e.err, path.name);
     } catch (const wav::FormatError& e) {
         warn_wav(warnings);
         raise_format_error(e);
@@ -725,7 +720,8 @@ py::object capture_py(const std::vector<std::complex<float>>& fev, const py::obj
 py::object capture_from_wav_py(const py::object& path, const py::object& q, const py::object& start_unix,
                                bool typed) {
     if (typed) {
-        const std::vector<double> x = read_wav_py(rx::as_string(py::str(path)));
+        // wavio.read_wav(str(path)): the reference's str() first
+        const std::vector<double> x = read_wav_py(fspath::str_path(path));
         std::vector<std::complex<float>> v;
         {
             py::gil_scoped_release nogil;
@@ -847,13 +843,13 @@ void bind(py::module_& qrss) {
           py::arg("typed"));
     // wav::read_wav itself, float64 (no row: the tests' window on the
     // reader, compared with wavio.read_wav bit for bit)
-    m.def("_read_wav", [](const py::object& path) { return to_numpy(read_wav_py(rx::as_string(py::str(path)))); },
+    m.def("_read_wav", [](const py::object& path) { return to_numpy(read_wav_py(fspath::fs_path(path))); },
           py::arg("path"));
     m.def("receive_wav", [](const py::object& path, const py::object& q, const py::object& start_unix,
                             const py::object& spec, const py::object& estimator) {
         // the reference's order: the file read, then int(q) and
         // float(start_unix), then receive_slot's spec and estimator
-        const std::vector<double> x = read_wav_py(rx::as_string(py::str(path)));
+        const std::vector<double> x = read_wav_py(fspath::str_path(path));   // capture_from_wav's str(path)
         const std::int64_t qi = rx::as_int(q);
         std::optional<double> su;
         if (!start_unix.is_none()) su = rx::as_double(start_unix);

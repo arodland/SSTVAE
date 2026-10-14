@@ -18,6 +18,9 @@
 
 #include "qrss/rx_types.hpp"
 
+#include "qrss/fspath.hpp"
+#include "qrss/npz.hpp"
+
 #include <cstdint>
 #include <span>
 #include <string>
@@ -64,10 +67,26 @@ void bind(py::module_& q) {
         return rx::to_str(t::pass_uid(rx::as_int(q_), f_hz, zz));
     }, py::arg("q"), py::arg("f_hz"), py::arg("z"));
 
-    m.def("save_pass", [](const py::object& p, const std::string& path) { rx::pass_result(p).save(path); },
-          py::arg("p"), py::arg("path"));
-    m.def("load_pass", [](const std::string& path) { return rx::to_py(t::PassResult::load(path)); },
-          py::arg("path"));
+    // a path as open() takes one (fspath.hpp); a file the C++ cannot open,
+    // read or write is RuntimeError("cannot open <name>") (the rows raise
+    // Python's own OSError from it)
+    m.def("save_pass", [](const py::object& p, const py::object& path) {
+        const t::PassResult r = rx::pass_result(p);
+        const fspath::FsPath f = fspath::fs_path(path);
+        try {
+            r.save(f.bytes);
+        } catch (const sstvae::qrss::npz::FileError& e) {
+            fspath::raise_runtime_error(e.verb + " ", f.bytes);
+        }
+    }, py::arg("p"), py::arg("path"));
+    m.def("load_pass", [](const py::object& path) {
+        const fspath::FsPath f = fspath::fs_path(path);
+        try {
+            return rx::to_py(t::PassResult::load(f.bytes));
+        } catch (const sstvae::qrss::npz::FileError& e) {
+            fspath::raise_runtime_error(e.verb + " ", f.bytes);
+        }
+    }, py::arg("path"));
     m.def("pass_bytes", [](const py::object& p) { return as_bytes(rx::pass_result(p).bytes()); }, py::arg("p"));
     m.def("parse_pass", [](const py::object& data) {
         const std::vector<std::uint8_t> b = bytes_of(data);

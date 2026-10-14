@@ -1,14 +1,35 @@
 // sstvae-qrss: dispatches to the subcommand named by the first argument.
 // The subcommands are the files beside this one (subcommand.hpp says how
 // they register and what each one promises).
+//
+// The subcommands take their arguments as UTF-8, file names included
+// (util/fileio.hpp opens them). On POSIX argv is that already, or the file
+// name's own bytes. On Windows a narrow argv is the ANSI code page's
+// reading of the command line, which cannot hold a name outside that code
+// page, so the wide command line is read instead and converted as Python
+// converts file names there (UTF-8; a lone surrogate as its three bytes),
+// which is what sys.argv holds: with MSVC through wmain, the CRT's own
+// split (Python's), and with MinGW, whose wmain needs -municode, through
+// CommandLineToArgvW, whose split differs from the CRT's only for
+// consecutive double quotes inside a quoted argument.
+//
+// What reaches stderr goes as the scripts' sys.stderr writes it, which is
+// "backslashreplace" whatever the locale: a file name that is not UTF-8
+// prints as "\udcXX" escapes there, so it does here (pypath::stderr_text).
+// stdout carries the bytes, as the scripts' does under a UTF-8 locale or
+// PYTHONUTF8 ("surrogateescape"; under another one the script fails with
+// UnicodeEncodeError, which nothing here imitates).
 
 #include <clocale>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <iostream>
 #include <new>
+#include <ostream>
 #include <stdexcept>
+#include <streambuf>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -19,6 +40,23 @@
 #include "checkpoint/qt_fetcher.hpp"
 #endif
 
+#ifdef _WIN32
+// Here only (not a widely-included header): GetCommandLineW,
+// CommandLineToArgvW, LocalFree. Kernel32 and shell32 are in CMake's
+// default link line for both Windows toolchains.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <shellapi.h>
+
+#include "util/fileio.hpp"
+#endif
+
+#include "qrss/pypath.hpp"
 #include "subcommand.hpp"
 
 using sstvae::qrss::cli::Subcommand;
@@ -63,14 +101,78 @@ void overview(std::ostream& os) {
     os << "\n'" << PROG << " <command> --help' describes one command.\n";
 }
 
+// Writes to `to` what pypath::stderr_text makes of the bytes, holding back
+// a UTF-8 sequence that one write cuts short until the next one ends it.
+class StderrBuf : public std::streambuf {
+public:
+    explicit StderrBuf(std::streambuf* to) : to_(to) {}
+    StderrBuf(const StderrBuf&) = delete;
+    StderrBuf& operator=(const StderrBuf&) = delete;
+    ~StderrBuf() override { drain(true); }
+
+protected:
+    int_type overflow(int_type c) override {
+        if (traits_type::eq_int_type(c, traits_type::eof())) return traits_type::not_eof(c);
+        pending_ += traits_type::to_char_type(c);
+        drain(false);
+        return c;
+    }
+    std::streamsize xsputn(const char* s, std::streamsize n) override {
+        pending_.append(s, static_cast<std::size_t>(n));
+        drain(false);
+        return n;
+    }
+    int sync() override { return to_->pubsync(); }
+
+private:
+    void drain(bool final) {
+        std::string out;
+        pending_.erase(0, sstvae::qrss::pypath::stderr_text(pending_, final, out));
+        if (!out.empty()) to_->sputn(out.data(), static_cast<std::streamsize>(out.size()));
+    }
+    std::streambuf* to_;
+    std::string pending_;
+};
+
+#if !(defined(_WIN32) && defined(_MSC_VER))
+// Everything after the program name, as UTF-8.
+std::vector<std::string> utf8_args(int argc, char** argv) {
+#ifdef _WIN32
+    int n = 0;
+    if (wchar_t** w = ::CommandLineToArgvW(::GetCommandLineW(), &n)) {
+        std::vector<std::string> out;
+        for (int i = 1; i < n; ++i) out.push_back(sstvae::util::utf8_of(std::wstring_view(w[i])));
+        ::LocalFree(w);
+        return out;
+    }
+#endif
+    return std::vector<std::string>(argv + (argc > 0 ? 1 : 0), argv + argc);
+}
+#endif
+
+int run(const std::vector<std::string>& args);
+
 }  // namespace
 
-int main(int argc, char** argv) {
+#if defined(_WIN32) && defined(_MSC_VER)
+int wmain(int argc, wchar_t** wargv) {
+    std::vector<std::string> args;
+    for (int i = 1; i < argc; ++i) args.push_back(sstvae::util::utf8_of(std::wstring_view(wargv[i])));
+    return run(args);
+}
+#else
+int main(int argc, char** argv) { return run(utf8_args(argc, argv)); }
+#endif
+
+namespace {
+
+int run(const std::vector<std::string>& args) {
 #ifdef SSTVAE_HAVE_FETCH
     // Qt only for the first-run model download (encode with no --model, as
     // sstvae-decode). Its own argv, so Qt never sees ours.
+    static char prog_name[] = "sstvae-qrss";
     int qt_argc = 1;
-    char* qt_argv[] = {argv[0], nullptr};
+    char* qt_argv[] = {prog_name, nullptr};
     QCoreApplication app(qt_argc, qt_argv);
     // QCoreApplication runs setlocale(LC_ALL, "") on Unix, and Python never
     // touches LC_NUMERIC: put it back, or under a decimal-comma locale strtod
@@ -84,9 +186,10 @@ int main(int argc, char** argv) {
         if (got >= total) std::fprintf(stderr, "\n");
     });
 #endif
-    const std::vector<std::string> args(argv + 1, argv + argc);
+    StderrBuf err_buf(std::cerr.rdbuf());
+    std::ostream err(&err_buf);
     if (args.empty()) {
-        overview(std::cerr);
+        overview(err);
         return 2;
     }
     if (args[0] == "-h" || args[0] == "--help") {
@@ -97,26 +200,28 @@ int main(int argc, char** argv) {
     if (!sub) {
         for (const NotBuilt& nb : NOT_BUILT) {
             if (args[0] == nb.name) {
-                std::cerr << PROG << " " << args[0] << ": " << nb.why << "\n";
+                err << PROG << " " << args[0] << ": " << nb.why << "\n";
                 return 2;
             }
         }
-        std::cerr << PROG << ": unknown command '" << args[0] << "'\n\n";
-        overview(std::cerr);
+        err << PROG << ": unknown command '" << args[0] << "'\n\n";
+        overview(err);
         return 2;
     }
     int status = 1;
     try {
         status = sub->run(std::string(PROG) + " " + sub->name, std::vector<std::string>(args.begin() + 1, args.end()),
-                          std::cout, std::cerr);
+                          std::cout, err);
     } catch (const std::exception& e) {
         // A subcommand ends every path the script can take itself; this is
         // the backstop for one it missed. The script would end in a
         // traceback and exit 1, never in std::terminate's abort.
         std::cout.flush();
-        std::cerr << python_class(e) << ": " << e.what() << "\n";
+        err << python_class(e) << ": " << e.what() << "\n";
         return 1;
     }
     std::cout.flush();
     return status;
 }
+
+}  // namespace

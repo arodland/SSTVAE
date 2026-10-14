@@ -12,9 +12,11 @@
 #include <cstdint>
 #include <cstring>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "qrss/fspath.hpp"
 #include "qrss/picture.hpp"
 #include "qrss/picture_chain.hpp"
 
@@ -220,9 +222,17 @@ void bind(py::module_& q) {
     }, py::arg("path"), py::arg("sp"));
 
     // load_qrsp(path) -> {mode, codec_id, segs, picture_id}.
+    // The refusals name the file as f"{path}" does, str(path): carried as
+    // os.fsencode's bytes and decoded back the same way, so a name that is
+    // not UTF-8 comes back as the str it was.
     m.def("load_qrsp", [](const py::object& path) {
         const std::vector<std::uint8_t> data = read_file(path);
-        return picture_dict(pc::parse_qrsp(data, str_of(path)));
+        const std::string shown = fspath::str_path(path).bytes;
+        try {
+            return picture_dict(pc::parse_qrsp(data, shown));
+        } catch (const std::invalid_argument& e) {
+            fspath::raise_text(PyExc_ValueError, e.what());
+        }
     }, py::arg("path"));
 
     // The whole .qrsp file in memory, for the parity test.

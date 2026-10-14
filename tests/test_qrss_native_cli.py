@@ -332,8 +332,46 @@ def test_dispatch(cli):
     assert r.returncode == 2 and r.stderr.startswith("sstvae-qrss: unknown command 'frobnicate'\n")
     r = subprocess.run([cli, "--help"], capture_output=True, text=True, timeout=60)
     assert any(line.split()[:1] == ["transmit"] and "qrss_transmit.py" in line for line in r.stdout.splitlines())
-    r = subprocess.run([cli, "listen"], capture_output=True, text=True, timeout=60)
-    assert r.returncode == 2 and r.stderr == "sstvae-qrss listen: not in this build yet; use qrss_listen.py\n"
+
+
+def _commands(cli: Path) -> dict[str, str]:
+    """The binary's own list of its subcommands: name -> the script it names."""
+    r = subprocess.run([cli, "--help"], capture_output=True, text=True, timeout=60)
+    lines = r.stdout.split("commands:\n", 1)[1].split("\n\n", 1)[0].splitlines()
+    out = {}
+    for line in lines:
+        name, script = line.split()[0], line.rsplit("(", 1)[1].rstrip(")")
+        out[name] = script
+    return out
+
+
+def test_dispatch_every_script(cli):
+    """Every qrss_*.py script is a subcommand the binary lists, one it says
+    it was not built with (naming the script to use instead), or one it
+    does not know -- read off the binary, so porting a script (or building
+    without the codec) needs no edit here."""
+    commands = _commands(cli)
+    scripts = sorted(p.name for p in REPO_ROOT.glob("qrss_*.py"))
+    assert set(commands.values()) <= set(scripts), commands
+    not_built = []
+    for script in scripts:
+        name = script[len("qrss_"):-len(".py")]
+        r = subprocess.run([cli, name, "--help"], capture_output=True, text=True, timeout=60)
+        if name in commands:
+            assert commands[name] == script
+            assert r.returncode == 0 and r.stderr == "", (name, r)
+            assert r.stdout.startswith(f"usage: sstvae-qrss {name} "), (name, r.stdout)
+        elif r.stderr.startswith(f"sstvae-qrss {name}: "):
+            # not in this build: one line, exit 2, pointing at the script
+            assert r.returncode == 2 and r.stdout == "", (name, r)
+            assert r.stderr.count("\n") == 1 and script in r.stderr, (name, r.stderr)
+            not_built.append(name)
+        else:
+            assert r.returncode == 2 and r.stderr.startswith(f"sstvae-qrss: unknown command '{name}'\n"), (name, r)
+    # the same answer without --help: nothing is parsed before the dispatch
+    for name in not_built:
+        r = subprocess.run([cli, name, "x", "--bogus"], capture_output=True, text=True, timeout=60)
+        assert r.returncode == 2 and r.stderr.startswith(f"sstvae-qrss {name}: ") and r.stderr.count("\n") == 1
 
 
 # --- encode ---------------------------------------------------------------------------------

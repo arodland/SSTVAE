@@ -24,6 +24,7 @@
 
 #include "qrss/codec/codec.hpp"
 #include "qrss/codec/render.hpp"
+#include "qrss/fspath.hpp"
 #include "qrss/picture_chain.hpp"
 
 namespace sstvae_bindings::qrss {
@@ -31,11 +32,6 @@ namespace {
 
 namespace qc = sstvae::qrss::codec;
 using namespace picture_chain;
-
-[[noreturn]] void raise_as(PyObject* type, const std::string& what) {
-    PyErr_SetString(type, what.c_str());
-    throw py::error_already_set();
-}
 
 template <typename F>
 auto translated(F&& f) -> decltype(f()) {
@@ -46,10 +42,9 @@ auto translated(F&& f) -> decltype(f()) {
         PyErr_SetObject(cls.ptr(), py::str(e.what()).ptr());
         throw py::error_already_set();
     } catch (const qc::OrtError& e) {
-        raise_as(PyExc_RuntimeError, e.python_class() + ": " + e.what());
+        fspath::raise_text(PyExc_RuntimeError, e.python_class() + ": " + e.what());
     } catch (const sstvae::checkpoint::CheckpointError& e) {
-        PyErr_SetObject(PyExc_SystemExit, py::str(e.what()).ptr());
-        throw py::error_already_set();
+        fspath::raise_text(PyExc_SystemExit, e.what());
     }
 }
 
@@ -58,9 +53,10 @@ std::optional<std::int64_t> opt_int(const py::handle& v) {
     return int64_of(v);
 }
 
+// a model path (a str or os.PathLike, made a Path), as os.fsencode's bytes
 std::optional<std::string> opt_text(const py::handle& v) {
     if (v.is_none()) return std::nullopt;
-    return utf8_of(py::module_::import("os").attr("fspath")(v));
+    return fspath::pathlib_path(v).bytes;
 }
 
 std::vector<double> flat_f64(const py::handle& a) {

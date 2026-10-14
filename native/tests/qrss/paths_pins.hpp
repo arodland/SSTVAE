@@ -22,6 +22,14 @@ constexpr const char* FOUR_DIGEST = "c6636132c18bf6ce62f31da4eca8e26d3f8406db6c0
 constexpr std::size_t FOUR_COUNT = 81920;
 constexpr std::size_t FOUR_ACCEPTED = 4096;
 
+// stderr_text's families: POSIX (surrogateescape), Windows (surrogatepass first)
+constexpr const char* STDERR_ONE_TWO_POSIX = "978eab9c07cfa3f385a738ac810330dea032ee8104ec5fc37d976f82f375a545";
+constexpr const char* STDERR_ONE_TWO_WINDOWS = "978eab9c07cfa3f385a738ac810330dea032ee8104ec5fc37d976f82f375a545";
+constexpr const char* STDERR_THREE_POSIX = "be3649f247da2d6023e0fcfa3309263ef47099d6ea0899935b3a8daac0e2c578";
+constexpr const char* STDERR_THREE_WINDOWS = "61c6fc05a3236284f40a9ca4b02ae45164dd01b3c05884ec930f6c813e392ffe";
+constexpr const char* STDERR_FOUR_POSIX = "7c83f5cd3c7c22755395213713d1096b419ef62baad1cc73b52e8ef2beb37ae6";
+constexpr const char* STDERR_FOUR_WINDOWS = "6ef09d3903eabd30144151beb0611aa6914a469aa04dcf7e06216a34a6e8a7fc";
+
 constexpr unsigned char EDGES[] = {0x00, 0x7F, 0x80, 0x9F, 0xA0, 0xBF, 0xC0, 0xFF};
 
 // str(PurePosixPath(text)), .name, .suffix

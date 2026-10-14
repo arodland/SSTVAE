@@ -16,11 +16,13 @@
 #include <algorithm>
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 #include "qrss/api.hpp"
 #include "qrss/codec/api.hpp"
 #include "qrss/codec/codec.hpp"
+#include "qrss/fspath.hpp"
 #include "qrss/picture_chain.hpp"
 
 namespace sstvae_bindings::qrss {
@@ -35,14 +37,19 @@ auto translated(F&& f) -> decltype(f()) {
     try {
         return f();
     } catch (const qc::NoModelFile& e) {
-        PyErr_SetString(PyExc_FileNotFoundError, e.what());
-        throw py::error_already_set();
+        fspath::raise_text(PyExc_FileNotFoundError, e.what());
     } catch (const sstvae::checkpoint::CheckpointError& e) {
-        PyErr_SetObject(PyExc_SystemExit, py::str(e.what()).ptr());
-        throw py::error_already_set();
+        fspath::raise_text(PyExc_SystemExit, e.what());
     } catch (const qc::OrtError& e) {
-        PyErr_SetString(PyExc_RuntimeError, (e.python_class() + ": " + e.what()).c_str());
-        throw py::error_already_set();
+        fspath::raise_text(PyExc_RuntimeError, e.python_class() + ": " + e.what());
+    } catch (const std::overflow_error&) {
+        throw;
+    } catch (const std::range_error&) {
+        throw;
+    } catch (const std::runtime_error& e) {
+        // the image layer's ("cannot read <path>: ..."), the name decoded
+        // as Python decodes names
+        fspath::raise_text(PyExc_RuntimeError, e.what());
     }
 }
 
@@ -51,7 +58,8 @@ void bind(py::module_& q) {
 
     py::class_<api::OpenEncoder>(m, "OpenEncoder")
         .def_readonly("codec_id", &api::OpenEncoder::codec_id)
-        .def_readonly("onnx_path", &api::OpenEncoder::onnx_path)
+        .def_property_readonly("onnx_path",
+                               [](const api::OpenEncoder& enc) { return fspath::fs_text(enc.onnx_path); })
         .def("encode_picture", [](const api::OpenEncoder& enc,
                                   const py::array_t<std::uint8_t, py::array::c_style | py::array::forcecast>& rgb,
                                   std::int64_t mode) {
@@ -67,12 +75,13 @@ void bind(py::module_& q) {
                 return picture_dict(sp);
             });
         }, py::arg("rgb"), py::arg("mode"))
-        .def("encode_file", [](const api::OpenEncoder& enc, const std::string& path, std::int64_t mode) {
+        .def("encode_file", [](const api::OpenEncoder& enc, const py::object& path, std::int64_t mode) {
+            const std::string p = fspath::fs_path(path).bytes;   // Image.open's: str, bytes or os.PathLike
             return translated([&] {
                 sstvae::qrss::picture::StoredPicture sp;
                 {
                     py::gil_scoped_release unlock;
-                    sp = api::encode_file(path, mode, enc);
+                    sp = api::encode_file(p, mode, enc);
                 }
                 return picture_dict(sp);
             });
@@ -80,7 +89,7 @@ void bind(py::module_& q) {
 
     m.def("open_encoder", [](const py::object& model, const std::string& precision, const py::object& codec_id) {
         std::optional<std::string> mdl;
-        if (!model.is_none()) mdl = utf8_of(py::module_::import("os").attr("fspath")(model));
+        if (!model.is_none()) mdl = fspath::pathlib_path(model).bytes;   // --model, made a Path
         std::optional<std::int64_t> cid;
         if (!codec_id.is_none()) cid = int64_of(codec_id);
         return translated([&] { return api::open_encoder(mdl, precision, cid); });

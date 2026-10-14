@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -23,6 +24,7 @@
 #include <vector>
 
 #include "qrss/api.hpp"
+#include "qrss/fspath.hpp"
 #include "qrss/picture_chain.hpp"
 #include "qrss/polar_util.hpp"
 
@@ -38,11 +40,25 @@ api::Waveform waveform_of(const std::string& name) {
     return *w;
 }
 
+// A path (a str, bytes or os.PathLike, as open() takes one) is read as
+// the script reads its input. open(path, "rb")'s OSError surfaces as a
+// RuntimeError with that OSError's own text; a refusal naming the file
+// has the name decoded as Python decodes names.
 api::Source src_of(const py::handle& src) {
-    if (py::isinstance<py::str>(src) || py::hasattr(src, "__fspath__")) {
-        const std::string path = utf8_of(py::module_::import("os").attr("fspath")(src));
-        py::gil_scoped_release unlock;
-        return api::read_source(path);
+    if (py::isinstance<py::str>(src) || py::isinstance<py::bytes>(src) || py::hasattr(src, "__fspath__")) {
+        const fspath::FsPath p = fspath::fs_path(src);
+        try {
+            py::gil_scoped_release unlock;
+            return api::read_source(p.bytes);
+        } catch (const api::ReadError& e) {
+            const py::object os_error = py::reinterpret_borrow<py::object>(PyExc_OSError)(e.err, std::strerror(e.err),
+                                                                                           p.name);
+            const py::str text(os_error);
+            PyErr_SetObject(PyExc_RuntimeError, text.ptr());
+            throw py::error_already_set();
+        } catch (const std::invalid_argument& e) {
+            fspath::raise_text(PyExc_ValueError, e.what());
+        }
     }
     return source_of(src);
 }

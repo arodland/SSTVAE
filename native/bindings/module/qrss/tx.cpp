@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "qrss/frame.hpp"
+#include "qrss/fspath.hpp"
 #include "qrss/picture_chain.hpp"
 #include "qrss/rational.hpp"
 #include "qrss/tx.hpp"
@@ -209,9 +210,17 @@ py::array render_block(const txm::PassAudio& audio, std::int64_t i0, std::int64_
     return out;
 }
 
-// open()'s path argument: os.fspath(path) as a str.
-std::string path_of(const py::handle& path) {
-    return py::str(py::module_::import("os").attr("fspath")(path)).cast<std::string>();
+// fn() writing the file `p` names, the GIL released; a WriteError is
+// open()'s OSError, naming os.fspath(path) as that does (fspath.hpp: a
+// path as open() takes one, str, bytes or os.PathLike).
+template <typename Fn>
+void write_file(const fspath::FsPath& p, Fn&& fn) {
+    try {
+        py::gil_scoped_release nogil;
+        fn(p.bytes);
+    } catch (const wavm::WriteError& e) {
+        fspath::raise_os_error(e.err, p.name);
+    }
 }
 
 void bind(py::module_& q) {
@@ -337,24 +346,22 @@ void bind(py::module_& q) {
            "the next m samples from position (fewer at the end), moving on past them")
         .def("seek", &txm::PassAudio::seek, py::arg("i"))
         .def("write_wav", [](const txm::PassAudio& a, const py::object& path, bool as_float, double peak) {
-            const std::string p = path_of(path);
-            py::gil_scoped_release nogil;
-            txm::write_wav(a, p, as_float, peak);
+            write_file(fspath::fs_path(path), [&](const std::string& p) { txm::write_wav(a, p, as_float, peak); });
         }, py::arg("path"), py::arg("float") = false, py::arg("peak") = 0.95,
            "qrss_transmit.py's WAV: peak-normalised int16, or float32 with float=True");
 
     // sstvae.wavio's two writers, for an array.
     m.def("write_wav", [](const py::object& path, const py::object& x, double peak) {
-        const std::string p = path_of(path);
+        // the samples first, then open(path): wavfile.write's order
         const std::vector<double> v = from_numpy<double>(numpy().attr("asarray")(x, py::arg("dtype") = "float64"));
-        py::gil_scoped_release nogil;
-        wavm::write_int16(p, v, peak);
+        const fspath::FsPath p = fspath::fs_path(path);
+        write_file(p, [&](const std::string& f) { wavm::write_int16(f, v, peak); });
     }, py::arg("path"), py::arg("x"), py::arg("peak") = 0.95);
     m.def("write_wav_float", [](const py::object& path, const py::object& x) {
-        const std::string p = path_of(path);
+        // the samples first, then open(path): wavfile.write's order
         const std::vector<double> v = from_numpy<double>(numpy().attr("asarray")(x, py::arg("dtype") = "float64"));
-        py::gil_scoped_release nogil;
-        wavm::write_float32(p, v);
+        const fspath::FsPath p = fspath::fs_path(path);
+        write_file(p, [&](const std::string& f) { wavm::write_float32(f, v); });
     }, py::arg("path"), py::arg("x"));
 }
 

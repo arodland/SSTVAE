@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "qrss/crc32.hpp"
+#include "qrss/fspath.hpp"
 #include "qrss/half.hpp"
 #include "qrss/npsum.hpp"
 #include "qrss/npz.hpp"
@@ -30,6 +31,17 @@ namespace half = sstvae::qrss::half;
 namespace npsum = sstvae::qrss::npsum;
 namespace npz = sstvae::qrss::npz;
 using sstvae::qrss::Rational;
+
+// fn(), an npz::FileError raised as RuntimeError with the file's name
+// decoded as Python decodes file names.
+template <typename Fn>
+auto file_op(const fspath::FsPath& p, Fn&& fn) -> decltype(fn()) {
+    try {
+        return fn();
+    } catch (const npz::FileError& e) {
+        fspath::raise_runtime_error(e.verb + " ", p.bytes);
+    }
+}
 
 std::string dtype_str(const py::array& a) { return py::str(a.attr("dtype").attr("str")).cast<std::string>(); }
 
@@ -290,12 +302,24 @@ void bind(py::module_& q) {
         const std::string s = b;
         return to_dict(npz::parse_npz(as_span(s)));
     }, py::arg("data"), "dict(np.load(io.BytesIO(data)))");
-    m.def("save_npy", [](const std::string& path, const py::object& a) { npz::save_npy(path, to_array(a)); },
-          py::arg("path"), py::arg("array"));
-    m.def("load_npy", [](const std::string& path) { return to_numpy(npz::load_npy(path)); }, py::arg("path"));
-    m.def("save_npz", [](const std::string& path, const py::dict& arrays) { npz::save_npz(path, to_npz(arrays)); },
-          py::arg("path"), py::arg("arrays"));
-    m.def("load_npz", [](const std::string& path) { return to_dict(npz::load_npz(path)); }, py::arg("path"));
+    // The files: a path as open() takes one (fspath.hpp); a file the C++
+    // cannot open, read or write is RuntimeError("cannot open <name>").
+    m.def("save_npy", [](const py::object& path, const py::object& a) {
+        const fspath::FsPath p = fspath::fs_path(path);
+        file_op(p, [&] { npz::save_npy(p.bytes, to_array(a)); });
+    }, py::arg("path"), py::arg("array"));
+    m.def("load_npy", [](const py::object& path) {
+        const fspath::FsPath p = fspath::fs_path(path);
+        return to_numpy(file_op(p, [&] { return npz::load_npy(p.bytes); }));
+    }, py::arg("path"));
+    m.def("save_npz", [](const py::object& path, const py::dict& arrays) {
+        const fspath::FsPath p = fspath::fs_path(path);
+        file_op(p, [&] { npz::save_npz(p.bytes, to_npz(arrays)); });
+    }, py::arg("path"), py::arg("arrays"));
+    m.def("load_npz", [](const py::object& path) {
+        const fspath::FsPath p = fspath::fs_path(path);
+        return to_dict(file_op(p, [&] { return npz::load_npz(p.bytes); }));
+    }, py::arg("path"));
     m.def("npz_to_double", [](const py::object& a) {
         const auto v = to_array(a).to_double();
         return py::array_t<double>(static_cast<py::ssize_t>(v.size()), v.data());

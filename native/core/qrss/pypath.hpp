@@ -14,6 +14,7 @@
 #ifndef SSTVAE_QRSS_PYPATH_HPP
 #define SSTVAE_QRSS_PYPATH_HPP
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -45,6 +46,20 @@ std::string child(std::string_view dir, const std::string& name);
 // str(PurePosixPath(p).with_name(name)); std::invalid_argument "<p> has an
 // empty name" for a path with no name (pathlib's ValueError).
 std::string with_name(std::string_view p, const std::string& name);
+
+// `text` (a message, which may name a file by its bytes) as the scripts'
+// sys.stderr writes the str they hold for it, os.fsdecode(text): UTF-8 as
+// it is, and a byte that is not part of a UTF-8 sequence as "\\udcXX"
+// (surrogateescape's U+DCXX through stderr's "backslashreplace", which
+// Python uses for stderr whatever the locale or PYTHONIOENCODING say). On
+// Windows the file-system codec is "surrogatepass" (PEP 529), so a lone
+// surrogate's three bytes (WTF-8, util/fileio.hpp) are one "\\udXXX". Every
+// other platform reads them as three bytes that are not UTF-8.
+//
+// For a stream: appends to `out` what `text` gives, up to a sequence that
+// the end of `text` cuts short, which is left for the next call (unless
+// `final`), and returns how many bytes of `text` it used.
+std::size_t stderr_text(std::string_view text, bool final, std::string& out);
 
 }  // namespace sstvae::qrss::pypath
 
