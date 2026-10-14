@@ -646,6 +646,11 @@ std::optional<double> LiveListener::audio_end() const {
     return audio_end_;
 }
 
+std::optional<std::int64_t> LiveListener::next_index() const {
+    Lock lk(mu_);
+    return fe_.next_index();
+}
+
 std::string LiveListener::source() const {
     Lock lk(mu_);
     return source_;

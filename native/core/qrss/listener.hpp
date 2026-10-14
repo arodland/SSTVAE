@@ -237,7 +237,9 @@ public:
     const std::vector<frame::FrameSpec>& selection() const { return sel_; }
     bool joint() const { return joint_; }
     double dur() const { return dur_; }
+    // The ring (internally locked: a test may write into it directly).
     const FeRing& ring() const { return ring_; }
+    FeRing& ring() { return ring_; }
     DialLog& dial() { return dial_; }
     // The clock seam's time.
     double clock() const;
@@ -248,6 +250,9 @@ public:
     std::optional<std::string> busy() const;
     double now() const;
     std::optional<double> audio_end() const;
+    // The stream front end's next audio index (fe.next_index): where the
+    // next chunk follows on; nullopt before the first.
+    std::optional<std::int64_t> next_index() const;
     std::string source() const;
     void set_source(std::string name);
     std::vector<std::string> lines() const;
