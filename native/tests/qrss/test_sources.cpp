@@ -8,6 +8,7 @@
 // this file keeps the C++ honest without Python and covers what only the
 // C++ has: close(), a read error ending the stream, the seams.
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>

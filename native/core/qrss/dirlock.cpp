@@ -1,5 +1,6 @@
 // live.dir_lock: see dirlock.hpp. The Windows half is here only, so no
-// header pulls in <windows.h> (CLAUDE.md).
+// header pulls in <windows.h> (CLAUDE.md). Every FileError thrown here
+// carries an errno code (util::errno_code_of), on Windows too.
 
 #include "qrss/dirlock.hpp"
 
@@ -76,10 +77,21 @@ DirLock::~DirLock() { close(); }
 
 #ifdef _WIN32
 
+namespace {
+
+// The last Win32 error as an errno code (util::errno_of: ERROR_ACCESS_DENIED
+// -> EACCES, EIO for one with no errno), which is what the bindings and the
+// CLI read a FileError's code as.
+std::error_code win32_error() {
+    return util::errno_code_of(std::error_code(static_cast<int>(::GetLastError()), std::system_category()));
+}
+
+}  // namespace
+
 std::optional<DirLock> DirLock::try_acquire(const std::string& dir) {
     std::error_code ec;
     std::string failed;
-    if (!rawfile::make_dirs(dir, ec, &failed)) throw rawfile::FileError(ec, failed);
+    if (!rawfile::make_dirs(dir, ec, &failed)) throw rawfile::FileError(util::errno_code_of(ec), failed);
     DirLock l;
     l.path_ = lock_path(dir);
     const std::optional<std::wstring> w = util::wide_of(l.path_);
@@ -89,17 +101,17 @@ std::optional<DirLock> DirLock::try_acquire(const std::string& dir) {
     HANDLE h = ::CreateFileW(w->c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE)
-        throw rawfile::FileError(std::error_code(static_cast<int>(::GetLastError()), std::system_category()), l.path_);
+        throw rawfile::FileError(win32_error(), l.path_);
     l.h_ = h;
     OVERLAPPED ov{};   // byte 0
     if (!::LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) return std::nullopt;
     LARGE_INTEGER zero{};
     if (!::SetFilePointerEx(h, zero, nullptr, FILE_BEGIN) || !::SetEndOfFile(h))
-        throw rawfile::FileError(std::error_code(static_cast<int>(::GetLastError()), std::system_category()), l.path_);
+        throw rawfile::FileError(win32_error(), l.path_);
     const std::string line = pid_line();
     DWORD done = 0;
     if (!::WriteFile(h, line.data(), static_cast<DWORD>(line.size()), &done, nullptr) || done != line.size())
-        throw rawfile::FileError(std::error_code(static_cast<int>(::GetLastError()), std::system_category()), l.path_);
+        throw rawfile::FileError(win32_error(), l.path_);
     return l;
 }
 
@@ -121,7 +133,7 @@ long long DirLock::native_handle() const { return h_ ? reinterpret_cast<long lon
 std::optional<DirLock> DirLock::try_acquire(const std::string& dir) {
     std::error_code ec;
     std::string failed;
-    if (!rawfile::make_dirs(dir, ec, &failed)) throw rawfile::FileError(ec, failed);
+    if (!rawfile::make_dirs(dir, ec, &failed)) throw rawfile::FileError(util::errno_code_of(ec), failed);
     DirLock l;
     l.path_ = lock_path(dir);
     if (l.path_.find('\0') != std::string::npos)

@@ -23,10 +23,18 @@
 // only on the one CI machine that runs Windows.
 //
 // Header-only and Win32-header-free: _wfopen comes from <cstdio> on both
-// Windows toolchains, and nothing here needs <windows.h> (CLAUDE.md:
-// never from a widely-included header). Header-only because sstvae_core
-// lists its sources by hand while this is wanted by sstvae_core's and
-// sstvae_qrss's code alike.
+// Windows toolchains, and the three Win32 functions replace_file needs
+// (MoveFileExW, GetLastError, Sleep) are declared by hand, with winbase.h's
+// exact signatures, as native/tests/check.hpp declares SetErrorMode -- never
+// <windows.h> from a widely-included header (CLAUDE.md). Header-only
+// because sstvae_core lists its sources by hand while this is wanted by
+// sstvae_core's and sstvae_qrss's code alike.
+//
+// errno_of(ec) is the one place an error code becomes the errno an OSError
+// carries: on Windows a std::filesystem error is a Win32 code
+// (system_category: ERROR_ACCESS_DENIED is 5, which is EIO's number), so
+// it goes through the category's portable condition, and EIO when it has
+// none.
 
 #ifndef SSTVAE_UTIL_FILEIO_HPP
 #define SSTVAE_UTIL_FILEIO_HPP
@@ -43,7 +51,43 @@
 #include <system_error>
 #include <vector>
 
+#ifdef _WIN32
+// winbase.h / errhandlingapi.h / synchapi.h, exactly: BOOL WINAPI
+// MoveFileExW(LPCWSTR, LPCWSTR, DWORD); DWORD WINAPI GetLastError(VOID);
+// VOID WINAPI Sleep(DWORD). A translation unit that includes <windows.h>
+// as well sees the same declarations twice, which C++ allows.
+extern "C" __declspec(dllimport) int __stdcall MoveFileExW(const wchar_t*, const wchar_t*, unsigned long);
+extern "C" __declspec(dllimport) unsigned long __stdcall GetLastError(void);
+extern "C" __declspec(dllimport) void __stdcall Sleep(unsigned long);
+#endif
+
 namespace sstvae::util {
+
+// --- errors ----------------------------------------------------------------------
+
+// The errno an error code means, for an OSError: its value when it is one
+// (generic_category, and on POSIX system_category, whose codes are errno
+// values), else its category's portable condition when that is an errno (a
+// Win32 code through the standard library's table: ERROR_ACCESS_DENIED ->
+// EACCES, ERROR_FILE_NOT_FOUND -> ENOENT), else EIO -- an error with no
+// errno is still an OSError. EIO for no error at all (a caller that reports
+// a failure has one to report).
+inline int errno_of(const std::error_code& ec) {
+    if (!ec) return EIO;
+    if (ec.category() == std::generic_category()) return ec.value();
+#ifndef _WIN32
+    if (ec.category() == std::system_category()) return ec.value();
+#endif
+    const std::error_condition c = ec.default_error_condition();
+    if (c.category() == std::generic_category() && c.value() != 0) return c.value();
+    return EIO;
+}
+
+// errno_of(ec) as an error code of the generic category, for an exception
+// whose code() a binding turns into an OSError.
+inline std::error_code errno_code_of(const std::error_code& ec) {
+    return std::error_code(errno_of(ec), std::generic_category());
+}
 
 // --- UTF-8 <-> UTF-16, as Python converts Windows file names ----------------------
 
@@ -260,8 +304,38 @@ inline bool remove_file(const std::string& path, std::error_code& ec) {
     return !ec;
 }
 
+//
+// replace_file on Windows is os.replace's own call, MoveFileExW(from, to,
+// MOVEFILE_REPLACE_EXISTING), retried for about a second while it fails
+// with ERROR_ACCESS_DENIED or ERROR_SHARING_VIOLATION: the target held
+// open for a moment by another process (a reader of state.json, a virus
+// scanner, the search indexer) refuses a replace that succeeds a few
+// milliseconds later, and a writer that gives up at once loses its update.
+// Any other error, or the same one after the retries, is returned (ec a
+// Win32 code: errno_of reads it).
 inline bool replace_file(const std::string& from, const std::string& to, std::error_code& ec) {
     ec.clear();
+#ifdef _WIN32
+    const auto a = from.find('\0') == std::string::npos ? wide_of(from) : std::nullopt;
+    const auto b = to.find('\0') == std::string::npos ? wide_of(to) : std::nullopt;
+    if (!a || !b) {
+        ec = std::make_error_code(std::errc::invalid_argument);
+        return false;
+    }
+    constexpr unsigned long replace_existing = 0x1;       // MOVEFILE_REPLACE_EXISTING
+    constexpr unsigned long access_denied = 5;            // ERROR_ACCESS_DENIED
+    constexpr unsigned long sharing_violation = 32;       // ERROR_SHARING_VIOLATION
+    constexpr int tries = 21;                             // 20 waits of 50 ms: about 1 s
+    for (int k = 0;; ++k) {
+        if (::MoveFileExW(a->c_str(), b->c_str(), replace_existing)) return true;
+        const unsigned long e = ::GetLastError();
+        if ((e != access_denied && e != sharing_violation) || k + 1 >= tries) {
+            ec = std::error_code(static_cast<int>(e), std::system_category());
+            return false;
+        }
+        ::Sleep(50);
+    }
+#else
     const auto a = fs_path(from);
     const auto b = fs_path(to);
     if (!a || !b) {
@@ -270,6 +344,7 @@ inline bool replace_file(const std::string& from, const std::string& to, std::er
     }
     std::filesystem::rename(*a, *b, ec);
     return !ec;
+#endif
 }
 
 }  // namespace sstvae::util

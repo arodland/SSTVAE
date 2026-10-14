@@ -18,6 +18,7 @@
 
 #include "qrss/config.hpp"
 #include "qrss/live.hpp"
+#include "util/fileio.hpp"
 
 #ifdef _WIN32
 #include <io.h>
@@ -194,7 +195,8 @@ ReadResult read_once(State& st, unsigned char* buf, std::size_t n, std::size_t& 
             if (st.stopping()) return ReadResult::stopped;
             continue;               // a cancel that raced a read that finished
         }
-        throw std::system_error(static_cast<int>(e), std::system_category(), "read");
+        throw std::system_error(util::errno_code_of(std::error_code(static_cast<int>(e), std::system_category())),
+                                "read");
     }
 #else
     const int fd = static_cast<int>(st.handle);
@@ -316,8 +318,8 @@ void StreamSource::close() {
             if (st_->reader_done) break;
             h = st_->thread;
         }
-        if (h) CancelSynchronousIo(h);
-        Sleep(10);
+        if (h) ::CancelSynchronousIo(h);
+        ::Sleep(10);   // (the Win32 one, not live::Sleep)
     }
 #endif
     reader_.join();

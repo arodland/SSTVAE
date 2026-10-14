@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -13,6 +14,7 @@
 #include <vector>
 
 #include "qrss/pytext.hpp"
+#include "qrss/pyunicode_tables.hpp"
 
 namespace sstvae::qrss::pynum {
 
@@ -25,6 +27,79 @@ namespace {
 bool py_space(char c) {
     const auto u = static_cast<unsigned char>(c);
     return u == 0x20 || (u >= 0x09 && u <= 0x0D);
+}
+
+// One code point of strict UTF-8 at s[i] (RFC 3629, no surrogates), i moved
+// past it; nullopt for anything else.
+std::optional<char32_t> next_code_point(std::string_view s, std::size_t& i) {
+    const auto b = static_cast<unsigned char>(s[i]);
+    if (b < 0x80) {
+        ++i;
+        return b;
+    }
+    std::size_t len = 0;
+    unsigned char lo = 0x80, hi = 0xBF;
+    if (b >= 0xC2 && b <= 0xDF) {
+        len = 2;
+    } else if (b >= 0xE0 && b <= 0xEF) {
+        len = 3;
+        if (b == 0xE0) lo = 0xA0;
+        if (b == 0xED) hi = 0x9F;   // not the surrogates
+    } else if (b >= 0xF0 && b <= 0xF4) {
+        len = 4;
+        if (b == 0xF0) lo = 0x90;
+        if (b == 0xF4) hi = 0x8F;
+    } else {
+        return std::nullopt;
+    }
+    if (i + len > s.size()) return std::nullopt;
+    const auto b1 = static_cast<unsigned char>(s[i + 1]);
+    if (b1 < lo || b1 > hi) return std::nullopt;
+    char32_t cp = b & (len == 2 ? 0x1Fu : len == 3 ? 0x0Fu : 0x07u);
+    for (std::size_t k = 1; k < len; ++k) {
+        const auto c = static_cast<unsigned char>(s[i + k]);
+        if ((c & 0xC0) != 0x80) return std::nullopt;
+        cp = (cp << 6) | (c & 0x3Fu);
+    }
+    i += len;
+    return cp;
+}
+
+bool unicode_space(char32_t cp) {
+    for (const std::uint32_t c : pyunicode::SPACES)
+        if (c == cp) return true;
+    return false;
+}
+
+int unicode_digit(char32_t cp) {
+    for (const pyunicode::DigitRun& r : pyunicode::DIGITS)
+        if (cp >= r.first && cp <= r.last) return r.value + static_cast<int>(cp - r.first);
+    return -1;
+}
+
+// The text int() and float() parse: _PyUnicode_TransformDecimalAndSpaceToASCII
+// of it -- ASCII kept, a Unicode space (Py_UNICODE_ISSPACE) read as ' ', a
+// Unicode decimal digit as its ASCII digit; anything else past ASCII (DEL
+// included, and a byte that is not UTF-8: a surrogate escape there) is the
+// reference's '?', which no number holds, so nullopt.
+std::optional<std::string> to_ascii(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    std::size_t i = 0;
+    while (i < text.size()) {
+        const std::optional<char32_t> cp = next_code_point(text, i);
+        if (!cp) return std::nullopt;
+        if (*cp < 127) {
+            out += static_cast<char>(*cp);
+        } else if (unicode_space(*cp)) {
+            out += ' ';
+        } else if (const int d = unicode_digit(*cp); d >= 0) {
+            out += static_cast<char>('0' + d);
+        } else {
+            return std::nullopt;
+        }
+    }
+    return out;
 }
 
 std::string_view strip(std::string_view s) {
@@ -75,7 +150,9 @@ void put_utf8(std::string& out, char32_t cp) {
 
 std::optional<PyInt> py_int(std::string_view text, int base) {
     if (base != 10 && base != 16) throw std::invalid_argument("py_int: base must be 10 or 16");
-    const std::string_view s = strip(text);
+    const std::optional<std::string> ascii = to_ascii(text);
+    if (!ascii) return std::nullopt;
+    const std::string_view s = strip(*ascii);
     std::size_t i = 0;
     const std::size_t n = s.size();
     bool negative = false;
@@ -143,7 +220,9 @@ std::string invalid_int_literal(std::string_view text, int base) {
 }
 
 std::optional<double> py_float(std::string_view text) {
-    const std::string_view s = strip(text);
+    const std::optional<std::string> ascii = to_ascii(text);
+    if (!ascii) return std::nullopt;
+    const std::string_view s = strip(*ascii);
     if (s.empty()) return std::nullopt;
 
     // Underscores only between two digits (_Py_string_to_number_with_underscores).
