@@ -38,20 +38,55 @@ The bars, and in brackets what was measured (2026-10-14):
   own (mu within 0.1, beta within 10%, exceedance at the committed 10% and
   1% points under 1.25 and 1.0 of nominal), and over both seed sets (the
   2,400 Z values the constants were fitted to) mu within 0.002 and beta
-  within 0.002 of the committed constants [see MEASURED below];
+  within 0.002 of the committed constants [MEASURED below];
 - A3 hits on production noise slots: every field the reference's,
-  p_value to 1e-12 relative (gumbel_p's numpy SIMD exp) [Z, paths, f_hz
-  bit for bit; p_value 0];
+  p_value to 1e-12 relative (gumbel_p's numpy SIMD exp) [Z, paths,
+  centre_hz bit for bit; p_value 2.0e-16 relative at worst];
 - A1: the statistic within one float32 ulp in 1e-5 of cells (the plan's
   "a few 1-ulp flips") and the same exceedance counts at 1e-3 and 1e-4
-  [see MEASURED];
+  [0 of 2,496,260 cells differ; 2998 and 359 cells past, 1.20 and 1.44 of
+  nominal on both sides];
 - A2: Lambda at every scale to 1e-9 relative, p to 1e-9 relative, the
-  same exceedance counts [see MEASURED];
-- noise slots: no pass on either side, and per capture the same A2 passes,
-  A3 hits and A3 statistic (Z of every channel bit for bit) as the
-  reference's.
+  same exceedance counts [Lambda 1.8e-12 (k=1) to 3.1e-15 (k=10), p
+  3.5e-14; every count equal; MEASURED below];
+- noise slots: no pass on either side, and per capture the same passes,
+  A2 hits (p to 1e-9, f to 1e-9 Hz), A3 hits and A3 statistic (Z of every
+  channel bit for bit) as the reference's, on its subsample and on every
+  C++ capture with a hit of any kind [MEASURED below].
 
-MEASURED holds the numbers (`pytest -s` prints them again).
+MEASURED (2026-10-14, 4 shared CPUs; `pytest -s` prints them again):
+
+A-7 over 200 captures (seeds 1000 + n), C++ = reference bit for bit, and
+over 400 (seeds 1000 + n and 2000 + n) on the C++:
+
+    n    mu (200)   beta (200)  10%/1% exceed.  mu (400)  beta (400)  committed     ms/capture py/C++
+    31    9.8842    0.6913      1.07 / 0.33     9.8443    0.7023      9.845 0.702   11.7 /   4.9
+    132  18.6448    0.6296      1.00 / 0.50    18.6368    0.6267     18.637 0.627   40.7 /  21.1
+    331  28.9175    0.6153      0.92 / 0.08    28.9237    0.6244     28.924 0.624  101.1 /  51.0
+    896  47.3064    0.5882      0.87 / 0.25    47.3068    0.6013     47.307 0.601  273.5 / 138.8
+
+(per capture at 896: noise 37-53 ms, spectrogram 40 -> 31, CFAR 60 -> 53,
+Viterbi 133 -> 14). No constant moves: the largest gap is n = 31's mu,
+9.8443 against 9.845, the reference's own (rounding 9.8443 to three places
+gives 9.844). native/tests/qrss/test_calibration.cpp repeats this with no
+Python on noise of its own (splitmix64 + Box-Muller, 470 captures): mu
+9.842 / 18.627 / 28.927 / 47.225, every mean within 1.1 standard errors.
+
+A-6 A2 (40 captures, 1,050,840 cells per scale), past each scale's Gamma
+point at 1e-3 / 1e-4, of nominal: k=1 0.90 / 0.66, k=2 0.85 / 0.71, k=5
+0.80 / 0.89, k=10 0.89 / 0.96; combined p at 1e-2/1e-3/1e-4: 0.68 / 0.71 /
+0.72. Reference 7.1 s, C++ 2.2 s.
+
+Noise slots through the C++ receive_slot (typed, joint CE + L, budget_s
+None): 0 passes in 100 (60 SHORT + L_SHORT, 40 TINY + L_TINY). A3: 0 hits
+at p < 1e-3 over 3,694 channels (mean Z 18.92 / 18.95 against the Gumbel's
+19.00 at 132 frames, 10.21 against 10.25 at 31). A2: one hit in 100 slots
+(SHORT seed 5046, f 2687.44 Hz, p 4.94e-8 against A2_PFA 1e-7; the
+reference's the same, p to 7.5e-15 relative), its gate-V candidate refused
+by both. Reference subsample 20 slots (5 + 5 SHORT, 10 TINY) plus seed
+5046: the same capture by capture. Per slot here, about 2.8 s C++ against
+5-9 s reference for SHORT (half of each is `_listen`'s own acquisition),
+1.9 s against 5.9 s for TINY.
 """
 
 import importlib
@@ -366,6 +401,7 @@ def _listen(cap, specs):
     longest = max(specs, key=lambda s: s.keyed_end_pos * s.t_sym)
     every = A.track_before_detect(prep.fe, prep.t0_index, longest, acq.lines, prep.fs, all_hits=True)
     return {"passes": [(p.f_hz, p.waveform) for p in passes], "a2": len(acq.preamble),
+            "a2_p": [h.p_value for h in acq.preamble], "a2_f": [h.f_hz for h in acq.preamble],
             "a3": len(acq.tbd), "a3_p": [h.p_value for h in acq.tbd],
             "cands": len(acq.detections(specs)), "z": np.array([h.z for h in every]),
             "n_frames": every[0].n_frames}
@@ -419,9 +455,14 @@ def _summary(rs):
             "cands": sum(r["cands"] for r in rs), "channels": len(z), "z": z}
 
 
-# frames, C++ slots, reference slots (a subsample of the same seeds), first seed
+# frames, C++ slots, reference slots (a subsample of the same seeds), first
+# seed. SHORT is two node ids of 30 (a SHORT slot is ~3 s through the C++
+# here, half receive_slot and half _listen's own acquisition, and 5-8 s
+# through the reference), so each stays under three minutes: 60 SHORT slots
+# and 10 on the reference between them.
 SLOTS = {
-    "short": ((frame.SHORT, lframe.L_SHORT), 60, 6, 5000),
+    "short-1": ((frame.SHORT, lframe.L_SHORT), 30, 5, 5000),
+    "short-2": ((frame.SHORT, lframe.L_SHORT), 30, 5, 5030),
     "tiny": ((frame.TINY, lframe.L_TINY), 40, 10, 9000),
 }
 
@@ -431,16 +472,23 @@ SLOTS = {
 def test_noise_slots_on_the_cpp(native, Q, name):
     """Noise-only slots through the C++ receive_slot, CE and L listened for
     (budget_s None): no pass; A2 passes and A3 hits counted; and on the
-    reference's subsample the same, capture by capture, with A3's Z on
-    every channel bit for bit. A3's channels hold the committed Gumbel."""
+    reference's subsample, plus every C++ capture outside it that had any
+    hit, the same, capture by capture, with A3's Z on every channel bit for
+    bit. A3's channels hold the committed Gumbel."""
     specs, n_cpp, n_py, seed0 = SLOTS[name]
     seeds = list(range(seed0, seed0 + n_cpp))
     got, t_cpp = _cpp_listen(native, seeds, specs)
-    ref, t_py = _py_listen(seeds[:n_py], specs)
-    for s, g, r in zip(seeds, got, ref):
+    flagged = [k for k in range(n_py, n_cpp)
+               if got[k]["passes"] or got[k]["a2"] or got[k]["a3"] or got[k]["cands"]]
+    idx = list(range(n_py)) + flagged
+    ref, t_py = _py_listen([seeds[k] for k in idx], specs)
+    for k, r in zip(idx, ref):
+        s, g = seeds[k], got[k]
         assert g["passes"] == r["passes"], s
         assert (g["a2"], g["a3"], g["cands"], g["n_frames"]) == \
             (r["a2"], r["a3"], r["cands"], r["n_frames"]), s
+        assert np.allclose(g["a2_p"], r["a2_p"], rtol=1e-9, atol=0), s
+        assert np.allclose(g["a2_f"], r["a2_f"], rtol=0, atol=1e-9), s
         assert np.allclose(g["a3_p"], r["a3_p"], rtol=1e-12, atol=0), s
         _dz(g["z"], r["z"], s)
     sg, sr = _summary(got), _summary(ref)
@@ -456,5 +504,7 @@ def test_noise_slots_on_the_cpp(native, Q, name):
           f"{sg['a3']} A3 hits at p < {A.TBD_PFA:g}, {sg['cands']} gate-V candidates; "
           f"{sg['channels']} A3 channels, mean Z {np.mean(z):.3f} "
           f"(Gumbel {mu + np.euler_gamma * be:.3f}), {p_ch:.2g} of channels at p < {A.TBD_PFA:g}. "
-          f"Reference {sr['slots']} slots in {t_py:.1f} s: {sr['passes']} passes, {sr['a2']} A2 "
-          f"passes, {sr['a3']} A3 hits, {sr['cands']} candidates")
+          f"Reference {sr['slots']} slots ({n_py} + {len(flagged)} with a C++ hit: seeds "
+          f"{[seeds[k] for k in flagged]}) in {t_py:.1f} s: {sr['passes']} passes, {sr['a2']} A2 "
+          f"passes, {sr['a3']} A3 hits, {sr['cands']} candidates. A2 p of every hit: C++ "
+          f"{[p for r in got for p in r['a2_p']]}")
