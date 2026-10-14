@@ -1189,3 +1189,47 @@ def test_fe_ring_threads(Lv):
         t.join()
     assert not bad, bad[:5]
     assert ring.end == chunk * chunks
+
+
+def test_dial_log_threads(Lv, tmp_path):
+    """Readers refreshing and splitting one native DialLog while the file
+    is appended to (a partial line now and then, as the app's writer can
+    leave): no reader raises or sees a half-built point list, and the last
+    refresh reads what the reference reads."""
+    p = tmp_path / "dial.jsonl"
+    p.write_text("")
+    got = Lv.DialLog(p)
+    stop = threading.Event()
+    bad = []
+
+    def reader():
+        while not stop.is_set():
+            try:
+                got.refresh()
+                pts = got.points
+                if any(b[0] < a[0] or a[1] == b[1] for a, b in zip(pts, pts[1:])):
+                    bad.append(("points", len(pts)))
+                got.spans(1000.0, 2000.0)
+            except Exception as e:  # noqa: BLE001 -- any raise is the failure
+                bad.append(repr(e))
+                return
+
+    threads = [threading.Thread(target=reader) for _ in range(3)]
+    for t in threads:
+        t.start()
+    with open(p, "a") as f:
+        for i in range(600):
+            f.write(json.dumps({"t": 1000.0 + i, "dial_hz": 14_070_000 + i % 5}) + "\n")
+            if i % 4 == 0:
+                f.write('{"t": 10')
+                f.flush()
+                f.write("50.5}\n")
+            f.flush()
+    stop.set()
+    for t in threads:
+        t.join()
+    assert not bad, bad[:5]
+    ref = live.DialLog(p)
+    ref.refresh()
+    got.refresh()
+    assert got.points == ref.points and len(ref.points) == 600
