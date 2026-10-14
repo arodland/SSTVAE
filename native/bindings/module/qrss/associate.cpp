@@ -145,7 +145,9 @@ void bind(py::module_& q) {
         const std::int64_t md = rx::as_int(mode), g = rx::as_int(segment);
         const auto zz = rx::vec<double>(z), ww = rx::vec<double>(w);
         const as::Validation v = nogil([&] { return as::validate_header_match(core(s), k, md, g, zz, ww); });
-        return py::make_tuple(v.ok, st::to_py(v.details));
+        py::object details = st::to_py(v.details);
+        if (v.t_numpy) details[py::str("t")] = np_float(v.details.at("t").as_double());
+        return py::make_tuple(v.ok, details);
     }, py::arg("store"), py::arg("key"), py::arg("mode"), py::arg("segment"), py::arg("z"), py::arg("w"));
     m.def("_attach_by_header", [](PyStore& s, const py::object& h, const py::object& uids, const py::object& method) {
         const auto hf = rx::header_fields(h);

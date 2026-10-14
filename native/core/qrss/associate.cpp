@@ -160,6 +160,7 @@ Validation validate_header_match(Store& store, const Key& key, std::int64_t mode
     const double t_exp = expected_t(w, W);
     out.ok = !(c.t < HDR_REJECT_T && t_exp > HDR_REJECT_EXPECT);
     out.details.set("t", Value::number(c.t));
+    out.t_numpy = c.numpy;
     out.details.set("M", Value::integer(c.M));
     out.details.set("t_expected", Value::number(t_exp));
     return out;

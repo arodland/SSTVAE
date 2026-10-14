@@ -106,6 +106,7 @@ std::optional<Best> best_accumulator(store::Store& store, std::span<const double
 struct Validation {
     bool ok = true;
     pyjson::Value details = pyjson::Value::object();
+    bool t_numpy = false;   // details["t"] is corr_stat's t, an np.float64 in the reference
 };
 Validation validate_header_match(store::Store& store, const store::Key& key, std::int64_t mode,
                                  std::int64_t segment, std::span<const double> z, std::span<const double> w);

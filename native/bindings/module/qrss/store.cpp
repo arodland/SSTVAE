@@ -433,6 +433,21 @@ void bind(py::module_& q) {
         return store::mean_w_db(std::span<const double>(v));
     }, py::arg("w"));
     m.def("canonical_index", [](const py::object& segment, const py::object& n) {
+        if (!PyIndex_Check(n.ptr())) {
+            // The reference's order for an n that is not an integer: its range
+            // check (Python's comparisons, so its errors), the segment, then the
+            // slice [:n], which refuses it.
+            const py::int_ lo(0), hi(store::SENT);
+            const int a = PyObject_RichCompareBool(lo.ptr(), n.ptr(), Py_LT);
+            if (a < 0) throw py::error_already_set();
+            const int b = a ? PyObject_RichCompareBool(n.ptr(), hi.ptr(), Py_LE) : 0;
+            if (b < 0) throw py::error_already_set();
+            if (!a || !b)
+                throw py::value_error("a pass carries 1.." + std::to_string(store::SENT) + " latents, not " +
+                                      rx::as_string(py::str(n)));
+            (void)store::canonical_index(rx::as_int(segment), 1);
+            throw py::type_error("slice indices must be integers or None or have an __index__ method");
+        }
         const auto idx = store::canonical_index(rx::as_int(segment), rx::as_int(n));
         py::array_t<py::ssize_t> out(static_cast<py::ssize_t>(idx.size()));
         py::ssize_t* d = out.mutable_data();

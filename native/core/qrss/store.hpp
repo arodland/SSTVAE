@@ -27,7 +27,9 @@
 // rethrows. One documented difference in the bytes: a member's mean_w_db is
 // 10*log10(mean w), which numpy computes with its own SIMD log10 on x86-64
 // machines with AVX-512 (SVML) and this computes with the C library's; the
-// two differ in the last place for about 3% of arguments, which then shows
+// two differ in the last place for a few percent of arguments (5 to 9% of
+// 10*log10(x), x uniform on [0.01, 100] or [0.5, 20], measured against
+// glibc on an AVX-512 machine, 2026-10-14), which then shows
 // in the JSON text (and nowhere else: no decision here reads it but `twin`'s
 // choice between two copies of one transmission).
 //

@@ -461,7 +461,8 @@ std::string default_root() {
         while (!home.empty() && home.back() == '/') home.pop_back();
         if (home.empty()) home = "/";
     }
-    return pathlib(home + "/.local/share/qrsstvae");
+    // (Path("/") / ".local" is "/.local": a POSIX "//" root would survive pathlib)
+    return pathlib((home == "/" ? std::string() : home) + "/.local/share/qrsstvae");
 #endif
 }
 

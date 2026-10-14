@@ -180,6 +180,8 @@ inline store::Key key_of(const py::handle& k) {
     if (PyErr_Occurred()) throw py::error_already_set();
     if (parts.size() < 2)
         throw py::value_error("not enough values to unpack (expected 2, got " + std::to_string(parts.size()) + ")");
+    if (PyBytes_Check(parts[0].ptr()) || PyByteArray_Check(parts[0].ptr()))
+        throw py::type_error("a bytes-like object is required, not 'str'");   // bytes.replace('/', '_')
     if (!PyUnicode_Check(parts[0].ptr()))
         throw py::attribute_error("'" + class_name(parts[0]) + "' object has no attribute 'replace'");
     return {rx::as_string(parts[0]), rx::as_int(parts[1])};
