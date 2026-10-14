@@ -45,11 +45,13 @@
 //   interrupt   at once). Ends the audio, waits for the session's thread to
 //               write its last state and for the listener to close, at most
 //               stop_bound_s in all, plus the time to write state.json once
-//               if the deadline finds the session's thread writing it. What has not finished by then
-//               is abandoned (a receive in flight: minutes for a FULL slot,
-//               since the receivers take no cancel flag): its results are
-//               dropped, nothing of it reaches the store, tiles/ or the sink,
-//               and the locks are released. A receive that does finish
+//               if the deadline finds the session's thread writing it, and
+//               to finish a write of the listener's (state.json, a picture)
+//               that the deadline finds under way. What has not finished by
+//               then is abandoned (a receive in flight: minutes for a FULL
+//               slot, since the receivers take no cancel flag): its results
+//               are dropped, the listener writes nothing more (below) and
+//               the locks are released. A receive that does finish
 //               within the bound is kept: its tiles, store passes and log
 //               lines land after "audio ended", and state.json is written
 //               once more (still not listening) so that it shows them.
@@ -83,25 +85,33 @@
 // once it has returned, so a waiter sees its effects.
 //
 // Abandoning, precisely. The C++ receivers cannot be interrupted, so a stop
-// that finds one running gives up on it: the session wraps the listener's
-// seams so that, once abandoned, every further stage of that receive throws
-// at its start ("ListenerStopped"), its results are dropped where it
-// returns, a store association that has not begun never begins (one that
-// has is waited for, and the store's lock is released when it ends, even if
-// that is after stop() returned), a picture is never drawn (one drawn
-// within the last SETTLE_S is given that long to reach its file before the
-// locks go), and its log lines reach no sink. What is not guarded, and so is
-// the residue of an abandoned receive: the listener's one log line saying
-// the slot failed is still appended to listener.log when the receive
-// returns (the listener writes its log file itself), and the passband
-// store's packer, if it was packing an hour, finishes that hour (~1.5 s)
-// with its own atomic swap. Neither can collide with a new listener's files
-// beyond that line. One more, not seen in any measurement: a deadline that
-// finds the session's thread neither waiting for audio nor on its last
-// writes (a read-back or a step that outlasts the bound) cannot stop it
-// mid-step, so the state.json write that ends that step lands after the
-// locks go, saying "listening"; the thread stops at its next read. (A
-// LiveListener::abandon() would retire all three; see the port notes.)
+// that finds one running gives up on it, and it gives up on the listener
+// first: LiveListener::abandon(), called while the session still holds
+// every lock, after which the listener appends nothing to listener.log,
+// writes no state.json and no picture, changes no tile, starts no job,
+// applies nothing a running job returns (the line saying the slot failed
+// included), begins no store association and starts no further hour of
+// the passband store's packing; a write of its own under way when it is
+// called lands before it returns. The session's wrapped seams then make
+// every further stage of the receive throw at its start ("ListenerStopped")
+// and draw no picture, and nothing more reaches the sink. So what a stop
+// that abandoned leaves on disk is what was there when it returned, apart
+// from three things, all of them work already begun:
+//   * the receive itself runs to its end on the listener's thread (CPU
+//     only: it writes nothing), which ~Session lets go;
+//   * a store association already under way is waited for to the deadline,
+//     and if it is still running then, it completes after stop() returned
+//     and the store's lock is released when it ends (a session started on
+//     that store meanwhile runs without one, with its notice);
+//   * an hour the packer was packing is given up at its next FLAC frame,
+//     unless it had passed its checks and was being swapped into place,
+//     which completes (renames within the passband directory), possibly
+//     after the locks are released.
+// And one thing left unwritten: a deadline that finds the session's thread
+// neither waiting for audio nor on its last writes (a read-back or a step
+// that outlasts the bound) leaves it where it is, so state.json stays as
+// that thread last wrote it, saying "listening"; the thread writes nothing
+// more and stops at its next read.
 //
 // Departures from the script, each deliberate:
 //   * interrupt() is the script's KeyboardInterrupt, and the CLI sends it on
@@ -143,8 +153,9 @@ namespace sstvae::qrss::listen {
 // How long stop() and interrupt() may take (about 1.5 s, as asked of the app's
 // window, whose own fallback kills the process at 3 s).
 inline constexpr double STOP_BOUND_S = 1.5;
-// The last part of the bound, kept for a picture drawn just before it to
-// reach its file.
+// The last part of the bound (a quarter of it, at most), kept for abandoning
+// what has not finished: the session's thread's last writes, a write of the
+// listener's under way, an association under way.
 inline constexpr double SETTLE_S = 0.25;
 // The PushSource's name, as state.json's "source" shows it.
 inline constexpr const char* PUSH_NAME = "app capture (8 kHz)";

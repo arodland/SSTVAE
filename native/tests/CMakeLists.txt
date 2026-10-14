@@ -388,7 +388,16 @@ endif()
 # qrss_core_<module>. Keyed on the target, not the option, for the
 # reason given above add_subdirectory(tests) in ../CMakeLists.txt. Each
 # gets the QRSS golden corpus directory as its one argument.
+#
+# The TIMEOUT is sized for an optimized build. Under ThreadSanitizer (the
+# CI tsan job's -fsanitize=thread) the slowest ones run many times longer
+# -- acquire 99 s, receiver_slot about 255 s, on 4 shared CPUs -- so there
+# it is 1500 s: still the bound on a wedged test, never the expected time.
 if(TARGET sstvae_qrss)
+  set(_qrss_core_timeout 120)
+  if(CMAKE_CXX_FLAGS MATCHES "-fsanitize=thread")
+    set(_qrss_core_timeout 1500)
+  endif()
   file(GLOB _qrss_core_tests CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/qrss/test_*.cpp)
   foreach(_src ${_qrss_core_tests})
     get_filename_component(_name ${_src} NAME_WE)
@@ -402,7 +411,7 @@ if(TARGET sstvae_qrss)
     endif()
     add_test(NAME qrss_core_${_mod}
              COMMAND test_qrss_core_${_mod} ${CMAKE_CURRENT_SOURCE_DIR}/golden_qrss)
-    set_tests_properties(qrss_core_${_mod} PROPERTIES TIMEOUT 120)
+    set_tests_properties(qrss_core_${_mod} PROPERTIES TIMEOUT ${_qrss_core_timeout})
   endforeach()
 endif()
 

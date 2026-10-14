@@ -353,7 +353,56 @@ std::string py_str_of(const std::exception& e) {
     return what;
 }
 
+// What leaves a job once the listener is abandoned: not a std::exception, so
+// that nothing on the way (the store's "store failed", a picture's "render
+// failed") takes it for an error; run_job ends the job on it, saying nothing.
+struct Dropped {};
+
 }  // namespace
+
+// --- default seams ----------------------------------------------------------------------------
+
+Seams default_seams(const LiveConfig& cfg, Seams s) {
+    if (!s.clock) s.clock = system_time;
+    if (!s.log)
+        s.log = [](const std::string& line) {
+            std::fputs((line + "\n").c_str(), stderr);
+            std::fflush(stderr);
+        };
+    if (!s.candidates || !s.detect || !s.receive_slot) {
+        // the live receives' configuration (the constructor's rx_)
+        api::ReceiveConfig rx;
+        rx.frames = cfg.selection();
+        rx.estimator = cfg.estimator;
+        rx.old_edge_noise = s.old_edge_noise;
+        rx.old_gating = s.old_gating;
+        if (!s.candidates)
+            s.candidates = [rx](const receiver::Prepared& prep, Selection sel, std::span<const acquire::Hint> hints) {
+                return receiver::candidates(prep, sel, true, hints, api::slot_seams(rx));
+            };
+        if (!s.detect)
+            s.detect = [rx](const receiver::Prepared& prep, Selection sel, const receiver::DetectOptions& opt) {
+                return receiver::detect(prep, sel, opt, api::slot_seams(rx));
+            };
+        if (!s.receive_slot)
+            s.receive_slot = [rx](const receiver::Prepared& prep, Selection sel, const receiver::SlotOptions& opt) {
+                return receiver::receive_slot(receiver::CaptureRef(&prep), sel, opt, api::slot_seams(rx));
+            };
+    }
+    if (!s.finish) {
+        const NoiseFn noise = s.noise;
+        s.finish = [noise](std::span<const cf> x, std::span<const std::uint8_t> ok, std::int64_t origin,
+                           std::int64_t q, const api::ReceiveConfig& config, std::span<const Detection> dets,
+                           std::span<const acquire::Hint> hints) {
+            FinishOptions opt;
+            opt.seams.noise = noise;
+            return finish_receive(x, ok, origin, q, config, dets, hints, opt);
+        };
+    }
+    if (!s.associate)
+        s.associate = [](const PassResult& p, store::Store& st) { return associate::associate(p, st); };
+    return s;
+}
 
 // --- errors ---------------------------------------------------------------------------------
 
@@ -420,37 +469,7 @@ LiveListener::LiveListener(std::string state_dir, LiveConfig cfg, std::shared_pt
     finish_rx_.old_edge_noise = seams_.old_edge_noise;
     finish_rx_.old_gating = seams_.old_gating;
 
-    if (!seams_.clock) seams_.clock = system_time;
-    if (!seams_.log)
-        seams_.log = [](const std::string& line) {
-            std::fputs((line + "\n").c_str(), stderr);
-            std::fflush(stderr);
-        };
-    const api::ReceiveConfig rx = rx_;
-    if (!seams_.candidates)
-        seams_.candidates = [rx](const receiver::Prepared& prep, Selection sel, std::span<const acquire::Hint> hints) {
-            return receiver::candidates(prep, sel, true, hints, api::slot_seams(rx));
-        };
-    if (!seams_.detect)
-        seams_.detect = [rx](const receiver::Prepared& prep, Selection sel, const receiver::DetectOptions& opt) {
-            return receiver::detect(prep, sel, opt, api::slot_seams(rx));
-        };
-    if (!seams_.receive_slot)
-        seams_.receive_slot = [rx](const receiver::Prepared& prep, Selection sel, const receiver::SlotOptions& opt) {
-            return receiver::receive_slot(receiver::CaptureRef(&prep), sel, opt, api::slot_seams(rx));
-        };
-    if (!seams_.finish) {
-        const NoiseFn noise = seams_.noise;
-        seams_.finish = [noise](std::span<const cf> x, std::span<const std::uint8_t> ok, std::int64_t origin,
-                                std::int64_t q, const api::ReceiveConfig& config,
-                                std::span<const Detection> dets, std::span<const acquire::Hint> hints) {
-            FinishOptions opt;
-            opt.seams.noise = noise;
-            return finish_receive(x, ok, origin, q, config, dets, hints, opt);
-        };
-    }
-    if (!seams_.associate)
-        seams_.associate = [](const PassResult& p, store::Store& st) { return associate::associate(p, st); };
+    seams_ = default_seams(cfg_, std::move(seams_));   // (the live receives' rx_ is its configuration)
     if (!cfg_.render) seams_.renderer.reset();
 
     load_previous();
@@ -488,6 +507,61 @@ void LiveListener::close() {
     }
 }
 
+// --- abandon -----------------------------------------------------------------------------------
+
+// A write made outside mu_ (state.json, a picture's file): entered only while
+// not abandoned, and counted until it is done, so that abandon() returns only
+// once every write it did not refuse has landed.
+class LiveListener::WriteScope {
+public:
+    explicit WriteScope(LiveListener& l) : l_(l) {
+        std::lock_guard<std::mutex> w(l_.write_mu_);
+        ok_ = !l_.abandoned_.load();
+        if (ok_) ++l_.writing_;
+    }
+    ~WriteScope() {
+        if (!ok_) return;
+        {
+            std::lock_guard<std::mutex> w(l_.write_mu_);
+            --l_.writing_;
+        }
+        l_.write_cv_.notify_all();
+    }
+    WriteScope(const WriteScope&) = delete;
+    WriteScope& operator=(const WriteScope&) = delete;
+    explicit operator bool() const { return ok_; }
+
+private:
+    LiveListener& l_;
+    bool ok_ = false;
+};
+
+void LiveListener::drop_if_abandoned() const {
+    if (abandoned_.load()) throw Dropped{};
+}
+
+void LiveListener::abandon() {
+    {
+        // Under mu_: whatever holds it now finishes first, and everything
+        // that takes it after sees the flag. The queues go: nothing starts.
+        Lock lk(mu_);
+        {
+            std::lock_guard<std::mutex> w(write_mu_);
+            abandoned_ = true;
+        }
+        live_jobs_.clear();
+        finish_jobs_.clear();
+        sink_queue_.clear();
+    }
+    idle_cv_.notify_all();   // (the queues emptied: idle may be true now)
+    {
+        // the writes under way outside the lock (a state.json, a picture)
+        std::unique_lock<std::mutex> w(write_mu_);
+        write_cv_.wait(w, [&] { return writing_ == 0; });
+    }
+    if (passband_) passband_->stop_packing();
+}
+
 // --- logging ----------------------------------------------------------------------------------
 
 double LiveListener::clock_locked() const { return seams_.clock(); }
@@ -498,6 +572,7 @@ double LiveListener::clock() const {
 }
 
 void LiveListener::log_locked(const std::string& msg) {
+    if (abandoned_.load()) return;   // (set under mu_, which the caller holds)
     const std::string line = utc_iso(now_ != 0.0 ? now_ : clock_locked()) + " " + msg;
     lines_.push_back(line);
     if (lines_.size() > 50) lines_.erase(lines_.begin(), lines_.end() - 50);
@@ -540,6 +615,7 @@ void LiveListener::deliver() {
                 lines.swap(sink_queue_);
             }
             for (const std::string& line : lines) {
+                if (abandoned_.load()) break;   // (and abandon() emptied the queue)
                 try {
                     seams_.log(line);
                 } catch (...) {
@@ -713,6 +789,7 @@ void LiveListener::write_state(bool listening) {
     std::string text;
     {
         Lock lk(mu_);
+        if (abandoned_.load()) return;
         Value st = Value::object();
         st.set("version", Value::integer(1));
         st.set("updated", num(clock_locked()));
@@ -763,6 +840,8 @@ void LiveListener::write_state(bool listening) {
     // threads writing the state at once never share a temporary)
     const std::string tmp = dir_ + "/.state.json." + std::to_string(rawfile::process_id()) + "." +
                             std::to_string(rawfile::thread_ident()) + ".tmp";
+    const WriteScope writing(*this);   // (abandoned since the JSON was built: not written)
+    if (!writing) return;
     write_file(tmp, text_mode(text));
     replace_or_throw(tmp, dir_ + "/state.json");
 }
@@ -773,6 +852,7 @@ void LiveListener::feed(std::span<const double> x, double t_end) {
     if (x.empty()) return;
     {
         Lock lk(mu_);
+        if (abandoned_.load()) return;   // (the ring and the passband store are written under mu_)
         const std::int64_t n = static_cast<std::int64_t>(x.size());
         std::int64_t a = py_round_int(t_end * FS) - n + 1;
         if (const std::optional<std::int64_t> nxt = fe_.next_index()) {
@@ -865,12 +945,12 @@ std::vector<std::pair<std::int64_t, std::int64_t>> LiveListener::heard_runs(std:
 }
 
 double LiveListener::backfill(double now) {
-    if (!passband_) return 0.0;
+    if (!passband_ || abandoned_.load()) return 0.0;
     const std::int64_t a = py_round_int(now * FE_FS_D) - ring_.n();
     const double t_a = static_cast<double>(a) / FE_FS_D;
     const passband::Masked m = passband_->read(t_a, t_a + static_cast<double>(ring_.n()) / FE_FS_D);
     const auto runs = runs_of(m.mask);
-    if (runs.empty()) return 0.0;
+    if (runs.empty() || abandoned_.load()) return 0.0;
     std::size_t count = 0;
     for (const std::uint8_t b : m.mask) count += b ? 1 : 0;
     for (const auto& [lo, hi] : runs)
@@ -881,7 +961,7 @@ double LiveListener::backfill(double now) {
 }
 
 std::vector<std::int64_t> LiveListener::recover(double now, double hours) {
-    if (!passband_ || hours <= 0) return {};
+    if (!passband_ || hours <= 0 || abandoned_.load()) return {};
     const std::shared_ptr<passband::PassbandStore> pb = passband_;
     const FeReader reader = [pb](std::int64_t a, std::int64_t b) {
         passband::Masked m = pb->read(static_cast<double>(a) / FE_FS_D, static_cast<double>(b) / FE_FS_D);
@@ -913,6 +993,7 @@ std::vector<std::int64_t> LiveListener::recover(double now, double hours) {
         const std::int64_t t0 = slot_t0(q);
         {
             Lock lk(mu_);
+            if (abandoned_.load()) break;
             const bool queued = std::any_of(recover_.begin(), recover_.end(),
                                             [&](const std::shared_ptr<Rec>& r) { return r->s.q == q; });
             if (!(now - hours * 3600.0 <= end && end <= now) || finished_.count(q) || slot_locked(q) || queued)
@@ -926,6 +1007,7 @@ std::vector<std::int64_t> LiveListener::recover(double now, double hours) {
         const FeSpan sp = reader(t0 * FE_FS_I, py_round_int((static_cast<double>(t0) + dur_) * FE_FS_D));
         if (mask_mean(sp.ok) < FINISH_SEARCH_MIN_HEARD) continue;   // not heard (enough) by an earlier listener
         Lock lk(mu_);
+        if (abandoned_.load()) break;
         auto r = std::make_shared<Rec>(q);
         r->s.finishing = true;
         r->s.reader = reader;
@@ -984,6 +1066,7 @@ bool LiveListener::step(double now) {
     bool changed = false;
     {
         Lock lk(mu_);
+        if (abandoned_.load()) return false;
         now_ = now;
         for (const std::int64_t q : active_slots_locked(now)) {
             if (!slot_locked(q) && !finished_.count(q)) {
@@ -996,6 +1079,8 @@ bool LiveListener::step(double now) {
         std::vector<std::shared_ptr<Rec>> snap = slots_;
         py_sort(snap, [](const std::shared_ptr<Rec>& a, const std::shared_ptr<Rec>& b) { return a->s.q < b->s.q; });
         for (const std::shared_ptr<Rec>& r : snap) {
+            // (abandoned while a job ran here: synchronous mode lets the lock go for it)
+            if (abandoned_.load()) return changed;
             SlotState& s = r->s;
             const double t0 = static_cast<double>(slot_t0(s.q));
             if (s.done) continue;
@@ -1021,6 +1106,7 @@ bool LiveListener::step(double now) {
                 }
             }
         }
+        if (abandoned_.load()) return changed;
         if (!recover_.empty() && finish_idle_locked()) {
             const std::shared_ptr<Rec> r = recover_.front();
             recover_.erase(recover_.begin());
@@ -1034,6 +1120,7 @@ bool LiveListener::step(double now) {
             submit(lk, true, r);
             changed = true;
         }
+        if (abandoned_.load()) return changed;
         std::vector<std::shared_ptr<Rec>> keep_slots;
         for (const auto& r : slots_) {
             if (!r->s.done) {
@@ -1058,6 +1145,7 @@ bool LiveListener::step(double now) {
 // --- the workers --------------------------------------------------------------------------------
 
 void LiveListener::submit(Lock& lk, bool finish, const std::shared_ptr<Rec>& s) {
+    if (abandoned_.load()) return;   // abandoned: no job starts
     if (!cfg_.background) {
         lk.unlock();
         run_job(Job{finish, s});
@@ -1079,6 +1167,10 @@ void LiveListener::worker(bool finish) {
         if (stopping_) break;
         const Job j = jobs.front();
         jobs.pop_front();
+        if (abandoned_.load()) {   // (abandon() empties the queues: never started)
+            idle_cv_.notify_all();
+            continue;
+        }
         // taken and busy in one step, so idle() never reads true in between
         try {
             busy = std::string(finish ? "finish " : "refresh ") + slot_utc(j.s->s.q);
@@ -1100,6 +1192,8 @@ void LiveListener::run_job(const Job& j) {
             finish(j.s);
         else
             refresh(j.s);
+    } catch (const Dropped&) {
+        return;   // abandoned: nothing of it applied, nothing to deliver
     } catch (const std::exception& e) {
         job_failed(j, error_text(e));
     } catch (...) {
@@ -1110,6 +1204,7 @@ void LiveListener::run_job(const Job& j) {
 
 void LiveListener::job_failed(const Job& j, const std::string& text) {
     Lock lk(mu_);
+    if (abandoned_.load()) return;   // (its failure, too, is not applied)
     std::string line;
     try {
         line = "slot " + slot_utc(j.s->s.q) + ": " + text;
@@ -1128,13 +1223,13 @@ void LiveListener::job_failed(const Job& j, const std::string& text) {
 }
 
 bool LiveListener::finish_idle_locked() const {
-    if (!cfg_.background || stopping_) return true;
+    if (!cfg_.background || stopping_ || abandoned_.load()) return true;
     return !busy_finish_ && finish_jobs_.empty();
 }
 
 bool LiveListener::idle_locked() const {
     if (!finish_idle_locked()) return false;
-    if (!cfg_.background || stopping_) return true;
+    if (!cfg_.background || stopping_ || abandoned_.load()) return true;
     return !busy_live_ && live_jobs_.empty();
 }
 
@@ -1451,6 +1546,7 @@ void LiveListener::render(const RenderJob& job) {
         h ? std::optional<std::int64_t>(h->codec_id) : matched ? std::optional<std::int64_t>(matched->codec_id) : std::nullopt;
     {
         Lock lk(mu_);
+        drop_if_abandoned();
         if (codec_error_) return;
     }
     std::optional<std::string> err;
@@ -1462,6 +1558,7 @@ void LiveListener::render(const RenderJob& job) {
     if (err) {
         {
             Lock lk(mu_);
+            drop_if_abandoned();
             if (!codec_error_) {
                 codec_error_ = *err;
                 log_locked("no pictures: " + *err);
@@ -1541,15 +1638,19 @@ void LiveListener::render(const RenderJob& job) {
         png.lock();   // one file write at a time, the newest picture last
         {
             Lock lk(mu_);
+            drop_if_abandoned();
             const auto g = render_gen_.find(job.tile_id);
             if (g == render_gen_.end() || g->second != job.gen) return;   // a newer update draws its own
         }
         // (through util/fileio.hpp, to "tiles/.<id>.png.<pid>.<thread id>.tmp"
         // and moved into place: images::save_png's narrow fopen cannot open a
         // name outside the ANSI code page on Windows)
+        const WriteScope writing(*this);
+        if (!writing) throw Dropped{};
         png::write_png(*pic, dir_ + "/" + rel);
     }
     Lock lk(mu_);
+    drop_if_abandoned();
     const auto g = render_gen_.find(job.tile_id);
     Tile* t = find_tile_locked(job.tile_id);
     if (!t || g == render_gen_.end() || g->second != job.gen) return;
@@ -1588,6 +1689,7 @@ std::vector<Detection> LiveListener::candidates_for(const std::shared_ptr<Rec>& 
     std::vector<Detection> cands;
     {
         Lock lk(mu_);
+        drop_if_abandoned();
         hints = hints_locked(q, dial_.dial_at(static_cast<double>(slot_t0(q)), seams_.dial_guard), due);
         need = !s->s.cands || !subset(hints, s->s.hints);
         if (need && !hints.empty() && !set_equal(hints, s->s.hints)) {
@@ -1615,6 +1717,7 @@ std::vector<Detection> LiveListener::candidates_for(const std::shared_ptr<Rec>& 
             }
         const bool final = last >= 0 && static_cast<double>(last + 1 - origin) / FE_FS_D > acquire::live_end_s() + 1.0;
         Lock lk(mu_);
+        drop_if_abandoned();
         if (final)
             s->s.cands = cands;
         else
@@ -1633,6 +1736,7 @@ void LiveListener::refresh(const std::shared_ptr<Rec>& s) {
     double t_start = 0.0, elapsed = 0.0, progress = 0.0;
     {
         Lock lk(mu_);
+        drop_if_abandoned();
         if (s->s.done || s->applying) return;   // (a final refresh queued behind a finish that has run)
         t_start = clock_locked();
         elapsed = now_ - static_cast<double>(t0);
@@ -1700,6 +1804,7 @@ void LiveListener::refresh(const std::shared_ptr<Rec>& s) {
     std::vector<Detection> dets;
     {
         Lock lk(mu_);
+        drop_if_abandoned();
         for (const Detection& d : found) keep(*s, d);   // keep one detection per signal
         if (s->s.dets.empty()) return;
         dets = s->s.dets;
@@ -1717,6 +1822,7 @@ void LiveListener::refresh(const std::shared_ptr<Rec>& s) {
         std::optional<RenderJob> job;
         {
             Lock lk(mu_);
+            drop_if_abandoned();   // (what the receive found is dropped)
             if (s->s.done || s->applying) break;
             known_header_in_place(*s, p, dial);
             if (!plausible(*s, p, dial)) continue;
@@ -1733,6 +1839,7 @@ void LiveListener::refresh(const std::shared_ptr<Rec>& s) {
     if (took) {   // once per refresh, not once per pass
         {
             Lock lk(mu_);
+            drop_if_abandoned();
             if (!s->s.done)
                 log_locked("slot " + slot_utc(q) + ": " + std::to_string(n_passes) + " signal(s) at " +
                            fmt(100 * progress_locked(q), "%.0f") + "% (" + fmt(clock_locked() - t_start, "%.0f") +
@@ -1750,6 +1857,7 @@ void LiveListener::finish(const std::shared_ptr<Rec>& s) {
     std::vector<Detection> dets;
     {
         Lock lk(mu_);
+        drop_if_abandoned();
         t_start = clock_locked();
         reader = s->s.reader;
         dets = s->s.dets;
@@ -1762,6 +1870,7 @@ void LiveListener::finish(const std::shared_ptr<Rec>& s) {
     std::vector<acquire::Hint> hints;
     {
         Lock lk(mu_);
+        drop_if_abandoned();
         dials = dial_.by_dial(static_cast<double>(t0) - static_cast<double>(rd.origin) / FE_FS_D,
                               static_cast<double>(t0) + static_cast<double>(rd.x.size()) / FE_FS_D, seams_.dial_guard);
         first = dial_.dial_at(static_cast<double>(t0), seams_.dial_guard);
@@ -1777,6 +1886,7 @@ void LiveListener::finish(const std::shared_ptr<Rec>& s) {
     // erased; the preamble's detections belong to the dial it started on
     std::vector<Result> results;
     for (const auto& [dial, spans] : dials) {
+        drop_if_abandoned();   // (another dial's receive would only be dropped)
         const std::vector<std::uint8_t> ok = restrict(rd.ok, rd.origin, q, spans);
         const bool own = dial == first;
         FinishResult r = seams_.finish(rd.x, ok, rd.origin, q, finish_rx_,
@@ -1789,12 +1899,14 @@ void LiveListener::finish(const std::shared_ptr<Rec>& s) {
     std::set<std::string> seen;
     {
         Lock lk(mu_);
+        drop_if_abandoned();
         s->applying = true;
     }
     for (Result& res : results) {
         std::vector<PassResult> keep_passes;
         {
             Lock lk(mu_);
+            drop_if_abandoned();
             for (PassResult& p : res.passes) known_header_in_place(*s, p, res.dial);
             for (PassResult& p : res.passes)
                 if (plausible(*s, p, res.dial)) keep_passes.push_back(std::move(p));
@@ -1803,6 +1915,7 @@ void LiveListener::finish(const std::shared_ptr<Rec>& s) {
             std::string tid;
             {
                 Lock lk(mu_);
+                drop_if_abandoned();
                 const auto [wf, fr] = kind(p);
                 Tile& t = tile_for(*s, p.f_hz, res.dial, wf, fr);
                 if (!takes(t, p)) {
@@ -1818,6 +1931,7 @@ void LiveListener::finish(const std::shared_ptr<Rec>& s) {
             std::optional<std::string> note;
             bool stored = false;
             if (store_) {
+                drop_if_abandoned();   // (no association begins once abandoned)
                 try {
                     const associate::Result a = seams_.associate(p, *store_);
                     key = a.key;
@@ -1831,6 +1945,7 @@ void LiveListener::finish(const std::shared_ptr<Rec>& s) {
             std::optional<RenderJob> job;
             {
                 Lock lk(mu_);
+                drop_if_abandoned();
                 Tile* t = s->s.tile(tid);
                 if (!t) continue;
                 if (note) t->note = *note;
@@ -1844,6 +1959,7 @@ void LiveListener::finish(const std::shared_ptr<Rec>& s) {
     }
     {
         Lock lk(mu_);
+        drop_if_abandoned();
         for (auto& [id, t] : s->s.tiles)
             if (!seen.count(id)) {
                 t.status = "lost";
@@ -1853,6 +1969,7 @@ void LiveListener::finish(const std::shared_ptr<Rec>& s) {
     if (!seen.empty()) identify_provisional();
     {
         Lock lk(mu_);
+        drop_if_abandoned();
         s->applying = false;
         s->s.done = true;
         std::size_t n = 0;
@@ -1879,6 +1996,7 @@ void LiveListener::identify_provisional() {
     std::vector<Todo> todo;
     {
         Lock lk(mu_);
+        drop_if_abandoned();
         for (const Tile& t : done_tiles_)
             if (t.uid && !t.uid->empty() && t.status == "complete" && t.note.rfind("stored (provisional)", 0) == 0)
                 todo.push_back({t.id, *t.uid});
@@ -1897,6 +2015,7 @@ void LiveListener::identify_provisional() {
             continue;
         }
         Lock lk(mu_);
+        drop_if_abandoned();
         Tile* t = nullptr;
         for (Tile& x : done_tiles_)
             if (x.id == td.id && x.uid == td.uid) {
@@ -1934,7 +2053,7 @@ void run(LiveListener& listener, Source& source, bool realtime, const std::atomi
     for (;;) {
         std::optional<Chunk> c = source.next(1.0);
         if (!c && source.eof()) break;
-        if (stop && stop->load()) break;
+        if ((stop && stop->load()) || listener.abandoned()) break;
         if (!realtime) listener.wait_idle();   // a replay waits for its receives
         if (c) listener.feed(c->x, c->t_end);
         const double now = realtime ? listener.clock() : listener.audio_end().value_or(0.0);
@@ -1943,6 +2062,7 @@ void run(LiveListener& listener, Source& source, bool realtime, const std::atomi
             last_write = listener.clock();
         }
     }
+    if (listener.abandoned()) return;   // (it would write nothing)
     if (!realtime && listener.audio_end()) {
         listener.wait_idle();
         if (const std::optional<double> end = listener.replay_end()) listener.step(*end);

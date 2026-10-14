@@ -62,6 +62,9 @@
 //   close         until the receives in flight return (the receivers take
 //                 no cancel flag: a FULL end-of-slot receive is minutes)
 //                 and the passband store's packer (at most CLOSE_PACKER_S)
+//   abandon       the lock, for a flag (as long as tiles() waits for it),
+//                 then a state.json or picture write already under way
+//                 (milliseconds); never a receive, the store or the packer
 // The clock seam is called with the lock held (it must not call back into
 // the listener); the log sink never is (lines are handed to it in order
 // once the lock is released, so a sink may read the listener).
@@ -78,7 +81,9 @@
 //     constructor);
 //   * idle() is exact: a worker takes a job and says it is busy in one step
 //     (the reference's worker took it from the queue, then set _busy, so
-//     idle() could read true in between and a replay ran ahead of a receive).
+//     idle() could read true in between and a replay ran ahead of a receive);
+//   * abandon(), which the reference has no counterpart for (its close()
+//     waits for the receive in flight, its process then exiting under it).
 
 #ifndef SSTVAE_QRSS_LISTENER_HPP
 #define SSTVAE_QRSS_LISTENER_HPP
@@ -218,6 +223,16 @@ struct Seams {
     DialGuard dial_guard = DIAL_GUARD_S;
 };
 
+// `s` with every empty seam of clock, log, candidates, detect,
+// receive_slot, finish and associate filled as a LiveListener on `cfg`
+// fills it (its constructor calls this): the system clock; stderr, one
+// line each; the C++ receiver (receiver_slot.hpp with api::slot_seams of
+// cfg's selection and estimator and s's two rules); live::finish_receive
+// with its default budgets and s.noise; associate::associate. What is set
+// is kept, and the rest of `s` is returned as it came (so a caller can
+// wrap the listener's own receivers, as listen_api.cpp does).
+Seams default_seams(const LiveConfig& cfg, Seams s);
+
 class LiveListener {
 public:
     // state_dir: where state.json, tiles/ and listener.log go (tiles/ is
@@ -304,19 +319,46 @@ public:
                               const std::string& waveform = "CE") const;
 
     // --- workers ----------------------------------------------------------------------------
-    // No end-of-slot receive queued or running.
+    // No end-of-slot receive queued or running (true once closed or
+    // abandoned, whatever still runs: nothing more is applied by it, or
+    // waited for).
     bool finish_idle() const;
-    // No receive queued or running.
+    // No receive queued or running (the same).
     bool idle() const;
-    // Block until idle() (or close()); false when timeout_s passed first.
+    // Block until idle() (or close(), or abandon()); false when timeout_s
+    // passed first.
     bool wait_idle(std::optional<double> timeout_s = std::nullopt) const;
     // run()'s end of a replay: max(every slot's end + 1 s, audio_end), or
     // nullopt with no slot.
     std::optional<double> replay_end() const;
-    // Stop the workers: the receives in flight finish (and are applied),
-    // nothing queued is run; then the passband store's packer gets
-    // CLOSE_PACKER_S. Idempotent; the destructor calls it.
+    // Stop the workers: the receives in flight finish (and are applied,
+    // unless abandoned), nothing queued is run; then the passband store's
+    // packer gets CLOSE_PACKER_S. Idempotent; the destructor calls it.
     void close();
+    // Give up on everything, for good (an application that cannot wait for
+    // a receive to return: listen_api's bounded stop). Once it has
+    // returned the listener writes nothing more anywhere: no line reaches
+    // listener.log, lines() or the log seam (a line the seam is being handed
+    // as abandon() is called excepted: that one is not taken back);
+    // write_state does nothing; no picture reaches tiles/; feed, recover,
+    // step and backfill do nothing from then on (step returns false;
+    // backfill's ring writes, which run outside the lock, are the one
+    // thing a call already under way may finish); the jobs queued are
+    // dropped and none starts; and a job still running applies nothing of
+    // what it finds -- no tile, picture, store association, slot or log
+    // line: a receive that returns has its result dropped, one that throws
+    // its failure unsaid. The passband store's packer starts no further
+    // hour (PassbandStore::stop_packing; an hour mid-pack may complete its
+    // atomic swap). idle() is true from then on. What it cannot stop: a
+    // receive in flight runs to its end on its worker (the receivers take
+    // no cancel flag), so close() still waits for it; and a store
+    // association already begun ends on its own, holding the store's lock
+    // to the end of its transaction. The readers (tiles, lines, ...) show
+    // the listener as it was. Thread-safe and idempotent; what it waits for
+    // is in the table above (never a receive, the store or the packer).
+    void abandon();
+    // abandon() was called.
+    bool abandoned() const { return abandoned_.load(); }
 
 private:
     struct Rec;           // a slot, and what the listener keeps beside it
@@ -385,8 +427,26 @@ private:
     std::thread live_thread_;
     std::thread finish_thread_;
 
+    // abandon(). The flag is set under mu_ and write_mu_ both, so a holder
+    // of either that reads it false finishes what it does before abandon()
+    // returns: every change under mu_ (the state, lines and log file, feed's
+    // ring and passband writes) checks it there, and the two writes made
+    // outside mu_ (state.json and a picture's file) are counted in
+    // `writing_` under write_mu_ (WriteScope), which abandon() waits to see
+    // at zero. write_mu_ is held for the count alone, never across I/O, and
+    // never taken before mu_.
+    std::atomic<bool> abandoned_{false};
+    std::mutex write_mu_;
+    std::condition_variable write_cv_;
+    int writing_ = 0;
+    class WriteScope;
+
     using Lock = std::unique_lock<std::mutex>;
 
+    // A job applies nothing once abandoned: checked under mu_ before each
+    // change, and before each receive stage or association it would start,
+    // it leaves the job by an exception run_job takes as the end of it.
+    void drop_if_abandoned() const;
     double clock_locked() const;
     void log_locked(const std::string& msg);
     void deliver();
@@ -435,7 +495,9 @@ private:
     void render(const RenderJob& job);
 };
 
-// Feed `source` into `listener` until it ends (or *stop is set). realtime:
+// Feed `source` into `listener` until it ends (or *stop is set, or the
+// listener is abandoned: then it returns at its next chunk, as it would
+// write nothing more). realtime:
 // "now" is the listener's clock (live audio); otherwise it is the time of
 // the newest sample (a replay), each chunk waits until no receive is queued
 // or running, and at the end of a replay time runs on until every slot it

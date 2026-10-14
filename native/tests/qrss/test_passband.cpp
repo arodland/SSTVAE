@@ -6,7 +6,8 @@
 // across an hour boundary, meta.json winning on reopen, expiry by an
 // injected clock, write_capture's power-of-2 gain and capture's trimming
 // and coverage, packing to FLAC and back (a write into a packed hour
-// unpacks it), the packer thread, writers and readers on several threads,
+// unpacks it), the packer thread (and stop_packing: a packer told to stop
+// starts no second hour), writers and readers on several threads,
 // and the lock refusing a second holder until the first lets go.
 
 #include <algorithm>
@@ -14,10 +15,12 @@
 #include <chrono>
 #include <cmath>
 #include <complex>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <limits>
+#include <mutex>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -429,6 +432,74 @@ void test_pack_write_meanwhile(const std::filesystem::path& dir) {
     CHECK(r.x.size() == 1 && r.x[0] == cf(0.5f, -0.5f));
 }
 
+// stop_packing(): a packer told to stop starts no second hour, and the call
+// waits for nothing. The packer is held at its first hour's swap (the hour
+// has passed its checks), the store told to stop meanwhile; the held hour
+// then completes its swap, the second due hour is never reached, and from
+// then on a due hour starts no packer and pack_hour packs nothing, while
+// writes and reads go on.
+void test_stop_packing(const std::filesystem::path& dir) {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool entered = false, release = false;
+    std::vector<std::int64_t> swaps;   // the hours that reached their swap
+    pb::StoreOptions opt;
+    opt.fs = 40;   // (a pack takes milliseconds)
+    opt.pack = true;
+    opt.before_swap = [&](std::int64_t hour) {
+        std::unique_lock lk(mu);
+        swaps.push_back(hour);
+        entered = true;
+        cv.notify_all();
+        cv.wait_for(lk, std::chrono::seconds(60), [&] { return release; });
+    };
+    pb::PassbandStore s(path_text(dir / "stop_packing"), opt);
+    const std::int64_t per = s.per_hour();
+    const std::vector<cf> x(1000, cf(0.5f, 0.25f));
+    s.write_at(HOUR0 * per, x, false);
+    s.write_at((HOUR0 + 1) * per, x, false);
+    CHECK(!s.packer_started());
+    // a write long after both: both are due, and the packer takes the first
+    s.write((HOUR0 + 2) * 3600.0 + pb::PB_PACK_AFTER_S + 10.0, x);
+    CHECK(s.packer_started());
+    {
+        std::unique_lock lk(mu);
+        CHECK(cv.wait_for(lk, std::chrono::seconds(30), [&] { return entered; }));
+    }
+    const auto a = std::chrono::steady_clock::now();
+    s.stop_packing();
+    s.stop_packing();   // (idempotent)
+    CHECK(std::chrono::steady_clock::now() - a < std::chrono::milliseconds(500));   // the packer is held: not waited for
+    CHECK(s.packer_alive());
+    {
+        std::lock_guard lk(mu);
+        release = true;
+    }
+    cv.notify_all();
+    CHECK(s.join_packer(60.0) && !s.packer_alive());
+    {
+        std::lock_guard lk(mu);
+        CHECK((swaps == std::vector<std::int64_t>{HOUR0}));   // the second hour never started
+    }
+    CHECK(exists(s.flac_path(HOUR0)) && !exists(s.raw_path(HOUR0)));   // the hour in hand swapped
+    CHECK(exists(s.raw_path(HOUR0 + 1)) && !exists(s.flac_path(HOUR0 + 1)));
+    CHECK(no_tmp(s.root()));
+    // later: due hours start no packer, pack_hour packs nothing; writes and reads go on
+    s.write((HOUR0 + 3) * 3600.0 + pb::PB_PACK_AFTER_S + pb::PB_PACK_CHECK_S + 20.0, x);
+    CHECK(s.join_packer(60.0) && !s.packer_alive());
+    CHECK(!s.pack_hour(HOUR0 + 1));
+    {
+        std::lock_guard lk(mu);
+        CHECK((swaps == std::vector<std::int64_t>{HOUR0}));
+    }
+    CHECK((s.raw_hours() == std::vector<std::int64_t>{HOUR0 + 1, HOUR0 + 2, HOUR0 + 3}));
+    CHECK(no_tmp(s.root()));
+    const pb::Masked r = s.read((HOUR0 + 1) * 3600.0, (HOUR0 + 1) * 3600.0 + 1000 / 40.0);
+    CHECK(r.x == x && std::all_of(r.mask.begin(), r.mask.end(), [](std::uint8_t m) { return m == 1; }));
+    const pb::Masked h0 = s.read(HOUR0 * 3600.0, HOUR0 * 3600.0 + 1000 / 40.0);
+    CHECK(h0.x == x);   // (read back from its FLAC)
+}
+
 void test_short_raw_hour(const std::filesystem::path& dir) {
     // A raw hour left short (a crash between its creation and its sizing):
     // reads give what it holds and the rest as unwritten (a final partial
@@ -595,6 +666,7 @@ int main() {
         test_threads(dir);
         test_pack_race(dir);
         test_pack_write_meanwhile(dir);
+        test_stop_packing(dir);
         test_short_raw_hour(dir);
         test_reference_fixes(dir);
         test_dirlock(dir);

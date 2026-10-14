@@ -237,10 +237,12 @@ jobs:
       # kind that stay true until someone adds a field.
       #
       # QRSSTVAE's threads are here too: the live listener's workers and
-      # its state, the stdin reader and its self-pipe, the passband
-      # store's packer and directory lock, the multi-pass store's shared
-      # lock, and every QRSS ctest that checks a function from several
-      # threads at once (or keeps a watchdog thread beside the test).
+      # its state (and abandon(), racing them), the listen session's
+      # thread and its bounded stop, the stdin reader and its self-pipe,
+      # the passband store's packer and directory lock, the multi-pass
+      # store's shared lock, and every QRSS ctest that checks a function
+      # from several threads at once (or keeps a watchdog thread beside
+      # the test).
       - name: Configure with ThreadSanitizer
         run: |
           cmake -S native -B native/build-tsan -G Ninja \
@@ -253,7 +255,7 @@ jobs:
             -DSSTVAE_HEIF=OFF -DSSTVAE_WEBP=OFF -DSSTVAE_JP2=OFF
       - run: >-
           cmake --build native/build-tsan --target test_rx_engine test_tx_engine test_ringbuffer
-          test_qrss_core_listener test_qrss_core_sources test_qrss_core_passband
+          test_qrss_core_listener test_qrss_core_listen_api test_qrss_core_sources test_qrss_core_passband
           test_qrss_core_store test_qrss_core_live test_qrss_core_associate
           test_qrss_core_frontend test_qrss_core_chan test_qrss_core_receiver
           test_qrss_core_receiver_slot test_qrss_core_acquire test_qrss_core_acquire_a12
@@ -261,15 +263,10 @@ jobs:
           test_qrss_core_frame test_qrss_core_track test_qrss_core_track_timing
           test_qrss_core_ltrack test_qrss_core_ltrack_timing test_qrss_core_trackbase
           test_qrss_core_tx_audio
+      # (acquire and receiver_slot outlive the 120 s TIMEOUT a QRSS ctest
+      # carries in an optimized build once instrumented -- 99 s and about
+      # 255 s on 4 shared CPUs -- so native/tests/CMakeLists.txt gives every
+      # QRSS ctest 1500 s when CMAKE_CXX_FLAGS has -fsanitize=thread.)
       - run: >-
           ctest --test-dir native/build-tsan --output-on-failure
-          -R '^(rx_engine|tx_engine|ringbuffer|qrss_core_(listener|sources|passband|store|live|associate|frontend|chan|receiver|acquire_a12|acquire_stats|acquire_tbd|cwid|frame|track|track_timing|ltrack|ltrack_timing|trackbase|tx_audio))$'
-      # Two QRSS tests outlive the 120 s TIMEOUT every QRSS ctest carries
-      # (sized for the optimized build) once instrumented: acquire took
-      # 99 s under ThreadSanitizer on 4 shared CPUs, receiver_slot about
-      # 255 s. So they run outside ctest, bounded at several times that.
-      # A race fails the step all the same (ThreadSanitizer exits 66).
-      - name: QRSS tests too slow for ctest's timeout under ThreadSanitizer
-        run: |
-          timeout 900 native/build-tsan/tests/test_qrss_core_acquire native/tests/golden_qrss
-          timeout 1500 native/build-tsan/tests/test_qrss_core_receiver_slot native/tests/golden_qrss
+          -R '^(rx_engine|tx_engine|ringbuffer|qrss_core_(listener|listen_api|sources|passband|store|live|associate|frontend|chan|receiver|receiver_slot|acquire|acquire_a12|acquire_stats|acquire_tbd|cwid|frame|track|track_timing|ltrack|ltrack_timing|trackbase|tx_audio))$'

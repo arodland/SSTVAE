@@ -15,7 +15,6 @@
 #include <thread>
 #include <utility>
 
-#include "qrss/associate.hpp"
 #include "qrss/config.hpp"
 #include "qrss/dirlock.hpp"
 #include "qrss/frame.hpp"
@@ -77,12 +76,10 @@ struct Guard {
         }
     }
 
-    // associations and pictures under way, and the store's lock
+    // associations under way, and the store's lock
     std::mutex mu;
     std::condition_variable cv;
     int associating = 0;
-    int rendering = 0;
-    std::optional<steady::time_point> last_render;
     std::optional<dirlock::DirLock> store_lock;
     bool release_store = false;   // the session has let go: the last association releases it
 
@@ -91,7 +88,8 @@ struct Guard {
     }
 };
 
-// The listener's pictures, through the guard: none once abandoned.
+// The listener's pictures, through the guard: none drawn once abandoned (the
+// listener writes none then either: LiveListener::abandon).
 class GuardedRenderer final : public live::Renderer {
 public:
     GuardedRenderer(std::shared_ptr<live::Renderer> inner, std::shared_ptr<Guard> g)
@@ -107,22 +105,7 @@ public:
     }
     images::Picture render(std::span<const double> S, std::span<const double> W, std::int64_t mode,
                            std::optional<std::int64_t> codec_id) override {
-        {
-            std::lock_guard lk(g_->mu);
-            if (g_->abandoned.load()) throw stopped();
-            ++g_->rendering;
-        }
-        struct Done {
-            Guard& g;
-            ~Done() {
-                {
-                    std::lock_guard lk(g.mu);
-                    --g.rendering;
-                    g.last_render = steady::now();
-                }
-                g.cv.notify_all();
-            }
-        } done{*g_};
+        if (g_->abandoned.load()) throw stopped();
         images::Picture pic = inner_->render(S, W, mode, codec_id);
         if (g_->abandoned.load()) throw stopped();
         return pic;
@@ -135,38 +118,10 @@ private:
 
 // The listener's seams with every receive stage and the store's association
 // refused once the session has abandoned them. An empty seam becomes the
-// listener's own default (listener.cpp's, the same calls) so that it can be
-// wrapped.
+// listener's own default (live::default_seams, the one copy) so that it can
+// be wrapped.
 live::Seams guarded_seams(live::Seams s, const live::LiveConfig& cfg, const std::shared_ptr<Guard>& g) {
-    api::ReceiveConfig rx;
-    rx.frames = cfg.selection();
-    rx.estimator = cfg.estimator;
-    rx.old_edge_noise = s.old_edge_noise;
-    rx.old_gating = s.old_gating;
-    if (!s.candidates)
-        s.candidates = [rx](const receiver::Prepared& prep, live::Selection sel, std::span<const acquire::Hint> hints) {
-            return receiver::candidates(prep, sel, true, hints, api::slot_seams(rx));
-        };
-    if (!s.detect)
-        s.detect = [rx](const receiver::Prepared& prep, live::Selection sel, const receiver::DetectOptions& opt) {
-            return receiver::detect(prep, sel, opt, api::slot_seams(rx));
-        };
-    if (!s.receive_slot)
-        s.receive_slot = [rx](const receiver::Prepared& prep, live::Selection sel, const receiver::SlotOptions& opt) {
-            return receiver::receive_slot(receiver::CaptureRef(&prep), sel, opt, api::slot_seams(rx));
-        };
-    if (!s.finish) {
-        const live::NoiseFn noise = s.noise;
-        s.finish = [noise](std::span<const live::cf> x, std::span<const std::uint8_t> ok, std::int64_t origin,
-                           std::int64_t q, const api::ReceiveConfig& config, std::span<const types::Detection> dets,
-                           std::span<const acquire::Hint> hints) {
-            live::FinishOptions opt;
-            opt.seams.noise = noise;
-            return live::finish_receive(x, ok, origin, q, config, dets, hints, opt);
-        };
-    }
-    if (!s.associate)
-        s.associate = [](const types::PassResult& p, store::Store& st) { return associate::associate(p, st); };
+    s = live::default_seams(cfg, std::move(s));
 
     // each stage: refused before it starts, and its result dropped where it
     // returns, once abandoned
@@ -577,8 +532,10 @@ void Session::Core::abandon(bool on_run_thread) {
     {
         // The session's thread at a safe point (waiting for audio, or done),
         // else on its last writes, which are waited for (the time to write
-        // state); anywhere else (reading the passband store back), it sees
-        // the flag at its next step and writes nothing more.
+        // state); anywhere else (reading the passband store back, or a step
+        // that outlasts the bound) it is left where it is: the listener,
+        // abandoned below, writes nothing more for it, and it stops at its
+        // next read.
         std::unique_lock<std::timed_mutex> rl(run_mu, std::defer_lock);
         bool done;
         {
@@ -588,6 +545,12 @@ void Session::Core::abandon(bool on_run_thread) {
         if (!on_run_thread && !done) {
             if (!rl.try_lock_until(deadline) && finishing.load()) rl.lock();
         }
+        // The listener first, while the session still holds every lock:
+        // nothing more to listener.log, state.json, tiles/ or the passband
+        // store (a write under way when this is called lands before it
+        // returns), no job of it applies anything, and its packer starts no
+        // further hour. It waits for no receive.
+        listener->abandon();
         std::lock_guard g(guard->mu);
         guard->abandoned = true;
     }
@@ -596,20 +559,9 @@ void Session::Core::abandon(bool on_run_thread) {
         std::lock_guard s(guard->sink_mu);
     }
     guard->cv.notify_all();
-    // a picture drawn just now: SETTLE_S to reach its file
-    std::unique_lock g(guard->mu);
-    for (;;) {
-        const steady::time_point t = steady::now();
-        if (t >= deadline) break;
-        steady::time_point until = deadline;
-        if (guard->rendering == 0) {
-            if (!guard->last_render || t - *guard->last_render >= seconds(SETTLE_S)) break;
-            until = std::min(deadline, *guard->last_render + seconds(SETTLE_S));
-        }
-        guard->cv.wait_until(g, until);
-    }
     // an association under way: waited for to the deadline, else it lets the
     // store's lock go itself (release_locks)
+    std::unique_lock g(guard->mu);
     guard->cv.wait_until(g, deadline, [&] { return guard->associating == 0; });
 }
 

@@ -12,7 +12,10 @@
 //     the sink, state.json or the tiles once it is let go; push()'s latency
 //     meanwhile (printed: the port's measurement);
 //   * the same during a replay (the session's thread then waits for the
-//     receive itself);
+//     receive itself); in both, listener.log too ends with the stop's own
+//     lines and stays so once the receive is let go;
+//   * stop() with the session's thread held mid-step (not waiting for
+//     audio): abandoned at the deadline, and nothing written when it goes on;
 //   * interrupt(): "stopped", state.json not listening;
 //   * a replay source that ends by itself: on_ended, "audio ended";
 //   * start()'s refusals and notices in the script's texts and order: the
@@ -498,9 +501,11 @@ void test_stop_with_a_receive_held() {
         check::is_true(since(c) < ls::STOP_BOUND_S + 0.4 && !s3->abandoned(), "held: and stops cleanly");
     }
 
-    // let the abandoned receive go: nothing of it reaches the sink or state.json
+    // let the abandoned receive go: nothing of it reaches the sink, state.json
+    // or listener.log (which ends with a stop's own lines)
     check::current_step = "held: the abandoned receive returns";
     const std::string state_before = read_text(root / "state" / "state.json");
+    const std::string log_before = read_text(root / "state" / "listener.log");
     const std::size_t sink_after_stop = lines.size();
     s.reset();   // (the session's threads outlive it)
     latch->let_go();
@@ -510,6 +515,9 @@ void test_stop_with_a_receive_held() {
     check::equal(lines.size(), sink_after_stop, "held: nothing more reached the sink");
     check::is_true(sink_after_stop >= lines_before, "held: (sanity)");
     check::equal(read_text(root / "state" / "state.json"), state_before, "held: state.json untouched after");
+    check::is_true(!listening(root / "state"), "held: state.json still not listening");
+    check::equal(read_text(root / "state" / "listener.log"), log_before, "held: listener.log untouched after");
+    check::is_true(ends_with(last_log_line(root / "state"), " audio ended"), "held: listener.log still ends there");
     check::is_true(lock_free(root / "state") && lock_free(root / "store"), "held: the locks stay free");
 }
 
@@ -592,6 +600,7 @@ void test_stop_a_replay_with_a_receive_held() {
     check::is_true(!listening(root / "state"), "replay held: state.json not listening");
     check::is_true(ends_with(last_log_line(root / "state"), " audio ended"), "replay held: audio ended");
     const std::string state_before = read_text(root / "state" / "state.json");
+    const std::string log_before = read_text(root / "state" / "listener.log");
     const std::size_t sink_after = lines.size();
     s.reset();
     latch->let_go();
@@ -599,6 +608,66 @@ void test_stop_a_replay_with_a_receive_held() {
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     check::equal(lines.size(), sink_after, "replay held: nothing more reached the sink");
     check::equal(read_text(root / "state" / "state.json"), state_before, "replay held: state.json untouched after");
+    check::equal(read_text(root / "state" / "listener.log"), log_before,
+                 "replay held: listener.log untouched after (ending with the stop's audio ended)");
+}
+
+// A replay source whose name() -- which live::run asks for first, the
+// session's thread holding its run lock -- waits on a latch: the stop's
+// deadline finds that thread mid-step, neither waiting for audio nor on its
+// last writes. The stop abandons it there, and when it goes on it writes
+// nothing: no "listening" line, no state.json, though the locks are gone.
+class HeldNameSource final : public lv::Source {
+public:
+    explicit HeldNameSource(std::shared_ptr<Latch> latch) : latch_(std::move(latch)), inner_(t0() - 16.0, t0() + 30.0, "replay.wav") {}
+    std::optional<lv::Chunk> next(double timeout_s) override { return inner_.next(timeout_s); }
+    bool eof() const override { return inner_.eof(); }
+    std::string name() const override {
+        if (!asked_.exchange(true)) {
+            latch_->hold();
+            latch_->done();
+        }
+        return inner_.name();
+    }
+
+private:
+    std::shared_ptr<Latch> latch_;
+    ListSource inner_;
+    mutable std::atomic<bool> asked_{false};
+};
+
+void test_stop_with_the_thread_mid_step() {
+    Step step("mid-step: stop() while the session's thread is mid-step");
+    const fs::path root = fresh_dir("mid_step");
+    Clock clk;
+    clk.t->store(1.79e9);
+    auto latch = std::make_shared<Latch>();
+    Lines lines;
+    ls::Options o = tiny_options(root, clk);
+    o.realtime = false;
+    o.source = [latch](const ls::SourceContext&) { return std::make_unique<HeldNameSource>(latch); };
+    std::unique_ptr<ls::Session> s = ls::Session::start(o, lines.sink());
+    check::is_true(latch->wait_entered(30.0), "mid-step: the session's thread is held");
+    const steady::time_point b = steady::now();
+    s->stop();
+    const double took = since(b);
+    check::is_true(took < ls::STOP_BOUND_S + 0.4, "mid-step: within the bound (" + std::to_string(took) + " s)");
+    check::is_true(s->ended() && s->abandoned(), "mid-step: abandoned");
+    check::is_true(!latch->returned, "mid-step: the thread is still held");
+    check::is_true(lock_free(root / "state") && lock_free(root / "store") && lock_free(root / "store" / "passband"),
+                   "mid-step: every lock released");
+    const fs::path state = root / "state";
+    check::is_true(!fs::exists(state / "listener.log") && !fs::exists(state / "state.json"),
+                   "mid-step: nothing written yet");
+    const std::size_t sink_after = lines.size();
+    s.reset();   // (the session's thread outlives it)
+    latch->let_go();
+    check::is_true(latch->wait_returned(10.0), "mid-step: the thread goes on once let go");
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    check::is_true(!latch->timed_out, "mid-step: released, not timed out");
+    check::is_true(!fs::exists(state / "listener.log"), "mid-step: no listener.log line once it goes on");
+    check::is_true(!fs::exists(state / "state.json"), "mid-step: no state.json once it goes on");
+    check::equal(lines.size(), sink_after, "mid-step: nothing more reached the sink");
 }
 
 // interrupt(): the script's KeyboardInterrupt.
@@ -818,6 +887,7 @@ int main(int argc, char** argv) {
         test_push_from_another_thread();
         test_stop_with_a_receive_held();
         test_stop_a_replay_with_a_receive_held();
+        test_stop_with_the_thread_mid_step();
         test_a_receive_that_finishes_within_the_bound();
         test_interrupt();
         test_a_replay_ends_by_itself();

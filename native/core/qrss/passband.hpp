@@ -73,6 +73,7 @@
 //     1.0, decode and compare the rest; soundfile's path takes 1.0 s), a
 //     third of a second for a mostly unwritten one, outside the lock, then
 //     a rename under it. Two pack_hour calls run one after the other.
+//   - stop_packing: a flag, nothing waited for.
 //   - ~PassbandStore: asks a running packer to stop (it checks once per
 //     FLAC frame) and joins it: a few milliseconds.
 
@@ -227,6 +228,14 @@ public:
     bool packer_started() const;
     bool packer_alive() const;
     bool join_packer(std::optional<double> timeout_s = std::nullopt);
+    // Pack nothing more (the flag the destructor sets before it joins the
+    // packer): the packer starts no further hour, and gives up the one in
+    // hand at its next FLAC frame, unless that hour has passed its checks
+    // and is being swapped into place, which then completes (the rename
+    // under the store's lock). From then on maybe_pack starts no packer
+    // and pack_hour returns false; writes, reads and expiry go on.
+    // Non-blocking (it waits for nothing: join_packer does) and idempotent.
+    void stop_packing();
 
     // File names (UTF-8), as the reference spells them.
     std::string raw_path(std::int64_t hour) const;

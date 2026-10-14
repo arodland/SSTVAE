@@ -319,7 +319,7 @@ PassbandStore::PassbandStore(std::string root, StoreOptions opt)
 }
 
 PassbandStore::~PassbandStore() {
-    closing_.store(true);
+    stop_packing();
     std::thread t;
     {
         std::lock_guard lk(packer_mu_);
@@ -793,6 +793,11 @@ bool PassbandStore::packer_alive() const {
     std::lock_guard lk(packer_mu_);
     return packer_running_;
 }
+
+// (closing_ is what the packer's loop reads before each hour, what the FLAC
+// encoder and pack_hour's decode-back read once per frame and chunk, and
+// what maybe_pack reads before it starts a packer)
+void PassbandStore::stop_packing() { closing_.store(true); }
 
 bool PassbandStore::join_packer(std::optional<double> timeout_s) {
     std::unique_lock lk(packer_mu_);
