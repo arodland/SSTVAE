@@ -1,0 +1,85 @@
+{
+ "scenario": "ce-short-drift",
+ "parameters": {
+  "name": "ce-short-drift",
+  "frame": "short",
+  "snr_db": -12.0,
+  "receive": [
+   "short"
+  ],
+  "seed": 6,
+  "carrier_hz": 1500.0,
+  "lead_in_s": 0.0,
+  "drift_hz_per_min": 1.0,
+  "tx_ppm": 0.0,
+  "rx_ppm": 0.0,
+  "neighbours": [],
+  "what": "CE SHORT at -12 dB drifting 1 Hz/min"
+ },
+ "capture": {
+  "n": 1083047,
+  "t0_index": 48000.0,
+  "power": 26.31187449778683,
+  "probe": [
+   [
+    7.772423267364502,
+    -0.3176719844341278
+   ],
+   [
+    -4.115945816040039,
+    7.791281223297119
+   ],
+   [
+    -3.2534589767456055,
+    6.637977600097656
+   ],
+   [
+    -1.0804694890975952,
+    -3.3351893424987793
+   ],
+   [
+    -1.8539618253707886,
+    4.1384196281433105
+   ],
+   [
+    -1.186423659324646,
+    5.866333961486816
+   ]
+  ]
+ },
+ "signals": [
+  {
+   "frame": "short",
+   "waveform": "CE",
+   "f_hz": 1500.0
+  }
+ ],
+ "n_passes": 1,
+ "passes": [
+  {
+   "waveform": "CE",
+   "frame": "short",
+   "signal": 0,
+   "header": {
+    "callsign": "K1ABC",
+    "grid": "FN42",
+    "picture_id": 305419896,
+    "mode": 0,
+    "segment": 0,
+    "codec_id": 53720,
+    "version": 2,
+    "reserved": 0
+   },
+   "cw": {
+    "text": "K1ABC",
+    "keying": "fsk",
+    "agrees": true
+   },
+   "f_hz": 1500.0219257262966,
+   "tau0_ch": -0.14589574948640768,
+   "latent_snr_db": 4.4146014290099,
+   "z_ref": 60.445233968325745,
+   "mean_w_db": 4.656967851054657
+  }
+ ]
+}

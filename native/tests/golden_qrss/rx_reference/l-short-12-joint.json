@@ -1,0 +1,86 @@
+{
+ "scenario": "l-short-12-joint",
+ "parameters": {
+  "name": "l-short-12-joint",
+  "frame": "l-short",
+  "snr_db": -12.0,
+  "receive": [
+   "short",
+   "l-short"
+  ],
+  "seed": 1,
+  "carrier_hz": 1500.0,
+  "lead_in_s": 0.0,
+  "drift_hz_per_min": 0.0,
+  "tx_ppm": 0.0,
+  "rx_ppm": 0.0,
+  "neighbours": [],
+  "what": "L l-short at -12 dB, received with the default joint frames (CE and L)"
+ },
+ "capture": {
+  "n": 1082744,
+  "t0_index": 48000.0,
+  "power": 27.786797393010538,
+  "probe": [
+   [
+    2.8260176181793213,
+    0.513983964920044
+   ],
+   [
+    1.5316044092178345,
+    2.856879711151123
+   ],
+   [
+    3.5457041263580322,
+    0.2438780665397644
+   ],
+   [
+    -3.775552272796631,
+    2.080507516860962
+   ],
+   [
+    1.0696741342544556,
+    -4.308687210083008
+   ],
+   [
+    -2.7238731384277344,
+    1.765816330909729
+   ]
+  ]
+ },
+ "signals": [
+  {
+   "frame": "l-short",
+   "waveform": "L",
+   "f_hz": 1500.0
+  }
+ ],
+ "n_passes": 1,
+ "passes": [
+  {
+   "waveform": "L",
+   "frame": "l-short",
+   "signal": 0,
+   "header": {
+    "callsign": "K1ABC",
+    "grid": "FN42",
+    "picture_id": 305419896,
+    "mode": 0,
+    "segment": 0,
+    "codec_id": 53720,
+    "version": 2,
+    "reserved": 0
+   },
+   "cw": {
+    "text": "K1ABC",
+    "keying": "fsk",
+    "agrees": true
+   },
+   "f_hz": 1500.0057358138845,
+   "tau0_ch": -0.0008236779521703362,
+   "latent_snr_db": 6.971890374199483,
+   "z_ref": 94.75743623324689,
+   "mean_w_db": 6.90307253823916
+  }
+ ]
+}

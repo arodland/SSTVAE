@@ -1,0 +1,114 @@
+{
+ "scenario": "ce-l-neighbours",
+ "parameters": {
+  "name": "ce-l-neighbours",
+  "frame": "short",
+  "snr_db": -12.0,
+  "receive": [
+   "short",
+   "l-short"
+  ],
+  "seed": 9,
+  "carrier_hz": 1500.0,
+  "lead_in_s": 0.0,
+  "drift_hz_per_min": 0.0,
+  "tx_ppm": 0.0,
+  "rx_ppm": 0.0,
+  "neighbours": [
+   {
+    "df_hz": 60.0,
+    "rel_db": 0.0,
+    "waveform": "L",
+    "seed": 7
+   }
+  ],
+  "what": "CE SHORT at -12 dB and an L l-short as strong 60 Hz above, received jointly"
+ },
+ "capture": {
+  "n": 1083047,
+  "t0_index": 48000.0,
+  "power": 27.248029763378803,
+  "probe": [
+   [
+    4.949422359466553,
+    3.995466470718384
+   ],
+   [
+    3.0896852016448975,
+    9.34383773803711
+   ],
+   [
+    1.9538507461547852,
+    0.39498385787010193
+   ],
+   [
+    0.1418868452310562,
+    5.667124271392822
+   ],
+   [
+    2.5425937175750732,
+    -4.924927711486816
+   ],
+   [
+    2.4904091358184814,
+    3.6302924156188965
+   ]
+  ]
+ },
+ "signals": [
+  {
+   "frame": "short",
+   "waveform": "CE",
+   "f_hz": 1500.0
+  },
+  {
+   "frame": "l-short",
+   "waveform": "L",
+   "f_hz": 1560.0
+  }
+ ],
+ "n_passes": 2,
+ "passes": [
+  {
+   "waveform": "L",
+   "frame": "l-short",
+   "signal": 1,
+   "header": null,
+   "cw": {
+    "text": "N7NBR",
+    "keying": "fsk",
+    "agrees": null
+   },
+   "f_hz": 1559.9958630383392,
+   "tau0_ch": -0.08749406366602099,
+   "latent_snr_db": 5.424712563938549,
+   "z_ref": 90.89532867047943,
+   "mean_w_db": 5.472840112434641
+  },
+  {
+   "waveform": "CE",
+   "frame": "short",
+   "signal": 0,
+   "header": {
+    "callsign": "K1ABC",
+    "grid": "FN42",
+    "picture_id": 305419896,
+    "mode": 0,
+    "segment": 0,
+    "codec_id": 53720,
+    "version": 2,
+    "reserved": 0
+   },
+   "cw": {
+    "text": "K1ABC",
+    "keying": "fsk",
+    "agrees": true
+   },
+   "f_hz": 1500.0350147878435,
+   "tau0_ch": 0.09844657519732657,
+   "latent_snr_db": 4.309311132893817,
+   "z_ref": 60.4898863661923,
+   "mean_w_db": 4.22086484176599
+  }
+ ]
+}

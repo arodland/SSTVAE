@@ -1,0 +1,85 @@
+{
+ "scenario": "ce-short-20",
+ "parameters": {
+  "name": "ce-short-20",
+  "frame": "short",
+  "snr_db": -20.0,
+  "receive": [
+   "short"
+  ],
+  "seed": 4,
+  "carrier_hz": 1500.0,
+  "lead_in_s": 0.0,
+  "drift_hz_per_min": 0.0,
+  "tx_ppm": 0.0,
+  "rx_ppm": 0.0,
+  "neighbours": [],
+  "what": "CE SHORT at -20 dB"
+ },
+ "capture": {
+  "n": 1083047,
+  "t0_index": 48000.0,
+  "power": 160.7734659864503,
+  "probe": [
+   [
+    9.777566909790039,
+    -10.6956205368042
+   ],
+   [
+    -10.719993591308594,
+    -4.405709266662598
+   ],
+   [
+    -2.5902254581451416,
+    -2.941603422164917
+   ],
+   [
+    -16.6646671295166,
+    -3.4838836193084717
+   ],
+   [
+    -3.953660249710083,
+    -9.008126258850098
+   ],
+   [
+    -7.751604080200195,
+    -13.967057228088379
+   ]
+  ]
+ },
+ "signals": [
+  {
+   "frame": "short",
+   "waveform": "CE",
+   "f_hz": 1500.0
+  }
+ ],
+ "n_passes": 1,
+ "passes": [
+  {
+   "waveform": "CE",
+   "frame": "short",
+   "signal": 0,
+   "header": {
+    "callsign": "K1ABC",
+    "grid": "FN42",
+    "picture_id": 305419896,
+    "mode": 0,
+    "segment": 0,
+    "codec_id": 53720,
+    "version": 2,
+    "reserved": 0
+   },
+   "cw": {
+    "text": null,
+    "keying": "fsk",
+    "agrees": true
+   },
+   "f_hz": 1500.0282999814062,
+   "tau0_ch": -0.4684641725027228,
+   "latent_snr_db": -3.156518467915337,
+   "z_ref": 22.425853362418223,
+   "mean_w_db": -3.045154846607778
+  }
+ ]
+}
