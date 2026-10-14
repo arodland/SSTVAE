@@ -182,11 +182,12 @@ using FeReader = std::function<FeSpan(std::int64_t a, std::int64_t b)>;
 // FeRing: the last span_s seconds of FE in memory, addressed by absolute FE
 // index (t * 4000). The reference's rules exactly: a write longer than the
 // ring keeps its last n samples; a write starting past the end clears the
-// hole between (what was there is older than the ring); every write lands
-// at its index mod n, so a write older than the ring's window lands on
-// newer samples' slots (as the reference's does); end is max(end or 0,
-// n0 + len). A read is zero and unwritten wherever the ring does not hold
-// the index (before end - n, at or after end).
+// hole between (what was there is older than the ring); end becomes
+// max(end or 0, n0 + len), and whatever of the write lies before the new
+// end - n, behind the ring's window, is dropped (its slots hold newer
+// samples: it overwrote them before 2026-10-14's fix); the rest lands at
+// its index mod n. A read is zero and unwritten wherever the ring does not
+// hold the index (before end - n, at or after end).
 //
 // Thread-safe: write and clear take an exclusive lock, read a shared one;
 // each copies under it and returns a copy.
@@ -288,7 +289,8 @@ struct PrepareSeams {
 // heard and 1 where filled; q, t0_index = origin, fs = FE_FS), the spans
 // to erase (`spans` of ok), and the share of the frame heard
 // (mean(ok[origin:k1]) with k1 = min(len, origin + round(frame_s FE_FS)),
-// Python's slice rules; 0.0 when k1 <= origin). seed nullopt: q.
+// Python's slice rules; 0.0 when k1 <= origin or the slice is empty, as the
+// reference's _share_heard). seed nullopt: q.
 // std::invalid_argument when x and ok differ in length.
 struct SlotCapture {
     receiver::Prepared prep;
@@ -315,8 +317,8 @@ std::pair<std::int64_t, std::int64_t> py_slice(std::int64_t n, std::int64_t star
 // finish_receive's first decision, before anything is prepared: k1, and
 // whether to receive at all. receive false: nothing heard of the frame, or
 // no dets and no hints with less than min_heard of it heard; `heard` is then
-// what the reference returns (mean(ok[origin:k1]), 0.0 when k1 <= origin,
-// NaN for an empty slice it still takes the mean of).
+// what the reference returns (mean(ok[origin:k1]), 0.0 when k1 <= origin or
+// the slice is empty: it was NaN before 2026-10-14's fix).
 struct FinishGate {
     bool receive = false;
     std::int64_t k1 = 0;
@@ -404,9 +406,11 @@ using DialEpochs = std::vector<std::pair<std::optional<std::int64_t>, std::vecto
 // and "dial_hz" taken as float() takes them (a number, a bool, or a
 // numeric string: pynum::py_float), the dial rounded half to even; a line
 // that does not parse, lacks either, or is not a dict, skipped, and so is
-// one whose t is not finite or whose dial is not positive; stably sorted by
-// t, a repeated dial (no change) dropped. A dial past int64 (or infinite,
-// where the reference raises OverflowError out of refresh) is skipped too.
+// one whose t is not finite or whose dial is not positive, and one whose
+// dial is infinite or whose t is past float's range (OverflowError, which
+// the reference skips since 2026-10-14's fix); stably sorted by t, a
+// repeated dial (no change) dropped. A dial past int64 is skipped too, where
+// the reference keeps it as a Python int (a deviation).
 std::vector<DialPoint> parse_dial_text(std::string_view bytes);
 
 // DialLog: the radio's dial frequency over time, from a DIAL_FILE the app
@@ -510,10 +514,9 @@ struct Tile {
     std::optional<std::string> uid;             // the pass as filed in the multi-pass store
     std::string waveform = "CE";                // "CE" or "L"
 
-    // asdict(tile) as a JSON object, the fields in the reference's order,
-    // floats as floats -- except that a float that is not finite is null:
-    // state.json stays strict JSON, where the reference's json.dumps would
-    // write NaN or Infinity (it guards snr_db and z_ref only).
+    // Tile.to_json(): asdict(tile) as a JSON object, the fields in the
+    // reference's order, floats as floats, a float that is not finite null
+    // (in confidence too), so state.json stays strict JSON.
     pyjson::Value to_json() const;
     // Tile(**{k: t[k] for k in fields if k in t}), the listener's reading
     // of an earlier state.json: unknown keys ignored, absent ones their

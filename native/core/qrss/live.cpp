@@ -60,9 +60,10 @@ std::int64_t ceil_clamped(double v) {
 }
 
 // mean(ok[lo:hi]) as numpy computes it for bools (a count over n, exact);
-// NaN for an empty slice, as np.mean of one is.
+// 0.0 for an empty slice (the reference's share heard of nothing, where
+// np.mean of one is NaN).
 double mean_of(std::span<const std::uint8_t> ok, std::int64_t lo, std::int64_t hi) {
-    if (hi <= lo) return std::numeric_limits<double>::quiet_NaN();
+    if (hi <= lo) return 0.0;
     std::int64_t c = 0;
     for (std::int64_t i = lo; i < hi; ++i) c += ok[static_cast<std::size_t>(i)] ? 1 : 0;
     return static_cast<double>(c) / static_cast<double>(hi - lo);
@@ -468,13 +469,20 @@ void FeRing::write(std::int64_t n0, std::span<const cf> x) {
         if (n_ > 0) x = x.last(static_cast<std::size_t>(n_));
     }
     if (end_ && n0 > *end_) clear_locked(*end_, n0);   // a hole: what was there is older than the ring
+    if (!x.empty() && n_ == 0) throw std::out_of_range("index 0 is out of bounds for axis 0 with size 0");
+    const std::int64_t end = std::max(end_.value_or(0), n0 + static_cast<std::int64_t>(x.size()));
+    if (n0 < end - n_) {
+        // behind the window: those slots hold newer samples
+        const std::int64_t drop = std::min(end - n_ - n0, static_cast<std::int64_t>(x.size()));
+        x = x.subspan(static_cast<std::size_t>(drop));
+        n0 = end - n_;
+    }
     const auto m = static_cast<std::int64_t>(x.size());
-    if (m > 0 && n_ == 0) throw std::out_of_range("index 0 is out of bounds for axis 0 with size 0");
     each_run(n0, n0 + m, n_, [&](std::int64_t pos, std::int64_t off, std::int64_t cnt) {
         std::copy_n(x.begin() + off, cnt, x_.begin() + pos);
         std::fill_n(ok_.begin() + pos, cnt, std::uint8_t{1});
     });
-    end_ = std::max(end_.value_or(0), n0 + m);
+    end_ = end;
 }
 
 FeSpan FeRing::read(std::int64_t a, std::int64_t b) const {
@@ -658,7 +666,7 @@ SlotCapture capture_prepare(std::span<const cf> x, std::span<const std::uint8_t>
     const std::int64_t k1 = std::min(len, origin + py_round_int(frame_s * static_cast<double>(FE_FS)));
     if (k1 > origin) {
         const auto [lo, hi] = py_slice(len, origin, k1);
-        out.heard = mean_of(ok, lo, hi);
+        out.heard = mean_of(ok, lo, hi);   // (0.0 for an empty slice)
     } else {
         out.heard = 0.0;
     }
@@ -699,7 +707,7 @@ FinishGate finish_gate(std::span<const std::uint8_t> ok, std::int64_t origin, do
     const bool nothing = !any_of(ok, lo, hi);
     if (nothing || (!have_dets && !have_hints && mean_of(ok, lo, hi) < min_heard)) {
         g.receive = false;
-        g.heard = g.k1 > origin ? mean_of(ok, lo, hi) : 0.0;
+        g.heard = g.k1 > origin ? mean_of(ok, lo, hi) : 0.0;   // (0.0 for an empty slice too)
         return g;
     }
     g.receive = true;
@@ -808,7 +816,7 @@ std::vector<DialPoint> parse_dial_text(std::string_view bytes) {
         if (!t || !hv) continue;
         const std::optional<double> hzf = as_float(*hv);
         if (!hzf || std::isnan(*hzf)) continue;   // round(nan): ValueError
-        if (std::isinf(*hzf)) continue;           // round(inf): OverflowError out of the reference's refresh
+        if (std::isinf(*hzf)) continue;           // round(inf): OverflowError, skipped
         const double r = std::nearbyint(*hzf);
         if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0)) continue;   // past int64
         const auto hz = static_cast<std::int64_t>(r);

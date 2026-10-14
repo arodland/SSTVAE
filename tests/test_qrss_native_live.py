@@ -20,9 +20,10 @@ The contract (the bar), and in brackets the worst measured (2026-10-14):
 - FeRing (native class): bit for bit the reference's ring -- every read,
   `end`, `n` and the storage itself -- over 4000 random writes, clears and
   reads on rings of 1 to 400 samples: wraps, writes longer than the ring,
-  holes past the end, writes behind the window (which land on newer
-  samples' slots, as the reference's do), empty writes, negative indices,
-  reads over unwritten and evicted spans, and the errors;
+  holes past the end, writes behind the window (dropped in both, where
+  they landed on newer samples' slots before 2026-10-14's fix), empty
+  writes, negative and numpy indices (`end` a Python int in both), reads
+  over unwritten and evicted spans, and the errors;
 - _spans: the same spans (np.float64) on 3000 random masks;
 - captures from rings with holes, written zeros (digital silence written
   as heard), an unheard future, evicted starts and nothing heard:
@@ -40,22 +41,26 @@ The contract (the bar), and in brackets the worst measured (2026-10-14):
   bools, NaN, non-positive and half-way dials, CRLF, \\v, \\x1c, U+2028,
   a BOM, invalid UTF-8, duplicate keys, big JSON ints) skipped or taken
   exactly as the reference; spans, by_dial, dial_at and span_at over a
-  time grid with DIAL_GUARD_S changed at run time; the two refusals that
-  differ (an infinite dial, which the reference raises OverflowError out
-  of refresh for, and a dial past int64) pinned as deviations;
+  time grid with DIAL_GUARD_S changed at run time; an infinite dial and a
+  time past float's range skipped by both (the reference raised
+  OverflowError out of refresh before 2026-10-14's fix); the one refusal
+  that differs (a dial past int64, a Python int there) pinned as a
+  deviation; native/tests/golden_qrss/live_pins.json current;
 - restrict: the same mask (and `ok` itself for an unbounded span) around
-  every dial's guard spans, for bool and int8 masks, and the errors;
+  every dial's guard spans, for bool and int8 masks, spans as a list or a
+  generator, and the errors;
   same_dial the same value and type;
-- Tile: to_json is json.dumps(asdict(tile)) byte for byte, fields in the
-  reference's order; NaN and infinities null (never a NaN token);
+- Tile: to_json is json.dumps(tile.to_json()) byte for byte, fields in
+  the reference's order; NaN and infinities null in both (never a NaN
+  token);
   from_json reads back what to_json wrote, ignores unknown keys, refuses
   what the reference's Tile(**...) would raise for; LiveConfig: the
   defaults, specs, selection and joint, and the errors;
 - finish_receive's decisions, the receivers stubbed: on 300 random
   captures (lengths, origins outside the capture, masks, dets, hints, CE
   and joint) the same calls with the same arguments (the prepared capture
-  bit for bit) and the same result, the share heard included (NaN for the
-  empty slice the reference averages); typed, nothing is drawn for a slot
+  bit for bit) and the same result, the share heard included (0.0 for an
+  empty slice, NaN before 2026-10-14's fix); typed, nothing is drawn for a slot
   with nothing to receive (a negative q passes, as in the reference);
 - finish_receive on the real receivers, typed (asserted by a spy on the
   binding, and no per-pass binding reached through Python), against the
@@ -101,6 +106,7 @@ import threading
 import time
 import types
 import warnings
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -251,6 +257,7 @@ def test_in_band_centre_of_waveform_ids(Lv):
 
 def _ring_same(a, b, what):
     assert (a.n, a.end) == (b.n, b.end), what
+    assert type(a.end) is type(b.end) and type(a.end) in (int, type(None)), (what, type(a.end), type(b.end))
     _same(a.x, b.x, (what, "x"))
     _same(a.ok, b.ok, (what, "ok"))
 
@@ -580,28 +587,36 @@ def test_dial_log_refreshes_on_its_signature(Lv, tmp_path):
 
 
 def test_dial_log_deviations(Lv, tmp_path):
-    """Lines the reference does not skip, pinned: an infinite dial (or a
-    time past float's range) raises OverflowError out of the reference's
-    refresh (round(inf), float(10**400)), and a dial past int64 is a Python
-    int there; the port skips each of those lines."""
+    """An infinite dial or a time past float's range (round(inf),
+    float(10**400): OverflowError) is skipped by both; a dial past int64,
+    pinned, is a Python int in the reference and a skipped line here."""
     p = tmp_path / "dial.jsonl"
-    for line, ref_points in (('{"t": 5, "dial_hz": 1e400}', OverflowError),
-                             ('{"t": 5, "dial_hz": "-Infinity"}', OverflowError),
-                             ('{"t": 1' + "0" * 400 + ', "dial_hz": 5}', OverflowError),
+    for line, ref_points in (('{"t": 5, "dial_hz": 1e400}', [(1.0, 3)]),
+                             ('{"t": 5, "dial_hz": "-Infinity"}', [(1.0, 3)]),
+                             ('{"t": 1' + "0" * 400 + ', "dial_hz": 5}', [(1.0, 3)]),
                              ('{"t": 5, "dial_hz": 1e30}', [(1.0, 3), (5.0, int(round(1e30)))]),
                              ('{"t": 5, "dial_hz": 123456789012345678901234567890}',
                               [(1.0, 3), (5.0, int(round(float(123456789012345678901234567890))))]),
                              ('{"t": 5, "dial_hz": 99999999999999999999.5}', [(1.0, 3), (5.0, 10 ** 20)])):
         p.write_bytes(_dial_bytes([_dial_line(1.0, 3), line]))
         ref, got = live.DialLog(p), Lv.DialLog(p)
-        if ref_points is OverflowError:
-            with pytest.raises(OverflowError):
-                ref.refresh()
-        else:
-            ref.refresh()
-            assert ref.points == ref_points
+        ref.refresh()
+        assert ref.points == ref_points, line
         got.refresh()
         assert got.points == [(1.0, 3)], line
+
+
+def test_live_pins_are_current():
+    """native/tests/golden_qrss/live_pins.json (test_live.cpp's dial files
+    and tiles) is what tools/gen_qrss_live_pins.py makes of the reference as
+    it is now: run it when this fails."""
+    import importlib.util
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("gen_qrss_live_pins", root / "tools" / "gen_qrss_live_pins.py")
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    assert gen.OUT.read_text() == gen.build(), "stale: run tools/gen_qrss_live_pins.py"
 
 
 # --- restrict and same_dial ------------------------------------------------------------------------
@@ -643,12 +658,13 @@ def test_restrict(Lv, tmp_path, monkeypatch):
     for spans in ([("a", "b")], [(t0, "b")]):
         assert _outcome(Lv.restrict, ok, origin, Q_TEST, spans)[0] is _outcome(live.restrict, ok, origin, Q_TEST,
                                                                                 spans)[0] is TypeError, spans
-    # (the reference iterates `spans` twice: a generator is spent by its any(),
-    # and the mask comes back empty; the listener hands it lists, and the port
-    # takes the spans as they come)
-    assert not live.restrict(ok, origin, Q_TEST, (s for s in [(t0, t0 + 1)])).any()
-    _same(Lv.restrict(ok, origin, Q_TEST, (s for s in [(t0, t0 + 1)])), live.restrict(ok, origin, Q_TEST,
-                                                                                      [(t0, t0 + 1)]), "generator")
+    # a generator restricts as a list does (the reference spent it on its any()
+    # and came back with nothing heard before 2026-10-14's fix)
+    for spans in ([(t0, t0 + 1), (t0 + 3, t0 + 7)], [(t0, t0 + 1), (-math.inf, math.inf)]):
+        r = live.restrict(ok, origin, Q_TEST, (s for s in spans))
+        assert r.any()
+        _same(Lv.restrict(ok, origin, Q_TEST, (s for s in spans)), r, "generator")
+        _same(r, live.restrict(ok, origin, Q_TEST, spans), "generator")
 
 
 def test_same_dial(Lv):
@@ -718,10 +734,9 @@ def test_tile_json(Lv):
     for t in _nonfinite_tiles():
         text = Lv._tile_json(t)
         assert "NaN" not in text and "Infinity" not in text, text
-        assert json.loads(text) == _nulled(t.to_json())
+        assert text == json.dumps(t.to_json(), allow_nan=False)   # (the reference's tokens before 2026-10-14)
+        assert json.loads(text) == _nulled(dataclasses.asdict(t))
         assert list(json.loads(text)) == names
-        ref = json.dumps(t.to_json())
-        assert "NaN" in ref or "Infinity" in ref       # (the reference's own would carry the tokens)
 
 
 def test_live_config(native, Lv):
@@ -865,7 +880,7 @@ def test_finish_receive_stubbed(Lv, row, monkeypatch):
     """The reference's calls, arguments and result on 300 random captures,
     the receivers stubbed (so the row goes over the Python objects): the
     gate, the share heard, and which receive runs with what."""
-    seen = {"search": 0, "known": 0, "detect": 0, "nothing": 0, "nan": 0}
+    seen = {"search": 0, "known": 0, "detect": 0, "nothing": 0, "empty": 0}
     for k, x, ok, origin, spec, dets, hints in _finish_cases():
         out = []
         for fn in (live.finish_receive, row["finish_receive"],
@@ -884,7 +899,11 @@ def test_finish_receive_stubbed(Lv, row, monkeypatch):
             seen["detect"] += "detect" in names
         else:
             seen["nothing"] += 1
-            seen["nan"] += out[0][0][0] == "ok" and "nan" in out[0][0][2]
+            k1 = min(len(ok), origin + int(round(live.frame_seconds(spec) * FE_FS)))
+            if k1 > origin and not len(ok[origin:k1]):    # an empty slice: 0.0 heard (NaN before the fix)
+                seen["empty"] += 1
+                assert out[0][0] == ("ok", tuple, "([], 0.0)"), (k, out[0][0])
+        assert "nan" not in str(out[0][0]), (k, out[0][0])
     assert min(seen.values()) >= 5, seen
 
 

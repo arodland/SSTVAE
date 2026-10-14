@@ -70,6 +70,7 @@ import collections
 import copy
 import json
 import math
+import operator
 import os
 import queue
 import sys
@@ -216,15 +217,20 @@ class FeRing:
         self.end = None                  # one past the newest index written
 
     def write(self, n0: int, x) -> None:
+        n0 = operator.index(n0)           # (a numpy index made `end` a numpy int)
         x = np.asarray(x, dtype=np.complex64)
         if len(x) > self.n:
             n0, x = n0 + len(x) - self.n, x[-self.n:]
         if self.end is not None and n0 > self.end:
             self._clear(self.end, n0)     # a hole: what was there is older than the ring
+        end = max(self.end or 0, n0 + len(x))
+        if self.n and n0 < end - self.n:
+            # behind the window: those slots hold newer samples, which it overwrote
+            x, n0 = x[end - self.n - n0:], end - self.n
         i = np.arange(n0, n0 + len(x)) % self.n
         self.x[i] = x
         self.ok[i] = True
-        self.end = max(self.end or 0, n0 + len(x))
+        self.end = end
 
     def _clear(self, a: int, b: int) -> None:
         b = min(b, a + self.n)
@@ -308,8 +314,15 @@ def capture_prepare(x, ok, origin: int, q: int, spec, seed: int | None = None):
     prep = receiver.Prepared(fe=fe.astype(np.complex64), keep=keep.astype(np.float32), q=int(q),
                              t0_index=float(origin), fs=FE_FS)
     k1 = min(len(ok), origin + int(round(frame_seconds(spec) * FE_FS)))
-    heard = float(np.mean(ok[origin:k1])) if k1 > origin else 0.0
-    return prep, _spans(ok, FE_FS, origin), heard
+    return prep, _spans(ok, FE_FS, origin), _share_heard(ok, origin, k1)
+
+
+def _share_heard(ok, origin: int, k1: int) -> float:
+    """mean(ok[origin:k1]), the share of the frame heard: 0.0 when k1 <= origin
+    or the slice is empty (an origin before the capture's start counts from
+    its end, as Python slices do, and numpy's mean of nothing is NaN)."""
+    s = ok[origin:k1]
+    return float(np.mean(s)) if k1 > origin and len(s) else 0.0
 
 
 def finish_receive(x, ok, origin: int, q: int, spec, estimator: str,
@@ -335,7 +348,7 @@ def finish_receive(x, ok, origin: int, q: int, spec, estimator: str,
     k1 = min(len(ok), origin + int(round(frame_seconds(spec) * FE_FS)))
     if not ok[origin:k1].any() or (not dets and not hints
                                    and np.mean(ok[origin:k1]) < FINISH_SEARCH_MIN_HEARD):
-        return [], float(np.mean(ok[origin:k1])) if k1 > origin else 0.0   # nothing to receive
+        return [], _share_heard(ok, origin, k1)      # nothing to receive
     prep, erase, heard = capture_prepare(x, ok, origin, q, spec)
     passes = []
     if heard >= FINISH_SEARCH_MIN_HEARD:
@@ -471,7 +484,7 @@ class DialLog:
         if sig == self._sig:
             return
         try:
-            text = self.path.read_text(errors="replace")
+            text = self.path.read_text(encoding="utf-8", errors="replace")   # (the app writes UTF-8)
         except OSError:
             return
         self._sig = sig
@@ -480,8 +493,8 @@ class DialLog:
             try:
                 d = json.loads(line)
                 t, hz = float(d["t"]), int(round(float(d["dial_hz"])))
-            except (ValueError, KeyError, TypeError, IndexError):
-                continue
+            except (ValueError, KeyError, TypeError, IndexError, OverflowError):
+                continue          # (OverflowError: an infinite dial, or a time past float's range)
             if math.isfinite(t) and hz > 0:
                 pts.append((t, hz))
         pts.sort(key=lambda p: p[0])
@@ -544,6 +557,7 @@ def same_dial(a: int | None, b: int | None) -> bool:
 def restrict(ok: np.ndarray, origin: int, q: int, spans) -> np.ndarray:
     """`capture_read`'s written mask, less everything outside the spans
     [(lo, hi), ...] (unix s, -inf/inf for unbounded)."""
+    spans = list(spans)                  # (read twice below: a generator was spent by the first)
     if any(lo == -math.inf and hi == math.inf for lo, hi in spans):
         return ok
     t0 = slot_t0(q)
@@ -595,7 +609,18 @@ class Tile:
     waveform: str = "CE"
 
     def to_json(self) -> dict:
-        return asdict(self)
+        """asdict(self), a float that is not finite as None: state.json stays
+        strict JSON (json.dumps wrote NaN and Infinity tokens, which a strict
+        reader refuses)."""
+        return {k: _finite_or_none(v) for k, v in asdict(self).items()}
+
+
+def _finite_or_none(v):
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    if isinstance(v, list):
+        return [_finite_or_none(x) for x in v]
+    return v
 
 
 @dataclass
@@ -790,24 +815,33 @@ class LiveListener:
             pass                          # a log that cannot be written must not stop the listener
 
     def _load_previous(self) -> None:
-        """Finished tiles from an earlier run stay listed (until keep_done_s)."""
+        """Finished tiles from an earlier run stay listed (until keep_done_s).
+        A state.json that cannot be read, or is not of the shape write_state
+        writes (an object, its "finished" and "tiles" lists, each tile an
+        object), is ignored whole: the listener starts fresh, where it raised
+        out of its constructor and could not start at all."""
         try:
             st = json.loads((self.dir / "state.json").read_text())
-        except (OSError, ValueError):
+            fin, tiles = st.get("finished", []), st.get("tiles", [])
+            if not isinstance(fin, list) or not isinstance(tiles, list):
+                raise TypeError("not a state file")
+            finished = {int(q) for q in fin}
+            done = []
+            for t in tiles:
+                if t.get("status") in ("complete", "lost") and "q" in t:
+                    finished.add(int(t["q"]))        # (a state file from before "finished")
+                if t.get("status") not in ("receiving", "finishing"):
+                    if (not t.get("callsign") and not t.get("cw_text")
+                            and (t.get("snr_db") or -99.0) > HEADERLESS_MAX_SNR_DB):
+                        continue           # kept by an older listener; see _plausible
+                    try:
+                        done.append(Tile(**{k: t[k] for k in Tile.__dataclass_fields__ if k in t}))
+                    except TypeError:
+                        pass
+        except (OSError, ValueError, TypeError, AttributeError, KeyError, OverflowError):
             return
-        self.finished |= {int(q) for q in st.get("finished", [])}
-        for t in st.get("tiles", []):
-            if t.get("status") in ("complete", "lost") and "q" in t:
-                self.finished.add(int(t["q"]))       # (a state file from before "finished")
-            if t.get("status") not in ("receiving", "finishing"):
-                if (not t.get("callsign") and not t.get("cw_text")
-                        and (t.get("snr_db") or -99.0) > HEADERLESS_MAX_SNR_DB):
-                    continue           # kept by an older listener; see _plausible
-                try:
-                    self.done_tiles.append(Tile(**{k: t[k] for k in Tile.__dataclass_fields__
-                                                   if k in t}))
-                except TypeError:
-                    pass
+        self.finished |= finished
+        self.done_tiles.extend(done)
 
     def tiles(self) -> list[Tile]:
         live = [t for s in self.slots.values() for t in s.tiles.values()]
@@ -1065,15 +1099,26 @@ class LiveListener:
             (self._finish_jobs if finish else self._jobs).put((job, s))
 
     def _worker(self, name: str, jobs: queue.Queue) -> None:
+        logged: set = set()              # (slot, line): live receives' failures logged
         while True:
             job, s = jobs.get()
             self._busy[name] = f"{job.__name__.strip('_')} {utc_iso(slot_t0(s.q) - 1)}"
             try:
                 job(s)
             except Exception as e:       # one bad slot must not stop the listener
+                line = f"slot {utc_iso(slot_t0(s.q) - 1)}: {type(e).__name__}: {e}"
                 with self.lock:
-                    self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: {type(e).__name__}: {e}")
-                    s.done = True
+                    if name != "live":
+                        self.log(line)
+                        s.done = True
+                    elif (s.q, line) not in logged:
+                        # A live receive that fails is tried again at the slot's
+                        # next refresh, and its end-of-slot receive still runs:
+                        # retiring the slot lost the rest of it to one failure.
+                        # Its line is logged once, not at every refresh.
+                        logged = {k for k in logged if k[0] in self.slots}
+                        logged.add((s.q, line))
+                        self.log(line)
             finally:
                 self._busy[name] = None
 

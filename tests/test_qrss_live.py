@@ -9,6 +9,7 @@ and then whole (about 5 s): the half-heard pass carries no weight in
 blocks it has not heard yet.
 """
 
+import dataclasses
 import json
 
 import numpy as np
@@ -1139,3 +1140,154 @@ def test_a_late_join_searches_where_a_later_pass_is_due(tmp_path, monkeypatch):
     assert q in L.finished
     assert calls == [("detect", [1600.0], []), ("receive", [1600.0])]
     assert any("no whole-slot search" in s for s in L.lines)
+
+
+# --- reference fixes (2026-10-14, from the C++ port's review) -------------------------------
+
+def test_a_ring_write_behind_its_window_is_dropped():
+    """The part of a write older than the ring's window is dropped: it
+    landed on the slots of newer samples and overwrote them. `end` stays a
+    Python int whatever the index's type (a numpy index made it numpy's)."""
+    r = live.FeRing(span_s=1.0)                # 4000 samples
+    r.write(6100, np.arange(4000, dtype=np.complex64))        # holds [6100, 10100)
+    r.write(np.int64(2000), np.full(10, 77, np.complex64))    # all of it behind
+    r.write(6095, np.full(10, 55, np.complex64))              # 6095..6099 behind
+    x, ok = r.read(6100, 10100)
+    want = np.arange(4000, dtype=np.complex64)
+    want[:5] = 55
+    assert ok.all() and np.array_equal(x, want)
+    assert not r.read(2000, 2010)[1].any() and not r.read(6095, 6100)[1].any()
+    assert r.end == 10100 and type(r.end) is int
+    r.write(np.int64(10100), np.ones(3, np.complex64))
+    assert r.end == 10103 and type(r.end) is int
+
+
+def test_the_share_heard_of_an_empty_slice_is_zero():
+    """A capture whose frame slice ok[origin:k1] is empty (an origin before
+    its start counts from its end) has 0.0 of the frame heard, where
+    numpy's mean of nothing made it NaN, in finish_receive's early return
+    and in capture_prepare."""
+    F = int(round(live.frame_seconds(TINY) * FE_FS))
+    n = F + 10
+    x = np.zeros(n, np.complex64)
+    assert len(np.ones(n, bool)[-5:F - 5]) == 0
+    with np.errstate(all="raise"):
+        assert live.finish_receive(x, np.ones(n, bool), -5, Q_TEST, TINY, "joint", [], []) == ([], 0.0)
+    _, _, heard = live.capture_prepare(x, np.zeros(n, bool), -5, Q_TEST, TINY)
+    assert heard == 0.0
+
+
+def test_the_dial_log_skips_an_infinite_dial(tmp_path):
+    """A line whose dial is infinite, or whose time is past float's range,
+    is skipped like any other that does not parse: it raised OverflowError
+    out of refresh, and out of the listener's receive with it."""
+    p = tmp_path / live.DIAL_FILE
+    p.write_text('{"t": 1, "dial_hz": 5}\n{"t": 2, "dial_hz": 1e400}\n{"t": 3, "dial_hz": "-Infinity"}\n'
+                 '{"t": 1' + "0" * 400 + ', "dial_hz": 7}\n{"t": 4, "dial_hz": 6}\n')
+    d = live.DialLog(p)
+    d.refresh()
+    assert d.points == [(1.0, 5), (4.0, 6)]
+
+
+def test_the_dial_log_is_read_as_utf8_whatever_the_locale(tmp_path):
+    """The app writes the dial file in UTF-8, and it is read so under any
+    locale: in the C locale U+0085 between two changes read as two
+    replacement characters, and both changes were lost."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    p = tmp_path / live.DIAL_FILE
+    p.write_bytes(b'{"t": 1, "dial_hz": 5}\xc2\x85{"t": 2, "dial_hz": 6}\n')
+    root = Path(live.__file__).resolve().parents[2]
+    env = {**os.environ, "LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0",
+           "PYTHONPATH": str(root)}
+    code = ("import locale, sys\nfrom sstvae.qrss import live\nd = live.DialLog(sys.argv[1])\nd.refresh()\n"
+            "print(locale.getpreferredencoding(False), d.points)")
+    out = subprocess.run([sys.executable, "-c", code, str(p)], env=env, capture_output=True, text=True,
+                         check=True, timeout=120).stdout.split(" ", 1)
+    assert out[1].strip() == "[(1.0, 5), (2.0, 6)]", out
+
+
+def test_restrict_takes_its_spans_once():
+    """Spans handed as an iterator restrict as a list does: restrict read
+    them twice, and a generator came back as nothing heard."""
+    t0 = slot_t0(Q_TEST)
+    ok = np.ones(20 * FE_FS, bool)
+    spans = [(t0 + 1.0, t0 + 3.0), (t0 + 5.0, t0 + 6.0)]
+    want = live.restrict(ok, 4 * FE_FS, Q_TEST, spans)
+    assert want.sum() == 3 * FE_FS
+    assert np.array_equal(live.restrict(ok, 4 * FE_FS, Q_TEST, (s for s in spans)), want)
+    assert live.restrict(ok, 4 * FE_FS, Q_TEST, iter([(-np.inf, np.inf)])) is ok
+
+
+def test_a_tile_writes_strict_json():
+    """A float of a tile that is not finite is null in its JSON, in its
+    confidence too: state.json held NaN and Infinity tokens, which a strict
+    JSON reader (the app's) refuses."""
+    t = live.Tile(id="a", q=Q_TEST, slot_utc="", frame="tiny", f_hz=1500.0, snr_db=float("nan"),
+                  z_ref=float("inf"), heard=float("nan"), mean_w_db=float("-inf"),
+                  confidence=[None, float("nan"), 1.5, float("inf")])
+    d = t.to_json()
+    text = json.dumps(d, allow_nan=False)
+    assert d["snr_db"] is d["z_ref"] is d["heard"] is d["mean_w_db"] is None
+    assert d["confidence"] == [None, None, 1.5, None] and d["f_hz"] == 1500.0
+    assert json.loads(text) == d
+    assert live.Tile(id="a", q=1, slot_utc="", frame="tiny", f_hz=1.0).to_json() == \
+        dataclasses.asdict(live.Tile(id="a", q=1, slot_utc="", frame="tiny", f_hz=1.0))
+
+
+@pytest.mark.parametrize("text", ["[1, 2]", '{"tiles": [1]}', '{"finished": 5}', '{"finished": "12"}',
+                                  '{"tiles": {"a": 1}}', '{"finished": [1e400]}', '{"finished": [5], "tiles": [1]}',
+                                  '{"tiles": [{"status": "complete", "q": "x"}]}',
+                                  '{"tiles": [{"status": "lost", "q": 3, "snr_db": "x"}]}', '"x"', "null"])
+def test_a_state_file_of_another_shape_starts_the_listener_fresh(tmp_path, text):
+    """A state.json that is not what write_state writes is ignored whole
+    (the C++ listener does the same): it raised out of the constructor, so
+    the listener could not start until the file was removed by hand."""
+    (tmp_path / "state.json").write_text(text)
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False), log=lambda m: None)
+    assert L.tiles() == [] and L.finished == set()
+
+
+def test_a_failed_live_refresh_is_retried_and_logged_once(tmp_path, monkeypatch):
+    """With background on, a live receive that raises is logged once (per
+    slot and message), and the slot is received again at its next refresh
+    and finished at its end: the worker retired the slot on the spot, so
+    one failure lost the rest of it, end-of-slot receive included."""
+    n = {"k": 0}
+
+    def receive_slot(*a, **k):
+        n["k"] += 1
+        if n["k"] <= 2:
+            raise RuntimeError("the receiver fell over")
+        return [_Pass(1500.0)]
+
+    monkeypatch.setattr(RX, "candidates", lambda *a, **k: [])
+    monkeypatch.setattr(RX, "detect", lambda *a, **k: [_Det(1500.0)])
+    monkeypatch.setattr(RX, "receive_slot", receive_slot)
+    lines = []
+    cfg = live.LiveConfig(spec=TINY, refresh_s=5.0, render=False, background=True)
+    L = live.LiveListener(tmp_path, cfg, log=lines.append)
+    q = Q_TEST
+    t0 = slot_t0(q)
+    end = t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 0.5
+    L.feed(_hiss(int((end - t0 + 15) * FS)), end)
+    for t in (t0 + 26.0, t0 + 31.0):
+        with L.lock:
+            L.step(t)
+        _until(L.idle)
+    failed = [m for m in lines if "RuntimeError" in m]
+    assert len(failed) == 1 and failed[0].endswith("slot 2025-10-01T00:00:00Z: RuntimeError: the receiver fell over")
+    assert q in L.slots and not L.slots[q].done and L.tiles() == [] and n["k"] == 2
+    with L.lock:
+        L.step(t0 + 36.0)
+    _until(L.idle)
+    assert [round(t.f_hz) for t in L.tiles()] == [1500] and n["k"] == 3
+    with L.lock:
+        L.step(end)
+    _until(L.idle)
+    with L.lock:
+        L.step(end + 1.0)
+    assert q in L.finished and [t.status for t in L.tiles()] == ["complete"]

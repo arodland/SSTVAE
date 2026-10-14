@@ -3,13 +3,16 @@
 // end-of-slot receive's decisions, the dial log, restrict, tiles and the
 // listener's configuration.
 //
-// The expected values are the reference's, pinned: each was printed by the
-// Python (utc_iso, frame_seconds, the capture span, FeRing reads, _spans,
-// DialLog's points and spans, restrict, json.dumps(asdict(Tile))).
-// tests/test_qrss_native_live.py compares the two directly (fuzzing the
-// ring, the masks, the dial files and the end-of-slot receive) where Python
-// is available; this file keeps the C++ honest without it, and covers what
-// only the C++ has: the noise generator and the seams.
+// The expected values are the reference's, pinned: the dial files' points
+// and spans and the tiles' Tile.to_json() text come from
+// golden_qrss/live_pins.json (tools/gen_qrss_live_pins.py runs the
+// reference; the directory is this test's one argument); the rest were
+// printed by the Python (utc_iso, frame_seconds, the capture span, FeRing
+// reads, _spans, restrict). tests/test_qrss_native_live.py compares the two
+// directly (fuzzing the ring, the masks, the dial files and the end-of-slot
+// receive) where Python is available, and checks the pins file is current;
+// this file keeps the C++ honest without it, and covers what only the C++
+// has: the noise generator and the seams.
 
 #include <algorithm>
 #include <atomic>
@@ -221,12 +224,20 @@ void test_fe_ring() {
     equal_floats(im(s.x), want_im, "r3 x");
     equal_vec(as_ints(s.ok), want_ok3, "r3 ok");
 
-    // behind the window: lands on 0 mod 40, the slot of index 280 (the reference's rule)
+    // behind the window ([265, 305)): dropped, where it landed on the slot of
+    // index 280 (0 mod 40) before 2026-10-14's fix, in both implementations
     r.write(0, std::vector<cf>{cf(9.0f, 0.0f)});
     check::is_true(r.end() == std::optional<std::int64_t>(305), "r4 end (unchanged)");
     s = r.read(278, 284);
-    equal_floats(re(s.x), {0, 0, 9, 0, 0, 0}, "r4 x");
-    equal_vec(as_ints(s.ok), {0, 0, 1, 0, 0, 0}, "r4 ok");
+    equal_floats(re(s.x), {0, 0, 0, 0, 0, 0}, "r4 x");
+    equal_vec(as_ints(s.ok), {0, 0, 0, 0, 0, 0}, "r4 ok");
+    // in part behind it: 262..264 dropped, 265 and 266 written
+    r.write(262, ramp(21, 25));
+    check::is_true(r.end() == std::optional<std::int64_t>(305), "r5 end (unchanged)");
+    lv::FeSpan s5 = r.read(260, 270);
+    equal_floats(re(s5.x), {0, 0, 0, 0, 0, 24, 25, 0, 0, 0}, "r5 x");
+    equal_vec(as_ints(s5.ok), {0, 0, 0, 0, 0, 1, 1, 0, 0, 0}, "r5 ok");
+    r.clear(265, 267);
 
     // read_into agrees with read; clear
     std::vector<cf> x(6);
@@ -419,6 +430,9 @@ void test_capture_prepare_seams() {
     check::equal(c2.heard, 1510.0 / 4000.0, "heard: ok[500:4500]");
     const lv::SlotCapture c3 = lv::capture_prepare(x, ok, std::int64_t(n) + 5, 42, 1.0, std::nullopt, seams);
     check::equal(c3.heard, 0.0, "heard: origin past the capture");
+    // ok[-5:995] is empty: 0.0, where the reference's np.mean gave NaN before 2026-10-14's fix
+    const lv::SlotCapture c4 = lv::capture_prepare(x, ok, -5, 42, 0.25, std::nullopt, seams);
+    check::equal(c4.heard, 0.0, "heard: an empty slice (a negative origin)");
 
     lv::PrepareSeams bad = seams;
     bad.noise = [](std::int64_t, std::size_t m) { return std::vector<cf>(m + 1); };
@@ -474,6 +488,8 @@ void test_finish_decisions() {
     check::is_true(!g.receive && g.k1 == -1000 && g.heard == 0.0, "gate: a negative origin");
     g = lv::finish_gate(ok, -2600, 0.25, false, false);   // ok[-2600:-1600] = ok[400:1400]
     check::is_true(!g.receive && g.k1 == -1600 && g.heard == 0.1, "gate: a negative origin, a tenth heard");
+    g = lv::finish_gate(ok, -5, fs1, true, true);   // ok[-5:995] = ok[2995:995]: empty
+    check::is_true(!g.receive && g.k1 == 995 && g.heard == 0.0, "gate: an empty slice, 0.0 (NaN before the fix)");
 
     using B = lv::FinishBranch;
     check::is_true(lv::finish_branch(0.5, false, false) == B::Search, "branch: half heard, a search");
@@ -516,24 +532,47 @@ void test_finish_decisions() {
     check::is_true(fres.passes.empty() && fres.heard == 0.0 && !drew, "finish_receive: nothing heard");
 }
 
+// --- the reference's pins ---------------------------------------------------------------------
+
+using Value = qrss::pyjson::Value;
+
+// golden_qrss/live_pins.json (tools/gen_qrss_live_pins.py), read in main.
+Value PINS;
+
+Value read_pins(const std::string& dir) {
+    const std::string path = dir + "/live_pins.json";
+    util::File f = util::open_file(path, "rb");
+    if (!f) throw std::runtime_error("cannot read " + path + " (tools/gen_qrss_live_pins.py writes it)");
+    std::string text;
+    char buf[65536];
+    for (std::size_t got; (got = std::fread(buf, 1, sizeof buf, f.get())) > 0;) text.append(buf, got);
+    return qrss::pyjson::loads(text);
+}
+
+std::string unhex(const std::string& h) {
+    auto nib = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
+    std::string out;
+    for (std::size_t i = 0; i + 1 < h.size(); i += 2) out.push_back(static_cast<char>(nib(h[i]) * 16 + nib(h[i + 1])));
+    return out;
+}
+
+std::vector<lv::DialPoint> pin_points(const Value& v) {
+    std::vector<lv::DialPoint> out;
+    for (const Value& p : v.items()) out.push_back({p.items()[0].as_double(), p.items()[1].as_int()});
+    return out;
+}
+
+std::optional<std::int64_t> pin_dial(const Value& v) {
+    return v.is_null() ? std::nullopt : std::optional<std::int64_t>(v.as_int());
+}
+
+const Value& dial_pin(std::string_view name) {
+    for (const Value& d : PINS.at("dial").items())
+        if (d.at("name").as_string() == name) return d;
+    throw std::runtime_error("no dial pin " + std::string(name));
+}
+
 // --- the dial ---------------------------------------------------------------------------------
-
-const char DIAL_BYTES[] =
-    "{\"t\": 10, \"dial_hz\": 7038600}\n{\"t\": 5, \"dial_hz\": 7038600}\ngarbage\n"
-    "{\"t\": 20, \"dial_hz\": 14095600.5}\n{\"t\": 21, \"dial_hz\": 14095601.5}\n"
-    "{\"t\": \"30\", \"dial_hz\": \"10138700\"}\n{\"t\": 40, \"dial_hz\": 0}\n{\"t\": NaN, \"dial_hz\": 5}\n"
-    "{\"t\": 50, \"dial_hz\": true}\n{\"t\": 60, \"dial_hz\": 10138700}\n[1, 2]\n{\"dial_hz\": 1}\n{\"t\": 70}\n"
-    "{\"t\": 123456789012345678901234567890, \"dial_hz\": 3}\n"
-    "{\"t\": 80, \"dial_hz\": 4, \"x\": 123456789012345678901234567890}\n{\"t\": 90, \"dial_hz\": 5\r\n"
-    "{\"t\": 95, \"dial_hz\": 6}\xc2\x85{\"t\": 96, \"dial_hz\": 7}\xe2\x80\xa8{\"t\": 97, \"dial_hz\": 8}\n"
-    "{\"t\": 98, \"dial_hz\": 9}\xff\n";
-
-// DialLog(...).refresh(); .points of DIAL_BYTES, the reference's
-const std::vector<lv::DialPoint> DIAL_POINTS = {
-    {5.0, 7038600},  {20.0, 14095600}, {21.0, 14095602}, {30.0, 10138700},
-    {50.0, 1},       {60.0, 10138700}, {80.0, 4},        {95.0, 6},
-    {96.0, 7},       {97.0, 8},        {1.2345678901234568e+29, 3},
-};
 
 std::string pts_text(const std::vector<lv::DialPoint>& p) {
     std::string s = "[";
@@ -548,26 +587,18 @@ void equal_points(const std::vector<lv::DialPoint>& got, const std::vector<lv::D
 }
 
 void test_parse_dial() {
-    equal_points(lv::parse_dial_text(std::string_view(DIAL_BYTES, sizeof DIAL_BYTES - 1)), DIAL_POINTS,
-                 "parse_dial_text");
+    // every pinned file: the reference's DialLog points (for the one with dials
+    // past int64, the reference's of the file without those lines: the port
+    // skips them, where the reference keeps a Python int)
+    std::size_t files = 0;
+    for (const Value& d : PINS.at("dial").items()) {
+        const std::string bytes = unhex(d.at("hex").as_string());
+        equal_points(lv::parse_dial_text(bytes), pin_points(d.at("points")),
+                     "parse_dial_text: " + d.at("name").as_string());
+        ++files;
+    }
+    check::is_true(files >= 10, "the pins hold every dial file");
     equal_points(lv::parse_dial_text(""), {}, "parse_dial_text of nothing");
-    equal_points(lv::parse_dial_text("{\"t\": 1, \"dial_hz\": 2}\x0b{\"t\": 2, \"dial_hz\": 3}\x1d"
-                                     "{\"t\": 3, \"dial_hz\": 4}\x0c{\"t\": 4, \"dial_hz\": 5}"),
-                 {{1.0, 2}, {2.0, 3}, {3.0, 4}, {4.0, 5}}, "parse_dial_text: splitlines' separators");
-    // the port's skips (the reference raises OverflowError out of refresh, or keeps a Python int)
-    equal_points(lv::parse_dial_text("{\"t\": 1, \"dial_hz\": 3}\n{\"t\": 5, \"dial_hz\": 1e400}\n"
-                                     "{\"t\": 6, \"dial_hz\": \"-Infinity\"}\n"
-                                     "{\"t\": 7, \"dial_hz\": 123456789012345678901234567890}\n"
-                                     "{\"t\": 8, \"dial_hz\": 1e30}\n{\"t\": 9, \"dial_hz\": 9223372036854775807}\n"
-                                     "{\"t\": 10, \"dial_hz\": 9223372036854774784}"),
-                 {{1.0, 3}, {10.0, 9223372036854774784}}, "parse_dial_text: dials past int64 skipped");
-    // a stable sort: equal times keep the file's order
-    equal_points(lv::parse_dial_text("{\"t\": 5, \"dial_hz\": 1}\n{\"t\": 5, \"dial_hz\": 2}\n{\"t\": 1, \"dial_hz\": 3}"),
-                 {{1.0, 3}, {5.0, 1}, {5.0, 2}}, "parse_dial_text: stable");
-    // big integers inside strings are left alone, and an escaped quote does not end a string
-    equal_points(lv::parse_dial_text("{\"s\": \"\\\"12345678901234567890123\", \"t\": 1e1, \"dial_hz\": 2, "
-                                     "\"n\": -98765432109876543210}"),
-                 {{10.0, 2}}, "parse_dial_text: a big int beside a string");
 }
 
 std::string dial_spans_text(const std::vector<lv::DialSpan>& v) {
@@ -614,6 +645,36 @@ void test_dial_queries() {
     check::is_true(lv::same_dial(1, 1) && lv::same_dial(std::nullopt, 2) && lv::same_dial(3, std::nullopt) &&
                        !lv::same_dial(1, 2),
                    "same_dial");
+
+    // the reference's spans, by_dial and span_at over the first pinned file, at its DIAL_GUARD_S
+    const Value& d = PINS.at("dial").items()[0];
+    const std::vector<lv::DialPoint> fp = pin_points(d.at("points"));
+    const lv::DialGuard pg = {PINS.at("dial_guard_s").items()[0].as_double(),
+                              PINS.at("dial_guard_s").items()[1].as_double()};
+    check::is_true(pg == lv::DIAL_GUARD_S, "DIAL_GUARD_S: the reference's");
+    for (const Value& q : d.at("spans").items()) {
+        const double a = q.at("a").as_double(), b = q.at("b").as_double();
+        std::vector<lv::DialSpan> want;
+        for (const Value& w : q.at("spans").items())
+            want.push_back({w.items()[0].as_double(), w.items()[1].as_double(), pin_dial(w.items()[2])});
+        equal_spans(lv::dial_spans(fp, a, b, pg), want, "pinned spans " + std::to_string(a) + " " + std::to_string(b));
+        lv::DialEpochs want_by;
+        for (const Value& e : q.at("by_dial").items()) {
+            std::vector<std::pair<double, double>> sp;
+            for (const Value& w : e.items()[1].items()) sp.emplace_back(w.items()[0].as_double(), w.items()[1].as_double());
+            want_by.emplace_back(pin_dial(e.items()[0]), sp);
+        }
+        ++check::checks;
+        if (lv::dial_by_dial(fp, a, b, pg) != want_by)
+            check::fail("pinned by_dial " + std::to_string(a) + " " + std::to_string(b), "differs");
+    }
+    for (const Value& q : d.at("span_at").items()) {
+        const Value& w = q.at("span");
+        const double t = q.at("t").as_double();
+        equal_spans({lv::dial_span_at(fp, t, pg)},
+                    {{w.items()[0].as_double(), w.items()[1].as_double(), pin_dial(w.items()[2])}},
+                    "pinned span_at " + std::to_string(t));
+    }
 }
 
 void test_dial_log() {
@@ -632,9 +693,10 @@ void test_dial_log() {
     log.refresh();
     check::is_true(log.points().empty(), "DialLog: no file, no points");
     check::equal(log.dial_at(5.0).has_value(), false, "DialLog: no file, the dial unknown");
-    put(std::string_view(DIAL_BYTES, sizeof DIAL_BYTES - 1));
+    const Value& mixed = dial_pin("mixed");
+    put(unhex(mixed.at("hex").as_string()));
     log.refresh();
-    equal_points(log.points(), DIAL_POINTS, "DialLog.refresh");
+    equal_points(log.points(), pin_points(mixed.at("points")), "DialLog.refresh");
     check::is_true(log.dial_at(25.0) == std::optional<std::int64_t>(14095602), "DialLog.dial_at");
     const lv::DialSpan s = log.span_at(25.0);
     check::is_true(s.lo == 21.0 + lv::DIAL_GUARD_S[1] && s.hi == 30.0 - lv::DIAL_GUARD_S[0], "DialLog.span_at");
@@ -700,51 +762,27 @@ void test_restrict() {
 // --- tiles and the configuration ----------------------------------------------------------------
 
 void test_tile() {
-    lv::Tile t;
-    t.id = "a";
-    t.q = 7;
-    t.slot_utc = "2026-10-09T06:00Z";
-    t.frame = "tiny";
-    t.f_hz = 1234.5;
-    t.dial_hz = 14095600;
-    t.snr_db = -3.25;
-    t.z_ref = 8.0;
-    t.callsign = "N0CALL";
-    t.mode = "B";
-    t.segment = 2;
-    t.progress = 0.5;
-    t.heard = 1.0;
-    t.received = 0.25;
-    t.mean_w_db = -1.5;
-    t.confidence = {std::nullopt, 1.5, -2.0};
-    t.passes = 2;
-    t.image = "x.png";
-    t.image_rev = 3;
-    t.updated = 1760000000.125;
-    t.note = "n";
-    t.uid = "u";
-    t.waveform = "L";
-    const std::string want =
-        R"({"id": "a", "q": 7, "slot_utc": "2026-10-09T06:00Z", "frame": "tiny", "f_hz": 1234.5, )"
-        R"("dial_hz": 14095600, "status": "receiving", "snr_db": -3.25, "z_ref": 8.0, "callsign": "N0CALL", )"
-        R"("grid": null, "picture_id": null, "mode": "B", "segment": 2, "cw_text": null, "progress": 0.5, )"
-        R"("heard": 1.0, "received": 0.25, "mean_w_db": -1.5, "confidence": [null, 1.5, -2.0], "passes": 2, )"
-        R"("image": "x.png", "image_rev": 3, "updated": 1760000000.125, "note": "n", "uid": "u", "waveform": "L"})";
-    const qrss::pyjson::Value j = t.to_json();
-    check::equal(qrss::pyjson::dumps(j), want, "Tile.to_json: json.dumps(asdict(tile))");
-    const std::optional<lv::Tile> back = lv::Tile::from_json(j);
-    check::is_true(back && qrss::pyjson::dumps(back->to_json()) == want, "Tile.from_json: a round trip");
-
-    lv::Tile nf = t;
-    nf.snr_db = NaN;
-    nf.progress = INF;
-    nf.confidence = {-INF};
-    const std::string got = qrss::pyjson::dumps(nf.to_json());
-    check::is_true(got.find("NaN") == std::string::npos && got.find("Infinity") == std::string::npos &&
-                       got.find(R"("snr_db": null)") != std::string::npos &&
-                       got.find(R"("progress": null)") != std::string::npos &&
-                       got.find(R"("confidence": [null])") != std::string::npos,
-                   "Tile.to_json: never a NaN token");
+    // every pinned tile: built from asdict(tile) (Tile::from_json), dumped
+    // (to_json) to the reference's json.dumps(tile.to_json()) byte for byte
+    // -- a float that is not finite null, never a NaN token -- and read back
+    std::size_t tiles = 0;
+    for (const Value& p : PINS.at("tiles").items()) {
+        const std::string name = p.at("name").as_string();
+        const std::string& want = p.at("json").as_string();
+        const std::optional<lv::Tile> t = lv::Tile::from_json(p.at("tile"));
+        check::is_true(t.has_value(), "Tile.from_json: " + name);
+        if (!t) continue;
+        check::equal(qrss::pyjson::dumps(t->to_json()), want, "Tile.to_json: " + name);
+        check::is_true(want.find("NaN") == std::string::npos && want.find("Infinity") == std::string::npos,
+                       "Tile.to_json: no NaN token: " + name);
+        const std::optional<lv::Tile> back = lv::Tile::from_json(qrss::pyjson::loads(want));
+        if (name == "every float not finite")   // f_hz null is no float: refused (the reference's Tile(**) takes None)
+            check::is_true(!back, "Tile.from_json: a null f_hz");
+        else
+            check::is_true(back && qrss::pyjson::dumps(back->to_json()) == want, "Tile.from_json: a round trip: " + name);
+        ++tiles;
+    }
+    check::is_true(tiles >= 7, "the pins hold every tile");
 
     auto from = [](const char* text) { return lv::Tile::from_json(qrss::pyjson::loads(text)); };
     const std::optional<lv::Tile> m = from(R"({"id": "z", "q": 1, "slot_utc": "s", "frame": "tiny", "f_hz": 900, "other": 1})");
@@ -758,7 +796,7 @@ void test_tile() {
     check::is_true(!from(R"([1])"), "Tile.from_json: not an object");
 
     lv::SlotState st;
-    st.tiles.emplace_back("a", t);
+    st.tiles.emplace_back("a", *lv::Tile::from_json(PINS.at("tiles").items()[2].at("tile")));
     st.tiles.emplace_back("b", lv::Tile{});
     check::is_true(st.tile("a") && st.tile("a")->q == 7 && !st.tile("c"), "SlotState.tile");
     st.tile("b")->note = "x";
@@ -787,8 +825,13 @@ void test_live_config() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::fprintf(stderr, "usage: test_qrss_core_live <golden_qrss directory>\n");
+        return 2;
+    }
     try {
+        PINS = read_pins(argv[1]);
         test_utc_iso();
         test_small();
         test_fe_ring();
