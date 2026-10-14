@@ -47,7 +47,10 @@
 // results, so no departure): a candidate's channel, its derotated capture
 // and N0 are computed once and reused for every segment (the reference
 // rebuilds them per segment); a 250 Hz capture's channel and noise floor
-// once for all candidates (they do not depend on the candidate); the
+// once for all candidates (they do not depend on the candidate; the floor
+// is taken at the first candidate inside the capture's reach, as the
+// reference takes it only past that test -- a capture too short for a
+// floor is refused only when some candidate reaches it); the
 // capture's FFT per chunk start once per (segment, candidate) instead of per
 // clock step; and the FFT-domain roll of the template is an index offset,
 // not a copied array. retro_detect prepares a slot's capture once for its

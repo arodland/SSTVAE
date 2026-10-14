@@ -46,7 +46,9 @@
 // int(key[1])), spec and search keywords, the slot's capture as pb.capture
 // gave it (or the reference's frontend.Capture of the C++ read), and the
 // records the C++ made as "__type__" dicts (which the rows' wrappers turn
-// into the reference's); what a seam returns is read back by field.
+// into the reference's); what a seam returns is read back by field. The
+// result tuple carries the receive seam's own pass object and the
+// associate seam's own key and rule (a None rule stays None).
 //
 // THREADS and the GIL: every core call runs with the GIL released; hooks
 // and seams take it back for their Python calls, and every Python object a
@@ -296,6 +298,8 @@ py::list retro_detect(const py::object& store_obj, const py::object& key, const 
     auto last_det = std::make_shared<Held>();
     auto last_pass = std::make_shared<Held>();
     auto pass_objs = std::make_shared<std::vector<Held>>();
+    // an associate seam's own (key, rule) of each find, in order (a None rule stays None)
+    auto assoc_objs = std::make_shared<std::vector<std::pair<Held, Held>>>();
 
     // the slot's capture as Python sees it (needs the GIL)
     auto cap_obj = [](const em::SlotInputPtr& in) -> py::object {
@@ -386,13 +390,17 @@ py::list retro_detect(const py::object& store_obj, const py::object& key, const 
     steps.associate = [=](const types::PassResult& p) -> as::Result {
         const Held po = *last_pass;
         pass_objs->push_back(po);
-        if (!as_seam) return c_associate(p);
+        if (!as_seam) {
+            assoc_objs->emplace_back(nullptr, nullptr);
+            return c_associate(p);
+        }
         py::gil_scoped_acquire gil;
         const py::object pobj = po ? *po : py::object(rx::to_py(p));
         const auto [kk, rule] = unpack2((*as_seam)(pobj, *py_store));
         as::Result out;
         if (!kk.is_none()) out.key = st::key_of(kk);
         if (!rule.is_none()) out.rule = rx::as_string(rule);
+        assoc_objs->emplace_back(held_object(kk), held_object(rule));
         return out;
     };
 
@@ -402,7 +410,11 @@ py::list retro_detect(const py::object& store_obj, const py::object& key, const 
     for (std::size_t i = 0; i < finds.size(); ++i) {
         const Held& po = (*pass_objs)[i];
         py::object p = po ? *po : py::object(rx::to_py(finds[i].pass));
-        out.append(py::make_tuple(p, st::opt_key(finds[i].key), rx::to_str(finds[i].rule)));
+        const auto& [ko, ro] = (*assoc_objs)[i];
+        if (ko)   // the seam's own key and rule, as the reference returns them
+            out.append(py::make_tuple(p, *ko, *ro));
+        else
+            out.append(py::make_tuple(p, st::opt_key(finds[i].key), rx::to_str(finds[i].rule)));
     }
     return out;
 }

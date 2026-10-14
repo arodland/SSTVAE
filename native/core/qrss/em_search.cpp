@@ -466,9 +466,11 @@ SearchResult search_prepared(store::Store& store, const store::Accumulator& acc,
     const bool ch_rate = prep.fs == config::CH_FS;
 
     // A 250 Hz capture's channel (channel_for with the capture's own mix): one
-    // for every candidate, its noise floor with it.
+    // for every candidate. Its noise floor is taken only once a candidate is
+    // inside the capture, as the reference takes it only past the reach test
+    // (a capture every candidate misses never measures it).
     std::optional<track::ChanCapture> ch_chan;
-    double ch_n0 = 0.0;
+    std::optional<double> ch_n0;
     std::vector<std::optional<CandChan>> per_cand(cands.size());
 
     struct Best {
@@ -491,16 +493,14 @@ SearchResult search_prepared(store::Store& store, const store::Accumulator& acc,
             const Hypothesis& hyp = cands[c];
             if (!per_cand[c]) {
                 if (ch_rate) {
-                    if (!ch_chan) {
-                        ch_chan = receiver::channel_for(prep, spec, types::Detection{}, {}, in.f_mix);
-                        ch_n0 = noise_n0(*ch_chan);
-                    }
+                    if (!ch_chan) ch_chan = receiver::channel_for(prep, spec, types::Detection{}, {}, in.f_mix);
                     if (std::fabs(hyp.f_hz - ch_chan->mix_audio_hz()) + opt.df_hz > TS_CH_REACH_HZ) {
                         CandChan skip;
                         skip.skip = true;
                         per_cand[c] = std::move(skip);
                     } else {
-                        per_cand[c] = derotated(*ch_chan, hyp.f_hz, hyp.drift_hz_per_min, ch_n0);
+                        if (!ch_n0) ch_n0 = noise_n0(*ch_chan);
+                        per_cand[c] = derotated(*ch_chan, hyp.f_hz, hyp.drift_hz_per_min, *ch_n0);
                     }
                 } else {
                     const double lo = -(config::LEAD_IN_MAX_S + config::SPAN * config::T_SYM) - opt.tau_s - 1.0;

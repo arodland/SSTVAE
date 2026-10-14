@@ -31,6 +31,12 @@ The contract (the bar), and in brackets what was measured (2026-10-14):
   (f_hz, ppm, tau0, drift) exactly, the same chunks and cells, Z within
   0.05 [worst |dZ| printed: 0 to 4e-15], lam within 1e-9 relative, the
   same refusals;
+- **an accumulator with CW IDs and a drifting member** (OOK and FSK
+  majorities; a 0.25 Hz/min, 7.5 ppm candidate): template_search exactly as
+  above, each capture found on its own candidate; the pass within the bars
+  below on TINY (fast), within 1e-4 on SHORT (slow), whose CW ID windows
+  reach the template [worst printed: 2.7e-5 of the ppm, from track's
+  finite-difference timing Newton];
 - **receive_template**: the pass within the receiver lane's bars (f_hz
   1e-6 Hz, z / w / ch to 1e-6 of the scale, timing, report), the same
   header, frame, q, mix and estimator [worst printed];
@@ -72,6 +78,7 @@ from sstvae.qrss import receiver as RX
 from sstvae.qrss import store as S
 from sstvae.qrss.channel import ChannelConfig
 from sstvae.qrss.constants import CH_FS, T_SYM, WAVEFORM_CE, WAVEFORM_L
+from sstvae.qrss.types import CwIdResult
 
 CALL = "K1ABC"
 Z_BAR = 0.05
@@ -555,6 +562,12 @@ def test_template_search_refusals(ns, stores):
     _search_both(ns, st, nst, key, cap, frame.TINY, segments=[2])            # a segment without data
     c = _outcome(ns.template_search, nst, key, cap, frame.TINY, tau_s=-1.0)  # deviation: refused
     assert c[0] == "ValueError" and "tau_s" in c[1]
+    # a 250 Hz capture too short for a noise floor: the floor's own refusal with a
+    # candidate inside it, and nothing (no floor taken) with every candidate out of reach
+    for n in (0, 1):
+        short = frontend.Capture(np.zeros(n, dtype=np.complex64), cap.q, 3.0, fs=CH_FS)
+        assert _search_both(ns, st, nst, key, short, frame.TINY, f_mix_hz=Fraction(0)) is None
+        assert _search_both(ns, st, nst, key, short, frame.TINY, f_mix_hz=Fraction(200)) == (None, 0.0, {})
 
 
 def test_template_search_cancel(ns, native, stores):
@@ -563,6 +576,84 @@ def test_template_search_cancel(ns, native, stores):
     flag.set()
     with pytest.raises(native.qrss.em.Cancelled):
         ns.template_search(nst, _key(h), _cap("tiny", WEAK["tiny"], Q_TEST + 11, 7), frame.TINY, cancel=flag)
+
+
+# --- members with a CW ID, a drifting and clock-off member ---------------------------------------
+
+def _cw_world(root, NStore, votes):
+    """Stores whose accumulator holds the +5 dB pass, one weaker pass per CW ID
+    keying vote in `votes` (each ID matching the header's call), and a member at
+    1500.7 Hz drifting 0.25 Hz/min with a 7.5 ppm clock (a second candidate)."""
+    sp, h = _picture(0)
+    a = tx.slot_air_latents(sp, 0)[:frame.FULL.n_data]
+    st = S.Store(root / "py", clock=Clock())
+    ps = [make_pass_result(a, 10 ** 0.5, hdr=h, decoded=True, seed=1)]
+    for i, kind in enumerate(votes):
+        p = make_pass_result(a, 2.0, hdr=h, decoded=True, seed=2 + i, f_hz=1500.0 + 0.02 * i)
+        ps.append(dataclasses.replace(p, cw=CwIdResult(text=CALL, z_match=9.0, keying=kind, agrees=True)))
+    p = make_pass_result(a, 2.0, hdr=h, decoded=True, seed=9, f_hz=1500.7)
+    ps.append(dataclasses.replace(p, report=dataclasses.replace(p.report, drift_hz_per_min=0.25, offset_hz=1500.7),
+                                  timing=dataclasses.replace(p.timing, ppm=7.5)))
+    for p in ps:
+        st.add_pass(p)
+        st.attach(_key(h), p.uid, h.segment, "test", mode=h.mode, codec_id=h.codec_id)
+    shutil.copytree(root / "py", root / "cpp")
+    return st, NStore(root / "cpp", clock=Clock()), h
+
+
+def _keyed_cap(name, snr, q, seed, ook, drift=0.0, ppm=0.0, f_hz=1500.0):
+    """A capture whose CW ID windows (if the frame has them) are keyed OOK or FSK."""
+    spec = SPECS[name]
+    sp, h = _picture(0)
+    sym = tx.slot_symbols(sp, q, spec, header=h if spec.n_hdr else None)
+    sim = chm.simulate(sym, spec, q, ChannelConfig(snr_db=snr, preset="quiet", seed=seed, drift_hz_per_min=drift,
+                                                  tx_ppm=ppm, freq_offset_hz=f_hz - 1500.0),
+                       keying=morse.keying_units(CALL) if spec.n_win else None, ook=ook)
+    return frontend.Capture(sim.fe, q, sim.t0_index)
+
+
+def _cw_case(ns, NStore, root, name, votes, receive_bar):
+    """template_search exactly (the cell, Z, lam) with the accumulator's CW keying
+    and its drifting candidate, each found where the capture says; then
+    receive_template at `receive_bar` (None: _pass_close's)."""
+    st, nst, h = _cw_world(root, NStore, votes)
+    key = _key(h)
+    spec = SPECS[name]
+    acc = st.accumulator(key)
+    cands = [(1500.0, 0.0, 0.0), (1500.7, 0.25, 7.5)]
+    assert em._candidates(st, acc) == cands and ns._candidates(nst, nst.accumulator(key)) == cands
+    ook = votes.count("ook") > votes.count("fsk")
+    assert em.known_keying(st, acc, CALL)[1] is ook
+    for snr, q, seed, kw, drift in ((WEAK[name], Q_TEST + 11, 7, {}, 0.0),
+                                    (WEAK[name] + 1.0, Q_TEST + 12, 8,
+                                     {"drift": 0.25, "ppm": 7.5, "f_hz": 1500.7}, 0.25)):
+        cap = _keyed_cap(name, snr, q, seed, ook, **kw)
+        r = _search_both(ns, st, nst, key, cap, spec)
+        assert r[0] is not None and r[2]["drift"] == drift, r[2]
+        if receive_bar is None:
+            _receive_both(ns, st, nst, key, cap, spec, det=r[0], segment=r[2]["segment"])
+            continue
+        p = em.receive_template(st, key, cap, spec, det=r[0], segment=r[2]["segment"])
+        c = _rx.to_ref(ns.receive_template(nst, key, cap, spec, det=r[0], segment=r[2]["segment"]))
+        assert (c.q, c.frame, c.header, c.f_mix_hz) == (p.q, p.frame, p.header, p.f_mix_hz)
+        for what, err in (("f_hz", abs(c.f_hz - p.f_hz)), ("z", _rel(c.z, p.z)),
+                          ("ppm", abs(c.timing.ppm - p.timing.ppm) / max(1.0, abs(p.timing.ppm)))):
+            _worst(f"cw pass {what}", err)
+            assert err <= receive_bar, (what, err)
+
+
+@pytest.mark.parametrize("votes", [["ook", "ook", "fsk"], ["fsk"]])
+def test_template_search_cw_and_drift_tiny(ns, tmp_path, NStore, votes):
+    _cw_case(ns, NStore, tmp_path, "tiny", votes, None)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("votes", [["ook", "ook", "fsk"], ["fsk"]])
+def test_template_search_cw_and_drift_short(ns, tmp_path, NStore, votes):
+    """SHORT has the CW ID windows, so the keying reaches the template. The search
+    is exact; the pass is held to 1e-4, since track's finite-difference timing
+    Newton (h = 0.3) turns last-ulp differences into 1e-5 of the ppm here."""
+    _cw_case(ns, NStore, tmp_path, "short", votes, 1e-4)
 
 
 # --- receive_template ---------------------------------------------------------------------------
@@ -710,6 +801,26 @@ def test_retro_detect_hooks_and_seams(ns, native, tmp_path, NStore):
         ns.retro_detect(nst, key, pb1, frame.TINY, slots=[Q_TEST + 3], _seams=stub)
     with pytest.raises(TypeError):                         # the C++ search does not take it
         ns.retro_detect(nst, key, pb1, frame.TINY, slots=[Q_TEST + 3], bogus=1)
+    # every step a seam: the receive seam's pass object and the associate seam's
+    # own key and rule come back as given, None included
+    p0 = em.receive_template(st, key, _cap("tiny", WEAK["tiny"], Q_TEST + 11, 7), frame.TINY, det=det)
+    import sstvae.qrss.associate as ref_assoc
+    steps = {"template_search": lambda *a, **k: (det, 9.0, {"segment": 0}),
+             "receive_template": lambda *a, **k: p0,
+             "associate": lambda p, store: (None, None)}
+    lp = []
+    mp = pytest.MonkeyPatch()
+    mp.setattr(ref_em, "template_search", steps["template_search"])
+    mp.setattr(ref_em, "receive_template", steps["receive_template"])
+    mp.setattr(ref_assoc, "associate", steps["associate"])
+    try:
+        ref = em.retro_detect(st, key, pb1, frame.TINY, slots=[Q_TEST + 3], log=lp.append)
+    finally:
+        mp.undo()
+    lc = []
+    got = ns.retro_detect(nst, key, pb1, frame.TINY, slots=[Q_TEST + 3], log=lc.append, _seams=steps)
+    assert ref == [(p0, None, None)] and len(got) == 1 and got[0][0] is p0 and got[0][1:] == (None, None)
+    assert lc == lp and lp[0].endswith("stored provisional"), (lc, lp)
     for spec in (lframe.L_TINY,):
         a = _outcome(em.retro_detect, st, key, None, spec)
         b = _outcome(ns.retro_detect, nst, key, None, spec)
