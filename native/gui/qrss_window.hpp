@@ -1,11 +1,12 @@
 // The QRSS window: every QRSSTVAE signal in the passband, as a tile
 // whose picture fills in while its half-hour pass arrives.
 //
-// The QRSSTVAE receiver is Python (`sstvae/qrss/`, `qrss_listen.py`) and
-// is not ported; this window is its front end, in two halves that are
-// deliberately independent:
+// The QRSSTVAE receiver is a separate process: `sstvae-qrss listen`, the
+// C++ port, or `qrss_listen.py`, the Python it was ported from (same
+// arguments, same files). This window is its front end, in two halves
+// that are deliberately independent:
 //
-//   * **Feed.** "Start listener" runs `qrss_listen.py` as a child
+//   * **Feed.** "Start listener" runs the listener as a child
 //     process and pipes this app's own capture audio into it: every
 //     sample the receive pane's ring buffer gets, once, as float32 at
 //     8 kHz (`RingBuffer::read_since`). So QRSS hears exactly what the
@@ -86,9 +87,10 @@ public:
     static QString default_state_dir();
 
     // The command that starts the listener, before `--state DIR` is
-    // appended: $SSTVAE_QRSS_LISTEN if set, else a Python (the repo's
-    // .venv if there is one, else python3) and qrss_listen.py, looked
-    // for beside the executable and up to four directories above it.
+    // appended: $SSTVAE_QRSS_LISTEN if set, else `sstvae-qrss listen`
+    // (unless SSTVAE_QRSS_BACKEND=python), else a Python (the repo's
+    // .venv if there is one, else python3) and qrss_listen.py; each
+    // looked for beside the executable and up to four directories above.
     static QString default_command();
     QString command() const;
     void set_command(const QString& command);

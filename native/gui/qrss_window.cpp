@@ -402,8 +402,9 @@ QrssWindow::QrssWindow(QWidget* parent, Qt::WindowFlags flags) : QWidget(parent,
     row->addWidget(new QLabel(tr("Listener:"), this));
     command_edit_ = new QLineEdit(default_command(), this);
     command_edit_->setToolTip(
-        tr("The command that runs qrss_listen.py; \"--state DIR\" is added. "
-           "Set SSTVAE_QRSS_LISTEN to change the default."));
+        tr("The command that runs the QRSSTVAE listener (sstvae-qrss listen, or "
+           "qrss_listen.py); \"--state DIR\" is added. Set SSTVAE_QRSS_LISTEN to "
+           "change the default."));
     row->addWidget(command_edit_, 1);
     start_button_ = new QPushButton(tr("Start listener"), this);
     stop_button_ = new QPushButton(tr("Stop"), this);
@@ -522,10 +523,26 @@ QString QrssWindow::default_state_dir() {
 QString QrssWindow::default_command() {
     const QByteArray env = qgetenv("SSTVAE_QRSS_LISTEN");
     if (!env.isEmpty()) return QString::fromLocal8Bit(env);
+    // The C++ listener (`sstvae-qrss listen`, the same arguments and
+    // files as qrss_listen.py) unless SSTVAE_QRSS_BACKEND=python, as for
+    // sending. Looked for beside the executable and up to four
+    // directories above it: a macOS bundle's executable sits three
+    // below the build directory that holds sstvae-qrss.
+    const bool python_backend = qgetenv("SSTVAE_QRSS_BACKEND") == "python";
+#ifdef Q_OS_WIN
+    const QString native = QStringLiteral("sstvae-qrss.exe");
+#else
+    const QString native = QStringLiteral("sstvae-qrss");
+#endif
     QDir dir(QCoreApplication::applicationDirPath());
+    QString script;
     for (int up = 0; up <= 4; ++up) {
-        const QString script = dir.filePath(QStringLiteral("qrss_listen.py"));
-        if (QFileInfo::exists(script)) {
+        const QString exe = dir.filePath(native);
+        if (!python_backend && QFileInfo(exe).isExecutable() && QFileInfo(exe).isFile()) {
+            return join_command({exe, QStringLiteral("listen")});
+        }
+        const QString py = dir.filePath(QStringLiteral("qrss_listen.py"));
+        if (script.isEmpty() && QFileInfo::exists(py)) {
             QString python = QStringLiteral("python3");
             for (const char* venv : {".venv/bin/python", ".venv/Scripts/python.exe"}) {
                 const QString p = dir.filePath(QString::fromLatin1(venv));
@@ -534,10 +551,12 @@ QString QrssWindow::default_command() {
                     break;
                 }
             }
-            return join_command({python, script});
+            script = join_command({python, py});
+            if (python_backend) return script;
         }
         if (!dir.cdUp()) break;
     }
+    if (!script.isEmpty()) return script;
     return QStringLiteral("python3 qrss_listen.py");
 }
 
