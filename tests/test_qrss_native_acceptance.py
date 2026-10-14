@@ -40,10 +40,13 @@ keeps the list honest (every sstvae module the receiver, render and the
 simulator import is pinned or excused in the tool's NOT_PINNED).
 
 Times, C++ receive against the Python receive of the same capture (the
-tool prints the latter), 4 shared CPUs, over three runs each: TINY
-0.7-1.2 s against 1.0-2.9 s, SHORT 1.5-2.0 s against 3.7-5.1 s, the joint
-SHORT neighbour slot 2.9-3.2 s against 6.9-7.0 s -- the C++ 1.5 to 2.6
-times faster, most on the longer slots. The file runs in about 25 s.
+tool prints the latter), 4 shared CPUs: TINY 0.7-1.2 s against 1.0-3.1 s,
+SHORT 1.5-2.0 s against 3.7-5.1 s, the joint SHORT neighbour slot
+2.9-3.3 s against 6.9-11 s. Scenario by scenario in one quiet pair of
+runs (load about 1.5) the C++ was 2.0 to 3.0 times faster, the least on
+the joint L slot (l-short-12-joint, 2.0) and the most on CE SHORT and the
+neighbour slot (2.9-3.0); single runs on a shared machine move by a
+factor of 1.5 either way. The file runs in about 25 s.
 """
 
 from __future__ import annotations
@@ -103,13 +106,18 @@ def test_pins_cover_the_imports(native):
     assert not G.unaccounted_imports(), G.unaccounted_imports()
     assert sorted(json.loads(G.PINS.read_text())["sources"]) == sorted(G.PINNED)
     assert not set(G.PINNED) & set(G.NOT_PINNED)
+    assert all((ROOT / p).is_file() and "\\" not in p for p in G.PINNED)
+    # what the C++ mirrors beyond the references: the streaming front end
+    # and rx_config.hpp's `live` constants, read_wav, the receive CLI
     assert {"sstvae/qrss/receiver.py", "sstvae/qrss/track.py", "sstvae/qrss/ltrack.py",
-            "sstvae/qrss/channel.py", "sstvae/qrss/frontend.py", "sstvae/qrss/acquire.py"} <= set(G.PINNED)
+            "sstvae/qrss/channel.py", "sstvae/qrss/frontend.py", "sstvae/qrss/acquire.py",
+            "sstvae/qrss/live.py", "sstvae/wavio.py", "qrss_receive.py"} <= set(G.PINNED)
+    # channel.py reaches ce and frontend through importlib.import_module
+    assert {"sstvae/qrss/ce.py", "sstvae/qrss/frontend.py"} <= G._imports("sstvae/qrss/channel.py")
 
 
 def test_stale_pins_name_what_moved():
-    """The pin test's message says which source moved (or the scenarios),
-    and CRLF line endings (a Windows checkout) are not a change."""
+    """The pin test's message says which source moved (or the scenarios)."""
     now = G.pins()
     assert G.stale_pins(now) == []
     old = json.loads(json.dumps(now))
@@ -121,10 +129,27 @@ def test_stale_pins_name_what_moved():
         "sstvae/qrss/gone.py removed", "sstvae/qrss/ltrack.py added",
         "sstvae/qrss/track.py changed",
         "the scenario definitions (tools/gen_qrss_rx_reference.py) changed"]
-    data = (ROOT / "sstvae/qrss/rules.py").read_bytes()
-    assert b"\r\n" not in data
-    assert G._sha256(data.replace(b"\n", b"\r\n").replace(b"\r\n", b"\n")) == \
-        now["sources"]["sstvae/qrss/rules.py"]
+
+
+def test_line_endings_are_not_a_change(tmp_path, monkeypatch):
+    """A checkout with CRLF line endings (Git for Windows' default; nothing
+    in .gitattributes stops it for .py files) hashes as the LF one: the
+    pinned sources, read by `source_hashes` itself from a CRLF copy of the
+    tree, and the scenario section of a CRLF copy of the tool."""
+    now = G.pins()
+    for p in G.PINNED:
+        lf = (ROOT / p).read_bytes().replace(b"\r\n", b"\n")
+        crlf = lf.replace(b"\n", b"\r\n")
+        assert crlf != lf, p
+        (tmp_path / p).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / p).write_bytes(crlf)
+    tool = tmp_path / "tools" / TOOL.name
+    tool.parent.mkdir(parents=True, exist_ok=True)
+    tool.write_bytes(TOOL.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    monkeypatch.setattr(G, "ROOT", tmp_path)
+    monkeypatch.setattr(G, "__file__", str(tool))
+    assert G.source_hashes() == now["sources"]
+    assert G.scenario_hash() == now["scenarios"]
 
 
 def test_every_scenario_has_its_reference():

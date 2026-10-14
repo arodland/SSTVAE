@@ -32,9 +32,9 @@ simulation runs (`PINNED`), and of the scenario definitions themselves
 (the source between the "scenarios: begin/end" markers below). The
 acceptance file's pin test fails with "Python receiver changed; regenerate
 references" when one moves, and `import_closure` keeps `PINNED` honest:
-every sstvae module the receiver and the simulator import (statically,
-function-level imports included) is pinned or listed in `NOT_PINNED`
-with its reason.
+every sstvae module the receiver, render and the simulator import
+(function-level imports and importlib.import_module included) is pinned
+or listed in `NOT_PINNED` with its reason.
 
 A tool, never a test: each scenario takes seconds to a minute of Python
 (its time is printed). Run it when the pin test trips, or after changing
@@ -71,10 +71,14 @@ REGENERATE = "python tools/gen_qrss_rx_reference.py --all"
 # path from the repository root: the receiver (receive_slot and all under
 # it), render (decoder_planes, mirrored in C++) with the picture and air-map
 # modules under it, the transmit side the simulation assembles with, the rx
-# config sources (tools/gen_qrss_rx_config.py's modules but live.py, which
-# is the listener's: stage 3), the simulator (channel.py: its CE and L
-# paths), and the SSTVAE modules they import (config, dsp, beacon's CRC and
-# alphabet, framing's air maps, golay under both).
+# config sources (tools/gen_qrss_rx_config.py's modules, live.py among
+# them), the simulator (channel.py: its CE and L paths), and the SSTVAE
+# modules they import (config, dsp, beacon's CRC and alphabet, framing's air
+# maps, golay under both). Three of them feed no reference and are pinned
+# because stage 2's C++ mirrors them: live.py (StreamFE, frontend.cpp's
+# streaming front end, and the `live` constants rx_config.hpp generates
+# from it), wavio.py (read_wav, wavread.cpp) and qrss_receive.py (the
+# `sstvae-qrss receive` CLI and its capture loading, receive.cpp).
 PINNED = (
     "sstvae/qrss/acquire.py",
     "sstvae/qrss/beaconfile.py",
@@ -101,20 +105,23 @@ PINNED = (
     "sstvae/qrss/track.py",
     "sstvae/qrss/tx.py",
     "sstvae/qrss/types.py",
+    "sstvae/qrss/live.py",
     "sstvae/config.py",
+    "sstvae/wavio.py",
     "sstvae/modem/beacon.py",
     "sstvae/modem/dsp.py",
     "sstvae/modem/framing.py",
     "sstvae/modem/golay.py",
+    "qrss_receive.py",
 )
 
-# Imported (statically) by the receiver or the simulator and deliberately
-# not pinned, each with its reason. `import_closure` does not follow them.
+# Imported by the receiver, render or the simulator and deliberately not
+# pinned, each with its reason. `import_closure` does not follow them.
 NOT_PINNED = {
     "sstvae/__init__.py": "package marker",
     "sstvae/qrss/__init__.py": "package marker",
-    "sstvae/modem/__init__.py": "SSTVAE's modem package; QRSS uses only dsp and beacon (pinned)",
-    "sstvae/wavio.py": "receiver.capture_from_wav only; the references hand the receiver a capture",
+    "sstvae/modem/__init__.py": ("SSTVAE's modem package, which imports SSTVAE's Modem; QRSS uses "
+                                 "dsp, beacon, framing and golay (pinned) and never the Modem"),
     "sstvae/hfchannel.py": "channel.simulate_audio only; the scenarios use channel.simulate",
     "sstvae/codec.py": "render.render only; the C++ mirrors decoder_planes, which needs no codec",
     "sstvae/checkpoint.py": "picture.codec_id_from_onnx only (the codec glue); no receiver reads a model",
@@ -467,14 +474,15 @@ def stale_pins(committed: dict) -> list[str]:
 
 
 def _module_path(name: str) -> str | None:
-    """sstvae.x.y -> its source path from ROOT, or None outside the repo."""
+    """sstvae.x.y -> its source path from ROOT, '/'-separated as PINNED
+    spells it on every OS (str() of a Windows path would use '\\', and
+    then match nothing in PINNED), or None outside the repo."""
     if name != "sstvae" and not name.startswith("sstvae."):
         return None
-    base = ROOT / Path(*name.split("."))
-    if (base / "__init__.py").exists():
-        return str((base / "__init__.py").relative_to(ROOT))
-    if base.with_suffix(".py").exists():
-        return str(base.with_suffix(".py").relative_to(ROOT))
+    base = "/".join(name.split("."))
+    for p in (f"{base}/__init__.py", f"{base}.py"):
+        if (ROOT / p).is_file():
+            return p
     return None
 
 
@@ -500,6 +508,15 @@ def _imports(path: str) -> set[str]:
                 mod = node.module
             names.add(mod)
             names.update(f"{mod}.{a.name}" for a in node.names)   # from pkg import module
+        elif (isinstance(node, ast.Call) and node.args
+              and getattr(node.func, "attr", getattr(node.func, "id", None)) == "import_module"):
+            # importlib.import_module("sstvae.x") or (f"{__package__}.x"), as
+            # channel.py reaches ce and frontend
+            a = node.args[0]
+            if isinstance(a, ast.JoinedStr) and a.values and isinstance(a.values[-1], ast.Constant):
+                a = a.values[-1]
+            if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                names.add(pkg + a.value if a.value.startswith(".") else a.value)
     out = set()
     for n in names:
         parts = n.split(".")
@@ -535,6 +552,8 @@ def reference_path(name: str) -> Path:
 
 
 def _dump(obj) -> str:
+    """The committed JSON's text (written with LF line ends on every OS, so
+    a regeneration on Windows is no diff)."""
     return json.dumps(obj, indent=1, allow_nan=False) + "\n"
 
 
@@ -608,7 +627,7 @@ def main(argv=None) -> int:
                 bad += bool(problems)
         else:
             OUT_DIR.mkdir(parents=True, exist_ok=True)
-            reference_path(sc.name).write_text(_dump(summary))
+            reference_path(sc.name).write_text(_dump(summary), encoding="utf-8", newline="\n")
             print(f"{line}  -> {reference_path(sc.name).relative_to(ROOT)}")
         for p in summary["passes"]:
             hdr = "header " + (p["header"]["callsign"] if p["header"] else "-")
@@ -627,7 +646,7 @@ def main(argv=None) -> int:
             print("rx_pins.json is current")
         return 1 if bad else 0
     if args.all:
-        PINS.write_text(_dump(pins()))
+        PINS.write_text(_dump(pins()), encoding="utf-8", newline="\n")
         print(f"pins -> {PINS.relative_to(ROOT)}")
     else:
         print("pins not written (only --all writes them, so every reference is current)")
