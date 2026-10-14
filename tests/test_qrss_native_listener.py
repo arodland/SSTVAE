@@ -859,6 +859,42 @@ def test_a_bad_state_file_starts_fresh(LN, native, tmp_path, monkeypatch):
         L.close()
 
 
+def test_a_tile_of_another_shape_is_skipped_alone(LN, native, tmp_path, monkeypatch):
+    """A state.json tile whose value is not of its field's JSON type (a null
+    where the field cannot be None, a string for a number) is skipped alone
+    and the rest read, a number taken as its field's type (an int as a
+    float, a bool as 0 or 1): the same tiles and finished slots from both.
+    live.py kept such a tile, Tile(**...), where the C++ skipped it."""
+    good = dict(id="good", q=Q_TEST, slot_utc="", frame="tiny", f_hz=1500.0, status="complete",
+                callsign="K1ABC", updated=CLOCK)
+    nums = dict(good, id="nums", f_hz=1700, passes=True, heard=True, dial_hz=False, snr_db=3,
+                image_rev=False, confidence=[1, None, True, 2.5])
+    bad = [("f_hz", None), ("heard", None), ("progress", None), ("received", None), ("updated", None),
+           ("q", None), ("passes", None), ("image_rev", None), ("q", 3.5), ("dial_hz", 1.5),
+           ("segment", "1"), ("id", 5), ("status", None), ("note", None), ("waveform", None),
+           ("callsign", 7), ("snr_db", "x"), ("confidence", None), ("confidence", [1.0, "x"]),
+           ("f_hz", "1500"), ("slot_utc", None), ("uid", 12), ("mode", 1), ("frame", None)]
+    tiles = [good, nums]
+    for i, (field, value) in enumerate(bad):
+        t = dict(good, id=f"bad{i}", f_hz=1600.0 + i, status="shown" if field == "q" else "lost")
+        t[field] = value
+        tiles.append(t)
+
+    def scenario(side):
+        d = side.root / "live"
+        d.mkdir(parents=True)
+        (d / "state.json").write_text(json.dumps({"tiles": tiles, "finished": [Q_TEST - 4]}))
+        L = side.listener(cfg=live.LiveConfig(spec=TINY, render=False))
+        return dict(tiles=[t.to_json() for t in L.tiles()], finished=sorted(L.finished))
+
+    out = both(native, tmp_path, monkeypatch, scenario)
+    same(out["py"], out["cpp"])
+    assert [t["id"] for t in out["py"]["tiles"]] == ["good", "nums"]
+    n = out["py"]["tiles"][1]
+    assert (n["f_hz"], n["passes"], n["heard"], n["dial_hz"], n["confidence"]) == (1700.0, 1, 1.0, 0,
+                                                                                  [1.0, None, 1.0, 2.5])
+
+
 # --- where the two differ by design ---------------------------------------------------------
 
 

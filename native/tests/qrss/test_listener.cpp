@@ -65,6 +65,7 @@
 #include "qrss/live.hpp"
 #include "qrss/picture.hpp"
 #include "qrss/pyjson.hpp"
+#include "qrss/rawfile.hpp"
 #include "qrss/render.hpp"
 #include "qrss/source.hpp"
 #include "qrss/store.hpp"
@@ -647,6 +648,45 @@ void test_threads_feed_and_step() {
     L.close();
 }
 
+// write_state's temporary is store.py's _tmp_name, ".state.json.<pid>.<thread
+// id>.tmp": with the process's id alone, two threads writing the state at
+// once shared one (the second's open truncated the first's, or the first's
+// move took it away and the second's failed).
+void test_the_state_temporary_carries_the_thread() {
+    Step step("write_state: the temporary carries the thread");
+    const fs::path d = fresh_dir("state_tmp");
+    lv::LiveListener L(d.string(), tiny_config(false), nullptr, nullptr, quick_stubs(std::chrono::milliseconds(0)));
+    const std::string name = ".state.json." + std::to_string(qrss::rawfile::process_id()) + "." +
+                             std::to_string(qrss::rawfile::thread_ident()) + ".tmp";
+    fs::create_directories(d / name);   // in the way: the write fails, naming it
+    try {
+        L.write_state();
+        check::fail("state temporary", "a directory where the temporary goes did not stop the write");
+    } catch (const std::exception& e) {
+        check::is_true(std::string(e.what()).find(name) != std::string::npos,
+                       std::string("state temporary: the error names ") + name + ": " + e.what());
+    }
+    fs::remove(d / name);
+    std::atomic<int> errors{0};
+    std::vector<std::thread> writers;
+    for (int k = 0; k < 4; ++k)
+        writers.emplace_back([&] {
+            try {
+                for (int i = 0; i < 50; ++i) L.write_state();
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "writer: %s\n", e.what());
+                ++errors;
+            }
+        });
+    for (std::thread& w : writers) w.join();
+    check::equal(errors.load(), 0, "state temporary: four threads writing at once");
+    bool stray = false;
+    for (const auto& e : fs::directory_iterator(d)) stray = stray || e.path().filename().string().find(".tmp") != std::string::npos;
+    check::is_true(!stray, "state temporary: none left");
+    check::is_true(pj::loads(read_text(d / "state.json")).at("version").as_int() == 1, "state temporary: state.json whole");
+    L.close();
+}
+
 // feed(), step() and the readers while a receive is held in flight; then
 // close() waits for it, and it is applied.
 void test_close_with_a_receive_in_flight() {
@@ -923,6 +963,7 @@ int main(int argc, char** argv) {
         test_pinned_scenarios();
         test_a_refresh_exception_is_retried();
         test_threads_feed_and_step();
+        test_the_state_temporary_carries_the_thread();
         test_close_with_a_receive_in_flight();
         test_destructor_with_a_receive_in_flight();
         test_run_replays_to_the_end();

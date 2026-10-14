@@ -44,11 +44,15 @@
 // how long:
 //   Stamper::push/flush      the arithmetic and a concatenation (microseconds)
 //   StreamSource::next       up to timeout_s, waiting for the reader thread
-//   StreamSource::close and  until the reader thread has stopped: at most
-//   its destructor           ~0.1 s on POSIX (it polls), one cancelled read
-//                            on Windows; a clock seam that is itself waiting
-//                            (a Python callable wanting the GIL) delays it --
-//                            a binding releases the GIL first
+//   StreamSource::close and  until the reader thread has stopped: on POSIX
+//   its destructor           at once (the reader waits on the input and on a
+//                            self-pipe close() writes to, with select(), which
+//                            waits on a terminal where macOS's poll() does
+//                            not; past FD_SETSIZE poll(), and a terminal
+//                            there on macOS still waits for its next read);
+//                            one cancelled read on Windows; a clock seam that
+//                            is itself waiting (a Python callable wanting the
+//                            GIL) delays it -- a binding releases the GIL first
 //   WavSource(path, ...)     reading the whole file (a 30-minute recording:
 //                            about a second)
 //   WavSource::next          the replay's pacing sleep when speed > 0 (up

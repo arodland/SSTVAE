@@ -87,6 +87,7 @@ from .constants import (CARRIER_BAND_HZ, FE_FS, FS, L_EDGE_HZ, L_PILOT_HZ, WAVEF
                         WAVEFORM_L, WAVEFORM_NAMES)
 from .frame import FULL, FrameSpec
 from .frontend import PB_LEAD_S, PB_TAIL_S, slot_t0
+from .store import _tmp_name
 from .types import Detection, PassResult
 
 FE_DECIM = FS // FE_FS            # 2
@@ -614,6 +615,55 @@ class Tile:
         reader refuses)."""
         return {k: _finite_or_none(v) for k, v in asdict(self).items()}
 
+    @classmethod
+    def from_state(cls, d: dict) -> Tile:
+        """A tile as to_json wrote it, read back from state.json: unknown keys
+        ignored, absent ones their defaults. TypeError when id, q, slot_utc,
+        frame or f_hz is missing, or when a value is not of its field's JSON
+        type -- a null where the field cannot be None (to_json writes a
+        non-finite f_hz or heard as null, which Tile(**...) kept as a None
+        number: tiles() then sorted on it), a string for a number -- so the
+        caller skips that tile alone, as the C++ listener's Tile::from_json
+        does. A number is taken as its field's
+        type (a bool as 0 or 1, an int as a float), as the C++ does."""
+        missing = [k for k in ("id", "q", "slot_utc", "frame", "f_hz") if k not in d]
+        if missing:
+            raise TypeError("a tile without " + ", ".join(missing))
+        kw = {}
+        for k, kind in _TILE_KINDS.items():
+            if k in d:
+                kw[k] = _state_value(k, kind, d[k])
+        return cls(**kw)
+
+
+# Each Tile field's JSON type, as Tile.from_state (and the C++ listener's
+# Tile::from_json) reads it: str, int, float, a list of floats; "?": or null.
+_TILE_KINDS = {
+    "id": "str", "q": "int", "slot_utc": "str", "frame": "str", "f_hz": "float", "dial_hz": "int?",
+    "status": "str", "snr_db": "float?", "z_ref": "float?", "callsign": "str?", "grid": "str?",
+    "picture_id": "str?", "mode": "str?", "segment": "int?", "cw_text": "str?", "progress": "float",
+    "heard": "float", "received": "float", "mean_w_db": "float?", "confidence": "floats",
+    "passes": "int", "image": "str?", "image_rev": "int", "updated": "float", "note": "str",
+    "uid": "str?", "waveform": "str",
+}
+
+
+def _state_value(name: str, kind: str, v):
+    """`v` as a Tile field of `kind` (_TILE_KINDS); TypeError when it is not one."""
+    if kind.endswith("?"):
+        if v is None:
+            return None
+        kind = kind[:-1]
+    if kind == "str" and isinstance(v, str):
+        return v
+    if kind == "int" and isinstance(v, int):             # (a bool included: 0 or 1)
+        return int(v)
+    if kind == "float" and isinstance(v, (int, float)):
+        return float(v)
+    if kind == "floats" and isinstance(v, list):
+        return [_state_value(name, "float?", x) for x in v]
+    raise TypeError(f"tile field {name}: {type(v).__name__} is not {kind}")
+
 
 def _finite_or_none(v):
     if isinstance(v, float) and not math.isfinite(v):
@@ -835,9 +885,9 @@ class LiveListener:
                             and (t.get("snr_db") or -99.0) > HEADERLESS_MAX_SNR_DB):
                         continue           # kept by an older listener; see _plausible
                     try:
-                        done.append(Tile(**{k: t[k] for k in Tile.__dataclass_fields__ if k in t}))
+                        done.append(Tile.from_state(t))
                     except TypeError:
-                        pass
+                        pass               # a tile of another shape: that one skipped
         except (OSError, ValueError, TypeError, AttributeError, KeyError, OverflowError):
             return
         self.finished |= finished
@@ -861,7 +911,7 @@ class LiveListener:
             log=self.lines[-20:],
             finished=sorted(q for q in self.finished
                             if slot_t0(q) > (self.now or time.time()) - 48 * 3600))
-        tmp = self.dir / f"state.json.{os.getpid()}.tmp"
+        tmp = _tmp_name(self.dir / "state.json")   # (two threads writing it never share one)
         tmp.write_text(json.dumps(st, indent=1))
         os.replace(tmp, self.dir / "state.json")
 

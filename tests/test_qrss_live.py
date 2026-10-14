@@ -1251,6 +1251,89 @@ def test_a_state_file_of_another_shape_starts_the_listener_fresh(tmp_path, text)
     assert L.tiles() == [] and L.finished == set()
 
 
+_GOOD_TILE = dict(id="good", q=Q_TEST, slot_utc="", frame="tiny", f_hz=1500.0, status="complete",
+                  callsign="K1ABC", updated=0.0)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("f_hz", None), ("heard", None), ("progress", None), ("received", None), ("updated", None),
+    ("q", None), ("passes", None), ("image_rev", None), ("q", 3.5), ("dial_hz", 1.5), ("segment", "1"),
+    ("id", 5), ("status", None), ("note", None), ("waveform", None), ("callsign", 7),
+    ("snr_db", "x"), ("confidence", None), ("confidence", [1.0, "x"]), ("confidence", "abc"),
+    ("f_hz", "1500"), ("slot_utc", None), ("f_hz", [1500.0]), ("uid", 12)])
+def test_a_tile_of_another_shape_is_skipped_alone(tmp_path, field, value):
+    """A tile whose value is not of its field's JSON type -- a null where
+    the field cannot be None (to_json writes a non-finite f_hz or heard as
+    null), a string for a number -- is skipped and the rest of state.json
+    read, as the C++ listener does: Tile(**...) kept it, a None f_hz then
+    sorted against the other tiles' numbers."""
+    # (a null q in a complete or lost tile is int(None) for "finished",
+    # which ignores the file whole in both: another status skips that)
+    bad = dict(_GOOD_TILE, id="bad", f_hz=1600.0, status="shown" if field == "q" else "lost")
+    bad[field] = value
+    st = {"tiles": [_GOOD_TILE, bad], "finished": [Q_TEST - 1]}
+    (tmp_path / "state.json").write_text(json.dumps(st))
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False), log=lambda m: None)
+    assert [t.id for t in L.tiles()] == ["good"]
+    assert Q_TEST - 1 in L.finished and Q_TEST in L.finished
+
+
+def test_a_tiles_numbers_are_read_as_their_fields_types(tmp_path):
+    """A number is taken as its field's type: an int float field a float, a
+    bool int field 0 or 1, a bool float 1.0 -- what the C++ listener reads,
+    so a state file round-trips the same through either."""
+    t = dict(_GOOD_TILE, f_hz=1500, q=True, heard=True, passes=False, dial_hz=True, snr_db=2,
+             confidence=[1, None, True, 2.5])
+    (tmp_path / "state.json").write_text(json.dumps({"tiles": [t]}))
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False), log=lambda m: None)
+    (got,) = L.tiles()
+    assert (got.f_hz, got.q, got.heard, got.passes, got.dial_hz, got.snr_db) == (1500.0, 1, 1.0, 0, 1, 2.0)
+    assert [type(v) for v in (got.f_hz, got.q, got.heard, got.passes, got.dial_hz, got.snr_db)] == \
+        [float, int, float, int, int, float]
+    assert got.confidence == [1.0, None, 1.0, 2.5] and type(got.confidence[0]) is float
+    full = live.Tile(id="a", q=1, slot_utc="", frame="tiny", f_hz=1.0, snr_db=-1.5, confidence=[None, 2.0])
+    assert live.Tile.from_state(full.to_json()) == full
+    assert set(live._TILE_KINDS) == set(live.Tile.__dataclass_fields__)
+    with pytest.raises(TypeError):
+        live.Tile.from_state({"id": "a", "q": 1, "slot_utc": "", "frame": "tiny"})
+
+
+def test_the_state_temporary_carries_the_thread(tmp_path, monkeypatch):
+    """write_state's temporary is store.py's .state.json.<pid>.<thread id>.tmp,
+    so two threads writing the state at once do not share one (the second's
+    open truncated the first's, or the first's os.replace moved it away
+    and the second's raised FileNotFoundError)."""
+    import os
+    import threading
+
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False), log=lambda m: None)
+    seen = []
+    real = os.replace
+
+    def spy(src, dst):
+        if str(dst).endswith("state.json"):
+            seen.append(os.path.basename(src))
+        real(src, dst)
+    monkeypatch.setattr(os, "replace", spy)
+    L.write_state()
+    assert seen == [f".state.json.{os.getpid()}.{threading.get_ident()}.tmp"]
+    errors = []
+
+    def hammer():
+        try:
+            for _ in range(50):
+                L.write_state()
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+    th = [threading.Thread(target=hammer) for _ in range(4)]
+    for x in th:
+        x.start()
+    for x in th:
+        x.join()
+    assert errors == [] and json.loads((tmp_path / "state.json").read_text())["version"] == 1
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+
 def test_a_failed_live_refresh_is_retried_and_logged_once(tmp_path, monkeypatch):
     """With background on, a live receive that raises is logged once (per
     slot and message), and the slot is received again at its next refresh

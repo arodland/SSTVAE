@@ -31,6 +31,8 @@
 
 #ifndef _WIN32
 #include <fcntl.h>
+#include <stdlib.h>
+#include <termios.h>
 #include <unistd.h>
 #endif
 
@@ -322,6 +324,51 @@ void test_stream_close_and_timeout() {
                                   "chunk_s must make a read of at least one sample", "chunk_s NaN");
 }
 
+// A terminal nobody types on: close() returns at once -- within 100 ms --
+// every time, and what is typed is read. The reader waits on the input and
+// on close()'s self-pipe with select(): on macOS poll() answers POLLNVAL at
+// once for a terminal, the read() behind it blocked until a key was
+// pressed, and close() (the listener's shutdown, the destructor) with it.
+// (Linux's poll() works on a terminal, so there the old 0.1 s poll tick met
+// the bound too; this pins the bound on the path every POSIX build now takes.)
+void test_stream_close_on_a_terminal() {
+    check::current_step = "stream close on a terminal";
+    const int master = ::posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0 || ::grantpt(master) != 0 || ::unlockpt(master) != 0) {
+        std::printf("skipped: no pseudo-terminal here\n");
+        if (master >= 0) ::close(master);
+        return;
+    }
+    const char* name = ::ptsname(master);
+    const int tty = name ? ::open(name, O_RDWR | O_NOCTTY) : -1;
+    if (tty < 0) throw std::runtime_error("open the pseudo-terminal");
+    check::is_true(::isatty(tty) == 1, "a terminal");
+    termios raw{};
+    if (::tcgetattr(tty, &raw) != 0) throw std::runtime_error("tcgetattr");
+    ::cfmakeraw(&raw);                      // (bytes through as they are)
+    if (::tcsetattr(tty, TCSANOW, &raw) != 0) throw std::runtime_error("tcsetattr");
+    for (int k = 0; k < 5; ++k) {
+        lv::StreamSource src(lv::InputHandle::from_fd(tty));
+        std::this_thread::sleep_for(std::chrono::milliseconds(k == 0 ? 150 : 30));   // the reader waiting
+        const auto t0 = std::chrono::steady_clock::now();
+        src.close();
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        check::is_true(ms < 100.0, "close() within 100 ms: " + std::to_string(ms) + " ms");
+        check::is_true(!src.next(INF).has_value() && src.eof() && !src.error(), "then the end, no error");
+    }
+    {
+        lv::StreamOptions o;
+        o.hold_s = 0.0;                     // (out at once: the first audio not held)
+        lv::StreamSource src(lv::InputHandle::from_fd(tty), o);
+        const float half = 0.5f;
+        if (::write(master, &half, 4) != 4) throw std::runtime_error("write the pseudo-terminal");
+        const auto c = src.next(5.0);
+        check::is_true(c.has_value() && c->x == std::vector<double>{0.5}, "what is typed is read");
+    }   // the destructor, the reader waiting again
+    ::close(tty);
+    ::close(master);
+}
+
 void test_stream_read_error() {
     check::current_step = "stream read error";
     const int fd = ::open(".", O_RDONLY);
@@ -439,6 +486,7 @@ int main() {
         test_stream_f32_split_samples();
         test_stream_s16_scale();
         test_stream_close_and_timeout();
+        test_stream_close_on_a_terminal();
         test_stream_read_error();
         test_stream_clock_throws();
 #endif
