@@ -26,7 +26,7 @@
   "sstvae/qrss/track.py": "bcf6d2469f2767e034e6da58252072d7f292eeef03f040ed6ed116e109e7205e",
   "sstvae/qrss/tx.py": "9c1ccc5507d3993a8066078abf749df39697c2331f7c3c16bc53983249c0cb92",
   "sstvae/qrss/types.py": "6cfc8c4532a33f1a6ca2feba12440b1d69318e2e1b2f0415c8301ac9b0f41aeb",
-  "sstvae/qrss/live.py": "5af16ff0c98e55bb4f695222388571453584ed09344923625b7511cb65ac4996",
+  "sstvae/qrss/live.py": "52c5d269fc5059fbcf1c465c949eba304c11f2e0b400ccfec8c1017e2e79d014",
   "sstvae/config.py": "157fdd4226627d10ea35c9e210b188f0edc3eda4b0002590c441cce9ca59c308",
   "sstvae/wavio.py": "c98b9524397c28cb2a4aed2920467cfb440cf56af0befcf9a00e43a187cfdb81",
   "sstvae/modem/beacon.py": "5027b3b5392391fca8617c693ca00dc4ff3109165213d1bc2d543a3142c1f444",
