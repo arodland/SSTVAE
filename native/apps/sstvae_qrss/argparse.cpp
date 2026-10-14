@@ -140,12 +140,21 @@ ArgParser::ArgParser(std::string prog, std::string description)
 }
 
 ArgParser& ArgParser::positional(const std::string& name, const std::string& help) {
+    for (const Action& a : actions_)
+        if (a.positional && !a.spec.required)
+            throw std::logic_error("positional " + name + " after the nargs='?' positional " + a.dest);
     Action a;
     a.positional = true;
     a.dest = name;
     a.spec.help = help;
     a.spec.required = true;
     actions_.push_back(std::move(a));
+    return *this;
+}
+
+ArgParser& ArgParser::optional_positional(const std::string& name, const std::string& help) {
+    positional(name, help);
+    actions_.back().spec.required = false;
     return *this;
 }
 
@@ -219,7 +228,7 @@ std::string ArgParser::usage() const {
     for (const std::size_t k : order) {
         const Action& a = actions_[k];
         if (a.positional) {
-            parts.emplace_back(a.metavar());
+            parts.emplace_back(a.spec.required ? a.metavar() : "[" + a.metavar() + "]");
             continue;
         }
         std::string part = a.flags.front();
@@ -402,8 +411,11 @@ std::optional<Args> ArgParser::parse(const std::vector<std::string>& args, std::
                 // before the value of a positional still to fill. Otherwise
                 // it is an unrecognized argument like any other ("a b --opt
                 // x --" refuses "--"; everything after it is a value anyway).
+                // A nargs='?' positional's -*A?-* matches the '--' alone, so
+                // it takes it even at the end.
+                const std::optional<std::size_t> next = positional_index(next_positional);
                 const bool taken = (i > 0 && to_positional[i - 1]) ||
-                                   (positional_index(next_positional) && i + 1 < tokens.size());
+                                   (next && (i + 1 < tokens.size() || !actions_[*next].spec.required));
                 if (!taken) extras.push_back(args[i]);
                 continue;
             }

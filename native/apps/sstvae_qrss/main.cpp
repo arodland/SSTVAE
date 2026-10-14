@@ -80,7 +80,6 @@ struct NotBuilt {
 constexpr NotBuilt NOT_BUILT[] = {
     {"encode", "built without the codec (SSTVAE_BUILD_CODEC=OFF); use qrss_encode.py, or rebuild with the codec"},
     {"listen", "not in this build yet; use qrss_listen.py"},
-    {"decode", "not in this build yet; use qrss_decode.py"},
 };
 
 // The Python class an escaped exception would most likely have been.

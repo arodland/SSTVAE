@@ -9,9 +9,15 @@
 // 99999999999999999999") then reads as the reference's even where the C++
 // cannot hold the number.
 //
-// ASCII only. Python also accepts Unicode whitespace around the number and
-// Unicode decimal digits inside it (" 12", "١"); those are
-// refused here, which a command line typed by an operator never meets.
+// The text is read as CPython reads a str for int() and float()
+// (_PyUnicode_TransformDecimalAndSpaceToASCII): a Unicode space past ASCII
+// (Py_UNICODE_ISSPACE: U+00A0, U+2003, U+3000, ...) counts as a space and a
+// Unicode decimal digit (U+0661 ARABIC-INDIC DIGIT ONE, U+FF11 FULLWIDTH
+// DIGIT ONE) as its ASCII digit, from the tables
+// tools/gen_qrss_unicode_tables.py writes from the reference's Python
+// (pyunicode_tables.hpp: Python 3.13, Unicode 15.1); any other character
+// past ASCII (DEL included), and text that is not UTF-8, makes the number
+// invalid, as the '?' CPython puts there does.
 
 #ifndef SSTVAE_QRSS_PYNUM_HPP
 #define SSTVAE_QRSS_PYNUM_HPP
@@ -29,7 +35,8 @@ struct PyInt {
 };
 
 // int(text, base) for base 10 or 16 (std::invalid_argument for another
-// base): surrounding ASCII whitespace (\t \n \v \f \r and space), one
+// base): surrounding whitespace (\t \n \v \f \r, space, the Unicode
+// spaces above; not \x1c-\x1f, which str.isspace() counts), one
 // sign, base 16's optional 0x/0X prefix after it, single underscores
 // between digits (and one straight after the prefix). nullopt where Python
 // raises ValueError.

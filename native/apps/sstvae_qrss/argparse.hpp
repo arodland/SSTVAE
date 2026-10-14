@@ -4,7 +4,8 @@
 //
 // What is reproduced, against CPython 3.13's argparse:
 //
-// - positionals (each exactly one value) and long options taking one value
+// - positionals (each exactly one value, or as the last one nargs='?': at
+//   most one value, None without) and long options taking one value
 //   (`--opt V` or `--opt=V`) or none (store_true); `-h`/`--help`;
 // - every argument classified before any is consumed, as argparse does: an
 //   exact option, `--opt=V`, a unique prefix of a long option (allow_abbrev;
@@ -14,7 +15,11 @@
 //   the first `--` a value;
 // - that first `--` dropped only where a positional takes it (next to a
 //   positional's value): after the positionals are filled it is an
-//   unrecognized argument, so "in out --callsign K --" refuses "--";
+//   unrecognized argument, so "in out --callsign K --" refuses "--"; a
+//   positional of nargs='?' still to fill takes it even as the last
+//   argument (its pattern -*A?-* matches the "--" alone, and argparse
+//   drops a "--" inside a positional's match), and is never a required
+//   argument;
 // - an option's value must be the next argument and must not look like an
 //   option ("argument --model: expected one argument"); a store_true given
 //   one is "ignored explicit argument 'x'";
@@ -41,7 +46,7 @@
 // Not reproduced: argparse wraps a long usage line at the terminal width
 // and lays out --help with its own formatter (this prints the usage on one
 // line, the description as written and the options in argparse's columns,
-// wrapped at 78); and Unicode digits and spaces in numbers (pynum.hpp).
+// wrapped at 78).
 
 #ifndef SSTVAE_APPS_SSTVAE_QRSS_ARGPARSE_HPP
 #define SSTVAE_APPS_SSTVAE_QRSS_ARGPARSE_HPP
@@ -64,7 +69,7 @@ struct ArgSpec {
     enum class Type { str, int_, float_ };
     Type type = Type::str;
     std::vector<std::string> choices;          // empty: any value
-    bool required = false;                     // options only (positionals always are)
+    bool required = false;                     // options (a positional is, unless nargs='?')
     std::optional<std::string> default_text;   // as text of `type`; nullopt is None
     std::string metavar;                       // default: DEST, or {a,b,c} with choices
     std::string help;
@@ -101,6 +106,10 @@ public:
     ArgParser(std::string prog, std::string description);
 
     ArgParser& positional(const std::string& name, const std::string& help = {});
+    // add_argument(name, nargs="?"): the value or None, "[name]" in the
+    // usage line. Only as the last positional (std::logic_error for a
+    // positional added after it).
+    ArgParser& optional_positional(const std::string& name, const std::string& help = {});
     // A long option taking one value ("--codec-id"; dest "codec_id").
     ArgParser& option(const std::string& flag, ArgSpec spec = {});
     // action="store_true".
