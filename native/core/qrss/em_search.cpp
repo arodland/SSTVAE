@@ -635,7 +635,7 @@ std::vector<Hypothesis> candidates(store::Store& store, const store::Accumulator
     for (const pyjson::Value& m : acc.members) {
         std::optional<types::PassResult> p;
         try {
-            p = store.load_pass(m.at("uid").as_string("uid"));
+            p = store.load_pass(store::member_uid(m.at("uid")));
         } catch (const store::FileError&) {   // OSError
             continue;
         } catch (const pyjson::KeyError&) {   // KeyError
@@ -860,7 +860,11 @@ std::vector<RetroFind> retro_detect_steps(store::Store& store, const store::Key&
     const store::Accumulator acc = store.accumulator(key);
     const double dur = spec.keyed_end_pos() * config::T_SYM;
     std::vector<std::int64_t> held;
-    for (const std::string& u : acc.uids()) held.push_back(store.pass_info(u).q);
+    {   // {store.pass_info(u)["q"] for u in acc.uids}: each uid refused (no str) as it is reached
+        std::vector<pyjson::Value> ids;
+        for (const pyjson::Value& m : acc.members) ids.push_back(m.at("uid"));
+        for (const pyjson::Value& u : ids) held.push_back(store.pass_info(store::member_uid(u)).q);
+    }
     std::vector<std::pair<std::int64_t, double>> stored;
     for (const std::string& u : store.pass_uids()) {
         const store::PassInfo i = store.pass_info(u);

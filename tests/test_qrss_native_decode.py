@@ -633,11 +633,22 @@ def test_decode_edited_accumulators(cli, stores, models, renders, tmp_path):
     for name in ("mode-1", "mode-4", "uid-gone", "zref-str", "zref-gone"):
         cases.append(Case(f"{name}-key", ["out.png", "--key", kA, "--store", "st", "--precision", "fp16"],
                           store=f"edit-{name}"))
+    # --em and --retro hand a uid that is no string to the store, which
+    # refuses it as a bad uid (with its repr)
+    bad_uids = (("uid-int", "5"), ("uid-null", "None"), ("uid-list", "[1]"), ("uid-dict", "{'a': 1}"))
+    for name, _ in bad_uids:
+        cases.append(Case(f"{name}-em", ["out.png", "--key", kA, "--store", "st", "--em", "1"],
+                          store=f"edit-{name}"))
+        cases.append(Case(f"{name}-retro", ["out.png", "--key", kA, "--store", "st", "--retro", "--passband", "pb",
+                                            "--frame", "tiny"], store=f"edit-{name}", dirs=["pb"]))
     results = _run_and_check(cases, tmp_path, cli, stores, models, renders)
     assert results["mode5-list"][0].err.endswith("IndexError: tuple index out of range\n")
-    for name, shown in (("uid-int", "5"), ("uid-null", "None"), ("uid-list", "[1]"), ("uid-dict", "{'a': 1}")):
+    for name, shown in bad_uids:
         py = results[f"{name}-list"][0]
         assert py.rc == 0 and f"\n    {shown}  ?  segment " in py.out, (name, py)
+        for how in ("em", "retro"):
+            py = results[f"{name}-{how}"][0]
+            assert py.rc == 1 and py.err.endswith(f"ValueError: bad pass uid {shown}\n"), (name, how, py)
     assert results["zref-str-list"][0].err.endswith(
         "ValueError: Unknown format code 'f' for object of type 'str'\n")
 

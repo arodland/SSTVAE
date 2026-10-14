@@ -41,7 +41,8 @@ bool pathlib_is_dir(const std::string& path) {
     return st.type() == std::filesystem::file_type::directory;
 }
 
-// An estimator given by name: demod's refusal unless "joint" or "plain".
+// refine's estimator: none or "" (each pass's own), else demod's refusal
+// unless "joint" or "plain".
 void check_estimator(const std::optional<std::string>& estimator) {
     if (estimator && !estimator->empty()) demod::check_estimator(*estimator);
 }
@@ -166,7 +167,9 @@ RetroResult retro(store::Store& store, const store::Key& key, const Passband& pb
         check_passband_dir(dir);
     }
     const frame::FrameSpec& spec = retro_frame(frame_name);
-    check_estimator(opt.estimator);
+    // every name is checked here, "" included: retro has no "each pass's
+    // own" (refine's ""), and the search would refuse "" at its first find
+    demod::check_estimator(opt.estimator);
     std::shared_ptr<const passband::PassbandStore> store_pb = pb.open;
     if (!store_pb) store_pb = std::make_shared<const passband::PassbandStore>(dir);
 

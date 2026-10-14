@@ -113,6 +113,10 @@ std::string dumps(const Value& v);
 std::string dumps(const Value& v, std::optional<int> indent, bool sort_keys);
 // json.loads(text); text is UTF-8.
 Value loads(std::string_view text);
+// repr(v) of the Python value: None, True/False, ints in decimal, floats
+// as float.__repr__, strs as str.__repr__, lists and dicts (insertion
+// order) of those -- what an f-string's !r shows of a JSON value.
+std::string repr(const Value& v);
 
 }  // namespace sstvae::qrss::pyjson
 

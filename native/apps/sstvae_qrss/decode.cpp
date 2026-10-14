@@ -54,11 +54,11 @@
 //   other implementation wrote is "no picture" on --key (and --list ends
 //   in the store's KeyError); store.py is the one to fix, since two
 //   callsigns differing after their last '.' share its file.
-// - A damaged store (a truncated or corrupt pass or accumulator file)
-//   ends both, but not with the same exception: the script's tracebacks
-//   name np.load's and json's classes (BadZipFile, EOFError,
-//   JSONDecodeError, ...), the C++ store throws its ValueError with its own
-//   text. And in member_wave (--list, --key) the script catches only
+// - A damaged store (a truncated or corrupt pass or accumulator file, or
+//   --retro's passband meta.json) ends both, but not with the same
+//   exception: the script's tracebacks name np.load's and json's classes
+//   (BadZipFile, EOFError, JSONDecodeError, ...), the C++ stores throw
+//   their ValueError with their own text. And in member_wave (--list, --key) the script catches only
 //   OSError, KeyError and ValueError, so a pass file np.load cannot open
 //   (BadZipFile, EOFError) crashes the listing part-way, where this prints
 //   "?" for that member and goes on; the script is the one to fix.
@@ -374,6 +374,8 @@ int run(const std::string& prog, const std::vector<std::string>& argv, std::ostr
             if (const std::optional<std::string> why = r.refusal(req)) return system_exit(err, *why);
         return r.render(planes, codec_id, req, out, err);
     } catch (const dq::Refusal& e) {
+        return system_exit(err, e.what());
+    } catch (const em_api::Refusal& e) {   // the API's own checks (a picture gone since the one above)
         return system_exit(err, e.what());
     } catch (const dq::PyException& e) {
         return uncaught(err, e.cls(), e.what());

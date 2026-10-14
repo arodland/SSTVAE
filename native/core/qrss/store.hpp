@@ -200,6 +200,11 @@ struct Expired {
 
 class Store;
 
+// A member's "uid" as the store's pass calls take it: the str, or (a
+// hand-edited accumulator) std::invalid_argument "bad pass uid <repr>",
+// what Store._pass_path raises for a uid that is no str.
+std::string member_uid(const pyjson::Value& uid);
+
 // One picture's accumulated latents, canonical [3, 52800] float32 row-major.
 // members and foreign are the JSON's dicts (see Store::attach, Store::merge);
 // parts is a dict in insertion order (sha -> foreign (S, W)).
@@ -217,7 +222,8 @@ struct Accumulator {
     // Zero arrays, no members, created = updated = now.
     static Accumulator empty(Key key, std::int64_t mode, std::int64_t codec_id, double now);
 
-    // [m["uid"] for m in members]
+    // [m["uid"] for m in members], each through member_uid (Python's list
+    // keeps a uid that is no str, and the store call it reaches refuses it)
     std::vector<std::string> uids() const;
     // The first member whose "uid" is `uid` (a copy), or nullopt.
     std::optional<pyjson::Value> member(std::string_view uid) const;

@@ -13,7 +13,11 @@
 // cancel; the refusals, each with the CLI's text and in the CLI's order;
 // and both calls on the store and passband store of a running
 // listen_api::Session (Session::store() / passband()), with the session's
-// listener writing the same passband directory meanwhile.
+// listener writing the retro slot's own hour of the same passband
+// directory meanwhile and its packer packing the hour before (the slot's
+// lead) to FLAC: the slot reads back the same through a separate
+// PassbandStore and the session's, before, between and after the calls,
+// and from FLAC afterwards.
 //
 // The numbers EM and retro compute are their ports' (test_em_refine.cpp,
 // test_em_search.cpp, and the parity files against Python); this file
@@ -615,6 +619,11 @@ void test_refusals(const std::vector<types::PassResult>& passes) {
     rbad.estimator = "Joint";
     throws<std::invalid_argument>([&] { ea::retro(st, KEY, ea::Passband::at(pbdir), "tiny", rbad); },
                                   "estimator must be 'joint' or 'plain', not 'Joint'", "retro: a bad estimator");
+    // "" too: retro has no "each pass's own" (refine's ""), and with nothing
+    // to find the search would never meet it
+    rbad.estimator = "";
+    throws<std::invalid_argument>([&] { ea::retro(st, KEY, ea::Passband::at(pbdir), "tiny", rbad); },
+                                  "estimator must be 'joint' or 'plain', not ''", "retro: an empty estimator");
     // an open passband store skips the directory check
     auto open = std::make_shared<const pb::PassbandStore>(pbdir);
     const ea::RetroResult r = ea::retro(st, KEY, ea::Passband::of(open), "tiny");
@@ -646,7 +655,32 @@ void test_session_sharing(const std::vector<types::PassResult>& passes) {
             st.attach(KEY, p.uid, 0, "test", 0, 0xD1D8);
         }
     }
+    // The session's clock is in the retro slot's own hour, after its frame:
+    // the listener writes that hour's file and index while retro reads the
+    // slot from it, and its packer packs the hour before (which holds the
+    // slot's lead: slot_t0 is one second into its hour, the capture starts
+    // PB_LEAD_S before) once the stream is PB_PACK_AFTER_S past its end.
+    const double dur = fr::get("tiny").keyed_end_pos() * cfg::T_SYM;
+    const double t0 = static_cast<double>(pb::slot_t0(Q_RETRO));
+    const std::int64_t hour = pb::slot_t0(Q_RETRO) / 3600;
+    const std::string pbdir = (root / "store" / "passband").string();
+    pb::SlotCapture ref;
+    {
+        const pb::PassbandStore before(pbdir);
+        ref = before.capture(Q_RETRO, dur);
+        check::is_true(ref.capture.has_value() && ref.coverage >= em::RETRO_MIN_COVERAGE,
+                       "session: the retro slot is on disk");
+        check::is_true(fs::exists(before.raw_path(hour - 1)) && fs::exists(before.raw_path(hour)),
+                       "session: the slot spans two raw hours");
+    }
+    if (!ref.capture) return;
+    auto same_capture = [&](const pb::SlotCapture& c) {
+        return c.capture && c.capture->fe == ref.capture->fe && c.capture->q == ref.capture->q &&
+               c.capture->t0_index == ref.capture->t0_index && c.coverage == ref.coverage;
+    };
+
     Clock clk;
+    clk.t->store(t0 + 400.0);
     ls::Options o;
     o.frame = "tiny";
     o.just_ce = true;
@@ -659,18 +693,33 @@ void test_session_sharing(const std::vector<types::PassResult>& passes) {
     check::is_true(s->store() != nullptr && s->passband() != nullptr, "session: holds the store and the passband");
     if (!s->store() || !s->passband()) return;
     check::equal(s->store()->root(), *s->store_root(), "session: store() is the root it reports");
+    const std::shared_ptr<pb::PassbandStore> spb = s->passband();
+    check::equal(spb->root(), pbdir, "session: passband() is STORE/passband");
 
-    // the listener writes the passband directory while retro and refine run
+    // the listener writes the passband directory while retro and refine run;
+    // the slot reads back the same, through a separate PassbandStore and the
+    // session's own, before, between and after
     std::atomic<bool> busy{true};
     ea::RetroResult rr;
     ea::RefineResult fr_;
     std::exception_ptr err;
+    int reads = 0, same = 0;
     std::thread worker([&] {
         try {
-            rr = ea::retro(*s->store(), rs.key, ea::Passband::of(s->passband()), "tiny");
+            const pb::PassbandStore separate(pbdir);
+            auto read_both = [&] {
+                for (const pb::PassbandStore* p : {&separate, static_cast<const pb::PassbandStore*>(spb.get())}) {
+                    ++reads;
+                    same += same_capture(p->capture(Q_RETRO, dur)) ? 1 : 0;
+                }
+            };
+            read_both();
+            rr = ea::retro(*s->store(), rs.key, ea::Passband::of(spb), "tiny");
+            read_both();
             ea::RefineOptions ro;
             ro.rounds = 1;
             fr_ = ea::refine(*s->store(), KEY, ro);
+            read_both();
         } catch (...) {
             err = std::current_exception();
         }
@@ -680,7 +729,8 @@ void test_session_sharing(const std::vector<types::PassResult>& passes) {
     const std::vector<double> g = fx::gauss(11, 2000);
     std::vector<float> chunk(2000);
     for (std::size_t i = 0; i < chunk.size(); ++i) chunk[i] = static_cast<float>(0.01 * g[i]);
-    while (busy && chunks < 4000) {
+    // (on until the packer has started too, so the pack below is not left to luck)
+    while ((busy || !spb->packer_started()) && chunks < 4000) {
         clk.t->store(clk.t->load() + 0.25);
         s->push(chunk);
         (void)s->tiles();
@@ -696,6 +746,18 @@ void test_session_sharing(const std::vector<types::PassResult>& passes) {
         }
     }
     std::printf("session: %lld chunks pushed while retro and refine ran\n", static_cast<long long>(chunks));
+    check::equal(reads, 6, "session: the slot read six times");
+    check::equal(same, reads, "session: the slot reads back the same while the listener writes its hour");
+    check::is_true(spb->join_packer(120.0), "session: the packer finished");
+    check::is_true(fs::exists(spb->flac_path(hour - 1)) && !fs::exists(spb->raw_path(hour - 1)),
+                   "session: the slot's lead hour was packed meanwhile");
+    {
+        const pb::PassbandStore after(pbdir);
+        check::is_true(same_capture(after.capture(Q_RETRO, dur)), "session: the slot reads back the same from FLAC");
+        const pb::Masked m = after.read(t0 + 401.0, t0 + 402.0);
+        check::is_true(std::count(m.mask.begin(), m.mask.end(), std::uint8_t{1}) > 0,
+                       "session: the listener wrote the slot's own hour");
+    }
     check::equal(rr.finds.size(), std::size_t{1}, "session: retro finds the weak pass through the session's stores");
     check::is_true(!fr_.cancelled && fr_.passes.size() == 3, "session: refine re-receives the TINY passes");
     // a second Store on the root sees what the session's store wrote

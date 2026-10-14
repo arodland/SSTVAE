@@ -289,15 +289,21 @@ std::vector<double> em_refine(store::Store& st, const store::Key& key, const EmR
     std::int64_t done = 0;
     std::map<std::string, std::optional<FreqPath>> paths;
     for (std::int64_t r = 1; r < args.rounds + 1; ++r) {
-        const std::vector<std::string> uids = acc.uids();   // list(acc.uids): the round's start
+        // list(acc.uids): the round's start; a uid that is no str is refused
+        // (store::member_uid) only when the round reaches it, as load_pass
+        // refuses it there, after the members before it were re-received
+        std::vector<pyjson::Value> uids;
+        uids.reserve(acc.members.size());
+        for (const pyjson::Value& m : acc.members) uids.push_back(m.at("uid"));
         if (hooks.progress) {
             std::int64_t n = 0;
-            for (const std::string& uid : uids)
-                if (eligible(st, uid)) ++n;
+            for (const pyjson::Value& u : uids)
+                if (u.kind() != pyjson::Value::Kind::String || eligible(st, u.as_string())) ++n;
             total = std::max(total, done + (args.rounds - r + 1) * n);
         }
-        for (const std::string& uid : uids) {
+        for (const pyjson::Value& u : uids) {
             check_cancel(hooks);
+            const std::string uid = store::member_uid(u);
             const PassResult p = st.load_pass(uid);
             if (p.ch.empty()) continue;
             const frame::FrameSpec spec = pass_spec(p);

@@ -74,7 +74,7 @@ header::HeaderFields header_from_json(const Value& h) {
 }
 
 // A member's "uid" as store.pass_info / load_pass take it.
-std::string member_uid(const Value& m) { return m.at("uid").as_string("uid"); }
+std::string member_uid(const Value& m) { return store::member_uid(m.at("uid")); }
 
 }  // namespace
 
