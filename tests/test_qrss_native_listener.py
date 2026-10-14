@@ -355,9 +355,9 @@ def test_late_join_searches_a_hint_only(LN, native, tmp_path, monkeypatch):
 def test_a_later_pass_due_through_the_refresh(LN, native, tmp_path, monkeypatch):
     """test_a_later_pass_is_listened_for_where_it_is_due through the live
     refresh: the hint an earlier slot's tile gives reaches acquisition, said
-    once ("a later pass is due at"), CE and joint; and a store whose
-    accumulator cannot be read says "hints: <str(e)>" and the tiles' hint
-    still stands."""
+    once ("a later pass is due at"), CE and joint; and an accumulator of
+    another shape is passed over by the store, the tiles' hint still
+    standing and nothing said."""
     def scenario(side):
         calls = []
 
@@ -378,10 +378,11 @@ def test_a_later_pass_due_through_the_refresh(LN, native, tmp_path, monkeypatch)
             ("receive", [d.f_hz for d in dets or ()])) or [])
         q = Q_TEST
         out = {}
-        # (an accumulator whose structure is not a dict of lists of dicts
-        # raises TypeError out of the reference's store.due, where the C++
-        # store skips it: the two part there, in the store, not here)
-        bad = ({"mode": 2, "members": [{"segment": None, "uid": "x"}]},)
+        # (an accumulator whose values are not the types it holds: both
+        # stores' due() pass it over now, where the reference's let its
+        # TypeError out to the listener's "hints: <str(e)>")
+        bad = ({"mode": 2, "members": [{"segment": None, "uid": "x"}]},
+               {"mode": 2, "members": {"segment": 0, "uid": "x"}})
         for name, ws, acc in (("ce", None, None), ("joint", (CE, L_), None),
                               *((f"bad{k}", None, b) for k, b in enumerate(bad))):
             joint[:] = [ws is not None]
@@ -407,9 +408,10 @@ def test_a_later_pass_due_through_the_refresh(LN, native, tmp_path, monkeypatch)
     assert any("a later pass is due at 1600.0 Hz (CE), 1720.0 Hz (CE)" in ln
                for ln in py["joint"]["snap"]["lines"])
     assert [c[3] for c in py["ce"]["calls"] if c[0] == "cand"][0] == [1600.0, 1720.0]
-    lines = [ln.split(" ", 1)[1] for ln in py["bad0"]["snap"]["lines"]]
-    assert "hints: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'" in lines
-    assert any("a later pass is due at 1600.0, 1720.0 Hz" in ln for ln in lines)
+    for name in ("bad0", "bad1"):
+        lines = [ln.split(" ", 1)[1] for ln in py[name]["snap"]["lines"]]
+        assert not any(ln.startswith("hints:") for ln in lines), lines
+        assert any("a later pass is due at 1600.0, 1720.0 Hz" in ln for ln in lines)
 
 
 def test_a_slot_heard_on_two_dials(LN, native, tmp_path, monkeypatch):
