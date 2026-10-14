@@ -452,3 +452,33 @@ def test_cli_transmit(cli, tiny_inputs, tmp_path, name):
     assert nat[1:] == py[1:], (py, nat)
     assert nat[1].startswith(b"wrote " + _arg(out) + b": ")
     _same_wav("ce", (tmp_path / "py" / out).read_bytes(), (tmp_path / "nat" / out).read_bytes())
+
+
+@pytest.mark.skipif(os.name != "posix" or not UTF8_FS, reason="argv as bytes: POSIX, a UTF-8 file-system codec")
+def test_cli_encoded_surrogate_argv(cli, tmp_path):
+    """An argument holding a surrogate's UTF-8 bytes (ED A0 80) is three
+    escapes in sys.argv, which is what a refusal's repr names and what the
+    slot parser sees: as one surrogate it read as an ISO separator, and
+    sstvae-qrss transmit accepted a --slot the script refuses."""
+    s = b"\xed\xa0\x80"
+    ok = ["in.qrsp", "out.wav", "--slot", SLOT]
+    cases = [
+        ["in.qrsp", "out.wav", "--slot", b"2025-10-01" + s + b"00:00Z"],   # refused, not a separator
+        ["x" + os.fsdecode(s) + ".qrsp", "out.wav", "--slot", SLOT],      # OSError naming the input
+        [*ok, "--segment", b"1" + s],                                      # argparse: invalid int value
+        [*ok, "--freq", b"1" + s],                                         # invalid float value
+        [*ok, "--waveform", b"C" + s],                                     # invalid choice
+        [*ok, b"--ook=" + s],                                              # ignored explicit argument
+    ]
+    cases = [[os.fsencode(a) if isinstance(a, str) else a for a in c] for c in cases]
+    (tmp_path / "in.qrsp").write_bytes(b"")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda c: _side_by_side(cli, "transmit", c, tmp_path), cases))
+    for args, (py, nat) in zip(cases, results):
+        assert nat[0] == py[0] != 0, (args, py, nat)
+        assert not (tmp_path / "out.wav").exists(), args
+        last_py, last_nat = py[2].splitlines()[-1], nat[2].splitlines()[-1]
+        if py[0] == 2:   # argparse names its own program
+            last_py = last_py.replace(b"qrss_transmit.py: ", b"sstvae-qrss transmit: ", 1)
+        assert last_nat == last_py, (args, py, nat)
+        assert b"\\udced\\udca0\\udc80" in last_py, (args, py)

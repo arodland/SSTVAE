@@ -30,6 +30,14 @@ constexpr const char* STDERR_THREE_WINDOWS = "61c6fc05a3236284f40a9ca4b02ae45164
 constexpr const char* STDERR_FOUR_POSIX = "7c83f5cd3c7c22755395213713d1096b419ef62baad1cc73b52e8ef2beb37ae6";
 constexpr const char* STDERR_FOUR_WINDOWS = "6ef09d3903eabd30144151beb0611aa6914a469aa04dcf7e06216a34a6e8a7fc";
 
+// fs_decode's families: the same decoders, the code points as UTF-32LE
+constexpr const char* DECODE_ONE_TWO_POSIX = "1ed87b2953237e3e1da3ad6c1b09a50c9cff60ddc735e8b2a4648e1f3c1361d7";
+constexpr const char* DECODE_ONE_TWO_WINDOWS = "1ed87b2953237e3e1da3ad6c1b09a50c9cff60ddc735e8b2a4648e1f3c1361d7";
+constexpr const char* DECODE_THREE_POSIX = "53cbe62a49e0faab93979016c2464829f69bed4383cd21ec29a14f9b95d1c173";
+constexpr const char* DECODE_THREE_WINDOWS = "8ea3612b51ae489c3c49aef81229489733da62a7c3ad1e55d614f56316511d0b";
+constexpr const char* DECODE_FOUR_POSIX = "8331d2fbfb6979c758d5d860ed3d5f8d5c226a98eae440418151de9873b193a0";
+constexpr const char* DECODE_FOUR_WINDOWS = "3b56368a15cbb2a46d506e6a7170207630acf98e997fc8438496aca48aa0791e";
+
 constexpr unsigned char EDGES[] = {0x00, 0x7F, 0x80, 0x9F, 0xA0, 0xBF, 0xC0, 0xFF};
 
 // str(PurePosixPath(text)), .name, .suffix

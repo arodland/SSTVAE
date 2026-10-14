@@ -35,6 +35,7 @@
 #include "qrss/frame.hpp"
 #include "qrss/picture.hpp"
 #include "qrss/pynum.hpp"
+#include "qrss/pypath.hpp"
 #include "qrss/pytext.hpp"
 #include "qrss/slot.hpp"
 #include "qrss/tx.hpp"
@@ -117,9 +118,11 @@ int run(const std::string& prog, const std::vector<std::string>& argv, std::ostr
 
     std::int64_t q = 0;
     try {
-        q = slot::parse_slot(slot_text);
+        // the str sys.argv holds: on POSIX an encoded surrogate's three bytes
+        // are three escapes there, which no ISO time takes as its separator
+        q = slot::parse_slot(pypath::fs_str(slot_text));
     } catch (const std::invalid_argument& e) {
-        return system_exit(err, "--slot " + pytext::repr(slot_text) + ": " + e.what());
+        return system_exit(err, "--slot " + pytext::repr(pypath::fs_decode(slot_text)) + ": " + e.what());
     }
     const fr::FrameSpec& spec = waveform_l ? fr::get_l("l-" + *args->text("frame")) : fr::get(*args->text("frame"));
     if (waveform_l && ook_flag)

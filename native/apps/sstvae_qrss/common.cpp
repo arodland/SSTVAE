@@ -14,6 +14,7 @@
 
 #include "qrss/npz.hpp"
 #include "qrss/picture.hpp"
+#include "qrss/pypath.hpp"
 #include "qrss/pytext.hpp"
 #include "util/fileio.hpp"
 
@@ -49,7 +50,9 @@ int uncaught(std::ostream& err, const std::string& cls, const std::string& messa
 
 OsError::OsError(int err, const std::string& path)
     : PyError(os_error_class(err),
-              "[Errno " + std::to_string(err) + "] " + std::strerror(err) + ": " + pytext::repr(path)),
+              // str(OSError(err, strerror, path)): the name as repr(os.fsdecode(path))
+              "[Errno " + std::to_string(err) + "] " + std::strerror(err) + ": " +
+                  pytext::repr(pypath::fs_decode(path))),
       err_(err) {}
 
 std::vector<std::uint8_t> read_file(const std::string& path) {

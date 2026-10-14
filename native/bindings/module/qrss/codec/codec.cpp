@@ -74,6 +74,8 @@ auto translated(F&& f) -> decltype(f()) {
         throw;   // pybind11's OverflowError
     } catch (const std::range_error&) {
         throw;   // pybind11's ValueError
+    } catch (const py::builtin_exception&) {
+        throw;   // pybind11's own (value_error, type_error, ...): a std::runtime_error too
     } catch (const std::runtime_error& e) {
         // the image layer's ("cannot read <path>: ..."): RuntimeError, as
         // pybind11 raises it, with the name decoded as Python decodes names

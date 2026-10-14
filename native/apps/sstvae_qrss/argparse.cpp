@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "qrss/pynum.hpp"
+#include "qrss/pypath.hpp"
 #include "qrss/pytext.hpp"
 
 namespace sstvae::qrss::cli {
@@ -438,7 +439,7 @@ std::optional<Args> ArgParser::parse(const std::vector<std::string>& args, std::
                     const bool shortflag = m.flag.size() >= 2 && m.flag[1] != '-';
                     if (!shortflag || x.empty() || m.sep || x[0] == '-')
                         throw ArgumentError{"argument " + a.name() + ": ignored explicit argument " +
-                                            pytext::repr(x)};
+                                            pytext::repr(pypath::fs_decode(x))};
                 }
                 take(m.action);
                 if (a.help) {
@@ -458,9 +459,11 @@ std::optional<Args> ArgParser::parse(const std::vector<std::string>& args, std::
                 throw ArgumentError{"argument " + a.name() + ": expected one argument"};
             }
             if (a.spec.type == ArgSpec::Type::int_ && !pynum::py_int(value, 10))
-                throw ArgumentError{"argument " + a.name() + ": invalid int value: " + pytext::repr(value)};
+                throw ArgumentError{"argument " + a.name() + ": invalid int value: " +
+                                    pytext::repr(pypath::fs_decode(value))};
             if (a.spec.type == ArgSpec::Type::float_ && !pynum::py_float(value))
-                throw ArgumentError{"argument " + a.name() + ": invalid float value: " + pytext::repr(value)};
+                throw ArgumentError{"argument " + a.name() + ": invalid float value: " +
+                                    pytext::repr(pypath::fs_decode(value))};
             if (!a.spec.choices.empty()) {
                 bool ok = false;
                 for (const std::string& c : a.spec.choices) ok = ok || c == value;
@@ -468,7 +471,8 @@ std::optional<Args> ArgParser::parse(const std::vector<std::string>& args, std::
                     std::string choices;
                     for (std::size_t k = 0; k < a.spec.choices.size(); ++k)
                         choices += (k ? ", " : "") + pytext::repr(a.spec.choices[k]);
-                    throw ArgumentError{"argument " + a.name() + ": invalid choice: " + pytext::repr(value) +
+                    throw ArgumentError{"argument " + a.name() + ": invalid choice: " +
+                                        pytext::repr(pypath::fs_decode(value)) +
                                         " (choose from " + choices + ")"};
                 }
             }

@@ -43,9 +43,28 @@ std::string pathlib_suffix(std::string_view text);
 // str(PurePosixPath(dir) / name), for a name with no slash.
 std::string child(std::string_view dir, const std::string& name);
 
-// str(PurePosixPath(p).with_name(name)); std::invalid_argument "<p> has an
-// empty name" for a path with no name (pathlib's ValueError).
+// str(PurePosixPath(p).with_name(name)); std::invalid_argument
+// "PosixPath('<p>') has an empty name" for a path with no name (pathlib's
+// ValueError, the path by the repr of its os.fsdecode).
 std::string with_name(std::string_view p, const std::string& name);
+
+// os.fsdecode(text): the str Python holds for a file name's bytes. UTF-8
+// decoded strictly, and a byte that is not part of a UTF-8 sequence as
+// U+DC00 + that byte ("surrogateescape"). On Windows the codec is
+// "surrogatepass" (PEP 529), so a lone surrogate's three bytes (WTF-8,
+// util/fileio.hpp) decode to it; elsewhere they are three escaped bytes,
+// as os.fsdecode(b"\xed\xa0\x80") is '\udced\udca0\udc80' on Linux.
+// For a message's repr (pytext::repr), where pytext::decode would read a
+// POSIX file name's ED A0 80 as one surrogate.
+std::u32string fs_decode(std::string_view text);
+
+// The same str as the rest of the port carries one (UTF-8, a surrogate as
+// its three bytes: what pytext::decode reads back as fs_decode's code
+// points), for a parser handed an argument that is text and not a path:
+// on POSIX an escaped byte X becomes U+DC00+X's three bytes and an encoded
+// surrogate's three bytes three escapes, as sys.argv holds them; on Windows
+// (WTF-8 already) nothing changes. Never for a name to open.
+std::string fs_str(std::string_view text);
 
 // `text` (a message, which may name a file by its bytes) as the scripts'
 // sys.stderr writes the str they hold for it, os.fsdecode(text): UTF-8 as

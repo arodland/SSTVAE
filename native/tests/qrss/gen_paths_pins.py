@@ -34,6 +34,10 @@ with "surrogateescape"; Windows with "surrogatepass" (PEP 529), and since
 that refuses what is not a surrogate either, the Windows digest escapes the
 rest a byte at a time as "surrogateescape" would (a name sstvae-qrss is
 given on Windows is always UTF-8 but for lone surrogates).
+
+And pypath::fs_decode, the str os.fsdecode holds for those bytes (what a
+refusal's repr is taken of), over the same families and decoders: each
+string's code points as UTF-32LE, recorded as two length bytes and those.
 """
 
 from __future__ import annotations
@@ -91,6 +95,14 @@ def stderr_family(strings, errors: str) -> str:
     h = hashlib.sha256()
     for b in strings:
         out = b.decode("utf-8", errors).encode("utf-8", "backslashreplace")
+        h.update(len(out).to_bytes(2, "little") + out)
+    return h.hexdigest()
+
+
+def decode_family(strings, errors: str) -> str:
+    h = hashlib.sha256()
+    for b in strings:
+        out = b.decode("utf-8", errors).encode("utf-32-le", "surrogatepass")
         h.update(len(out).to_bytes(2, "little") + out)
     return h.hexdigest()
 
@@ -154,6 +166,11 @@ def main() -> None:
         lines.append(f'constexpr const char* STDERR_{name}_POSIX = "{stderr_family(make(), "surrogateescape")}";')
         lines.append(f'constexpr const char* STDERR_{name}_WINDOWS = '
                      f'"{stderr_family(make(), "sstvae_pass_then_escape")}";')
+    lines += ["", "// fs_decode's families: the same decoders, the code points as UTF-32LE"]
+    for name, make in [("ONE_TWO", one_two), ("THREE", three), ("FOUR", four)]:
+        lines.append(f'constexpr const char* DECODE_{name}_POSIX = "{decode_family(make(), "surrogateescape")}";')
+        lines.append(f'constexpr const char* DECODE_{name}_WINDOWS = '
+                     f'"{decode_family(make(), "sstvae_pass_then_escape")}";')
     lines.append("")
     lines.append("constexpr unsigned char EDGES[] = {" + ", ".join(f"0x{e:02X}" for e in EDGES) + "};")
     lines += ["", "// str(PurePosixPath(text)), .name, .suffix", "struct PathPin {",

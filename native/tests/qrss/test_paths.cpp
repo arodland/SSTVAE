@@ -12,9 +12,10 @@
 //   replace_file on names that are not ASCII and (POSIX) not UTF-8 at all,
 //   in a scratch directory: a name goes to the system as its bytes, and
 //   comes back the same.
-// - pypath against pathlib.PurePosixPath's str, name and suffix, and
+// - pypath against pathlib.PurePosixPath's str, name and suffix,
 //   stderr_text against what the scripts' sys.stderr writes for a message
-//   naming a file whose name is not UTF-8.
+//   naming a file whose name is not UTF-8, and fs_decode against the str
+//   os.fsdecode holds for it (what a refusal's repr names).
 
 #include <cerrno>
 #include <chrono>
@@ -27,17 +28,20 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include "check.hpp"
 #include "paths_pins.hpp"
 #include "qrss/pypath.hpp"
+#include "qrss/pytext.hpp"
 #include "util/fileio.hpp"
 #include "util/sha256.hpp"
 
 namespace check = sstvae::check;
 namespace util = sstvae::util;
 namespace pypath = sstvae::qrss::pypath;
+namespace pytext = sstvae::qrss::pytext;
 namespace fs = std::filesystem;
 
 namespace {
@@ -251,13 +255,18 @@ void test_pathlib() {
     check::equal(pypath::child("", "c"), std::string("c"), "child of nothing");
     check::equal(pypath::with_name("m/x-encoder-fp16.onnx", "x-decoder-fp16.onnx"),
                  std::string("m/x-decoder-fp16.onnx"), "with_name");
-    bool threw = false;
-    try {
-        pypath::with_name("/", "x");
-    } catch (const std::invalid_argument& e) {
-        threw = std::string(e.what()) == "/ has an empty name";
+    // Path(t).with_name("x")'s ValueError, for every path with no name
+    for (const auto& [t, want] : {std::pair<const char*, const char*>{"/", "PosixPath('/') has an empty name"},
+                                  {"", "PosixPath('.') has an empty name"},
+                                  {"//", "PosixPath('//') has an empty name"}}) {
+        std::string got = "(no exception)";
+        try {
+            pypath::with_name(t, "x");
+        } catch (const std::invalid_argument& e) {
+            got = e.what();
+        }
+        check::equal(got, std::string(want), std::string("with_name of ") + t + ": pathlib's ValueError text");
     }
-    check::is_true(threw, "with_name of a path with no name: pathlib's ValueError text");
 }
 
 // --- stderr ------------------------------------------------------------------------------
@@ -270,8 +279,8 @@ std::string stderr_once(const std::string& text) {
 }
 
 struct StderrFamily {
-    util::Sha256 h;
-    std::size_t streamed_ok = 0, n = 0;
+    util::Sha256 h, decoded;
+    std::size_t streamed_ok = 0, n = 0, str_ok = 0;
     void add(const std::string& bytes) {
         ++n;
         const std::string out = stderr_once(bytes);
@@ -279,6 +288,17 @@ struct StderrFamily {
         rec += static_cast<char>(out.size() & 0xFF);
         rec += static_cast<char>(out.size() >> 8);
         h.update(rec + out);
+        // fs_decode's code points, as UTF-32LE
+        const std::u32string cps = pypath::fs_decode(bytes);
+        // fs_str carries that str as pytext::decode reads it back
+        str_ok += pytext::decode(pypath::fs_str(bytes)) == cps;
+        std::string u32;
+        for (const char32_t cp : cps)
+            for (int k = 0; k < 4; ++k) u32 += static_cast<char>((static_cast<std::uint32_t>(cp) >> (8 * k)) & 0xFF);
+        std::string drec;
+        drec += static_cast<char>(u32.size() & 0xFF);
+        drec += static_cast<char>(u32.size() >> 8);
+        decoded.update(drec + u32);
         // the same bytes in two writes, split anywhere, give the same text
         bool same = true;
         for (std::size_t cut = 1; cut < bytes.size(); ++cut) {
@@ -293,16 +313,23 @@ struct StderrFamily {
     }
 };
 
-void stderr_family_is(StderrFamily& f, const char* posix, const char* windows, const std::string& what) {
+void stderr_family_is(StderrFamily& f, const char* posix, const char* windows, const char* decode_posix,
+                      const char* decode_windows, const std::string& what) {
 #ifdef _WIN32
     const char* digest = windows;
+    const char* decode = decode_windows;
     (void)posix;
+    (void)decode_posix;
 #else
     const char* digest = posix;
+    const char* decode = decode_posix;
     (void)windows;
+    (void)decode_windows;
 #endif
     check::equal(hex_of(f.h), std::string(digest), what + " stderr digest");
     check::equal(f.streamed_ok, f.n, what + " stderr in two writes");
+    check::equal(hex_of(f.decoded), std::string(decode), what + " fs_decode digest");
+    check::equal(f.str_ok, f.n, what + " fs_str read back as fs_decode");
 }
 
 void test_stderr() {
@@ -310,13 +337,15 @@ void test_stderr() {
     for (int a = 0; a < 256; ++a) one_two.add(std::string(1, static_cast<char>(a)));
     for (int a = 0; a < 256; ++a)
         for (int b = 0; b < 256; ++b) one_two.add({static_cast<char>(a), static_cast<char>(b)});
-    stderr_family_is(one_two, paths_pins::STDERR_ONE_TWO_POSIX, paths_pins::STDERR_ONE_TWO_WINDOWS, "one and two bytes");
+    stderr_family_is(one_two, paths_pins::STDERR_ONE_TWO_POSIX, paths_pins::STDERR_ONE_TWO_WINDOWS,
+                     paths_pins::DECODE_ONE_TWO_POSIX, paths_pins::DECODE_ONE_TWO_WINDOWS, "one and two bytes");
 
     StderrFamily three;
     for (int a = 0xE0; a < 0xF0; ++a)
         for (int b = 0; b < 256; ++b)
             for (int c = 0; c < 256; ++c) three.add({static_cast<char>(a), static_cast<char>(b), static_cast<char>(c)});
-    stderr_family_is(three, paths_pins::STDERR_THREE_POSIX, paths_pins::STDERR_THREE_WINDOWS, "three bytes");
+    stderr_family_is(three, paths_pins::STDERR_THREE_POSIX, paths_pins::STDERR_THREE_WINDOWS,
+                     paths_pins::DECODE_THREE_POSIX, paths_pins::DECODE_THREE_WINDOWS, "three bytes");
 
     StderrFamily four;
     for (int a = 0xF0; a < 0xF5; ++a)
@@ -324,7 +353,8 @@ void test_stderr() {
             for (const unsigned char c : paths_pins::EDGES)
                 for (const unsigned char d : paths_pins::EDGES)
                     four.add({static_cast<char>(a), static_cast<char>(b), static_cast<char>(c), static_cast<char>(d)});
-    stderr_family_is(four, paths_pins::STDERR_FOUR_POSIX, paths_pins::STDERR_FOUR_WINDOWS, "four bytes");
+    stderr_family_is(four, paths_pins::STDERR_FOUR_POSIX, paths_pins::STDERR_FOUR_WINDOWS,
+                     paths_pins::DECODE_FOUR_POSIX, paths_pins::DECODE_FOUR_WINDOWS, "four bytes");
 
     // By name, so a failure above has a readable neighbour.
     check::equal(stderr_once("caf\xC3\xA9 \xE6\x97\xA5.wav"), std::string("caf\xC3\xA9 \xE6\x97\xA5.wav"), "UTF-8 as it is");
@@ -334,6 +364,19 @@ void test_stderr() {
 #else
     check::equal(stderr_once("\xED\xA0\x80"), std::string("\\udced\\udca0\\udc80"), "a lone surrogate's bytes");
 #endif
+    // A refusal's repr(os.fsdecode(name)), as str(OSError) and argparse print it.
+    check::equal(pytext::repr(pypath::fs_decode("caf\xE9.wav")), std::string("'caf\\udce9.wav'"), "repr: an escaped byte");
+#ifdef _WIN32
+    check::equal(pytext::repr(pypath::fs_decode("x\xED\xA0\x80")), std::string("'x\\ud800'"), "repr: a lone surrogate");
+#else
+    check::equal(pytext::repr(pypath::fs_decode("x\xED\xA0\x80")), std::string("'x\\udced\\udca0\\udc80'"),
+                 "repr: a lone surrogate's bytes, escaped one by one");
+#endif
+#ifndef _WIN32
+    check::equal(pypath::fs_str("x\xE9\xED\xA0\x80"), std::string("x\xED\xB3\xA9\xED\xB3\xAD\xED\xB2\xA0\xED\xB2\x80"),
+                 "fs_str: each escape as its surrogate's three bytes");
+#endif
+    check::equal(pypath::fs_str("caf\xC3\xA9"), std::string("caf\xC3\xA9"), "fs_str: UTF-8 as it is");
     std::string out;
     check::equal(pypath::stderr_text("ok \xE6\x97", false, out), std::size_t{3}, "a cut-short sequence waits");
     check::equal(out, std::string("ok "), "and nothing of it is written");

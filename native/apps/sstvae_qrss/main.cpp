@@ -16,9 +16,13 @@
 // What reaches stderr goes as the scripts' sys.stderr writes it, which is
 // "backslashreplace" whatever the locale: a file name that is not UTF-8
 // prints as "\udcXX" escapes there, so it does here (pypath::stderr_text).
-// stdout carries the bytes, as the scripts' does under a UTF-8 locale or
-// PYTHONUTF8 ("surrogateescape"; under another one the script fails with
-// UnicodeEncodeError, which nothing here imitates).
+// That is the error handler; the encoding is the locale's, and this writes
+// UTF-8 whatever the locale (a Latin-1 locale's stderr would write a
+// name's e-acute as one byte). stdout carries the bytes, as the scripts'
+// does in Python's UTF-8 mode and under the C, POSIX or C.UTF-8 locale
+// ("surrogateescape"). Under any other locale, en_US.UTF-8 included,
+// sys.stdout is "strict" and the script fails with UnicodeEncodeError,
+// which nothing here imitates.
 
 #include <clocale>
 #include <cstddef>
