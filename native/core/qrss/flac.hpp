@@ -36,7 +36,9 @@
 //   tukey(0.5) alone), where the FIXED-only encoder this replaced was
 //   1.22-1.55x; 0.4-1.5 s of one core per hour (RelWithDebInfo, -O2
 //   without -march: the residual's sums go through int16 so that baseline
-//   SSE2 vectorizes them) against soundfile's 0.4-0.8 s.
+//   SSE2 vectorizes them) against soundfile's 0.4-0.8 s. Unpredictable
+//   audio is the slowest: an hour of white noise (VERBATIM throughout)
+//   takes about 1.9 s, Gaussian noise 1.8 s.
 // - The reader is dr_flac v0.13.4 (native/third_party/dr_libs), compiled
 //   with its CRC checks on, reading through rawfile (positioned reads, a
 //   file opened through util/fileio's names), seeking to a sample with the
@@ -51,7 +53,8 @@
 // writes the library's CPU-feature globals (on ARM on every open), so
 // two threads may open readers at once. encode_file
 // blocks for the whole encode (a full 4 kHz stereo hour: up to about 1.5 s
-// of one core, above) and polls `cancel` once per frame.
+// of one core on passband audio, 1.9 s on white noise, above) and polls
+// `cancel` once per frame (a frame: at most about half a millisecond).
 
 #ifndef SSTVAE_QRSS_FLAC_HPP
 #define SSTVAE_QRSS_FLAC_HPP

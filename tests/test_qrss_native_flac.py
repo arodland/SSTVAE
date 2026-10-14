@@ -9,7 +9,10 @@ libFLAC's:
 - every stream decodes sample for sample through libFLAC (soundfile),
   dr_flac (the C++ reader) and, where installed, ffmpeg's FLAC decoder and
   `flac -t` (the reference decoder's own test mode; not installed on the
-  machine this was written on, so that test skips there);
+  machine this was written on, so that test skips there); test_libflac
+  runs what `flac -t` checks through the system's libFLAC by ctypes (its
+  MD5 of the decoded samples, every error it reports), skipping only when
+  there is no libFLAC;
 - STREAMINFO holds the MD5 hashlib computes of the samples, the stream's
   real minimum and maximum frame sizes (each frame found through a seek
   point per frame, starting with a frame sync), the frame count and the
@@ -41,6 +44,7 @@ alone 1.18-1.32x.
 
 import hashlib
 import io
+import os
 import shutil
 import subprocess
 
@@ -321,6 +325,73 @@ def test_flac_cli(F, tmp_path):
         p = tmp_path / f"{i}.flac"
         p.write_bytes(F.encode(q, FE_FS, **opts)[0])
         subprocess.run(["flac", "-t", "--totally-silent", str(p)], check=True)
+
+
+def _libflac():
+    """The reference decoder's library by ctypes, or a skip: `flac -t`'s
+    check (libFLAC's own MD5 of what it decoded, every error it reports)
+    where the command-line tool is not installed."""
+    import ctypes
+    import ctypes.util
+    name = ctypes.util.find_library("FLAC")
+    if not name:
+        pytest.skip("libFLAC is not installed")
+    lib = ctypes.CDLL(name)
+    vp, i32 = ctypes.c_void_p, ctypes.c_int
+    lib.FLAC__stream_decoder_new.restype = vp
+    for f, args in (("set_md5_checking", [vp, i32]), ("process_until_end_of_stream", [vp]), ("finish", [vp]),
+                    ("delete", [vp])):
+        getattr(lib, "FLAC__stream_decoder_" + f).argtypes = args
+    lib.FLAC__stream_decoder_finish.restype = i32
+    lib.FLAC__stream_decoder_process_until_end_of_stream.restype = i32
+    write_t = ctypes.CFUNCTYPE(i32, vp, ctypes.POINTER(ctypes.c_uint32),
+                               ctypes.POINTER(ctypes.POINTER(ctypes.c_int32)), vp)
+    meta_t = ctypes.CFUNCTYPE(None, vp, vp, vp)
+    error_t = ctypes.CFUNCTYPE(None, vp, i32, vp)
+    lib.FLAC__stream_decoder_init_file.argtypes = [vp, ctypes.c_char_p, write_t, meta_t, error_t, vp]
+    lib.FLAC__stream_decoder_init_file.restype = i32
+
+    def test(path):
+        """(samples int32[frames, channels], [error statuses], MD5 and stream fine)"""
+        blocks, errors = [], []
+
+        def on_write(_d, frame, buf, _c):
+            n, ch = frame[0], frame[2]          # FLAC__FrameHeader: blocksize, sample_rate, channels
+            blocks.append(np.stack([np.ctypeslib.as_array(buf[c], shape=(n,)).copy() for c in range(ch)], 1))
+            return 0
+
+        callbacks = (write_t(on_write), meta_t(lambda *a: None), error_t(lambda _d, st, _c: errors.append(st)))
+        d = lib.FLAC__stream_decoder_new()
+        try:
+            lib.FLAC__stream_decoder_set_md5_checking(d, 1)
+            assert lib.FLAC__stream_decoder_init_file(d, os.fsencode(path), *callbacks, None) == 0
+            ok = lib.FLAC__stream_decoder_process_until_end_of_stream(d)
+            ok = lib.FLAC__stream_decoder_finish(d) and ok       # (false on an MD5 mismatch)
+        finally:
+            lib.FLAC__stream_decoder_delete(d)
+        return (np.concatenate(blocks) if blocks else np.zeros((0, 1), np.int32)), errors, bool(ok)
+
+    return test
+
+
+def test_libflac(F, tmp_path):
+    """libFLAC's decoder with its MD5 check on, as `flac -t` runs it: no
+    error reported, the MD5 of what it decoded is STREAMINFO's, the samples
+    are the input's."""
+    test = _libflac()
+    rng = np.random.default_rng(7)
+    p = tmp_path / "x.flac"
+    cases = [_case(rng, F, defaults=i % 2 == 0)[:2] for i in range(40)]
+    cases.append((_passband(20.0, 0.1, ssb=True, seed=8), {}))
+    for q, opts in cases:
+        p.write_bytes(F.encode(q, FE_FS, **opts)[0])
+        y, errors, ok = test(p)
+        assert not errors and ok and np.array_equal(y, q), (q.shape, opts, errors, ok)
+    # (and the check can fail: a STREAMINFO MD5 off by a bit)
+    b = bytearray(p.read_bytes())
+    b[26] ^= 1
+    p.write_bytes(bytes(b))
+    assert test(p)[2] is False
 
 
 def test_refusals(F):
