@@ -250,10 +250,10 @@ em::EmSeams make_seams(const py::object& seams) {
     return s;
 }
 
-std::vector<double> em_refine_py(PyStore& s, const py::object& key, const py::object& rounds,
-                                 const py::object& tol_db, const py::object& estimator,
-                                 const py::object& use_header, const py::object& log, const py::object& progress,
-                                 const py::object& cancel, const py::object& seams) {
+py::list em_refine_py(PyStore& s, const py::object& key, const py::object& rounds,
+                     const py::object& tol_db, const py::object& estimator, const py::object& use_header,
+                     const py::object& log, const py::object& progress, const py::object& cancel,
+                     const py::object& seams) {
     // key = (key[0], int(key[1]))
     const py::object k0 = key[py::int_(0)];
     const py::object k1 = key[py::int_(1)];
@@ -266,7 +266,10 @@ std::vector<double> em_refine_py(PyStore& s, const py::object& key, const py::ob
     const emh::PyHooks h = emh::hooks_from_py(log, progress, cancel);
     const em::EmSeams sm = make_seams(seams);
     store::Store& core = *s.core;
-    return nogil([&] { return em::em_refine(core, k, a, h.hooks, sm); });
+    const std::vector<double> hist = nogil([&] { return em::em_refine(core, k, a, h.hooks, sm); });
+    py::list out;
+    for (const double x : hist) out.append(x);
+    return out;
 }
 
 void bind(py::module_& q) {
