@@ -404,12 +404,23 @@ jobs:
         run: |
           case "$(uname -s)" in
             Darwin) exe=dist/SSTVAE.app/Contents/MacOS/sstvae-gui
+                    qrss=dist/SSTVAE.app/Contents/MacOS/sstvae-qrss
                     templates=dist/SSTVAE.app/Contents/Resources/templates ;;
             MINGW*|MSYS*) exe=dist/sstvae/sstvae-gui.exe
+                    qrss=dist/sstvae/sstvae-qrss.exe
                     templates=dist/sstvae/templates ;;
             *) exe=dist/sstvae/sstvae-gui
+                    qrss=dist/sstvae/bin/sstvae-qrss
                     templates=dist/sstvae/share/sstvae/templates ;;
           esac
+          # The QRSS listener the app runs (`sstvae-qrss listen`, found
+          # beside the app's executable), and that it loads its libraries
+          # from the staged tree: a release build runs no Python, so an
+          # app without it has no QRSS receiver at all. On Linux with the
+          # launcher's library path, which the app passes on to it.
+          test -x "$qrss" || { echo "sstvae-qrss is not at $qrss" >&2; exit 1; }
+          LD_LIBRARY_PATH="$PWD/dist/sstvae/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            "$qrss" listen --help > /dev/null
           # The built-in templates, where `TransmitPanel::
           # builtin_templates_dir` looks for them on this platform. An
           # app that cannot find them starts and stays up with an empty
