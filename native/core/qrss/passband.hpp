@@ -53,8 +53,10 @@
 //     about a quarter of a second) under the lock.
 //   - read / capture: the I/O (a slot is ~30 MB of raw hours or a FLAC
 //     decode of the same, a fraction of a second), outside the lock.
-//   - pack_hour: about a second for a full hour (encode, decode, compare)
-//     outside the lock, then a rename under it. Two pack_hour calls run
+//   - pack_hour: 1.4 s for a full hour of band noise on a desktop (encode
+//     1.0, decode and compare the rest; soundfile's path takes 1.0 s), a
+//     third of a second for a mostly unwritten one, outside the lock, then
+//     a rename under it. Two pack_hour calls run
 //     one after the other (the reference's would share a temporary name).
 //   - ~PassbandStore: asks a running packer to stop (it checks once per
 //     FLAC frame) and joins it: a few milliseconds.
