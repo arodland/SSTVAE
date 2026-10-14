@@ -24,10 +24,10 @@ The contract (the bar):
   the passband store, provisional pictures and the redraw a header
   brings, resync and early audio, digital silence as holes, and run()'s
   replay to its end;
-- an exception in a live refresh, where the two differ by design: the
-  C++ logs it once per slot and message and retries the slot (its `done`
-  stays false), where the reference's synchronous listener raises it out
-  of step() and its worker retires the slot;
+- an exception in a live refresh: the C++ logs it once per slot and
+  message and retries the slot (its `done` stays false), as the
+  reference's worker does; the reference's synchronous listener raises it
+  out of step();
 - the real receiver on TINY CE and TINY L slots heard half and then whole
   (the C++ listener on the C++ receiver, the reference on its own): one
   tile each, f_hz within 0.1 Hz, snr_db within 0.3 dB, callsign, picture
@@ -821,11 +821,11 @@ def test_the_log_file_rotates(LN, native, tmp_path, monkeypatch):
 
 
 def test_a_bad_state_file_starts_fresh(LN, native, tmp_path, monkeypatch):
-    """A state.json that is not the schema: the reference raises out of its
-    constructor (a list where an object is wanted, a tile that is not an
-    object); the C++ starts fresh (a deviation: the listener must start).
-    What both read: tiles of every kind, the old headerless strong ones
-    dropped, receiving/finishing ones not listed, finished slots kept."""
+    """A state.json that is not the schema (a list where an object is
+    wanted, a tile that is not an object): both start fresh, since the
+    listener must start. What both read: tiles of every kind, the old
+    headerless strong ones dropped, receiving/finishing ones not listed,
+    finished slots kept."""
     tiles = [
         live.Tile(id="a", q=Q_TEST, slot_utc="", frame="tiny", f_hz=1500.0, status="complete",
                   callsign="K1ABC", updated=CLOCK),
@@ -851,8 +851,9 @@ def test_a_bad_state_file_starts_fresh(LN, native, tmp_path, monkeypatch):
         d = tmp_path / f"bad{len(bad)}"
         d.mkdir()
         (d / "state.json").write_text(bad)
-        with pytest.raises(Exception):
-            live.LiveListener(d, live.LiveConfig(spec=TINY, render=False), log=lambda m: None)
+        P = live.LiveListener(d, live.LiveConfig(spec=TINY, render=False), log=lambda m: None)
+        assert P.tiles() == [] and P.finished == set()
+        P.close()
         L = _listener.listener(native, d, live.LiveConfig(spec=TINY, render=False), log=lambda m: None)
         assert L.tiles() == [] and L.finished == set()
         L.close()
@@ -864,8 +865,8 @@ def test_a_bad_state_file_starts_fresh(LN, native, tmp_path, monkeypatch):
 def test_an_exception_in_a_refresh_is_logged_once_and_retried(LN, native, tmp_path, monkeypatch):
     """The C++ listener: a live refresh that raises is logged once per slot
     and message, the slot stays live and is received again at its next
-    refresh; the reference's raises out of step() (synchronous) or retires
-    the slot (its worker)."""
+    refresh, as the reference's worker does; the reference's synchronous
+    listener raises it out of step()."""
     _listener.frozen_time(monkeypatch, CLOCK)
     n = {"k": 0}
 

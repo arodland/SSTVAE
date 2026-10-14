@@ -1714,6 +1714,7 @@ void LiveListener::refresh(const std::shared_ptr<Rec>& s) {
     so.dets = dets;
     std::vector<PassResult> passes = seams_.receive_slot(cap.prep, sel_, so);
     const std::size_t n_passes = passes.size();
+    bool took = false;
     for (PassResult& p : passes) {
         std::optional<RenderJob> job;
         {
@@ -1726,13 +1727,18 @@ void LiveListener::refresh(const std::shared_ptr<Rec>& s) {
             if (!takes(t, p)) continue;
             job = update_tile(t, p, cap.heard, std::nullopt, progress);
             t.status = s->s.finishing ? "finishing" : "receiving";
+            took = true;
         }
         deliver();
         if (job) render(*job);
+    }
+    if (took) {   // once per refresh, not once per pass
         {
             Lock lk(mu_);
-            log_locked("slot " + slot_utc(q) + ": " + std::to_string(n_passes) + " signal(s) at " +
-                       fmt(100 * progress_locked(q), "%.0f") + "% (" + fmt(clock_locked() - t_start, "%.0f") + " s)");
+            if (!s->s.done)
+                log_locked("slot " + slot_utc(q) + ": " + std::to_string(n_passes) + " signal(s) at " +
+                           fmt(100 * progress_locked(q), "%.0f") + "% (" + fmt(clock_locked() - t_start, "%.0f") +
+                           " s)");
         }
         deliver();
     }

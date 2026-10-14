@@ -1308,6 +1308,7 @@ class LiveListener:
         with self.lock:
             if s.done:
                 return
+            took = False
             for p in passes:
                 p = self._known_header(s, p, dial)
                 if not self._plausible(s, p, dial):
@@ -1317,8 +1318,10 @@ class LiveListener:
                     continue
                 self._update_tile(t, p, heard, progress=progress)
                 t.status = "finishing" if s.finishing else "receiving"
+                took = True
+            if took:            # once per refresh, not once per pass
                 self.log(f"slot {utc_iso(slot_t0(s.q) - 1)}: {len(passes)} signal(s) at "
-                     f"{100 * self._progress(s.q):.0f}% ({time.time() - t_start:.0f} s)")
+                         f"{100 * self._progress(s.q):.0f}% ({time.time() - t_start:.0f} s)")
 
     def _finish(self, s: SlotState) -> None:
         """The frame is over: receive the whole slot (`finish_receive`, in
