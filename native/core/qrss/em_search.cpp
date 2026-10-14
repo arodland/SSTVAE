@@ -18,6 +18,10 @@
 #include <variant>
 #include <vector>
 
+#if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
+#include <immintrin.h>   // the AVX2 clone of the search's accumulation (below)
+#endif
+
 #include "dsp/fft.hpp"   // pocketfft (numpy's np.fft)
 #include "math/npcomplex.hpp"
 #include "qrss/ce_rx.hpp"
@@ -122,6 +126,144 @@ std::int64_t fft_length(std::int64_t chunk, std::int64_t lag_max) {
     return nfft;
 }
 
+#if defined(__GNUC__) || defined(__clang__)
+#define SSTVAE_EMS_INLINE inline __attribute__((always_inline))
+#else
+#define SSTVAE_EMS_INLINE inline
+#endif
+
+// On x86 without -mfma (the portable build) std::fma is a library call per
+// operation; the two loops of the search made of numpy's fused multiplies
+// (the spectra's product and np.abs) have a clone compiled for AVX2 + FMA3,
+// picked at run time when the CPU has them (math/convolve.cpp's pattern).
+// fma, sqrt and division are exactly rounded either way and this file is
+// built with -ffp-contract=off, so both clones compute the same bits.
+#if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__))
+#define SSTVAE_EMS_FMA_CLONES 1
+bool cpu_has_avx2_fma() {
+    static const bool has = [] {
+        __builtin_cpu_init();
+        return __builtin_cpu_supports("fma") != 0 && __builtin_cpu_supports("avx2") != 0;
+    }();
+    return has;
+}
+#endif
+
+// p[f] = fr[f] * conj(ft[(f - shift) % n]) for f < n (shift < n): numpy's
+// fused complex multiply (np::mul) of FR by the rolled template spectrum.
+SSTVAE_EMS_INLINE void rolled_product_impl(const cplx* fr, const cplx* ft, cplx* p, std::size_t n, std::size_t shift) {
+    for (std::size_t f = 0; f < shift; ++f) {   // reads ft[f + n - shift]
+        const double ar = fr[f].real(), ai = fr[f].imag();
+        const cplx b = ft[f + n - shift];
+        const double br = b.real(), bi = -b.imag();
+        p[f] = cplx(std::fma(ar, br, -(ai * bi)), std::fma(ar, bi, ai * br));
+    }
+    for (std::size_t f = shift; f < n; ++f) {   // reads ft[f - shift]
+        const double ar = fr[f].real(), ai = fr[f].imag();
+        const cplx b = ft[f - shift];
+        const double br = b.real(), bi = -b.imag();
+        p[f] = cplx(std::fma(ar, br, -(ai * bi)), std::fma(ar, bi, ai * br));
+    }
+}
+
+// lam[j] = (first ? nothing : lam[j] +) np.abs(c[j]) ** 2 * nk for j < w: the
+// first row assigned, as numpy's reduction over axis 0 starts from it.
+SSTVAE_EMS_INLINE void accumulate_impl(const cplx* c, double nk, double* lam, std::size_t w, bool first) {
+    if (first) {
+        for (std::size_t j = 0; j < w; ++j) {
+            const double a = np::abs(c[j]);
+            lam[j] = (a * a) * nk;
+        }
+    } else {
+        for (std::size_t j = 0; j < w; ++j) {
+            const double a = np::abs(c[j]);
+            lam[j] = lam[j] + (a * a) * nk;
+        }
+    }
+}
+
+#ifdef SSTVAE_EMS_FMA_CLONES
+__attribute__((target("avx2,fma"))) void rolled_product_avx2(const cplx* fr, const cplx* ft, cplx* p, std::size_t n,
+                                                             std::size_t shift) {
+    rolled_product_impl(fr, ft, p, n, shift);
+}
+
+// accumulate_impl four lanes at a time: np::abs written out branch-free (the
+// same comparisons, selections and exactly rounded operations, lane by lane
+// -- numpy's own hypot loop is this SIMD form), the tail by np::abs itself.
+__attribute__((target("avx2,fma"))) void accumulate_avx2(const cplx* c, double nk, double* lam, std::size_t w,
+                                                         bool first) {
+    const __m256d sign = _mm256_set1_pd(-0.0);
+    const __m256d inf = _mm256_set1_pd(INF);
+    const __m256d nan = _mm256_set1_pd(std::numeric_limits<double>::quiet_NaN());
+    const __m256d zero = _mm256_setzero_pd();
+    const __m256d one = _mm256_set1_pd(1.0);
+    const __m256d vk = _mm256_set1_pd(nk);
+    std::size_t j = 0;
+    for (; j + 4 <= w; j += 4) {
+        const __m256d a = _mm256_loadu_pd(reinterpret_cast<const double*>(c + j));       // r0 i0 r1 i1
+        const __m256d b = _mm256_loadu_pd(reinterpret_cast<const double*>(c + j + 2));   // r2 i2 r3 i3
+        __m256d re = _mm256_permute4x64_pd(_mm256_unpacklo_pd(a, b), 0xD8);              // r0 r1 r2 r3
+        __m256d im = _mm256_permute4x64_pd(_mm256_unpackhi_pd(a, b), 0xD8);              // i0 i1 i2 i3
+        re = _mm256_andnot_pd(sign, re);
+        im = _mm256_andnot_pd(sign, im);
+        const __m256d re_inf = _mm256_cmp_pd(re, inf, _CMP_EQ_OQ);
+        const __m256d im_inf = _mm256_cmp_pd(im, inf, _CMP_EQ_OQ);
+        im = _mm256_blendv_pd(im, inf, re_inf);
+        re = _mm256_blendv_pd(re, inf, im_inf);
+        const __m256d re_nan = _mm256_cmp_pd(re, re, _CMP_UNORD_Q);
+        const __m256d im_nan = _mm256_cmp_pd(im, im, _CMP_UNORD_Q);
+        im = _mm256_blendv_pd(im, nan, re_nan);
+        re = _mm256_blendv_pd(re, nan, im_nan);
+        const __m256d larger = _mm256_blendv_pd(im, re, _mm256_cmp_pd(re, im, _CMP_GT_OQ));    // re > im ? re : im
+        const __m256d smaller = _mm256_blendv_pd(re, im, _mm256_cmp_pd(im, re, _CMP_LT_OQ));   // im < re ? im : re
+        const __m256d bad =
+            _mm256_or_pd(_mm256_cmp_pd(larger, zero, _CMP_EQ_OQ), _mm256_cmp_pd(smaller, inf, _CMP_EQ_OQ));
+        const __m256d ratio = _mm256_andnot_pd(bad, _mm256_div_pd(smaller, larger));
+        const __m256d mag = _mm256_mul_pd(_mm256_sqrt_pd(_mm256_fmadd_pd(ratio, ratio, one)), larger);
+        const __m256d v = _mm256_mul_pd(_mm256_mul_pd(mag, mag), vk);
+        _mm256_storeu_pd(lam + j, first ? v : _mm256_add_pd(_mm256_loadu_pd(lam + j), v));
+    }
+    if (j < w) accumulate_impl(c + j, nk, lam + j, w - j, first);
+}
+#endif
+
+void rolled_product(const cplx* fr, const cplx* ft, cplx* p, std::size_t n, std::size_t shift) {
+#ifdef SSTVAE_EMS_FMA_CLONES
+    if (cpu_has_avx2_fma()) {
+        rolled_product_avx2(fr, ft, p, n, shift);
+        return;
+    }
+#endif
+    rolled_product_impl(fr, ft, p, n, shift);
+}
+
+void accumulate(const cplx* c, double nk, double* lam, std::size_t w, bool first) {
+#ifdef SSTVAE_EMS_FMA_CLONES
+    if (cpu_has_avx2_fma()) {
+        accumulate_avx2(c, nk, lam, w, first);
+        return;
+    }
+#endif
+    accumulate_impl(c, nk, lam, w, first);
+}
+
+// `rows` transforms of length n, row-major, in place, as one pocketfft call:
+// it runs several rows at once in SIMD lanes, each lane the arithmetic of a
+// lone transform of its row (numpy's np.fft, a row at a time), so the bits
+// are the same -- measured equal, and pinned by the parity tests. The
+// inverse is scaled by fct. Single-threaded.
+void c2c_rows_inplace(cplx* data, std::size_t rows, std::size_t n, bool forward, double fct) {
+    if (rows == 0 || n == 0) return;
+    const pocketfft::shape_t shape{rows, n};
+    const pocketfft::stride_t stride{static_cast<std::ptrdiff_t>(n * sizeof(cplx)),
+                                     static_cast<std::ptrdiff_t>(sizeof(cplx))};
+    pocketfft::c2c(shape, stride, stride, pocketfft::shape_t{1}, forward, data, data, fct, 1);
+}
+
+// Rows per batch of the search's inverse transforms (1 MB at nfft 2048).
+constexpr std::size_t SEARCH_BATCH = 32;
+
 // One channel's correlation search: the capture's chunk-window FFTs (FR),
 // cached by start sample (they depend on nothing else), and the search over
 // (m, lag) of one template.
@@ -168,34 +310,30 @@ public:
         for (std::size_t k = 0; k < K; ++k) {
             std::copy(t.E.begin() + static_cast<std::ptrdiff_t>(k * C), t.E.begin() + static_cast<std::ptrdiff_t>((k + 1) * C),
                       FT.begin() + static_cast<std::ptrdiff_t>(k * N));
-            plan_->exec(reinterpret_cast<pd::cmplx<double>*>(FT.data() + k * N), 1.0, true);
-            FR[k] = &fr(t.starts[k]);
             norm[k] = 1.0 / (N0 * t.en[k]);
         }
+        c2c_rows_inplace(FT.data(), K, N, true, 1.0);
+        for (std::size_t k = 0; k < K; ++k) FR[k] = &fr(t.starts[k]);
         const double inv_n = 1.0 / static_cast<double>(nfft_);   // numpy's ifft fct, 1/n
         ChanPeak best;
-        std::vector<cplx> P(N);
+        const std::size_t B = std::min(K, SEARCH_BATCH);
+        std::vector<cplx> P(B * N);
         std::vector<double> lam(W);
         for (std::int64_t m = -m_max; m <= m_max; ++m) {
             std::fill(lam.begin(), lam.end(), 0.0);
-            for (std::size_t k = 0; k < K; ++k) {
-                const std::int64_t mk = m + (drift_bins.empty() ? 0 : drift_bins[k]);
-                // FTm[k, f] = FT[k, (f - mk) % nfft]; P = FR * conj(FTm)
-                const auto shift = static_cast<std::size_t>(floor_mod(mk, nfft_));
-                const cplx* fr = FR[k]->data();
-                const cplx* ft = FT.data() + k * N;
-                for (std::size_t f = 0; f < N; ++f) {
-                    const std::size_t src = f >= shift ? f - shift : f + N - shift;
-                    P[f] = np::mul(fr[f], std::conj(ft[src]));
+            for (std::size_t k0 = 0; k0 < K; k0 += B) {
+                const std::size_t nb = std::min(B, K - k0);
+                for (std::size_t i = 0; i < nb; ++i) {
+                    const std::size_t k = k0 + i;
+                    const std::int64_t mk = m + (drift_bins.empty() ? 0 : drift_bins[k]);
+                    // FTm[k, f] = FT[k, (f - mk) % nfft]; P = FR * conj(FTm)
+                    const auto shift = static_cast<std::size_t>(floor_mod(mk, nfft_));
+                    rolled_product(FR[k]->data(), FT.data() + k * N, P.data() + i * N, N, shift);
                 }
-                plan_->exec(reinterpret_cast<pd::cmplx<double>*>(P.data()), inv_n, false);
+                c2c_rows_inplace(P.data(), nb, N, false, inv_n);
                 // np.sum(np.abs(C) ** 2 * norm[:, None], axis=0): the rows added in turn
-                const double nk = norm[k];
-                for (std::size_t j = 0; j < W; ++j) {
-                    const double a = np::abs(P[j]);
-                    const double v = (a * a) * nk;
-                    lam[j] = k == 0 ? v : lam[j] + v;
-                }
+                for (std::size_t i = 0; i < nb; ++i)
+                    accumulate(P.data() + i * N, norm[k0 + i], lam.data(), W, k0 + i == 0);
             }
             const std::size_t j = np_argmax(lam);
             if (lam[j] > best.lam) best = ChanPeak{lam[j], static_cast<std::int64_t>(j) - lag_max_, m};
@@ -320,7 +458,7 @@ SearchResult search_prepared(store::Store& store, const store::Accumulator& acc,
     const std::int64_t chunk = static_cast<std::int64_t>(std::nearbyint(TS_CHUNK_S * config::CH_FS));
     const std::int64_t lag_max = py_ceil(opt.tau_s * config::CH_FS);
     // this port's refusal (the reference slices the correlation from its end)
-    if (lag_max < 0) throw std::invalid_argument("tau_s must not be negative, not " + frame::py_repr(opt.tau_s));
+    if (lag_max < 0) throw std::invalid_argument("tau_s must be >= 0, not " + frame::py_repr(opt.tau_s));
     const std::int64_t m_max = py_ceil(opt.df_hz * TS_NFFT / config::CH_FS);
     const double dur = spec.keyed_end_pos() * config::T_SYM;
     const double ppm_step = TS_SLIP_SAMPLES / (dur * config::CH_FS) * 1e6;
