@@ -337,12 +337,12 @@ void bind_flac(py::module_& m) {
         out["frames"] = st.frames;
         out["stereo"] = py::make_tuple(st.stereo[0], st.stereo[1], st.stereo[2], st.stereo[3]);
         py::list sub;
-        for (std::size_t k = 0; k < 7; ++k) sub.append(st.subframes[k]);
+        for (const auto v : st.subframes) sub.append(v);
         out["subframes"] = sub;
         out["md5"] = py::bytes(reinterpret_cast<const char*>(st.md5.data()), st.md5.size());
         return out;
     }, py::arg("path"), py::arg("data"), py::arg("fs"), py::arg("blocksize") = 4096, py::arg("max_fixed_order") = 4,
-          py::arg("max_partition_order") = 8, py::arg("stereo") = true, py::arg("seek_every") = 16);
+          py::arg("max_partition_order") = flac::EncodeOptions{}.max_partition_order, py::arg("stereo") = true, py::arg("seek_every") = 16);
 
     m.def("_flac_read", [](const py::object& path, std::uint64_t start, const py::object& stop) {
         const fspath::FsPath p = fspath::fs_path(path);

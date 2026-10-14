@@ -1640,7 +1640,7 @@ class LiveListener:
             t.note = f"render failed: {e}"
             return
         rel = f"tiles/{t.id}.png"
-        tmp = self.dir / f"tiles/.{t.id}.{os.getpid()}.png.tmp"
+        tmp = _tmp_name(self.dir / rel)        # (two threads writing it never share one)
         img.save(tmp, format="PNG")
         os.replace(tmp, self.dir / rel)
         t.image = rel
@@ -1718,7 +1718,14 @@ class StdinSource:
         self.dtype = np.dtype("<f4") if fmt == "f32" else np.dtype("<i2")
         self.scale = 1.0 if fmt == "f32" else 1.0 / 32768.0
         self.nbytes = int(chunk_s * FS) * self.dtype.itemsize
-        self.stream = stream if stream is not None else sys.stdin.buffer
+        # stdin's raw file, not its BufferedReader: a raw read is one read(2),
+        # as read1 is, and takes no lock, where the daemon thread blocked in
+        # BufferedReader.read1 holds the reader's lock and Ctrl-C then ended
+        # the script with SIGABRT at interpreter shutdown ("could not
+        # acquire lock for <_io.BufferedReader name='<stdin>'>").
+        if stream is None:
+            stream = getattr(sys.stdin.buffer, "raw", sys.stdin.buffer)
+        self.stream = stream
         self.stamper = Stamper(hold_s)
         self.q: queue.Queue = queue.Queue()
         self.eof = False

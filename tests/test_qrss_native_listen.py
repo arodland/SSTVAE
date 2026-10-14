@@ -740,14 +740,10 @@ def test_a_signal_stops_it(cli, tmp_path, sig):
     """Ctrl-C (SIGINT) stops either implementation alike: "stopped" last, in
     listener.log too, state.json not listening, exit 0, the three locks
     free. SIGTERM stops the C++ the same way (the script dies on SIGTERM
-    with nothing written: not compared).
-
-    The script then aborts at interpreter shutdown (SIGABRT, "Fatal Python
-    error: _enter_buffered_busy: could not acquire lock for
-    <_io.BufferedReader name='<stdin>'>"): StdinSource's daemon thread is
-    blocked in sys.stdin.buffer.read1 holding the reader's lock, which the
-    interpreter's finalisation then needs. Its exit status is allowed to be
-    that, and only its lines up to "stopped" are compared."""
+    with nothing written: not compared). (The script used to abort at
+    interpreter shutdown, its StdinSource thread blocked in
+    sys.stdin.buffer.read1 holding the reader's lock; it reads stdin's raw
+    file now.)"""
     import signal
 
     from sstvae.qrss.live import dir_lock
@@ -775,10 +771,7 @@ def test_a_signal_stops_it(cli, tmp_path, sig):
         stop = next((k for k, ln in enumerate(p.lines) if ln.endswith(" stopped")), None)
         assert stop is not None, (name, p.lines)
         lines[name] = p.lines[:stop + 1]
-        if name == "py" and rcs[name] == -signal.SIGABRT:
-            assert p.lines[stop + 1].startswith("Fatal Python error: _enter_buffered_busy: "), p.lines
-        else:
-            assert rcs[name] == 0 and stop == len(p.lines) - 1, (name, rcs[name], p.lines)
+        assert rcs[name] == 0 and stop == len(p.lines) - 1, (name, rcs[name], p.lines)
         assert _log(d / "st")[-1].endswith(" stopped"), name
         assert _state(d / "st")["listening"] is False, name
         for lock in (d / "st", d / "store", d / "store" / "passband"):
