@@ -97,6 +97,16 @@ private:
 // conversion), so values compare with Python's own for the same file.
 std::optional<std::int64_t> mtime_ns(const std::string& path, std::error_code& ec);
 
+// (os.stat(path).st_mtime_ns, st_size) from one stat: what a cache of a
+// file's contents is checked against (store.py's _signature). nullopt with
+// `ec` set when it cannot be stat'ed.
+struct Signature {
+    std::int64_t mtime_ns = 0;
+    std::uint64_t size = 0;
+    bool operator==(const Signature&) const = default;
+};
+std::optional<Signature> signature(const std::string& path, std::error_code& ec);
+
 // The whole file as bytes; nullopt with `ec` set when it cannot be read
 // (ENOENT for a missing file).
 std::optional<std::string> read_all(const std::string& path, std::error_code& ec);

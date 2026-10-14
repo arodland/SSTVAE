@@ -4,9 +4,7 @@
 //
 //   T_ACCEPT RHO_MIN KURTOSIS VALIDATE_MEDIAN_W HDR_REJECT_T HDR_REJECT_EXPECT
 //   PAIR_HZ PAIR_DAYS HDR_AGREE_Z HDR_OTHER_FLIP
-//   corr_stat(z, w, m, W) -> (t, M)    t an np.float64, or the float 0.0 as
-//                                      the reference returns when nothing
-//                                      correlates
+//   corr_stat(z, w, m, W) -> (t, M)    t a float (0.0 when nothing correlates)
 //   expected_t(w, W, kurtosis=3.0) -> float
 //   corr_accept(t, t_exp) -> bool      an np.bool_ where the reference's
 //                                      comparisons give one (t or t_exp numpy)
@@ -68,8 +66,6 @@ py::list strings_py(const std::vector<std::string>& v) {
     return out;
 }
 
-py::object np_float(double x) { return rx::np_module().attr("float64")(x); }
-
 bool is_numpy(const py::handle& o) {
     static py::object* generic = new py::object(rx::np_module().attr("generic"));
     return py::isinstance(o, *generic);
@@ -105,7 +101,7 @@ void bind(py::module_& q) {
     m.def("corr_stat", [](const py::object& z, const py::object& w, const py::object& m_, const py::object& W) {
         const auto zz = rx::vec<double>(z), ww = rx::vec<double>(w), mm = rx::vec<double>(m_), WW = rx::vec<double>(W);
         const as::Corr c = nogil([&] { return as::corr_stat(zz, ww, mm, WW); });
-        return py::make_tuple(c.numpy ? np_float(c.t) : py::object(py::float_(c.t)), c.M);
+        return py::make_tuple(c.t, c.M);
     }, py::arg("z"), py::arg("w"), py::arg("m"), py::arg("W"));
     m.def("expected_t", [](const py::object& w, const py::object& W, const py::object& kurtosis) {
         const auto ww = rx::vec<double>(w), WW = rx::vec<double>(W);
@@ -137,7 +133,7 @@ void bind(py::module_& q) {
         for (const py::handle h : py::reinterpret_borrow<py::iterable>(py::iter(exclude))) ex.push_back(st::key_of(h));
         const auto best = nogil([&] { return as::best_accumulator(core(s), zz, ww, ex); });
         if (!best) return py::none();
-        return py::make_tuple(np_float(best->t), st::key_py(best->key), best->segment);
+        return py::make_tuple(best->t, st::key_py(best->key), best->segment);
     }, py::arg("store"), py::arg("z"), py::arg("w"), py::arg("exclude") = py::tuple());
     m.def("validate_header_match", [](PyStore& s, const py::object& key, const py::object& mode,
                                       const py::object& segment, const py::object& z, const py::object& w) {
@@ -145,9 +141,7 @@ void bind(py::module_& q) {
         const std::int64_t md = rx::as_int(mode), g = rx::as_int(segment);
         const auto zz = rx::vec<double>(z), ww = rx::vec<double>(w);
         const as::Validation v = nogil([&] { return as::validate_header_match(core(s), k, md, g, zz, ww); });
-        py::object details = st::to_py(v.details);
-        if (v.t_numpy) details[py::str("t")] = np_float(v.details.at("t").as_double());
-        return py::make_tuple(v.ok, details);
+        return py::make_tuple(v.ok, st::to_py(v.details));
     }, py::arg("store"), py::arg("key"), py::arg("mode"), py::arg("segment"), py::arg("z"), py::arg("w"));
     m.def("_attach_by_header", [](PyStore& s, const py::object& h, const py::object& uids, const py::object& method) {
         const auto hf = rx::header_fields(h);

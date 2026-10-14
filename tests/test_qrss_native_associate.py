@@ -7,8 +7,8 @@ The contract (the bar), and in brackets what was measured (2026-10-14):
 
 - **the statistics**: corr_stat's t and M, expected_t, corr_accept, the
   references (_acc_reference, _cluster_sums) and _best_accumulator, bit
-  for bit and of the reference's types -- t an np.float64, or the Python
-  float 0.0 where the reference returns it; corr_accept an np.bool_ where
+  for bit and of the reference's types -- t a Python float (an np.float64
+  before 2026-10-14's fix); corr_accept an np.bool_ where
   a numpy operand decides and a bool where a Python one does -- on random
   and degenerate inputs (no overlap, zero numerator and denominator, NaN
   and infinite values, unequal lengths, lists, float32, a custom

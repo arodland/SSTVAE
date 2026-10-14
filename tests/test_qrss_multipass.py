@@ -840,3 +840,182 @@ def test_due_names_the_later_passes_of_a_picture(store):
                      codec_id=sp.codec_id)
     assert due(Q_TEST + 12) == [(1, 900.0, Q_TEST + 10)]
     assert due(Q_TEST + 14) == [] and due(Q_TEST + 10) == []
+
+
+# --- reference fixes (2026-10-14, from the C++ port's review) -------------------------
+
+
+def test_rule1_validates_short_frames(store):
+    """Rule 1's check gates on the median W over the latents the pass
+    carries. Over the whole segment, a SHORT frame's accumulator has median
+    W 0 however many passes it holds (4096 of 50,600 latents covered), so a
+    colliding header was attached unchecked."""
+    sp = synthetic_picture(12)
+    key = ("K1ABC", sp.picture_id)
+    h = make_header(sp, callsign="K1ABC")
+    p = make_pass_result(_air(sp, 0)[:4096], 10.0, seed=1, hdr=h, decoded=True)
+    assert asc.associate(p, store) == (key, "header")
+    acc = store.accumulator(key)
+    assert acc.median_w(0) == 0.0 and acc.median_w(0, 4096) == 10.0
+    impostor = make_pass_result(_air(synthetic_picture(13), 0)[:4096], 1.0, seed=2,
+                                hdr=h, decoded=True, q=Q_TEST + 1)
+    assert asc.associate(impostor, store) == (None, "prov")
+    log = [json.loads(x) for x in (store.root / "log.jsonl").read_text().splitlines()]
+    assert log[-1]["event"] == "collision" and log[-1]["M"] == 4096 and log[-1]["t_expected"] > 8
+    assert store.accumulator(key).uids == [p.uid]
+    rep = make_pass_result(_air(sp, 0)[:4096], 0.3, seed=3, hdr=h, decoded=True, q=Q_TEST + 2)
+    assert asc.associate(rep, store) == (key, "header")
+
+
+def test_prov_add_never_drops_a_cluster(store):
+    """A new cluster is c_<uid>, or c_<uid>_<n> when that name is taken --
+    here by the cluster this pass founded and left, which another pass
+    still holds (writing over it dropped that pass from the provisional set)."""
+    a, b = (make_pass_result(unit_rms_latents(800, seed=i), 1.0, seed=i) for i in (1, 2))
+    for p in (a, b):
+        store.add_pass(p)
+    ca = store.prov_add(a.uid)
+    assert ca == f"c_{a.uid}"
+    assert store.prov_add(b.uid, ca) == ca
+    store.prov_remove(a.uid)
+    assert store.prov_add(a.uid) == f"c_{a.uid}_2"
+    assert store.prov_cluster_of(b.uid)["cluster"] == ca
+    assert store.prov_cluster_of(b.uid)["members"] == [b.uid]
+    assert store.prov_cluster_of(a.uid)["members"] == [a.uid]
+    store.prov_remove(a.uid)                         # (an emptied cluster is deleted)
+    assert store.prov_add(a.uid) == f"c_{a.uid}_2"
+    assert len(store.prov_clusters()) == 2
+
+
+def test_pass_cache_of_size_zero(store, monkeypatch):
+    """ZW_CACHE = 0 keeps nothing and still returns the pass (it raised
+    KeyError, evicting the entry it was about to return)."""
+    from sstvae.qrss import store as store_mod
+    monkeypatch.setattr(store_mod, "ZW_CACHE", 0)
+    p = make_pass_result(unit_rms_latents(800, seed=1), 1.0, seed=1)
+    store.add_pass(p)
+    z, w = store.pass_zw(p.uid)
+    np.testing.assert_array_equal(z, p.z.astype(np.float64))
+    np.testing.assert_array_equal(w, p.w.astype(np.float64))
+    assert list(store._zw) == []
+
+
+def test_due_gives_nothing_from_an_accumulator_it_cannot_read(store):
+    """An accumulator whose later member's pass is gone gives no due rows,
+    not the rows of the members read before the failure."""
+    sp = synthetic_picture(21, mode=2)
+    key = ("KC2G", sp.picture_id)
+    p0 = make_pass_result(_air(sp, 0), 1.0, seed=1, q=Q_TEST, f_hz=1205.47)
+    p1 = make_pass_result(_air(sp, 1), 1.0, seed=2, q=Q_TEST + 2, f_hz=1206.08)
+    for p, g in ((p0, 0), (p1, 1)):
+        store.add_pass(p)
+        store.attach(key, p.uid, g, "header", mode=2, codec_id=sp.codec_id)
+    assert len(store.due(Q_TEST + 4)) == 2
+    (store.root / "passes" / f"{p1.uid}.npz").unlink()
+    assert Store(store.root).due(Q_TEST + 4) == []
+    assert store.due(Q_TEST + 4) == []                # (a cached pass is checked against its file)
+
+
+def test_merge_log_says_accepted_as_a_bool(store):
+    """merge's log line writes "accepted" as true/false whatever the
+    statistic's type (an np.bool_ was written 1.0 through default=float)."""
+    sp = synthetic_picture(3)
+    key = ("K1ABC", sp.picture_id)
+    a = _air(sp, 0)
+    p = make_pass_result(a, 1.0, seed=5)
+    store.add_pass(p)
+    store.attach(key, p.uid, 0, "header", mode=0)
+    idx = picture.air_to_canonical(0)
+    q = make_pass_result(a, 0.5, seed=6)
+    Sf = np.zeros((3, 52800), np.float32)
+    Wf = np.zeros((3, 52800), np.float32)
+    Wf[0, idx] = q.w
+    Sf[0, idx] = q.w * q.z
+    assert store.merge(key, Sf, Wf, source="rx2")
+    Wo = np.zeros((3, 52800), np.float32)
+    So = np.zeros((3, 52800), np.float32)
+    Wo[0, idx] = 1.0
+    So[0, idx] = _air(synthetic_picture(4), 0)
+    assert not store.merge(key, So, Wo, source="stranger")
+    assert not store.merge(key, np.zeros((3, 52800)), np.zeros((3, 52800)), source="nothing")
+    lines = [x for x in (store.root / "log.jsonl").read_text().splitlines() if '"merge"' in x]
+    assert [json.loads(x)["accepted"] for x in lines] == [True, False, False]
+    assert all(type(json.loads(x)["accepted"]) is bool for x in lines)
+    t, _ = asc.corr_stat(q.z, q.w, a, np.ones(a.size))
+    assert type(t) is float
+
+
+def test_pass_cache_follows_the_file(store):
+    """A pass rewritten by another Store (qrss_decode.py's EM, in another
+    process) is read again, not served from this Store's cache: its next
+    rebuild wrote the old (z, w) back."""
+    sp = synthetic_picture(31)
+    key = ("K1ABC", sp.picture_id)
+    p = make_pass_result(_air(sp, 0), 0.5, seed=1)
+    store.add_pass(p)
+    store.attach(key, p.uid, 0, "header", mode=0)
+    store.pass_zw(p.uid)
+    assert store.pass_info(p.uid)["em_round"] == 0
+    better = make_pass_result(_air(sp, 0), 2.0, seed=9, em_round=1)
+    p.z, p.w, p.em_round = better.z, better.w, 1
+    Store(store.root, clock=store.clock).update_pass(p)
+    path = store.root / "passes" / f"{p.uid}.npz"
+    st = os.stat(path)          # (EM runs minutes later: no file system's clock is that coarse)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    z, w = store.pass_zw(p.uid)
+    np.testing.assert_array_equal(w, better.w.astype(np.float64))
+    assert store.pass_info(p.uid)["em_round"] == 1
+    acc = store.accumulator(key)
+    acc.rebuild(store)
+    np.testing.assert_array_equal(acc.W[0, picture.air_to_canonical(0)], better.w)
+
+
+def test_temporary_names_carry_the_thread(store, monkeypatch):
+    """A write's temporary sibling is .<name>.<pid>.<thread id>.tmp, so two
+    threads (or two Stores) of one process writing one file do not share
+    one (the second open truncated the first's, or its os.replace moved it)."""
+    import threading
+
+    seen = []
+    real = os.replace
+
+    def spy(src, dst):
+        seen.append(os.path.basename(src))
+        real(src, dst)
+    monkeypatch.setattr(os, "replace", spy)
+    p = make_pass_result(unit_rms_latents(800, seed=1), 1.0, seed=1)
+    store.add_pass(p)
+    assert seen == [f".{p.uid}.npz.{os.getpid()}.{threading.get_ident()}.tmp"]
+    monkeypatch.undo()
+    errors = []
+
+    def hammer():
+        try:
+            for _ in range(40):
+                store.add_pass(p)
+        except Exception as e:                       # noqa: BLE001
+            errors.append(e)
+    ts = [threading.Thread(target=hammer) for _ in range(3)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert errors == []
+    assert store.load_pass(p.uid).uid == p.uid
+    assert not [f for f in store.root.rglob("*") if f.name.endswith(".tmp")]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the password database is POSIX")
+def test_default_root_with_an_empty_home(monkeypatch):
+    """An empty $HOME counts as unset: the password database's home, not
+    expanduser's '/', which put the store under the filesystem root."""
+    import pwd
+    from pathlib import Path
+
+    from sstvae.qrss import store as store_mod
+    monkeypatch.delenv("QRSSTVAE_HOME", raising=False)
+    monkeypatch.setenv("HOME", "")
+    home = pwd.getpwuid(os.getuid()).pw_dir or "/"
+    assert store_mod.default_root() == Path(home) / ".local" / "share" / "qrsstvae"
+    monkeypatch.setenv("HOME", "/h")
+    assert store_mod.default_root() == Path("/h/.local/share/qrsstvae")

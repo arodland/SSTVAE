@@ -62,10 +62,7 @@ Corr corr_stat(std::span<const double> z, std::span<const double> w, std::span<c
     const double den = npsum::sum(std::span<const double>(p2));
     Corr c;
     c.M = static_cast<std::int64_t>(p.size());
-    if (den > 0) {
-        c.t = num / std::sqrt(den);
-        c.numpy = true;
-    }
+    if (den > 0) c.t = num / std::sqrt(den);
     return c;
 }
 
@@ -154,13 +151,14 @@ Validation validate_header_match(Store& store, const Key& key, std::int64_t mode
         out.details.set("mode", Value::integer(mode));
         return out;
     }
-    if (!acc.has_data(segment) || acc.median_w(segment) <= VALIDATE_MEDIAN_W) return out;
-    const auto [m, W] = acc_reference(acc, segment, static_cast<std::int64_t>(z.size()));
+    // (the median over the latents this pass carries: its air-order prefix)
+    const auto n = static_cast<std::int64_t>(z.size());
+    if (!acc.has_data(segment) || acc.median_w(segment, n) <= VALIDATE_MEDIAN_W) return out;
+    const auto [m, W] = acc_reference(acc, segment, n);
     const Corr c = corr_stat(z, w, m, W);
     const double t_exp = expected_t(w, W);
     out.ok = !(c.t < HDR_REJECT_T && t_exp > HDR_REJECT_EXPECT);
     out.details.set("t", Value::number(c.t));
-    out.t_numpy = c.numpy;
     out.details.set("M", Value::integer(c.M));
     out.details.set("t_expected", Value::number(t_exp));
     return out;

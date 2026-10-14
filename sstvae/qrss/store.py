@@ -29,9 +29,10 @@ Layout under the root (default `$QRSSTVAE_HOME`, else
     prov/<cluster>.json        a provisional cluster of unassociated pass uids
     log.jsonl                  association events (collisions, merges)
 
-Every write goes to a temporary file in the same directory and is moved
-into place with `os.replace`, so a crash leaves either the old file or
-the new one, never half of either. `/` in a callsign becomes `_` in file
+Every write goes to a temporary file in the same directory (named for the
+process and the thread, so two writers in one process never share one) and
+is moved into place with `os.replace`, so a crash leaves either the old file
+or the new one, never half of either. `/` in a callsign becomes `_` in file
 names (QRSS callsigns are `[A-Z0-9/]`, so the mapping cannot collide);
 the JSON carries the real callsign.
 """
@@ -42,6 +43,7 @@ import hashlib
 import io
 import json
 import os
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -63,9 +65,28 @@ SAME_PASS_HZ = 5.0                          # passes of one slot this close are 
 
 
 def default_root() -> Path:
-    """$QRSSTVAE_HOME, else ~/.local/share/qrsstvae."""
+    """$QRSSTVAE_HOME, else ~/.local/share/qrsstvae.
+
+    An empty $HOME counts as unset (the password database's home on POSIX):
+    expanduser reads it as "/", which put a service started with an empty
+    environment's store under the filesystem root.
+    """
     env = os.environ.get("QRSSTVAE_HOME")
-    return Path(env) if env else Path.home() / ".local" / "share" / "qrsstvae"
+    if env:
+        return Path(env)
+    return _home() / ".local" / "share" / "qrsstvae"
+
+
+def _home() -> Path:
+    """Path.home(), with an empty $HOME treated as unset (POSIX)."""
+    if os.name == "posix" and os.environ.get("HOME") == "":
+        try:
+            import pwd
+
+            return Path(pwd.getpwuid(os.getuid()).pw_dir or "/")
+        except (ImportError, KeyError):
+            return Path("~")
+    return Path.home()
 
 
 def key_name(key) -> str:
@@ -99,10 +120,22 @@ def canonical_index(segment: int, n: int) -> np.ndarray:
 # --- atomic files ----------------------------------------------------------------
 
 
+def _tmp_name(path: Path) -> Path:
+    """The temporary sibling ".<name>.<pid>.<thread id>.tmp": two threads (or
+    two Stores) of one process writing one file must not share it."""
+    return path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+
+
+def _signature(path: Path) -> tuple[int, int]:
+    """(st_mtime_ns, st_size): what a cached read of `path` is checked against."""
+    st = os.stat(path)
+    return st.st_mtime_ns, st.st_size
+
+
 def _atomic_write(path: Path, write) -> None:
     """Call write(file) on a temporary sibling, then os.replace it into place."""
     path = Path(path)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp = _tmp_name(path)
     try:
         with open(tmp, "wb") as f:
             write(f)
@@ -120,7 +153,7 @@ def _atomic_write(path: Path, write) -> None:
 def _atomic_save(path: Path, save) -> None:
     """Like _atomic_write, for a saver that takes a path (PassResult.save)."""
     path = Path(path)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp = _tmp_name(path)
     try:
         save(tmp)
         os.replace(tmp, path)
@@ -214,9 +247,10 @@ class Accumulator:
     def has_data(self, g: int) -> bool:
         return bool(np.any(self.W[g] > 0))
 
-    def median_w(self, g: int) -> float:
-        """Median W over group g's 50,600 sent latents (linear)."""
-        return float(np.median(self.W[g, picture.air_to_canonical(g)]))
+    def median_w(self, g: int, n: int = SENT) -> float:
+        """Median W over the first n of group g's sent latents in air order
+        (linear; all 50,600 by default)."""
+        return float(np.median(self.W[g, canonical_index(g, n)]))
 
     def seg_snr_db(self) -> list[float | None]:
         """Effective SNR per segment, 10 log10 median W (spec 11); None without data."""
@@ -241,6 +275,12 @@ class Store:
 
     `clock` is the time source (unix seconds) for created/updated stamps
     and for `expire`; tests pass a fake one.
+
+    A pass's cached (z, w) and light metadata are kept with the file's
+    signature (mtime_ns, size), taken before it is read, and read again
+    when the file no longer has it: another process (qrss_decode.py's EM)
+    may rewrite a pass under a running listener, whose next rebuild would
+    otherwise write the old values back.
     """
 
     def __init__(self, root=None, clock=time.time):
@@ -250,6 +290,7 @@ class Store:
             (self.root / d).mkdir(parents=True, exist_ok=True)
         self._zw: OrderedDict[str, tuple[np.ndarray, np.ndarray]] = OrderedDict()
         self._light: dict[str, dict] = {}
+        self._sig: dict[tuple[str, str], tuple[int, int]] = {}   # ("zw"|"light", uid) -> signature
 
     # --- passes ---
 
@@ -261,8 +302,13 @@ class Store:
     def add_pass(self, p: PassResult) -> None:
         """Write (or overwrite) a pass file."""
         _atomic_save(self._pass_path(p.uid), p.save)
-        self._zw.pop(p.uid, None)
-        self._light.pop(p.uid, None)
+        self._forget(p.uid)
+
+    def _forget(self, uid: str) -> None:
+        self._zw.pop(uid, None)
+        self._light.pop(uid, None)
+        self._sig.pop(("zw", uid), None)
+        self._sig.pop(("light", uid), None)
 
     def has_pass(self, uid: str) -> bool:
         return self._pass_path(uid).exists()
@@ -276,21 +322,27 @@ class Store:
     def pass_zw(self, uid: str) -> tuple[np.ndarray, np.ndarray]:
         """A pass's (z, w), float64: what accumulators are built from.
 
-        The ZW_CACHE most recently used passes are kept in memory; older
-        ones are read from disk again when next needed.
+        The ZW_CACHE most recently used passes are kept in memory (none at
+        ZW_CACHE = 0); older ones, and a pass whose file changed since it
+        was read, are read from disk again when next needed.
         """
-        if uid in self._zw:
+        path = self._pass_path(uid)
+        sig = _signature(path)
+        if uid in self._zw and self._sig.get(("zw", uid)) == sig:
             self._zw.move_to_end(uid)
-        else:
-            with np.load(self._pass_path(uid), allow_pickle=False) as d:
-                z = d["z"].astype(np.float64)
-                w = d["w"].astype(np.float64)
-            if z.shape != w.shape or z.ndim != 1:
-                raise ValueError(f"pass {uid}: z{z.shape} and w{w.shape} do not match")
-            self._zw[uid] = (z, w)
-            while len(self._zw) > ZW_CACHE:
-                self._zw.popitem(last=False)
-        return self._zw[uid]
+            return self._zw[uid]
+        with np.load(path, allow_pickle=False) as d:
+            z = d["z"].astype(np.float64)
+            w = d["w"].astype(np.float64)
+        if z.shape != w.shape or z.ndim != 1:
+            raise ValueError(f"pass {uid}: z{z.shape} and w{w.shape} do not match")
+        self._zw[uid] = (z, w)
+        self._zw.move_to_end(uid)
+        self._sig[("zw", uid)] = sig
+        while len(self._zw) > ZW_CACHE:
+            old, _ = self._zw.popitem(last=False)
+            self._sig.pop(("zw", old), None)
+        return z, w
 
     def pass_info(self, uid: str) -> dict:
         """A pass's light metadata: q, f_hz, header (dict or None), hdr_llr, z_ref,
@@ -299,8 +351,10 @@ class Store:
         f_hz is the pass's own frequency: the CE band centre, or the L pilot.
         A pass written before waveform L existed reads as CE.
         """
-        if uid not in self._light:
-            with np.load(self._pass_path(uid), allow_pickle=False) as d:
+        path = self._pass_path(uid)
+        sig = _signature(path)
+        if uid not in self._light or self._sig.get(("light", uid)) != sig:
+            with np.load(path, allow_pickle=False) as d:
                 meta = json.loads(d["meta"].tobytes().decode())
                 llr = d["hdr_llr"].astype(np.float64)
             self._light[uid] = {"uid": uid, "q": int(meta["q"]),
@@ -310,6 +364,7 @@ class Store:
                                 "em_round": int(meta["em_round"]),
                                 "waveform": int(meta.get("waveform", 0)),
                                 "frame": meta.get("frame")}
+            self._sig[("light", uid)] = sig
         return self._light[uid]
 
     def update_pass(self, p: PassResult) -> list[tuple]:
@@ -399,9 +454,14 @@ class Store:
         One dict per (member, segment): key, segment, and the member's f_hz,
         q, waveform and frame, so the caller listens for the same waveform
         at the same frequency.
+
+        An accumulator that cannot be read through (being written, or a
+        member's pass expired) contributes no rows at all, not the ones it
+        gave before failing.
         """
         out = []
         for j in sorted((self.root / "acc").glob("*.json")):
+            rows = []
             try:
                 meta = _read_json(j)
                 have = {int(m["segment"]) for m in meta["members"]}
@@ -409,12 +469,13 @@ class Store:
                     k, info = int(m["segment"]), self.pass_info(m["uid"])
                     for g in range(k + 1, int(meta["mode"]) + 1):
                         if g not in have and info["q"] + 2 * (g - k) == int(q):
-                            out.append(dict(key=(meta["callsign"], int(meta["picture_id"])),
-                                            segment=g, f_hz=info["f_hz"], q=info["q"],
-                                            waveform=info["waveform"],
-                                            frame=info["frame"]))
+                            rows.append(dict(key=(meta["callsign"], int(meta["picture_id"])),
+                                             segment=g, f_hz=info["f_hz"], q=info["q"],
+                                             waveform=info["waveform"],
+                                             frame=info["frame"]))
             except (OSError, KeyError, ValueError):
                 continue                  # (an accumulator being written, or a pass expired)
+            out.extend(rows)
         return out
 
     def find_member(self, uid: str) -> tuple | None:
@@ -551,7 +612,7 @@ class Store:
         t_exp = expected_t(Wf.ravel(), Wm.ravel())
         ok = corr_accept(t, t_exp)
         self.log({"event": "merge", "key": list(acc.key), "source": source,
-                  "t": t, "M": M, "t_expected": t_exp, "accepted": ok})
+                  "t": t, "M": M, "t_expected": t_exp, "accepted": bool(ok)})
         if not ok:
             return False
         for f in stale:
@@ -586,7 +647,10 @@ class Store:
     def prov_add(self, uid: str, cluster: str | None = None) -> str:
         """Put pass `uid` in provisional cluster `cluster` (a new one if None).
 
-        A no-op when `uid` is already in `cluster`.
+        A no-op when `uid` is already in `cluster`. A new cluster is
+        "c_<uid>", or "c_<uid>_<n>" (the smallest n >= 2 free) when that
+        name is taken -- by a cluster this pass founded and left, which
+        other passes still hold: writing over it would drop them.
         """
         if cluster is not None:
             c = _read_json(self._prov_path(cluster))
@@ -596,6 +660,10 @@ class Store:
         now = self.clock()
         if cluster is None:
             cluster = f"c_{uid}"
+            n = 2
+            while self._prov_path(cluster).exists():
+                cluster = f"c_{uid}_{n}"
+                n += 1
             c = {"cluster": cluster, "created": now, "members": []}
         else:
             c = _read_json(self._prov_path(cluster))
@@ -652,7 +720,6 @@ class Store:
                 continue
             if slot_time(self.pass_info(uid)["q"]) < cutoff:
                 self._pass_path(uid).unlink()
-                self._zw.pop(uid, None)
-                self._light.pop(uid, None)
+                self._forget(uid)
                 removed["passes"].append(uid)
         return removed

@@ -64,14 +64,11 @@ inline constexpr double PAIR_DAYS = rxconfig::associate::PAIR_DAYS;             
 inline constexpr double HDR_AGREE_Z = rxconfig::associate::HDR_AGREE_Z;            // 3
 inline constexpr double HDR_OTHER_FLIP = rxconfig::associate::HDR_OTHER_FLIP;      // 0.3
 
-// corr_stat's (t, M). `numpy` says the reference's t is an np.float64 (it
-// is a Python float 0.0 when nothing correlates: no latent kept, or a zero
-// denominator), which decides how a merge's log line writes "accepted"
-// (np.bool_ through default=float as 1.0 / 0.0, a bool as true / false).
+// corr_stat's (t, M): t a Python float (0.0 when nothing correlates: no
+// latent kept, or a zero denominator).
 struct Corr {
     double t = 0.0;
     std::int64_t M = 0;
-    bool numpy = false;
 };
 
 // The self-normalised correlation of a pass (z, w) with a reference (m, W),
@@ -106,7 +103,6 @@ std::optional<Best> best_accumulator(store::Store& store, std::span<const double
 struct Validation {
     bool ok = true;
     pyjson::Value details = pyjson::Value::object();
-    bool t_numpy = false;   // details["t"] is corr_stat's t, an np.float64 in the reference
 };
 Validation validate_header_match(store::Store& store, const store::Key& key, std::int64_t mode,
                                  std::int64_t segment, std::span<const double> z, std::span<const double> w);

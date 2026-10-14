@@ -11,7 +11,7 @@
 //       .key .mode .codec_id .S .W .S_ext .W_ext .members .foreign .parts
 //       .created .updated .uids
 //       .member(uid) ._sums(store, skip=None, ext=True) .rebuild(store)
-//       .loo(uid, store) .has_data(g) .median_w(g) .seg_snr_db() .meta()
+//       .loo(uid, store) .has_data(g) .median_w(g, n=SENT) .seg_snr_db() .meta()
 //   Store(root=None, clock=time.time, *, replace=None, zw_cache=None)
 //       .root (pathlib.Path) .clock ._zw (an OrderedDict copy of the cache)
 //       every method of store.py's Store, private ones included
@@ -192,7 +192,9 @@ void bind_accumulator(py::module_& m) {
             return pair_py(nogil([&] { return c.loo(u, core(s)); }));
         }, py::arg("uid"), py::arg("store"))
         .def("has_data", [](const Acc& a, const py::object& g) { return a.has_data(rx::as_int(g)); }, py::arg("g"))
-        .def("median_w", [](const Acc& a, const py::object& g) { return a.median_w(rx::as_int(g)); }, py::arg("g"))
+        .def("median_w", [](const Acc& a, const py::object& g, const py::object& n) {
+            return a.median_w(rx::as_int(g), rx::as_int(n));
+        }, py::arg("g"), py::arg("n") = store::SENT)
         .def("seg_snr_db", [](const Acc& a) {
             py::list out;
             for (const auto& v : a.seg_snr_db()) out.append(v ? py::object(py::float_(*v)) : py::object(py::none()));

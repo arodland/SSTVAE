@@ -20,8 +20,8 @@
 // diffs two trees): the npz through npz.hpp (np.savez's archive, 1980
 // timestamps), the JSON through pyjson.hpp (Python's float repr, ensure_ascii,
 // indent=1 and sorted keys), and each write to the temporary sibling
-// ".<name>.<pid>.tmp" (store.py's name, so a Python process sharing the store
-// meets the same names), flushed (and fsync'd where store.py fsyncs: the
+// ".<name>.<pid>.<thread id>.tmp" (store.py's name, threading.get_ident()'s
+// id, so a Python process sharing the store meets the same names), flushed (and fsync'd where store.py fsyncs: the
 // accumulators and clusters, not the pass files) and moved into place by the
 // replace seam (os.replace). A failure removes the temporary file and
 // rethrows. One documented difference in the bytes: a member's mean_w_db is
@@ -60,11 +60,13 @@
 // for the whole of a call, file I/O included: a call blocks while another
 // thread's call runs. It is the root's, not the object's: every Store open
 // on one directory in this process shares it (by its canonical path), since
-// two would otherwise write the same ".<name>.<pid>.tmp" at once and lose
-// each other's read-modify-write of an accumulator. Their caches are still
-// their own, as two processes' are (store.py's): a pass rewritten through one
-// Store (add_pass, update_pass) is read stale by another that has it cached
-// (pass_zw, pass_info) until that one forgets it -- open one Store per root. What a call costs: reading a pass is ~1 ms per MB
+// two would otherwise lose each other's read-modify-write of an accumulator.
+// Their caches are still their own, as two processes' are (store.py's), and
+// each cached pass is kept with its file's signature (mtime_ns, size), taken
+// before the read and checked at every use: a pass rewritten by another Store
+// or another process (qrss_decode.py's EM) is read again rather than served
+// stale (a rewrite inside one mtime tick that keeps the size is not seen, as
+// in store.py). What a call costs: a stat per cached read; reading a pass is ~1 ms per MB
 // (a full pass is about 1 MB, with its narrow capture), an accumulator
 // rebuild ~1 ms per member once its passes are cached (ZW_CACHE of them),
 // writing an accumulator ~2 MB of npz plus fsync (milliseconds on a local
@@ -96,6 +98,7 @@
 #include "qrss/npz.hpp"
 #include "qrss/picture.hpp"
 #include "qrss/pyjson.hpp"
+#include "qrss/rawfile.hpp"
 #include "qrss/rx_config.hpp"
 #include "qrss/types.hpp"
 
@@ -126,7 +129,8 @@ struct Key {
 
 // $QRSSTVAE_HOME (when set and not empty), else Path.home()/.local/share/
 // qrsstvae, as str(Path(...)) spells it (UTF-8). Path.home() is
-// os.path.expanduser("~"): $HOME (else the password database) on POSIX,
+// os.path.expanduser("~"): $HOME when set and not empty (else the password
+// database: store.py's _home treats an empty $HOME as unset) on POSIX,
 // %USERPROFILE% (else %HOMEDRIVE%%HOMEPATH%) on Windows, where the
 // separators are backslashes as a WindowsPath prints them.
 std::string default_root();
@@ -236,8 +240,10 @@ struct Accumulator {
     std::pair<std::vector<double>, std::vector<double>> loo(std::string_view uid, Store& store) const;
     // np.any(W[g] > 0); std::out_of_range (IndexError) for g outside 0..2.
     bool has_data(std::int64_t g) const;
-    // np.median of W over group g's 50,600 sent latents (float32 arithmetic).
-    double median_w(std::int64_t g) const;
+    // np.median of W over the first n of group g's sent latents in air order
+    // (all 50,600 by default; float32 arithmetic). canonical_index's
+    // refusals for n or g out of range.
+    double median_w(std::int64_t g, std::int64_t n = SENT) const;
     // 10 log10 median W per segment 0..mode; nullopt without data.
     std::vector<std::optional<double>> seg_snr_db() const;
     // The JSON index store.py writes.
@@ -284,7 +290,9 @@ public:
     types::PassResult load_pass(std::string_view uid) const;
     // Sorted uids of passes/*.npz.
     std::vector<std::string> pass_uids() const;
-    // A pass's (z, w), float64, from the LRU cache or the file.
+    // A pass's (z, w), float64, from the LRU cache (when the file still has
+    // the signature it was read with) or the file. FileError when the file
+    // cannot be stat'ed.
     // std::invalid_argument "pass <uid>: z(<shape>) and w(<shape>) do not
     // match" when they are not one 1-D length.
     ZWPtr pass_zw(const std::string& uid);
@@ -311,8 +319,8 @@ public:
     // Every accumulator's key, in file-name order.
     std::vector<Key> open_keys() const;
     // The later passes of pictures partly received that are due in slot q
-    // (store.py's `due`; an accumulator that cannot be read is skipped, the
-    // rows it gave before failing kept).
+    // (store.py's `due`; an accumulator that cannot be read through gives no
+    // rows at all).
     std::vector<Due> due(std::int64_t q);
     // The key of the accumulator holding pass `uid`.
     std::optional<Key> find_member(std::string_view uid) const;
@@ -342,8 +350,10 @@ public:
     // Every cluster's dict, in file-name order.
     std::vector<pyjson::Value> prov_clusters() const;
     std::optional<pyjson::Value> prov_cluster_of(std::string_view uid) const;
-    // Put pass `uid` in cluster `cluster` (a new "c_<uid>" when nullopt);
-    // a no-op when it is there already. Returns the cluster.
+    // Put pass `uid` in cluster `cluster` (when nullopt a new one, "c_<uid>",
+    // or "c_<uid>_<n>" with the smallest free n >= 2 when that file exists:
+    // never written over); a no-op when it is there already. Returns the
+    // cluster.
     std::string prov_add(const std::string& uid, std::optional<std::string> cluster = std::nullopt);
     void prov_remove(std::string_view uid);
 
@@ -358,16 +368,27 @@ private:
     void write_atomic(const std::string& path, std::span<const std::uint8_t> data, bool sync) const;
     void write_json(const std::string& path, const pyjson::Value& v) const;
     void forget(const std::string& uid);
+    // os.stat(path)'s (mtime_ns, size); FileError when it cannot be stat'ed.
+    rawfile::Signature signature(const std::string& path) const;
     std::string dir(const char* name) const;
+
+    struct Cached {
+        ZWPtr zw;
+        rawfile::Signature sig;
+    };
+    struct LightEntry {
+        PassInfo info;
+        rawfile::Signature sig;
+    };
 
     std::string root_;
     Seams seams_;
     // The root's mutex, shared with every other Store open on it (THREADS).
     std::shared_ptr<std::recursive_mutex> mu_;
     // (z, w) LRU: front is the least recently used.
-    std::list<std::pair<std::string, ZWPtr>> zw_;
-    std::unordered_map<std::string, std::list<std::pair<std::string, ZWPtr>>::iterator> zw_index_;
-    std::unordered_map<std::string, PassInfo> light_;
+    std::list<std::pair<std::string, Cached>> zw_;
+    std::unordered_map<std::string, std::list<std::pair<std::string, Cached>>::iterator> zw_index_;
+    std::unordered_map<std::string, LightEntry> light_;
 };
 
 // --- helpers shared with associate ---------------------------------------------------

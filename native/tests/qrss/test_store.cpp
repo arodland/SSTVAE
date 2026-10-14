@@ -516,6 +516,112 @@ static void test_two_stores_one_root() {
     holder.join();
 }
 
+// --- the reference's fixes of 2026-10-14 (tests/test_qrss_multipass.py's twins) -----------
+
+// A pass cut to its first n latents (a SHORT-sized frame), uid recomputed.
+static qrss::types::PassResult prefix_of(qrss::types::PassResult p, std::size_t n) {
+    p.z.resize(n);
+    p.w.resize(n);
+    p.uid = qrss::types::pass_uid(p.q, p.f_hz, p.z);
+    return p;
+}
+
+static void test_reference_fixes() {
+    check::current_step = "reference fixes";
+    const std::string root = fresh_root("fixes");
+    Cleanup cleanup{root};
+    auto passes = ss::make_passes();
+    std::vector<std::string> moved;
+    std::size_t cap = qs::ZW_CACHE;
+    qs::Store st(root, qs::Store::Seams{[] { return store_pins::T0; },
+                                        [&](const std::string& from, const std::string& to) {
+                                            moved.push_back(fs::path(from).filename().string());
+                                            std::error_code ec;
+                                            if (!util::replace_file(from, to, ec)) throw std::system_error(ec);
+                                        },
+                                        [&] { return cap; }});
+    const auto& a0 = passes.at("a0").pass;
+    st.add_pass(a0);
+    // the temporary sibling carries the thread: .<name>.<pid>.<thread id>.tmp
+    check::equal(moved.at(0), "." + a0.uid + ".npz." + std::to_string(qrss::rawfile::process_id()) + "." +
+                                  std::to_string(qrss::rawfile::thread_ident()) + ".tmp",
+                 "temporary name");
+
+    // rule 1 gates on the median W over the pass's own prefix: SHORT-sized
+    // passes of picture 1 under picture 0's header are a collision
+    const qs::Key key = ss::key_a();
+    const auto mine = prefix_of(a0, 4000), stranger = prefix_of(passes.at("x0").pass, 4000);
+    st.add_pass(mine);
+    st.attach(key, mine.uid, 0, "header", 2, 0xD1D8);
+    const qs::Accumulator acc = st.accumulator(key);
+    check::equal(acc.median_w(0), 0.0, "the whole segment's median W is 0");
+    check::equal(acc.median_w(0, 4000), 10.0, "its prefix's is 10");
+    const std::vector<double> sz(stranger.z.begin(), stranger.z.end()), sw(stranger.w.begin(), stranger.w.end());
+    const qa::Validation v = qa::validate_header_match(st, key, 2, 0, sz, sw);
+    check::is_true(!v.ok, "a SHORT-sized impostor is a collision");
+    check::equal(v.details.at("M").as_int(), std::int64_t(4000), "checked over its 4000 latents");
+    const std::vector<double> mz(mine.z.begin(), mine.z.end()), mw(mine.w.begin(), mine.w.end());
+    check::is_true(qa::validate_header_match(st, key, 2, 0, mz, mw).ok, "the picture's own pass is not");
+
+    // ZW_CACHE = 0: the pass returned, nothing cached
+    cap = 0;
+    check::equal(st.pass_zw(a0.uid)->z.size(), a0.z.size(), "returned at size 0");
+    check::is_true(st.zw_cached().empty(), "and nothing cached");
+    cap = qs::ZW_CACHE;
+
+    // a pass rewritten through another Store is read again
+    check::equal(st.pass_zw(a0.uid)->w[0], 10.0, "cached");
+    check::equal(st.pass_info(a0.uid).em_round, std::int64_t(0), "cached info");
+    {
+        qs::Store other(root, qs::Store::Seams{[] { return store_pins::T0; }, {}, {}});
+        other.add_pass(passes.at("a0e").pass);   // a0's uid, w = 100, EM round 1
+    }
+    const fs::path ppath = fs::path(root) / "passes" / (a0.uid + ".npz");
+    fs::last_write_time(ppath, fs::last_write_time(ppath) + std::chrono::seconds(1));
+    check::equal(st.pass_zw(a0.uid)->w[0], 100.0, "the new file's (z, w)");
+    check::equal(st.pass_info(a0.uid).em_round, std::int64_t(1), "and its info");
+
+    // a new cluster never writes over one of the same name
+    const auto& b0 = passes.at("b0").pass;
+    const auto& b0b = passes.at("b0b").pass;
+    st.add_pass(b0);
+    st.add_pass(b0b);
+    const std::string c = st.prov_add(b0.uid);
+    check::equal(c, "c_" + b0.uid, "c_<uid>");
+    st.prov_add(b0b.uid, c);
+    st.prov_remove(b0.uid);
+    check::equal(st.prov_add(b0.uid), "c_" + b0.uid + "_2", "c_<uid>_2 when c_<uid> holds another");
+    check::equal(st.prov_cluster_of(b0b.uid)->at("cluster").as_string(), c, "which keeps it");
+    check::equal(st.prov_clusters().size(), std::size_t(2), "two clusters");
+
+    // due: an accumulator whose later member's pass is gone gives no rows
+    const auto& b1 = passes.at("b1").pass;
+    st.add_pass(b1);
+    st.attach(qs::Key{"DUE", 7}, b0.uid, 0, "corr", 2);
+    st.attach(qs::Key{"DUE", 7}, b1.uid, 1, "corr", 2);
+    check::equal(st.due(b0.q + 4).size(), std::size_t(1), "segment 2 due from the first member");
+    fs::remove(fs::path(root) / "passes" / (b1.uid + ".npz"));
+    check::equal(st.due(b0.q + 4).size(), std::size_t(0), "none once the second member's pass is gone");
+
+#ifndef _WIN32
+    // an empty $HOME counts as unset
+    const char* old_home = std::getenv("HOME");
+    const std::string saved_home = old_home ? old_home : "";
+    const char* old_q = std::getenv("QRSSTVAE_HOME");
+    const std::string saved_q = old_q ? old_q : "";
+    ::unsetenv("QRSSTVAE_HOME");
+    ::setenv("HOME", "", 1);
+    const std::string r = qs::default_root();
+    check::is_true(r != "/.local/share/qrsstvae", "not under the filesystem root: " + r);
+    check::equal(r.substr(r.size() - std::string("/.local/share/qrsstvae").size()), std::string("/.local/share/qrsstvae"),
+                 "the password database's home");
+    ::setenv("HOME", "/h", 1);
+    check::equal(qs::default_root(), std::string("/h/.local/share/qrsstvae"), "a set $HOME");
+    if (old_home) ::setenv("HOME", saved_home.c_str(), 1); else ::unsetenv("HOME");
+    if (old_q) ::setenv("QRSSTVAE_HOME", saved_q.c_str(), 1);
+#endif
+}
+
 int main() {
     check::report_crashes_instead_of_prompting();
     check::Watchdog watchdog(600.0, "qrss_core_store");
@@ -526,6 +632,7 @@ int main() {
         test_expire_cutoff();
         test_replace_seam();
         test_zw_cache_seam();
+        test_reference_fixes();
         test_threads();
         test_two_stores_one_root();
     } catch (const std::exception& e) {

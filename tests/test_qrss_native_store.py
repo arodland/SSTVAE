@@ -20,8 +20,8 @@ The contract (the bar), and in brackets what was measured (2026-10-14):
 - **every return value** of a scripted sequence of 142 operations (each
   method of Store and Accumulator, twins CE and L, header modes, merges
   accepted, duplicated, replaced, anonymous, uncorrelated, without overlap,
-  non-finite, negative and misshapen, provisional clusters including the
-  reference's clobbering of a cluster named c_<uid>, logs of numpy scalars
+  non-finite, negative and misshapen, provisional clusters including a
+  new one whose name c_<uid> is taken (c_<uid>_2), logs of numpy scalars
   and odd keys, due with an accumulator whose later member's pass is gone,
   expiry): the same values of the same types (np.float64 where the
   reference returns one), the same arrays bit for bit, the same dicts in
@@ -35,9 +35,8 @@ The contract (the bar), and in brackets what was measured (2026-10-14):
 - **the seams**: the clock (called for every stamp, its exception passed
   on with nothing written), the facade's os.replace (a failing replace
   leaves what the reference's leaves, temporary files removed) and
-  ZW_CACHE (the same cache, in the same order, at any size but 0, where
-  the reference raises KeyError and the C++ returns the pass: a deviation,
-  pinned);
+  ZW_CACHE (the same cache, in the same order, at any size, 0 included:
+  the pass returned and nothing cached);
 - **threads**: eight threads hammering one C++ Store (attach, detach,
   merge, the provisional clusters, due, reads) raise nothing, and every
   accumulator they leave is what its members and parts sum to (the
@@ -274,7 +273,8 @@ def test_module_functions(ns):
 
 def test_default_root(ns, monkeypatch, tmp_path):
     """$QRSSTVAE_HOME, else ~/.local/share/qrsstvae, as pathlib.Path; an
-    empty $QRSSTVAE_HOME is unset and an empty $HOME is '/' (expanduser)."""
+    empty $QRSSTVAE_HOME is unset, and so is an empty $HOME (the password
+    database's home, not expanduser's '/')."""
     for env, home in [("x/y", None), (str(tmp_path / "q"), None), ("", str(tmp_path)),
                       (None, str(tmp_path)), (None, ""), (None, "/"), ("~/z", "/h")]:
         if env is None:
@@ -456,7 +456,7 @@ def _script(cls, root):
     r("prov_remove again", st.prov_remove, P["D2"].uid)
     tick()
     r("prov_add D2 to c3", st.prov_add, P["D2"].uid, c3)
-    r("prov_add D3 anew", st.prov_add, P["D3"].uid)        # the reference clobbers D2 here
+    r("prov_add D3 anew", st.prov_add, P["D3"].uid)        # c_<D3> holds D2: c_<D3>_2
     r("prov after", st.prov_clusters)
     r("attach provisional", st.attach, K["D"], P["D1"].uid, 0, "corr", mode=0)
     r("prov end", st.prov_clusters)
@@ -663,12 +663,11 @@ def test_replace_seam(NStore, tmp_path, monkeypatch):
 
 def test_zw_cache_seam(NStore, tmp_path, monkeypatch):
     """store.ZW_CACHE read at every pass_zw: the same cache in the same
-    order at sizes 1 to 4; at 0 the reference raises KeyError (it evicts
-    the entry it is about to return) and the C++ returns the pass."""
+    order at sizes 0 (the pass returned, nothing cached) to 4."""
     P, K, _ = _passes()
     uids = [P[k].uid for k in ("A0", "A1", "A2", "B1", "C0")]
     seq = [0, 1, 2, 0, 3, 4, 1, 0, 2, 2, 4]
-    for size in (1, 2, 4, S.ZW_CACHE):
+    for size in (0, 1, 2, 4, S.ZW_CACHE):
         monkeypatch.setattr(S, "ZW_CACHE", size)
         orders = []
         for cls, name in ((S.Store, "py"), (NStore, "cpp")):
@@ -681,14 +680,8 @@ def test_zw_cache_seam(NStore, tmp_path, monkeypatch):
                 got.append((_sha(z), _sha(w), list(st._zw)))
             orders.append(got)
         assert orders[0] == orders[1], size
-    monkeypatch.setattr(S, "ZW_CACHE", 0)
-    py, cpp = S.Store(tmp_path / "py0"), NStore(tmp_path / "cpp0")
-    for st in (py, cpp):
-        st.add_pass(P["A0"])
-    with pytest.raises(KeyError):
-        py.pass_zw(P["A0"].uid)
-    z, w = cpp.pass_zw(P["A0"].uid)                     # the deviation, pinned
-    assert np.array_equal(z, P["A0"].z.astype(np.float64)) and list(cpp._zw) == []
+        if size == 0:
+            assert all(o[2] == [] for o in orders[0])
 
 
 # --- threads ---------------------------------------------------------------------------------------------

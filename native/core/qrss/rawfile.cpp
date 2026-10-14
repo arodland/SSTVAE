@@ -191,6 +191,26 @@ std::optional<std::int64_t> mtime_ns(const std::string& path, std::error_code& e
     return (static_cast<std::int64_t>(t) - 116444736000000000LL) * 100;
 }
 
+std::optional<Signature> signature(const std::string& path, std::error_code& ec) {
+    ec.clear();
+    const std::optional<std::wstring> w = util::wide_of(path);
+    if (!w || path.find('\0') != std::string::npos) {
+        ec = errno_code(EINVAL);
+        return std::nullopt;
+    }
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    if (!::GetFileAttributesExW(w->c_str(), GetFileExInfoStandard, &a)) {
+        ec = win_code(::GetLastError());
+        return std::nullopt;
+    }
+    const std::uint64_t t = (static_cast<std::uint64_t>(a.ftLastWriteTime.dwHighDateTime) << 32) |
+                            a.ftLastWriteTime.dwLowDateTime;
+    Signature s;
+    s.mtime_ns = (static_cast<std::int64_t>(t) - 116444736000000000LL) * 100;
+    s.size = (static_cast<std::uint64_t>(a.nFileSizeHigh) << 32) | a.nFileSizeLow;
+    return s;
+}
+
 std::int64_t process_id() { return static_cast<std::int64_t>(::GetCurrentProcessId()); }
 std::uint64_t thread_ident() { return static_cast<std::uint64_t>(::GetCurrentThreadId()); }
 
@@ -322,6 +342,27 @@ std::optional<std::int64_t> mtime_ns(const std::string& path, std::error_code& e
 #else
     return static_cast<std::int64_t>(st.st_mtim.tv_sec) * 1000000000LL + st.st_mtim.tv_nsec;
 #endif
+}
+
+std::optional<Signature> signature(const std::string& path, std::error_code& ec) {
+    ec.clear();
+    if (path.find('\0') != std::string::npos) {
+        ec = errno_code(EINVAL);
+        return std::nullopt;
+    }
+    struct stat st;
+    if (::stat(path.c_str(), &st) != 0) {
+        ec = errno_code(errno);
+        return std::nullopt;
+    }
+    Signature s;
+#if defined(__APPLE__)
+    s.mtime_ns = static_cast<std::int64_t>(st.st_mtimespec.tv_sec) * 1000000000LL + st.st_mtimespec.tv_nsec;
+#else
+    s.mtime_ns = static_cast<std::int64_t>(st.st_mtim.tv_sec) * 1000000000LL + st.st_mtim.tv_nsec;
+#endif
+    s.size = static_cast<std::uint64_t>(st.st_size);
+    return s;
 }
 
 std::int64_t process_id() { return static_cast<std::int64_t>(::getpid()); }

@@ -86,7 +86,7 @@ static void test_statistics() {
         W.resize(static_cast<std::size_t>(c.n_m));
         const qa::Corr r = qa::corr_stat(z, w, m, W);
         const double te = qa::expected_t(w, W);
-        const Value got = Value::array({Value::number(r.t), Value::integer(r.M), Value::boolean(r.numpy),
+        const Value got = Value::array({Value::number(r.t), Value::integer(r.M),
                                         Value::number(te), Value::number(qa::expected_t(w, W, 0.0)),
                                         Value::boolean(qa::corr_accept(r.t, te))});
         check::equal(qrss::pyjson::dumps(got), std::string(c.want), "stats case " + std::to_string(k));

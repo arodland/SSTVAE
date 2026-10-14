@@ -318,7 +318,8 @@ def stats():
         z, w, m, W = stats_case(k, nz, nm, family, edits)
         t, M = asc.corr_stat(z, w, m, W)
         te = asc.expected_t(w, W)
-        out.append(json.dumps([float(t), int(M), type(t) is not float, te,
+        assert type(t) is float, type(t)
+        out.append(json.dumps([t, int(M), te,
                                asc.expected_t(w, W, kurtosis=0.0), bool(asc.corr_accept(t, te))]))
     return out
 
@@ -521,7 +522,7 @@ def main() -> None:
         "    int n_z, n_m;",
         "    const char* family;",
         "    const char* edits;",
-        "    const char* want;   // [t, M, t is np.float64, expected_t, expected_t(kurtosis=0), corr_accept]",
+        "    const char* want;   // [t, M, expected_t, expected_t(kurtosis=0), corr_accept]",
         "};",
         "inline const Stat STATS[] = {",
     ]

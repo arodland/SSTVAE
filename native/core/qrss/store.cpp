@@ -120,14 +120,6 @@ bool uid_matches(const Value& v, std::optional<std::string_view> uid) {
 
 // --- files ---------------------------------------------------------------------------
 
-long process_id() {
-#ifdef _WIN32
-    return static_cast<long>(::_getpid());
-#else
-    return static_cast<long>(::getpid());
-#endif
-}
-
 [[noreturn]] void file_error(const char* verb, const std::string& path, int err) {
     throw FileError(verb, path, err);
 }
@@ -312,15 +304,13 @@ std::string env(const char* name) {
 #endif
 }
 
-bool has_env(const char* name) {
 #ifdef _WIN32
+bool has_env(const char* name) {
     std::wstring w;
     for (const char* c = name; *c; ++c) w += static_cast<wchar_t>(*c);
     return ::_wgetenv(w.c_str()) != nullptr;
-#else
-    return std::getenv(name) != nullptr;
-#endif
 }
+#endif
 
 std::string pathlib(const std::string& p) {
 #ifdef _WIN32
@@ -478,7 +468,7 @@ std::string default_root() {
     }
     return pathlib(home + "\\.local\\share\\qrsstvae");
 #else
-    if (has_env("HOME")) {
+    if (!env("HOME").empty()) {      // (an empty $HOME counts as unset: store.py's _home)
         home = env("HOME");
     } else if (const auto dir = passwd_home()) {
         home = *dir;
@@ -630,8 +620,8 @@ bool Accumulator::has_data(std::int64_t g) const {
     return false;
 }
 
-double Accumulator::median_w(std::int64_t g) const {
-    const auto idx = picture::air_to_canonical(g);
+double Accumulator::median_w(std::int64_t g, std::int64_t n) const {
+    const auto idx = canonical_index(g, n);
     const std::size_t base = static_cast<std::size_t>(g) * GROUP_LATENTS;
     std::vector<float> v(idx.size());
     for (std::size_t i = 0; i < idx.size(); ++i) v[i] = W[base + idx[i]];
@@ -696,7 +686,8 @@ void Store::write_atomic(const std::string& path, std::span<const std::uint8_t> 
     );
     const std::string parent = path.substr(0, slash + 1);
     const std::string name = path.substr(slash + 1);
-    const std::string tmp = parent + "." + name + "." + std::to_string(process_id()) + ".tmp";
+    const std::string tmp = parent + "." + name + "." + std::to_string(rawfile::process_id()) + "." +
+                            std::to_string(rawfile::thread_ident()) + ".tmp";
     try {
         {
             util::File f = util::open_file(tmp, "wb");
@@ -739,6 +730,13 @@ void Store::forget(const std::string& uid) {
     light_.erase(uid);
 }
 
+rawfile::Signature Store::signature(const std::string& path) const {
+    std::error_code ec;
+    const auto sig = rawfile::signature(path, ec);
+    if (!sig) file_error("cannot stat", path, code_of(ec));
+    return *sig;
+}
+
 // --- passes ---
 
 std::string Store::pass_path(std::string_view uid) const {
@@ -773,11 +771,17 @@ std::vector<std::string> Store::pass_uids() const {
 ZWPtr Store::pass_zw(const std::string& uid) {
     const auto lk = hold();
     const std::size_t cap = seams_.zw_cache ? seams_.zw_cache() : ZW_CACHE;
+    const std::string path = pass_path(uid);
+    const rawfile::Signature sig = signature(path);   // (before the read: a rewrite during it shows next time)
     if (const auto it = zw_index_.find(uid); it != zw_index_.end()) {
-        zw_.splice(zw_.end(), zw_, it->second);
-        return it->second->second;
+        if (it->second->second.sig == sig) {
+            zw_.splice(zw_.end(), zw_, it->second);
+            return it->second->second.zw;
+        }
+        zw_.erase(it->second);       // the file changed: read it again
+        zw_index_.erase(it);
     }
-    const npz::Npz d = npz::load_npz(pass_path(uid));
+    const npz::Npz d = npz::load_npz(path);
     const npz::Array& za = member_of(d, "z");
     const npz::Array& wa = member_of(d, "w");
     auto zw = std::make_shared<ZW>();
@@ -787,7 +791,7 @@ ZWPtr Store::pass_zw(const std::string& uid) {
         throw std::invalid_argument("pass " + uid + ": z" + shape_repr(za.shape) + " and w" + shape_repr(wa.shape) +
                                     " do not match");
     ZWPtr out = zw;
-    zw_.emplace_back(uid, out);
+    zw_.emplace_back(uid, Cached{out, sig});
     zw_index_[uid] = std::prev(zw_.end());
     while (zw_.size() > cap) {
         zw_index_.erase(zw_.front().first);
@@ -805,13 +809,16 @@ std::vector<std::string> Store::zw_cached() const {
 
 std::vector<std::pair<std::string, ZWPtr>> Store::zw_items() const {
     const auto lk = hold();
-    return std::vector<std::pair<std::string, ZWPtr>>(zw_.begin(), zw_.end());
+    std::vector<std::pair<std::string, ZWPtr>> out;
+    for (const auto& e : zw_) out.emplace_back(e.first, e.second.zw);
+    return out;
 }
 
 PassInfo Store::pass_info(const std::string& uid) {
     const auto lk = hold();
-    if (const auto it = light_.find(uid); it != light_.end()) return it->second;
     const std::string path = pass_path(uid);
+    const rawfile::Signature sig = signature(path);
+    if (const auto it = light_.find(uid); it != light_.end() && it->second.sig == sig) return it->second.info;
     const npz::Npz d = npz::load_npz(path);
     const npz::Array& ma = member_of(d, "meta");
     check_utf8(ma.bytes, path);
@@ -829,7 +836,7 @@ PassInfo Store::pass_info(const std::string& uid) {
     info.waveform = wf ? py_int(*wf) : 0;
     const Value* fr = meta.find("frame");
     info.frame = fr ? *fr : Value::null();
-    light_.emplace(uid, info);
+    light_.insert_or_assign(uid, LightEntry{info, sig});
     return info;
 }
 
@@ -946,6 +953,7 @@ std::vector<Due> Store::due(std::int64_t q) {
     sort_paths(names);
     std::vector<Due> out;
     for (const std::string& n : names) {
+        std::vector<Due> rows;   // (an accumulator that fails part way gives none)
         try {
             const Value meta = read_json(join(dir("acc"), n));
             std::unordered_set<std::int64_t> have;
@@ -955,8 +963,8 @@ std::vector<Due> Store::due(std::int64_t q) {
                 const PassInfo info = pass_info(m.at("uid").as_string("a member's uid"));
                 for (std::int64_t g = k + 1; g < py_int(meta.at("mode")) + 1; ++g) {
                     if (!have.count(g) && info.q + 2 * (g - k) == q)
-                        out.push_back(Due{Key{meta.at("callsign").as_string("callsign"), py_int(meta.at("picture_id"))},
-                                          g, info.f_hz, info.q, info.waveform, info.frame});
+                        rows.push_back(Due{Key{meta.at("callsign").as_string("callsign"), py_int(meta.at("picture_id"))},
+                                           g, info.f_hz, info.q, info.waveform, info.frame});
                 }
             }
         } catch (const FileError&) {          // OSError: an accumulator being written,
@@ -966,6 +974,7 @@ std::vector<Due> Store::due(std::int64_t q) {
         } catch (const std::invalid_argument&) {   // ValueError
             continue;
         }
+        out.insert(out.end(), std::make_move_iterator(rows.begin()), std::make_move_iterator(rows.end()));
     }
     return out;
 }
@@ -1120,7 +1129,7 @@ bool Store::merge(const Key& key, std::span<const float> S, std::span<const floa
     ev.set("M", Value::integer(c.M));
     ev.set("t_expected", Value::number(t_exp));
     // an np.bool_ (t an np.float64) goes through default=float
-    ev.set("accepted", c.numpy ? Value::number(ok ? 1.0 : 0.0) : Value::boolean(ok));
+    ev.set("accepted", Value::boolean(ok));
     log(ev);
     if (!ok) return false;
     std::vector<Value> stale_entries;
@@ -1209,6 +1218,8 @@ std::string Store::prov_add(const std::string& uid, std::optional<std::string> c
     Value c;
     if (!cluster) {
         cluster = "c_" + uid;
+        for (std::int64_t n = 2; util::exists(prov_path(*cluster)); ++n)   // (never over another cluster)
+            cluster = "c_" + uid + "_" + std::to_string(n);
         c = Value::object();
         c.set("cluster", Value::string(*cluster));
         c.set("created", Value::number(t));

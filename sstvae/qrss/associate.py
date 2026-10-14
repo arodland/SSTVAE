@@ -5,7 +5,8 @@ A pass is attached to an accumulator by the first rule that succeeds:
 
 1. **header** -- the pass's own header decoded: (callsign, picture ID).
    Validated by correlation when the accumulator's segment is already
-   good (median W > -10 dB): a pass whose latents do not correlate
+   good (median W > -10 dB over the latents the pass carries): a pass
+   whose latents do not correlate
    (t < 3 while t > 8 was expected) is a picture-ID collision or a
    re-encoded picture under an old ID; it is logged and held
    provisionally instead.
@@ -97,7 +98,7 @@ def corr_stat(z, w, m, W) -> tuple[float, int]:
         return 0.0, 0
     num = float(np.sum(v * z * m))
     den = float(np.sum((v * z * m) ** 2))
-    return (num / np.sqrt(den) if den > 0 else 0.0), int(v.size)
+    return (float(num / np.sqrt(den)) if den > 0 else 0.0), int(v.size)
 
 
 def expected_t(w, W, kurtosis: float = KURTOSIS) -> float:
@@ -173,17 +174,22 @@ def validate_header_match(store: Store, key, mode: int, segment: int, z, w) -> t
     """Rule 1's correlation check of a header match. Returns (ok, details).
 
     No check (ok) while there is no accumulator or its segment's median
-    W is at most -10 dB. A mode that disagrees with the accumulator's is
-    a collision as well.
+    W, over the latents this pass carries (its air-order prefix: all of
+    them for FULL, the first 1024/4096/16384 for TINY/SHORT/MEDIUM), is at
+    most -10 dB. Over the whole segment the median of a short frame's
+    accumulator stays 0 however many passes it holds, and a colliding
+    header was attached unchecked. A mode that disagrees with the
+    accumulator's is a collision as well.
     """
     if not store.has_accumulator(key):
         return True, {}
     acc = store.accumulator(key)
     if int(mode) != acc.mode:
         return False, {"reason": "mode", "acc_mode": acc.mode, "mode": int(mode)}
-    if not acc.has_data(segment) or acc.median_w(segment) <= VALIDATE_MEDIAN_W:
+    n = np.asarray(z).size
+    if not acc.has_data(segment) or acc.median_w(segment, n) <= VALIDATE_MEDIAN_W:
         return True, {}
-    m, W = _acc_reference(acc, segment, np.asarray(z).size)
+    m, W = _acc_reference(acc, segment, n)
     t, M = corr_stat(z, w, m, W)
     t_exp = expected_t(w, W)
     ok = not (t < HDR_REJECT_T and t_exp > HDR_REJECT_EXPECT)
