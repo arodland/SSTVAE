@@ -31,6 +31,7 @@
 #define NOMINMAX
 #endif
 #include <io.h>
+#include <stdlib.h>
 #include <windows.h>
 #else
 #include <poll.h>
@@ -131,9 +132,28 @@ InputHandle InputHandle::standard_input() {
 #endif
 }
 
+#ifdef _MSC_VER
+namespace {
+// _get_osfhandle of a descriptor that is not open runs the CRT's
+// invalid-parameter handler, whose default ends the process on the spot
+// (Python's os.read raises OSError EBADF there instead): silenced on this
+// thread for the one call, as CPython's _Py_BEGIN_SUPPRESS_IPH does, so the
+// invalid handle reaches the first read and is reported there.
+void __cdecl ignore_invalid_parameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int,
+                                      std::uintptr_t) {}
+}  // namespace
+#endif
+
 InputHandle InputHandle::from_fd(int fd) {
 #ifdef _WIN32
-    return InputHandle(static_cast<std::intptr_t>(_get_osfhandle(fd)));
+#ifdef _MSC_VER
+    const _invalid_parameter_handler old = _set_thread_local_invalid_parameter_handler(ignore_invalid_parameter);
+#endif
+    const std::intptr_t h = _get_osfhandle(fd);
+#ifdef _MSC_VER
+    _set_thread_local_invalid_parameter_handler(old);
+#endif
+    return InputHandle(h);
 #else
     return InputHandle(fd);
 #endif

@@ -43,6 +43,14 @@
 //   other implementation wrote is "no picture" on --key (and --list ends
 //   in the store's KeyError); store.py is the one to fix, since two
 //   callsigns differing after their last '.' share its file.
+// - A damaged store (a truncated or corrupt pass or accumulator file)
+//   ends both, but not with the same exception: the script's tracebacks
+//   name np.load's and json's classes (BadZipFile, EOFError,
+//   JSONDecodeError, ...), the C++ store throws its ValueError with its own
+//   text. And in member_wave (--list, --key) the script catches only
+//   OSError, KeyError and ValueError, so a pass file np.load cannot open
+//   (BadZipFile, EOFError) crashes the listing part-way, where this prints
+//   "?" for that member and goes on; the script is the one to fix.
 //
 // --key's picture ID is any hexadecimal int, as int() reads it: one past
 // int64 keys no accumulator the store can hold, so it is "no picture", the

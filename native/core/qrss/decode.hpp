@@ -91,7 +91,9 @@ PictureKey parse_key(std::string_view s);
 // member_wave(store, uid): a stored pass's waveform and frame ("CE full",
 // "L l-short", "CE ?" for a pass without a frame), "?" when it cannot be
 // read (OSError, KeyError, ValueError). The uid as the member's JSON holds
-// it: anything but a string is the script's TypeError.
+// it: anything but a string is the script's TypeError. A pass file np.load
+// cannot open is "?" here too (the C++ store's ValueError), where the script
+// lets np.load's BadZipFile / EOFError escape (apps/sstvae_qrss/decode.cpp).
 std::string member_wave(store::Store& store, const pyjson::Value& uid);
 
 // em.acc_mean_w_db(acc): 10 log10 of the mean W over the latents heard
