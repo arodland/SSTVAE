@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <charconv>
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -193,6 +194,75 @@ std::vector<std::string_view> split_lines(std::string_view s) {
         }
     }
     if (start < n) out.push_back(s.substr(start));
+    return out;
+}
+
+// json.loads reads an integer of any size, and float() of one past int64 is
+// the float it rounds to; pyjson holds int64 and refuses the rest. So an
+// integer token past int64 (outside strings) is read again as the float
+// literal of the same digits, "123...890" as "123...890.0": the same float,
+// both correctly rounded, so a line the reference keeps (a time, or an
+// extra key, that big) is kept. nullopt when the line has no such token.
+std::optional<std::string> widen_big_ints(std::string_view s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    bool changed = false;
+    bool in_str = false;
+    const std::size_t n = s.size();
+    std::size_t i = 0;
+    auto digit = [&](std::size_t k) { return k < n && s[k] >= '0' && s[k] <= '9'; };
+    while (i < n) {
+        const char c = s[i];
+        if (in_str) {
+            out += c;
+            if (c == '\\' && i + 1 < n) {
+                out += s[i + 1];
+                i += 2;
+                continue;
+            }
+            if (c == '"') in_str = false;
+            ++i;
+            continue;
+        }
+        if (c == '"') {
+            in_str = true;
+            out += c;
+            ++i;
+            continue;
+        }
+        if (c == '-' || digit(i)) {
+            std::size_t j = i + (c == '-' ? 1 : 0);
+            const std::size_t d0 = j;
+            while (digit(j)) ++j;
+            const std::size_t d1 = j;
+            bool real = false;
+            if (j < n && s[j] == '.') {
+                real = true;
+                ++j;
+                while (digit(j)) ++j;
+            }
+            if (j < n && (s[j] == 'e' || s[j] == 'E')) {
+                real = true;
+                ++j;
+                if (j < n && (s[j] == '+' || s[j] == '-')) ++j;
+                while (digit(j)) ++j;
+            }
+            out.append(s.substr(i, j - i));
+            if (!real && d1 > d0) {
+                std::int64_t v = 0;
+                const auto res = std::from_chars(s.data() + i, s.data() + d1, v);
+                if (res.ec == std::errc::result_out_of_range) {
+                    out += ".0";
+                    changed = true;
+                }
+            }
+            i = std::max(j, i + 1);
+            continue;
+        }
+        out += c;
+        ++i;
+    }
+    if (!changed) return std::nullopt;
     return out;
 }
 
@@ -716,8 +786,17 @@ std::vector<DialPoint> parse_dial_text(std::string_view bytes) {
         pyjson::Value d;
         try {
             d = pyjson::loads(line);
+        } catch (const std::overflow_error&) {
+            // an integer past int64 (widen_big_ints)
+            const std::optional<std::string> wide = widen_big_ints(line);
+            if (!wide) continue;
+            try {
+                d = pyjson::loads(*wide);
+            } catch (const std::exception&) {
+                continue;
+            }
         } catch (const std::exception&) {
-            continue;   // json's ValueError (and an int past int64, which this reader cannot hold)
+            continue;   // json's ValueError
         }
         if (d.kind() != pyjson::Value::Kind::Object) continue;   // d["t"] on a list or a number: TypeError
         const pyjson::Value* tv = d.find("t");

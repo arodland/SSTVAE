@@ -143,6 +143,15 @@ std::int64_t index_of(const py::handle& o) {
 
 bool truth(const py::handle& o) { return rx::as_bool(o); }
 
+// A number as a double the way arithmetic takes one (__float__ or
+// __index__): TypeError for a str, where rx::as_double's float() would
+// parse it.
+double real(const py::handle& o) {
+    const double v = PyFloat_AsDouble(o.ptr());
+    if (v == -1.0 && PyErr_Occurred()) throw py::error_already_set();
+    return v;
+}
+
 // a <op> b, Python's comparison, as a bool
 bool compare(const py::handle& a, const py::handle& b, int op) {
     const py::object r = steal(PyObject_RichCompare(a.ptr(), b.ptr(), op));
@@ -693,14 +702,27 @@ void bind(py::module_& qrss) {
                 return best;
             }
             if (py::isinstance<fr::FrameSpec>(spec)) return py::float_(lv::frame_seconds(spec.cast<fr::FrameSpec>()));
-            return steal(PyNumber_Multiply(spec.attr("keyed_end_pos").ptr(), spec.attr("t_sym").ptr()));
+            // `spec.keyed_end_pos * spec.t_sym`, its operands in Python's order
+            // (C++ leaves the order of a call's arguments open)
+            const py::object k = spec.attr("keyed_end_pos");
+            const py::object t = spec.attr("t_sym");
+            return steal(PyNumber_Multiply(k.ptr(), t.ptr()));
         }
     };
     m.def("frame_seconds", [](const py::object& spec) { return FrameSeconds::of(spec); }, py::arg("spec"));
 
-    m.def("in_band", [](const py::object& f_hz, const py::object& waveform) {
+    m.def("in_band", [](const py::object& f_hz, const py::object& waveform) -> py::object {
         const bool l = waveform.equal(py::int_(cfg::WAVEFORM_L));
-        return lv::in_band(rx::as_double(f_hz), l ? cfg::WAVEFORM_L : cfg::WAVEFORM_CE);
+        if (PyFloat_CheckExact(f_hz.ptr()) || PyLong_CheckExact(f_hz.ptr()))
+            return py::bool_(lv::in_band(rx::as_double(f_hz), l ? cfg::WAVEFORM_L : cfg::WAVEFORM_CE));
+        // another number type keeps its own arithmetic and its own booleans
+        // (np.float32 - 22.07 in float32, np.bool_ out), as the reference's
+        // `lo = f_hz - L_BELOW_HZ ...; band[0] <= lo and f_hz <= band[1]`
+        const py::object band = live_attr("CARRIER_BAND_HZ");
+        const py::object lo = l ? steal(PyNumber_Subtract(f_hz.ptr(), live_attr("L_BELOW_HZ").ptr())) : f_hz;
+        py::object first = steal(PyObject_RichCompare(band[py::int_(0)].ptr(), lo.ptr(), Py_LE));
+        if (!truth(first)) return first;
+        return steal(PyObject_RichCompare(f_hz.ptr(), band[py::int_(1)].ptr(), Py_LE));
     }, py::arg("f_hz"), py::arg("waveform") = cfg::WAVEFORM_CE);
 
     m.def("centre_of", [](const py::object& f_hz, const py::object& waveform) -> py::object {
@@ -827,20 +849,20 @@ void bind(py::module_& qrss) {
             std::vector<lv::DialPoint> pts;
             for (const py::object& o : objects(v)) {
                 const std::vector<py::object> th = unpack(o, 2);
-                pts.push_back({rx::as_double(th[0]), rx::as_int(th[1])});
+                pts.push_back({real(th[0]), rx::as_int(th[1])});
             }
             d.log->set_points(std::move(pts));
         })
         .def("spans", [](const PyDialLog& d, const py::object& a, const py::object& b) {
             const lv::DialGuard g = guard_now();
             py::list out;
-            for (const lv::DialSpan& s : d.log->spans(rx::as_double(a), rx::as_double(b), g)) out.append(dial_span_py(s));
+            for (const lv::DialSpan& s : d.log->spans(real(a), real(b), g)) out.append(dial_span_py(s));
             return out;
         }, py::arg("a"), py::arg("b"))
         .def("by_dial", [](const PyDialLog& d, const py::object& a, const py::object& b) {
             const lv::DialGuard g = guard_now();
             py::list out;
-            for (const auto& [dial, spans] : d.log->by_dial(rx::as_double(a), rx::as_double(b), g)) {
+            for (const auto& [dial, spans] : d.log->by_dial(real(a), real(b), g)) {
                 py::list ss;
                 for (const auto& [lo, hi] : spans) ss.append(py::make_tuple(py::float_(lo), py::float_(hi)));
                 out.append(py::make_tuple(opt_int_py(dial), ss));
@@ -848,10 +870,10 @@ void bind(py::module_& qrss) {
             return out;
         }, py::arg("a"), py::arg("b"))
         .def("dial_at", [](const PyDialLog& d, const py::object& t) {
-            return opt_int_py(d.log->dial_at(rx::as_double(t), guard_now()));
+            return opt_int_py(d.log->dial_at(real(t), guard_now()));
         }, py::arg("t"))
         .def("span_at", [](const PyDialLog& d, const py::object& t) {
-            return dial_span_py(d.log->span_at(rx::as_double(t), guard_now()));
+            return dial_span_py(d.log->span_at(real(t), guard_now()));
         }, py::arg("t"));
 
     m.def("same_dial", [](const py::object& a, const py::object& b) -> py::object {
@@ -873,7 +895,7 @@ void bind(py::module_& qrss) {
         std::vector<std::pair<double, double>> sp;
         for (const py::object& o : objects(spans)) {
             const std::vector<py::object> lh = unpack(o, 2);
-            const double lo = rx::as_double(lh[0]), hi = rx::as_double(lh[1]);
+            const double lo = real(lh[0]), hi = real(lh[1]);
             if (lo == -std::numeric_limits<double>::infinity() && hi == std::numeric_limits<double>::infinity())
                 return ok;
             sp.emplace_back(lo, hi);
