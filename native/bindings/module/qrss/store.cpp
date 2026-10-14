@@ -44,6 +44,7 @@
 
 #include "qrss/store_types.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>

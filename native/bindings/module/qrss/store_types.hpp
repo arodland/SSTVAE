@@ -33,6 +33,7 @@
 
 #include "qrss/rx_types.hpp"
 
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
