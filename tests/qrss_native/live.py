@@ -65,7 +65,11 @@ def rows(q):
 
     def _read_typed():
         LV = _live_module()
-        return _fs_ok(LV) and _reference(LV.slot_t0, "frontend", "slot_t0")
+        # (passband.py's rows replace frontend.slot_t0, and the from-import
+        # in live.py with it, by the native one: the same arithmetic)
+        st = LV.slot_t0
+        return _fs_ok(LV) and (st is getattr(getattr(q, "passband", None), "slot_t0", None)
+                               or _reference(st, "frontend", "slot_t0"))
 
     def _prepare_typed():
         LV = _live_module()

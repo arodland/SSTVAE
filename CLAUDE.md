@@ -32,6 +32,12 @@ rationale lives in the plan history.
   changed; regenerate references", run `--all` (about a minute of Python)
   and commit the result, since the pins hash every Python source the
   C++ receiver mirrors. The acceptance file itself takes ~25 s.
+  Stage 3's parity files are `test_qrss_native_{store,associate,
+  passband,live}.py`; `QRSS_LIVE_NOISE=cpp` makes the live rows fill
+  holes with the C++ noise generator instead of numpy's (same
+  distribution, different draws, so whole-pipeline comparisons loosen).
+  Run the parity files in groups of about ten: together they are over
+  ten minutes of fast tier on 4 CPUs.
 - Slow gate: `pytest -m slow` (~2 min) — the listener state machine and
   the app's transmit→receive loopback. Run it after touching `sstvae/rx/`.
 - Native port: `tools/build_native.sh --test` (builds `native/`, runs

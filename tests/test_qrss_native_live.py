@@ -110,6 +110,7 @@ from qrss_native import _live, _rx, require
 
 import test_qrss_native_receiver as P
 import test_qrss_native_receiver_slot as S
+from sstvae.qrss import associate as assoc
 from sstvae.qrss import frame, lframe, live
 from sstvae.qrss import receiver as RX
 from sstvae.qrss.constants import FE_FS, FS, WAVEFORM_CE, WAVEFORM_L
@@ -1011,8 +1012,11 @@ class _InProcess:
 
 
 class _Store:
-    """store.due's records, and nothing else (associate's calls fail, and
-    the tile notes it, as the listener does with a store that fails)."""
+    """store.due's records, and nothing else: associate is replaced by one
+    that fails (`_run_listener`), and the tile notes it, as the listener
+    does with a store that fails. (Failing on this object instead would
+    make the note the associate's own error text, which the C++ store's
+    row words differently.)"""
 
     def __init__(self, rows):
         self.rows = rows
@@ -1054,6 +1058,10 @@ def _run_listener(tmp, stubs, mp):
                     dict(f_hz=2210.0, q=q - 2, frame="tiny", waveform="L"), dict(f_hz=320.0, q=q, waveform=L_)])
     cfg = live.LiveConfig(spec=TINY, waveforms=(CE, L_), render=False, refresh_s=10.0)
     stubs.install(mp)
+
+    def no_store(p, store):
+        raise RuntimeError("the test's store holds due records only")
+    mp.setattr(assoc, "associate", no_store)
     lst = live.LiveListener(tmp, cfg, store=store, log=lambda m: None)
     lst._proc = _InProcess()
     lst.done_tiles.append(live.Tile(id="old", q=q - 2, slot_utc="", frame="l-tiny", f_hz=2509.5,

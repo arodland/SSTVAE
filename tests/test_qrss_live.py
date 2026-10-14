@@ -670,7 +670,11 @@ def test_the_end_of_slot_receive_runs_in_its_own_process(tmp_path):
         ((_, there, heard2),) = got[0]
         assert heard == heard2 and len(here) == len(there) == 1
         import qrss_native
-        if qrss_native.ACTIVE is None:
+        if os.environ.get("QRSS_LIVE_NOISE") == "cpp":
+            # The C++ generator fills this process's holes and numpy's the
+            # child's, so the two passes share a pass count, not latents.
+            pass
+        elif qrss_native.ACTIVE is None:
             assert np.array_equal(here[0].z, there[0].z) and np.array_equal(here[0].w, there[0].w)
         else:
             # Under --native-qrss this process runs the C++ rows while the
