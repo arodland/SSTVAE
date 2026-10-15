@@ -931,7 +931,13 @@ void test_the_window(const std::filesystem::path& dir) {
         times->setValue(0);
         const QPoint at(t->x_of(Q + 20 * H) + QrssTimeline::CELL_W / 2, t->height() / 2);
         if (mime) {
-            QDragEnterEvent enter(at, Qt::CopyAction, mime.get(), Qt::LeftButton, Qt::NoModifier);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 12, 0)
+            const QPointF enter_at(at);   // 6.12 deprecates the QPoint constructor
+#else
+            const QPoint enter_at(at);    // and earlier versions have only that one
+#endif
+            QDragEnterEvent enter(enter_at, Qt::CopyAction, mime.get(), Qt::LeftButton,
+                                  Qt::NoModifier);
             QApplication::sendEvent(t, &enter);
             check::is_true(enter.isAccepted(), "drop: the timeline takes a Send");
             QDropEvent drop(QPointF(at), Qt::CopyAction, mime.get(), Qt::LeftButton,

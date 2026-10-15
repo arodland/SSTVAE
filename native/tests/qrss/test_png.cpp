@@ -145,8 +145,11 @@ void test_failures(const fs::path& dir) {
     }
     check::equal(others(dir / "adir", "x.png").size(), std::size_t(0), "the temporary removed after a failed move");
     // a buffer that does not hold the picture is refused before anything is written
-    images::Picture bad(4, 4);
-    bad.rgb.resize(10);
+    // (built short rather than shrunk, which GCC 16 flags under -Warray-bounds)
+    images::Picture bad;
+    bad.width = 4;
+    bad.height = 4;
+    bad.rgb = std::vector<std::uint8_t>(10);
     try {
         png::write_png(bad, util::path_text(dir / "bad.png"));
         check::fail("a short buffer", "no error");

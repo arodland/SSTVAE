@@ -337,8 +337,12 @@ void test_encode_picture() {
     // A picture whose pixels are not width x height x 3 never reaches the
     // resize (which would read past them), nor the encoder.
     const int calls_before = calls;
-    images::Picture short_rgb(640, 480);
-    short_rgb.rgb.resize(100);
+    // Built short rather than shrunk: GCC 16 flags the dead growth branch of
+    // resize() on a vector it knows the exact size of (-Warray-bounds).
+    images::Picture short_rgb;
+    short_rgb.width = 640;
+    short_rgb.height = 480;
+    short_rgb.rgb = std::vector<std::uint8_t>(100);
     images::Picture empty;
     images::Picture zero_wide(0, 480);
     for (const auto* p : {&short_rgb, &empty, &zero_wide})

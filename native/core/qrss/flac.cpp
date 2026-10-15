@@ -1131,22 +1131,23 @@ EncodeStats encode_stream(Sink& sink, int fs, int channels, std::uint64_t total,
     if (npoints * 18 >= (1u << 24)) throw std::invalid_argument("FLAC encoder: seek table too large");
 
     // Header: marker, STREAMINFO and SEEKTABLE as placeholders, patched at the end.
-    std::vector<std::uint8_t> head{'f', 'L', 'a', 'C'};
-    head.push_back(npoints ? 0x00 : 0x80);   // STREAMINFO (last block unless a seek table follows)
-    head.push_back(0);
-    head.push_back(0);
-    head.push_back(34);
-    const std::size_t streaminfo_at = head.size();
-    head.resize(head.size() + 34, 0);
-    std::size_t seek_at = 0;
+    // Sized once and filled by index: growing a vector built at an exact size
+    // trips GCC 16's -Warray-bounds on the dead in-place branch.
+    const std::size_t streaminfo_at = 8;
+    const std::size_t seek_at = npoints ? streaminfo_at + 34 + 4 : 0;
+    std::vector<std::uint8_t> head(npoints ? seek_at + npoints * 18 : streaminfo_at + 34, 0);
+    head[0] = 'f';
+    head[1] = 'L';
+    head[2] = 'a';
+    head[3] = 'C';
+    head[4] = npoints ? 0x00 : 0x80;   // STREAMINFO (last block unless a seek table follows)
+    head[7] = 34;
     if (npoints) {
         const std::uint32_t len = static_cast<std::uint32_t>(npoints * 18);
-        head.push_back(0x80 | 3);
-        head.push_back(static_cast<std::uint8_t>(len >> 16));
-        head.push_back(static_cast<std::uint8_t>(len >> 8));
-        head.push_back(static_cast<std::uint8_t>(len));
-        seek_at = head.size();
-        head.resize(head.size() + npoints * 18, 0);
+        head[streaminfo_at + 34] = 0x80 | 3;
+        head[streaminfo_at + 35] = static_cast<std::uint8_t>(len >> 16);
+        head[streaminfo_at + 36] = static_cast<std::uint8_t>(len >> 8);
+        head[streaminfo_at + 37] = static_cast<std::uint8_t>(len);
     }
     sink.write(head.data(), head.size());
     const std::uint64_t first_frame_at = head.size();
