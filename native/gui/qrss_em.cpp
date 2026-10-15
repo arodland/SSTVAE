@@ -410,8 +410,9 @@ QString EmBar::card(Kind kind) const {
                "the signal is. Better tracking gives the decoder cleaner numbers, so the picture can "
                "sharpen a little."),
             here, why.isEmpty(), tr("Use it when"),
-            {tr("A picture you want to keep"), tr("After Find missed passes adds passes"),
-             tr("A pass that faded or drifted")},
+            {tr("All its passes are in, but it is still noisy"),
+             tr("Find missed passes has just found more passes of it"),
+             tr("One of its passes faded or drifted")},
             tr("Keep in mind"),
             {tr("Usually a small gain, 0 to 0.2 dB"), tr("About a minute for 4 full passes"),
              tr("Only CE passes; L passes stay as they are")},

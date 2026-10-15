@@ -253,23 +253,30 @@ QString info_html(const QPalette& pal, const QString& title, const QString& what
                   const QString& cost_head, const QStringList& cost, const QString& extra) {
     const QString muted = hex(style::secondary_text(pal));
     const auto head = [](const QString& colour, const QString& text) {
-        return QStringLiteral("<p style=\"margin:0;\"><span style=\"color:%1; font-size:small; "
-                              "font-weight:600; letter-spacing:1px;\">%2</span></p>")
+        return QStringLiteral("<span style=\"color:%1; font-size:small; "
+                              "font-weight:600; letter-spacing:1px;\">%2</span>")
             .arg(colour, text.toUpper().toHtmlEscaped());
     };
     const QString now_line =
         now.isEmpty() ? QString()
-                      : QStringLiteral("<p style=\"margin:0 0 8px 0; color:%1; font-weight:600;\">%2</p>")
+                      : QStringLiteral("<p style=\"margin:8px 0 0 0; color:%1; font-weight:600;\">%2</p>")
                             .arg(ok ? good_colour(pal) : cost_colour(pal), now.toHtmlEscaped());
     return QStringLiteral(
                "<p style=\"margin:0; font-weight:700;\">%1</p>"
-               "<p style=\"margin:2px 0 8px 0; color:%2;\">%3</p>%4"
+               "<p style=\"margin:2px 0 0 0; color:%2;\">%3</p>%4"
+               // The headings get a row of their own, and the gap above them is
+               // cell padding: a paragraph's bottom margin before the table
+               // pushed one column's heading lower than the other's (Jeff,
+               // 2026-10-15).
                "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr>"
-               "<td width=\"50%\" valign=\"top\">%5%6</td>"
-               "<td width=\"50%\" valign=\"top\" style=\"padding-left:10px;\">%7%8</td>"
+               "<td width=\"50%\" valign=\"bottom\" style=\"padding-top:8px;\">%5</td>"
+               "<td width=\"50%\" valign=\"bottom\" style=\"padding-top:8px; padding-left:10px;\">%6</td>"
+               "</tr><tr>"
+               "<td width=\"50%\" valign=\"top\">%7</td>"
+               "<td width=\"50%\" valign=\"top\" style=\"padding-left:10px;\">%8</td>"
                "</tr></table>%9")
         .arg(title.toHtmlEscaped(), muted, what.toHtmlEscaped(), now_line,
-             head(good_colour(pal), good_head), bullet_list(good), head(cost_colour(pal), cost_head),
+             head(good_colour(pal), good_head), head(cost_colour(pal), cost_head), bullet_list(good),
              bullet_list(cost), extra);
 }
 
