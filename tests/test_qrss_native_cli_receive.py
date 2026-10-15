@@ -1,6 +1,6 @@
 """`sstvae-qrss receive` (native/apps/sstvae_qrss/receive.cpp) against
-qrss_receive.py --no-store, run side by side, and Python's transmitter
-into the C++ receiver (the reverse of test_qrss_native_cli.py's chain).
+qrss_receive.py, run side by side, and Python's transmitter into the C++
+receiver (the reverse of test_qrss_native_cli.py's chain).
 
 Each case runs the script and the subcommand with the same arguments in
 two directories holding the same input files, and compares:
@@ -15,7 +15,16 @@ two directories holding the same input files, and compares:
 - stderr by how the script ended, as test_qrss_native_cli.py does: a
   SystemExit exactly, a usage error by its message, an uncaught exception
   by the traceback's last line (or its class, where only the class can
-  agree).
+  agree);
+- with the multi-pass store (the cases without --no-store), everything
+  the two leave in their directories (same_tree): the same files, with
+  the pass uids' hash part taken out of their names and texts (it hashes
+  z's float32 bytes); the JSON (the accumulators', the clusters', the
+  passband store's index and meta.json, log.jsonl) as parsed, floats
+  within 1e-6 relative, wall-clock stamps within the test's run; every
+  .npz member by member (dtype, shape; floats within 1e-6 of the array's
+  scale, the rest exact; a pass's `meta` as JSON); and every other file
+  (the passband store's raw hours, a lock file) byte for byte.
 
 The fixtures are made by the reference's own tools: qrss_simulate.py
 (.qrsp -> .npz at -6 dB) for the .npz inputs, and qrss_transmit.py then
@@ -30,10 +39,12 @@ are the reference's for the same latents (test_render_is_the_reference);
 the slow FULL test compares the two programs' PNGs.
 """
 
+import json
 import os
 import re
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,8 +58,6 @@ from sstvae.qrss import picture
 
 SLOT = "2025-10-01T00:00Z"
 SNR_DB = "-6"
-STORE_REFUSAL = ("the multi-pass store is not ported to sstvae-qrss yet (plan stage 3): run with --no-store "
-                 "(and without --store, --passband or --no-passband), or use qrss_receive.py\n")
 NO_RENDERER = ("--image: this sstvae-qrss renders no pictures (the codec half of receive is not compiled in: it "
                "needs SSTVAE_BUILD_CODEC and apps/sstvae_qrss/codec/receive_image.cpp); use qrss_receive.py "
                "--image\n")
@@ -97,6 +106,9 @@ class Case:
     dirs: list[str] = field(default_factory=list)          # empty directories to make
     only_class: bool = False         # an uncaught exception's class, not its text
     store: bool = False              # do not add --no-store
+    texts: dict[str, str] = field(default_factory=dict)    # files to write in the run dir
+    locks: list[str] = field(default_factory=list)         # directories this process locks (live.dir_lock)
+    json_error: bool = False         # the script's JSONDecodeError is the C++'s ValueError
 
 
 @dataclass
@@ -124,6 +136,9 @@ def _stage(case: Case, root: Path) -> tuple[Path, Path]:
             os.symlink(Path(src).resolve(), d / name)
         for sub in case.dirs:
             (d / sub).mkdir(parents=True, exist_ok=True)
+        for name, text in case.texts.items():
+            (d / name).parent.mkdir(parents=True, exist_ok=True)
+            (d / name).write_text(text)
         dirs.append(d)
     return dirs[0], dirs[1]
 
@@ -132,16 +147,33 @@ def _argv(case: Case) -> list[str]:
     return case.args if case.store else [*case.args, "--no-store"]
 
 
+def _home(d: Path) -> dict:
+    """The default store's root ($QRSSTVAE_HOME) inside the run directory,
+    for every case: a store without --store never reaches the real one."""
+    return {"QRSSTVAE_HOME": str(d / "home")}
+
+
 def run_cases(cases: list[Case], root: Path, cli: Path, workers: int = 4) -> dict[str, tuple[Run, Run]]:
-    jobs = {}
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for c in cases:
-            py_dir, nat_dir = _stage(c, root)
-            jobs[c.name] = (
-                pool.submit(_run, [sys.executable, REPO_ROOT / "qrss_receive.py", *_argv(c)], py_dir),
-                pool.submit(_run, [cli, "receive", *_argv(c)], nat_dir),
-            )
-        return {name: (a.result(), b.result()) for name, (a, b) in jobs.items()}
+    from sstvae.qrss import live
+
+    jobs, held = {}, []
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for c in cases:
+                py_dir, nat_dir = _stage(c, root)
+                for d in (py_dir, nat_dir):
+                    for sub in c.locks:
+                        held.append(live.dir_lock(d / sub))
+                        assert held[-1] is not None, d / sub
+                jobs[c.name] = (
+                    pool.submit(_run, [sys.executable, REPO_ROOT / "qrss_receive.py", *_argv(c)], py_dir,
+                                _home(py_dir)),
+                    pool.submit(_run, [cli, "receive", *_argv(c)], nat_dir, _home(nat_dir)),
+                )
+            return {name: (a.result(), b.result()) for name, (a, b) in jobs.items()}
+    finally:
+        for f in held:
+            f.close()
 
 
 def _last_line(text: str) -> str:
@@ -192,6 +224,12 @@ def check(case: Case, py: Run, nat: Run):
         want, got = _last_line(py.err), _last_line(nat.err)
         if case.only_class:
             assert got.split(":")[0] == want.split(":")[0], (want, got)
+        elif case.json_error:
+            # json.decoder.JSONDecodeError is a ValueError, which the C++
+            # store raises with json's message (receive.cpp's header)
+            prefix = "json.decoder.JSONDecodeError: "
+            assert want.startswith(prefix), want
+            assert got == "ValueError: " + want[len(prefix):], (want, got)
         else:
             assert got == want
         assert nat.err == got + "\n"
@@ -220,8 +258,10 @@ def _resave(src: Path, dst: Path, **changes):
 def inputs(tmp_path_factory):
     """The stored picture, CE and L SHORT .npz files (qrss_simulate.py at
     -6 dB) and CE and L SHORT WAVs (qrss_transmit.py, then qrss_simulate.py
-    WAV -> WAV at -6 dB: int16 for CE, float32 for L), plus the broken and
-    noise inputs the refusal cases read."""
+    WAV -> WAV at -6 dB: int16 for CE, float32 for L), two headerless CE
+    TINY .npz files of the same picture at 0 dB (1800 and 1000 Hz, so
+    neither is the SHORT pass's transmission again), plus the broken and
+    noise inputs the refusal and store cases read."""
     d = tmp_path_factory.mktemp("receive-in")
     sp = picture.StoredPicture.from_latents(synthetic_full_latents(3), 0xD1D8, 1)
     picture.save_qrsp(d / "pic.qrsp", sp)
@@ -236,15 +276,22 @@ def inputs(tmp_path_factory):
         _tool("qrss_simulate.py", tx, f"{wf.lower()}-rx.wav", "--slot", SLOT, "--frame", "short",
               "--waveform", wf, "--snr", SNR_DB, "--seed", seed, *sim_extra, cwd=d)
 
+    def tiny(name, freq, seed):
+        _tool("qrss_simulate.py", "pic.qrsp", name, "--slot", SLOT, "--callsign", "K1ABC", "--frame", "tiny",
+              "--snr", "0", "--freq", freq, "--seed", seed, cwd=d)
+
     with ThreadPoolExecutor(max_workers=4) as pool:
         jobs = [pool.submit(npz, "ce.npz", "--seed", "1"),
                 pool.submit(npz, "l.npz", "--waveform", "L", "--segment", "1", "--seed", "2"),
                 pool.submit(wav, "CE", "0", "5"),
-                pool.submit(wav, "L", "1", "6", "--float")]
+                pool.submit(wav, "L", "1", "6", "--float"),
+                pool.submit(tiny, "tiny-1800.npz", "1800", "3"),
+                pool.submit(tiny, "tiny-1000.npz", "1000", "4")]
         for j in jobs:
             j.result()
 
-    f = {k: d / k for k in ("pic.qrsp", "ce.npz", "l.npz", "ce-rx.wav", "l-rx.wav")}
+    f = {k: d / k for k in ("pic.qrsp", "ce.npz", "l.npz", "ce-rx.wav", "l-rx.wav", "tiny-1800.npz",
+                            "tiny-1000.npz")}
     (d / "empty.npz").write_bytes(b"")
     (d / "garbage.npz").write_bytes(b"hello, this is not an archive\n")
     (d / "text.wav").write_text("hello, this is not a WAV file at all")
@@ -259,13 +306,15 @@ def inputs(tmp_path_factory):
     rng = np.random.default_rng(7)
     noise = ((rng.standard_normal(fe.size) + 1j * rng.standard_normal(fe.size)) * np.std(fe) / np.sqrt(2))
     _resave(f["ce.npz"], d / "noise.npz", fe=noise.astype(np.complex64))
+    # noise at twice the front end's rate: the passband store is not written
+    _resave(f["ce.npz"], d / "noise-8k.npz", fe=noise.astype(np.complex64), fs=np.int64(8000))
     _resave(f["ce.npz"], d / "fe-c16.npz", fe=fe.astype(np.complex128))
     (d / "not-zip.npz").write_bytes(b"PK\x03\x04" + bytes(range(64)))
     data = bytearray(f["ce.npz"].read_bytes())
     data[data.index(fe[:4].tobytes())] ^= 0x01        # a bit of fe's data: zipfile's CRC check
     (d / "bad-crc.npz").write_bytes(bytes(data))
     for k in ("empty.npz", "garbage.npz", "text.wav", "array.npz", "bogus-frame.npz", "v1.npz", "noise.npz",
-              "not-zip.npz", "bad-crc.npz", "q-negative.npz", "fs-zero.npz", "fe-c16.npz"):
+              "not-zip.npz", "bad-crc.npz", "q-negative.npz", "fs-zero.npz", "fe-c16.npz", "noise-8k.npz"):
         f[k] = d / k
     return sp, f
 
@@ -423,20 +472,292 @@ def test_refusals(cli, inputs, tmp_path):
         assert results[name][1] == Run(1, "", f"--image {image}: {parent}: no such directory\n"), name
 
 
-def test_store_is_refused(cli, inputs, tmp_path):
-    """Stage 2 receives with --no-store only: the store's flags, and their
-    absence (the reference's default stores), are refused before anything
-    is read."""
+# --- the multi-pass store ------------------------------------------------------------------
+
+_UID_LINE = re.compile(r"^pass (\S+)   ", re.M)
+_STAMPS = {"created", "updated", "time", "merged"}     # wall-clock stamps (time.time())
+_REL = 1e-6                                            # floats, relative (measured worst: 3e-8)
+
+
+def _uid_map(*outs: str) -> dict:
+    """{uid: "UID<k>"} by the order the passes were printed (one side's
+    stdout, run after run): the uid's hash part is z's float32 bytes."""
+    m = {}
+    for out in outs:
+        for uid in _UID_LINE.findall(out):
+            m.setdefault(uid, f"UID{len(m)}")
+    return m
+
+
+def _norm(x, uids: dict):
+    if isinstance(x, str):
+        for u, v in uids.items():
+            x = x.replace(u, v)
+        return x
+    if isinstance(x, dict):
+        return {_norm(k, uids): _norm(v, uids) for k, v in x.items()}
+    if isinstance(x, list):
+        return [_norm(v, uids) for v in x]
+    return x
+
+
+class _Worst:
+    rel = 0.0
+
+
+def _close(a, b, where: str, window: tuple[float, float]):
+    """Parsed JSON: the same structure and values, floats within _REL
+    relative (and 1e-9 absolute, for values near zero), stamps equal or
+    both within the run's window."""
+    if isinstance(a, dict):
+        assert isinstance(b, dict) and sorted(a) == sorted(b), (where, a, b)
+        for k in a:
+            if k in _STAMPS and isinstance(a[k], float) and a[k] != b[k]:
+                for v in (a[k], b[k]):
+                    assert isinstance(v, float) and window[0] <= v <= window[1], (where, k, v, window)
+            else:
+                _close(a[k], b[k], f"{where}.{k}", window)
+    elif isinstance(a, list):
+        assert isinstance(b, list) and len(a) == len(b), (where, a, b)
+        for k, (u, v) in enumerate(zip(a, b)):
+            _close(u, v, f"{where}[{k}]", window)
+    elif isinstance(a, float):
+        assert isinstance(b, float), (where, a, b)
+        if a != b and not (np.isnan(a) and np.isnan(b)):
+            d = abs(a - b)
+            assert d <= _REL * max(abs(a), abs(b)) + 1e-9, (where, a, b)
+            _Worst.rel = max(_Worst.rel, d / max(abs(a), abs(b)))
+    else:
+        assert type(a) is type(b) and a == b, (where, a, b)
+
+
+def _same_bytes(a: Path, b: Path) -> bool:
+    if a.stat().st_size != b.stat().st_size:
+        return False
+    with open(a, "rb") as fa, open(b, "rb") as fb:
+        while True:
+            x, y = fa.read(1 << 20), fb.read(1 << 20)
+            if x != y:
+                return False
+            if not x:
+                return True
+
+
+def _same_npz(a: Path, b: Path, uids: tuple[dict, dict], where: str, window):
+    with np.load(a, allow_pickle=False) as da, np.load(b, allow_pickle=False) as db:
+        assert da.files == db.files, (where, da.files, db.files)
+        for k in da.files:
+            x, y = da[k], db[k]
+            if k == "meta" and x.dtype == y.dtype == np.uint8:     # PassResult.save's JSON (any length)
+                _close(_norm(json.loads(x.tobytes()), uids[0]), _norm(json.loads(y.tobytes()), uids[1]),
+                       f"{where}:meta", window)
+                continue
+            assert x.dtype == y.dtype and x.shape == y.shape, (where, k, x.dtype, y.dtype, x.shape, y.shape)
+            if np.issubdtype(x.dtype, np.inexact) and x.size:
+                scale = float(np.max(np.abs(x)))
+                assert np.allclose(x, y, rtol=_REL, atol=_REL * scale, equal_nan=True), (where, k)
+                d = float(np.max(np.abs(x.astype(np.complex128) - y.astype(np.complex128))))
+                _Worst.rel = max(_Worst.rel, d / scale if scale else 0.0)
+            else:
+                assert np.array_equal(x, y), (where, k)
+
+
+def _parses(path: Path) -> bool:
+    try:
+        json.loads(path.read_text())
+    except ValueError:
+        return False                  # (a broken file a case planted: compared byte for byte)
+    return True
+
+
+def same_tree(py_dir: Path, nat_dir: Path, uids: tuple[dict, dict], window: tuple[float, float]) -> list[str]:
+    """What the two runs left in their directories (the staged inputs, symlinks, aside): the same
+    names, uids' hash parts taken out; JSON as parsed, .npz member by member, the rest byte for
+    byte (module docstring). Returns the names."""
+    def names(d: Path, m: dict) -> dict:
+        out = {}
+        for q in sorted(d.rglob("*")):
+            if q.is_symlink():
+                continue
+            out[_norm(q.relative_to(d).as_posix(), m) + ("/" if q.is_dir() else "")] = q
+        return out
+
+    a, b = names(py_dir, uids[0]), names(nat_dir, uids[1])
+    assert sorted(a) == sorted(b), sorted(set(a) ^ set(b))
+    for name, pa in a.items():
+        pb = b[name]
+        if name.endswith("/"):
+            continue
+        if name.endswith(".json") and _parses(pa):
+            _close(_norm(json.loads(pa.read_text()), uids[0]), _norm(json.loads(pb.read_text()), uids[1]),
+                   name, window)
+        elif name.endswith(".jsonl"):
+            la, lb = pa.read_text().splitlines(), pb.read_text().splitlines()
+            assert len(la) == len(lb), (name, la, lb)
+            for k, (x, y) in enumerate(zip(la, lb)):
+                _close(_norm(json.loads(x), uids[0]), _norm(json.loads(y), uids[1]), f"{name}:{k + 1}", window)
+        elif name.endswith(".npz"):
+            _same_npz(pa, pb, uids, name, window)
+        else:
+            assert _same_bytes(pa, pb), name
+    return sorted(a)
+
+
+_ACC = "acc/K1ABC_ab2dea7f"
+_ACC_JSON = json.dumps({"callsign": "K1ABC", "codec_id": 0xD1D8, "created": 0.0, "foreign": [], "members": [],
+                        "mode": 1, "picture_id": 0xAB2DEA7F, "updated": 0.0})
+
+
+def _store_cases(f) -> list[Case]:
+    def c(name, *args, files=None, **kw):
+        return Case(name, list(args), {k: f[k] for k in (files or [args[0]])}, store=True, **kw)
+
+    meta = "pb/meta.json"
+    tiny = "tiny-1800.npz"      # (the refusals come before the receive: the smaller file)
+    return [
+        # (the default store, $QRSSTVAE_HOME, is test_store_sequence's)
+        # --store, from a WAV, with a listener's locks held on both stores
+        # (the script takes none: it stores beside a listener)
+        c("store-wav", "ce-rx.wav", "--slot", SLOT, "--frame", "short", "--store", "st",
+          locks=["st", "st/passband"]),
+        # --passband elsewhere, an L pass
+        c("passband-l", "l.npz", "--store", "st/", "--passband", "./pb"),
+        # nothing found: the slot kept (an empty --passband is the default)...
+        c("nothing", "noise.npz", "--store", "st", "--passband", ""),
+        # ... and not, with --no-passband
+        c("nothing-no-passband", "noise.npz", "--store", "st", "--no-passband"),
+        # a capture at another rate: no passband store written, though the
+        # line says the slot is kept (the script's condition)
+        c("nothing-8k", "noise-8k.npz", "--store", "st"),
+        # --store "": Path("") is the current directory
+        c("store-empty", "noise-8k.npz", "--store", ""),
+        # --passband and --no-passband with --no-store: ignored
+        c("no-store-passband", "noise.npz", "--no-store", "--passband", "pb", "--no-passband"),
+        # the store's and the passband store's refusals, uncaught in the script
+        c("store-file", tiny, "--store", "f", texts={"f": "x"}),
+        c("store-under-file", tiny, "--store", "f/st", texts={"f": "x"}),
+        c("passband-file", tiny, "--store", "st", "--passband", "f", texts={"f": "x"}),
+        c("passband-meta-dir", tiny, "--store", "st", "--passband", "pb", dirs=[meta]),
+        c("passband-meta-garbage", tiny, "--store", "st", "--passband", "pb", texts={meta: "not json"},
+          json_error=True),
+        c("passband-meta-no-fs", tiny, "--store", "st", "--passband", "pb", texts={meta: '{"scale": 1.0}'}),
+        c("passband-meta-fs-0", tiny, "--store", "st", "--passband", "pb",
+          texts={meta: '{"fs": 0, "scale": 8192.0}'}),
+        c("passband-meta-8k", tiny, "--store", "st", "--passband", "pb",
+          texts={meta: '{"fs": 8000, "scale": 8192.0}'}),
+        # an association that fails, after the pass's lines: a picture's
+        # index without its arrays (read by rule 3, the TINY pass having
+        # no header)
+        c("acc-npz-missing", "tiny-1800.npz", "--store", "st", "--no-passband",
+          texts={f"st/{_ACC}.json": _ACC_JSON}),
+    ]
+
+
+def test_store_side_by_side(cli, inputs, tmp_path):
+    """Receives that store, side by side: the same report (with its
+    "stored" line), exit status and stderr, and the same trees left behind
+    (same_tree) -- the multi-pass store, the passband store, and nothing
+    where nothing is to be written."""
     _, f = inputs
-    for args in (["ce.npz"], ["ce.npz", "--store", "st"], ["ce.npz", "--no-store", "--store", "st"],
-                 ["ce.npz", "--no-store", "--passband", "pb"], ["ce.npz", "--no-store", "--no-passband"],
-                 ["nope.npz"], ["ce.npz", "--no-store", "--no-passband", "--image", "a.png"]):
-        d = tmp_path / str(len(list(tmp_path.iterdir())))
+    cases = _store_cases(f)
+    t0 = time.time()
+    results = run_cases(cases, tmp_path, cli)
+    window = (t0, time.time())
+    trees = {}
+    for c in cases:
+        py, nat = results[c.name]
+        check(c, py, nat)
+        py_dir, nat_dir = tmp_path / c.name / "py", tmp_path / c.name / "nat"
+        trees[c.name] = same_tree(py_dir, nat_dir, (_uid_map(py.out), _uid_map(nat.out)), window)
+    print(f"store trees: worst relative difference {_Worst.rel:.2e}")
+
+    def out(name):
+        return results[name][1].out
+
+    def err(name):
+        return results[name][1].err
+
+    stored = "  stored     K1ABC ab2dea7f by header\n"
+    passband = ["", "fe_488687.i16", "fe_488687.json", "fe_488688.i16", "fe_488688.json", "meta.json"]
+    empty = ["", "acc/", "passes/", "prov/"]
+    store = empty + [f"{_ACC}.json", f"{_ACC}.npz", "passes/UID0.npz"]
+
+    def under(d, names):
+        return [f"{d}/{n}" for n in names]
+
+    for name in ("store-wav", "passband-l"):
+        assert out(name).endswith(stored) and out(name).count("\npass ") + out(name).startswith("pass ") == 1
+    assert trees["store-wav"] == sorted(under("st", store + [".lock"]) + under("st/passband", passband + [".lock"]))
+    assert trees["passband-l"] == sorted(under("pb", passband) + under("st", store))
+    kept = "no CE or L signal found (slot kept for a later --retro search)\n"
+    assert results["nothing"][1] == Run(1, kept, "")
+    assert trees["nothing"] == sorted(under("st", empty) + under("st/passband", passband))
+    assert results["nothing-no-passband"][1] == Run(1, "no CE or L signal found\n", "")
+    assert trees["nothing-no-passband"] == under("st", empty)
+    assert results["nothing-8k"][1] == Run(1, kept, "")          # (and nothing kept)
+    assert trees["nothing-8k"] == under("st", empty)
+    assert results["store-empty"][1] == Run(1, kept, "")
+    assert trees["store-empty"] == empty[1:]
+    assert results["no-store-passband"][1] == Run(1, "no CE or L signal found\n", "")
+    assert trees["no-store-passband"] == []
+    assert err("store-file") == "NotADirectoryError: [Errno 20] Not a directory: 'f/passes'\n"
+    assert err("store-under-file") == "NotADirectoryError: [Errno 20] Not a directory: 'f/st/passes'\n"
+    assert err("passband-file") == "FileExistsError: [Errno 17] File exists: 'f'\n"
+    assert err("passband-meta-dir") == "IsADirectoryError: [Errno 21] Is a directory: 'pb/meta.json'\n"
+    assert err("passband-meta-garbage") == "ValueError: Expecting value: line 1 column 1 (char 0)\n"
+    assert err("passband-meta-no-fs") == "KeyError: 'fs'\n"
+    assert err("passband-meta-fs-0") == "ValueError: the passband store's fs must be positive, not 0\n"
+    assert err("passband-meta-8k") == "ValueError: the store holds 8000 Hz FE, not a 4000 Hz capture\n"
+    for name in ("passband-file", "passband-meta-dir", "passband-meta-garbage", "passband-meta-no-fs",
+                 "passband-meta-fs-0", "passband-meta-8k"):
+        assert out(name) == "" and "st/passes/" in trees[name], name     # the store first
+    assert out("acc-npz-missing").startswith("pass ") and "  mean W     " in out("acc-npz-missing")
+    assert "stored" not in out("acc-npz-missing")
+    assert err("acc-npz-missing") == f"FileNotFoundError: [Errno 2] No such file or directory: 'st/{_ACC}.npz'\n"
+    assert "st/passes/UID0.npz" in trees["acc-npz-missing"]      # the pass was stored first
+
+
+def test_store_sequence(cli, inputs, tmp_path):
+    """Four receives into the default store ($QRSSTVAE_HOME, with its
+    passband store), one per implementation, the trees compared after each
+    receive: a headerless TINY pass with nothing to join (provisional); the
+    SHORT pass with the picture's header (header, and the TINY pass's
+    cluster then joins the picture by correlation); a second TINY pass, at
+    another frequency (corr); the first again (already a member)."""
+    _, f = inputs
+    steps = [("tiny-1800.npz", "provisional (prov)"), ("ce.npz", "K1ABC ab2dea7f by header"),
+             ("tiny-1000.npz", "K1ABC ab2dea7f by corr"), ("tiny-1800.npz", "K1ABC ab2dea7f by existing membership")]
+    sides = {side: tmp_path / side for side in ("py", "nat")}
+    for side, d in sides.items():
         d.mkdir()
-        os.symlink(f["ce.npz"], d / "ce.npz")
-        r = _run([cli, "receive", *args], d)
-        assert r == Run(1, "", STORE_REFUSAL), (args, r)
-        assert sorted(p.name for p in d.iterdir()) == ["ce.npz"], args
+        for name, _ in steps:
+            if not (d / name).exists():
+                os.symlink(f[name], d / name)
+    outs = {"py": [], "nat": []}
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for k, (name, want) in enumerate(steps):
+            case = Case(f"step{k}", [name], store=True)
+            jobs = (pool.submit(_run, [sys.executable, REPO_ROOT / "qrss_receive.py", *case.args], sides["py"],
+                                _home(sides["py"])),
+                    pool.submit(_run, [cli, "receive", *case.args], sides["nat"], _home(sides["nat"])))
+            py, nat = (j.result() for j in jobs)
+            check(case, py, nat)
+            assert py.rc == 0 and _last_line(nat.out) == f"  stored     {want}", (k, py, nat)
+            outs["py"].append(py.out)
+            outs["nat"].append(nat.out)
+            tree = same_tree(sides["py"], sides["nat"], (_uid_map(*outs["py"]), _uid_map(*outs["nat"])),
+                             (t0, time.time()))
+            if k == 0:
+                assert "home/prov/c_UID0.json" in tree, tree
+    acc = json.loads((sides["nat"] / "home" / f"{_ACC}.json").read_text())
+    assert [(m["uid"], m["method"]) for m in _norm(acc["members"], _uid_map(*outs["nat"]))] == [
+        ("UID1", "header"), ("UID0", "corr"), ("UID2", "corr")]
+    hours = ["fe_488687.i16", "fe_488687.json", "fe_488688.i16", "fe_488688.json", "meta.json"]
+    assert tree == sorted(["home/", "home/acc/", f"home/{_ACC}.json", f"home/{_ACC}.npz", "home/passband/",
+                           *(f"home/passband/{h}" for h in hours), "home/passes/",
+                           *(f"home/passes/UID{k}.npz" for k in range(3)), "home/prov/"])
+    print(f"store sequence: worst relative difference {_Worst.rel:.2e}")
 
 
 def test_help(cli):
@@ -449,10 +770,16 @@ def test_help(cli):
         "[--image IMAGE] [--model MODEL] [--precision {fp32,fp16,int8}] [--old-edge-noise] [--old-gating] "
         "input\n")
     for flag in ("--slot", "--start", "--frame", "--just-ce", "--just-l", "--estimator", "--image", "--model",
-                 "--precision", "--old-edge-noise", "--old-gating", "--no-store", "not ported to sstvae-qrss yet"):
+                 "--precision", "--old-edge-noise", "--old-gating", "--store", "--no-store", "--passband",
+                 "--no-passband"):
         assert flag in r.out, flag
+    # the docstring's store paragraph, the script's words
+    assert ("Passes are stored and associated in the multi-pass store\n(--store DIR, default $QRSSTVAE_HOME or "
+            "~/.local/share/qrsstvae)\nunless --no-store.") in r.out
+    assert "not ported" not in r.out
     r = _run([cli, "--help"], REPO_ROOT)
-    assert any(line.split()[:1] == ["receive"] and "qrss_receive.py" in line for line in r.out.splitlines())
+    assert any(line.split()[:1] == ["receive"] and "qrss_receive.py" in line and "--no-store" not in line
+               for line in r.out.splitlines())
 
 
 # --- --image --------------------------------------------------------------------------------

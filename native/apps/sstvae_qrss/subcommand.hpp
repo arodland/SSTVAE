@@ -8,7 +8,7 @@
 //   encode.cpp     qrss_encode.py    (only with the codec: SSTVAE_BUILD_CODEC)
 //   beacon.cpp     qrss_beacon.py
 //   transmit.cpp   qrss_transmit.py
-//   receive.cpp    qrss_receive.py   (--no-store only; --image with the codec)
+//   receive.cpp    qrss_receive.py   (--image with the codec)
 //   decode.cpp     qrss_decode.py    (pictures with the codec; qrss/em_api.hpp is
 //                                     --em and --retro in process)
 //   listen.cpp     qrss_listen.py    (pictures with the codec; qrss/listen_api.hpp

@@ -12,15 +12,40 @@
 //         WAV without --slot                      SystemExit("--slot is required for a WAV input")
 //         WAV: receiver.capture_from_wav          uncaught (OSError, ValueError)
 //   select_frames: an .npz frame the flags exclude, or a frame with no twin: SystemExit
+//   unless --no-store: Store(--store)             (default $QRSSTVAE_HOME or
+//         ~/.local/share/qrsstvae) OSError if its directories cannot be made
+//     unless --no-passband, and only for a capture at frontend.FE_FS:
+//         PassbandStore(--passband or STORE/passband).write_capture(cap)
+//                                                 OSError (the directory, meta.json, an
+//                                                 hour's files); meta.json's json/KeyError/
+//                                                 ValueError; ValueError for a store at
+//                                                 another fs; all uncaught
 //   receiver.receive_slot(cap, frames, estimator)
-//   no pass: "no CE or L signal found", exit 1
-//   pass_lines(p) for every pass
+//   no pass: "no CE or L signal found", exit 1, with " (slot kept for a later
+//         --retro search)" when a store is open and --no-passband is not given
+//         (whatever the capture's rate: the script's condition, which does not
+//         ask whether the passband store was written)
+//   pass_lines(p) for every pass, then (with a store) associate(p, store):
+//         "  stored     provisional (<rule>)" or
+//         "  stored     <CALL> <pid:08x> by <rule, or 'existing membership'>"
+//                                                 the store's errors uncaught (OSError,
+//                                                 KeyError, ValueError, ...)
 //   --image: render_pass(passes[0], ...)          (receive.hpp's hook)
+// --passband and --no-passband with --no-store are accepted and ignored, as
+// there. No lock is taken on either store, as the script takes none, so a
+// receive runs beside a listener holding live.dir_lock on the same store
+// and nothing orders their writes (the Store's mutex is this process's).
 //
-// Stage 2 of the port has no multi-pass store (plan stage 3), so only
-// --no-store is served: without it, and with --store, --passband or
-// --no-passband (which only mean anything to the store), this refuses
-// before reading anything rather than receive without storing.
+// The store's exceptions end the run as decode.cpp's and listen.cpp's do:
+// the traceback's last line with the class the script's would name
+// (OSError's PEP 3151 subclass, KeyError, ValueError, TypeError,
+// OverflowError, IndexError), with one difference shared with those two: a
+// store file json cannot parse (the passband store's meta.json, an
+// accumulator's or a cluster's index) is the script's
+// json.decoder.JSONDecodeError and this one's ValueError (its base class),
+// with json's message; and a damaged .npz in the store ends both with the
+// C++ store's ValueError text where the script names np.load's or
+// zipfile's class (decode.cpp's note).
 //
 // --just-ce and --just-l are argparse's mutually exclusive group
 // (argparse.hpp's exclusive()), refused and printed as argparse does.
@@ -32,6 +57,7 @@
 #include <cstdlib>
 #include <exception>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <sstream>
@@ -43,15 +69,21 @@
 
 #include "argparse.hpp"
 #include "common.hpp"
+#include "math/errors.hpp"
+#include "qrss/associate.hpp"
 #include "qrss/config.hpp"
 #include "qrss/frame.hpp"
+#include "qrss/npz.hpp"
+#include "qrss/passband.hpp"
 #include "qrss/pypath.hpp"
 #include "qrss/pytext.hpp"
+#include "qrss/rawfile.hpp"
 #include "qrss/receiver.hpp"
 #include "qrss/rules.hpp"
 #include "qrss/rx_api.hpp"
 #include "qrss/simfile.hpp"
 #include "qrss/slot.hpp"
+#include "qrss/store.hpp"
 #include "qrss/types.hpp"
 #include "qrss/wavread.hpp"
 #include "receive.hpp"
@@ -93,16 +125,17 @@ const char* wav_error_class(wav::FormatError::Kind k) {
     return "ValueError";
 }
 
-// qrss_receive.py's docstring, its --help description, with the store's
-// paragraph as this port has it.
+// qrss_receive.py's docstring, its --help description, with the program's
+// name in the examples and --image's last sentence as this port has it
+// (PNG only: receive_image.cpp's refusal).
 constexpr const char* DESCRIPTION =
     "Receive the QRSSTVAE passes, CE and L, in one slot recording.\n"
     "\n"
-    "    sstvae-qrss receive rx.wav --slot 2026-10-09T06:00Z --no-store\n"
+    "    sstvae-qrss receive rx.wav --slot 2026-10-09T06:00Z\n"
     "    sstvae-qrss receive rx.npz --slot 2026-10-09T06:00Z --frame short --no-store\n"
-    "    sstvae-qrss receive rx.wav --slot 2026-10-09T06:00Z --just-l --no-store\n"
+    "    sstvae-qrss receive rx.wav --slot 2026-10-09T06:00Z --just-l\n"
     "    sstvae-qrss receive rx.wav --slot 2026-10-09T06:00Z --start 2026-10-09T05:59:49Z \\\n"
-    "        --no-store --image pass.png\n"
+    "        --image pass.png\n"
     "\n"
     "A WAV is 8 kHz audio starting 12 s before t0 (as `qrss_transmit.py`\n"
     "writes it) unless --start gives its first sample's UTC time; an .npz is\n"
@@ -130,16 +163,13 @@ constexpr const char* DESCRIPTION =
     "An .npz's own frame fixes the waveform it holds, so a flag excluding\n"
     "that waveform is refused rather than reporting an empty slot.\n"
     "\n"
-    "qrss_receive.py stores and associates passes in the multi-pass store\n"
-    "unless --no-store, and keeps the slot's front-end stream in the 48 h\n"
-    "passband store. The store is not ported to sstvae-qrss yet (plan stage\n"
-    "3): give --no-store; --store, --passband and --no-passband are refused.\n"
-    "--image renders the single pass (FULL frames with a decoded header only)\n"
-    "with the codec (--model DIR, --precision).";
-
-constexpr const char* STORE_REFUSAL =
-    "the multi-pass store is not ported to sstvae-qrss yet (plan stage 3): run with --no-store "
-    "(and without --store, --passband or --no-passband), or use qrss_receive.py";
+    "Passes are stored and associated in the multi-pass store\n"
+    "(--store DIR, default $QRSSTVAE_HOME or ~/.local/share/qrsstvae)\n"
+    "unless --no-store. The slot's whole front-end stream is also kept in the\n"
+    "48 h passband store (--passband DIR, default STORE/passband; off with\n"
+    "--no-passband or --no-store), where `qrss_decode.py --retro` later\n"
+    "template-searches it for passes too weak to detect now. --image renders the single pass (FULL frames with a\n"
+    "decoded header only) with the codec (--model DIR, --precision).";
 
 const char* waveform_name(std::int64_t wf) { return wf == config::WAVEFORM_L ? "L" : "CE"; }
 
@@ -207,15 +237,18 @@ std::string fmt(const char* spec, double x, std::size_t width) {
     return s;
 }
 
-// f"{v:08x}" / f"{v:04x}" of a non-negative int.
+// f"{v:08x}" / f"{v:04x}": the sign counts toward the width, as Python's
+// zero padding has it (f"{-5:08x}" is "-0000005"; only a hand-edited
+// store's key can be negative).
 std::string hex(std::int64_t v, int width) {
     std::string digits;
-    auto u = static_cast<std::uint64_t>(v < 0 ? -v : v);
+    auto u = v < 0 ? 0 - static_cast<std::uint64_t>(v) : static_cast<std::uint64_t>(v);
     do {
         digits.insert(digits.begin(), "0123456789abcdef"[u % 16]);
         u /= 16;
     } while (u);
-    if (static_cast<int>(digits.size()) < width) digits.insert(0, static_cast<std::size_t>(width) - digits.size(), '0');
+    const std::size_t want = static_cast<std::size_t>(width) - (v < 0 ? 1 : 0);
+    if (digits.size() < want) digits.insert(0, want - digits.size(), '0');
     return (v < 0 ? "-" : "") + digits;
 }
 
@@ -251,6 +284,32 @@ std::vector<std::string> pass_lines(const types::PassResult& p) {
     return out;
 }
 
+// --- the stores' errors ----------------------------------------------------------------------
+
+// The exception being handled, from the store or the passband store, as the
+// script's traceback ends (decode.cpp's and listen.cpp's mapping): its last
+// line, exit 1. What is not theirs goes on to main's backstop.
+int store_failure(std::ostream& err) {
+    try {
+        throw;
+    } catch (const store::KeyError& e) {   // pyjson's: what() is "KeyError: '<key>'"
+        err << e.what() << "\n";
+        return 1;
+    } catch (const npz::FileError& e) {     // the multi-pass store's files
+        return uncaught(err, OsError(e.err, e.path));
+    } catch (const rawfile::FileError& e) {   // the passband store's
+        return uncaught(err, OsError(util::errno_of(e.code()), e.path()));
+    } catch (const math::TypeError& e) {
+        return uncaught(err, "TypeError", e.what());
+    } catch (const std::overflow_error& e) {
+        return uncaught(err, "OverflowError", e.what());
+    } catch (const std::out_of_range& e) {
+        return uncaught(err, "IndexError", e.what());
+    } catch (const std::invalid_argument& e) {
+        return uncaught(err, "ValueError", e.what());
+    }
+}
+
 // --- the run ---------------------------------------------------------------------------------
 
 int run(const std::string& prog, const std::vector<std::string>& argv, std::ostream& out, std::ostream& err) {
@@ -259,9 +318,6 @@ int run(const std::string& prog, const std::vector<std::string>& argv, std::ostr
     const std::optional<Args> args = ap.parse(argv, out, err, status);
     if (!args) return status;
 
-    // What this port cannot do yet, refused before anything is read.
-    if (!args->on("no_store") || args->text("store") || args->text("passband") || args->on("no_passband"))
-        return system_exit(err, STORE_REFUSAL);
     std::optional<receive::ImageRequest> image;
     if (const auto& im = args->text("image")) {
         // check_image's first refusal: the directory the picture would be
@@ -411,6 +467,25 @@ int run(const std::string& prog, const std::vector<std::string>& argv, std::ostr
         }
     }
 
+    // The multi-pass store, and the slot's front-end stream in the passband
+    // store (a capture at the front end's own rate only).
+    std::unique_ptr<store::Store> st;
+    const bool no_passband = args->on("no_passband");
+    if (!args->on("no_store")) {
+        try {
+            st = std::make_unique<store::Store>(args->text("store"));
+            if (!no_passband && cap.fs == config::FE_FS) {
+                // Path(args.passband) if args.passband else store.root / "passband"
+                const std::optional<std::string>& pb = args->text("passband");
+                passband::PassbandStore(pb && !pb->empty() ? pypath::pathlib_str(*pb)
+                                                           : pypath::child(st->root(), "passband"))
+                    .write_capture(cap);
+            }
+        } catch (const std::exception&) {
+            return store_failure(err);
+        }
+    }
+
     std::vector<types::PassResult> passes;
     try {
         passes = api::receive_slot(cap, rc);
@@ -429,17 +504,31 @@ int run(const std::string& prog, const std::vector<std::string>& argv, std::ostr
         std::string names;
         for (const fr::FrameSpec& s : receiver::frames(std::span<const fr::FrameSpec>(rc.frames)))
             names += (names.empty() ? "" : " or ") + std::string(waveform_name(static_cast<int>(s.waveform())));
-        out << "no " << names << " signal found\n";
+        out << "no " << names << " signal found"
+            << (st && !no_passband ? " (slot kept for a later --retro search)" : "") << "\n";
         return 1;
     }
-    for (const types::PassResult& p : passes)
+    for (const types::PassResult& p : passes) {
         for (const std::string& line : pass_lines(p)) out << line << "\n";
+        if (!st) continue;
+        associate::Result a;
+        try {
+            a = associate::associate(p, *st);   // rule 2 by the C++ soft_header, as the listener's
+        } catch (const std::exception&) {
+            return store_failure(err);
+        }
+        if (!a.key)
+            out << "  stored     provisional (" << a.rule << ")\n";
+        else
+            out << "  stored     " << a.key->callsign << " " << hex(a.key->picture_id, 8) << " by "
+                << (a.rule.empty() ? "existing membership" : a.rule) << "\n";
+    }
     if (image) return receive::image_renderer().render(passes.front(), *image, out, err);
     return 0;
 }
 
-const Subcommand::Register reg("receive", "qrss_receive.py",
-                               "receive the CE and L passes in a slot recording (--no-store only)", &run);
+const Subcommand::Register reg("receive", "qrss_receive.py", "receive the CE and L passes in a slot recording",
+                               &run);
 
 }  // namespace
 }  // namespace sstvae::qrss::cli
