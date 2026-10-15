@@ -1568,6 +1568,28 @@ void TransmitPanel::begin_transmit(const images::Picture& picture,
     });
 }
 
+void TransmitPanel::make_qrss_engine() {
+    engine_ = std::make_unique<tx::TxEngine>(
+        app_->ptt(),
+        [](const std::string& device, std::span<const double> wave, int samplerate,
+           const std::function<void(double)>& on_progress,
+           const std::function<bool()>& should_stop,
+           const std::function<void(const std::string&)>& on_error) {
+            return audio::qt::play(device, wave, samplerate, on_progress, should_stop,
+                                   on_error);
+        },
+        [](const images::ImageArray&) -> std::vector<double> {
+            throw std::logic_error("a QRSS send never encodes through the SSTVAE path");
+        },
+        [this](const tx::TxState& state) {
+            emit stateChanged(static_cast<int>(state.phase), state.progress,
+                              QString::fromStdString(state.message));
+        },
+        [this](const std::string& message) {
+            emit errorOccurred(QString::fromStdString(message));
+        });
+}
+
 std::string TransmitPanel::begin_qrss(const images::Picture& picture, const std::string& mode,
                                       const std::string& waveform, double freq_hz, std::vector<qrss_tx::Pass> passes,
                                       bool interactive) {
@@ -1625,25 +1647,7 @@ std::string TransmitPanel::begin_qrss(const images::Picture& picture, const std:
                         .arg(qrss_tx::PASS_S, 0, 'f', 1)
                         .arg(QString::fromLatin1(qrss_tx::backend_name(backend))));
 
-    engine_ = std::make_unique<tx::TxEngine>(
-        app_->ptt(),
-        [](const std::string& device, std::span<const double> wave, int samplerate,
-           const std::function<void(double)>& on_progress,
-           const std::function<bool()>& should_stop,
-           const std::function<void(const std::string&)>& on_error) {
-            return audio::qt::play(device, wave, samplerate, on_progress, should_stop,
-                                   on_error);
-        },
-        [](const images::ImageArray&) -> std::vector<double> {
-            throw std::logic_error("a QRSS send never encodes through the SSTVAE path");
-        },
-        [this](const tx::TxState& state) {
-            emit stateChanged(static_cast<int>(state.phase), state.progress,
-                              QString::fromStdString(state.message));
-        },
-        [this](const std::string& message) {
-            emit errorOccurred(QString::fromStdString(message));
-        });
+    make_qrss_engine();
 
     send_button_->setEnabled(false);
     set_picture_controls_enabled(false);
@@ -1670,6 +1674,51 @@ std::string TransmitPanel::begin_qrss(const images::Picture& picture, const std:
                 const std::unique_ptr<qrss_tx::Maker> maker = qrss_tx::native_maker();
                 ok = qrss_tx::run(*engine_, request, *maker, on_error);
             }
+        } catch (const std::exception& e) {
+            emit errorOccurred(QString::fromUtf8(e.what()));
+        }
+        running_.store(false);
+        emit sendFinished(ok);
+    });
+    return {};
+}
+
+std::string TransmitPanel::begin_test_tone() {
+    if (transmitting() || awaiting_optimizer_ || thread_.joinable()) {
+        return tr("The transmitter is busy.").toStdString();
+    }
+    const settings::Config& config = app_->config();
+    tx::TxConfig cfg;
+    cfg.device = config.audio.output_device;
+    cfg.level = config.transmit.level;
+    cfg.ptt_lead_s = config.rig.ptt_lead_s;
+    cfg.ptt_tail_s = config.rig.ptt_tail_s;
+    cfg.cw_id = false;
+    cfg.vox_lead_s = 0.0;
+    const double seconds = config.transmit.test_tone_s;
+    std::vector<double> wave =
+        tx::condition_for_output(qrss_tx::test_tone(seconds), config.transmit.level);
+    app_->log_event("tx", log::Severity::Info,
+                    tr("Test / Tune: 1500 Hz for %1 s").arg(seconds, 0, 'f', 0));
+
+    make_qrss_engine();
+    send_button_->setEnabled(false);
+    set_picture_controls_enabled(false);
+    cancel_button_->setEnabled(true);
+    level_slider_->setEnabled(false);
+    mode_combo_->setEnabled(false);
+    last_logged_phase_ = -1;
+    running_.store(true);
+    // Keyed like a QRSS pass: receiving pauses when the radio keys.
+    qrss_run_ = true;
+    announced_ = false;
+    test_run_ = true;
+    emit testToneChanged(true, 1.0);
+
+    thread_ = std::thread([this, wave = std::move(wave), cfg] {
+        bool ok = false;
+        try {
+            ok = engine_->transmit_wave(wave, cfg);
         } catch (const std::exception& e) {
             emit errorOccurred(QString::fromUtf8(e.what()));
         }
@@ -1736,6 +1785,11 @@ void TransmitPanel::show_schedule() {
                 return d;
             },
             std::move(context), this);
+        schedule_window_->set_test_tune(
+            {[this] { return begin_test_tone(); }, [this] { cancel(); }});
+        connect(this, &TransmitPanel::testToneChanged, schedule_window_,
+                &QrssScheduleWindow::set_test_state);
+        schedule_window_->set_test_state(test_run_, 1.0);
     }
     schedule_window_->show();
     schedule_window_->raise();
@@ -1769,6 +1823,13 @@ void TransmitPanel::cancel() {
 
 void TransmitPanel::on_state(int phase, double progress, const QString& message) {
     const auto tx_phase = static_cast<tx::TxPhase>(phase);
+    if (test_run_) {
+        const double left = tx_phase == tx::TxPhase::Sending ? 1.0 - progress
+                            : (tx_phase == tx::TxPhase::Unkeying || tx_phase == tx::TxPhase::Done)
+                                ? 0.0
+                                : 1.0;
+        emit testToneChanged(true, std::clamp(left, 0.0, 1.0));
+    }
     if (qrss_run_ && !announced_) {
         if (tx_phase == tx::TxPhase::Keying || tx_phase == tx::TxPhase::Sending) {
             announced_ = true;
@@ -1842,7 +1903,9 @@ void TransmitPanel::on_error(const QString& message) {
 
 void TransmitPanel::on_finished(bool ok) {
     if (thread_.joinable()) thread_.join();
-    if (scheduler_ != nullptr) scheduler_->run_finished();
+    const bool test = test_run_;
+    test_run_ = false;
+    if (scheduler_ != nullptr && !test) scheduler_->run_finished();
     // Only re-armed if an edit was deferred while the send was
     // committed. Otherwise the composition is unchanged and still has
     // its optimized latents -- `take_result` consumes nothing -- so a
@@ -1877,6 +1940,7 @@ void TransmitPanel::on_finished(bool ok) {
         announced_ = false;
         emit transmitFinished();
     }
+    if (test) emit testToneChanged(false, 0.0);
 }
 
 }  // namespace sstvae::gui

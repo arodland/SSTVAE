@@ -445,6 +445,11 @@ void EmBar::refresh() {
     const bool running = st && st->running;
     actions_->setVisible(!running);
     working_->setVisible(running);
+    // Improve re-receives CE passes only, so an L tile has no Improve at
+    // all (Jeff, 2026-10-15); Find stays, since it looks for CE resends.
+    const bool l_tile = target_.waveform == QLatin1String("L");
+    improve_->setVisible(!l_tile);
+    improve_info_->setVisible(!l_tile);
     improve_->setEnabled(controller_->unavailable(Kind::Improve, target_).isEmpty());
     find_->setEnabled(controller_->unavailable(Kind::Find, target_).isEmpty());
     if (running) {

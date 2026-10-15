@@ -102,6 +102,11 @@ public:
     QrssScheduleWindow* schedule_window() const { return schedule_window_; }
     QString schedule_summary() const;
     QrssSends* sends() const { return sends_; }
+    // Test / Tune: key the radio and send a 1500 Hz tone for
+    // `transmit.test_tone_s` (the schedule window's button). Empty when
+    // it started, else why not. `cancel()` halts it.
+    std::string begin_test_tone();
+    bool test_tone_running() const { return test_run_; }
     // Hide the schedule window, so it does not keep the app running as
     // its last window.
     void hide_windows();
@@ -159,6 +164,9 @@ signals:
     void stateChanged(int phase, double progress, const QString& message);
     void errorOccurred(const QString& message);
     void sendFinished(bool ok);
+    // Test / Tune started, ticked or ended: `remaining` is the fraction
+    // of the tone still to send (1 until the radio keys).
+    void testToneChanged(bool running, double remaining);
 
 protected:
     // A dropped picture file loads exactly as a chosen one does.
@@ -211,6 +219,8 @@ private:
                                          const std::vector<qrss_tx::Pass>& passes,
                                          std::string* why);
     void update_schedule_summary();
+    // The engine a QRSS run or Test / Tune keys through.
+    void make_qrss_engine();
     // The selected SSTVAE mode ("A"/"B"/"C"); with a QRSS mode selected,
     // the SSTVAE mode last saved, so the optimizer and `{mode}` always
     // see a real SSTVAE mode.
@@ -357,6 +367,7 @@ private:
     // so receiving carries on and nothing reads as on the air early.
     bool announced_ = false;
     bool qrss_run_ = false;
+    bool test_run_ = false;   // the run is Test / Tune
 
     QrssScheduler* scheduler_ = nullptr;          // a child of this panel
     // The QRSS run on the air takes following sends through this.

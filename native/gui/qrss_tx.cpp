@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -551,6 +552,24 @@ bool run(tx::TxEngine& engine, const Request& request, Maker& maker,
     }
     engine.report(tx::TxPhase::Done, "QRSS sent");
     return true;
+}
+
+std::vector<double> test_tone(double seconds, int hz) {
+    constexpr int fs = 8000;
+    const auto n = static_cast<std::size_t>(std::max(0.0, std::round(seconds * fs)));
+    std::vector<double> wave(n);
+    const auto ramp = std::min<std::size_t>(fs / 100, n / 2);
+    const double turn = 2.0 * std::acos(-1.0);
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto cycle = static_cast<std::int64_t>(i) * hz % fs;
+        double v = std::sin(turn * static_cast<double>(cycle) / fs);
+        const std::size_t edge = std::min(i, n - 1 - i);
+        if (edge < ramp) {
+            v *= 0.5 - 0.5 * std::cos(std::acos(-1.0) * static_cast<double>(edge) / ramp);
+        }
+        wave[i] = v;
+    }
+    return wave;
 }
 
 }  // namespace sstvae::gui::qrss_tx

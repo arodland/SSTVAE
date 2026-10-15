@@ -136,6 +136,7 @@ private:
     QCheckBox* cw_id_ = nullptr;
     QLineEdit* cw_message_ = nullptr;
     QCheckBox* vox_lead_ = nullptr;
+    QSpinBox* test_tone_ = nullptr;
 
     // Receive
     QCheckBox* auto_start_ = nullptr;

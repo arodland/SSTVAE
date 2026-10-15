@@ -289,8 +289,10 @@ void read_transmit(const Reader& r, TransmitConfig& c) {
     }
     r.get("qrss_freq_hz", c.qrss_freq_hz);
     c.qrss_freq_hz = std::clamp(c.qrss_freq_hz, 300.0, 2700.0);
+    r.get("test_tone_s", c.test_tone_s);
+    c.test_tone_s = std::clamp(c.test_tone_s, 5.0, 300.0);
     r.report_unknown({"mode", "level", "optimize", "cw_id", "cw_message", "vox_lead_s",
-                      "qrss_mode", "qrss_freq_hz"});
+                      "qrss_mode", "qrss_freq_hz", "test_tone_s"});
 }
 
 void read_ui(const Reader& r, UiConfig& c) {
@@ -497,7 +499,8 @@ std::string to_json(const Config& c) {
           {"cw_message", c.transmit.cw_message},
           {"vox_lead_s", c.transmit.vox_lead_s},
           {"qrss_mode", c.transmit.qrss_mode},
-          {"qrss_freq_hz", c.transmit.qrss_freq_hz}}},
+          {"qrss_freq_hz", c.transmit.qrss_freq_hz},
+          {"test_tone_s", c.transmit.test_tone_s}}},
         {"ui",
          {{"layout", c.ui.layout},
           {"log_visible", c.ui.log_visible},

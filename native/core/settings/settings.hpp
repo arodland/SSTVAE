@@ -231,6 +231,12 @@ struct TransmitConfig {
     // The QRSS audio carrier, Hz (300-2700): where in the passband the
     // signal goes. CE signals sit about 50 Hz apart.
     double qrss_freq_hz = 1500.0;
+
+    // How long the schedule window's Test / Tune button keys the radio
+    // with a 1500 Hz tone, in seconds (5-300): long enough to set the
+    // level and check the ALC, short enough that a test cannot become a
+    // stuck carrier.
+    double test_tone_s = 30.0;
 };
 
 // How the window arranges the receive and transmit halves.

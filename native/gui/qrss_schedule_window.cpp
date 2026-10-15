@@ -353,6 +353,51 @@ private:
     QPixmap pix_;
 };
 
+TestTuneButton::TestTuneButton(QWidget* parent) : QPushButton(tr("&Test / Tune"), parent) {
+    setObjectName(QStringLiteral("schedule_test_tune"));
+}
+
+void TestTuneButton::set_running(bool running, double remaining) {
+    remaining = std::clamp(remaining, 0.0, 1.0);
+    if (running == running_ && std::abs(remaining - remaining_) < 1e-4) return;
+    if (running != running_) setText(running ? tr("&Halt Test") : tr("&Test / Tune"));
+    running_ = running;
+    remaining_ = running ? remaining : 1.0;
+    update();
+}
+
+void TestTuneButton::paintEvent(QPaintEvent* event) {
+    if (!running_) {
+        QPushButton::paintEvent(event);
+        return;
+    }
+    // On the air: all red, with the time left as a lighter bar inside it.
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing);
+    const QRectF outer = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+    p.setPen(QPen(QColor(120, 0, 0), 1.0));
+    p.setBrush(QColor(200, 24, 24));
+    p.drawRoundedRect(outer, 4, 4);
+    const QRectF track = outer.adjusted(5, 5, -5, -5);
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(150, 0, 0));
+    p.drawRoundedRect(track, 2, 2);
+    QRectF bar = track;
+    bar.setWidth(track.width() * remaining_);
+    p.setBrush(QColor(255, 120, 110));
+    if (bar.width() > 0.5) p.drawRoundedRect(bar, 2, 2);
+    QFont f = font();
+    f.setBold(true);
+    p.setFont(f);
+    p.setPen(Qt::white);
+    p.drawText(rect(), Qt::AlignCenter | Qt::TextShowMnemonic, text());
+    if (hasFocus()) {
+        p.setPen(QPen(Qt::white, 1.0, Qt::DotLine));
+        p.setBrush(Qt::NoBrush);
+        p.drawRoundedRect(outer.adjusted(2, 2, -2, -2), 3, 3);
+    }
+}
+
 QrssScheduleWindow::QrssScheduleWindow(QrssScheduler* scheduler, QrssSends* sends,
                                        std::function<Defaults()> defaults,
                                        QrssEditor::Context editor_context, QWidget* parent)
@@ -712,6 +757,27 @@ QWidget* QrssScheduleWindow::build_form(QWidget* parent) {
     summary_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     right->addWidget(summary_);
 
+    // Test / Tune, above Add: a tone to check the audio and the radio
+    // with, stopped by itself after the test length in Preferences.
+    test_ = new TestTuneButton(both);
+    test_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    test_->setMinimumHeight(test_->sizeHint().height() * 3 / 2);
+    test_->setToolTip(tr("Key the radio and send a steady 1500 Hz tone, to check the "
+                         "audio level and the radio. It stops by itself after the test "
+                         "length set in Preferences > Transmit."));
+    connect(test_, &QPushButton::clicked, this, [this] {
+        if (test_->running()) {
+            if (test_tune_.halt) test_tune_.halt();
+            return;
+        }
+        if (!test_tune_.start) return;
+        const std::string why = test_tune_.start();
+        if (!why.empty()) {
+            QMessageBox::warning(this, tr("Cannot test"), QString::fromStdString(why));
+        }
+    });
+    right->addWidget(test_);
+
     add_ = new QPushButton(tr("&Add to schedule"), both);
     add_->setObjectName(QStringLiteral("schedule_add"));
     add_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
@@ -1050,6 +1116,10 @@ void QrssScheduleWindow::show_result(const std::string& why, const QString& done
     } else if (!done.isEmpty()) {
         message_->setText(done);
     }
+}
+
+void QrssScheduleWindow::set_test_state(bool running, double remaining) {
+    if (test_ != nullptr) test_->set_running(running, remaining);
 }
 
 void QrssScheduleWindow::refresh() {

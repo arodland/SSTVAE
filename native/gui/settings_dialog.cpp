@@ -31,6 +31,7 @@
 #include <QWidget>
 #include <QtGlobal>
 
+#include <cmath>
 #include <exception>
 #include <memory>
 #include <string>
@@ -1071,6 +1072,18 @@ QWidget* SettingsDialog::transmit_tab() {
                     page));
     add_gap(form);
 
+    test_tone_ = new QSpinBox(page);
+    test_tone_->setObjectName(QStringLiteral("test_tone_s"));
+    test_tone_->setRange(5, 300);
+    test_tone_->setSuffix(tr(" s"));
+    test_tone_->setValue(static_cast<int>(std::lround(config_.transmit.test_tone_s)));
+    form->addRow(tr("Test / Tune length"), test_tone_);
+    form->addRow(QString(),
+                 style::note(tr("How long the QRSS schedule's Test / Tune button keys the radio "
+                                "with a 1500 Hz tone."),
+                             page));
+    add_gap(form);
+
     // The transmit level itself stays on the send bar, where it is
     // adjusted, and keeps a short tooltip there. What lives here is the
     // *procedure*, because a tooltip only ever reaches an operator who
@@ -1120,6 +1133,7 @@ void SettingsDialog::apply_to(settings::Config& config) const {
     config.transmit.cw_id = cw_id_->isChecked();
     config.transmit.cw_message = cw_message_->text().toStdString();
     config.transmit.vox_lead_s = vox_lead_->isChecked() ? dsp::VOX_LEAD_DEFAULT_S : 0.0;
+    config.transmit.test_tone_s = test_tone_->value();
     config.receive.auto_start = auto_start_->isChecked();
     config.receive.autosave = autosave_->isChecked();
     config.receive.save_audio = save_audio_->isChecked();

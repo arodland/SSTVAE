@@ -187,6 +187,11 @@ public:
                                      std::string* error) = 0;
 };
 
+// Test / Tune: a steady `hz` sine for `seconds` at 8 kHz, peak 1, with
+// 10 ms raised-cosine ends so keying it on and off does not click.
+// Whole Hz only: the phase is reduced exactly, (n * hz) mod 8000.
+std::vector<double> test_tone(double seconds, int hz = 1500);
+
 // The C++ transmitter. The encoder (the codec's, from the model cache)
 // is opened on the first encode and kept for the life of the app.
 std::unique_ptr<Maker> native_maker();

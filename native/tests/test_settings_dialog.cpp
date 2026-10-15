@@ -60,6 +60,7 @@ settings::Config populated() {
     c.transmit.optimize = true;  // not the default, per this fixture's rule
     c.transmit.cw_id = true;
     c.transmit.cw_message = "TEST DE {callsign}";
+    c.transmit.test_tone_s = 45.0;
     c.folders.template_dir = "/srv/sstv/tpl";
 
     c.receive.autosave = false;

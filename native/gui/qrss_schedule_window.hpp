@@ -24,11 +24,13 @@
 #ifndef SSTVAE_GUI_QRSS_SCHEDULE_WINDOW_HPP
 #define SSTVAE_GUI_QRSS_SCHEDULE_WINDOW_HPP
 
+#include <QPushButton>
 #include <QWidget>
 
 #include <functional>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "images/types.hpp"
@@ -55,6 +57,27 @@ class QrssTimeline;
 class InfoButton;
 class QrssClockFace;
 class SendPicture;
+
+// Test / Tune (Jeff, 2026-10-15): a plain button until pressed, then
+// wholly red with a bar inside it that runs down over the test, labelled
+// "Halt Test" while the tone is on the air.
+class TestTuneButton : public QPushButton {
+    Q_OBJECT
+
+public:
+    explicit TestTuneButton(QWidget* parent = nullptr);
+    // `remaining`: the fraction of the test still to go, 0..1.
+    void set_running(bool running, double remaining = 1.0);
+    bool running() const { return running_; }
+    double remaining() const { return remaining_; }
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+
+private:
+    bool running_ = false;
+    double remaining_ = 1.0;
+};
 
 class QrssScheduleWindow : public QWidget {
     Q_OBJECT
@@ -121,8 +144,19 @@ public:
     QMenu* change_menu_for(const std::string& id);
     QMenu* empty_menu_for(double t);
 
+    // What Test / Tune does: `start` keys the tone (empty when it
+    // started, else why not), `halt` stops it.
+    struct TestTune {
+        std::function<std::string()> start;
+        std::function<void()> halt;
+    };
+    void set_test_tune(TestTune hooks) { test_tune_ = std::move(hooks); }
+    TestTuneButton* test_tune_button() const { return test_; }
+
 public slots:
     void refresh();
+    // The tone started, ticked or ended.
+    void set_test_state(bool running, double remaining);
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -191,6 +225,8 @@ private:
     double chosen_slot_ = 0.0;
     QLabel* summary_ = nullptr;
     QPushButton* add_ = nullptr;
+    TestTuneButton* test_ = nullptr;
+    TestTune test_tune_;
     QTimer* clock_timer_ = nullptr;
 };
 

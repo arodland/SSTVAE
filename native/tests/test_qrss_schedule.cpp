@@ -18,6 +18,8 @@
 #include <QMenu>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QImage>
+#include <QPixmap>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -29,6 +31,8 @@
 #include <QTreeWidget>
 #include <QWheelEvent>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <variant>
@@ -51,6 +55,7 @@
 #include "qrss_schedule_window.hpp"
 #include "qrss_sends.hpp"
 #include "qrss_timeline.hpp"
+#include "qrss_tx.hpp"
 #include "waterfall.hpp"
 #include "dial_log.hpp"
 
@@ -1230,6 +1235,47 @@ void test_the_dial_log(const std::filesystem::path& dir) {
 
 }  // namespace
 
+void test_test_tune(const std::filesystem::path& dir) {
+    Fake fake;
+    std::unique_ptr<QrssScheduler> s(make(fake, dir / "t" / "qrss_schedule.json"));
+    QrssSends sends(dir / "t" / "qrss_sends");
+    QrssScheduleWindow w(s.get(), &sends, [] { return QrssScheduleWindow::Defaults{}; }, {});
+    w.resize(1000, 700);
+    w.show();
+    QApplication::processEvents();
+    auto* test = w.findChild<TestTuneButton*>(QStringLiteral("schedule_test_tune"));
+    auto* add = w.findChild<QPushButton*>(QStringLiteral("schedule_add"));
+    check::is_true(test != nullptr && add != nullptr, "test/tune: the button is there");
+    if (test == nullptr || add == nullptr) return;
+    check::is_true(test->mapTo(&w, QPoint(0, test->height())).y() <= add->mapTo(&w, QPoint()).y(),
+                   "test/tune: above Add to schedule");
+    int starts = 0, halts = 0;
+    w.set_test_tune({[&] { ++starts; return std::string(); }, [&] { ++halts; }});
+    test->click();
+    check::is_true(starts == 1 && halts == 0, "test/tune: a press starts the tone");
+    w.set_test_state(true, 0.5);
+    check::is_true(test->running() && test->text().remove(QLatin1Char('&')) == "Halt Test",
+                   "test/tune: reads Halt Test while on the air");
+    const QImage img = test->grab().toImage();
+    const QColor mid = img.pixelColor(img.width() / 2, 2);
+    check::is_true(mid.red() > 150 && mid.green() < 80, "test/tune: red while on the air");
+    const QColor left = img.pixelColor(img.width() / 4, img.height() / 2);
+    const QColor right = img.pixelColor(img.width() * 7 / 8, img.height() / 2);
+    check::is_true(left.green() > right.green() + 40, "test/tune: the bar shows the time left");
+    test->click();
+    check::is_true(halts == 1 && starts == 1, "test/tune: a press while on the air halts it");
+    w.set_test_state(false, 0.0);
+    check::is_true(!test->running() && test->text().remove(QLatin1Char('&')) == "Test / Tune",
+                   "test/tune: back to Test / Tune when it ends");
+
+    const std::vector<double> tone = qrss_tx::test_tone(2.0);
+    double peak = 0.0;
+    for (double v : tone) peak = std::max(peak, std::abs(v));
+    check::is_true(tone.size() == 16000 && std::abs(tone.front()) < 1e-9 && peak > 0.999 &&
+                       std::abs(tone[8000] - tone[8016]) < 1e-12,
+                   "test/tune: 2 s of 1500 Hz, ramped in, period 16 samples");
+}
+
 int main(int argc, char** argv) {
     check::report_crashes_instead_of_prompting();
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -1247,6 +1293,7 @@ int main(int argc, char** argv) {
     test_the_sends_store(dir);
     test_change_and_truncate(dir);
     test_the_window(dir);
+    test_test_tune(dir);
     test_the_editor(dir);
     test_a_change_needs_no_sends(dir);
     test_frequency_changes(dir);

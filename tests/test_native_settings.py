@@ -116,6 +116,7 @@ NON_DEFAULT = {
         "vox_lead_s": 0.5,
         "qrss_mode": "B",
         "qrss_freq_hz": 1234.5,
+        "test_tone_s": 45.0,
     },
     "ui": {
         # None is a default: the default layout is "auto", the default
