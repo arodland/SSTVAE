@@ -24,6 +24,7 @@
 #ifndef SSTVAE_GUI_QRSS_SCHEDULE_WINDOW_HPP
 #define SSTVAE_GUI_QRSS_SCHEDULE_WINDOW_HPP
 
+#include <QDialog>
 #include <QPushButton>
 #include <QWidget>
 
@@ -39,6 +40,8 @@
 #include "qrss_schedule.hpp"
 
 class QComboBox;
+class QDateTimeEdit;
+class QDoubleSpinBox;
 class QGroupBox;
 class QLabel;
 class QListWidget;
@@ -77,6 +80,38 @@ protected:
 private:
     bool running_ = false;
     double remaining_ = 1.0;
+};
+
+// "Add frequency change" and its kin (Jeff, 2026-10-15): the time on a
+// clock face like At Time's, in UTC or local time by a toggle, beside a
+// field to type it in. The wheel steps 15 minutes, an hour with Shift and
+// a minute with Ctrl.
+class QrssFreqChangeDialog : public QDialog {
+    Q_OBJECT
+
+public:
+    QrssFreqChangeDialog(const QString& title, double at, double dial_hz, bool with_time, bool utc,
+                         QWidget* parent = nullptr);
+    double at() const { return t_; }
+    double dial_hz() const;
+    bool utc() const { return utc_; }
+    void set_utc(bool utc);
+    void set_time(double t);
+    QrssClockFace* face() const { return face_; }
+
+private:
+    void show_time();
+
+    double t_ = 0.0;
+    bool utc_ = true;
+    bool syncing_ = false;
+    QrssClockFace* face_ = nullptr;
+    QDateTimeEdit* edit_ = nullptr;
+    QLabel* zone_ = nullptr;
+    QLabel* readout_ = nullptr;
+    QPushButton* utc_button_ = nullptr;
+    QPushButton* local_button_ = nullptr;
+    QDoubleSpinBox* freq_ = nullptr;
 };
 
 class QrssScheduleWindow : public QWidget {
@@ -227,6 +262,7 @@ private:
     QPushButton* add_ = nullptr;
     TestTuneButton* test_ = nullptr;
     TestTune test_tune_;
+    bool freq_utc_ = true;   // the frequency change dialog's last UTC/local choice
     QTimer* clock_timer_ = nullptr;
 };
 

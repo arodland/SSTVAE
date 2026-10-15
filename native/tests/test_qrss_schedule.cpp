@@ -9,6 +9,7 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QDateTimeEdit>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QMimeData>
@@ -1276,6 +1277,35 @@ void test_test_tune(const std::filesystem::path& dir) {
                    "test/tune: 2 s of 1500 Hz, ramped in, period 16 samples");
 }
 
+void test_the_freq_change_dialog() {
+    const double t0 = 1'760'000'400.0;   // a whole minute
+    QrssFreqChangeDialog d(QStringLiteral("Add frequency change"), t0, 7'064'000.0, true, true);
+    auto* face = d.findChild<QrssClockFace*>(QStringLiteral("freq_change_clock"));
+    auto* local = d.findChild<QPushButton*>(QStringLiteral("freq_change_local"));
+    auto* edit = d.findChild<QDateTimeEdit*>(QStringLiteral("freq_change_time"));
+    check::is_true(face && local && edit && face->utc() && face->time() == t0,
+                   "freq change: a UTC clock at the time given");
+    if (!(face && local && edit)) return;
+    auto wheel = [&](Qt::KeyboardModifiers mods) {
+        QWheelEvent ev(QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, 120), Qt::NoButton,
+                       mods, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(face, &ev);
+    };
+    wheel(Qt::ControlModifier);
+    check::is_true(d.at() == t0 + 60.0, "freq change: Ctrl+wheel steps a minute");
+    wheel(Qt::ShiftModifier);
+    wheel(Qt::NoModifier);
+    check::is_true(d.at() == t0 + 60.0 + 3600.0 + 900.0, "freq change: Shift an hour, plain 15 min");
+    local->click();
+    check::is_true(!d.utc() && !face->utc() && d.at() == t0 + 4560.0 &&
+                       edit->dateTime().toSecsSinceEpoch() == static_cast<qint64>(t0 + 4560.0),
+                   "freq change: Local shows the same moment in local time");
+    edit->setDateTime(edit->dateTime().addSecs(-60));
+    check::is_true(d.at() == t0 + 4500.0 && face->time() == d.at(),
+                   "freq change: a typed time moves the clock");
+    check::is_true(d.dial_hz() == 7'064'000.0, "freq change: the dial frequency");
+}
+
 int main(int argc, char** argv) {
     check::report_crashes_instead_of_prompting();
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -1294,6 +1324,7 @@ int main(int argc, char** argv) {
     test_change_and_truncate(dir);
     test_the_window(dir);
     test_test_tune(dir);
+    test_the_freq_change_dialog();
     test_the_editor(dir);
     test_a_change_needs_no_sends(dir);
     test_frequency_changes(dir);

@@ -466,8 +466,11 @@ void QrssScheduleWindow::build() {
     auto* add_change = new QPushButton(tr("Add frequency change..."), upcoming);
     add_change->setObjectName(QStringLiteral("add_freq_change"));
     connect(add_change, &QPushButton::clicked, this, [this] {
+        // From the At Time clocks: two minutes before the send they show,
+        // so the change is made and the tuner done before it keys; never
+        // sooner than a minute from now.
         const double now = scheduler_->now();
-        double at = std::ceil((now + 300.0) / 60.0) * 60.0;
+        double at = std::max(std::ceil((now + 60.0) / 60.0) * 60.0, chosen_slot_ - 120.0);
         double hz = defaults_().dial_hz;
         if (ask_freq_change(tr("Add frequency change"), &at, &hz)) add_freq_change(at, hz);
     });
@@ -1295,44 +1298,150 @@ QMenu* QrssScheduleWindow::empty_menu_for(double t) {
 
 bool QrssScheduleWindow::ask_freq_change(const QString& title, double* at, double* dial_hz,
                                          bool with_time) {
-    QDialog dialog(this);
-    dialog.setWindowTitle(title);
-    auto* form = new QFormLayout(&dialog);
-    auto* when = new QDateTimeEdit(&dialog);
-    when->setObjectName(QStringLiteral("freq_change_time"));
-    // setTimeZone arrived in Qt 6.7 and deprecates setTimeSpec there.
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
-    when->setTimeZone(QTimeZone::utc());
-#else
-    when->setTimeSpec(Qt::UTC);
-#endif
-    when->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm:ss 'UTC'"));
-    when->setDateTime(utc_of(*at));
-    if (with_time) {
-        form->addRow(tr("When:"), when);
-    } else {
-        when->hide();
-    }
-    auto* freq = new QDoubleSpinBox(&dialog);
-    freq->setObjectName(QStringLiteral("freq_change_mhz"));
-    freq->setDecimals(6);
-    freq->setRange(0.001, 10000.0);
-    freq->setSingleStep(0.001);
-    freq->setSuffix(tr(" MHz"));
-    freq->setValue(*dial_hz > 0.0 ? *dial_hz / 1e6 : 10.141);
-    form->addRow(tr("Dial frequency:"), freq);
-    form->addRow(style::note(tr("Keep it at least 30 s clear of any send. With \"Perform "
-                                "tuning after frequency change\" on (Settings > Rig control), "
-                                "the tuner starts 5 s later."),
-                             &dialog));
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    form->addRow(buttons);
+    QrssFreqChangeDialog dialog(title, *at, *dial_hz, with_time, freq_utc_, this);
     if (dialog.exec() != QDialog::Accepted) return false;
-    *at = static_cast<double>(when->dateTime().toSecsSinceEpoch());
-    *dial_hz = std::round(freq->value() * 1e6);
+    freq_utc_ = dialog.utc();
+    *at = dialog.at();
+    *dial_hz = dialog.dial_hz();
     return true;
+}
+
+// --- the frequency change dialog -------------------------------------------
+
+QrssFreqChangeDialog::QrssFreqChangeDialog(const QString& title, double at, double dial_hz,
+                                           bool with_time, bool utc, QWidget* parent)
+    : QDialog(parent), t_(std::round(at / 60.0) * 60.0), utc_(utc) {
+    setWindowTitle(title);
+    auto* outer = new QVBoxLayout(this);
+    if (with_time) {
+        auto* when = new QGroupBox(tr("When"), this);
+        auto* box = new QVBoxLayout(when);
+        auto* toggle = new QHBoxLayout;
+        toggle->setSpacing(0);
+        utc_button_ = new QPushButton(tr("UTC"), when);
+        utc_button_->setObjectName(QStringLiteral("freq_change_utc"));
+        local_button_ = new QPushButton(tr("Local"), when);
+        local_button_->setObjectName(QStringLiteral("freq_change_local"));
+        for (QPushButton* b : {utc_button_, local_button_}) {
+            b->setCheckable(true);
+            b->setAutoExclusive(true);
+            b->setFocusPolicy(Qt::TabFocus);
+            toggle->addWidget(b);
+        }
+        toggle->addStretch(1);
+        connect(utc_button_, &QPushButton::toggled, this, [this](bool on) {
+            if (on) set_utc(true);
+        });
+        connect(local_button_, &QPushButton::toggled, this, [this](bool on) {
+            if (on) set_utc(false);
+        });
+        box->addLayout(toggle);
+
+        auto* row = new QHBoxLayout;
+        face_ = new QrssClockFace(utc_, when);
+        face_->setObjectName(QStringLiteral("freq_change_clock"));
+        face_->set_minute_steps(true);
+        face_->setToolTip(tr("Turn the mouse wheel here to move the change 15 minutes; hold Shift "
+                             "to move it an hour, or Ctrl to move it a minute. The arrow keys do "
+                             "the same."));
+        connect(face_, &QrssClockFace::stepRequested, this,
+                [this](int seconds) { set_time(t_ + seconds); });
+        row->addWidget(face_, 0, Qt::AlignTop);
+        auto* right = new QVBoxLayout;
+        auto* typed = new QHBoxLayout;
+        edit_ = new QDateTimeEdit(when);
+        edit_->setObjectName(QStringLiteral("freq_change_time"));
+        edit_->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm"));
+        connect(edit_, &QDateTimeEdit::dateTimeChanged, this, [this](const QDateTime& d) {
+            if (syncing_) return;
+            set_time(static_cast<double>(d.toSecsSinceEpoch()));
+        });
+        typed->addWidget(edit_);
+        zone_ = new QLabel(when);
+        typed->addWidget(zone_);
+        typed->addStretch(1);
+        right->addLayout(typed);
+        readout_ = new QLabel(when);
+        readout_->setObjectName(QStringLiteral("freq_change_readout"));
+        right->addWidget(readout_);
+        right->addStretch(1);
+        row->addLayout(right, 1);
+        box->addLayout(row);
+
+        auto* hint = new QHBoxLayout;
+        hint->setSpacing(4);
+        auto* wheel = new QLabel(tr("Wheel: ±15 min ·"), when);
+        auto* shift = new QLabel(tr("+wheel: ±1 hour ·"), when);
+        auto* ctrl = new QLabel(tr("+wheel: ±1 min"), when);
+        for (QLabel* l : {wheel, shift, ctrl}) style::dim(l);
+        hint->addWidget(wheel, 0, Qt::AlignVCenter);
+        hint->addWidget(new ShiftKeyCap(when), 0, Qt::AlignVCenter);
+        hint->addWidget(shift, 0, Qt::AlignVCenter);
+        hint->addWidget(new ShiftKeyCap(when, Qt::Key_Control), 0, Qt::AlignVCenter);
+        hint->addWidget(ctrl, 0, Qt::AlignVCenter);
+        hint->addStretch(1);
+        box->addLayout(hint);
+        outer->addWidget(when);
+    }
+    auto* form = new QFormLayout;
+    freq_ = new QDoubleSpinBox(this);
+    freq_->setObjectName(QStringLiteral("freq_change_mhz"));
+    freq_->setDecimals(6);
+    freq_->setRange(0.001, 10000.0);
+    freq_->setSingleStep(0.001);
+    freq_->setSuffix(tr(" MHz"));
+    freq_->setValue(dial_hz > 0.0 ? dial_hz / 1e6 : 10.141);
+    form->addRow(tr("Dial frequency:"), freq_);
+    outer->addLayout(form);
+    outer->addWidget(style::note(tr("Keep it at least 30 s clear of any send. With \"Perform "
+                                    "tuning after frequency change\" on (Settings > Rig control), "
+                                    "the tuner starts 5 s later."),
+                                 this));
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    outer->addWidget(buttons);
+    if (with_time) {
+        (utc_ ? utc_button_ : local_button_)->setChecked(true);
+        show_time();
+        face_->setFocus();
+    }
+}
+
+double QrssFreqChangeDialog::dial_hz() const { return std::round(freq_->value() * 1e6); }
+
+void QrssFreqChangeDialog::set_utc(bool utc) {
+    utc_ = utc;
+    if (face_ == nullptr) return;
+    face_->set_utc(utc);
+    if (utc_button_->isChecked() != utc) (utc ? utc_button_ : local_button_)->setChecked(true);
+    show_time();
+}
+
+void QrssFreqChangeDialog::set_time(double t) {
+    t_ = std::round(t / 60.0) * 60.0;
+    if (face_ != nullptr) show_time();
+}
+
+void QrssFreqChangeDialog::show_time() {
+    // The typed field shows the chosen zone; what it holds stays one instant.
+    const QDateTime when = utc_ ? utc_of(t_) : utc_of(t_).toLocalTime();
+    syncing_ = true;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+    edit_->setTimeZone(utc_ ? QTimeZone::utc() : QTimeZone(QTimeZone::LocalTime));
+#else
+    edit_->setTimeSpec(utc_ ? Qt::UTC : Qt::LocalTime);
+#endif
+    edit_->setDateTime(when);
+    syncing_ = false;
+    zone_->setText(utc_ ? tr("UTC") : when.timeZoneAbbreviation());
+    face_->set_time(t_);
+    // The other zone, so the operator can check the conversion at a glance.
+    const QDateTime other = utc_ ? utc_of(t_).toLocalTime() : utc_of(t_);
+    readout_->setText(utc_ ? tr("%1 local").arg(other.toString(QStringLiteral("ddd HH:mm ")) +
+                                                other.timeZoneAbbreviation())
+                           : tr("%1 UTC").arg(other.toString(QStringLiteral("ddd HH:mm"))));
+    style::dim(readout_);
 }
 
 // --- the timeline's right-click menu -------------------------------------

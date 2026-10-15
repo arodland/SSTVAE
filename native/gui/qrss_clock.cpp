@@ -39,6 +39,17 @@ QrssClockFace::QrssClockFace(bool utc, QWidget* parent) : QWidget(parent), utc_(
                   "to move it an hour. The arrow keys do the same."));
 }
 
+void QrssClockFace::set_utc(bool utc) {
+    if (utc == utc_) return;
+    utc_ = utc;
+    update();
+}
+
+int QrssClockFace::step_for(Qt::KeyboardModifiers mods) const {
+    if (minute_steps_ && (mods & Qt::ControlModifier)) return CTRL_STEP_S;
+    return (mods & Qt::ShiftModifier) ? SHIFT_STEP_S : STEP_S;
+}
+
 void QrssClockFace::set_time(double t) {
     if (t == t_) return;
     t_ = t;
@@ -118,13 +129,12 @@ void QrssClockFace::wheelEvent(QWheelEvent* event) {
         return;
     }
     wheel_accum_ -= notches * 120;
-    const int step = (event->modifiers() & Qt::ShiftModifier) ? SHIFT_STEP_S : STEP_S;
-    emit stepRequested(notches * step);
+    emit stepRequested(notches * step_for(event->modifiers()));
     event->accept();
 }
 
 void QrssClockFace::keyPressEvent(QKeyEvent* event) {
-    const int step = (event->modifiers() & Qt::ShiftModifier) ? SHIFT_STEP_S : STEP_S;
+    const int step = step_for(event->modifiers());
     switch (event->key()) {
         case Qt::Key_Up:
         case Qt::Key_Right:
@@ -141,8 +151,8 @@ void QrssClockFace::keyPressEvent(QKeyEvent* event) {
 
 // --- the Shift key cap ----------------------------------------------------------
 
-ShiftKeyCap::ShiftKeyCap(QWidget* parent) : QWidget(parent) {
-    setObjectName(QStringLiteral("at_time_shift"));
+ShiftKeyCap::ShiftKeyCap(QWidget* parent, Qt::Key key) : QWidget(parent), key_(key) {
+    if (key == Qt::Key_Shift) setObjectName(QStringLiteral("at_time_shift"));
     setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     qApp->installEventFilter(this);
 }
@@ -157,11 +167,20 @@ void ShiftKeyCap::set_down(bool on) {
     update();
 }
 
+QString ShiftKeyCap::label() const {
+    if (key_ != Qt::Key_Control) return QStringLiteral("Shift");
+#ifdef Q_OS_MACOS
+    return QStringLiteral("Cmd");
+#else
+    return QStringLiteral("Ctrl");
+#endif
+}
+
 QSize ShiftKeyCap::sizeHint() const {
     QFont f = font();
     f.setPointSizeF(std::max(6.0, f.pointSizeF() * 0.85));
     const QFontMetrics fm(f);
-    return {fm.horizontalAdvance(QStringLiteral("Shift")) + 10, fm.height() + 4};
+    return {fm.horizontalAdvance(label()) + 10, fm.height() + 4};
 }
 
 void ShiftKeyCap::paintEvent(QPaintEvent*) {
@@ -181,7 +200,7 @@ void ShiftKeyCap::paintEvent(QPaintEvent*) {
     f.setPointSizeF(std::max(6.0, f.pointSizeF() * 0.85));
     p.setFont(f);
     p.setPen(down_ ? style::color::on_danger() : pal.color(QPalette::Text));
-    p.drawText(box, Qt::AlignCenter, QStringLiteral("Shift"));
+    p.drawText(box, Qt::AlignCenter, label());
 }
 
 bool ShiftKeyCap::eventFilter(QObject* watched, QEvent* event) {
@@ -189,11 +208,12 @@ bool ShiftKeyCap::eventFilter(QObject* watched, QEvent* event) {
         case QEvent::KeyPress:
         case QEvent::KeyRelease: {
             auto* k = static_cast<QKeyEvent*>(event);
-            if (k->key() == Qt::Key_Shift) set_down(event->type() == QEvent::KeyPress);
+            if (k->key() == key_) set_down(event->type() == QEvent::KeyPress);
             break;
         }
         case QEvent::Wheel:
-            set_down(static_cast<QWheelEvent*>(event)->modifiers() & Qt::ShiftModifier);
+            set_down(static_cast<QWheelEvent*>(event)->modifiers() &
+                     (key_ == Qt::Key_Control ? Qt::ControlModifier : Qt::ShiftModifier));
             break;
         case QEvent::ApplicationDeactivate:
             set_down(false);
