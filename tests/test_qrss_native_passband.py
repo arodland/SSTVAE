@@ -313,6 +313,21 @@ def test_refusals(P, tmp_path):
         assert g[0] == r[0] == "raise" and issubclass(g[1], exc) and issubclass(r[1], exc), (meta, g, r)
         if exc is KeyError:
             assert g[1] is r[1] and g[2] == r[2], (meta, g, r)
+    # meta.json's values as int(m["fs"]) and float(m["scale"]) take them (a
+    # numeric string is a number), and the TypeError of a value they refuse,
+    # or of a meta.json that is no dict, type and text
+    for k, meta in enumerate(('{"fs": " 4_000 ", "scale": "8192"}', '{"fs": "\\u0664\\u0660", "scale": 1}',
+                              '{"fs": "4000.0", "scale": 1}', '{"fs": 40, "scale": "x"}',
+                              '{"fs": null, "scale": 1}', '{"fs": [40], "scale": 1}', '{"fs": 40, "scale": {}}',
+                              "[40]", '"fs"', "40", "null")):
+        d = tmp_path / f"meta{k}"
+        d.mkdir()
+        (d / "meta.json").write_text(meta)
+        g, r = _call(P.PassbandStore, d), _call(frontend.PassbandStore, d)
+        if r[0] == "ok":
+            assert g[0] == "ok" and (g[1].fs, g[1].scale) == (r[1].fs, r[1].scale), (meta, g, r)
+        else:
+            _same_result(g, r, meta)
     # fs <= 0, given or in meta.json: the same ValueError, and no meta.json written
     for fs in (0, -40, -1):
         g = _call(P.PassbandStore, tmp_path / f"cfs{fs}", fs=fs)

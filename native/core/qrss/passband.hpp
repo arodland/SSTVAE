@@ -171,7 +171,13 @@ public:
     // scale from it, as the files were written), else writes it from
     // `opt`. FileError for a root that cannot be made, std::invalid_argument
     // (ValueError) for unparsable JSON or an fs <= 0 (before meta.json is
-    // written), pyjson::KeyError for a key missing.
+    // written), pyjson::KeyError for a key missing. meta.json's values are
+    // read as int(m["fs"]) and float(m["scale"]) read them: a float fs
+    // truncated, a bool as 0/1, a numeric string parsed ("4000" is 4000),
+    // and anything else -- or a meta.json that is no dict -- the TypeError
+    // (math::TypeError) Python raises, in its words; an fs past int is
+    // std::overflow_error, where Python's int takes it and refuses the
+    // capture later (ValueError, "the store holds ... Hz FE").
     explicit PassbandStore(std::string root, StoreOptions opt = {});
     ~PassbandStore();
     PassbandStore(const PassbandStore&) = delete;

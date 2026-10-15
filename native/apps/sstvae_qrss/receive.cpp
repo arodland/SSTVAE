@@ -43,9 +43,12 @@
 // store file json cannot parse (the passband store's meta.json, an
 // accumulator's or a cluster's index) is the script's
 // json.decoder.JSONDecodeError and this one's ValueError (its base class),
-// with json's message; and a damaged .npz in the store ends both with the
+// with json's message; a damaged .npz in the store ends both with the
 // C++ store's ValueError text where the script names np.load's or
-// zipfile's class (decode.cpp's note).
+// zipfile's class (decode.cpp's note); and a packed passband hour the
+// capture is written into that does not decode is soundfile's
+// LibsndfileError there and RuntimeError (its base class) here, from main's
+// backstop, in the FLAC decoder's words, naming the same file.
 //
 // --just-ce and --just-l are argparse's mutually exclusive group
 // (argparse.hpp's exclusive()), refused and printed as argparse does.

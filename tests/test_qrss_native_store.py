@@ -838,6 +838,20 @@ def test_threads_hammer_one_store(NStore, tmp_path):
     assert all(line.startswith('{"time": ') and line.endswith("}") for line in lines)
 
 
+def test_root_that_cannot_be_made(NStore, tmp_path):
+    """A root whose directories cannot be made: the reference's OSError,
+    type and text, naming the directory whose own mkdir failed -- passes/
+    itself, or a parent (Path.mkdir(parents=True)), as a dangling symlink in
+    the path makes it -- and nothing made."""
+    (tmp_path / "file").write_text("x")
+    os.symlink(tmp_path / "nowhere", tmp_path / "dangling")
+    for k, root in enumerate(["file", "file/below", "dangling", "dangling/below", "dangling/below/deeper"]):
+        ref = _outcome(S.Store, tmp_path / root)
+        got = _outcome(NStore, tmp_path / root)
+        assert ref[0] == "raise" and got == ref, (root, got, ref)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["dangling", "file"]
+
+
 def test_two_stores_one_root(NStore, tmp_path):
     """Two C++ Stores open on one directory (spelled two ways) used from two
     threads: they share the root's lock, so neither trips over the other's

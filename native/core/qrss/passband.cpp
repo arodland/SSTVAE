@@ -11,8 +11,11 @@
 #include <set>
 #include <string>
 
+#include "math/errors.hpp"
 #include "qrss/flac.hpp"
 #include "qrss/pyjson.hpp"
+#include "qrss/pynum.hpp"
+#include "qrss/pytext.hpp"
 #include "qrss/rawfile.hpp"
 #include "util/fileio.hpp"
 
@@ -128,7 +131,37 @@ void atomic_write(const std::string& root, const std::string& name, const std::s
     if (!rawfile::write_replace(tmp, join(root, name), text, ec)) throw FileError(ec, tmp);
 }
 
-// int(v) of a meta.json value (an int, a float truncated, a bool).
+// The name of a JSON value's Python type, as a TypeError gives it.
+const char* type_name(const pyjson::Value& v) {
+    using K = pyjson::Value::Kind;
+    switch (v.kind()) {
+        case K::Null: return "NoneType";
+        case K::Bool: return "bool";
+        case K::Int: return "int";
+        case K::Float: return "float";
+        case K::String: return "str";
+        case K::Array: return "list";
+        case K::Object: return "dict";
+    }
+    return "object";
+}
+
+// m[key] of meta.json's value: KeyError when a dict lacks it, and for
+// anything but a dict the TypeError Python's subscript raises.
+const pyjson::Value& subscript(const pyjson::Value& m, const char* key) {
+    using K = pyjson::Value::Kind;
+    switch (m.kind()) {
+        case K::Object: return m.at(key);
+        case K::Array: throw math::TypeError("list indices must be integers or slices, not str");
+        case K::String: throw math::TypeError("string indices must be integers, not 'str'");
+        default: throw math::TypeError(std::string("'") + type_name(m) + "' object is not subscriptable");
+    }
+}
+
+// int(v) of a meta.json value: an int, a float truncated, a bool, a str
+// as int() reads one (pynum: " 4_000 " is 4000); TypeError for the rest,
+// in Python's words. A value past int64 is OverflowError (Python's int
+// would take it, and fail later).
 std::int64_t py_int(const pyjson::Value& v, const char* key) {
     using K = pyjson::Value::Kind;
     switch (v.kind()) {
@@ -141,17 +174,34 @@ std::int64_t py_int(const pyjson::Value& v, const char* key) {
             if (f >= 0x1p63 || f < -0x1p63) too_big(key);
             return static_cast<std::int64_t>(f);
         }
-        default: throw std::invalid_argument(std::string("meta.json: ") + key + " is not a number");
+        case K::String: {
+            const auto parsed = pynum::py_int(v.as_string(), 10);
+            if (!parsed) throw std::invalid_argument(pynum::invalid_int_literal(v.as_string(), 10));
+            if (!parsed->value) too_big(key);
+            return *parsed->value;
+        }
+        default:
+            throw math::TypeError(
+                std::string("int() argument must be a string, a bytes-like object or a real number, not '") +
+                type_name(v) + "'");
     }
 }
 
-double py_float(const pyjson::Value& v, const char* key) {
+// float(v): an int, a float, a bool, a str as float() reads one; TypeError
+// for the rest.
+double py_float(const pyjson::Value& v) {
     using K = pyjson::Value::Kind;
     switch (v.kind()) {
         case K::Int:
         case K::Float: return v.as_double();
         case K::Bool: return v.as_bool() ? 1.0 : 0.0;
-        default: throw std::invalid_argument(std::string("meta.json: ") + key + " is not a number");
+        case K::String: {
+            if (const auto f = pynum::py_float(v.as_string())) return *f;
+            throw std::invalid_argument("could not convert string to float: " + pytext::repr(v.as_string()));
+        }
+        default:
+            throw math::TypeError(std::string("float() argument must be a string or a real number, not '") +
+                                  type_name(v) + "'");
     }
 }
 
@@ -301,9 +351,11 @@ PassbandStore::PassbandStore(std::string root, StoreOptions opt)
         const auto text = rawfile::read_all(meta, ec);
         if (!text) throw FileError(ec, meta);
         const pyjson::Value m = pyjson::loads(*text);
-        const std::int64_t fs = py_int(m.at("fs"), "fs");
-        const double scale = py_float(m.at("scale"), "scale");
-        if (fs > std::numeric_limits<int>::max() || fs < std::numeric_limits<int>::min()) too_big("fs");
+        // fs, scale = int(m["fs"]), float(m["scale"])
+        const std::int64_t fs = py_int(subscript(m, "fs"), "fs");
+        const double scale = py_float(subscript(m, "scale"));
+        if (fs > std::numeric_limits<int>::max() || fs < std::numeric_limits<int>::min())
+            throw std::overflow_error("the passband store's fs " + std::to_string(fs) + " is out of the int range");
         fs_ = static_cast<int>(fs);
         scale_ = scale;
     }

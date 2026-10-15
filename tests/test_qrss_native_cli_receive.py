@@ -109,6 +109,7 @@ class Case:
     texts: dict[str, str] = field(default_factory=dict)    # files to write in the run dir
     locks: list[str] = field(default_factory=list)         # directories this process locks (live.dir_lock)
     json_error: bool = False         # the script's JSONDecodeError is the C++'s ValueError
+    flac_error: bool = False         # soundfile's LibsndfileError is the C++'s RuntimeError
 
 
 @dataclass
@@ -230,6 +231,13 @@ def check(case: Case, py: Run, nat: Run):
             prefix = "json.decoder.JSONDecodeError: "
             assert want.startswith(prefix), want
             assert got == "ValueError: " + want[len(prefix):], (want, got)
+        elif case.flac_error:
+            # soundfile.LibsndfileError is a RuntimeError, which the C++
+            # passband store's FLAC decoder raises in its own words
+            # (receive.cpp's header): the same file named
+            assert re.fullmatch(r"soundfile\.LibsndfileError: Error opening '([^']*)': .*", want), want
+            path = re.fullmatch(r"[^']*'([^']*)'.*", want).group(1)
+            assert got == f"RuntimeError: {path}: not a FLAC file (or a damaged one)", (want, got)
         else:
             assert got == want
         assert nat.err == got + "\n"
@@ -260,8 +268,9 @@ def inputs(tmp_path_factory):
     -6 dB) and CE and L SHORT WAVs (qrss_transmit.py, then qrss_simulate.py
     WAV -> WAV at -6 dB: int16 for CE, float32 for L), two headerless CE
     TINY .npz files of the same picture at 0 dB (1800 and 1000 Hz, so
-    neither is the SHORT pass's transmission again), plus the broken and
-    noise inputs the refusal and store cases read."""
+    neither is the SHORT pass's transmission again) and the two in one
+    slot (two.npz), plus the broken and noise inputs the refusal and store
+    cases read."""
     d = tmp_path_factory.mktemp("receive-in")
     sp = picture.StoredPicture.from_latents(synthetic_full_latents(3), 0xD1D8, 1)
     picture.save_qrsp(d / "pic.qrsp", sp)
@@ -309,12 +318,18 @@ def inputs(tmp_path_factory):
     # noise at twice the front end's rate: the passband store is not written
     _resave(f["ce.npz"], d / "noise-8k.npz", fe=noise.astype(np.complex64), fs=np.int64(8000))
     _resave(f["ce.npz"], d / "fe-c16.npz", fe=fe.astype(np.complex128))
+    # both TINY transmissions in one slot (1000 and 1800 Hz): two passes
+    with np.load(f["tiny-1800.npz"]) as a, np.load(f["tiny-1000.npz"]) as b:
+        assert a["fe"].shape == b["fe"].shape and a["t0_index"] == b["t0_index"]
+        two = (a["fe"] + b["fe"]).astype(np.complex64)
+    _resave(f["tiny-1800.npz"], d / "two.npz", fe=two)
     (d / "not-zip.npz").write_bytes(b"PK\x03\x04" + bytes(range(64)))
     data = bytearray(f["ce.npz"].read_bytes())
     data[data.index(fe[:4].tobytes())] ^= 0x01        # a bit of fe's data: zipfile's CRC check
     (d / "bad-crc.npz").write_bytes(bytes(data))
     for k in ("empty.npz", "garbage.npz", "text.wav", "array.npz", "bogus-frame.npz", "v1.npz", "noise.npz",
-              "not-zip.npz", "bad-crc.npz", "q-negative.npz", "fs-zero.npz", "fe-c16.npz", "noise-8k.npz"):
+              "not-zip.npz", "bad-crc.npz", "q-negative.npz", "fs-zero.npz", "fe-c16.npz", "noise-8k.npz",
+              "two.npz"):
         f[k] = d / k
     return sp, f
 
@@ -645,11 +660,33 @@ def _store_cases(f) -> list[Case]:
           texts={meta: '{"fs": 0, "scale": 8192.0}'}),
         c("passband-meta-8k", tiny, "--store", "st", "--passband", "pb",
           texts={meta: '{"fs": 8000, "scale": 8192.0}'}),
+        # meta.json's values as int() and float() read them: a numeric
+        # string is a number (the receive goes on and stores), anything
+        # else Python's TypeError, as is a meta.json that is no dict
+        c("passband-meta-str", tiny, "--store", "st", "--passband", "pb",
+          texts={meta: '{"fs": " 4_000 ", "scale": "8192"}'}),
+        c("passband-meta-fs-null", tiny, "--store", "st", "--passband", "pb",
+          texts={meta: '{"fs": null, "scale": 8192.0}'}),
+        c("passband-meta-list", tiny, "--store", "st", "--passband", "pb", texts={meta: "[4000]"}),
+        # an hour packed (FLAC) that does not decode, where the capture is
+        # written: the unpack's error
+        c("passband-flac-damaged", tiny, "--store", "st", "--passband", "pb",
+          texts={"pb/fe_488687.flac": "not a FLAC file"}, flac_error=True),
+        # a directory whose own mkdir fails is the one the error names, a
+        # parent's included (Path.mkdir(parents=True)): here a dangling
+        # symlink, which exists and is no directory
+        Case("store-dangling", [tiny, "--store", "d/st"], {tiny: f[tiny], "d": f[tiny].parent / "nowhere"},
+             store=True),
+        Case("passband-dangling", [tiny, "--store", "st", "--passband", "d/pb"],
+             {tiny: f[tiny], "d": f[tiny].parent / "nowhere"}, store=True),
         # an association that fails, after the pass's lines: a picture's
         # index without its arrays (read by rule 3, the TINY pass having
         # no header)
         c("acc-npz-missing", "tiny-1800.npz", "--store", "st", "--no-passband",
           texts={f"st/{_ACC}.json": _ACC_JSON}),
+        # two passes in one slot, each stored and associated after its own
+        # lines, in the order printed: the second joins the first's cluster
+        c("two-passes", "two.npz", "--store", "st", "--no-passband"),
     ]
 
 
@@ -708,35 +745,74 @@ def test_store_side_by_side(cli, inputs, tmp_path):
     assert err("passband-meta-no-fs") == "KeyError: 'fs'\n"
     assert err("passband-meta-fs-0") == "ValueError: the passband store's fs must be positive, not 0\n"
     assert err("passband-meta-8k") == "ValueError: the store holds 8000 Hz FE, not a 4000 Hz capture\n"
+    assert out("passband-meta-str").endswith("  stored     provisional (prov)\n")
+    assert trees["passband-meta-str"] == sorted(under("pb", passband) + under("st", empty) +
+                                                ["st/passes/UID0.npz", "st/prov/c_UID0.json"])
+    assert err("passband-meta-fs-null") == ("TypeError: int() argument must be a string, a bytes-like object or a "
+                                            "real number, not 'NoneType'\n")
+    assert err("passband-meta-list") == "TypeError: list indices must be integers or slices, not str\n"
+    assert err("passband-flac-damaged") == "RuntimeError: pb/fe_488687.flac: not a FLAC file (or a damaged one)\n"
+    assert err("store-dangling") == "FileExistsError: [Errno 17] File exists: 'd'\n"
+    assert err("passband-dangling") == "FileExistsError: [Errno 17] File exists: 'd'\n"
+    assert trees["store-dangling"] == [] and trees["passband-dangling"] == under("st", empty)
     for name in ("passband-file", "passband-meta-dir", "passband-meta-garbage", "passband-meta-no-fs",
-                 "passband-meta-fs-0", "passband-meta-8k"):
+                 "passband-meta-fs-0", "passband-meta-8k", "passband-meta-fs-null", "passband-meta-list",
+                 "passband-flac-damaged", "passband-dangling"):
         assert out(name) == "" and "st/passes/" in trees[name], name     # the store first
     assert out("acc-npz-missing").startswith("pass ") and "  mean W     " in out("acc-npz-missing")
     assert "stored" not in out("acc-npz-missing")
     assert err("acc-npz-missing") == f"FileNotFoundError: [Errno 2] No such file or directory: 'st/{_ACC}.npz'\n"
     assert "st/passes/UID0.npz" in trees["acc-npz-missing"]      # the pass was stored first
+    two = out("two-passes")
+    assert two.count("  stored     provisional (prov)\n") == 2, two
+    assert [ln for ln in two.splitlines() if ln.startswith(("pass ", "  stored"))][1::2] == [
+        "  stored     provisional (prov)"] * 2, two                    # each after its own pass
+    assert trees["two-passes"] == sorted(under("st", empty) + ["st/passes/UID0.npz", "st/passes/UID1.npz",
+                                                               "st/prov/c_UID0.json"])
+
+
+def _rekey(home: Path, old: str, picture_id: int) -> str:
+    """Give the accumulator `old` (acc/<CALL>_<pid:08x>) another picture
+    ID, its files renamed as Store.key_name names them; returns the new
+    name. What a receive prints for an existing member is the key read
+    back from that file."""
+    meta = json.loads((home / f"{old}.json").read_text())
+    meta["picture_id"] = picture_id
+    new = f"acc/{meta['callsign']}_{picture_id:08x}"
+    (home / f"{new}.json").write_text(json.dumps(meta, indent=1, sort_keys=True))
+    (home / f"{old}.json").unlink()
+    os.replace(home / f"{old}.npz", home / f"{new}.npz")
+    return new
 
 
 def test_store_sequence(cli, inputs, tmp_path):
-    """Four receives into the default store ($QRSSTVAE_HOME, with its
-    passband store), one per implementation, the trees compared after each
-    receive: a headerless TINY pass with nothing to join (provisional); the
-    SHORT pass with the picture's header (header, and the TINY pass's
-    cluster then joins the picture by correlation); a second TINY pass, at
-    another frequency (corr); the first again (already a member)."""
+    """Receives into the default store ($QRSSTVAE_HOME, with its passband
+    store), one per implementation, the trees compared after each receive:
+    a headerless TINY pass with nothing to join (provisional); the SHORT
+    pass with the picture's header (header, and the TINY pass's cluster
+    then joins the picture by correlation); a second TINY pass, at another
+    frequency (corr); the first again (already a member), twice, with the
+    accumulator re-keyed to a picture ID of fewer than eight hex digits and
+    then to a negative one (a hand-edited store's), which the key's
+    f"{pid:08x}" pads, the sign counted in the width."""
     _, f = inputs
-    steps = [("tiny-1800.npz", "provisional (prov)"), ("ce.npz", "K1ABC ab2dea7f by header"),
-             ("tiny-1000.npz", "K1ABC ab2dea7f by corr"), ("tiny-1800.npz", "K1ABC ab2dea7f by existing membership")]
+    steps = [("tiny-1800.npz", None, "provisional (prov)"), ("ce.npz", None, "K1ABC ab2dea7f by header"),
+             ("tiny-1000.npz", None, "K1ABC ab2dea7f by corr"),
+             ("tiny-1800.npz", 0x2A, "K1ABC 0000002a by existing membership"),
+             ("tiny-1800.npz", -0x2A, "K1ABC -000002a by existing membership")]
     sides = {side: tmp_path / side for side in ("py", "nat")}
     for side, d in sides.items():
         d.mkdir()
-        for name, _ in steps:
+        for name, _, _ in steps:
             if not (d / name).exists():
                 os.symlink(f[name], d / name)
     outs = {"py": [], "nat": []}
+    acc = _ACC
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=2) as pool:
-        for k, (name, want) in enumerate(steps):
+        for k, (name, rekey, want) in enumerate(steps):
+            if rekey is not None:
+                acc = [_rekey(d / "home", acc, rekey) for d in sides.values()][0]
             case = Case(f"step{k}", [name], store=True)
             jobs = (pool.submit(_run, [sys.executable, REPO_ROOT / "qrss_receive.py", *case.args], sides["py"],
                                 _home(sides["py"])),
@@ -750,11 +826,13 @@ def test_store_sequence(cli, inputs, tmp_path):
                              (t0, time.time()))
             if k == 0:
                 assert "home/prov/c_UID0.json" in tree, tree
-    acc = json.loads((sides["nat"] / "home" / f"{_ACC}.json").read_text())
-    assert [(m["uid"], m["method"]) for m in _norm(acc["members"], _uid_map(*outs["nat"]))] == [
-        ("UID1", "header"), ("UID0", "corr"), ("UID2", "corr")]
+            if k == 2:
+                meta = json.loads((sides["nat"] / "home" / f"{_ACC}.json").read_text())
+                assert [(m["uid"], m["method"]) for m in _norm(meta["members"], _uid_map(*outs["nat"]))] == [
+                    ("UID1", "header"), ("UID0", "corr"), ("UID2", "corr")]
+    assert acc == "acc/K1ABC_-000002a"
     hours = ["fe_488687.i16", "fe_488687.json", "fe_488688.i16", "fe_488688.json", "meta.json"]
-    assert tree == sorted(["home/", "home/acc/", f"home/{_ACC}.json", f"home/{_ACC}.npz", "home/passband/",
+    assert tree == sorted(["home/", "home/acc/", f"home/{acc}.json", f"home/{acc}.npz", "home/passband/",
                            *(f"home/passband/{h}" for h in hours), "home/passes/",
                            *(f"home/passes/UID{k}.npz" for k in range(3)), "home/prov/"])
     print(f"store sequence: worst relative difference {_Worst.rel:.2e}")

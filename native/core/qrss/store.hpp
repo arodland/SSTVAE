@@ -273,7 +273,8 @@ public:
 
     // Opens (creating passes/, acc/ and prov/ as needed) the store at
     // `root` (UTF-8), or default_root(). FileError when a directory
-    // cannot be made.
+    // cannot be made, naming the one whose mkdir failed (it or a parent,
+    // as Path.mkdir(parents=True)'s OSError does).
     explicit Store(std::optional<std::string> root = std::nullopt, Seams seams = {});
 
     Store(const Store&) = delete;

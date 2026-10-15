@@ -647,13 +647,14 @@ Value Accumulator::meta() const {
 Store::Store(std::optional<std::string> root, Seams seams)
     : root_(root ? pathlib(*root) : default_root()), seams_(std::move(seams)) {
     for (const char* d : {"passes", "acc", "prov"}) {
+        // (self.root / d).mkdir(parents=True, exist_ok=True): the OSError
+        // names the directory whose own mkdir failed, this one or a parent
+        // (--store /proc/st is "No such file or directory: '/proc/st'", as
+        // an unwritable parent is its PermissionError)
         const std::string path = dir(d);
-        const auto p = util::fs_path(path);
-        if (!p) file_error("cannot create", path, EINVAL);
         std::error_code ec;
-        std::filesystem::create_directories(*p, ec);
-        if (ec) file_error("cannot create", path, util::errno_of(ec));
-        if (!util::is_dir(path)) file_error("cannot create", path, EEXIST);
+        std::string failed;
+        if (!rawfile::make_dirs(path, ec, &failed)) file_error("cannot create", failed, util::errno_of(ec));
     }
     mu_ = root_mutex(root_);
 }
