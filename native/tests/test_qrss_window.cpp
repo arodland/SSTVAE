@@ -255,8 +255,9 @@ void test_the_confidence_band() {
     gui::PassBar* bar = tile->pass_bar();
     check::equal(bar->width(), tile->width() - 12, "qrss/bar: as wide as the picture");
     const QImage img = bar->grab().toImage();
-    const double step = (bar->width() - 2) / 5.0;
-    auto at = [&](int bin) { return img.pixelColor(1 + static_cast<int>((bin + 0.5) * step), 4); };
+    const double step = (bar->width() - 4) / 5.0;   // less the border and the shadow
+    // Bin 3 is half filled (progress 0.7), so sample left of centre.
+    auto at = [&](int bin) { return img.pixelColor(1 + static_cast<int>((bin + 0.3) * step), 4); };
     check::is_true(at(0) == QColor(0, 0, 0),
                    "qrss/bar: past the preamble, nothing measured is black");
     check::is_true(at(1) == QColor(0, 0, 0), "qrss/bar: no better than noise is black");
@@ -517,7 +518,7 @@ void test_the_pass_bar() {
     check::is_true(!h[0] && h[10] && h[20] && !h[30] && !h[5],
                    "pass bar: holes where latents are missing, not the preamble or weak data");
     check::is_true(!h[70], "pass bar: what has not arrived yet is not a hole");
-    bar.resize(240, 8);
+    bar.setFixedSize(242, 10);   // 240 x 8 and the shadow
     QImage img(bar.size(), QImage::Format_RGB32);
     bar.render(&img);
     const int x10 = 1 + static_cast<int>(10.5 * 238 / 120);

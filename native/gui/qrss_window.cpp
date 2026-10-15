@@ -115,6 +115,9 @@ QString hhmm(const QString& iso) {
 
 namespace {
 constexpr int PASS_BAR_H = 8;
+// A soft grey drop shadow below and to the right, so the white of a
+// strong stretch stands out from a white tile (Jeff, 2026-10-15).
+constexpr int PASS_SHADOW = 2;
 // The preamble at the start of a pass carries no latents: not a hole.
 constexpr double PREAMBLE_S = 20.0;
 // receiver.CONF_FLOOR_DB: a bin whose latents were all erased.
@@ -157,7 +160,7 @@ QColor PassBar::unmeasured() { return QColor(128, 128, 128); }
 
 PassBar::PassBar(QWidget* parent) : QWidget(parent) {
     setObjectName(QStringLiteral("pass_bar"));
-    setFixedSize(PICTURE_W, PASS_BAR_H);
+    setFixedSize(PICTURE_W, PASS_BAR_H + PASS_SHADOW);
     setToolTip(tr("The pass so far, left to right, coloured by how well each stretch came "
                   "through: black is no better than noise (or nothing there: not heard, or "
                   "lost), then blue, red, yellow, and white at +10 dB or more per latent. "
@@ -183,11 +186,20 @@ void PassBar::set(const std::vector<std::optional<double>>& bins, double progres
 void PassBar::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     const QPalette& pal = palette();
-    const int w = width();
-    const int h = height();
+    const int w = width() - PASS_SHADOW;
+    const int h = height() - PASS_SHADOW;
+    // The shadow first, behind the bar: two offsets for a soft edge.
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(0, 0, 0, 60));
+    painter.drawRoundedRect(QRectF(PASS_SHADOW, PASS_SHADOW, w, h), 1.5, 1.5);
+    painter.setBrush(QColor(0, 0, 0, 60));
+    painter.drawRoundedRect(QRectF(1, 1, w, h), 1.0, 1.0);
+    painter.setRenderHint(QPainter::Antialiasing, false);
+    painter.setBrush(Qt::NoBrush);
     // The track is the window's colour, not Base: Base is white on most
     // themes, which is also the strongest confidence.
-    painter.fillRect(rect(), pal.color(QPalette::Window));
+    painter.fillRect(0, 0, w, h, pal.color(QPalette::Window));
     painter.setPen(pal.color(QPalette::Mid));
     painter.drawRect(0, 0, w - 1, h - 1);
     const int fill = static_cast<int>(std::lround(progress_ * (w - 2)));
