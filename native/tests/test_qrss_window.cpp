@@ -24,6 +24,7 @@
 #include <QTemporaryDir>
 #include <QThread>
 
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -35,6 +36,9 @@
 #include <vector>
 
 #include "check.hpp"
+#include "info_button.hpp"
+#include "qrss/em.hpp"
+#include "qrss_em.hpp"
 #include "qrss_page.hpp"
 #include "qrss_spectrogram.hpp"
 #include "qrss_window.hpp"
@@ -943,6 +947,89 @@ void test_the_tab_layout() {
                    "tab: the spectrogram the larger to start with");
 }
 
+// Improve and Find missed passes, briefly (the calls behind them are
+// em_api's, tested there): when they can run, a run's progress and
+// result, the picture drawn again, and a second press queued.
+void test_improve_and_find() {
+    QTemporaryDir dir;
+    QDir(dir.path()).mkpath(QStringLiteral("tiles"));
+    QImage img(64, 48, QImage::Format_RGB32);
+    img.fill(Qt::red);
+    img.save(QDir(dir.path()).filePath(QStringLiteral("tiles/a.png")));
+    img.fill(Qt::blue);
+    const QString redrawn = QDir(dir.path()).filePath(QStringLiteral("redrawn.png"));
+    img.save(redrawn);
+
+    gui::QrssWindow w;
+    w.em()->set_store_root(dir.path());   // no passband/ yet
+    std::atomic<bool> release{false};
+    std::atomic<int> runs{0};
+    w.em()->set_runner([&](gui::qrss_em::Kind kind, const gui::qrss_em::Target&,
+                           const qrss::em::Hooks& hooks) {
+        runs++;
+        hooks.progress(1, 3, "round 1 pass x");
+        while (!release.load() && !(hooks.cancel && hooks.cancel->load())) QThread::msleep(2);
+        gui::qrss_em::Outcome out;
+        out.line = kind == gui::qrss_em::Kind::Improve ? QStringLiteral("Improved: +0.12 dB over 3 rounds")
+                                                       : QStringLiteral("Searched 48 h: no missed passes");
+        if (kind == gui::qrss_em::Kind::Improve) {
+            out.image = redrawn;
+            out.mean_w_db = -7.6;
+        }
+        return out;
+    });
+    w.set_state_dir(dir.path());
+    QJsonObject t = tile_json(QStringLiteral("a"), 1500.0, QStringLiteral("N0CALL"), 1.0,
+                              QStringLiteral("tiles/a.png"), 2);
+    t[QStringLiteral("status")] = QStringLiteral("complete");
+    write_state(dir.path(), QJsonArray{t}, 2'000'000);
+    w.reload();
+    gui::QrssTile* a = w.tile(QStringLiteral("a"));
+    check::is_true(a && a->em_bar() && !a->em_bar()->isHidden(), "qrss/em: a picture's tile has the buttons");
+    if (!a || !a->em_bar()) return;
+    gui::qrss_em::EmBar* bar = a->em_bar();
+    check::is_true(bar->improve_button()->isEnabled() && !bar->find_button()->isEnabled(),
+                   "qrss/em: Improve can run; Find cannot without a recording");
+    check::is_true(bar->card(gui::qrss_em::Kind::Find).contains(QStringLiteral("no recording")),
+                   "qrss/em: Find's card says why not");
+    check::equal(bar->improve_info()->glyph().toStdString(), std::string("?"), "qrss/em: a (?) beside each");
+    QDir(dir.path()).mkpath(QStringLiteral("passband"));
+    w.reload();
+    a->update_from(t, dir.path());
+    check::is_true(bar->find_button()->isEnabled(), "qrss/em: Find can run once a recording is kept");
+
+    const auto wait_for = [](const std::function<bool()>& done) {
+        QElapsedTimer timer;
+        timer.start();
+        while (!done() && timer.elapsed() < 10'000) {
+            QCoreApplication::processEvents();
+            QThread::msleep(2);
+        }
+        return done();
+    };
+    bar->improve_button()->click();
+    check::is_true(wait_for([&] { return bar->progress_label()->text().contains(QStringLiteral("round 1 of 3")); }),
+                   "qrss/em: the run's progress replaces the buttons");
+    bar->find_button()->setEnabled(true);
+    w.em()->start(gui::qrss_em::Kind::Find, bar->target());
+    check::is_true(bar->progress_label()->text().contains(QStringLiteral("Find next")),
+                   "qrss/em: a second press waits for the first");
+    release = true;
+    check::is_true(wait_for([&] { return !w.em()->busy(); }), "qrss/em: both runs end");
+    check::equal(runs.load(), 2, "qrss/em: Improve, then Find");
+    check::is_true(bar->result_label()->text().contains(QStringLiteral("Improved: +0.12 dB")) &&
+                       bar->result_label()->text().contains(QStringLiteral("no missed passes")),
+                   "qrss/em: each run leaves its line");
+    check::equal(a->image_path().toStdString(), redrawn.toStdString(), "qrss/em: the tile shows the picture drawn again");
+    check::equal(a->weight_text().toStdString(), std::string("-7.6 dB"), "qrss/em: and its weight");
+    a->update_from(t, dir.path());
+    check::equal(a->image_path().toStdString(), redrawn.toStdString(),
+                 "qrss/em: kept until the listener draws its own");
+    t[QStringLiteral("image_rev")] = 3;
+    a->update_from(t, dir.path());
+    check::is_true(a->image_path().endsWith(QStringLiteral("tiles/a.png")), "qrss/em: then the listener's");
+}
+
 int main(int argc, char** argv) {
     check::report_crashes_instead_of_prompting();
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -961,5 +1048,6 @@ int main(int argc, char** argv) {
     test_the_spectrogram();
     test_the_history_is_kept();
     test_the_tab_layout();
+    test_improve_and_find();
     return check::report("qrss window");
 }

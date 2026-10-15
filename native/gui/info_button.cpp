@@ -1,6 +1,7 @@
 #include "info_button.hpp"
 
 #include <QApplication>
+#include <QColor>
 #include <QEnterEvent>
 #include <QFrame>
 #include <QGuiApplication>
@@ -8,6 +9,7 @@
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPalette>
 #include <QPen>
 #include <QScreen>
 #include <QTimer>
@@ -15,6 +17,8 @@
 
 #include <algorithm>
 #include <utility>
+
+#include "style.hpp"
 
 namespace sstvae::gui {
 
@@ -93,6 +97,11 @@ bool InfoButton::card_shown() const { return card_ != nullptr && card_->isVisibl
 
 QWidget* InfoButton::card() const { return card_; }
 
+void InfoButton::set_glyph(const QString& glyph) {
+    glyph_ = glyph;
+    update();
+}
+
 void InfoButton::show_card() {
     show_timer_->stop();
     hide_timer_->stop();
@@ -159,7 +168,7 @@ void InfoButton::paintEvent(QPaintEvent*) {
     f.setPixelSize(std::max(9, static_cast<int>(d * 0.62)));
     p.setFont(f);
     p.setPen(hot ? pal.color(QPalette::HighlightedText) : pal.color(QPalette::Text));
-    p.drawText(circle, Qt::AlignCenter, QStringLiteral("i"));
+    p.drawText(circle, Qt::AlignCenter, glyph_);
 }
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
@@ -204,5 +213,71 @@ bool InfoButton::eventFilter(QObject* watched, QEvent* event) {
     if (event->type() == QEvent::ApplicationDeactivate) hide_card();
     return false;
 }
+
+// --- card text ----------------------------------------------------------------------------
+
+namespace info {
+
+namespace {
+bool dark_theme(const QPalette& pal) { return pal.color(QPalette::Base).lightness() < 128; }
+}  // namespace
+
+QString hex(const QColor& c) { return c.name(QColor::HexRgb); }
+QString good_colour(const QPalette& pal) {
+    return dark_theme(pal) ? QStringLiteral("#5cc983") : QStringLiteral("#23824a");
+}
+QString cost_colour(const QPalette& pal) {
+    return dark_theme(pal) ? QStringLiteral("#f0a648") : QStringLiteral("#a85d00");
+}
+
+QString bullet_list(const QStringList& items) {
+    QString out;
+    // A table, not <ul>: a label's list indent is a fixed 40 px.
+    for (const QString& t : items) {
+        out += QStringLiteral("<tr><td valign=\"top\" style=\"padding-right:4px;\">\u2022</td>"
+                              "<td valign=\"top\" style=\"padding-bottom:3px;\">%1</td></tr>")
+                   .arg(t.toHtmlEscaped());
+    }
+    return QStringLiteral("<table cellspacing=\"0\" cellpadding=\"0\" style=\"margin-top:3px;\">%1</table>")
+        .arg(out);
+}
+
+QString info_html(const QPalette& pal, const QString& title, const QString& what,
+                  const QStringList& good, const QStringList& cost, const QString& extra) {
+    return info_html(pal, title, what, QString(), true, QObject::tr("Better at"), good,
+                     QObject::tr("Costs"), cost, extra);
+}
+
+QString info_html(const QPalette& pal, const QString& title, const QString& what,
+                  const QString& now, bool ok, const QString& good_head, const QStringList& good,
+                  const QString& cost_head, const QStringList& cost, const QString& extra) {
+    const QString muted = hex(style::secondary_text(pal));
+    const auto head = [](const QString& colour, const QString& text) {
+        return QStringLiteral("<p style=\"margin:0;\"><span style=\"color:%1; font-size:small; "
+                              "font-weight:600; letter-spacing:1px;\">%2</span></p>")
+            .arg(colour, text.toUpper().toHtmlEscaped());
+    };
+    const QString now_line =
+        now.isEmpty() ? QString()
+                      : QStringLiteral("<p style=\"margin:0 0 8px 0; color:%1; font-weight:600;\">%2</p>")
+                            .arg(ok ? good_colour(pal) : cost_colour(pal), now.toHtmlEscaped());
+    return QStringLiteral(
+               "<p style=\"margin:0; font-weight:700;\">%1</p>"
+               "<p style=\"margin:2px 0 8px 0; color:%2;\">%3</p>%4"
+               "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr>"
+               "<td width=\"50%\" valign=\"top\">%5%6</td>"
+               "<td width=\"50%\" valign=\"top\" style=\"padding-left:10px;\">%7%8</td>"
+               "</tr></table>%9")
+        .arg(title.toHtmlEscaped(), muted, what.toHtmlEscaped(), now_line,
+             head(good_colour(pal), good_head), bullet_list(good), head(cost_colour(pal), cost_head),
+             bullet_list(cost), extra);
+}
+
+QString footnote(const QPalette& pal, const QString& text) {
+    return QStringLiteral("<p style=\"margin:8px 0 0 0; color:%1; font-size:small;\">%2</p>")
+        .arg(hex(style::secondary_text(pal)), text.toHtmlEscaped());
+}
+
+}  // namespace info
 
 }  // namespace sstvae::gui

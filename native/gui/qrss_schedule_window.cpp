@@ -163,55 +163,13 @@ QPixmap thumbnail(const std::filesystem::path& png, int w, int h) {
     return pix.scaled(w, h, Qt::KeepAspectRatio, Qt::SmoothTransformation);
 }
 
-// The (i) cards' colours: the window's own, with a green and an amber
-// dark enough to read on a light window and light enough on a dark one.
-QString hex(const QColor& c) { return c.name(QColor::HexRgb); }
-bool dark_theme(const QPalette& pal) { return pal.color(QPalette::Base).lightness() < 128; }
-QString good_colour(const QPalette& pal) {
-    return dark_theme(pal) ? QStringLiteral("#5cc983") : QStringLiteral("#23824a");
-}
-QString cost_colour(const QPalette& pal) {
-    return dark_theme(pal) ? QStringLiteral("#f0a648") : QStringLiteral("#a85d00");
-}
-
-QString bullet_list(const QStringList& items) {
-    QString out;
-    // A table, not <ul>: a label's list indent is a fixed 40 px.
-    for (const QString& t : items) {
-        out += QStringLiteral("<tr><td valign=\"top\" style=\"padding-right:4px;\">\u2022</td>"
-                              "<td valign=\"top\" style=\"padding-bottom:3px;\">%1</td></tr>")
-                   .arg(t.toHtmlEscaped());
-    }
-    return QStringLiteral("<table cellspacing=\"0\" cellpadding=\"0\" style=\"margin-top:3px;\">%1</table>")
-        .arg(out);
-}
-
-// Title, one line of what it is, "Better at" beside "Costs", then
-// whatever `extra` adds (a table, a footnote).
-QString info_html(const QPalette& pal, const QString& title, const QString& what,
-                  const QStringList& good, const QStringList& cost, const QString& extra) {
-    const QString muted = hex(style::secondary_text(pal));
-    const auto head = [](const QString& colour, const QString& text) {
-        return QStringLiteral("<p style=\"margin:0;\"><span style=\"color:%1; font-size:small; "
-                              "font-weight:600; letter-spacing:1px;\">%2</span></p>")
-            .arg(colour, text.toUpper().toHtmlEscaped());
-    };
-    return QStringLiteral(
-               "<p style=\"margin:0; font-weight:700;\">%1</p>"
-               "<p style=\"margin:2px 0 8px 0; color:%2;\">%3</p>"
-               "<table width=\"100%\" cellspacing=\"0\" cellpadding=\"0\"><tr>"
-               "<td width=\"50%\" valign=\"top\">%4%5</td>"
-               "<td width=\"50%\" valign=\"top\" style=\"padding-left:10px;\">%6%7</td>"
-               "</tr></table>%8")
-        .arg(title.toHtmlEscaped(), muted, what.toHtmlEscaped(),
-             head(good_colour(pal), QObject::tr("Better at")), bullet_list(good),
-             head(cost_colour(pal), QObject::tr("Costs")), bullet_list(cost), extra);
-}
-
-QString footnote(const QPalette& pal, const QString& text) {
-    return QStringLiteral("<p style=\"margin:8px 0 0 0; color:%1; font-size:small;\">%2</p>")
-        .arg(hex(style::secondary_text(pal)), text.toHtmlEscaped());
-}
+// The (i) cards' pieces are info_button.hpp's.
+using info::bullet_list;
+using info::cost_colour;
+using info::footnote;
+using info::good_colour;
+using info::hex;
+using info::info_html;
 
 // The Waveform (i): the chosen waveform, then L beside CE. Numbers from
 // the spec (qrss-spec rev 13 and docs/qrss/waveform-l.md).

@@ -191,6 +191,12 @@ ImageViewer::ImageViewer(const QPixmap& pixmap, const QString& title, QWidget* p
     update_caption();
 }
 
+void ImageViewer::add_footer(QWidget* footer) {
+    footer->setParent(this);
+    footer->setContentsMargins(6, 0, 6, 6);
+    static_cast<QVBoxLayout*>(layout())->addWidget(footer);
+}
+
 void ImageViewer::update_caption() {
     const QPixmap& p = view_->pixmap();
     caption_->setText(tr("%1 x %2, %3%%4   Wheel zooms, drag pans, double-click fits or "

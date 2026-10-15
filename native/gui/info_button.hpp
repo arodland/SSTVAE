@@ -12,11 +12,15 @@
 #ifndef SSTVAE_GUI_INFO_BUTTON_HPP
 #define SSTVAE_GUI_INFO_BUTTON_HPP
 
+#include <QString>
+#include <QStringList>
 #include <QToolButton>
 
 #include <functional>
 
+class QColor;
 class QLabel;
+class QPalette;
 class QTimer;
 
 namespace sstvae::gui {
@@ -44,6 +48,9 @@ public:
     void refresh();
     // The card window, for tests; null until first shown.
     QWidget* card() const;
+    // The letter in the circle: "i" by default, "?" for a button's help.
+    void set_glyph(const QString& glyph);
+    QString glyph() const { return glyph_; }
 
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override { return sizeHint(); }
@@ -65,7 +72,28 @@ private:
     QTimer* show_timer_ = nullptr;
     QTimer* hide_timer_ = nullptr;
     bool pinned_ = false;
+    QString glyph_ = QStringLiteral("i");
 };
+
+// The cards' rich text, in the window's own colours with a green and an
+// amber dark enough to read on a light window and light enough on a dark
+// one: a title, one line of what it is, two bulleted columns, then
+// whatever `extra` adds (a table, a footnote).
+namespace info {
+QString hex(const QColor& c);
+QString good_colour(const QPalette& pal);
+QString cost_colour(const QPalette& pal);
+QString bullet_list(const QStringList& items);
+// "Better at" beside "Costs".
+QString info_html(const QPalette& pal, const QString& title, const QString& what,
+                  const QStringList& good, const QStringList& cost, const QString& extra);
+// The same with the columns' own headings, and a line in green (`ok`) or
+// amber under `what` when `now` is not empty: what the thing can do here.
+QString info_html(const QPalette& pal, const QString& title, const QString& what,
+                  const QString& now, bool ok, const QString& good_head, const QStringList& good,
+                  const QString& cost_head, const QStringList& cost, const QString& extra);
+QString footnote(const QPalette& pal, const QString& text);
+}  // namespace info
 
 }  // namespace sstvae::gui
 

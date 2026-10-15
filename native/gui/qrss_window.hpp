@@ -59,6 +59,10 @@ namespace sstvae::gui {
 
 class FlowLayout;
 class QrssTile;
+namespace qrss_em {
+class Controller;
+class EmBar;
+}  // namespace qrss_em
 
 class QrssWindow : public QWidget {
     Q_OBJECT
@@ -109,6 +113,8 @@ public:
     int tile_count() const { return tiles_.size(); }
     // The tile for a listener tile id, or null.
     QrssTile* tile(const QString& id) const { return tiles_.value(id, nullptr); }
+    // What runs the tiles' Improve and Find missed passes (qrss_em.hpp).
+    qrss_em::Controller* em() const { return em_; }
 
 public slots:
     void start_listener();
@@ -153,6 +159,7 @@ private:
     QTimer* feed_timer_ = nullptr;
     QPointer<QProcess> proc_;
     QHash<QString, QrssTile*> tiles_;
+    qrss_em::Controller* em_ = nullptr;
     QString stderr_rest_;
 
     std::shared_ptr<rx::RingBuffer> ring_;
@@ -197,7 +204,9 @@ class QrssTile : public QWidget {
 
 public:
     static constexpr int WIDTH = 252;
-    explicit QrssTile(QWidget* parent = nullptr);
+    // `em`: what runs the picture's Improve and Find missed passes (none
+    // without one).
+    explicit QrssTile(QWidget* parent = nullptr, qrss_em::Controller* em = nullptr);
     // No header yet: the picture is a guess (the Provisional column).
     bool provisional() const { return provisional_; }
     // Apply one tile object from state.json; `dir` resolves its image.
@@ -214,6 +223,8 @@ public:
     PassBar* pass_bar() const { return progress_; }
     // The picture file shown, at its full size ("" before one).
     QString image_path() const { return image_path_; }
+    // Improve and Find missed passes, under the lines; null without a controller.
+    qrss_em::EmBar* em_bar() const { return em_bar_; }
 
 protected:
     // Opens the picture in a viewer to zoom and pan (image_viewer.hpp).
@@ -229,6 +240,11 @@ private:
     int image_rev_ = -1;
     bool provisional_ = true;
     QString image_path_;
+    qrss_em::Controller* em_ = nullptr;
+    qrss_em::EmBar* em_bar_ = nullptr;
+    // The listener's image_rev when the app last drew the picture again
+    // (Improve, Find): until the listener draws it itself, the app's stays.
+    int em_rev_ = -1;
 };
 
 }  // namespace sstvae::gui

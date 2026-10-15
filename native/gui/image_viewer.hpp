@@ -83,6 +83,8 @@ class ImageViewer : public QDialog {
 public:
     ImageViewer(const QPixmap& pixmap, const QString& title, QWidget* parent = nullptr);
     ImageView* view() const { return view_; }
+    // A row of the caller's under the caption (a QRSS picture's buttons).
+    void add_footer(QWidget* footer);
 
 private:
     void update_caption();

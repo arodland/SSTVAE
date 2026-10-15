@@ -35,6 +35,7 @@
 
 #include "flow_layout.hpp"
 #include "image_viewer.hpp"
+#include "qrss_em.hpp"
 #include "qrss_spectrogram.hpp"
 #include "qrss_tx.hpp"
 #include "rx/ringbuffer.hpp"
@@ -211,7 +212,7 @@ void PassBar::paintEvent(QPaintEvent*) {
 
 // --- tile -------------------------------------------------------------------------------
 
-QrssTile::QrssTile(QWidget* parent) : QWidget(parent) {
+QrssTile::QrssTile(QWidget* parent, qrss_em::Controller* em) : QWidget(parent), em_(em) {
     auto* box = new QVBoxLayout(this);
     box->setContentsMargins(6, 6, 6, 6);
     box->setSpacing(3);
@@ -266,6 +267,21 @@ QrssTile::QrssTile(QWidget* parent) : QWidget(parent) {
     box->addWidget(progress_);
     box->addWidget(details_);
     box->addWidget(note_);
+    if (em_ != nullptr) {
+        em_bar_ = new qrss_em::EmBar(em_, this);
+        em_bar_->setFixedWidth(PICTURE_W);
+        box->addWidget(em_bar_);
+        connect(em_bar_, &qrss_em::EmBar::pictureChanged, this,
+                [this](const QString& path, std::optional<double> mean_w_db) {
+                    QPixmap px(path);
+                    if (px.isNull()) return;
+                    picture_->setPixmap(
+                        px.scaled(PICTURE_W, PICTURE_H, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+                    image_path_ = path;
+                    em_rev_ = std::max(0, image_rev_);
+                    if (mean_w_db) weight_->setText(QString::number(*mean_w_db, 'f', 1) + tr(" dB"));
+                });
+    }
     box->addStretch(1);
     setFixedWidth(WIDTH);
 }
@@ -290,7 +306,14 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
     }
     progress_->set(bins, progress);
 
-    weight_->setText(number_or(t.value(QStringLiteral("mean_w_db")), 1, tr(" dB"), QString()));
+    const int rev = t.value(QStringLiteral("image_rev")).toInt();
+    // The app drew the picture again: its picture and weight stay until
+    // the listener draws one of its own.
+    if (em_rev_ >= 0 && rev != em_rev_) em_rev_ = -1;
+    const bool em_shown = em_rev_ >= 0;
+    if (!em_shown) {
+        weight_->setText(number_or(t.value(QStringLiteral("mean_w_db")), 1, tr(" dB"), QString()));
+    }
     QStringList lines;
     // Where it is: the dial plus the audio offset (USB), as an operator
     // would say it ("10.141 MHz + 1500 Hz", Jeff, 2026-10-10); the offset
@@ -336,11 +359,23 @@ void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
     note_->setText(note);
     note_->setVisible(!note.isEmpty());
     provisional_ = pid.isEmpty();
+    if (em_bar_ != nullptr) {
+        qrss_em::Target target;
+        target.callsign = call;
+        target.picture_id = pid;
+        target.mode = t.value(QStringLiteral("mode")).toString();
+        target.frame = t.value(QStringLiteral("frame")).toString();
+        target.waveform = t.value(QStringLiteral("waveform")).toString();
+        target.status = status;
+        target.passes = t.value(QStringLiteral("passes")).toInt(1);
+        em_bar_->set_target(target);
+    }
     details_->setText(lines.join(QLatin1Char('\n')));
 
     const QString image = t.value(QStringLiteral("image")).toString();
-    const int rev = t.value(QStringLiteral("image_rev")).toInt();
-    if (!image.isEmpty()) {
+    if (em_shown) {
+        // The app's picture, above.
+    } else if (!image.isEmpty()) {
         const QString path = QDir(dir).filePath(image);
         if (rev != image_rev_ || path != image_path_) {
             QPixmap px(path);
@@ -374,7 +409,19 @@ bool QrssTile::has_picture() const {
 void QrssTile::mouseDoubleClickEvent(QMouseEvent* event) {
     if (event->button() == Qt::LeftButton && !image_path_.isEmpty()) {
         // From the file, at full size: the tile shows a reduction.
-        open_image_viewer(QPixmap(image_path_), title_->text(), this);
+        ImageViewer* viewer = open_image_viewer(QPixmap(image_path_), title_->text(), this);
+        if (viewer != nullptr && em_bar_ != nullptr && em_bar_->target().valid()) {
+            auto* bar = new qrss_em::EmBar(em_, viewer);
+            bar->set_target(em_bar_->target());
+            viewer->add_footer(bar);
+            connect(bar, &qrss_em::EmBar::pictureChanged, viewer,
+                    [viewer](const QString& path, std::optional<double>) {
+                        const QPixmap px(path);
+                        if (!px.isNull()) viewer->view()->set_pixmap(px);
+                    });
+            // The tile's bar follows the tile; this one keeps the picture
+            // the viewer was opened on.
+        }
         return;
     }
     QWidget::mouseDoubleClickEvent(event);
@@ -389,6 +436,7 @@ int QrssTile::progress_percent() const {
 QrssWindow::QrssWindow(QWidget* parent, Qt::WindowFlags flags) : QWidget(parent, flags) {
     setWindowTitle(tr("QRSS signals"));
     state_dir_ = default_state_dir();
+    em_ = new qrss_em::Controller(state_dir_, this);
 
     auto* box = new QVBoxLayout(this);
 
@@ -588,6 +636,7 @@ void QrssWindow::set_command(const QString& command) { command_edit_->setText(co
 
 void QrssWindow::set_state_dir(const QString& dir) {
     state_dir_ = dir;
+    em_->set_state_dir(dir);
     state_mtime_ = -1;
     reload();
 }
@@ -765,7 +814,7 @@ void QrssWindow::reload() {
         }
         QrssTile* tile = tiles_.value(id, nullptr);
         if (!tile) {
-            tile = new QrssTile(tiles_host_);
+            tile = new QrssTile(tiles_host_, em_);
             tiles_.insert(id, tile);
         }
         tile->update_from(t, state_dir_);
