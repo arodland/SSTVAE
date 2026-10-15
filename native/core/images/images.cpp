@@ -343,8 +343,8 @@ bool looks_like_jp2(const std::uint8_t* data, std::size_t len) {
 
 namespace {
 
-[[noreturn]] void missing_library(const std::string& path, const std::string& what,
-                                  const std::string& packages) {
+[[noreturn, maybe_unused]] void missing_library(const std::string& path, const std::string& what,
+                                                 const std::string& packages) {
     throw std::runtime_error("cannot read " + path + ": " + what + " pictures need " +
                              packages + ". Install it, then rebuild the app.");
 }
