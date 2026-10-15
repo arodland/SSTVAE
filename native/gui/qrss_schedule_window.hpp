@@ -90,8 +90,10 @@ class QrssFreqChangeDialog : public QDialog {
     Q_OBJECT
 
 public:
+    // `earliest`: the time can go no sooner than this (now plus a minute,
+    // from the window); 0 for no limit.
     QrssFreqChangeDialog(const QString& title, double at, double dial_hz, bool with_time, bool utc,
-                         QWidget* parent = nullptr);
+                         double earliest = 0.0, QWidget* parent = nullptr);
     double at() const { return t_; }
     double dial_hz() const;
     bool utc() const { return utc_; }
@@ -103,6 +105,7 @@ private:
     void show_time();
 
     double t_ = 0.0;
+    double earliest_ = 0.0;
     bool utc_ = true;
     bool syncing_ = false;
     QrssClockFace* face_ = nullptr;

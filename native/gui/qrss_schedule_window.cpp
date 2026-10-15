@@ -1298,7 +1298,9 @@ QMenu* QrssScheduleWindow::empty_menu_for(double t) {
 
 bool QrssScheduleWindow::ask_freq_change(const QString& title, double* at, double* dial_hz,
                                          bool with_time) {
-    QrssFreqChangeDialog dialog(title, *at, *dial_hz, with_time, freq_utc_, this);
+    // Never before now plus a minute (Jeff, 2026-10-15).
+    const double earliest = std::ceil((scheduler_->now() + 60.0) / 60.0) * 60.0;
+    QrssFreqChangeDialog dialog(title, *at, *dial_hz, with_time, freq_utc_, earliest, this);
     if (dialog.exec() != QDialog::Accepted) return false;
     freq_utc_ = dialog.utc();
     *at = dialog.at();
@@ -1309,8 +1311,12 @@ bool QrssScheduleWindow::ask_freq_change(const QString& title, double* at, doubl
 // --- the frequency change dialog -------------------------------------------
 
 QrssFreqChangeDialog::QrssFreqChangeDialog(const QString& title, double at, double dial_hz,
-                                           bool with_time, bool utc, QWidget* parent)
-    : QDialog(parent), t_(std::round(at / 60.0) * 60.0), utc_(utc) {
+                                           bool with_time, bool utc, double earliest,
+                                           QWidget* parent)
+    : QDialog(parent),
+      t_(std::max(std::round(at / 60.0) * 60.0, earliest)),
+      earliest_(earliest),
+      utc_(utc) {
     setWindowTitle(title);
     auto* outer = new QVBoxLayout(this);
     if (with_time) {
@@ -1419,7 +1425,7 @@ void QrssFreqChangeDialog::set_utc(bool utc) {
 }
 
 void QrssFreqChangeDialog::set_time(double t) {
-    t_ = std::round(t / 60.0) * 60.0;
+    t_ = std::max(std::round(t / 60.0) * 60.0, earliest_);
     if (face_ != nullptr) show_time();
 }
 

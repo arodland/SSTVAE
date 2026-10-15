@@ -1304,6 +1304,16 @@ void test_the_freq_change_dialog() {
     check::is_true(d.at() == t0 + 4500.0 && face->time() == d.at(),
                    "freq change: a typed time moves the clock");
     check::is_true(d.dial_hz() == 7'064'000.0, "freq change: the dial frequency");
+
+    QrssFreqChangeDialog e(QStringLiteral("Add frequency change"), t0 + 600.0, 7'064'000.0, true,
+                           true, t0 + 300.0);
+    auto* face2 = e.findChild<QrssClockFace*>(QStringLiteral("freq_change_clock"));
+    if (face2 == nullptr) return;
+    QWheelEvent back(QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, -120), Qt::NoButton,
+                     Qt::NoModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(face2, &back);
+    check::is_true(e.at() == t0 + 300.0 && face2->time() == t0 + 300.0,
+                   "freq change: the clock stops at the earliest time");
 }
 
 int main(int argc, char** argv) {
