@@ -258,6 +258,16 @@ public:
     // on (Jeff, 2026-10-16): its entry ends after the send that started,
     // and goes when the run does. True when one was on the air.
     bool clear();
+    // What clear() would take off, for its confirmation: the entries it
+    // removes (never the one on the air), the frequency changes, and
+    // whether the send on the air loses later repeats.
+    struct ClearPlan {
+        int sends = 0;
+        int changes = 0;
+        bool on_air = false;
+        bool repeats = false;
+    };
+    ClearPlan clear_plan() const;
 
     // The entry whose run is on the air (or getting ready), else empty.
     const std::string& active() const { return active_; }

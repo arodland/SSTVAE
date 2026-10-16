@@ -489,19 +489,28 @@ void QrssScheduleWindow::build() {
     auto* clear = new QPushButton(tr("Clear schedule..."), upcoming);
     clear->setObjectName(QStringLiteral("clear_schedule"));
     connect(clear, &QPushButton::clicked, this, [this] {
-        const int sends = static_cast<int>(scheduler_->entries().size());
-        const int changes = static_cast<int>(scheduler_->changes().size());
-        if (sends == 0 && changes == 0) {
-            message_->setText(tr("The schedule is already empty."));
-            return;
-        }
+        const QrssScheduler::ClearPlan plan = scheduler_->clear_plan();
         const auto n = [](int k, const QString& one, const QString& many) {
             return QStringLiteral("%1 %2").arg(k).arg(k == 1 ? one : many);
         };
-        QString text = tr("Remove %1 and %2 from the schedule?")
-                           .arg(n(sends, tr("scheduled send"), tr("scheduled sends")),
-                                n(changes, tr("frequency change"), tr("frequency changes")));
-        if (!scheduler_->active().empty()) {
+        QStringList parts;
+        if (plan.sends > 0) {
+            parts << n(plan.sends, tr("scheduled send"), tr("scheduled sends"));
+        }
+        if (plan.changes > 0) {
+            parts << n(plan.changes, tr("frequency change"), tr("frequency changes"));
+        }
+        if (plan.repeats) parts << tr("the later repeats of the current send");
+        if (parts.isEmpty()) {
+            message_->setText(plan.on_air
+                                  ? tr("Nothing to clear: only the current send is scheduled.")
+                                  : tr("The schedule is already empty."));
+            return;
+        }
+        QString list = parts.takeLast();
+        if (!parts.isEmpty()) list = parts.join(QStringLiteral(", ")) + tr(" and ") + list;
+        QString text = tr("Remove %1 from the schedule?").arg(list);
+        if (plan.on_air) {
             text += QStringLiteral("\n\n") + tr("Current Send will NOT be canceled.");
         }
         const auto answer = QMessageBox::question(this, tr("Clear schedule"), text,

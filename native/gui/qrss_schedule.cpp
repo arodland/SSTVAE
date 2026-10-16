@@ -764,6 +764,20 @@ std::string QrssScheduler::try_edit_change(const std::string& id,
     return {};
 }
 
+QrssScheduler::ClearPlan QrssScheduler::clear_plan() const {
+    ClearPlan plan;
+    for (const qs::Entry& e : entries_) {
+        if (on_air(e.id)) {
+            plan.on_air = true;
+            if (e.next > 0 && (e.count == 0 || e.count > e.next)) plan.repeats = true;
+        } else {
+            ++plan.sends;
+        }
+    }
+    plan.changes = static_cast<int>(changes_.size());
+    return plan;
+}
+
 bool QrssScheduler::clear() {
     bool kept = false;
     std::vector<std::string> gone;

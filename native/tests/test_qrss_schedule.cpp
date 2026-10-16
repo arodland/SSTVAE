@@ -372,6 +372,9 @@ void test_clear_keeps_the_send_on_the_air(const std::filesystem::path& dir) {
     check::is_true(s->add(entry("A", Q, 3, 120, "repeating"), pic).empty() &&
                        s->add(entry("A", Q + 6 * H, 1, 0, "later"), pic).empty(),
                    "clear: a repeating send starting now, and a later one");
+    const QrssScheduler::ClearPlan plan = s->clear_plan();
+    check::is_true(plan.sends == 1 && plan.changes == 0 && plan.on_air && plan.repeats,
+                   "clear: the prompt counts only the later send, not the one on the air");
     int cancels = 0;
     s->set_canceller([&cancels] { ++cancels; });
     const bool kept = s->clear();
@@ -380,6 +383,9 @@ void test_clear_keeps_the_send_on_the_air(const std::filesystem::path& dir) {
     check::is_true(s->entries().size() == 1 && qs::finished(s->entries()[0]) &&
                        s->changes().empty(),
                    "clear: everything else goes, and nothing after the send on the air");
+    const QrssScheduler::ClearPlan after = s->clear_plan();
+    check::is_true(after.sends == 0 && after.on_air && !after.repeats,
+                   "clear: then nothing is left to clear");
     s->run_finished();
     check::is_true(s->entries().empty(), "clear: and that send leaves when it ends");
 }
