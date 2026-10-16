@@ -1202,7 +1202,11 @@ void QrssScheduleWindow::set_test_state(bool running, double remaining) {
 void QrssScheduleWindow::refresh() {
     const auto& entries = scheduler_->entries();
     if (entry_by_id(entries, selected_entry_) == nullptr) selected_entry_.clear();
-    select_entry(selected_entry_);
+    // Only the highlight: refilling the form from the selected entry here
+    // undid what the operator had set since clicking it, so an Add after
+    // choosing "0 times" went out as the selected entry's 2 x A
+    // (Jeff, 2026-10-16). Clicking an entry, or editing one, fills it.
+    timeline_->set_selected_entry(selected_entry_);
     refresh_timeline();
     refresh_sends();
     update_summary();

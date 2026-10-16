@@ -826,6 +826,24 @@ void test_the_window(const std::filesystem::path& dir) {
                        "window: Add there is refused, says why, and logs it");
         w.set_chosen_slot(Q + 2 * 1800.0);
     }
+    {
+        // With the 2 x A above selected, the form keeps what is set
+        // after the click: two Adds at "0 times" are two single sends.
+        auto* tl = w.findChild<QrssTimeline*>();
+        if (tl != nullptr) emit tl->blockClicked(QString::fromStdString(s->entries()[0].id), 0);
+        times->setValue(0);
+        add->click();
+        QApplication::processEvents();
+        add->click();
+        QApplication::processEvents();
+        check::is_true(tl != nullptr && times->value() == 0 && s->entries().size() == 3 &&
+                           s->entries()[1].count == 1 && s->entries()[2].count == 1,
+                       "window: Add again after Add keeps the form's repeats");
+        for (int i = 2; i >= 1 && static_cast<int>(s->entries().size()) > i; --i) {
+            s->remove(s->entries()[static_cast<std::size_t>(i)].id);
+        }
+        w.set_chosen_slot(Q + 2 * 1800.0);
+    }
     const std::string id = s->entries()[0].id;
     {
         // What the app finds after a restart: the schedule, its Send and
