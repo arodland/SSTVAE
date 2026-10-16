@@ -99,9 +99,9 @@ static void test_tables() {
     const auto& t = lt::pilot_table();
     check::equal(t.sps(), P::TABLE_SPS, "pilot_table sps");
     check::equal(static_cast<std::int64_t>(t.half()), P::TABLE_HALF, "pilot_table half");
-    check::equal(t.g0(), P::TABLE_G0, "pilot_table g0");
-    digest_is(std::vector<double>(t.tab().begin(), t.tab().end()), P::TABLE_TAB, "pilot_table taps");
-    digest_is(lt::pilot_taps(), P::TAPS, "_pilot_taps");
+    qrss_check::libm_equal(t.g0(), P::TABLE_G0, "pilot_table g0");
+    qrss_check::libm_digest_is(std::vector<double>(t.tab().begin(), t.tab().end()), P::TABLE_TAB, "pilot_table taps");
+    qrss_check::libm_digest_is(lt::pilot_taps(), P::TAPS, "_pilot_taps");
     // built once, and every thread sees the one table
     std::vector<const tk::MfTable*> seen(6, nullptr);
     std::vector<std::thread> th;
@@ -136,7 +136,7 @@ static void test_pilot_filter() {
 static void test_mix_mf() {
     const Inputs in = inputs();
     const std::int64_t n_pos = SHORT().n_pos();
-    digest_is(lt::data_mix(in.zc, -100.5, in.tm, n_pos), P::MIX_ALL, "data_mix");
+    qrss_check::libm_digest_is(lt::data_mix(in.zc, -100.5, in.tm, n_pos), P::MIX_ALL, "data_mix");
     const std::vector<std::int64_t> idx{-5, 0, 7, 5999, 1234, -6000};
     digest_is(lt::data_mix(in.zc, -100.5, in.tm, n_pos, std::span<const std::int64_t>(idx)), P::MIX_IDX,
               "data_mix at idx");
@@ -146,9 +146,9 @@ static void test_mix_mf() {
         "index 6000 is out of bounds for axis 0 with size 6000", "data_mix, index past z_d");
     std::vector<double> pos;
     for (std::int64_t p = -20; p < 300; ++p) pos.push_back(static_cast<double>(p));
-    digest_is(lt::data_mf(in.zc, -100.5, in.tm, pos, n_pos), P::MF_DENSE, "data_mf dense");
+    qrss_check::libm_digest_is(lt::data_mf(in.zc, -100.5, in.tm, pos, n_pos), P::MF_DENSE, "data_mf dense");
     const std::vector<double> sparse{0.0, 200.5, 377.25};
-    digest_is(lt::data_mf(in.zc, -100.5, in.tm, sparse, n_pos), P::MF_SPARSE, "data_mf sparse");
+    qrss_check::libm_digest_is(lt::data_mf(in.zc, -100.5, in.tm, sparse, n_pos), P::MF_SPARSE, "data_mf sparse");
     check::is_true(lt::data_mf(in.zc, -100.5, in.tm, std::vector<double>{}, n_pos).empty(), "data_mf, no pos");
     const auto far = lt::data_mf(in.zc, -100.5, in.tm, std::vector<double>{5000.0, 6000.0}, n_pos);
     check::is_true(far.size() == 2 && far[0] == cd(0.0, 0.0) && far[1] == cd(0.0, 0.0), "data_mf past z_d");
@@ -244,8 +244,8 @@ static void test_pilot_wave() {
     digest_is(lt::pilot_gain(tau, S, 5.0), P::PG_5, "_pilot_gain, lead-in");
     const lw::Keying key = lw::Keying::units(in.key);
     digest_is(lt::pilot_wave(tau, S), P::PW_0, "pilot_wave");
-    digest_is(lt::pilot_wave(tau, S, &key), P::PW_K, "pilot_wave, keyed");
-    digest_is(lt::pilot_wave(tau, S, &key, 5.0), P::PW_K5, "pilot_wave, keyed, lead-in");
+    qrss_check::libm_digest_is(lt::pilot_wave(tau, S, &key), P::PW_K, "pilot_wave, keyed");
+    qrss_check::libm_digest_is(lt::pilot_wave(tau, S, &key, 5.0), P::PW_K5, "pilot_wave, keyed, lead-in");
     digest_is(lt::pilot_wave(tau, TINY(), nullptr, 2.5), P::PW_TINY, "pilot_wave, l-tiny");
     near(lt::keyed_power_db(TINY()), P::KEYED_DB_TINY, 1e-15, "keyed_power_db");
 }

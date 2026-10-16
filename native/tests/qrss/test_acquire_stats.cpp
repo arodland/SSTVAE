@@ -84,8 +84,8 @@ static void throws(F f, const std::string& text, const std::string& what) {
 }
 
 static void pair_is(std::pair<double, double> got, double a, double b, const std::string& what) {
-    check::equal(got.first, a, what + " [0]");
-    check::equal(got.second, b, what + " [1]");
+    qrss_check::libm_equal(got.first, a, what + " [0]");
+    qrss_check::libm_equal(got.second, b, what + " [1]");
 }
 
 static void test_digest() {

@@ -86,7 +86,7 @@ static void test_digest() {
         append_all(out, math::rfftfreq(N, 0.25));
         append_all(out, math::fftfreq(N, 1.0 / 4000));
     }
-    check::equal(util::to_hex(util::sha256(std::span<const std::uint8_t>(out))),
+    qrss_check::libm_equal(util::to_hex(util::sha256(std::span<const std::uint8_t>(out))),
                  std::string("87d1b00584a3ebafb34ad60194620fe2b89b0c9c9d9fe521be3774de58f304d9"),
                  "fft / ifft / rfft / irfft / fftfreq digest");
 }
@@ -112,7 +112,7 @@ static void test_single_digest() {
         append_all(out, math::rfft(std::span<const float>(r)));
         append_all(out, math::irfft(std::span<const cf>(a.data(), n / 2 + 1), N));
     }
-    check::equal(util::to_hex(util::sha256(std::span<const std::uint8_t>(out))),
+    qrss_check::libm_equal(util::to_hex(util::sha256(std::span<const std::uint8_t>(out))),
                  std::string("32b785ca02b4fc607b96221752c72e4a70b13a680876c17654817d6dd9ed4054"),
                  "single-precision fft / ifft / rfft / irfft digest");
 }

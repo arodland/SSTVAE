@@ -106,7 +106,7 @@ static void test_taps() {
     check::equal(t.size(), want.size(), "255 taps");
     bool same = t.size() == want.size();
     for (std::size_t i = 0; same && i < t.size(); ++i) same = t[i] == want[i];
-    check::is_true(same, "the FE taps are firwin(255, 1250, kaiser 8) to the bit");
+    qrss_check::libm_pin(same, "the FE taps are firwin(255, 1250, kaiser 8) to the bit");
     check::equal(fe::FE_DECIM, 2, "FE_DECIM");
     check::equal(fe::fe_hz(1830.25), 330.25, "fe_hz");
 }

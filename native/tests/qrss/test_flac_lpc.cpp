@@ -391,12 +391,41 @@ Result check_stream(const std::vector<std::int16_t>& x, int ch, const flac::Enco
 
 // --- signals ------------------------------------------------------------------------------------
 
+// The draws are made from mt19937's own output, which the standard fixes;
+// the <random> distributions are each library's own, so libstdc++, libc++
+// and MSVC would otherwise hand this test three different signals.
+struct UniformInt {
+    int lo, hi;
+    UniformInt(int lo_, int hi_) : lo(lo_), hi(hi_) {}
+    int operator()(std::mt19937& g) const {
+        const std::uint64_t span = static_cast<std::uint64_t>(static_cast<std::int64_t>(hi) - lo + 1);
+        return lo + static_cast<int>((static_cast<std::uint64_t>(g()) * span) >> 32);
+    }
+};
+
+struct UniformReal {
+    double lo, hi;
+    UniformReal(double lo_, double hi_) : lo(lo_), hi(hi_) {}
+    double operator()(std::mt19937& g) const { return lo + (hi - lo) * (static_cast<double>(g()) / 4294967296.0); }
+};
+
+// Box-Muller, one variate per call.
+struct NormalDist {
+    double mean, sd;
+    NormalDist(double mean_, double sd_) : mean(mean_), sd(sd_) {}
+    double operator()(std::mt19937& g) const {
+        const double u1 = (static_cast<double>(g()) + 0.5) / 4294967296.0;
+        const double u2 = static_cast<double>(g()) / 4294967296.0;
+        return mean + sd * std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * 3.14159265358979323846 * u2);
+    }
+};
+
 std::int16_t clip16(double v) { return static_cast<std::int16_t>(std::clamp(std::nearbyint(v), -32768.0, 32767.0)); }
 
 // White noise through a two-pole resonator at `f` (cycles per sample) of
 // pole radius `r`, scaled to `rms`: band-limited noise.
 std::vector<double> resonant(std::size_t n, double f, double r, double rms, std::mt19937& g) {
-    std::normal_distribution<double> d(0.0, 1.0);
+    NormalDist d(0.0, 1.0);
     std::vector<double> y(n);
     double y1 = 0.0, y2 = 0.0;
     const double a1 = 2 * r * std::cos(2 * 3.14159265358979323846 * f), a2 = -r * r;
@@ -451,7 +480,7 @@ void test_residual_kernel() {
     // included (a block formed again in 64 bits) and residuals past 31 bits
     // (refused).
     std::mt19937 g(11);
-    auto pick = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(g); };
+    auto pick = [&](int lo, int hi) { return UniformInt(lo, hi)(g); };
     int redone = 0, refused = 0, plain = 0;
     for (int t = 0; t < 4000; ++t) {
         const int mode = pick(0, 4);   // 1, 2: the largest coefficients (1: every product at its largest)
@@ -523,7 +552,7 @@ void test_lpc_on_band_noise() {
     CHECK(rm.stats.subframes[7] == rm.stats.frames);
     // a sine with a little noise: LPC of a low order beats FIXED
     std::mt19937 g(2);
-    std::normal_distribution<double> nd(0.0, 3.0);
+    NormalDist nd(0.0, 3.0);
     std::vector<double> s(30000);
     for (std::size_t i = 0; i < s.size(); ++i) s[i] = 12000.0 * std::sin(0.31 * static_cast<double>(i)) + nd(g);
     const Result rs = check_stream(mono(s), 1, d, true, "sine");
@@ -556,7 +585,7 @@ std::vector<std::int16_t> autoregressive(int order, std::size_t n, unsigned seed
     for (int k = 0; k < order / 2; ++k) times({1.0, -2.0 * r * std::cos(PI * (k + 0.5) / (order / 2)), r * r});
     if (order % 2) times({1.0, -r});
     std::mt19937 g(seed);
-    std::normal_distribution<double> nd(0.0, 1.0);
+    NormalDist nd(0.0, 1.0);
     std::vector<double> y(n + 2000, 0.0);
     for (std::size_t i = 0; i < y.size(); ++i) {
         double v = nd(g);
@@ -627,7 +656,7 @@ void test_mid_side() {
     std::mt19937 g(12);
     const std::size_t n = 4 * 4096 + 321;
     const auto sv = resonant(n, 0.06, 0.98, 3000.0, g);
-    std::uniform_int_distribution<int> wd(-15000, 15000);
+    UniformInt wd(-15000, 15000);
     std::vector<std::int16_t> x;
     for (std::size_t i = 0; i < n; ++i) {
         const int s = static_cast<int>(clip16(sv[i])), w = wd(g);
@@ -648,7 +677,10 @@ void test_mid_side() {
 
 void test_windows() {
     // Each block holds two different signals, one in each half: the
-    // partial_tukey windows see each half alone.
+    // partial_tukey windows see each half alone. Both settings must round
+    // trip. Which is smaller is not asserted: over 16 seeds the windows made
+    // the split signal 0.1-1% larger in 13 and the bursts within 4 bytes
+    // either way, so a size claim held only for one library's noise draw.
     std::mt19937 g(6);
     const std::size_t n = 6 * 4096;
     auto lo = resonant(n, 0.04, 0.99, 2000.0, g);
@@ -660,9 +692,8 @@ void test_windows() {
     for (const auto& sig : {a, bursts}) {
         flac::EncodeOptions on, off;
         off.partial_tukey = false;
-        const Result r_on = check_stream(mono(sig), 1, on, true, "partial_tukey on");
-        const Result r_off = check_stream(mono(sig), 1, off, true, "partial_tukey off");
-        CHECK(r_on.bytes < r_off.bytes);
+        check_stream(mono(sig), 1, on, true, "partial_tukey on");
+        check_stream(mono(sig), 1, off, true, "partial_tukey off");
     }
 }
 
@@ -684,7 +715,7 @@ void test_extremes() {
     opts[4].blocksize = 9000;   // (FIXED alone, over blocks long enough to fold its sums)
     opts[4].max_lpc_order = 0;
     std::mt19937 g(7);
-    std::uniform_int_distribution<int> any(-32768, 32767);
+    UniformInt any(-32768, 32767);
     const std::size_t n = 2 * 9000 + 777;
     std::vector<std::pair<std::string, std::vector<std::int16_t>>> sigs;
     {
@@ -747,8 +778,8 @@ void test_fuzz() {
     // seeded: lengths (a partial last block nearly always), mono and stereo,
     // every kind of content, every option drawn
     std::mt19937 g(9);
-    auto pick = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(g); };
-    auto uni = [&](double lo, double hi) { return std::uniform_real_distribution<double>(lo, hi)(g); };
+    auto pick = [&](int lo, int hi) { return UniformInt(lo, hi)(g); };
+    auto uni = [&](double lo, double hi) { return UniformReal(lo, hi)(g); };
     for (int t = 0; t < 400; ++t) {
         flac::EncodeOptions o;
         const bool defaults = t % 3 == 0;
@@ -773,13 +804,13 @@ void test_fuzz() {
                 case 0: c[k] = resonant(n, uni(0.0, 0.5), uni(0.5, 0.9999), uni(1.0, 40000.0), g); break;
                 case 1: {   // sine plus noise
                     const double f = uni(0.0, 3.0), amp = uni(0.0, 33000.0), sd = uni(0.0, 100.0);
-                    std::normal_distribution<double> nd(0.0, sd > 0 ? sd : 1e-9);
+                    NormalDist nd(0.0, sd > 0 ? sd : 1e-9);
                     c[k].resize(n);
                     for (std::size_t i = 0; i < n; ++i) c[k][i] = amp * std::sin(f * static_cast<double>(i)) + nd(g);
                     break;
                 }
                 case 2: {   // white
-                    std::uniform_real_distribution<double> u(-uni(0.0, 33000.0), uni(0.0, 33000.0));
+                    UniformReal u(-uni(0.0, 33000.0), uni(0.0, 33000.0));
                     c[k].resize(n);
                     for (auto& v : c[k]) v = u(g);
                     break;

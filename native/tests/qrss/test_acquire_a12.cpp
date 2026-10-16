@@ -142,10 +142,10 @@ static void test_a1(const std::vector<cf>& x, double t0) {
 }
 
 static void test_tables() {
-    qrss_check::digest_is(acq::notch_taps(), "b58532339cb2b35e2a7d170a2c4344f19b18d1bd83af8cfa5d00af3df133075e", "notch");
-    qrss_check::digest_is(acq::mf_taps(), "20beeeefc133593140f36afd10cd4fc599f168614aa1dde2c636170a2b9fb56d", "mf");
-    qrss_check::digest_is(acq::l_mf_taps(), "9a213f55043818b0f53493d04b34304015e2778b15cf26eb2c91c783ad28c685", "l mf");
-    qrss_check::digest_is(acq::mf_taps(500), "a8430ede131e1d05b41d6ca38dee00474b2c238c5f59f3ebfdd785644c7bee75", "mf 500");
+    qrss_check::libm_digest_is(acq::notch_taps(), "b58532339cb2b35e2a7d170a2c4344f19b18d1bd83af8cfa5d00af3df133075e", "notch");
+    qrss_check::libm_digest_is(acq::mf_taps(), "20beeeefc133593140f36afd10cd4fc599f168614aa1dde2c636170a2b9fb56d", "mf");
+    qrss_check::libm_digest_is(acq::l_mf_taps(), "9a213f55043818b0f53493d04b34304015e2778b15cf26eb2c91c783ad28c685", "l mf");
+    qrss_check::libm_digest_is(acq::mf_taps(500), "a8430ede131e1d05b41d6ca38dee00474b2c238c5f59f3ebfdd785644c7bee75", "mf 500");
     std::vector<double> ce_seq;
     for (const cd& v : acq::ce_pre().seq) ce_seq.push_back(v.real());
     qrss_check::digest_is(ce_seq, "71ff3707fadd10dd65834c63723f7c6f7790fc00f617ce82cf3b073f2a6e70e0", "CE preamble");
@@ -164,11 +164,11 @@ static void test_tables() {
     std::vector<double> ce_b;
     for (const cd& v : ce.b.b) ce_b.push_back(v.real());
     qrss_check::digest_is(ce_b, "eaef2407ee25e6cc77003ca16a0b5574685cc839798552aadff4229bcc53575c", "CE chunks");
-    qrss_check::digest_is(ce.W, "4657a342bbbf51e417f174045dca622196013717a56d624792ced339d14f89fc", "CE templates W");
+    qrss_check::libm_digest_is(ce.W, "4657a342bbbf51e417f174045dca622196013717a56d624792ced339d14f89fc", "CE templates W");
     qrss_check::digest_is(ce.norm, "db36d825ea67b11191d0a4c6d1f89a9a91d2fd5833a79709896365071ddc4bd0", "CE norm");
     const acq::Templates lt = acq::templates(df, acq::l_pre());
     qrss_check::digest_is(lt.b.b, "b3f3ba7efcb15e00ef729b4f3786f560d44a010a9db8b82c293dd6e8efcde431", "L chunks");
-    qrss_check::digest_is(lt.W, "dbc3b5f3bc6a734fcf5fa4906392b4c8389a6aeb12f27e1a9d5d3e5c0e669b89", "L templates W");
+    qrss_check::libm_digest_is(lt.W, "dbc3b5f3bc6a734fcf5fa4906392b4c8389a6aeb12f27e1a9d5d3e5c0e669b89", "L templates W");
     qrss_check::digest_is(lt.norm, "ce2e781bd1bbfd10d649534688ecdc9685540f9a31dd8ce48f644dcc94020b54", "L norm");
     // numpy's float32 log (its SIMD kernel), [v.hex() for v in np.log(np.float32([...]))]
     const float in[] = {0.3f, 7.0f, 1e-9f, 2.0f, 0.7071067f, 123456.7f, 3.4e38f, 1.5e-45f};

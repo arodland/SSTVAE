@@ -72,7 +72,7 @@ static void test_i0() {
         a.push_back(flt::i0(k / 16.0));
         b.push_back(flt::i0e(k / 16.0));
     }
-    digest_is(a, "f75edae26014b4742243e3749590bf955f2c7d9e4f052f9ebf34d7edfd02c753", "i0 on k/16");
+    qrss_check::libm_digest_is(a, "f75edae26014b4742243e3749590bf955f2c7d9e4f052f9ebf34d7edfd02c753", "i0 on k/16");
     digest_is(b, "7ef3897c7dc26287622883f4a6379f74b39bff7b8459b86f3b0e9784291b70a6", "i0e on k/16");
     check::equal(flt::i0(0.0), 1.0, "i0(0)");
     check::is_true(std::isinf(flt::i0(710.0)), "i0 overflows past log(DBL_MAX), as Cephes does");
@@ -82,23 +82,23 @@ static void test_i0() {
 
 static void test_firwin() {
     const auto l = flt::firwin(481, 125.0, flt::Window::kaiser(12.0), flt::PassZero::Yes, true, 8000.0);
-    check::is_true(std::equal(l.begin(), l.end(), qrss::tables::L_INTERP_TAPS.begin()) &&
+    qrss_check::libm_pin(std::equal(l.begin(), l.end(), qrss::tables::L_INTERP_TAPS.begin()) &&
                        l.size() == qrss::tables::L_INTERP_TAPS.size(),
                    "firwin(481, 125, fs=8000, ('kaiser', 12)) is the frozen L interpolator");
-    digest_is(l, std::string(qrss::tables::L_INTERP_TAPS_SHA256), "L interpolator digest");
-    digest_is(flt::firwin(255, 1250.0, flt::Window::kaiser(8.0), flt::PassZero::Yes, true, 8000.0),
+    qrss_check::libm_digest_is(l, std::string(qrss::tables::L_INTERP_TAPS_SHA256), "L interpolator digest");
+    qrss_check::libm_digest_is(flt::firwin(255, 1250.0, flt::Window::kaiser(8.0), flt::PassZero::Yes, true, 8000.0),
               "89877403527d899cd53cefc55b66eb525da275af69c6fb3aa2a668de1b44c1c8", "frontend._FE_TAPS");
-    digest_is(flt::firwin(321, 1.0 / 16, flt::Window::kaiser(10.0)),
+    qrss_check::libm_digest_is(flt::firwin(321, 1.0 / 16, flt::Window::kaiser(10.0)),
               "9ed77c54109fe70fdb5b8c53650121a171fd2d76dc4a53ad24917eb179250e5a", "channeliser decimator");
-    digest_is(flt::firwin(2001, 0.6, flt::Window::hann(), flt::PassZero::Yes, true, 250.0),
+    qrss_check::libm_digest_is(flt::firwin(2001, 0.6, flt::Window::hann(), flt::PassZero::Yes, true, 250.0),
               "b58532339cb2b35e2a7d170a2c4344f19b18d1bd83af8cfa5d00af3df133075e", "acquire notch");
     const double bp[2] = {0.2, 0.5};
-    digest_is(flt::firwin(31, bp, flt::Window::hamming(), flt::PassZero::No),
+    qrss_check::libm_digest_is(flt::firwin(31, bp, flt::Window::hamming(), flt::PassZero::No),
               "f076a2cb2447618ffdebd14c4dff23d1892403d8bcc496769932fe1826d5901d", "bandpass hamming");
     const double bs[3] = {0.1, 0.3, 0.6};
     digest_is(flt::firwin(51, bs, flt::Window::hann(), flt::PassZero::Yes, false),
               "a069d08623812b22c31678b5743408dc8c78b0edc35e71f130899be8ba14c426", "3 edges, hann, unscaled");
-    digest_is(flt::firwin(61, 0.25, flt::Window::hamming(), flt::PassZero::Highpass, true, std::nullopt, 0.05),
+    qrss_check::libm_digest_is(flt::firwin(61, 0.25, flt::Window::hamming(), flt::PassZero::Highpass, true, std::nullopt, 0.05),
               "6ce7b0a313d55c4752f553bd35621e3bcce94c83a6730b42497bd872c0e3c911", "highpass by width");
 
     const double two[2] = {0.1, 0.4};
@@ -119,9 +119,9 @@ static void test_firwin() {
 }
 
 static void test_windows() {
-    digest_is(flt::hann(16000, false), "1f280d5a244ca42ec6fa3acb5e16e2f141c24e5a1c1ab1c8f186412a38c0c6c0",
+    qrss_check::libm_digest_is(flt::hann(16000, false), "1f280d5a244ca42ec6fa3acb5e16e2f141c24e5a1c1ab1c8f186412a38c0c6c0",
               "hann(16000, sym=False)");
-    digest_is(flt::hamming(64), "cec21907a722277d2de18e93dd9d0baa5368b5967148c61643920cd4d0fcc8ea", "hamming(64)");
+    qrss_check::libm_digest_is(flt::hamming(64), "cec21907a722277d2de18e93dd9d0baa5368b5967148c61643920cd4d0fcc8ea", "hamming(64)");
     digest_is(flt::kaiser(101, 8.6), "d3e7664f48f7ce7bbe1c0bee7b093e7db57510860f916c75040e4640fae6a960",
               "kaiser(101, 8.6)");
     check::equal(flt::hann(1).size(), std::size_t(1), "hann(1)");
@@ -151,7 +151,7 @@ static void test_upfirdn() {
 
     std::vector<double> interp = flt::firwin(481, 125.0, flt::Window::kaiser(12.0), flt::PassZero::Yes, true, 8000.0);
     for (auto& v : interp) v *= 32;
-    digest_is(flt::upfirdn(interp, std::span<const cd>(xc.data(), 50), 32),
+    qrss_check::libm_digest_is(flt::upfirdn(interp, std::span<const cd>(xc.data(), 50), 32),
               "e11c886cedf927f5ad27647c40425b99dcc4615f796d9e865594b3b24cadeea0", "lwave.resample's x32");
 
     const std::vector<float> hf = {0.5f, -1.25f, 2.0f};
@@ -191,13 +191,13 @@ static void test_upfirdn() {
 static void test_resample_poly() {
     const auto yr = seq_r(1000);
     const auto yc = seq_c(1000);
-    digest_is(flt::resample_poly<cd>(yc, 1, 16, flt::Window::kaiser(10.0)),
+    qrss_check::libm_digest_is(flt::resample_poly<cd>(yc, 1, 16, flt::Window::kaiser(10.0)),
               "60f01a0d73951cfb1715348b9c111521c48c7e2826b396f7c55d4727b037c7a7", "channelise's decimation");
-    digest_is(flt::resample_poly<double>(yr, 1, 16, flt::Window::kaiser(10.0)),
+    qrss_check::libm_digest_is(flt::resample_poly<double>(yr, 1, 16, flt::Window::kaiser(10.0)),
               "0e5a7f53fc33a90253ae88c595355e1dbbc9bee109d5315825f24bc2bfcd645e", "channelise_keep's decimation");
     const auto up = flt::resample_poly<cd>(std::span<const cd>(yc.data(), 250), 32, 1);
     check::equal(up.size(), std::size_t(8000), "250 Hz to 8 kHz length");
-    digest_is(up, "45826a6a260ae7d08a40cbc3572892112a6e5e67c6b1ac7264256ae81c4ae0da", "ce.to_audio from 250 Hz");
+    qrss_check::libm_digest_is(up, "45826a6a260ae7d08a40cbc3572892112a6e5e67c6b1ac7264256ae81c4ae0da", "ce.to_audio from 250 Hz");
     std::vector<float> yf(yr.size());
     for (std::size_t i = 0; i < yf.size(); ++i) yf[i] = static_cast<float>(yr[i]);
     digest_is(flt::resample_poly<float>(yf, 3, 2), "bdf03d3cf872259ef4e414a6cff7a19a586b65d5869a32739d23ba9ceaa6e818",

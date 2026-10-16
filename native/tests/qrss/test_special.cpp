@@ -80,7 +80,7 @@ static void test_digest() {
     for (const double v : xs) append(out, math::erfc(v * 0.5));
     const auto zx = units(301, 64), zq = units(302, 64);
     for (std::size_t i = 0; i < 64; ++i) append(out, math::zeta(zx[i] * 20.0 + 1.01, zq[i] * 50.0 + 0.01));
-    check::equal(util::to_hex(util::sha256(std::span<const std::uint8_t>(out))),
+    qrss_check::libm_equal(util::to_hex(util::sha256(std::span<const std::uint8_t>(out))),
                  std::string("86cb884af3078f75f019b7df50c06edf8b245c3f9f300b4ac851b502cf4eeaf7"),
                  "gammaincc / gammainc / gammainccinv / gammaincinv / gammaln / gamma / erfc / zeta digest");
 }
@@ -158,7 +158,7 @@ static void test_py_lgamma() {
     for (int i = 1; i <= 200; ++i) xs.push_back(static_cast<double>(i) * 0.5 + 0.25);
     std::vector<std::uint8_t> out;
     for (const double v : xs) append(out, math::py_lgamma(v));
-    check::equal(util::to_hex(util::sha256(std::span<const std::uint8_t>(out))), std::string(em_pins::LGAMMA_DIGEST),
+    qrss_check::libm_equal(util::to_hex(util::sha256(std::span<const std::uint8_t>(out))), std::string(em_pins::LGAMMA_DIGEST),
                  "math.lgamma digest");
     const double inf = std::numeric_limits<double>::infinity();
     // math.lgamma: nan for nan, inf for +-inf, 0 for 1 and 2; where Python

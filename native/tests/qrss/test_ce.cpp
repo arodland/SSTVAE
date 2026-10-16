@@ -116,7 +116,7 @@ void test_pulse() {
     for (std::int64_t m = -ce::HALF; m <= ce::HALF; ++m)
         worst = std::max(worst, std::abs(ce::pulse(static_cast<double>(m) / qc::T_NUM) -
                                          table[static_cast<std::size_t>(m + ce::HALF)]));
-    check::is_true(worst <= 1e-15, "pulse(m/485) regenerates PULSE_TABLE");
+    qrss_check::libm_pin(worst <= 1e-15, "pulse(m/485) regenerates PULSE_TABLE");
     // ce._rrc([0, 5/3, -5/3, 0.5, 2, 7.9]) -- the zero, both singularities, regular points
     const std::pair<double, double> rrc[] = {
         {0.0, 0x1.0a7e0dd44aae0p+0},         {5.0 / 3, -0x1.0c6a390299303p-3}, {-5.0 / 3, -0x1.0c6a390299303p-3},

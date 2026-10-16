@@ -218,11 +218,11 @@ static void test_windows() {
     const fr::FrameSpec& ls = fr::get_any("l-short");
     const Stub a = stub(sh);
     check::equal(a.z.size(), std::size_t(64251), "SHORT stub length");
-    check::equal(window_digest(a.src, sh), std::string("71c891383d9e016b4392e8e5cc04b2eb07b443b86b46daa831088a479cbaf4ed"),
+    qrss_check::libm_equal(window_digest(a.src, sh), std::string("71c891383d9e016b4392e8e5cc04b2eb07b443b86b46daa831088a479cbaf4ed"),
                  "SHORT unit sums and windows digest");
     const Stub b = stub(ls);
     check::equal(b.z.size(), std::size_t(64387), "L_SHORT stub length");
-    check::equal(window_digest(b.src, ls), std::string("b3996c3cdfe4be7dd60de0e1835519f9c04ef1ee02700232958324c481cfd72f"),
+    qrss_check::libm_equal(window_digest(b.src, ls), std::string("b3996c3cdfe4be7dd60de0e1835519f9c04ef1ee02700232958324c481cfd72f"),
                  "L_SHORT unit sums and windows digest");
 
     auto combined = [](const cw::Units32& u) {

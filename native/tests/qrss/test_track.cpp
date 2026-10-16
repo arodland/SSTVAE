@@ -107,18 +107,18 @@ static void test_tables() {
     check::equal(t.half(), 62, "mf_table half");
     check::equal(t.g0(), 0x1.006d1ed38b121p+0, "mf_table g0");
     const std::span<const double> tab = t.tab();
-    digest_is(std::vector<double>(tab.begin(), tab.end()),
+    qrss_check::libm_digest_is(std::vector<double>(tab.begin(), tab.end()),
               "96948942f8ea15676533a9e4b28e0240197a19c268995897419edcf12435ccaf", "mf_table taps");
     check::is_true(&tk::mf_table(qrss::config::T_SYM) == &t, "mf_table is built once");
     const auto& tl = tk::mf_table(2 * qrss::config::T_SYM);    // L's symbol, 0.060625 s
     check::equal(tl.half(), 123, "L mf_table half");
     check::equal(tl.g0(), 0x1.006cb85d5f6d6p+0, "L mf_table g0");
-    digest_is(std::vector<double>(tl.tab().begin(), tl.tab().end()),
+    qrss_check::libm_digest_is(std::vector<double>(tl.tab().begin(), tl.tab().end()),
               "29dc05100aa2173abbd424002a3cc0b84224f3f01d209f5649ed037898e09218", "L mf_table taps");
     check::equal(tk::pulse_g0(qrss::config::T_SYM), 0x1.006d1ed38b121p+0, "pulse_g0");
-    digest_is(tk::mf_taps(qrss::config::CH_FS, qrss::config::T_SYM),
+    qrss_check::libm_digest_is(tk::mf_taps(qrss::config::CH_FS, qrss::config::T_SYM),
               "cf40a862c38d4afc1ae0e231523aab2c6df167d03f5bdadcd5140f8e221f6d25", "mf_taps");
-    digest_is(tk::mf_taps(qrss::config::CH_FS, 2 * qrss::config::T_SYM),
+    qrss_check::libm_digest_is(tk::mf_taps(qrss::config::CH_FS, 2 * qrss::config::T_SYM),
               "515869c657d0014727aed122240850156be4aa40dde6df2158693ce218edf426", "L mf_taps");
     // the cache under contention: every thread sees the one table
     std::vector<const tk::MfTable*> seen(8, nullptr);
@@ -133,13 +133,13 @@ static void test_tables() {
 static void test_mf_psi_derotate() {
     const Inputs in = inputs();
     const std::int64_t n_pos = fr::get("tiny").n_pos();
-    digest_is(tk::symbol_mf(std::span<const cd>(in.zc), in.tm, in.pos, -100.5, n_pos),
+    qrss_check::libm_digest_is(tk::symbol_mf(std::span<const cd>(in.zc), in.tm, in.pos, -100.5, n_pos),
               "01400c13c199b2c9b90335445a34d0aa3e23b4a16ebedbd03b1e3ba27550a611", "symbol_mf complex");
-    digest_is(tk::symbol_mf(std::span<const double>(in.zr), in.tm, in.pos, -100.5, n_pos),
+    qrss_check::libm_digest_is(tk::symbol_mf(std::span<const double>(in.zr), in.tm, in.pos, -100.5, n_pos),
               "7b9be1963a24c95673e24d325c5c273993c48e589aac53559e210578aaed1b50", "symbol_mf real");
     std::vector<double> keep;
     for (std::int64_t n = 0; n < 6000; ++n) keep.push_back(n % 29 == 0 ? 0.0 : 1.0);
-    digest_is(tk::psi_at(std::span<const double>(keep), in.tm, in.pos, -100.5, n_pos),
+    qrss_check::libm_digest_is(tk::psi_at(std::span<const double>(keep), in.tm, in.pos, -100.5, n_pos),
               "4ebbb4a32d44d7ad08db6e30add7465026318f039a56ada2c1892649ed57236d", "psi_at");
     tk::ChanCapture chan;
     for (const cd& z : in.zc) chan.ch.emplace_back(static_cast<float>(z.real()), static_cast<float>(z.imag()));
@@ -151,7 +151,7 @@ static void test_mf_psi_derotate() {
         for (const double x : t) out.push_back(1500.25 + 0.001 * x);
         return out;
     };
-    digest_is(tk::derotate(chan, f), "de7c9223b415c232431e3e597f9a3cd60f725373c43d622ccafdf8c25da43699", "derotate");
+    qrss_check::libm_digest_is(tk::derotate(chan, f), "de7c9223b415c232431e3e597f9a3cd60f725373c43d622ccafdf8c25da43699", "derotate");
 }
 
 static void test_filters() {

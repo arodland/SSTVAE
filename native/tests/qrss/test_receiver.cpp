@@ -705,7 +705,7 @@ void test_confidence() {
         const std::vector<double> w(p.w.begin(), p.w.end());
         check_conf(rc::confidence_db(spec, w, nullptr, nullptr), f.bare, 0.0,
                    std::string("confidence_db, no psi, no hdr_llr: ") + f.name);
-        check::equal(rc::mean_w_db(p), f.mean_w_db, std::string("mean_w_db ") + f.name);
+        qrss_check::libm_equal(rc::mean_w_db(p), f.mean_w_db, std::string("mean_w_db ") + f.name);
     }
     const types::PassResult ps = synthetic_pass(fr::get("short"));
     throws<std::invalid_argument>([&] { (void)rc::confidence_db(ps, nullptr, std::nullopt, -1); }, P::ERR_CONF_M1,

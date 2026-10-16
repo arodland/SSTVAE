@@ -89,7 +89,7 @@ static double sps() { return cfg::L_T_SYM * cfg::CH_FS; }
 static void test_phases() {
     std::vector<double> lag;
     for (std::int64_t k = -3000; k < 3000; ++k) lag.push_back(static_cast<double>(k) * 0.375 + 0.0625);
-    digest_is(lt::lag_phase(std::span<const double>(lag)), P::LAG_PHASE, "_lag_phase");
+    qrss_check::libm_digest_is(lt::lag_phase(std::span<const double>(lag)), P::LAG_PHASE, "_lag_phase");
     const std::pair<double, const double*> scalars[] = {{0.0, P::LP_ZERO}, {-0.0, P::LP_NZERO}, {12.5, P::LP_HALF}};
     for (const auto& [v, want] : scalars) {
         const cd z = lt::lag_phase(v);
@@ -100,8 +100,8 @@ static void test_phases() {
     std::vector<double> pos;
     for (std::int64_t p = 0; p < 30000; p += 7) pos.push_back(static_cast<double>(p));
     digest_is(lt::clock_phase(pos, 0.0), P::CP_0, "_clock_phase d 0");
-    digest_is(lt::clock_phase(pos, 2.5e-4), P::CP_P, "_clock_phase d 2.5e-4");
-    digest_is(lt::clock_phase(pos, -1.75e-4), P::CP_M, "_clock_phase d -1.75e-4");
+    qrss_check::libm_digest_is(lt::clock_phase(pos, 2.5e-4), P::CP_P, "_clock_phase d 2.5e-4");
+    qrss_check::libm_digest_is(lt::clock_phase(pos, -1.75e-4), P::CP_M, "_clock_phase d -1.75e-4");
 }
 
 // --- the statistic and the grid ---------------------------------------------------------------
@@ -139,7 +139,7 @@ static void test_grid() {
     for (int k = -3; k < 4; ++k) deltas.push_back(static_cast<double>(k) * 2.5e-5);
     const auto Z = lt::fit_grid_l(zc, kn, -40, 300, 0.375, deltas, sps(), 3.5);
     check::equal(Z.size(), deltas.size() * 300, "grid size");
-    digest_is(Z, P::GRID, "grid, bitwise in the C++'s order");
+    qrss_check::libm_digest_is(Z, P::GRID, "grid, bitwise in the C++'s order");
     for (std::size_t c = 0; c < std::size(P::GRID_REF); ++c) {
         const auto i = static_cast<std::size_t>(P::GRID_CELLS[2 * c]), j = static_cast<std::size_t>(P::GRID_CELLS[2 * c + 1]);
         near(Z[i * 300 + j], P::GRID_REF[c], 0.0, "grid against the reference's direct path, cell " + std::to_string(c),

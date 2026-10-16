@@ -272,8 +272,9 @@ void check_back_to_back(const std::string& name, const std::string& mode,
         [&](const std::string&, std::span<const double> wave, int,
             const std::function<void(double)>&, const std::function<bool()>&,
             const std::function<void(const std::string&)>&) {
-            // Long enough for the next pass to be made "during" this one.
-            std::this_thread::sleep_for(std::chrono::milliseconds(120));
+            // Long enough for the next pass to be made "during" this one,
+            // with room for a slow runner (a make takes 50 ms).
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
             std::lock_guard<std::mutex> lock(mu);
             events.push_back("play " + std::to_string(wave.size()));
             ++played;
@@ -332,6 +333,11 @@ void check_back_to_back(const std::string& name, const std::string& mode,
         }
     }
     check::is_true(order, name + "each pass made while the one before plays, in order");
+    if (!order) {
+        std::string seen;
+        for (const std::string& e : events) seen += (seen.empty() ? "" : ", ") + e;
+        std::fprintf(stderr, "  events: %s\n", seen.c_str());
+    }
 }
 
 void test_passes_back_to_back() {

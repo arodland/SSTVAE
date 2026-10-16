@@ -177,7 +177,10 @@ void test_names(const std::string& dir) {
         "\xE6\x97\xA5\xE6\x9C\xAC.npz",                                            // CJK
         "\xF0\x9F\x98\x80.qrsp",                                                   // outside the BMP
     };
-#ifndef _WIN32
+#if defined(__APPLE__)
+    // macOS refuses a name that is not UTF-8 (EILSEQ), so there is no such
+    // file to round-trip; the escaping itself is checked further down.
+#elif !defined(_WIN32)
     // Not UTF-8 at all: a POSIX name is bytes (Python's surrogateescape).
     names.push_back("caf\xE9.wav");
     names.push_back("\xFF\xFE.npz");
