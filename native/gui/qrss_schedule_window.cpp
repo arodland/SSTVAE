@@ -29,6 +29,7 @@
 #include <QStyledItemDelegate>
 #include <QTimeZone>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
@@ -590,28 +591,37 @@ QWidget* QrssScheduleWindow::build_sends(QWidget* parent) {
             [this](QListWidgetItem*) { edit_send(selected_send()); });
     layout->addWidget(sends_list_, 1);
 
-    auto* new_button = new QPushButton(tr("&New..."), box);
-    new_button->setObjectName(QStringLiteral("sends_new"));
-    new_button->setToolTip(tr("Open the Editor on a blank picture"));
-    connect(new_button, &QPushButton::clicked, this, &QrssScheduleWindow::new_send);
-    auto* open_file = new QPushButton(tr("&Open file..."), box);
-    open_file->setObjectName(QStringLiteral("sends_open_file"));
-    open_file->setToolTip(tr("Open the Editor on a picture file, framed first unless it is "
-                             "exactly 640 x 480"));
-    connect(open_file, &QPushButton::clicked, this, [this] {
+    // One row of icon buttons, a word under each, Delete apart at the
+    // right (Jeff, 2026-10-16, option B of the mockup).
+    const int icon = 22;
+    const auto tool = [box, icon](const QString& text, const QIcon& glyph, const char* name) {
+        auto* b = new QToolButton(box);
+        b->setObjectName(QLatin1String(name));
+        b->setText(text);
+        b->setIcon(glyph);
+        b->setIconSize(QSize(icon, icon));
+        b->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+        return b;
+    };
+    auto* new_button = tool(tr("&New"), compose::new_send_icon(box, icon), "sends_new");
+    new_button->setToolTip(tr("New Send: the Editor on a blank picture"));
+    connect(new_button, &QToolButton::clicked, this, &QrssScheduleWindow::new_send);
+    auto* open_file = tool(tr("&Open"), compose::open_file_icon(box, icon), "sends_open_file");
+    open_file->setToolTip(tr("New Send from a picture file: the Editor on it, framed first "
+                             "unless it is exactly 640 x 480"));
+    connect(open_file, &QToolButton::clicked, this, [this] {
         const QString path = QFileDialog::getOpenFileName(
             this, tr("Picture for a Send"), QString::fromStdString(editor_context_.picture_dir),
             QString::fromLatin1(compose::IMAGE_FILTER));
         if (!path.isEmpty()) new_from_file(path);
     });
-    edit_send_ = new QPushButton(tr("&Edit..."), box);
-    edit_send_->setObjectName(QStringLiteral("sends_edit"));
-    connect(edit_send_, &QPushButton::clicked, this, [this] { edit_send(selected_send()); });
-    delete_send_ = new QPushButton(tr("&Delete"), box);
-    delete_send_->setObjectName(QStringLiteral("sends_delete"));
-    delete_send_->setToolTip(tr("Delete the Send. What is already on the schedule still goes "
-                                "out: it has its own copy."));
-    connect(delete_send_, &QPushButton::clicked, this, [this] {
+    edit_send_ = tool(tr("&Edit"), compose::edit_icon(box, icon), "sends_edit");
+    edit_send_->setToolTip(tr("Edit the selected Send (or double-click it)"));
+    connect(edit_send_, &QToolButton::clicked, this, [this] { edit_send(selected_send()); });
+    delete_send_ = tool(tr("&Delete"), compose::delete_icon(box, icon), "sends_delete");
+    delete_send_->setToolTip(tr("Delete the selected Send. What is already on the schedule still "
+                                "goes out: it has its own copy."));
+    connect(delete_send_, &QToolButton::clicked, this, [this] {
         const std::string id = selected_send();
         if (id.empty()) return;
         const QrssSend* s = sends_->find(id);
@@ -622,8 +632,21 @@ QWidget* QrssScheduleWindow::build_sends(QWidget* parent) {
         }
         delete_send(id);
     });
-    layout->addWidget(style::row(box, {new_button}));
-    layout->addWidget(style::row(box, {open_file, edit_send_, delete_send_}));
+    // All four the width of the widest, so the row reads as one set.
+    int w = 0;
+    for (QToolButton* b : {new_button, open_file, edit_send_, delete_send_}) {
+        w = std::max(w, b->sizeHint().width());
+    }
+    auto* row = new QHBoxLayout;
+    row->setSpacing(6);
+    for (QToolButton* b : {new_button, open_file, edit_send_}) {
+        b->setMinimumWidth(w);
+        row->addWidget(b);
+    }
+    row->addStretch(1);
+    delete_send_->setMinimumWidth(w);
+    row->addWidget(delete_send_);
+    layout->addLayout(row);
     return box;
 }
 

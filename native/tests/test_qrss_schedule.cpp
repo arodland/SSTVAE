@@ -30,6 +30,7 @@
 #include <QSpinBox>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QWheelEvent>
 
@@ -1296,6 +1297,17 @@ void test_test_tune(const std::filesystem::path& dir) {
     check::is_true(w.add_freq_changes(at, 7'064'000.0, 24, 3).empty() && s->changes().size() == 3 &&
                        s->changes()[2].at - s->changes()[0].at == 2 * 86400.0,
                    "freq change: every 24 hours, 3 times, is three changes");
+    {
+        int found = 0;
+        for (const char* name : {"sends_new", "sends_open_file", "sends_edit", "sends_delete"}) {
+            auto* b = w.findChild<QToolButton*>(QLatin1String(name));
+            if (b != nullptr && !b->icon().isNull() &&
+                b->toolButtonStyle() == Qt::ToolButtonTextUnderIcon) {
+                ++found;
+            }
+        }
+        check::equal(found, 4, "sends: four icon buttons with a word under each");
+    }
     check::is_true(w.findChild<QPushButton*>(QStringLiteral("clear_schedule")) != nullptr,
                    "clear schedule: the button is there");
     w.clear_schedule();

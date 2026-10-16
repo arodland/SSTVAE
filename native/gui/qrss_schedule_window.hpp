@@ -51,6 +51,7 @@ class QPushButton;
 class QScrollArea;
 class QSpinBox;
 class QTimer;
+class QToolButton;
 
 namespace sstvae::gui {
 
@@ -253,8 +254,8 @@ private:
     QLabel* message_ = nullptr;
 
     QListWidget* sends_list_ = nullptr;
-    QPushButton* edit_send_ = nullptr;
-    QPushButton* delete_send_ = nullptr;
+    QToolButton* edit_send_ = nullptr;
+    QToolButton* delete_send_ = nullptr;
 
     // The Send's choices on the left, At Time (the clocks) on the right,
     // Add under the right, level with the bottom of the left (Jeff,

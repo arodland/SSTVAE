@@ -5,6 +5,7 @@
 #include <QFont>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPen>
 #include <QPixmap>
 #include <QPolygonF>
 #include <QStyle>
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <vector>
 
 namespace sstvae::gui::compose {
 
@@ -70,7 +72,65 @@ void draw_picture_glyph(QPainter& p, int size, const QColor& ink) {
     p.drawPath(mountains);
 }
 
+// Line glyphs on a 24-unit grid, as the mockup drew them: each path is
+// a list of polylines.
+QIcon line_icon(const QWidget* metrics, int size,
+                const std::vector<std::vector<QPointF>>& lines, const QColor& hover = {}) {
+    const qreal dpr = metrics->devicePixelRatioF();
+    const auto draw = [&](const QColor& ink) {
+        QPixmap pixmap(static_cast<int>(std::lround(size * dpr)),
+                       static_cast<int>(std::lround(size * dpr)));
+        pixmap.setDevicePixelRatio(dpr);
+        pixmap.fill(Qt::transparent);
+        QPainter p(&pixmap);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        const double k = size / 24.0;
+        p.setPen(QPen(ink, 1.7 * k, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.setBrush(Qt::NoBrush);
+        for (const auto& line : lines) {
+            QPolygonF poly;
+            for (const QPointF& pt : line) poly << pt * k;
+            p.drawPolyline(poly);
+        }
+        return pixmap;
+    };
+    QIcon icon(draw(metrics->palette().color(QPalette::WindowText)));
+    if (hover.isValid()) icon.addPixmap(draw(hover), QIcon::Active);
+    return icon;
+}
+
 }  // namespace
+
+QIcon new_send_icon(const QWidget* metrics, int size) {
+    return line_icon(metrics, size,
+                     {{{6, 3}, {14, 3}, {18, 7}, {18, 21}, {6, 21}, {6, 3}},
+                      {{14, 3}, {14, 7}, {18, 7}},
+                      {{12, 11}, {12, 17}},
+                      {{9, 14}, {15, 14}}});
+}
+
+QIcon open_file_icon(const QWidget* metrics, int size) {
+    return line_icon(metrics, size,
+                     {{{3, 7}, {3, 5}, {9, 5}, {11, 7}, {19, 7}, {19, 10}},
+                      {{3, 7}, {3, 19}, {18, 19}, {21, 10}, {7, 10}, {4, 19}}});
+}
+
+QIcon edit_icon(const QWidget* metrics, int size) {
+    return line_icon(metrics, size,
+                     {{{4, 20}, {5, 16}, {16, 5}, {19, 8}, {8, 19}, {4, 20}},
+                      {{14, 7}, {17, 10}}});
+}
+
+QIcon delete_icon(const QWidget* metrics, int size) {
+    // Red while the pointer is over it: the one that cannot be taken back.
+    return line_icon(metrics, size,
+                     {{{4, 7}, {20, 7}},
+                      {{9, 7}, {9, 4}, {15, 4}, {15, 7}},
+                      {{6, 7}, {7, 20}, {17, 20}, {18, 7}},
+                      {{10, 11}, {10, 17}},
+                      {{14, 11}, {14, 17}}},
+                     QColor(192, 53, 43));
+}
 
 QIcon text_tool_icon(const QWidget* metrics) {
     return draw_tool_icon(metrics, [](QPainter& p, int size, const QColor& ink) {

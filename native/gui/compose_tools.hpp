@@ -21,6 +21,13 @@ QIcon image_tool_icon(const QWidget* metrics);
 QIcon last_rx_tool_icon(const QWidget* metrics);
 QIcon rect_tool_icon(const QWidget* metrics);
 
+// The Sends list's buttons (Jeff, 2026-10-16, option B of the mockup):
+// a page with a plus, an open folder, a pencil and a bin, line drawn.
+QIcon new_send_icon(const QWidget* metrics, int size);
+QIcon open_file_icon(const QWidget* metrics, int size);
+QIcon edit_icon(const QWidget* metrics, int size);
+QIcon delete_icon(const QWidget* metrics, int size);
+
 // The built-in templates' directory (see the .cpp for where an installed
 // app keeps them).
 std::filesystem::path builtin_templates_dir();
