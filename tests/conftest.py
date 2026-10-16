@@ -424,6 +424,21 @@ def _configure_native_qrss(config):
         raise pytest.UsageError(f"--native-qrss: {e}") from None
 
 
+def pytest_collection_modifyitems(config, items):
+    # tests/test_qrss_native_*.py hold the QRSS C++ beside the Python
+    # reference in one process. --native swaps SSTVAE's C++ into that
+    # reference (beacon._crc16, the DSP helpers), so the "Python" side
+    # would no longer be Python: the comparison means nothing there. Run
+    # them without --native (CLAUDE.md "Commands").
+    if not config.getoption("--native"):
+        return
+    skip = pytest.mark.skip(reason="side-by-side QRSS check; its reference "
+                            "is not pure Python under --native")
+    for item in items:
+        if item.path.name.startswith("test_qrss_native_"):
+            item.add_marker(skip)
+
+
 def pytest_report_header(config):
     lines = []
     if config.getoption("--native"):

@@ -151,9 +151,12 @@ jobs:
       - run: uv pip install --system -e ".[dev,cli]"
       - name: Fast suite
         run: pytest -q
+      # Without QRSSTVAE's slow tier, which runs about two hours; run it
+      # by hand with `pytest -m slow -k qrss`. Its fast tier, with one TINY
+      # and one SHORT pass decoded at -6 dB, is in the suite above.
       - name: Slow suite
         if: matrix.os == 'ubuntu-latest'
-        run: pytest -q -m slow
+        run: pytest -q -m slow --ignore-glob='tests/test_qrss_*'
 
   # The build/test/package/sign matrix lives in its own file so the
   # release workflow can run *this* job rather than a copy of it. See

@@ -570,9 +570,11 @@ jobs:
       # Also covers tests/test_native_cli.py, which runs the built
       # `sstvae-decode` against sstvae_decode.py on one WAV and requires
       # the same picture byte for byte -- Phase 2's exit criterion.
+      # QRSSTVAE's slow tier is left out here as in ci.yml (about two
+      # hours); `pytest --native-qrss=...` is how it runs against the C++.
       - name: Slow suite against the C++ core
         if: matrix.os == 'ubuntu-24.04'
-        run: pytest -q -m slow --native
+        run: pytest -q -m slow --native --ignore-glob='tests/test_qrss_*'
         env:
           SSTVAE_REQUIRE_CODEC: "1"
 
