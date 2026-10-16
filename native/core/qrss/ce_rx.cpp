@@ -12,7 +12,7 @@
 #include <type_traits>
 #include <vector>
 
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/lwave.hpp"
 #include "qrss/npsum.hpp"
 

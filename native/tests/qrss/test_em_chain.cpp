@@ -54,7 +54,7 @@
 #include "em_api_fixture.hpp"
 #include "images/types.hpp"
 #include "qrss/api.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/decode.hpp"
 #include "qrss/png.hpp"
 #include "qrss/wav.hpp"

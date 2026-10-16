@@ -37,7 +37,7 @@
 #include <utility>
 #include <vector>
 
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/demod.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/pytext.hpp"

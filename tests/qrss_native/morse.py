@@ -1,7 +1,7 @@
 """sstvae.qrss.morse -> sstvae_native.qrss.morse (native/core/qrss/morse).
 
 The table itself (`MORSE`, `MAX_CALL_CHARS`) is data the generator copies
-into qrss/config.hpp, so the parity test compares it rather than
+into qrss/qrss_config.hpp, so the parity test compares it rather than
 substituting it.
 """
 

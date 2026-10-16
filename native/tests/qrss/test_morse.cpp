@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/morse.hpp"
 #include "qrss/pytext.hpp"
 #include "qrss_check.hpp"

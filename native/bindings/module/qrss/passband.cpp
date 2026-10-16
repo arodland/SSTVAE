@@ -47,7 +47,7 @@
 #include <utility>
 #include <vector>
 
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/dirlock.hpp"
 #include "qrss/flac.hpp"
 #include "qrss/frontend.hpp"

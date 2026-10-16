@@ -35,7 +35,7 @@
 
 #include "em_pins.hpp"
 #include "infra_testgen.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/em.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/header.hpp"

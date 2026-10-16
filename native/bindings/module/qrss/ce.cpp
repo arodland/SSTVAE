@@ -24,7 +24,7 @@
 #include <vector>
 
 #include "qrss/ce.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/rational.hpp"
 #include "qrss/tables.hpp"

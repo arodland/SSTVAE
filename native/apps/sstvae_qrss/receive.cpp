@@ -74,7 +74,7 @@
 #include "common.hpp"
 #include "math/errors.hpp"
 #include "qrss/associate.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/npz.hpp"
 #include "qrss/passband.hpp"

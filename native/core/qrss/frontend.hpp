@@ -47,7 +47,7 @@
 #include <utility>
 #include <vector>
 
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/rational.hpp"
 #include "qrss/rx_config.hpp"
 

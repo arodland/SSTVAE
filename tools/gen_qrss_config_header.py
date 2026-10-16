@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Emit `native/core/qrss/config.hpp` and `native/core/qrss/tables.cpp`
+"""Emit `native/core/qrss/qrss_config.hpp` and `native/core/qrss/tables.cpp`
 from `sstvae/qrss`, the C++ port's copy of every QRSSTVAE format constant.
 
     tools/gen_qrss_config_header.py            # write both files
@@ -41,7 +41,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 OUT_DIR = ROOT / "native" / "core" / "qrss"
-CONFIG_OUT = OUT_DIR / "config.hpp"
+CONFIG_OUT = OUT_DIR / "qrss_config.hpp"
 TABLES_OUT = OUT_DIR / "tables.cpp"
 
 BANNER = ("// GENERATED FILE -- DO NOT EDIT.\n"

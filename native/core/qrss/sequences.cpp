@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "util/sha256.hpp"
 
 namespace sstvae::qrss::sequences {

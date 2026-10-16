@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <string>
 
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/pytext.hpp"
 
 namespace sstvae::qrss::morse {

@@ -39,7 +39,7 @@
 #include <vector>
 
 #include "framing/interleaver_table.hpp"   // brings SSTVAE's config.hpp
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/half.hpp"
 #include "qrss/npz.hpp"
 

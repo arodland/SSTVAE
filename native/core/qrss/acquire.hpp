@@ -60,7 +60,7 @@
 
 #include "qrss/acquire_a12.hpp"
 #include "qrss/acquire_tbd.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/frontend.hpp"
 #include "qrss/rx_config.hpp"

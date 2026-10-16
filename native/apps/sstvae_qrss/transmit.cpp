@@ -31,7 +31,7 @@
 #include "common.hpp"
 #include "qrss/api.hpp"
 #include "qrss/beaconfile.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/picture.hpp"
 #include "qrss/pynum.hpp"

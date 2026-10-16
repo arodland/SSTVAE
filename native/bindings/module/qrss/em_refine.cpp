@@ -52,7 +52,7 @@
 #include <utility>
 #include <vector>
 
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/em.hpp"
 #include "qrss/em_refine.hpp"
 #include "qrss/frame.hpp"

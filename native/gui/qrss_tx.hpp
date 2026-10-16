@@ -47,7 +47,7 @@
 
 namespace sstvae::gui::qrss_tx {
 
-// From the transmitter's own constants (qrss/config.hpp, generated from
+// From the transmitter's own constants (qrss/qrss_config.hpp, generated from
 // the Python reference), never typed by hand.
 inline constexpr double PASS_S = qrss::api::PASS_S;              // FULL frame, t0 to the end
 inline constexpr double AUDIO_LEAD_S = qrss::api::AUDIO_LEAD_S;  // the audio starts this long before t0

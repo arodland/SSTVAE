@@ -24,7 +24,7 @@
 #include <vector>
 
 #include "dsp/dsp.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/npsum.hpp"
 #include "util/fileio.hpp"
 

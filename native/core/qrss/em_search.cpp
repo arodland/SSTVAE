@@ -27,7 +27,7 @@
 #include "math/npcomplex.hpp"
 #include "qrss/ce_rx.hpp"
 #include "qrss/chan.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/demod.hpp"
 #include "qrss/header.hpp"
 #include "qrss/morse.hpp"

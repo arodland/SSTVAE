@@ -57,7 +57,7 @@
 #include <vector>
 
 #include "qrss/ce.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/demod_rx.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/mf_rx.hpp"

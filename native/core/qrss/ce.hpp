@@ -9,7 +9,7 @@
 // with time in symbols from t0 throughout (tau = (t - t0)/T).
 //
 // A format module: what this computes goes on the air. No RNG, and every
-// constant comes from the generated qrss/config.hpp and qrss/tables.hpp
+// constant comes from the generated qrss/qrss_config.hpp and qrss/tables.hpp
 // (or is derived from them here); the few that ce.py defines itself are
 // marked below and compared with it by tests/test_qrss_native_ce.py.
 //
@@ -55,7 +55,7 @@
 #include <utility>
 #include <vector>
 
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/rational.hpp"
 

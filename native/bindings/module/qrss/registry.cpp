@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 
 namespace sstvae_bindings::qrss {
 

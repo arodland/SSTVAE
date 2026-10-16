@@ -69,7 +69,7 @@
 #include "check.hpp"
 #include "images/images.hpp"
 #include "images/types.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/listener.hpp"
 #include "qrss/live.hpp"

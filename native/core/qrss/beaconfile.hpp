@@ -43,7 +43,7 @@
 #include <string_view>
 #include <vector>
 
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/header.hpp"
 #include "qrss/picture.hpp"
 

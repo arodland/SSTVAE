@@ -20,7 +20,7 @@
 // refusal text (its SystemExit), in its order; pass_audio throws
 // std::invalid_argument with the same text.
 //
-// Every number below comes from the generated qrss/config.hpp, i.e. from
+// Every number below comes from the generated qrss/qrss_config.hpp, i.e. from
 // the reference, never from a copy typed by hand.
 
 #ifndef SSTVAE_QRSS_API_HPP
@@ -36,7 +36,7 @@
 
 #include "images/types.hpp"
 #include "qrss/codec/encode.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/picture.hpp"
 #include "qrss/tx.hpp"

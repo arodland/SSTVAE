@@ -62,7 +62,7 @@
 #include <vector>
 
 #include "qrss/chan.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/lwave.hpp"
 #include "qrss/rx_config.hpp"

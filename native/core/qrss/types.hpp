@@ -47,7 +47,7 @@
 #include <vector>
 
 #include "math/linalg.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/header.hpp"
 #include "qrss/npz.hpp"
 #include "qrss/rational.hpp"

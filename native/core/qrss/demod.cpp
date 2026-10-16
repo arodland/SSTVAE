@@ -14,7 +14,7 @@
 #include <vector>
 
 #include "math/npstats.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/lwave.hpp"
 #include "qrss/npsum.hpp"
 #include "qrss/precoder.hpp"

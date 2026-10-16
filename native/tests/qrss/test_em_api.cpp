@@ -50,7 +50,7 @@
 #include "em_refine_pins.hpp"
 #include "qrss/api.hpp"
 #include "qrss/ce.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/em.hpp"
 #include "qrss/em_api.hpp"
 #include "qrss/em_refine.hpp"

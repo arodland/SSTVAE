@@ -70,7 +70,7 @@
 #include <vector>
 
 #include "qrss/ce.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/em.hpp"
 #include "qrss/em_search.hpp"
 #include "qrss/fspath.hpp"

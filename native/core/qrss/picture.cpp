@@ -8,7 +8,7 @@
 #include <utility>
 
 #include "framing/interleaver_table.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/npsum.hpp"
 #include "util/sha256.hpp"

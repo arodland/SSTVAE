@@ -159,7 +159,7 @@ def main() -> int:
                 )
 
     for rel, tool in (("core/config.hpp", "tools/gen_config_header.py"),
-                      ("core/qrss/config.hpp", "tools/gen_qrss_config_header.py"),
+                      ("core/qrss/qrss_config.hpp", "tools/gen_qrss_config_header.py"),
                       ("core/qrss/tables.hpp", "tools/gen_qrss_config_header.py"),
                       ("core/qrss/tables.cpp", "tools/gen_qrss_config_header.py"),
                       ("core/qrss/rx_config.hpp", "tools/gen_qrss_rx_config.py")):

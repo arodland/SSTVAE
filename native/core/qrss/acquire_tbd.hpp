@@ -68,7 +68,7 @@
 #include <vector>
 
 #include "qrss/acquire_stats.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/rx_config.hpp"
 #include "qrss/types.hpp"

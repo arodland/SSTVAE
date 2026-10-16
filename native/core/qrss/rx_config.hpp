@@ -15,7 +15,7 @@
 #include <limits>
 #include <string_view>
 
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 
 namespace sstvae::qrss::rxconfig {
 

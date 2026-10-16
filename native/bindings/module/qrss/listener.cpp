@@ -77,7 +77,7 @@
 #include <vector>
 
 #include "qrss/associate.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/listener.hpp"
 #include "qrss/live.hpp"
 #include "qrss/passband.hpp"

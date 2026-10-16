@@ -22,7 +22,7 @@
 #include <vector>
 
 #include "math/linalg.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/header.hpp"
 #include "qrss/picture.hpp"

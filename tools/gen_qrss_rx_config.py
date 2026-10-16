@@ -176,7 +176,7 @@ def render() -> str:
       "// here goes on the air (config.hpp has those). Private Python names\n"
       "// (_FP_NUM) appear with the leading underscores moved to the end (FP_NUM_).\n\n")
     w("#pragma once\n\n#include <array>\n#include <cstddef>\n#include <cstdint>\n#include <limits>\n"
-      "#include <string_view>\n\n#include \"qrss/config.hpp\"\n\n")
+      "#include <string_view>\n\n#include \"qrss/qrss_config.hpp\"\n\n")
     w("namespace sstvae::qrss::rxconfig {\n\n")
     w("// One entry of a Python dict of str to number, in insertion order.\n")
     w("struct NamedValue {\n    std::string_view name;\n    double value;\n};\n\n")

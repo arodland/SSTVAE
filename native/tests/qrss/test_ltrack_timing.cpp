@@ -34,7 +34,7 @@
 
 #include "ltrack_timing_pins.hpp"
 #include "qrss/chan.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/ltrack.hpp"
 #include "qrss/ltrack_timing.hpp"

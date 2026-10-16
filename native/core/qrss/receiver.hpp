@@ -65,7 +65,7 @@
 
 #include "qrss/acquire.hpp"
 #include "qrss/chan.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/frontend.hpp"
 #include "qrss/header.hpp"

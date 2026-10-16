@@ -8,7 +8,7 @@
 //     info bits     header bit t -> u[INFO_SET[t]]; every other u is frozen at 0
 //     rate matching circular repetition, coded bit e = x[e mod 2048], e < 2474
 //
-// INFO_SET is committed literal data, generated into qrss/config.hpp from
+// INFO_SET is committed literal data, generated into qrss/qrss_config.hpp from
 // the Python tuple, with its SHA-256 beside it.
 //
 // The decoder (CA-SCL, list 8) is not on-air format but lives here, as it
@@ -33,7 +33,7 @@
 #include <string>
 #include <vector>
 
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 
 namespace sstvae::qrss::polar {
 

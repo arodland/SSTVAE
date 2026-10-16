@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <stdexcept>
 
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/npsum.hpp"
 
 namespace sstvae::qrss::associate {

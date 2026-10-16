@@ -32,7 +32,7 @@
 
 #include "em_search_pins.hpp"
 #include "infra_testgen.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/ce.hpp"
 #include "qrss/em.hpp"
 #include "qrss/em_search.hpp"

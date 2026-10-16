@@ -28,7 +28,7 @@
 #include "math/errors.hpp"
 #include "math/npstats.hpp"
 #include "qrss/associate.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/npsum.hpp"
 #include "qrss/pynum.hpp"
 #include "qrss/pypath.hpp"

@@ -51,7 +51,7 @@
 #include <vector>
 
 #include "check.hpp"
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/dirlock.hpp"
 #include "qrss/frame.hpp"
 #include "qrss/listen_api.hpp"

@@ -9,7 +9,7 @@
 #include <cstdio>
 #include <stdexcept>
 
-#include "qrss/config.hpp"
+#include "qrss/qrss_config.hpp"
 #include "qrss/sequences.hpp"
 #include "qrss_check.hpp"
 #include "util/sha256.hpp"
