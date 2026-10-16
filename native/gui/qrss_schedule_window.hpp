@@ -188,7 +188,7 @@ public:
     // `count` changes, `every_hours` apart, the first at `at`.
     std::string add_freq_changes(double at, double dial_hz, int every_hours, int count);
     // Every send and frequency change off the schedule (the "Clear
-    // schedule" button, after it asks); a send on the air is stopped.
+    // schedule" button, after it asks); a send on the air carries on.
     void clear_schedule();
     std::string move_freq_change(const std::string& id, double at);
     std::string retune_freq_change(const std::string& id, double dial_hz);

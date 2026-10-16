@@ -254,6 +254,10 @@ public:
     std::string edit_change(const std::string& id,
                             const std::function<void(qrss_schedule::FreqChange&)>& edit);
     void remove_change(const std::string& id);
+    // Everything off the schedule, except that a send on the air carries
+    // on (Jeff, 2026-10-16): its entry ends after the send that started,
+    // and goes when the run does. True when one was on the air.
+    bool clear();
 
     // The entry whose run is on the air (or getting ready), else empty.
     const std::string& active() const { return active_; }

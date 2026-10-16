@@ -497,7 +497,7 @@ void QrssScheduleWindow::build() {
                            .arg(n(sends, tr("scheduled send"), tr("scheduled sends")),
                                 n(changes, tr("frequency change"), tr("frequency changes")));
         if (!scheduler_->active().empty()) {
-            text += QLatin1Char(' ') + tr("The send on the air now will be stopped.");
+            text += QStringLiteral("\n\n") + tr("Current Send will NOT be canceled.");
         }
         const auto answer = QMessageBox::question(this, tr("Clear schedule"), text,
                                                   QMessageBox::Yes | QMessageBox::Cancel,
@@ -1285,13 +1285,9 @@ std::string QrssScheduleWindow::add_freq_changes(double at, double dial_hz, int 
 }
 
 void QrssScheduleWindow::clear_schedule() {
-    std::vector<std::string> ids;
-    for (const qs::Entry& e : scheduler_->entries()) ids.push_back(e.id);
-    for (const std::string& id : ids) scheduler_->remove(id);
-    ids.clear();
-    for (const qs::FreqChange& c : scheduler_->changes()) ids.push_back(c.id);
-    for (const std::string& id : ids) scheduler_->remove_change(id);
-    message_->setText(tr("The schedule is cleared."));
+    const bool kept = scheduler_->clear();
+    message_->setText(kept ? tr("The schedule is cleared. The current send carries on.")
+                           : tr("The schedule is cleared."));
 }
 
 std::string QrssScheduleWindow::move_freq_change(const std::string& id, double at) {

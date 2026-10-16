@@ -764,6 +764,33 @@ std::string QrssScheduler::try_edit_change(const std::string& id,
     return {};
 }
 
+bool QrssScheduler::clear() {
+    bool kept = false;
+    std::vector<std::string> gone;
+    for (qs::Entry& e : entries_) {
+        if (on_air(e.id)) {
+            // What has started stays; nothing after it.
+            if (e.next > 0 && (e.count == 0 || e.count > e.next)) e.count = e.next;
+            kept = true;
+        } else {
+            gone.push_back(e.id);
+        }
+    }
+    std::error_code ec;
+    std::erase_if(entries_, [&](const qs::Entry& e) {
+        if (std::find(gone.begin(), gone.end(), e.id) == gone.end()) return false;
+        const std::filesystem::path png(e.picture);
+        if (png.parent_path() == picture_dir()) std::filesystem::remove(png, ec);
+        return true;
+    });
+    changes_.clear();
+    save();
+    emit logged(0, kept ? tr("QRSS schedule: cleared; the send on the air carries on")
+                        : tr("QRSS schedule: cleared"));
+    emit changed();
+    return kept;
+}
+
 void QrssScheduler::remove_change(const std::string& id) {
     const auto it = std::find_if(changes_.begin(), changes_.end(),
                                  [&](const qs::FreqChange& c) { return c.id == id; });

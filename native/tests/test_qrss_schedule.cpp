@@ -360,6 +360,27 @@ void test_a_late_send_starts_at_once(const std::filesystem::path& dir) {
     check::equal(cancels, 1, "scheduler/remove: nothing else stops a run");
 }
 
+// Clear schedule leaves the send on the air going (Jeff, 2026-10-16).
+void test_clear_keeps_the_send_on_the_air(const std::filesystem::path& dir) {
+    Fake fake;
+    std::unique_ptr<QrssScheduler> s(make(fake, dir / "clear" / "qrss_schedule.json"));
+    const images::Picture pic(64, 48);
+    fake.now = Q - qs::ADD_BY_S;
+    check::is_true(s->add(entry("A", Q, 3, 120, "repeating"), pic).empty() &&
+                       s->add(entry("A", Q + 6 * H, 1, 0, "later"), pic).empty(),
+                   "clear: a repeating send starting now, and a later one");
+    int cancels = 0;
+    s->set_canceller([&cancels] { ++cancels; });
+    const bool kept = s->clear();
+    check::is_true(kept && cancels == 0 && !s->active().empty(),
+                   "clear: the send on the air is not cancelled");
+    check::is_true(s->entries().size() == 1 && qs::finished(s->entries()[0]) &&
+                       s->changes().empty(),
+                   "clear: everything else goes, and nothing after the send on the air");
+    s->run_finished();
+    check::is_true(s->entries().empty(), "clear: and that send leaves when it ends");
+}
+
 void test_sends_follow_straight_on(const std::filesystem::path& dir) {
     Fake fake;
     std::unique_ptr<QrssScheduler> s(make(fake, dir / "follow" / "qrss_schedule.json"));
@@ -1355,6 +1376,7 @@ int main(int argc, char** argv) {
     test_upcoming_and_the_file();
     test_the_scheduler_starts_what_is_due(dir);
     test_a_late_send_starts_at_once(dir);
+    test_clear_keeps_the_send_on_the_air(dir);
     test_sends_follow_straight_on(dir);
     test_missed_and_paused(dir);
     test_the_sends_store(dir);
