@@ -4,6 +4,7 @@
 // against a stub maker or runner, a stub player and a clock that starts
 // just before a quarter hour.
 
+#include <QByteArray>
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QFileInfo>
@@ -113,13 +114,13 @@ void test_pass_request() {
                    "qrss_tx/pass_request: a grid that is not a locator is left out");
 
     // The C++ transmitter is the default; the scripts only when asked.
-    ::unsetenv("SSTVAE_QRSS_BACKEND");
+    qunsetenv("SSTVAE_QRSS_BACKEND");
     check::is_true(qrss_tx::backend() == qrss_tx::Backend::Native,
                    "qrss_tx/backend: C++ unless asked otherwise");
-    ::setenv("SSTVAE_QRSS_BACKEND", "python", 1);
+    qputenv("SSTVAE_QRSS_BACKEND", QByteArray("python"));
     check::is_true(qrss_tx::backend() == qrss_tx::Backend::Python,
                    "qrss_tx/backend: SSTVAE_QRSS_BACKEND=python runs the scripts");
-    ::unsetenv("SSTVAE_QRSS_BACKEND");
+    qunsetenv("SSTVAE_QRSS_BACKEND");
 
     std::string error;
     check::is_true(qrss_tx::native_maker()->make(0, r, {Q, 0}, &error).empty() && !error.empty(),

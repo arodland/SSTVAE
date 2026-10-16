@@ -7,6 +7,7 @@
 #include <QLayout>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QByteArray>
 #include <QColor>
 #include <QDateTime>
 #include <QDir>
@@ -297,22 +298,22 @@ bool wait_until(const std::function<bool()>& done, int ms) {
 // (here the build directory, above this test's own), the Python one
 // only when asked for, and SSTVAE_QRSS_LISTEN over both.
 void test_the_default_listener() {
-    ::unsetenv("SSTVAE_QRSS_LISTEN");
-    ::unsetenv("SSTVAE_QRSS_BACKEND");
+    qunsetenv("SSTVAE_QRSS_LISTEN");
+    qunsetenv("SSTVAE_QRSS_BACKEND");
     QDir build(QCoreApplication::applicationDirPath());
     build.cdUp();
     if (QFileInfo(build.filePath(QStringLiteral("sstvae-qrss"))).isExecutable()) {
         check::is_true(gui::QrssWindow::default_command().endsWith(QStringLiteral("sstvae-qrss listen")),
                        "qrss/listener: sstvae-qrss listen by default");
     }
-    ::setenv("SSTVAE_QRSS_BACKEND", "python", 1);
+    qputenv("SSTVAE_QRSS_BACKEND", QByteArray("python"));
     check::is_true(gui::QrssWindow::default_command().contains(QStringLiteral("qrss_listen.py")),
                    "qrss/listener: SSTVAE_QRSS_BACKEND=python runs qrss_listen.py");
-    ::setenv("SSTVAE_QRSS_LISTEN", "my-listener --x", 1);
+    qputenv("SSTVAE_QRSS_LISTEN", QByteArray("my-listener --x"));
     check::equal(gui::QrssWindow::default_command().toStdString(), std::string("my-listener --x"),
                  "qrss/listener: SSTVAE_QRSS_LISTEN wins");
-    ::unsetenv("SSTVAE_QRSS_LISTEN");
-    ::unsetenv("SSTVAE_QRSS_BACKEND");
+    qunsetenv("SSTVAE_QRSS_LISTEN");
+    qunsetenv("SSTVAE_QRSS_BACKEND");
 }
 
 void test_audio_reaches_the_listener_once() {
