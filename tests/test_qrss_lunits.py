@@ -283,7 +283,8 @@ def test_erase_recenter_report_in_l_time():
     _, df = T._recenter(tr)
     assert df == pytest.approx(0.05, rel=1e-6)
     r = T.report(tr)
-    assert r.offset_hz == pytest.approx(1500.0) and r.drift_hz_per_min == pytest.approx(0.0)
+    assert r.offset_hz == pytest.approx(1500.0)
+    assert r.drift_hz_per_min == pytest.approx(0.0, abs=1e-9)     # 1.7e-12 on aarch64
     assert r.wander_hz_rms == pytest.approx(0.05, rel=1e-3)
     assert r.doppler_hz == pytest.approx(T.Q_SPREADS_HZ[3], rel=1e-12)
     assert r.slip_free and r.z_ref == 9.0
