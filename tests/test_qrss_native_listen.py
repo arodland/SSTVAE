@@ -43,7 +43,6 @@ subprocess, so --native-qrss does not reach it.
 import json
 import math
 import os
-import pty
 import re
 import shutil
 import signal
@@ -58,6 +57,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 from qrss_helpers import Q_TEST, REPO_ROOT, codec_skip, model_dir
+
+try:
+    import pty
+except ImportError:  # Windows has no pseudo-terminals: the tty refusal is left out there
+    pty = None
 
 SLOT = "2025-10-01T00:00Z"
 SLOT_UTC = "2025-10-01T00:00:00Z"
@@ -353,6 +357,8 @@ REFUSALS = [
     ("held-state", ["--frame", "tiny", "--store", "store", "--state", "st"], "exit"),
     ("tty", ["--frame", "tiny", *ST], "exit"),
 ]
+if pty is None:
+    REFUSALS = [r for r in REFUSALS if r[0] != "tty"]
 
 
 def _refusal_run(cmd: list, d: Path, name: str) -> Run:
@@ -411,7 +417,7 @@ def test_refusals(cli, tmp_path):
     assert by["start-wins"].err == "nope.wav: no such file\n"
     assert by["start-bad"].err.startswith("--start 'yesterday': ")
     assert by["slot-bad"].err.startswith("--slot 'nope': ")
-    assert by["tty"].err == "pipe 8 kHz mono audio into stdin (see --help), or use --wav\n"
+    assert pty is None or by["tty"].err == "pipe 8 kHz mono audio into stdin (see --help), or use --wav\n"
     assert by["held-state"].err == ("another listener is writing tiles to st; stop it, or give this one its "
                                     "own --state DIR\n")
     assert _last_line(by["both-just"].err) == ("sstvae-qrss listen: error: argument --just-l: not allowed with "
