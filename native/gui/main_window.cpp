@@ -549,6 +549,21 @@ void MainWindow::set_ui_mode(UiMode mode) {
     qrss_page_->spectrogram()->set_active(qrss);
     qrss_->set_active(qrss);
     if (qrss && rx_panel_->listening() && !qrss_->listener_running()) qrss_->start_listener();
+    // QRSSTVAE listens by itself, on launch and on switching to it
+    // (Jeff, 2026-10-16): after this call returns, so the window is up
+    // for any message about the audio device, and not during an over,
+    // which resumes receiving itself.
+    if (qrss && !rx_panel_->listening() && state_->config().receive.qrss_auto_start) {
+        QTimer::singleShot(0, this, [this] {
+            if (ui_mode() != UiMode::Qrsstvae || rx_panel_->listening() ||
+                tx_panel_->transmitting()) {
+                return;
+            }
+            state_->log_event("rx", log::Severity::Info,
+                              tr("starting to listen (QRSSTVAE mode)"));
+            rx_panel_->start();
+        });
+    }
     // Side by side or tabbed is about the SSTVAE panes only.
     if (layout_menu_ != nullptr) layout_menu_->setEnabled(!qrss);
     const QString app = QString::fromLatin1(APP_NAME);

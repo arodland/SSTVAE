@@ -140,6 +140,7 @@ private:
 
     // Receive
     QCheckBox* auto_start_ = nullptr;
+    QCheckBox* qrss_auto_start_ = nullptr;
     QCheckBox* autosave_ = nullptr;
     QCheckBox* save_audio_ = nullptr;
     QCheckBox* low_cpu_ = nullptr;

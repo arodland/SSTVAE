@@ -95,6 +95,7 @@ NON_DEFAULT = {
     "receive": {
         "autosave": False,
         "auto_start": True,
+        "qrss_auto_start": False,
         "low_cpu": True,
         "waterfall_fps": 7,
         "buffer_seconds": 95.5,

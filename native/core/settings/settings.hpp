@@ -159,6 +159,10 @@ struct ReceiveConfig {
     // happens once per run: a later checkpoint change reloads the model
     // and must not restart a session the operator has since stopped.
     bool auto_start = false;
+    // QRSSTVAE mode starts listening by itself, when the app opens in it
+    // and when the operator switches to it (Jeff, 2026-10-16). No codec
+    // to wait for there, so it needs none of auto_start's care.
+    bool qrss_auto_start = true;
     bool low_cpu = false;
     // Waterfall rows a second (1-30). Lower saves a little CPU and
     // scrolls less smoothly; the QRSS spectrogram does not depend on it.

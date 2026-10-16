@@ -846,6 +846,11 @@ QWidget* SettingsDialog::receive_tab() {
     auto_start_ = new QCheckBox(tr("Start listening when the app opens"), page);
     auto_start_->setChecked(receive.auto_start);
     form->addRow(auto_start_);
+    qrss_auto_start_ = new QCheckBox(
+        tr("In QRSSTVAE mode, start listening when the app opens or you switch to it"), page);
+    qrss_auto_start_->setObjectName(QStringLiteral("qrss_auto_start"));
+    qrss_auto_start_->setChecked(receive.qrss_auto_start);
+    form->addRow(qrss_auto_start_);
     add_gap(form);
 
     autosave_ = new QCheckBox(tr("Save every completed reception automatically"),
@@ -1135,6 +1140,7 @@ void SettingsDialog::apply_to(settings::Config& config) const {
     config.transmit.vox_lead_s = vox_lead_->isChecked() ? dsp::VOX_LEAD_DEFAULT_S : 0.0;
     config.transmit.test_tone_s = test_tone_->value();
     config.receive.auto_start = auto_start_->isChecked();
+    config.receive.qrss_auto_start = qrss_auto_start_->isChecked();
     config.receive.autosave = autosave_->isChecked();
     config.receive.save_audio = save_audio_->isChecked();
     config.receive.low_cpu = low_cpu_->isChecked();

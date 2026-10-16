@@ -65,6 +65,7 @@ settings::Config populated() {
 
     c.receive.autosave = false;
     c.receive.auto_start = true;
+    c.receive.qrss_auto_start = false;
     c.receive.save_audio = true;
     c.receive.low_cpu = true;
     c.receive.waterfall_fps = 7;

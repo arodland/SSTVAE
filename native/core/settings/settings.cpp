@@ -244,6 +244,7 @@ void read_folders(const Reader& r, FolderConfig& c) {
 void read_receive(const Reader& r, ReceiveConfig& c) {
     r.get("autosave", c.autosave);
     r.get("auto_start", c.auto_start);
+    r.get("qrss_auto_start", c.qrss_auto_start);
     r.get("low_cpu", c.low_cpu);
     r.get("waterfall_fps", c.waterfall_fps);
     if (c.waterfall_fps < 1 || c.waterfall_fps > 30) {
@@ -269,8 +270,8 @@ void read_receive(const Reader& r, ReceiveConfig& c) {
                                                "'; using off");
         c.drift_track = "off";
     }
-    r.report_unknown({"autosave", "auto_start", "low_cpu", "waterfall_fps", "buffer_seconds",
-                      "poll_interval", "blind_search_seconds", "blind_wide",
+    r.report_unknown({"autosave", "auto_start", "qrss_auto_start", "low_cpu", "waterfall_fps",
+                      "buffer_seconds", "poll_interval", "blind_search_seconds", "blind_wide",
                       "drift_track", "end_grace", "save_size", "save_audio",
                       "filename_template"});
 }
@@ -480,6 +481,7 @@ std::string to_json(const Config& c) {
         {"receive",
          {{"autosave", c.receive.autosave},
           {"auto_start", c.receive.auto_start},
+          {"qrss_auto_start", c.receive.qrss_auto_start},
           {"low_cpu", c.receive.low_cpu},
           {"waterfall_fps", c.receive.waterfall_fps},
           {"buffer_seconds", c.receive.buffer_seconds},
