@@ -92,6 +92,10 @@ public:
     void set_proposal(double first, std::vector<std::pair<double, double>> spans);
     void clear_proposal();
     bool has_proposal() const { return proposal_; }
+    // Where the proposal is when it is scrolled wholly out of view: -1
+    // left of it, +1 right, 0 in view or none. Then a blinking red arrow
+    // at that edge of the view points to it (Jeff, 2026-10-16).
+    int proposal_off_view() const;
     double proposal_at() const { return proposal_at_; }
     const std::vector<std::pair<double, double>>& proposal_spans() const { return spans_; }
     // The slot a column under the pointer would start a send on.

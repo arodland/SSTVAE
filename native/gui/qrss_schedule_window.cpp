@@ -454,6 +454,10 @@ void QrssScheduleWindow::build() {
                                      2);
     // A mouse wheel scrolls the timeline sideways: it has no other way.
     timeline_scroll_->viewport()->installEventFilter(this);
+    // Scrolling moves what was painted; the arrow to an out-of-view
+    // proposal belongs at the edge of the view, so draw it afresh.
+    connect(timeline_scroll_->horizontalScrollBar(), &QScrollBar::valueChanged, timeline_,
+            [this] { timeline_->update(); });
     up_layout->addWidget(timeline_scroll_);
     message_ = new QLabel(upcoming);
     message_->setObjectName(QStringLiteral("schedule_message"));

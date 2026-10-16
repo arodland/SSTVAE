@@ -40,7 +40,8 @@ QrssTimeline::QrssTimeline(QWidget* parent) : QWidget(parent) {
     blink_->setInterval(530);
     connect(blink_, &QTimer::timeout, this, [this] {
         blink_on_ = !blink_on_;
-        update(QRect(0, rows_bottom(), width(), BUG_H));
+        // The whole of what is in view: the arrow at its edge blinks too.
+        update(visibleRegion().boundingRect());
     });
 }
 
@@ -52,6 +53,21 @@ void QrssTimeline::set_proposal(double first, std::vector<std::pair<double, doub
     blink_on_ = true;
     if (!blink_->isActive()) blink_->start();
     update();
+}
+
+int QrssTimeline::proposal_off_view() const {
+    if (!proposal_) return 0;
+    const QRect view = visibleRegion().boundingRect();
+    if (view.isEmpty()) return 0;
+    int lo = x_of(proposal_at_);
+    int hi = lo;
+    for (const auto& [from, to] : spans_) {
+        lo = std::min(lo, x_of(from));
+        hi = std::max(hi, x_of(to));
+    }
+    if (hi < view.left()) return -1;
+    if (lo > view.right()) return 1;
+    return 0;
 }
 
 void QrssTimeline::clear_proposal() {
@@ -357,6 +373,26 @@ void QrssTimeline::paintEvent(QPaintEvent*) {
     if (xn >= 0 && xn <= width()) {
         p.setPen(QPen(style::color::danger(), 2));
         p.drawLine(xn, 0, xn, rows_bottom());
+    }
+
+    // The proposal scrolled out of view: an arrow at that edge of the
+    // view, pointing to it, blinking with the bug.
+    if (const int side = proposal_off_view(); side != 0 && blink_on_) {
+        const QRect view = visibleRegion().boundingRect();
+        const int cy = (HEADER_H + rows_bottom()) / 2;
+        const int tip = side < 0 ? view.left() + 5 : view.right() - 5;
+        const int base = tip - side * 16;
+        QPainterPath arrow;
+        arrow.moveTo(tip, cy);
+        arrow.lineTo(base, cy - 11);
+        arrow.lineTo(base, cy + 11);
+        arrow.closeSubpath();
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(QPen(pal.color(QPalette::Base), 3));
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(arrow);
+        p.fillPath(arrow, style::color::danger());
+        p.setRenderHint(QPainter::Antialiasing, false);
     }
 }
 

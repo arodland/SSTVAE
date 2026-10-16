@@ -27,6 +27,8 @@
 #include <QJsonObject>
 #include <QListWidget>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSpinBox>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -1307,6 +1309,20 @@ void test_test_tune(const std::filesystem::path& dir) {
             }
         }
         check::equal(found, 4, "sends: four icon buttons with a word under each");
+    }
+    {
+        // A proposal scrolled out of view gets an arrow at that edge.
+        QrssTimeline* t = w.timeline();
+        auto* scroll = w.findChild<QScrollArea*>(QStringLiteral("schedule_timeline_scroll"));
+        const double far = t->start() + 40.0 * 3600.0;
+        t->set_proposal(far, {{far, far + 1800.0}});
+        scroll->horizontalScrollBar()->setValue(0);
+        QApplication::processEvents();
+        check::equal(t->proposal_off_view(), 1, "timeline: a proposal off to the right");
+        scroll->horizontalScrollBar()->setValue(t->x_of(far) - 100);
+        QApplication::processEvents();
+        check::equal(t->proposal_off_view(), 0, "timeline: and none once it is in view");
+        t->clear_proposal();
     }
     check::is_true(w.findChild<QPushButton*>(QStringLiteral("clear_schedule")) != nullptr,
                    "clear schedule: the button is there");
