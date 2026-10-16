@@ -1,6 +1,7 @@
 #include "qrss_schedule_window.hpp"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDateTime>
 #include <QDateTimeEdit>
@@ -472,9 +473,40 @@ void QrssScheduleWindow::build() {
         const double now = scheduler_->now();
         double at = std::max(std::ceil((now + 60.0) / 60.0) * 60.0, chosen_slot_ - 120.0);
         double hz = defaults_().dial_hz;
-        if (ask_freq_change(tr("Add frequency change"), &at, &hz)) add_freq_change(at, hz);
+        int every = 0;
+        int count = 1;
+        if (ask_freq_change(tr("Add frequency change"), &at, &hz, true, &every, &count)) {
+            add_freq_changes(at, hz, every, count);
+        }
     });
-    message_row->addWidget(add_change, 0, Qt::AlignTop);
+    auto* buttons_col = new QVBoxLayout;
+    buttons_col->addWidget(add_change);
+    auto* clear = new QPushButton(tr("Clear schedule..."), upcoming);
+    clear->setObjectName(QStringLiteral("clear_schedule"));
+    connect(clear, &QPushButton::clicked, this, [this] {
+        const int sends = static_cast<int>(scheduler_->entries().size());
+        const int changes = static_cast<int>(scheduler_->changes().size());
+        if (sends == 0 && changes == 0) {
+            message_->setText(tr("The schedule is already empty."));
+            return;
+        }
+        const auto n = [](int k, const QString& one, const QString& many) {
+            return QStringLiteral("%1 %2").arg(k).arg(k == 1 ? one : many);
+        };
+        QString text = tr("Remove %1 and %2 from the schedule?")
+                           .arg(n(sends, tr("scheduled send"), tr("scheduled sends")),
+                                n(changes, tr("frequency change"), tr("frequency changes")));
+        if (!scheduler_->active().empty()) {
+            text += QLatin1Char(' ') + tr("The send on the air now will be stopped.");
+        }
+        const auto answer = QMessageBox::question(this, tr("Clear schedule"), text,
+                                                  QMessageBox::Yes | QMessageBox::Cancel,
+                                                  QMessageBox::Cancel);
+        if (answer == QMessageBox::Yes) clear_schedule();
+    });
+    buttons_col->addWidget(clear);
+    buttons_col->addStretch(1);
+    message_row->addLayout(buttons_col);
     up_layout->addLayout(message_row);
     outer->addWidget(upcoming);
     connect(timeline_, &QrssTimeline::blockClicked, this, &QrssScheduleWindow::on_block_clicked);
@@ -1218,6 +1250,50 @@ std::string QrssScheduleWindow::add_freq_change(double at, double dial_hz) {
     return why;
 }
 
+std::string QrssScheduleWindow::add_freq_changes(double at, double dial_hz, int every_hours,
+                                                 int count) {
+    if (every_hours <= 0 || count <= 1) return add_freq_change(at, dial_hz);
+    int added = 0;
+    std::string first_why;
+    for (int k = 0; k < count; ++k) {
+        qs::FreqChange c;
+        c.at = at + static_cast<double>(k) * every_hours * 3600.0;
+        c.dial_hz = dial_hz;
+        const std::string why = scheduler_->add_change(c);
+        if (why.empty()) {
+            ++added;
+        } else if (first_why.empty()) {
+            first_why = why;
+        }
+    }
+    if (added == 0) {
+        show_result(first_why, {});
+        return first_why;
+    }
+    QString line = tr("%1 frequency changes to %2, every %3 hours from %4.")
+                       .arg(added)
+                       .arg(QString::fromStdString(qs::mhz(dial_hz)))
+                       .arg(every_hours)
+                       .arg(local_and_utc(at));
+    if (added < count) {
+        line += QLatin1Char(' ') + tr("%1 could not be added: %2.")
+                                       .arg(count - added)
+                                       .arg(QString::fromStdString(first_why));
+    }
+    message_->setText(line);
+    return {};
+}
+
+void QrssScheduleWindow::clear_schedule() {
+    std::vector<std::string> ids;
+    for (const qs::Entry& e : scheduler_->entries()) ids.push_back(e.id);
+    for (const std::string& id : ids) scheduler_->remove(id);
+    ids.clear();
+    for (const qs::FreqChange& c : scheduler_->changes()) ids.push_back(c.id);
+    for (const std::string& id : ids) scheduler_->remove_change(id);
+    message_->setText(tr("The schedule is cleared."));
+}
+
 std::string QrssScheduleWindow::move_freq_change(const std::string& id, double at) {
     const std::string why =
         scheduler_->edit_change(id, [at](qs::FreqChange& c) { c.at = at; });
@@ -1291,17 +1367,24 @@ QMenu* QrssScheduleWindow::empty_menu_for(double t) {
     connect(add, &QAction::triggered, this, [this, at0] {
         double at = at0;
         double hz = defaults_().dial_hz;
-        if (ask_freq_change(tr("Add frequency change"), &at, &hz)) add_freq_change(at, hz);
+        int every = 0;
+        int count = 1;
+        if (ask_freq_change(tr("Add frequency change"), &at, &hz, true, &every, &count)) {
+            add_freq_changes(at, hz, every, count);
+        }
     });
     return menu;
 }
 
 bool QrssScheduleWindow::ask_freq_change(const QString& title, double* at, double* dial_hz,
-                                         bool with_time) {
+                                         bool with_time, int* every_hours, int* count) {
     // Never before now plus a minute (Jeff, 2026-10-15).
     const double earliest = std::ceil((scheduler_->now() + 60.0) / 60.0) * 60.0;
-    QrssFreqChangeDialog dialog(title, *at, *dial_hz, with_time, freq_utc_, earliest, this);
+    QrssFreqChangeDialog dialog(title, *at, *dial_hz, with_time, freq_utc_, earliest, this,
+                                every_hours != nullptr && count != nullptr);
     if (dialog.exec() != QDialog::Accepted) return false;
+    if (every_hours != nullptr) *every_hours = dialog.repeat_hours();
+    if (count != nullptr) *count = dialog.occurrences();
     freq_utc_ = dialog.utc();
     *at = dialog.at();
     *dial_hz = dialog.dial_hz();
@@ -1312,7 +1395,7 @@ bool QrssScheduleWindow::ask_freq_change(const QString& title, double* at, doubl
 
 QrssFreqChangeDialog::QrssFreqChangeDialog(const QString& title, double at, double dial_hz,
                                            bool with_time, bool utc, double earliest,
-                                           QWidget* parent)
+                                           QWidget* parent, bool with_repeat)
     : QDialog(parent),
       t_(std::max(std::round(at / 60.0) * 60.0, earliest)),
       earliest_(earliest),
@@ -1370,6 +1453,36 @@ QrssFreqChangeDialog::QrssFreqChangeDialog(const QString& title, double at, doub
         readout_ = new QLabel(when);
         readout_->setObjectName(QStringLiteral("freq_change_readout"));
         right->addWidget(readout_);
+        if (with_repeat) {
+            auto* repeat = new QHBoxLayout;
+            repeat->setSpacing(4);
+            repeat_ = new QCheckBox(tr("Every"), when);
+            repeat_->setObjectName(QStringLiteral("freq_change_repeat"));
+            every_ = new QComboBox(when);
+            every_->setObjectName(QStringLiteral("freq_change_every"));
+            every_->addItem(QStringLiteral("12"), 12);
+            every_->addItem(QStringLiteral("24"), 24);
+            every_->setCurrentIndex(1);
+            auto* hours = new QLabel(tr("hours, for"), when);
+            times_ = new QSpinBox(when);
+            times_->setObjectName(QStringLiteral("freq_change_times"));
+            times_->setRange(2, 60);
+            times_->setValue(7);
+            auto* occurrences = new QLabel(tr("occurrences"), when);
+            for (QWidget* w : {static_cast<QWidget*>(every_), static_cast<QWidget*>(hours),
+                               static_cast<QWidget*>(times_), static_cast<QWidget*>(occurrences)}) {
+                w->setEnabled(false);
+                connect(repeat_, &QCheckBox::toggled, w, &QWidget::setEnabled);
+            }
+            repeat->addWidget(repeat_);
+            repeat->addWidget(every_);
+            repeat->addWidget(hours);
+            repeat->addWidget(times_);
+            repeat->addWidget(occurrences);
+            repeat->addStretch(1);
+            right->addSpacing(6);
+            right->addLayout(repeat);
+        }
         right->addStretch(1);
         row->addLayout(right, 1);
         box->addLayout(row);
@@ -1412,6 +1525,15 @@ QrssFreqChangeDialog::QrssFreqChangeDialog(const QString& title, double at, doub
         show_time();
         face_->setFocus();
     }
+}
+
+int QrssFreqChangeDialog::repeat_hours() const {
+    if (repeat_ == nullptr || !repeat_->isChecked()) return 0;
+    return every_->currentData().toInt();
+}
+
+int QrssFreqChangeDialog::occurrences() const {
+    return repeat_hours() > 0 ? times_->value() : 1;
 }
 
 double QrssFreqChangeDialog::dial_hz() const { return std::round(freq_->value() * 1e6); }

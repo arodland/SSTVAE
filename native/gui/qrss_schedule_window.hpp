@@ -39,6 +39,7 @@
 #include "qrss_editor.hpp"
 #include "qrss_schedule.hpp"
 
+class QCheckBox;
 class QComboBox;
 class QDateTimeEdit;
 class QDoubleSpinBox;
@@ -92,11 +93,18 @@ class QrssFreqChangeDialog : public QDialog {
 public:
     // `earliest`: the time can go no sooner than this (now plus a minute,
     // from the window); 0 for no limit.
+    // `with_repeat`: the "Every 12/24 hours, for N occurrences" row
+    // (Jeff, 2026-10-16), for adding a change, not editing one.
     QrssFreqChangeDialog(const QString& title, double at, double dial_hz, bool with_time, bool utc,
-                         double earliest = 0.0, QWidget* parent = nullptr);
+                         double earliest = 0.0, QWidget* parent = nullptr,
+                         bool with_repeat = false);
     double at() const { return t_; }
     double dial_hz() const;
     bool utc() const { return utc_; }
+    // Hours between repeats, 0 when it does not repeat; and how many
+    // changes in all, the first included.
+    int repeat_hours() const;
+    int occurrences() const;
     void set_utc(bool utc);
     void set_time(double t);
     QrssClockFace* face() const { return face_; }
@@ -115,6 +123,9 @@ private:
     QPushButton* utc_button_ = nullptr;
     QPushButton* local_button_ = nullptr;
     QDoubleSpinBox* freq_ = nullptr;
+    QCheckBox* repeat_ = nullptr;
+    QComboBox* every_ = nullptr;
+    QSpinBox* times_ = nullptr;
 };
 
 class QrssScheduleWindow : public QWidget {
@@ -174,6 +185,11 @@ public:
     // Frequency changes (green on the timeline). Each returns empty on
     // success, else why not (also shown in the window).
     std::string add_freq_change(double at, double dial_hz);
+    // `count` changes, `every_hours` apart, the first at `at`.
+    std::string add_freq_changes(double at, double dial_hz, int every_hours, int count);
+    // Every send and frequency change off the schedule (the "Clear
+    // schedule" button, after it asks); a send on the air is stopped.
+    void clear_schedule();
     std::string move_freq_change(const std::string& id, double at);
     std::string retune_freq_change(const std::string& id, double dial_hz);
     void remove_freq_change(const std::string& id);
@@ -222,8 +238,9 @@ private:
     void open_editor(const std::function<bool(QrssEditor&)>& prepare);
     // Asks for a change's time and dial frequency; false if cancelled.
     // Without the time, only the frequency is asked for.
+    // `every_hours`/`count` given: the repeat row too (for Add).
     bool ask_freq_change(const QString& title, double* at, double* dial_hz,
-                         bool with_time = true);
+                         bool with_time = true, int* every_hours = nullptr, int* count = nullptr);
 
     QrssScheduler* scheduler_ = nullptr;
     QrssSends* sends_ = nullptr;

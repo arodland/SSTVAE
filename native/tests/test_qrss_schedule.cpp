@@ -8,6 +8,7 @@
 // that is not 640 x 480 first and saves to the Sends.
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDateTimeEdit>
 #include <QDragEnterEvent>
@@ -1269,6 +1270,16 @@ void test_test_tune(const std::filesystem::path& dir) {
     check::is_true(!test->running() && test->text().remove(QLatin1Char('&')) == "Test / Tune",
                    "test/tune: back to Test / Tune when it ends");
 
+    // A repeating frequency change is that many changes.
+    const double at = std::ceil((s->now() + 3600.0) / 60.0) * 60.0;
+    check::is_true(w.add_freq_changes(at, 7'064'000.0, 24, 3).empty() && s->changes().size() == 3 &&
+                       s->changes()[2].at - s->changes()[0].at == 2 * 86400.0,
+                   "freq change: every 24 hours, 3 times, is three changes");
+    check::is_true(w.findChild<QPushButton*>(QStringLiteral("clear_schedule")) != nullptr,
+                   "clear schedule: the button is there");
+    w.clear_schedule();
+    check::is_true(s->changes().empty() && s->entries().empty(), "clear schedule: nothing left");
+
     const std::vector<double> tone = qrss_tx::test_tone(2.0);
     double peak = 0.0;
     for (double v : tone) peak = std::max(peak, std::abs(v));
@@ -1304,6 +1315,22 @@ void test_the_freq_change_dialog() {
     check::is_true(d.at() == t0 + 4500.0 && face->time() == d.at(),
                    "freq change: a typed time moves the clock");
     check::is_true(d.dial_hz() == 7'064'000.0, "freq change: the dial frequency");
+
+    QrssFreqChangeDialog r(QStringLiteral("Add frequency change"), t0, 7'064'000.0, true, true,
+                           0.0, nullptr, true);
+    auto* repeat = r.findChild<QCheckBox*>(QStringLiteral("freq_change_repeat"));
+    auto* times = r.findChild<QSpinBox*>(QStringLiteral("freq_change_times"));
+    check::is_true(repeat != nullptr && times != nullptr && r.repeat_hours() == 0 &&
+                       r.occurrences() == 1 && !times->isEnabled(),
+                   "freq change: no repeat until ticked");
+    if (repeat != nullptr && times != nullptr) {
+        repeat->setChecked(true);
+        times->setValue(3);
+        check::is_true(times->isEnabled() && r.repeat_hours() == 24 && r.occurrences() == 3,
+                       "freq change: every 24 hours, 3 times");
+    }
+    check::is_true(d.findChild<QCheckBox*>(QStringLiteral("freq_change_repeat")) == nullptr,
+                   "freq change: no repeat row unless adding");
 
     QrssFreqChangeDialog e(QStringLiteral("Add frequency change"), t0 + 600.0, 7'064'000.0, true,
                            true, t0 + 300.0);
