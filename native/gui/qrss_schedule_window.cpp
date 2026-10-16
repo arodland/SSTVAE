@@ -1139,7 +1139,8 @@ std::string QrssScheduleWindow::add() {
     summary_->setText(tr("Added \"%1\": %2.")
                           .arg(QString::fromStdString(s->label),
                                QString::fromStdString(qs::describe(e))));
-    add_->setEnabled(false);
+    // Add stays on: the form has moved past what was just added, so the
+    // same Send can go in again straight away (Jeff, 2026-10-16).
     return {};
 }
 

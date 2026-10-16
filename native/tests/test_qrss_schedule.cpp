@@ -808,6 +808,7 @@ void test_the_window(const std::filesystem::path& dir) {
                        s->entries()[0].send_id == blue && s->entries()[0].label == "Blue" &&
                        s->entries()[0].first_slot == Q,
                    "window: Add schedules the chosen Send as the form says");
+    check::is_true(add->isEnabled(), "window: and Add stays on for the next one");
     if (s->entries().size() != 1) return;
     check::equal(w.chosen_slot(), Q + 2 * 1800.0,
                  "window: and the form moves on past the sends just added");
