@@ -390,6 +390,39 @@ void test_clear_keeps_the_send_on_the_air(const std::filesystem::path& dir) {
     check::is_true(s->entries().empty(), "clear: and that send leaves when it ends");
 }
 
+// "2 x A" back to back is one run: Clear and "remove this send" take
+// the second A back off it, and leave the one on the air (2026-10-16).
+void test_clear_ends_a_back_to_back_run(const std::filesystem::path& dir) {
+    for (int way = 0; way < 2; ++way) {
+        Fake fake;
+        std::unique_ptr<QrssScheduler> s(
+            make(fake, dir / ("clear2x" + std::to_string(way)) / "qrss_schedule.json"));
+        std::vector<double> dropped;
+        s->set_dropper([&dropped](const std::vector<double>& q) {
+            dropped.insert(dropped.end(), q.begin(), q.end());
+        });
+        fake.now = Q - qs::ADD_BY_S;
+        check::is_true(s->add(entry("A", Q, 2, 0, "aa"), images::Picture(64, 48)).empty() &&
+                           fake.runs.size() == 1 && fake.runs[0].size() == 2,
+                       "clear 2xA: both sends go to the transmitter as one run");
+        if (way == 0) {
+            const QrssScheduler::ClearPlan plan = s->clear_plan();
+            check::is_true(plan.sends == 0 && plan.repeats == 1 && plan.on_air,
+                           "clear 2xA: the prompt names one later repeat, no send");
+            s->clear();
+        } else {
+            const std::string id = s->entries()[0].id;
+            check::equal(s->sends_kept(id), 1, "clear 2xA: the send on the air must stay");
+            check::equal(s->truncate(id, 0), 1, "clear 2xA: removing from send 1 keeps it");
+        }
+        check::is_true(dropped == std::vector<double>{Q + 1800.0},
+                       "clear 2xA: the second A is taken off the run");
+        check::is_true(s->entries().size() == 1 && s->entries()[0].count == 1 &&
+                           qs::finished(s->entries()[0]) && !s->active().empty(),
+                       "clear 2xA: the first A carries on, and nothing after it");
+    }
+}
+
 void test_sends_follow_straight_on(const std::filesystem::path& dir) {
     Fake fake;
     std::unique_ptr<QrssScheduler> s(make(fake, dir / "follow" / "qrss_schedule.json"));
@@ -1411,6 +1444,7 @@ int main(int argc, char** argv) {
     test_the_scheduler_starts_what_is_due(dir);
     test_a_late_send_starts_at_once(dir);
     test_clear_keeps_the_send_on_the_air(dir);
+    test_clear_ends_a_back_to_back_run(dir);
     test_sends_follow_straight_on(dir);
     test_missed_and_paused(dir);
     test_the_sends_store(dir);

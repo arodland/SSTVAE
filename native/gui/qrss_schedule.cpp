@@ -568,20 +568,66 @@ std::string QrssScheduler::try_change(const std::string& id,
     return {};
 }
 
-void QrssScheduler::truncate(const std::string& id, int k) {
+int QrssScheduler::sends_kept(const std::string& id) const {
+    const auto it = std::find_if(entries_.begin(), entries_.end(),
+                                 [&](const qs::Entry& e) { return e.id == id; });
+    if (it == entries_.end()) return 0;
+    if (!on_air(id)) return it->next;
+    const auto i = static_cast<std::size_t>(it - entries_.begin());
+    const std::vector<RunSend> run = run_sends();
+    const auto in_run = std::count_if(run.begin(), run.end(),
+                                      [i](const RunSend& r) { return r.entry == i; });
+    const bool current = !run.empty() && run.front().entry == i;
+    return it->next - static_cast<int>(in_run) + (current ? 1 : 0);
+}
+
+int QrssScheduler::truncate(const std::string& id, int k) {
     qs::Entry* e = find(id);
-    if (e == nullptr) return;
-    if (k <= e->next) {
-        remove(id);
-        return;
+    if (e == nullptr) return 0;
+    if (!on_air(id)) {
+        if (k <= e->next) {
+            remove(id);
+            return 0;
+        }
+    } else {
+        // Never the send on the air; the ones handed to its run after it
+        // come back off the run.
+        k = std::max(k, sends_kept(id));
+        if (k == 0) {
+            std::vector<double> quarter_hours;
+            for (const RunSend& r : run_sends()) {
+                if (entries_[r.entry].id != id) continue;
+                for (const qrss_tx::Pass& p : qs::passes_of(*e, r.k)) quarter_hours.push_back(p.slot);
+            }
+            std::error_code ec;
+            const std::filesystem::path png(e->picture);
+            if (png.parent_path() == picture_dir()) std::filesystem::remove(png, ec);
+            const QString label = QString::fromStdString(e->label);
+            std::erase_if(entries_, [&](const qs::Entry& x) { return x.id == id; });
+            std::erase(on_air_, id);
+            drop_from_run(quarter_hours);
+            save();
+            emit logged(0, tr("QRSS schedule: removed \"%1\"").arg(label));
+            emit changed();
+            return 0;
+        }
+        std::vector<double> quarter_hours;
+        for (const RunSend& r : run_sends()) {
+            if (entries_[r.entry].id != id || r.k < k) continue;
+            for (const qrss_tx::Pass& p : qs::passes_of(*e, r.k)) quarter_hours.push_back(p.slot);
+        }
+        if (quarter_hours.empty() && e->count > 0 && k >= e->count) return e->count;
+        e->next = std::min(e->next, k);
+        drop_from_run(quarter_hours);
     }
-    if (e->count > 0 && k >= e->count) return;
+    if (e->count > 0 && k >= e->count) return e->count;
     e->count = k;
     save();
     emit logged(0, tr("QRSS schedule: \"%1\" now ends after send %2")
                            .arg(QString::fromStdString(e->label))
                            .arg(k));
     emit changed();
+    return k;
 }
 
 std::string QrssScheduler::try_set_enabled(const std::string& id, bool on) {
@@ -764,14 +810,70 @@ std::string QrssScheduler::try_edit_change(const std::string& id,
     return {};
 }
 
+std::vector<QrssScheduler::RunSend> QrssScheduler::run_sends() const {
+    std::vector<RunSend> out;
+    const double now = clock_();
+    for (std::size_t i = 0; i < entries_.size(); ++i) {
+        const qs::Entry& e = entries_[i];
+        if (!on_air(e.id)) continue;
+        for (int k = e.next - 1; k >= 0; --k) {
+            const std::vector<qrss_tx::Pass> p = qs::passes_of(e, k);
+            if (p.empty() || qrss_tx::audio_end(p.back().slot) <= now) break;
+            out.push_back({i, k});
+        }
+    }
+    std::sort(out.begin(), out.end(), [this](const RunSend& a, const RunSend& b) {
+        return qs::send_slot(entries_[a.entry], a.k) < qs::send_slot(entries_[b.entry], b.k);
+    });
+    return out;
+}
+
+void QrssScheduler::drop_from_run(const std::vector<double>& quarter_hours) {
+    if (quarter_hours.empty()) return;
+    const auto gone = [&](double slot) {
+        return std::find(quarter_hours.begin(), quarter_hours.end(), slot) != quarter_hours.end();
+    };
+    double end = 0.0;
+    for (const RunSend& r : run_sends()) {
+        for (const qrss_tx::Pass& p : qs::passes_of(entries_[r.entry], r.k)) {
+            if (!gone(p.slot)) end = std::max(end, p.slot);
+        }
+    }
+    if (end > 0.0) run_end_ = end;
+    if (dropper_) dropper_(quarter_hours);
+}
+
+QrssScheduler::Cut QrssScheduler::clear_cut() const {
+    Cut cut;
+    cut.keep.assign(entries_.size(), 0);
+    const std::vector<RunSend> run = run_sends();
+    std::vector<int> taken(entries_.size(), 0);
+    for (std::size_t r = 1; r < run.size(); ++r) {
+        for (const qrss_tx::Pass& p : qs::passes_of(entries_[run[r].entry], run[r].k)) {
+            cut.quarter_hours.push_back(p.slot);
+        }
+        ++taken[run[r].entry];
+    }
+    for (std::size_t i = 0; i < entries_.size(); ++i) {
+        if (on_air(entries_[i].id)) cut.keep[i] = entries_[i].next - taken[i];
+    }
+    return cut;
+}
+
 QrssScheduler::ClearPlan QrssScheduler::clear_plan() const {
     ClearPlan plan;
-    for (const qs::Entry& e : entries_) {
-        if (on_air(e.id)) {
-            plan.on_air = true;
-            if (e.next > 0 && (e.count == 0 || e.count > e.next)) plan.repeats = true;
-        } else {
+    const Cut cut = clear_cut();
+    for (std::size_t i = 0; i < entries_.size(); ++i) {
+        const qs::Entry& e = entries_[i];
+        if (cut.keep[i] == 0) {
             ++plan.sends;
+            continue;
+        }
+        plan.on_air = true;
+        if (e.count == 0) {
+            plan.repeats = -1;
+        } else if (plan.repeats >= 0) {
+            plan.repeats += e.count - cut.keep[i];
         }
     }
     plan.changes = static_cast<int>(changes_.size());
@@ -779,24 +881,26 @@ QrssScheduler::ClearPlan QrssScheduler::clear_plan() const {
 }
 
 bool QrssScheduler::clear() {
+    const Cut cut = clear_cut();
     bool kept = false;
-    std::vector<std::string> gone;
-    for (qs::Entry& e : entries_) {
-        if (on_air(e.id)) {
-            // What has started stays; nothing after it.
-            if (e.next > 0 && (e.count == 0 || e.count > e.next)) e.count = e.next;
-            kept = true;
-        } else {
-            gone.push_back(e.id);
-        }
-    }
     std::error_code ec;
-    std::erase_if(entries_, [&](const qs::Entry& e) {
-        if (std::find(gone.begin(), gone.end(), e.id) == gone.end()) return false;
+    std::vector<qs::Entry> left;
+    for (std::size_t i = 0; i < entries_.size(); ++i) {
+        qs::Entry& e = entries_[i];
+        if (cut.keep[i] > 0) {
+            // What has started stays; nothing after it.
+            e.count = cut.keep[i];
+            e.next = cut.keep[i];
+            left.push_back(e);
+            kept = true;
+            continue;
+        }
         const std::filesystem::path png(e.picture);
         if (png.parent_path() == picture_dir()) std::filesystem::remove(png, ec);
-        return true;
-    });
+        std::erase(on_air_, e.id);
+    }
+    entries_ = std::move(left);
+    drop_from_run(cut.quarter_hours);
     changes_.clear();
     save();
     emit logged(0, kept ? tr("QRSS schedule: cleared; the send on the air carries on")

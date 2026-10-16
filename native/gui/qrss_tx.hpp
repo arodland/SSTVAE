@@ -129,10 +129,15 @@ public:
     // For `run`: the next part waiting, else nothing, and the chain closes.
     std::optional<Part> take_or_close();
     void close();
+    // Takes passes (by quarter hour) off the run: it skips them, and
+    // ends once nothing is left to send. A pass already keyed plays out.
+    void drop(const std::vector<double>& quarter_hours);
+    bool dropped(double slot) const;
 
 private:
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::deque<Part> parts_;
+    std::vector<double> dropped_;
     bool closed_ = false;
 };
 

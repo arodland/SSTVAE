@@ -240,6 +240,9 @@ std::optional<Part> Chain::take_or_close() {
     }
     Part p = std::move(parts_.front());
     parts_.pop_front();
+    // What was taken off is behind the run now, and this part may go
+    // into its quarter hours.
+    dropped_.clear();
     return p;
 }
 
@@ -247,6 +250,16 @@ void Chain::close() {
     std::lock_guard<std::mutex> lock(mutex_);
     closed_ = true;
     parts_.clear();
+}
+
+void Chain::drop(const std::vector<double>& quarter_hours) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    dropped_.insert(dropped_.end(), quarter_hours.begin(), quarter_hours.end());
+}
+
+bool Chain::dropped(double slot) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return std::find(dropped_.begin(), dropped_.end(), slot) != dropped_.end();
 }
 
 qrss::api::PassRequest pass_request(const Request& request, const Pass& pass) {
@@ -510,7 +523,29 @@ bool run(tx::TxEngine& engine, const Request& request, Maker& maker,
         if (engine.cancelled()) return cancelled();
         return fail("QRSS pass audio failed: " + error);
     }
+    // Passes taken off the schedule after the run started are skipped.
+    auto dropped = [&](std::size_t k) {
+        return request.chain && request.chain->dropped(passes[k].pass.slot);
+    };
+    // The first pass from k on still to send, else passes.size().
+    auto live_from = [&](std::size_t k) {
+        while (k < passes.size() && dropped(k)) ++k;
+        return k;
+    };
+    std::size_t wave_for = 0;   // the pass `wave` was made for
     for (std::size_t k = 0; k < passes.size(); ++k) {
+        if (dropped(k)) continue;
+        if (wave_for != k) {
+            // Made for a pass since taken off; this one is at least a
+            // half hour after it, so there is time to make its own.
+            engine.report(tx::TxPhase::Modulating, "making " + what(k));
+            wave = make(k, &error);
+            if (wave.empty()) {
+                if (engine.cancelled()) return cancelled();
+                return fail("QRSS audio for " + what(k) + " failed: " + error);
+            }
+            wave_for = k;
+        }
         const double lead = audio_start(passes[k].pass.slot) - request.tx.ptt_lead_s - clock();
         if (lead < -1.0) {
             return fail("QRSS: " + what(k) + " was due to start " + std::to_string(-lead) +
@@ -520,12 +555,15 @@ bool run(tx::TxEngine& engine, const Request& request, Maker& maker,
                          "starting " + what(k) + (k == 0 ? keys_at : std::string()))) {
             return cancelled();
         }
+        if (dropped(k)) continue;
         // Keying the last pass: a picture waiting to follow joins now, or
-        // the run closes to more.
+        // the run closes to more. Passes after it were taken off, so a
+        // picture may follow into their place.
+        if (live_from(k + 1) == passes.size()) passes.resize(k + 1);
         while (k + 1 == passes.size() && request.chain) {
             std::optional<Part> part = request.chain->take_or_close();
             if (!part) break;
-            if (std::string bad = problem(*part, passes.back().pass.slot); !bad.empty()) {
+            if (std::string bad = problem(*part, passes[k].pass.slot); !bad.empty()) {
                 on_error("QRSS: the picture to follow was not added: " + bad);
                 continue;
             }
@@ -539,15 +577,19 @@ bool run(tx::TxEngine& engine, const Request& request, Maker& maker,
             pictures.push_back({std::move(r), false});
             for (const Pass& p : part->passes) passes.push_back({pictures.size() - 1, p});
         }
+        const std::size_t j = live_from(k + 1);
         std::string next_error;
         std::future<std::vector<double>> next;
-        if (k + 1 < passes.size()) next = std::async(std::launch::async, make, k + 1, &next_error);
+        if (j < passes.size()) next = std::async(std::launch::async, make, j, &next_error);
         const bool sent = engine.transmit_wave(wave, request.tx);
-        if (next.valid()) wave = next.get();
+        if (next.valid()) {
+            wave = next.get();
+            wave_for = j;
+        }
         if (!sent) return false;
-        if (k + 1 < passes.size() && wave.empty()) {
+        if (j < passes.size() && wave.empty()) {
             if (engine.cancelled()) return cancelled();
-            return fail("QRSS audio for " + what(k + 1) + " failed: " + next_error);
+            return fail("QRSS audio for " + what(j) + " failed: " + next_error);
         }
     }
     engine.report(tx::TxPhase::Done, "QRSS sent");

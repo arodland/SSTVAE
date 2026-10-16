@@ -500,7 +500,12 @@ void QrssScheduleWindow::build() {
         if (plan.changes > 0) {
             parts << n(plan.changes, tr("frequency change"), tr("frequency changes"));
         }
-        if (plan.repeats) parts << tr("the later repeats of the current send");
+        if (plan.repeats < 0) {
+            parts << tr("the later repeats of the current send");
+        } else if (plan.repeats > 0) {
+            parts << n(plan.repeats, tr("later repeat of the current send"),
+                       tr("later repeats of the current send"));
+        }
         if (parts.isEmpty()) {
             message_->setText(plan.on_air
                                   ? tr("Nothing to clear: only the current send is scheduled.")
@@ -1643,7 +1648,8 @@ QMenu* QrssScheduleWindow::menu_for(const std::string& entry, int send) {
         e->count == 1 ? tr("Remove") : tr("Remove all its sends"));
     remove->setObjectName(QStringLiteral("menu_remove"));
     connect(remove, &QAction::triggered, this, [this, id] { remove_entry(id); });
-    if (e->count != 1 && send > e->next) {
+    const int kept = scheduler_->sends_kept(id);
+    if (e->count != 1 && (scheduler_->on_air(id) ? send >= kept && kept > 0 : send > kept)) {
         QAction* from = menu->addAction(tr("Remove this send and the ones after it"));
         from->setObjectName(QStringLiteral("menu_remove_from"));
         connect(from, &QAction::triggered, this, [this, id, send] { remove_from(id, send); });
@@ -1721,8 +1727,16 @@ std::string QrssScheduleWindow::remove_from(const std::string& entry, int send) 
     const qs::Entry* e = entry_by_id(scheduler_->entries(), entry);
     if (e == nullptr) return "it is no longer on the schedule";
     const QString label = QString::fromStdString(e->label);
-    scheduler_->truncate(entry, send);
-    show_result({}, tr("\"%1\" now stops before send %2.").arg(label).arg(send + 1));
+    const int kept = scheduler_->truncate(entry, send);
+    if (kept == 0) {
+        show_result({}, tr("Removed \"%1\".").arg(label));
+    } else if (kept > send) {
+        show_result({}, tr("\"%1\" now stops after send %2, the one on the air.")
+                            .arg(label)
+                            .arg(kept));
+    } else {
+        show_result({}, tr("\"%1\" now stops before send %2.").arg(label).arg(send + 1));
+    }
     return {};
 }
 

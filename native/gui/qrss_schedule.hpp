@@ -236,7 +236,13 @@ public:
                        const std::function<void(qrss_schedule::Entry&)>& edit);
     // Ends an entry after its send `k`'s predecessor: send k and the ones
     // after it are dropped. Removes the entry when nothing would be left.
-    void truncate(const std::string& id, int k);
+    // Sends already handed to the run on the air are taken back off it,
+    // but never the one on the air: the entry then ends after that one.
+    // Returns the sends the entry keeps (0: removed).
+    int truncate(const std::string& id, int k);
+    // The fewest sends `truncate` leaves an entry: those over, and the
+    // one on the air (or getting ready).
+    int sends_kept(const std::string& id) const;
     // Empty on success; resuming an entry that would clash is refused.
     std::string set_enabled(const std::string& id, bool on);
 
@@ -247,6 +253,10 @@ public:
     void set_chainer(Chainer chainer) { chainer_ = std::move(chainer); }
     // Stops the run on the air; called when its entry is removed.
     void set_canceller(std::function<void()> canceller) { canceller_ = std::move(canceller); }
+    // Takes passes (by quarter hour) off the run on the air: a send that
+    // was handed to it with its run and is now off the schedule.
+    using Dropper = std::function<void(const std::vector<double>& quarter_hours)>;
+    void set_dropper(Dropper dropper) { dropper_ = std::move(dropper); }
     // Adds a change; its `id` is filled in here. Empty on success, else
     // why not (too soon, or it would cut into a send).
     std::string add_change(qrss_schedule::FreqChange change);
@@ -254,18 +264,20 @@ public:
     std::string edit_change(const std::string& id,
                             const std::function<void(qrss_schedule::FreqChange&)>& edit);
     void remove_change(const std::string& id);
-    // Everything off the schedule, except that a send on the air carries
-    // on (Jeff, 2026-10-16): its entry ends after the send that started,
-    // and goes when the run does. True when one was on the air.
+    // Everything off the schedule, except that the send on the air
+    // carries on (Jeff, 2026-10-16): its entry ends after it, and goes
+    // when the run does. Later sends already handed to the run (2 x A
+    // back to back is one run) are taken off it. True when one was on
+    // the air.
     bool clear();
     // What clear() would take off, for its confirmation: the entries it
-    // removes (never the one on the air), the frequency changes, and
-    // whether the send on the air loses later repeats.
+    // removes (never the one on the air), the frequency changes, and the
+    // later repeats of the send on the air (-1: it repeats until removed).
     struct ClearPlan {
         int sends = 0;
         int changes = 0;
         bool on_air = false;
-        bool repeats = false;
+        int repeats = 0;
     };
     ClearPlan clear_plan() const;
 
@@ -321,6 +333,23 @@ private:
     double run_end_ = 0.0;              // the run's last pass, its quarter hour
     Chainer chainer_;
     std::function<void()> canceller_;
+    Dropper dropper_;
+    // The sends in the run on the air that are not over, earliest first:
+    // the first is the one on the air (or getting ready).
+    struct RunSend {
+        std::size_t entry = 0;
+        int k = 0;
+    };
+    std::vector<RunSend> run_sends() const;
+    // What clear() keeps of each entry (0: removes it), and the passes it
+    // takes off the run.
+    struct Cut {
+        std::vector<int> keep;
+        std::vector<double> quarter_hours;
+    };
+    Cut clear_cut() const;
+    // Takes `quarter_hours` off the run and ends `run_end_` at its last send left.
+    void drop_from_run(const std::vector<double>& quarter_hours);
     // Hands sends that follow straight on to the run on the air.
     void chain(double now, bool& dirty);
     // The last refusal logged, "<id>/<send>", so a busy transmitter is

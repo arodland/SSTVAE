@@ -186,6 +186,9 @@ TransmitPanel::TransmitPanel(AppState* state, QWidget* parent)
         return true;
     });
     scheduler_->set_canceller([this] { cancel(); });
+    scheduler_->set_dropper([this](const std::vector<double>& quarter_hours) {
+        if (thread_.joinable() && qrss_chain_) qrss_chain_->drop(quarter_hours);
+    });
     connect(scheduler_, &QrssScheduler::changed, this, &TransmitPanel::update_schedule_summary);
     update_schedule_summary();
 }

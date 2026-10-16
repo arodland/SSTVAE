@@ -450,6 +450,58 @@ void test_a_following_picture_joins_the_run() {
     check::is_true(qrss_tx::problem(part, Q).empty(), "qrss_tx/chain: straight on is fine");
 }
 
+// A pass taken off the schedule while the run plays is not sent, and
+// its audio is not made (Clear schedule on "3 x A", 2026-10-16).
+void test_a_dropped_pass_is_skipped() {
+    struct Stub final : qrss_tx::Maker {
+        int made = 0;
+        std::string encode(std::size_t, const qrss_tx::Request&) override { return {}; }
+        std::vector<double> make(std::size_t, const qrss_tx::Request&, const qrss_tx::Pass&,
+                                 std::string*) override {
+            ++made;
+            return std::vector<double>(600, 0.25);
+        }
+    } maker;
+    QElapsedTimer since;
+    since.start();
+    const double prep = 0.2;
+    const double start = Q - 11.0 - prep - 0.5;
+    double jump = 0.0;
+    std::mutex mu;
+    auto clock = [&] {
+        std::lock_guard<std::mutex> lock(mu);
+        return start + since.elapsed() / 1000.0 + jump;
+    };
+    auto chain = std::make_shared<qrss_tx::Chain>();
+    int played = 0;
+    tx::TxEngine engine(
+        [](bool) {},
+        [&](const std::string&, std::span<const double>, int, const std::function<void(double)>&,
+            const std::function<bool()>&, const std::function<void(const std::string&)>&) {
+            if (played == 0) chain->drop({Q + 3600.0});
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+            std::lock_guard<std::mutex> lock(mu);
+            ++played;
+            jump += (Q - 11.0 + 1800.0 * played - 2.0) - (start + since.elapsed() / 1000.0 + jump);
+            return true;
+        },
+        [](const images::ImageArray&) { return std::vector<double>(); });
+    qrss_tx::Request r;
+    r.picture = images::Picture(16, 12);
+    r.callsign = "AG7EW";
+    r.mode = "A";
+    r.prep_s = prep;
+    r.passes = {{Q, 0}, {Q + 1800.0, 0}, {Q + 3600.0, 0}};
+    r.chain = chain;
+    r.tx.ptt_lead_s = 0.0;
+    r.tx.ptt_tail_s = 0.0;
+    std::vector<std::string> errors;
+    const bool ok = qrss_tx::run(engine, r, maker,
+                                 [&](const std::string& e) { errors.push_back(e); }, clock);
+    check::is_true(ok && errors.empty() && played == 2 && maker.made == 2,
+                   "qrss_tx/drop: two passes sent, the third neither made nor sent");
+}
+
 void test_cancel_while_waiting() {
     tx::TxEngine engine([](bool) {}, {}, {});
     // The pass is fifteen minutes away.
@@ -497,6 +549,7 @@ int main(int argc, char** argv) {
     test_pass_lists_are_checked();
     check::current_step = "a following picture joins the run";
     test_a_following_picture_joins_the_run();
+    test_a_dropped_pass_is_skipped();
     check::current_step = "cancel while waiting";
     test_cancel_while_waiting();
     return check::report("qrss tx");
