@@ -87,7 +87,7 @@ from .constants import (CARRIER_BAND_HZ, FE_FS, FS, L_EDGE_HZ, L_PILOT_HZ, WAVEF
                         WAVEFORM_L, WAVEFORM_NAMES)
 from .frame import FULL, FrameSpec
 from .frontend import PB_LEAD_S, PB_TAIL_S, slot_t0
-from .store import _tmp_name
+from .store import _tmp_name, replace
 from .types import Detection, PassResult
 
 FE_DECIM = FS // FE_FS            # 2
@@ -913,7 +913,7 @@ class LiveListener:
                             if slot_t0(q) > (self.now or time.time()) - 48 * 3600))
         tmp = _tmp_name(self.dir / "state.json")   # (two threads writing it never share one)
         tmp.write_text(json.dumps(st, indent=1))
-        os.replace(tmp, self.dir / "state.json")
+        replace(tmp, self.dir / "state.json")
 
     # -- audio --------------------------------------------------------------------------
 
@@ -1642,7 +1642,7 @@ class LiveListener:
         rel = f"tiles/{t.id}.png"
         tmp = _tmp_name(self.dir / rel)        # (two threads writing it never share one)
         img.save(tmp, format="PNG")
-        os.replace(tmp, self.dir / rel)
+        replace(tmp, self.dir / rel)
         t.image = rel
         t.image_rev += 1
         t.passes = n

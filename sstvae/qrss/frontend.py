@@ -608,7 +608,7 @@ class PassbandStore:
                     if (not same or data.stat().st_mtime_ns != before
                             or self._gen.get(hour, 0) != gen):
                         return False           # (written to meanwhile: packed again later)
-                    os.replace(tmp, self._flac(hour))
+                    replace(tmp, self._flac(hour))
                     data.unlink()
                 return True
             except (OSError, RuntimeError, ValueError):
@@ -629,7 +629,7 @@ class PassbandStore:
         mm[:len(y)] = y[:self.per_hour]
         mm.flush()
         del mm
-        os.replace(tmp, data)
+        replace(tmp, data)
         path.unlink()
 
     def _maybe_pack(self, now: float) -> None:
@@ -815,7 +815,26 @@ def _merge_ranges(rs) -> list[list[int]]:
     return out
 
 
+def replace(src, dst) -> None:
+    """os.replace(src, dst), retried for about a second on Windows while it
+    raises PermissionError: there a target held open for a moment (a reader
+    of state.json, another thread's replace of the same file, a virus
+    scanner) refuses a replace that succeeds a few milliseconds later. As
+    native/core/util/fileio.hpp's replace_file does."""
+    if os.name != "nt":
+        os.replace(src, dst)
+        return
+    for k in range(21):                     # 20 waits of 50 ms
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if k == 20:
+                raise
+            time.sleep(0.05)
+
+
 def _atomic_write(path: Path, text: str) -> None:
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     tmp.write_text(text)
-    os.replace(tmp, path)
+    replace(tmp, path)

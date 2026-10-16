@@ -53,6 +53,7 @@ import numpy as np
 
 from . import picture
 from .constants import WAVEFORM_L
+from .frontend import replace
 from .types import PassResult
 
 N_GROUPS = picture.N_GROUPS                 # 3
@@ -145,7 +146,7 @@ def _atomic_write(path: Path, write) -> None:
             write(f)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        replace(tmp, path)
     except BaseException:
         try:
             tmp.unlink()
@@ -160,7 +161,7 @@ def _atomic_save(path: Path, save) -> None:
     tmp = _tmp_name(path)
     try:
         save(tmp)
-        os.replace(tmp, path)
+        replace(tmp, path)
     except BaseException:
         try:
             tmp.unlink()
