@@ -235,12 +235,23 @@ std::string py_repr(double v) {
 }
 
 std::string py_format(double v, const char* printf_spec) {
-    if (std::isnan(v)) v = std::fabs(v);   // Python prints a NaN unsigned; printf writes "-nan"
+    // Python prints a NaN as a positive one ("+nan" under "%+.2f"); glibc
+    // writes "-nan" for a negative NaN and Apple's libc drops the sign
+    // flag on a NaN. Infinity is signed alike everywhere, and "inf" and
+    // "nan" are the same width, so a NaN is formatted as +inf and renamed.
+    const bool nan = std::isnan(v);
+    if (nan) v = INFINITY;
     const int n = std::snprintf(nullptr, 0, printf_spec, v);
     if (n < 0) throw std::invalid_argument(std::string("py_format: bad conversion ") + printf_spec);
     std::string buf(static_cast<std::size_t>(n) + 1, '\0');
     std::snprintf(buf.data(), buf.size(), printf_spec, v);
     buf.resize(static_cast<std::size_t>(n));
+    if (nan) {
+        for (const char* inf : {"inf", "INF"}) {
+            const std::size_t at = buf.find(inf);
+            if (at != std::string::npos) buf.replace(at, 3, inf[0] == 'i' ? "nan" : "NAN");
+        }
+    }
     // printf of a float writes only a sign, digits, an exponent, inf/nan,
     // a width's space padding and the locale's decimal point (no grouping
     // without the ' flag): every other byte run is that point, which may be
