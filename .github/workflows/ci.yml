@@ -251,8 +251,7 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
             -DSSTVAE_BUILD_PYMODULE=OFF -DSSTVAE_BUILD_CODEC=OFF \
             -DSSTVAE_BUILD_RIG=OFF -DSSTVAE_BUILD_GUI=OFF \
-            -DSSTVAE_BUILD_QTAUDIO=OFF -DSSTVAE_BUILD_OVERLAY=OFF \
-            -DSSTVAE_HEIF=OFF -DSSTVAE_WEBP=OFF -DSSTVAE_JP2=OFF
+            -DSSTVAE_BUILD_QTAUDIO=OFF -DSSTVAE_BUILD_OVERLAY=OFF
       - run: >-
           cmake --build native/build-tsan --target test_rx_engine test_tx_engine test_ringbuffer
           test_qrss_core_listener test_qrss_core_listen_api test_qrss_core_sources test_qrss_core_passband

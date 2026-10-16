@@ -1,7 +1,5 @@
 #include "overlay/render.hpp"
 
-#include "images/images.hpp"
-
 #include <QBrush>
 #include <QColor>
 #include <QFont>
@@ -21,7 +19,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <exception>
 #include <map>
 #include <mutex>
 #include <numbers>
@@ -408,14 +405,7 @@ QImage cached_file_image(const std::string& path) {
     if (loaded.load(QString::fromStdString(path))) {
         loaded = loaded.convertToFormat(QImage::Format_ARGB32_Premultiplied);
     } else {
-        // What Qt's image plugins cannot read (HEIC on Linux) the app's
-        // own loader may: the same one the picture pickers use.
-        try {
-            loaded = to_qimage(images::load(path))
-                         .convertToFormat(QImage::Format_ARGB32_Premultiplied);
-        } catch (const std::exception&) {
-            loaded = QImage();
-        }
+        loaded = QImage();
     }
     if (cache.size() >= CAPACITY) cache.erase(cache.begin());
     cache.emplace_back(path, loaded);
