@@ -67,11 +67,21 @@ std::shared_ptr<py::object> hold(py::object f) {
     });
 }
 
+// Py_IsFinalizing is public from Python 3.13; 3.12 and earlier name it
+// _Py_IsFinalizing.
+bool interpreter_finalizing() {
+#if PY_VERSION_HEX >= 0x030D0000
+    return Py_IsFinalizing() != 0;
+#else
+    return _Py_IsFinalizing() != 0;
+#endif
+}
+
 lv::Clock clock_of(const py::object& f) {
     if (f.is_none()) return {};
     auto h = hold(f);
     return [h]() -> double {
-        if (Py_IsFinalizing()) throw std::runtime_error("the interpreter is finalizing");
+        if (interpreter_finalizing()) throw std::runtime_error("the interpreter is finalizing");
         py::gil_scoped_acquire g;
         const py::object r = (*h)();
         return r.cast<double>();
