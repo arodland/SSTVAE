@@ -97,15 +97,15 @@ std::int64_t floor_div(std::int64_t a, std::int64_t b) {
 std::int64_t ceil_div(std::int64_t a, std::int64_t b) { return -floor_div(-a, b); }
 
 // round(x, 2): the correctly rounded two-decimal value, ties to even on the
-// exact binary value (what Python's dtoa-based round does).
+// exact binary value (what Python's dtoa-based round does). printf and
+// strtod round correctly on glibc, macOS and the UCRT; not std::to_chars,
+// which libc++ withholds for doubles below macOS 13.3.
 double py_round2(double x) {
     if (!std::isfinite(x)) return x;
     std::array<char, 400> buf{};
-    const auto r = std::to_chars(buf.data(), buf.data() + buf.size(), x, std::chars_format::fixed, 2);
-    if (r.ec != std::errc()) return x;
-    double y = x;
-    std::from_chars(buf.data(), r.ptr, y);
-    return y;
+    const int n = std::snprintf(buf.data(), buf.size(), "%.2f", x);
+    if (n <= 0 || n >= static_cast<int>(buf.size())) return x;
+    return std::strtod(buf.data(), nullptr);
 }
 
 // Python's max(a, b) and min(a, b) (the first unless the second compares past it).
