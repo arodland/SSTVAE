@@ -694,7 +694,9 @@ void test_session_sharing(const std::vector<types::PassResult>& passes) {
     if (!s->store() || !s->passband()) return;
     check::equal(s->store()->root(), *s->store_root(), "session: store() is the root it reports");
     const std::shared_ptr<pb::PassbandStore> spb = s->passband();
-    check::equal(spb->root(), pbdir, "session: passband() is STORE/passband");
+    // (joined with "/" as the C++'s pathlib joins on every system; Windows
+    // takes the mixed spelling)
+    check::equal(spb->root(), (root / "store").string() + "/passband", "session: passband() is STORE/passband");
 
     // the listener writes the passband directory while retro and refine run;
     // the slot reads back the same, through a separate PassbandStore and the

@@ -114,10 +114,20 @@ struct Step {
     explicit Step(const char* name) { check::current_step = name; }
 };
 
+// The text as Python's read_text gives it: the listener writes its text
+// files in text mode, so on Windows "\r\n" reads back as "\n".
 std::string read_text(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
     if (!f) throw std::runtime_error("cannot read " + p.string());
-    return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    std::string s(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>{});
+#ifdef _WIN32
+    std::string lf;
+    lf.reserve(s.size());
+    for (std::size_t i = 0; i < s.size(); ++i)
+        if (!(s[i] == '\r' && i + 1 < s.size() && s[i + 1] == '\n')) lf += s[i];
+    s = std::move(lf);
+#endif
+    return s;
 }
 
 void write_text(const fs::path& p, const std::string& s) {

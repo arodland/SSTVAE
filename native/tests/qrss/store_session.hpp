@@ -133,7 +133,17 @@ inline std::vector<std::pair<std::string, std::string>> tree(const std::string& 
     std::vector<std::pair<std::string, std::string>> out;
     for (const auto& e : std::filesystem::recursive_directory_iterator(root)) {
         if (!e.is_regular_file()) continue;
-        const auto bytes = read_file(e.path());
+        auto bytes = read_file(e.path());
+#ifdef _WIN32
+        // log.jsonl is appended in text mode, as Python appends it, so on
+        // Windows its lines end "\r\n"; the pins are POSIX files.
+        if (e.path().extension() == ".jsonl") {
+            std::vector<std::uint8_t> lf;
+            for (std::size_t i = 0; i < bytes.size(); ++i)
+                if (!(bytes[i] == '\r' && i + 1 < bytes.size() && bytes[i + 1] == '\n')) lf.push_back(bytes[i]);
+            bytes = std::move(lf);
+        }
+#endif
         out.emplace_back(std::filesystem::relative(e.path(), root).generic_string(),
                          sstvae::util::to_hex(sstvae::util::sha256(std::span<const std::uint8_t>(bytes))));
     }

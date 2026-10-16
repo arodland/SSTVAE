@@ -83,10 +83,20 @@ struct Step {
 
 double since(steady::time_point a) { return std::chrono::duration<double>(steady::now() - a).count(); }
 
+// The text as Python's read_text gives it: the listener writes its text
+// files in text mode, so on Windows "\r\n" reads back as "\n".
 std::string read_text(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
     if (!f) throw std::runtime_error("cannot read " + p.string());
-    return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    std::string s(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>{});
+#ifdef _WIN32
+    std::string lf;
+    lf.reserve(s.size());
+    for (std::size_t i = 0; i < s.size(); ++i)
+        if (!(s[i] == '\r' && i + 1 < s.size() && s[i + 1] == '\n')) lf += s[i];
+    s = std::move(lf);
+#endif
+    return s;
 }
 
 fs::path fresh_dir(const std::string& name) {
@@ -108,6 +118,10 @@ std::string last_log_line(const fs::path& state) {
     const std::size_t start = s.rfind('\n', end ? end - 1 : 0);
     return s.substr(start == std::string::npos ? 0 : start + 1, end - (start == std::string::npos ? 0 : start + 1));
 }
+
+// STORE/passband as the session spells it: joined with "/", as the C++'s
+// pathlib joins on every system (Windows takes the mixed spelling).
+std::string pb_text(const fs::path& root) { return (root / "store").string() + "/passband"; }
 
 bool ends_with(const std::string& s, const std::string& tail) {
     return s.size() >= tail.size() && s.compare(s.size() - tail.size(), tail.size(), tail) == 0;
@@ -340,7 +354,7 @@ void test_push_from_another_thread() {
     check::is_true(s->running() && !s->ended(), "push: running after start");
     check::equal(s->state_dir(), (root / "state").string(), "push: state_dir");
     check::is_true(s->store_root() == (root / "store").string(), "push: the store held");
-    check::is_true(s->passband_dir() == (root / "store" / "passband").string(), "push: the passband store held");
+    check::is_true(s->passband_dir() == pb_text(root), "push: the passband store held");
     check::is_true(!lock_free(root / "state") && !lock_free(root / "store") && !lock_free(root / "store" / "passband"),
                    "push: all three locks held while it runs");
 
@@ -809,7 +823,7 @@ void test_refusals_and_notices() {
         const auto got = l.all();
         check::is_true(!got.empty() && got[0].first == ls::LineKind::notice &&
                            got[0].second == "another listener is writing the passband store in " +
-                                                (root / "store" / "passband").string() + "; this one keeps none",
+                                                pb_text(root) + "; this one keeps none",
                        "start: the passband store's notice, first");
         check::is_true(s->store_root().has_value() && !s->passband_dir(), "start: a store, no passband store");
         s->stop();

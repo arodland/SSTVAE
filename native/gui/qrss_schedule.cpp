@@ -501,7 +501,7 @@ std::string QrssScheduler::try_add(qs::Entry entry, const images::Picture& pictu
     return {};
 }
 
-void QrssScheduler::remove(const std::string& id) {
+void QrssScheduler::remove(std::string id) {
     const auto it = std::find_if(entries_.begin(), entries_.end(),
                                  [&](const qs::Entry& e) { return e.id == id; });
     if (it == entries_.end()) return;
@@ -581,7 +581,7 @@ int QrssScheduler::sends_kept(const std::string& id) const {
     return it->next - static_cast<int>(in_run) + (current ? 1 : 0);
 }
 
-int QrssScheduler::truncate(const std::string& id, int k) {
+int QrssScheduler::truncate(std::string id, int k) {
     qs::Entry* e = find(id);
     if (e == nullptr) return 0;
     if (!on_air(id)) {

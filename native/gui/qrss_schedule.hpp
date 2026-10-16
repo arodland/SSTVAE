@@ -221,7 +221,9 @@ public:
     // Adds an entry for `picture`; its `picture` path and `id` are filled
     // in here. Empty on success, else why not (nothing is added).
     std::string add(qrss_schedule::Entry entry, const images::Picture& picture);
-    void remove(const std::string& id);
+    // `id` by value: a caller may pass an entry's own id, which removing
+    // the entry destroys.
+    void remove(std::string id);
     // Logs a refusal (`what` was refused, `why`) and returns `why`. The
     // edits below log their own; the window calls this for one it
     // refuses before asking (a dropped Send that cannot go there).
@@ -239,7 +241,7 @@ public:
     // Sends already handed to the run on the air are taken back off it,
     // but never the one on the air: the entry then ends after that one.
     // Returns the sends the entry keeps (0: removed).
-    int truncate(const std::string& id, int k);
+    int truncate(std::string id, int k);   // (id by value, as remove's)
     // The fewest sends `truncate` leaves an entry: those over, and the
     // one on the air (or getting ready).
     int sends_kept(const std::string& id) const;

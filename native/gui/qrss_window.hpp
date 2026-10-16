@@ -225,6 +225,8 @@ public:
     QString image_path() const { return image_path_; }
     // Improve and Find missed passes, under the lines; null without a controller.
     qrss_em::EmBar* em_bar() const { return em_bar_; }
+    // The height its wrapped lines need at the tile's fixed width.
+    QSize sizeHint() const override;
 
 protected:
     // Opens the picture in a viewer to zoom and pan (image_viewer.hpp).

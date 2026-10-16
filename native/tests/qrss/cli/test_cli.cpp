@@ -36,6 +36,7 @@
 #include "qrss/header.hpp"
 #include "qrss/npz.hpp"
 #include "qrss/picture.hpp"
+#include "qrss/pytext.hpp"
 #include "qrss_check.hpp"
 #include "subcommand.hpp"
 
@@ -281,7 +282,7 @@ void test_beacon(const TempDir& t) {
 
     const std::string missing = t / "missing.qrsp";
     expect(run("beacon", {missing, out, "--callsign", "K1ABC"}), 1, "",
-           "FileNotFoundError: [Errno 2] No such file or directory: '" + missing + "'\n", "missing input");
+           "FileNotFoundError: [Errno 2] No such file or directory: " + qrss::pytext::repr(missing) + "\n", "missing input");
     const std::string empty = t / "empty.qrsp";
     std::ofstream(empty).close();
     expect(run("beacon", {empty, out, "--callsign", "K1ABC"}), 1, "", "EOFError: No data left in file\n",
@@ -311,7 +312,7 @@ void test_beacon(const TempDir& t) {
            1, "", "ValueError: " + (t / "v2.qrsp") + ": .qrsp version 2, expected 1\n", "version 2");
     check::is_true(!exists(out), "no file for a malformed picture");
     expect(run("beacon", {in, t / "nodir/x.bin", "--callsign", "K1ABC"}), 1, "",
-           "FileNotFoundError: [Errno 2] No such file or directory: '" + (t / "nodir/x.bin") + "'\n",
+           "FileNotFoundError: [Errno 2] No such file or directory: " + qrss::pytext::repr(t / "nodir/x.bin") + "\n",
            "unwritable output");
     check::is_true(!exists(out), "still no file");
 }

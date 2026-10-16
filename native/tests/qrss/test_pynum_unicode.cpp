@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <string>
 
@@ -31,7 +32,10 @@ void test_pins() {
         if (*r.flt == '\0') {
             check::is_true(!f.has_value(), what + " float refused");
         } else {
-            const double want = std::strtod(r.flt, nullptr);
+            // (Python's float("nan") is the positive quiet NaN; MSVC's strtod
+            // reads "nan" with the sign bit set)
+            const double want = std::strcmp(r.flt, "nan") == 0 ? std::numeric_limits<double>::quiet_NaN()
+                                                               : std::strtod(r.flt, nullptr);
             ++check::checks;
             if (!f || std::memcmp(&*f, &want, sizeof want) != 0)
                 check::fail(what + " float", f ? std::to_string(*f) : std::string("refused"));

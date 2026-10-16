@@ -298,6 +298,17 @@ QrssTile::QrssTile(QWidget* parent, qrss_em::Controller* em) : QWidget(parent), 
     setFixedWidth(WIDTH);
 }
 
+// The flow lays a tile out at its size hint, and a box layout's hint
+// takes each wrapped label at a width of the label's own choosing, not
+// the tile's: with Windows' wider fonts the details wrapped onto one more
+// line than the hint allowed and the tile cut its last line off.
+QSize QrssTile::sizeHint() const {
+    QSize s = QWidget::sizeHint();
+    if (layout() != nullptr && layout()->hasHeightForWidth())
+        s.setHeight(std::max(s.height(), layout()->totalHeightForWidth(WIDTH)));
+    return s;
+}
+
 void QrssTile::update_from(const QJsonObject& t, const QString& dir) {
     const QString call = t.value(QStringLiteral("callsign")).toString();
     const QString grid = t.value(QStringLiteral("grid")).toString();
