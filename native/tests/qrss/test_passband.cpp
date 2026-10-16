@@ -633,9 +633,9 @@ void test_dirlock(const std::filesystem::path& dir) {
     const std::string d = path_text(dir / "lock" / "deeper");
     std::optional<dl::DirLock> a = dl::DirLock::try_acquire(d);
     CHECK(a.has_value() && a->is_open());
-#ifdef _WIN32
-    CHECK(slurp(d + "/.lock") == std::to_string(rawfile::process_id()) + "\r\n");   // text mode, as Python writes it
-#else
+#ifndef _WIN32
+    // (On Windows the held byte cannot be read through another handle;
+    // the line is checked once the lock goes, below.)
     CHECK(slurp(d + "/.lock") == std::to_string(rawfile::process_id()) + "\n");
 #endif
     CHECK(!dl::DirLock::try_acquire(d).has_value());   // a second holder is refused, in-process too
@@ -644,6 +644,9 @@ void test_dirlock(const std::filesystem::path& dir) {
     CHECK(!dl::DirLock::try_acquire(d).has_value());
     moved.close();
     moved.close();   // idempotent
+#ifdef _WIN32
+    CHECK(slurp(d + "/.lock") == std::to_string(rawfile::process_id()) + "\r\n");   // text mode, as Python writes it
+#endif
     std::optional<dl::DirLock> b = dl::DirLock::try_acquire(d);
     CHECK(b.has_value() && b->path() == d + "/.lock");
     b.reset();
