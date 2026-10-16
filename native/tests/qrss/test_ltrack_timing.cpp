@@ -93,8 +93,8 @@ static void test_phases() {
     const std::pair<double, const double*> scalars[] = {{0.0, P::LP_ZERO}, {-0.0, P::LP_NZERO}, {12.5, P::LP_HALF}};
     for (const auto& [v, want] : scalars) {
         const cd z = lt::lag_phase(v);
-        check::is_true(same_bits(z.real(), want[0]) && same_bits(z.imag(), want[1]),
-                       "_lag_phase(" + std::to_string(v) + "), signed zeros");
+        qrss_check::libm_pin(same_bits(z.real(), want[0]) && same_bits(z.imag(), want[1]),
+                             "_lag_phase(" + std::to_string(v) + "), signed zeros");
         check::is_true(z == lt::lag_phase(std::span<const double>(&v, 1))[0], "_lag_phase scalar = array");
     }
     std::vector<double> pos;

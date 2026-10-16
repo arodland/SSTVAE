@@ -96,8 +96,8 @@ static void test_firwin() {
     qrss_check::libm_digest_is(flt::firwin(31, bp, flt::Window::hamming(), flt::PassZero::No),
               "f076a2cb2447618ffdebd14c4dff23d1892403d8bcc496769932fe1826d5901d", "bandpass hamming");
     const double bs[3] = {0.1, 0.3, 0.6};
-    digest_is(flt::firwin(51, bs, flt::Window::hann(), flt::PassZero::Yes, false),
-              "a069d08623812b22c31678b5743408dc8c78b0edc35e71f130899be8ba14c426", "3 edges, hann, unscaled");
+    qrss_check::libm_digest_is(flt::firwin(51, bs, flt::Window::hann(), flt::PassZero::Yes, false),
+                               "a069d08623812b22c31678b5743408dc8c78b0edc35e71f130899be8ba14c426", "3 edges, hann, unscaled");
     qrss_check::libm_digest_is(flt::firwin(61, 0.25, flt::Window::hamming(), flt::PassZero::Highpass, true, std::nullopt, 0.05),
               "6ce7b0a313d55c4752f553bd35621e3bcce94c83a6730b42497bd872c0e3c911", "highpass by width");
 

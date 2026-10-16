@@ -81,14 +81,6 @@ OrtError ort_error(const Ort::Exception& e) {
                     "[ONNXRuntimeError] : " + std::to_string(code) + " : " + n.status + " : " + e.what());
 }
 
-// One environment for the metadata sessions, never destroyed: onnxruntime's
-// environment is a process-wide singleton, and tearing it down during
-// static destruction races whatever else holds it.
-Ort::Env& ort_env() {
-    static Ort::Env* env = new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "sstvae-qrss");
-    return *env;
-}
-
 }  // namespace
 
 // --- locating the model ------------------------------------------------------------------
@@ -146,6 +138,12 @@ std::string resolve_onnx(std::string_view part_in, const std::optional<std::stri
 
 std::optional<std::string> source_sha256(const std::string& onnx_path) {
     try {
+        // An environment per read, released with the session, as SSTVAE's
+        // codec holds one per codec: onnxruntime refcounts one process-wide
+        // environment. One left alive at exit (it used to be a leaked
+        // static) aborts onnxruntime 1.22's teardown on macOS x86_64 with
+        // "mutex lock failed".
+        Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "sstvae-qrss");
         Ort::SessionOptions opts;
         // Only the metadata is read; one thread spares a pool nobody uses.
         opts.SetIntraOpNumThreads(1);
@@ -157,9 +155,9 @@ std::optional<std::string> source_sha256(const std::string& onnx_path) {
         if (!wpath)
             throw OrtError(3, "NoSuchFile", "[ONNXRuntimeError] : 3 : NO_SUCHFILE : Load model from " + onnx_path +
                                                 " failed: the name is not UTF-8");
-        Ort::Session sess(ort_env(), wpath->c_str(), opts);
+        Ort::Session sess(env, wpath->c_str(), opts);
 #else
-        Ort::Session sess(ort_env(), onnx_path.c_str(), opts);
+        Ort::Session sess(env, onnx_path.c_str(), opts);
 #endif
         Ort::AllocatorWithDefaultOptions alloc;
         Ort::ModelMetadata meta = sess.GetModelMetadata();

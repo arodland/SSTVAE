@@ -138,8 +138,8 @@ static void test_mix_mf() {
     const std::int64_t n_pos = SHORT().n_pos();
     qrss_check::libm_digest_is(lt::data_mix(in.zc, -100.5, in.tm, n_pos), P::MIX_ALL, "data_mix");
     const std::vector<std::int64_t> idx{-5, 0, 7, 5999, 1234, -6000};
-    digest_is(lt::data_mix(in.zc, -100.5, in.tm, n_pos, std::span<const std::int64_t>(idx)), P::MIX_IDX,
-              "data_mix at idx");
+    qrss_check::libm_digest_is(lt::data_mix(in.zc, -100.5, in.tm, n_pos, std::span<const std::int64_t>(idx)), P::MIX_IDX,
+                               "data_mix at idx");
     const std::vector<std::int64_t> bad{6000};
     throws<std::out_of_range>(
         [&] { (void)lt::data_mix(in.zc, -100.5, in.tm, n_pos, std::span<const std::int64_t>(bad)); },

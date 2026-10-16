@@ -47,11 +47,11 @@ std::string known_rule(const py::handle& rule) {
 void set_old_py(const py::object& rule, const py::object& on) {
     const std::string name = known_rule(rule);
     const bool set = rx::as_bool(on);
-    py::object environ = py::module_::import("os").attr("environ");
+    py::object env = py::module_::import("os").attr("environ");   // not "environ": a macro on Windows
     if (set)
-        environ[py::str(name)] = py::str("1");
+        env[py::str(name)] = py::str("1");
     else
-        environ.attr("pop")(py::str(name), py::none());
+        env.attr("pop")(py::str(name), py::none());
     rules::set_old(name, set);   // the same value os.environ has just written
 }
 
