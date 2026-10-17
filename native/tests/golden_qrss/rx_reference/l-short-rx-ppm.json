@@ -1,0 +1,85 @@
+{
+ "scenario": "l-short-rx-ppm",
+ "parameters": {
+  "name": "l-short-rx-ppm",
+  "frame": "l-short",
+  "snr_db": -12.0,
+  "receive": [
+   "l-short"
+  ],
+  "seed": 8,
+  "carrier_hz": 1500.0,
+  "lead_in_s": 0.0,
+  "drift_hz_per_min": 0.0,
+  "tx_ppm": 0.0,
+  "rx_ppm": -100.0,
+  "neighbours": [],
+  "what": "L l-short at -12 dB, the receiver's clock 100 ppm slow"
+ },
+ "capture": {
+  "n": 1082641,
+  "t0_index": 48000.0,
+  "power": 27.783955730939844,
+  "probe": [
+   [
+    7.298193454742432,
+    1.9290953874588013
+   ],
+   [
+    2.457247495651245,
+    -0.2624642252922058
+   ],
+   [
+    1.5615127086639404,
+    6.2434515953063965
+   ],
+   [
+    -5.040172576904297,
+    2.4807353019714355
+   ],
+   [
+    -4.842489719390869,
+    -1.1145045757293701
+   ],
+   [
+    -5.713430881500244,
+    -0.9471887946128845
+   ]
+  ]
+ },
+ "signals": [
+  {
+   "frame": "l-short",
+   "waveform": "L",
+   "f_hz": 1500.0
+  }
+ ],
+ "n_passes": 1,
+ "passes": [
+  {
+   "waveform": "L",
+   "frame": "l-short",
+   "signal": 0,
+   "header": {
+    "callsign": "K1ABC",
+    "grid": "FN42",
+    "picture_id": 305419896,
+    "mode": 0,
+    "segment": 0,
+    "codec_id": 53720,
+    "version": 2,
+    "reserved": 0
+   },
+   "cw": {
+    "text": "K1ABC",
+    "keying": "fsk",
+    "agrees": true
+   },
+   "f_hz": 1500.166014497813,
+   "tau0_ch": -0.06274127618657534,
+   "latent_snr_db": 6.279080675317289,
+   "z_ref": 94.0023311019851,
+   "mean_w_db": 6.590139468191039
+  }
+ ]
+}

@@ -1,0 +1,73 @@
+{
+ "scenario": "ce-tiny-12-joint",
+ "parameters": {
+  "name": "ce-tiny-12-joint",
+  "frame": "tiny",
+  "snr_db": -12.0,
+  "receive": [
+   "tiny",
+   "l-tiny"
+  ],
+  "seed": 1,
+  "carrier_hz": 1500.0,
+  "lead_in_s": 0.0,
+  "drift_hz_per_min": 0.0,
+  "tx_ppm": 0.0,
+  "rx_ppm": 0.0,
+  "neighbours": [],
+  "what": "CE TINY at -12 dB, received with the default joint frames (CE and L)"
+ },
+ "capture": {
+  "n": 273400,
+  "t0_index": 48000.0,
+  "power": 26.05160491982803,
+  "probe": [
+   [
+    -0.522018551826477,
+    -4.351584434509277
+   ],
+   [
+    -2.068188428878784,
+    -1.3169564008712769
+   ],
+   [
+    4.878446578979492,
+    0.9206923842430115
+   ],
+   [
+    6.040034294128418,
+    -0.2927788197994232
+   ],
+   [
+    1.838262677192688,
+    1.5228924751281738
+   ],
+   [
+    3.1482326984405518,
+    -4.593474388122559
+   ]
+  ]
+ },
+ "signals": [
+  {
+   "frame": "tiny",
+   "waveform": "CE",
+   "f_hz": 1500.0
+  }
+ ],
+ "n_passes": 1,
+ "passes": [
+  {
+   "waveform": "CE",
+   "frame": "tiny",
+   "signal": 0,
+   "header": null,
+   "cw": null,
+   "f_hz": 1500.022453981604,
+   "tau0_ch": 0.343628673975043,
+   "latent_snr_db": 4.1261030500644305,
+   "z_ref": 49.046968929023585,
+   "mean_w_db": 4.197250232543768
+  }
+ ]
+}

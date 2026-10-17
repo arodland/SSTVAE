@@ -67,6 +67,17 @@ public:
     // at the decode loop's 5 s poll and ruinous at 20 fps.
     std::vector<double> tail(std::size_t n) const;
 
+    // Everything written since sample `from` (an earlier
+    // total_written()), oldest first, and in `total` the count it ends
+    // at -- one acquire load, so the two cannot disagree the way
+    // `tail(total_written() - from)` can when the writer runs between
+    // the calls. A reader that fell more than a buffer behind gets the
+    // last capacity() samples and loses the rest; one whose `from` is
+    // past the count (the ring was replaced by a fresh one) gets
+    // nothing and should start again from 0. For a consumer that must
+    // see each sample once, such as the QRSS listener's audio feed.
+    std::vector<double> read_since(std::uint64_t from, std::uint64_t* total = nullptr) const;
+
     // Drop everything captured so far, keeping the sample counter
     // monotonic.
     //

@@ -28,6 +28,7 @@ class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
+class QSpinBox;
 class QPushButton;
 class QWidget;
 
@@ -115,6 +116,7 @@ private:
     QDoubleSpinBox* poll_interval_s_ = nullptr;
     QDoubleSpinBox* ptt_lead_ = nullptr;
     QDoubleSpinBox* ptt_tail_ = nullptr;
+    QCheckBox* tune_after_change_ = nullptr;
     QPushButton* test_cat_ = nullptr;
     QPushButton* test_ptt_ = nullptr;
 
@@ -134,12 +136,15 @@ private:
     QCheckBox* cw_id_ = nullptr;
     QLineEdit* cw_message_ = nullptr;
     QCheckBox* vox_lead_ = nullptr;
+    QSpinBox* test_tone_ = nullptr;
 
     // Receive
     QCheckBox* auto_start_ = nullptr;
+    QCheckBox* qrss_auto_start_ = nullptr;
     QCheckBox* autosave_ = nullptr;
     QCheckBox* save_audio_ = nullptr;
     QCheckBox* low_cpu_ = nullptr;
+    QSpinBox* waterfall_fps_ = nullptr;
     QCheckBox* blind_wide_ = nullptr;
     QComboBox* drift_track_ = nullptr;
     QLineEdit* filename_template_ = nullptr;

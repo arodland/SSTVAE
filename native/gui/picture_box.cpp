@@ -1,6 +1,7 @@
 #include "picture_box.hpp"
 
 #include <QLabel>
+#include <QMouseEvent>
 #include <QPalette>
 #include <QPainter>
 #include <QResizeEvent>
@@ -9,6 +10,7 @@
 #include <algorithm>
 
 #include "images/images.hpp"
+#include "image_viewer.hpp"
 #include "style.hpp"
 
 namespace sstvae::gui {
@@ -89,6 +91,14 @@ void PictureBox::paintEvent(QPaintEvent* event) {
     painter.fillRect(frame, style::color::viewport_frame());
     painter.setPen(style::color::viewport_edge());
     painter.drawRect(frame.adjusted(0, 0, -1, -1));
+}
+
+void PictureBox::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton && !source_.isNull()) {
+        open_image_viewer(source_, tr("Received picture"), this);
+        return;
+    }
+    QWidget::mouseDoubleClickEvent(event);
 }
 
 void PictureBox::rescale() {

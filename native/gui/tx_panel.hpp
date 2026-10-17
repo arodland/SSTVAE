@@ -25,6 +25,8 @@
 #include "optimize/speculative.hpp"
 #include "overlay/model.hpp"
 #include "overlay/template.hpp"
+#include "qrss_schedule.hpp"
+#include "qrss_tx.hpp"
 #include "tx/engine.hpp"
 
 class QComboBox;
@@ -46,6 +48,8 @@ class AppState;
 class ErrorBanner;
 class ItemMenu;
 class OverlayEditor;
+class QrssScheduleWindow;
+class QrssSends;
 
 // The output level is stored as a peak amplitude (`transmit.level`,
 // 0..1) because that is what the transmitter scales to, but it is
@@ -91,9 +95,25 @@ public:
     // Everything below the canvas, as one widget, so the container can
     // hold it to the same height as the receive pane's strip.
     QWidget* control_strip() const;
+    // Scheduled QRSS sends (gui/qrss_schedule.hpp), and the window the
+    // QRSSTVAE mode's "Schedule..." button opens. The window is made on
+    // first use.
+    QrssScheduler* scheduler() const { return scheduler_; }
+    QrssScheduleWindow* schedule_window() const { return schedule_window_; }
+    QString schedule_summary() const;
+    QrssSends* sends() const { return sends_; }
+    // Test / Tune: key the radio and send a 1500 Hz tone for
+    // `transmit.test_tone_s` (the schedule window's button). Empty when
+    // it started, else why not. `cancel()` halts it.
+    std::string begin_test_tone();
+    bool test_tone_running() const { return test_run_; }
+    // Hide the schedule window, so it does not keep the app running as
+    // its last window.
+    void hide_windows();
 
 public slots:
     void send();
+    void show_schedule();
     // The settings dialog was accepted, or the model finished loading.
     // Both can turn refinement on or off underneath us, and both must
     // take effect at once rather than at the next edit.
@@ -126,8 +146,15 @@ public slots:
     void set_last_reception_info(const QString& callsign, double snr_db);
 
 signals:
+    // The next scheduled QRSS send, in a line, whenever the schedule
+    // changes (shown on the main window's QRSSTVAE mode).
+    void scheduleChanged(const QString& summary);
     void transmitStarted();
     void transmitFinished();
+    // A QRSS run is getting ready (encoding, making audio, waiting for
+    // its quarter hour) and has not keyed: `message` says what for.
+    // Empty when it keys or ends.
+    void qrssPreparing(const QString& message);
 
     // Emitted from the optimizer's worker thread; queued to the slot
     // below, exactly like the transmit callbacks above.
@@ -137,6 +164,9 @@ signals:
     void stateChanged(int phase, double progress, const QString& message);
     void errorOccurred(const QString& message);
     void sendFinished(bool ok);
+    // Test / Tune started, ticked or ended: `remaining` is the fraction
+    // of the tone still to send (1 until the radio keys).
+    void testToneChanged(bool running, double remaining);
 
 protected:
     // A dropped picture file loads exactly as a chosen one does.
@@ -175,6 +205,27 @@ private:
     // for the optimizer first, and that wait must not block the GUI.
     void begin_transmit(const images::Picture& picture,
                         std::vector<double> latents);
+    // A QRSS send (gui/qrss_tx.hpp): encode, then each pass on its half
+    // hour, keyed through the same engine and PTT. `passes` empty: the
+    // mode's own, from the next quarter hour there is time for. Empty
+    // when it started; otherwise why not, which `interactive` shows in a
+    // dialog (Send); the schedule, which nobody may be watching, puts it
+    // on the banner and in the log itself.
+    std::string begin_qrss(const images::Picture& picture, const std::string& mode,
+                           const std::string& waveform, double freq_hz, std::vector<qrss_tx::Pass> passes,
+                           bool interactive);
+    // The scheduler's way in.
+    QrssScheduler::Start start_scheduled(const qrss_schedule::Entry& entry,
+                                         const std::vector<qrss_tx::Pass>& passes,
+                                         std::string* why);
+    void update_schedule_summary();
+    // The engine a QRSS run or Test / Tune keys through.
+    void make_qrss_engine();
+    // The selected SSTVAE mode ("A"/"B"/"C"); with a QRSS mode selected,
+    // the SSTVAE mode last saved, so the optimizer and `{mode}` always
+    // see a real SSTVAE mode.
+    std::string sstvae_mode() const;
+    // The selected QRSS mode ("A"/"B"/"C"), or empty.
     void rebuild_optimizer();
     QWidget* build_tool_row();
     // Text and its alignment only, now -- everything else a selection
@@ -310,6 +361,21 @@ private:
     std::unique_ptr<tx::TxEngine> engine_;
     std::thread thread_;
     std::atomic<bool> running_{false};
+    // transmitStarted has gone out for the send in progress. A QRSS run
+    // spends minutes encoding, making audio and waiting for its quarter
+    // hour before it keys; it announces itself only at the first key,
+    // so receiving carries on and nothing reads as on the air early.
+    bool announced_ = false;
+    bool qrss_run_ = false;
+    bool test_run_ = false;   // the run is Test / Tune
+
+    QrssScheduler* scheduler_ = nullptr;          // a child of this panel
+    // The QRSS run on the air takes following sends through this.
+    std::shared_ptr<qrss_tx::Chain> qrss_chain_;
+    QrssScheduleWindow* schedule_window_ = nullptr;
+    QrssSends* sends_ = nullptr;                  // a child of this panel
+    // The newest reception, for a "last received" inset in the Editor.
+    std::optional<images::Picture> last_rx_;
 
     // Null when the feature is off or the model has not loaded yet.
     std::unique_ptr<optimize::Speculative> optimizer_;

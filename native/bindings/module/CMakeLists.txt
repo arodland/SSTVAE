@@ -22,6 +22,29 @@ find_package(pybind11 CONFIG REQUIRED)
 pybind11_add_module(sstvae_native MODULE module.cpp)
 target_link_libraries(sstvae_native PRIVATE sstvae_core)
 
+# QRSSTVAE bindings register themselves (qrss/registry.hpp), one file per
+# ported module, so adding a module touches nothing here.
+if(TARGET sstvae_qrss)
+  file(GLOB _qrss_bindings CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/qrss/*.cpp)
+  target_sources(sstvae_native PRIVATE ${_qrss_bindings})
+  # "qrss/registry.hpp" from here; every other "qrss/..." resolves to core/qrss.
+  target_include_directories(sstvae_native PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(sstvae_native PRIVATE sstvae_qrss)
+  target_compile_definitions(sstvae_native PRIVATE SSTVAE_HAVE_QRSS)
+  if(NOT MSVC)
+    target_compile_options(sstvae_native PRIVATE -ffp-contract=off)
+  endif()
+endif()
+
+# The QRSS codec glue (sstvae_native.qrss.codec and
+# qrss.picture.codec_id_from_onnx), only with the codec: its own directory,
+# outside the qrss/*.cpp glob above, for that reason.
+if(TARGET sstvae_qrss_codec)
+  file(GLOB _qrss_codec_bindings CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/qrss/codec/*.cpp)
+  target_sources(sstvae_native PRIVATE ${_qrss_codec_bindings})
+  target_link_libraries(sstvae_native PRIVATE sstvae_qrss_codec)
+endif()
+
 if(SSTVAE_BUILD_CODEC)
   target_link_libraries(sstvae_native PRIVATE sstvae_codec)
   target_compile_definitions(sstvae_native PRIVATE SSTVAE_HAVE_CODEC)

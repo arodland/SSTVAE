@@ -1,0 +1,1428 @@
+// native/core/qrss/listener (the live listener) without Python.
+//
+// The scenarios of golden_qrss/listener_pins.json (tools/
+// gen_qrss_listener_pins.py) were run through the reference's
+// LiveListener with its receivers stubbed: this replays each through the
+// C++ one with the same stubs (the receivers' answers, call by call, from
+// the file) and requires what the reference did -- every receiver call
+// with its arguments, each step's result, the log lines, the tiles,
+// state.json's and listener.log's text byte for byte, and the pictures of
+// a fake codec. tests/test_qrss_native_listener.py compares the two side
+// by side where Python is available (more scenarios, the real receiver
+// and the real codec); this keeps the C++ honest without it, and covers
+// what only the C++ has: its threads.
+//
+//   * two threads feeding and stepping (and a third reading the tiles and
+//     writing state.json) while the background workers receive;
+//   * feed(), step() and the readers while a receive is in flight, which
+//     must never wait on it (the receive is held until they are done: with
+//     a lock held across it they would wait out the stub's 60 s and the
+//     test fails "released, not timed out", the step named meanwhile);
+//     feed()'s latency then is printed (the measurement the port reports);
+//   * close() with a receive in flight: it waits for the receive, which is
+//     applied, and runs nothing queued; a second close() returns at once;
+//   * an exception in a live receive: logged once, the slot received again
+//     at its next refresh (the reference retired it);
+//   * run() replaying a source to its end;
+//   * feed() and step() while another thread holds the store (as an
+//     association does, for its whole transaction) and a live receive wants
+//     the store's due passes: the receive waits, feed() and step() must not;
+//   * abandon() with a receive held (a live one, one that throws, an
+//     end-of-slot one): it returns at once, and once the receive is let go
+//     nothing of it lands in listener.log, state.json, tiles/, the store,
+//     the tiles, lines() or the log seam, and close() returns;
+//   * abandon() racing feed(), step(), write_state() and log() on other
+//     threads with the workers busy;
+//   * abandon() from inside the log seam, on the caller's thread and on the
+//     finish worker: the rest of the lines handed over with that one, a
+//     later feed()'s ring and passband writes, the passband store's packing
+//     and the job's store association all stop there.
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <complex>
+#include <condition_variable>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <deque>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <iterator>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <random>
+#include <set>
+#include <span>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+#include "check.hpp"
+#include "images/images.hpp"
+#include "images/types.hpp"
+#include "qrss/qrss_config.hpp"
+#include "qrss/frame.hpp"
+#include "qrss/listener.hpp"
+#include "qrss/live.hpp"
+#include "qrss/picture.hpp"
+#include "qrss/pyjson.hpp"
+#include "qrss/rawfile.hpp"
+#include "qrss/render.hpp"
+#include "qrss/source.hpp"
+#include "qrss/store.hpp"
+
+using namespace sstvae;
+namespace lv = sstvae::qrss::live;
+namespace fr = sstvae::qrss::frame;
+namespace pj = sstvae::qrss::pyjson;
+namespace types = sstvae::qrss::types;
+namespace rcv = sstvae::qrss::receiver;
+namespace aq = sstvae::qrss::acquire;
+namespace hdr = sstvae::qrss::header;
+namespace qcfg = sstvae::qrss::config;
+namespace fs = std::filesystem;
+
+namespace {
+
+std::string g_golden;   // argv[1]: native/tests/golden_qrss
+fs::path g_tmp;         // this run's scratch directory
+
+// Built with -fsanitize=thread (GCC says so with __SANITIZE_THREAD__,
+// Clang through __has_feature).
+#if defined(__SANITIZE_THREAD__)
+constexpr bool UNDER_TSAN = true;
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+constexpr bool UNDER_TSAN = true;
+#else
+constexpr bool UNDER_TSAN = false;
+#endif
+#else
+constexpr bool UNDER_TSAN = false;
+#endif
+
+struct Step {
+    explicit Step(const char* name) { check::current_step = name; }
+};
+
+// The text as Python's read_text gives it: the listener writes its text
+// files in text mode, so on Windows "\r\n" reads back as "\n".
+std::string read_text(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    if (!f) throw std::runtime_error("cannot read " + p.string());
+    std::string s(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>{});
+#ifdef _WIN32
+    std::string lf;
+    lf.reserve(s.size());
+    for (std::size_t i = 0; i < s.size(); ++i)
+        if (!(s[i] == '\r' && i + 1 < s.size() && s[i + 1] == '\n')) lf += s[i];
+    s = std::move(lf);
+#endif
+    return s;
+}
+
+void write_text(const fs::path& p, const std::string& s) {
+    std::ofstream f(p, std::ios::binary);
+    f << s;
+    if (!f) throw std::runtime_error("cannot write " + p.string());
+}
+
+fs::path fresh_dir(const std::string& name) {
+    const fs::path d = g_tmp / name;
+    std::error_code ec;
+    fs::remove_all(d, ec);
+    fs::create_directories(d);
+    return d;
+}
+
+// The generator's audio: sample k of a chunk of seed s is
+// 1e-3 ((h(k + 7919 s) / 2^32) - 0.5), h(i) = i 2654435761 mod 2^32.
+std::vector<double> audio(std::int64_t n, std::int64_t seed) {
+    std::vector<double> x(static_cast<std::size_t>(n));
+    for (std::int64_t k = 0; k < n; ++k) {
+        const std::uint64_t i = static_cast<std::uint64_t>(k) + 7919ULL * static_cast<std::uint64_t>(seed);
+        const std::uint64_t h = (i * 2654435761ULL) % 4294967296ULL;
+        x[static_cast<std::size_t>(k)] = 1e-3 * (static_cast<double>(h) / 4294967296.0 - 0.5);
+    }
+    return x;
+}
+
+// --- the stubs' records and answers ----------------------------------------------------------
+
+pj::Value num(double v) { return pj::Value::number(v); }
+pj::Value integer(std::int64_t v) { return pj::Value::integer(v); }
+pj::Value str(std::string s) { return pj::Value::string(std::move(s)); }
+
+pj::Value floats(const std::vector<double>& v) {
+    pj::Value a = pj::Value::array();
+    for (const double x : v) a.push_back(num(x));
+    return a;
+}
+
+pj::Value spans(const std::vector<std::pair<double, double>>& e) {
+    pj::Value a = pj::Value::array();
+    for (const auto& [lo, hi] : e) a.push_back(floats({lo, hi}));
+    return a;
+}
+
+pj::Value f_of(std::span<const types::Detection> ds) {
+    std::vector<double> f;
+    for (const auto& d : ds) f.push_back(d.f_hz);
+    return floats(f);
+}
+
+// a hint as the generator records it: [f, waveform] for (f, waveform), else f
+pj::Value hints_of(std::span<const aq::Hint> hs) {
+    pj::Value a = pj::Value::array();
+    for (const aq::Hint& h : hs) {
+        if (h.waveform) {
+            pj::Value t = pj::Value::array();
+            t.push_back(num(h.f_hz));
+            t.push_back(integer(*h.waveform));
+            a.push_back(std::move(t));
+        } else {
+            a.push_back(num(h.f_hz));
+        }
+    }
+    return a;
+}
+
+types::Detection det_of(const pj::Value& d) {
+    types::Detection o;
+    o.f_hz = d.at("f_hz").as_double();
+    if (const pj::Value* w = d.find("waveform")) o.waveform = w->as_int();
+    if (const pj::Value* z = d.find("z_ref")) o.z_ref = z->as_double();
+    if (const pj::Value* m = d.find("method")) o.method = m->as_string();
+    return o;
+}
+
+std::vector<types::Detection> dets_of(const pj::Value& a) {
+    std::vector<types::Detection> out;
+    for (const pj::Value& d : a.items()) out.push_back(det_of(d));
+    return out;
+}
+
+hdr::HeaderFields header_of(const pj::Value& h) {
+    hdr::HeaderFields o;
+    o.callsign = h.at("callsign").as_string();
+    if (const pj::Value* g = h.find("grid"); g && !g->is_null()) o.grid = g->as_string();
+    o.picture_id = h.at("picture_id").as_int();
+    o.mode = h.at("mode").as_int();
+    o.segment = h.at("segment").as_int();
+    o.codec_id = h.at("codec_id").as_int();
+    return o;
+}
+
+// The generator's _Pass: w ones, z (k % 7 - 3) / 4 in float32, n -1 for picture.SENT.
+types::PassResult pass_of(const pj::Value& d) {
+    types::PassResult p;
+    const std::int64_t n0 = d.at("n").as_int();
+    const std::size_t n = static_cast<std::size_t>(n0 == -1 ? qrss::picture::SENT : n0);
+    p.f_hz = d.at("f_hz").as_double();
+    p.uid = d.at("uid").as_string();
+    p.report.snr2500_db = d.at("snr").as_double();
+    p.report.z_ref = d.at("z_ref").as_double();
+    p.report.suspect = false;
+    if (const pj::Value* h = d.find("header")) p.header = header_of(*h);
+    if (const pj::Value* c = d.find("cw")) {
+        types::CwIdResult cw;
+        cw.text = c->as_string();
+        p.cw = cw;
+    }
+    if (const pj::Value* w = d.find("waveform")) {
+        p.waveform = w->as_int();
+        p.frame = p.waveform == qcfg::WAVEFORM_L ? "l-tiny" : "tiny";
+    }
+    p.w.assign(n, 1.0f);
+    p.z.resize(n);
+    for (std::size_t k = 0; k < n; ++k) p.z[k] = (static_cast<float>(k % 7) - 3.0f) / 4.0f;
+    return p;
+}
+
+std::vector<types::PassResult> passes_of(const pj::Value& a) {
+    std::vector<types::PassResult> out;
+    for (const pj::Value& p : a.items()) out.push_back(pass_of(p));
+    return out;
+}
+
+// One scenario's stub receivers: each answers from its queue in order, the
+// last answer repeated, and records its call as the generator does.
+struct Script {
+    std::mutex mu;
+    std::map<std::string, std::deque<pj::Value>> answers;
+    std::vector<std::string> calls;   // json.dumps of each call
+
+    explicit Script(const pj::Value& sc) {
+        for (const char* k : {"candidates", "detect", "receive", "finish"})
+            for (const pj::Value& a : sc.at(k).items()) answers[k].push_back(a);
+    }
+
+    pj::Value take(const std::string& k) {
+        std::deque<pj::Value>& q = answers.at(k);
+        if (q.size() > 1) {
+            pj::Value a = q.front();
+            q.pop_front();
+            return a;
+        }
+        return q.front();
+    }
+
+    pj::Value call(const pj::Value& record, const std::string& k) {
+        std::lock_guard<std::mutex> lk(mu);
+        calls.push_back(pj::dumps(record));
+        return take(k);
+    }
+
+    lv::Seams seams() {
+        lv::Seams s;
+        s.candidates = [this](const rcv::Prepared& prep, auto, std::span<const aq::Hint> hints) {
+            pj::Value r = pj::Value::array();
+            r.push_back(str("candidates"));
+            r.push_back(integer(prep.q));
+            r.push_back(integer(static_cast<std::int64_t>(prep.fe.size())));
+            r.push_back(hints_of(hints));
+            return dets_of(call(r, "candidates"));
+        };
+        s.detect = [this](const rcv::Prepared& prep, auto, const rcv::DetectOptions& opt) {
+            pj::Value r = pj::Value::array();
+            r.push_back(str("detect"));
+            r.push_back(integer(prep.q));
+            r.push_back(integer(static_cast<std::int64_t>(prep.fe.size())));
+            r.push_back(pj::Value::boolean(opt.live_only));
+            r.push_back(spans(opt.erase_s));
+            r.push_back(opt.cands ? f_of(*opt.cands) : pj::Value::null());
+            r.push_back(floats(opt.skip_hz));
+            return dets_of(call(r, "detect"));
+        };
+        s.receive_slot = [this](const rcv::Prepared& prep, auto, const rcv::SlotOptions& opt) {
+            pj::Value r = pj::Value::array();
+            r.push_back(str("receive"));
+            r.push_back(integer(prep.q));
+            r.push_back(integer(static_cast<std::int64_t>(prep.fe.size())));
+            r.push_back(str(opt.estimator));
+            r.push_back(pj::Value::boolean(opt.round_b));
+            r.push_back(spans(opt.erase_s));
+            r.push_back(opt.dets ? f_of(*opt.dets) : pj::Value::array());
+            return passes_of(call(r, "receive"));
+        };
+        s.finish = [this](std::span<const std::complex<float>> x, std::span<const std::uint8_t> ok, std::int64_t origin,
+                          std::int64_t q, const qrss::api::ReceiveConfig& config,
+                          std::span<const types::Detection> dets, std::span<const aq::Hint> hints) {
+            pj::Value r = pj::Value::array();
+            r.push_back(str("finish"));
+            r.push_back(integer(q));
+            r.push_back(integer(static_cast<std::int64_t>(x.size())));
+            r.push_back(integer(static_cast<std::int64_t>(std::count_if(ok.begin(), ok.end(),
+                                                                         [](std::uint8_t b) { return b != 0; }))));
+            r.push_back(integer(origin));
+            r.push_back(str(config.estimator));
+            r.push_back(f_of(dets));
+            r.push_back(hints_of(hints));
+            const pj::Value a = call(r, "finish");
+            lv::FinishResult out;
+            out.passes = passes_of(a.items().at(0));
+            out.heard = a.items().at(1).as_double();
+            return out;
+        };
+        return s;
+    }
+};
+
+// The generator's fake codec: picture k (counting from 0) is 8 x 6 of
+// value (37 k + int(sum of the weight plane) % 200) % 256.
+class FakeRenderer : public lv::Renderer {
+public:
+    std::optional<std::string> load(std::optional<std::int64_t>, const Warn&) override { return std::nullopt; }
+    std::optional<std::string> check(std::optional<std::int64_t>) override { return std::nullopt; }
+    images::Picture render(std::span<const double> S, std::span<const double> W, std::int64_t mode,
+                           std::optional<std::int64_t>) override {
+        const auto planes = qrss::render::decoder_planes(S, W, mode);
+        double sum = 0.0;
+        for (const float w : planes.second) sum += static_cast<double>(w);
+        std::lock_guard<std::mutex> lk(mu_);
+        const int v = static_cast<int>((37 * k_ + static_cast<std::int64_t>(sum) % 200) % 256);
+        ++k_;
+        images::Picture p(8, 6);
+        std::fill(p.rgb.begin(), p.rgb.end(), static_cast<std::uint8_t>(v));
+        return p;
+    }
+
+private:
+    std::mutex mu_;
+    std::int64_t k_ = 0;
+};
+
+constexpr double CLOCK_DEFAULT = 1'760'000'000.0;
+
+lv::LiveConfig config_of(const pj::Value& c) {
+    lv::LiveConfig cfg;
+    cfg.render = false;   // (the generator's default)
+    for (std::size_t i = 0; i < c.keys().size(); ++i) {
+        const std::string& k = c.keys()[i];
+        const pj::Value& v = c.values()[i];
+        if (k == "spec") cfg.spec = fr::get(v.as_string());
+        else if (k == "waveforms") {
+            std::vector<std::int64_t> w;
+            for (const pj::Value& x : v.items()) w.push_back(x.as_int());
+            cfg.waveforms = w;
+        } else if (k == "render") cfg.render = v.as_bool();
+        else if (k == "refresh_s") cfg.refresh_s = v.as_double();
+        else if (k == "first_s") cfg.first_s = v.as_double();
+        else if (k == "detect_until_s") cfg.detect_until_s = v.as_double();
+        else if (k == "recheck_until_s") cfg.recheck_until_s = v.as_double();
+        else if (k == "empty_refresh_s") cfg.empty_refresh_s = v.as_double();
+        else if (k == "keep_done_s") cfg.keep_done_s = v.as_double();
+        else throw std::runtime_error("listener_pins: unknown config key " + k);
+    }
+    return cfg;
+}
+
+std::string tiles_json(const std::vector<lv::Tile>& tiles) {
+    pj::Value a = pj::Value::array();
+    for (const lv::Tile& t : tiles) a.push_back(t.to_json());
+    return pj::dumps(a);
+}
+
+void equal_strings(const std::vector<std::string>& got, const pj::Value& want, const std::string& what) {
+    std::vector<std::string> w;
+    for (const pj::Value& x : want.items()) w.push_back(x.as_string());
+    ++check::checks;
+    if (got == w) return;
+    std::string detail = std::to_string(got.size()) + " against " + std::to_string(w.size());
+    for (std::size_t k = 0; k < std::max(got.size(), w.size()); ++k) {
+        const std::string g = k < got.size() ? got[k] : "(none)";
+        const std::string e = k < w.size() ? w[k] : "(none)";
+        if (g != e) {
+            detail += "; first difference at " + std::to_string(k) + ":\n  got  " + g + "\n  want " + e;
+            break;
+        }
+    }
+    check::fail(what, detail);
+}
+
+// Where two texts part, for a failure that says where.
+void equal_text(const std::string& got, const std::string& want, const std::string& what) {
+    ++check::checks;
+    if (got == want) return;
+    std::size_t k = 0;
+    while (k < got.size() && k < want.size() && got[k] == want[k]) ++k;
+    const std::size_t a = k > 60 ? k - 60 : 0;
+    check::fail(what, "differ at byte " + std::to_string(k) + ":\n  got  ..." + got.substr(a, 160) + "\n  want ..." +
+                          want.substr(a, 160));
+}
+
+// --- the pinned scenarios -------------------------------------------------------------------
+
+void replay(const pj::Value& sc, double clock) {
+    const std::string name = sc.at("name").as_string();
+    const pj::Value& expect = sc.at("expect");
+    const fs::path d = fresh_dir("pins_" + name);
+    if (const pj::Value* st = sc.find("state")) write_text(d / "state.json", pj::dumps(*st));
+    if (const pj::Value* df = sc.find("dial_file")) write_text(d / lv::DIAL_FILE, df->as_string());
+    const lv::LiveConfig cfg = config_of(sc.at("cfg"));
+
+    Script script(sc);
+    std::mutex sink_mu;
+    std::vector<std::string> sink;
+    lv::Seams seams = script.seams();
+    seams.clock = [clock] { return clock; };
+    seams.log = [&](const std::string& line) {
+        std::lock_guard<std::mutex> lk(sink_mu);
+        sink.push_back(line);
+    };
+    if (const pj::Value* g = sc.find("dial_guard")) seams.dial_guard = {g->items().at(0).as_double(), g->items().at(1).as_double()};
+    if (cfg.render) seams.renderer = std::make_shared<FakeRenderer>();
+
+    auto L = std::make_unique<lv::LiveListener>(d.string(), cfg, nullptr, nullptr, seams);
+    for (const pj::Value& f : sc.at("feeds").items()) {
+        const auto& v = f.items();
+        L->feed(audio(v.at(0).as_int(), v.at(1).as_int()), v.at(2).as_double());
+    }
+    std::vector<std::string> steps;
+    std::vector<std::string> want_steps;
+    for (const pj::Value& t : sc.at("steps").items()) steps.push_back(L->step(t.as_double()) ? "true" : "false");
+    for (const pj::Value& b : expect.at("steps").items()) want_steps.push_back(b.as_bool() ? "true" : "false");
+    ++check::checks;
+    if (steps != want_steps) check::fail(name + ": steps", "differ");
+    L->write_state();
+
+    const std::string what = "pins " + name + ": ";
+    {
+        std::lock_guard<std::mutex> lk(sink_mu);
+        equal_strings(sink, expect.at("sink"), what + "log sink");
+    }
+    equal_strings(L->lines(), expect.at("lines"), what + "lines");
+    equal_text(tiles_json(L->tiles()), expect.at("tiles").as_string(), what + "tiles");
+    equal_text(read_text(d / "state.json"), expect.at("state").as_string(), what + "state.json");
+    std::vector<std::int64_t> want_finished;
+    for (const pj::Value& q : expect.at("finished").items()) want_finished.push_back(q.as_int());
+    check::is_true(L->finished() == want_finished, what + "finished");
+    const pj::Value& log = expect.at("log");
+    const fs::path log_path = d / lv::LOG_FILE;
+    if (log.is_null()) {
+        check::is_true(!fs::exists(log_path), what + "no listener.log");
+    } else {
+        equal_text(fs::exists(log_path) ? read_text(log_path) : std::string(), log.as_string(), what + "listener.log");
+    }
+
+    // the pictures: the same files, each its size and the one value its pixels take
+    std::set<std::string> pngs;
+    for (const auto& e : fs::directory_iterator(d / "tiles"))
+        if (e.path().extension() == ".png") pngs.insert(e.path().filename().string());
+    const pj::Value& pics = expect.at("pictures");
+    check::equal(pngs.size(), pics.keys().size(), what + "pictures");
+    for (std::size_t i = 0; i < pics.keys().size(); ++i) {
+        const std::string& f = pics.keys()[i];
+        const auto& want = pics.values()[i].items();
+        if (!pngs.count(f)) {
+            check::fail(what + f, "missing");
+            continue;
+        }
+        const images::Picture pic = images::load((d / "tiles" / f).string());
+        check::equal(pic.width, static_cast<int>(want.at(0).as_int()), what + f + " width");
+        check::equal(pic.height, static_cast<int>(want.at(1).as_int()), what + f + " height");
+        std::set<std::int64_t> values(pic.rgb.begin(), pic.rgb.end());
+        std::set<std::int64_t> want_values;
+        for (const pj::Value& v : want.at(2).items()) want_values.insert(v.as_int());
+        check::is_true(values == want_values, what + f + " pixels");
+    }
+
+    if (const pj::Value* rt = expect.find("restart_tiles")) {
+        lv::Seams s2 = script.seams();
+        s2.clock = [clock] { return clock; };
+        s2.log = [](const std::string&) {};
+        s2.dial_guard = seams.dial_guard;
+        lv::LiveListener L2(d.string(), cfg, nullptr, nullptr, s2);
+        const std::vector<lv::Tile> t2 = L2.tiles();
+        equal_text(tiles_json(t2), rt->as_string(), what + "tiles read back");
+        if (!t2.empty()) L2.step(t2.front().updated + cfg.keep_done_s + 1);
+        equal_text(tiles_json(L2.tiles()), expect.at("expired_tiles").as_string(), what + "tiles expired");
+    }
+    // every receiver call, the restarted listener's included (it makes none)
+    std::lock_guard<std::mutex> lk(script.mu);
+    std::vector<std::string> want_calls;
+    for (const pj::Value& c : expect.at("calls").items()) want_calls.push_back(pj::dumps(c));
+    ++check::checks;
+    if (script.calls != want_calls) {
+        std::string detail = std::to_string(script.calls.size()) + " calls against " + std::to_string(want_calls.size());
+        for (std::size_t k = 0; k < std::max(script.calls.size(), want_calls.size()); ++k) {
+            const std::string g = k < script.calls.size() ? script.calls[k] : "(none)";
+            const std::string e = k < want_calls.size() ? want_calls[k] : "(none)";
+            if (g != e) {
+                detail += "; first difference at " + std::to_string(k) + ":\n  got  " + g + "\n  want " + e;
+                break;
+            }
+        }
+        check::fail(what + "receiver calls", detail);
+    }
+}
+
+void test_pinned_scenarios() {
+    const pj::Value pins = pj::loads(read_text(fs::path(g_golden) / "listener_pins.json"));
+    const double clock = pins.at("clock").as_double();
+    check::equal(pins.at("q").as_int(), std::int64_t{1954752}, "pins: Q_TEST");
+    check::is_true(pins.at("scenarios").items().size() >= 7, "pins: the scenarios");
+    static std::deque<std::string> names;   // (the watchdog may read a step's name at any time)
+    for (const pj::Value& sc : pins.at("scenarios").items()) {
+        names.push_back("pinned scenario " + sc.at("name").as_string());
+        check::current_step = names.back().c_str();
+        replay(sc, clock);
+    }
+}
+
+// --- threads ------------------------------------------------------------------------------------
+
+constexpr std::int64_t Q = 1954752;
+
+double t0() { return static_cast<double>(lv::slot_t0(Q)); }
+double tiny_end() { return t0() + lv::frame_seconds(fr::get("tiny")) + lv::PB_TAIL_S + 0.5; }
+
+types::Detection det(double f) {
+    types::Detection d;
+    d.f_hz = f;
+    return d;
+}
+
+types::PassResult pass(double f, std::int64_t n = 1024) {
+    types::PassResult p;
+    p.f_hz = f;
+    p.uid = "u" + std::to_string(static_cast<long long>(f));
+    p.report.snr2500_db = -12.0;
+    p.report.z_ref = 20.0;
+    p.w.assign(static_cast<std::size_t>(n), 1.0f);
+    p.z.assign(static_cast<std::size_t>(n), 0.25f);
+    return p;
+}
+
+// Stub receivers that each find the signal at 1500 Hz, after `delay`.
+lv::Seams quick_stubs(std::chrono::milliseconds delay, std::atomic<int>* receives = nullptr) {
+    lv::Seams s;
+    s.clock = [] { return CLOCK_DEFAULT; };
+    s.log = [](const std::string&) {};
+    s.candidates = [](const rcv::Prepared&, auto, std::span<const aq::Hint>) {
+        return std::vector<types::Detection>{det(1500.0)};
+    };
+    s.detect = [](const rcv::Prepared&, auto, const rcv::DetectOptions&) {
+        return std::vector<types::Detection>{det(1500.0)};
+    };
+    s.receive_slot = [delay, receives](const rcv::Prepared&, auto, const rcv::SlotOptions&) {
+        std::this_thread::sleep_for(delay);
+        if (receives) ++*receives;
+        return std::vector<types::PassResult>{pass(1500.0)};
+    };
+    s.finish = [delay](std::span<const std::complex<float>>, std::span<const std::uint8_t>, std::int64_t,
+                       std::int64_t, const qrss::api::ReceiveConfig&, std::span<const types::Detection>,
+                       std::span<const aq::Hint>) {
+        std::this_thread::sleep_for(delay);
+        lv::FinishResult r;
+        r.passes = {pass(1500.0)};
+        r.heard = 1.0;
+        return r;
+    };
+    return s;
+}
+
+lv::LiveConfig tiny_config(bool background) {
+    lv::LiveConfig cfg;
+    cfg.spec = fr::get("tiny");
+    cfg.refresh_s = 5.0;
+    cfg.render = false;
+    cfg.background = background;
+    return cfg;
+}
+
+std::optional<lv::Tile> tile_of(const lv::LiveListener& L, const std::string& id) {
+    for (const lv::Tile& t : L.tiles())
+        if (t.id == id) return t;
+    return std::nullopt;
+}
+
+// Two threads feed and step while the workers receive, a third reads.
+void test_threads_feed_and_step() {
+    Step step("threads: feeding and stepping while the workers run");
+    const fs::path d = fresh_dir("threads");
+    std::atomic<int> receives{0};
+    lv::LiveListener L(d.string(), tiny_config(true), nullptr, nullptr,
+                       quick_stubs(std::chrono::milliseconds(15), &receives));
+    const double start = t0() - 16.0;
+    const double end = tiny_end() + 2.0;
+    const std::int64_t chunk = qcfg::FS / 4;   // 0.25 s
+    const std::int64_t n_chunks = static_cast<std::int64_t>((end - start) * 4.0);
+    std::atomic<std::int64_t> fed{0};
+    std::atomic<bool> done{false};
+    std::atomic<int> errors{0};
+
+    std::thread feeder([&] {
+        try {
+            for (std::int64_t k = 0; k < n_chunks; ++k) {
+                L.feed(audio(chunk, 100 + k), start + 0.25 * static_cast<double>(k + 1));
+                fed = k + 1;
+                if (k % 16 == 0) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "feeder: %s\n", e.what());
+            ++errors;
+        }
+        done = true;
+    });
+    std::thread stepper([&] {
+        try {
+            while (!done) {
+                const std::optional<double> now = L.audio_end();
+                if (now) L.step(*now);
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "stepper: %s\n", e.what());
+            ++errors;
+        }
+    });
+    std::thread reader([&] {
+        try {
+            while (!done) {
+                (void)L.tiles();
+                (void)L.busy();
+                (void)L.lines();
+                (void)L.idle();
+                L.write_state();
+                std::this_thread::sleep_for(std::chrono::milliseconds(3));
+            }
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "reader: %s\n", e.what());
+            ++errors;
+        }
+    });
+    feeder.join();
+    stepper.join();
+    reader.join();
+    check::equal(errors.load(), 0, "threads: no exception");
+    check::equal(fed.load(), n_chunks, "threads: every chunk fed");
+
+    // the replay's end: the slot finishes once the workers are idle
+    check::is_true(L.wait_idle(60.0), "threads: the workers go idle");
+    L.step(end);
+    check::is_true(L.wait_idle(60.0), "threads: the end-of-slot receive returns");
+    L.step(end + 1.0);
+    const std::vector<std::int64_t> fin = L.finished();
+    check::is_true(std::find(fin.begin(), fin.end(), Q) != fin.end(), "threads: the slot finished");
+    const std::optional<lv::Tile> t = tile_of(L, "1954752-1500");
+    check::is_true(t && t->status == "complete", "threads: its tile complete");
+    check::is_true(receives.load() >= 1, "threads: live receives ran");
+    const pj::Value st = pj::loads(read_text(d / "state.json"));
+    check::is_true(st.at("tiles").kind() == pj::Value::Kind::Array, "threads: state.json is JSON");
+    L.close();
+}
+
+// write_state's temporary is store.py's _tmp_name, ".state.json.<pid>.<thread
+// id>.tmp": with the process's id alone, two threads writing the state at
+// once shared one (the second's open truncated the first's, or the first's
+// move took it away and the second's failed).
+void test_the_state_temporary_carries_the_thread() {
+    Step step("write_state: the temporary carries the thread");
+    const fs::path d = fresh_dir("state_tmp");
+    lv::LiveListener L(d.string(), tiny_config(false), nullptr, nullptr, quick_stubs(std::chrono::milliseconds(0)));
+    const std::string name = ".state.json." + std::to_string(qrss::rawfile::process_id()) + "." +
+                             std::to_string(qrss::rawfile::thread_ident()) + ".tmp";
+    fs::create_directories(d / name);   // in the way: the write fails, naming it
+    try {
+        L.write_state();
+        check::fail("state temporary", "a directory where the temporary goes did not stop the write");
+    } catch (const std::exception& e) {
+        check::is_true(std::string(e.what()).find(name) != std::string::npos,
+                       std::string("state temporary: the error names ") + name + ": " + e.what());
+    }
+    fs::remove(d / name);
+    std::atomic<int> errors{0};
+    std::vector<std::thread> writers;
+    for (int k = 0; k < 4; ++k)
+        writers.emplace_back([&] {
+            try {
+                for (int i = 0; i < 50; ++i) L.write_state();
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "writer: %s\n", e.what());
+                ++errors;
+            }
+        });
+    for (std::thread& w : writers) w.join();
+    check::equal(errors.load(), 0, "state temporary: four threads writing at once");
+    bool stray = false;
+    for (const auto& e : fs::directory_iterator(d)) stray = stray || e.path().filename().string().find(".tmp") != std::string::npos;
+    check::is_true(!stray, "state temporary: none left");
+    check::is_true(pj::loads(read_text(d / "state.json")).at("version").as_int() == 1, "state temporary: state.json whole");
+    L.close();
+}
+
+// feed(), step() and the readers while a receive is held in flight; then
+// close() waits for it, and it is applied.
+void test_close_with_a_receive_in_flight() {
+    Step step("close: a receive in flight");
+    const fs::path d = fresh_dir("close");
+    std::mutex mu;
+    std::condition_variable cv;
+    bool entered = false, release = false, timed_out = false;
+    std::atomic<int> receives{0};
+
+    lv::Seams s = quick_stubs(std::chrono::milliseconds(0));
+    s.receive_slot = [&](const rcv::Prepared&, auto, const rcv::SlotOptions&) {
+        std::unique_lock<std::mutex> lk(mu);
+        entered = true;
+        cv.notify_all();
+        if (!cv.wait_for(lk, std::chrono::seconds(60), [&] { return release; })) timed_out = true;
+        ++receives;
+        return std::vector<types::PassResult>{pass(1500.0)};
+    };
+    auto L = std::make_unique<lv::LiveListener>(d.string(), tiny_config(true), nullptr, nullptr, s);
+    L->feed(audio(static_cast<std::int64_t>(46.0 * qcfg::FS), 1), t0() + 30.0);
+    L->step(t0() + 30.0);
+    {
+        std::unique_lock<std::mutex> lk(mu);
+        check::is_true(cv.wait_for(lk, std::chrono::seconds(30), [&] { return entered; }), "close: the receive started");
+    }
+
+    // everything but close() goes on while the receive is held
+    check::current_step = "close: feeding while the receive is held";
+    std::vector<double> lat;
+    for (int k = 0; k < 120; ++k) {
+        const auto a = std::chrono::steady_clock::now();
+        L->feed(audio(qcfg::FS / 4, 50 + k), t0() + 30.0 + 0.25 * (k + 1));
+        lat.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count());
+    }
+    check::current_step = "close: stepping and reading while the receive is held";
+    L->step(t0() + 60.0);
+    const std::optional<std::string> busy = L->busy();
+    check::is_true(busy && busy->find("refresh 2025-10-01T00:00:00Z") != std::string::npos, "close: busy says so");
+    check::is_true(!L->idle(), "close: not idle");
+    (void)L->tiles();
+    L->write_state();
+    check::is_true(!L->wait_idle(0.05), "close: wait_idle times out");
+    std::sort(lat.begin(), lat.end());
+    std::printf("feed() during a receive: p50 %.1f us, p95 %.1f us, max %.1f us (%zu chunks of 0.25 s)\n",
+                lat[lat.size() / 2] * 1e6, lat[lat.size() * 95 / 100] * 1e6, lat.back() * 1e6, lat.size());
+
+    check::current_step = "close: close() waits for the receive";
+    std::atomic<bool> closed{false};
+    std::thread closer([&] {
+        L->close();
+        closed = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    check::is_true(!closed.load(), "close: waits for the receive in flight");
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        release = true;
+    }
+    cv.notify_all();
+    closer.join();
+    check::is_true(closed.load(), "close: returns once it has");
+    check::is_true(!timed_out, "close: the receive was released, not timed out");
+    check::equal(receives.load(), 1, "close: one receive, nothing queued run");
+    const std::optional<lv::Tile> t = tile_of(*L, "1954752-1500");
+    check::is_true(t.has_value(), "close: the receive in flight was applied");
+    check::current_step = "close: a second close";
+    const auto a = std::chrono::steady_clock::now();
+    L->close();
+    check::is_true(std::chrono::steady_clock::now() - a < std::chrono::seconds(5), "close: idempotent");
+    check::is_true(L->idle() && L->wait_idle(1.0), "close: idle after");
+    check::current_step = "close: the destructor";
+    L.reset();
+}
+
+// The destructor of a background listener with a receive in flight closes it.
+void test_destructor_with_a_receive_in_flight() {
+    Step step("close: the destructor with a receive in flight");
+    const fs::path d = fresh_dir("dtor");
+    std::atomic<bool> entered{false};
+    lv::Seams s = quick_stubs(std::chrono::milliseconds(0));
+    s.receive_slot = [&](const rcv::Prepared&, auto, const rcv::SlotOptions&) {
+        entered = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        return std::vector<types::PassResult>{pass(1500.0)};
+    };
+    {
+        lv::LiveListener L(d.string(), tiny_config(true), nullptr, nullptr, s);
+        L.feed(audio(static_cast<std::int64_t>(46.0 * qcfg::FS), 2), t0() + 30.0);
+        L.step(t0() + 30.0);
+        for (int k = 0; k < 3000 && !entered; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        check::is_true(entered.load(), "dtor: the receive started");
+    }
+    check::is_true(true, "dtor: returned");
+}
+
+// An exception in a live receive: logged once (per slot and message), and
+// the slot received again at its next refresh, never raised from step().
+void test_a_refresh_exception_is_retried() {
+    Step step("a refresh exception: logged once and retried");
+    const fs::path d = fresh_dir("refresh_error");
+    std::atomic<int> calls{0};
+    std::vector<std::string> sink;
+    lv::Seams s = quick_stubs(std::chrono::milliseconds(0));
+    s.log = [&](const std::string& line) { sink.push_back(line); };
+    s.receive_slot = [&](const rcv::Prepared&, auto, const rcv::SlotOptions&) {
+        const int k = ++calls;
+        if (k <= 2) throw std::runtime_error("boom");
+        return std::vector<types::PassResult>{pass(1500.0)};
+    };
+    lv::LiveConfig cfg = tiny_config(false);
+    cfg.refresh_s = 10.0;
+    lv::LiveListener L(d.string(), cfg, nullptr, nullptr, s);
+    L.feed(audio(76 * qcfg::FS, 8), t0() + 60.0);
+    bool threw = false;
+    try {
+        for (const double t : {t0() + 26.0, t0() + 36.0, t0() + 46.0}) L.step(t);
+    } catch (const std::exception& e) {
+        threw = true;
+        std::fprintf(stderr, "step raised: %s\n", e.what());
+    }
+    check::is_true(!threw, "refresh error: never raised from step()");
+    check::equal(calls.load(), 3, "refresh error: the slot received again at each refresh");
+    int said = 0;
+    for (const std::string& line : sink)
+        if (line.find("slot 2025-10-01T00:00:00Z: RuntimeError: boom") != std::string::npos) ++said;
+    check::equal(said, 1, "refresh error: said once");
+    const std::optional<lv::Tile> t = tile_of(L, "1954752-1500");
+    check::is_true(t && t->status == "receiving", "refresh error: the third receive's tile");
+    L.step(tiny_end());
+    const std::vector<std::int64_t> fin = L.finished();
+    check::is_true(std::find(fin.begin(), fin.end(), Q) != fin.end(), "refresh error: the slot still finishes");
+    const std::optional<lv::Tile> t2 = tile_of(L, "1954752-1500");
+    check::is_true(t2 && t2->status == "complete", "refresh error: its tile complete");
+}
+
+// run() over a replayed source: "listening" first, "audio ended" last, the
+// slot finished, state.json written with listening false.
+class ChunkSource : public lv::Source {
+public:
+    ChunkSource(double start, double end, double chunk_s) : t_(start), end_(end), chunk_s_(chunk_s) {}
+    std::optional<lv::Chunk> next(double) override {
+        if (t_ >= end_) {
+            eof_ = true;
+            return std::nullopt;
+        }
+        lv::Chunk c;
+        c.x = audio(static_cast<std::int64_t>(chunk_s_ * qcfg::FS), ++seed_);
+        t_ += chunk_s_;
+        c.t_end = t_;
+        return c;
+    }
+    bool eof() const override { return eof_; }
+    std::string name() const override { return "replay"; }
+
+private:
+    double t_, end_, chunk_s_;
+    std::int64_t seed_ = 0;
+    bool eof_ = false;
+};
+
+void test_run_replays_to_the_end() {
+    for (const bool background : {false, true}) {
+        Step step(background ? "run: a replay, background" : "run: a replay");
+        const fs::path d = fresh_dir(background ? "run_bg" : "run");
+        std::vector<std::string> sink;
+        std::mutex mu;
+        lv::Seams s = quick_stubs(std::chrono::milliseconds(background ? 5 : 0));
+        s.log = [&](const std::string& line) {
+            std::lock_guard<std::mutex> lk(mu);
+            sink.push_back(line);
+        };
+        lv::LiveListener L(d.string(), tiny_config(background), nullptr, nullptr, s);
+        ChunkSource src(t0() - 16.0, t0() + 40.0, 1.0);
+        lv::run(L, src, false);
+        const std::string tag = background ? "run (background): " : "run: ";
+        std::lock_guard<std::mutex> lk(mu);
+        check::is_true(!sink.empty() && sink.front().find(" listening: replay, frame tiny, waveform CE (tiny)") !=
+                                            std::string::npos,
+                       tag + "listening first");
+        check::is_true(!sink.empty() && sink.back().size() >= 11 &&
+                           sink.back().compare(sink.back().size() - 11, 11, "audio ended") == 0,
+                       tag + "audio ended last");
+        const std::vector<std::int64_t> fin = L.finished();
+        check::is_true(std::find(fin.begin(), fin.end(), Q) != fin.end(), tag + "the slot finished");
+        const pj::Value st = pj::loads(read_text(d / "state.json"));
+        check::is_true(!st.at("listening").as_bool(), tag + "listening false at the end");
+        check::equal(st.at("source").as_string(), std::string("replay"), tag + "the source's name");
+        L.close();
+    }
+    {
+        Step step("run: stopped");
+        const fs::path d = fresh_dir("run_stop");
+        lv::LiveListener L(d.string(), tiny_config(false), nullptr, nullptr, quick_stubs(std::chrono::milliseconds(0)));
+        ChunkSource src(t0() - 16.0, t0() + 40.0, 1.0);
+        const std::atomic<bool> stop{true};
+        lv::run(L, src, false, &stop);
+        check::is_true(!L.audio_end().has_value(), "run: a set stop feeds nothing");
+        const std::vector<std::string> lines = L.lines();
+        check::is_true(!lines.empty() && lines.back().find("audio ended") != std::string::npos, "run: stopped, ended");
+    }
+}
+
+// A live receive reads the store's due passes (its hints) while another
+// thread holds the store -- the end-of-slot worker's association holds it
+// for a whole transaction, writes and fsync included. The receive waits for
+// the store; feed() and step() must not wait for the receive (a store read
+// under the listener's lock made both wait out the whole association).
+void test_the_store_is_never_waited_on_under_the_lock() {
+    Step step("store: feeding while another thread holds the store");
+    const fs::path d = fresh_dir("store_held");
+    auto st = std::make_shared<sstvae::qrss::store::Store>((d / "store").string());
+    std::mutex mu;
+    std::condition_variable cv;
+    bool held = false, release = false;
+    std::thread holder([&] {
+        const auto lk_store = st->hold();
+        std::unique_lock<std::mutex> lk(mu);
+        held = true;
+        cv.notify_all();
+        cv.wait_for(lk, std::chrono::seconds(8), [&] { return release; });
+    });
+    {
+        std::unique_lock<std::mutex> lk(mu);
+        check::is_true(cv.wait_for(lk, std::chrono::seconds(30), [&] { return held; }), "store: held");
+    }
+    std::atomic<int> receives{0};
+    lv::LiveListener L((d / "live").string(), tiny_config(true), st, nullptr,
+                       quick_stubs(std::chrono::milliseconds(0), &receives));
+    L.feed(audio(static_cast<std::int64_t>(46.0 * qcfg::FS), 3), t0() + 30.0);
+    L.step(t0() + 30.0);
+    // the refresh is taken, and has had the time to reach the store
+    for (int k = 0; k < 3000 && !L.busy(); ++k) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    check::current_step = "store: feeding and stepping while the store is held";
+    double worst = 0.0;
+    for (int k = 0; k < 8; ++k) {
+        const auto a = std::chrono::steady_clock::now();
+        L.feed(audio(qcfg::FS / 4, 60 + k), t0() + 30.0 + 0.25 * (k + 1));
+        L.step(t0() + 30.0 + 0.25 * (k + 1));
+        (void)L.tiles();
+        worst = std::max(worst, std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count());
+    }
+    const bool waiting = receives.load() == 0;
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        release = true;
+    }
+    cv.notify_all();
+    holder.join();
+    check::is_true(waiting, "store: the receive waits for the store");
+    check::is_true(worst < 1.0, "store: feed() and step() did not wait for it (worst " + std::to_string(worst) + " s)");
+    check::is_true(L.wait_idle(60.0), "store: the receive returns once it is released");
+    check::equal(receives.load(), 1, "store: and receives");
+    const std::optional<lv::Tile> t = tile_of(L, "1954752-1500");
+    check::is_true(t.has_value(), "store: its tile");
+    L.close();
+}
+
+// Every file under `dir`, by its path relative to it, with its bytes.
+std::map<std::string, std::string> tree(const fs::path& dir) {
+    std::map<std::string, std::string> out;
+    std::error_code ec;
+    if (!fs::exists(dir, ec)) return out;
+    for (const auto& e : fs::recursive_directory_iterator(dir))
+        if (e.is_regular_file()) out[fs::relative(e.path(), dir).generic_string()] = read_text(e.path());
+    return out;
+}
+
+bool ends_with_text(const std::string& s, const std::string& tail) {
+    return s.size() >= tail.size() && s.compare(s.size() - tail.size(), tail.size(), tail) == 0;
+}
+
+bool any_temporary(const std::map<std::string, std::string>& files) {
+    for (const auto& [name, bytes] : files)
+        if (name.size() >= 4 && name.compare(name.size() - 4, 4, ".tmp") == 0) return true;
+    return false;
+}
+
+// abandon() with a receive held on a latch: it returns at once; nothing
+// asked of the listener afterwards does anything; and once the receive is
+// let go, nothing of it lands -- listener.log, state.json, tiles/ and the
+// store byte for byte as abandon() left them, the tiles and lines() as
+// they were, no line to the log seam, no further receive -- and close()
+// returns. A live receive that returns, one that throws (its failure is
+// not said either), and an end-of-slot receive (no store association).
+// The clock moves on every call, so a state.json written again would not
+// be the same bytes.
+void test_abandon_with_a_receive_held() {
+    struct Case {
+        const char* step;
+        const char* dir;
+        bool at_finish;
+        bool throws;
+    };
+    for (const Case c : {Case{"abandon: a live receive held", "abandon_live", false, false},
+                         Case{"abandon: a live receive held, that throws", "abandon_throws", false, true},
+                         Case{"abandon: an end-of-slot receive held", "abandon_finish", true, false}}) {
+        Step step(c.step);
+        const std::string tag = std::string(c.step) + ": ";
+        const fs::path d = fresh_dir(c.dir);
+        std::mutex mu;
+        std::condition_variable cv;
+        bool entered = false, release = false, timed_out = false, returned = false;
+        std::atomic<int> receives{0}, finishes{0};
+        std::atomic<std::int64_t> ticks{0};
+        std::mutex smu;
+        std::vector<std::string> seam;
+        auto hold = [&] {
+            std::unique_lock<std::mutex> lk(mu);
+            entered = true;
+            cv.notify_all();
+            if (!cv.wait_for(lk, std::chrono::seconds(60), [&] { return release; })) timed_out = true;
+        };
+        auto done = [&] {
+            std::lock_guard<std::mutex> lk(mu);
+            returned = true;
+            cv.notify_all();
+        };
+        lv::Seams s = quick_stubs(std::chrono::milliseconds(0));
+        s.clock = [&ticks] { return CLOCK_DEFAULT + 1e-3 * static_cast<double>(++ticks); };
+        s.log = [&](const std::string& line) {
+            std::lock_guard<std::mutex> lk(smu);
+            seam.push_back(line);
+        };
+        s.receive_slot = [&](const rcv::Prepared&, auto, const rcv::SlotOptions&) {
+            const int k = ++receives;
+            if (!c.at_finish && k >= 2) {
+                hold();
+                done();
+                if (c.throws) throw std::runtime_error("boom");
+            }
+            return std::vector<types::PassResult>{pass(1500.0, qrss::picture::SENT)};
+        };
+        s.finish = [&](std::span<const std::complex<float>>, std::span<const std::uint8_t>, std::int64_t,
+                       std::int64_t, const qrss::api::ReceiveConfig&, std::span<const types::Detection>,
+                       std::span<const aq::Hint>) {
+            ++finishes;
+            if (c.at_finish) {
+                hold();
+                done();
+            }
+            lv::FinishResult r;
+            r.passes = {pass(1500.0, qrss::picture::SENT)};
+            r.heard = 1.0;
+            return r;
+        };
+        s.renderer = std::make_shared<FakeRenderer>();
+        lv::LiveConfig cfg = tiny_config(true);
+        cfg.render = true;
+        auto st = std::make_shared<sstvae::qrss::store::Store>((d / "store").string());
+        lv::LiveListener L((d / "live").string(), cfg, st, nullptr, s);
+
+        // a first refresh, applied: a tile and its picture
+        L.feed(audio(static_cast<std::int64_t>(46.0 * qcfg::FS), 21), t0() + 30.0);
+        L.step(t0() + 30.0);
+        check::is_true(L.wait_idle(60.0), tag + "the first refresh returns");
+        const std::optional<lv::Tile> first = tile_of(L, "1954752-1500");
+        check::is_true(first && first->image, tag + "a tile with its picture");
+        // then the receive that is held
+        if (c.at_finish) {
+            L.feed(audio(static_cast<std::int64_t>((tiny_end() - t0() - 30.0) * qcfg::FS), 22), tiny_end());
+            L.step(tiny_end());
+        } else {
+            L.feed(audio(static_cast<std::int64_t>(6.0 * qcfg::FS), 22), t0() + 36.0);
+            L.step(t0() + 36.0);
+        }
+        {
+            std::unique_lock<std::mutex> lk(mu);
+            check::is_true(cv.wait_for(lk, std::chrono::seconds(30), [&] { return entered; }),
+                           tag + "the receive is held");
+        }
+        L.write_state();
+        L.log("before abandon");
+
+        check::current_step = "abandon: abandon() with the receive held";
+        const auto a = std::chrono::steady_clock::now();
+        L.abandon();
+        const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count();
+        check::is_true(took < 1.0, tag + "abandon() does not wait for the receive (" + std::to_string(took) + " s)");
+        check::is_true(L.abandoned(), tag + "abandoned()");
+        const std::map<std::string, std::string> files = tree(d);
+        const std::string tiles = tiles_json(L.tiles());
+        const std::vector<std::string> lines = L.lines();
+        std::size_t said = 0;
+        {
+            std::lock_guard<std::mutex> lk(smu);
+            said = seam.size();
+        }
+        const int receives_then = receives.load(), finishes_then = finishes.load();
+        check::is_true(files.count("live/listener.log") && files.count("live/state.json") &&
+                           files.count("live/tiles/1954752-1500.png"),
+                       tag + "listener.log, state.json and the picture were there");
+        check::is_true(!lines.empty() && ends_with_text(lines.back(), " before abandon"), tag + "lines() up to it");
+
+        // nothing asked of it now does anything
+        check::current_step = "abandon: asking the abandoned listener";
+        L.log("after abandon");
+        L.write_state();
+        L.write_state(false);
+        L.feed(audio(qcfg::FS / 4, 23), tiny_end() + 0.25);
+        check::is_true(!L.step(tiny_end() + 30.0), tag + "step() does nothing");
+        check::is_true(L.recover(tiny_end() + 30.0, 3.0).empty() && L.backfill(tiny_end() + 30.0) == 0.0,
+                       tag + "recover() and backfill() do nothing");
+        check::is_true(L.idle() && L.finish_idle() && L.wait_idle(0.0), tag + "idle once abandoned");
+        L.abandon();   // (idempotent)
+
+        // the receive is let go: its result (or its failure) is dropped
+        check::current_step = "abandon: the held receive returns";
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            release = true;
+        }
+        cv.notify_all();
+        {
+            std::unique_lock<std::mutex> lk(mu);
+            check::is_true(cv.wait_for(lk, std::chrono::seconds(30), [&] { return returned; }),
+                           tag + "the receive returns once let go");
+        }
+        std::atomic<bool> closed{false};
+        std::thread closer([&] {
+            L.close();
+            closed = true;
+        });
+        for (int k = 0; k < 30000 && !closed; ++k) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        check::is_true(closed.load(), tag + "close() returns once the receive has");
+        closer.join();
+        check::is_true(!timed_out, tag + "released, not timed out");
+        check::is_true(tree(d) == files, tag + "listener.log, state.json, tiles/ and the store as abandon() left them");
+        check::is_true(!any_temporary(files), tag + "no temporary left");
+        check::equal(tiles_json(L.tiles()), tiles, tag + "the tiles unchanged");
+        const std::vector<std::string> after = L.lines();
+        check::is_true(after == lines, tag + "lines() unchanged");
+        {
+            std::lock_guard<std::mutex> lk(smu);
+            check::equal(seam.size(), said, tag + "no line to the log seam");
+        }
+        check::equal(receives.load(), receives_then, tag + "no further live receive");
+        check::equal(finishes.load(), finishes_then, tag + "no further end-of-slot receive");
+    }
+}
+
+// abandon() racing feed(), step(), write_state(), log() and the readers on
+// other threads while the workers receive and draw: once it has returned,
+// listener.log, state.json and tiles/ stay byte for byte as they are (no
+// temporary among them), lines() and the tiles too, and the log seam gets
+// at most the one line it was being handed, which listener.log has.
+void test_abandon_racing() {
+    Step step("abandon: racing feed, step and write_state");
+    const fs::path d = fresh_dir("abandon_race");
+    std::atomic<int> receives{0};
+    std::atomic<std::int64_t> ticks{0};
+    std::mutex smu;
+    std::vector<std::string> seam;
+    lv::Seams s = quick_stubs(std::chrono::milliseconds(2), &receives);
+    s.clock = [&ticks] { return CLOCK_DEFAULT + 1e-3 * static_cast<double>(++ticks); };
+    s.log = [&](const std::string& line) {
+        std::lock_guard<std::mutex> lk(smu);
+        seam.push_back(line);
+    };
+    s.receive_slot = [&receives](const rcv::Prepared&, auto, const rcv::SlotOptions&) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        ++receives;
+        return std::vector<types::PassResult>{pass(1500.0, qrss::picture::SENT)};
+    };
+    s.renderer = std::make_shared<FakeRenderer>();
+    lv::LiveConfig cfg = tiny_config(true);
+    cfg.render = true;
+    cfg.refresh_s = 1.0;
+    lv::LiveListener L(d.string(), cfg, nullptr, nullptr, s);
+    const double start = t0() - 16.0;
+    std::atomic<bool> stop{false};
+    std::atomic<int> errors{0};
+    std::atomic<std::int64_t> fed{0};
+    auto guarded = [&](const char* who, auto body) {
+        return std::thread([&errors, who, body] {
+            try {
+                body();
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "%s: %s\n", who, e.what());
+                ++errors;
+            }
+        });
+    };
+    // Fed at full speed into the slot, then paced by the receives (a chunk
+    // waits up to 100 ms for the next one), so the slot is still live with
+    // jobs running when abandon() comes, however slow the build: under
+    // ThreadSanitizer a refresh is ~25 times slower, and an unpaced feeder
+    // ran the whole slot out after one receive.
+    std::thread feeder = guarded("feeder", [&] {
+        for (std::int64_t k = 0; !stop; ++k) {
+            const double t = start + 0.25 * static_cast<double>(k + 1);
+            if (t > tiny_end() + 30.0) break;
+            const int before = receives.load();
+            L.feed(audio(qcfg::FS / 4, 400 + k), t);
+            fed = k + 1;
+            if (t > t0() + 30.0)
+                for (int w = 0; w < 100 && !stop && receives.load() == before; ++w)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+    std::thread stepper = guarded("stepper", [&] {
+        while (!stop) {
+            if (const std::optional<double> now = L.audio_end()) L.step(*now);
+            std::this_thread::sleep_for(std::chrono::microseconds(500));
+        }
+    });
+    std::thread writer = guarded("writer", [&] {
+        for (int k = 0; !stop; ++k) {
+            L.write_state(k % 2 == 0);
+            L.log("tick " + std::to_string(k));
+            (void)L.tiles();
+            (void)L.lines();
+            (void)L.busy();
+            std::this_thread::sleep_for(std::chrono::microseconds(700));
+        }
+    });
+    // abandoned in the thick of it: receives running, pictures drawn
+    for (int k = 0; k < 60000 && receives.load() < 2; ++k)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    check::is_true(receives.load() >= 2, "abandon race: the workers were receiving (" +
+                                             std::to_string(receives.load()) + " receives, " +
+                                             std::to_string(fed.load()) + " chunks fed)");
+    L.abandon();
+    const std::map<std::string, std::string> files = tree(d);
+    const std::string tiles = tiles_json(L.tiles());
+    const std::vector<std::string> lines = L.lines();
+    std::size_t said = 0;
+    {
+        std::lock_guard<std::mutex> lk(smu);
+        said = seam.size();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));   // (the three threads go on asking)
+    stop = true;
+    feeder.join();
+    stepper.join();
+    writer.join();
+    L.close();
+    check::equal(errors.load(), 0, "abandon race: no exception");
+    check::is_true(files.count("listener.log") && files.count("state.json"), "abandon race: the files were written");
+    check::is_true(!any_temporary(files), "abandon race: no temporary left by a write abandon() waited for");
+    check::is_true(tree(d) == files, "abandon race: listener.log, state.json and tiles/ unchanged after");
+    check::equal(tiles_json(L.tiles()), tiles, "abandon race: the tiles unchanged");
+    check::is_true(L.lines() == lines, "abandon race: lines() unchanged");
+    std::lock_guard<std::mutex> lk(smu);
+    check::is_true(seam.size() <= said + 1, "abandon race: at most the line being handed reached the seam after");
+    const std::string& log = files.at("listener.log");
+    bool all_logged = true;
+    for (std::size_t k = said > 0 ? said - 1 : 0; k < seam.size(); ++k)
+        all_logged = all_logged && log.find(seam[k] + "\n") != std::string::npos;
+    check::is_true(all_logged, "abandon race: and listener.log had it");
+}
+
+bool contains(const std::string& s, const std::string& part) { return s.find(part) != std::string::npos; }
+
+// abandon() from inside the log seam, which a sink may call (the seam is
+// never handed a line with a lock of the listener's held): it returns, the
+// lines handed over with that one never reach the seam, and what the job
+// handing it would do next, it does not. First on the caller's thread, in
+// the middle of the two lines one feed() logs: the second is not handed
+// over; feed() writes neither the ring nor the passband store from then
+// on; and the passband store was told to pack nothing more (an old hour
+// pack_hour would pack stays raw). Then on the finish worker, in the middle
+// of an end-of-slot receive's application, just before the pass's store
+// association: none begins, the store stays as it was, and the receive
+// ends there ("frame over" never said).
+void test_abandon_from_the_log_seam() {
+    {
+        Step step("abandon from the log seam: feed()'s lines, on the caller's thread");
+        const fs::path d = fresh_dir("abandon_seam_feed");
+        namespace pb = sstvae::qrss::passband;
+        pb::StoreOptions po;
+        po.fs = 40;   // (an hour file of 576 kB, which tree() reads whole)
+        auto band = std::make_shared<pb::PassbandStore>((d / "passband").string(), po);
+        const std::int64_t old = static_cast<std::int64_t>(t0()) / 3600 - 3;
+        band->write_at(old * band->per_hour(), std::vector<std::complex<float>>(1000, {0.5f, 0.25f}), false);
+        lv::LiveListener* self = nullptr;
+        std::vector<std::string> seam;   // (the caller's thread alone hands lines over here)
+        lv::Seams s = quick_stubs(std::chrono::milliseconds(0));
+        s.log = [&](const std::string& line) {
+            seam.push_back(line);
+            if (contains(line, " of audio missing")) self->abandon();
+        };
+        lv::LiveListener L((d / "live").string(), tiny_config(false), nullptr, band, s);
+        self = &L;
+        L.feed(audio(2 * qcfg::FS, 31), t0() - 10.0);
+        check::is_true(seam.empty() && !L.abandoned(), "seam abandon, feed: (nothing said yet)");
+        // 5 s later than its samples say, and 2 s of digital silence: two
+        // lines, handed over together
+        L.feed(std::vector<double>(2 * qcfg::FS, 0.0), t0() - 3.0);
+        check::is_true(L.abandoned(), "seam abandon, feed: abandoned from the seam");
+        check::equal(seam.size(), std::size_t{1}, "seam abandon, feed: the second line never reached the seam");
+        check::is_true(!seam.empty() && contains(seam.front(), "5.0 s of audio missing"),
+                       "seam abandon, feed: the first did");
+        const std::vector<std::string> lines = L.lines();
+        check::is_true(lines.size() == 2 && contains(lines.back(), "digital silence"),
+                       "seam abandon, feed: both were logged (before it)");
+        const std::map<std::string, std::string> files = tree(d);
+        check::is_true(files.count("live/listener.log") && contains(files.at("live/listener.log"), "digital silence"),
+                       "seam abandon, feed: listener.log has both");
+        const std::optional<double> end = L.audio_end();
+        const std::optional<std::int64_t> next = L.next_index();
+        L.feed(audio(qcfg::FS / 2, 32), t0() - 2.5);
+        check::is_true(L.audio_end() == end && L.next_index() == next, "seam abandon, feed: a feed after does nothing");
+        check::is_true(tree(d) == files, "seam abandon, feed: the passband store and listener.log unchanged after");
+        check::is_true(!band->pack_hour(old) && fs::exists(fs::path(band->raw_path(old))) &&
+                           !fs::exists(fs::path(band->flac_path(old))),
+                       "seam abandon, feed: the passband store packs nothing more");
+        check::equal(seam.size(), std::size_t{1}, "seam abandon, feed: nothing more to the seam");
+        L.close();
+    }
+    {
+        Step step("abandon from the log seam: on the finish worker, before its store association");
+        const fs::path d = fresh_dir("abandon_seam_finish");
+        auto st = std::make_shared<sstvae::qrss::store::Store>((d / "store").string());
+        std::mutex mu;
+        std::condition_variable cv;
+        bool go = false, timed_out = false;
+        std::mutex smu;
+        std::vector<std::string> seam;
+        lv::LiveListener* self = nullptr;
+        lv::Seams s = quick_stubs(std::chrono::milliseconds(0));
+        s.log = [&](const std::string& line) {
+            {
+                std::lock_guard<std::mutex> lk(smu);
+                seam.push_back(line);
+            }
+            if (contains(line, ": signal at 1700.0 Hz")) self->abandon();
+        };
+        // the end-of-slot receive waits until the caller's thread has done
+        // handing lines over: from then on the worker is the only one to
+        s.finish = [&](std::span<const std::complex<float>>, std::span<const std::uint8_t>, std::int64_t,
+                       std::int64_t, const qrss::api::ReceiveConfig&, std::span<const types::Detection>,
+                       std::span<const aq::Hint>) {
+            {
+                std::unique_lock<std::mutex> lk(mu);
+                if (!cv.wait_for(lk, std::chrono::seconds(60), [&] { return go; })) timed_out = true;
+            }
+            lv::FinishResult r;
+            r.passes = {pass(1700.0)};   // a signal no live receive saw: a new tile, said
+            r.heard = 1.0;
+            return r;
+        };
+        lv::LiveListener L((d / "live").string(), tiny_config(true), st, nullptr, s);
+        self = &L;
+        L.feed(audio(17 * qcfg::FS, 41), t0() + 1.0);
+        L.step(t0() + 1.0);   // the slot starts (no live receive before first_s)
+        L.feed(audio(static_cast<std::int64_t>((tiny_end() - t0() - 1.0) * qcfg::FS), 42), tiny_end());
+        L.step(tiny_end());   // its end-of-slot receive, held
+        const std::map<std::string, std::string> store = tree(d / "store");
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            go = true;
+        }
+        cv.notify_all();
+        for (int k = 0; k < 30000 && !L.abandoned(); ++k) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        check::is_true(L.abandoned(), "seam abandon, finish: abandoned from the seam, on the worker");
+        L.close();   // (the worker has left the job)
+        check::is_true(!timed_out, "seam abandon, finish: released, not timed out");
+        check::is_true(tree(d / "store") == store && st->pass_uids().empty(),
+                       "seam abandon, finish: no store association began");
+        const std::string log = read_text(d / "live" / "listener.log");
+        check::is_true(ends_with_text(log, ": signal at 1700.0 Hz\n") && !contains(log, "frame over"),
+                       "seam abandon, finish: listener.log ends with the line it was abandoned on");
+        std::lock_guard<std::mutex> lk(smu);
+        check::is_true(!seam.empty() && contains(seam.back(), ": signal at 1700.0 Hz"),
+                       "seam abandon, finish: and so does the seam");
+    }
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    check::report_crashes_instead_of_prompting();
+    if (argc < 2) {
+        std::fprintf(stderr, "usage: test_qrss_core_listener <golden_qrss dir>\n");
+        return 2;
+    }
+    g_golden = argv[1];
+    // ~20x the measured runtime either way (6 s optimized, about a minute
+    // under ThreadSanitizer, on 4 shared CPUs): expiring means wedged, and
+    // names the step
+    check::Watchdog watchdog(UNDER_TSAN ? 1200.0 : 110.0, "qrss_listener");
+    try {
+        g_tmp = fs::temp_directory_path() / ("qrss_listener_test_" + std::to_string(std::random_device{}()));
+        fs::create_directories(g_tmp);
+        test_pinned_scenarios();
+        test_a_refresh_exception_is_retried();
+        test_threads_feed_and_step();
+        test_the_state_temporary_carries_the_thread();
+        test_close_with_a_receive_in_flight();
+        test_destructor_with_a_receive_in_flight();
+        test_run_replays_to_the_end();
+        test_the_store_is_never_waited_on_under_the_lock();
+        test_abandon_with_a_receive_held();
+        test_abandon_racing();
+        test_abandon_from_the_log_seam();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "FATAL (%s): %s\n", check::current_step.load(), e.what());
+        return 1;
+    }
+    std::error_code ec;
+    fs::remove_all(g_tmp, ec);
+    return check::report("qrss_listener");
+}

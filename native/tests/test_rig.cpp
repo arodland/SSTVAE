@@ -102,6 +102,14 @@ public:
         block();
     }
 
+    void set_frequency_hz(double hz) override {
+        probe_->record("tune");
+        std::lock_guard<std::mutex> lock(probe_->m);
+        probe_->frequency = hz;
+    }
+
+    void tune_antenna() override { probe_->record("atu"); }
+
     double frequency_hz() override {
         probe_->record("freq");
         block();
@@ -473,6 +481,41 @@ void test_polling_pauses_while_transmitting() {
     controller.stop();
 }
 
+void test_tuning_reads_the_dial_back() {
+    auto probe = std::make_shared<Probe>();
+    probe->open_gate();
+    Published pub;
+    rig::RigController controller(pub.freq_fn(), pub.status_fn());
+    rig::RigConfig config;
+    config.poll_interval_s = 60.0;  // so only the tune can cause a second poll
+    check::is_true(!controller.request_frequency(10'141'000.0),
+                   "rig/tune: nothing to tune without a session");
+    controller.start(make(probe), config);
+    pub.wait_for_frequency();
+
+    check::is_true(controller.request_frequency(10'141'000.0), "rig/tune: asked");
+    check::is_true(pub.wait_for_status_containing("10.1410 MHz"),
+                   "rig/tune: tuned, and read straight back rather than a poll later");
+    const std::vector<std::string> calls = probe->call_log();
+    std::size_t tune_idx = calls.size();
+    for (std::size_t i = 0; i < calls.size(); ++i) {
+        if (calls[i] == "tune") tune_idx = i;
+    }
+    check::is_true(tune_idx + 1 < calls.size() && calls[tune_idx + 1] == "freq",
+                   "rig/tune: the readback follows the tune");
+
+    check::is_true(controller.request_antenna_tune(), "rig/atu: asked");
+    check::is_true(pub.wait_for_status_containing("tuner started"),
+                   "rig/atu: the tuner was started and said so");
+
+    controller.pause_polling();
+    check::is_true(!controller.request_frequency(14'070'000.0),
+                   "rig/tune: refused while keyed");
+    check::is_true(!controller.request_antenna_tune(), "rig/atu: refused while keyed");
+    controller.resume_polling();
+    controller.stop();
+}
+
 void test_destruction_stops_a_running_controller() {
     auto probe = std::make_shared<Probe>();
     probe->open_gate();
@@ -498,6 +541,7 @@ int main() {
         test_a_superseded_worker_does_not_publish();
         test_keying_is_not_stuck_behind_status_chatter();
         test_polling_pauses_while_transmitting();
+        test_tuning_reads_the_dial_back();
         test_destruction_stops_a_running_controller();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());

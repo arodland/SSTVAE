@@ -57,8 +57,11 @@ public:
     // an inverted axis or a dropped centring offset still looks like a
     // working preview until something is in it.
     QRect picture_rect() const;
+    const QPixmap& picture() const { return source_; }
 
 protected:
+    // Opens the picture in a viewer to zoom and pan (image_viewer.hpp).
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     // Draws the viewport and, inside it, the 4:3 frame the picture will
     // occupy. **The frame has to be visible before there is a picture**:

@@ -21,6 +21,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSpacerItem>
+#include <QSpinBox>
 #include <QStyle>
 #include <QSizePolicy>
 #include <QStringList>
@@ -30,6 +31,7 @@
 #include <QWidget>
 #include <QtGlobal>
 
+#include <cmath>
 #include <exception>
 #include <memory>
 #include <string>
@@ -652,6 +654,18 @@ QWidget* SettingsDialog::rig_tab() {
                  style::row(page, {new QLabel(tr("Poll"), page), poll_interval_s_,
                                    new QLabel(tr("Lead"), page), ptt_lead_,
                                    new QLabel(tr("Tail"), page), ptt_tail_}));
+    add_gap(form);
+
+    tune_after_change_ = new QCheckBox(tr("Perform tuning after frequency change"), page);
+    tune_after_change_->setObjectName(QStringLiteral("tune_after_change"));
+    tune_after_change_->setChecked(rig.tune_after_change);
+    form->addRow(tune_after_change_);
+    add_check_note(form, page,
+                   style::note(tr("Five seconds after the app changes the radio's frequency, "
+                                  "by hand or from the QRSS schedule, it starts the antenna "
+                                  "tuner (rigctl's G TUNE). The tuner puts a short carrier on "
+                                  "the air."),
+                               page));
 
     // Centred, and set apart from the rows above. Everything else on
     // this tab is a setting that takes effect on OK; these two *do*
@@ -741,6 +755,7 @@ settings::RigConfig SettingsDialog::pending_rig() const {
     rig.poll_interval_s = poll_interval_s_->value();
     rig.ptt_lead_s = ptt_lead_->value();
     rig.ptt_tail_s = ptt_tail_->value();
+    rig.tune_after_change = tune_after_change_->isChecked();
     return rig;
 }
 
@@ -831,6 +846,11 @@ QWidget* SettingsDialog::receive_tab() {
     auto_start_ = new QCheckBox(tr("Start listening when the app opens"), page);
     auto_start_->setChecked(receive.auto_start);
     form->addRow(auto_start_);
+    qrss_auto_start_ = new QCheckBox(
+        tr("In QRSSTVAE mode, start listening when the app opens or you switch to it"), page);
+    qrss_auto_start_->setObjectName(QStringLiteral("qrss_auto_start"));
+    qrss_auto_start_->setChecked(receive.qrss_auto_start);
+    form->addRow(qrss_auto_start_);
     add_gap(form);
 
     autosave_ = new QCheckBox(tr("Save every completed reception automatically"),
@@ -860,6 +880,18 @@ QWidget* SettingsDialog::receive_tab() {
                    style::note(tr("Low-CPU mode only looks for the start of a "
                                   "transmission, so it cannot pick up one already "
                                   "in progress or decode retrospectively."),
+                               page));
+    add_gap(form);
+
+    waterfall_fps_ = new QSpinBox(page);
+    waterfall_fps_->setObjectName(QStringLiteral("waterfall_fps"));
+    waterfall_fps_->setRange(1, 30);
+    waterfall_fps_->setSuffix(tr(" rows/s"));
+    waterfall_fps_->setValue(receive.waterfall_fps);
+    form->addRow(tr("Waterfall speed:"), waterfall_fps_);
+    add_check_note(form, page,
+                   style::note(tr("How many rows a second the SSTVAE waterfall "
+                                  "scrolls. Fewer use less CPU; 20 is smooth."),
                                page));
     add_gap(form);
 
@@ -1045,6 +1077,18 @@ QWidget* SettingsDialog::transmit_tab() {
                     page));
     add_gap(form);
 
+    test_tone_ = new QSpinBox(page);
+    test_tone_->setObjectName(QStringLiteral("test_tone_s"));
+    test_tone_->setRange(5, 300);
+    test_tone_->setSuffix(tr(" s"));
+    test_tone_->setValue(static_cast<int>(std::lround(config_.transmit.test_tone_s)));
+    form->addRow(tr("Test / Tune length"), test_tone_);
+    form->addRow(QString(),
+                 style::note(tr("How long the QRSS schedule's Test / Tune button keys the radio "
+                                "with a 1500 Hz tone."),
+                             page));
+    add_gap(form);
+
     // The transmit level itself stays on the send bar, where it is
     // adjusted, and keeps a short tooltip there. What lives here is the
     // *procedure*, because a tooltip only ever reaches an operator who
@@ -1094,10 +1138,13 @@ void SettingsDialog::apply_to(settings::Config& config) const {
     config.transmit.cw_id = cw_id_->isChecked();
     config.transmit.cw_message = cw_message_->text().toStdString();
     config.transmit.vox_lead_s = vox_lead_->isChecked() ? dsp::VOX_LEAD_DEFAULT_S : 0.0;
+    config.transmit.test_tone_s = test_tone_->value();
     config.receive.auto_start = auto_start_->isChecked();
+    config.receive.qrss_auto_start = qrss_auto_start_->isChecked();
     config.receive.autosave = autosave_->isChecked();
     config.receive.save_audio = save_audio_->isChecked();
     config.receive.low_cpu = low_cpu_->isChecked();
+    config.receive.waterfall_fps = waterfall_fps_->value();
     config.receive.blind_wide = blind_wide_->isChecked();
     config.receive.drift_track =
         drift_track_->currentData().toString().toStdString();

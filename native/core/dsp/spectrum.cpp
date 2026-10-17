@@ -4,6 +4,7 @@
 #include <cmath>
 #include <complex>
 #include <numbers>
+#include <utility>
 
 #include "dsp/fft.hpp"
 
@@ -76,6 +77,34 @@ std::vector<double> reduce_to_width(const std::vector<double>& values, int width
                                    static_cast<long long>(i + 1) * n / width);
         out[i] = *std::max_element(values.begin() + start, values.begin() + stop);
     }
+    return out;
+}
+
+void WaterfallHistory::push(double t, const std::vector<double>& db) {
+    Row r;
+    r.t = t;
+    r.centi_db.resize(db.size());
+    for (std::size_t k = 0; k < db.size(); ++k) {
+        r.centi_db[k] = static_cast<std::uint16_t>(
+            std::clamp(std::round((db[k] + 200.0) * 100.0), 0.0, 65535.0));
+    }
+    rows_.push_back(std::move(r));
+    while (!rows_.empty() && rows_.front().t < t - KEEP_S) {
+        rows_.pop_front();
+        ++first_;
+    }
+}
+
+void WaterfallHistory::clear() {
+    first_ = count();
+    rows_.clear();
+}
+
+std::vector<double> WaterfallHistory::row(std::uint64_t seq) const {
+    if (!has(seq)) return {};
+    const Row& r = rows_[static_cast<std::size_t>(seq - first_)];
+    std::vector<double> out(r.centi_db.size());
+    for (std::size_t k = 0; k < out.size(); ++k) out[k] = r.centi_db[k] / 100.0 - 200.0;
     return out;
 }
 

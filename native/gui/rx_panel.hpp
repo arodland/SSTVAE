@@ -52,6 +52,8 @@ namespace sstvae::gui {
 class AppState;
 class ErrorBanner;
 
+class QrssWindow;
+
 class ReceivePanel : public QWidget {
     Q_OBJECT
 
@@ -68,6 +70,9 @@ public:
     // buffer), so ownership moved to MainWindow while control did not.
     // Null until attached, and every use is guarded.
     void attach_waterfall(Waterfall* waterfall) { waterfall_ = waterfall; }
+    // The QRSS window, which gets the capture ring whenever the waterfall
+    // does (it pipes the audio to the QRSSTVAE listener).
+    void attach_qrss(QrssWindow* qrss) { qrss_ = qrss; }
     // Null-safe accessor. **Not defensive programming for its own
     // sake**: moving the strip up to the window made it a *sibling* of
     // this panel rather than a child, and it is added to the central
@@ -92,6 +97,12 @@ public:
 public slots:
     bool start();
     void stop();
+    // Whether capture also runs the SSTVAE decoder. Off in QRSSTVAE
+    // mode, where the audio only feeds the QRSS listener; switching it
+    // while listening starts or stops the decoder alone.
+    void set_decoding(bool on);
+    bool decoding() const { return decoding_; }
+    bool decoder_running() const { return decoder_running_.load(); }
     void save_current();
     // Reveal the last saved picture in the desktop's file manager.
     void open_saved_folder();
@@ -169,6 +180,7 @@ private:
     QLabel* last_card_ = nullptr;
     QProgressBar* progress_ = nullptr;
     QPointer<Waterfall> waterfall_;
+    QPointer<QrssWindow> qrss_;
     QPushButton* start_button_ = nullptr;
     QPushButton* stop_button_ = nullptr;
     QPushButton* save_button_ = nullptr;
@@ -181,7 +193,12 @@ private:
     std::unique_ptr<rx::SharedState> shared_;
     rx::StopFlag stop_flag_;
     std::thread thread_;
-    std::atomic<bool> running_{false};
+    void start_decoder();
+    void stop_decoder();
+    QString paused_text() const;
+    std::atomic<bool> running_{false};           // capture is open
+    std::atomic<bool> decoder_running_{false};   // the decode loop is
+    bool decoding_ = true;
 
     // The picture currently in the preview, and what to name it. Not
     // necessarily a *finished* reception: the loop reconstructs on every

@@ -148,6 +148,36 @@ void test_clear_keeps_the_clock() {
     check::is_true(rb.tail(10) == ramp(1000, 10), "ring/clear: writes resume cleanly");
 }
 
+// A reader that follows the count sees every sample exactly once,
+// across the wrap seam, whatever the block sizes on either side.
+void test_read_since_sees_every_sample_once() {
+    rx::RingBuffer rb = make(100);
+    std::uint64_t at = 0;
+    std::vector<double> got;
+    int next = 0;
+    for (int block : {7, 33, 99, 1, 64, 100, 13, 58}) {
+        rb.write(ramp(next, block));
+        next += block;
+        std::uint64_t total = 0;
+        const std::vector<double> part = rb.read_since(at, &total);
+        got.insert(got.end(), part.begin(), part.end());
+        at = total;
+    }
+    check::is_true(got == ramp(0, next), "ring/read_since: every sample, once, in order");
+    check::equal(rb.read_since(at).size(), std::size_t{0}, "ring/read_since: nothing new");
+}
+
+void test_read_since_after_falling_behind() {
+    rx::RingBuffer rb = make(100);
+    rb.write(ramp(0, 250));
+    std::uint64_t total = 0;
+    check::is_true(rb.read_since(10, &total) == ramp(150, 100),
+                   "ring/read_since: a reader a buffer behind gets the last capacity()");
+    check::equal(total, std::uint64_t{250}, "ring/read_since: and the count it ends at");
+    check::equal(rb.read_since(400, &total).size(), std::size_t{0},
+                 "ring/read_since: a count past the end (a fresh ring) reads nothing");
+}
+
 }  // namespace
 
 int main() {
@@ -161,6 +191,8 @@ int main() {
         test_tail();
         test_tail_of_an_empty_buffer();
         test_clear_keeps_the_clock();
+        test_read_since_sees_every_sample_once();
+        test_read_since_after_falling_behind();
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FATAL: %s\n", e.what());
         return 1;

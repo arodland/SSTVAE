@@ -1,0 +1,1971 @@
+{
+ "clock": 1760000000.0,
+ "q": 1954752,
+ "scenarios": [
+  {
+   "name": "bookkeeping",
+   "cfg": {
+    "spec": "tiny",
+    "refresh_s": 10.0,
+    "first_s": 25.0
+   },
+   "feeds": [
+    [
+     608000,
+     1,
+     1759276861.0
+    ]
+   ],
+   "steps": [
+    1759276781.0,
+    1759276831.0,
+    1759276836.0,
+    1759276842.0,
+    1759276859.85
+   ],
+   "candidates": [
+    [
+     {
+      "f_hz": 1500.0
+     },
+     {
+      "f_hz": 1610.0
+     }
+    ]
+   ],
+   "detect": [
+    [
+     {
+      "f_hz": 1500.0
+     },
+     {
+      "f_hz": 1610.0
+     }
+    ]
+   ],
+   "receive": [
+    [
+     {
+      "f_hz": 1500.3,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1500.3"
+     },
+     {
+      "f_hz": 1611.0,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1611.0"
+     }
+    ],
+    [
+     {
+      "f_hz": 1501.9,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1501.9"
+     },
+     {
+      "f_hz": 1609.5,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1609.5"
+     }
+    ]
+   ],
+   "finish": [
+    [
+     [
+      {
+       "f_hz": 1500.0,
+       "z_ref": 20.0,
+       "snr": -12.0,
+       "n": 1024,
+       "uid": "u1500.0"
+      },
+      {
+       "f_hz": 1610.0,
+       "z_ref": 20.0,
+       "snr": -12.0,
+       "n": 1024,
+       "uid": "u1610.0"
+      }
+     ],
+     1.0
+    ]
+   ],
+   "restart": true,
+   "expect": {
+    "calls": [
+     [
+      "candidates",
+      1954752,
+      293400,
+      []
+     ],
+     [
+      "detect",
+      1954752,
+      293400,
+      true,
+      [],
+      [
+       1500.0,
+       1610.0
+      ],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      293400,
+      "joint",
+      false,
+      [],
+      [
+       1500.0,
+       1610.0
+      ]
+     ],
+     [
+      "detect",
+      1954752,
+      293400,
+      true,
+      [],
+      [
+       1500.0,
+       1610.0
+      ],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      293400,
+      "joint",
+      false,
+      [],
+      [
+       1500.0,
+       1610.0
+      ]
+     ],
+     [
+      "finish",
+      1954752,
+      293400,
+      293400,
+      60000,
+      "joint",
+      [
+       1500.0,
+       1610.0
+      ],
+      []
+     ]
+    ],
+    "steps": [
+     false,
+     true,
+     false,
+     true,
+     true
+    ],
+    "sink": [
+     "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: signal at 1500.3 Hz",
+     "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: signal at 1611.0 Hz",
+     "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 56% (0 s)",
+     "2025-10-01T00:00:42Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 77% (0 s)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)"
+    ],
+    "lines": [
+     "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: signal at 1500.3 Hz",
+     "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: signal at 1611.0 Hz",
+     "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 56% (0 s)",
+     "2025-10-01T00:00:42Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 77% (0 s)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)"
+    ],
+    "tiles": "[{\"id\": \"1954752-1500\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1500.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": null, \"grid\": null, \"picture_id\": null, \"mode\": null, \"segment\": null, \"cw_text\": null, \"progress\": 1.0, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}, {\"id\": \"1954752-1611\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1610.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": null, \"grid\": null, \"picture_id\": null, \"mode\": null, \"segment\": null, \"cw_text\": null, \"progress\": 1.0, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}]",
+    "state": "{\n \"version\": 1,\n \"updated\": 1760000000.0,\n \"now\": 1759276859.85,\n \"now_utc\": \"2025-10-01T00:00:59Z\",\n \"listening\": true,\n \"source\": \"\",\n \"frame\": \"tiny\",\n \"waveforms\": [\n  \"CE\"\n ],\n \"audio_utc\": \"2025-10-01T00:01:01Z\",\n \"slots\": [],\n \"codec_error\": null,\n \"busy\": null,\n \"tiles\": [\n  {\n   \"id\": \"1954752-1500\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1500.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": null,\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": null,\n   \"segment\": null,\n   \"cw_text\": null,\n   \"progress\": 1.0,\n   \"heard\": 1.0,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  },\n  {\n   \"id\": \"1954752-1611\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1610.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": null,\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": null,\n   \"segment\": null,\n   \"cw_text\": null,\n   \"progress\": 1.0,\n   \"heard\": 1.0,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  }\n ],\n \"log\": [\n  \"2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: frame started\",\n  \"2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: signal at 1500.3 Hz\",\n  \"2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: signal at 1611.0 Hz\",\n  \"2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 56% (0 s)\",\n  \"2025-10-01T00:00:42Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 77% (0 s)\",\n  \"2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)\"\n ],\n \"finished\": [\n  1954752\n ]\n}",
+    "finished": [
+     1954752
+    ],
+    "log": "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: frame started\n2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: signal at 1500.3 Hz\n2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: signal at 1611.0 Hz\n2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 56% (0 s)\n2025-10-01T00:00:42Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 77% (0 s)\n2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)\n",
+    "pictures": {},
+    "restart_tiles": "[{\"id\": \"1954752-1500\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1500.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": null, \"grid\": null, \"picture_id\": null, \"mode\": null, \"segment\": null, \"cw_text\": null, \"progress\": 1.0, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}, {\"id\": \"1954752-1611\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1610.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": null, \"grid\": null, \"picture_id\": null, \"mode\": null, \"segment\": null, \"cw_text\": null, \"progress\": 1.0, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}]",
+    "expired_tiles": "[]"
+   }
+  },
+  {
+   "name": "recheck",
+   "cfg": {
+    "spec": "tiny",
+    "refresh_s": 10.0,
+    "first_s": 25.0,
+    "detect_until_s": 30.0,
+    "recheck_until_s": 45.0
+   },
+   "feeds": [
+    [
+     608000,
+     2,
+     1759276861.0
+    ]
+   ],
+   "steps": [
+    1759276827.0,
+    1759276837.0,
+    1759276847.0,
+    1759276859.85
+   ],
+   "candidates": [
+    [
+     {
+      "f_hz": 1500.0
+     },
+     {
+      "f_hz": 1600.0
+     }
+    ]
+   ],
+   "detect": [
+    [
+     {
+      "f_hz": 1500.0
+     }
+    ],
+    [
+     {
+      "f_hz": 1600.0
+     }
+    ],
+    []
+   ],
+   "receive": [
+    [
+     {
+      "f_hz": 1500.0,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1500.0"
+     }
+    ],
+    [
+     {
+      "f_hz": 1500.0,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1500.0"
+     },
+     {
+      "f_hz": 1600.0,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1600.0"
+     }
+    ]
+   ],
+   "finish": [
+    [
+     [
+      {
+       "f_hz": 1500.0,
+       "z_ref": 20.0,
+       "snr": -12.0,
+       "n": 1024,
+       "uid": "u1500.0"
+      },
+      {
+       "f_hz": 1600.0,
+       "z_ref": 20.0,
+       "snr": -12.0,
+       "n": 1024,
+       "uid": "u1600.0",
+       "header": {
+        "callsign": "AG7EW",
+        "grid": "CN85",
+        "picture_id": 1645922419,
+        "mode": 1,
+        "segment": 0,
+        "codec_id": 53720
+       }
+      }
+     ],
+     1.0
+    ]
+   ],
+   "expect": {
+    "calls": [
+     [
+      "candidates",
+      1954752,
+      293400,
+      []
+     ],
+     [
+      "detect",
+      1954752,
+      293400,
+      true,
+      [],
+      [
+       1500.0,
+       1600.0
+      ],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      293400,
+      "joint",
+      false,
+      [],
+      [
+       1500.0
+      ]
+     ],
+     [
+      "detect",
+      1954752,
+      293400,
+      true,
+      [],
+      [
+       1500.0,
+       1600.0
+      ],
+      [
+       1500.0
+      ]
+     ],
+     [
+      "receive",
+      1954752,
+      293400,
+      "joint",
+      false,
+      [],
+      [
+       1500.0,
+       1600.0
+      ]
+     ],
+     [
+      "receive",
+      1954752,
+      293400,
+      "joint",
+      false,
+      [],
+      [
+       1500.0,
+       1600.0
+      ]
+     ],
+     [
+      "finish",
+      1954752,
+      293400,
+      293400,
+      60000,
+      "joint",
+      [
+       1500.0,
+       1600.0
+      ],
+      []
+     ]
+    ],
+    "steps": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "sink": [
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 49% (0 s)",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)",
+     "2025-10-01T00:00:47Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 86% (0 s)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)"
+    ],
+    "lines": [
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 49% (0 s)",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)",
+     "2025-10-01T00:00:47Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 86% (0 s)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)"
+    ],
+    "tiles": "[{\"id\": \"1954752-1500\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1500.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": null, \"grid\": null, \"picture_id\": null, \"mode\": null, \"segment\": null, \"cw_text\": null, \"progress\": 1.0, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}, {\"id\": \"1954752-1600\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1600.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": \"AG7EW\", \"grid\": \"CN85\", \"picture_id\": \"621ac873\", \"mode\": \"B\", \"segment\": 0, \"cw_text\": null, \"progress\": 1.0, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}]",
+    "state": "{\n \"version\": 1,\n \"updated\": 1760000000.0,\n \"now\": 1759276859.85,\n \"now_utc\": \"2025-10-01T00:00:59Z\",\n \"listening\": true,\n \"source\": \"\",\n \"frame\": \"tiny\",\n \"waveforms\": [\n  \"CE\"\n ],\n \"audio_utc\": \"2025-10-01T00:01:01Z\",\n \"slots\": [],\n \"codec_error\": null,\n \"busy\": null,\n \"tiles\": [\n  {\n   \"id\": \"1954752-1500\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1500.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": null,\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": null,\n   \"segment\": null,\n   \"cw_text\": null,\n   \"progress\": 1.0,\n   \"heard\": 1.0,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  },\n  {\n   \"id\": \"1954752-1600\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1600.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": \"AG7EW\",\n   \"grid\": \"CN85\",\n   \"picture_id\": \"621ac873\",\n   \"mode\": \"B\",\n   \"segment\": 0,\n   \"cw_text\": null,\n   \"progress\": 1.0,\n   \"heard\": 1.0,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  }\n ],\n \"log\": [\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 49% (0 s)\",\n  \"2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz\",\n  \"2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)\",\n  \"2025-10-01T00:00:47Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 86% (0 s)\",\n  \"2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)\"\n ],\n \"finished\": [\n  1954752\n ]\n}",
+    "finished": [
+     1954752
+    ],
+    "log": "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 49% (0 s)\n2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz\n2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)\n2025-10-01T00:00:47Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 86% (0 s)\n2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)\n",
+    "pictures": {}
+   }
+  },
+  {
+   "name": "late_join_hint",
+   "cfg": {
+    "spec": "tiny"
+   },
+   "state": {
+    "tiles": [
+     {
+      "id": "p1954750_1600.0",
+      "q": 1954750,
+      "slot_utc": "",
+      "frame": "tiny",
+      "f_hz": 1600.0,
+      "status": "complete",
+      "mode": "B",
+      "segment": 0,
+      "callsign": "KC2G",
+      "updated": 1759276801.0
+     }
+    ]
+   },
+   "feeds": [
+    [
+     189380,
+     3,
+     1759276859.35
+    ]
+   ],
+   "steps": [
+    1759276835.6775,
+    1759276859.85
+   ],
+   "candidates": [
+    []
+   ],
+   "detect": [
+    []
+   ],
+   "receive": [
+    []
+   ],
+   "finish": [
+    [
+     [
+      {
+       "f_hz": 1600.0,
+       "z_ref": 20.0,
+       "snr": -12.0,
+       "n": 1024,
+       "uid": "u1600.0",
+       "header": {
+        "callsign": "KC2G",
+        "grid": "CN85",
+        "picture_id": 1645922419,
+        "mode": 1,
+        "segment": 1,
+        "codec_id": 53720
+       }
+      }
+     ],
+     0.35
+    ]
+   ],
+   "expect": {
+    "calls": [
+     [
+      "finish",
+      1954752,
+      293400,
+      94560,
+      60000,
+      "joint",
+      [],
+      [
+       1600.0
+      ]
+     ]
+    ],
+    "steps": [
+     true,
+     true
+    ],
+    "sink": [
+     "2025-10-01T00:00:35Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 1 pass(es), 35% heard: no whole-slot search (0 s)"
+    ],
+    "lines": [
+     "2025-10-01T00:00:35Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 1 pass(es), 35% heard: no whole-slot search (0 s)"
+    ],
+    "tiles": "[{\"id\": \"1954752-1600\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1600.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": \"KC2G\", \"grid\": \"CN85\", \"picture_id\": \"621ac873\", \"mode\": \"B\", \"segment\": 1, \"cw_text\": null, \"progress\": 1.0, \"heard\": 0.35, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}, {\"id\": \"p1954750_1600.0\", \"q\": 1954750, \"slot_utc\": \"\", \"frame\": \"tiny\", \"f_hz\": 1600.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": null, \"z_ref\": null, \"callsign\": \"KC2G\", \"grid\": null, \"picture_id\": null, \"mode\": \"B\", \"segment\": 0, \"cw_text\": null, \"progress\": 0.0, \"heard\": 0.0, \"received\": 0.0, \"mean_w_db\": null, \"confidence\": [], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276801.0, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}]",
+    "state": "{\n \"version\": 1,\n \"updated\": 1760000000.0,\n \"now\": 1759276859.85,\n \"now_utc\": \"2025-10-01T00:00:59Z\",\n \"listening\": true,\n \"source\": \"\",\n \"frame\": \"tiny\",\n \"waveforms\": [\n  \"CE\"\n ],\n \"audio_utc\": \"2025-10-01T00:00:59Z\",\n \"slots\": [],\n \"codec_error\": null,\n \"busy\": null,\n \"tiles\": [\n  {\n   \"id\": \"1954752-1600\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1600.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": \"KC2G\",\n   \"grid\": \"CN85\",\n   \"picture_id\": \"621ac873\",\n   \"mode\": \"B\",\n   \"segment\": 1,\n   \"cw_text\": null,\n   \"progress\": 1.0,\n   \"heard\": 0.35,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  },\n  {\n   \"id\": \"p1954750_1600.0\",\n   \"q\": 1954750,\n   \"slot_utc\": \"\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1600.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": null,\n   \"z_ref\": null,\n   \"callsign\": \"KC2G\",\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": \"B\",\n   \"segment\": 0,\n   \"cw_text\": null,\n   \"progress\": 0.0,\n   \"heard\": 0.0,\n   \"received\": 0.0,\n   \"mean_w_db\": null,\n   \"confidence\": [],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276801.0,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  }\n ],\n \"log\": [\n  \"2025-10-01T00:00:35Z slot 2025-10-01T00:00:00Z: frame started\",\n  \"2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz\",\n  \"2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 1 pass(es), 35% heard: no whole-slot search (0 s)\"\n ],\n \"finished\": [\n  1954750,\n  1954752\n ]\n}",
+    "finished": [
+     1954750,
+     1954752
+    ],
+    "log": "2025-10-01T00:00:35Z slot 2025-10-01T00:00:00Z: frame started\n2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz\n2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 1 pass(es), 35% heard: no whole-slot search (0 s)\n",
+    "pictures": {}
+   }
+  },
+  {
+   "name": "two_dials",
+   "cfg": {
+    "spec": "tiny"
+   },
+   "dial_guard": [
+    2.0,
+    2.0
+   ],
+   "dial_file": "{\"t\": 1759276201.0, \"dial_hz\": 10138700, \"why\": \"start\"}\n{\"t\": 1759276821.0, \"dial_hz\": 14095600, \"why\": \"schedule\"}\n",
+   "feeds": [
+    [
+     634799,
+     4,
+     1759276864.35
+    ]
+   ],
+   "steps": [
+    1759276831.0,
+    1759276859.85
+   ],
+   "candidates": [
+    [
+     {
+      "f_hz": 1500.0
+     }
+    ]
+   ],
+   "detect": [
+    [
+     {
+      "f_hz": 1500.0
+     }
+    ]
+   ],
+   "receive": [
+    [
+     {
+      "f_hz": 1500.0,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1500.0"
+     }
+    ]
+   ],
+   "finish": [
+    [
+     [
+      {
+       "f_hz": 1500.0,
+       "z_ref": 20.0,
+       "snr": -12.0,
+       "n": 1024,
+       "uid": "u1500.0"
+      }
+     ],
+     0.4
+    ],
+    [
+     [
+      {
+       "f_hz": 1500.0,
+       "z_ref": 20.0,
+       "snr": -12.0,
+       "n": 1024,
+       "uid": "u1500.0"
+      }
+     ],
+     0.6
+    ]
+   ],
+   "expect": {
+    "calls": [
+     [
+      "candidates",
+      1954752,
+      293400,
+      []
+     ],
+     [
+      "detect",
+      1954752,
+      293400,
+      true,
+      [
+       [
+        18.0,
+        58.35
+       ]
+      ],
+      [
+       1500.0
+      ],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      293400,
+      "joint",
+      false,
+      [
+       [
+        18.0,
+        58.35
+       ]
+      ],
+      [
+       1500.0
+      ]
+     ],
+     [
+      "finish",
+      1954752,
+      293400,
+      132000,
+      60000,
+      "joint",
+      [
+       1500.0
+      ],
+      []
+     ],
+     [
+      "finish",
+      1954752,
+      293400,
+      145400,
+      60000,
+      "joint",
+      [],
+      []
+     ]
+    ],
+    "steps": [
+     true,
+     true
+    ],
+    "sink": [
+     "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz (dial 10.138700 MHz)",
+     "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 56% (0 s)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz (dial 14.095600 MHz)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es), on 2 dials (0 s)"
+    ],
+    "lines": [
+     "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz (dial 10.138700 MHz)",
+     "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 56% (0 s)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz (dial 14.095600 MHz)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es), on 2 dials (0 s)"
+    ],
+    "tiles": "[{\"id\": \"1954752-1500\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1500.0, \"dial_hz\": 10138700, \"status\": \"complete\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": null, \"grid\": null, \"picture_id\": null, \"mode\": null, \"segment\": null, \"cw_text\": null, \"progress\": 1.0, \"heard\": 0.4, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}, {\"id\": \"1954752-1500b\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1500.0, \"dial_hz\": 14095600, \"status\": \"complete\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": null, \"grid\": null, \"picture_id\": null, \"mode\": null, \"segment\": null, \"cw_text\": null, \"progress\": 1.0, \"heard\": 0.6, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}]",
+    "state": "{\n \"version\": 1,\n \"updated\": 1760000000.0,\n \"now\": 1759276859.85,\n \"now_utc\": \"2025-10-01T00:00:59Z\",\n \"listening\": true,\n \"source\": \"\",\n \"frame\": \"tiny\",\n \"waveforms\": [\n  \"CE\"\n ],\n \"audio_utc\": \"2025-10-01T00:01:04Z\",\n \"slots\": [],\n \"codec_error\": null,\n \"busy\": null,\n \"tiles\": [\n  {\n   \"id\": \"1954752-1500\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1500.0,\n   \"dial_hz\": 10138700,\n   \"status\": \"complete\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": null,\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": null,\n   \"segment\": null,\n   \"cw_text\": null,\n   \"progress\": 1.0,\n   \"heard\": 0.4,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  },\n  {\n   \"id\": \"1954752-1500b\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1500.0,\n   \"dial_hz\": 14095600,\n   \"status\": \"complete\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": null,\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": null,\n   \"segment\": null,\n   \"cw_text\": null,\n   \"progress\": 1.0,\n   \"heard\": 0.6,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  }\n ],\n \"log\": [\n  \"2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: frame started\",\n  \"2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz (dial 10.138700 MHz)\",\n  \"2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 56% (0 s)\",\n  \"2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz (dial 14.095600 MHz)\",\n  \"2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es), on 2 dials (0 s)\"\n ],\n \"finished\": [\n  1954752\n ]\n}",
+    "finished": [
+     1954752
+    ],
+    "log": "2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: frame started\n2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz (dial 10.138700 MHz)\n2025-10-01T00:00:31Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 56% (0 s)\n2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz (dial 14.095600 MHz)\n2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es), on 2 dials (0 s)\n",
+    "pictures": {}
+   }
+  },
+  {
+   "name": "waveform_switch",
+   "cfg": {
+    "spec": "tiny",
+    "waveforms": [
+     0,
+     1
+    ],
+    "refresh_s": 10.0
+   },
+   "feeds": [
+    [
+     1120000,
+     5,
+     1759276926.0
+    ]
+   ],
+   "steps": [
+    1759276827.0,
+    1759276837.0,
+    1759276847.0,
+    1759276857.0
+   ],
+   "candidates": [
+    []
+   ],
+   "detect": [
+    [
+     {
+      "f_hz": 1500.0,
+      "waveform": 0,
+      "z_ref": 10.0,
+      "method": "preamble"
+     }
+    ]
+   ],
+   "receive": [
+    [
+     {
+      "f_hz": 1500.0,
+      "z_ref": 10.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1500.0",
+      "waveform": 0
+     },
+     {
+      "f_hz": 1560.0,
+      "z_ref": 9.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1560.0",
+      "waveform": 0
+     }
+    ],
+    [
+     {
+      "f_hz": 1509.5,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1509.5",
+      "waveform": 1
+     }
+    ],
+    [
+     {
+      "f_hz": 1500.2,
+      "z_ref": 15.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1500.2",
+      "waveform": 0
+     }
+    ],
+    [
+     {
+      "f_hz": 1500.1,
+      "z_ref": 12.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1500.1",
+      "waveform": 0
+     }
+    ]
+   ],
+   "finish": [
+    [
+     [
+      {
+       "f_hz": 1500.1,
+       "z_ref": 12.0,
+       "snr": -12.0,
+       "n": 1024,
+       "uid": "u1500.1",
+       "waveform": 0
+      }
+     ],
+     1.0
+    ]
+   ],
+   "expect": {
+    "calls": [
+     [
+      "candidates",
+      1954752,
+      294370,
+      []
+     ],
+     [
+      "detect",
+      1954752,
+      294370,
+      true,
+      [
+       [
+        -15.0,
+        -14.982
+       ]
+      ],
+      [],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      294370,
+      "joint",
+      false,
+      [
+       [
+        -15.0,
+        -14.982
+       ]
+      ],
+      [
+       1500.0
+      ]
+     ],
+     [
+      "detect",
+      1954752,
+      294370,
+      true,
+      [
+       [
+        -15.0,
+        -14.982
+       ]
+      ],
+      [],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      294370,
+      "joint",
+      false,
+      [
+       [
+        -15.0,
+        -14.982
+       ]
+      ],
+      [
+       1500.0
+      ]
+     ],
+     [
+      "detect",
+      1954752,
+      294370,
+      true,
+      [
+       [
+        -15.0,
+        -14.982
+       ]
+      ],
+      [],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      294370,
+      "joint",
+      false,
+      [
+       [
+        -15.0,
+        -14.982
+       ]
+      ],
+      [
+       1500.0
+      ]
+     ],
+     [
+      "detect",
+      1954752,
+      294370,
+      true,
+      [
+       [
+        -15.0,
+        -14.982
+       ]
+      ],
+      [],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      294370,
+      "joint",
+      false,
+      [
+       [
+        -15.0,
+        -14.982
+       ]
+      ],
+      [
+       1500.0
+      ]
+     ]
+    ],
+    "steps": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "sink": [
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz, waveform CE",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1560.0 Hz, waveform CE",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 49% (0 s)",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: the signal at 1500.0 Hz is waveform L (Z_ref 20.0 against 10.0 as CE)",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 67% (0 s)"
+    ],
+    "lines": [
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz, waveform CE",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1560.0 Hz, waveform CE",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 49% (0 s)",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: the signal at 1500.0 Hz is waveform L (Z_ref 20.0 against 10.0 as CE)",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 67% (0 s)"
+    ],
+    "tiles": "[{\"id\": \"1954752-1500\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"l-tiny\", \"f_hz\": 1509.5, \"dial_hz\": null, \"status\": \"receiving\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": null, \"grid\": null, \"picture_id\": null, \"mode\": null, \"segment\": null, \"cw_text\": null, \"progress\": 0.6717357839249894, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276837.0, \"note\": \"\", \"uid\": null, \"waveform\": \"L\"}, {\"id\": \"1954752-1560\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1560.0, \"dial_hz\": null, \"status\": \"receiving\", \"snr_db\": -12.0, \"z_ref\": 9.0, \"callsign\": null, \"grid\": null, \"picture_id\": null, \"mode\": null, \"segment\": null, \"cw_text\": null, \"progress\": 0.4851425106124924, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276827.0, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}]",
+    "state": "{\n \"version\": 1,\n \"updated\": 1760000000.0,\n \"now\": 1759276857.0,\n \"now_utc\": \"2025-10-01T00:00:57Z\",\n \"listening\": true,\n \"source\": \"\",\n \"frame\": \"tiny\",\n \"waveforms\": [\n  \"CE\",\n  \"L\"\n ],\n \"audio_utc\": \"2025-10-01T00:02:06Z\",\n \"slots\": [\n  {\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"progress\": 1.0,\n   \"signals\": 2\n  }\n ],\n \"codec_error\": null,\n \"busy\": null,\n \"tiles\": [\n  {\n   \"id\": \"1954752-1500\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"l-tiny\",\n   \"f_hz\": 1509.5,\n   \"dial_hz\": null,\n   \"status\": \"receiving\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": null,\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": null,\n   \"segment\": null,\n   \"cw_text\": null,\n   \"progress\": 0.6717357839249894,\n   \"heard\": 1.0,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276837.0,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"L\"\n  },\n  {\n   \"id\": \"1954752-1560\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1560.0,\n   \"dial_hz\": null,\n   \"status\": \"receiving\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 9.0,\n   \"callsign\": null,\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": null,\n   \"segment\": null,\n   \"cw_text\": null,\n   \"progress\": 0.4851425106124924,\n   \"heard\": 1.0,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276827.0,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  }\n ],\n \"log\": [\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz, waveform CE\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1560.0 Hz, waveform CE\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 49% (0 s)\",\n  \"2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: the signal at 1500.0 Hz is waveform L (Z_ref 20.0 against 10.0 as CE)\",\n  \"2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 67% (0 s)\"\n ],\n \"finished\": []\n}",
+    "finished": [],
+    "log": "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz, waveform CE\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1560.0 Hz, waveform CE\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 49% (0 s)\n2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: the signal at 1500.0 Hz is waveform L (Z_ref 20.0 against 10.0 as CE)\n2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 67% (0 s)\n",
+    "pictures": {}
+   }
+  },
+  {
+   "name": "ghost_and_snr_cut",
+   "cfg": {
+    "spec": "tiny",
+    "refresh_s": 10.0
+   },
+   "feeds": [
+    [
+     608000,
+     6,
+     1759276861.0
+    ]
+   ],
+   "steps": [
+    1759276827.0,
+    1759276837.0,
+    1759276859.85
+   ],
+   "candidates": [
+    []
+   ],
+   "detect": [
+    [
+     {
+      "f_hz": 1500.0
+     }
+    ]
+   ],
+   "receive": [
+    [
+     {
+      "f_hz": 1500.0,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1500.0",
+      "header": {
+       "callsign": "AG7EW",
+       "grid": "CN85",
+       "picture_id": 1645922419,
+       "mode": 1,
+       "segment": 0,
+       "codec_id": 53720
+      }
+     },
+     {
+      "f_hz": 1700.0,
+      "z_ref": 20.0,
+      "snr": 3.1,
+      "n": 1024,
+      "uid": "u1700.0"
+     },
+     {
+      "f_hz": 5000.0,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u5000.0"
+     },
+     {
+      "f_hz": 250.0,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u250.0"
+     },
+     {
+      "f_hz": 1800.0,
+      "z_ref": 20.0,
+      "snr": 2.0,
+      "n": 1024,
+      "uid": "u1800.0",
+      "cw": "AG7EW"
+     },
+     {
+      "f_hz": 1900.0,
+      "z_ref": 20.0,
+      "snr": -5.9,
+      "n": 1024,
+      "uid": "u1900.0"
+     }
+    ],
+    [
+     {
+      "f_hz": 1500.4,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1500.4"
+     },
+     {
+      "f_hz": 1700.2,
+      "z_ref": 20.0,
+      "snr": -6.0,
+      "n": 1024,
+      "uid": "u1700.2"
+     }
+    ]
+   ],
+   "finish": [
+    [
+     [
+      {
+       "f_hz": 1500.0,
+       "z_ref": 20.0,
+       "snr": -12.0,
+       "n": 1024,
+       "uid": "u1500.0"
+      },
+      {
+       "f_hz": 1700.0,
+       "z_ref": 20.0,
+       "snr": -6.5,
+       "n": 1024,
+       "uid": "u1700.0"
+      }
+     ],
+     1.0
+    ]
+   ],
+   "expect": {
+    "calls": [
+     [
+      "candidates",
+      1954752,
+      293400,
+      []
+     ],
+     [
+      "detect",
+      1954752,
+      293400,
+      true,
+      [],
+      [],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      293400,
+      "joint",
+      false,
+      [],
+      [
+       1500.0
+      ]
+     ],
+     [
+      "detect",
+      1954752,
+      293400,
+      true,
+      [],
+      [],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      293400,
+      "joint",
+      false,
+      [],
+      [
+       1500.0
+      ]
+     ],
+     [
+      "finish",
+      1954752,
+      293400,
+      293400,
+      60000,
+      "joint",
+      [
+       1500.0
+      ],
+      []
+     ]
+    ],
+    "steps": [
+     true,
+     true,
+     true
+    ],
+    "sink": [
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1800.0 Hz",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 6 signal(s) at 49% (0 s)",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: signal at 1700.2 Hz",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)"
+    ],
+    "lines": [
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1800.0 Hz",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 6 signal(s) at 49% (0 s)",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: signal at 1700.2 Hz",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)"
+    ],
+    "tiles": "[{\"id\": \"1954752-1500\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1500.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": \"AG7EW\", \"grid\": \"CN85\", \"picture_id\": \"621ac873\", \"mode\": \"B\", \"segment\": 0, \"cw_text\": null, \"progress\": 1.0, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}, {\"id\": \"1954752-1700\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1700.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": -6.5, \"z_ref\": 20.0, \"callsign\": null, \"grid\": null, \"picture_id\": null, \"mode\": null, \"segment\": null, \"cw_text\": null, \"progress\": 1.0, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}, {\"id\": \"1954752-1800\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1800.0, \"dial_hz\": null, \"status\": \"lost\", \"snr_db\": 2.0, \"z_ref\": 20.0, \"callsign\": null, \"grid\": null, \"picture_id\": null, \"mode\": null, \"segment\": null, \"cw_text\": \"AG7EW\", \"progress\": 0.4873477038425492, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}]",
+    "state": "{\n \"version\": 1,\n \"updated\": 1760000000.0,\n \"now\": 1759276859.85,\n \"now_utc\": \"2025-10-01T00:00:59Z\",\n \"listening\": true,\n \"source\": \"\",\n \"frame\": \"tiny\",\n \"waveforms\": [\n  \"CE\"\n ],\n \"audio_utc\": \"2025-10-01T00:01:01Z\",\n \"slots\": [],\n \"codec_error\": null,\n \"busy\": null,\n \"tiles\": [\n  {\n   \"id\": \"1954752-1500\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1500.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": \"AG7EW\",\n   \"grid\": \"CN85\",\n   \"picture_id\": \"621ac873\",\n   \"mode\": \"B\",\n   \"segment\": 0,\n   \"cw_text\": null,\n   \"progress\": 1.0,\n   \"heard\": 1.0,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  },\n  {\n   \"id\": \"1954752-1700\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1700.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": -6.5,\n   \"z_ref\": 20.0,\n   \"callsign\": null,\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": null,\n   \"segment\": null,\n   \"cw_text\": null,\n   \"progress\": 1.0,\n   \"heard\": 1.0,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  },\n  {\n   \"id\": \"1954752-1800\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1800.0,\n   \"dial_hz\": null,\n   \"status\": \"lost\",\n   \"snr_db\": 2.0,\n   \"z_ref\": 20.0,\n   \"callsign\": null,\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": null,\n   \"segment\": null,\n   \"cw_text\": \"AG7EW\",\n   \"progress\": 0.4873477038425492,\n   \"heard\": 1.0,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  }\n ],\n \"log\": [\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1800.0 Hz\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 6 signal(s) at 49% (0 s)\",\n  \"2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: signal at 1700.2 Hz\",\n  \"2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)\",\n  \"2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)\"\n ],\n \"finished\": [\n  1954752\n ]\n}",
+    "finished": [
+     1954752
+    ],
+    "log": "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1800.0 Hz\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 6 signal(s) at 49% (0 s)\n2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: signal at 1700.2 Hz\n2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)\n2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)\n",
+    "pictures": {}
+   }
+  },
+  {
+   "name": "provisional_picture",
+   "cfg": {
+    "spec": "tiny",
+    "refresh_s": 10.0,
+    "render": true
+   },
+   "feeds": [
+    [
+     608000,
+     7,
+     1759276861.0
+    ]
+   ],
+   "steps": [
+    1759276827.0,
+    1759276837.0,
+    1759276847.0,
+    1759276859.85
+   ],
+   "candidates": [
+    []
+   ],
+   "detect": [
+    [
+     {
+      "f_hz": 1500.0
+     }
+    ]
+   ],
+   "receive": [
+    [
+     {
+      "f_hz": 1500.0,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": -1,
+      "uid": "u1500.0"
+     }
+    ],
+    [
+     {
+      "f_hz": 1500.0,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": -1,
+      "uid": "u1500.0",
+      "header": {
+       "callsign": "AG7EW",
+       "grid": "CN85",
+       "picture_id": 1645922419,
+       "mode": 1,
+       "segment": 1,
+       "codec_id": 53720
+      }
+     }
+    ],
+    [
+     {
+      "f_hz": 1500.0,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": -1,
+      "uid": "u1500.0"
+     }
+    ]
+   ],
+   "finish": [
+    [
+     [
+      {
+       "f_hz": 1500.0,
+       "z_ref": 20.0,
+       "snr": -12.0,
+       "n": -1,
+       "uid": "u1500.0"
+      }
+     ],
+     1.0
+    ]
+   ],
+   "expect": {
+    "calls": [
+     [
+      "candidates",
+      1954752,
+      293400,
+      []
+     ],
+     [
+      "detect",
+      1954752,
+      293400,
+      true,
+      [],
+      [],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      293400,
+      "joint",
+      false,
+      [],
+      [
+       1500.0
+      ]
+     ],
+     [
+      "detect",
+      1954752,
+      293400,
+      true,
+      [],
+      [],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      293400,
+      "joint",
+      false,
+      [],
+      [
+       1500.0
+      ]
+     ],
+     [
+      "detect",
+      1954752,
+      293400,
+      true,
+      [],
+      [],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      293400,
+      "joint",
+      false,
+      [],
+      [
+       1500.0
+      ]
+     ],
+     [
+      "finish",
+      1954752,
+      293400,
+      293400,
+      60000,
+      "joint",
+      [
+       1500.0
+      ],
+      []
+     ]
+    ],
+    "steps": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "sink": [
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 49% (0 s)",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 67% (0 s)",
+     "2025-10-01T00:00:47Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 86% (0 s)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 1 pass(es) (0 s)"
+    ],
+    "lines": [
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 49% (0 s)",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 67% (0 s)",
+     "2025-10-01T00:00:47Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 86% (0 s)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 1 pass(es) (0 s)"
+    ],
+    "tiles": "[{\"id\": \"1954752-1500\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1500.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": \"AG7EW\", \"grid\": \"CN85\", \"picture_id\": \"621ac873\", \"mode\": \"B\", \"segment\": 1, \"cw_text\": null, \"progress\": 1.0, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null], \"passes\": 1, \"image\": \"tiles/1954752-1500.png\", \"image_rev\": 4, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}]",
+    "state": "{\n \"version\": 1,\n \"updated\": 1760000000.0,\n \"now\": 1759276859.85,\n \"now_utc\": \"2025-10-01T00:00:59Z\",\n \"listening\": true,\n \"source\": \"\",\n \"frame\": \"tiny\",\n \"waveforms\": [\n  \"CE\"\n ],\n \"audio_utc\": \"2025-10-01T00:01:01Z\",\n \"slots\": [],\n \"codec_error\": null,\n \"busy\": null,\n \"tiles\": [\n  {\n   \"id\": \"1954752-1500\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1500.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": \"AG7EW\",\n   \"grid\": \"CN85\",\n   \"picture_id\": \"621ac873\",\n   \"mode\": \"B\",\n   \"segment\": 1,\n   \"cw_text\": null,\n   \"progress\": 1.0,\n   \"heard\": 1.0,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null\n   ],\n   \"passes\": 1,\n   \"image\": \"tiles/1954752-1500.png\",\n   \"image_rev\": 4,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  }\n ],\n \"log\": [\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 49% (0 s)\",\n  \"2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 67% (0 s)\",\n  \"2025-10-01T00:00:47Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 86% (0 s)\",\n  \"2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 1 pass(es) (0 s)\"\n ],\n \"finished\": [\n  1954752\n ]\n}",
+    "finished": [
+     1954752
+    ],
+    "log": "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 49% (0 s)\n2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 67% (0 s)\n2025-10-01T00:00:47Z slot 2025-10-01T00:00:00Z: 1 signal(s) at 86% (0 s)\n2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 1 pass(es) (0 s)\n",
+    "pictures": {
+     "1954752-1500.png": [
+      8,
+      6,
+      [
+       111
+      ]
+     ]
+    }
+   }
+  },
+  {
+   "name": "due_hint_ce",
+   "cfg": {
+    "spec": "tiny",
+    "refresh_s": 5.0
+   },
+   "state": {
+    "tiles": [
+     {
+      "id": "p1954750_1600.0",
+      "q": 1954750,
+      "slot_utc": "",
+      "frame": "tiny",
+      "f_hz": 1600.0,
+      "status": "complete",
+      "mode": "B",
+      "segment": 0,
+      "callsign": "KC2G",
+      "updated": 1759276801.0
+     },
+     {
+      "id": "p1954748_1720.0",
+      "q": 1954748,
+      "slot_utc": "",
+      "frame": "tiny",
+      "f_hz": 1720.0,
+      "status": "complete",
+      "mode": "C",
+      "segment": 0,
+      "callsign": "KC2G",
+      "updated": 1759276801.0
+     }
+    ]
+   },
+   "feeds": [
+    [
+     528000,
+     8,
+     1759276851.0
+    ]
+   ],
+   "steps": [
+    1759276827.0,
+    1759276832.0,
+    1759276837.0,
+    1759276859.85
+   ],
+   "candidates": [
+    [
+     {
+      "f_hz": 1500.0
+     },
+     {
+      "f_hz": 1600.0
+     },
+     {
+      "f_hz": 1720.0
+     }
+    ]
+   ],
+   "detect": [
+    [
+     {
+      "f_hz": 1500.0
+     },
+     {
+      "f_hz": 1720.0
+     }
+    ]
+   ],
+   "receive": [
+    [
+     {
+      "f_hz": 1500.0,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1500.0"
+     },
+     {
+      "f_hz": 1720.0,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1720.0",
+      "header": {
+       "callsign": "AG7EW",
+       "grid": "CN85",
+       "picture_id": 1645922419,
+       "mode": 1,
+       "segment": 2,
+       "codec_id": 53720
+      }
+     }
+    ]
+   ],
+   "finish": [
+    [
+     [
+      {
+       "f_hz": 1500.0,
+       "z_ref": 20.0,
+       "snr": -12.0,
+       "n": 1024,
+       "uid": "u1500.0"
+      },
+      {
+       "f_hz": 1600.0,
+       "z_ref": 20.0,
+       "snr": -12.0,
+       "n": 1024,
+       "uid": "u1600.0"
+      }
+     ],
+     1.0
+    ]
+   ],
+   "expect": {
+    "calls": [
+     [
+      "candidates",
+      1954752,
+      293400,
+      [
+       1600.0,
+       1720.0
+      ]
+     ],
+     [
+      "detect",
+      1954752,
+      293400,
+      true,
+      [
+       [
+        49.984,
+        58.35
+       ]
+      ],
+      [
+       1500.0,
+       1600.0,
+       1720.0
+      ],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      293400,
+      "joint",
+      false,
+      [
+       [
+        49.984,
+        58.35
+       ]
+      ],
+      [
+       1500.0,
+       1720.0
+      ]
+     ],
+     [
+      "detect",
+      1954752,
+      293400,
+      true,
+      [
+       [
+        49.984,
+        58.35
+       ]
+      ],
+      [
+       1500.0,
+       1600.0,
+       1720.0
+      ],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      293400,
+      "joint",
+      false,
+      [
+       [
+        49.984,
+        58.35
+       ]
+      ],
+      [
+       1500.0,
+       1720.0
+      ]
+     ],
+     [
+      "detect",
+      1954752,
+      293400,
+      true,
+      [
+       [
+        49.984,
+        58.35
+       ]
+      ],
+      [
+       1500.0,
+       1600.0,
+       1720.0
+      ],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      293400,
+      "joint",
+      false,
+      [
+       [
+        49.984,
+        58.35
+       ]
+      ],
+      [
+       1500.0,
+       1720.0
+      ]
+     ],
+     [
+      "finish",
+      1954752,
+      293400,
+      259936,
+      60000,
+      "joint",
+      [
+       1500.0,
+       1720.0
+      ],
+      [
+       1600.0,
+       1720.0
+      ]
+     ]
+    ],
+    "steps": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "sink": [
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: a later pass is due at 1600.0, 1720.0 Hz",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1720.0 Hz",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 49% (0 s)",
+     "2025-10-01T00:00:32Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 58% (0 s)",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)"
+    ],
+    "lines": [
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: a later pass is due at 1600.0, 1720.0 Hz",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1720.0 Hz",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 49% (0 s)",
+     "2025-10-01T00:00:32Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 58% (0 s)",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)"
+    ],
+    "tiles": "[{\"id\": \"1954752-1500\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1500.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": null, \"grid\": null, \"picture_id\": null, \"mode\": null, \"segment\": null, \"cw_text\": null, \"progress\": 1.0, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}, {\"id\": \"1954752-1600\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1600.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": null, \"grid\": null, \"picture_id\": null, \"mode\": null, \"segment\": null, \"cw_text\": null, \"progress\": 1.0, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}, {\"id\": \"1954752-1720\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1720.0, \"dial_hz\": null, \"status\": \"lost\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": \"AG7EW\", \"grid\": \"CN85\", \"picture_id\": \"621ac873\", \"mode\": \"B\", \"segment\": 2, \"cw_text\": null, \"progress\": 0.6747891283973758, \"heard\": 0.9369072164948453, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}, {\"id\": \"p1954750_1600.0\", \"q\": 1954750, \"slot_utc\": \"\", \"frame\": \"tiny\", \"f_hz\": 1600.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": null, \"z_ref\": null, \"callsign\": \"KC2G\", \"grid\": null, \"picture_id\": null, \"mode\": \"B\", \"segment\": 0, \"cw_text\": null, \"progress\": 0.0, \"heard\": 0.0, \"received\": 0.0, \"mean_w_db\": null, \"confidence\": [], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276801.0, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}, {\"id\": \"p1954748_1720.0\", \"q\": 1954748, \"slot_utc\": \"\", \"frame\": \"tiny\", \"f_hz\": 1720.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": null, \"z_ref\": null, \"callsign\": \"KC2G\", \"grid\": null, \"picture_id\": null, \"mode\": \"C\", \"segment\": 0, \"cw_text\": null, \"progress\": 0.0, \"heard\": 0.0, \"received\": 0.0, \"mean_w_db\": null, \"confidence\": [], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276801.0, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}]",
+    "state": "{\n \"version\": 1,\n \"updated\": 1760000000.0,\n \"now\": 1759276859.85,\n \"now_utc\": \"2025-10-01T00:00:59Z\",\n \"listening\": true,\n \"source\": \"\",\n \"frame\": \"tiny\",\n \"waveforms\": [\n  \"CE\"\n ],\n \"audio_utc\": \"2025-10-01T00:00:51Z\",\n \"slots\": [],\n \"codec_error\": null,\n \"busy\": null,\n \"tiles\": [\n  {\n   \"id\": \"1954752-1500\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1500.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": null,\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": null,\n   \"segment\": null,\n   \"cw_text\": null,\n   \"progress\": 1.0,\n   \"heard\": 1.0,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  },\n  {\n   \"id\": \"1954752-1600\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1600.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": null,\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": null,\n   \"segment\": null,\n   \"cw_text\": null,\n   \"progress\": 1.0,\n   \"heard\": 1.0,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  },\n  {\n   \"id\": \"1954752-1720\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1720.0,\n   \"dial_hz\": null,\n   \"status\": \"lost\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": \"AG7EW\",\n   \"grid\": \"CN85\",\n   \"picture_id\": \"621ac873\",\n   \"mode\": \"B\",\n   \"segment\": 2,\n   \"cw_text\": null,\n   \"progress\": 0.6747891283973758,\n   \"heard\": 0.9369072164948453,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  },\n  {\n   \"id\": \"p1954750_1600.0\",\n   \"q\": 1954750,\n   \"slot_utc\": \"\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1600.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": null,\n   \"z_ref\": null,\n   \"callsign\": \"KC2G\",\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": \"B\",\n   \"segment\": 0,\n   \"cw_text\": null,\n   \"progress\": 0.0,\n   \"heard\": 0.0,\n   \"received\": 0.0,\n   \"mean_w_db\": null,\n   \"confidence\": [],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276801.0,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  },\n  {\n   \"id\": \"p1954748_1720.0\",\n   \"q\": 1954748,\n   \"slot_utc\": \"\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1720.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": null,\n   \"z_ref\": null,\n   \"callsign\": \"KC2G\",\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": \"C\",\n   \"segment\": 0,\n   \"cw_text\": null,\n   \"progress\": 0.0,\n   \"heard\": 0.0,\n   \"received\": 0.0,\n   \"mean_w_db\": null,\n   \"confidence\": [],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276801.0,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  }\n ],\n \"log\": [\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: a later pass is due at 1600.0, 1720.0 Hz\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1720.0 Hz\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 49% (0 s)\",\n  \"2025-10-01T00:00:32Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 58% (0 s)\",\n  \"2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)\",\n  \"2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz\",\n  \"2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)\"\n ],\n \"finished\": [\n  1954748,\n  1954750,\n  1954752\n ]\n}",
+    "finished": [
+     1954748,
+     1954750,
+     1954752
+    ],
+    "log": "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: a later pass is due at 1600.0, 1720.0 Hz\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1720.0 Hz\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 49% (0 s)\n2025-10-01T00:00:32Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 58% (0 s)\n2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)\n2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz\n2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)\n",
+    "pictures": {}
+   }
+  },
+  {
+   "name": "due_hint_joint",
+   "cfg": {
+    "spec": "tiny",
+    "refresh_s": 5.0,
+    "waveforms": [
+     0,
+     1
+    ]
+   },
+   "state": {
+    "tiles": [
+     {
+      "id": "p1954750_1600.0",
+      "q": 1954750,
+      "slot_utc": "",
+      "frame": "tiny",
+      "f_hz": 1600.0,
+      "status": "complete",
+      "mode": "B",
+      "segment": 0,
+      "callsign": "KC2G",
+      "updated": 1759276801.0
+     },
+     {
+      "id": "p1954748_1720.0",
+      "q": 1954748,
+      "slot_utc": "",
+      "frame": "tiny",
+      "f_hz": 1720.0,
+      "status": "complete",
+      "mode": "C",
+      "segment": 0,
+      "callsign": "KC2G",
+      "updated": 1759276801.0
+     }
+    ]
+   },
+   "feeds": [
+    [
+     528000,
+     8,
+     1759276851.0
+    ]
+   ],
+   "steps": [
+    1759276827.0,
+    1759276832.0,
+    1759276837.0,
+    1759276859.85
+   ],
+   "candidates": [
+    [
+     {
+      "f_hz": 1500.0,
+      "waveform": 0,
+      "z_ref": 10.0,
+      "method": "preamble"
+     },
+     {
+      "f_hz": 1600.0,
+      "waveform": 0,
+      "z_ref": 10.0,
+      "method": "hint"
+     },
+     {
+      "f_hz": 1720.0,
+      "waveform": 0,
+      "z_ref": 10.0,
+      "method": "preamble"
+     }
+    ]
+   ],
+   "detect": [
+    [
+     {
+      "f_hz": 1500.0,
+      "waveform": 0,
+      "z_ref": 10.0,
+      "method": "preamble"
+     },
+     {
+      "f_hz": 1720.0,
+      "waveform": 0,
+      "z_ref": 10.0,
+      "method": "preamble"
+     }
+    ]
+   ],
+   "receive": [
+    [
+     {
+      "f_hz": 1500.0,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1500.0",
+      "waveform": 0
+     },
+     {
+      "f_hz": 1720.0,
+      "z_ref": 20.0,
+      "snr": -12.0,
+      "n": 1024,
+      "uid": "u1720.0",
+      "header": {
+       "callsign": "AG7EW",
+       "grid": "CN85",
+       "picture_id": 1645922419,
+       "mode": 1,
+       "segment": 2,
+       "codec_id": 53720
+      },
+      "waveform": 0
+     }
+    ]
+   ],
+   "finish": [
+    [
+     [
+      {
+       "f_hz": 1500.0,
+       "z_ref": 20.0,
+       "snr": -12.0,
+       "n": 1024,
+       "uid": "u1500.0",
+       "waveform": 0
+      },
+      {
+       "f_hz": 1600.0,
+       "z_ref": 20.0,
+       "snr": -12.0,
+       "n": 1024,
+       "uid": "u1600.0",
+       "waveform": 0
+      }
+     ],
+     1.0
+    ]
+   ],
+   "expect": {
+    "calls": [
+     [
+      "candidates",
+      1954752,
+      294370,
+      [
+       [
+        1600.0,
+        0
+       ],
+       [
+        1720.0,
+        0
+       ]
+      ]
+     ],
+     [
+      "detect",
+      1954752,
+      294370,
+      true,
+      [
+       [
+        49.984,
+        58.5925
+       ]
+      ],
+      [
+       1500.0,
+       1720.0
+      ],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      294370,
+      "joint",
+      false,
+      [
+       [
+        49.984,
+        58.5925
+       ]
+      ],
+      [
+       1500.0,
+       1720.0
+      ]
+     ],
+     [
+      "detect",
+      1954752,
+      294370,
+      true,
+      [
+       [
+        49.984,
+        58.5925
+       ]
+      ],
+      [
+       1500.0,
+       1720.0
+      ],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      294370,
+      "joint",
+      false,
+      [
+       [
+        49.984,
+        58.5925
+       ]
+      ],
+      [
+       1500.0,
+       1720.0
+      ]
+     ],
+     [
+      "detect",
+      1954752,
+      294370,
+      true,
+      [
+       [
+        49.984,
+        58.5925
+       ]
+      ],
+      [
+       1500.0,
+       1720.0
+      ],
+      []
+     ],
+     [
+      "receive",
+      1954752,
+      294370,
+      "joint",
+      false,
+      [
+       [
+        49.984,
+        58.5925
+       ]
+      ],
+      [
+       1500.0,
+       1720.0
+      ]
+     ],
+     [
+      "finish",
+      1954752,
+      294370,
+      259936,
+      60000,
+      "joint",
+      [
+       1500.0,
+       1720.0
+      ],
+      [
+       [
+        1600.0,
+        0
+       ],
+       [
+        1720.0,
+        0
+       ]
+      ]
+     ]
+    ],
+    "steps": [
+     true,
+     true,
+     true,
+     true
+    ],
+    "sink": [
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: a later pass is due at 1600.0 Hz (CE), 1720.0 Hz (CE)",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz, waveform CE",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1720.0 Hz, waveform CE",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 49% (0 s)",
+     "2025-10-01T00:00:32Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 58% (0 s)",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz, waveform CE",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)"
+    ],
+    "lines": [
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: a later pass is due at 1600.0 Hz (CE), 1720.0 Hz (CE)",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz, waveform CE",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1720.0 Hz, waveform CE",
+     "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 49% (0 s)",
+     "2025-10-01T00:00:32Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 58% (0 s)",
+     "2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz, waveform CE",
+     "2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)"
+    ],
+    "tiles": "[{\"id\": \"1954752-1500\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1500.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": null, \"grid\": null, \"picture_id\": null, \"mode\": null, \"segment\": null, \"cw_text\": null, \"progress\": 1.0, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}, {\"id\": \"1954752-1600\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1600.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": null, \"grid\": null, \"picture_id\": null, \"mode\": null, \"segment\": null, \"cw_text\": null, \"progress\": 1.0, \"heard\": 1.0, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}, {\"id\": \"1954752-1720\", \"q\": 1954752, \"slot_utc\": \"2025-10-01T00:00:00Z\", \"frame\": \"tiny\", \"f_hz\": 1720.0, \"dial_hz\": null, \"status\": \"lost\", \"snr_db\": -12.0, \"z_ref\": 20.0, \"callsign\": \"AG7EW\", \"grid\": \"CN85\", \"picture_id\": \"621ac873\", \"mode\": \"B\", \"segment\": 2, \"cw_text\": null, \"progress\": 0.6717357839249894, \"heard\": 0.9326678173251854, \"received\": 1.0, \"mean_w_db\": 0.0, \"confidence\": [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276859.85, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}, {\"id\": \"p1954750_1600.0\", \"q\": 1954750, \"slot_utc\": \"\", \"frame\": \"tiny\", \"f_hz\": 1600.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": null, \"z_ref\": null, \"callsign\": \"KC2G\", \"grid\": null, \"picture_id\": null, \"mode\": \"B\", \"segment\": 0, \"cw_text\": null, \"progress\": 0.0, \"heard\": 0.0, \"received\": 0.0, \"mean_w_db\": null, \"confidence\": [], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276801.0, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}, {\"id\": \"p1954748_1720.0\", \"q\": 1954748, \"slot_utc\": \"\", \"frame\": \"tiny\", \"f_hz\": 1720.0, \"dial_hz\": null, \"status\": \"complete\", \"snr_db\": null, \"z_ref\": null, \"callsign\": \"KC2G\", \"grid\": null, \"picture_id\": null, \"mode\": \"C\", \"segment\": 0, \"cw_text\": null, \"progress\": 0.0, \"heard\": 0.0, \"received\": 0.0, \"mean_w_db\": null, \"confidence\": [], \"passes\": 1, \"image\": null, \"image_rev\": 0, \"updated\": 1759276801.0, \"note\": \"\", \"uid\": null, \"waveform\": \"CE\"}]",
+    "state": "{\n \"version\": 1,\n \"updated\": 1760000000.0,\n \"now\": 1759276859.85,\n \"now_utc\": \"2025-10-01T00:00:59Z\",\n \"listening\": true,\n \"source\": \"\",\n \"frame\": \"tiny\",\n \"waveforms\": [\n  \"CE\",\n  \"L\"\n ],\n \"audio_utc\": \"2025-10-01T00:00:51Z\",\n \"slots\": [],\n \"codec_error\": null,\n \"busy\": null,\n \"tiles\": [\n  {\n   \"id\": \"1954752-1500\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1500.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": null,\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": null,\n   \"segment\": null,\n   \"cw_text\": null,\n   \"progress\": 1.0,\n   \"heard\": 1.0,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  },\n  {\n   \"id\": \"1954752-1600\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1600.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": null,\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": null,\n   \"segment\": null,\n   \"cw_text\": null,\n   \"progress\": 1.0,\n   \"heard\": 1.0,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  },\n  {\n   \"id\": \"1954752-1720\",\n   \"q\": 1954752,\n   \"slot_utc\": \"2025-10-01T00:00:00Z\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1720.0,\n   \"dial_hz\": null,\n   \"status\": \"lost\",\n   \"snr_db\": -12.0,\n   \"z_ref\": 20.0,\n   \"callsign\": \"AG7EW\",\n   \"grid\": \"CN85\",\n   \"picture_id\": \"621ac873\",\n   \"mode\": \"B\",\n   \"segment\": 2,\n   \"cw_text\": null,\n   \"progress\": 0.6717357839249894,\n   \"heard\": 0.9326678173251854,\n   \"received\": 1.0,\n   \"mean_w_db\": 0.0,\n   \"confidence\": [\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    0.0,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null,\n    null\n   ],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276859.85,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  },\n  {\n   \"id\": \"p1954750_1600.0\",\n   \"q\": 1954750,\n   \"slot_utc\": \"\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1600.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": null,\n   \"z_ref\": null,\n   \"callsign\": \"KC2G\",\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": \"B\",\n   \"segment\": 0,\n   \"cw_text\": null,\n   \"progress\": 0.0,\n   \"heard\": 0.0,\n   \"received\": 0.0,\n   \"mean_w_db\": null,\n   \"confidence\": [],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276801.0,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  },\n  {\n   \"id\": \"p1954748_1720.0\",\n   \"q\": 1954748,\n   \"slot_utc\": \"\",\n   \"frame\": \"tiny\",\n   \"f_hz\": 1720.0,\n   \"dial_hz\": null,\n   \"status\": \"complete\",\n   \"snr_db\": null,\n   \"z_ref\": null,\n   \"callsign\": \"KC2G\",\n   \"grid\": null,\n   \"picture_id\": null,\n   \"mode\": \"C\",\n   \"segment\": 0,\n   \"cw_text\": null,\n   \"progress\": 0.0,\n   \"heard\": 0.0,\n   \"received\": 0.0,\n   \"mean_w_db\": null,\n   \"confidence\": [],\n   \"passes\": 1,\n   \"image\": null,\n   \"image_rev\": 0,\n   \"updated\": 1759276801.0,\n   \"note\": \"\",\n   \"uid\": null,\n   \"waveform\": \"CE\"\n  }\n ],\n \"log\": [\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: a later pass is due at 1600.0 Hz (CE), 1720.0 Hz (CE)\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz, waveform CE\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1720.0 Hz, waveform CE\",\n  \"2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 49% (0 s)\",\n  \"2025-10-01T00:00:32Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 58% (0 s)\",\n  \"2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)\",\n  \"2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz, waveform CE\",\n  \"2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)\"\n ],\n \"finished\": [\n  1954748,\n  1954750,\n  1954752\n ]\n}",
+    "finished": [
+     1954748,
+     1954750,
+     1954752
+    ],
+    "log": "2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: frame started\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: a later pass is due at 1600.0 Hz (CE), 1720.0 Hz (CE)\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1500.0 Hz, waveform CE\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: signal at 1720.0 Hz, waveform CE\n2025-10-01T00:00:27Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 49% (0 s)\n2025-10-01T00:00:32Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 58% (0 s)\n2025-10-01T00:00:37Z slot 2025-10-01T00:00:00Z: 2 signal(s) at 67% (0 s)\n2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: signal at 1600.0 Hz, waveform CE\n2025-10-01T00:00:59Z slot 2025-10-01T00:00:00Z: frame over, 2 pass(es) (0 s)\n",
+    "pictures": {}
+   }
+  }
+ ]
+}

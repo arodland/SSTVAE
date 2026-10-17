@@ -10,6 +10,8 @@
 #define SSTVAE_DSP_SPECTRUM_HPP
 
 #include <cstddef>
+#include <cstdint>
+#include <deque>
 #include <vector>
 
 #include "config.hpp"
@@ -43,6 +45,36 @@ std::vector<double> spectrum_db(const std::vector<double>& block, int n_bins);
 // Widening interpolates instead, to avoid a blocky frequency axis on a
 // wide pane.
 std::vector<double> reduce_to_width(const std::vector<double>& values, int width);
+
+// The waterfall's rows, kept so the display can be redrawn from them:
+// a resize, or a strip dragged taller, shows the history instead of
+// black. One row is WATERFALL_BINS dB values, held as hundredths of a dB
+// in two bytes (768 bytes a row, about 9 MB for KEEP_S at 20 rows a
+// second).
+class WaterfallHistory {
+public:
+    static constexpr double KEEP_S = 10 * 60.0;
+
+    // A row of dB values computed at `t` (seconds, any clock).
+    void push(double t, const std::vector<double>& db);
+    void clear();
+
+    // Rows are numbered from 0 in the order pushed, for ever: `count()`
+    // is one past the newest, `first()` the oldest still kept.
+    std::uint64_t count() const { return first_ + rows_.size(); }
+    std::uint64_t first() const { return first_; }
+    bool has(std::uint64_t seq) const { return seq >= first_ && seq < count(); }
+    // Row `seq` in dB (empty if not kept).
+    std::vector<double> row(std::uint64_t seq) const;
+
+private:
+    struct Row {
+        double t = 0.0;
+        std::vector<std::uint16_t> centi_db;   // (dB + 200) * 100
+    };
+    std::deque<Row> rows_;
+    std::uint64_t first_ = 0;
+};
 
 }  // namespace sstvae::dsp
 

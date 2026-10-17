@@ -233,6 +233,12 @@ if(TARGET sstvae_overlay_render)
   set_tests_properties(overlay_render PROPERTIES TIMEOUT 300)
 endif()
 
+add_executable(test_slow_spectrogram test_slow_spectrogram.cpp)
+target_link_libraries(test_slow_spectrogram PRIVATE sstvae_core)
+target_include_directories(test_slow_spectrogram PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+add_test(NAME slow_spectrogram COMMAND test_slow_spectrogram)
+set_tests_properties(slow_spectrogram PROPERTIES TIMEOUT 300)
+
 add_executable(test_spectrum test_spectrum.cpp)
 target_link_libraries(test_spectrum PRIVATE sstvae_core)
 target_include_directories(test_spectrum PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -324,6 +330,13 @@ if(TARGET sstvae_gui)
   sstvae_onnxruntime_copy_runtime(test_picture_box)
   add_test(NAME picture_box COMMAND test_picture_box)
   set_tests_properties(picture_box PROPERTIES TIMEOUT 300)
+  add_executable(test_image_viewer test_image_viewer.cpp)
+  target_link_libraries(test_image_viewer PRIVATE sstvae_gui)
+  target_include_directories(test_image_viewer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  sstvae_hamlib_copy_runtime(test_image_viewer)
+  sstvae_onnxruntime_copy_runtime(test_image_viewer)
+  add_test(NAME image_viewer COMMAND test_image_viewer)
+  set_tests_properties(image_viewer PROPERTIES TIMEOUT 300)
 
   add_executable(test_pane_container test_pane_container.cpp)
   target_link_libraries(test_pane_container PRIVATE sstvae_gui)
@@ -332,6 +345,30 @@ if(TARGET sstvae_gui)
   sstvae_onnxruntime_copy_runtime(test_pane_container)
   add_test(NAME pane_container COMMAND test_pane_container)
   set_tests_properties(pane_container PROPERTIES TIMEOUT 300)
+
+  add_executable(test_qrss_window test_qrss_window.cpp)
+  target_link_libraries(test_qrss_window PRIVATE sstvae_gui)
+  target_include_directories(test_qrss_window PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  sstvae_hamlib_copy_runtime(test_qrss_window)
+  sstvae_onnxruntime_copy_runtime(test_qrss_window)
+  add_test(NAME qrss_window COMMAND test_qrss_window)
+  set_tests_properties(qrss_window PROPERTIES TIMEOUT 120)
+
+  add_executable(test_qrss_tx test_qrss_tx.cpp)
+  target_link_libraries(test_qrss_tx PRIVATE sstvae_gui)
+  target_include_directories(test_qrss_tx PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  sstvae_hamlib_copy_runtime(test_qrss_tx)
+  sstvae_onnxruntime_copy_runtime(test_qrss_tx)
+  add_test(NAME qrss_tx COMMAND test_qrss_tx)
+  set_tests_properties(qrss_tx PROPERTIES TIMEOUT 120)
+
+  add_executable(test_qrss_schedule test_qrss_schedule.cpp)
+  target_link_libraries(test_qrss_schedule PRIVATE sstvae_gui)
+  target_include_directories(test_qrss_schedule PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  sstvae_hamlib_copy_runtime(test_qrss_schedule)
+  sstvae_onnxruntime_copy_runtime(test_qrss_schedule)
+  add_test(NAME qrss_schedule COMMAND test_qrss_schedule)
+  set_tests_properties(qrss_schedule PROPERTIES TIMEOUT 60)
 
   add_executable(test_waterfall test_waterfall.cpp)
   target_link_libraries(test_waterfall PRIVATE sstvae_gui)
@@ -343,3 +380,67 @@ if(TARGET sstvae_gui)
 endif()
 
 
+
+# --- QRSSTVAE core (native/core/qrss) ------------------------------------------
+# One executable per tests/qrss/test_<module>.cpp, globbed so a ported
+# module adds its test without editing this file; ctest names are
+# qrss_core_<module>. Keyed on the target, not the option, for the
+# reason given above add_subdirectory(tests) in ../CMakeLists.txt. Each
+# gets the QRSS golden corpus directory as its one argument.
+#
+# The TIMEOUT is sized for an optimized build. Under ThreadSanitizer (the
+# CI tsan job's -fsanitize=thread) the slowest ones run many times longer
+# -- acquire 99 s, receiver_slot about 255 s, on 4 shared CPUs -- so there
+# it is 1500 s: still the bound on a wedged test, never the expected time.
+if(TARGET sstvae_qrss)
+  set(_qrss_core_timeout 120)
+  if(CMAKE_CXX_FLAGS MATCHES "-fsanitize=thread")
+    set(_qrss_core_timeout 1500)
+  endif()
+  file(GLOB _qrss_core_tests CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/qrss/test_*.cpp)
+  foreach(_src ${_qrss_core_tests})
+    get_filename_component(_name ${_src} NAME_WE)
+    string(REGEX REPLACE "^test_" "" _mod ${_name})
+    add_executable(test_qrss_core_${_mod} ${_src})
+    target_link_libraries(test_qrss_core_${_mod} PRIVATE sstvae_qrss)
+    target_include_directories(test_qrss_core_${_mod} PRIVATE
+                               ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/qrss)
+    if(NOT MSVC)
+      target_compile_options(test_qrss_core_${_mod} PRIVATE -ffp-contract=off)
+    endif()
+    add_test(NAME qrss_core_${_mod}
+             COMMAND test_qrss_core_${_mod} ${CMAKE_CURRENT_SOURCE_DIR}/golden_qrss)
+    set_tests_properties(qrss_core_${_mod} PROPERTIES TIMEOUT ${_qrss_core_timeout})
+  endforeach()
+endif()
+
+# The codec glue (native/core/qrss/codec): only with SSTVAE's codec, so not
+# in the glob above, which every build compiles. Writes the ONNX models it
+# reads; checks the v5 artifacts too when they are on this machine.
+if(TARGET sstvae_qrss_codec)
+  add_executable(test_qrss_core_codec qrss/codec/test_codec.cpp)
+  target_link_libraries(test_qrss_core_codec PRIVATE sstvae_qrss_codec)
+  target_include_directories(test_qrss_core_codec PRIVATE
+                             ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/qrss)
+  if(NOT MSVC)
+    target_compile_options(test_qrss_core_codec PRIVATE -ffp-contract=off)
+  endif()
+  sstvae_onnxruntime_copy_runtime(test_qrss_core_codec)
+  add_test(NAME qrss_core_codec COMMAND test_qrss_core_codec)
+  set_tests_properties(qrss_core_codec PROPERTIES TIMEOUT 120)
+endif()
+
+# sstvae-qrss's subcommands, run in-process from the CLI's object library
+# (whichever it holds: encode only with the codec).
+if(TARGET sstvae_qrss_cli)
+  add_executable(test_qrss_core_cli qrss/cli/test_cli.cpp)
+  target_link_libraries(test_qrss_core_cli PRIVATE sstvae_qrss_cli)
+  target_include_directories(test_qrss_core_cli PRIVATE
+                             ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/qrss)
+  if(NOT MSVC)
+    target_compile_options(test_qrss_core_cli PRIVATE -ffp-contract=off)
+  endif()
+  sstvae_onnxruntime_copy_runtime(test_qrss_core_cli)
+  add_test(NAME qrss_core_cli COMMAND test_qrss_core_cli)
+  set_tests_properties(qrss_core_cli PROPERTIES TIMEOUT 120)
+endif()

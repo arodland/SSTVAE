@@ -1,6 +1,7 @@
 #include "waterfall.hpp"
 
 #include <QColor>
+#include <QDateTime>
 #include <QFontMetrics>
 #include <QMouseEvent>
 #include <QPaintEvent>
@@ -20,6 +21,7 @@
 #include "config.hpp"
 #include "dsp/spectrum.hpp"
 #include "rx/ringbuffer.hpp"
+#include "spectrum_feed.hpp"
 #include "style.hpp"
 
 namespace sstvae::gui {
@@ -81,9 +83,25 @@ Waterfall::Waterfall(QWidget* parent, int fps) : QWidget(parent) {
     // fight the picture below it for height.
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
-    auto* timer = new QTimer(this);
-    connect(timer, &QTimer::timeout, this, &Waterfall::tick);
-    timer->start(std::max(1, 1000 / std::max(1, fps)));
+    own_feed_ = std::make_unique<SpectrumFeed>();
+    feed_ = own_feed_.get();
+    timer_ = new QTimer(this);
+    connect(timer_, &QTimer::timeout, this, &Waterfall::tick);
+    timer_->start(std::max(1, 1000 / std::max(1, fps)));
+}
+
+void Waterfall::set_feed(SpectrumFeed* feed) {
+    if (feed == nullptr || feed == feed_) return;
+    if (feed_ != own_feed_.get()) disconnect(feed_, nullptr, this, nullptr);
+    feed_ = feed;
+    timer_->stop();
+    connect(feed_, &SpectrumFeed::pumped, this, &Waterfall::draw_new_rows);
+    // Redraw from the shared history at once.
+    const auto hold = feed_->lock();
+    drawn_ = feed_->fast().count();
+    image_ = QImage();
+    ensure_image();
+    update();
 }
 
 Waterfall::~Waterfall() = default;
@@ -96,7 +114,7 @@ Waterfall::~Waterfall() = default;
 QSize Waterfall::sizeHint() const { return QSize(520, 160); }
 
 void Waterfall::set_ring(std::shared_ptr<rx::RingBuffer> ring) {
-    ring_ = std::move(ring);
+    feed_->set_ring(std::move(ring));
 }
 
 void Waterfall::clear() {
@@ -106,6 +124,7 @@ void Waterfall::clear() {
     update();
 }
 
+// The caller holds the feed's lock: this may redraw from its history.
 void Waterfall::ensure_image() {
     // Device pixels, not logical ones.
     //
@@ -126,19 +145,23 @@ void Waterfall::ensure_image() {
         return;
     }
 
-    // Carry the history across a resize rather than blanking it. Rows
-    // are already one pixel each, so they are kept as-is; columns are
-    // point-resampled, which is good enough for pixels that are only
-    // scrolling off anyway.
+    // Carry the history across a resize rather than blanking it: redrawn
+    // from the stored rows, at the new width and as deep as the new
+    // height, so dragging the strip taller shows older rows. A row the
+    // store no longer has is copied from the old image, its columns
+    // point-resampled.
     QImage grown(w, h, QImage::Format_RGB888);
     grown.setDevicePixelRatio(dpr);
     grown.fill(Qt::black);
-    if (!image_.isNull()) {
-        const int rows = std::min(h, image_.height());
-        const int old_w = image_.width();
-        for (int y = 0; y < rows; ++y) {
+    const dsp::WaterfallHistory& history = feed_->fast();
+    const int old_w = image_.isNull() ? 0 : image_.width();
+    for (int y = 0; y < h; ++y) {
+        uchar* dst = grown.scanLine(y);
+        const std::uint64_t seq = drawn_ - 1 - static_cast<std::uint64_t>(y);
+        if (static_cast<std::uint64_t>(y) < drawn_ && history.has(seq)) {
+            paint_row(dst, history.row(seq), w);
+        } else if (y < (image_.isNull() ? 0 : image_.height())) {
             const uchar* src = image_.constScanLine(y);
-            uchar* dst = grown.scanLine(y);
             for (int x = 0; x < w; ++x) {
                 const int sx = std::min(old_w - 1, x * old_w / w);
                 std::copy_n(src + sx * 3, 3, dst + x * 3);
@@ -148,13 +171,29 @@ void Waterfall::ensure_image() {
     image_ = std::move(grown);
 }
 
-void Waterfall::tick() {
-    if (!ring_) return;
-    const std::vector<double> block = ring_->tail(dsp::WATERFALL_NFFT);
-    if (static_cast<int>(block.size()) < dsp::WATERFALL_NFFT) return;
+void Waterfall::paint_row(uchar* dst, const std::vector<double>& db, int width) const {
+    const std::vector<double> reduced = dsp::reduce_to_width(db, width);
+    if (static_cast<int>(reduced.size()) < width) return;
+    const std::array<Rgb, 256>& lut = colormap();
+    for (int x = 0; x < width; ++x) {
+        const double norm =
+            std::clamp((reduced[x] - DB_FLOOR) / (DB_CEIL - DB_FLOOR), 0.0, 1.0);
+        const Rgb& color = lut[static_cast<std::size_t>(norm * 255.0)];
+        std::copy_n(color.data(), 3, dst + x * 3);
+    }
+}
 
-    peak_ = 0.0;
-    for (const double sample : block) peak_ = std::max(peak_, std::abs(sample));
+void Waterfall::tick() {
+    if (feed_ == own_feed_.get()) feed_->pump();
+    draw_new_rows();
+}
+
+void Waterfall::draw_new_rows() {
+    const auto hold = feed_->lock();
+    const dsp::WaterfallHistory& history = feed_->fast();
+    const std::uint64_t count = history.count();
+    if (count == drawn_) return;
+    peak_ = feed_->peak();
     // The audio layer hands back floats; anything at or over unity has
     // already been clipped somewhere upstream in the capture chain, so
     // this reports the soundcard's problem rather than ours.
@@ -162,46 +201,78 @@ void Waterfall::tick() {
     if (clipping_) clip_latched_ = true;
 
     ensure_image();
-    const std::vector<double> reduced = dsp::reduce_to_width(
-        dsp::spectrum_db(block, dsp::WATERFALL_BINS), image_.width());
-    if (reduced.empty()) return;
-
-    // One row = one pixel, so this is a 1 px scroll. Bottom-up, in
+    const int h = image_.height();
+    const std::uint64_t from =
+        std::max<std::uint64_t>({drawn_, history.first(),
+                                 count > static_cast<std::uint64_t>(h) ? count - h : 0});
+    // One row = one pixel, so each is a 1 px scroll. Bottom-up, in
     // place: row h-1 is overwritten first, so no row is read after it
     // has been clobbered.
-    const int h = image_.height();
     const std::size_t stride = static_cast<std::size_t>(image_.bytesPerLine());
-    for (int y = h - 1; y > 0; --y) {
-        std::copy_n(image_.constScanLine(y - 1), stride, image_.scanLine(y));
+    for (std::uint64_t seq = from; seq < count; ++seq) {
+        for (int y = h - 1; y > 0; --y) {
+            std::copy_n(image_.constScanLine(y - 1), stride, image_.scanLine(y));
+        }
+        paint_row(image_.scanLine(0), history.row(seq), image_.width());
     }
-
-    const std::array<Rgb, 256>& lut = colormap();
-    uchar* top = image_.scanLine(0);
-    for (int x = 0; x < image_.width(); ++x) {
-        const double norm =
-            std::clamp((reduced[x] - DB_FLOOR) / (DB_CEIL - DB_FLOOR), 0.0, 1.0);
-        const Rgb& color = lut[static_cast<std::size_t>(norm * 255.0)];
-        std::copy_n(color.data(), 3, top + x * 3);
-    }
+    drawn_ = count;
+    newest_row_time_ = static_cast<double>(QDateTime::currentMSecsSinceEpoch()) / 1000.0;
     update();
 }
 
 void Waterfall::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
+    const auto hold = feed_->lock();
     ensure_image();
 }
 
 void Waterfall::paintEvent(QPaintEvent* event) {
     Q_UNUSED(event);
-    ensure_image();
+    {
+        const auto hold = feed_->lock();
+        ensure_image();
+    }
     QPainter painter(this);
     // 1:1 by construction, so this is a blit and not a rescale: the
     // image carries the same device pixel ratio as the painter, so
     // drawing it at the origin puts one image pixel on one device pixel.
     painter.drawImage(QPointF(0, 0), image_);
     draw_band_markers(painter);
+    draw_dial_marks(painter);
     draw_level_meter(painter);
     draw_disabled_scrim(painter);
+}
+
+void Waterfall::set_dial_marks(std::vector<double> times) {
+    dial_marks_ = std::move(times);
+    update();
+}
+
+void Waterfall::draw_dial_marks(QPainter& painter) {
+    if (dial_marks_.empty() || newest_row_time_ <= 0.0) return;
+    const double rows_per_px = std::max(1e-9, image_.devicePixelRatio());
+    const double fps = std::max(1, feed_->fps());
+    const QColor green(0x3c, 0xe0, 0x6e);
+    for (const double t : dial_marks_) {
+        const double age = newest_row_time_ - t;
+        if (age < 0) continue;
+        const int y = static_cast<int>(std::lround(age * fps / rows_per_px));
+        if (y >= height()) continue;
+        painter.setPen(QPen(green, 2));
+        painter.drawLine(0, y, width(), y);
+        const QString label = dial_mark_label(age);
+        painter.setPen(QColor(0, 0, 0, 180));
+        painter.drawText(5, y + 13, label);
+        painter.setPen(green);
+        painter.drawText(4, y + 12, label);
+    }
+}
+
+QString dial_mark_label(double age_s) {
+    const long long m = static_cast<long long>(std::floor(age_s / 60.0));
+    if (age_s < 60.0) return QStringLiteral("<-%1s").arg(static_cast<long long>(age_s));
+    if (m < 60) return QStringLiteral("<-%1m").arg(m);
+    return QStringLiteral("<-%1h%2m").arg(m / 60).arg(m % 60, 2, 10, QLatin1Char('0'));
 }
 
 void Waterfall::draw_disabled_scrim(QPainter& painter) {

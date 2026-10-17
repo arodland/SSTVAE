@@ -42,6 +42,18 @@ public:
     // Dial frequency in Hz.
     virtual double frequency_hz() = 0;
 
+    // Tune the dial. Not pure: a backend that cannot tune says so when
+    // asked, rather than every test fake having to.
+    virtual void set_frequency_hz(double /*hz*/) {
+        throw RigError("this rig cannot be tuned from here");
+    }
+
+    // Start the antenna tuner's tune cycle (Hamlib's RIG_OP_TUNE). The
+    // radio puts a brief carrier on the air to do it.
+    virtual void tune_antenna() {
+        throw RigError("this rig cannot start its tuner from here");
+    }
+
     // For status text. Need not be the model name the user picked.
     virtual std::string description() const = 0;
 };

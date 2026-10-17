@@ -1,0 +1,1376 @@
+"""The live listener (`sstvae.qrss.live`, `qrss_listen.py`).
+
+Fast: the streaming front end equals the batch one sample for sample,
+the ring and the slot capture account for what was and was not heard,
+the clock follows on or restarts, and the slot bookkeeping (tiles,
+their ids across refreshes, finishing, the state file) runs against a
+stub receiver. One TINY slot goes through the real receiver half heard
+and then whole (about 5 s): the half-heard pass carries no weight in
+blocks it has not heard yet.
+"""
+
+import dataclasses
+import json
+
+import numpy as np
+import pytest
+
+from qrss_helpers import Q_TEST, unit_rms_latents
+from sstvae.qrss import channel as chm
+from sstvae.qrss import acquire as acquisition
+from sstvae.qrss import frame, frontend, live, precoder
+from sstvae.qrss import receiver as RX
+from sstvae.qrss.channel import ChannelConfig
+from sstvae.qrss.constants import FE_FS, FS, T_SYM
+from sstvae.qrss.frontend import slot_t0
+
+TINY = frame.TINY
+
+
+def _hiss(n):
+    """n samples of a quiet band: faint, but heard (exact zeros are not, see SILENCE_S)."""
+    return 1e-3 * np.random.default_rng(n).standard_normal(n)
+
+
+def test_stream_fe_equals_batch():
+    x = np.random.default_rng(3).standard_normal(30000)
+    ref = frontend.audio_to_fe(x)
+    s = live.StreamFE(block=4096)
+    out, a = [], 0
+    for n in (100, 3000, 777, 5000, 16000, 5123):
+        out += s.push(a, x[a:a + n])
+        a += n
+    n0 = out[0][0]
+    y = np.concatenate([o[1] for o in out])
+    assert n0 == live.HALO // 2 and len(y) > 14000
+    assert np.array_equal(y, ref[n0:n0 + len(y)])
+
+
+def test_stream_fe_restarts_on_the_grid():
+    s = live.StreamFE()
+    s.push(0, np.zeros(4000))
+    out = s.push(10_007, np.zeros(4000))      # not following on
+    assert s.a0 % live.ALIGN == 0
+    assert out and out[0][0] == (10_016 + live.HALO) // 2
+
+
+def test_ring_wraps_and_holes_read_as_unheard():
+    r = live.FeRing(span_s=1.0)                # 4000 samples
+    r.write(100, np.arange(3000, dtype=np.complex64))
+    r.write(3100, np.arange(3000, 6000, dtype=np.complex64))   # wraps
+    x, ok = r.read(2100, 6100)
+    assert ok.all() and np.array_equal(x.real, np.arange(2000, 6000))
+    x, ok = r.read(1000, 2200)                 # partly older than the ring
+    assert not ok[:1100].any() and ok[1100:].all()
+    r.write(9000, np.ones(100, dtype=np.complex64))           # a hole before it
+    x, ok = r.read(6100, 9100)
+    assert not ok[:2900].any() and ok[2900:].all()
+
+
+def test_slot_capture_fills_and_erases_what_was_not_heard():
+    q = Q_TEST
+    t0 = slot_t0(q)
+    r = live.FeRing(live.frame_seconds(TINY) + 60)
+    rng = np.random.default_rng(0)
+    a = (t0 - 15) * FE_FS
+    n = 40 * FE_FS                              # heard from t0 - 15 s to t0 + 25 s
+    r.write(a, (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(np.complex64))
+    prep, erase, heard = live.slot_capture(r, q, TINY)
+    assert prep.t0_index == 15 * FE_FS
+    assert erase == [(25.0, live.frame_seconds(TINY) + frontend.PB_TAIL_S)]
+    assert heard == pytest.approx(25.0 / live.frame_seconds(TINY), rel=1e-3)
+    p = np.abs(prep.fe) ** 2
+    # heard and filled parts at the same normalised level (median power 1)
+    assert np.median(p[:30 * FE_FS]) == pytest.approx(1.0, rel=0.05)
+    assert np.median(p[45 * FE_FS:]) == pytest.approx(1.0, rel=0.05)
+
+
+def test_clock_follows_on_and_restarts_after_a_gap(tmp_path):
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    t = 1_000_000.0
+    L.feed(_hiss(FS), t)
+    first = L.fe.next_index
+    L.feed(_hiss(FS), t + 1.0 + 0.3)        # 0.3 s of clock disagreement: follows on
+    assert L.fe.next_index == first + FS
+    L.feed(_hiss(FS), t + 10.0)             # 7.7 s missing: restarts there
+    assert L.fe.next_index == int(round((t + 10.0) * FS)) + 1
+    _, ok = L.ring.read(int((t + 2.5) * FE_FS), int((t + 8.5) * FE_FS))
+    assert not ok.any()
+    assert any("missing" in s for s in L.lines)
+    # a burst (ten seconds read at once) follows on: a pipe loses nothing
+    nxt = L.fe.next_index
+    for k in range(10):
+        L.feed(_hiss(FS), t + 10.5 + 0.01 * k)
+    assert L.fe.next_index == nxt + 10 * FS
+    # audio early for EARLY_WINDOW_S on end: the sound card runs fast, step back
+    t2 = t + 20.0
+    for k in range(40):
+        L.feed(_hiss(FS), t2 - 1.0 + k)      # the stream 2 s ahead of every stamp
+    assert any("ahead of the clock" in s for s in L.lines)
+
+
+def test_digital_silence_is_not_heard(tmp_path):
+    """What a WebSDR sends once it has dropped the session: exact zeros,
+    which used to count as heard (a silent band). They are a hole in the
+    ring and the passband store like missing audio, logged once each way;
+    a moment of them inside a quiet band is still heard."""
+    lines = []
+    pb = frontend.PassbandStore(tmp_path / "passband")
+    L = live.LiveListener(tmp_path / "live", live.LiveConfig(spec=TINY, render=False),
+                          passband=pb, log=lines.append)
+    t = 1_000_000.0
+    sound = _hiss(20 * FS)
+    sound[5 * FS:5 * FS + FS // 2] = 0.0                  # half a second of zeros: heard
+    audio = np.concatenate([sound[:10 * FS], np.zeros(60 * FS), sound[10 * FS:]])
+    for k in range(0, len(audio), 2000):
+        L.feed(audio[k:k + 2000], t + (k + 2000) / FS)
+    t0 = t + 1 / FS                                       # the first sample's time
+
+    def heard(a, b):
+        _, ok = L.ring.read(int((t0 + a) * FE_FS), int((t0 + b) * FE_FS))
+        _, m = pb.read(t0 + a, t0 + b, return_mask=True)
+        assert np.array_equal(ok, m)
+        return ok
+
+    assert heard(1.0, 9.9).all()                          # the short run included
+    assert not heard(11.0, 69.9).any()                    # (its first second may count)
+    assert heard(70.1, 79.0).all()
+    said = [m.split(" ", 1)[1] for m in lines if "silence" in m]     # (after the time)
+    assert said == [
+        f"the audio is digital silence from {live.utc_iso(t0 + 10.0)}: not counted as heard",
+        "audio back after 60 s of digital silence"]
+
+
+def _steady(t, secs, n=2000):
+    """(chunk, read time) of audio heard from t on, read as it arrives (n samples a chunk)."""
+    return [(_hiss(n), t + (k + 1) * n / FS) for k in range(int(round(secs * FS / n)))]
+
+
+def _feed(L, chunks, stamper=None):
+    for x, t in chunks:
+        for y, te in (stamper.push(x, t) if stamper is not None else [(x, t)]):
+            L.feed(y, te)
+
+
+def test_a_burst_after_a_stall_is_not_missing_audio(tmp_path):
+    """The app's audio pump held up for 3 s, then the 3 s arriving at once:
+    stamped by read time, the first piece reads 2.75 s late and the
+    listener leaves a hole; the stamper sees the backlog drain and the
+    stream follows on, with nothing missing."""
+    T = 1_000_000.0
+    stall = [(_hiss(2000), T + 23.0 + 1e-4 * k) for k in range(12)]   # heard T+20..T+23
+    chunks = _steady(T, 20.0) + stall + _steady(T + 23.0, 40.0)
+    old = live.LiveListener(tmp_path / "old", live.LiveConfig(spec=TINY, render=False),
+                            log=lambda m: None)
+    _feed(old, chunks)
+    assert any("missing" in s for s in old.lines)          # what stamping by read time did
+    L = live.LiveListener(tmp_path / "new", live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    st = live.Stamper()
+    _feed(L, chunks, st)
+    for y, te in st.flush():
+        L.feed(y, te)
+    assert not any("missing" in s or "ahead" in s for s in L.lines)
+    assert L.fe.next_index == int(round((T + 63.0) * FS)) + 1     # on the clock at the end
+    _, ok = L.ring.read(int((T + 1.0) * FE_FS), int((T + 62.0) * FE_FS))
+    assert ok.all()
+
+
+def test_missing_audio_is_still_missing(tmp_path):
+    """10 s that never arrive (the receive muted): held, then a hole of 10 s
+    with the audio after it on the clock."""
+    T = 1_000_000.0
+    chunks = _steady(T, 20.0) + _steady(T + 30.0, 20.0)
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    _feed(L, chunks, live.Stamper())
+    (gap,) = [s for s in L.lines if "missing" in s]
+    assert "10.0 s of audio missing" in gap
+    _, ok = L.ring.read(int((T + 32.0) * FE_FS), int((T + 44.0) * FE_FS))
+    assert ok.all()
+    _, ok = L.ring.read(int((T + 21.0) * FE_FS), int((T + 29.0) * FE_FS))
+    assert not ok.any()
+
+
+def test_the_log_is_kept_in_the_state_directory(tmp_path, monkeypatch):
+    """Every log line goes to listener.log beside state.json (which keeps 20),
+    moved to listener.log.1 once the file passes LOG_FILE_BYTES."""
+    monkeypatch.setattr(live, "LOG_FILE_BYTES", 2000)
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    for k in range(100):
+        L.log(f"line {k}")
+    now = (tmp_path / live.LOG_FILE).read_text().splitlines()
+    old = (tmp_path / (live.LOG_FILE + ".1")).read_text().splitlines()
+    assert [x.split()[-1] for x in old + now] == [str(k) for k in range(100 - len(old + now), 100)]
+    assert len(old) > 20 and now[-1].endswith("line 99")
+
+
+def test_audio_queued_for_a_starting_listener_starts_when_it_was_heard(tmp_path):
+    """8 s of audio queued while the listener started up, read at once,
+    then audio as it arrives: the stream starts where the queue did."""
+    T = 1_000_000.0
+    queued = [(_hiss(2000), T + 8.0 + 1e-4 * k) for k in range(32)]
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    _feed(L, queued + _steady(T + 8.0, 40.0), live.Stamper())
+    assert not any("missing" in s or "ahead" in s for s in L.lines)
+    _, ok = L.ring.read(int((T + 1.0) * FE_FS), int((T + 47.0) * FE_FS))
+    assert ok.all()
+    assert L.fe.next_index > int(round((T + 47.0) * FS))
+
+
+class _Det:
+    def __init__(self, f):
+        self.f_hz = f
+
+
+class _Report:
+    def __init__(self, z, snr=-12.0):
+        self.snr2500_db, self.z_ref = snr, z
+
+
+class _Pass:
+    def __init__(self, f, z=20.0, header=None, n=TINY.n_data, snr=-12.0):
+        self.f_hz, self.report, self.header, self.cw = f, _Report(z, snr), header, None
+        self.uid = f"u{f}"
+        self.w = np.ones(n, dtype=np.float32)
+        self.z = np.zeros(n, dtype=np.float32)
+
+
+def test_slot_bookkeeping_with_a_stub_receiver(tmp_path, monkeypatch):
+    calls = []
+
+    def detect(prep, spec, live_only=False, **kw):
+        calls.append(("detect", live_only))
+        return [_Det(1500.0), _Det(1610.0)]
+
+    freqs = iter([(1500.3, 1611.0), (1501.9, 1609.5), (1500.0, 1610.0)])
+
+    def receive_slot(prep, spec, live_only=False, estimator="joint", *, erase_s=(),
+                     round_b=True, dets=None, max_candidates=None, budget_s=None,
+                     hints=()):
+        calls.append(("receive", round_b, bool(erase_s)))
+        return [_Pass(f) for f in next(freqs)]
+
+    monkeypatch.setattr(RX, "detect", detect)
+    monkeypatch.setattr(RX, "receive_slot", receive_slot)
+    cfg = live.LiveConfig(spec=TINY, refresh_s=10.0, first_s=25.0, render=False)
+    L = live.LiveListener(tmp_path, cfg, log=lambda m: None)
+    q = Q_TEST
+    t0 = slot_t0(q)
+    L.feed(_hiss(76 * FS), t0 + 60.0)       # the whole TINY slot heard
+    assert not L.step(t0 - 20.0)
+    assert L.step(t0 + 30.0) and set(L.slots) == {q}
+    tiles = {round(t.f_hz): t.id for t in L.tiles()}
+    assert len(tiles) == 2
+    L.step(t0 + 35.0)                          # not yet due
+    L.step(t0 + 41.0)                          # due: frequencies moved under 5 Hz
+    assert sorted(t.id for t in L.tiles()) == sorted(tiles.values())
+    assert [c[1] for c in calls if c[0] == "receive"] == [False, False]   # live: round A
+    L.step(t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 0.5)
+    assert calls[-1] == ("receive", True, False)        # the whole slot, round B, nothing erased
+    assert q not in L.slots and q in L.finished
+    assert {t.status for t in L.tiles()} == {"complete"}
+    L.write_state()
+    st = json.loads((tmp_path / "state.json").read_text())
+    assert [t["id"] for t in st["tiles"]] == [t.id for t in L.tiles()]
+    assert st["frame"] == "tiny" and st["listening"]
+    # complete: every bin of the band has a value (W = 1 is 0 dB)
+    conf = st["tiles"][0]["confidence"]
+    assert len(conf) == RX.CONF_BINS and conf[-1] == 0.0
+    # a restart keeps the finished tiles; they expire after keep_done_s
+    L2 = live.LiveListener(tmp_path, cfg, log=lambda m: None)
+    assert len(L2.tiles()) == 2
+    L2.step(L2.tiles()[0].updated + cfg.keep_done_s + 1)
+    assert L2.tiles() == []
+
+
+def test_an_empty_slot_is_searched_less_often(tmp_path):
+    """Every refresh_s until detect_until_s; after it, a slot where nothing
+    was found is searched every empty_refresh_s, and one with a signal is
+    still received every refresh_s."""
+    cfg = live.LiveConfig(render=False)            # FULL: 120 s, 25 s, 300 s, 300 s
+    end = live.frame_seconds(cfg.spec)
+
+    def refreshes(found_at):
+        L = live.LiveListener(tmp_path / f"f{found_at}", cfg, log=lambda m: None)
+        t0 = slot_t0(Q_TEST)
+        seen = []
+
+        def refresh(s):
+            if s.q != Q_TEST:
+                return                            # (the slot before, still on the air)
+            seen.append(round(L.now - t0))
+            if found_at is not None and len(seen) >= found_at:
+                s.dets = [_Det(1500.0)]
+
+        L._refresh = refresh
+        for t in np.arange(0.0, end, 5.0):
+            L.step(t0 + t)
+        return seen
+
+    assert refreshes(None) == [25, 145, 265, 565, 865, 1165, 1465, 1765]
+    found = refreshes(2)                          # found at the second search
+    assert found[:2] == [25, 145] and np.all(np.diff(found) == 120) and found[-1] > end - 120
+
+
+def test_confidence_over_the_pass():
+    """The band under a tile: per-latent SNR over time, from W and the header LLRs."""
+    from types import SimpleNamespace
+
+    spec = frame.FULL
+    lay = frame.layout(spec)
+    t_data = lay.pos[lay.data] * T_SYM
+    w = np.where(t_data < 900.0, 10 ** 0.4, 0.0).astype(np.float32)   # 4 dB, then nothing
+    s2 = 0.5                                                          # header at 3 dB
+    rng = np.random.default_rng(3)
+    x = rng.choice([-1.0, 1.0], len(lay.hdr_bits))
+    llr = (2 * (x + rng.normal(0.0, s2 ** 0.5, len(x))) / s2).astype(np.float32)
+    psi = np.ones(spec.n_pos, dtype=np.float32)
+    psi[int(1200 / T_SYM):int(1300 / T_SYM)] = 0.0                    # not heard
+    p = SimpleNamespace(w=w, hdr_llr=llr, psi=psi)
+    c = RX.confidence_db(p, spec)
+    bin_s = spec.keyed_end_pos * T_SYM / RX.CONF_BINS
+
+    def at(t):
+        return c[int(t / bin_s)]
+
+    assert len(c) == RX.CONF_BINS
+    assert c[0] is None                                   # the preamble: nothing to measure
+    assert abs(at(50.0) - 3.0) < 0.6                      # header, from its LLRs
+    assert at(500.0) == 4.0                               # data, from W
+    assert at(1000.0) == RX.CONF_FLOOR_DB                 # heard, no information
+    assert at(1250.0) is None                             # not heard
+    live_c = RX.confidence_db(p, spec, elapsed_s=600.0)   # 600 s into the pass
+    assert at(500.0) == live_c[int(500.0 / bin_s)] and live_c[int(700.0 / bin_s)] is None
+
+
+def test_implausible_and_neighbour_passes_get_no_tile(tmp_path):
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    s = live.SlotState(Q_TEST)
+    other = live.SlotState(Q_TEST + 1)
+    L.slots = {Q_TEST: s, Q_TEST + 1: other}
+    L.now = slot_t0(Q_TEST + 1)
+    t = L._tile_for(other, 1500.0)
+    assert L._plausible(s, _Pass(1500.0))      # the neighbour has no header yet
+    t.callsign = "K1ABC"
+    assert not L._plausible(s, _Pass(1512.0))  # its signal, at the wrong timing
+    assert L._plausible(s, _Pass(1560.0))
+    assert not L._plausible(s, _Pass(float("inf")))
+    assert not L._plausible(s, _Pass(5000.0))
+    # strong enough that its header would have decoded: a carrier or a voice
+    assert not L._plausible(s, _Pass(1560.0, snr=3.1))
+    assert not L._plausible(s, _Pass(1560.0, snr=float("nan")))
+
+
+def test_tiny_slot_half_heard_then_whole(tmp_path):
+    """The real receiver on a TINY slot at -6 dB: half heard, the blocks not
+    yet heard carry no weight; heard whole, every latent does."""
+    q = Q_TEST
+    a = unit_rms_latents(TINY.n_data, 0)
+    sym = frame.assemble(TINY, None, precoder.precode(a, q))
+    sim = chm.simulate(sym, TINY, q, ChannelConfig(snr_db=-6.0, seed=2), carrier_hz=1500.0)
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    t0 = slot_t0(q)
+    n0 = t0 * FE_FS - int(round(sim.t0_index))
+    half = int(round(sim.t0_index + 0.5 * live.frame_seconds(TINY) * FE_FS))
+    L.ring.write(n0, sim.fe[:half])
+    cut = (half - sim.t0_index) / FE_FS
+    L.step(t0 + cut)
+    (tile,) = L.tiles()
+    assert abs(tile.f_hz - 1500.0) < 0.2 and tile.status == "receiving"
+    # the preamble is 20 of the frame's 53 s, so a quarter of the data is heard
+    assert 0.1 < tile.received < 0.45 and tile.heard == pytest.approx(0.5, abs=0.01)
+    prep, erase, _ = live.slot_capture(L.ring, q, TINY)
+    p = RX.receive_slot(prep, TINY, erase_s=erase, round_b=False, dets=list(L.slots[q].dets))[0]
+    # data symbol k of a block: each 64-latent block is spread over 64
+    # consecutive data symbols, so a block whose symbols all come after
+    # the cut has W = 0, and one wholly before it has W > 0
+    lay = frame.layout(TINY)
+    t_data = np.asarray(lay.pos)[np.asarray(lay.data)] * T_SYM
+    bi = precoder.block_index(TINY.n_data)
+    late = np.array([t_data[bi == b].min() > cut for b in bi])
+    early = np.array([t_data[bi == b].max() < cut - 1.0 for b in bi])
+    assert late.any() and early.any()
+    assert np.all(p.w[late] == 0) and np.all(p.w[early] > 0)
+
+    L.ring.write(n0 + half, sim.fe[half:])
+    L.step(t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 1.0)
+    (tile,) = L.tiles()
+    assert tile.status == "complete" and tile.received == 1.0 and tile.heard == 1.0
+
+
+def test_one_listener_per_directory(tmp_path):
+    a = live.dir_lock(tmp_path)
+    assert a is not None
+    assert live.dir_lock(tmp_path) is None          # a second writer is refused
+    a.close()
+    b = live.dir_lock(tmp_path)                     # and allowed once the first is gone
+    assert b is not None
+    b.close()
+
+
+def test_atomic_writes_from_two_writers_do_not_collide(tmp_path):
+    """Two writers of one passband index file: each write's temporary file
+    is its own, so neither os.replace moves the other's away."""
+    import threading
+    p = tmp_path / "fe_1.json"
+    errors = []
+
+    def write(k):
+        try:
+            for i in range(300):
+                frontend._atomic_write(p, f"[{k}, {i}]")
+        except OSError as e:
+            errors.append(e)
+
+    ts = [threading.Thread(target=write, args=(k,)) for k in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert not errors
+    assert json.loads(p.read_text())[1] == 299
+
+
+def test_a_refused_preamble_is_checked_again(tmp_path, monkeypatch):
+    """Field test (2026-10-11, slot 04:15Z): KC2G's preamble passed A2 at
+    every refresh, gate V refused it, and once AG7EW had been found the
+    slot's search stopped at detect_until_s, so KC2G was never checked
+    again. A refused preamble hit is checked again until recheck_until_s,
+    on its own (a signal already found is not verified again), and the
+    slot's acquisition runs once, its answer final once the audio is past it."""
+    acq, calls = [], []
+    monkeypatch.setattr(RX, "candidates",
+                        lambda *a, **k: acq.append(1) or [_Det(1500.0), _Det(1600.0)])
+    answers = iter([[_Det(1500.0)], [_Det(1600.0)]])
+
+    def detect(prep, spec, live_only=False, *, erase_s=(), cands=None, skip_hz=(),
+               hints=()):
+        calls.append((tuple(c.f_hz for c in cands), tuple(skip_hz)))
+        return next(answers)
+
+    monkeypatch.setattr(RX, "detect", detect)
+    monkeypatch.setattr(RX, "receive_slot",
+                        lambda prep, spec, *, dets=None, **k: [_Pass(d.f_hz) for d in dets])
+    cfg = live.LiveConfig(spec=TINY, refresh_s=10.0, first_s=25.0, detect_until_s=30.0,
+                          recheck_until_s=45.0, render=False)
+    L = live.LiveListener(tmp_path, cfg, log=lambda m: None)
+    t0 = slot_t0(Q_TEST)
+    L.feed(_hiss(76 * FS), t0 + 60.0)
+    L.step(t0 + 26.0)                          # the search: 1600 refused
+    L.step(t0 + 36.0)                          # past detect_until_s: 1600 checked again
+    assert calls == [((1500.0, 1600.0), ()), ((1500.0, 1600.0), (1500.0,))]
+    assert sorted(round(t.f_hz) for t in L.tiles()) == [1500, 1600]
+    L.step(t0 + 46.0)                          # past recheck_until_s (and nothing refused)
+    assert len(calls) == 2 and acq == [1]
+
+
+def test_acquisition_is_kept_only_once_it_is_final(tmp_path, monkeypatch):
+    """A refresh heard to less than acquisition's reach past t0 (plus the
+    blanker's) finds the candidates again next time; one past it keeps them."""
+    acq = []
+    monkeypatch.setattr(RX, "candidates", lambda *a, **k: acq.append(1) or [])
+    monkeypatch.setattr(RX, "detect", lambda *a, **k: [])
+    monkeypatch.setattr(RX, "receive_slot", lambda *a, **k: [])
+    cfg = live.LiveConfig(spec=TINY, refresh_s=5.0, first_s=25.0, render=False)
+    L = live.LiveListener(tmp_path, cfg, log=lambda m: None)
+    t0 = slot_t0(Q_TEST)
+    reach = acquisition.live_end_s() + 1.0
+    L.feed(_hiss(int((reach - 0.5 + 16) * FS)), t0 + reach - 0.5)
+    L.step(t0 + 26.0)
+    s = L.slots[Q_TEST]
+    assert acq == [1] and s.cands is None
+    L.feed(_hiss(FS), t0 + reach + 0.5)
+    L.step(t0 + 31.0)
+    assert acq == [1, 1] and s.cands == []
+    L.step(t0 + 36.0)
+    assert acq == [1, 1]
+
+
+def test_a_slot_mostly_unheard_gets_no_whole_slot_search(tmp_path, monkeypatch):
+    """Joined late (after the preamble, a third of the slot heard): the end
+    of the slot receives only what the preamble found, which here is
+    nothing, rather than searching the slot; on a phone band that search
+    ran for longer than a slot."""
+    calls = []
+    monkeypatch.setattr(RX, "detect", lambda *a, **k: calls.append("detect") or [])
+    monkeypatch.setattr(RX, "receive_slot", lambda *a, **k: calls.append(("receive", k)) or [])
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    q = Q_TEST
+    t0 = slot_t0(q)
+    dur = live.frame_seconds(TINY)
+    late = t0 + 0.65 * dur
+    L.feed(_hiss(int((t0 + dur + 5 - late) * FS)), t0 + dur + 5)
+    L.step(late)
+    L.step(t0 + dur + frontend.PB_TAIL_S + 0.5)
+    assert q in L.finished and calls == []
+    assert any("no whole-slot search" in s for s in L.lines)
+
+
+def test_receives_run_on_the_worker_and_state_keeps_moving(tmp_path, monkeypatch):
+    """With background on, a slow receive does not hold up feeding or
+    state.json, which says what the worker is doing."""
+    import threading
+    release = threading.Event()
+    started = threading.Event()
+
+    def slow(*a, **k):
+        started.set()
+        release.wait(10)
+        return []
+
+    monkeypatch.setattr(RX, "receive_slot", slow)
+    monkeypatch.setattr(RX, "detect", lambda *a, **k: [])
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False, background=True),
+                          log=lambda m: None)
+    q = Q_TEST
+    t0 = slot_t0(q)
+    end = t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 0.5
+    L.feed(_hiss(int((end - t0 + 15) * FS)), end)
+    with L.lock:
+        L.step(t0 + 30.0)             # the slot starts (its refresh finds nothing)
+    for _ in range(100):
+        if L.idle():
+            break
+        import time as _t
+        _t.sleep(0.05)
+    with L.lock:
+        L.step(end)
+    assert started.wait(5)
+    with L.lock:                      # the loop can still feed and write state
+        L.feed(_hiss(FS), end + 1.0)
+        L.write_state()
+    st = json.loads((tmp_path / "state.json").read_text())
+    assert st["busy"] and "finish" in st["busy"]
+    release.set()
+    for _ in range(100):
+        if L.idle():
+            break
+        import time as _t
+        _t.sleep(0.05)
+    with L.lock:
+        L.step(end + 2.0)
+    assert q in L.finished and L.idle()
+
+
+def _until(cond, timeout=10.0):
+    import time as _t
+    deadline = _t.monotonic() + timeout
+    while not cond() and _t.monotonic() < deadline:
+        _t.sleep(0.02)
+    assert cond()
+
+
+def test_a_finishing_slot_shows_the_whole_pass_meanwhile(tmp_path, monkeypatch):
+    """The end-of-slot receive takes minutes. Meanwhile the tile reads
+    "finishing", and one more live receive of the whole frame takes it to
+    the pass's end, where it used to stay at the last refresh (96% for
+    five minutes in a field test). A tile's progress is when its audio was read,
+    not when its receive returned."""
+    import threading
+
+    reads = []
+
+    def receive_slot(*a, **k):
+        reads.append(L.now)
+        with L.lock:
+            L.now += 10.0             # the loop steps on while a receive runs
+        return [_Pass(1500.0)]
+
+    monkeypatch.setattr(RX, "detect", lambda *a, **k: [_Det(1500.0)])
+    monkeypatch.setattr(RX, "receive_slot", receive_slot)
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False, background=True),
+                          log=lambda m: None)
+    release = threading.Event()
+    finish = L._finish
+    L._finish = lambda s: (release.wait(10), finish(s))
+    q = Q_TEST
+    t0 = slot_t0(q)
+    dur = live.frame_seconds(TINY)
+    end = t0 + dur + frontend.PB_TAIL_S + 0.5
+    L.feed(_hiss(int((end - t0 + 15) * FS)), end)
+    live_idle = lambda: L._busy["live"] is None and L._jobs.empty()   # noqa: E731
+    with L.lock:
+        L.step(t0 + 30.0)
+    _until(lambda: live_idle() and reads)
+    (tile,) = L.tiles()
+    assert tile.status == "receiving" and tile.progress == pytest.approx(30.0 / dur)
+    with L.lock:
+        L.step(end)
+    assert tile.status == "finishing"
+    _until(lambda: live_idle() and len(reads) == 2)
+    assert tile.status == "finishing" and tile.progress == 1.0 and tile.heard == 1.0
+    with L.lock:
+        L.step(end + 1.0)             # no second final refresh
+    assert len(reads) == 2
+    release.set()
+    _until(L.idle)
+    with L.lock:
+        L.step(end + 2.0)
+    assert q in L.finished and tile.status == "complete"
+    # a listener stopped while it finished re-finishes the slot, not lists the tile
+    t = live.Tile(id="x", q=q + 1, slot_utc="", frame="tiny", f_hz=1500.0, status="finishing")
+    (tmp_path / "s2").mkdir()
+    (tmp_path / "s2" / "state.json").write_text(json.dumps({"tiles": [t.to_json()]}))
+    L2 = live.LiveListener(tmp_path / "s2", live.LiveConfig(spec=TINY, render=False),
+                           log=lambda m: None)
+    assert L2.tiles() == [] and q + 1 not in L2.finished
+    L2.close()
+    L.close()
+
+
+def test_the_end_of_slot_receive_runs_in_its_own_process(tmp_path):
+    """With finish_process, the end-of-slot receive runs in a child process
+    while the live worker stays free, gets the same passes, and a child that
+    dies is replaced at the next receive."""
+    import os
+    import time as _t
+
+    q = Q_TEST
+    a = unit_rms_latents(TINY.n_data, 0)
+    sym = frame.assemble(TINY, None, precoder.precode(a, q))
+    sim = chm.simulate(sym, TINY, q, ChannelConfig(snr_db=-10.0, seed=2), carrier_hz=1500.0)
+    t0 = slot_t0(q)
+    n0 = t0 * FE_FS - int(round(sim.t0_index))
+    end = t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 0.5
+    cfg = live.LiveConfig(spec=TINY, render=False, background=True, finish_process=True)
+    L = live.LiveListener(tmp_path, cfg, log=lambda m: None)
+    try:
+        L.ring.write(n0, sim.fe)
+        L._refresh = lambda s: None           # (live receives are not what is tested)
+        got = []
+        apply = L._finish_apply
+        L._finish_apply = lambda s, results: (got.append(results), apply(s, results))
+        with L.lock:
+            L.step(t0 + 30.0)                 # the slot starts
+            L.step(end)                       # and ends
+        s = L.slots[q]
+        child = None
+        deadline = _t.monotonic() + 120.0
+        while not (s.done and L.idle()) and _t.monotonic() < deadline:
+            if child is None and L._proc._proc is not None:
+                child = L._proc._proc.pid
+                assert L._busy["live"] is None and "finish" in L.busy
+            _t.sleep(0.05)
+        assert s.done and L.idle(), "the end-of-slot receive did not finish"
+        assert child is not None and child != os.getpid()
+        with L.lock:
+            L.step(end + 1.0)
+        assert q in L.finished
+        (tile,) = L.tiles()
+        assert tile.status == "complete" and abs(tile.f_hz - 1500.0) < 0.5
+        # the same receive in this process gives the same pass
+        x, ok, origin = live.capture_read(L.ring, q, TINY)
+        here, heard = live.finish_receive(x, ok, origin, q, TINY, cfg.estimator, [])
+        ((_, there, heard2),) = got[0]
+        assert heard == heard2 and len(here) == len(there) == 1
+        import qrss_native
+        if os.environ.get("QRSS_LIVE_NOISE") == "cpp":
+            # The C++ generator fills this process's holes and numpy's the
+            # child's, so the two passes share a pass count, not latents.
+            pass
+        elif qrss_native.ACTIVE is None:
+            assert np.array_equal(here[0].z, there[0].z) and np.array_equal(here[0].w, there[0].w)
+        else:
+            # Under --native-qrss this process runs the C++ rows while the
+            # spawned child imports the Python reference, so the two passes
+            # agree to the port's tolerance (the tracker's rounding moves a
+            # few float32 latents by an ulp), not bit for bit.
+            np.testing.assert_allclose(here[0].z, there[0].z, rtol=1e-4, atol=1e-5)
+            np.testing.assert_allclose(here[0].w, there[0].w, rtol=1e-4, atol=1e-5)
+        # a child that dies is replaced
+        L._proc._proc.kill()
+        L._proc._proc.join(10.0)
+        empty = (np.zeros(len(x), np.complex64), np.zeros(len(x), bool), origin, q, TINY,
+                 cfg.estimator, [])
+        assert L._proc.call(empty) == ([], 0.0)
+    finally:
+        L.close()
+    assert L._proc._proc is None
+
+
+def test_the_dial_log_splits_time_into_epochs(tmp_path):
+    """The app's dial file: lines in any order, a bad or half-written line
+    skipped, a repeated dial not a change, the first dial in force before
+    it, DIAL_GUARD_S taken off around each change, re-read on change."""
+    path = tmp_path / live.DIAL_FILE
+    D = live.DialLog(path)
+    D.refresh()
+    assert D.spans(0.0, 100.0) == [(-np.inf, np.inf, None)]
+    assert D.span_at(50.0) == (-np.inf, np.inf, None)
+    lines = [{"t": 1000.0, "dial_hz": 10_140_000, "why": "start"},
+             {"t": 3000.0, "dial_hz": 7_039_000},
+             {"t": 2000.0, "dial_hz": 14_096_000, "why": "menu"},
+             {"t": 1500.0, "dial_hz": 10_140_000, "why": "radio"},     # no change
+             {"t": 2500.0}]
+    path.write_text("\n".join(json.dumps(d) for d in lines) + '\n{"t": 3500.0, "dial')
+    D.refresh()
+    assert D.points == [(1000.0, 10_140_000), (2000.0, 14_096_000), (3000.0, 7_039_000)]
+    g0, g1 = live.DIAL_GUARD_S
+    assert D.span_at(0.0) == (-np.inf, 2000.0 - g0, 10_140_000)          # before the first line
+    assert D.span_at(2010.0) == (2000.0 + g1, 3000.0 - g0, 14_096_000)   # lo after t: settling
+    assert D.span_at(9999.0) == (3000.0 + g1, np.inf, 7_039_000)
+    assert D.spans(1900.0, 2100.0) == [(-np.inf, 2000.0 - g0, 10_140_000),
+                                       (2000.0 + g1, 3000.0 - g0, 14_096_000)]
+    assert D.spans(3100.0, 3200.0) == [(3000.0 + g1, np.inf, 7_039_000)]
+    # the app's 48 h trim replaces the file: read again by path
+    # a dial left and come back to is one dial, heard twice
+    assert D.by_dial(0.0, 9999.0) == [(10_140_000, [(-np.inf, 2000.0 - g0)]),
+                                      (14_096_000, [(2000.0 + g1, 3000.0 - g0)]),
+                                      (7_039_000, [(3000.0 + g1, np.inf)])]
+    path.write_text("\n".join(json.dumps({"t": t, "dial_hz": hz}) for t, hz in
+                              [(1000.0, 7_040_000), (2000.0, 7_041_000), (2001.0, 7_040_000)]))
+    D.refresh()
+    assert D.by_dial(0.0, 9999.0) == [(7_040_000, [(-np.inf, 2000.0 - g0), (2001.0 + g1, np.inf)])]
+    assert D.dial_at(2000.5) == 7_041_000
+    path.write_text(json.dumps({"t": 5000.0, "dial_hz": 3_568_600}) + "\n")
+    D.refresh()
+    assert D.points == [(5000.0, 3_568_600)]
+    path.unlink()
+    D.refresh()
+    assert D.points == []
+
+
+def test_restrict_keeps_only_what_was_heard_on_one_dial():
+    q = Q_TEST
+    t0 = slot_t0(q)
+    origin = 10 * FE_FS
+    ok = np.ones(100 * FE_FS, dtype=bool)
+    ok[50 * FE_FS:55 * FE_FS] = False                 # a hole stays a hole
+    assert live.restrict(ok, origin, q, [(-np.inf, np.inf)]) is ok
+    r = live.restrict(ok, origin, q, [(t0 + 20.0, t0 + 60.0)])
+    assert np.flatnonzero(np.diff(r.astype(np.int8))).tolist() == [
+        30 * FE_FS - 1, 50 * FE_FS - 1, 55 * FE_FS - 1, 70 * FE_FS - 1]
+    assert not live.restrict(ok, origin, q, [(t0 + 200.0, np.inf)]).any()
+    assert not live.restrict(ok, origin, q, []).any()
+    r = live.restrict(ok, origin, q, [(-np.inf, t0 + 5.0), (t0 + 80.0, np.inf)])
+    assert r[:15 * FE_FS].all() and not r[15 * FE_FS:90 * FE_FS].any() and r[90 * FE_FS:].all()
+    assert live.same_dial(None, 7_040_000) and not live.same_dial(7_040_000, 14_096_000)
+
+
+def test_a_slot_heard_on_two_dials_is_received_on_each(tmp_path, monkeypatch):
+    """The dial changes twenty seconds into a slot. Live, the slot is
+    received on the dial it started on with everything after the change
+    erased; at its end each dial is received on its own, and a signal at
+    the same audio frequency on the other dial is another tile."""
+    monkeypatch.setattr(live, "DIAL_GUARD_S", (2.0, 2.0))   # (TINY is 53 s: room after it)
+    calls = []
+
+    def detect(prep, spec, live_only=False, **kw):
+        return [_Det(1500.0)]
+
+    def receive_slot(prep, spec, live_only=False, estimator="joint", *, erase_s=(),
+                     round_b=True, dets=None, max_candidates=None, budget_s=None,
+                     hints=()):
+        calls.append((round_b, bool(dets), list(erase_s)))
+        return [_Pass(1500.0)]
+
+    monkeypatch.setattr(RX, "detect", detect)
+    monkeypatch.setattr(RX, "receive_slot", receive_slot)
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    q = Q_TEST
+    t0 = slot_t0(q)
+    end = t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S
+    (tmp_path / live.DIAL_FILE).write_text(
+        json.dumps({"t": t0 - 600.0, "dial_hz": 10_138_700, "why": "start"}) + "\n"
+        + json.dumps({"t": t0 + 20.0, "dial_hz": 14_095_600, "why": "schedule"}) + "\n")
+    start = t0 - frontend.PB_LEAD_S - 1.0
+    L.feed(_hiss(int((end + 5 - start) * FS)), end + 5)
+    L.step(t0 + 30.0)
+    (tile,) = L.tiles()
+    assert tile.dial_hz == 10_138_700
+    ((round_b, dets, erase),) = calls
+    assert not round_b and dets and erase[0] == (18.0, live.frame_seconds(TINY) + frontend.PB_TAIL_S)
+    calls.clear()
+    L.step(end + 0.5)
+    assert q in L.finished
+    assert [c[:2] for c in calls] == [(True, True), (True, False)]   # its signal; then a search
+    assert calls[0][2][0][0] == 18.0 and calls[1][2][0] == (-frontend.PB_LEAD_S, 22.0)
+    tiles = sorted(L.tiles(), key=lambda t: t.dial_hz)
+    assert [t.dial_hz for t in tiles] == [10_138_700, 14_095_600]
+    assert all(t.status == "complete" and t.f_hz == 1500.0 for t in tiles)
+    assert any("on 2 dials" in s for s in L.lines)
+    L.write_state()
+    st = json.loads((tmp_path / "state.json").read_text())
+    assert sorted(t["dial_hz"] for t in st["tiles"]) == [10_138_700, 14_095_600]
+
+
+def test_a_restarted_listener_reads_the_preamble_back(tmp_path):
+    """A listener started mid-slot refills its ring from the passband store
+    an earlier one wrote, so the slot's preamble (and its tile) is not lost."""
+    q = Q_TEST
+    a = unit_rms_latents(TINY.n_data, 0)
+    sym = frame.assemble(TINY, None, precoder.precode(a, q))
+    sim = chm.simulate(sym, TINY, q, ChannelConfig(snr_db=-6.0, seed=2), carrier_hz=1500.0)
+    t0 = slot_t0(q)
+    n0 = t0 * FE_FS - int(round(sim.t0_index))
+    half = int(round(sim.t0_index + 0.5 * live.frame_seconds(TINY) * FE_FS))
+    pb = frontend.PassbandStore(tmp_path / "passband")
+    pb.write(n0 / FE_FS, sim.fe[:half], expire=False)      # what the first listener heard
+    now = (n0 + half) / FE_FS
+    L = live.LiveListener(tmp_path / "live", live.LiveConfig(spec=TINY, render=False),
+                          passband=pb, log=lambda m: None)
+    assert L.step(now) is not None and not L.tiles()     # nothing heard: no preamble
+    L = live.LiveListener(tmp_path / "live2", live.LiveConfig(spec=TINY, render=False),
+                          passband=pb, log=lambda m: None)
+    assert L.backfill(now) == pytest.approx(half / FE_FS, abs=1.0)
+    L.step(now)
+    (tile,) = L.tiles()
+    assert abs(tile.f_hz - 1500.0) < 0.2 and tile.status == "receiving"
+
+
+def test_a_headerless_pass_gets_a_provisional_picture(tmp_path):
+    """No header: the picture is drawn as segment 0 of a mode A send and
+    marked so; once a header decodes it is redrawn from it, unmarked."""
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from sstvae.qrss import picture
+
+    decoded = []
+
+    class Codec:
+        def decode(self, lat, wt):
+            decoded.append(np.asarray(wt))
+            return Image.new("RGB", (64, 48))
+
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=True),
+                          log=lambda m: None)
+    L.codec = Codec()
+    t = live.Tile(id="t", q=Q_TEST, slot_utc="x", frame="full", f_hz=1500.0)
+    p = _Pass(1500.0, n=picture.SENT)
+    p.z = np.ones(picture.SENT, dtype=np.float32)
+    L._render(t, p)
+    assert t.image == "tiles/t.png" and (tmp_path / t.image).is_file()
+    assert live.GUESS_NOTE in t.note and len(decoded) == 1
+    L._render(t, p)
+    assert t.note.count(live.GUESS_NOTE) == 1            # marked once, however often redrawn
+    p.header = SimpleNamespace(segment=1, mode=1, codec_id=0xD1D8, callsign="AG7EW",
+                               grid="CN85", picture_id=7)
+    L._render(t, p)
+    assert t.note == "" and t.image_rev == 3
+    # the guess put the pass in group 0; the header puts it in group 1
+    assert not np.array_equal(decoded[0], decoded[2])
+
+
+def test_a_headerless_pass_the_store_matched_is_drawn_as_its_picture(tmp_path):
+    """Section 9: a headerless pass matched to a picture by the store (a
+    combined header, or its latents) shows that picture, not the guess."""
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from sstvae.qrss import picture
+
+    decoded = []
+
+    class Codec:
+        def decode(self, lat, wt):
+            decoded.append(np.asarray(wt))
+            return Image.new("RGB", (64, 48))
+
+    p = _Pass(1500.0, n=picture.SENT)
+    S = np.zeros((picture.N_GROUPS, picture.GROUP_LATENTS), dtype=np.float32)
+    W = np.zeros_like(S)
+    W[1] = 1.0                                     # the store placed it in group 1
+    acc = SimpleNamespace(mode=1, codec_id=0xD1D8, S=S, W=W, members=[{}, {}],
+                          uids=[p.uid, "other"])
+    key = ("AG7EW", 7)
+    store = SimpleNamespace(has_accumulator=lambda k: k == key, accumulator=lambda k: acc)
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=True), store=store,
+                          log=lambda m: None)
+    L.codec = Codec()
+    t = live.Tile(id="t", q=Q_TEST, slot_utc="x", frame="full", f_hz=1500.0,
+                  note="stored (corr)")
+    L._render(t, p, key=key)
+    assert t.note == "stored (corr)" and t.callsign == "AG7EW" and t.mode == "B"
+    assert t.passes == 2 and len(decoded) == 1
+
+
+def test_a_restarted_listener_finishes_a_slot_that_ended_while_it_was_stopped(tmp_path):
+    """A slot heard by an earlier listener that stopped before its frame
+    ended is received from the passband store on the next start, once."""
+    q = Q_TEST
+    a = unit_rms_latents(TINY.n_data, 0)
+    sym = frame.assemble(TINY, None, precoder.precode(a, q))
+    sim = chm.simulate(sym, TINY, q, ChannelConfig(snr_db=-6.0, seed=2), carrier_hz=1500.0)
+    t0 = slot_t0(q)
+    n0 = t0 * FE_FS - int(round(sim.t0_index))
+    pb = frontend.PassbandStore(tmp_path / "passband")
+    pb.write(n0 / FE_FS, sim.fe, expire=False)        # the earlier listener heard it all
+    now = t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 600.0
+    cfg = live.LiveConfig(spec=TINY, render=False)
+    L = live.LiveListener(tmp_path / "live", cfg, passband=pb, log=lambda m: None)
+    assert L.recover(now) == [q]
+    assert not L.recover(now)                          # queued once
+    L.step(now)
+    (tile,) = L.tiles()
+    assert abs(tile.f_hz - 1500.0) < 0.2 and tile.status == "complete"
+    L.write_state()
+    assert q in json.loads((tmp_path / "live" / "state.json").read_text())["finished"]
+    L2 = live.LiveListener(tmp_path / "live", cfg, passband=pb, log=lambda m: None)
+    assert L2.recover(now) == []                        # finished already, by the first
+    assert live.LiveListener(tmp_path / "live3", cfg, passband=pb,
+                             log=lambda m: None).recover(now, hours=0.1) == []   # too long ago
+
+
+def test_a_slot_the_store_holds_is_not_received_again(tmp_path):
+    """An earlier listener that filed a slot's passes and stopped before it
+    recorded the slot as finished: the restart does not receive it again,
+    which would file a second copy of each pass under its picture."""
+    from types import SimpleNamespace
+
+    q = Q_TEST
+    pb = frontend.PassbandStore(tmp_path / "passband")
+    t0 = slot_t0(q)
+    pb.write(t0 - 15.0, np.ones(int(80 * FE_FS), np.complex64), expire=False)
+    now = t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 600.0
+    cfg = live.LiveConfig(spec=TINY, render=False)
+    held = SimpleNamespace(pass_uids=lambda: [f"{q}_1500000_0123abcd", "junk"])
+    L = live.LiveListener(tmp_path / "a", cfg, store=held, passband=pb, log=lambda m: None)
+    assert L.recover(now) == [] and q in L.finished
+    other = SimpleNamespace(pass_uids=lambda: [f"{q - 4}_1500000_0123abcd"])
+    L = live.LiveListener(tmp_path / "b", cfg, store=other, passband=pb, log=lambda m: None)
+    assert L.recover(now) == [q]
+
+
+def test_a_provisional_tile_takes_the_picture_a_later_header_finds(tmp_path, monkeypatch):
+    """A pass filed provisional, then pulled into its picture when a later
+    pass's header decodes: the older tile takes the picture's callsign, ID
+    and mode (so the app hides it behind the newer one); others stay."""
+    from types import SimpleNamespace
+
+    import sstvae.qrss.associate as assoc
+
+    key = ("AG7EW", 0x7B202AAD)
+    hdr = SimpleNamespace(callsign="AG7EW", grid="CN85", picture_id=key[1], mode=1,
+                          segment=1, codec_id=0xD1D8)
+    filed = set()
+
+    def associate(p, store):
+        if p.header is None:
+            return None, "prov"
+        filed.add("old")                  # the header pulls the provisional pass in
+        return key, "header"
+
+    monkeypatch.setattr(assoc, "associate", associate)
+    acc = SimpleNamespace(mode=1, member=lambda u: {"uid": u, "segment": 0, "method": "corr"})
+    store = SimpleNamespace(find_member=lambda u: key if u == "old" and filed else None,
+                            accumulator=lambda k: acc)
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False), store=store,
+                          log=lambda m: None)
+    L.now = slot_t0(Q_TEST + 4)
+    first, second = live.SlotState(Q_TEST), live.SlotState(Q_TEST + 4)
+    old, stray = _Pass(1500.0), _Pass(1700.0)
+    old.uid, stray.uid = "old", "stray"
+    L._finish_apply(first, [(None, [old, stray], 1.0)])
+    L.done_tiles.extend(first.tiles.values())
+    by_f = {round(t.f_hz): t for t in L.done_tiles}
+    assert by_f[1500].note == "stored (provisional)" and by_f[1500].uid == "old"
+    new = _Pass(1500.0, header=hdr)
+    new.uid = "new"
+    L._finish_apply(second, [(None, [new], 1.0)])
+    t = by_f[1500]
+    assert (t.callsign, t.picture_id, t.mode, t.segment) == ("AG7EW", "7b202aad", "B", 0)
+    assert t.note == "stored (corr)" and t.passes == 1
+    assert by_f[1700].picture_id is None and by_f[1700].note == "stored (provisional)"
+    (n,) = second.tiles.values()
+    assert n.note == "stored (header)" and n.uid == "new"
+
+
+def test_a_header_decoded_once_stays_with_its_signal(tmp_path, monkeypatch):
+    """A later live receive that misses the header keeps the one decoded
+    earlier: the tile keeps its callsign and is not redrawn as the guess,
+    and the end-of-slot pass goes to the store with it."""
+    from types import SimpleNamespace
+
+    hdr = SimpleNamespace(callsign="AG7EW", grid="CN85", picture_id=0x621AC873, mode=1,
+                          segment=0, codec_id=0xD1D8)
+    headers = iter([hdr, None, None])
+
+    def receive_slot(prep, spec, live_only=False, estimator="joint", *, erase_s=(),
+                     round_b=True, dets=None, max_candidates=None, budget_s=None,
+                     hints=()):
+        return [_Pass(1500.0, header=next(headers))]
+
+    monkeypatch.setattr(RX, "detect", lambda prep, spec, live_only=False, **kw: [_Det(1500.0)])
+    monkeypatch.setattr(RX, "receive_slot", receive_slot)
+    stored = []
+
+    import sstvae.qrss.associate as assoc
+    monkeypatch.setattr(assoc, "associate", lambda p, store: stored.append(p.header) or
+                        (("AG7EW", 1), "header"))
+    store = SimpleNamespace(has_accumulator=lambda k: False)
+    cfg = live.LiveConfig(spec=TINY, refresh_s=10.0, first_s=25.0, render=False)
+    L = live.LiveListener(tmp_path, cfg, store=store, log=lambda m: None)
+    t0 = slot_t0(Q_TEST)
+    L.feed(_hiss(76 * FS), t0 + 60.0)
+    L.step(t0 + 30.0)
+    L.step(t0 + 41.0)                                   # this receive missed the header
+    (t,) = L.tiles()
+    assert t.callsign == "AG7EW" and t.mode == "B" and live.GUESS_NOTE not in t.note
+    L.step(t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 0.5)
+    assert stored == [hdr]
+
+
+def test_a_late_joined_pass_is_kept_for_the_store(tmp_path):
+    """A pass whose header was never heard (the listener started mid-slot)
+    is kept: when it is strong if its callsign windows read a call, and
+    whatever a slot other than its two neighbours decoded at its frequency
+    (the same picture sent again later), so the store can match it."""
+    from types import SimpleNamespace
+
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    s = live.SlotState(Q_TEST)
+    later = live.SlotState(Q_TEST + 2)
+    L.slots = {Q_TEST: s, Q_TEST + 2: later}
+    L.now = slot_t0(Q_TEST + 2)
+    L._tile_for(later, 1500.0).callsign = "AG7EW"    # the repeat, half an hour later
+    assert L._plausible(s, _Pass(1503.0))
+    strong = _Pass(1700.0, snr=2.0)
+    assert not L._plausible(s, strong)
+    strong.cw = SimpleNamespace(text="AG7EW")
+    assert L._plausible(s, strong)
+
+
+class _Cand:
+    def __init__(self, f, method="preamble"):
+        self.f_hz, self.method = f, method
+
+
+def _part1(q, f, mode="B", dial=None):
+    """A tile of an earlier slot whose header said it was part 1 of `mode`."""
+    return live.Tile(id=f"p{q}_{f}", q=q, slot_utc="", frame="tiny", f_hz=f, dial_hz=dial,
+                     status="complete", mode=mode, segment=0, updated=float(slot_t0(q + 2)))
+
+
+def test_hints_name_where_a_later_pass_is_due(tmp_path):
+    """Field test (2026-10-11): KC2G's mode B part 2 came two slots after
+    part 1, 0.6 Hz higher. The hints for slot q: each later segment due in
+    q of a picture in the multi-pass store or on an earlier slot's tile,
+    moved by the dial change since it was heard (USB), within the band,
+    one per MERGE_HZ."""
+    from qrss_fakes import make_pass_result, synthetic_picture
+    from sstvae.qrss import picture
+    from sstvae.qrss.store import Store
+
+    q = Q_TEST
+    store = Store(tmp_path / "store", clock=lambda: float(slot_t0(q)))
+    sp = synthetic_picture(31, mode=1)
+    p = make_pass_result(picture.air_values(sp.segs[0], 0), 1.0, seed=1, q=q, f_hz=1205.47)
+    store.add_pass(p)
+    store.attach(("KC2G", sp.picture_id), p.uid, 0, "header", mode=1, codec_id=sp.codec_id)
+    L = live.LiveListener(tmp_path / "live", live.LiveConfig(spec=TINY, render=False),
+                          store=store, log=lambda m: None)
+    (tmp_path / "live" / live.DIAL_FILE).write_text(
+        json.dumps({"t": slot_t0(q) - 600.0, "dial_hz": 10_141_000}) + "\n"
+        + json.dumps({"t": slot_t0(q + 1), "dial_hz": 10_140_900}) + "\n")
+    L.dial.refresh()
+    L.done_tiles += [_part1(q, 1205.6),                         # the store's own pass
+                     _part1(q, 1500.0, "C", dial=10_141_000),
+                     _part1(q, 2650.0, "C"),                     # 2750 Hz on the new dial
+                     _part1(q, 900.0, "A")]                      # no later part
+    at = lambda k: L._hints(q + k, L.dial.dial_at(slot_t0(q + k)))   # noqa: E731
+    assert at(2) == [1305.47, 1600.0]
+    assert at(4) == [1600.0]
+    assert at(1) == [] and at(3) == [] and at(6) == []
+    assert L._hints(q + 2, None) == [1205.47, 1500.0, 2650.0]   # (no dial: not moved)
+
+
+def test_a_hint_goes_to_acquisition_and_to_the_end_of_slot_search(tmp_path, monkeypatch):
+    """Live, acquisition gets the slot's hints and a hint A2 did not pass
+    is not verified (with no timing, gate V costs about a minute on FULL);
+    the end of the slot searches with them."""
+    seen, calls = [], []
+    monkeypatch.setattr(RX, "candidates", lambda *a, hints=(), **k: seen.append(hints) or [
+        _Cand(1500.0), _Cand(1600.0, "hint")])
+    monkeypatch.setattr(RX, "detect", lambda *a, cands=None, **k: calls.append(
+        ("detect", [c.f_hz for c in cands])) or [_Det(1500.0)])
+    monkeypatch.setattr(RX, "receive_slot", lambda *a, dets=None, hints=(), **k: calls.append(
+        ("receive", dets is None, list(hints))) or [])
+    lines = []
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lines.append)
+    q = Q_TEST
+    L.done_tiles.append(_part1(q - 2, 1600.0))
+    t0 = slot_t0(q)
+    end = t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 0.5
+    L.feed(_hiss(int((end - t0 + 15) * FS)), end)
+    L.step(t0 + 30.0)
+    assert seen == [(1600.0,)] and calls[0] == ("detect", [1500.0])
+    assert any("a later pass is due at 1600.0 Hz" in m for m in lines)
+    calls.clear()
+    L.step(end)
+    assert q in L.finished
+    assert ("receive", True, [1600.0]) in calls
+
+
+def test_a_late_join_searches_where_a_later_pass_is_due(tmp_path, monkeypatch):
+    """Joined after the preamble (a third of the slot heard), the end of the
+    slot does no whole-slot search, but it does look at a hint: part 2 of a
+    picture whose part 1 was heard, where part 1 was."""
+    calls = []
+
+    def detect(*a, hints=(), skip_hz=(), **k):
+        calls.append(("detect", list(hints), list(skip_hz)))
+        return [_Det(f) for f in hints]
+
+    monkeypatch.setattr(RX, "detect", detect)
+    monkeypatch.setattr(RX, "receive_slot", lambda *a, dets=None, **k: calls.append(
+        ("receive", [d.f_hz for d in dets])) or [])
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False),
+                          log=lambda m: None)
+    q = Q_TEST
+    L.done_tiles.append(_part1(q - 2, 1600.0))
+    t0 = slot_t0(q)
+    dur = live.frame_seconds(TINY)
+    late = t0 + 0.65 * dur
+    L.feed(_hiss(int((t0 + dur + 5 - late) * FS)), t0 + dur + 5)
+    L.step(late)
+    L.step(t0 + dur + frontend.PB_TAIL_S + 0.5)
+    assert q in L.finished
+    assert calls == [("detect", [1600.0], []), ("receive", [1600.0])]
+    assert any("no whole-slot search" in s for s in L.lines)
+
+
+# --- reference fixes (2026-10-14, from the C++ port's review) -------------------------------
+
+def test_a_ring_write_behind_its_window_is_dropped():
+    """The part of a write older than the ring's window is dropped: it
+    landed on the slots of newer samples and overwrote them. `end` stays a
+    Python int whatever the index's type (a numpy index made it numpy's)."""
+    r = live.FeRing(span_s=1.0)                # 4000 samples
+    r.write(6100, np.arange(4000, dtype=np.complex64))        # holds [6100, 10100)
+    r.write(np.int64(2000), np.full(10, 77, np.complex64))    # all of it behind
+    r.write(6095, np.full(10, 55, np.complex64))              # 6095..6099 behind
+    x, ok = r.read(6100, 10100)
+    want = np.arange(4000, dtype=np.complex64)
+    want[:5] = 55
+    assert ok.all() and np.array_equal(x, want)
+    assert not r.read(2000, 2010)[1].any() and not r.read(6095, 6100)[1].any()
+    assert r.end == 10100 and type(r.end) is int
+    r.write(np.int64(10100), np.ones(3, np.complex64))
+    assert r.end == 10103 and type(r.end) is int
+
+
+def test_the_share_heard_of_an_empty_slice_is_zero():
+    """A capture whose frame slice ok[origin:k1] is empty (an origin before
+    its start counts from its end) has 0.0 of the frame heard, where
+    numpy's mean of nothing made it NaN, in finish_receive's early return
+    and in capture_prepare."""
+    F = int(round(live.frame_seconds(TINY) * FE_FS))
+    n = F + 10
+    x = np.zeros(n, np.complex64)
+    assert len(np.ones(n, bool)[-5:F - 5]) == 0
+    with np.errstate(all="raise"):
+        assert live.finish_receive(x, np.ones(n, bool), -5, Q_TEST, TINY, "joint", [], []) == ([], 0.0)
+    _, _, heard = live.capture_prepare(x, np.zeros(n, bool), -5, Q_TEST, TINY)
+    assert heard == 0.0
+
+
+def test_the_dial_log_skips_an_infinite_dial(tmp_path):
+    """A line whose dial is infinite, or whose time is past float's range,
+    is skipped like any other that does not parse: it raised OverflowError
+    out of refresh, and out of the listener's receive with it."""
+    p = tmp_path / live.DIAL_FILE
+    p.write_text('{"t": 1, "dial_hz": 5}\n{"t": 2, "dial_hz": 1e400}\n{"t": 3, "dial_hz": "-Infinity"}\n'
+                 '{"t": 1' + "0" * 400 + ', "dial_hz": 7}\n{"t": 4, "dial_hz": 6}\n')
+    d = live.DialLog(p)
+    d.refresh()
+    assert d.points == [(1.0, 5), (4.0, 6)]
+
+
+def test_the_dial_log_is_read_as_utf8_whatever_the_locale(tmp_path):
+    """The app writes the dial file in UTF-8, and it is read so under any
+    locale: in the C locale U+0085 between two changes read as two
+    replacement characters, and both changes were lost."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    p = tmp_path / live.DIAL_FILE
+    p.write_bytes(b'{"t": 1, "dial_hz": 5}\xc2\x85{"t": 2, "dial_hz": 6}\n')
+    root = Path(live.__file__).resolve().parents[2]
+    env = {**os.environ, "LC_ALL": "C", "LANG": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0",
+           "PYTHONPATH": str(root)}
+    code = ("import locale, sys\nfrom sstvae.qrss import live\nd = live.DialLog(sys.argv[1])\nd.refresh()\n"
+            "print(locale.getpreferredencoding(False), d.points)")
+    out = subprocess.run([sys.executable, "-c", code, str(p)], env=env, capture_output=True, text=True,
+                         check=True, timeout=120).stdout.split(" ", 1)
+    assert out[1].strip() == "[(1.0, 5), (2.0, 6)]", out
+
+
+def test_restrict_takes_its_spans_once():
+    """Spans handed as an iterator restrict as a list does: restrict read
+    them twice, and a generator came back as nothing heard."""
+    t0 = slot_t0(Q_TEST)
+    ok = np.ones(20 * FE_FS, bool)
+    spans = [(t0 + 1.0, t0 + 3.0), (t0 + 5.0, t0 + 6.0)]
+    want = live.restrict(ok, 4 * FE_FS, Q_TEST, spans)
+    assert want.sum() == 3 * FE_FS
+    assert np.array_equal(live.restrict(ok, 4 * FE_FS, Q_TEST, (s for s in spans)), want)
+    assert live.restrict(ok, 4 * FE_FS, Q_TEST, iter([(-np.inf, np.inf)])) is ok
+
+
+def test_a_tile_writes_strict_json():
+    """A float of a tile that is not finite is null in its JSON, in its
+    confidence too: state.json held NaN and Infinity tokens, which a strict
+    JSON reader (the app's) refuses."""
+    t = live.Tile(id="a", q=Q_TEST, slot_utc="", frame="tiny", f_hz=1500.0, snr_db=float("nan"),
+                  z_ref=float("inf"), heard=float("nan"), mean_w_db=float("-inf"),
+                  confidence=[None, float("nan"), 1.5, float("inf")])
+    d = t.to_json()
+    text = json.dumps(d, allow_nan=False)
+    assert d["snr_db"] is d["z_ref"] is d["heard"] is d["mean_w_db"] is None
+    assert d["confidence"] == [None, None, 1.5, None] and d["f_hz"] == 1500.0
+    assert json.loads(text) == d
+    assert live.Tile(id="a", q=1, slot_utc="", frame="tiny", f_hz=1.0).to_json() == \
+        dataclasses.asdict(live.Tile(id="a", q=1, slot_utc="", frame="tiny", f_hz=1.0))
+
+
+@pytest.mark.parametrize("text", ["[1, 2]", '{"tiles": [1]}', '{"finished": 5}', '{"finished": "12"}',
+                                  '{"tiles": {"a": 1}}', '{"finished": [1e400]}', '{"finished": [5], "tiles": [1]}',
+                                  '{"tiles": [{"status": "complete", "q": "x"}]}',
+                                  '{"tiles": [{"status": "lost", "q": 3, "snr_db": "x"}]}', '"x"', "null"])
+def test_a_state_file_of_another_shape_starts_the_listener_fresh(tmp_path, text):
+    """A state.json that is not what write_state writes is ignored whole
+    (the C++ listener does the same): it raised out of the constructor, so
+    the listener could not start until the file was removed by hand."""
+    (tmp_path / "state.json").write_text(text)
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False), log=lambda m: None)
+    assert L.tiles() == [] and L.finished == set()
+
+
+_GOOD_TILE = dict(id="good", q=Q_TEST, slot_utc="", frame="tiny", f_hz=1500.0, status="complete",
+                  callsign="K1ABC", updated=0.0)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("f_hz", None), ("heard", None), ("progress", None), ("received", None), ("updated", None),
+    ("q", None), ("passes", None), ("image_rev", None), ("q", 3.5), ("dial_hz", 1.5), ("segment", "1"),
+    ("id", 5), ("status", None), ("note", None), ("waveform", None), ("callsign", 7),
+    ("snr_db", "x"), ("confidence", None), ("confidence", [1.0, "x"]), ("confidence", "abc"),
+    ("f_hz", "1500"), ("slot_utc", None), ("f_hz", [1500.0]), ("uid", 12)])
+def test_a_tile_of_another_shape_is_skipped_alone(tmp_path, field, value):
+    """A tile whose value is not of its field's JSON type -- a null where
+    the field cannot be None (to_json writes a non-finite f_hz or heard as
+    null), a string for a number -- is skipped and the rest of state.json
+    read, as the C++ listener does: Tile(**...) kept it, a None f_hz then
+    sorted against the other tiles' numbers."""
+    # (a null q in a complete or lost tile is int(None) for "finished",
+    # which ignores the file whole in both: another status skips that)
+    bad = dict(_GOOD_TILE, id="bad", f_hz=1600.0, status="shown" if field == "q" else "lost")
+    bad[field] = value
+    st = {"tiles": [_GOOD_TILE, bad], "finished": [Q_TEST - 1]}
+    (tmp_path / "state.json").write_text(json.dumps(st))
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False), log=lambda m: None)
+    assert [t.id for t in L.tiles()] == ["good"]
+    assert Q_TEST - 1 in L.finished and Q_TEST in L.finished
+
+
+def test_a_tiles_numbers_are_read_as_their_fields_types(tmp_path):
+    """A number is taken as its field's type: an int float field a float, a
+    bool int field 0 or 1, a bool float 1.0 -- what the C++ listener reads,
+    so a state file round-trips the same through either."""
+    t = dict(_GOOD_TILE, f_hz=1500, q=True, heard=True, passes=False, dial_hz=True, snr_db=2,
+             confidence=[1, None, True, 2.5])
+    (tmp_path / "state.json").write_text(json.dumps({"tiles": [t]}))
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False), log=lambda m: None)
+    (got,) = L.tiles()
+    assert (got.f_hz, got.q, got.heard, got.passes, got.dial_hz, got.snr_db) == (1500.0, 1, 1.0, 0, 1, 2.0)
+    assert [type(v) for v in (got.f_hz, got.q, got.heard, got.passes, got.dial_hz, got.snr_db)] == \
+        [float, int, float, int, int, float]
+    assert got.confidence == [1.0, None, 1.0, 2.5] and type(got.confidence[0]) is float
+    full = live.Tile(id="a", q=1, slot_utc="", frame="tiny", f_hz=1.0, snr_db=-1.5, confidence=[None, 2.0])
+    assert live.Tile.from_state(full.to_json()) == full
+    assert set(live._TILE_KINDS) == set(live.Tile.__dataclass_fields__)
+    with pytest.raises(TypeError):
+        live.Tile.from_state({"id": "a", "q": 1, "slot_utc": "", "frame": "tiny"})
+
+
+def test_the_state_temporary_carries_the_thread(tmp_path, monkeypatch):
+    """write_state's temporary is store.py's .state.json.<pid>.<thread id>.tmp,
+    so two threads writing the state at once do not share one (the second's
+    open truncated the first's, or the first's os.replace moved it away
+    and the second's raised FileNotFoundError)."""
+    import os
+    import threading
+
+    L = live.LiveListener(tmp_path, live.LiveConfig(spec=TINY, render=False), log=lambda m: None)
+    seen = []
+    real = os.replace
+
+    def spy(src, dst):
+        if str(dst).endswith("state.json"):
+            seen.append(os.path.basename(src))
+        real(src, dst)
+    monkeypatch.setattr(os, "replace", spy)
+    L.write_state()
+    assert seen == [f".state.json.{os.getpid()}.{threading.get_ident()}.tmp"]
+    errors = []
+
+    def hammer():
+        try:
+            for _ in range(50):
+                L.write_state()
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+    th = [threading.Thread(target=hammer) for _ in range(4)]
+    for x in th:
+        x.start()
+    for x in th:
+        x.join()
+    assert errors == [] and json.loads((tmp_path / "state.json").read_text())["version"] == 1
+    assert not [p for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_a_failed_live_refresh_is_retried_and_logged_once(tmp_path, monkeypatch):
+    """With background on, a live receive that raises is logged once (per
+    slot and message), and the slot is received again at its next refresh
+    and finished at its end: the worker retired the slot on the spot, so
+    one failure lost the rest of it, end-of-slot receive included."""
+    n = {"k": 0}
+
+    def receive_slot(*a, **k):
+        n["k"] += 1
+        if n["k"] <= 2:
+            raise RuntimeError("the receiver fell over")
+        return [_Pass(1500.0)]
+
+    monkeypatch.setattr(RX, "candidates", lambda *a, **k: [])
+    monkeypatch.setattr(RX, "detect", lambda *a, **k: [_Det(1500.0)])
+    monkeypatch.setattr(RX, "receive_slot", receive_slot)
+    lines = []
+    cfg = live.LiveConfig(spec=TINY, refresh_s=5.0, render=False, background=True)
+    L = live.LiveListener(tmp_path, cfg, log=lines.append)
+    q = Q_TEST
+    t0 = slot_t0(q)
+    end = t0 + live.frame_seconds(TINY) + frontend.PB_TAIL_S + 0.5
+    L.feed(_hiss(int((end - t0 + 15) * FS)), end)
+    for t in (t0 + 26.0, t0 + 31.0):
+        with L.lock:
+            L.step(t)
+        _until(L.idle)
+    failed = [m for m in lines if "RuntimeError" in m]
+    assert len(failed) == 1 and failed[0].endswith("slot 2025-10-01T00:00:00Z: RuntimeError: the receiver fell over")
+    assert q in L.slots and not L.slots[q].done and L.tiles() == [] and n["k"] == 2
+    with L.lock:
+        L.step(t0 + 36.0)
+    _until(L.idle)
+    assert [round(t.f_hz) for t in L.tiles()] == [1500] and n["k"] == 3
+    with L.lock:
+        L.step(end)
+    _until(L.idle)
+    with L.lock:
+        L.step(end + 1.0)
+    assert q in L.finished and [t.status for t in L.tiles()] == ["complete"]

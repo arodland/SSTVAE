@@ -68,6 +68,10 @@ jobs:
         run: python tools/gen_config_header.py --check
       - name: Golden vectors match the Python reference
         run: python tools/gen_golden_vectors.py --check
+      - name: QRSS constants and tables match sstvae/qrss
+        run: python tools/gen_qrss_config_header.py --check
+      - name: QRSS receiver constants match sstvae/qrss
+        run: python tools/gen_qrss_rx_config.py --check
       # Encoding check only: it compares the generated C++ against
       # sstvae/modem/interleaver_perms.npy, which is the frozen on-air
       # format. It does NOT re-derive from numpy -- see
@@ -105,6 +109,8 @@ jobs:
         run: |
           python tools/gen_config_header.py || true
           python tools/gen_golden_vectors.py || true
+          python tools/gen_qrss_config_header.py || true
+          python tools/gen_qrss_rx_config.py || true
           git diff --stat
           git diff -- native/core/config.hpp native/tests/golden/manifest.json
 
@@ -145,9 +151,12 @@ jobs:
       - run: uv pip install --system -e ".[dev,cli]"
       - name: Fast suite
         run: pytest -q
+      # Without QRSSTVAE's slow tier, which runs about two hours; run it
+      # by hand with `pytest -m slow -k qrss`. Its fast tier, with one TINY
+      # and one SHORT pass decoded at -6 dB, is in the suite above.
       - name: Slow suite
         if: matrix.os == 'ubuntu-latest'
-        run: pytest -q -m slow
+        run: pytest -q -m slow --ignore-glob='tests/test_qrss_*'
 
   # The build/test/package/sign matrix lives in its own file so the
   # release workflow can run *this* job rather than a copy of it. See
@@ -229,6 +238,14 @@ jobs:
       # callback never blocks", "the message string is only written
       # outside the playing window" -- and those claims are exactly the
       # kind that stay true until someone adds a field.
+      #
+      # QRSSTVAE's threads are here too: the live listener's workers and
+      # its state (and abandon(), racing them), the listen session's
+      # thread and its bounded stop, the stdin reader and its self-pipe,
+      # the passband store's packer and directory lock, the multi-pass
+      # store's shared lock, and every QRSS ctest that checks a function
+      # from several threads at once (or keeps a watchdog thread beside
+      # the test).
       - name: Configure with ThreadSanitizer
         run: |
           cmake -S native -B native/build-tsan -G Ninja \
@@ -236,6 +253,22 @@ jobs:
             -DCMAKE_CXX_FLAGS="-fsanitize=thread -g" \
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
             -DSSTVAE_BUILD_PYMODULE=OFF -DSSTVAE_BUILD_CODEC=OFF \
-            -DSSTVAE_BUILD_RIG=OFF
-      - run: cmake --build native/build-tsan --target test_rx_engine test_tx_engine test_ringbuffer
-      - run: ctest --test-dir native/build-tsan --output-on-failure -R 'rx_engine|tx_engine|ringbuffer'
+            -DSSTVAE_BUILD_RIG=OFF -DSSTVAE_BUILD_GUI=OFF \
+            -DSSTVAE_BUILD_QTAUDIO=OFF -DSSTVAE_BUILD_OVERLAY=OFF
+      - run: >-
+          cmake --build native/build-tsan --target test_rx_engine test_tx_engine test_ringbuffer
+          test_qrss_core_listener test_qrss_core_listen_api test_qrss_core_sources test_qrss_core_passband
+          test_qrss_core_store test_qrss_core_live test_qrss_core_associate
+          test_qrss_core_frontend test_qrss_core_chan test_qrss_core_receiver
+          test_qrss_core_receiver_slot test_qrss_core_acquire test_qrss_core_acquire_a12
+          test_qrss_core_acquire_stats test_qrss_core_acquire_tbd test_qrss_core_cwid
+          test_qrss_core_frame test_qrss_core_track test_qrss_core_track_timing
+          test_qrss_core_ltrack test_qrss_core_ltrack_timing test_qrss_core_trackbase
+          test_qrss_core_tx_audio
+      # (acquire and receiver_slot outlive the 120 s TIMEOUT a QRSS ctest
+      # carries in an optimized build once instrumented -- 99 s and about
+      # 255 s on 4 shared CPUs -- so native/tests/CMakeLists.txt gives every
+      # QRSS ctest 1500 s when CMAKE_CXX_FLAGS has -fsanitize=thread.)
+      - run: >-
+          ctest --test-dir native/build-tsan --output-on-failure
+          -R '^(rx_engine|tx_engine|ringbuffer|qrss_core_(listener|listen_api|sources|passband|store|live|associate|frontend|chan|receiver|receiver_slot|acquire|acquire_a12|acquire_stats|acquire_tbd|cwid|frame|track|track_timing|ltrack|ltrack_timing|trackbase|tx_audio))$'

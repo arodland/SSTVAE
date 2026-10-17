@@ -9,19 +9,25 @@
 // answer, so each is asserted here.
 
 #include <QApplication>
+#include <QElapsedTimer>
 #include <QImage>
 #include <QMouseEvent>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <memory>
 #include <numbers>
+#include <thread>
 #include <vector>
 
 #include "check.hpp"
 #include "config.hpp"
 #include "dsp/spectrum.hpp"
 #include "rx/ringbuffer.hpp"
+#include "qrss_spectrogram.hpp"
+#include "spectrum_feed.hpp"
 #include "waterfall.hpp"
 
 using namespace sstvae;
@@ -264,6 +270,92 @@ void test_clear_blanks_it() {
 
 }  // namespace
 
+// The waterfall and the QRSS spectrogram share one feed (Jeff,
+// 2026-10-10): the audio is read once and both histories are kept, so
+// a strip dragged taller shows older rows rather than black.
+void test_a_shared_feed() {
+    gui::SpectrumFeed feed;
+    gui::Waterfall widget;
+    gui::QrssSpectrogram spectrogram;
+    widget.resize(W, 60);
+    widget.set_feed(&feed);
+    spectrogram.set_feed(&feed);
+    check::is_true(&spectrogram.data() == &feed.slow(),
+                   "waterfall/shared: the spectrogram draws from the feed's store");
+    // Two seconds of tone: enough for a QRSS column too.
+    auto ring = std::make_shared<rx::RingBuffer>(4.0);
+    std::vector<double> tone(2 * config::FS);
+    for (std::size_t i = 0; i < tone.size(); ++i) {
+        tone[i] = 0.5 * std::sin(2.0 * std::numbers::pi * TONE_HZ * static_cast<double>(i) /
+                                 config::FS);
+    }
+    widget.set_ring(ring);
+    ring->write(tone);
+    check::is_true(feed.ring() != nullptr, "waterfall/shared: set_ring sets the feed's ring");
+    for (int i = 0; i < 150; ++i) feed.pump();
+    check::is_true(feed.fast().count() == 150, "waterfall/shared: a row a pump, kept");
+    check::is_true(!feed.slow().fine().empty(),
+                   "waterfall/shared: and the same audio went to the QRSS store");
+    check::is_true(!is_dark(shot(widget), tone_column(), 5),
+                   "waterfall/shared: rows arrive when the feed pumps");
+    // Each mode fills only its own store.
+    feed.set_enabled(true, false);
+    const std::size_t fine_before = feed.slow().fine().size();
+    ring->write(tone);
+    for (int i = 0; i < 20; ++i) feed.pump();
+    check::is_true(feed.slow().fine().size() == fine_before && feed.fast().count() == 170,
+                   "waterfall/shared: SSTVAE mode fills no QRSS store");
+    feed.set_enabled(false, true);
+    ring->write(tone);
+    for (int i = 0; i < 20; ++i) feed.pump();
+    check::is_true(feed.fast().count() == 170 && feed.slow().fine().size() > fine_before,
+                   "waterfall/shared: QRSSTVAE mode makes no waterfall rows");
+    feed.set_enabled(true, true);
+    // Taller than it has ever been: the extra rows come from the history.
+    widget.resize(W, 140);
+    check::is_true(!is_dark(shot(widget), tone_column(), 120),
+                   "waterfall/shared: dragged taller, it shows older rows, not black");
+}
+
+// The shared feed pumps on a worker thread, and its rows reach the
+// widget on the screen's thread.
+void test_the_feed_runs_on_a_worker() {
+    gui::SpectrumFeed feed;
+    gui::Waterfall widget;
+    widget.resize(W, 60);
+    widget.set_feed(&feed);
+    widget.set_ring(ring_with_tone(TONE_HZ));
+    const std::thread::id gui_thread = std::this_thread::get_id();
+    std::atomic<int> pumps_on_gui{0};
+    std::atomic<int> pumps_elsewhere{0};
+    QObject::connect(&feed, &gui::SpectrumFeed::pumped, &feed,
+                     [&, gui_thread] {
+                         (std::this_thread::get_id() == gui_thread ? pumps_on_gui
+                                                                   : pumps_elsewhere)++;
+                     },
+                     Qt::DirectConnection);
+    feed.start(50);
+    QElapsedTimer clock;
+    clock.start();
+    std::uint64_t rows = 0;
+    while (clock.elapsed() < 10000) {
+        QApplication::processEvents();
+        {
+            const auto hold = feed.lock();
+            rows = feed.fast().count();
+        }
+        if (rows >= 5) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    feed.stop();
+    QApplication::processEvents();
+    check::is_true(rows >= 5, "waterfall/worker: the feed pumps by itself once started");
+    check::is_true(pumps_elsewhere.load() > 0 && pumps_on_gui.load() == 0,
+                   "waterfall/worker: and not on the screen's thread");
+    check::is_true(!is_dark(shot(widget), tone_column(), 2),
+                   "waterfall/worker: its rows still reach the widget");
+}
+
 int main(int argc, char** argv) {
     check::report_crashes_instead_of_prompting();
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -276,6 +368,8 @@ int main(int argc, char** argv) {
     test_clipping_latches_until_cleared();
     test_disabled_looks_different();
     test_clear_blanks_it();
+    test_a_shared_feed();
+    test_the_feed_runs_on_a_worker();
 
     return check::report("waterfall widget");
 }

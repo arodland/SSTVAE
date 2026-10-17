@@ -14,10 +14,20 @@ FlowLayout::FlowLayout(QWidget* parent, int margin, int hspace, int vspace)
 }
 
 FlowLayout::~FlowLayout() {
-    while (QLayoutItem* item = takeAt(0)) delete item;
+    qDeleteAll(items_);
+    items_.clear();
 }
 
-void FlowLayout::addItem(QLayoutItem* item) { items_.append(item); }
+// **Both say the layout changed.** QBoxLayout's own addItem/takeAt call
+// invalidate(); a custom QLayout must too, or `activate()` sees nothing
+// to do and the items keep their old geometry until something else
+// asks. The QRSS Received pane rebuilt its cards this way on every
+// reload, so a new card was drawn on top of the others (Jeff,
+// 2026-10-12, after 324a876 had only repainted them).
+void FlowLayout::addItem(QLayoutItem* item) {
+    items_.append(item);
+    invalidate();
+}
 
 int FlowLayout::count() const { return static_cast<int>(items_.size()); }
 
@@ -26,7 +36,10 @@ QLayoutItem* FlowLayout::itemAt(int index) const {
 }
 
 QLayoutItem* FlowLayout::takeAt(int index) {
-    return (index >= 0 && index < items_.size()) ? items_.takeAt(index) : nullptr;
+    if (index < 0 || index >= items_.size()) return nullptr;
+    QLayoutItem* item = items_.takeAt(index);
+    invalidate();
+    return item;
 }
 
 int FlowLayout::heightForWidth(int width) const {
@@ -102,7 +115,8 @@ int FlowLayout::reflow(const QRect& rect, bool apply) const {
     std::vector<std::pair<QLayoutItem*, QRect>> line;
     auto place_line = [&] {
         for (const auto& [item, box] : line) {
-            item->setGeometry(box.translated(0, (line_height - box.height()) / 2));
+            item->setGeometry(
+                align_top_ ? box : box.translated(0, (line_height - box.height()) / 2));
         }
         line.clear();
     };

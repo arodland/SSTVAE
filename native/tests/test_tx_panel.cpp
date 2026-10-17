@@ -28,6 +28,7 @@
 
 #include <QAbstractButton>
 #include <QApplication>
+#include <QStringList>
 #include <QByteArray>
 #include <QComboBox>
 #include <QContextMenuEvent>
@@ -42,6 +43,7 @@
 #include <QPoint>
 #include <QPushButton>
 #include <QSlider>
+#include <QSpinBox>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QWidget>
@@ -49,11 +51,14 @@
 #include <string>
 
 #include "app_state.hpp"
+#include "images/types.hpp"
 #include "check.hpp"
 #include "flow_layout.hpp"
 #include "item_menu.hpp"
 #include "overlay/model.hpp"
 #include "overlay_editor.hpp"
+#include "qrss_schedule.hpp"
+#include "qrss_schedule_window.hpp"
 #include "tx_panel.hpp"
 
 using namespace sstvae;
@@ -168,6 +173,71 @@ void test_the_level_controls_are_one_flow_item() {
     check::is_true(group != nullptr &&
                        dynamic_cast<FlowLayout*>(group->layout()) == nullptr,
                    "their container does not wrap between them");
+}
+
+// QRSS modes are not in the transmit pane any more: QRSS sends are
+// scheduled from the main window's QRSSTVAE mode. A config saved with one
+// chosen (an older build) falls back to its SSTVAE mode.
+void test_no_qrss_modes_in_the_pane() {
+    AppState state;
+    state.config().transmit.mode = "B";
+    state.config().transmit.qrss_mode = "C";
+    QWidget host;
+    host.resize(1400, 700);
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    auto* combo = panel->findChild<QComboBox*>(QStringLiteral("mode_combo"));
+    check::is_true(combo != nullptr, "qrss: the mode list is there");
+    if (!combo) return;
+    bool any_qrss = false;
+    for (int i = 0; i < combo->count(); ++i) {
+        any_qrss = any_qrss || combo->itemText(i).contains(QStringLiteral("QRSS"));
+    }
+    check::is_true(!any_qrss, "qrss: no QRSS modes in the transmit pane's list");
+    check::is_true(combo->currentData().toString() == QStringLiteral("B"),
+                   "qrss: an old QRSS choice falls back to the SSTVAE mode");
+    check::is_true(panel->findChild<QSlider*>(QStringLiteral("qrss_freq_slider")) == nullptr &&
+                       panel->findChild<QPushButton*>(QStringLiteral("qrss_schedule_button")) ==
+                           nullptr,
+                   "qrss: nor the carrier slider or the Schedule button");
+}
+
+void test_show_schedule_opens_the_window() {
+    AppState state;
+    state.config().transmit.qrss_freq_hz = 777;
+    QWidget host;
+    host.resize(1400, 700);
+    auto* panel = new TransmitPanel(&state, &host);
+    host.show();
+    check::is_true(panel->scheduler() != nullptr && panel->scheduler()->entries().empty(),
+                   "schedule: an empty schedule in a fresh profile");
+    check::is_true(panel->schedule_summary() == QStringLiteral("Nothing scheduled."),
+                   "schedule: and says so");
+    QString told;
+    QObject::connect(panel, &TransmitPanel::scheduleChanged,
+                     [&told](const QString& text) { told = text; });
+    panel->show_schedule();
+    QCoreApplication::processEvents();
+    QWidget* window = panel->schedule_window();
+    check::is_true(window != nullptr && window->isVisible() && window->isWindow() &&
+                       window->objectName() == QStringLiteral("qrss_schedule_window"),
+                   "schedule: opens as a window of its own");
+    if (window == nullptr) return;
+    auto* mode = window->findChild<QComboBox*>(QStringLiteral("schedule_mode"));
+    auto* freq = window->findChild<QSpinBox*>(QStringLiteral("schedule_freq"));
+    check::is_true(mode && freq && mode->currentData().toString() == QStringLiteral("A") &&
+                       freq->value() == 777,
+                   "schedule: mode A on the saved carrier to start with");
+    qrss_schedule::Entry e;
+    e.label = "test";
+    e.first_slot = qrss_schedule::earliest_slot(panel->scheduler()->now()) + 3600.0;
+    check::is_true(panel->scheduler()->add(e, images::Picture(640, 480)).empty(),
+                   "schedule: a send added");
+    check::is_true(told.startsWith(QStringLiteral("Next send: \"test\", mode A")),
+                   "schedule: the summary follows the schedule");
+    panel->scheduler()->remove(panel->scheduler()->entries()[0].id);
+    panel->hide_windows();
+    check::is_true(!window->isVisible(), "schedule: and closes with the app");
 }
 
 // Editing defers the composite rebuild instead of doing it inline.
@@ -709,6 +779,8 @@ int main(int argc, char** argv) {
 
     test_the_strip_height_survives_a_selection();
     test_the_level_controls_are_one_flow_item();
+    test_no_qrss_modes_in_the_pane();
+    test_show_schedule_opens_the_window();
     test_an_edit_defers_the_rebuild();
     test_a_rebuild_consumes_the_pending_edit();
     test_the_template_combo_lists_none_then_the_builtins();

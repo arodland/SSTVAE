@@ -22,6 +22,7 @@ from 0.5 dB through 30 dB (i.e. from heavy clipping to none at all),
 across AWGN, fading, sample-clock offset and frame-erasure impairments.
 """
 
+import os
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -62,6 +63,10 @@ NO_CLIP_HEADROOM_DB = 30.0
 # * Module-level arrays (MOD_MATRIX and friends) are substituted too, so
 #   the C++ tables are genuinely in the path rather than merely built.
 NATIVE_MODULE_DIR = Path(__file__).resolve().parent.parent / "native" / "build" / "python"
+# A different build tree's module, e.g. a minimal codec-free build kept
+# beside the app's (SSTVAE_NATIVE_MODULE_DIR=native/build-qrss/python).
+if os.environ.get("SSTVAE_NATIVE_MODULE_DIR"):
+    NATIVE_MODULE_DIR = Path(os.environ["SSTVAE_NATIVE_MODULE_DIR"]).resolve()
 
 # (reference module, attribute, native module, native attribute)
 NATIVE_SUBSTITUTIONS = [
@@ -311,6 +316,13 @@ def pytest_addoption(parser):
         help="run the suite against the C++ core (native/bindings/module) "
              "instead of the Python reference",
     )
+    # QRSSTVAE's own switch, separate from --native so that one keeps its
+    # exact meaning (tests/qrss_native/__init__.py).
+    parser.addoption(
+        "--native-qrss", choices=("tx", "rx", "live"), default=None,
+        help="run the QRSS suites against the C++ port (native/core/qrss), "
+             "substituting every ported module up to this stage",
+    )
 
 
 _native_import_error: str | None = None
@@ -346,6 +358,8 @@ def import_native():
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "native: only meaningful under --native")
+    if config.getoption("--native-qrss"):
+        _configure_native_qrss(config)
     if not config.getoption("--native"):
         return
 
@@ -394,11 +408,50 @@ def pytest_configure(config):
     config._sstvae_native = native
 
 
+def _configure_native_qrss(config):
+    native = import_native()
+    if native is None:
+        raise pytest.UsageError(
+            f"--native-qrss given but the extension module could not be imported.\n"
+            f"    {_native_import_error}\n"
+            "Build it with:  tools/build_native.sh")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from qrss_native import apply
+
+    try:
+        config._sstvae_qrss_native = apply(native, config.getoption("--native-qrss"))
+    except (LookupError, AttributeError) as e:
+        raise pytest.UsageError(f"--native-qrss: {e}") from None
+
+
+def pytest_collection_modifyitems(config, items):
+    # tests/test_qrss_native_*.py hold the QRSS C++ beside the Python
+    # reference in one process. --native swaps SSTVAE's C++ into that
+    # reference (beacon._crc16, the DSP helpers), so the "Python" side
+    # would no longer be Python: the comparison means nothing there. Run
+    # them without --native (CLAUDE.md "Commands").
+    if not config.getoption("--native"):
+        return
+    skip = pytest.mark.skip(reason="side-by-side QRSS check; its reference "
+                            "is not pure Python under --native")
+    for item in items:
+        if item.path.name.startswith("test_qrss_native_"):
+            item.add_marker(skip)
+
+
 def pytest_report_header(config):
+    lines = []
     if config.getoption("--native"):
-        return (f"sstvae: running against the C++ core "
-                f"({len(NATIVE_SUBSTITUTIONS)} substitutions)")
-    return "sstvae: running against the Python reference"
+        lines.append(f"sstvae: running against the C++ core "
+                     f"({len(NATIVE_SUBSTITUTIONS)} substitutions)")
+    else:
+        lines.append("sstvae: running against the Python reference")
+    report = getattr(config, "_sstvae_qrss_native", None)
+    if report is not None:
+        lines.append(f"sstvae: QRSS against the C++ port, stage {report.stage} "
+                     f"({len(report.rows)} substitutions, {report.extra_sites} "
+                     f"from-import sites, modules {', '.join(report.modules)})")
+    return lines
 
 
 @pytest.fixture(scope="session")

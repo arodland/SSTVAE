@@ -3393,6 +3393,7 @@ cli = [
 ]
 dev = [
     { name = "platformdirs" },
+    { name = "pyarrow" },
     { name = "pytest" },
     { name = "torch", version = "2.13.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform == 'darwin' and extra == 'extra-6-sstvae-dev') or (extra == 'extra-6-sstvae-dev' and extra == 'extra-6-sstvae-train')" },
     { name = "torch", version = "2.13.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "(sys_platform != 'darwin' and extra == 'extra-6-sstvae-dev') or (extra == 'extra-6-sstvae-dev' and extra == 'extra-6-sstvae-train')" },
@@ -3437,6 +3438,7 @@ requires-dist = [
     { name = "onnxscript", marker = "extra == 'train'", specifier = ">=0.1" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "platformdirs", marker = "extra == 'dev'", specifier = ">=3.0" },
+    { name = "pyarrow", marker = "extra == 'dev'", specifier = ">=14" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "scipy", specifier = ">=1.10" },
     { name = "sounddevice", marker = "extra == 'listen'", specifier = ">=0.4.6" },

@@ -65,6 +65,7 @@ public:
     // size by the caller.
     void set_base_image(const images::Picture& image);
     bool has_base() const { return !base_.empty(); }
+    const images::Picture& base_image() const { return base_; }
 
     // The most recent reception, for a "last_rx" inset. Late-bound on
     // purpose: an item referring to it keeps meaning "the most recent

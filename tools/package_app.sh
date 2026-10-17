@@ -87,6 +87,11 @@ MINGW*|MSYS*|CYGWIN*)
     cp -R "$BUILD_DIR/templates" "$app/"
     cp "$BUILD_DIR/sstvae-decode.exe" "$app/" 2>/dev/null || true
     cp "$BUILD_DIR/sstvae-audio-check.exe" "$app/" 2>/dev/null || true
+    # The QRSSTVAE command line, which the app runs as its QRSS listener
+    # (`sstvae-qrss listen`, looked for beside the executable): without
+    # it the QRSS window falls back to a Python script a packaged app
+    # does not have. Absent only from a build with SSTVAE_BUILD_QRSS=OFF.
+    cp "$BUILD_DIR/sstvae-qrss.exe" "$app/" 2>/dev/null || true
     # Ours first, so windeployqt sees a complete executable and does not
     # report an import it cannot resolve.
     [ -n "$HAMLIB_RUNTIME_DIR" ] && cp "$HAMLIB_RUNTIME_DIR"/*.dll "$app/"
@@ -115,6 +120,8 @@ Darwin)
     # this is what tells them apart on a machine we cannot log in to.
     cp "$BUILD_DIR/sstvae-audio-check" "$app/Contents/MacOS/" 2>/dev/null || true
     cp "$BUILD_DIR/sstvae-decode" "$app/Contents/MacOS/" 2>/dev/null || true
+    # The app's QRSS listener (`sstvae-qrss listen`), as on Windows.
+    cp "$BUILD_DIR/sstvae-qrss" "$app/Contents/MacOS/" 2>/dev/null || true
     mkdir -p "$app/Contents/Frameworks"
     [ -n "$HAMLIB_RUNTIME_DIR" ] && cp "$HAMLIB_RUNTIME_DIR"/libhamlib*.dylib \
         "$app/Contents/Frameworks/" 2>/dev/null || true
@@ -179,6 +186,9 @@ Darwin)
     cp -R "$BUILD_DIR/templates" "$app/share/sstvae/"
     cp "$BUILD_DIR/sstvae-decode" "$app/bin/" 2>/dev/null || true
     cp "$BUILD_DIR/sstvae-audio-check" "$app/bin/" 2>/dev/null || true
+    # The app's QRSS listener (`sstvae-qrss listen`), as on Windows. It
+    # inherits the launcher's LD_LIBRARY_PATH from the app that runs it.
+    cp "$BUILD_DIR/sstvae-qrss" "$app/bin/" 2>/dev/null || true
     [ -n "$HAMLIB_RUNTIME_DIR" ] && cp -P "$HAMLIB_RUNTIME_DIR"/libhamlib.so* "$app/lib/"
     [ -n "$ORT_LIBDIR" ] && cp -P "$ORT_LIBDIR"/libonnxruntime.so* "$app/lib/"
 
@@ -331,11 +341,14 @@ Darwin)
                 ;;
         esac
     done
-    libs="$(unresolved "$app/bin/sstvae-gui" | tr '\n' ' ')"
-    if [ -n "$libs" ]; then
-        echo "package_app: sstvae-gui needs $libs" >&2
-        fatal=1
-    fi
+    for exe in sstvae-gui sstvae-qrss; do
+        [ -e "$app/bin/$exe" ] || continue
+        libs="$(unresolved "$app/bin/$exe" | tr '\n' ' ')"
+        if [ -n "$libs" ]; then
+            echo "package_app: $exe needs $libs" >&2
+            fatal=1
+        fi
+    done
     [ "$fatal" -eq 0 ] || exit 1
 
     # A wrapper, because the alternative is asking the user to set two

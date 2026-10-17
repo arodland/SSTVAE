@@ -64,6 +64,11 @@ set_property(CACHE SSTVAE_BUILD_GUI PROPERTY STRINGS ON OFF AUTO)
 # OFF still builds and tests the threading design in
 # core/rig/controller.cpp, which has no external dependency at all.
 option(SSTVAE_BUILD_RIG "Build libhamlib rig control" ON)
+# QRSSTVAE (native/core/qrss/): the slow narrow picture mode, ported from
+# sstvae/qrss/ module by module with Python as the reference. No external
+# dependency; the switch exists so a build (Android, today) can leave it
+# out until it is wanted.
+option(SSTVAE_BUILD_QRSS "Build the QRSSTVAE library (native/core/qrss)" ON)
 
 # The numeric core is compared against Python to ~1e-12. Fast-math would
 # licence the compiler to reassociate exactly the sums those tolerances
@@ -96,6 +101,7 @@ add_library(sstvae_core STATIC
   core/beacon/beacon.cpp
   core/dsp/dsp.cpp
   core/dsp/spectrum.cpp
+  core/dsp/slow_spectrogram.cpp
   core/dsp/morse.cpp
   core/dsp/leader.cpp
   core/framing/framing.cpp
@@ -108,6 +114,7 @@ add_library(sstvae_core STATIC
   core/latents/latents.cpp
   core/log/log.cpp
   core/util/event.cpp
+  core/util/sha256.cpp
   core/rx/ringbuffer.cpp
   core/rig/controller.cpp
   core/rig/trace.cpp
@@ -165,6 +172,31 @@ if(NOT WIN32)
   target_sources(sstvae_core PRIVATE core/rig/bridge.cpp core/rig/bridged.cpp)
 endif()
 
+# --- QRSSTVAE -----------------------------------------------------------------
+# One library for the whole port, its sources globbed so a module added
+# under core/qrss/ needs no edit here (the port lands one module at a time,
+# often several at once). Python (sstvae/qrss/) is the reference; see
+# tests/qrss_native/ for how the pytest suites are pointed at this code.
+#
+# -ffp-contract=off: the transmit chain is checked bit for bit against
+# numpy, and Clang on arm64 contracts a*b+c into an FMA by default, which
+# rounds once where numpy rounds twice. GCC on x86-64 does not contract
+# without -mfma, and MSVC's /fp:precise never does.
+if(SSTVAE_BUILD_QRSS)
+  # core/math/ is the receiver's numpy/scipy numerics (median, interp,
+  # polyfit, lstsq, eigh, make_lsq_spline), held to numpy's rounding and
+  # so built with the same flags.
+  file(GLOB _qrss_sources CONFIGURE_DEPENDS
+       ${CMAKE_CURRENT_SOURCE_DIR}/core/qrss/*.cpp
+       ${CMAKE_CURRENT_SOURCE_DIR}/core/math/*.cpp)
+  add_library(sstvae_qrss STATIC ${_qrss_sources})
+  target_link_libraries(sstvae_qrss PUBLIC sstvae_core)
+  set_target_properties(sstvae_qrss PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  if(NOT MSVC)
+    target_compile_options(sstvae_qrss PRIVATE -ffp-contract=off)
+  endif()
+endif()
+
 # --- codec ------------------------------------------------------------------
 if(SSTVAE_BUILD_CODEC)
   list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
@@ -180,6 +212,26 @@ if(SSTVAE_BUILD_CODEC)
   # right download and then looks for a directory that was never in it.
   target_include_directories(sstvae_codec SYSTEM PRIVATE
     ${SSTVAE_ONNXRUNTIME_INCLUDE})
+endif()
+
+# --- QRSSTVAE codec glue ------------------------------------------------------
+# The two places a stored picture meets the codec on the transmit side: the
+# codec ID read from an artifact's metadata and the encode of an image file
+# (core/qrss/codec/, plan stage 1 item 16). A library of its own so that
+# sstvae_qrss, its ctests and the rest of the CLI build without onnxruntime;
+# it reads the metadata through onnxruntime itself, hence the direct link.
+# Declared here, before add_subdirectory(tests), so tests can key on the
+# target.
+if(TARGET sstvae_qrss AND TARGET sstvae_codec)
+  file(GLOB _qrss_codec_sources CONFIGURE_DEPENDS
+       ${CMAKE_CURRENT_SOURCE_DIR}/core/qrss/codec/*.cpp)
+  add_library(sstvae_qrss_codec STATIC ${_qrss_codec_sources})
+  target_link_libraries(sstvae_qrss_codec PUBLIC sstvae_qrss sstvae_codec PRIVATE onnxruntime)
+  target_include_directories(sstvae_qrss_codec SYSTEM PRIVATE ${SSTVAE_ONNXRUNTIME_INCLUDE})
+  set_target_properties(sstvae_qrss_codec PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  if(NOT MSVC)
+    target_compile_options(sstvae_qrss_codec PRIVATE -ffp-contract=off)
+  endif()
 endif()
 
 # Put the onnxruntime runtime where `target` can find it.
@@ -450,7 +502,9 @@ else()
   if(NOT Qt6_FOUND)
     list(APPEND _gui_missing "Qt6 Widgets")
   endif()
-  foreach(_dep sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render)
+  # sstvae_qrss_codec: QRSSTVAE's transmitter (qrss/api.hpp) runs in
+  # process; it exists whenever sstvae_codec does and QRSS is on.
+  foreach(_dep sstvae_codec sstvae_qrss_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render)
     if(NOT TARGET ${_dep})
       list(APPEND _gui_missing ${_dep})
     endif()
@@ -489,19 +543,35 @@ if(_want_gui)
     gui/style.cpp
     gui/flow_layout.cpp
     gui/pane_container.cpp
+    gui/image_viewer.cpp
     gui/picture_box.cpp
     gui/waterfall.cpp
     gui/rx_panel.cpp
+    gui/qrss_em.cpp
+    gui/qrss_window.cpp
+    gui/qrss_tx.cpp
+    gui/qrss_schedule.cpp
+    gui/qrss_schedule_window.cpp
     gui/rig_config.cpp
     gui/settings_dialog.cpp
     gui/overlay_editor.cpp
     gui/item_menu.cpp
+    gui/compose_tools.cpp
+    gui/qrss_sends.cpp
+    gui/qrss_editor.cpp
+    gui/qrss_timeline.cpp
+    gui/qrss_clock.cpp
+    gui/info_button.cpp
+    gui/qrss_page.cpp
+    gui/qrss_spectrogram.cpp
+    gui/spectrum_feed.cpp
     gui/tx_panel.cpp
     gui/banner.cpp
     gui/crop_dialog.cpp
     gui/log_pane.cpp
     gui/share_dialog.cpp
     gui/app_state.cpp
+    gui/dial_log.cpp
     # The QR encoder, vendored -- see third_party/qrcodegen/README.md.
     # Built into the GUI rather than into `sstvae_core`, because showing
     # a template as a code is a thing a window does; nothing headless
@@ -516,8 +586,8 @@ if(_want_gui)
   target_include_directories(sstvae_gui PUBLIC core gui)
   target_include_directories(sstvae_gui PRIVATE third_party/qrcodegen)
   target_link_libraries(sstvae_gui PUBLIC
-    sstvae_core sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render
-    sstvae_fetch
+    sstvae_core sstvae_codec sstvae_qrss_codec sstvae_audio_qt sstvae_rig
+    sstvae_overlay_render sstvae_fetch
     Qt6::Core Qt6::Gui Qt6::Widgets)
 
   add_executable(sstvae-gui WIN32 MACOSX_BUNDLE gui/main.cpp)
@@ -579,6 +649,56 @@ if(_want_gui)
   sstvae_onnxruntime_copy_runtime(sstvae-gui)
   sstvae_copy_builtin_templates(sstvae-gui)
   message(STATUS "Desktop application: Qt ${Qt6_VERSION}")
+endif()
+
+# --- the QRSSTVAE command line --------------------------------------------------
+# sstvae-qrss: one executable, argument for argument the qrss_*.py CLIs
+# (apps/sstvae_qrss/subcommand.hpp). Each subcommand is a file that
+# registers itself, globbed, so a new one needs no edit here. They are an
+# OBJECT library so the ctest can run them
+# in-process and every registration is linked (a static library would
+# drop the unreferenced ones). The codec-only subcommands are compiled in
+# only with the codec glue; main.cpp names them as "built without the
+# codec" otherwise. Before add_subdirectory(tests), which keys on the
+# targets.
+if(TARGET sstvae_qrss)
+  file(GLOB _qrss_cli_sources CONFIGURE_DEPENDS
+       ${CMAKE_CURRENT_SOURCE_DIR}/apps/sstvae_qrss/*.cpp)
+  list(REMOVE_ITEM _qrss_cli_sources ${CMAKE_CURRENT_SOURCE_DIR}/apps/sstvae_qrss/main.cpp)
+  set(_qrss_cli_codec_only encode.cpp)
+  if(NOT TARGET sstvae_qrss_codec)
+    foreach(_f ${_qrss_cli_codec_only})
+      list(REMOVE_ITEM _qrss_cli_sources ${CMAKE_CURRENT_SOURCE_DIR}/apps/sstvae_qrss/${_f})
+    endforeach()
+  endif()
+  add_library(sstvae_qrss_cli OBJECT ${_qrss_cli_sources})
+  target_link_libraries(sstvae_qrss_cli PUBLIC sstvae_qrss)
+  target_include_directories(sstvae_qrss_cli PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/apps/sstvae_qrss)
+  if(NOT MSVC)
+    target_compile_options(sstvae_qrss_cli PRIVATE -ffp-contract=off)
+  endif()
+  if(TARGET sstvae_qrss_codec)
+    target_link_libraries(sstvae_qrss_cli PUBLIC sstvae_qrss_codec)
+    # The subcommands' codec halves (receive --image, decode's picture,
+    # listen's tile pictures), outside the glob above: receive.hpp's,
+    # decode.hpp's and listen.hpp's hooks.
+    file(GLOB _qrss_cli_codec_sources CONFIGURE_DEPENDS
+         ${CMAKE_CURRENT_SOURCE_DIR}/apps/sstvae_qrss/codec/*.cpp)
+    target_sources(sstvae_qrss_cli PRIVATE ${_qrss_cli_codec_sources})
+  endif()
+
+  add_executable(sstvae-qrss apps/sstvae_qrss/main.cpp)
+  target_link_libraries(sstvae-qrss PRIVATE sstvae_qrss_cli)
+  if(NOT MSVC)
+    target_compile_options(sstvae-qrss PRIVATE -ffp-contract=off)
+  endif()
+  # As sstvae-decode: the fetcher only for encode's first-run download;
+  # --model and a warm cache work without it.
+  if(TARGET sstvae_qrss_codec AND TARGET sstvae_fetch)
+    target_link_libraries(sstvae-qrss PRIVATE sstvae_fetch Qt6::Core)
+    target_compile_definitions(sstvae-qrss PRIVATE SSTVAE_HAVE_FETCH)
+  endif()
+  sstvae_onnxruntime_copy_runtime(sstvae-qrss)
 endif()
 
 # --- tests ------------------------------------------------------------------

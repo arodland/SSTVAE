@@ -62,6 +62,7 @@ const char* phase_name(TxPhase p) {
     switch (p) {
         case TxPhase::Idle: return "idle";
         case TxPhase::Encoding: return "encoding";
+        case TxPhase::Waiting: return "waiting";
         case TxPhase::Modulating: return "modulating";
         case TxPhase::Keying: return "keying";
         case TxPhase::Sending: return "sending";
@@ -221,6 +222,17 @@ bool TxEngine::transmit(const images::Picture& image, const TxConfig& config) {
     }
 
     return keyed_send(wave, config);
+}
+
+bool TxEngine::transmit_wave(const std::vector<double>& wave, const TxConfig& config) {
+    if (cancel_.is_set()) return cancelled_result();
+    return keyed_send(wave, config);
+}
+
+bool TxEngine::wait(double seconds, TxPhase phase, const std::string& message) {
+    set(phase, 0.0, message);
+    if (seconds <= 0.0) return !cancel_.is_set();
+    return !cancel_.wait(seconds);
 }
 
 bool TxEngine::cancelled_result() {

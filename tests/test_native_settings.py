@@ -84,6 +84,7 @@ NON_DEFAULT = {
         "mode": "pkt_usb",
         "ptt_lead_s": 0.45,
         "ptt_tail_s": 0.25,
+        "tune_after_change": True,
         "poll_interval_s": 2.5,
     },
     "folders": {
@@ -94,7 +95,9 @@ NON_DEFAULT = {
     "receive": {
         "autosave": False,
         "auto_start": True,
+        "qrss_auto_start": False,
         "low_cpu": True,
+        "waterfall_fps": 7,
         "buffer_seconds": 95.5,
         "poll_interval": 11.0,
         "blind_search_seconds": 30.0,
@@ -112,6 +115,9 @@ NON_DEFAULT = {
         "cw_id": True,
         "cw_message": "TEST DE {callsign}",
         "vox_lead_s": 0.5,
+        "qrss_mode": "B",
+        "qrss_freq_hz": 1234.5,
+        "test_tone_s": 45.0,
     },
     "ui": {
         # None is a default: the default layout is "auto", the default
@@ -119,6 +125,8 @@ NON_DEFAULT = {
         # starts open.
         "layout": "tabs",
         "log_visible": False,
+        "mode": "qrsstvae",
+        "qrss_received_width": 560,
         "waterfall_height": 140,
     },
     "version": 2,

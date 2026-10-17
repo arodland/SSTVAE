@@ -40,6 +40,8 @@
 
 class QAction;
 class QSplitter;
+class QActionGroup;
+class QStackedWidget;
 class QDockWidget;
 class QLabel;
 class QMenu;
@@ -48,7 +50,10 @@ class QTimer;
 namespace sstvae::gui {
 
 class AppState;
+class SpectrumFeed;
 class LogPane;
+class QrssWindow;
+class QrssPage;
 class ReceivePanel;
 class Waterfall;
 class TransmitPanel;
@@ -60,8 +65,15 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
+    // The two UI modes, picked under View (Jeff, 2026-10-10): SSTVAE,
+    // the receive and transmit panes; QRSSTVAE, QRSS reception and its
+    // schedule. Remembered in `ui.mode`.
+    enum class UiMode { Sstvae, Qrsstvae };
+    UiMode ui_mode() const;
+
 public slots:
     void open_settings();
+    void set_ui_mode(UiMode mode);
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -99,12 +111,24 @@ private:
     void restore_waterfall_height();
     void remember_waterfall_height();
     void refresh_rig_error_age();
+    // The rig readout's right-click menu, and what its one item does.
+    void show_rig_menu(const QPoint& at);
+    void change_frequency();
 
     AppState* state_ = nullptr;
     QSplitter* stack_ = nullptr;
     PaneContainer* panes_ = nullptr;
     Waterfall* waterfall_ = nullptr;
     ReceivePanel* rx_panel_ = nullptr;
+    QrssWindow* qrss_ = nullptr;
+    QrssPage* qrss_page_ = nullptr;
+    // SSTVAE (the two panes) or QRSSTVAE (the QRSS signals), one at a
+    // time, under the waterfall, which both use.
+    QStackedWidget* modes_ = nullptr;
+    SpectrumFeed* spectrum_feed_ = nullptr;
+    QAction* sstvae_action_ = nullptr;
+    QAction* qrsstvae_action_ = nullptr;
+    QMenu* layout_menu_ = nullptr;
     TransmitPanel* tx_panel_ = nullptr;
     QLabel* ptt_label_ = nullptr;
     QLabel* station_label_ = nullptr;

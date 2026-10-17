@@ -59,6 +59,7 @@ inline constexpr double CW_ID_TONE_HZ = 1000.0;
 enum class TxPhase {
     Idle,
     Encoding,    // neural encoder; no progress fraction available
+    Waiting,     // a QRSS pass waits for its quarter hour; nothing keyed
     Modulating,
     Keying,      // PTT up, waiting out the lead delay
     Sending,     // audio playing; progress is meaningful here
@@ -248,6 +249,22 @@ public:
     // caller is a worker thread whose only sensible response is to
     // report it.
     bool transmit(const images::Picture& image, const TxConfig& config);
+
+    // A waveform made elsewhere (a QRSS pass), already conditioned for
+    // output: key, play, unkey, with the same PTT guarantees as
+    // `transmit`. Does not clear a cancellation.
+    bool transmit_wave(const std::vector<double>& wave, const TxConfig& config);
+
+    // Sleep up to `seconds`, reporting `phase` and `message` meanwhile.
+    // False if cancelled (now or while waiting). For a caller that runs
+    // several keyed sends in one sequence and waits between them.
+    bool wait(double seconds, TxPhase phase, const std::string& message);
+
+    // Report a phase and message from a caller's own sequence.
+    void report(TxPhase phase, const std::string& message) { set(phase, 0.0, message); }
+
+    // Start a fresh sequence: forget an earlier cancellation.
+    void reset() { cancel_.clear(); }
 
 private:
     bool keyed_send(const std::vector<double>& wave, const TxConfig& config);

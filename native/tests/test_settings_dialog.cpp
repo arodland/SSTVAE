@@ -41,6 +41,7 @@ settings::Config populated() {
     c.rig.poll_interval_s = 1.5;
     c.rig.ptt_lead_s = 0.45;
     c.rig.ptt_tail_s = 0.25;
+    c.rig.tune_after_change = true;
     c.rig.device = "localhost:4532";
     c.rig.baud = 38400;
     c.rig.data_bits = "seven";
@@ -59,12 +60,15 @@ settings::Config populated() {
     c.transmit.optimize = true;  // not the default, per this fixture's rule
     c.transmit.cw_id = true;
     c.transmit.cw_message = "TEST DE {callsign}";
+    c.transmit.test_tone_s = 45.0;
     c.folders.template_dir = "/srv/sstv/tpl";
 
     c.receive.autosave = false;
     c.receive.auto_start = true;
+    c.receive.qrss_auto_start = false;
     c.receive.save_audio = true;
     c.receive.low_cpu = true;
+    c.receive.waterfall_fps = 7;
     c.receive.blind_wide = true;
     c.receive.drift_track = "fast";
     c.receive.filename_template = "{callsign}_{date}";

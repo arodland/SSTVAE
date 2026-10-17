@@ -24,3 +24,22 @@ scale-invariant enough to *nearly* decode them — which is exactly the
 class of bug that has cost this project the most time (see the
 `read_wav` stereo-scaling note in CLAUDE.md, which decoded anyway and
 so went unnoticed).
+
+## dr_flac.h
+
+`dr_flac.h` v0.13.4 from the same repository,
+https://raw.githubusercontent.com/mackron/dr_libs/master/dr_flac.h,
+fetched 2026-10-14, sha256
+`111144e778f55738db6851cb226015c419e00d04b916a09506d4856d9cff945c`.
+Same dual licence as `dr_wav.h` (public domain / MIT-0; `LICENSE` above
+is the identical block from this header too). Unmodified.
+
+It reads the QRSSTVAE passband store's packed hours
+(`native/core/qrss/flac.cpp`, the only translation unit that defines
+`DR_FLAC_IMPLEMENTATION`): both the files the C++ packer writes and the
+ones Python's `soundfile` (libsndfile -> libFLAC, LPC) wrote, seeking to
+a sample range. dr_flac decodes only; the encoder is ours
+(`native/core/qrss/flac.cpp`), small enough to check, because the store
+needs FLAC written with no libFLAC. Built with its CRC checks on: they
+are what makes its seek without a SEEKTABLE (a binary search over frame
+headers) safe on soundfile's files, which carry none.

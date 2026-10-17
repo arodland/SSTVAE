@@ -95,6 +95,9 @@ struct RigConfig {
     double poll_interval_s = 5.0;
     double ptt_lead_s = 0.3;
     double ptt_tail_s = 0.3;
+    // After a frequency change (by hand or scheduled), start the radio's
+    // antenna tuner (Hamlib's TUNE, rigctl's `G TUNE`) five seconds on.
+    bool tune_after_change = false;
 
     // --- CAT ---------------------------------------------------------
     // Serial device, or "host:port" when the model is NET rigctl.
@@ -156,7 +159,14 @@ struct ReceiveConfig {
     // happens once per run: a later checkpoint change reloads the model
     // and must not restart a session the operator has since stopped.
     bool auto_start = false;
+    // QRSSTVAE mode starts listening by itself, when the app opens in it
+    // and when the operator switches to it (Jeff, 2026-10-16). No codec
+    // to wait for there, so it needs none of auto_start's care.
+    bool qrss_auto_start = true;
     bool low_cpu = false;
+    // Waterfall rows a second (1-30). Lower saves a little CPU and
+    // scrolls less smoothly; the QRSS spectrogram does not depend on it.
+    int waterfall_fps = 20;
     double buffer_seconds = 130.0;
     double poll_interval = 5.0;
     double blind_search_seconds = 25.0;
@@ -215,6 +225,22 @@ struct TransmitConfig {
     // default because a station keyed by CAT or a manual PTT foot switch
     // has no use for it, and it costs airtime.
     double vox_lead_s = 0.0;
+
+    // QRSSTVAE CE (docs/qrss/README.md): the mode the transmit panel's
+    // mode list has selected, "A"/"B"/"C", or empty for an SSTVAE mode
+    // (then `mode` above applies). Kept apart from `mode` so nothing
+    // that reads an SSTVAE mode is ever handed a QRSS one.
+    std::string qrss_mode;
+
+    // The QRSS audio carrier, Hz (300-2700): where in the passband the
+    // signal goes. CE signals sit about 50 Hz apart.
+    double qrss_freq_hz = 1500.0;
+
+    // How long the schedule window's Test / Tune button keys the radio
+    // with a 1500 Hz tone, in seconds (5-300): long enough to set the
+    // level and check the ALC, short enough that a test cannot become a
+    // stuck carrier.
+    double test_tone_s = 30.0;
 };
 
 // How the window arranges the receive and transmit halves.
@@ -231,6 +257,11 @@ struct UiConfig {
     // should tune -- 0 means "never set", which takes the initial
     // height instead.
     int waterfall_height = 0;
+
+    // How wide the QRSSTVAE view's Received pane is, in pixels, beside
+    // the spectrogram. Dragged by the operator; 0 = never set, which
+    // takes the initial 3:2 split.
+    int qrss_received_width = 0;
 
     // Whether the status-log dock is open.
     //
@@ -254,6 +285,11 @@ struct UiConfig {
     // stops the window shrinking to the width that would trigger the
     // switch, so the downward transition is unreachable by definition.
     std::string layout = "auto";
+
+    // "sstvae" | "qrsstvae": which of the two UI modes (View menu) the
+    // window shows -- the SSTVAE panes, or QRSS reception and its
+    // schedule. Remembered so the app opens the way it was left.
+    std::string mode = "sstvae";
 };
 
 struct Config {

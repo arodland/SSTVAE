@@ -55,6 +55,7 @@
 #include "codec/codec.hpp"
 #include "codec/grad_session.hpp"
 #include "config.hpp"
+#include "compose_tools.hpp"
 #include "crop_dialog.hpp"
 #include "images/images.hpp"
 #include "flow_layout.hpp"
@@ -62,119 +63,14 @@
 #include "overlay/template.hpp"
 #include "overlay/template_catalog.hpp"
 #include "overlay_editor.hpp"
+#include "qrss_schedule_window.hpp"
+#include "qrss_sends.hpp"
+#include "qrss_tx.hpp"
 #include "share_dialog.hpp"
 #include "style.hpp"
 #include "settings/settings.hpp"
 
 namespace sstvae::gui {
-
-namespace {
-
-const char* IMAGE_FILTER =
-    "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif);;All files (*)";
-
-// --- the tool palette's icons -------------------------------------------
-//
-// Hand-drawn rather than shipped as asset files: four tiny glyphs are
-// cheaper to draw once than to source, license and keep in step with
-// the platform's icon theme (which several of this project's target
-// platforms do not reliably have one of). `PM_LargeIconSize` and
-// `devicePixelRatioF`, so a HiDPI screen gets a crisp glyph.
-
-QIcon draw_tool_icon(const QWidget* metrics,
-                     const std::function<void(QPainter&, int, const QColor&)>& paint) {
-    const int size = metrics->style()->pixelMetric(QStyle::PM_LargeIconSize);
-    const qreal dpr = metrics->devicePixelRatioF();
-    QPixmap pixmap(static_cast<int>(std::lround(size * dpr)),
-                   static_cast<int>(std::lround(size * dpr)));
-    pixmap.setDevicePixelRatio(dpr);
-    pixmap.fill(Qt::transparent);
-    QPainter painter(&pixmap);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    // Palette, not a literal color: a hand-drawn icon that ignored the
-    // palette would go invisible on a dark theme.
-    paint(painter, size, metrics->palette().color(QPalette::WindowText));
-    return QIcon(pixmap);
-}
-
-// The "picture" glyph shared by the image-inset and last-received tools
-// -- a frame, a sun and a mountain range, the generic photo icon every
-// platform already uses this shape for.
-void draw_picture_glyph(QPainter& p, int size, const QColor& ink) {
-    const QRectF frame(size * 0.12, size * 0.12, size * 0.76, size * 0.76);
-    p.setPen(QPen(ink, std::max(1.0, size / 16.0)));
-    p.setBrush(Qt::NoBrush);
-    p.drawRoundedRect(frame, size * 0.06, size * 0.06);
-
-    p.setPen(Qt::NoPen);
-    p.setBrush(ink);
-    p.drawEllipse(QPointF(frame.left() + frame.width() * 0.3,
-                          frame.top() + frame.height() * 0.32),
-                 size * 0.07, size * 0.07);
-
-    QPainterPath mountains;
-    mountains.moveTo(frame.left() + frame.width() * 0.06, frame.bottom() - frame.height() * 0.1);
-    mountains.lineTo(frame.left() + frame.width() * 0.38, frame.bottom() - frame.height() * 0.55);
-    mountains.lineTo(frame.left() + frame.width() * 0.58, frame.bottom() - frame.height() * 0.3);
-    mountains.lineTo(frame.left() + frame.width() * 0.78, frame.bottom() - frame.height() * 0.52);
-    mountains.lineTo(frame.right() - frame.width() * 0.06, frame.bottom() - frame.height() * 0.1);
-    mountains.closeSubpath();
-    p.drawPath(mountains);
-}
-
-QIcon text_tool_icon(const QWidget* metrics) {
-    return draw_tool_icon(metrics, [](QPainter& p, int size, const QColor& ink) {
-        QFont font = p.font();
-        font.setBold(true);
-        font.setPixelSize(static_cast<int>(size * 0.72));
-        p.setFont(font);
-        p.setPen(ink);
-        p.drawText(QRect(0, 0, size, size), Qt::AlignCenter, QStringLiteral("T"));
-    });
-}
-
-QIcon image_tool_icon(const QWidget* metrics) {
-    return draw_tool_icon(metrics, [](QPainter& p, int size, const QColor& ink) {
-        draw_picture_glyph(p, size, ink);
-    });
-}
-
-QIcon last_rx_tool_icon(const QWidget* metrics) {
-    return draw_tool_icon(metrics, [](QPainter& p, int size, const QColor& ink) {
-        draw_picture_glyph(p, size, ink);
-        // A small curved "history" arrow badge over the bottom-right
-        // corner, so the glyph reads as "that picture again" rather
-        // than a second, redundant photo icon.
-        const QRectF badge(size * 0.48, size * 0.48, size * 0.46, size * 0.46);
-        QPainterPath arrow;
-        arrow.arcMoveTo(badge, 30);
-        arrow.arcTo(badge, 30, 260);
-        p.setPen(QPen(ink, std::max(1.0, size / 14.0)));
-        p.setBrush(Qt::NoBrush);
-        p.drawPath(arrow);
-        const QPointF tip = arrow.currentPosition();
-        QPolygonF head;
-        head << tip << QPointF(tip.x() - size * 0.09, tip.y() - size * 0.02)
-             << QPointF(tip.x() - size * 0.01, tip.y() + size * 0.09);
-        p.setPen(Qt::NoPen);
-        p.setBrush(ink);
-        p.drawPolygon(head);
-    });
-}
-
-QIcon rect_tool_icon(const QWidget* metrics) {
-    return draw_tool_icon(metrics, [](QPainter& p, int size, const QColor& ink) {
-        const QRectF box(size * 0.15, size * 0.26, size * 0.7, size * 0.48);
-        p.setPen(Qt::NoPen);
-        p.setBrush(QColor(ink.red(), ink.green(), ink.blue(), 90));
-        p.drawRect(box);
-        p.setBrush(Qt::NoBrush);
-        p.setPen(QPen(ink, std::max(1.0, size / 14.0)));
-        p.drawRect(box);
-    });
-}
-
-}  // namespace
 
 double level_to_db(double level) {
     if (level <= 0.0) return LEVEL_MIN_DB;
@@ -233,6 +129,68 @@ TransmitPanel::TransmitPanel(AppState* state, QWidget* parent)
     refresh_templates();
     sync_custom_field_rows();
     refresh_fields();
+
+    // Scheduled QRSS sends. The file sits beside the config, so a test's
+    // temporary config directory gets a temporary schedule too.
+    scheduler_ = new QrssScheduler(
+        settings::config_dir() / "qrss_schedule.json",
+        [this](const qrss_schedule::Entry& entry, const std::vector<qrss_tx::Pass>& passes,
+               std::string* why) { return start_scheduled(entry, passes, why); },
+        {}, 5000, this);
+    connect(scheduler_, &QrssScheduler::logged, this, [this](int severity, const QString& m) {
+        const auto level = static_cast<log::Severity>(std::clamp(severity, 0, 2));
+        if (level == log::Severity::Error) {
+            // The banner as well: a send that will not happen is worth
+            // finding on the screen, not only in the log.
+            place_banner();
+            banner_->show_error(m);
+        }
+        app_->log_event("tx", level, m);
+    });
+    // A scheduled frequency change waits for the transmitter to be free:
+    // the radio is not retuned under a transmission.
+    scheduler_->set_retuner([this](const qrss_schedule::FreqChange& change, std::string* why) {
+        if (transmitting() || awaiting_optimizer_ || thread_.joinable()) {
+            *why = "the transmitter is busy";
+            return QrssScheduler::Start::Busy;
+        }
+        if (!app_->tune_rig(change.dial_hz, "schedule")) {
+            *why = "rig control is off or the radio is not connected";
+            return QrssScheduler::Start::Failed;
+        }
+        return QrssScheduler::Start::Started;
+    });
+    // A send that starts the half hour after the run on the air ends
+    // joins that run: it is encoded while the pass before it plays.
+    scheduler_->set_chainer([this](const qrss_schedule::Entry& entry,
+                                   const std::vector<qrss_tx::Pass>& passes, std::string* why) {
+        if (!thread_.joinable() || !qrss_chain_) {
+            *why = "no QRSS send is on the air to follow";
+            return false;
+        }
+        qrss_tx::Part part;
+        try {
+            part.picture = images::load(entry.picture);
+        } catch (const std::exception& e) {
+            *why = std::string("its picture could not be read: ") + e.what();
+            return false;
+        }
+        part.mode = entry.mode;
+        part.waveform = entry.waveform;
+        part.freq_hz = entry.freq_hz;
+        part.passes = passes;
+        if (!qrss_chain_->append(std::move(part))) {
+            *why = "the send on the air has already keyed its last pass";
+            return false;
+        }
+        return true;
+    });
+    scheduler_->set_canceller([this] { cancel(); });
+    scheduler_->set_dropper([this](const std::vector<double>& quarter_hours) {
+        if (thread_.joinable() && qrss_chain_) qrss_chain_->drop(quarter_hours);
+    });
+    connect(scheduler_, &QrssScheduler::changed, this, &TransmitPanel::update_schedule_summary);
+    update_schedule_summary();
 }
 
 TransmitPanel::~TransmitPanel() {
@@ -368,8 +326,7 @@ void TransmitPanel::schedule_optimization() {
     if (model == nullptr) return;
 
     images::ImageArray array = images::to_array(*image);
-    const std::string mode_name =
-        mode_combo_->currentData().toString().toStdString();
+    const std::string mode_name = sstvae_mode();
     const config::ModeSpec* mode = &config::MODES[0];
     for (const config::ModeSpec& m : config::MODES) {
         if (mode_name == m.name) mode = &m;
@@ -575,7 +532,7 @@ QWidget* TransmitPanel::build_tool_row() {
     // does the same thing, it is only condensed on screen. The full
     // sentence survives as each button's tooltip.
     add_text_button_ = new QToolButton(overlay_box);
-    add_text_button_->setIcon(text_tool_icon(this));
+    add_text_button_->setIcon(compose::text_tool_icon(this));
     add_text_button_->setToolTip(tr("Add text"));
     connect(add_text_button_, &QToolButton::clicked, this, [this] {
         const std::string& callsign = app_->config().callsign;
@@ -583,7 +540,7 @@ QWidget* TransmitPanel::build_tool_row() {
     });
 
     add_rx_button_ = new QToolButton(overlay_box);
-    add_rx_button_->setIcon(last_rx_tool_icon(this));
+    add_rx_button_->setIcon(compose::last_rx_tool_icon(this));
     // Nothing to insert until something has been received: the item it
     // adds resolves at render time, so before the first reception it
     // drew nothing and looked like a button that did not work.
@@ -595,19 +552,19 @@ QWidget* TransmitPanel::build_tool_row() {
             &OverlayEditor::add_last_rx_inset);
 
     add_image_button_ = new QToolButton(overlay_box);
-    add_image_button_->setIcon(image_tool_icon(this));
+    add_image_button_->setIcon(compose::image_tool_icon(this));
     add_image_button_->setToolTip(tr("Add image..."));
     connect(add_image_button_, &QToolButton::clicked, this, [this] {
         const QString path = QFileDialog::getOpenFileName(
             this, tr("Choose an inset image"),
             QString::fromStdString(app_->config().folders.transmit_dir),
-            QString::fromLatin1(IMAGE_FILTER));
+            QString::fromLatin1(compose::IMAGE_FILTER));
         if (!path.isEmpty()) editor_->add_image_inset(path.toStdString());
     });
 
     add_rect_button_ = new QToolButton(overlay_box);
     add_rect_button_->setObjectName(QStringLiteral("add_rect_button"));
-    add_rect_button_->setIcon(rect_tool_icon(this));
+    add_rect_button_->setIcon(compose::rect_tool_icon(this));
     add_rect_button_->setToolTip(
         tr("Add rectangle: a box, filled and/or stroked with a solid "
            "color or a gradient -- see the floating panel that appears "
@@ -839,14 +796,17 @@ QWidget* TransmitPanel::build_send_bar() {
     layout->setContentsMargins(0, 0, 0, 0);
 
     mode_combo_ = new QComboBox(bar);
+    mode_combo_->setObjectName(QStringLiteral("mode_combo"));
     for (const config::ModeSpec& spec : config::MODES) {
         const QString name = QString::fromUtf8(spec.name.data(),
                                                static_cast<int>(spec.name.size()));
         mode_combo_->addItem(
             tr("Mode %1 - %2 s").arg(name).arg(spec.duration_s, 0, 'f', 0), name);
     }
-    const int mode_index =
-        mode_combo_->findData(QString::fromStdString(app_->config().transmit.mode));
+    // QRSSTVAE modes are not here: QRSS sends are scheduled, from the
+    // main window's QRSSTVAE mode (Schedule...).
+    const settings::TransmitConfig& tcfg = app_->config().transmit;
+    const int mode_index = mode_combo_->findData(QString::fromStdString(tcfg.mode));
     mode_combo_->setCurrentIndex(std::max(0, mode_index));
     mode_combo_->setToolTip(
         tr("How long the transmission takes, and how much detail it carries. "
@@ -945,6 +905,10 @@ QWidget* TransmitPanel::build_send_bar() {
     return bar;
 }
 
+std::string TransmitPanel::sstvae_mode() const {
+    return mode_combo_->currentData().toString().toStdString();
+}
+
 void TransmitPanel::on_level_changed(int steps) {
     app_->config().transmit.level = db_to_level(steps * LEVEL_STEP_DB);
     update_level_label();
@@ -960,7 +924,9 @@ void TransmitPanel::on_mode_changed() {
     // A different mode is a different latent budget, so any result in
     // hand is for the wrong transmission.
     schedule_optimization();
-    app_->config().transmit.mode = mode_combo_->currentData().toString().toStdString();
+    settings::TransmitConfig& tcfg = app_->config().transmit;
+    tcfg.mode = mode_combo_->currentData().toString().toStdString();
+    tcfg.qrss_mode.clear();
     app_->save_config();
     // `{mode}` may be in the composition. `schedule_optimization` above
     // already rebuilds the composite, but from `editor_->composed_image()`
@@ -973,31 +939,7 @@ void TransmitPanel::on_mode_changed() {
 // --- templates (docs/overlay-templates.md) -----------------------------------
 
 std::filesystem::path TransmitPanel::builtin_templates_dir() {
-    // Copied at build time (`sstvae_copy_builtin_templates` in
-    // native/CMakeLists.txt) from `sstvae/overlay/templates/`, the one
-    // place the three ship from. Where an *installed* app keeps its
-    // data is a platform convention, tried first; beside the executable
-    // is the build tree, the tests, sstvae-gui-shot and the Windows
-    // package, and is the fallback everywhere.
-    //
-    // macOS: a bundle's Contents/Resources -- "beside the executable" is
-    // Contents/MacOS there, and codesign refuses data in it (see the
-    // CMake function). Linux: <prefix>/share/sstvae/templates, resolved
-    // from the executable's own prefix, so one rule covers a distro
-    // package at /usr, a hand install at /usr/local or /opt, and the
-    // AppDir -- a packager expects /usr/share/sstvae, not a data
-    // directory under /usr/bin.
-    const QString beside = QCoreApplication::applicationDirPath();
-#if defined(Q_OS_MACOS)
-    const QString installed = QDir::cleanPath(beside + QStringLiteral("/../Resources/templates"));
-#elif defined(Q_OS_UNIX)
-    const QString installed =
-        QDir::cleanPath(beside + QStringLiteral("/../share/sstvae/templates"));
-#else
-    const QString installed;
-#endif
-    if (!installed.isEmpty() && QDir(installed).exists()) return installed.toStdString();
-    return (beside + QStringLiteral("/templates")).toStdString();
+    return compose::builtin_templates_dir();
 }
 
 void TransmitPanel::refresh_templates() {
@@ -1127,7 +1069,7 @@ void TransmitPanel::refresh_fields() {
     const QDateTime now = QDateTime::currentDateTimeUtc();
     fields.builtin["utc"] = now.toString(QStringLiteral("HH:mm")).toStdString();
     fields.builtin["date"] = now.toString(QStringLiteral("yyyy-MM-dd")).toStdString();
-    fields.builtin["mode"] = mode_combo_->currentData().toString().toStdString();
+    fields.builtin["mode"] = sstvae_mode();
     for (const std::string& label : used.custom) {
         const auto it = custom_field_values_.find(label);
         if (it != custom_field_values_.end()) fields.custom[label] = it->second;
@@ -1259,7 +1201,7 @@ void TransmitPanel::choose_image() {
     const QString path = QFileDialog::getOpenFileName(
         this, tr("Choose an image"),
         QString::fromStdString(app_->config().folders.transmit_dir),
-        QString::fromLatin1(IMAGE_FILTER));
+        QString::fromLatin1(compose::IMAGE_FILTER));
     if (!path.isEmpty()) load_image(path);
 }
 
@@ -1429,6 +1371,7 @@ void TransmitPanel::set_last_reception_info(const QString& callsign, double snr_
 
 void TransmitPanel::set_last_rx_image(const images::Picture& image) {
     editor_->set_last_rx(image);
+    last_rx_ = image;
     // Only now is there anything for the button to insert. Before the
     // first reception it added an item that rendered as nothing, which
     // reads as a broken button rather than as "not yet".
@@ -1570,7 +1513,7 @@ void TransmitPanel::begin_transmit(const images::Picture& picture,
 
     const settings::Config& config = app_->config();
     tx::TxConfig tx_config;
-    tx_config.mode = mode_combo_->currentData().toString().toStdString();
+    tx_config.mode = sstvae_mode();
     tx_config.callsign = config.callsign;
     tx_config.device = config.audio.output_device;
     tx_config.level = config.transmit.level;
@@ -1612,6 +1555,8 @@ void TransmitPanel::begin_transmit(const images::Picture& picture,
     level_slider_->setEnabled(false);
     last_logged_phase_ = -1;
     running_.store(true);
+    qrss_run_ = false;
+    announced_ = true;
     emit transmitStarted();
 
     thread_ = std::thread([this, picture, tx_config] {
@@ -1626,6 +1571,253 @@ void TransmitPanel::begin_transmit(const images::Picture& picture,
     });
 }
 
+void TransmitPanel::make_qrss_engine() {
+    engine_ = std::make_unique<tx::TxEngine>(
+        app_->ptt(),
+        [](const std::string& device, std::span<const double> wave, int samplerate,
+           const std::function<void(double)>& on_progress,
+           const std::function<bool()>& should_stop,
+           const std::function<void(const std::string&)>& on_error) {
+            return audio::qt::play(device, wave, samplerate, on_progress, should_stop,
+                                   on_error);
+        },
+        [](const images::ImageArray&) -> std::vector<double> {
+            throw std::logic_error("a QRSS send never encodes through the SSTVAE path");
+        },
+        [this](const tx::TxState& state) {
+            emit stateChanged(static_cast<int>(state.phase), state.progress,
+                              QString::fromStdString(state.message));
+        },
+        [this](const std::string& message) {
+            emit errorOccurred(QString::fromStdString(message));
+        });
+}
+
+std::string TransmitPanel::begin_qrss(const images::Picture& picture, const std::string& mode,
+                                      const std::string& waveform, double freq_hz, std::vector<qrss_tx::Pass> passes,
+                                      bool interactive) {
+    const settings::Config& config = app_->config();
+    qrss_tx::Request request;
+    request.picture = picture;
+    request.mode = mode;
+    request.waveform = waveform;
+    request.freq_hz = freq_hz;
+    request.passes = std::move(passes);
+    request.chain = std::make_shared<qrss_tx::Chain>();
+    request.callsign = config.callsign;
+    request.grid = config.grid;
+    request.tx.device = config.audio.output_device;
+    request.tx.level = config.transmit.level;
+    request.tx.ptt_lead_s = config.rig.ptt_lead_s;
+    request.tx.ptt_tail_s = config.rig.ptt_tail_s;
+    // No SSTVAE CW ID and no VOX leader: every QRSS pass carries its own
+    // Morse ID windows, and a leader would land on the preamble.
+    request.tx.cw_id = false;
+    request.tx.vox_lead_s = 0.0;
+
+    // The schedule reports a refusal itself, on the banner and in the log.
+    auto refuse = [&](const QString& title, const QString& why) {
+        if (interactive) QMessageBox::warning(this, title, why);
+        return why.toStdString();
+    };
+    const std::string problem = qrss_tx::problem(request);
+    if (!problem.empty()) {
+        return refuse(tr("Cannot send QRSS"), QString::fromStdString(problem));
+    }
+    // The C++ transmitter unless SSTVAE_QRSS_BACKEND=python, which runs
+    // the scripts (for comparing the two).
+    const qrss_tx::Backend backend = qrss_tx::backend();
+    std::optional<qrss_tx::Tools> tools;
+    if (backend == qrss_tx::Backend::Python) tools = qrss_tx::find_tools();
+    if (backend == qrss_tx::Backend::Python && !tools) {
+        return refuse(
+            tr("QRSS tools not found"),
+            tr("QRSS sending runs qrss_encode.py and qrss_transmit.py from the "
+               "repository, and they were not found near this program. Set "
+               "SSTVAE_QRSS_DIR to the repository (and SSTVAE_QRSS_PYTHON to its "
+               "Python, if it has no .venv)."));
+    }
+    // Which quarter hours the passes take is decided once encoding is
+    // done (`qrss_tx::run`), and logged then as the "waiting for" line.
+    const int n_passes = request.passes.empty() ? qrss_tx::passes_for(request.mode)
+                                                : static_cast<int>(request.passes.size());
+    app_->log_event("tx", log::Severity::Info,
+                    tr("QRSS %1 mode %2 at %3 Hz: %4 pass(es) of %5 s (%6 transmitter)")
+                        .arg(QString::fromStdString(request.waveform),
+                             QString::fromStdString(request.mode))
+                        .arg(request.freq_hz, 0, 'f', 0)
+                        .arg(n_passes)
+                        .arg(qrss_tx::PASS_S, 0, 'f', 1)
+                        .arg(QString::fromLatin1(qrss_tx::backend_name(backend))));
+
+    make_qrss_engine();
+
+    send_button_->setEnabled(false);
+    set_picture_controls_enabled(false);
+    cancel_button_->setEnabled(true);
+    level_slider_->setEnabled(false);
+    mode_combo_->setEnabled(false);
+    last_logged_phase_ = -1;
+    running_.store(true);
+    // Not announced yet: `on_state` does it when the radio first keys.
+    qrss_run_ = true;
+    announced_ = false;
+    emit qrssPreparing(tr("Getting ready to send"));
+
+    qrss_chain_ = request.chain;
+    thread_ = std::thread([this, request, tools] {
+        bool ok = false;
+        try {
+            auto on_error = [this](const std::string& message) {
+                emit errorOccurred(QString::fromStdString(message));
+            };
+            if (tools) {
+                ok = qrss_tx::run(*engine_, request, *tools, on_error);
+            } else {
+                const std::unique_ptr<qrss_tx::Maker> maker = qrss_tx::native_maker();
+                ok = qrss_tx::run(*engine_, request, *maker, on_error);
+            }
+        } catch (const std::exception& e) {
+            emit errorOccurred(QString::fromUtf8(e.what()));
+        }
+        running_.store(false);
+        emit sendFinished(ok);
+    });
+    return {};
+}
+
+std::string TransmitPanel::begin_test_tone() {
+    if (transmitting() || awaiting_optimizer_ || thread_.joinable()) {
+        return tr("The transmitter is busy.").toStdString();
+    }
+    const settings::Config& config = app_->config();
+    tx::TxConfig cfg;
+    cfg.device = config.audio.output_device;
+    cfg.level = config.transmit.level;
+    cfg.ptt_lead_s = config.rig.ptt_lead_s;
+    cfg.ptt_tail_s = config.rig.ptt_tail_s;
+    cfg.cw_id = false;
+    cfg.vox_lead_s = 0.0;
+    const double seconds = config.transmit.test_tone_s;
+    std::vector<double> wave =
+        tx::condition_for_output(qrss_tx::test_tone(seconds), config.transmit.level);
+    app_->log_event("tx", log::Severity::Info,
+                    tr("Test / Tune: 1500 Hz for %1 s").arg(seconds, 0, 'f', 0));
+
+    make_qrss_engine();
+    send_button_->setEnabled(false);
+    set_picture_controls_enabled(false);
+    cancel_button_->setEnabled(true);
+    level_slider_->setEnabled(false);
+    mode_combo_->setEnabled(false);
+    last_logged_phase_ = -1;
+    running_.store(true);
+    // Keyed like a QRSS pass: receiving pauses when the radio keys.
+    qrss_run_ = true;
+    announced_ = false;
+    test_run_ = true;
+    emit testToneChanged(true, 1.0);
+
+    thread_ = std::thread([this, wave = std::move(wave), cfg] {
+        bool ok = false;
+        try {
+            ok = engine_->transmit_wave(wave, cfg);
+        } catch (const std::exception& e) {
+            emit errorOccurred(QString::fromUtf8(e.what()));
+        }
+        running_.store(false);
+        emit sendFinished(ok);
+    });
+    return {};
+}
+
+QrssScheduler::Start TransmitPanel::start_scheduled(const qrss_schedule::Entry& entry,
+                                                    const std::vector<qrss_tx::Pass>& passes,
+                                                    std::string* why) {
+    // Not until the last send is wholly over: `on_finished` joins its
+    // thread, and a run started before that would be re-enabled under.
+    if (transmitting() || awaiting_optimizer_ || thread_.joinable()) {
+        *why = "the transmitter is busy";
+        return QrssScheduler::Start::Busy;
+    }
+    images::Picture picture;
+    try {
+        picture = images::load(entry.picture);
+    } catch (const std::exception& e) {
+        *why = std::string("its picture could not be read: ") + e.what();
+        return QrssScheduler::Start::Failed;
+    }
+    const std::string problem = begin_qrss(picture, entry.mode, entry.waveform, entry.freq_hz, passes,
+                                           false);
+    if (!problem.empty()) {
+        *why = problem;
+        return QrssScheduler::Start::Failed;
+    }
+    return QrssScheduler::Start::Started;
+}
+
+void TransmitPanel::show_schedule() {
+    if (schedule_window_ == nullptr) {
+        if (sends_ == nullptr) {
+            sends_ = new QrssSends(settings::config_dir() / "qrss_sends", this);
+        }
+        QrssEditor::Context context;
+        context.fields = [this] { return editor_->fields(); };
+        context.last_rx = [this] { return last_rx_; };
+        context.default_text = app_->config().callsign;
+        context.template_dir = app_->config().folders.template_dir;
+        context.picture_dir = app_->config().folders.transmit_dir;
+        schedule_window_ = new QrssScheduleWindow(
+            scheduler_, sends_,
+            [this] {
+                QrssScheduleWindow::Defaults d;
+                // The carrier last scheduled, else the saved one.
+                d.freq_hz = scheduler_->entries().empty()
+                                ? app_->config().transmit.qrss_freq_hz
+                                : scheduler_->entries().back().freq_hz;
+                // And the waveform last scheduled, else L.
+                if (!scheduler_->entries().empty()) {
+                    d.waveform = scheduler_->entries().back().waveform;
+                }
+                // The dial now, else the last change scheduled.
+                if (const auto hz = app_->current_frequency_hz()) {
+                    d.dial_hz = *hz;
+                } else if (!scheduler_->changes().empty()) {
+                    d.dial_hz = scheduler_->changes().back().dial_hz;
+                }
+                return d;
+            },
+            std::move(context), this);
+        schedule_window_->set_test_tune(
+            {[this] { return begin_test_tone(); }, [this] { cancel(); }});
+        connect(this, &TransmitPanel::testToneChanged, schedule_window_,
+                &QrssScheduleWindow::set_test_state);
+        schedule_window_->set_test_state(test_run_, 1.0);
+    }
+    schedule_window_->show();
+    schedule_window_->raise();
+    schedule_window_->activateWindow();
+}
+
+void TransmitPanel::hide_windows() {
+    if (schedule_window_ != nullptr) schedule_window_->hide();
+}
+
+QString TransmitPanel::schedule_summary() const {
+    if (scheduler_ == nullptr) return {};
+    const double now = scheduler_->now();
+    const auto next = qrss_schedule::upcoming(scheduler_->entries(), now, 30 * 86400.0, 1);
+    if (next.empty()) return tr("Nothing scheduled.");
+    const qrss_schedule::Entry& e = scheduler_->entries()[next.front().entry];
+    return tr("Next send: \"%1\", mode %2 at %3.")
+        .arg(QString::fromStdString(e.label), QString::fromStdString(e.mode),
+             QString::fromStdString(qrss_schedule::when(next.front().slot, now)));
+}
+
+void TransmitPanel::update_schedule_summary() {
+    emit scheduleChanged(schedule_summary());
+}
+
 void TransmitPanel::cancel() {
     if (!engine_) return;
     engine_->cancel();
@@ -1634,12 +1826,31 @@ void TransmitPanel::cancel() {
 
 void TransmitPanel::on_state(int phase, double progress, const QString& message) {
     const auto tx_phase = static_cast<tx::TxPhase>(phase);
+    if (test_run_) {
+        const double left = tx_phase == tx::TxPhase::Sending ? 1.0 - progress
+                            : (tx_phase == tx::TxPhase::Unkeying || tx_phase == tx::TxPhase::Done)
+                                ? 0.0
+                                : 1.0;
+        emit testToneChanged(true, std::clamp(left, 0.0, 1.0));
+    }
+    if (qrss_run_ && !announced_) {
+        if (tx_phase == tx::TxPhase::Keying || tx_phase == tx::TxPhase::Sending) {
+            announced_ = true;
+            emit qrssPreparing({});
+            emit transmitStarted();
+        } else if (tx_phase == tx::TxPhase::Encoding || tx_phase == tx::TxPhase::Waiting ||
+                   tx_phase == tx::TxPhase::Modulating) {
+            emit qrssPreparing(message.isEmpty() ? QString::fromLatin1(tx::phase_name(tx_phase))
+                                                 : message);
+        }
+    }
     // This slot fires on every playback progress tick; the log gets a
     // line only when the phase changes. Keying and unkeying are the
     // lines the on-air PTT shakedown will want timestamps for.
     if (phase != last_logged_phase_) {
         last_logged_phase_ = phase;
         switch (tx_phase) {
+            case tx::TxPhase::Waiting:
             case tx::TxPhase::Keying:
             case tx::TxPhase::Sending:
             case tx::TxPhase::Unkeying:
@@ -1674,6 +1885,8 @@ void TransmitPanel::on_state(int phase, double progress, const QString& message)
                tx_phase == tx::TxPhase::Modulating) {
         // Indeterminate: there is no useful fraction to report.
         progress_->setRange(0, 0);
+    } else if (tx_phase == tx::TxPhase::Waiting) {
+        progress_->setRange(0, 0);
     } else {
         progress_->setRange(0, 100);
     }
@@ -1693,6 +1906,9 @@ void TransmitPanel::on_error(const QString& message) {
 
 void TransmitPanel::on_finished(bool ok) {
     if (thread_.joinable()) thread_.join();
+    const bool test = test_run_;
+    test_run_ = false;
+    if (scheduler_ != nullptr && !test) scheduler_->run_finished();
     // Only re-armed if an edit was deferred while the send was
     // committed. Otherwise the composition is unchanged and still has
     // its optimized latents -- `take_result` consumes nothing -- so a
@@ -1707,6 +1923,7 @@ void TransmitPanel::on_finished(bool ok) {
     set_picture_controls_enabled(true);
     cancel_button_->setEnabled(false);
     level_slider_->setEnabled(true);
+    mode_combo_->setEnabled(true);
     progress_->setRange(0, 100);
     progress_->setValue(ok ? 100 : 0);
     if (ok) {
@@ -1719,7 +1936,14 @@ void TransmitPanel::on_finished(bool ok) {
         // already correct, so only a genuine failure is relabelled.
         status_->setText(tr("Failed"));
     }
-    emit transmitFinished();
+    if (qrss_run_) emit qrssPreparing({});
+    qrss_run_ = false;
+    // A run stopped before it keyed paused nothing, so resumes nothing.
+    if (announced_) {
+        announced_ = false;
+        emit transmitFinished();
+    }
+    if (test) emit testToneChanged(false, 0.0);
 }
 
 }  // namespace sstvae::gui

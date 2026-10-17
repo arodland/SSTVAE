@@ -205,6 +205,7 @@ void read_rig(const Reader& r, RigConfig& c) {
     r.get("poll_interval_s", c.poll_interval_s);
     r.get("ptt_lead_s", c.ptt_lead_s);
     r.get("ptt_tail_s", c.ptt_tail_s);
+    r.get("tune_after_change", c.tune_after_change);
     r.get("device", c.device);
     r.get("baud", c.baud);
     r.get("data_bits", c.data_bits);
@@ -226,7 +227,7 @@ void read_rig(const Reader& r, RigConfig& c) {
     // changed shape" and a wall of complaints about a file they did not
     // write.
     r.report_unknown({"enabled", "model", "poll_interval_s", "ptt_lead_s",
-                      "ptt_tail_s", "device", "baud", "data_bits", "stop_bits",
+                      "ptt_tail_s", "tune_after_change", "device", "baud", "data_bits", "stop_bits",
                       "parity", "handshake", "dtr", "rts", "ptt_method",
                       "ptt_device", "ptt_audio", "mode",
                       // v1, ignored:
@@ -243,7 +244,15 @@ void read_folders(const Reader& r, FolderConfig& c) {
 void read_receive(const Reader& r, ReceiveConfig& c) {
     r.get("autosave", c.autosave);
     r.get("auto_start", c.auto_start);
+    r.get("qrss_auto_start", c.qrss_auto_start);
     r.get("low_cpu", c.low_cpu);
+    r.get("waterfall_fps", c.waterfall_fps);
+    if (c.waterfall_fps < 1 || c.waterfall_fps > 30) {
+        r.notes.add(r.path("waterfall_fps"),
+                    "is out of range (1-30); using 20 instead of " +
+                        std::to_string(c.waterfall_fps));
+        c.waterfall_fps = 20;
+    }
     r.get("buffer_seconds", c.buffer_seconds);
     r.get("poll_interval", c.poll_interval);
     r.get("blind_search_seconds", c.blind_search_seconds);
@@ -261,8 +270,8 @@ void read_receive(const Reader& r, ReceiveConfig& c) {
                                                "'; using off");
         c.drift_track = "off";
     }
-    r.report_unknown({"autosave", "auto_start", "low_cpu", "buffer_seconds",
-                      "poll_interval", "blind_search_seconds", "blind_wide",
+    r.report_unknown({"autosave", "auto_start", "qrss_auto_start", "low_cpu", "waterfall_fps",
+                      "buffer_seconds", "poll_interval", "blind_search_seconds", "blind_wide",
                       "drift_track", "end_grace", "save_size", "save_audio",
                       "filename_template"});
 }
@@ -274,13 +283,31 @@ void read_transmit(const Reader& r, TransmitConfig& c) {
     r.get("cw_id", c.cw_id);
     r.get("cw_message", c.cw_message);
     r.get("vox_lead_s", c.vox_lead_s);
-    r.report_unknown({"mode", "level", "optimize", "cw_id", "cw_message", "vox_lead_s"});
+    r.get("qrss_mode", c.qrss_mode);
+    if (!c.qrss_mode.empty() && c.qrss_mode != "A" && c.qrss_mode != "B" && c.qrss_mode != "C") {
+        r.notes.add(r.path("qrss_mode"), "unknown qrss_mode '" + c.qrss_mode + "'; using none");
+        c.qrss_mode.clear();
+    }
+    r.get("qrss_freq_hz", c.qrss_freq_hz);
+    c.qrss_freq_hz = std::clamp(c.qrss_freq_hz, 300.0, 2700.0);
+    r.get("test_tone_s", c.test_tone_s);
+    c.test_tone_s = std::clamp(c.test_tone_s, 5.0, 300.0);
+    r.report_unknown({"mode", "level", "optimize", "cw_id", "cw_message", "vox_lead_s",
+                      "qrss_mode", "qrss_freq_hz", "test_tone_s"});
 }
 
 void read_ui(const Reader& r, UiConfig& c) {
     r.get("layout", c.layout);
     r.get("log_visible", c.log_visible);
+    r.get("mode", c.mode);
     r.get("waterfall_height", c.waterfall_height);
+    r.get("qrss_received_width", c.qrss_received_width);
+    if (c.qrss_received_width < 0 || c.qrss_received_width > 10000) {
+        r.notes.add(r.path("qrss_received_width"),
+                    "is out of range (0-10000); ignoring " +
+                        std::to_string(c.qrss_received_width));
+        c.qrss_received_width = 0;
+    }
     // Negative is meaningless and a huge value would push the panes off
     // the window; clamp quietly rather than refuse, since the only way
     // to get one is to hand-edit the file.
@@ -299,7 +326,12 @@ void read_ui(const Reader& r, UiConfig& c) {
                                           "'; expected auto, split or tabs");
         c.layout = "auto";
     }
-    r.report_unknown({"layout", "log_visible", "waterfall_height"});
+    if (c.mode != "sstvae" && c.mode != "qrsstvae") {
+        r.notes.add(r.path("mode"),
+                    "unknown mode '" + c.mode + "'; expected sstvae or qrsstvae");
+        c.mode = "sstvae";
+    }
+    r.report_unknown({"layout", "log_visible", "mode", "qrss_received_width", "waterfall_height"});
 }
 
 // Empty string <-> JSON null, for the fields Python declares optional.
@@ -429,6 +461,7 @@ std::string to_json(const Config& c) {
           {"poll_interval_s", c.rig.poll_interval_s},
           {"ptt_lead_s", c.rig.ptt_lead_s},
           {"ptt_tail_s", c.rig.ptt_tail_s},
+          {"tune_after_change", c.rig.tune_after_change},
           {"device", c.rig.device},
           {"baud", c.rig.baud},
           {"data_bits", c.rig.data_bits},
@@ -448,7 +481,9 @@ std::string to_json(const Config& c) {
         {"receive",
          {{"autosave", c.receive.autosave},
           {"auto_start", c.receive.auto_start},
+          {"qrss_auto_start", c.receive.qrss_auto_start},
           {"low_cpu", c.receive.low_cpu},
+          {"waterfall_fps", c.receive.waterfall_fps},
           {"buffer_seconds", c.receive.buffer_seconds},
           {"poll_interval", c.receive.poll_interval},
           {"blind_search_seconds", c.receive.blind_search_seconds},
@@ -464,10 +499,15 @@ std::string to_json(const Config& c) {
           {"optimize", c.transmit.optimize},
           {"cw_id", c.transmit.cw_id},
           {"cw_message", c.transmit.cw_message},
-          {"vox_lead_s", c.transmit.vox_lead_s}}},
+          {"vox_lead_s", c.transmit.vox_lead_s},
+          {"qrss_mode", c.transmit.qrss_mode},
+          {"qrss_freq_hz", c.transmit.qrss_freq_hz},
+          {"test_tone_s", c.transmit.test_tone_s}}},
         {"ui",
          {{"layout", c.ui.layout},
           {"log_visible", c.ui.log_visible},
+          {"mode", c.ui.mode},
+          {"qrss_received_width", c.ui.qrss_received_width},
           {"waterfall_height", c.ui.waterfall_height}}},
         {"version", c.version},
     };

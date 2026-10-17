@@ -6,6 +6,7 @@
 #include <QDateTime>
 #include <QDockWidget>
 #include <QGroupBox>
+#include <QInputDialog>
 #include <QKeySequence>
 #include <QLabel>
 #include <QMenu>
@@ -17,15 +18,22 @@
 #include <QMessageBox>
 #include <QScreen>
 #include <QStatusBar>
+#include <QStackedWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
 #include <algorithm>
+#include <cmath>
+#include <optional>
+#include <vector>
 
 #include "app_state.hpp"
 #include "log_pane.hpp"
 #include "pane_container.hpp"
+#include "qrss_page.hpp"
+#include "qrss_window.hpp"
+#include "spectrum_feed.hpp"
 #include "waterfall.hpp"
 #include "rig/hamlib.hpp"
 #include "rx_panel.hpp"
@@ -116,6 +124,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     rx_panel_ = new ReceivePanel(state_);
     tx_panel_ = new TransmitPanel(state_);
     rx_panel_->attach_waterfall(waterfall_);
+    // The QRSS signals are the QRSSTVAE mode, made now so the receive pane
+    // can hand them the capture ring from its first Listen.
+    qrss_ = new QrssWindow(nullptr, Qt::Widget);
+    rx_panel_->attach_qrss(qrss_);
 
     // **Each pane is named.** The tabs this replaced carried the only
     // labels that said which half was which, and dropping them left two
@@ -165,9 +177,63 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // was removed to lock the panes equal -- that one decided which
     // pane won, and this one only decides how much spectrum history is
     // on screen.
+    // **Two UI modes, one per protocol** (Jeff, 2026-10-10), picked
+    // under View rather than tabs: SSTVAE is the two panes as they were;
+    // QRSSTVAE is the QRSS signals, with receiving and the transmit
+    // schedule above them. QRSS modes left the transmit pane's mode list
+    // with this: a QRSS send is scheduled. The waterfall stays above
+    // both, since both are tuned by it.
+    qrss_page_ = new QrssPage(qrss_);
+    // One spectrum feed for the waterfall and the QRSS spectrogram: the
+    // audio is read once and both histories kept (spectrum_feed.hpp).
+    spectrum_feed_ = new SpectrumFeed(this);
+    spectrum_feed_->start(state_->config().receive.waterfall_fps);
+    waterfall_->set_feed(spectrum_feed_);
+    qrss_page_->spectrogram()->set_feed(spectrum_feed_);
+    modes_ = new QStackedWidget(this);
+    modes_->setObjectName(QStringLiteral("main_modes"));
+    modes_->addWidget(panes_);
+    modes_->addWidget(qrss_page_);
+    connect(qrss_page_, &QrssPage::listenRequested, this, [this](bool on) {
+        if (on) {
+            // The listener follows capture (below).
+            rx_panel_->start();
+        } else {
+            // And Stop here stops both, so there is one switch.
+            rx_panel_->stop();
+            qrss_->stop_listener();
+        }
+    });
+    connect(rx_panel_, &ReceivePanel::listeningChanged, qrss_page_, &QrssPage::set_listening);
+    connect(tx_panel_, &TransmitPanel::transmitStarted, qrss_page_,
+            [this] { qrss_page_->set_transmitting(true); });
+    connect(tx_panel_, &TransmitPanel::transmitFinished, qrss_page_,
+            [this] { qrss_page_->set_transmitting(false); });
+    connect(qrss_page_, &QrssPage::haltRequested, tx_panel_, &TransmitPanel::cancel);
+    connect(tx_panel_, &TransmitPanel::qrssPreparing, qrss_page_, &QrssPage::set_preparing);
+    // In QRSSTVAE mode, capture starting (a click, auto start, the end of
+    // an over) starts the QRSS listener if it is not already running.
+    connect(rx_panel_, &ReceivePanel::listeningChanged, this, [this](bool on) {
+        if (on && ui_mode() == UiMode::Qrsstvae && !qrss_->listener_running()) {
+            qrss_->start_listener();
+        }
+    });
+    // The divider between the spectrogram and the Received pane: the
+    // Received pane keeps the width the operator dragged it to.
+    qrss_page_->set_received_width(state_->config().ui.qrss_received_width);
+    connect(qrss_page_, &QrssPage::receivedWidthChanged, this, [this](int w) {
+        if (state_->config().ui.qrss_received_width == w) return;
+        state_->config().ui.qrss_received_width = w;
+        state_->save_config();
+    });
+    connect(qrss_page_, &QrssPage::scheduleRequested, tx_panel_, &TransmitPanel::show_schedule);
+    connect(tx_panel_, &TransmitPanel::scheduleChanged, qrss_page_,
+            &QrssPage::set_schedule_summary);
+    qrss_page_->set_schedule_summary(tx_panel_->schedule_summary());
+
     stack_ = new GripSplitter(Qt::Vertical, this);
     stack_->addWidget(waterfall_);
-    stack_->addWidget(panes_);
+    stack_->addWidget(modes_);
     stack_->setStretchFactor(0, 0);
     stack_->setStretchFactor(1, 1);
     // Neither half may be dragged out of existence: a waterfall of zero
@@ -180,11 +246,23 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             [this](int, int) { remember_waterfall_height(); });
 
     build_menu();
+    set_ui_mode(state_->config().ui.mode == "qrsstvae" ? UiMode::Qrsstvae : UiMode::Sstvae);
     build_status_bar();
     build_log_dock();
 
     connect(state_, &AppState::modelLoaded, this, &MainWindow::on_model_loaded);
     connect(state_, &AppState::rigStatus, this, &MainWindow::on_rig_status);
+    // The dial log goes where the listener reads it.
+    state_->set_dial_log_dir(qrss_->state_dir());
+    // The tuner never starts under a transmission.
+    state_->set_transmit_busy([this] { return tx_panel_->transmitting(); });
+    // Dial changes, by hand or scheduled, marked on both spectrum views.
+    connect(state_, &AppState::dialChanged, this, [this] {
+        std::vector<double> times;
+        for (const AppState::DialChange& c : state_->dial_changes()) times.push_back(c.t);
+        waterfall_->set_dial_marks(times);
+        qrss_page_->spectrogram()->set_dial_marks(std::move(times));
+    });
     connect(state_, &AppState::modelProgress, this,
             &MainWindow::on_model_progress);
     // The PTT lamp follows the transmit phase; the rig chip greys while
@@ -270,6 +348,7 @@ void MainWindow::build_layout_menu() {
     // choose "whatever you think" over an answer they can see. Picking
     // either entry writes a concrete value and ends the guessing.
     QMenu* layout = view_menu_->addMenu(tr("&Layout"));
+    layout_menu_ = layout;
     auto* group = new QActionGroup(this);
     group->setExclusive(true);
 
@@ -405,6 +484,22 @@ void MainWindow::build_menu() {
     // The action is added in build_log_dock(), which runs after this;
     // the menu pointer is kept on the window via findChild-free means.
     view_menu_ = menuBar()->addMenu(tr("&View"));
+    auto* modes = new QActionGroup(this);
+    modes->setExclusive(true);
+    sstvae_action_ = view_menu_->addAction(tr("&SSTVAE"));
+    sstvae_action_->setObjectName(QStringLiteral("mode_sstvae"));
+    sstvae_action_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_1));
+    qrsstvae_action_ = view_menu_->addAction(tr("&QRSSTVAE"));
+    qrsstvae_action_->setObjectName(QStringLiteral("mode_qrsstvae"));
+    qrsstvae_action_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_2));
+    for (QAction* a : {sstvae_action_, qrsstvae_action_}) {
+        a->setCheckable(true);
+        a->setActionGroup(modes);
+    }
+    connect(sstvae_action_, &QAction::triggered, this, [this] { set_ui_mode(UiMode::Sstvae); });
+    connect(qrsstvae_action_, &QAction::triggered, this,
+            [this] { set_ui_mode(UiMode::Qrsstvae); });
+    view_menu_->addSeparator();
     build_layout_menu();
 
     QMenu* help = menuBar()->addMenu(tr("&Help"));
@@ -429,6 +524,54 @@ void MainWindow::restore_waterfall_height() {
     // constructor.
     const int rest = std::max(1, total - height);
     stack_->setSizes({height, rest});
+}
+
+MainWindow::UiMode MainWindow::ui_mode() const {
+    return modes_->currentWidget() == qrss_page_ ? UiMode::Qrsstvae : UiMode::Sstvae;
+}
+
+void MainWindow::set_ui_mode(UiMode mode) {
+    const bool qrss = mode == UiMode::Qrsstvae;
+    modes_->setCurrentWidget(qrss ? static_cast<QWidget*>(qrss_page_) : panes_);
+    sstvae_action_->setChecked(!qrss);
+    qrsstvae_action_->setChecked(qrss);
+    // The SSTVAE waterfall is for tuning SSTVAE; QRSSTVAE has its own
+    // spectrogram, so the strip goes and its height goes to the page
+    // (Jeff, 2026-10-10). Its rows keep arriving from the shared feed, so
+    // it comes back with its history.
+    waterfall_->setVisible(!qrss);
+    // And each mode runs only its own receiver (Jeff, 2026-10-10): no
+    // SSTVAE decoder in QRSSTVAE mode, no QRSS listener, store or
+    // redraws in SSTVAE mode. Capture itself is shared and keeps going.
+    // The QRSS transmit schedule is not a receiver and runs in both.
+    rx_panel_->set_decoding(!qrss);
+    spectrum_feed_->set_enabled(!qrss, qrss);
+    qrss_page_->spectrogram()->set_active(qrss);
+    qrss_->set_active(qrss);
+    if (qrss && rx_panel_->listening() && !qrss_->listener_running()) qrss_->start_listener();
+    // QRSSTVAE listens by itself, on launch and on switching to it
+    // (Jeff, 2026-10-16): after this call returns, so the window is up
+    // for any message about the audio device, and not during an over,
+    // which resumes receiving itself.
+    if (qrss && !rx_panel_->listening() && state_->config().receive.qrss_auto_start) {
+        QTimer::singleShot(0, this, [this] {
+            if (ui_mode() != UiMode::Qrsstvae || rx_panel_->listening() ||
+                tx_panel_->transmitting()) {
+                return;
+            }
+            state_->log_event("rx", log::Severity::Info,
+                              tr("starting to listen (QRSSTVAE mode)"));
+            rx_panel_->start();
+        });
+    }
+    // Side by side or tabbed is about the SSTVAE panes only.
+    if (layout_menu_ != nullptr) layout_menu_->setEnabled(!qrss);
+    const QString app = QString::fromLatin1(APP_NAME);
+    setWindowTitle(qrss ? app + tr(" - QRSSTVAE") : app);
+    const std::string value = qrss ? "qrsstvae" : "sstvae";
+    if (state_->config().ui.mode == value) return;
+    state_->config().ui.mode = value;
+    state_->save_config();
 }
 
 void MainWindow::remember_waterfall_height() {
@@ -514,6 +657,12 @@ void MainWindow::build_status_bar() {
     for (QLabel* label : {ptt_label_, station_label_, rig_label_, model_label_}) {
         bar->addPermanentWidget(label);
     }
+
+    // Right-click the readout to retune the radio.
+    rig_label_->setObjectName(QStringLiteral("rig_label"));
+    rig_label_->setContextMenuPolicy(Qt::CustomContextMenu);
+    rig_label_->setToolTip(tr("Right-click to change the frequency."));
+    connect(rig_label_, &QWidget::customContextMenuRequested, this, &MainWindow::show_rig_menu);
 
     rig_error_timer_ = new QTimer(this);
     rig_error_timer_->setInterval(5000);
@@ -646,6 +795,54 @@ void MainWindow::on_rig_status(const QString& text, bool error) {
     }
 }
 
+void MainWindow::show_rig_menu(const QPoint& at) {
+    QMenu menu(this);
+    QAction* change = menu.addAction(tr("Change frequency..."));
+    change->setObjectName(QStringLiteral("menu_change_frequency"));
+    // Not while transmitting: that covers an SSTVAE over and a QRSS
+    // send from the moment it starts, including the run-up before a
+    // pass is keyed and the waits between passes.
+    // Tuning keys a carrier, so it follows the same rules.
+    QAction* atu = menu.addAction(tr("Tune Rig"));
+    atu->setObjectName(QStringLiteral("menu_tune_rig"));
+    const QString why = tx_panel_->transmitting()       ? tr(" (not while transmitting)")
+                        : !state_->current_frequency_hz() ? tr(" (no frequency from the rig)")
+                                                          : QString();
+    if (!why.isEmpty()) {
+        for (QAction* a : {change, atu}) {
+            a->setEnabled(false);
+            a->setText(a->text() + why);
+        }
+    }
+    QAction* chosen = menu.exec(rig_label_->mapToGlobal(at));
+    if (chosen == change) {
+        change_frequency();
+    } else if (chosen == atu && !tx_panel_->transmitting() && !state_->start_rig_tuner()) {
+        QMessageBox::warning(this, tr("Tune Rig"),
+                             tr("The rig is not connected, so the tuner was not started."));
+    }
+}
+
+void MainWindow::change_frequency() {
+    const std::optional<double> now = state_->current_frequency_hz();
+    if (!now || tx_panel_->transmitting()) return;
+    bool ok = false;
+    const double mhz = QInputDialog::getDouble(
+        this, tr("Change frequency"), tr("Dial frequency (MHz):"), *now / 1e6, 0.001, 10000.0,
+        6, &ok, Qt::WindowFlags(), 0.001);
+    if (!ok) return;
+    // A scheduled QRSS send may have started while the dialog was open.
+    if (tx_panel_->transmitting()) {
+        QMessageBox::warning(this, tr("Change frequency"),
+                             tr("A transmission started; the frequency was not changed."));
+        return;
+    }
+    if (!state_->tune_rig(std::round(mhz * 1e6))) {
+        QMessageBox::warning(this, tr("Change frequency"),
+                             tr("The rig is not connected, so the frequency was not changed."));
+    }
+}
+
 void MainWindow::refresh_rig_error_age() {
     if (rig_error_text_.isEmpty()) return;
     const qint64 seconds =
@@ -720,6 +917,7 @@ void MainWindow::open_settings() {
     state_->save_config();
     update_station_label();
     rx_panel_->sync_from_config();
+    spectrum_feed_->start(state_->config().receive.waterfall_fps);
     // Picture refinement can be switched on or off here, and either way
     // it has to take effect now: on, and a run starts for what is
     // already composed; off, and any refined latents are discarded.
@@ -750,6 +948,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         tx_panel_->cancel();
     }
     rx_panel_->stop();
+    tx_panel_->hide_windows();
     state_->disconnect_rig();
     state_->save_config();
     QMainWindow::closeEvent(event);
