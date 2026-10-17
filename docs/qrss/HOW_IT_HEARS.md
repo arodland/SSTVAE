@@ -48,6 +48,16 @@ sending station picks one:
 The listener hears both at once, and passes of the same picture add up
 whichever waveform each was sent in.
 
+The two animations below show how each waveform turns the picture's
+numbers into a signal, slowed far down. In CE each number swings the
+tone's phase, and the arrow never changes length. In L each symbol
+carries two numbers at once, one on each of two axes (I and Q), so the
+dot can land anywhere, and a steady pilot sits just above the data.
+
+![Waveform CE: each latent turns the carrier's phase](images/waveform-ce.svg)
+
+![Waveform L: two latents per symbol, beside a pilot](images/waveform-l.svg)
+
 ## Why "below the noise" is possible at all
 
 Radio static is random. A signal is not. If you listen to the same
@@ -95,8 +105,9 @@ the whole pass, so any change the receiver sees in it comes from the
 radios and the path. The receiver follows the pilot's phase, frequency
 and drift, averaging over seconds so that a weak pilot still gives a
 clean reading. The data travel the same path a few hertz away, so the
-receiver reads them against the pilot's reference. The pilot does three
-more jobs:
+receiver reads them against the pilot's reference. In the L animation
+above, the pilot is what fixes the I and Q axes in place. The pilot does
+three more jobs:
 
 - **It makes L easy to find.** All its power sits in one narrow line,
   about 15 dB brighter per 0.1 Hz than the data next to it, so it is the
