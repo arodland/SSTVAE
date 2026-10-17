@@ -2,10 +2,11 @@
 
 **Send pictures over HF radio using a neural image codec instead of scanlines or file bytes.**
 
-SSTVAE is an experimental amateur-radio image mode. A convolutional
+SSTVAE (and QRSSTVAE) are experimental amateur-radio image modes. A convolutional
 autoencoder compresses your image into a few hundred thousand
 *continuous-valued* numbers ("latents"), and those numbers are sent
-directly as OFDM carrier amplitudes — no bits, no packets, no JPEG. The
+directly as OFDM carrier amplitudes, a phase-modulated constant carrier, or
+a single-carrier analog I/Q signal paired with a pilot tone. There are no bits, no packets, no JPEG.  A  
 decoder network is trained with a simulated HF channel in the loop, so
 noise and fading push the picture quality gently downhill instead of
 breaking it.
@@ -43,18 +44,6 @@ whole idea.
 > If you want something that just works and interoperates with the rest
 > of the world today, use MMSSTV or an existing digital SSTV mode. If
 > you want to help shake out a new one, read on.
-
-## QRSSTVAE (experimental branch)
-
-The `qrss` branch adds QRSSTVAE, a slow, narrow variant in the spirit of
-QRSS beacons. It sends the same v5 latents on one constant-amplitude
-carrier about 50 Hz wide, in 30-minute passes that start on the quarter
-hour. Receivers average repeated passes of a picture, so it can build up
-from signals far below the noise, and an Si5351 clock-chip beacon can
-generate the signal directly. It has been tested in simulation only;
-nothing has been transmitted yet. See
-[docs/qrss/README.md](docs/qrss/README.md) for status, commands and
-simulated results.
 
 ## What makes it different
 
@@ -112,6 +101,20 @@ row-by-row table against analog SSTV, HamDRM and SSDV in
 [Comparison with other modes](https://github.com/arodland/SSTVAE/wiki/Comparison-with-other-modes),
 and the beacon, nested modes and waveform in
 [How it works](https://github.com/arodland/SSTVAE/wiki/How-it-works).
+
+## QRSSTVAE
+
+**A slow, narrow variant in the spirit of QRSS beacons.** 
+It sends the same v5 latents on either a constant-amplitude
+carrier about 50 Hz wide, or on a single-carrier analog I/Q signal beside 
+a steady pilot -- all about 22 Hz wide. 
+
+These are sent in 30-minute passes that start on the quarter hour. 
+Receivers average repeated passes of a picture, so it can build 
+up from signals far below the noise. In the case of the constant-
+amplitude carrier implementation, a Si5351 clock-chip beacon can generate the signal
+directly; see [docs/qrss/README.md](docs/qrss/README.md).
+
 
 ## Get the app
 
@@ -241,6 +244,9 @@ still images; any mistakes in the translation are mine.
 The autoencoder is trained on **[COCO](https://cocodataset.org)**
 (Common Objects in Context), Lin *et al.*, 2014 — resized to 640×480 as
 `arodland/coco640-sstvae` on the Hugging Face Hub.
+
+QRSSTVAE user interface including the scheduler was designed and implemented 
+by Jeff Baitis (call sign: AG7EW).
 
 The photographs used on this page are my own.
 
