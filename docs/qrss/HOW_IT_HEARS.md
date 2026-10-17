@@ -70,6 +70,60 @@ for sixteen. Most transmitters are limited by their peak power, though,
 and L's peaks sit 3.2 dB above its average, so at the same peak power
 the two come out about even, with CE ahead on disturbed paths.
 
+## Why does waveform L have a pilot tone next to it?
+
+L sends each picture number as a strength on one of two halves of its
+signal, called I and Q, a quarter of a cycle apart. To tell the halves
+apart, and to tell a positive number from a negative one, the receiver
+has to know the signal's exact *phase*: where each cycle starts. If it is
+out by a quarter of a cycle, it reads every I number as a Q number. If it
+is out by half a cycle, every number comes out with its sign flipped.
+
+The data cannot tell the receiver the phase. Digital modes such as PSK31
+send only a few allowed symbols, so a receiver can work out the phase
+from the data alone, by finding the angle at which the symbols line up.
+L's numbers can take any value, so the data look equally plausible at
+every angle, and nothing in them says which way is up.
+
+The phase does not hold still, either. Neither station has a GPS-locked
+frequency reference, so each radio is off by a little and wanders as it
+warms up, and the ionosphere moves the path. A 1 Hz error alone turns
+the phase around about 1,800 times in one pass.
+
+The pilot solves this. It is a steady tone that never changes, sent for
+the whole pass, so any change the receiver sees in it comes from the
+radios and the path. The receiver follows the pilot's phase, frequency
+and drift, averaging over seconds so that a weak pilot still gives a
+clean reading. The data travel the same path a few hertz away, so the
+receiver reads them against the pilot's reference. The pilot does three
+more jobs:
+
+- **It makes L easy to find.** All its power sits in one narrow line,
+  about 15 dB brighter per 0.1 Hz than the data next to it, so it is the
+  QRSS-style trace you see on a spectrogram, and the receiver searches
+  for lines first. An L signal's frequency is its pilot's.
+- **It shows which waveform this is.** The data sit entirely below the
+  pilot, between 3 and 22 Hz under it, so an L signal is lopsided where
+  a CE signal is symmetrical. Keeping the pilot just outside the data
+  band also lets the receiver filter the two apart.
+- **It costs little.** The pilot takes about 15% of the transmitted
+  power. In the design's calculations, any share from 8% to 35% changes
+  the pictures by under 1 dB.
+
+The pilot works with a second reference. One symbol in sixteen is a
+*reference symbol*, a value the receiver knows in advance. Those
+symbols measure the phase at the data's own frequencies, which removes
+the small difference a radio's filter makes between the pilot and the
+data. They also give the timing of each symbol, which a plain tone
+cannot. The pilot carries the receiver from one reference symbol to the
+next.
+
+CE needs no separate pilot because it has one built in. Pushing a
+tone's phase back and forth leaves about half its power in a steady
+carrier at the centre, and that carrier does the pilot's job. L's
+numbers average out to nothing, so L has no leftover carrier, and the
+pilot is added to replace it.
+
 ## The clock: everything happens on the quarter hour
 
 Every station's computer keeps its clock right (to about a second, using
