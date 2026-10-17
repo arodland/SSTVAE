@@ -1,6 +1,6 @@
 # QRSSTVAE: slow, narrow SSTVAE pictures for HF
 
-QRSSTVAE is an experimental branch of SSTVAE (branch `qrss`). It sends a
+QRSSTVAE is an experimental picture mode added to SSTVAE. It sends a
 picture the way a QRSS beacon sends a callsign: very slowly, in a very
 narrow signal, repeated many times. It uses SSTVAE's published v5 image
 codec unchanged. A picture is encoded once into about 50,000 analog
@@ -19,7 +19,7 @@ below a steady pilot tone, about 22 Hz wide in all. The table below
 compares SSTVAE with CE; [waveform-l.md](waveform-l.md) compares L with
 CE.
 
-| | SSTVAE | QRSSTVAE (this branch, waveform CE) |
+| | SSTVAE | QRSSTVAE (waveform CE) |
 |---|---|---|
 | Codec | v5 neural encoder and decoder | The same v5 codec, unchanged |
 | Signal | 24 OFDM carriers, about 1.2 kHz wide | One phase-modulated, constant-amplitude carrier, about 50 Hz wide (99% of power in 51.5 Hz) |
@@ -28,7 +28,7 @@ CE.
 | Repeats | Each transmission decodes on its own | Passes of the same picture are averaged |
 | Identification | Callsign in the beacon carrier, optional CW ID after | Callsign in the header, and in Morse in four 11.6 s windows per pass, one every 7.5 minutes |
 | Transmitter | SSB rig and sound card | SSB rig and sound card, or an Si5351 board with a microcontroller |
-| Status | Used on the air | Simulation only |
+| Status | Used on the air | Experimental; on the air with waveform L since 2026-10-12 |
 
 [HOW_IT_HEARS.md](HOW_IT_HEARS.md) explains how the receiver works in plain
 language. [60m.md](60m.md) is the recommendation for operating on 60 m in the US
@@ -50,32 +50,30 @@ section 5.1). The header then survives a lost header block, and on an
 intact pass it decodes 1.6 dB deeper. The design and its measurements
 are in [docs/qrss/spread-header.md](spread-header.md).
 
-Waveform L (a QPSK data band beside a steady pilot, 2.4 times narrower
-than CE) has a transmitter since 2026-10-11 (`qrss_transmit.py
+Waveform L (analog latents on I and Q beside a steady pilot, 2.4 times
+narrower than CE; QPSK only in its preamble, header and reference
+symbols) has a transmitter since 2026-10-11 (`qrss_transmit.py
 --waveform L`) and a receiver since 2026-10-12: `qrss_receive.py` and
 `qrss_listen.py` listen for both waveforms by default, and `--just-ce`
-or `--just-l` picks one. So L may go on the air once the listeners meant
-to hear it run this code. A listener on older code, or run with
-`--just-ce`, does not know L and can show an L signal as a weak,
-headerless CE tile. [docs/qrss/waveform-l.md](waveform-l.md) says what L
+or `--just-l` picks one. L has been on the air since 2026-10-12. A
+listener run with `--just-ce` does not know L and can show an L signal
+as a weak, headerless CE tile. [docs/qrss/waveform-l.md](waveform-l.md) says what L
 gives over CE, what running CE taught us, what the receiver settled, and
 what decoding both in one window costs.
 
 ## Status
 
-**Everything here has been verified in simulation only.** Nothing has
-been transmitted, no Si5351 board has been built, and no recording from a
-real receiver has been decoded. All numbers in this document come from
-the channel simulator in this branch.
+**Experimental.** Waveform L has been tested on the air since
+2026-10-12. No Si5351 board has been built. All numbers in this document
+come from the channel simulator.
 
 - The on-air format is a draft. Expect incompatible changes.
 - Both stations need the same v5 codec checkpoint (codec ID `d1d8`).
   The decoder refuses a picture with a different codec ID unless you pass
   `--any-codec`.
-- Live receive works from audio piped into `qrss_listen.py`, and the
-  desktop app has a **QRSS signals** window that runs it on the app's
-  own capture audio (see "Listening live" below). Both are checked by
-  replaying simulated recordings only, never on a radio.
+- Live receive works from audio piped into `qrss_listen.py` (see
+  "Listening live" below), and the desktop app runs the C++ listener,
+  `sstvae-qrss listen`, on its own capture audio.
 - The app's QRSSTVAE view (**View > QRSSTVAE**, Ctrl+2) has a QRSS
   spectrogram of its own beside the received pictures, under the usual
   waterfall.
@@ -503,7 +501,7 @@ is one picture, one QRSS mode and one carrier, sent a number of times
   in brackets.
 - **Waveform**: L (the default, listed first) or CE. L is about 22 Hz
   wide and is linear, so keep the ALC out of it; only a listener that
-  hears L (this branch's, without `--just-ce`) decodes it.
+  hears L (any listener run without `--just-ce`) decodes it.
 - **Repeat**: how many sends, and how far apart their starts are. *Back
   to back* starts the next send the half hour after the last pass of
   the one before, so two mode A sends back to back ("2 x A") are two

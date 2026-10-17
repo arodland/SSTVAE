@@ -17,13 +17,14 @@ costs a receiver to listen for both.
 and since 2026-10-12 the receiver is built too (`acquire.py`, `ltrack.py`,
 `ldemod.py`, `receiver.py`, `live.py`): `qrss_receive.py` and the live
 listener `qrss_listen.py` hear L beside CE by default, and `--just-ce` or
-`--just-l` picks one. So **L may go on the air once a station's listeners
-run this code.** A listener on older code, or one run with `--just-ce`
-(the old CE receiver, and with `--old-edge-noise --old-gating` bit for
-bit the one of 2026-10-11), does not know L: it shows an L
-signal at most as a weak, headerless CE tile (below, "Keeping L out of
-the CE gate"). Everything about L here is simulated: no L signal has
-been received off the air.
+`--just-l` picks one. The C++ port (`sstvae-qrss`) does both, and the
+desktop app sends L by default. **L has been on the air since
+2026-10-12** (the first pass was mode A at 14.066 MHz). A listener run
+with `--just-ce` (the old CE receiver, and with `--old-edge-noise
+--old-gating` bit for bit the one of 2026-10-11) does not know L: it
+shows an L signal at most as a weak, headerless CE tile (below,
+"Keeping L out of the CE gate"). The measurements in this note come
+from the channel simulator, not from on-air passes.
 
 ## What L gives over CE
 
@@ -135,7 +136,7 @@ The 8 kHz audio through a genie receiver gives the same symbols as the
 
 ## What the receiver settled
 
-Built 2026-10-12, and measured in simulation only.
+Built 2026-10-12, and measured in simulation.
 
 - **One signal, one identity.** An L signal's frequency is its pilot
   everywhere (detections, passes, tiles), and its data run from 22.07 to

@@ -6,8 +6,8 @@ SSTVAE (and QRSSTVAE) are experimental amateur-radio image modes. A convolutiona
 autoencoder compresses your image into a few hundred thousand
 *continuous-valued* numbers ("latents"), and those numbers are sent
 directly as OFDM carrier amplitudes, a phase-modulated constant carrier, or
-a single-carrier analog I/Q signal paired with a pilot tone. There are no bits, no packets, no JPEG.  A  
-decoder network is trained with a simulated HF channel in the loop, so
+a single-carrier analog I/Q signal paired with a pilot tone. There are no
+bits, no packets, no JPEG. A decoder network is trained with a simulated HF channel in the loop, so
 noise and fading push the picture quality gently downhill instead of
 breaking it.
 
@@ -104,17 +104,16 @@ and the beacon, nested modes and waveform in
 
 ## QRSSTVAE
 
-**A slow, narrow variant in the spirit of QRSS beacons.** 
+**A slow, narrow variant in the spirit of QRSS beacons.**
 It sends the same v5 latents on either a constant-amplitude
-carrier about 50 Hz wide, or on a single-carrier analog I/Q signal beside 
-a steady pilot -- all about 22 Hz wide. 
+carrier about 50 Hz wide, or on a single-carrier analog I/Q signal beside
+a steady pilot, about 22 Hz wide in all.
 
-These are sent in 30-minute passes that start on the quarter hour. 
-Receivers average repeated passes of a picture, so it can build 
-up from signals far below the noise. In the case of the constant-
-amplitude carrier implementation, a Si5351 clock-chip beacon can generate the signal
-directly; see [docs/qrss/README.md](docs/qrss/README.md).
-
+These are sent in 30-minute passes that start on the quarter hour.
+Receivers average repeated passes of a picture, so it can build
+up from signals far below the noise. The constant-amplitude carrier is
+designed so that an Si5351 clock-chip beacon can generate it directly.
+See [docs/qrss/README.md](docs/qrss/README.md).
 
 ## Get the app
 
@@ -245,7 +244,7 @@ The autoencoder is trained on **[COCO](https://cocodataset.org)**
 (Common Objects in Context), Lin *et al.*, 2014 — resized to 640×480 as
 `arodland/coco640-sstvae` on the Hugging Face Hub.
 
-QRSSTVAE user interface including the scheduler was designed and implemented 
+QRSSTVAE user interface including the scheduler was designed and implemented
 by Jeff Baitis (call sign: AG7EW).
 
 The photographs used on this page are my own.
