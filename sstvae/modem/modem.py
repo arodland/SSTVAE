@@ -11,6 +11,7 @@ weights (0 for frames that never arrived) so a decoder can treat missing
 or faded latents as erasures.
 """
 
+import functools
 from dataclasses import dataclass
 
 import numpy as np
@@ -41,6 +42,12 @@ from ..config import (
     LEADOUT_SAMPLES,
     CLIP_HEADROOM_DB,
     DEMOD_BACKOFF,
+    SLIP_MIN,
+    SLIP_MAX,
+    SLIP_TRIGGER,
+    SLIP_ACCEPT,
+    SLIP_RECENT,
+    SLIP_REFINE,
     LATENT_GROUPS,
     MODES,
     MODES_BY_INDEX,
@@ -177,14 +184,30 @@ def _residual_cfo(h_pilot: np.ndarray, received: np.ndarray) -> float:
     return float(np.angle(d) / (2 * np.pi * FRAME_S)) if np.abs(d) > 0 else 0.0
 
 
+_HANN = np.hanning(NC + 2)[1:-1]
+
+
+def _profile_rows(h_pilot: np.ndarray) -> np.ndarray:
+    """(n, len(_DELAYS)) power of each pilot over `_DELAYS`: matched
+    filter, Hann-tapered across carriers to keep sidelobes out of it."""
+    return np.abs((h_pilot * _HANN) @ np.conj(_STEER)) ** 2
+
+
+def _delay_profile(h_pilot: np.ndarray) -> np.ndarray:
+    """Mean of `_profile_rows` over the pilots (n, NC)."""
+    return np.mean(_profile_rows(h_pilot), axis=0)
+
+
 def _delay_support(h_pilot: np.ndarray, floor_db: float = -15.0) -> tuple[int, int]:
     """(first, last) apparent delay holding power within `floor_db` of
     the strongest, from the transmission-averaged power delay profile
-    (matched filter, Hann-tapered across carriers to keep sidelobes out
-    of the support). Paths are local maxima, since a lone path's
+    (`_delay_profile`). Paths are local maxima, since a lone path's
     mainlobe is ~10 samples wide and must not read as spread."""
-    w = np.hanning(NC + 2)[1:-1]
-    prof = np.mean(np.abs((h_pilot * w) @ np.conj(_STEER)) ** 2, axis=0)
+    return _profile_support(_delay_profile(h_pilot), floor_db)
+
+
+def _profile_support(prof: np.ndarray, floor_db: float = -15.0) -> tuple[int, int]:
+    """`_delay_support` from a profile already averaged."""
     # Noise puts a flat floor under the whole profile, and most of the
     # grid is nothing but that floor, so its median is the floor's level.
     # At 0 dB the floor sits near -15 dB and its ripples read as paths
@@ -320,10 +343,7 @@ def _lmmse_channel(
             drift = rate * (f_idx - fm)
     undo = _shift_phasor(steps + drift)
     aligned = h_pilot * np.conj(undo)
-    d0, d1 = _delay_support(aligned[strong])
-    B = ofdm._phasor(np.outer(_BB_FREQS, np.arange(d0 - 4, d1 + 5)), -1)
-    lam, V = np.linalg.eigh(B @ B.conj().T)
-    U = V[:, lam > lam[-1] * 1e-4]
+    U = _support_basis(*_delay_support(aligned[strong]))
     r = U.shape[1]
     hs = (aligned @ (U @ U.conj().T).T) * undo
     n0 = float(np.mean(np.abs(h_pilot - hs) ** 2)) * NC / max(NC - r, 1)
@@ -441,6 +461,25 @@ class _DriftTracker:
         # frequency, so the correction stays continuous frame to frame.
         self.phase_acc += self.f_est * FRAME_S
         self.f_est += self.r_est * FRAME_S
+
+
+@functools.lru_cache(maxsize=64)
+def _support_basis(d0: int, d1: int) -> np.ndarray:
+    """(NC, r) orthonormal basis of every channel whose paths lie in
+    apparent delays d0..d1 (4 samples' margin either side): the
+    subspace `_lmmse_channel` projects pilots onto."""
+    B = ofdm._phasor(np.outer(_BB_FREQS, np.arange(d0 - 4, d1 + 5)), -1)
+    lam, V = np.linalg.eigh(B @ B.conj().T)
+    return V[:, lam > lam[-1] * 1e-4]
+
+
+def _in_support(h: np.ndarray, U: np.ndarray) -> np.ndarray:
+    """Fraction of each gain vector's energy (along the last axis) in the
+    span of U: 1 for a channel inside the support, whatever its scale and
+    common phase; r / NC on average for noise."""
+    return np.sum(np.abs(h @ np.conj(U)) ** 2, axis=-1) / (
+        np.sum(np.abs(h) ** 2, axis=-1) + 1e-30
+    )
 
 
 def _make_tracker(drift_track: str) -> _DriftTracker | None:
@@ -563,13 +602,19 @@ class Modem:
         # the preamble's estimate reaches 2.1 Hz off, the pilots' 0.17)
         # and about delay spread, from which the window is placed so
         # every path sits inside the CP (+1.1 dB latent SNR on mpd).
-        _, hp, rcv, _ = self._demod_frames(z, p_frames, n_f, phi_ref, 0, None, False)
+        # Timing slips are searched for once, here (the search is blind to
+        # a common phase, so the residual CFO does not matter), and
+        # replayed in the other two passes.
+        slips = np.zeros(n_f, dtype=np.int64)
+        _, hp, rcv, _ = self._demod_frames(
+            z, p_frames, n_f, phi_ref, 0, None, False, slips, search=True
+        )
         cfo_res = _residual_cfo(hp, rcv)
         z = freq_correct(z, cfo_res)
-        _, hp, rcv, _ = self._demod_frames(z, p_frames, n_f, phi_ref, 0, None, False)
+        _, hp, rcv, _ = self._demod_frames(z, p_frames, n_f, phi_ref, 0, None, False, slips)
         shift = _window_shift(_delay_support(hp[rcv])) if rcv.any() else 0
         raw, h_pilot, received, steps = self._demod_frames(
-            z, p_frames, n_f, phi_ref, shift, _make_tracker(drift_track)
+            z, p_frames, n_f, phi_ref, shift, _make_tracker(drift_track), slips=slips
         )
         # Equalize data symbols with pilots interpolated across the frame.
         latents = np.zeros(spec.n_tx_latents)
@@ -687,12 +732,13 @@ class Modem:
         n_f = L_hi - L_lo + 1
         p_start = p0 + L_lo * FRAME_SAMPLES
 
-        def frames(p: int) -> tuple[np.ndarray, np.ndarray]:
+        def frames(pos: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
             raw = np.zeros((n_f, SYMS_PER_FRAME, NC), dtype=np.complex128)
             h_pilot = np.zeros((n_f, NC), dtype=np.complex128)
             tracker = _make_tracker(drift_track)
             pilot_powers: list[float] = []
             for f in range(n_f):
+                p = int(pos[f])
                 if tracker is None:
                     for s in range(SYMS_PER_FRAME):
                         raw[f, s] = ofdm.demod_window(z, p + s * NSYM + NCP, DEMOD_BACKOFF)
@@ -711,10 +757,30 @@ class Modem:
                     pilot_powers.append(power)
                     healthy = power > 0.1 * np.median(pilot_powers)
                     tracker.update(h_pilot[f], h_pilot[f - 1] if (f > 0 and healthy) else None)
-                p += FRAME_SAMPLES
             return raw, h_pilot
 
-        raw, h_pilot = frames(p_start)
+        pos = p_start + FRAME_SAMPLES * np.arange(n_f, dtype=np.int64)
+        raw, h_pilot = frames(pos)
+        # Timing slips. The lock is on whichever side of a slip carried
+        # more of the folded energy, so the frames at either end may be
+        # the misaligned ones, and a search can only follow a slip away
+        # from frames it can trust. So it walks from both ends, and the
+        # walk whose pilots measure the higher SNR wins (a misaligned
+        # window is part data, which the estimate reads as noise), over
+        # the frames either walk shows as the transmission: frames off by
+        # more than the CP fail that test, so each walk alone would score
+        # without the very frames it got wrong.
+        tx = _transmission_frames(h_pilot)
+        if tx.any():
+            walks = [self._follow_slips(z, pos, tx, back) for back in (False, True)]
+            pos = walks[0]
+            if not np.array_equal(*walks):
+                hs = [self._pilots(z, w) for w in walks]
+                both = _transmission_frames(hs[0]) | _transmission_frames(hs[1])
+                if _estimate_snr_db(hs[1], both) > _estimate_snr_db(hs[0], both):
+                    pos = walks[1]
+            if not np.array_equal(pos, p_start + FRAME_SAMPLES * np.arange(n_f)):
+                raw, h_pilot = frames(pos)
         if np.any(h_pilot):
             # Same placement as the preamble path, from the frames that
             # are plausibly the transmission rather than the noise
@@ -727,14 +793,15 @@ class Modem:
             # leaves frame0_start where it was, since the beacon's frame
             # offset moves with it.
             shift = _window_shift(_delay_support(h_pilot[_transmission_frames(h_pilot)]))
-            lo, n = p_start, n_f
-            if lo + shift + NCP - DEMOD_BACKOFF < 0:  # its first demod window
-                lo, n = lo + FRAME_SAMPLES, n - 1
-            if lo + shift + n * FRAME_SAMPLES > len(z):
+            first, n = 0, n_f
+            if pos[0] + shift + NCP - DEMOD_BACKOFF < 0:  # its first demod window
+                first, n = 1, n - 1
+            if pos[first + n - 1] + shift + FRAME_SAMPLES > len(z):
                 n -= 1
             if shift and n > 0:
-                p_start, n_f = lo, n
-                raw, h_pilot = frames(p_start + shift)
+                pos = pos[first : first + n]
+                p_start, n_f = p_start + first * FRAME_SAMPLES, n
+                raw, h_pilot = frames(pos + shift)
 
         # Blind demod always covers every frame the *whole current
         # buffer* can hold, since the transmission's true length is
@@ -837,9 +904,111 @@ class Modem:
             snr_db=_estimate_snr_db(h_pilot),
         )
 
+    def _pilots(self, z: np.ndarray, pos: np.ndarray) -> np.ndarray:
+        """(n, NC) pilot gains of the frames whose CP starts at `pos`."""
+        return np.stack([ofdm.demod_window(z, int(p) + NCP, DEMOD_BACKOFF) for p in pos]) / self.pilot
+
+    def _follow_slips(
+        self, z: np.ndarray, pos: np.ndarray, tx: np.ndarray, backward: bool,
+    ) -> np.ndarray:
+        """`pos` (n,) frame starts with timing slips followed, walking
+        from the first frame (or, `backward`, from the last) and searching
+        only within SLIP_RECENT frames of a transmission frame `tx`, since
+        most of a blind buffer is noise whose pilots would prompt a search
+        on every frame. The pilots the walk compares against are those
+        transmission frames, as it placed them."""
+        pos = pos.copy()
+        n = len(pos)
+        step = -FRAME_SAMPLES if backward else FRAME_SAMPLES
+        order = range(n - 1, -1, -1) if backward else range(n)
+        rows = np.zeros((n, len(_DELAYS)))  # each placed pilot's profile, once
+        passed: list[int] = []
+        for f in order:
+            # Not only the frame just passed: the one a slip lands in is
+            # part garbage and seldom reads as the transmission itself.
+            g = [i for i in passed[-SLIP_RECENT:] if tx[i]]
+            if g:
+                room = (int(pos[f]) // FRAME_SAMPLES if backward
+                        else (len(z) - int(pos[f])) // FRAME_SAMPLES - 1)
+                n_left = min(f if backward else n - 1 - f, room)
+                if n_left > 0:
+                    k = self._find_slip(z, int(pos[f]), n_left, np.mean(rows[g], axis=0), step)
+                    if backward:
+                        pos[: f + 1] += k
+                    else:
+                        pos[f:] += k
+            rows[f] = _profile_rows(ofdm.demod_window(z, int(pos[f]) + NCP, DEMOD_BACKOFF) / self.pilot)
+            passed.append(f)
+        return pos
+
+    def _find_slip(
+        self, z: np.ndarray, p: int, n_left: int, ref: np.ndarray,
+        step: int = FRAME_SAMPLES,
+    ) -> int:
+        """A jump in the audio's timing just before the frame at p (samples
+        inserted: positive; dropped: negative), or 0. A sender's playback
+        underrun inserts a buffer's worth of silence, a receiver's lost
+        capture period drops one; either moves every later frame at once,
+        where the drift tracker moves 2 samples a frame at most.
+
+        After Data2G's (modem._find_slip there), with a different
+        reference. Data2G asks how like the previous frame's pilot each
+        candidate is; here the question is how much of a candidate's
+        energy lies in the delay support of the recent pilots, whose
+        averaged `_delay_profile` is `ref` (_in_support). That has no phase in it, so Doppler cannot
+        decorrelate it. Against one pilot, the last of three confirming
+        pilots sits 432 ms on, where mpd's 2 Hz spread leaves nothing to
+        correlate; scored that way (and chained pilot to pilot), mpd at
+        3 dB found about half of the slips and made 13 false ones in 25
+        mode C receptions. A window off by more than the CP sees the
+        paths at the wrong delays, and its pilot is part data besides.
+
+        `step` -FRAME_SAMPLES walks backwards (demodulate_blind): the
+        frame at p is then the one before the slip, the confirming pilots
+        precede it, and `ref` describes the frames after it.
+
+        The pilot at p and the next ones (n_left: up to two more) are
+        tried at every offset within SLIP_MAX; the best joint offset is
+        taken only if each of them scores twice as much there as at p
+        and at least SLIP_ACCEPT, then refined within SLIP_REFINE by the
+        delay profile."""
+        U = _support_basis(*_profile_support(ref))
+        hf = ofdm.demod_window(z, p + NCP, DEMOD_BACKOFF) / self.pilot
+        if _in_support(hf, U) >= SLIP_TRIGGER:
+            return 0
+        n_conf = min(2, n_left)
+        lo = max(-SLIP_MAX, -(p + min(0, n_conf * step)))
+        offs = np.arange(lo, SLIP_MAX + 1)
+        hs, at = [], []
+        for j in range(1 + n_conf):
+            a = p + j * step + NCP - DEMOD_BACKOFF
+            seg = z[a + lo : a + SLIP_MAX + M]
+            seg = np.pad(seg, (0, len(offs) - 1 + M - len(seg)))
+            win = np.lib.stride_tricks.sliding_window_view(seg, M)
+            h = (2.0 / M) * (win @ ofdm.DEMOD_MATRIX.T) / self.pilot  # every offset's pilot
+            hs.append(h)
+            at.append(_in_support(h, U))
+        score = np.sum(at, axis=0)
+        score[np.abs(offs) < SLIP_MIN] = -np.inf
+        k = int(np.argmax(score))
+        if not all(c[k] >= max(2 * c[-lo], SLIP_ACCEPT) for c in at):
+            return 0
+        # The support score is flat across the support's width. The power
+        # delay profile of the pilots at k, slid against the recent ones',
+        # pins it: a window e samples early sees every path e later. Power
+        # rather than phase, since mpd's two paths fading independently
+        # tilt one pilot against the next as a timing error would (the
+        # last pilot's coherence put mpd's slips up to 50 samples out).
+        new = _delay_profile(np.stack([h[k] for h in hs]))
+        e = np.arange(-SLIP_REFINE, SLIP_REFINE + 1)
+        n = len(ref)
+        fit = [np.dot(ref[max(0, -i) : n - max(0, i)], new[max(0, i) : n - max(0, -i)]) for i in e]
+        return int(offs[k] + e[int(np.argmax(fit))])
+
     def _demod_frames(
         self, z: np.ndarray, p: int, n_f: int, phi_ref: float, shift: int,
         tracker: "_DriftTracker | None", unstep: bool = True,
+        slips: np.ndarray | None = None, search: bool = False,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Demodulate up to `n_f` frames from `p`, the window moved
         `shift` samples later than nominal. Returns raw (n_f, 6, NC),
@@ -857,6 +1026,11 @@ class Modem:
         look like to the frames as demodulated, which is what window
         placement must be measured on (measured: placing against the
         unstepped profile cost 0.6 dB on mpd).
+
+        `slips` (n_f,) moves the window by slips[f] samples before frame
+        f, its phase left alone: the channel after an audio slip is the
+        one before it. With `search` they are found (_find_slip) and
+        written into `slips`, which the later passes then replay.
         """
         # The shift's own slope, or the loop would read it as drift and
         # walk the window straight back.
@@ -868,7 +1042,17 @@ class Modem:
         pilot_powers: list[float] = []
         tau_ema, total = 0.0, 0
         h_prev = None
+        prows = np.zeros((n_f, len(_DELAYS))) if search else None  # each pilot's, once
         for f in range(n_f):
+            if search and f > 0:
+                # Two more pilots to confirm it on; the newest frame's slip
+                # is found by the next poll, which has them.
+                n_left = min(n_f - 1 - f, (len(z) - p) // FRAME_SAMPLES - 1)
+                if n_left > 0:
+                    ref = np.mean(prows[max(0, f - SLIP_RECENT) : f], axis=0)
+                    slips[f] = self._find_slip(z, p, n_left, ref)
+            if slips is not None:
+                p += int(slips[f])
             if p + FRAME_SAMPLES > len(z):
                 break
             if tracker is None:
@@ -879,6 +1063,8 @@ class Modem:
                 for s in range(SYMS_PER_FRAME):
                     raw[f, s] = ofdm.demod_window(zz, s * NSYM + NCP, DEMOD_BACKOFF)
             h = raw[f, 0] / self.pilot
+            if search:
+                prows[f] = _profile_rows(h)
             received[f] = True
             steps[f] = total
             p += FRAME_SAMPLES

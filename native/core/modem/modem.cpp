@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <numbers>
 #include <stdexcept>
 #include <tuple>
@@ -193,31 +194,55 @@ double residual_cfo(Rows h, std::span<const char> received) {
     return std::abs(d) > 0 ? std::arg(d) / (2 * PI * FRAME_S) : 0.0;
 }
 
-std::pair<int, int> delay_support(const std::vector<cdouble>& h, double floor_db = -15.0) {
-    constexpr int D = 4 * NCP + 1;  // delays -2*NCP .. 2*NCP
-    const std::size_t n = h.size() / NC;
-    std::array<double, NC> w{};
-    for (int k = 0; k < NC; ++k)
-        w[static_cast<std::size_t>(k)] =
-            0.5 - 0.5 * std::cos(2 * PI * (k + 1) / static_cast<double>(NC + 1));
-    std::array<double, D> prof{};
+constexpr int D = 4 * NCP + 1;  // delays -2*NCP .. 2*NCP
+
+using Profile = std::array<double, D>;
+
+// One pilot's power over delays -2*NCP..2*NCP: a row of _profile_rows
+// in modem.py.
+Profile profile_row(const cdouble* h) {
+    // The tapered steering vectors, built once: the slip search profiles
+    // every frame, and building them per call doubled its cost.
+    static const std::vector<cdouble> steer = [] {
+        std::vector<cdouble> t(static_cast<std::size_t>(D) * NC);
+        for (int j = 0; j < D; ++j)
+            for (int k = 0; k < NC; ++k)
+                t[static_cast<std::size_t>(j * NC + k)] =
+                    (0.5 - 0.5 * std::cos(2 * PI * (k + 1) / static_cast<double>(NC + 1))) *
+                    shift_phasor(baseband_hz(k), -(j - 2 * NCP));
+        return t;
+    }();
+    Profile row{};
     for (int j = 0; j < D; ++j) {
-        const std::int64_t d = j - 2 * NCP;
-        std::array<cdouble, NC> steer{};
-        for (int k = 0; k < NC; ++k)
-            steer[static_cast<std::size_t>(k)] = w[static_cast<std::size_t>(k)] *
-                                                 shift_phasor(baseband_hz(k), -d);
-        double acc = 0.0;
-        for (std::size_t f = 0; f < n; ++f) {
-            cdouble g{0.0, 0.0};
-            for (int k = 0; k < NC; ++k) {
-                const std::size_t i = static_cast<std::size_t>(k);
-                g += h[f * NC + i] * steer[i];
-            }
-            acc += std::norm(g);
-        }
-        prof[static_cast<std::size_t>(j)] = n ? acc / static_cast<double>(n) : 0.0;
+        const cdouble* sj = steer.data() + static_cast<std::size_t>(j) * NC;
+        cdouble g{0.0, 0.0};
+        for (std::size_t i = 0; i < NC; ++i) g += h[i] * sj[i];
+        row[static_cast<std::size_t>(j)] = std::norm(g);
     }
+    return row;
+}
+
+// Mean of the rows picked by `idx`, summed in order.
+Profile mean_rows(const std::vector<Profile>& rows, const std::vector<std::size_t>& idx) {
+    Profile prof{};
+    for (const std::size_t f : idx)
+        for (std::size_t j = 0; j < D; ++j) prof[j] += rows[f][j];
+    if (!idx.empty())
+        for (double& v : prof) v /= static_cast<double>(idx.size());
+    return prof;
+}
+
+// Mean power over delays of the pilots (n, NC): _delay_profile.
+Profile delay_profile(const std::vector<cdouble>& h) {
+    const std::size_t n = h.size() / NC;
+    std::vector<Profile> rows(n);
+    std::vector<std::size_t> idx(n);
+    for (std::size_t f = 0; f < n; ++f) rows[f] = profile_row(h.data() + f * NC), idx[f] = f;
+    return mean_rows(rows, idx);
+}
+
+// _profile_support: delay_support from a profile already averaged.
+std::pair<int, int> profile_support(const Profile& prof, double floor_db = -15.0) {
     // Gated on the noise floor as well; see _delay_support in modem.py.
     const double peak = *std::max_element(prof.begin(), prof.end());
     const double thr = std::max(peak * std::pow(10.0, floor_db / 10.0),
@@ -236,9 +261,192 @@ std::pair<int, int> delay_support(const std::vector<cdouble>& h, double floor_db
     return {first - 2 * NCP, last - 2 * NCP};
 }
 
+std::pair<int, int> delay_support(const std::vector<cdouble>& h, double floor_db = -15.0) {
+    return profile_support(delay_profile(h), floor_db);
+}
+
 int window_shift(std::pair<int, int> support) {
     // round() half to even, like Python's.
     return static_cast<int>(std::nearbyint((support.first + support.second - NCP) / 2.0));
+}
+
+struct Projector {
+    std::array<cdouble, NC * NC> proj;
+    int rank;
+};
+Projector support_projector(int d0, int d1);
+
+// Fraction of h's energy in the projector's span: modem._in_support.
+double in_support(std::span<const cdouble> h, const Projector& sp) {
+    double in = 0.0;
+    double all = 0.0;
+    for (int r = 0; r < NC; ++r) {
+        cdouble acc{0.0, 0.0};
+        for (int c = 0; c < NC; ++c)
+            acc += sp.proj[static_cast<std::size_t>(r * NC + c)] * h[static_cast<std::size_t>(c)];
+        in += std::norm(acc);
+        all += std::norm(h[static_cast<std::size_t>(r)]);
+    }
+    return in / (all + 1e-30);
+}
+
+// The slip search's support projectors. Each costs a 48x48 Jacobi, and
+// at 0 dB the support of eight pilots changes on a frame in four
+// (measured on mpd, mode C: 181 changes), which doubled the pass. But
+// moving every delay by d0 multiplies carrier k by a fixed phasor, so
+// the projector for (d0, d1) is the one for (0, d1 - d0) conjugated by
+// that diagonal: one Jacobi per width, of which a pass sees a handful.
+struct SupportCache {
+    std::map<int, Projector> by_width;
+    Projector get(std::pair<int, int> d) {
+        const int w = d.second - d.first;
+        auto it = by_width.find(w);
+        if (it == by_width.end()) it = by_width.emplace(w, support_projector(0, w)).first;
+        std::array<cdouble, NC> rot{};
+        for (int k = 0; k < NC; ++k) rot[static_cast<std::size_t>(k)] = shift_phasor(baseband_hz(k), d.first);
+        Projector sp = it->second;
+        for (std::size_t r = 0; r < NC; ++r)
+            for (std::size_t c = 0; c < NC; ++c) sp.proj[r * NC + c] *= rot[r] * std::conj(rot[c]);
+        return sp;
+    }
+};
+
+// Modem._find_slip -- read its docstring. `ref` is the recent pilots'
+// averaged delay profile; `step` -FRAME_SAMPLES walks backwards. Every
+// offset's pilot by a sliding DFT (one update per carrier a sample
+// rather than a window's demod), exact because every carrier is a
+// multiple of RS: a window M samples later sees the same phase on every
+// carrier.
+std::int64_t find_slip(std::span<const cdouble> z, std::int64_t p, int n_left, const Profile& ref,
+                       std::span<const cdouble> pilot, SupportCache& cache,
+                       std::int64_t step = FRAME_SAMPLES) {
+    using config::SLIP_ACCEPT;
+    using config::SLIP_MAX;
+    using config::SLIP_MIN;
+    using config::SLIP_REFINE;
+    using config::SLIP_TRIGGER;
+    const auto over_pilot = [&](std::array<cdouble, NC> x) {
+        for (int k = 0; k < NC; ++k) x[static_cast<std::size_t>(k)] /= pilot[static_cast<std::size_t>(k)];
+        return x;
+    };
+    const Projector sp = cache.get(profile_support(ref));
+    if (in_support(over_pilot(ofdm::demod_window(z, p + NCP, DEMOD_BACKOFF)), sp) >= SLIP_TRIGGER)
+        return 0;
+    const auto zlen = static_cast<std::int64_t>(z.size());
+    const auto at_z = [&](std::int64_t i) { return i < zlen ? z[static_cast<std::size_t>(i)] : cdouble{}; };
+    const int n_conf = std::min(2, n_left);
+    const std::int64_t lo =
+        std::max<std::int64_t>(-SLIP_MAX, -(p + std::min<std::int64_t>(0, n_conf * step)));
+    const auto n_off = static_cast<std::size_t>(SLIP_MAX - lo + 1);
+    std::array<cdouble, NC> rot{};
+    for (int k = 0; k < NC; ++k) rot[static_cast<std::size_t>(k)] = shift_phasor(baseband_hz(k), -1);
+    std::vector<std::vector<std::array<cdouble, NC>>> hs;  // every pilot at every offset
+    std::vector<std::vector<double>> at;
+    std::vector<double> score(n_off, 0.0);
+    for (int j = 0; j <= n_conf; ++j) {
+        const std::int64_t a = p + j * step + NCP - DEMOD_BACKOFF + lo;  // offset lo's window
+        std::array<cdouble, NC> x = ofdm::demod_window(z, a, 0);
+        auto& c = at.emplace_back(n_off);
+        auto& hj = hs.emplace_back(n_off);
+        for (std::size_t i = 0; i < n_off; ++i) {
+            if (i) {
+                const std::int64_t s = a + static_cast<std::int64_t>(i) - 1;
+                const cdouble d = (2.0 / M) * (at_z(s + M) - at_z(s));
+                for (std::size_t k = 0; k < NC; ++k) x[k] = (x[k] + d) * rot[k];
+            }
+            hj[i] = over_pilot(x);
+            c[i] = in_support(hj[i], sp);
+            score[i] += c[i];
+        }
+        // Acceptance needs the first pilot at SLIP_ACCEPT wherever the
+        // pick lands, so with no such offset the answer is already 0;
+        // most triggers in noise end here, at a third of the cost.
+        if (j == 0) {
+            bool any = false;
+            for (std::size_t i = 0; i < n_off; ++i)
+                any = any || (std::abs(lo + static_cast<std::int64_t>(i)) >= SLIP_MIN && c[i] >= SLIP_ACCEPT);
+            if (!any) return 0;
+        }
+    }
+    std::size_t best = n_off;
+    for (std::size_t i = 0; i < n_off; ++i)
+        if (std::abs(lo + static_cast<std::int64_t>(i)) >= SLIP_MIN &&
+            (best == n_off || score[i] > score[best]))
+            best = i;
+    if (best == n_off) return 0;
+    for (const auto& c : at)
+        if (c[best] < std::max(2 * c[static_cast<std::size_t>(-lo)], SLIP_ACCEPT)) return 0;
+    // Refined by sliding the delay profile at `best` against the recent
+    // pilots'; see the Python.
+    std::vector<cdouble> at_best;
+    for (const auto& hj : hs) at_best.insert(at_best.end(), hj[best].begin(), hj[best].end());
+    const Profile fresh = delay_profile(at_best);
+    int pick = 0;
+    double top = -1.0;
+    for (int e = -SLIP_REFINE; e <= SLIP_REFINE; ++e) {
+        double fit = 0.0;
+        for (int d = std::max(0, -e); d < D - std::max(0, e); ++d)
+            fit += ref[static_cast<std::size_t>(d)] * fresh[static_cast<std::size_t>(d + e)];
+        if (fit > top) top = fit, pick = e;
+    }
+    return lo + static_cast<std::int64_t>(best) + pick;
+}
+
+// Pilot gains (n, NC) of the frames whose CP starts at `pos`:
+// Modem._pilots.
+std::vector<cdouble> pilots_at(std::span<const cdouble> z, const std::vector<std::int64_t>& pos,
+                               std::span<const cdouble> pilot) {
+    std::vector<cdouble> h(pos.size() * NC);
+    for (std::size_t f = 0; f < pos.size(); ++f) {
+        const auto w = ofdm::demod_window(z, pos[f] + NCP, DEMOD_BACKOFF);
+        for (std::size_t k = 0; k < NC; ++k) h[f * NC + k] = w[k] / pilot[k];
+    }
+    return h;
+}
+
+// Modem._follow_slips -- read its docstring.
+std::vector<std::int64_t> follow_slips(std::span<const cdouble> z, std::vector<std::int64_t> pos,
+                                       const std::vector<char>& tx, bool backward,
+                                       std::span<const cdouble> pilot) {
+    const int n = static_cast<int>(pos.size());
+    const std::int64_t step = backward ? -FRAME_SAMPLES : FRAME_SAMPLES;
+    const auto zlen = static_cast<std::int64_t>(z.size());
+    std::vector<Profile> rows(pos.size());  // each placed pilot's profile, once
+    std::vector<std::size_t> passed;
+    SupportCache cache;
+    for (int i = 0; i < n; ++i) {
+        const int f = backward ? n - 1 - i : i;
+        const std::size_t fi = static_cast<std::size_t>(f);
+        // Not only the frame just passed: the one a slip lands in is part
+        // garbage and seldom reads as the transmission itself.
+        std::vector<std::size_t> g;
+        for (std::size_t j = passed.size() > static_cast<std::size_t>(config::SLIP_RECENT)
+                                 ? passed.size() - static_cast<std::size_t>(config::SLIP_RECENT)
+                                 : 0;
+             j < passed.size(); ++j)
+            if (tx[passed[j]]) g.push_back(passed[j]);
+        if (!g.empty()) {
+            const std::int64_t room = backward ? pos[fi] / FRAME_SAMPLES
+                                               : (zlen - pos[fi]) / FRAME_SAMPLES - 1;
+            const int n_left = static_cast<int>(
+                std::min<std::int64_t>(backward ? f : n - 1 - f, room));
+            if (n_left > 0) {
+                const std::int64_t k =
+                    find_slip(z, pos[fi], n_left, mean_rows(rows, g), pilot, cache, step);
+                if (k != 0) {
+                    if (backward)
+                        for (int j = 0; j <= f; ++j) pos[static_cast<std::size_t>(j)] += k;
+                    else
+                        for (int j = f; j < n; ++j) pos[static_cast<std::size_t>(j)] += k;
+                }
+            }
+        }
+        std::array<cdouble, NC> h = ofdm::demod_window(z, pos[fi] + NCP, DEMOD_BACKOFF);
+        for (std::size_t k = 0; k < NC; ++k) h[k] /= pilot[k];
+        rows[fi] = profile_row(h.data());
+        passed.push_back(fi);
+    }
+    return pos;
 }
 
 // One pass over the frames. Port of Modem._demod_frames in
@@ -253,7 +461,8 @@ struct Frames {
 
 Frames demod_frames(std::span<const cdouble> z, std::int64_t p, int n_f, double phi_ref,
                     int shift, std::optional<DriftTracker> tracker,
-                    std::span<const cdouble> pilot, bool unstep) {
+                    std::span<const cdouble> pilot, bool unstep,
+                    std::span<std::int64_t> slips = {}, bool search = false) {
     // The shift's own slope, or the loop would walk the window back.
     phi_ref += 2 * PI * RS * shift / FS;
     p += shift;
@@ -265,7 +474,23 @@ Frames demod_frames(std::span<const cdouble> z, std::int64_t p, int n_f, double 
     std::vector<cdouble> h_prev;
     double tau_ema = 0.0;
     std::int64_t total = 0;
+    SupportCache cache;
+    std::vector<Profile> prows(search ? static_cast<std::size_t>(n_f) : 0);  // each pilot's, once
     for (int f = 0; f < n_f; ++f) {
+        if (search && f > 0) {
+            // Two more pilots to confirm it on; the newest frame's slip
+            // is found by the next poll, which has them.
+            const std::int64_t room = (static_cast<std::int64_t>(z.size()) - p) / FRAME_SAMPLES - 1;
+            const int n_left = static_cast<int>(std::min<std::int64_t>(n_f - 1 - f, room));
+            if (n_left > 0) {
+                std::vector<std::size_t> g;
+                for (int i = std::max(0, f - config::SLIP_RECENT); i < f; ++i)
+                    g.push_back(static_cast<std::size_t>(i));
+                slips[static_cast<std::size_t>(f)] =
+                    find_slip(z, p, n_left, mean_rows(prows, g), pilot, cache);
+            }
+        }
+        if (!slips.empty()) p += slips[static_cast<std::size_t>(f)];
         if (p + FRAME_SAMPLES > static_cast<std::int64_t>(z.size())) break;
         const std::size_t fbase = static_cast<std::size_t>(f) * SYMS_PER_FRAME * NC;
         std::vector<cdouble> zz;
@@ -283,6 +508,7 @@ Frames demod_frames(std::span<const cdouble> z, std::int64_t p, int n_f, double 
             const std::size_t i = static_cast<std::size_t>(k);
             h[i] = out.raw[fbase + i] / pilot[i];
         }
+        if (search) prows[static_cast<std::size_t>(f)] = profile_row(h.data());
         out.received[static_cast<std::size_t>(f)] = 1;
         steps[static_cast<std::size_t>(f)] = total;
         p += FRAME_SAMPLES;
@@ -404,6 +630,46 @@ std::vector<double> jacobi_eigen(std::vector<double>& a, std::vector<double>& v,
     std::vector<double> lam(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) lam[static_cast<std::size_t>(i)] = at(a, i, i);
     return lam;
+}
+
+// The projector onto every channel whose paths lie in apparent delays
+// d0..d1 (4 samples' margin either side): _support_basis in modem.py,
+// found through the real 2x embedding of B B^H.
+Projector support_projector(int d0, int d1) {
+    std::array<cdouble, NC * NC> g{};  // B B^H
+    for (int d = d0 - 4; d <= d1 + 4; ++d)
+        for (int r = 0; r < NC; ++r)
+            for (int c = 0; c < NC; ++c)
+                g[static_cast<std::size_t>(r * NC + c)] +=
+                    shift_phasor(baseband_hz(r), d) * std::conj(shift_phasor(baseband_hz(c), d));
+    constexpr int N2 = 2 * NC;
+    std::vector<double> emb(static_cast<std::size_t>(N2 * N2));
+    for (int r = 0; r < NC; ++r)
+        for (int c = 0; c < NC; ++c) {
+            const cdouble x = g[static_cast<std::size_t>(r * NC + c)];
+            emb[static_cast<std::size_t>(r * N2 + c)] = x.real();
+            emb[static_cast<std::size_t>(r * N2 + c + NC)] = -x.imag();
+            emb[static_cast<std::size_t>((r + NC) * N2 + c)] = x.imag();
+            emb[static_cast<std::size_t>((r + NC) * N2 + c + NC)] = x.real();
+        }
+    std::vector<double> vec;
+    const std::vector<double> lam = jacobi_eigen(emb, vec, N2);
+    const double lam_max = *std::max_element(lam.begin(), lam.end());
+    std::array<cdouble, NC * NC> proj{};
+    int kept = 0;
+    for (int j = 0; j < N2; ++j) {
+        if (!(lam[static_cast<std::size_t>(j)] > lam_max * 1e-4)) continue;
+        ++kept;
+        for (int r = 0; r < NC; ++r)
+            for (int c = 0; c < NC; ++c) {
+                // P_real = V V^T; P = P_real[top-left] + i P_real[bottom-left].
+                const double vr = vec[static_cast<std::size_t>(r * N2 + j)];
+                const double vi = vec[static_cast<std::size_t>((r + NC) * N2 + j)];
+                const double vc = vec[static_cast<std::size_t>(c * N2 + j)];
+                proj[static_cast<std::size_t>(r * NC + c)] += cdouble{vr * vc, vi * vc};
+            }
+    }
+    return {proj, kept / 2};
 }
 
 // x = A^{-1} b for a real symmetric positive definite k x k A (Cholesky).
@@ -549,40 +815,9 @@ std::vector<cdouble> lmmse_channel(const std::vector<cdouble>& h, std::span<cons
             strong_rows.insert(strong_rows.end(), aligned.begin() + static_cast<std::ptrdiff_t>(f * NC),
                                aligned.begin() + static_cast<std::ptrdiff_t>((f + 1) * NC));
     const auto [d0, d1] = delay_support(strong_rows);
-    std::array<cdouble, NC * NC> g{};  // B B^H
-    for (int d = d0 - 4; d <= d1 + 4; ++d)
-        for (int r = 0; r < NC; ++r)
-            for (int c = 0; c < NC; ++c)
-                g[static_cast<std::size_t>(r * NC + c)] +=
-                    shift_phasor(baseband_hz(r), d) * std::conj(shift_phasor(baseband_hz(c), d));
-    constexpr int N2 = 2 * NC;
-    std::vector<double> emb(static_cast<std::size_t>(N2 * N2));
-    for (int r = 0; r < NC; ++r)
-        for (int c = 0; c < NC; ++c) {
-            const cdouble x = g[static_cast<std::size_t>(r * NC + c)];
-            emb[static_cast<std::size_t>(r * N2 + c)] = x.real();
-            emb[static_cast<std::size_t>(r * N2 + c + NC)] = -x.imag();
-            emb[static_cast<std::size_t>((r + NC) * N2 + c)] = x.imag();
-            emb[static_cast<std::size_t>((r + NC) * N2 + c + NC)] = x.real();
-        }
-    std::vector<double> vec;
-    const std::vector<double> lam = jacobi_eigen(emb, vec, N2);
-    const double lam_max = *std::max_element(lam.begin(), lam.end());
-    std::array<cdouble, NC * NC> proj{};
-    int kept = 0;
-    for (int j = 0; j < N2; ++j) {
-        if (!(lam[static_cast<std::size_t>(j)] > lam_max * 1e-4)) continue;
-        ++kept;
-        for (int r = 0; r < NC; ++r)
-            for (int c = 0; c < NC; ++c) {
-                // P_real = V V^T; P = P_real[top-left] + i P_real[bottom-left].
-                const double vr = vec[static_cast<std::size_t>(r * N2 + j)];
-                const double vi = vec[static_cast<std::size_t>((r + NC) * N2 + j)];
-                const double vc = vec[static_cast<std::size_t>(c * N2 + j)];
-                proj[static_cast<std::size_t>(r * NC + c)] += cdouble{vr * vc, vi * vc};
-            }
-    }
-    const int rank = kept / 2;
+    const Projector sp = support_projector(d0, d1);
+    const auto& proj = sp.proj;
+    const int rank = sp.rank;
     std::vector<cdouble> hs(n * NC);
     for (std::size_t f = 0; f < n; ++f)
         for (int k = 0; k < NC; ++k) {
@@ -887,15 +1122,18 @@ DemodResult Modem::demodulate(std::span<const double> x,
     const int n_f = spec.n_frames;
     const double phi_ref = bin_phase_step(h_pre);
     const std::int64_t p_frames = h0 + HEADER_SAMPLES;
-    Frames pass1 = demod_frames(z, p_frames, n_f, phi_ref, 0, std::nullopt, pilot_, false);
+    // Timing slips are searched for once, in the first pass, and replayed.
+    std::vector<std::int64_t> slips(static_cast<std::size_t>(n_f), 0);
+    Frames pass1 = demod_frames(z, p_frames, n_f, phi_ref, 0, std::nullopt, pilot_, false,
+                                slips, true);
     const double cfo_res = residual_cfo(Rows{pass1.h_pilot.data(), static_cast<std::size_t>(n_f)},
                                         pass1.received);
     z = dsp::freq_correct(z, cfo_res);
-    pass1 = demod_frames(z, p_frames, n_f, phi_ref, 0, std::nullopt, pilot_, false);
+    pass1 = demod_frames(z, p_frames, n_f, phi_ref, 0, std::nullopt, pilot_, false, slips);
     const std::vector<cdouble> rows1 = received_rows(pass1);
     const int shift = rows1.empty() ? 0 : window_shift(delay_support(rows1));
     const Frames fr = demod_frames(z, p_frames, n_f, phi_ref, shift, make_tracker(drift_track),
-                                   pilot_, true);
+                                   pilot_, true, slips);
     const std::vector<cdouble>& raw = fr.raw;
     const std::vector<cdouble>& h_pilot = fr.h_pilot;
     const std::vector<char>& received = fr.received;
@@ -995,13 +1233,14 @@ BlindDemodResult Modem::demodulate_blind(
     int n_f = static_cast<int>(L_hi - L_lo + 1);
     std::int64_t p_start = p0 + L_lo * FRAME_SAMPLES;
 
-    auto frames = [&](std::int64_t p) {
+    auto frames = [&](const std::vector<std::int64_t>& pos) {
         std::vector<cdouble> raw(static_cast<std::size_t>(n_f) * SYMS_PER_FRAME * NC,
                                  cdouble{});
         std::vector<cdouble> h_pilot(static_cast<std::size_t>(n_f) * NC, cdouble{});
         auto tracker = make_tracker(drift_track);
         std::vector<double> pilot_powers;
         for (int f = 0; f < n_f; ++f) {
+            const std::int64_t p = pos[static_cast<std::size_t>(f)];
             const std::size_t fbase = static_cast<std::size_t>(f) * SYMS_PER_FRAME * NC;
             if (!tracker) {
                 for (int s = 0; s < SYMS_PER_FRAME; ++s) {
@@ -1040,13 +1279,36 @@ BlindDemodResult Modem::demodulate_blind(
                                  h_pilot.data() + static_cast<std::size_t>(f - 1) * NC, NC)
                            : std::span<const cdouble>{});
             }
-            p += FRAME_SAMPLES;
         }
         return std::pair{std::move(raw), std::move(h_pilot)};
     };
-    auto first_pass = frames(p_start);
+    std::vector<std::int64_t> pos(static_cast<std::size_t>(n_f));
+    for (int f = 0; f < n_f; ++f) pos[static_cast<std::size_t>(f)] = p_start + std::int64_t{f} * FRAME_SAMPLES;
+    auto first_pass = frames(pos);
     std::vector<cdouble> raw = std::move(first_pass.first);
     std::vector<cdouble> h_pilot = std::move(first_pass.second);
+    {
+        // Timing slips, walked from both ends; see demodulate_blind in
+        // modem.py for why, and for how the walk is chosen.
+        const std::vector<char> tx = transmission_frames(h_pilot);
+        if (std::any_of(tx.begin(), tx.end(), [](char c) { return c != 0; })) {
+            const std::vector<std::int64_t> fwd = follow_slips(z, pos, tx, false, pilot_);
+            const std::vector<std::int64_t> back = follow_slips(z, pos, tx, true, pilot_);
+            std::vector<std::int64_t> chosen = fwd;
+            if (fwd != back) {
+                const std::vector<cdouble> hf = pilots_at(z, fwd, pilot_);
+                const std::vector<cdouble> hb = pilots_at(z, back, pilot_);
+                std::vector<char> both = transmission_frames(hf);
+                const std::vector<char> tb = transmission_frames(hb);
+                for (std::size_t f = 0; f < both.size(); ++f) both[f] = both[f] || tb[f];
+                if (estimate_snr_db(hb, n_f, both) > estimate_snr_db(hf, n_f, both)) chosen = back;
+            }
+            if (chosen != pos) {
+                pos = std::move(chosen);
+                std::tie(raw, h_pilot) = frames(pos);
+            }
+        }
+    }
     {
         // Same placement as the preamble path, from the frames that are
         // plausibly the transmission. A frame the moved window would take
@@ -1063,17 +1325,21 @@ BlindDemodResult Modem::demodulate_blind(
                                 h_pilot.begin() + static_cast<std::ptrdiff_t>(f * NC),
                                 h_pilot.begin() + static_cast<std::ptrdiff_t>((f + 1) * NC));
             const int shift = window_shift(delay_support(rows));
-            std::int64_t lo = p_start;
+            int first = 0;
             int n = n_f;
-            if (lo + shift + NCP - DEMOD_BACKOFF < 0) {  // its first demod window
-                lo += FRAME_SAMPLES;
+            if (pos[0] + shift + NCP - DEMOD_BACKOFF < 0) {  // its first demod window
+                first = 1;
                 --n;
             }
-            if (lo + shift + std::int64_t{n} * FRAME_SAMPLES > static_cast<std::int64_t>(z.size())) --n;
+            if (n > 0 && pos[static_cast<std::size_t>(first + n - 1)] + shift + FRAME_SAMPLES >
+                             static_cast<std::int64_t>(z.size()))
+                --n;
             if (shift != 0 && n > 0) {
-                p_start = lo;
+                std::vector<std::int64_t> moved(pos.begin() + first, pos.begin() + first + n);
+                for (std::int64_t& q : moved) q += shift;
+                p_start += std::int64_t{first} * FRAME_SAMPLES;
                 n_f = n;
-                std::tie(raw, h_pilot) = frames(p_start + shift);
+                std::tie(raw, h_pilot) = frames(moved);
             }
         }
     }
