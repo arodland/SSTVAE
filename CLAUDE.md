@@ -159,6 +159,60 @@ audio and rig bugs found so far were all invisible to unit tests.
     through the real 2x embedding of the 24x24 Hermitian matrix and a
     cyclic Jacobi, since `native/` has no linear algebra library; numpy
     uses `eigh` on the same matrix so both compute the same subspace.
+  - **The preamble path follows a timing slip** (`_find_slip`,
+    2026-10-30, after Data2G's). A dropped or inserted audio buffer (a
+    sender's playback underrun, a receiver's lost capture period: 85
+    samples here for 512 at 48 kHz) moves every later frame at once,
+    and unfollowed it costs 10-15 dB of latent SNR over the whole
+    transmission. Searched in pass 1 within +-`SLIP_MAX`, replayed in
+    the other two; the window moves, its phase is left alone.
+    **Data2G's reference does not survive this frame count or mpd**:
+    it scores three pilots by coherence with the previous one, and the
+    third is 432 ms on, which mpd's Doppler decorrelates. Ported as is,
+    or chained pilot to pilot, mpd at 3 dB found about half the slips
+    and made 13 false ones in 25 mode C receptions (8 on mpp). So a
+    candidate is scored by how much of its energy lies in the
+    **delay support of the last `SLIP_RECENT` pilots** (`_in_support`,
+    the LMMSE projector), which has no phase in it: 0 false slips in
+    every cell from AWGN 0 dB to mpd 3 dB. The offset is then refined
+    by sliding the candidates' **power delay profile** against the
+    recent pilots' (coherence with the last pilot put mpd's picks up to
+    50 samples out). Measured, 25 seeds a cell, mode A: AWGN every slip
+    within 2 samples and within 0.1 dB of no slip; mpp within 0.2 dB;
+    mpd 0.5-0.9 dB short of an oracle given the exact slip, because
+    with one path faded its profile matches either path (errors of
+    exactly the path spacing). Erasing the frame a slip lands in buys
+    nothing (oracle, measured). The C++ caches the projector **by
+    width**: the projector for (d0, d1) is (0, d1-d0)'s conjugated by
+    a per-carrier diagonal, and keying on the support itself left a
+    48x48 Jacobi on one frame in four. Cost: about 0.05 s per mode C
+    demodulate under 0 dB fading, either implementation.
+    **The blind path follows slips too, from both ends**
+    (`_follow_slips`). Unfollowed it was worse than the header path:
+    placement and the LMMSE support are measured across both timings,
+    so the window landed between them and *both* halves were lost
+    (-5 to -9 dB latent SNR) while the beacon still decoded -- a
+    ruined picture under a valid callsign. Three things it needed.
+    **Acquisition locks on whichever side of the slip carried more
+    energy**, so the frames at the buffer's start may be the misaligned
+    ones and a forward walk has nothing to trust; a walk from each end,
+    and the one whose pilots measure the higher SNR wins, **over the
+    union of both walks' transmission frames** -- frames off by more
+    than the CP fail `_transmission_frames`, so each walk scored on its
+    own frames omits exactly the ones it got wrong (scored on the frames
+    the walks share, the two tie and the wrong one could win). **The
+    search is gated on a transmission frame among the last
+    `SLIP_RECENT`**, not the one just passed: most of a ring is noise,
+    and the frame a slip lands in seldom passes the test itself. And
+    each frame's delay-profile row is computed once and averaged, not
+    the last eight pilots re-profiled per frame. Measured, mode A
+    10 dB, slip at 30% and 70% (lock after and before it): AWGN within
+    0.1 dB of no slip in every cell; mpp 3.8-5.3 dB against 5.6, the
+    walk choice within 0.3 dB of the better walk in 93/96. `rx_ab.py
+    --blind --ring` unchanged in all 13 cells. Cost, C++ on a full
+    130 s ring: 0.256 -> 0.29 s AWGN, 0.35-0.39 s under fading -- only
+    while the blind accumulator holds a lock, and never in
+    `decode_loop_low_cpu`, which has no blind path.
   - `framing.py` per-group interleaver, Golay-coded header.
     `_TX_PERMS` truncates each group's permutation to the transmittable
     budget (dropping the beacon carrier's capacity cost); `interleave`/

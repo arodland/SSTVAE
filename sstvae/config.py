@@ -422,6 +422,19 @@ CLIP_OVERSHOOT = (1.0, 1.5, 2.0)
 TX_BANDPASS = (850.0, 2200.0)  # Hz, post-clip filter
 DEMOD_BACKOFF = 6  # samples: demod window starts this early inside the CP
 
+# --- timing slips (receive side, modem._find_slip) -------------------------
+# A dropped or inserted audio buffer (a playback underrun at the sender, a
+# lost capture period at the receiver) moves every later frame by its
+# length at once; the drift tracker follows 2 samples a frame at most.
+# After Data2G's, whose frame geometry is this one; see CLAUDE.md for why the
+# reference differs.
+SLIP_MIN = 40  # samples: under it, a path fading in or out (mpd's 4 ms is 32) looks like one
+SLIP_MAX = 240  # samples: a 1024-sample buffer at 48 kHz is 171
+SLIP_RECENT = 8  # frames: the pilots whose delay support a candidate is scored against
+SLIP_TRIGGER = 0.5  # a pilot with less of its energy in that support prompts a search
+SLIP_ACCEPT = 0.5  # each pilot after a slip, this much in it at the new offset
+SLIP_REFINE = 24  # samples either side of the support's pick the delay profile then chooses from
+
 # --- SNR reporting convention ---------------------------------------------
 # Every SNR the project quotes -- the channel simulator's --snr, the
 # receiver's pilot-based estimate, the figures in README and docs -- is

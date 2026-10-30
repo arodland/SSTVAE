@@ -856,6 +856,50 @@ def test_modem_over_a_real_channel(native):
         assert abs(got["snr_db"] - ref.snr_db) < MODEM_TOL, where
 
 
+@pytest.mark.parametrize("slip", [85, -171])
+def test_modem_follows_a_timing_slip_alike(native, slip):
+    """Audio inserted or dropped mid-transmission: both find the slip
+    (the C++ by a sliding DFT, Python by a window per offset) and land
+    on the same frames."""
+    from sstvae import hfchannel
+    from sstvae.modem import Modem
+
+    wave = Modem().modulate(_unit_latents("A", seed=3), "A")
+    at = len(wave) // 2
+    if slip > 0:
+        wave = np.concatenate([wave[:at], np.zeros(slip), wave[at:]])
+    else:
+        wave = np.concatenate([wave[:at], wave[at - slip:]])
+    rx = hfchannel.awgn(hfchannel.fading(wave, "mpp", seed=1), 10.0, seed=1)
+    ref = Modem().demodulate(rx)
+    got = native.modem.demodulate(rx)
+    assert got["frames_received"] == ref.frames_received
+    assert max_abs_diff(ref.latents, got["latents"]) < MODEM_TOL
+    assert max_abs_diff(ref.weights, got["weights"]) < MODEM_TOL
+
+
+@pytest.mark.parametrize("slip,where", [(85, 0.3), (-171, 0.7)])
+def test_modem_blind_follows_a_timing_slip_alike(native, slip, where):
+    """Blind, with the lock after the slip (0.3: the backward walk wins)
+    and before it (0.7: the forward one)."""
+    from sstvae import hfchannel
+    from sstvae.modem import Modem
+
+    wave = Modem().modulate(_unit_latents("A", seed=6), "A")
+    at = int(where * len(wave))
+    if slip > 0:
+        wave = np.concatenate([wave[:at], np.zeros(slip), wave[at:]])
+    else:
+        wave = np.concatenate([wave[:at], wave[at - slip:]])
+    rx = hfchannel.awgn(hfchannel.fading(wave, "mpp", seed=3), 10.0, seed=3)
+    ref = Modem().demodulate_blind(rx)
+    got = native.modem.demodulate_blind(rx)
+    assert got["frame_offset"] == ref.frame_offset
+    assert got["frame0_start"] == ref.frame0_start
+    assert max_abs_diff(ref.latents, got["latents"]) < MODEM_TOL
+    assert max_abs_diff(ref.weights, got["weights"]) < MODEM_TOL
+
+
 def test_modem_clip_headroom_is_reachable_from_python(native):
     """The C++ takes the clip headroom as a parameter, not a constant.
 

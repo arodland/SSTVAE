@@ -134,6 +134,73 @@ def test_fading_smoke(modem, clip_floor_db):
     )
 
 
+def _slipped(x, at, slip):
+    if slip > 0:
+        return np.concatenate([x[:at], np.zeros(slip), x[at:]])
+    return np.concatenate([x[:at], x[at - slip:]])
+
+
+@pytest.mark.parametrize("slip", [85, -85, 171, -171])
+def test_timing_slip_recovered(modem, slip):
+    """Samples inserted (a sender's playback underrun: a 512-sample
+    buffer at 48 kHz is 85 here) or dropped (a receiver's lost capture
+    period) mid-transmission: the frames after are demodulated where
+    they moved to. Unfollowed, everything after the slip is garbage."""
+    lat = _unit_latents("A", seed=7)
+    x = np.concatenate([np.zeros(4000), modem.modulate(lat, "A"), np.zeros(4000)])
+
+    def rx(y):
+        y = hfchannel.apply_channel(y, snr_db=10, freq_offset_hz=37.0, ppm=10, seed=4)
+        r = modem.demodulate(y)
+        return _latent_snr_db(lat, r.latents, r.weights)
+
+    clean = rx(x)
+    assert rx(_slipped(x, len(x) // 2 + 300, slip)) > clean - 0.5
+
+
+@pytest.mark.parametrize("slip,where", [(85, 0.3), (-171, 0.3), (171, 0.7), (-85, 0.7)])
+def test_blind_timing_slip_recovered(modem, slip, where):
+    """The blind path too, with the lock on either side of the slip:
+    acquisition takes whichever carried more energy, so at 0.3 the frames
+    at the start are the misaligned ones and only a walk back from the
+    end can follow the slip."""
+    from sstvae.config import MODES as _MODES
+
+    lat = _unit_latents("A", seed=3)
+    x = np.concatenate([np.zeros(4000), modem.modulate(lat, "A"), np.zeros(4000)])
+    full = np.zeros(_MODES["C"].n_latents)
+    full[: lat.size] = lat
+
+    def rx(y):
+        y = hfchannel.apply_channel(y, snr_db=10, freq_offset_hz=37.0, ppm=10, seed=2)
+        r = modem.demodulate_blind(y)
+        assert r.beacon is not None
+        return _latent_snr_db(full, r.latents, r.weights)
+
+    clean = rx(x)
+    assert rx(_slipped(x, 4000 + int(where * (len(x) - 8000)), slip)) > clean - 0.5
+
+
+@pytest.mark.parametrize("preset", ["mpp", "mpd"])
+def test_no_slip_from_fading(modem, preset, request, monkeypatch):
+    """A path fading in or out moves the pilots' timing by its delay
+    (mpd's 4 ms): not a slip (SLIP_MIN), nor a deep fade's noise (the
+    acceptance). Mode C at 0 dB is 660 frames of chances."""
+    if request.config.getoption("--native"):
+        pytest.skip("spies on the Python search; parity covers the C++")
+    found = []
+    real = modem._find_slip
+
+    def spy(*a):
+        found.append(real(*a))
+        return found[-1]
+
+    monkeypatch.setattr(modem, "_find_slip", spy)
+    x = modem.modulate(_unit_latents("C", seed=8), "C")
+    modem.demodulate(hfchannel.apply_channel(x, snr_db=0.0, fading_preset=preset, seed=5))
+    assert found and not any(found)
+
+
 def test_no_signal_raises(modem):
     from sstvae.modem import SyncError
 
