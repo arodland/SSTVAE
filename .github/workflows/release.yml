@@ -2,12 +2,13 @@
 #
 # The flow this automates, and it is the whole of it:
 #
-#   1. Bump the version in native/CMakeLists.txt and pyproject.toml,
-#      commit, push.
-#   2. Create a **draft** release on GitHub whose tag is that version,
+#   1. Create a **draft** release on GitHub whose tag is the version,
 #      with `v` in front. Write whatever release notes you want.
-#   3. This workflow fires, checks the tag against the two declared
-#      versions, builds and signs all five platforms, attaches the
+#   2. This workflow fires (or is run by hand with that tag). If the
+#      declared versions are not the tag's, it runs
+#      tools/bump_version.sh and pushes the "Release vX.Y.Z" commit to
+#      the draft's target branch. It then builds and signs all five
+#      platforms, attaches the
 #      downloads, appends a table of them below your notes, and takes
 #      the draft flag off.
 #
@@ -89,6 +90,8 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
+      # For bump_version.sh's `uv lock`, the same uv CI uses.
+      - uses: astral-sh/setup-uv@v8.3.2
       - name: Parse the tag and check it against the source
         id: v
         # Everything the script needs arrives as an environment
@@ -125,11 +128,15 @@ jobs:
           # is exactly what the release names; otherwise the draft's
           # target branch, resolved to a SHA here so all five jobs build
           # one commit even if master moves.
+          # BRANCH is set only when the target is a branch: the one case
+          # where a version bump has somewhere to be pushed.
+          BRANCH=""
           if git rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null; then
             SHA="$(git rev-parse "refs/tags/$TAG^{commit}")"
             echo "tag $TAG exists, building $SHA"
           else
             TARGET="${TARGET:-${DEFAULT_BRANCH:-master}}"
+            git rev-parse --verify -q "refs/remotes/origin/$TARGET" >/dev/null && BRANCH="$TARGET"
             # `--verify -q`, not a bare rev-parse with stderr hidden.
             # **A bare `git rev-parse` echoes an argument it cannot
             # resolve to stdout** and then exits non-zero, so
@@ -160,15 +167,30 @@ jobs:
           # 0.2.0 containing a binary that reports 0.1.0 in its About box
           # and in Add/Remove Programs -- silent, and only visible to
           # somebody who already installed it. Fail instead, early.
-          CMAKE_V="$(sed -n 's/^project(sstvae_native VERSION \([0-9.]*\).*/\1/p' \
-                     native/CMakeLists.txt | head -1)"
-          PY_V="$(sed -n 's/^version = "\([0-9.]*\)".*/\1/p' pyproject.toml | head -1)"
+          # bump_version.sh reads with these same expressions.
+          read_versions() {
+            CMAKE_V="$(sed -n 's/^project(sstvae_native VERSION \([0-9.]*\).*/\1/p' \
+                       native/CMakeLists.txt | head -1)"
+            PY_V="$(sed -n 's/^version = "\([0-9.]*\)".*/\1/p' pyproject.toml | head -1)"
+          }
+          read_versions
+          # Not bumped already: commit the bump to the target branch and
+          # build that commit. A push that is not a fast-forward (the
+          # branch moved since the checkout) fails the run; re-run it.
+          if [ -n "$BRANCH" ] && { [ "$CMAKE_V" != "$VERSION" ] || [ "$PY_V" != "$VERSION" ]; }; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            tools/bump_version.sh "$VERSION"
+            git push origin "HEAD:refs/heads/$BRANCH"
+            SHA="$(git rev-parse HEAD)"
+            read_versions
+          fi
           echo "tag=$VERSION  native/CMakeLists.txt=$CMAKE_V  pyproject.toml=$PY_V"
           fail=0
           [ "$CMAKE_V" = "$VERSION" ] || { echo "::error::native/CMakeLists.txt says $CMAKE_V, tag says $VERSION"; fail=1; }
           [ "$PY_V" = "$VERSION" ]    || { echo "::error::pyproject.toml says $PY_V, tag says $VERSION"; fail=1; }
           if [ "$fail" -ne 0 ]; then
-            echo "Bump the version in the source, push, and re-run." >&2
+            echo "The tag or a SHA target cannot take a bump commit: run tools/bump_version.sh $VERSION, push, and re-run." >&2
             exit 1
           fi
 

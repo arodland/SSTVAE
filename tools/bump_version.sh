@@ -39,8 +39,8 @@
 # version bump would guess, and a guess that collides is rejected in a
 # browser minutes after the upload.
 #
-# Linux/bash only, by request: it is a developer's pre-release step, not
-# something CI or an operator runs.
+# Linux/bash only. release.yml runs it when the versions do not match
+# the tag; it can still be run by hand beforehand.
 
 set -euo pipefail
 
