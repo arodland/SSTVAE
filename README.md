@@ -108,26 +108,7 @@ rig and remembers how it is set up, and it needs no Python at all. It's
 a native C++/Qt program, built for **Linux x86-64, Linux arm64, macOS
 (Apple Silicon and Intel) and Windows x64** on every push, as both a
 portable archive and a platform installer (AppImage, `.dmg`, NSIS
-setup).
-
-> **No releases page yet.** The builds are code-signed — macOS with a
-> Developer ID and notarized by Apple, Windows with Azure Trusted
-> Signing — but there is still no tagged release, so the only downloads
-> are CI artifacts and GitHub requires you to be logged in to fetch
-> them. Open the latest green run of [the CI
-> workflow](https://github.com/arodland/SSTVAE/actions/workflows/ci.yml),
-> scroll to **Artifacts**, and take the one matching your platform
-> (`sstvae-linux-x86_64`, `sstvae-macos-arm64`,
-> `sstvae-windows-x64-portable`, …) or its installer.
->
-> macOS should no longer warn about an unidentified developer: the
-> notarization ticket is stapled into the `.dmg`, so Gatekeeper can
-> approve it without asking Apple, and without a network connection.
-> On Windows the publisher is now named rather than unknown, but
-> **SmartScreen may still interrupt the first install** — its
-> reputation is earned per certificate over downloads and time, and
-> this one is new. "More info" → "Run anyway" is the way past it, and
-> it should stop happening on its own.
+setup). Grab it [here](https://github.com/arodland/SSTVAE/releases/latest).
 
 The published model is fetched on first use and cached, so there is
 nothing else to download. Building from source is an ordinary CMake +
