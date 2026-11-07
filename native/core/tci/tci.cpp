@@ -142,7 +142,13 @@ struct Tci::Worker : QObject {
 
     void stop() {
         enabled = false;
-        ws->abort();
+        // A close frame, not abort(): the server sees an orderly goodbye
+        // rather than a dropped connection.
+        if (ws->state() == QAbstractSocket::ConnectedState) {
+            ws->close();
+        } else {
+            ws->abort();
+        }
         reset();
         const std::lock_guard<std::mutex> lock(mu);
         dial.reset();

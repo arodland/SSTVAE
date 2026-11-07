@@ -50,6 +50,12 @@ class RigControl : public QObject {
     // shipping default and not a degraded mode: the app was built to
     // work with no CAT, and a phone acoustically coupled to a handheld
     // has no radio to talk to.
+    // The radio interface: false is a soundcard with Hamlib (`enabled`
+    // and below), true is TCI at `tciHost`, which carries the audio, PTT
+    // and dial itself.
+    Q_PROPERTY(bool tci READ tci WRITE setTci NOTIFY changed)
+    Q_PROPERTY(QString tciHost READ tciHost WRITE setTciHost NOTIFY changed)
+    Q_PROPERTY(bool tciAvailable READ tciAvailable CONSTANT)
     Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY changed)
 
     // "usb" | "bluetooth" | "network". **This, not the shape of the
@@ -137,6 +143,11 @@ public:
     explicit RigControl(QObject* parent = nullptr);
     ~RigControl() override;
 
+    bool tci() const { return tci_; }
+    void setTci(bool on);
+    QString tciHost() const { return tci_host_; }
+    void setTciHost(const QString& h);
+    bool tciAvailable() const;
     bool enabled() const { return enabled_; }
     void setEnabled(bool on);
 
@@ -218,6 +229,8 @@ private:
     // Install or remove the Hamlib debug sink to match `debug_log_`.
     void apply_debug_log();
 
+    bool tci_ = false;
+    QString tci_host_;  // empty: localhost
     bool enabled_ = false;
     QString connection_ = QStringLiteral("usb");
     int model_ = 1;  // Hamlib's dummy: connects with no radio attached

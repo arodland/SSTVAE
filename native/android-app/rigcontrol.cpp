@@ -22,6 +22,9 @@
 #include "rig/hamlib.hpp"
 #include "rig/trace.hpp"
 #include "session.hpp"
+#ifdef SSTVAE_HAVE_TCI
+#include "tci/tci.hpp"
+#endif
 
 // `SSTVAE_ANDROID_RIG=OFF` is a supported configuration -- the one
 // escape hatch for a build environment whose NDK cannot cross-compile
@@ -84,6 +87,8 @@ constexpr auto kBaudKey = "rig/baud";
 constexpr auto kPttKey = "rig/ptt";
 constexpr auto kPttAudioKey = "rig/pttaudio";
 constexpr auto kDebugLogKey = "rig/debuglog";
+constexpr auto kTciKey = "rig/tci";
+constexpr auto kTciHostKey = "rig/tcihost";
 
 // Hamlib's trace, ring-buffered for the settings screen.
 //
@@ -224,7 +229,7 @@ RigControl::RigControl(QObject* parent) : QObject(parent) {
     // reopen the radio -- but a *first* launch with rig control on
     // should connect without the operator pressing anything.
     if (!have_rig_support()) enabled_ = false;
-    if (enabled_ && !Session::instance().rig_running()) connectRig();
+    if ((tci_ || enabled_) && !Session::instance().rig_running()) connectRig();
 }
 
 RigControl::~RigControl() {
@@ -247,6 +252,8 @@ void RigControl::load() {
     ptt_ = s.value(QLatin1String(kPttKey), ptt_).toString();
     ptt_audio_ = s.value(QLatin1String(kPttAudioKey), ptt_audio_).toString();
     debug_log_ = s.value(QLatin1String(kDebugLogKey), false).toBool();
+    tci_ = s.value(QLatin1String(kTciKey), false).toBool();
+    tci_host_ = s.value(QLatin1String(kTciHostKey), QString()).toString();
 }
 
 void RigControl::save() {
@@ -260,6 +267,35 @@ void RigControl::save() {
     s.setValue(QLatin1String(kPttKey), ptt_);
     s.setValue(QLatin1String(kPttAudioKey), ptt_audio_);
     s.setValue(QLatin1String(kDebugLogKey), debug_log_);
+    s.setValue(QLatin1String(kTciKey), tci_);
+    s.setValue(QLatin1String(kTciHostKey), tci_host_);
+}
+
+void RigControl::setTci(bool on) {
+    if (on == tci_) return;
+    tci_ = on;
+    error_.clear();
+    save();
+    // One interface at a time: whichever was running stops, and the
+    // chosen one starts if it is in use (TCI always; Hamlib if enabled).
+    Session::instance().stop_rig();
+    if (tci_ || enabled_) connectRig();
+    emit changed();
+}
+
+void RigControl::setTciHost(const QString& h) {
+    if (h == tci_host_) return;
+    tci_host_ = h;
+    save();
+    emit changed();
+}
+
+bool RigControl::tciAvailable() const {
+#ifdef SSTVAE_HAVE_TCI
+    return true;
+#else
+    return false;
+#endif
 }
 
 void RigControl::setEnabled(bool on) {
@@ -272,7 +308,10 @@ void RigControl::setEnabled(bool on) {
     if (on == enabled_) return;
     enabled_ = on;
     save();
-    if (!on) {
+    if (tci_) {
+        // The Hamlib switch is not the active interface's: remembered
+        // for when the soundcard comes back, nothing started or stopped.
+    } else if (!on) {
         Session::instance().stop_rig();
     } else {
         connectRig();
@@ -496,6 +535,24 @@ void RigControl::publish_permission(const QString& id, bool granted) {
 // --- the session ------------------------------------------------------------
 
 bool RigControl::connectRig() {
+    if (tci_) {
+#ifdef SSTVAE_HAVE_TCI
+        const QString text = tci_host_.trimmed().isEmpty() ? QStringLiteral("localhost")
+                                                           : tci_host_.trimmed();
+        const auto address = tci::parse_address(text.toStdString());
+        if (!address) {
+            error_ = tr("\"%1\" is not HOST or HOST:PORT.").arg(text);
+            emit changed();
+            return false;
+        }
+        error_.clear();
+        const bool ok = Session::instance().start_tci(address->first, address->second);
+#else
+        const bool ok = Session::instance().start_tci({}, 0);  // reports the build has none
+#endif
+        emit changed();
+        return ok;
+    }
     rig::HamlibConfig config;
     config.model = model_;
     config.baud = baud_;
@@ -609,7 +666,8 @@ void RigControl::apply_debug_log() {
 }
 
 void RigControl::maybe_reconnect() {
-    if (!enabled_ || !layer_ok_) return;
+    // TCI retries by itself, every 2 s.
+    if (tci_ || !enabled_ || !layer_ok_) return;
 
     Session& session = Session::instance();
     if (!session.rig_running()) return;
@@ -665,6 +723,13 @@ void RigControl::maybe_reconnect() {
 bool RigControl::running() const { return Session::instance().rig_running(); }
 
 QString RigControl::connectionState() const {
+    if (tci_) {
+        Session& session = Session::instance();
+        if (!session.rig_running()) return tr("Not connected");
+        if (session.rig_frequency_hz().has_value()) return tr("Connected");
+        if (session.rig_failed()) return tr("Not responding — retrying");
+        return tr("Connecting…");
+    }
     if (!layer_ok_) return tr("Unavailable");
     if (!enabled_) return {};
 

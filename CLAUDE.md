@@ -1282,6 +1282,13 @@ asserts the chrono-paced over used *no* pushed frames, so each path is
 known to be the one it exercised.
 `tests/test_tci.cpp` runs it against a fake server; the app end to end
 over TCI has not been run against a real one.
+**Android has it too** (2026-11-07): `Session` owns the `Tci` beside
+the rig controller and the rig accessors answer for whichever is
+active; Settings opens with a Radio section (interface, then the audio
+pickers and rig control, or the TCI server). Needs `qtwebsockets` in the
+Android Qt kit. Verified on the emulator against a fake server on the
+host (10.0.2.2): a mode A picture received, a mode B over sent and
+decoded on the host at 440/440 frames, and listening resumed after it.
 
 **Rig control is a re-derivation, not a port, and the design doc says
 why.** The deleted `sstvae/rig/rigctld.py` talked to a `rigctld` child
