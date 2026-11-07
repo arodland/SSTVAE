@@ -134,6 +134,16 @@ target_link_libraries(sstvae_android PRIVATE Qt6::Quick Qt6::Gui sstvae_core
 # configuration that has no CAT.
 target_link_libraries(sstvae_android PRIVATE sstvae_rig_android)
 
+# TCI (core/tci/), when the Android Qt has the WebSockets module:
+# audio, PTT and the dial from SDR software on the network.
+# Found here as well as in native/: an imported target is visible only in
+# the directory that found it, and Qt's deployment walk runs from this one.
+if(TARGET sstvae_tci)
+    find_package(Qt6 REQUIRED COMPONENTS WebSockets)
+    target_link_libraries(sstvae_android PRIVATE sstvae_tci)
+    target_compile_definitions(sstvae_android PRIVATE SSTVAE_HAVE_TCI)
+endif()
+
 if(TARGET sstvae_rig)
     target_link_libraries(sstvae_android PRIVATE sstvae_rig)
     target_compile_definitions(sstvae_android PRIVATE SSTVAE_ANDROID_HAVE_RIG=1)

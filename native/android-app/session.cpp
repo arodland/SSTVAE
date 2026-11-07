@@ -1,11 +1,14 @@
 #include "session.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <stdexcept>
 
 #include "assets.hpp"
 #include "checkpoint/checkpoint.hpp"
@@ -13,6 +16,13 @@
 #include "config.hpp"
 #include "images/images.hpp"
 #include "images/types.hpp"
+#ifdef SSTVAE_HAVE_TCI
+#include "tci/tci.hpp"
+#else
+namespace sstvae::tci {
+class Tci {};  // never made: start_tci() refuses
+}  // namespace sstvae::tci
+#endif
 
 namespace sstvae::androidapp {
 
@@ -287,16 +297,16 @@ std::pair<std::int64_t, std::int64_t> Session::model_progress() const {
 
 bool Session::running() const {
     std::lock_guard<std::mutex> lk(mu_);
-    return stream_ != nullptr;
+    return stop_ != nullptr;  // not stream_: over TCI there is none
 }
 
 bool Session::start(const std::string& device_name) {
     std::lock_guard<std::mutex> lk(mu_);
-    if (stream_) return true;
+    if (stop_) return true;
     error_.clear();
     device_ = device_name;
 
-    ring_ = std::make_unique<rx::RingBuffer>(130.0);
+    ring_ = std::make_shared<rx::RingBuffer>(130.0);
     state_ = std::make_unique<rx::SharedState>();
     stop_ = std::make_unique<rx::StopFlag>();
 
@@ -337,7 +347,22 @@ bool Session::start(const std::string& device_name) {
         return save_reception(r);
     };
 
+    bool tci = false;
+    [[maybe_unused]] tci::Tci* tci_link = nullptr;
+    {
+        std::lock_guard<std::mutex> lk2(rig_mu_);
+        tci = tci_active_;
+        tci_link = tci_.get();
+    }
+#ifdef SSTVAE_HAVE_TCI
+    // Over TCI the audio arrives on the TCI connection, which feeds the
+    // ring itself; there is no device to open.
+    if (tci) {
+        tci_link->set_capture(ring_);
+    } else
+#endif
     try {
+        if (tci) throw std::runtime_error("this build has no TCI");
         stream_ = std::make_unique<audio::android::InputStream>(
             device_name, *ring_, config::FS, audio::android::Report{},
             [this](const std::string& m) {
@@ -376,6 +401,14 @@ void Session::stop() {
         flag = std::move(stop_);
     }
     if (stream) stream->stop();
+#ifdef SSTVAE_HAVE_TCI
+    tci::Tci* tci_link = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(rig_mu_);
+        tci_link = tci_.get();
+    }
+    if (tci_link) tci_link->set_capture(nullptr);
+#endif
     if (flag) flag->set();
     if (thread_.joinable()) thread_.join();
 
@@ -397,12 +430,14 @@ std::string Session::last_error() const {
 
 int Session::device_rate() const {
     std::lock_guard<std::mutex> lk(mu_);
-    return stream_ ? stream_->device_rate() : 0;
+    if (stream_) return stream_->device_rate();
+    return stop_ ? 48000 : 0;  // TCI's rate (tci::RATE)
 }
 
 std::string Session::routed_device() const {
     std::lock_guard<std::mutex> lk(mu_);
-    return stream_ ? stream_->routed_device() : std::string{};
+    if (stream_) return stream_->routed_device();
+    return stop_ ? std::string("TCI") : std::string{};
 }
 
 std::string Session::routing_warning() const {
@@ -412,7 +447,14 @@ std::string Session::routing_warning() const {
 
 double Session::peak_level() const {
     std::lock_guard<std::mutex> lk(mu_);
-    return stream_ ? stream_->peak_level() : 0.0;
+    if (stream_) return stream_->peak_level();
+    // Over TCI there is no stream to measure; the last half second of
+    // what reached the ring says the same thing.
+    double peak = 0.0;
+    if (ring_) {
+        for (const double x : ring_->tail(config::FS / 2)) peak = std::max(peak, std::abs(x));
+    }
+    return peak;
 }
 
 double Session::near_zero_fraction() const {
@@ -635,6 +677,7 @@ bool Session::start_rig(const rig::HamlibConfig& config,
 
 void Session::stop_rig() {
     rig::RigController* controller = nullptr;
+    [[maybe_unused]] tci::Tci* tci_link = nullptr;
     {
         std::lock_guard<std::mutex> lk(rig_mu_);
         controller = rig_.get();
@@ -642,7 +685,12 @@ void Session::stop_rig() {
         rig_status_.clear();
         rig_failed_ = false;
         rig_can_key_ = false;
+        tci_active_ = false;
+        tci_link = tci_.get();
     }
+#ifdef SSTVAE_HAVE_TCI
+    if (tci_link) tci_link->stop();
+#endif
     // Stopped, never destroyed -- see `start_rig`. `stop()` detaches
     // rather than joining, so this returns immediately even against a
     // rig that has stopped answering, which is the whole point of the
@@ -650,13 +698,53 @@ void Session::stop_rig() {
     if (controller) controller->stop();
 }
 
+bool Session::start_tci(const std::string& host, int port) {
+    stop_rig();
+#ifdef SSTVAE_HAVE_TCI
+    tci::Tci* t = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(rig_mu_);
+        if (!tci_) {
+            tci_ = std::make_unique<tci::Tci>([this](const std::string& text, bool error) {
+                std::lock_guard<std::mutex> lock(rig_mu_);
+                rig_status_ = text;
+                rig_failed_ = error;
+            });
+        }
+        t = tci_.get();
+        tci_active_ = true;
+        rig_status_ = "connecting";
+        rig_failed_ = false;
+    }
+    // No mode on connect: the phone has no such setting, so the
+    // operator's modulation is left as it is.
+    t->start(host, port, "");
+    return true;
+#else
+    (void)host;
+    (void)port;
+    std::lock_guard<std::mutex> lk(rig_mu_);
+    rig_status_ = "this build has no TCI";
+    rig_failed_ = true;
+    return false;
+#endif
+}
+
+bool Session::tci_active() const {
+    std::lock_guard<std::mutex> lk(rig_mu_);
+    return tci_active_;
+}
+
 bool Session::rig_running() const {
     std::lock_guard<std::mutex> lk(rig_mu_);
-    return rig_ != nullptr && rig_->running();
+    return tci_active_ || (rig_ != nullptr && rig_->running());
 }
 
 std::optional<double> Session::rig_frequency_hz() const {
     std::lock_guard<std::mutex> lk(rig_mu_);
+#ifdef SSTVAE_HAVE_TCI
+    if (tci_active_) return tci_->frequency_hz();
+#endif
     return rig_frequency_;
 }
 
@@ -672,7 +760,7 @@ bool Session::rig_failed() const {
 
 bool Session::rig_can_key() const {
     std::lock_guard<std::mutex> lk(rig_mu_);
-    return rig_ != nullptr && rig_can_key_;
+    return tci_active_ || (rig_ != nullptr && rig_can_key_);
 }
 
 void Session::run_transmit(const TxRequest& request) {
@@ -686,7 +774,7 @@ void Session::run_transmit(const TxRequest& request) {
     bool resume_capture = false;
     {
         std::lock_guard<std::mutex> lk(mu_);
-        resume_capture = stream_ != nullptr;
+        resume_capture = stop_ != nullptr;
         resume_device = device_;
     }
     if (resume_capture) stop();
@@ -719,9 +807,32 @@ void Session::run_transmit(const TxRequest& request) {
     // `PttWatchdog` with a null `Ptt` stands itself down, so there is no
     // special case below either way.
     tx::Ptt ptt;
-    if (request.use_ptt) {
+    tx::Player player = [](const std::string& device, std::span<const double> wave,
+                           int samplerate, const std::function<void(double)>& on_progress,
+                           const std::function<bool()>& should_stop,
+                           const std::function<void(const std::string&)>& on_error) {
+        return audio::android::play(device, wave, samplerate, on_progress, should_stop,
+                                    on_error);
+    };
+    {
         std::lock_guard<std::mutex> lk(rig_mu_);
-        if (rig_ && rig_can_key_) ptt = rig_->ptt_function();
+#ifdef SSTVAE_HAVE_TCI
+        // Over TCI the server keys the radio and takes the audio, whether
+        // or not the request asked for PTT: there is no other path to it.
+        if (tci_active_) {
+            tci::Tci* t = tci_.get();  // immortal, so safe for the whole over
+            ptt = [t](bool on) { t->set_ptt(on); };
+            player = [t](const std::string&, std::span<const double> wave, int samplerate,
+                         const std::function<void(double)>& on_progress,
+                         const std::function<bool()>& should_stop,
+                         const std::function<void(const std::string&)>& on_error) {
+                return t->play(wave, samplerate, on_progress, should_stop, on_error);
+            };
+        } else
+#endif
+        if (request.use_ptt && rig_ && rig_can_key_) {
+            ptt = rig_->ptt_function();
+        }
     }
     // **The leader is not suppressed when the rig is keyed directly**
     // (Andrew, on hardware). An earlier version zeroed it here, on the
@@ -734,14 +845,7 @@ void Session::run_transmit(const TxRequest& request) {
     // sets it to zero.
 
     auto engine = std::make_unique<tx::TxEngine>(
-        std::move(ptt),
-        [](const std::string& device, std::span<const double> wave, int samplerate,
-           const std::function<void(double)>& on_progress,
-           const std::function<bool()>& should_stop,
-           const std::function<void(const std::string&)>& on_error) {
-            return audio::android::play(device, wave, samplerate, on_progress,
-                                        should_stop, on_error);
-        },
+        std::move(ptt), std::move(player),
         [model](const images::ImageArray& array) { return model->encode(array); },
         [this](const tx::TxState& s) {
             std::lock_guard<std::mutex> lk(tx_mu_);
