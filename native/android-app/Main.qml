@@ -110,12 +110,20 @@ ApplicationWindow {
     footer: TabBar {
         id: tabs
         bottomPadding: SafeArea.margins.bottom
-        TabButton { text: "Listen" }
         // The encoder is a second 9 MB artifact, fetched on the first
-        // visit to this tab rather than at startup: a station that only
-        // ever listens must never pay for it, which is the whole reason
+        // visit to Send rather than at startup: a station that only ever
+        // listens must never pay for it, which is the whole reason
         // `load_codec`'s parts are lazy and independent.
-        TabButton { text: "Send"; onClicked: transmitter.loadEncoder() }
+        //
+        // **On the tab becoming current, not on its button being
+        // tapped.** The three Reply buttons switch tabs by setting
+        // `currentIndex`, which fires no `clicked`, so with the fetch on
+        // the button a Reply landed on a Send screen whose Send stayed
+        // disabled at "encoder not downloaded yet". Repeat calls are
+        // free: the load returns at once if it is under way or done.
+        onCurrentIndexChanged: if (currentIndex === 1) transmitter.loadEncoder()
+        TabButton { text: "Listen" }
+        TabButton { text: "Send" }
         TabButton { text: "Pictures"; onClicked: pictures.refresh() }
         TabButton { text: "Settings" }
         TabButton { text: "About" }
