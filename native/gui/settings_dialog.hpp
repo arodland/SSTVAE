@@ -8,11 +8,13 @@
 // so a saved index silently comes back pointing at a different
 // soundcard.
 //
-// The Rig tab is the one part that is not a port of
-// `sstvae/gui/settings_dialog.py`. That dialog configured a *rigctld
-// socket*; this one configures Hamlib directly, and is modelled on
-// WSJT-X's Radio tab because that is the set a real radio needs and the
-// one operators already know. See `settings::RigConfig`.
+// The Radio tab picks the interface first, as Data2G's does: a soundcard
+// and Hamlib, or TCI, and only that interface's settings show. Its
+// Hamlib part is not a port of `sstvae/gui/settings_dialog.py`. That
+// dialog configured a *rigctld socket*; this one configures Hamlib
+// directly, and is modelled on WSJT-X's Radio tab because that is the
+// set a real radio needs and the one operators already know. See
+// `settings::RigConfig`.
 
 #ifndef SSTVAE_GUI_SETTINGS_DIALOG_HPP
 #define SSTVAE_GUI_SETTINGS_DIALOG_HPP
@@ -26,6 +28,7 @@
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
+class QGroupBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -48,6 +51,8 @@ private slots:
     void sync_precision_enabled();
     void refresh_devices();
     void sync_ptt_enabled();
+    // TCI or soundcard + Hamlib: which boxes show.
+    void sync_interface();
     // Show what the current filename template would actually produce.
     void sync_filename_preview();
     void test_cat();
@@ -68,6 +73,7 @@ signals:
 
 private:
     QWidget* model_tab();
+    QWidget* radio_tab();  // the interface, then audio_tab/rig_tab or TCI
     QWidget* audio_tab();
     QWidget* rig_tab();
     QWidget* folders_tab();
@@ -89,6 +95,13 @@ private:
     QComboBox* precision_ = nullptr;
     QLabel* precision_note_ = nullptr;
     QPushButton* download_all_ = nullptr;
+
+    // Radio
+    QComboBox* interface_ = nullptr;  // soundcard + CAT (false) or TCI (true)
+    QLineEdit* tci_host_ = nullptr;
+    QGroupBox* tci_box_ = nullptr;
+    QGroupBox* audio_box_ = nullptr;
+    QGroupBox* rig_box_ = nullptr;
 
     // Audio
     QComboBox* input_device_ = nullptr;

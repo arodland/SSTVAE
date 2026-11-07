@@ -68,6 +68,8 @@ NON_DEFAULT = {
         "samplerate": 8000,  # see test_samplerate_is_refused_rather_than_obeyed
     },
     "rig": {
+        "tci": True,
+        "tci_host": "sdr.lan:50002",
         "enabled": True,
         "model": 3073,
         "device": "COM5",

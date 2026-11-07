@@ -13,6 +13,8 @@
 // field comes back as its default and no default appears here.
 
 #include <QApplication>
+#include <QComboBox>
+#include <QLineEdit>
 
 #include <string>
 
@@ -36,6 +38,8 @@ settings::Config populated() {
     c.audio.input_device = "USB Audio CODEC";
     c.audio.output_device = "SSTVAE-Loopback";
 
+    c.rig.tci = true;
+    c.rig.tci_host = "sdr.lan:50002";
     c.rig.enabled = true;
     c.rig.model = 2;  // NET rigctl, which is in every Hamlib build
     c.rig.poll_interval_s = 1.5;
@@ -130,6 +134,34 @@ void test_an_unknown_rig_model_is_kept_not_reset() {
                  "settings dialog: an unlisted rig model survives");
 }
 
+void test_the_interface_picks_what_shows() {
+    // TCI carries the audio and PTT itself, so the soundcard and Hamlib
+    // settings would only be things to set that do nothing.
+    settings::Config before;
+    before.rig.tci = true;
+    gui::SettingsDialog dialog(before);
+    auto* iface = dialog.findChild<QComboBox*>(QStringLiteral("interface"));
+    auto* host = dialog.findChild<QLineEdit*>(QStringLiteral("tci_host"));
+    auto* tci = dialog.findChild<QWidget*>(QStringLiteral("tci"));
+    auto* audio = dialog.findChild<QWidget*>(QStringLiteral("audio"));
+    auto* hamlib = dialog.findChild<QWidget*>(QStringLiteral("hamlib"));
+    check::is_true(iface && host && tci && audio && hamlib,
+                   "settings dialog: the interface, the server and the three boxes exist");
+    if (!(iface && host && tci && audio && hamlib)) return;
+    check::is_true(!tci->isHidden() && audio->isHidden() && hamlib->isHidden(),
+                   "settings dialog: TCI shows the server, not the devices or Hamlib");
+    iface->setCurrentIndex(0);
+    check::is_true(tci->isHidden() && !audio->isHidden() && !hamlib->isHidden(),
+                   "settings dialog: soundcard shows the devices and Hamlib, not the server");
+
+    host->clear();
+    iface->setCurrentIndex(1);
+    settings::Config after;
+    dialog.apply_to(after);
+    check::is_true(after.rig.tci && after.rig.tci_host == settings::RigConfig{}.tci_host,
+                   "settings dialog: an empty TCI server is the default one");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -141,6 +173,7 @@ int main(int argc, char** argv) {
     test_defaults_survive_too();
     test_a_callsign_is_normalized();
     test_an_unknown_rig_model_is_kept_not_reset();
+    test_the_interface_picks_what_shows();
 
     return check::report("settings dialog");
 }
