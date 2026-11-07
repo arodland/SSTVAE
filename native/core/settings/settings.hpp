@@ -90,6 +90,13 @@ struct AudioConfig {
 // answer and is why WSJT-X offers it as a distinct choice rather than
 // making the user guess 8-N-1.
 struct RigConfig {
+    // The radio interface: false is a soundcard plus Hamlib (`audio` and
+    // the fields below), true is TCI at `tci_host` -- audio, PTT and the
+    // dial over one WebSocket (core/tci/), which leaves the soundcard
+    // and every Hamlib field unused. `mode` and the PTT lead and tail
+    // apply to both.
+    bool tci = false;
+    std::string tci_host = "localhost:50001";  // HOST or HOST:PORT
     bool enabled = false;
     int model = 1;  // Hamlib model number; 1 is the dummy rig, 2 is NET rigctl
     double poll_interval_s = 5.0;

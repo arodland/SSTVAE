@@ -4,9 +4,18 @@
 #include <initializer_list>
 #include <utility>
 
+#include "audio/qt/qtaudio.hpp"
 #include "checkpoint/checkpoint.hpp"
 #include "checkpoint/qt_fetcher.hpp"
 #include "rig_config.hpp"
+#include "rx/ringbuffer.hpp"
+#ifdef SSTVAE_HAVE_TCI
+#include "tci/tci.hpp"
+#else
+namespace sstvae::tci {
+class Tci {};  // never made: connect_rig() refuses TCI
+}  // namespace sstvae::tci
+#endif
 
 namespace sstvae::gui {
 
@@ -90,6 +99,14 @@ AppState::AppState(QObject* parent)
     // The `this` capture outlives all of them because ~MainWindow
     // destroys the panels -- which join those workers -- *before* its
     // AppState child, and ~AppState then joins the model thread.
+#ifdef SSTVAE_HAVE_TCI
+    tci_ = std::make_unique<tci::Tci>([this](const std::string& text, bool error) {
+        const QString qtext = QString::fromStdString(text);
+        log_event("rig", error ? log::Severity::Error : log::Severity::Info, qtext);
+        emit rigStatus(qtext, error);
+    });
+#endif
+
     checkpoint::install_qt_fetcher([this](std::int64_t received,
                                           std::int64_t total) {
         emit modelProgress(static_cast<qlonglong>(received),
@@ -160,10 +177,17 @@ QString AppState::model_error() const {
 }
 
 std::optional<double> AppState::current_frequency_hz() const {
+#ifdef SSTVAE_HAVE_TCI
+    if (config_.rig.tci) return tci_->frequency_hz();
+#endif
     return rig_.frequency_hz();
 }
 
 std::function<void(bool)> AppState::ptt() {
+#ifdef SSTVAE_HAVE_TCI
+    // tci_ lives as long as this object, which outlives every over.
+    if (config_.rig.tci) return [t = tci_.get()](bool on) { t->set_ptt(on); };
+#endif
     // Nothing to key, in both of the cases where that is true: rig
     // control off entirely, and rig control on but the radio keyed by
     // its own VOX. Returning nothing rather than a no-op is what lets
@@ -172,8 +196,60 @@ std::function<void(bool)> AppState::ptt() {
     return rig_.ptt_function();
 }
 
+tx::Player AppState::player() {
+#ifdef SSTVAE_HAVE_TCI
+    if (config_.rig.tci) {
+        return [t = tci_.get()](const std::string&, std::span<const double> wave,
+                                int samplerate,
+                                const std::function<void(double)>& on_progress,
+                                const std::function<bool()>& should_stop,
+                                const std::function<void(const std::string&)>& on_error) {
+            return t->play(wave, samplerate, on_progress, should_stop, on_error);
+        };
+    }
+#endif
+    return [](const std::string& device, std::span<const double> wave, int samplerate,
+              const std::function<void(double)>& on_progress,
+              const std::function<bool()>& should_stop,
+              const std::function<void(const std::string&)>& on_error) {
+        return audio::qt::play(device, wave, samplerate, on_progress, should_stop, on_error);
+    };
+}
+
+void AppState::set_tci_capture(std::shared_ptr<rx::RingBuffer> ring) {
+#ifdef SSTVAE_HAVE_TCI
+    tci_->set_capture(std::move(ring));
+#else
+    (void)ring;
+#endif
+}
+
 void AppState::connect_rig() {
     rig_.stop();
+#ifdef SSTVAE_HAVE_TCI
+    tci_->stop();
+#endif
+    if (config_.rig.tci) {
+#ifdef SSTVAE_HAVE_TCI
+        const auto address = tci::parse_address(config_.rig.tci_host);
+        if (!address) {
+            emit rigStatus(tr("TCI: \"%1\" is not HOST or HOST:PORT")
+                               .arg(QString::fromStdString(config_.rig.tci_host)),
+                           true);
+            return;
+        }
+        const std::string& mode = config_.rig.mode;
+        tci_->start(address->first, address->second,
+                    mode == "usb" ? "usb" : mode == "pkt_usb" ? "digu" : "");
+        emit rigStatus(tr("TCI: connecting to %1:%2")
+                           .arg(QString::fromStdString(address->first))
+                           .arg(address->second),
+                       false);
+#else
+        emit rigStatus(tr("TCI: this build has none (Qt WebSockets was not found)"), true);
+#endif
+        return;
+    }
     if (!config_.rig.enabled) {
         emit rigStatus(QStringLiteral("Rig control off"), false);
         return;
@@ -181,7 +257,12 @@ void AppState::connect_rig() {
     rig_.start(make_backend(config_.rig), controller_config(config_.rig));
 }
 
-void AppState::disconnect_rig() { rig_.stop(); }
+void AppState::disconnect_rig() {
+    rig_.stop();
+#ifdef SSTVAE_HAVE_TCI
+    tci_->stop();
+#endif
+}
 
 void AppState::pause_rig_polling() { rig_.pause_polling(); }
 

@@ -343,3 +343,12 @@ if(TARGET sstvae_gui)
 endif()
 
 
+
+# The TCI client against a fake server on loopback (core/tci/).
+if(TARGET sstvae_tci)
+  add_executable(test_tci test_tci.cpp)
+  target_link_libraries(test_tci PRIVATE sstvae_tci Qt6::WebSockets)
+  target_include_directories(test_tci PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  add_test(NAME tci COMMAND test_tci)
+  set_tests_properties(tci PROPERTIES TIMEOUT 300 ENVIRONMENT QT_QPA_PLATFORM=offscreen)
+endif()

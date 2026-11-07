@@ -61,6 +61,7 @@ void usage() {
                  "  --out DIR    where to write the PNGs (default: .)\n"
                  "  --size WxH   window size (default: the window's own)\n"
                  "  --tab N      only this settings tab; default is all\n"
+                 "  --tci        the settings with TCI as the radio interface\n"
                  "  --transmit   also shoot the transmit panel\n"
                  "  --receive    also shoot the receive panel\n"
                  "  --crop       also shoot the framing dialog\n"
@@ -108,6 +109,7 @@ int main(int argc, char** argv) {
     bool log_widgets = false;
     bool panes = false;
     bool item_menu = false;
+    bool tci = false;
 
     const QStringList args = QCoreApplication::arguments();
     for (int i = 1; i < args.size(); ++i) {
@@ -140,13 +142,16 @@ int main(int argc, char** argv) {
             share = true;
         } else if (arg == QLatin1String("--item-menu")) {
             item_menu = true;
+        } else if (arg == QLatin1String("--tci")) {
+            tci = true;
         } else {
             usage();
             return 2;
         }
     }
 
-    const sstvae::settings::Config config = demo_config();
+    sstvae::settings::Config config = demo_config();
+    config.rig.tci = tci;
     sstvae::gui::SettingsDialog dialog(config);
     if (width > 0 && height > 0) dialog.resize(width, height);
     dialog.show();

@@ -49,7 +49,6 @@
 #include <vector>
 
 #include "app_state.hpp"
-#include "audio/qt/qtaudio.hpp"
 #include "banner.hpp"
 #include "checkpoint/checkpoint.hpp"
 #include "codec/codec.hpp"
@@ -1581,14 +1580,7 @@ void TransmitPanel::begin_transmit(const images::Picture& picture,
     tx_config.vox_lead_s = config.transmit.vox_lead_s;
 
     engine_ = std::make_unique<tx::TxEngine>(
-        app_->ptt(),
-        [](const std::string& device, std::span<const double> wave, int samplerate,
-           const std::function<void(double)>& on_progress,
-           const std::function<bool()>& should_stop,
-           const std::function<void(const std::string&)>& on_error) {
-            return audio::qt::play(device, wave, samplerate, on_progress,
-                                   should_stop, on_error);
-        },
+        app_->ptt(), app_->player(),
         // The optimizer's output enters here, through the seam the
         // engine already had. Empty means it was off, unfinished, or
         // failed -- in which case this is the plain encoder and the

@@ -37,6 +37,9 @@ The rules mirror the Python package's, for the same reasons:
   is the one thing in `core/` that needs a network stack, and it is a
   separate library so that resolution and the cache lookup -- which is
   every case but a first run -- stay dependency-free.
+* **Only `core/tci/` may include Qt WebSockets.** TCI is a separate
+  library, built only where Qt WebSockets is, for the same reason as
+  the soundcard layer.
 * **Nothing outside `bindings/embed/` may link libpython.** The
   dev-only build that embeds the Python modem is the single exception,
   and it is never shipped.
@@ -84,6 +87,11 @@ RULES = [
         "only core/checkpoint/ may depend on Qt Network",
         lambda p: p.parts[0] == "core" and p.parts[:2] != ("core", "checkpoint"),
         re.compile(r'^\s*#\s*include\s*[<"](QtNetwork|QNetwork)', re.M),
+    ),
+    (
+        "only core/tci/ may depend on Qt WebSockets",
+        lambda p: p.parts[0] == "core" and p.parts[:2] != ("core", "tci"),
+        re.compile(r'^\s*#\s*include\s*[<"](QtWebSockets|QWebSocket)', re.M),
     ),
     (
         "only bindings/embed/ may link libpython",

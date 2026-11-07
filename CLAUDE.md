@@ -1262,6 +1262,27 @@ offline message is a deliverable, not a nicety** — a fetch failure that
 was rethrown unchanged silently dropped it, which is a caught
 regression with a test of its own.
 
+**TCI is the other radio interface** (2026-11-07, ported from Data2G's
+PR #139). `core/tci/` is a TCI 2.1 client on its own QThread, a
+separate library built only when Qt WebSockets is found
+(`SSTVAE_HAVE_TCI`), and `rig.tci`/`rig.tci_host` choose it. It carries
+audio, PTT and the dial at once, so the soundcard and every Hamlib field
+go unused: `AppState` hands the receive panel a ring to feed
+(`set_tci_capture`) instead of an `InputStream`, and the transmit
+engine a `play` and `set_ptt` through the existing `Player`/`Ptt`
+seams. Settings has one Radio tab: the interface first, then only that
+interface's boxes, then mode on connect and PTT lead/tail for both.
+Three things to keep. **The `Tci` is created once and never
+destroyed**, like `RigController`: a settings change reconnects it in
+place, because the engine holds its PTT for a whole over. **It asks for
+48 kHz**, which every server has, and resamples both ways, so a server
+that keeps another rate still works. And **a server that sends no
+TX_CHRONO** (AetherSDR) is fed on our clock after 500 ms; the test
+asserts the chrono-paced over used *no* pushed frames, so each path is
+known to be the one it exercised.
+`tests/test_tci.cpp` runs it against a fake server; the app end to end
+over TCI has not been run against a real one.
+
 **Rig control is a re-derivation, not a port, and the design doc says
 why.** The deleted `sstvae/rig/rigctld.py` talked to a `rigctld` child
 over a socket because the SWIG Hamlib bindings live in the system

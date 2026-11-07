@@ -231,7 +231,11 @@ bool ReceivePanel::start() {
     shared_ = std::make_unique<rx::SharedState>();
     if (Waterfall* w = fall()) w->set_ring(ring_);
 
-    try {
+    // Over TCI the audio arrives on the TCI connection, which feeds the
+    // ring itself; there is no device to open.
+    if (config.rig.tci) {
+        app_->set_tci_capture(ring_);
+    } else try {
         stream_ = std::make_unique<audio::qt::InputStream>(
             config.audio.input_device, *ring_, config::FS,
             // What opened, and at what rate: information. The resampler
@@ -284,7 +288,8 @@ bool ReceivePanel::start() {
 
     stop_flag_.clear();
     const bool low_cpu = config.receive.low_cpu;
-    const int device_rate = stream_->device_rate();
+    const QString source = stream_ ? tr("device at %1 Hz").arg(stream_->device_rate())
+                                   : tr("TCI");
 
     running_.store(true);
     thread_ = std::thread([this, rx_config, decoder, sink, low_cpu] {
@@ -306,13 +311,13 @@ bool ReceivePanel::start() {
 
     start_button_->setEnabled(false);
     stop_button_->setEnabled(true);
-    set_status(tr("Listening at %1 Hz").arg(device_rate));
+    set_status(tr("Listening (%1)").arg(source));
     // A clean restart of the activity clears its error banner; the log
     // keeps the history.
     banner_->clear();
     was_receiving_ = false;
     app_->log_event("rx", log::Severity::Info,
-                    tr("listening (device at %1 Hz)").arg(device_rate));
+                    tr("listening (%1)").arg(source));
     emit listeningChanged(true);
     return true;
 }
@@ -327,6 +332,7 @@ void ReceivePanel::stop() {
     // The stream first: it is what feeds the loop, and stopping it means
     // the loop's next poll sees no new audio rather than racing us.
     stream_.reset();
+    app_->set_tci_capture(nullptr);
     if (thread_.joinable()) thread_.join();
     running_.store(false);
 

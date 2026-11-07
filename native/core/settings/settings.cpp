@@ -179,6 +179,8 @@ void read_audio(const Reader& r, AudioConfig& c) {
 }
 
 void read_rig(const Reader& r, RigConfig& c) {
+    r.get("tci", c.tci);
+    r.get("tci_host", c.tci_host);
     r.get("enabled", c.enabled);
     // v1 wrote the model as a string ("1"), because it was passed
     // straight to a rigctld command line; it is a number and is stored
@@ -225,7 +227,7 @@ void read_rig(const Reader& r, RigConfig& c) {
     // it once. Naming them here is the difference between "your config
     // changed shape" and a wall of complaints about a file they did not
     // write.
-    r.report_unknown({"enabled", "model", "poll_interval_s", "ptt_lead_s",
+    r.report_unknown({"tci", "tci_host", "enabled", "model", "poll_interval_s", "ptt_lead_s",
                       "ptt_tail_s", "device", "baud", "data_bits", "stop_bits",
                       "parity", "handshake", "dtr", "rts", "ptt_method",
                       "ptt_device", "ptt_audio", "mode",
@@ -424,7 +426,9 @@ std::string to_json(const Config& c) {
           {"output_device", or_null(c.audio.output_device)},
           {"samplerate", c.audio.samplerate}}},
         {"rig",
-         {{"enabled", c.rig.enabled},
+         {{"tci", c.rig.tci},
+          {"tci_host", c.rig.tci_host},
+          {"enabled", c.rig.enabled},
           {"model", c.rig.model},
           {"poll_interval_s", c.rig.poll_interval_s},
           {"ptt_lead_s", c.rig.ptt_lead_s},

@@ -178,13 +178,13 @@ jobs:
       # label. Windows 10 is still supported (6.12 LTS is announced as
       # the last release that will be), so decision 2 is unaffected.
       #
-      # qtmultimedia is the only extra module: Widgets, Gui and Network
-      # are in the base package.
+      # The extra modules: qtmultimedia (soundcards) and qtwebsockets
+      # (TCI). Widgets, Gui and Network are in the base package.
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
           version: "6.11.1"
-          modules: qtmultimedia
+          modules: qtmultimedia qtwebsockets
           cache: true
           # The action works out `host` from the runner (it knows about
           # linux_arm64), but it only fills in `arch` for Android and

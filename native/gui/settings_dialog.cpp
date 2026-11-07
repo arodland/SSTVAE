@@ -9,6 +9,7 @@
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -194,8 +195,7 @@ SettingsDialog::SettingsDialog(const settings::Config& config, QWidget* parent)
     // is "blank" for the life of the station -- so they go at the end;
     // the callsign, which is the one field nobody can leave alone, moved
     // to the top of Transmit, next to the CW ID that sends it.
-    tabs->addTab(scrolling(audio_tab()), tr("Audio"));
-    tabs->addTab(scrolling(rig_tab()), tr("Rig control"));
+    tabs->addTab(scrolling(radio_tab()), tr("Radio"));
     tabs->addTab(scrolling(receive_tab()), tr("Receive"));
     tabs->addTab(scrolling(transmit_tab()), tr("Transmit"));
     tabs->addTab(scrolling(folders_tab()), tr("Folders"));
@@ -377,6 +377,101 @@ void SettingsDialog::on_model_download_finished(bool ok, const QString& message)
     }
 }
 
+// --- radio ------------------------------------------------------------------
+
+// The interface first, as in Data2G: a soundcard and Hamlib, or TCI.
+// Only that interface's settings show; what applies to both (mode on
+// connect, PTT timing) is last.
+QWidget* SettingsDialog::radio_tab() {
+    auto* page = new QWidget(this);
+    auto* top = new QVBoxLayout(page);
+    const auto boxed = [&](const QString& title, QWidget* content) {
+        auto* box = new QGroupBox(title, page);
+        auto* layout = new QVBoxLayout(box);
+        layout->addWidget(content);
+        top->addWidget(box);
+        return box;
+    };
+
+    auto* choose = new QWidget(page);
+    QFormLayout* choose_form = make_form(choose);
+    choose_form->setContentsMargins(0, 0, 0, 0);
+    interface_ = compact(new QComboBox(choose));
+    interface_->setObjectName(QStringLiteral("interface"));
+    interface_->addItem(tr("Soundcard + CAT"), false);
+    interface_->addItem(tr("TCI"), true);
+    interface_->setCurrentIndex(config_.rig.tci ? 1 : 0);
+    choose_form->addRow(tr("Radio interface"), interface_);
+    choose_form->addRow(QString(),
+                        style::note(tr("TCI carries the radio's audio, PTT and dial over "
+                                       "the network from SDR software (ExpertSDR, Thetis, "
+                                       "and others), in place of a soundcard and Hamlib."),
+                                    choose));
+    top->addWidget(choose);
+
+    auto* tci = new QWidget(page);
+    QFormLayout* tci_form = make_form(tci);
+    tci_host_ = new QLineEdit(QString::fromStdString(config_.rig.tci_host), tci);
+    tci_host_->setObjectName(QStringLiteral("tci_host"));
+    tci_host_->setPlaceholderText(QString::fromStdString(settings::RigConfig{}.tci_host));
+    tci_form->addRow(tr("Server"), tci_host_);
+    tci_form->addRow(QString(),
+                     style::note(tr("host:port of the SDR program's TCI server; the port "
+                                    "is 50001 if left off."),
+                                 tci));
+    tci_box_ = boxed(tr("TCI"), tci);
+    tci_box_->setObjectName(QStringLiteral("tci"));
+    audio_box_ = boxed(tr("Audio"), audio_tab());
+    audio_box_->setObjectName(QStringLiteral("audio"));
+    rig_box_ = boxed(tr("Rig control"), rig_tab());
+    rig_box_->setObjectName(QStringLiteral("hamlib"));
+
+    // Both interfaces.
+    auto* tx = new QWidget(page);
+    QFormLayout* form = make_form(tx);
+    const settings::RigConfig& rig = config_.rig;
+    rig_mode_ = compact(choice(
+        tx, {{"none", "None"}, {"usb", "USB"}, {"pkt_usb", "Data/Pkt"}}, rig.mode));
+    form->addRow(tr("Mode on connect"), style::row(tx, {rig_mode_}));
+    add_gap(form);
+    ptt_lead_ = new QDoubleSpinBox(tx);
+    ptt_lead_->setRange(0.0, 3.0);
+    ptt_lead_->setSingleStep(0.05);
+    ptt_lead_->setSuffix(tr(" s"));
+    ptt_lead_->setValue(rig.ptt_lead_s);
+    ptt_tail_ = new QDoubleSpinBox(tx);
+    ptt_tail_->setRange(0.0, 3.0);
+    ptt_tail_->setSingleStep(0.05);
+    ptt_tail_->setSuffix(tr(" s"));
+    ptt_tail_->setValue(rig.ptt_tail_s);
+    form->addRow(tr("PTT timing"),
+                 style::row(tx, {new QLabel(tr("Lead"), tx), ptt_lead_,
+                                 new QLabel(tr("Tail"), tx), ptt_tail_}));
+    add_gap(form);
+    // Labelled rather than left floating in the field column: it is a
+    // pointer to a control that lives elsewhere, and a label is what
+    // says which control.
+    form->addRow(tr("Transmit level"),
+                 style::note(tr("On the Transmit panel, not here — setting it means "
+                                "watching the radio's ALC while sending, so no modal "
+                                "dialog may be in the way."),
+                             tx));
+    boxed(tr("Transmit"), tx);
+    top->addStretch(1);
+
+    connect(interface_, &QComboBox::currentIndexChanged, this,
+            &SettingsDialog::sync_interface);
+    sync_interface();
+    return page;
+}
+
+void SettingsDialog::sync_interface() {
+    const bool tci = interface_->currentData().toBool();
+    tci_box_->setVisible(tci);
+    audio_box_->setVisible(!tci);
+    rig_box_->setVisible(!tci);
+}
+
 // --- audio ------------------------------------------------------------------
 
 QWidget* SettingsDialog::audio_tab() {
@@ -423,16 +518,6 @@ QWidget* SettingsDialog::audio_tab() {
                         "channels=1"),
                      page));
 #endif
-    add_gap(form);
-
-    // Labelled rather than left floating in the field column: it is a
-    // pointer to a control that lives elsewhere, and a label is what
-    // says which control.
-    form->addRow(tr("Transmit level"),
-                 style::note(tr("On the Transmit panel, not here — setting it means "
-                                "watching the radio's ALC while sending, so no modal "
-                                "dialog may be in the way."),
-                             page));
     return page;
 }
 
@@ -628,30 +713,12 @@ QWidget* SettingsDialog::rig_tab() {
     sync_ptt_enabled();
     add_gap(form);
 
-    rig_mode_ = compact(choice(
-        page, {{"none", "None"}, {"usb", "USB"}, {"pkt_usb", "Data/Pkt"}}, rig.mode));
-    form->addRow(tr("Mode on connect"), style::row(page, {rig_mode_}));
-    add_gap(form);
-
     poll_interval_s_ = new QDoubleSpinBox(page);
     poll_interval_s_->setRange(0.5, 60.0);
     poll_interval_s_->setSingleStep(0.5);
     poll_interval_s_->setSuffix(tr(" s"));
     poll_interval_s_->setValue(rig.poll_interval_s);
-    ptt_lead_ = new QDoubleSpinBox(page);
-    ptt_lead_->setRange(0.0, 3.0);
-    ptt_lead_->setSingleStep(0.05);
-    ptt_lead_->setSuffix(tr(" s"));
-    ptt_lead_->setValue(rig.ptt_lead_s);
-    ptt_tail_ = new QDoubleSpinBox(page);
-    ptt_tail_->setRange(0.0, 3.0);
-    ptt_tail_->setSingleStep(0.05);
-    ptt_tail_->setSuffix(tr(" s"));
-    ptt_tail_->setValue(rig.ptt_tail_s);
-    form->addRow(tr("Timing"),
-                 style::row(page, {new QLabel(tr("Poll"), page), poll_interval_s_,
-                                   new QLabel(tr("Lead"), page), ptt_lead_,
-                                   new QLabel(tr("Tail"), page), ptt_tail_}));
+    form->addRow(tr("Poll every"), style::row(page, {poll_interval_s_}));
 
     // Centred, and set apart from the rows above. Everything else on
     // this tab is a setting that takes effect on OK; these two *do*
@@ -722,6 +789,9 @@ int SettingsDialog::rig_model_number() const {
 
 settings::RigConfig SettingsDialog::pending_rig() const {
     settings::RigConfig rig = config_.rig;
+    rig.tci = interface_->currentData().toBool();
+    const QString host = tci_host_->text().trimmed();
+    rig.tci_host = host.isEmpty() ? settings::RigConfig{}.tci_host : host.toStdString();
     rig.enabled = rig_enabled_->isChecked();
     rig.model = rig_model_number();
     rig.device = rig_device_->text().trimmed().toStdString();

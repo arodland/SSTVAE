@@ -292,6 +292,22 @@ if(_want_qtaudio)
   message(STATUS "Qt Multimedia audio: ${Qt6_VERSION}")
 endif()
 
+# --- TCI --------------------------------------------------------------------
+# The radio's audio, PTT and dial over a WebSocket (core/tci/), in place of
+# a soundcard and Hamlib. Built when Qt WebSockets is there; the app offers
+# TCI only then.
+find_package(Qt6 6.2 COMPONENTS Core WebSockets QUIET)
+if(Qt6WebSockets_FOUND)
+  add_library(sstvae_tci STATIC core/tci/tci.cpp)
+  set_target_properties(sstvae_tci PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(sstvae_tci PUBLIC core)
+  target_link_libraries(sstvae_tci PUBLIC sstvae_core Qt6::Core
+                        PRIVATE Qt6::WebSockets)
+  message(STATUS "TCI: Qt WebSockets ${Qt6WebSockets_VERSION}")
+else()
+  message(STATUS "Qt6 WebSockets not found; building without TCI")
+endif()
+
 # --- Android audio ----------------------------------------------------------
 # The Android counterpart of core/audio/qt/, and a separate library for the
 # same reason: the modem, the codec and both engines must still build with no
@@ -519,6 +535,10 @@ if(_want_gui)
     sstvae_core sstvae_codec sstvae_audio_qt sstvae_rig sstvae_overlay_render
     sstvae_fetch
     Qt6::Core Qt6::Gui Qt6::Widgets)
+  if(TARGET sstvae_tci)
+    target_link_libraries(sstvae_gui PUBLIC sstvae_tci)
+    target_compile_definitions(sstvae_gui PUBLIC SSTVAE_HAVE_TCI)
+  endif()
 
   add_executable(sstvae-gui WIN32 MACOSX_BUNDLE gui/main.cpp)
   set_target_properties(sstvae-gui PROPERTIES AUTOMOC ON)

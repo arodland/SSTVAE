@@ -35,6 +35,14 @@
 #include "log/log.hpp"
 #include "rig/controller.hpp"
 #include "settings/settings.hpp"
+#include "tx/engine.hpp"
+
+namespace sstvae::rx {
+class RingBuffer;
+}
+namespace sstvae::tci {
+class Tci;
+}
 
 namespace sstvae::gui {
 
@@ -59,13 +67,24 @@ public:
     QString model_error() const;
 
     // --- rig -----------------------------------------------------------
-    // The last polled dial frequency: a cached value, never a request.
+    // The radio interface is `config().rig.tci`: a soundcard plus Hamlib,
+    // or TCI, which carries the audio, PTT and dial itself.
+
+    // The last polled (or, over TCI, reported) dial frequency: a cached
+    // value, never a request.
     std::optional<double> current_frequency_hz() const;
 
     // What the transmit engine keys, or nothing if rig control is off.
     // Returning nothing rather than a no-op is what tells the engine
     // there is nothing to key -- VOX or a manual PTT switch.
     std::function<void(bool)> ptt();
+
+    // What the transmit engine plays through: the soundcard, or TCI.
+    tx::Player player();
+
+    // Over TCI, where received audio goes (nullptr: nowhere). Does
+    // nothing with a soundcard, which the receive panel opens itself.
+    void set_tci_capture(std::shared_ptr<rx::RingBuffer> ring);
 
     void connect_rig();
     void disconnect_rig();
@@ -123,6 +142,9 @@ private:
     std::thread model_thread_;
 
     rig::RigController rig_;
+    // Created once, like rig_, and last: its worker reports through
+    // log_event, so it must stop before anything above it is destroyed.
+    std::unique_ptr<tci::Tci> tci_;
 };
 
 }  // namespace sstvae::gui
