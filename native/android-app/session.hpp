@@ -44,6 +44,10 @@
 #include "rx/ringbuffer.hpp"
 #include "tx/engine.hpp"
 
+namespace sstvae::tci {
+class Tci;
+}
+
 namespace sstvae::androidapp {
 
 // What the model is doing, for a UI that must say so without guessing.
@@ -216,6 +220,14 @@ public:
                    std::shared_ptr<rig::SerialTransport> transport);
     void stop_rig();
 
+    // TCI in place of the soundcard and Hamlib: audio, PTT and the dial
+    // over one WebSocket to SDR software on the network. Supersedes a
+    // rig session (and `stop_rig` ends this one), and the rig accessors
+    // below answer for whichever is active. Capture follows at the next
+    // `start`, as a device change does. False when the build has no TCI.
+    bool start_tci(const std::string& host, int port);
+    bool tci_active() const;
+
     // Whether a session is configured -- **not** whether the radio is
     // answering, which is what `rig_status()` reports. The desktop's
     // distinction, kept for the desktop's reason: a worker whose open()
@@ -337,13 +349,17 @@ private:
     std::string rig_status_;
     bool rig_failed_ = false;
     bool rig_can_key_ = false;
+    // Created once and never destroyed, like rig_ and for the same
+    // reason: an over in flight holds its PTT and its player.
+    std::unique_ptr<tci::Tci> tci_;
+    bool tci_active_ = false;  // rig_mu_
 
     // Guards the members below against a view thread reading while the
     // UI thread starts or stops. It is never held across a decode: the
     // engine thread touches `ring_` and `state_`, which have their own
     // synchronisation, and not these pointers.
     mutable std::mutex mu_;
-    std::unique_ptr<rx::RingBuffer> ring_;
+    std::shared_ptr<rx::RingBuffer> ring_;  // shared: TCI's worker writes into it
     std::unique_ptr<audio::android::InputStream> stream_;
     std::unique_ptr<rx::SharedState> state_;
     std::unique_ptr<rx::StopFlag> stop_;

@@ -451,29 +451,54 @@ ApplicationWindow {
             width: settingsScroll.availableWidth
             spacing: 0
 
-            // ---- Receive --------------------------------------------
+            // ---- Radio ----------------------------------------------
+            //
+            // The interface first, as on the desktop: a soundcard with
+            // (optional) Hamlib, or TCI, which carries the audio, PTT and
+            // dial from SDR software on the network. Only that
+            // interface's settings show. RigPane draws the rig part; the
+            // section supplies the heading and the summary.
             SettingsSection {
-                title: "Receive"
+                title: "Radio"
+                summary: rigControl.tci
+                         ? "TCI" + (rigControl.connectionState !== ""
+                                    ? " · " + rigControl.connectionState : "")
+                         : rigControl.enabled
+                           ? (rigControl.running ? "Soundcard · rig connected"
+                                                 : "Soundcard · rig on")
+                           : "Soundcard"
 
                 Label {
-                    text: "Audio input"
+                    text: "Radio interface"
                     font.bold: true
                     font.pixelSize: 12
                     color: "#888"
                     Layout.leftMargin: 12
                 }
                 ComboBox {
-                    id: deviceBox
+                    id: interfaceBox
+                    objectName: "radioInterface"
                     Layout.fillWidth: true
                     Layout.leftMargin: 12
                     Layout.rightMargin: 12
-                    model: listener.inputDevices
-                    enabled: !listener.listening
+                    textRole: "text"
+                    valueRole: "value"
+                    model: rigControl.tciAvailable
+                           ? [{ text: "Soundcard + CAT", value: false },
+                              { text: "TCI", value: true }]
+                           : [{ text: "Soundcard + CAT", value: false }]
+                    // Capture is chosen when listening starts, so the
+                    // interface cannot change under a running session.
+                    enabled: !listener.listening && !transmitter.transmitting
+                    currentIndex: rigControl.tci && rigControl.tciAvailable ? 1 : 0
+                    onActivated: rigControl.tci = currentValue
                 }
                 Label {
-                    text: listener.listening ? listener.audioRoute
-                                             : "Choose before starting; the device cannot change mid-session."
-                    font.family: "monospace"
+                    text: listener.listening
+                          ? "Stop listening to change it."
+                          : "TCI carries the radio's audio, PTT and dial over the "
+                            + "network from SDR software (ExpertSDR, Thetis, and "
+                            + "others), in place of a soundcard and Hamlib."
                     font.pixelSize: 11
                     color: "#666"
                     Layout.fillWidth: true
@@ -481,32 +506,96 @@ ApplicationWindow {
                     Layout.rightMargin: 12
                     wrapMode: Text.Wrap
                 }
-                // **One button, both directions.** It sits under "Audio
-                // input" because that is where the first device picker
-                // is, but plugging in a USB interface adds a capture
-                // *and* a playback device at the same instant, and a
-                // rescan that refreshed only the list you happened to be
-                // looking at is a button that appears not to work. Two
-                // buttons would be worse: two lists that can disagree
-                // about when they were last looked at.
-                Button {
-                    text: "Rescan audio devices"
-                    Layout.leftMargin: 12
-                    enabled: !listener.listening && !transmitter.transmitting
-                    onClicked: {
-                        listener.refreshDevices()
-                        transmitter.refreshDevices()
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.topMargin: 8
+                    spacing: 4
+                    visible: !rigControl.tci
+
+                    Label {
+                        text: "Audio input"
+                        font.bold: true
+                        font.pixelSize: 12
+                        color: "#888"
+                        Layout.leftMargin: 12
+                    }
+                    ComboBox {
+                        id: deviceBox
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        model: listener.inputDevices
+                        enabled: !listener.listening
+                    }
+                    Label {
+                        text: listener.listening ? listener.audioRoute
+                                                 : "Choose before starting; the device cannot change mid-session."
+                        font.family: "monospace"
+                        font.pixelSize: 11
+                        color: "#666"
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        wrapMode: Text.Wrap
+                    }
+                    // **One button, both directions.** It sits under "Audio
+                    // input" because that is where the first device picker
+                    // is, but plugging in a USB interface adds a capture
+                    // *and* a playback device at the same instant, and a
+                    // rescan that refreshed only the list you happened to be
+                    // looking at is a button that appears not to work. Two
+                    // buttons would be worse: two lists that can disagree
+                    // about when they were last looked at.
+                    Button {
+                        text: "Rescan audio devices"
+                        Layout.leftMargin: 12
+                        enabled: !listener.listening && !transmitter.transmitting
+                        onClicked: {
+                            listener.refreshDevices()
+                            transmitter.refreshDevices()
+                        }
+                    }
+                    Label {
+                        text: "Refreshes both the input and output lists."
+                        font.pixelSize: 11
+                        color: "#666"
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        wrapMode: Text.Wrap
+                    }
+
+                    Label {
+                        text: "Audio output"
+                        font.bold: true
+                        font.pixelSize: 12
+                        color: "#888"
+                        Layout.leftMargin: 12
+                        Layout.topMargin: 8
+                    }
+                    ComboBox {
+                        id: outputBox
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        model: transmitter.outputDevices
+                        enabled: !transmitter.transmitting
+                        currentIndex: Math.max(0, model.indexOf(transmitter.outputDevice))
+                        onActivated: transmitter.outputDevice = currentValue
                     }
                 }
-                Label {
-                    text: "Refreshes both the input and output lists."
-                    font.pixelSize: 11
-                    color: "#666"
+
+                RigPane {
+                    rig: rigControl
                     Layout.fillWidth: true
-                    Layout.leftMargin: 12
-                    Layout.rightMargin: 12
-                    wrapMode: Text.Wrap
+                    Layout.topMargin: 8
                 }
+            }
+
+            // ---- Receive --------------------------------------------
+            SettingsSection {
+                title: "Receive"
 
                 Label {
                     text: "Tuning"
@@ -664,24 +753,6 @@ ApplicationWindow {
                     wrapMode: Text.Wrap
                 }
 
-                Label {
-                    text: "Output"
-                    font.bold: true
-                    font.pixelSize: 12
-                    color: "#888"
-                    Layout.leftMargin: 12
-                    Layout.topMargin: 8
-                }
-                ComboBox {
-                    id: outputBox
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 12
-                    Layout.rightMargin: 12
-                    model: transmitter.outputDevices
-                    enabled: !transmitter.transmitting
-                    currentIndex: Math.max(0, model.indexOf(transmitter.outputDevice))
-                    onActivated: transmitter.outputDevice = currentValue
-                }
                 RowLayout {
                     Layout.fillWidth: true
                     Layout.leftMargin: 12
@@ -773,23 +844,6 @@ ApplicationWindow {
                     Layout.leftMargin: 12
                     Layout.rightMargin: 12
                     wrapMode: Text.Wrap
-                }
-            }
-
-            // ---- Rig control ----------------------------------------
-            //
-            // RigPane draws its own body; the section supplies the
-            // heading and the on/off summary, so its internal title
-            // label was dropped when it moved in here.
-            SettingsSection {
-                title: "Rig control"
-                summary: rigControl.enabled
-                         ? (rigControl.running ? "Connected" : "On")
-                         : "Off"
-
-                RigPane {
-                    rig: rigControl
-                    Layout.fillWidth: true
                 }
             }
 

@@ -34,6 +34,7 @@ ColumnLayout {
 
     Switch {
         text: "Control the radio"
+        visible: !pane.rig.tci
         Layout.leftMargin: 4
         checked: pane.rig.enabled
         onToggled: pane.rig.enabled = checked
@@ -47,6 +48,7 @@ ColumnLayout {
               + "USB serial adapter, a Bluetooth radio, or a station computer "
               + "on the network. Leave it off if the phone is not wired to a "
               + "radio — receiving and VOX transmitting need none of it."
+        visible: !pane.rig.tci
         font.pixelSize: 11
         color: "#666"
         Layout.fillWidth: true
@@ -55,13 +57,48 @@ ColumnLayout {
         wrapMode: Text.Wrap
     }
 
+    // ---- TCI: the server is the whole configuration --------------------
+    ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 4
+        visible: pane.rig.tci
+
+        Label {
+            text: "TCI server"
+            Layout.leftMargin: 12
+            Layout.rightMargin: 12
+        }
+        TextField {
+            objectName: "tciHost"
+            Layout.fillWidth: true
+            Layout.leftMargin: 12
+            Layout.rightMargin: 12
+            placeholderText: "192.168.1.10:50001"
+            text: pane.rig.tciHost
+            inputMethodHints: Qt.ImhNoAutoUppercase | Qt.ImhNoPredictiveText
+            // Per keystroke, for the reasons the Host field below gives.
+            onTextEdited: pane.rig.tciHost = text
+        }
+        Label {
+            text: "The computer running the SDR program, with its TCI server "
+                  + "switched on. The port defaults to 50001. Connect again "
+                  + "after changing it."
+            font.pixelSize: 11
+            color: "#666"
+            Layout.fillWidth: true
+            Layout.leftMargin: 12
+            Layout.rightMargin: 12
+            wrapMode: Text.Wrap
+        }
+    }
+
     // Everything below is meaningless with the switch off, and hiding it
     // rather than disabling it keeps the Settings page short for the
     // majority who never turn this on.
     ColumnLayout {
         Layout.fillWidth: true
         spacing: 8
-        visible: pane.rig.enabled
+        visible: pane.rig.enabled && !pane.rig.tci
 
         // ---- how it is connected -------------------------------------
         Label {
@@ -381,6 +418,20 @@ ColumnLayout {
             wrapMode: Text.Wrap
         }
 
+        // Hamlib's own trace -- the one thing that answers "how far did
+        // open get, and what did the radio say" -- is the "Log rig
+        // traffic" switch, and it lives in Settings > Advanced rather
+        // than here: it is a debug tool an operator reaches for once in
+        // the life of a radio, so it belongs with the other debug
+        // toggle, not in the middle of the connection controls.
+    }
+
+    // ---- connect: both interfaces ----------------------------------------
+    ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 8
+        visible: pane.rig.tci || pane.rig.enabled
+
         // ---- connect --------------------------------------------------
         RowLayout {
             Layout.fillWidth: true
@@ -423,13 +474,6 @@ ColumnLayout {
             Layout.leftMargin: 12
             Layout.rightMargin: 12
         }
-
-        // Hamlib's own trace -- the one thing that answers "how far did
-        // open get, and what did the radio say" -- is the "Log rig
-        // traffic" switch, and it lives in Settings > Advanced rather
-        // than here: it is a debug tool an operator reaches for once in
-        // the life of a radio, so it belongs with the other debug
-        // toggle, not in the middle of the connection controls.
     }
 
     // ---- the radio picker ---------------------------------------------

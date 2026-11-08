@@ -57,13 +57,17 @@ SDK. Both kits via [aqtinstall](https://github.com/miurahr/aqtinstall):
 ```sh
 aqt install-qt linux desktop 6.11.1 linux_gcc_64 -O ~/Qt -m qtimageformats
 aqt install-qt all_os android 6.11.1 android_arm64_v8a -O ~/Qt \
-    -m qtimageformats qtshadertools
+    -m qtimageformats qtshadertools qtwebsockets
 aqt install-qt all_os android 6.11.1 android_x86_64 -O ~/Qt \
-    -m qtimageformats qtshadertools
+    -m qtimageformats qtshadertools qtwebsockets
 ```
 
 Both Android ABIs: **arm64-v8a for phones, x86_64 for the emulator.**
 176 MB each.
+
+`qtwebsockets` is TCI (Settings > Radio > Radio interface). Without it
+the app still builds, with no TCI choice offered. To add it to an
+existing kit, `--noarchives -m qtwebsockets` installs only the module.
 
 Two things that are easy to get wrong. Qt 6.8+ publishes Android under
 the **`all_os`** host, not `linux` — under `linux` the listing stops at
