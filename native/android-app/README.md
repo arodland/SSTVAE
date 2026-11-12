@@ -303,7 +303,7 @@ run.
 ## The Play upload
 
 ```sh
-tools/build_android.sh --aab --version-code N   # -> build-android/sstvae-upload.aab
+tools/build_android.sh --aab --version-code N   # -> build-android/sstvae-upload.aab, plus the APK
 ```
 
 A bundle rather than an APK because Play takes nothing else, and it is
@@ -315,8 +315,8 @@ path — it refuses to emit anything rather than quietly producing an
 unsigned or debug-signed bundle, since Play rejects both and the
 rejection arrives minutes later in a browser, a long way from the
 build. For the same reason it refuses `--abi` (a single-ABI bundle is a
-store listing half the world cannot install), `--debug`, and
-`--install` (nothing installs a bundle).
+store listing half the world cannot install) and `--debug`. The APK is
+built beside the bundle, debug-signed as usual.
 
 **The upload key lives outside the repository and must be backed up.**
 `~/.android-keys/sstvae-upload.jks`, PKCS12, RSA-2048, valid to 2053 —
@@ -343,6 +343,19 @@ reasons, and re-shipping a fixed build of the same release still needs a
 new code. Hence an explicit input rather than something derived. Getting
 it wrong is tedious, not dangerous: Play refuses the bundle and names
 the number it already has.
+
+**CI** (`.github/workflows/android-build.yml`) builds an APK on every
+push and pull request, signed with `ci-debug.keystore` in this
+directory: public on purpose (password `android`), so CI builds install
+over each other and are recognisably test builds. It is not your local
+debug key, so a CI APK does not upgrade a locally built one. A release
+(`release.yml`) also runs `--aab` with the upload key from the
+`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
+`ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD` secrets and sends the
+bundle to Play with `PLAY_SERVICE_ACCOUNT_JSON` (track `PLAY_TRACK`,
+default `internal`; status `PLAY_STATUS`, default `completed`). Its
+version code is `X*1000000 + Y*1000 + Z`, so 0.6.5 uploads as 6005; a
+hand upload must stay below the next release's code.
 
 Four things that were checked on the first bundle and are worth
 re-checking only when something below them changes:

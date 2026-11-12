@@ -176,6 +176,12 @@ jobs:
                 || contains(github.event.pull_request.labels.*.name, 'sign') }}
     secrets: inherit
 
+  # A debug-signed APK; the upload key and Play are release-only. The
+  # `sign` label means nothing here, so a labeled event does not rebuild it.
+  android:
+    if: github.event.action != 'labeled'
+    uses: ./.github/workflows/android-build.yml
+
   sanitizers:
     name: ASan + UBSan
     if: *label_is_relevant

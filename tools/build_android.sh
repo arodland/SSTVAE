@@ -18,8 +18,8 @@
 # artifact -- the debug key is world-known and every machine's is
 # different -- but nothing here is claiming otherwise.
 #
-# `--aab` builds a Play Store bundle instead, and is a different job in
-# one respect that matters: an APK here is signed with the *debug* key,
+# `--aab` builds a Play Store bundle as well as the APK, and the bundle
+# is a different job in one respect that matters: an APK here is signed with the *debug* key,
 # which is world-known and fine for a sideload, while a bundle is signed
 # with the **upload key** and is an identity. So the two paths do not
 # share a fallback -- `--aab` refuses to produce anything rather than
@@ -34,7 +34,11 @@
 # Signing an AAB reads the keystore from the environment:
 #   SSTVAE_UPLOAD_KEYSTORE       path to the PKCS12 upload keystore
 #   SSTVAE_UPLOAD_KEYSTORE_PASS  a *file* holding its password
+#   SSTVAE_UPLOAD_KEY_PASS       a file holding the key's password, if it
+#                                differs from the keystore's
 #   SSTVAE_UPLOAD_ALIAS          key alias (default sstvae-upload)
+# The APK's debug keystore is ANDROID_DEBUG_KEYSTORE (CI points it at
+# native/android-app/ci-debug.keystore, which is public on purpose).
 # A file rather than the password itself, because an argument or an
 # exported value is visible in `ps` to every process on the machine.
 set -euo pipefail
@@ -67,10 +71,10 @@ if [[ $AAB == 1 ]]; then
     # world cannot install. Refuse rather than warn.
     [[ $ALL_ABIS == ON ]] || { echo "--aab cannot be combined with --abi" >&2; exit 2; }
     [[ $BUILD_TYPE == RelWithDebInfo ]] || { echo "--aab cannot be combined with --debug" >&2; exit 2; }
-    [[ $INSTALL == 0 ]] || { echo "--aab produces a bundle; adb cannot install one" >&2; exit 2; }
 
     KS=${SSTVAE_UPLOAD_KEYSTORE:-$HOME/.android-keys/sstvae-upload.jks}
     PASSFILE=${SSTVAE_UPLOAD_KEYSTORE_PASS:-$HOME/.android-keys/sstvae-upload.pass}
+    KEYPASSFILE=${SSTVAE_UPLOAD_KEY_PASS:-$PASSFILE}
     ALIAS=${SSTVAE_UPLOAD_ALIAS:-sstvae-upload}
     # **Resolved here, before cmake is even configured**, because the
     # only thing worse than having no upload key is finding that out
@@ -85,7 +89,7 @@ if [[ $AAB == 1 ]]; then
         echo "no jarsigner -- set JAVA_HOME to a JDK (not a JRE)." >&2
         exit 1
     fi
-    if [[ ! -f $KS || ! -f $PASSFILE ]]; then
+    if [[ ! -f $KS || ! -f $PASSFILE || ! -f $KEYPASSFILE ]]; then
         echo "no upload keystore ($KS) or password file ($PASSFILE)." >&2
         echo "This is the key Play identifies your uploads by -- see" >&2
         echo "native/android-app/README.md, 'The Play upload'." >&2
@@ -117,6 +121,7 @@ cmake -S "$ROOT/native/android-app" -B "$BUILD_DIR" -G Ninja \
     -DANDROID_NDK_ROOT="$NDK" \
     -DCMAKE_BUILD_TYPE=$BUILD_TYPE \
     "${EXTRA[@]}"
+cmake --build "$BUILD_DIR" --target apk
 if [[ $AAB == 1 ]]; then
     cmake --build "$BUILD_DIR" --target aab
     UNSIGNED=$(echo "$BUILD_DIR"/android-build/build/outputs/bundle/release/*-release.aab)
@@ -127,15 +132,12 @@ if [[ $AAB == 1 ]]; then
     # the 16 KB page alignment that Play requires has to be right in the
     # .so files themselves rather than fixable here.
     "$JARSIGNER" -keystore "$KS" \
-        -storepass:file "$PASSFILE" -keypass:file "$PASSFILE" \
+        -storepass:file "$PASSFILE" -keypass:file "$KEYPASSFILE" \
         -sigalg SHA256withRSA -digestalg SHA-256 \
         -signedjar "$OUT" "$UNSIGNED" "$ALIAS" >/dev/null
     "$JARSIGNER" -verify "$OUT" | head -1
     echo "built: $OUT"
-    exit 0
 fi
-
-cmake --build "$BUILD_DIR" --target apk
 
 OUT="$BUILD_DIR/sstvae-$BUILD_TYPE.apk"
 if [[ $BUILD_TYPE == Debug ]]; then

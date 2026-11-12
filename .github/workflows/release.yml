@@ -224,10 +224,25 @@ jobs:
       sign: true
     secrets: inherit
 
+  # -------------------------------------------------------------- android
+  # After the native build, so a native failure never leaves a Play
+  # upload behind. Play refuses a version code twice: retry a release
+  # that failed after this job with "Re-run failed jobs", which leaves it
+  # alone.
+  android:
+    name: Android
+    needs: [resolve, build]
+    uses: ./.github/workflows/android-build.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+      ref: ${{ needs.resolve.outputs.sha }}
+      release: true
+    secrets: inherit
+
   # ---------------------------------------------------------------- publish
   publish:
     name: Write the download table and publish
-    needs: [resolve, build]
+    needs: [resolve, build, android]
     runs-on: ubuntu-latest
     steps:
       # For tools/release_notes.py. Pinned to the same commit that was

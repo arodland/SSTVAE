@@ -1,0 +1,183 @@
+# The Android app (native/android-app/): a debug-signed APK on every run;
+# with `release`, also the Play bundle, signed with the upload key and
+# sent to Google Play. Called by ci.yml (no inputs) and release.yml (all
+# of them), like native-build.yml, so a release runs the job CI runs.
+#
+# Secrets for a release (a missing one fails the release, never skips it):
+#   ANDROID_KEYSTORE_BASE64    upload keystore, `base64 -w0`
+#   ANDROID_KEYSTORE_PASSWORD  its store password
+#   ANDROID_KEY_ALIAS          the upload key's alias in it
+#   ANDROID_KEY_PASSWORD       that key's password
+#   PLAY_SERVICE_ACCOUNT_JSON  service-account JSON key with release rights on the app
+# Repository variables: PLAY_TRACK (default internal), PLAY_STATUS (default
+# completed; `draft` while the Play app itself is still a draft).
+
+name: Android build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version for file names and the version code, no leading "v". Empty for CI builds.
+        type: string
+        default: ""
+      ref:
+        description: Commit to build. Empty means whatever triggered the workflow.
+        type: string
+        default: ""
+      release:
+        description: Build and sign the bundle and upload it to Google Play.
+        type: boolean
+        default: false
+
+env:
+  QT_VERSION: "6.11.1"
+  NDK_VERSION: "28.2.13676358"
+
+jobs:
+  android:
+    name: Android
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      # Qt 6.11's Gradle plugin wants 17; the runner's default may move.
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: lukka/get-cmake@v4.4.0
+      # Pinned, not "whatever the image has": the image's newest NDK moves.
+      - name: Android SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "ndk;$NDK_VERSION" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      # Three installs into one tree: QT_ANDROID_BUILD_ALL_ABIS finds the
+      # ABIs as siblings of QT_ANDROID, and the host Qt runs the build
+      # tools. Modules as native/android-app/README.md lists them; the
+      # aqtinstall pin is native-build.yml's, for the reason given there.
+      - name: Install Qt (host)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          dir: ${{ runner.temp }}
+          modules: qtimageformats
+          cache: true
+          aqtsource: "git+https://github.com/miurahr/aqtinstall@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b"
+      - name: Install Qt (Android arm64-v8a)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          dir: ${{ runner.temp }}
+          target: android
+          arch: android_arm64_v8a
+          modules: qtimageformats qtshadertools qtwebsockets
+          cache: true
+          aqtsource: "git+https://github.com/miurahr/aqtinstall@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b"
+      # x86_64: emulators and Chromebooks.
+      - name: Install Qt (Android x86_64)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          dir: ${{ runner.temp }}
+          target: android
+          arch: android_x86_64
+          modules: qtimageformats qtshadertools qtwebsockets
+          cache: true
+          aqtsource: "git+https://github.com/miurahr/aqtinstall@8c3695d4a4e1ceabf6a74dc6c79681656dc6b74b"
+      # onnxruntime's AAR, the Hamlib cross-build and the bundled models.
+      - name: Cache native dependencies
+        uses: actions/cache@v6
+        with:
+          path: native/.deps
+          key: deps-android-${{ hashFiles('native/cmake/*.cmake', 'native/android-app/CMakeLists.txt') }}
+      # The upload key goes to files, never arguments: build_android.sh
+      # reads both passwords with jarsigner's `:file`. It checks the key
+      # before configuring, so a missing secret fails in seconds.
+      - name: Upload key
+        if: inputs.release
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          for v in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS \
+                   ANDROID_KEY_PASSWORD PLAY_SERVICE_ACCOUNT_JSON; do
+            [ -n "${!v}" ] || { echo "::error::secret $v is not set"; exit 1; }
+          done
+          umask 077
+          d="$RUNNER_TEMP/upload-key"
+          mkdir -p "$d"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$d/upload.jks"
+          printf '%s' "$ANDROID_KEYSTORE_PASSWORD" > "$d/store.pass"
+          printf '%s' "$ANDROID_KEY_PASSWORD" > "$d/key.pass"
+          {
+            echo "SSTVAE_UPLOAD_KEYSTORE=$d/upload.jks"
+            echo "SSTVAE_UPLOAD_KEYSTORE_PASS=$d/store.pass"
+            echo "SSTVAE_UPLOAD_KEY_PASS=$d/key.pass"
+            echo "SSTVAE_UPLOAD_ALIAS=$ANDROID_KEY_ALIAS"
+          } >> "$GITHUB_ENV"
+      # Play rejects a version code it has seen, so a release derives one
+      # that increases with the version: X.Y.Z -> X*1000000 + Y*1000 + Z.
+      # The APK is signed with a debug key committed to the repo (password
+      # "android"), so every CI build installs over the last one. It is
+      # public on purpose: it marks a test build. It is not the key on any
+      # local machine, so a CI APK does not upgrade a locally built one,
+      # and neither upgrades a Play install.
+      - name: Build
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          RELEASE: ${{ inputs.release }}
+        run: |
+          set -euo pipefail
+          extra=()
+          if [ -n "$VERSION" ]; then
+            IFS=. read -r X Y Z <<< "$VERSION"
+            extra+=(--version-code $((X * 1000000 + Y * 1000 + Z)))
+          fi
+          [ "$RELEASE" = true ] && extra+=(--aab)
+          QT_ANDROID="$RUNNER_TEMP/Qt/$QT_VERSION/android_arm64_v8a" \
+          QT_HOST="$RUNNER_TEMP/Qt/$QT_VERSION/gcc_64" \
+          BUILD_DIR="$PWD/native/build-android" \
+          ANDROID_DEBUG_KEYSTORE="$PWD/native/android-app/ci-debug.keystore" \
+          SSTVAE_ANDROID_MODEL_DIR="$PWD/native/.deps/sstvae-models" \
+            tools/build_android.sh "${extra[@]}" \
+            -- -DFETCHCONTENT_BASE_DIR="$PWD/native/.deps"
+          pkg="sstvae-android${VERSION:+-$VERSION}"
+          mv native/build-android/sstvae-RelWithDebInfo.apk "$pkg-debug.apk"
+          if [ "$RELEASE" = true ]; then
+            mv native/build-android/sstvae-upload.aab "$pkg.aab"
+          fi
+          echo "pkg=$pkg" >> "$GITHUB_ENV"
+      - name: Remove the upload key
+        if: always() && inputs.release
+        run: rm -rf "$RUNNER_TEMP/upload-key"
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.pkg }}-debug.apk
+          archive: false
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: inputs.release
+        with:
+          path: ${{ env.pkg }}.aab
+          archive: false
+          if-no-files-found: error
+      - name: Upload to Google Play
+        if: inputs.release
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: org.cleverdomain.sstvae
+          releaseFiles: ${{ env.pkg }}.aab
+          releaseName: ${{ inputs.version }}
+          track: ${{ vars.PLAY_TRACK || 'internal' }}
+          status: ${{ vars.PLAY_STATUS || 'completed' }}
